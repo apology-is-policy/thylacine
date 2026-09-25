@@ -17,13 +17,17 @@
 #   3. The deck is still SHOWING after the change, not blanked -- a clear that
 #      erased and failed to repaint would satisfy (2) on its own, so (3) is (2)'s
 #      control rather than a restatement of (1).
+#   5. In a tile WITH history the clear still starts the slide at the top of a
+#      clean view (TC-1, HALCYON 14.13). (1)-(3) run on a fresh tile, which has
+#      no history, and that is exactly why none of them could see the defect.
 #
 # The captures are kept at build/lantern-rich-*.png whatever the verdict: the
 # reason to run this is as much to LOOK at the result as to gate it, and a gate
 # that deletes its evidence on the way out is the #223 mistake.
 #
-# Needs HALCYON_SESSION=y. Bake with:
-#   THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci
+# Needs HALCYON_SESSION=y. Bake with the Instrument profile, the operator's: its
+# top padding is what the pinned view in (5) has to keep history out of.
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
 # A gate-image run SKIPs (exit 77) rather than failing: a lever the image lacks
 # is not a defect.
 
@@ -61,6 +65,13 @@ proc ink {png} {
     global repo
     return [exec python3 $repo/tools/interactive/gfx_ink.py $png]
 }
+# The same count inside the band BELOW where slide one sits on a fresh tile. The
+# right tenth is left out: a tile with history reserves the position indicator's
+# lane, and at the bottom of the scroll its thumb sits in exactly this band.
+proc band {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_ink.py $png --rect 0 0.45 0.9 0.94]
+}
 
 lc_boot
 set timeout $lc_boot_timeout
@@ -81,7 +92,8 @@ expect {
     -ex "login: session compositor (halcyond) spawned" {}
     -ex "Thylacine textual shell" {
         puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
- compositor. Bake with: THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci"
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument\
+ tools/build.sh kernel --config ci"
         lc_quit
         exit 77
     }
@@ -130,6 +142,34 @@ if {$ink_two < 2000} {
     lc_fail "slide two is effectively blank (ink $ink_two): the clear erased and did not repaint"
 }
 lc_pass "ls-halcyon-lantern(3): slide two is DRAWN, not merely different -- the clear repainted"
+
+# (5) TC-1, the operator's "lantern doesn't clear". Before the fix the view
+# bottom-anchored the live tail, so after a clear the slide sat at the BOTTOM of
+# a tile with history, the earlier output filling the space above it. Quit, fill
+# the history, start the deck again, and ask the band below slide one. Its
+# control is slide one's own fresh-tile capture: the same band must be ground
+# there, or this check could not tell the two apart.
+type "q"
+type "seq 1 150\n"
+after 1500
+type "lantern /deck\n"
+set hist [capture slide1-history]
+set ink_hist [ink $hist]
+set band_fresh [band $one]
+set band_hist [band $hist]
+lc_step "ink below slide one: fresh tile $band_fresh, after 150 lines of history $band_hist"
+if {$band_fresh > 500} {
+    lc_fail "premise: slide one already inks the band below it on a fresh tile ($band_fresh), so the band cannot discriminate"
+}
+if {$ink_hist < 2000} {
+    lc_fail "slide one painted almost nothing after the history (ink $ink_hist)"
+}
+if {$band_hist > $band_fresh + 500} {
+    lc_fail "after 150 lines of history the band below slide one is inked ($band_hist): the clear did not start the slide at the top of a clean view"
+}
+lc_pass "ls-halcyon-lantern(5): in a tile with history the clear starts the slide at the top of a clean view"
+# Slide two again, which is what (4) scales.
+type " "
 
 # (4) The display scale, which is the answer to "can this be presented from the
 # back of a room" that costs NO code: SCALE_MIN 100 / SCALE_MAX 200 / STEP 25,

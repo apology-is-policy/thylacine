@@ -1,8 +1,9 @@
 // clear -- clear the terminal screen.
 //
 // Emits the ANSI control sequence to fd 1: cursor-home (ESC[H), erase the
-// entire display (ESC[2J), and erase the scrollback (ESC[3J, xterm). This is
-// the ncurses `clear` convention. Authored natively (no aux source); any
+// entire display (ESC[2J), and erase the scrollback (ESC[3J, xterm) -- a
+// request a Halcyon tile declines, its history being the user's (HALCYON
+// 14.13). This is the ncurses `clear` convention. Authored natively (no aux source); any
 // operands are ignored.
 
 #![no_std]
@@ -16,7 +17,8 @@ use libthyla_rs::io;
 
 const USAGE: &str = "\
 usage: clear
-  Clear the terminal screen and scrollback.
+  Clear the terminal screen. In a Halcyon tile, what was on it moves into
+  the tile's history, which only the user deletes.
   --help  show this help
 ";
 

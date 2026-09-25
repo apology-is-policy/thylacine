@@ -4,7 +4,7 @@ type: chg
 title: "build.sh re-swept: three target lists that disagree, and the vault recommended the shortest"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["015d6d97"]
 touched: [sub-substrate-build, sub-pouch-seam]
 established: []
 closed: []

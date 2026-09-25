@@ -594,6 +594,18 @@ pub enum Boundary {
     Scroll(Vec<Cell>, bool),
     /// BEL (0x07) in ground state.
     Bell,
+    /// The NORMAL screen was cleared: ED 2 or ED 3 (one arm; DECSED is ED
+    /// here, no cell being protected) or RIS -- never ED 0 or ED 1, whatever
+    /// they cover. The rows it erased through the last one with text were
+    /// pushed first as `Scroll`s (the erased screen moves into the consumer's
+    /// history, HALCYON 14.13), so this arrives after them and after the
+    /// blank. Never on the alt screen.
+    ScreenErased,
+    /// Row 0 of the NORMAL screen stopped continuing the row that scrolled
+    /// off above it (it restarted as a line of its own). Pushed on that edge
+    /// only, so the consumer ends the fragment it holds before the next row
+    /// leaves -- two rows coalesced into one scroll would otherwise glue.
+    TopRestart,
     /// A non-7770 OSC terminated: the raw payload bytes between the OSC
     /// introducer and the terminator (e.g. `b"0;title"` or `b"1936;v1;..."`).
     /// The consumer routes by the leading numeric code; vt stays agnostic of
@@ -610,10 +622,17 @@ pub enum Boundary {
     /// final diff with THIS cursor (so a later alt-leave restores it correctly),
     /// emits the mode switch, then resets its shadow to the now-blank alt.
     AltEnter(Vec<Cell>, (usize, usize)),
-    /// Left the alt screen. Carries the RESTORED main buffer (== `cells` now)
-    /// -- the alt live grid is discarded; the consumer resets its shadow to
-    /// this and resumes normal-mode diffing.
-    AltLeave(Vec<Cell>),
+    /// Left the alt screen. Carries the RESTORED main screen as it stood at
+    /// the leave -- cells, soft-wrap flags, cursor `(cx, cy)` and top flag --
+    /// because the byte that left can go on to change them (RIS leaves, then
+    /// erases). The alt live grid is discarded; the consumer resets its
+    /// shadow to this and resumes normal-mode diffing.
+    AltLeave {
+        cells: Vec<Cell>,
+        wrapped: Vec<bool>,
+        cursor: (usize, usize),
+        top_continues: bool,
+    },
 }
 
 /// The main screen re-cut at a new geometry: what `reflow` returns.
@@ -1164,6 +1183,9 @@ impl Vt {
     /// above it, if a consumer still holds it, is complete as it stands.
     fn restart_top(&mut self) {
         if !self.on_alt {
+            if self.top_continues && self.capture_events {
+                self.pending.push(Boundary::TopRestart);
+            }
             self.top_continues = false;
         }
     }
@@ -1424,7 +1446,11 @@ impl Vt {
                 }
             }
             b'c' => {
-                // RIS full reset.
+                // RIS full reset. It returns to the main screen first, as
+                // xterm, kitty and VTE do, so a reset rescues a screen a
+                // crashed TUI left on the alt buffer (no in-tree tool sends
+                // RIS yet), and the erase below then acts on the main screen.
+                self.alt_screen(false);
                 self.fg = self.pal.fg;
                 self.bg = self.pal.bg;
                 self.attrs = 0;
@@ -1435,6 +1461,13 @@ impl Vt {
                 self.origin = false;
                 self.cursor_visible = true;
                 self.app_cursor = false;
+                // The power-on modes: autowrap on, no saved cursor.
+                self.wrap = true;
+                self.saved = (0, 0);
+                self.saved_wrap = true;
+                // A reset erases the screen like ED 2; unlike xterm's RIS it
+                // never drops history, which is not the program's to drop.
+                self.screen_to_history();
                 let (fg, bg) = (self.pal.fg, self.bg);
                 for c in self.cells.iter_mut() {
                     *c = Cell::blank(fg, bg);
@@ -1444,6 +1477,7 @@ impl Vt {
                 }
                 self.restart_top();
                 self.mark_all();
+                self.note_screen_erased();
             }
             _ => {}
         }
@@ -1621,7 +1655,12 @@ impl Vt {
                 // self.saved holds the main cursor (implicit DECSC at enter).
                 Boundary::AltEnter(self.alt_cells.clone(), self.saved)
             } else {
-                Boundary::AltLeave(self.cells.clone())
+                Boundary::AltLeave {
+                    cells: self.cells.clone(),
+                    wrapped: self.wrapped.clone(),
+                    cursor: (self.cx, self.cy),
+                    top_continues: self.top_continues,
+                }
             });
         }
         self.mark_all();
@@ -1656,6 +1695,7 @@ impl Vt {
         // off the row (F1 P0), and cx would exceed cols (ICH/DCH/ECH underflow).
         let w = if w == 2 && self.cols < 2 { 1 } else { w };
         // Resolve a deferred wrap left pending by the previous glyph.
+        let mut autowrapped = false;
         if self.cx >= self.cols {
             if self.wrap {
                 // This row filled and the next glyph wraps: mark it soft-wrapped
@@ -1664,6 +1704,7 @@ impl Vt {
                 self.wrapped[self.cy] = true;
                 self.cx = 0;
                 self.line_feed();
+                autowrapped = true;
             } else {
                 // DECAWM reset: the cursor sticks at the right margin; each
                 // new glyph overwrites the last column (the VT100 rule).
@@ -1678,6 +1719,7 @@ impl Vt {
                 self.wrapped[self.cy] = true;
                 self.cx = 0;
                 self.line_feed();
+                autowrapped = true;
             } else {
                 let (cx, cy) = (self.cols - 1, self.cy);
                 self.write_cell(cx, cy, ch, self.attrs);
@@ -1688,9 +1730,12 @@ impl Vt {
         let (cx, cy) = (self.cx, self.cy);
         // A glyph at column 0 restarts this row's logical line: clear any
         // soft-wrap flag it carried (re-set below if this row fills + wraps).
+        // A glyph this call's autowrap put there is the continuation instead:
+        // on a one-row screen that row is row 0, and it continues the row the
+        // wrap just scrolled off.
         if cx == 0 {
             self.wrapped[cy] = false;
-            if cy == 0 {
+            if cy == 0 && !autowrapped {
                 self.restart_top();
             }
         }
@@ -1806,6 +1851,10 @@ impl Vt {
     }
 
     fn erase_display(&mut self, mode: u32) {
+        // ECMA-48 defines 0-2 and xterm adds 3; xterm ignores the rest.
+        if mode > 3 {
+            return;
+        }
         let (fg, bg) = (self.pal.fg, self.bg);
         // Clamp cx: put_char leaves the cursor in the deferred-wrap state
         // cx == cols (past the last column) after a line that exactly fills
@@ -1816,6 +1865,14 @@ impl Vt {
         // logically ON the last column at the wrap point). Holotype G-4 F1.
         let cx = self.cx.min(self.cols - 1);
         let cur = self.cy * self.cols + cx;
+        // A clear is ED 2 or ED 3 only. ED 0 from a prompt's top is a line
+        // editor's redraw primitive (ut redraws every keystroke with
+        // `\r ESC[J`), so after a clear left the prompt at the top-left, an
+        // ED 0 read by its effect would file every keystroke into history.
+        let whole = mode >= 2;
+        if whole {
+            self.screen_to_history();
+        }
         // An erase that reaches row 0's first cell restarts row 0.
         if mode != 0 || cur == 0 {
             self.restart_top();
@@ -1854,6 +1911,42 @@ impl Vt {
                     *w = false;
                 }
             }
+        }
+        if whole {
+            self.note_screen_erased();
+        }
+    }
+
+    /// Before a whole-screen erase of the normal screen (capture only): every
+    /// row through the last one with text leaves as a `Scroll`, so what the
+    /// erase removes moves into the consumer's history instead of vanishing
+    /// -- a clear keeps what it erases (HALCYON 14.13).
+    /// Nothing continues the last of them once the screen is blank.
+    fn screen_to_history(&mut self) {
+        if !self.capture_events || self.on_alt {
+            return;
+        }
+        let cols = self.cols;
+        let Some(last) = (0..self.rows).rev().find(|&r| {
+            self.cells[r * cols..(r + 1) * cols]
+                .iter()
+                .any(|c| c.ch != ' ')
+        }) else {
+            return;
+        };
+        for r in 0..=last {
+            let w = r < last && self.wrapped[r];
+            self.pending.push(Boundary::Scroll(
+                self.cells[r * cols..(r + 1) * cols].to_vec(),
+                w,
+            ));
+        }
+    }
+
+    /// After the blank that `screen_to_history` preceded.
+    fn note_screen_erased(&mut self) {
+        if self.capture_events && !self.on_alt {
+            self.pending.push(Boundary::ScreenErased);
         }
     }
 
@@ -2800,6 +2893,290 @@ mod tests {
         assert_eq!(vt.cells[1].ch, 'B'); // now it is
     }
 
+    // A boundary list as text: each Scroll's row (trailing blanks trimmed)
+    // with its wrap flag, and the erase as "ERASED".
+    fn erase_trace(bs: &[Boundary]) -> Vec<String> {
+        bs.iter()
+            .map(|b| match b {
+                Boundary::Scroll(row, w) => {
+                    let s: String = row.iter().map(|c| c.ch).collect();
+                    alloc::format!("{}{}", s.trim_end(), if *w { "+" } else { "" })
+                }
+                Boundary::ScreenErased => String::from("ERASED"),
+                Boundary::AltLeave { cells, .. } => {
+                    let s: String = cells.iter().map(|c| c.ch).collect();
+                    alloc::format!("ALT-LEAVE {}", s.trim_end())
+                }
+                other => alloc::format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn all_blank(vt: &Vt) -> bool {
+        vt.cells.iter().all(|c| c.ch == ' ')
+    }
+
+    #[test]
+    fn a_whole_screen_erase_hands_its_rows_to_history_before_it_reports() {
+        // "cdef" fills row 1, so "gh" autowraps: row 1 continues into row 2.
+        // Row 3 was never written and does not travel.
+        let mut vt = Vt::new(4, 4);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"ab\r\ncdefgh");
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"\x1b[2J")),
+            ["ab", "cdef+", "gh", "ERASED"],
+            "the rows the erase removed, in order, then the erase"
+        );
+        assert!(all_blank(&vt), "and the screen is blank");
+        // ED 3 shares ED 2's arm; a blank screen has nothing to hand over.
+        feed(&mut vt, b"\x1b[Hx");
+        assert_eq!(erase_trace(&drive(&mut vt, b"\x1b[3J")), ["x", "ERASED"]);
+        assert_eq!(erase_trace(&drive(&mut vt, b"\x1b[2J")), ["ERASED"]);
+    }
+
+    #[test]
+    fn the_last_row_handed_over_continues_into_nothing() {
+        // Row 0 autowrapped into row 1, then row 1 was erased by EL: the
+        // flag still says "continues", but nothing does once the screen is
+        // blank, so it travels as a finished line.
+        let mut vt = Vt::new(4, 3);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"abcde\x1b[2K");
+        assert!(vt.wrapped[0], "premise: row 0 still reads as continued");
+        assert_eq!(erase_trace(&drive(&mut vt, b"\x1b[2J")), ["abcd", "ERASED"]);
+    }
+
+    #[test]
+    fn only_ed2_and_ed3_clear_the_screen() {
+        // ED 0 from the first cell and ED 1 through the last cover every
+        // cell, yet report nothing: only a clear moves the screen. Each did
+        // blank the screen, so the silence is not a no-op's.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"ab\r\ncd");
+        assert!(drive(&mut vt, b"\x1b[H\x1b[J").is_empty());
+        assert!(
+            all_blank(&vt),
+            "ED 0 from the first cell blanked the screen"
+        );
+        feed(&mut vt, b"ab\r\ncd");
+        assert!(drive(&mut vt, b"\x1b[2;4H\x1b[1J").is_empty());
+        assert!(all_blank(&vt), "ED 1 through the last cell blanked it");
+        // ED 3, and DECSED (ED here: no cell is protected), are clears.
+        feed(&mut vt, b"\x1b[Hab\r\ncd");
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"\x1b[3J")),
+            ["ab", "cd", "ERASED"]
+        );
+        feed(&mut vt, b"\x1b[Hab\r\ncd");
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"\x1b[?2J")),
+            ["ab", "cd", "ERASED"]
+        );
+        // A parameter past 3 is ignored, as xterm ignores it.
+        feed(&mut vt, b"\x1b[Hab\r\ncd");
+        assert!(drive(&mut vt, b"\x1b[4J").is_empty());
+        assert_eq!(
+            (vt.cells[0].ch, vt.cells[4].ch),
+            ('a', 'c'),
+            "ED 4 erased nothing"
+        );
+        // Partial erases report nothing -- and each did erase something, so
+        // the silence is not a no-op's.
+        feed(&mut vt, b"\x1b[Hab\r\ncd");
+        assert!(drive(&mut vt, b"\x1b[2;1H\x1b[J").is_empty());
+        assert_eq!(
+            (vt.cells[0].ch, vt.cells[4].ch),
+            ('a', ' '),
+            "ED 0 erased row 1 only"
+        );
+        feed(&mut vt, b"\x1b[2;1Hcd");
+        assert!(drive(&mut vt, b"\x1b[1;2H\x1b[1J").is_empty());
+        assert_eq!(
+            (vt.cells[1].ch, vt.cells[4].ch),
+            (' ', 'c'),
+            "ED 1 erased to (0,1) only"
+        );
+    }
+
+    #[test]
+    fn a_line_editor_redrawing_from_the_top_after_a_clear_files_nothing() {
+        // `clear`, ut's prompt at the top-left, then the redraw ut makes on
+        // every keystroke: `\r ESC[J` from the prompt block's top.
+        let mut vt = Vt::new(20, 4);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"% clear\r\n");
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"\x1b[H\x1b[2J\x1b[3J% ")),
+            ["% clear", "ERASED", "ERASED"]
+        );
+        for typed in ["% l", "% la", "% lan"] {
+            let mut redraw = b"\r\x1b[J".to_vec();
+            redraw.extend_from_slice(typed.as_bytes());
+            assert!(
+                drive(&mut vt, &redraw).is_empty(),
+                "the redraw of {typed:?} filed nothing"
+            );
+        }
+        let top: String = vt.cells[..5].iter().map(|c| c.ch).collect();
+        assert_eq!(top, "% lan", "and the redraws did draw");
+    }
+
+    #[test]
+    fn a_restarted_top_row_reports_before_the_next_row_leaves() {
+        // "abcdefghij" on 4x2 scrolls "abcd" off and row 0 ("efgh")
+        // continues it; "XY" at the home position restarts row 0.
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"abcdefghij\x1b[HXY\x1b[2J")),
+            ["abcd+", "TopRestart", "XYgh", "ij", "ERASED"]
+        );
+        // Only the edge reports: a second restart, or one with nothing
+        // held above row 0, is silent.
+        assert!(drive(&mut vt, b"\x1b[HZ").is_empty());
+        // And with capture off nothing is reported at all.
+        let mut off = Vt::new(4, 2);
+        assert!(drive(&mut off, b"abcdefghij\x1b[HXY\x1b[2J").is_empty());
+    }
+
+    #[test]
+    fn a_reset_erases_like_ed2_and_an_alt_screen_erase_reports_nothing() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"ab\r\ncd");
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"\x1bc")),
+            ["ab", "cd", "ERASED"]
+        );
+        // The alt screen has no history and no pin: an erase there hands
+        // nothing over and reports nothing -- though it did blank the alt
+        // grid (the positive control).
+        feed(&mut vt, b"\x1b[?1049hxy");
+        assert!(drive(&mut vt, b"\x1b[2J").is_empty());
+        assert!(all_blank(&vt), "ED 2 blanked the alt grid");
+    }
+
+    #[test]
+    fn a_reset_on_the_alt_screen_returns_to_the_main_screen_and_erases_it() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"ab\r\ncd\x1b[?1049hxy");
+        assert!(vt.on_alt, "premise: a TUI holds the alt screen");
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"\x1bc")),
+            ["ALT-LEAVE ab  cd", "ab", "cd", "ERASED"],
+            "the main screen comes back, then leaves for history like ED 2's"
+        );
+        assert!(!vt.on_alt, "the reset left the alt screen");
+        assert!(all_blank(&vt), "and blanked the main screen");
+        assert_eq!((vt.cx, vt.cy), (0, 0));
+    }
+
+    #[test]
+    fn a_reset_restores_autowrap_and_forgets_the_saved_cursor() {
+        let mut vt = Vt::new(4, 2);
+        // Autowrap off, the cursor saved at column 2 of row 1 -- and DECSC
+        // saved the wrap-off with it.
+        feed(&mut vt, b"\x1b[?7l\x1b[2;3H\x1b7\x1bc");
+        feed(&mut vt, b"abcde");
+        assert_eq!(vt.cells[4].ch, 'e', "autowrap is on again");
+        feed(&mut vt, b"\x1b8");
+        assert_eq!((vt.cx, vt.cy), (0, 0), "DECRC finds no saved position");
+        feed(&mut vt, b"wxyz!");
+        assert_eq!(vt.cells[4].ch, '!', "nor a saved autowrap-off");
+    }
+
+    /// The byte that leaves can go on to change the main screen (a reset
+    /// erases it), so AltLeave carries the screen as it stood at the leave:
+    /// here row 0 still continues the row that scrolled off before the TUI.
+    #[test]
+    fn a_reset_on_the_alt_screen_carries_the_main_screen_as_it_stood() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let before = drive(&mut vt, b"abcdef\r\n\x1b[?1049h");
+        assert_eq!(
+            erase_trace(&before)[0],
+            "abcd+",
+            "premise: a wrapped row left"
+        );
+        let bs = drive(&mut vt, b"\x1bc");
+        match &bs[0] {
+            Boundary::AltLeave {
+                wrapped,
+                cursor,
+                top_continues,
+                ..
+            } => {
+                assert!(*top_continues, "row 0 still continued it at the leave");
+                assert_eq!(wrapped, &vec![false, false]);
+                assert_eq!(
+                    *cursor,
+                    (0, 1),
+                    "the main cursor, before the reset homed it"
+                );
+            }
+            other => panic!("expected AltLeave, got {other:?}"),
+        }
+        assert!(!vt.top_continues(), "the reset then restarted row 0");
+        assert_eq!(
+            erase_trace(&bs[1..]),
+            ["ef", "TopRestart", "ERASED"],
+            "row 0 leaves for history before the restart is reported"
+        );
+    }
+
+    /// On a one-row screen the glyph an autowrap carries onto row 0 is the
+    /// continuation of the row that just scrolled off, not a restart.
+    #[test]
+    fn an_autowrap_onto_row_zero_continues_the_row_that_left() {
+        let mut vt = Vt::new(4, 1);
+        vt.set_capture_events(true);
+        assert_eq!(erase_trace(&drive(&mut vt, b"abcde")), ["abcd+"]);
+        assert!(vt.top_continues());
+        // A glyph put at row 0's first cell any other way still restarts it.
+        assert_eq!(erase_trace(&drive(&mut vt, b"\rX")), ["TopRestart"]);
+        // A wide glyph that cannot fit the row's last cell wraps whole, and is
+        // the continuation too.
+        let mut vt = Vt::new(4, 1);
+        vt.set_capture_events(true);
+        assert_eq!(
+            erase_trace(&drive(&mut vt, "abc\u{4e2d}".as_bytes())),
+            ["abc+"]
+        );
+        assert!(vt.top_continues());
+    }
+
+    #[test]
+    fn a_scroll_then_an_erase_keep_stream_order() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        assert_eq!(
+            erase_trace(&drive(&mut vt, b"a\r\nb\r\nc\x1b[2J")),
+            ["a", "b", "c", "ERASED"],
+            "the line that scrolled, then the screen the erase removed"
+        );
+    }
+
+    #[test]
+    fn the_erase_changes_no_cell_the_console_path_sees() {
+        // Capture changes what is REPORTED, never the grid: the console
+        // renderer (capture off) must see byte-identical cells.
+        let seq = b"ab\r\ncdefgh\x1b[2Jx\x1b[H\x1b[Jy\x1bcz\x1b[3J\x1b[?1049hq\x1bcw";
+        let mut on = Vt::new(4, 4);
+        on.set_capture_events(true);
+        let mut off = Vt::new(4, 4);
+        let _ = drive(&mut on, seq);
+        assert!(
+            drive(&mut off, seq).is_empty(),
+            "capture off reports nothing"
+        );
+        assert_eq!(on.cells, off.cells);
+        assert_eq!((on.cx, on.cy), (off.cx, off.cy));
+        assert_eq!((on.on_alt, off.on_alt), (false, false));
+    }
+
     #[test]
     fn title_osc_forwarded_raw() {
         let mut vt = Vt::new(6, 1);
@@ -2976,7 +3353,7 @@ mod tests {
             other => panic!("expected AltEnter, got {other:?}"),
         }
         match &bs[1] {
-            Boundary::AltLeave(restored) => assert_eq!(restored[0].ch, 'm'), // restored main
+            Boundary::AltLeave { cells, .. } => assert_eq!(cells[0].ch, 'm'), // restored main
             other => panic!("expected AltLeave, got {other:?}"),
         }
     }

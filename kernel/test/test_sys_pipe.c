@@ -396,11 +396,11 @@ void test_sys_pipe_handle_close_releases_one_end(void) {
 static struct Spoor *prw_open_ramfs(const char *name) {
     struct Spoor *root = devramfs.attach("");
     if (!root) return NULL;
-    const char *names[1] = { name };
-    struct Walkqid *wq = devramfs.walk(root, NULL, names, 1);
+    const char *names[2] = { "bin", name };
+    struct Walkqid *wq = devramfs.walk(root, NULL, names, 2);
     spoor_unref(root);
     if (!wq) return NULL;
-    if (wq->nqid != 1) { walkqid_free(wq); return NULL; }
+    if (wq->nqid != 2) { walkqid_free(wq); return NULL; }
     struct Spoor *f = wq->spoor;
     walkqid_free(wq);
     if (!devramfs.open(f, 0)) { spoor_unref(f); return NULL; }

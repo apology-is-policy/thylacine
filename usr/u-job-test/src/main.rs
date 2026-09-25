@@ -1,6 +1,6 @@
 // /u-job-test -- U-7a/U-7b job-control boot probe.
 //
-// Runs PRE-pivot (flat devramfs root, where echo/seq/tr all spawn by name).
+// Runs PRE-pivot (devramfs root, where echo/seq/tr all spawn by name).
 // Drives the REAL `&` background-launch + reap lifecycle + the U-7b job-
 // control builtins through the public libutopia surface (eval_source + Env +
 // the Repl prompt-cycle reaper), since the JobTable state is observable

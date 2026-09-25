@@ -24,7 +24,7 @@
 #   pouch-progs  the pouch-hello-* test binaries (need the sysroot).
 #   stratumd     the Stratum FS daemon (pouch binary; links the sysroot libc).
 #   pool         regenerate build/fixtures/pool.img + system.key, THEN re-bake
-#                the ramfs (so /system.key matches the fresh pool key).
+#                the ramfs (so /bin/system.key matches the fresh pool key).
 #   ramfs        assemble build/ramfs.cpio (bakes the userspace bins + key).
 #   disk         assemble build/disk.img.
 #   clean        rm -rf build/  (the ONLY true from-scratch reset).
@@ -41,7 +41,7 @@
 #    overflowing stratumd's stale 72-byte buffer.) To FORCE it: `clean` then
 #    `all`, or run `sysroot` directly.
 # 2. The pool fixture's system.key is RANDOM per regeneration. The `pool` target
-#    couples the ramfs re-bake to the pool re-bake so /system.key always matches
+#    couples the ramfs re-bake to the pool re-bake so /bin/system.key always matches
 #    (a mismatch = STM_EBADTAG at mount; the year-long "AEGIS corruption" ghost).
 #    A bare `kernel`/`all` regenerates BOTH together, so they always agree.
 # 3. `ramfs.cpio` is NOT re-baked by `disk` (nor by `userspace`) alone -- only by
@@ -222,6 +222,15 @@ sysroot_is_stale() {
     local libc="$BUILD_DIR/sysroot/lib/libc.a"
     [[ -f "$libc" ]] || return 0
     [[ -f "$BUILD_DIR/sysroot/lib/libclang_rt.builtins.a" ]] || return 0
+    [[ -f "$BUILD_DIR/sysroot/lib/libclang_rt.builtins_pic.a" ]] || return 0
+    # B-1d: a sysroot built while the LLVM fork's clang was absent has no
+    # libc.so, and no dynamic program links against it. Once the fork exists,
+    # that sysroot is stale.
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    if [[ -x "${POUCH_CC:-$fork/build/bin/clang}" && \
+          ! -f "$BUILD_DIR/sysroot/lib/libc.so" ]]; then
+        return 0
+    fi
     # The completion sentinel: build_sysroot rm -rf's the tree first and
     # touches this LAST, so a build that died mid-way (after libc.a +
     # builtins landed, before libsodium/GL/thyla headers) cannot read as
@@ -325,7 +334,7 @@ build_kernel() {
     # Self-skips (announced) without the fetched venus link set.
     build_vkquake
     # Clade CL-1c: cross-build GNU make (the first parallel-spawner port;
-    # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /make.
+    # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /bin/make.
     build_gnumake
     # Clade CL-2: cross-build the C++ runtime (libunwind+libc++abi+libc++) into
     # the sysroot + the /pouch-hello-cxx prover. Skips if the LLVM fork is absent.
@@ -368,7 +377,7 @@ build_kernel() {
     stage_viv_bundles
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
-    # gets copied into the cpio at /etc/stratum/system.key.
+    # gets copied into the cpio at bin/system.key.
     build_stratum_pool_fixture
     # GOOS=thylacine Stage 1: cross-compile the Go boot probe before build_ramfs
     # bakes it. Skips cleanly if the Go fork is absent.
@@ -393,27 +402,34 @@ build_ramfs() {
     # Rebuild from scratch so removed userspace binaries don't linger.
     rm -rf "$ramfs_src"
     mkdir -p "$ramfs_src"
+    # The initrd root holds only bin/ and lib/ beside the kernel's synthetic
+    # mount points (dec-2026-09-25-initrd-bin-directory): every program and
+    # data file goes into bin/, so no staged name can meet a mount point's.
+    # 0755 whatever the host's umask: every principal's X-search crosses it.
+    local ramfs_bin="$ramfs_src/bin"
+    mkdir -p "$ramfs_bin"
+    chmod 0755 "$ramfs_bin"
 
     # Smoke files (read-side checks for devramfs).
-    cat > "$ramfs_src/welcome" <<'EOF'
+    cat > "$ramfs_bin/welcome" <<'EOF'
 Welcome to Thylacine ramfs.
 EOF
-    cat > "$ramfs_src/version" <<'EOF'
+    cat > "$ramfs_bin/version" <<'EOF'
 Thylacine v0.1-dev
 EOF
     # Go Stage 8c-1 (iteration 1): the Ambush non-interactive init script that
-    # /ambush-probe drives via `ambush attach <pid> /ambush-child --init
-    # /ambush-init`. These commands run once against the attached, debug-stopped
-    # /ambush-child, then Ambush reads stdin -> EOF (the probe closes the child's
+    # /bin/ambush-probe drives via `ambush attach <pid> /bin/ambush-child --init
+    # /bin/ambush-init`. These commands run once against the attached, debug-stopped
+    # /bin/ambush-child, then Ambush reads stdin -> EOF (the probe closes the child's
     # stdin) -> the REPL exits + detaches. No `exit` command (which would prompt
     # to kill the attached target and block on the EOF'd stdin).
-    cat > "$ramfs_src/ambush-init" <<'EOF'
+    cat > "$ramfs_bin/ambush-init" <<'EOF'
 goroutines
 bt
 print main.Sentinel
 EOF
-    # Go Stage 8c-4 (launch E2E): the Ambush init script /ambush-probe drives via
-    # `ambush exec /ambush-child --init /ambush-init-exec`. Ambush spawns the child
+    # Go Stage 8c-4 (launch E2E): the Ambush init script /bin/ambush-probe drives via
+    # `ambush exec /bin/ambush-child --init /bin/ambush-init-exec`. Ambush spawns the child
     # (attach-first Launch), stops it before main.main, sets a HARDWARE breakpoint
     # at main.parkLoop (I-12/I-36 route every bp to the kernel hwbreak path), then
     # `continue` runs the target INTO the breakpoint (the whole-Proc stop). The
@@ -421,7 +437,7 @@ EOF
     # exits the REPL (killing the launched child). This is the 8c-2-fork
     # HW-breakpoint-routing + the kernel #95 focus-thread proof: break + continue +
     # bt/print at a real HW bp on a multi-M Go target.
-    cat > "$ramfs_src/ambush-init-exec" <<'EOF'
+    cat > "$ramfs_bin/ambush-init-exec" <<'EOF'
 break main.parkLoop
 continue
 goroutines
@@ -431,16 +447,16 @@ EOF
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).
-    cat > "$ramfs_src/builtin-test.rc" <<'EOF'
+    cat > "$ramfs_bin/builtin-test.rc" <<'EOF'
 let sourced_var = ok
 fn sourced_fn { true }
 EOF
 
     # D2 demo: a `#!/bin/ut` field-report script, baked 0755 so a logged-in
-    # user can run it as a bare `fun.ut` (the cpio root binds at /bin post-
-    # pivot). Exercises the shebang + `ut SCRIPT` execution path. The heredoc
+    # user can run it as a bare `fun.ut` (it lands in the initrd's bin/,
+    # which joey binds at /bin). Exercises the shebang + `ut SCRIPT` execution path. The heredoc
     # is QUOTED so `$cwd` / `$(...)` stay literal for the script to interpret.
-    cat > "$ramfs_src/fun.ut" <<'EOF'
+    cat > "$ramfs_bin/fun.ut" <<'EOF'
 #!/bin/ut
 # A little Thylacine field report -- a demo of script execution.
 #   fun.ut      (it lives in /bin; runs from anywhere)
@@ -473,22 +489,22 @@ for (q in $quarry) {
 echo "the lair is at: $cwd"
 echo 'the thylacine yips, and is gone.'
 EOF
-    chmod 0755 "$ramfs_src/fun.ut"
+    chmod 0755 "$ramfs_bin/fun.ut"
 
     # aux/apps: a tour of the native /net tools, baked 0755 (runs as net-demo.ut).
-    cp "$REPO_ROOT/usr/apps/net-demo.ut" "$ramfs_src/net-demo.ut"
-    chmod 0755 "$ramfs_src/net-demo.ut"
+    cp "$REPO_ROOT/usr/apps/net-demo.ut" "$ramfs_bin/net-demo.ut"
+    chmod 0755 "$ramfs_bin/net-demo.ut"
 
     # P4-Ia1: copy any built C-side userspace binaries from build/usr
-    # into the cpio root. The list is curated below (not glob) so an
+    # into the initrd's bin/. The list is curated below (not glob) so an
     # accidental CMake byproduct doesn't get shipped. Each binary's
     # source-of-truth comment lives in usr/<name>/CMakeLists.txt.
     local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" "stub-driver" "stub-fs-probe" "stub-walk-probe" "thread-probe" "thread-fault-probe" )
     for bin in "${usr_bins[@]}"; do
         local src="$USR_BUILD/$bin/$bin"
         if [[ -f "$src" ]]; then
-            cp "$src" "$ramfs_src/$bin"
-            chmod 0755 "$ramfs_src/$bin"
+            cp "$src" "$ramfs_bin/$bin"
+            chmod 0755 "$ramfs_bin/$bin"
         fi
     done
 
@@ -500,8 +516,8 @@ EOF
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
         if [[ -f "$src" ]]; then
-            cp "$src" "$ramfs_src/$bin"
-            chmod 0755 "$ramfs_src/$bin"
+            cp "$src" "$ramfs_bin/$bin"
+            chmod 0755 "$ramfs_bin/$bin"
         fi
     done
 
@@ -521,9 +537,9 @@ EOF
         # raw copy if llvm-strip is absent: unlike the TLS bins, venus-prove needs
         # no strip to SPAWN (REVENANT R-4 retired the blob cap; exec demand-pages),
         # so this is pure economy, not correctness.
-        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/thylacine-venus-prove" "$vp_src" 2>/dev/null \
-            || cp "$vp_src" "$ramfs_src/thylacine-venus-prove"
-        chmod 0755 "$ramfs_src/thylacine-venus-prove"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_bin/thylacine-venus-prove" "$vp_src" 2>/dev/null \
+            || cp "$vp_src" "$ramfs_bin/thylacine-venus-prove"
+        chmod 0755 "$ramfs_bin/thylacine-venus-prove"
         # Witness the SOURCE artifact's identity (size + short sha) so a STALE
         # stage is visible in the bake log: this binary is fetched from the
         # in-flux mesa fork and is covered by NO freshness check (the #120/#139
@@ -539,14 +555,14 @@ EOF
 
     # Warp W-3e: the SDL2 Vulkan first-frame witness (SDL_thylacinevulkan glue
     # + the W-3d swapchain + presents that DIRECT-bind). Same terms as
-    # venus-prove above in every respect: mesa-fork-fetched, ramfs root,
+    # venus-prove above in every respect: mesa-fork-fetched, ramfs bin/,
     # stripped, optional + announced, identity-witnessed against the stale-fetch
     # trap.
     if [[ -f "$BUILD_DIR/clade/gl/thylacine-vk-sdl-prove" ]]; then
         local vkp_src="$BUILD_DIR/clade/gl/thylacine-vk-sdl-prove"
-        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/thylacine-vk-sdl-prove" "$vkp_src" 2>/dev/null \
-            || cp "$vkp_src" "$ramfs_src/thylacine-vk-sdl-prove"
-        chmod 0755 "$ramfs_src/thylacine-vk-sdl-prove"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_bin/thylacine-vk-sdl-prove" "$vkp_src" 2>/dev/null \
+            || cp "$vkp_src" "$ramfs_bin/thylacine-vk-sdl-prove"
+        chmod 0755 "$ramfs_bin/thylacine-vk-sdl-prove"
         local vkp_sz vkp_sha
         vkp_sz=$(wc -c < "$vkp_src" | tr -d ' ')
         vkp_sha=$(shasum -a 256 "$vkp_src" 2>/dev/null | cut -c1-12)
@@ -563,9 +579,9 @@ EOF
     # terms as the witnesses above.
     if [[ -f "$BUILD_DIR/clade/gl/vkquake" ]]; then
         local vkq_src="$BUILD_DIR/clade/gl/vkquake"
-        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/vkquake" "$vkq_src" 2>/dev/null \
-            || cp "$vkq_src" "$ramfs_src/vkquake"
-        chmod 0755 "$ramfs_src/vkquake"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_bin/vkquake" "$vkq_src" 2>/dev/null \
+            || cp "$vkq_src" "$ramfs_bin/vkquake"
+        chmod 0755 "$ramfs_bin/vkquake"
         local vkq_sz vkq_sha
         vkq_sz=$(wc -c < "$vkq_src" | tr -d ' ')
         vkq_sha=$(shasum -a 256 "$vkq_src" 2>/dev/null | cut -c1-12)
@@ -584,8 +600,8 @@ EOF
     for bin in "${go_bins[@]}"; do
         local src="$go_release/$bin"
         if [[ -f "$src" ]]; then
-            cp "$src" "$ramfs_src/$bin"
-            chmod 0755 "$ramfs_src/$bin"
+            cp "$src" "$ramfs_bin/$bin"
+            chmod 0755 "$ramfs_bin/$bin"
         fi
     done
 
@@ -609,21 +625,21 @@ EOF
         exit 1
     fi
     for bin in "${tls_strip_bins[@]}"; do
-        if [[ -f "$ramfs_src/$bin" ]]; then
-            "$llvm_strip" --strip-all "$ramfs_src/$bin" \
+        if [[ -f "$ramfs_bin/$bin" ]]; then
+            "$llvm_strip" --strip-all "$ramfs_bin/$bin" \
                 || { echo "==> ramfs: llvm-strip $bin FAILED" >&2; exit 1; }
         fi
     done
     ledger "ramfs.cpio: TLS bins stripped for ramfs economy (tls-smoke + https + curl + wget + tlsperf); net-echo ships UNSTRIPPED (~1.1 MiB) -- the live REVENANT R-4 >1-MiB-exec proof"
 
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
-    # against the pouch sysroot by build_pouch_progs) into the cpio root.
+    # against the pouch sysroot by build_pouch_progs) into the initrd's bin/.
     # Same curation discipline — explicit list, not a glob.
     # Track R (Rust std port): /r1hello is the R-1 witness (built by
     # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
     # -f guard in the copy loop below stages nothing when build_rust_progs
     # self-skipped off the track-R box, so this entry is inert there.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -633,37 +649,61 @@ EOF
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
-            cp "$src" "$ramfs_src/$bin"
-            chmod 0755 "$ramfs_src/$bin"
+            cp "$src" "$ramfs_bin/$bin"
+            chmod 0755 "$ramfs_bin/$bin"
         fi
     done
 
+    # B-1d: /lib, the dynamic loader's directory (ARCH 6.5 "Dynamic loading";
+    # the vote of 2026-09-24): libc.so, the interpreter every dynamic Pouch
+    # program names, and the prover's plugin, which it finds there by bare
+    # name. Pre-pivot /lib is this directory; post-pivot joey binds it in
+    # front of the disk's /lib. The prover itself rides pouch_bins. Without
+    # the LLVM fork there is no libc.so, no prover and no lib/; with it, all
+    # three must reach the archive (mkcpio --require below), and joey fails
+    # a boot that ships the prover without its loader.
+    local dynbin
+    local cpio_require=( --require bin/joey )
+    if [[ -f "$BUILD_DIR/sysroot/lib/libc.so" ]]; then
+        cpio_require+=( --require lib/libc.so --require lib/libdlprobe.so
+                        --require bin/pouch-hello-dlopen )
+        # 0755 whatever the host's umask: every principal's X-search crosses it.
+        mkdir -p "$ramfs_src/lib"
+        chmod 0755 "$ramfs_src/lib"
+        for dynbin in "$BUILD_DIR/sysroot/lib/libc.so" "$pouch_progs/libdlprobe.so"; do
+            if [[ -f "$dynbin" ]]; then
+                cp "$dynbin" "$ramfs_src/lib/$(basename "$dynbin")"
+                chmod 0755 "$ramfs_src/lib/$(basename "$dynbin")"
+            fi
+        done
+    fi
+
     # DX-2c (Cryptid: run a real DOS program): emit the DX2C.COM DOS program
-    # into the ramfs root. It is a DATA file (a DOS .COM the emulated guest
+    # into the initrd's bin/. It is a DATA file (a DOS .COM the emulated guest
     # runs, NOT a Thylacine binary), so it rides the bake directly rather than
     # pouch_bins. The ls-gfx-dosbox gate mounts a writable guest dir as C:,
     # copies this in, runs it, and reads back C:\OUT.TXT ("DX-2C-OK"). Same
     # THYLACINE_BAKE_DOSBOX default-on gate as the emulator binary above.
     if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]]; then
-        python3 "$REPO_ROOT/tools/dx2c-dosprog.py" "$ramfs_src/DX2C.COM" \
+        python3 "$REPO_ROOT/tools/dx2c-dosprog.py" "$ramfs_bin/DX2C.COM" \
             || { echo "==> ramfs: DX2C.COM emit FAILED" >&2; exit 1; }
-        chmod 0644 "$ramfs_src/DX2C.COM"
+        chmod 0644 "$ramfs_bin/DX2C.COM"
         ledger "ramfs.cpio: staged DX2C.COM (DX-2c DOS run-a-program witness)"
         # DX-3: the DX3K.COM keystroke witness -- prints a prompt, reads ONE key
         # (INT 21h AH=08h), writes "KEY=<c>" to C:\OUT.TXT. The
         # ls-gfx-dosbox-input gate injects a key via QMP and reads the file
         # back, proving the QMP -> virtio-keyboard -> tapestryd -> SDL -> DOS
         # input path end to end.
-        python3 "$REPO_ROOT/tools/dx3-keyprog.py" "$ramfs_src/DX3K.COM" \
+        python3 "$REPO_ROOT/tools/dx3-keyprog.py" "$ramfs_bin/DX3K.COM" \
             || { echo "==> ramfs: DX3K.COM emit FAILED" >&2; exit 1; }
-        chmod 0644 "$ramfs_src/DX3K.COM"
+        chmod 0644 "$ramfs_bin/DX3K.COM"
         ledger "ramfs.cpio: staged DX3K.COM (DX-3 DOS keystroke witness)"
         # DX-3b: a sample DOSBox-X config demonstrating declarative startup.
         # `dosbox-x -conf <file>` loads settings + runs the [autoexec] section
         # (the file-based equivalent of -c flags). The ls-gfx-dosbox-conf gate
         # proves -conf loads the [autoexec] from a file (OUT.TXT appears with NO
         # -c flags passed).
-        cat > "$ramfs_src/dosbox-x.conf" <<'DOSBOXCONF'
+        cat > "$ramfs_bin/dosbox-x.conf" <<'DOSBOXCONF'
 # Thylacine DOSBox-X sample config (DX-3b). Load it with:
 #   dosbox-x -conf /path/to/dosbox-x.conf
 # The [autoexec] section runs at startup -- the declarative form of -c flags.
@@ -678,7 +718,7 @@ mount c /home/michael
 c:
 DX2C.COM
 DOSBOXCONF
-        chmod 0644 "$ramfs_src/dosbox-x.conf"
+        chmod 0644 "$ramfs_bin/dosbox-x.conf"
         ledger "ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)"
     fi
 
@@ -693,25 +733,36 @@ DOSBOXCONF
     for bin in "${pouch_daemon_bins[@]}"; do
         local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
-            cp "$src" "$ramfs_src/$bin"
-            chmod 0755 "$ramfs_src/$bin"
+            cp "$src" "$ramfs_bin/$bin"
+            chmod 0755 "$ramfs_bin/$bin"
         fi
     done
 
     # P6-pouch-stratumd-boot (sub-chunk 16b-gamma): copy the boot pool
-    # keyfile into the ramfs root as /system.key per the K1 initramfs-
+    # keyfile into the initrd's bin/ as /bin/system.key per the K1 initramfs-
     # literal-key boot decision (scripture commit e82e945; v1.0 root
-    # placement per 16b-gamma scope reduction — devramfs's flat-cpio
-    # constraint defers FHS-shaped /etc/stratum/ to a v1.x lift).
+    # placement per the 16b-gamma scope; an FHS-shaped /etc/stratum/ is a
+    # v1.x lift).
     # joey passes this path to stratumd via argv[--keyfile]. The
     # fixture is generated by build_stratum_pool_fixture before this.
     local keyfile_src="$BUILD_DIR/fixtures/system.key"
     if [[ -f "$keyfile_src" ]]; then
-        cp "$keyfile_src" "$ramfs_src/system.key"
-        chmod 0400 "$ramfs_src/system.key"
+        cp "$keyfile_src" "$ramfs_bin/system.key"
+        chmod 0400 "$ramfs_bin/system.key"
     fi
 
-    python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
+    # The root holds bin/ and lib/ only; the six mount points are the kernel's.
+    # A file staged beside them would load and then vanish at the pivot, where
+    # joey carries only bin/ and lib/ across.
+    local stray
+    stray="$(find "$ramfs_src" -mindepth 1 -maxdepth 1 ! -name bin ! -name lib -print)"
+    if [[ -n "$stray" ]]; then
+        echo "==> ramfs: staged outside bin/ and lib/: $stray" >&2
+        exit 1
+    fi
+
+    python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out" \
+        ${cpio_require[@]+"${cpio_require[@]}"}
     echo "==> ramfs cpio: $ramfs_out"
     ledger "ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)"
 
@@ -746,7 +797,7 @@ DOSBOXCONF
 
 # GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe
 # binaries with the Thylacine Go fork ($GOFORK) and stage them under
-# $BUILD_DIR/go/ so build_ramfs bakes them into the cpio root. The Go fork lives
+# $BUILD_DIR/go/ so build_ramfs bakes them into the initrd's bin/. The Go fork lives
 # outside this repo; if it is absent, skip cleanly (the binary is not baked and
 # joey's go-hello probe degrades to "not spawned" -- a fresh checkout still
 # builds). The Go binary is shipped UNSTRIPPED (>1 MiB) -- the REVENANT
@@ -2432,12 +2483,21 @@ build_sysroot() {
         local mman_h="$musl_src/src/internal/_pouch_mman.h"
         local ext
         for ext in 'SYS_thyla_burrow_reserve 124' 'SYS_thyla_burrow_protect 125' \
-                   'SYS_thyla_burrow_decommit 84' 'SYS_thyla_burrow_detach 38'; do
+                   'SYS_thyla_burrow_decommit 84' 'SYS_thyla_burrow_detach 38' \
+                   'SYS_thyla_burrow_map_file 126'; do
             grep -qE "^#define[[:space:]]+${ext% *}[[:space:]]+${ext#* }([[:space:]]|\$)" "$mman_h" 2>/dev/null || {
-                echo "    SEAM: '#define $ext' (0044) missing from src/internal/_pouch_mman.h" >&2
+                echo "    SEAM: '#define $ext' (0044/0047) missing from src/internal/_pouch_mman.h" >&2
                 fail=1
             }
         done
+        # B-1d (0048): the loader's RELRO call. Parked, __NR_mprotect answers
+        # ENOSYS, which upstream's check accepts -- RELRO would be skipped
+        # without a word.
+        if grep -q '__syscall(SYS_mprotect' "$musl_src/ldso/dynlink.c" || \
+           ! grep -q 'SYS_thyla_burrow_protect' "$musl_src/ldso/dynlink.c"; then
+            echo "    SEAM: ldso/dynlink.c's RELRO is not SYS_thyla_burrow_protect (0048)" >&2
+            fail=1
+        fi
     else
         echo "    MISSING: include/bits/syscall.h" >&2; fail=1
     fi
@@ -2454,6 +2514,10 @@ build_sysroot() {
     #    cross-toolchain is compiler + libc + CRT + compiler runtime; this
     #    installs libclang_rt.builtins.a alongside libc.a and the CRT objects.
     build_compiler_rt
+
+    # 6b. B-1d: libc.so, musl's loader, from the same patched tree. It links
+    #     the PIC builtins step 6 installs, so it follows it.
+    build_libc_shared "$musl_cflags"
 
     # 7. build libsodium (sub-chunk 14) — the first cross-compiled C library
     #    against pouch. Installs libsodium.a + headers alongside libc.a. The
@@ -2503,7 +2567,12 @@ build_sysroot() {
 
     echo "==> pouch sysroot ready:"
     echo "    libc.a    $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
-    echo "    runtime   libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes"
+    echo "    runtime   libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes, _pic.a $(wc -c < "$sysroot/lib/libclang_rt.builtins_pic.a" | tr -d ' ') bytes"
+    if [[ -f "$sysroot/lib/libc.so" ]]; then
+        echo "    libc.so   $(wc -c < "$sysroot/lib/libc.so" | tr -d ' ') bytes (the loader)"
+    else
+        echo "    libc.so   ABSENT (no LLVM fork clang): static programs only"
+    fi
     echo "    libsodium $(wc -c < "$sysroot/lib/libsodium.a" | tr -d ' ') bytes"
     echo "    CRT       crt1.o crti.o crtn.o"
     echo "    headers   $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
@@ -2511,7 +2580,100 @@ build_sysroot() {
     # Completion sentinel, LAST: the rm -rf at step 1 removed it, so its
     # presence certifies every install step above ran to the end.
     touch "$sysroot/.complete"
-    ledger "sysroot: REBUILT (pristine musl + pouch patch series + libc.a + compiler-rt + libsodium)"
+    ledger "sysroot: REBUILT (pristine musl + pouch patch series + libc.a + libc.so + compiler-rt + libsodium)"
+}
+
+build_libc_shared() {
+    # B-1d (ARCH 6.5 "Dynamic loading"): lib/libc.so, which is musl's loader
+    # and the interpreter every dynamic Pouch program names (/lib/libc.so).
+    # A second configure of the patched tree, in its own object directory, so
+    # libc.a and the CRT objects stay the static build's and a static program
+    # is unchanged byte for byte. This one is compiled and linked by the LLVM
+    # fork's clang, the one compiler here whose driver links for
+    # aarch64-thylacine: musl's link probes pass, so LDFLAGS_AUTO carries
+    # --no-undefined, --exclude-libs=ALL and --dynamic-list, without which
+    # libc.so is unsound. (Homebrew clang fails every link probe, silently,
+    # which is why the static build's LDFLAGS_AUTO is empty.) The compiler
+    # runtime is the PIC builtins. Only lib/libc.so is installed.
+    local musl_cflags="$1"
+    local sysroot="$BUILD_DIR/sysroot"
+    local musl_src="$BUILD_DIR/pouch/musl-src"
+    local musl_obj="$BUILD_DIR/pouch/musl-obj-shared"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local cc="${POUCH_CC:-$fork/build/bin/clang}"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+    local so="$sysroot/lib/libc.so"
+    local jobs
+    jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+
+    if [[ ! -x "$cc" ]]; then
+        echo "==> libc.so: the LLVM fork's clang is not built ($cc) -- skipped;"
+        echo "    this sysroot links static programs only (set LLVMFORK or POUCH_CC)"
+        return 0
+    fi
+    echo "==> building libc.so (musl's loader) with $cc"
+    rm -rf "$musl_obj"
+    mkdir -p "$musl_obj"
+    ( cd "$musl_obj" && sh "$musl_src/configure" \
+        --target=aarch64-thylacine \
+        --prefix="$sysroot" \
+        --enable-shared --disable-static \
+        CC="$cc --target=aarch64-thylacine" \
+        CFLAGS="$musl_cflags" \
+        LIBCC="$sysroot/lib/libclang_rt.builtins_pic.a" \
+        AR="$LLVM_PREFIX/bin/llvm-ar" \
+        RANLIB="$LLVM_PREFIX/bin/llvm-ranlib" )
+    # A driver that cannot link -shared fails these probes without a word,
+    # and the link below would still write a file.
+    local cfg flag
+    cfg="$(grep '^LDFLAGS_AUTO' "$musl_obj/config.mak" || true)"
+    for flag in -Wl,--no-undefined -Wl,--exclude-libs=ALL -Wl,--dynamic-list=; do
+        case "$cfg" in
+            *"$flag"*) ;;
+            *) echo "==> libc.so: configure did not take $flag -- is the fork's" >&2
+               echo "    driver one that links -shared? (rebuild it: ninja clang)" >&2
+               exit 1 ;;
+        esac
+    done
+    ( cd "$musl_obj" && make -j"$jobs" lib/libc.so )
+    install -m 0755 "$musl_obj/lib/libc.so" "$so"
+
+    # Its shape: a shared object that is its own loader. ET_DYN, no
+    # interpreter, nothing it needs and nothing undefined, no text
+    # relocation, entered at _dlstart; the C API exported and the compiler
+    # runtime not.
+    local hdr phdrs dyn dsyms entry dlstart undef
+    hdr="$("$readelf" -h "$so")"
+    phdrs="$("$readelf" -lW "$so")"
+    dyn="$("$readelf" -dW "$so")"
+    dsyms="$("$readelf" -W --dyn-syms "$so")"
+    local bad=""
+    case "$hdr" in *"Type:"*DYN*) ;; *) bad+=" not-ET_DYN" ;; esac
+    case "$phdrs" in *INTERP*) bad+=" has-PT_INTERP" ;; esac
+    case "$dyn" in *"(NEEDED)"*) bad+=" has-DT_NEEDED" ;; esac
+    case "$dyn" in *TEXTREL*) bad+=" has-TEXTREL" ;; esac
+    entry="$(awk '/Entry point address:/ {print $4}' <<<"$hdr")"
+    local syms
+    syms="$("$readelf" -sW "$so")"
+    dlstart="$(awk '$8 == "_dlstart" {print $2; exit}' <<<"$syms")"
+    if [[ -z "$dlstart" || $((entry)) -ne $((16#$dlstart)) ]]; then
+        bad+=" entry-not-_dlstart($entry/${dlstart:-none})"
+    fi
+    # The first UND row is the null symbol every table starts with.
+    undef="$(awk '$7 == "UND" && $8 != ""' <<<"$dsyms" | wc -l | tr -d ' ')"
+    [[ "$undef" -eq 0 ]] || bad+=" ${undef}-undefined-dynamic-symbols"
+    for flag in dlopen dlsym dlerror malloc printf; do
+        awk -v s="$flag" '$8 == s && $7 != "UND" {f=1} END {exit !f}' <<<"$dsyms" \
+            || bad+=" $flag-not-exported"
+    done
+    for flag in __addtf3 __aarch64_cas8_acq_rel; do
+        awk -v s="$flag" '$8 == s {f=1} END {exit !f}' <<<"$dsyms" \
+            && bad+=" $flag-exported"
+    done
+    if [[ -n "$bad" ]]; then
+        echo "==> libc.so FAILED verification:$bad" >&2
+        exit 1
+    fi
 }
 
 build_compiler_rt() {
@@ -2557,8 +2719,6 @@ build_compiler_rt() {
     fi
 
     echo "==> building compiler-rt builtins (aarch64-thylacine)"
-    rm -rf "$crt_obj"
-    mkdir -p "$crt_obj"
 
     # The aarch64 source list, derived from the vendored CMakeLists. Generic
     # fp_mode.c is dropped — aarch64/fp_mode.c supersedes it.
@@ -2582,8 +2742,8 @@ build_compiler_rt() {
     fi
 
     # Compile flags. -fno-builtin: a builtin must never be lowered into a call
-    # to itself. -fno-pic / -fno-stack-protector: pouch links static non-PIE,
-    # and the builtins are leaf runtime routines. -nostdlibinc keeps clang's
+    # to itself. -fno-stack-protector: the builtins are leaf runtime routines.
+    # The PIC flags are per archive, below. -nostdlibinc keeps clang's
     # resource headers (stdint.h / limits.h / stdarg.h / unwind.h — all
     # compiler-provided) while -isystem supplies pouch's libc headers for the
     # few OS-touching files (emutls.c, enable_execute_stack.c, ...).
@@ -2594,114 +2754,133 @@ build_compiler_rt() {
     # lowers to an inline LL/SC loop, which runs on every ARMv8 part.
     local cflags=( --target=aarch64-thylacine -march=armv8-a
                    -std=gnu11 -O2 -fno-builtin -fomit-frame-pointer
-                   -fno-stack-protector -fno-pic
+                   -fno-stack-protector
                    -nostdlibinc -isystem "$sysroot/include" -I"$crt_src" )
 
-    local n=0 base obj
-    for f in "${sources[@]}"; do
-        if [[ ! -f "$crt_src/$f" ]]; then
-            echo "    compiler-rt: source $f missing from the vendored tree" >&2
+    # Two archives from one source list. libclang_rt.builtins.a is -fno-pic,
+    # for the static non-PIE links every program has had, so they are
+    # unchanged. libclang_rt.builtins_pic.a has compiler-rt's own flags
+    # (-fPIC, hidden visibility: its CMakeLists) for a .so or a PIE (B-1d):
+    # a -fno-pic member can need a text relocation there, and a default-
+    # visibility one would be exported from every .so it links into.
+    local variant vobj varchive
+    local -a picflags
+    for variant in static pic; do
+        case "$variant" in
+            static) vobj="$crt_obj"; varchive="$archive"; picflags=( -fno-pic ) ;;
+            pic)    vobj="$crt_obj-pic"
+                    varchive="$sysroot/lib/libclang_rt.builtins_pic.a"
+                    picflags=( -fPIC -fvisibility=hidden -DVISIBILITY_HIDDEN ) ;;
+        esac
+        rm -rf "$vobj"
+        mkdir -p "$vobj"
+
+        local n=0 base obj
+        for f in "${sources[@]}"; do
+            if [[ ! -f "$crt_src/$f" ]]; then
+                echo "    compiler-rt: source $f missing from the vendored tree" >&2
+                exit 1
+            fi
+            base="${f%.c}"
+            obj="$vobj/${base//\//-}.o"
+            "$clang" "${cflags[@]}" "${picflags[@]}" -c "$crt_src/$f" -o "$obj"
+            n=$((n + 1))
+        done
+
+        # W1u-b (#71): the CPU-model TU, compiled from OUR wrapper rather than the
+        # vendored file. The wrapper #includes cpu_model/aarch64.c and appends the
+        # constructor that sets __aarch64_have_lse_atomics from AT_HWCAP -- see that
+        # file's header for why textual inclusion, and not a patch or a sibling
+        # object, is the only variant that both survives a re-vendor loudly AND
+        # actually gets linked.
+        local cpumodel_src="$REPO_ROOT/usr/lib/pouch/compiler-rt/aarch64-thylacine.c"
+        local cpumodel_obj="$vobj/cpu_model-aarch64-thylacine.o"
+        if [[ ! -f "$cpumodel_src" ]]; then
+            echo "    compiler-rt: Thylacine cpu_model wrapper missing at $cpumodel_src" >&2
             exit 1
         fi
-        base="${f%.c}"
-        obj="$crt_obj/${base//\//-}.o"
-        "$clang" "${cflags[@]}" -c "$crt_src/$f" -o "$obj"
+        "$clang" "${cflags[@]}" "${picflags[@]}" -c "$cpumodel_src" -o "$cpumodel_obj"
         n=$((n + 1))
-    done
+        # The constructor is the whole point of the wrapper, and it dies quietly:
+        # drop the attribute (or let a re-vendor move the flag out of that TU) and
+        # everything still builds, links, and boots -- just slowly, forever. An
+        # empty .init_array here means the probe never runs.
+        # Capture first, then match: `readelf | grep -q` under `set -o pipefail`
+        # reports the PRODUCER's status, and a -q grep can SIGPIPE it -- the check
+        # would then fail on a perfectly good object (it did, on first run).
+        local cpumodel_sections
+        cpumodel_sections="$("$LLVM_PREFIX/bin/llvm-readelf" -S "$cpumodel_obj" 2>&1 || true)"
+        case "$cpumodel_sections" in
+            *init_array*) ;;
+            *)
+                echo "    compiler-rt: $cpumodel_obj has no .init_array -- the AT_HWCAP" >&2
+                echo "                 LSE constructor was dropped (W1u-b, #71)" >&2
+                exit 1
+                ;;
+        esac
+        echo "    $variant: compiled $n objects"
 
-    # W1u-b (#71): the CPU-model TU, compiled from OUR wrapper rather than the
-    # vendored file. The wrapper #includes cpu_model/aarch64.c and appends the
-    # constructor that sets __aarch64_have_lse_atomics from AT_HWCAP -- see that
-    # file's header for why textual inclusion, and not a patch or a sibling
-    # object, is the only variant that both survives a re-vendor loudly AND
-    # actually gets linked.
-    local cpumodel_src="$REPO_ROOT/usr/lib/pouch/compiler-rt/aarch64-thylacine.c"
-    local cpumodel_obj="$crt_obj/cpu_model-aarch64-thylacine.o"
-    if [[ ! -f "$cpumodel_src" ]]; then
-        echo "    compiler-rt: Thylacine cpu_model wrapper missing at $cpumodel_src" >&2
-        exit 1
-    fi
-    "$clang" "${cflags[@]}" -c "$cpumodel_src" -o "$cpumodel_obj"
-    n=$((n + 1))
-    # The constructor is the whole point of the wrapper, and it dies quietly:
-    # drop the attribute (or let a re-vendor move the flag out of that TU) and
-    # everything still builds, links, and boots -- just slowly, forever. An
-    # empty .init_array here means the probe never runs.
-    # Capture first, then match: `readelf | grep -q` under `set -o pipefail`
-    # reports the PRODUCER's status, and a -q grep can SIGPIPE it -- the check
-    # would then fail on a perfectly good object (it did, on first run).
-    local cpumodel_sections
-    cpumodel_sections="$("$LLVM_PREFIX/bin/llvm-readelf" -S "$cpumodel_obj" 2>&1 || true)"
-    case "$cpumodel_sections" in
-        *init_array*) ;;
-        *)
-            echo "    compiler-rt: $cpumodel_obj has no .init_array -- the AT_HWCAP" >&2
-            echo "                 LSE constructor was dropped (W1u-b, #71)" >&2
-            exit 1
-            ;;
-    esac
-    echo "    compiled $n objects"
-
-    # W1u (#71): the outline-atomics helpers. One lse.S TU per
-    # (pattern, size, model) triple, mirroring the vendored CMakeLists'
-    # own loop (aarch64_SOURCES, "foreach(pat ...) foreach(size ...)
-    # foreach(model ...)") — 16-byte forms exist only for cas, so the
-    # count is 6*5*5 - 5*1*5 = 125.
-    #
-    # -DHAS_ASM_LSE is what COMPILER_RT_HAS_ASM_LSE would set: it selects
-    # `.arch armv8-a+lse` INSIDE lse.S, so the fast path assembles as real
-    # LSE even though the TU baseline is v8.0. Without it the helper still
-    # builds but its "fast" path is a second LL/SC loop — correct, pointless.
-    local asmflags=( --target=aarch64-thylacine -march=armv8-a
-                     -DHAS_ASM_LSE -I"$crt_src" )
-    local pat size model lse_n=0
-    for pat in cas swp ldadd ldclr ldeor ldset; do
-        for size in 1 2 4 8 16; do
-            for model in 1 2 3 4 5; do
-                [[ "$size" == "16" && "$pat" != "cas" ]] && continue
-                "$clang" "${asmflags[@]}" \
-                    "-DL_${pat}" "-DSIZE=${size}" "-DMODEL=${model}" \
-                    -c "$crt_src/aarch64/lse.S" \
-                    -o "$crt_obj/lse-${pat}${size}-${model}.o"
-                lse_n=$((lse_n + 1))
+        # W1u (#71): the outline-atomics helpers. One lse.S TU per
+        # (pattern, size, model) triple, mirroring the vendored CMakeLists'
+        # own loop (aarch64_SOURCES, "foreach(pat ...) foreach(size ...)
+        # foreach(model ...)") — 16-byte forms exist only for cas, so the
+        # count is 6*5*5 - 5*1*5 = 125.
+        #
+        # -DHAS_ASM_LSE is what COMPILER_RT_HAS_ASM_LSE would set: it selects
+        # `.arch armv8-a+lse` INSIDE lse.S, so the fast path assembles as real
+        # LSE even though the TU baseline is v8.0. Without it the helper still
+        # builds but its "fast" path is a second LL/SC loop — correct, pointless.
+        local asmflags=( --target=aarch64-thylacine -march=armv8-a
+                         -DHAS_ASM_LSE -I"$crt_src" )
+        local pat size model lse_n=0
+        for pat in cas swp ldadd ldclr ldeor ldset; do
+            for size in 1 2 4 8 16; do
+                for model in 1 2 3 4 5; do
+                    [[ "$size" == "16" && "$pat" != "cas" ]] && continue
+                    "$clang" "${asmflags[@]}" "${picflags[@]}" \
+                        "-DL_${pat}" "-DSIZE=${size}" "-DMODEL=${model}" \
+                        -c "$crt_src/aarch64/lse.S" \
+                        -o "$vobj/lse-${pat}${size}-${model}.o"
+                    lse_n=$((lse_n + 1))
+                done
             done
         done
-    done
-    if [[ "$lse_n" -ne 125 ]]; then
-        echo "    compiler-rt: expected 125 lse.S variants, built $lse_n" >&2
-        exit 1
-    fi
-    echo "    compiled $lse_n outline-atomics helpers (lse.S)"
+        if [[ "$lse_n" -ne 125 ]]; then
+            echo "    compiler-rt: expected 125 lse.S variants, built $lse_n" >&2
+            exit 1
+        fi
+        echo "    $variant: compiled $lse_n outline-atomics helpers (lse.S)"
 
-    # Archive + symbol index.
-    mkdir -p "$sysroot/lib"
-    rm -f "$archive"
-    "$LLVM_PREFIX/bin/llvm-ar" rcs "$archive" "$crt_obj"/*.o
+        # Archive + symbol index.
+        mkdir -p "$sysroot/lib"
+        rm -f "$varchive"
+        "$LLVM_PREFIX/bin/llvm-ar" rcs "$varchive" "$vobj"/*.o
 
-    # Verify the binary128 soft-float builtins printf's vfprintf path needs are
-    # defined in the archive — the toolchain-completeness gate. A sysroot with a
-    # libc but no runtime links a static hello, but not printf.
-    local defined sym fail=0
-    defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$archive" 2>/dev/null)"$'\n'
-    # The __aarch64_* entries are the W1u (#71) gate: with -moutline-atomics
-    # on the userspace baseline, a missing helper is a link failure in every
-    # pouch program that touches an atomic, so verify them here rather than
-    # discovering it three build stages later.
-    for sym in __addtf3 __subtf3 __multf3 __divtf3 __eqtf2 __extenddftf2 \
-               __trunctfdf2 __fixtfdi __floatditf \
-               __aarch64_cas1_acq_rel __aarch64_cas8_acq_rel \
-               __aarch64_swp4_rel __aarch64_ldadd8_acq_rel \
-               __aarch64_ldclr4_relax __aarch64_ldset2_acq; do
-        case "$defined" in
-            *" T $sym"$'\n'*) ;;
-            *) echo "    compiler-rt: builtin $sym not defined in the archive" >&2
-               fail=1 ;;
-        esac
+        # Verify the binary128 soft-float builtins printf's vfprintf path needs are
+        # defined in the archive — the toolchain-completeness gate. A sysroot with a
+        # libc but no runtime links a static hello, but not printf.
+        local defined sym fail=0
+        defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$varchive" 2>/dev/null)"$'\n'
+        # The __aarch64_* entries are the W1u (#71) gate: with -moutline-atomics
+        # on the userspace baseline, a missing helper is a link failure in every
+        # pouch program that touches an atomic, so verify them here rather than
+        # discovering it three build stages later.
+        for sym in __addtf3 __subtf3 __multf3 __divtf3 __eqtf2 __extenddftf2 \
+                   __trunctfdf2 __fixtfdi __floatditf \
+                   __aarch64_cas1_acq_rel __aarch64_cas8_acq_rel \
+                   __aarch64_swp4_rel __aarch64_ldadd8_acq_rel \
+                   __aarch64_ldclr4_relax __aarch64_ldset2_acq; do
+            case "$defined" in
+                *" T $sym"$'\n'*) ;;
+                *) echo "    compiler-rt: builtin $sym not defined in the archive" >&2
+                   fail=1 ;;
+            esac
+        done
+        if [[ "$fail" -ne 0 ]]; then
+            echo "==> compiler-rt FAILED verification" >&2
+            exit 1
+        fi
     done
-    if [[ "$fail" -ne 0 ]]; then
-        echo "==> compiler-rt FAILED verification" >&2
-        exit 1
-    fi
 }
 
 build_libsodium() {
@@ -3172,7 +3351,7 @@ build_stratum_pool_fixture() {
     # fixture that QEMU mounts as a second virtio-blk-device at boot. The
     # fixture lives at $BUILD_DIR/fixtures/{pool.img,system.key}; the
     # pool.img is fed to QEMU verbatim via -drive (file=...,format=raw),
-    # the keyfile is copied into the ramfs at /etc/stratum/system.key
+    # the keyfile is copied into the ramfs at bin/system.key
     # (per the K1 initramfs-literal-key boot decision; sub-chunk 16b-design
     # commit e82e945).
     #
@@ -3352,7 +3531,7 @@ build_stratum_pool_fixture() {
         exit 1
     fi
     echo "==> stratum pool fixture: $(wc -c < "$pool_img" | tr -d ' ') bytes ($pool_img), $(wc -c < "$keyfile" | tr -d ' ') bytes ($keyfile)"
-    ledger "pool.img + system.key: REGENERATED (fresh random key, seed=$mkfs_seed) -- the ramfs MUST be re-baked so /system.key matches"
+    ledger "pool.img + system.key: REGENERATED (fresh random key, seed=$mkfs_seed) -- the ramfs MUST be re-baked so /bin/system.key matches"
 
     # WHAT ACTUALLY WENT INTO THIS POOL, written where a HOST-side gate can read
     # it. The #101/#139 family keeps recurring because the optional payloads have
@@ -4558,6 +4737,59 @@ build_pouch_progs() {
         esac
         echo "    $prog: $(wc -c < "$progs_out/$prog" | tr -d ' ') bytes (ET_EXEC, static)"
     done
+
+    # B-1d: the dlopen prover and the plugin it loads. A dynamic PIE and a .so
+    # need the fork's driver and the sysroot's libc.so, so a sysroot without
+    # libc.so (no LLVM fork) builds neither, and joey reports the prover absent.
+    rm -f "$progs_out/libdlprobe.so"
+    if [[ -f "$sysroot/lib/libc.so" ]]; then
+        echo "==> pouch prog: pouch-hello-dlopen + libdlprobe.so (B-1d)"
+        "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
+            -nostdinc -isystem "$sysroot/include" -fPIC \
+            -c "$src_dir/pouch-hello-dlopen-lib.c" -o "$progs_out/pouch-hello-dlopen-lib.o"
+        POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+            "$pouch_ld" -shared "$progs_out/pouch-hello-dlopen-lib.o" \
+            -o "$progs_out/libdlprobe.so"
+        "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
+            -nostdinc -isystem "$sysroot/include" -fPIE \
+            -c "$src_dir/pouch-hello-dlopen.c" -o "$progs_out/pouch-hello-dlopen.o"
+        POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+            "$pouch_ld" -pie "$progs_out/pouch-hello-dlopen.o" \
+            -o "$progs_out/pouch-hello-dlopen"
+        # Each shape the prover's legs lean on, checked here so a link that
+        # quietly produced something else fails the build, not the boot.
+        local f hdr phdrs dyn bad loads
+        for f in pouch-hello-dlopen libdlprobe.so; do
+            hdr="$("$readelf" -h "$progs_out/$f")"
+            phdrs="$("$readelf" -lW "$progs_out/$f")"
+            dyn="$("$readelf" -dW "$progs_out/$f")"
+            bad=""
+            case "$hdr" in *"Type:"*DYN*) ;; *) bad+=" not-ET_DYN" ;; esac
+            case "$dyn" in *"(NEEDED)"*"[libc.so]"*) ;; *) bad+=" no-DT_NEEDED-libc.so" ;; esac
+            case "$dyn" in *TEXTREL*) bad+=" has-TEXTREL" ;; esac
+            if [[ "$f" == pouch-hello-dlopen ]]; then
+                case "$phdrs" in
+                    *"[Requesting program interpreter: /lib/libc.so]"*) ;;
+                    *) bad+=" interpreter-not-/lib/libc.so" ;;
+                esac
+            else
+                case "$phdrs" in *INTERP*) bad+=" has-PT_INTERP" ;; esac
+                case "$phdrs" in *GNU_RELRO*) ;; *) bad+=" no-PT_GNU_RELRO" ;; esac
+                # Flg prints as "R E" for read+exec: join the fields between
+                # MemSiz and Align.
+                loads="$(awk '$1 == "LOAD" { f = ""; for (i = 7; i < NF; i++) f = f $i
+                                             printf "%s%s", sep, f; sep = "," }' <<<"$phdrs")"
+                [[ "$loads" == "R,RE,RW,RW" ]] || bad+=" loads=$loads(want-R,RE,RW,RW)"
+            fi
+            if [[ -n "$bad" ]]; then
+                echo "    $f: FAILED shape check:$bad" >&2
+                exit 1
+            fi
+            echo "    $f: $(wc -c < "$progs_out/$f" | tr -d ' ') bytes (ET_DYN, against libc.so)"
+        done
+    else
+        echo "==> pouch prog: pouch-hello-dlopen SKIPPED (no libc.so in the sysroot)"
+    fi
     echo "==> pouch progs built under $progs_out"
 }
 
@@ -7120,7 +7352,7 @@ case "$target" in
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
     # The keyfile is a ramfs input: build_ramfs bakes build/fixtures/system.key
-    # into the cpio at /system.key. Re-baking the pool regenerates that key
+    # into the cpio at bin/system.key. Re-baking the pool regenerates that key
     # (libsodium-random per run), so the ramfs MUST be rebuilt too -- otherwise
     # the VM mounts the FRESH pool with the STALE ramfs key, stratumd derives the
     # wrong metadata key, and the first btree-node AEAD tag verify fails with

@@ -6839,6 +6839,61 @@ s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
     return (s64)rc;
 }
 
+// SYS_BURROW_MAP_FILE: the native form of D-3's three arms (ARCH 6.5 "Dynamic
+// loading"). The phenotype's mmap rows decide Linux's word and call the same
+// three cores; this entry decides the native word and calls them, so the
+// vouching, the eager copy and the Image cache are each spelled once. The word
+// passes straight through because the two encodings are one.
+_Static_assert(BURROW_PROT_READ  == (u64)VIV_PROT_READ &&
+               BURROW_PROT_WRITE == (u64)VIV_PROT_WRITE &&
+               BURROW_PROT_EXEC  == (u64)VIV_PROT_EXEC,
+               "SYS_BURROW_MAP_FILE hands its prot word to the phenotype's "
+               "fixed-window cores unconverted");
+
+s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+                                 u64 length_raw, u64 prot_raw, u64 flags_raw,
+                                 u64 addr_raw) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    const u64 rwx = BURROW_PROT_READ | BURROW_PROT_WRITE | BURROW_PROT_EXEC;
+    if (prot_raw & ~rwx)                             return -(s64)T_E_INVAL;
+    if (flags_raw & ~(u64)BURROW_MAP_FIXED)          return -(s64)T_E_INVAL;
+    // W|X is unspeakable (I-12), and refused before any lookup.
+    if ((prot_raw & BURROW_PROT_WRITE) && (prot_raw & BURROW_PROT_EXEC))
+        return -(s64)T_E_ACCES;
+    if ((prot_raw & BURROW_PROT_WRITE) && !(prot_raw & BURROW_PROT_READ))
+        return -(s64)T_E_INVAL;                       // no write-only AP (RW-1 C-F3)
+
+    const bool anon = (s64)fd_raw == -1;
+    s64 rc;
+    if (!(flags_raw & BURROW_MAP_FIXED)) {
+        // The whole-span map. `addr` is not a hint here -- Linux's quiet
+        // ignoring of one is what lets musl ask for an ET_EXEC's fixed address
+        // and fail later with EBUSY -- so a nonzero one is refused outright.
+        if (addr_raw != 0)                           return -(s64)T_E_INVAL;
+        if (anon)                                    return -(s64)T_E_BADF;
+        // A writable span would be a writable file mapping, which does not
+        // exist (I-36); the writable segment is a FIXED eager copy below.
+        if (prot_raw & BURROW_PROT_WRITE)            return -(s64)T_E_ACCES;
+        if (!(prot_raw & BURROW_PROT_READ))          return -(s64)T_E_INVAL;
+        rc = sys_mmap_file_for_proc(p, fd_raw, length_raw,
+                                    (prot_raw & BURROW_PROT_EXEC) != 0, offset);
+    } else if (anon) {
+        // The bss tail. Anonymous bytes become code only through the JIT
+        // syscalls (I-42), never here.
+        if (prot_raw & BURROW_PROT_EXEC)             return -(s64)T_E_ACCES;
+        if (offset != 0)                             return -(s64)T_E_INVAL;
+        rc = sys_mmap_fixed_anon_for_proc(p, addr_raw, length_raw, (u32)prot_raw);
+    } else {
+        if (!(prot_raw & BURROW_PROT_READ))          return -(s64)T_E_INVAL;
+        rc = sys_mmap_fixed_file_for_proc(p, addr_raw, fd_raw, length_raw,
+                                          (u32)prot_raw, offset);
+    }
+    // The cores refuse an exec map off an MNOEXEC mount with the Linux
+    // phenotype's EPERM. Returned natively, -T_E_PERM is Pouch's flat -1, which
+    // decodes as EIO (errno.h); the registry's permission-denied code is ACCES.
+    return rc == -(s64)T_E_PERM ? -(s64)T_E_ACCES : rc;
+}
+
 static s64 sys_burrow_reserve_handler(u64 length_raw, u64 prot_raw, u64 align_log2) {
     struct Thread *t = current_thread();
     if (!t)                                          return -(s64)T_E_INVAL;
@@ -6851,6 +6906,14 @@ static s64 sys_burrow_protect_handler(u64 vaddr_raw, u64 length_raw,
     if (!t)                                          return -(s64)T_E_INVAL;
     return sys_burrow_protect_for_proc(t->proc, vaddr_raw, length_raw,
                                        prot_raw, flags_raw);
+}
+
+static s64 sys_burrow_map_file_handler(u64 fd_raw, u64 offset, u64 length_raw,
+                                       u64 prot_raw, u64 flags_raw, u64 addr_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -(s64)T_E_INVAL;
+    return sys_burrow_map_file_for_proc(t->proc, fd_raw, offset, length_raw,
+                                        prot_raw, flags_raw, addr_raw);
 }
 
 // =============================================================================
@@ -7916,7 +7979,8 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
 // does the source rights gate + flags check + the mount-table op). The mount
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
-// inside territory.c::mount -- the mountpoint Spoor is NOT retained.
+// inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
+// only as the covered member of a union the mount starts.
 int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
                        struct Spoor *mountpoint, u32 flags) {
     if (!p)                                          return -1;
@@ -8009,7 +8073,8 @@ static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,
 
     s64 rc = (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw, mp,
                                      (u32)flags_raw);
-    // territory.c::mount copied mp's identity, not mp itself -- release it.
+    // territory.c::mount copied mp's identity (and took its own ref where it
+    // keeps mp as a union's covered member) -- release ours.
     spoor_clunk(mp);
     return rc;
 }
@@ -10043,7 +10108,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
                                            territory_root_pheno(p->territory));
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, proc_resource_exempt(p), p, new_pheno, exe, exe_size,
+    int rc = exec_load_into(nas, proc_resource_exempt(p), p, exe, exe_size,
                             path, (u32)path_len,
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
                             env_kbuf, (u32)env_data_len, (u32)envc,
@@ -15429,6 +15494,12 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_BURROW_PROTECT:
         ctx->regs[0] = (u64)sys_burrow_protect_handler(ctx->regs[0], ctx->regs[1],
                                                        ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_BURROW_MAP_FILE:
+        ctx->regs[0] = (u64)sys_burrow_map_file_handler(ctx->regs[0], ctx->regs[1],
+                                                        ctx->regs[2], ctx->regs[3],
+                                                        ctx->regs[4], ctx->regs[5]);
         return;
 
     case SYS_LOOM_SETUP:

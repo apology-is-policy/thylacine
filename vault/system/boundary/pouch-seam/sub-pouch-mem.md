@@ -8,15 +8,19 @@ code:
   - usr/lib/pouch/patches/0044-pouch-mman-protect-decommit.patch
   - usr/lib/pouch/patches/0045-pouch-main-stack-auxv.patch
   - usr/lib/pouch/patches/0046-pouch-init-tls-mmap.patch
+  - usr/lib/pouch/patches/0047-pouch-map-file.patch
+  - usr/lib/pouch/patches/0048-pouch-ldso-relro.patch
   - usr/pouch-hello/pouch-hello-mem.c
   - usr/pouch-hello/pouch-hello-guard.c
+  - usr/pouch-hello/pouch-hello-dlopen.c
+  - usr/pouch-hello/pouch-hello-dlopen-lib.c
 audit: hard
 guarded-by: [inv-i12, inv-i32]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/ARCHITECTURE.md", "docs/POUCH-DESIGN.md"]
 created: 2026-09-23
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -42,9 +46,11 @@ internal header, never `bits/syscall.h.in`): `SYS_thyla_burrow_reserve` 124
 `(length, prot, align_log2) -> vaddr | -errno`, `SYS_thyla_burrow_protect` 125
 `(vaddr, length, prot, flags) -> 0 | -errno`, `SYS_thyla_burrow_decommit` 84
 `(vaddr, length) -> 0 | -1`, `SYS_thyla_burrow_detach` 38 `(vaddr, length) ->
-0 | -1` (`= __NR_munmap`). `__NR_mmap`, `__NR_mprotect`, `__NR_madvise`,
-`__NR_mremap` are the sentinel: three of the four Thylacine numbers differ from
-their Linux namesakes in argument SHAPE, so a raw `syscall(SYS_mprotect, ..)`
+0 | -1` (`= __NR_munmap`), and since B-1d (0047) `SYS_thyla_burrow_map_file`
+126 `(fd, offset, length, prot, flags, addr) -> vaddr | -errno` (the B-1d
+section below). `__NR_mmap`, `__NR_mprotect`, `__NR_madvise`, `__NR_mremap`
+are the sentinel: three of the four numbers with Linux namesakes differ from
+them in argument SHAPE, so a raw `syscall(SYS_mprotect, ..)`
 from a port is a clean ENOSYS and can never be misread (a three-argument
 mprotect on 125 would pass x3 as the flags word and a stray 1 would SEAL; a
 raw madvise on 84 would DECOMMIT on a hint).
@@ -140,14 +146,16 @@ lesson.
 
 **A re-vendor.** 0001's awk filter loses `m["mmap"]` (0003 added it) and
 keeps `m["munmap"]="38"`; the sysroot's SEAM verification (`tools/build.sh`,
-`build_sysroot`) pins `SYS_mmap 0xFFFF`, `SYS_munmap 38` and the four numbers
+`build_sysroot`) pins `SYS_mmap 0xFFFF`, `SYS_munmap 38` and the five numbers
 of `_pouch_mman.h`, so a series that loses 0044 fails the build, not the first
-program with TLS.
+program with TLS, and one that loses 0047 fails it before a loader ships
+without its file maps.
 
 ## Data structures
 
-`src/internal/_pouch_mman.h`: the four numbers, `POUCH_BURROW_PROTECT_SEAL`
-(1), `AT_THYLA_STACK_BASE` / `AT_THYLA_STACK_SIZE` (mirrors of `elf.h`'s
+`src/internal/_pouch_mman.h`: the five numbers, `POUCH_BURROW_PROTECT_SEAL`
+(1), `POUCH_BURROW_MAP_FIXED` (1, 0047: the one flag 126 accepts, the kernel's
+`BURROW_MAP_FIXED`), `AT_THYLA_STACK_BASE` / `AT_THYLA_STACK_SIZE` (mirrors of `elf.h`'s
 private tags, pinned by `/pouch-hello-threads` against the kernel's maps row
 rather than by a static assert across trees).
 
@@ -286,3 +294,63 @@ the marker absent and the boot extincts.
 retargeted to `SYS_BURROW_ATTACH_LAZY` at #321) →
 [[chg-2026-09-23-b1b-pouch-memory]] (0044 / 0045 / 0046: the seam made
 exact; `__init_tls` through `__mmap`; the provers; holotype r1 0 / 0 / 1 / 5).
+
+## B-1d: file maps and RELRO for the loader (0047, 0048), and the dlopen prover (2026-09-24)
+
+**The loader is the first caller that maps files, so file maps got a door**
+(ARCH 6.5 "Dynamic loading", [[dec-2026-09-24-b1d-loader-shape]]). musl's
+`map_library` places an object with three shapes: the whole span where the
+kernel chooses, each later segment `MAP_FIXED` over it, and the bss tail
+anonymously. Until 0047 every file-backed
+`mmap` was ENOSYS. 0047 sends a `MAP_PRIVATE` file map to
+`SYS_BURROW_MAP_FILE` (126, [[sub-kernel-syscall-abi]]): without `MAP_FIXED` an
+R or R|X span at a kernel-chosen address (the hint is dropped, so an `ET_EXEC`
+fails the loader's exact-address check with EBUSY and only a PIE or a `.so`
+loads -- the vote); with it the window at `start` is replaced, R / R|X sharing
+the file's pages through the Image cache and RW as an eager private copy
+charged at once. The bss tail is not a file map: it is `MAP_FIXED|MAP_ANON`
+over the RW copy, which is plain anonymous memory, so 0044's decommit +
+protect serves it unchanged. Answered before the kernel: a negative fd is
+EBADF (the kernel reads fd -1 under FIXED as the anonymous window, and a
+request without `MAP_ANON` must never become one); `MAP_SHARED`,
+`MAP_SHARED_VALIDATE`, a writable map without `MAP_FIXED`, a map without read
+and `MAP_FIXED_NOREPLACE` are ENOSYS -- the domain the Linux phenotype's two
+file arms admit, so the substrates agree on what is served.
+
+**A census of the archive you have is not a census of the artifact you ship.**
+0046 found `__init_tls.c` as musl's one raw `mmap` caller by searching
+`libc.a`'s sources; `ldso/dynlink.c` is compiled only into `libc.so`, so it was
+invisible, and its `reloc_all` applies RELRO with a raw `SYS_mprotect`. With
+`__NR_mprotect` parked at the sentinel (0044) and the check beside the call
+accepting ENOSYS, every object would have loaded with its RELRO pages still
+writable and nothing would have said so. 0048 makes the call
+`SYS_thyla_burrow_protect` (125) with flags 0 -- a reduction, not a seal:
+Linux does not seal RELRO, and a sealed range would refuse the hook libraries
+that raise it to patch a GOT entry and lower it again -- and removes the ENOSYS
+acceptance, so a kernel that cannot protect the object fails the load. The
+sysroot seam check pins both (`SYS_thyla_burrow_map_file 126` in
+`_pouch_mman.h`; dynlink's RELRO spelled as `SYS_thyla_burrow_protect`).
+
+**The prover, `/pouch-hello-dlopen`, is a dynamic PIE loading
+`/lib/libdlprobe.so`.** Each leg runs even after an earlier one failed, and
+the census line joey matches prints only when all passed: `interp` (its
+loader is `/lib/libc.so`), `noexec` (DENY: in a child whose namespace marks
+`/lib`'s device `MNOEXEC`, the plugin does not load, and the reason is EACCES
+from the vouching, not a failed lookup; the leg first saw EIO, because the
+native call returned the cores' `-T_E_PERM`, which Pouch reads as its flat
+`-1`), `confined` (DENY: in a child pivoted
+to a root with no `/lib`, the bare name, the absolute path and a `../` escape
+all miss with ENOENT; the child works from `/` on both sides of the pivot, so
+the escape's `..` reaches the resolver's floor: before the pivot the same
+relative name opens the plugin, and after it `..` alone opens the new root),
+`load` (the control for both: the bare name finds the
+plugin and its constructor ran), `segments` (the four PT_LOADs R, R+X, RW, RW,
+a RELRO range and a bss tail, each reading and taking writes as its shape
+promises) and `relro` (a child writing the plugin's RELRO table dies of the
+fault; one writing its `.data` exits 0). The deny legs run before the parent's
+own load, because musl caches a loaded library by its short name. Every child
+is the same binary through `posix_spawn`: a dynamic program spawning a
+dynamic program. It ships only with `libc.so`, and the image that ships it
+must carry its loader: joey, the kernel test
+`devramfs.live_lib_when_prover_ships` and the ramfs bake each fail otherwise
+([[dec-2026-09-25-devramfs-directories]]).

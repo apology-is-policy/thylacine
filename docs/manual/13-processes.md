@@ -132,3 +132,16 @@ output and owns the terminal's master connection. Its seal prevents debugger
 attachment and memory extraction, including by a process with administrative
 capabilities. Programs started inside the terminal do not inherit that seal;
 their usual debugging permissions still apply. Process listings remain available.
+
+A program built with the C library can load a shared library while it runs.
+The library loader is `/lib/libc.so`, and a library named without a directory
+is looked for in the directories the program names and then in `/lib`. The
+loader does not read `LD_LIBRARY_PATH` or `LD_PRELOAD`, so neither variable
+changes which library a program loads. On Linux the loader ignores these two
+variables only when a program gains privilege as it starts. A Thylacine
+process gains authority after it starts, when it asks for elevation, and by
+then a library chosen through the environment would already be running inside
+it. A program linked statically has no loader, and it does read the locale,
+message-catalogue and time-zone variables (`MUSL_LOCPATH`, `NLSPATH`, a file
+named by `TZ`). A dynamically loaded program ignores those as well, because
+the C library applies one setting to all of them.

@@ -1,4 +1,4 @@
-// /alloc-smoke — incremental runtime validation for libthyla-rs's
+// /bin/alloc-smoke — incremental runtime validation for libthyla-rs's
 // typed Rust modules (U-2a onward).
 //
 // First native Thylacine binary that uses the alloc crate. Declares
@@ -9,7 +9,7 @@
 //   U-2b alloc:    Box / Vec / String / small-alloc loop
 //   U-2c-path:     Path / PathBuf / parent / join / components
 //   U-2c-io:       Cursor (in-mem Read/Seek), File::open + Read over
-//                  /system.key in devramfs (validates SYS_WALK_OPEN
+//                  /bin/system.key in devramfs (validates SYS_WALK_OPEN
 //                  + SYS_READ + SYS_LSEEK round-trip via t::io traits)
 //   U-2c-fs:       File::metadata, free fs::{metadata, exists, is_file,
 //                  is_dir}, OpenOptions builder (validates SYS_FSTAT
@@ -392,14 +392,14 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    // File::open of /system.key (devramfs, 3656 bytes, read-only).
+    // File::open of /bin/system.key (devramfs, 3656 bytes, read-only).
     // Validates: multi-step walk-or-single-step (this is single
     // component "system.key"), SYS_WALK_OPEN return decoding, Read
     // over SYS_READ, Seek over SYS_LSEEK, Drop via SYS_CLOSE.
-    let mut sk = match File::open("/system.key") {
+    let mut sk = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("alloc-smoke: File::open(/system.key) FAILED\n");
+            t_putstr("alloc-smoke: File::open(/bin/system.key) FAILED\n");
             return 1;
         }
     };
@@ -472,10 +472,10 @@ pub extern "C" fn rs_main() -> i64 {
     // ====================================================================
 
     // File::metadata on an open File.
-    let sk = match File::open("/system.key") {
+    let sk = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("alloc-smoke: File::open(/system.key) for metadata FAILED\n");
+            t_putstr("alloc-smoke: File::open(/bin/system.key) for metadata FAILED\n");
             return 1;
         }
     };
@@ -494,7 +494,7 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("alloc-smoke: Metadata::is_file/is_dir FAILED\n");
         return 1;
     }
-    // /system.key is chmod 0400 (a keyfile: read-only, owner-only). Since #58,
+    // /bin/system.key is chmod 0400 (a keyfile: read-only, owner-only). Since #58,
     // mkcpio preserves the source mode (was a hardcoded 0644), so permissions()
     // (type bits masked off) is 0o400.
     if md.permissions() != 0o400 {
@@ -504,7 +504,7 @@ pub extern "C" fn rs_main() -> i64 {
     drop(sk);
 
     // Free-function metadata: same checks, single line.
-    let md2 = match fs::metadata("/system.key") {
+    let md2 = match fs::metadata("/bin/system.key") {
         Ok(m) => m,
         Err(_) => {
             t_putstr("alloc-smoke: fs::metadata FAILED\n");
@@ -517,25 +517,25 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // exists / is_file / is_dir.
-    if !fs::exists("/system.key") {
-        t_putstr("alloc-smoke: fs::exists(/system.key) FAILED\n");
+    if !fs::exists("/bin/system.key") {
+        t_putstr("alloc-smoke: fs::exists(/bin/system.key) FAILED\n");
         return 1;
     }
     if fs::exists("/no-such-file-thylacine") {
         t_putstr("alloc-smoke: fs::exists(missing) unexpectedly true\n");
         return 1;
     }
-    if !fs::is_file("/system.key") {
-        t_putstr("alloc-smoke: fs::is_file(/system.key) FAILED\n");
+    if !fs::is_file("/bin/system.key") {
+        t_putstr("alloc-smoke: fs::is_file(/bin/system.key) FAILED\n");
         return 1;
     }
-    if fs::is_dir("/system.key") {
-        t_putstr("alloc-smoke: fs::is_dir(/system.key) unexpectedly true\n");
+    if fs::is_dir("/bin/system.key") {
+        t_putstr("alloc-smoke: fs::is_dir(/bin/system.key) unexpectedly true\n");
         return 1;
     }
 
     // OpenOptions: explicit-read open.
-    let mut sk3 = match OpenOptions::new().read(true).open("/system.key") {
+    let mut sk3 = match OpenOptions::new().read(true).open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
             t_putstr("alloc-smoke: OpenOptions::new().read(true).open FAILED\n");
@@ -550,7 +550,7 @@ pub extern "C" fn rs_main() -> i64 {
     drop(sk3);
 
     // OpenOptions: no read or write -> InvalidArgument.
-    match OpenOptions::new().open("/system.key") {
+    match OpenOptions::new().open("/bin/system.key") {
         Err(Error::InvalidArgument) => {}
         _ => {
             t_putstr("alloc-smoke: OpenOptions::new()-no-mode unexpectedly succeeded\n");
@@ -559,7 +559,7 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // OpenOptions: truncate without write -> InvalidArgument.
-    match OpenOptions::new().read(true).truncate(true).open("/system.key") {
+    match OpenOptions::new().read(true).truncate(true).open("/bin/system.key") {
         Err(Error::InvalidArgument) => {}
         _ => {
             t_putstr("alloc-smoke: OpenOptions::truncate-without-write unexpectedly succeeded\n");
@@ -1079,17 +1079,17 @@ pub extern "C" fn rs_main() -> i64 {
 
     // mount/unmount round-trip (stalk-2: path-keyed). alloc-smoke is spawned by
     // joey PRE-pivot, so FROM_ROOT resolves on the devramfs boot root. Source =
-    // /system.key (a cpio leaf, opened RDONLY -> RIGHT_READ); mount point = the
+    // /bin/system.key (a cpio leaf, opened RDONLY -> RIGHT_READ); mount point = the
     // devramfs synthetic /srv dir (stalk-2 D4) -- a DISTINCT, purpose-built,
     // empty mount point (the mount cycle check, stalk-2 audit F1, rejects a
     // self-mount where the source identity == the mount-point identity, so the
     // source and the mount point must differ). A plumbing smoke for the
     // territory:: API + the new path-keyed ABI.
     const TEST_MP: &str = "/srv";
-    let src = match File::open("/system.key") {
+    let src = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("alloc-smoke: U-2f File::open(/system.key) FAILED\n");
+            t_putstr("alloc-smoke: U-2f File::open(/bin/system.key) FAILED\n");
             return 1;
         }
     };
@@ -1120,7 +1120,7 @@ pub extern "C" fn rs_main() -> i64 {
     // bind_before / bind_after / bind_replace: same plumbing as
     // mount(); a syscall-success round-trip is enough to verify the
     // shorthand wiring.
-    let src2 = match File::open("/system.key") {
+    let src2 = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
             t_putstr("alloc-smoke: U-2f File::open #2 FAILED\n");

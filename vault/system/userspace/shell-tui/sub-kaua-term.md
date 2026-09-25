@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -51,7 +51,8 @@ The library (`lib.rs` + `wire.rs`, host-buildable) is a pure event model:
   channel's `Control` gained `Osc1936Raw { serial, frame }` -- the raw Beacon
   frame plus its span serial -- and the wire cell is now 17 bytes (`ch`/`fg`/`bg`
   u32, `attrs` u8, `span` u32; the trailing `span` is what the H-4d Beacon
-  threading added).
+  threading added). TC-1 added `Control::ScreenErased`, subtag 6, no payload
+  (KAUA-TERM 1b; subtag 7 is allocated to another record).
 
 The bin (`main.rs`): `kaua-term [--beacon none|cells|rich] <cols> <rows> [prog
 [args...]]` — fd 0 is the DOWN channel (halcyond's `Input` frames), fd 1 the UP
@@ -73,6 +74,24 @@ effect. The producer flushes a pending `CellDiff` before acting on each
 boundary, so the ORDER between records is guaranteed: a Beacon zone frame lands
 between exactly the cells it separates, a scrolled row precedes the screen that
 no longer holds it. Consecutive scrolls coalesce into one `ScrollOff`.
+
+**A whole-screen erase is three records, in an order the tile depends on
+(TC-1, HALCYON 14.13).** The vt hands the erased screen over as ordinary `Scroll`
+boundaries (every row through the last with text), blanks, then reports
+`Boundary::ScreenErased`. The rows coalesce into the scroll accumulator like any
+scroll -- bounded by `scroll_cap` and the sink exactly as a scroll is -- and the
+producer maps the report like `Bell`: `flush` first, then
+`Control::ScreenErased`. So the wire carries `ScrollOff` (the erased rows, which
+the tile keeps as history), `CellDiff` (the blank), `Control(ScreenErased)`, and
+no ScrollOff can land after the record and release the pin it sets.
+`Boundary::TopRestart` is flushed on the same way, with no record of its own:
+the held rows ship, then the CellDiff whose top flag ends the fragment, before
+the next row can join the same `ScrollOff` (TC-1a audit F5). That CellDiff is
+FORCED (`last_top = true` before the flush): the consumer has held the fragment
+since its row left, whatever flag last went out, and a restart that leaves the
+screen and cursor as last sent would otherwise send nothing (round-2 F3). The
+AltLeave arm sends the restored main with the wrap flags, cursor and top flag
+the boundary carries, never the vt's post-byte state (round-2 F1).
 
 **The bounds are per record CLASS, not per read — this is the security core.**
 The number of rows a chunk yields is the VT's to decide, not the chunk's size:
@@ -111,11 +130,15 @@ full diff in one emit, then `resized` resyncs the shadow.
 
 ## Data structures
 
-`Record` = `CellDiff { changed: Vec<(u16,u16,Cell)>, cursor }` | `ScrollOff {
-rows: Vec<Vec<Cell>> }` | `Control(Control)` | `Mode(ScreenMode)`. `Control` =
-`Osc1936Raw(Vec<u8>)` (a Beacon frame, passed through opaque) | `Title(String)`
-| `Bell` | `Exit(i32)` | `WinsizeAck`. `Producer` holds a shadow screen
-(`cols x rows` cells) it diffs against.
+`Record` = `CellDiff { changed: Vec<(u16,u16,Cell)>, cursor, wrapped,
+top_continues }` | `ScrollOff { rows: Vec<Vec<Cell>>, wrapped }` |
+`Control(Control)` | `Mode(ScreenMode)`. `Control` = `Osc1936Raw { serial,
+frame }` (a Beacon frame, passed through opaque) | `Bell` | `Title(String)` |
+`Exit(i32)` | `WinsizeAck` | `Osc7Raw(Vec<u8>)` (the cwd report, raw) |
+`ScreenErased` -- wire subtags 0 through 6 in that order of allocation (0
+osc1936, 1 bell, 2 title, 3 exit, 4 winsize_ack, 5 osc7, 6 screen_erased).
+`Producer` holds a shadow screen (`cols x rows` cells) it diffs against; a
+`Scroll` never shifts it, because the tile's grid changes only by CellDiff.
 
 `wire`: length-prefixed frames; `FrameDecoder` compacts its buffer and yields
 `Err(TooLarge)` on a declared length past `MAX_FRAME` (an unrecoverable stream
@@ -189,6 +212,12 @@ plus one capped record regardless of how much the app dumps at once.
 - **The master-write lock.** The two writers (keys, terminal replies) must not
   interleave a single write; the back-pressure nap is held under the lock, so
   the CPR latency bound is the reason the nap is bounded.
+- **The erase's order.** `Control::ScreenErased` must follow the flush that
+  ships the erased rows and the blank. Pushed first, the erase's own ScrollOff
+  arrives after it and releases the tile's pin (the TC-1a sabotage leg V10 reds
+  the producer's order test and the whole-seam test in halcyond). Its subtag is
+  pinned to the LITERAL 6 by a byte-level test, so a renumbering on both sides
+  at once still fails.
 - **The identity of the spawned app.** Prosecuted on the halcyond spawn side
   (`.caps(!T_CAP_SET_IDENTITY)`), but kaua-term's own `Command::new` for the
   slave inherits caps by default — the KT-1 audit's recurring footgun.
@@ -210,12 +239,22 @@ plus one capped record regardless of how much the app dumps at once.
   `emit_celldiff` resyncs silently. It is a guard only — the bin's call order
   (`drain_pending` without a diff, then `resized`) never diffs across a
   geometry change, equal cell counts included.
+- **Currency (2026-09-25): this dossier was brought current for TC-1 only.**
+  The lib and wire changes between 2026-09-06 and 2026-09-22 (the PL-3/PL-4
+  soft-wrap flags, `top_continues`, the OSC 7 report, the palette input) are
+  corrected in the record lists above but not otherwise described. Dating this
+  edit stopped `quaestor stale` from flagging the dossier, so the debt is
+  recorded here instead.
 
 ## Tests
 
-`cargo test -p kaua-term --no-default-features --target aarch64-apple-darwin`
-(30 host tests: `lib.rs` 23 + `wire.rs` 7 — the reference doc's "28" predates
-rounds 2-3). They pin: the codec round-trips + the malformed/oversize/truncated
+`cargo test -p kaua-term --lib --no-default-features --target
+aarch64-apple-darwin` from `usr/` (49 host tests on 2026-09-25, `tools/
+test-rust.sh kaua-term`; the "30" this row carried predates PL-3/PL-4 and TC-1).
+TC-1 added `a_screen_erase_ships_the_erased_rows_then_the_blank_then_the_record`
+(the three-record order) and `the_screen_erase_is_control_subtag_6_with_no_payload`
+(the literal byte pin, the trailing byte and an unallocated subtag both
+Malformed). They pin: the codec round-trips + the malformed/oversize/truncated
 frames; the producer's boundary order; `bulk_scroll_splits_into_bounded_
 scrolloffs`; the alt-screen full diffs;
 `feed_into_ships_each_capped_scrolloff_so_a_chunk_never_piles_them_up` (the

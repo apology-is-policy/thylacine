@@ -7,20 +7,22 @@ is claimed. The separate user-authority drafts remain untouched.
 
 ## Current pickup (September 25)
 
-Kernel/observer and session-readiness checkpoints are committed, most recently
-32734353 (session media on PollWorker). Its normal hooks passed, all four
-protected drafts were restored byte-for-byte, and all three completed monitors
-are paused. The historical commit-pickup instructions below are CLOSED; do not
-rerun their manifest runners on a later HEAD. Native and graphical evidence is
-recorded below. No live clipboard endpoint is enabled.
+Main 473cd0c0 is reconciled with Astra's 1f87fc69 connection-capacity checkpoint,
+including cleared TC-1a. The merge carries this note; its commit receipt and
+verification evidence are in work/hi1-main-evidence/. All required default,
+SMP/UBSan, native and graphical checks have completed. See the final reconciliation
+result below for measured coverage and the separate Linux harness limitations.
+Do not execute any older commit-only runner. The reconciliation heartbeat pauses
+after the normal-hook commit and Main/Aux notification; all three older monitors
+remain paused. No resource lease is retained.
 
-The next bounded checkpoint supplies pure connection-capacity admission and a
-shared pane/controller limit. It is not wired into PanePlaceServer yet: current
-media capacity remains two. Controller/host and ordered Tapestry admission,
-aggregate protocol buffers and complete kernel-resource accounting still precede
-38-connection activation. Aux TC-1b remains reserved and uncleared. The operator
-reports Main/Aux asleep until Monday and authorizes resource use (September 25);
-keep Yip informed, preserve their leases/checkouts/processes and authority drafts.
+No live clipboard endpoint is enabled. Session media on PollWorker is committed
+as 32734353; pool admission remains pure and inactive. Controller/host and ordered
+Tapestry admission, aggregate protocol buffers and complete kernel-resource
+accounting still precede 38-connection activation. TC-1a 1cc9a300 is included in
+the Main reconciliation; Aux TC-1b remains uncleared. The operator reports Main/Aux
+asleep until Monday and authorizes resource use (September 25); keep Yip informed,
+preserve their leases/checkouts/processes and the four separate authority drafts.
 
 ## Delivered source checkpoint
 
@@ -918,3 +920,154 @@ The first normal commit was refused by the dossier gate: exporting servicepool
 also changes lib.rs, owned by sub-halcyond. Updating that owning dossier resolves
 the omission; the failed hook log is retained as commit-first.log. Protected
 files were restored by finally even on that refusal.
+
+### Main reconciliation (September 25, in progress)
+
+Reconcile main 473cd0c0 (including cleared TC-1a 1cc9a300) after Astra 1f87fc69.
+Main's 8c4cb7c8 has recorded default boot, Rust, TC-1a and 50-boot SMP evidence;
+that evidence is upstream qualification, not this merged tree's result. All
+source merged without textual conflicts. The overlapping syscall code retains
+PTY suboperations 16..21 and adds Main's independent MAP_FILE syscall 126; its
+ceiling still derives from the highest assigned number. Lifecycle invalidation
+in proc.c and pts state are unchanged from the tested Astra implementation.
+
+Documentation resolutions preserve both histories and subsystem additions.
+ARCHITECTURE retains approved Astra I-35 and Main's newer I-36 dynamic-map wording;
+manual process text retains both terminal sealing and the new loader behavior.
+Generated Vault views will be rendered. No uncommitted Main work or uncleared
+TC-1b is imported. Main's shared checkout/ref is unchanged. The build uses index
+versions of the two protected kernel test files, restoring exact draft bytes in
+finally. Resource use follows the operator's September 25 authorization; Yip
+records the Pi lease and a note to Main, without altering Main's old Mac lease.
+
+Evidence goes in work/hi1-main-evidence/. Default image, host suite, native
+observer/readiness and relevant graphical regressions need verification on the
+merged source. Full SMP verification must precede claiming this integration
+qualified. Clipboard remains disabled throughout.
+
+HI1-R14 (open, host harness portability): the full test-rust.sh run on Linux
+reports curl's expected native libthyla_rs/std panic_impl collision as FAIL;
+the existing NO-HOST classifier only recognizes the Darwin ELF-assembly error
+or a failure compiling libthyla-rs itself. Preserve the Linux output, do not
+label those tests as passed. Run the canonical Mac host gate for this merge;
+keep the Linux classification correction as a tracked follow-up.
+
+Reconciliation results so far: the default full image builds; tools/test.sh
+passes with 1727/1727 registered tests and the lean production compile check.
+PTY interaction assertions remain called from existing registered tests, so they
+do not add table rows to Main's count. The canonical Mac Rust gate passes 2073
+tests in 29 crates; 97 are bin-only, four un-host-testable, one test remains
+quarantined and libutopia still has 69 stranded tests (not new coverage). The
+compiled kernel/libt/Rust 200-byte PTY ABI oracle passes using explicit ELF C
+compilation on macOS. The initial default-cc Mach-O attempt failed its ELF
+section attribute before producing fixtures and is retained, not counted.
+The full five-row SMP matrix is running in exec session 43055, through
+work/hi1-main-evidence/run.py; its finally restores the protected test drafts.
+Do not edit build inputs, rebuild images, duplicate the matrix or commit until
+its actual exit and all rows are checked. Linux host run session 21645 still
+holds Pi until it finishes; its unsupported-runtime failures remain separate.
+Mac host session 29147 and initial boot session 44239 completed exit zero.
+
+HI1-R15 (investigate): the Linux manual heap/time bounds tests have not completed
+after five minutes while the same tests passed on Mac. The process is consuming
+one CPU; do not call this a timing flake or PASS. Capture its own thread stacks
+and logs before deciding whether it is slow work or a stuck allocator fixture.
+No guest manual defect has been established.
+
+HI1-R15 update: two native host stack snapshots show forward progress, first
+inside small allocation and later scanning a one-MiB emphasis paragraph. The
+time-bound test is waiting on the fixture's deliberate SERIAL mutex. This is
+not evidence of a stuck allocator; allow the bounded work to finish and retain
+the actual timing/result. Stacks are in manual-linux-stacks*.log.
+
+The background heartbeat finish-halcyon-main-reconciliation is ACTIVE and handles
+this exact pending merge after the matrix, including native and graphical checks,
+Vault and normal hooks. The Linux host job has a separate process-exit cleanup
+watcher (exec session 16303, release-pi-when-host-exits.py) that releases Pi only
+after its known SSH process exits and a complete summary is present. Wait for
+work/hi1-main-evidence/pi-release.log before acquiring Pi for another job; the
+watcher must not release a later lease. It times out after 30 minutes with an
+error rather than claiming the old job ended. The heap-bound test has now passed;
+the serialized time-bound test and later crates still await the final report.
+
+Current matrix: the first ten default-smp1 boots pass with zero failure categories.
+Other rows remain in progress. The merge is deliberately uncommitted until its
+fresh verification completes. pending-merge.json pins the final staged snapshot
+for this handoff; later status/Vault updates are intentional after verification,
+not permission to overwrite unexpected source/index changes. Every normal hook
+must use the index versions of the protected test files, restore saved draft
+bytes in finally, and co-stage each changed source's owning Vault dossier.
+
+
+September 25 17:15 UTC pickup update: the Linux host gate exited 1 with 27
+passing crates / 1989 tests and five failing crates. curl, ptyhold and tls have
+the same native libthyla_rs duplicate panic_impl classification gap (HI1-R14).
+manual passed 71/72, including both heap/time bounds; its sole failure is the
+missing docs/manual fixture in Astra's copied remote source tree. HI1-R15 is
+resolved as slow forward progress: the suite completed in 787.69 seconds. Copy
+the matching staged manual fixtures and rerun only that failed catalogue test.
+
+HI1-R16 (open, host allocator fixture): thyla-heap received SIGKILL. Linux's
+kernel journal confirms the OOM killer selected its test process (PID 78031,
+3580288 KiB anonymous RSS), not a guest assertion or a test timeout. Evidence:
+work/hi1-main-evidence/linux-heap-oom.log. The fixture allocates a one-GiB
+aligned, zeroed arena per Mock and leaks each Mock/arena for the process lifetime;
+parallel tests can accumulate these arenas. Do not rerun this unbounded suite
+on Pi unchanged. A bounded fixture cleanup or isolated per-test execution needs
+verification; no Linux allocator PASS is claimed. The canonical Mac gate did
+pass all 12 allocator tests. This is host test coverage, not bare-metal evidence.
+
+The Pi host run and its cleanup watcher both exited; watcher session 16303
+returned zero and pi-release.log confirms release. No Astra lease remains.
+The SMP matrix session 43055 is still active: all three default rows now pass
+10/10 each with zero failure categories; UBSan rows are in progress. Its source
+and image artifacts remain untouched. Native/graphical regressions, final Vault
+render/lint and the normal-hook merge commit remain owed. The pending snapshot
+was verified before this status-only update and re-pinned afterwards.
+
+
+### Main reconciliation final verification (September 25)
+
+The original matrix runner 43055 exited zero. All 50 boots passed: default
+SMP1/4/8 and UBSan SMP4/8, ten per row, with zero corruption, external-kill,
+inject-miss, timing or other failures in every row. smp-verified.json records
+its log hash and the restored protected-file hashes. The merged default build
+and 1727/1727 boot/unit gate, canonical Mac 2073-test host gate and compiled
+200-byte PTY ABI oracle also passed. This is fresh merged-tree evidence.
+
+Fresh paired CI console and graphical images were built from the merged source.
+These targeted images omit GOROOT; the preceding full default/matrix builds used
+the default payload. Native pty-observer and readiness each pass in 33 seconds.
+The graphical session-media scenario passes (68 seconds reported by the runner):
+inline View, PNG/JPEG Gallery, zoom/return, SAK takeover and restoration, manual
+catalogue/history and live theme change. This scenario uses the legacy Delete
+SAK chord and the no-pending-request scene; it is not a new F10 or authorization
+proof. Cleared TC-1a Lantern legs 1--5 pass (53 seconds): rich slides, SPACE clear
+and repaint, a clean top-aligned view despite prior history, and 200% scale.
+
+Captures and UART logs are retained in work/hi1-main-evidence/graphics/ and its
+parent; console-pair/ and graphics-pair/ retain matching kernel/ramfs/pool/key
+artifacts and SHA256 manifests. The actual Lex curiata, manual catalogue and
+Lantern slide-two captures were visually inspected: readable content, no stale
+slide underneath, and clean trusted-scene placement at the tested 1280x800 mode.
+No all-modes visual or bare-metal qualification is inferred from these captures.
+
+Linux follow-up: the missing docs/manual fixture was copied from the exact
+staged source; the sole failed catalogue/render test now passes. The other 71
+manual tests had passed, including both bounds tests. All 12 unchanged allocator
+tests pass in separate processes (heap-isolated.log), bounding the deliberately
+leaked arena to each test lifetime. This establishes assertion coverage without
+rerunning the OOM-inducing all-in-one process. HI1-R16 remains a host-fixture
+cleanup task; HI1-R14 remains the Linux native-runtime classifier correction.
+The original full Linux gate remains failed, not relabelled green. No guest
+allocator defect was demonstrated. The Pi runner exited zero and released Pi
+in finally; no delayed cleanup remains.
+
+The HEAD/MERGE_HEAD/index snapshot was verified before documentation updates.
+Normal hooks use index versions of the protected test files; finally restores
+all four separate drafts exactly. No Main checkout/ref was changed, no TC-1b
+was imported, and no independent reviewer or graphical failure-recovery check
+is claimed. Remaining interaction implementation is unchanged: the real
+controller/host binding and ordered Tapestry focus admission, enforced aggregate
+protocol/fid/buffer and kernel-resource limits, expanded service activation,
+application clipboard clients, mode widget and transcript/Nora workflows.

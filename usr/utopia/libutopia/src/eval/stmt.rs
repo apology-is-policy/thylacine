@@ -570,13 +570,12 @@ fn out_stdio(inherit: bool) -> Stdio {
 /// resolves the spawn name through the caller's namespace (stalk + X-search),
 /// so the shell does the `$path` search. A name containing `/` is used as-is
 /// (absolute or relative). A bare command is searched on
-/// `$path = ["/bin", "/", "/goroot/bin", "/clade/bin", "/viv/bin"]`: `/bin` is the
-/// post-pivot installed location (joey binds the initrd binary tree there); `/`
-/// is the pre-pivot initrd root (where the boot-test shell runs); `/goroot/bin`
+/// `$path = ["/bin", "/goroot/bin", "/clade/bin", "/viv/bin", "/viv/abin"]`: `/bin` is the
+/// initrd's `bin/`, before the pivot and after it (joey binds it there); `/goroot/bin`
 /// is the Go toolchain and `/clade/bin` the Clade C/C++ toolchain
-/// (`clang++`/`ld.lld`); `/viv/bin` is the shipped **Linux** binaries (git), which
-/// the kernel runs under the Linux phenotype because `/viv/bin` is an
-/// `MPHENO_LINUX` mount (VIVARIUM section 13 -- ut needs NO phenotype logic, the
+/// (`clang++`/`ld.lld`); `/viv/bin` is the shipped **Linux** binaries (git) and
+/// `/viv/abin` the busybox applets, which the kernel runs under the Linux phenotype
+/// because each is an `MPHENO_LINUX` mount (VIVARIUM section 13 -- ut needs NO phenotype logic, the
 /// declaration is the mount, so `git ...` from ut is seamless). All shipped in
 /// optional bake chunks (`clang++` / `git` resolve bare; the extra dirs come LAST
 /// so `/bin` stays authoritative, and reachability stays namespace-governed: the
@@ -589,7 +588,7 @@ fn resolve_command(name: &str) -> String {
     if name.contains('/') {
         return String::from(name);
     }
-    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/", "/viv/bin/", "/viv/abin/"] {
+    for dir in ["/bin/", "/goroot/bin/", "/clade/bin/", "/viv/bin/", "/viv/abin/"] {
         let mut cand = String::with_capacity(dir.len() + name.len());
         cand.push_str(dir);
         cand.push_str(name);

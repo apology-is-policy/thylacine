@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -244,7 +244,9 @@ crossed clone takes the MOUNT-POINT's namespace name via
 
 ### Union resolution (the UM arc)
 
-A mount point with >= 2 grafted members is a **union**, and the resolver does
+A mount point with >= 2 members is a **union** (grafted sources, plus, since
+B-1d-u, the covered directory that an `MBEFORE` / `MAFTER` mount at an empty
+directory point keeps — [[sub-kernel-territory]]), and the resolver does
 not cross it the way it crosses a single mount — it leaves the mount POINT as
 the trail tip (so a later `..` lands on the union, and the recorded parent stays
 accurate) and iterates the members itself. `mount_member_at(_, 1) != NULL` at
@@ -271,6 +273,16 @@ per member in declared order, and returns the **first hit**:
 - The crossed member leaf takes the **mount POINT's** namespace name
   (`spoor_path_transplant`, I-33), so `/bin/<x>` reports as `/bin/<x>` whichever
   member served it.
+- **The covered member is resolved, never crossed** (B-1d-u).
+  `stalk_cross_src(p, src, src_flags, pheno)` takes the snapshot entry's flags:
+  an `MCOVERED` member IS the point's own directory, so it is cloned and
+  returned uncrossed (crossing it would re-enter the union it belongs to), and
+  a mount-over-mount chain that reaches a point whose member[0] is covered
+  stops there, on that directory. Every union consumer — the walk, the readdir
+  snapshot, the create member, the remove holder — passes the flags through.
+  Pinned by the seven `stalk.union_covered_*` tests (MBEFORE and MAFTER order,
+  the readdir dedup, create `EACCES` with no `MCREATE` member, unmount back to a
+  plain directory, a dissolve whose member[0] is covered, the remove holder).
 
 Two amodes exist because create and remove must pick *different* members:
 
@@ -315,7 +327,9 @@ obligations:
    entries are gone — a plain `unmount("/")` loop does it, no shed needed, and
    so does a `chroot` elsewhere whose shed drops them — the uncrossed point IS
    the covered directory: one the handle never named, in a tree its holder may
-   have no other path into (shed audit r2 F1). So the base-set site probes
+   have no other path into (shed audit r2 F1). (Since B-1d-u the covered
+   directory can also be member[0] itself — an `MAFTER` union — and then the
+   handle DID name it at open; the degrade below lands on it, correctly.) So the base-set site probes
    `mount_member_at(point, 0)` before routing through the point, and the
    zero-component site enforces it as a POST-condition of the cross
    (`zero_from_point`: a point clone that does not cross is replaced by a clone

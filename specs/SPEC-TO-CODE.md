@@ -264,6 +264,98 @@ replace-whole-group); `Unmount` -> `::unmount` (shift-down, order-preserving);
 `RemoveSel` -> `kernel/stalk.c::stalk_union_member_holding` (UM-8c, the F3 remove
 member-selection) via the `STALK_REMOVE` amode + `syscall.c::viv_union_member`.
 
+### B-1d-u: the covered directory (Plan 9 unions, 2026-09-25)
+
+> **Currency note (B-1d-u, 2026-09-25).** The UM paragraph above says the
+> mounted-on directory's own contents are NOT an implicit member
+> ("grafted-sources-only"). Superseded by the operator's vote for Plan 9
+> unions (vault `dec-2026-09-24-union-covered-directory`): an MBEFORE / MAFTER
+> mount at a directory point hosting no member makes the covered directory a
+> member, as Plan 9's cmount adds the old node. The UM table above is the
+> pre-B-1d-u run; the table below supersedes it.
+
+Model additions: `CovDirs` (each Path's own directory, disjoint from `Spoors`,
+so every Spoor pairing of the UM model is still explored) and the fixed
+injection `Covered`; `Member.cv`; `FilePaths` (the points that are not
+directories); `COV_MOUNTABLE` (a covered directory may also be mounted at
+another point); the history variable `unioned` (a group a fresh ordered mount
+started that nothing has since replaced or emptied -- it tells a union that
+lost its covered member from an MREPL group that never had one); the UM-8 F6
+`Reposition` action, modelled for the first time (freshness is judged before
+the move removes the member); `SYMMETRY Symm` over Procs and Spoors on the two
+large clean cfgs (the soundness argument is the comment at `Symm`).
+
+Seven invariants, each failed by its own buggy cfg:
+
+- `UnionHasCovered` -- a union a fresh MBEFORE / MAFTER started keeps its
+  covered member. `BUGGY_UNION_NO_COVERED` (the pre-vote union).
+- `CoveredOnlyInUnion` -- nothing else grows one. `BUGGY_FRESH_AFTER_REMOVE`
+  (a reposition judges freshness after removing the member).
+- `CoveredIsItsPoint` -- at most one, the point's own directory, never MBEFORE
+  or MCREATE. `BUGGY_COVERED_TAKES_FLAGS` (added at holotype round 3's close,
+  vault `fnd-b1d-r3-s3`: until then no cfg failed it).
+- `CoveredPlacement` -- MBEFORE members ahead of it, MAFTER members behind.
+  `BUGGY_COVERED_LAST` (a fresh MAFTER puts the new tree first).
+- `NoOrphanCovered` -- it leaves with the last mounted member.
+  `BUGGY_UNMOUNT_ORPHANS_COVERED`.
+- `NoSelfMount` (I-3) -- a point's own directory is never mounted at it as an
+  ordinary member. `BUGGY_SELF_MOUNT`.
+- `NoCoveredFile` -- a file point never grows one. `BUGGY_COVER_FILE`.
+
+TLC at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, CovDirs = {ca,
+cb}, Names = {n1}` (+ `CONSTRAINT StateConstraint`); every cfg lists every
+invariant, so a buggy cfg is judged against the whole set, not only its target.
+Run 2026-09-25 on thyla-keep (TLC 2026.09.17 rev 142d0ba, OpenJDK 21, 32 aarch64 cores):
+
+| Config | Constants | Verdict | Distinct |
+|---|---|---|---|
+| `territory.cfg` | all flags FALSE, `Symm` | clean, depth 11 | 8,052,876 |
+| `territory_file_point.cfg` | `FilePaths = {b}`, `Symm` | clean, depth 11 | 4,380,876 |
+| `territory_cov_alias.cfg` | `COV_MOUNTABLE`, `Procs = {p1}`, `Spoors = {s1}` | clean, depth 9 | 202,800 |
+| `territory_buggy.cfg` | `BUGGY_CYCLE` | `NoCycle` violated | (fast) |
+| `territory_buggy_mount_no_refbump.cfg` | `BUGGY_MOUNT_NO_REFBUMP` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_unmount_no_refdrop.cfg` | `BUGGY_UNMOUNT_NO_REFDROP` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_destroy_leak.cfg` | `BUGGY_DESTROY_LEAK` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_chroot_no_refbump.cfg` | `BUGGY_CHROOT_NO_REFBUMP` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_mount_order.cfg` | `BUGGY_MOUNT_ORDER` | `OrderCorrect` violated | (fast) |
+| `territory_buggy_walk_last_hit.cfg` | `BUGGY_WALK_LAST_HIT` | `WalkFirstHit` violated | (fast) |
+| `territory_buggy_readdir_last_wins.cfg` | `BUGGY_READDIR_LAST_WINS` | `ReaddirDedupFirstWins` violated | (fast) |
+| `territory_buggy_create_any_member.cfg` | `BUGGY_CREATE_ANY_MEMBER` | `CreateTargetCorrect` violated | (fast) |
+| `territory_buggy_remove_mcreate.cfg` | `BUGGY_REMOVE_MCREATE_MEMBER` | `RemoveTargetCorrect` violated | (fast) |
+| `territory_buggy_union_no_covered.cfg` | `BUGGY_UNION_NO_COVERED` | `UnionHasCovered` violated | (fast) |
+| `territory_buggy_fresh_after_remove.cfg` | `BUGGY_FRESH_AFTER_REMOVE` | `CoveredOnlyInUnion` violated | (fast) |
+| `territory_buggy_covered_takes_flags.cfg` | `BUGGY_COVERED_TAKES_FLAGS` | `CoveredIsItsPoint` violated | (fast) |
+| `territory_buggy_covered_last.cfg` | `BUGGY_COVERED_LAST` | `CoveredPlacement` violated | (fast) |
+| `territory_buggy_unmount_orphans_covered.cfg` | `BUGGY_UNMOUNT_ORPHANS_COVERED` | `NoOrphanCovered` violated | (fast) |
+| `territory_buggy_self_mount.cfg` | `BUGGY_SELF_MOUNT` | `NoSelfMount` violated | (fast) |
+| `territory_buggy_cover_file.cfg` | `BUGGY_COVER_FILE` | `NoCoveredFile` violated | (fast) |
+
+`specs/check-territory.sh` runs all twenty, pins the three clean counts, and
+asserts WHICH invariant each buggy cfg violates; the buggy cfgs run on one
+worker, so the attribution is the model's and not a worker race's. The script
+refuses a cfg it does not judge. Checked before use by a sabotaged copy that
+dropped two clean cfgs, mis-pinned `cov_alias` by one state and named the
+wrong invariant for `buggy_self_mount`: all three failed, by name. The two
+large clean cfgs came out identical across two independent runs: first on
+16 and 14 workers side by side, then under the script on 32, 8,052,876 and
+4,380,876 both times.
+
+Impl mapping: `CovAdded` / `Placed` -> `kernel/territory.c::mount`'s
+`starts_union` (judged before the UM-8 reposition scan: an MBEFORE / MAFTER,
+never MREPL or flagless, at a directory point hosting no member; `DirPoint` is
+its QTDIR check) and the two `mount_install_at` calls that place the covered
+entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
+MAFTER); `Reposition` -> the #219 / F6 reposition arm (the point is not fresh,
+so no covered entry); `Unmount` -> `::unmount` (the covered entry is never
+removed by name and leaves with the last mounted member); `NoSelfMount` ->
+`would_create_mount_cycle` (the covered entry is the one self-edge, and only
+`mount` builds it); a walk through a covered member -> `kernel/stalk.c::
+stalk_cross_src` (clones it without crossing into its own mount; a mount chain
+stops at a point whose member[0] is covered). Runtime: the 18 B-1d-u kernel
+tests (`territory_mount.covered_*`, `union_keeps_covered`,
+`no_covered_unless_fresh`, `territory.shed_covered_shares_fate`,
+`stalk.union_covered_*`).
+
 ### P2-Ea landed (this chunk)
 
 - `bindings` variable + Reachable transitive-closure helper.
@@ -2468,6 +2560,9 @@ violated. Three sabotages of the closure in scratch copies (rule too small,
 rule = every tree, truth too small) each fail -- the property round 1's module
 lacked. `specs/check-territory-shed.sh` runs all seven cfgs, pins the two
 clean state counts, and asserts WHICH invariant each buggy cfg violates.
+Re-run 2026-09-25 for B-1d-u (the shed spec itself unchanged), on thyla-keep:
+both clean counts reproduced (744,864 at depth 13, 793,408 at depth 14) and
+the five buggy verdicts as pinned.
 
 ## `capacity.tla` -- the I-32 page-accounting conservation law (B-1a', 2026-09-23)
 

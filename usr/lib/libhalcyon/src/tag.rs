@@ -20,7 +20,7 @@ pub fn argv_of(tag: &str) -> Vec<&str> {
 /// resolves to the same binary the shell would run. The kernel resolves a
 /// spawn name relative to the child's CWD (not a `$path` search), so a host
 /// must expand a bare name itself.
-pub const PROG_DIRS: [&str; 3] = ["/bin/", "/", "/goroot/bin/"];
+pub const PROG_DIRS: [&str; 2] = ["/bin/", "/goroot/bin/"];
 
 /// The candidate paths for `argv0`, in probe order. A name containing `/` is
 /// used verbatim (one candidate); a bare name expands to the PROG_DIRS joins.

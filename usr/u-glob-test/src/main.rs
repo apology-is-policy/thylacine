@@ -1,13 +1,13 @@
 // /u-glob-test -- U-6e-b-2 glob-argv-expansion boot probe.
 //
-// Runs PRE-pivot (flat devramfs root). Two layers:
+// Runs PRE-pivot, against the initrd's bin/ and the root beside it. Two layers:
 //
 //   A. The load-bearing fs-walk -- libutopia::eval::pathname::expand directly
 //      against the boot ramfs. argv echoes to a dropped pipe at v1.0
 //      (no terminal-backed fd 1 until U-PTY), so the expansion itself is
 //      asserted here on the returned Vec rather than via command output:
 //        - prefix star (`u-*`), bare star (`*`), single-char (`?`),
-//          char-class (`[vw]*`), absolute (`/u-*`);
+//          char-class (`[vw]*`), absolute (`/*`, `/bin/u-*`);
 //        - sortedness, single-level containment (no `/`, no dotfile leak),
 //          rc nullglob (no-match -> EMPTY list);
 //        - escapes honoured by the walk (`versio\n*`, `v*\*`).
@@ -44,10 +44,11 @@ static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    // cwd defaults to "/" -- relative patterns resolve against the root.
-    let env = Env::new();
+    // Relative patterns resolve in the initrd's bin/, where the programs are.
+    let mut env = Env::new();
+    env.cwd_set("/bin");
 
-    // A1. Prefix star: `u-*` names the u-prefixed binaries on the flat root.
+    // A1. Prefix star: `u-*` names the u-prefixed binaries in bin/.
     let u = pathname::expand(&env, "u-*");
     if !contains(&u, "u-glob-test") {
         return fail("u-* missing self");
@@ -62,7 +63,7 @@ pub extern "C" fn rs_main() -> i64 {
         return fail("u-* not sorted");
     }
 
-    // A2. Bare star: enumerates the whole flat root. Single-level (no `/`),
+    // A2. Bare star: enumerates the whole of bin/. Single-level (no `/`),
     //     no leading-dot leak, sorted, plausibly many entries.
     let all = pathname::expand(&env, "*");
     if all.len() < 10 {
@@ -80,8 +81,15 @@ pub extern "C" fn rs_main() -> i64 {
     if !contains(&all, "version") {
         return fail("* missing version");
     }
-    if !contains(&all, "srv") {
-        return fail("* missing srv");
+
+    // A2b. The root lists directories: the synthetic mount points and bin/
+    //      (the join_display root branch).
+    let root = pathname::expand(&env, "/*");
+    if !contains(&root, "/srv") {
+        return fail("/* missing /srv");
+    }
+    if !contains(&root, "/bin") {
+        return fail("/* missing /bin");
     }
 
     // A3. Single-char wildcard: `versio?` -> version.
@@ -105,19 +113,19 @@ pub extern "C" fn rs_main() -> i64 {
         return fail("nullglob expanded to a non-empty list");
     }
 
-    // A6. Absolute pattern: `/u-*` -> "/u-..." display (resolve_fs absolute
-    //     branch + the join_display root branch).
-    let abs = pathname::expand(&env, "/u-*");
-    if !contains(&abs, "/u-glob-test") {
-        return fail("/u-* missing /u-glob-test");
+    // A6. Absolute pattern: `/bin/u-*` -> "/bin/u-..." display (resolve_fs
+    //     absolute branch + the join_display directory branch).
+    let abs = pathname::expand(&env, "/bin/u-*");
+    if !contains(&abs, "/bin/u-glob-test") {
+        return fail("/bin/u-* missing /bin/u-glob-test");
     }
-    if !abs.iter().all(|s| s.as_bytes().starts_with(b"/u-")) {
-        return fail("/u-* yielded a non-/u- path");
+    if !abs.iter().all(|s| s.as_bytes().starts_with(b"/bin/u-")) {
+        return fail("/bin/u-* yielded a non-/bin/u- path");
     }
 
     // A7. Escapes inside a pattern the walker matches: an escaped ordinary
     //     character still matches itself, and an escaped star is not a
-    //     wildcard -- no name on this root ends in a literal `*`.
+    //     wildcard -- no name in bin/ ends in a literal `*`.
     let esc = pathname::expand(&env, "versio\\n*");
     if !contains(&esc, "version") {
         return fail("versio\\n* missing version");

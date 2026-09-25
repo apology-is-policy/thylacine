@@ -1,0 +1,57 @@
+pouch boundary-line patch 0048 - the loader applies RELRO (B-1d).
+
+ldso/dynlink.c is compiled only into libc.so, so no census of libc.a's
+sources saw it: 0046 found src/env/__init_tls.c as musl's one raw mmap
+caller, and its control, src/mman/mmap.c, is a libc.a source. dynlink.c
+makes three raw syscalls. Two are dl_mmap's (:1020, :1022), reached only
+under DL_FDPIC, which aarch64 is not. The third applies RELRO (:1426):
+
+    __syscall(SYS_mprotect, laddr(p, p->relro_start),
+              p->relro_end-p->relro_start, PROT_READ)
+
+__NR_mprotect is parked at the sentinel (0044), and the check beside the
+call accepts -ENOSYS, so every object would have loaded with its RELRO
+pages still writable, and nothing would have said so. ARCHITECTURE.md sec
+6.5 makes RELRO a burrow_protect reduction, and its permission-ceiling
+paragraph cites this line as a reason the protect was built. One file:
+
+  ldso/dynlink.c  The call is SYS_thyla_burrow_protect (125) with its four
+      words and flags 0: a reduction, not a seal. Linux does not seal
+      RELRO, and a sealed range would refuse the hook libraries that raise
+      it to patch a GOT entry and lower it again. The ENOSYS acceptance is
+      gone: a kernel that answered ENOSYS here could not protect the
+      object, and that must fail the load, not pass it. errno is set from
+      the return before error() formats %m (upstream printed whatever
+      errno held).
+
+The witness is the dlopen probe's RELRO leg: the loaded object's RELRO
+page must refuse a write.
+
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -29,6 +29,7 @@ static size_t ldso_page_size;
+ #endif
+ 
+ #include "libc.h"
++#include "_pouch_mman.h"
+ 
+ #define malloc __libc_malloc
+ #define calloc __libc_calloc
+@@ -1423,9 +1424,14 @@ static void reloc_all(struct dso *p)
+ 			do_relr_relocs(p, laddr(p, dyn[DT_RELR]), dyn[DT_RELRSZ]);
+ 
+ 		if (head != &ldso && p->relro_start != p->relro_end) {
+-			long ret = __syscall(SYS_mprotect, laddr(p, p->relro_start),
+-				p->relro_end-p->relro_start, PROT_READ);
+-			if (ret != 0 && ret != -ENOSYS) {
++			/* pouch: SYS_BURROW_PROTECT's four words. The Linux name
++			   is parked at the sentinel, whose ENOSYS was accepted
++			   here, so RELRO was never applied. */
++			long ret = __syscall(SYS_thyla_burrow_protect,
++				laddr(p, p->relro_start),
++				p->relro_end-p->relro_start, PROT_READ, 0);
++			if (ret != 0) {
++				errno = -ret;
+ 				error("Error relocating %s: RELRO protection failed: %m",
+ 					p->name);
+ 				if (runtime) longjmp(*rtld_fail, 1);

@@ -49,11 +49,10 @@ const E_INVAL: i64 = 22;
 const REEXEC_ARGV: &[u8] = b"exec-probe\0stage2\0";
 
 // A BARE name, resolved against the cwd -- not "/bin/exec-probe". This probe
-// runs PRE-PIVOT, where the namespace root is still the boot cpio and every
-// binary sits at its top level; joey spawns us by the same bare name. `/bin`
-// only exists after joey binds the cpio root there post-pivot, so an absolute
-// path would be correct-looking and wrong, which is how the first run of this
-// probe failed (leg D reported ENOENT while every other leg passed).
+// runs PRE-PIVOT with joey's working directory, the initrd's bin/, where joey
+// spawns us by the same bare name. (Before the initrd kept its programs in
+// bin/, /bin only existed after the pivot, and an absolute path here made
+// leg D report ENOENT; now both names reach the same file.)
 //
 // Using the relative form also puts the LS-4 cwd-join on the exec path, so the
 // probe covers both resolution shapes rather than just the absolute one.

@@ -119,14 +119,16 @@ struct PgrpMount {
     u64             mp_qid_path;
     int             mp_dc;
     u32             mp_devno;
-    u32             flags;    // MREPL / MBEFORE / MAFTER / MCREATE
+    u32             flags;    // MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC /
+                              // MPHENO_LINUX, or MCOVERED alone
     u32             _pad;     // 8-byte array-stride alignment for source
 };
 
-// Mount flags (ARCH §9.6.1 — mirror Plan 9). At v1.0 only MREPL has
-// distinguished semantics in the impl (it replaces an existing entry at
-// the same target); the others land at v1.x when union semantics get
-// their own implementation work.
+// Mount flags (ARCH §9.6.1 — mirror Plan 9). MREPL replaces every member at
+// the point; MBEFORE / MAFTER place the new member first / last in the union's
+// search order, and at a point hosting no member they also make the covered
+// directory a member (MCOVERED below); MCREATE marks where a create in the
+// union lands.
 #define MREPL     0x0001
 #define MBEFORE   0x0002
 #define MAFTER    0x0004
@@ -197,6 +199,28 @@ struct PgrpMount {
 // MNOEXEC: composing a mount is a namespace edit that confers no authority, and
 // /viv/bin is composed by PRINCIPAL_SYSTEM at boot.
 #define MPHENO_LINUX 0x0020
+
+// MCOVERED -- KERNEL-INTERNAL, never accepted from userspace (SYS_MOUNT's valid
+// mask excludes it). Marks the entry that makes a mount point's OWN directory a
+// member of its union: Plan 9's cmount adds `old` to the mount chain when an
+// MBEFORE / MAFTER mount lands on a directory with nothing mounted there, so
+// `bind -b new old` shows new's names, then old's. A point that is not a
+// directory has nothing to search, so its mount stays plain (Plan 9 refuses
+// it: Emount). The entry's source is the
+// covered directory itself (its identity IS the mount point's), so three rules
+// keep it from being an ordinary self-mount:
+//   - it is never crossed: stalk_cross_src stops at the clone, and a
+//     mount-over-mount chain stops at it, because crossing it again re-enters
+//     the union it belongs to;
+//   - it is never unmounted by itself, and leaves with the last member mounted
+//     at the point (unmount), so no point is left holding only its own
+//     directory;
+//   - it carries no other flag: not MCREATE (a create at the union needs a
+//     member mounted MCREATE, as in Plan 9), and never MNOEXEC or MPHENO_LINUX,
+//     which would otherwise restrict or re-declare the covered device.
+// MREPL replaces it along with the rest. A flagless mount never adds it (Plan
+// 9's flag 0 is MREPL).
+#define MCOVERED  0x0040
 
 // Design D (VIVARIUM 13.10.3): the NAMESPACE-LEVEL phenotype declaration, a bit
 // in Territory.flags. Set => every image load (any spawn variant, execve) whose
@@ -401,16 +425,19 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 
 // mount: graft Spoor `source` at the MOUNT POINT `mountpoint` in
 // `territory`'s mount table (stalk-2: was an abstract path_id_t target).
-// The entry records `mountpoint`'s (dc, devno, qid.path) IDENTITY -- it does
-// NOT retain `mountpoint` itself (the caller stalk's it, mount() copies the
-// key, the caller clunks it). Bumps source's refcount; the entry holds that
-// reference until unmount() or Territory destruction releases it.
+// The entry records `mountpoint`'s (dc, devno, qid.path) IDENTITY (the caller
+// stalk's it, mount() copies the key, the caller clunks it); only a union's
+// covered member, below, retains `mountpoint` itself. Bumps source's refcount;
+// the entry holds that reference until unmount() or Territory destruction
+// releases it.
 //
-// `flags` mirror Plan 9 (MREPL / MBEFORE / MAFTER / MCREATE); only MREPL
-// has distinguished semantics at v1.0 — when MREPL is set and an entry
-// at the same mount-point identity already exists, the existing entry is
-// replaced (its source's ref is dropped). The other flags are stored for
-// future union-mount work; at v1.0 they're treated as "append a new entry."
+// `flags` mirror Plan 9 (MREPL / MBEFORE / MAFTER / MCREATE): MREPL replaces
+// every member at the point (their source refs dropped); MBEFORE inserts the
+// new member ahead of the point's members, MAFTER and a flagless mount append
+// it. An MBEFORE / MAFTER mount at a DIRECTORY hosting no member first installs
+// the covered directory as a member (MCOVERED): the union is <new, covered> or
+// <covered, new>. That entry retains `mountpoint` itself (one ref) -- the only
+// case in which mount() keeps the Spoor rather than copying its key.
 //
 // Idempotency: mount(t, S, mp, flags) where (key(mp), S) is already in the
 // mount table adds no entry and bumps no refcount (the spec's
@@ -432,7 +459,8 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 // Return values:
 //    0   success (entry added, or the existing entry's flags converged).
 //   -1   source or mountpoint is NULL / has corrupted magic.
-//   -2   mounts[] full (PGRP_MAX_MOUNTS reached).
+//   -2   mounts[] full (PGRP_MAX_MOUNTS reached; a mount that starts a union
+//        needs two free slots, one for the covered directory).
 //   -3   would create a mount cycle (I-3) -- a self-mount (source identity ==
 //        mountpoint identity) or a cross-tree oscillation. The SVC layer
 //        collapses every failure to -1; the distinct code is for the C-API +
@@ -445,7 +473,10 @@ int mount(struct Territory *territory, struct Spoor *source,
 // drop the source's refcount. Models the spec's Unmount action.
 //
 // If multiple entries exist at the same mount point (union mount), this
-// removes the FIRST found; subsequent calls drop the others one by one.
+// removes the FIRST found that is not the covered directory (MCOVERED);
+// subsequent calls drop the others one by one. When the removed entry was the
+// last one mounted there, the covered directory's entry goes with it and the
+// point is a plain directory again.
 //
 // Return values:
 //    0   success (entry removed; refcount dropped).

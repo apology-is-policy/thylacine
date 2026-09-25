@@ -15,13 +15,14 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-09-18
+updated: 2026-09-25
 ---
 ## Trusted graphical seat bootstrap
 
 The GPU/input gather manifest starts [[sub-lictor]] with its physical function
 grants and seat-service role. After Lictor reports READY, Warden starts Tapestry
-as a separate leaf with only the DMA budget and normal-client designation. It
+(`/bin/tapestryd`) as a separate leaf with only the DMA budget and normal-client
+designation. It
 waits for both services before reporting the graphical bind ready. Startup failure
 reaps the relevant children before bounded retry. The narrowed-driver no-child
 rule is unchanged: Lictor does not spawn the compositor. Runtime owner death
@@ -68,7 +69,10 @@ the grant) are computed from one value, so they cannot disagree.
 
 To the machine, its contract is a prohibition: **it never reads a device
 register.** A bus whose device types are only knowable by asking the hardware
-is enumerated by a separate sandboxed process, not by the broker itself.
+is enumerated by a separate sandboxed process (`/bin/virtio-mmio-source`), not
+by the broker itself. Both named binaries are spelled under `/bin`, the path
+that names the initrd's programs before the pivot and after it
+([[dec-2026-09-25-initrd-bin-directory]]).
 
 ## Mechanism
 

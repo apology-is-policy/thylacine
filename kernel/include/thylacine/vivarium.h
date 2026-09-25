@@ -517,7 +517,11 @@ enum {
 //
 // PCI mapping windows append 113/114; clock_gettime now has a per-number
 // collision argument above rather than the old ceiling argument.
-#define VIV_NATIVE_CEILING 125
+//
+// B-1d appends SYS_BURROW_MAP_FILE at 126. No vivarium row lies at 126 or 127,
+// and the lowest row argued by the ceiling is restart_syscall (128), so the
+// move voids no row's argument.
+#define VIV_NATIVE_CEILING 126
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

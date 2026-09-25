@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -263,7 +263,7 @@ the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
 - **`exe` and `cwd` are bare bytes** — no trailing NUL, no newline — because
   `readlink("/proc/self/{exe,cwd}")` yields a bare path and a terminator would
   land inside every consumer's buffer. They differ on emptiness: `exe` is
-  **empty-is-valid** (kproc, the blob-loaded `/joey`, or any Proc whose `Path`
+  **empty-is-valid** (kproc, the blob-loaded `bin/joey`, or any Proc whose `Path`
   alloc failed genuinely have no name — I-33 makes that cost only this file's
   content; the read returns 0 bytes, never -1), while `cwd` is **never empty for
   a live Proc** (a NULL `dot_path` renders `"/"`, `territory_getdot`'s contract).

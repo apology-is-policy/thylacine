@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -181,22 +181,25 @@ is what makes the coupling checkable.
 Either way `[filesz, size)` reads as zero. Only *when* the page is allocated
 differs.
 
-### The phenotype shapes the load, threaded as a parameter and never read from the Proc
+### The load no longer reads the phenotype at all (B-1d)
 
-Since Design D (VIVARIUM 13.10.4) the phenotype that gates the PT_INTERP
-rewrite arrives as `exec_load_into`/`exec_load_body`'s `pheno` parameter,
-decided at the resolver *before* the load; the loader consults it and never
-reads `nsp->phenotype`. The review found three consumers of the phenotype
-during `execve`, each unsound in a different way if it read the live field —
-and one of the three is this file's:
+Design D (VIVARIUM 13.10.4) threaded the decided phenotype into
+`exec_load_into`/`exec_load_body` as a `pheno` parameter, because the PT_INTERP
+dispatch was gated `pheno == PHENO_LINUX` and `execve` commits
+`nsp->phenotype` only after the load. B-1d (ARCH 6.5 "Dynamic loading") lifted
+the gate: a native program's interpreter is Pouch's `/lib/libc.so`, resolved
+the same way, because the loader is the same object under both ABIs. Nothing in
+the load depends on the phenotype any more, so the parameter went with the
+gate. The review found three consumers of the phenotype during `execve`, each
+unsound in a different way if it read the live field — and one of the three
+was this file's:
 
-- **Leg C is here.** `exec_load_body` decides the PT_INTERP dispatch on the
-  parameter (`if r == ELF_LOAD_HAS_INTERP && pheno == PHENO_LINUX`). A native
-  caller `execve`ing a *dynamic* `/viv/bin` binary is decided Linux at the
-  resolver; had the dispatch read `nsp->phenotype` (still native before the
-  commit) it would fall through to the "dynamic Linux binary rejected" refusal
-  — D's symmetry unmet for exactly the case [DISTRO D-4] exists to serve.
-  Reading `pheno` takes the rewrite path.
+- **Leg C was here, and has nothing left to mislead.** The dispatch is now
+  `if (r == ELF_LOAD_HAS_INTERP && nsp)`; a stale field has no branch to steer.
+  Which loader a program gets is its namespace's answer to the path the
+  program names, and the phenotypes name different paths (`/lib/libc.so`,
+  `/lib/ld-musl-aarch64.so.1`), so a namespace holding both hands neither
+  program the other's.
 - **Leg B is why the loader never *writes* `nsp->phenotype`.** A failed load
   returns to the surviving old image (built detached), and an already-flipped
   phenotype would leave that image decoding its own calls under the wrong ABI.
@@ -204,16 +207,23 @@ and one of the three is this file's:
   store inside the infallible region after the address-space swap.
 - Leg A (the signal-state reset) is also [[sub-kernel-proc]]'s.
 
-**The PT_INTERP rewrite (DISTRO D-4)** is what that dispatch enables: a
-`PHENO_LINUX` exec of a binary carrying `PT_INTERP` rewrites the argv to run
-the interpreter, so a stock dynamic musl binary runs by name. The
-interpreter's *own* resolution stays phenotype-agnostic — it inherits the
-program's decided `pheno`; re-deciding by the interpreter's location (a rootfs
-`ld-musl`, crossing no pheno-mount) would flip it native and break every
+**The PT_INTERP rewrite (DISTRO D-4)** is what that dispatch enables: an exec
+of a binary carrying `PT_INTERP` rewrites the argv to run the interpreter, so a
+dynamic program runs by name — a stock musl binary in a vivarium, and since
+B-1d a native one through `/lib/libc.so`. ONE level, structurally: the path is
+straight-line, so an interpreter that itself carries `PT_INTERP` meets the
+unchanged refusal. The interpreter's *own* resolution stays
+phenotype-agnostic — it runs under the program's decided phenotype, which the
+caller commits after the load; re-deciding by the interpreter's location (a
+rootfs `ld-musl`, crossing no pheno-mount) would flip it native and break every
 dynamic Linux binary. One asymmetry (F5): the register-argument spawn variants
-thread no program name, which the rewrite needs, so a *dynamic* pheno-mount
-binary loads through `SYS_SPAWN_FULL_ARGV` and refuses loudly on the others —
-every shipped pheno-mount binary is static, so no caller meets it today.
+thread no program name, which the rewrite needs, so a *dynamic* binary —
+native or Linux — loads through `SYS_SPAWN_FULL_ARGV` (the shell,
+`posix_spawn`, `execve`) and refuses loudly on the others. Native dynamic
+binaries meet it since B-1d, which is why joey spawns the dlopen prover through
+the argv form. The "dynamic Linux binary rejected" message now says where such
+a binary's interpreter lives (a `PHENO_LINUX` vivarium's namespace), no longer
+that native execs are static.
 
 ### Two execve front ends, one core, and the blob that belongs to the caller (L-6a)
 
@@ -314,8 +324,9 @@ allocation failure leaves it empty. Neither fails an exec.
 [[inv-i32]] — page charging happens in the map layer, not here.
 
 [[inv-i43]] — exec is a *consumer* of the phenotype decision, never its
-enforcer. The load's shape (the PT_INTERP rewrite) follows the decided `pheno`
-threaded in, and the file confers no authority from it and reads none — the
+enforcer. Since B-1d the load's shape does not depend on the phenotype at all
+— the interpreter is whatever the namespace answers for the path the program
+names — and the file confers no authority from it and reads none — the
 "shape, never authority" half of I-43 realized as "the image loads the way its
 decided phenotype says, and nothing more." The enforcement that a phenotype
 grants no extra privilege lives at the fork cap-strip ([[sub-kernel-proc]]);

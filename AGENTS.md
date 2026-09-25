@@ -179,6 +179,7 @@ single-agent/draft-preservation rules. Aux's cleared H3+C base 0cb5b244 is
 integrated as c252a7f3. Kernel ownership/lifecycle checkpoint 97bf1077 and expanded
 regression checkpoint 5ad9ad27 are on Astra; consult the status for current runtime
 evidence and remaining integration. Kaua Control subtag 6 is Aux's ScreenErased,
-and 7 is Astra's binding announcement (Yip 0108 turn 22). His TC-1a wire/lib/tile
-work is still uncleared as of turn 29: coordinate that landing before edits there.
+and 7 is Astra's binding announcement (Yip 0108 turn 22). Cleared TC-1a 1cc9a300 is integrated through Main 473cd0c0 in the September 25
+reconciliation. Aux's TC-1b remains uncleared; preserve its reserved surfaces
+listed in the Halcyon interaction status and Yip call 0108.
 No live clipboard is delivered by the kernel/protocol/storage checkpoints alone.

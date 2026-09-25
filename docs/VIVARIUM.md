@@ -4156,6 +4156,11 @@ that reads `p->phenotype` at any of these three sites is wrong even if it passes
   at the resolver but the dispatch sees native and the binary hits the "dynamic Linux binary
   rejected" refusal (`exec.c:1399-1406`) — D's symmetry unmet for exactly the case DISTRO
   D-4 exists to serve.
+  **AMENDED 2026-09-24 (B-1d; ARCH §6.5 "Dynamic loading", DISTRO D-4 amended): the
+  PT_INTERP dispatch consults no phenotype now — the PHENO_LINUX gate is lifted, and every
+  exec with a namespace runs the interpreter its program names — so Leg C's hazard has no
+  dispatch left to mislead, and `exec_load_into` lost the `pheno` parameter that carried the
+  decided value. Leg C's fixture is now `exec.interp_dispatch_every_phenotype`; Leg B stands.**
 
 **The fix is one shape, three sites.** Decide the phenotype from the resolver into a
 **local**, before the load. **Thread that decided value as a parameter** into
@@ -4263,8 +4268,11 @@ makes that name cosmetic, never load-bearing — so a **dynamic** pheno-mount bi
 through `SYS_SPAWN_FULL_ARGV` and **refuses loudly** through `SYS_SPAWN` / `_WITH_FDS` /
 `_WITH_PERMS` / `_WITH_CAPS` (`exec.c`'s nameless-entry refusal, which this section's first
 draft called "unreachable"). A *static* pheno-mount binary is decided and loaded identically
-on every variant. Every shipped pheno-mount binary is static, so no caller meets the asymmetry
-today; a future dynamic one is served by FULL_ARGV, which is what every shell uses.
+on every variant. Every shipped pheno-mount binary is static. Since B-1d the rewrite serves
+native programs too (DISTRO D-4; ARCHITECTURE.md 6.5 "Dynamic loading"), so the asymmetry
+reaches every dynamic binary, native or Linux: it loads through FULL_ARGV, which the shell,
+`posix_spawn` and `execve` all use, and refuses through the nameless variants. joey spawns the
+dynamic loader's prover, `/pouch-hello-dlopen`, through FULL_ARGV for this reason.
 
 #### 13.10.7 Authority (review F5): the one coupling, and I-43
 

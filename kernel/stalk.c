@@ -195,16 +195,22 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
 // mount()) makes the graph acyclic; the bound is a defensive backstop. Extracted
 // (UM-8) so a caller holding a source from mount_members_snapshot can cross the
 // EXACT snapshot entry rather than re-deriving it by index (UM-7 F4).
+// `src_flags` are the entry's: a covered member (MCOVERED) IS its mount point's
+// own directory, so it is cloned and never crossed -- crossing it would re-enter
+// the union it belongs to -- and a chain that reaches a point whose primary
+// member is covered stops there, on that directory.
 static struct Spoor *stalk_cross_src(struct Proc *p, struct Spoor *src,
-                                     bool *crossed_pheno) {
+                                     u32 src_flags, bool *crossed_pheno) {
     if (!p || !p->territory || !src) return NULL;
     struct Spoor *cur = clone_walk_zero(src);
     if (!cur) return NULL;
+    if (src_flags & MCOVERED) return cur;
     struct Spoor *id = cur;                        // identity to re-test each round
     for (int hops = 1; hops < PGRP_MAX_MOUNTS; hops++) {
         u32 mflags = 0;
         struct Spoor *next = mount_lookup(p->territory, id, &mflags);
         if (!next) break;                          // the crossed link is not itself a point
+        if (mflags & MCOVERED) { spoor_clunk(next); break; }   // `cur` is that directory
         if ((mflags & MPHENO_LINUX) && crossed_pheno) *crossed_pheno = true;
         struct Spoor *crossed = clone_walk_zero(next);
         spoor_clunk(next);
@@ -243,7 +249,7 @@ static int stalk_cross_from(struct Proc *p, struct Spoor *probe, int first_membe
     // is detected even if the subsequent clone errors (the walk then fails
     // closed, but the fact that a pheno-mount was on the path is not lost).
     if ((mflags & MPHENO_LINUX) && crossed_pheno) *crossed_pheno = true;
-    struct Spoor *root = stalk_cross_src(p, src, crossed_pheno);
+    struct Spoor *root = stalk_cross_src(p, src, mflags, crossed_pheno);
     spoor_clunk(src);                              // done with the looked-up source
     if (!root) return -1;
     // #66: a crossed Spoor takes the MOUNT-POINT's namespace name -- the user
@@ -319,7 +325,7 @@ struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
     struct Spoor *cm = NULL;
     for (int k = 0; k < nsrc; k++) {
         if ((flags[k] & MCREATE) || nsrc == 1) {
-            cm = stalk_cross_src(p, srcs[k], NULL);   // the FIRST MCREATE member (or the only one)
+            cm = stalk_cross_src(p, srcs[k], flags[k], NULL);   // the FIRST MCREATE member (or the only one)
             if (cm) spoor_path_transplant(cm, base);  // #66: the mount-point name
             else    *errp = T_E_IO;                    // the chosen member failed to cross
             break;                                     // Plan 9: create in the FIRST writable
@@ -347,7 +353,8 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
                                                  struct Spoor *point, int *errp) {
     *errp = 0;
     struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, point, srcs, NULL,
+    u32           sflags[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, point, srcs, sflags,
                                       PGRP_MAX_MOUNTS);
     struct union_snap *snap =
         kmalloc(sizeof(*snap) + (size_t)nsrc * sizeof(struct union_member), 0);
@@ -363,7 +370,7 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
     spoor_ref(point);
     snap->n = 0;
     for (int k = 0; k < nsrc; k++) {
-        struct Spoor *root = stalk_cross_src(p, srcs[k], NULL);  // pheno irrelevant to readdir
+        struct Spoor *root = stalk_cross_src(p, srcs[k], sflags[k], NULL);  // pheno irrelevant to readdir
         spoor_clunk(srcs[k]);                                    // done with the source
         if (!root)                              continue;        // cross hole -> skip (Plan 9)
         if (!(root->qid.type & QTDIR)) { spoor_clunk(root); continue; }  // non-directory member
@@ -669,14 +676,15 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
                                        bool *crossed_pheno, int *errp) {
     *errp = 0;
     struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, union_base, srcs, NULL,
+    u32           sflags[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, union_base, srcs, sflags,
                                       PGRP_MAX_MOUNTS);
     struct Spoor *hit = NULL;
     for (int k = 0; k < nsrc && !hit; k++) {
         // Per-member phenotype: accumulate locally, propagate only on a WIN.
         bool member_pheno = false;
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
-        struct Spoor *leaf = stalk_cross_src(p, srcs[k], &member_pheno);
+        struct Spoor *leaf = stalk_cross_src(p, srcs[k], sflags[k], &member_pheno);
         // UM-8 F8: a member that fails to cross (a dead 9P session, a transient
         // clone OOM) is SKIPPED -- matching the readdir merge and Plan 9's union
         // skip-on-error -- NOT a hard failure of the whole walk, which hid a
@@ -739,12 +747,13 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
     *errp = 0;
     if (!p || !p->territory || !point || !leafname) return NULL;
     struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, point, srcs, NULL,
+    u32           sflags[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, point, srcs, sflags,
                                       PGRP_MAX_MOUNTS);
     struct Spoor *hit = NULL;
     for (int k = 0; k < nsrc && !hit; k++) {
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
-        struct Spoor *mroot = stalk_cross_src(p, srcs[k], NULL);
+        struct Spoor *mroot = stalk_cross_src(p, srcs[k], sflags[k], NULL);
         if (!mroot)                            continue;   // F8: cross-fail -> skip
         // #66/I-33: the crossed member takes the MOUNT-POINT's namespace name.
         spoor_path_transplant(mroot, point);

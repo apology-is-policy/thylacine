@@ -77,6 +77,12 @@ pub struct Tile {
     exit: Option<i32>,
     /// A pending bell affordance the render consumes once (no kernel bell).
     bell: bool,
+    /// HALCYON 14.13: a clear (ED 2 / ED 3 / RIS) erased the normal screen
+    /// and nothing has scrolled off since. With history, the render lays the
+    /// tail under its own top padding with the history ending at the view's
+    /// top edge and a full view below it. The normal screen's, so an
+    /// alt-screen excursion leaves it as it was.
+    pinned: bool,
     /// The frozen blocks' laid heights at `heights_width`, aligned to the
     /// scrollback's frozen deque (front-evicted, back-appended; block ids are
     /// strictly increasing along it). A frozen block's layout is width- and
@@ -163,6 +169,7 @@ impl Tile {
             caret_on: true,
             exit: None,
             bell: false,
+            pinned: false,
             heights: VecDeque::new(),
             heights_width: 0,
             frame: Vec::new(),
@@ -363,6 +370,8 @@ impl Tile {
                 }
             }
             Record::ScrollOff { rows, wrapped } => {
+                // Output has filled the screen: the view flows again.
+                self.pinned = false;
                 self.scrollback
                     .push_scrolled_rows(&rows, &wrapped, &self.spans)
             }
@@ -400,6 +409,14 @@ impl Tile {
             Control::Exit(code) => self.exit = Some(code),
             // The down-channel resize was applied on the pts; no model state here.
             Control::WinsizeAck => {}
+            // The erased rows arrived first, as history. An erase claimed on
+            // the alt screen is not the normal screen's, whatever the
+            // producer says.
+            Control::ScreenErased => {
+                if self.mode == ScreenMode::Normal {
+                    self.pinned = true;
+                }
+            }
         }
     }
 
@@ -571,7 +588,7 @@ impl Tile {
         // at the full. Nothing under legacy (the lane is 0).
         let lane = crate::indicator::lane(sheet);
         let mut passes = 0u8;
-        let (lay_w, open_lb, live_lb, prov, total, content_h) = loop {
+        let (lay_w, open_lb, live_lb, prov, total, tail_gap, content_h) = loop {
             passes += 1;
             let lay_w = widthi - if self.lane { lane } else { 0 };
             self.laid_last += self.sync_heights(lay_w, sheet, gs);
@@ -611,18 +628,33 @@ impl Tile {
             self.laid_last += 1;
             self.laid_lines_last += live_lb.lines.len();
 
-            let content_h =
-                total + live_lb.height + ended_line.map_or(0, |(_, lh)| lh) + sheet.pad_bottom;
+            // HALCYON 14.13: after a clear the live tail starts where a fresh
+            // tile's does -- under its own top padding, the history ending at
+            // the view's top edge with a full view reserved below it --
+            // whatever the typeface metrics. A tile with no history is laid
+            // that way already.
+            let pin = self.pinned && total > sheet.pad_top;
+            let tail_gap = if pin { sheet.pad_top } else { 0 };
+            let natural = total
+                + tail_gap
+                + live_lb.height
+                + ended_line.map_or(0, |(_, lh)| lh)
+                + sheet.pad_bottom;
+            let content_h = if pin {
+                natural.max(viewh + total)
+            } else {
+                natural
+            };
             let overflow = content_h > viewh;
             if lane == 0 {
                 // No indicator on this sheet (legacy, or a switch back to
                 // it): the flag clears so a later Instrument sheet decides
                 // afresh rather than inheriting a stale reservation.
                 self.lane = false;
-                break (lay_w, open_lb, live_lb, prov, total, content_h);
+                break (lay_w, open_lb, live_lb, prov, total, tail_gap, content_h);
             }
             if overflow == self.lane {
-                break (lay_w, open_lb, live_lb, prov, total, content_h);
+                break (lay_w, open_lb, live_lb, prov, total, tail_gap, content_h);
             }
             // BOUNDED (r2 B-F1): the loop rested on "narrowing never
             // shortens", and a layout rule that was not monotone in the
@@ -636,7 +668,7 @@ impl Tile {
             // picture is stable across frames, never a per-frame flip.
             if passes >= 2 {
                 if self.lane {
-                    break (lay_w, open_lb, live_lb, prov, total, content_h);
+                    break (lay_w, open_lb, live_lb, prov, total, tail_gap, content_h);
                 }
                 self.lane = true;
                 continue;
@@ -678,7 +710,7 @@ impl Tile {
             if span.is_none() && m.block == GRID_KEY {
                 let sp = live_row_spans(&live_lb, &prov, m.item, live_cols);
                 if let (Some(&(y0, _)), Some(&(y1, h1))) = (sp.first(), sp.last()) {
-                    span = Some((total + y0, (y1 + h1) - y0));
+                    span = Some((total + tail_gap + y0, (y1 + h1) - y0));
                 }
             }
             if let Some((r, lh)) = span {
@@ -729,8 +761,8 @@ impl Tile {
             render_block(cart, &open_lb, y, gs);
             paint_run(cart, &open_lb, y, sheet, m);
         }
-        y += open_lb.height;
-        // `y` is now the grid tail's screen-y (== y0 + total). H-4d: the
+        y += open_lb.height + tail_gap;
+        // `y` is now the grid tail's screen-y (== y0 + total + tail_gap). H-4d: the
         // live grid is the virtual trailing block (14.11.5) -- in the frame
         // under GRID_KEY, its marked row banded under the cells, its
         // selected run underlined over them.
@@ -1628,6 +1660,452 @@ mod tests {
         assert!(t.paints_caret(true), "the show brings the caret back");
     }
 
+    /// HALCYON 14.13: after a whole-screen erase the live tail starts where
+    /// a fresh tile's does, with the history above it; the next ScrollOff
+    /// hands the view back to the bottom-anchored flow.
+    #[test]
+    fn a_screen_erase_pins_the_live_tail_to_the_top_of_the_view() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((20 * cw) as usize, (6 * ch) as usize);
+        let mut t = daylight_tile(20, 6);
+        // History far taller than the view, then a one-line tail.
+        let rows: Vec<Vec<Cell>> = (0..30u8)
+            .map(|i| vec![cell(char::from(b'a' + i % 26))])
+            .collect();
+        t.apply(Record::ScrollOff {
+            wrapped: vec![false; rows.len()],
+            rows,
+        });
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('s'))],
+            cursor: (0, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let tail_y = |t: &Tile| {
+            t.live_laid
+                .as_ref()
+                .map(|l| l.2)
+                .expect("a normal render caches the tail")
+        };
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        let flowing = tail_y(&t);
+        assert!(
+            flowing > sheet.pad_top,
+            "premise: unpinned, the history pushes the tail down the view ({flowing})"
+        );
+
+        t.apply(Record::Control(Control::ScreenErased));
+        let content = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert_eq!(
+            tail_y(&t),
+            sheet.pad_top,
+            "pinned: the tail starts where a fresh tile's does"
+        );
+        assert!(
+            t.frame
+                .iter()
+                .filter(|&&(id, _, _)| id != GRID_KEY)
+                .all(|&(_, y, bh)| y + bh <= 0),
+            "and no history shows above it: {:?}",
+            t.frame
+        );
+        assert!(
+            content > h as i32,
+            "the history is still there, above the view"
+        );
+        let mut up = i32::MAX;
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut up, None);
+        assert_eq!(
+            up,
+            content - h as i32,
+            "and all of it is reachable by scrolling up"
+        );
+
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cell('z')]],
+            wrapped: vec![false],
+        });
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert_eq!(
+            tail_y(&t),
+            flowing,
+            "released: the tail is back where the flow puts it"
+        );
+    }
+
+    /// On the Instrument sheet (28 px of top padding at 100 %): a pinned view
+    /// shows none of a short history, and the floor alone overflows the view,
+    /// so the position lane is reserved -- there is history to scroll to.
+    #[test]
+    fn a_pinned_instrument_view_hides_a_short_history_and_reserves_the_lane() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((60 * cw) as usize, (30 * ch) as usize);
+        let mut t = history_tile(60, 30, 64);
+        push_history(&mut t, 2, 1, 'h');
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('s'))],
+            cursor: (0, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let mut cart = Cartoon::new();
+        let content = t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(content < h as i32 && !t.lane, "premise: it fits unpinned");
+        t.apply(Record::Control(Control::ScreenErased));
+        let mut cart = Cartoon::new();
+        let content = t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(content > h as i32, "the floor overflows the view");
+        assert!(t.lane, "so the lane is reserved");
+        assert_eq!(
+            t.live_laid.as_ref().map(|l| l.2),
+            Some(s.pad_top),
+            "the tail under the Instrument padding"
+        );
+        assert!(
+            t.frame
+                .iter()
+                .filter(|&&(id, _, _)| id != GRID_KEY)
+                .all(|&(_, y, bh)| y + bh <= 0),
+            "no history above the tail: {:?}",
+            t.frame
+        );
+    }
+
+    /// A pinned tail taller than the view flows as any tall tail does: its
+    /// end, then the bottom padding, meet the view's bottom edge.
+    #[test]
+    fn a_pinned_tail_taller_than_the_view_still_ends_at_its_bottom() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((20 * cw) as usize, (6 * ch) as usize);
+        let mut t = history_tile(20, 20, 64);
+        push_history(&mut t, 4, 1, 'h');
+        t.apply(Record::CellDiff {
+            changed: (0..20u16).map(|r| (r, 0, cell('t'))).collect(),
+            cursor: (19, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        t.apply(Record::Control(Control::ScreenErased));
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        let (tail_h, tail_y) = t
+            .live_laid
+            .as_ref()
+            .map(|l| (l.0.height, l.2))
+            .expect("a normal render caches the tail");
+        assert!(
+            tail_h > h as i32,
+            "premise: the tail is taller than the view"
+        );
+        assert_eq!(
+            tail_y + tail_h + sheet.pad_bottom,
+            h as i32,
+            "the tail's end sits on the view's bottom edge"
+        );
+    }
+
+    /// Pinned with no history there is nothing to scroll to: the tile lays
+    /// out exactly as it did before the clear.
+    #[test]
+    fn a_pinned_tile_without_history_lays_out_as_a_fresh_one() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((60 * cw) as usize, (30 * ch) as usize);
+        let mut t = history_tile(60, 30, 64);
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('s'))],
+            cursor: (0, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let mut cart = Cartoon::new();
+        let fresh = t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        let fresh_y = t.live_laid.as_ref().map(|l| l.2);
+        t.apply(Record::Control(Control::ScreenErased));
+        let mut cart = Cartoon::new();
+        let pinned = t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert_eq!(
+            (pinned, t.live_laid.as_ref().map(|l| l.2), t.lane),
+            (fresh, fresh_y, false),
+            "nothing to scroll to, so nothing moves"
+        );
+    }
+
+    /// Scrolled up into the history of a pinned tile, a mark on the tail's row
+    /// drags the view down until that row is inside it.
+    #[test]
+    fn a_mark_on_the_pinned_tail_drags_the_view_to_it() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((20 * cw) as usize, (12 * ch) as usize);
+        let mut t = history_tile(20, 4, 1000);
+        push_history(&mut t, 40, 3, 'm');
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('s'))],
+            cursor: (0, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        t.apply(Record::Control(Control::ScreenErased));
+        let mut cart = Cartoon::new();
+        let mut su = i32::MAX;
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, None);
+        assert!(su > 0, "premise: scrolled up into the history");
+        let mark = Mark {
+            block: GRID_KEY,
+            item: 0,
+            row: usize::MAX,
+            obj: None,
+        };
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &sheet, &mut su, Some(mark));
+        let band = cart
+            .ops
+            .iter()
+            .find_map(|o| match o {
+                Op::Rect {
+                    y, h: bh, color, ..
+                } if *color == sheet.sel_bg => Some((*y, *bh as i32)),
+                _ => None,
+            })
+            .expect("the marked row paints its band");
+        assert!(
+            band.0 >= 0 && band.0 + band.1 <= h as i32,
+            "the marked row is in view: {band:?} of {h}"
+        );
+    }
+
+    #[test]
+    fn the_pin_is_the_normal_screens_and_only_a_scrolloff_releases_it() {
+        let mut t = tile();
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.apply(Record::Control(Control::ScreenErased));
+        assert!(!t.pinned, "an erase claimed on the alt screen pins nothing");
+        t.apply(Record::Mode(ScreenMode::Normal));
+        t.apply(Record::Control(Control::ScreenErased));
+        assert!(t.pinned, "a normal-screen erase pins");
+        // `clear`, then an editor, then back: the pin belongs to the screen
+        // the editor left alone.
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('e'))],
+            cursor: (0, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        t.apply(Record::Mode(ScreenMode::Normal));
+        assert!(t.pinned, "an alt-screen excursion leaves it");
+        t.apply(Record::Control(Control::Bell));
+        t.apply(Record::CellDiff {
+            changed: vec![(1, 0, cell('x'))],
+            cursor: (1, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        assert!(t.pinned, "cells and other controls leave it");
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cell('x')]],
+            wrapped: vec![false],
+        });
+        assert!(!t.pinned, "a ScrollOff releases it");
+    }
+
+    /// TC-1 across every link, in the operator's shape: output that has
+    /// partly scrolled, the command that starts the deck, then its clear.
+    // One chunk of program output through the whole seam: the vt, the
+    // producer, the wire both ways, the tile.
+    fn seam_step(t: &mut Tile, p: &mut kaua_term::Producer, v: &mut vt::Vt, bytes: &[u8]) {
+        let mut out = Vec::new();
+        p.feed(v, bytes, &mut out);
+        for rec in out {
+            let mut buf = Vec::new();
+            kaua_term::wire::encode_record(&rec, &mut buf);
+            let back = kaua_term::wire::parse_record(buf[0], &buf[5..])
+                .expect("the producer's own record must parse");
+            assert_eq!(back, rec, "the wire round-trip is lossless");
+            t.apply(back);
+        }
+    }
+
+    fn history_lines(t: &Tile) -> Vec<String> {
+        t.scrollback
+            .open_block()
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Line(l) => Some(l.cells.iter().map(|c| c.ch).collect()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The vt reports the erase, the producer orders it, the record crosses
+    /// the wire, and the tile keeps the erased screen as history and pins.
+    #[test]
+    fn a_clear_crosses_the_whole_seam_keeping_the_erased_screen_as_history() {
+        let mut v = vt::Vt::new(20, 4);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(20, 4, libhalcyon::theme::daylight_palette());
+        // Four rows: 1..3 scroll off; 4..6 and the command line are the
+        // screen, and the newline that runs the command scrolls 4 off too.
+        seam_step(
+            &mut t,
+            &mut p,
+            &mut v,
+            b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n% lantern deck",
+        );
+        seam_step(&mut t, &mut p, &mut v, b"\r\n\x1b[0m\x1b[H\x1b[2Jslide one");
+        assert_eq!(
+            history_lines(&t),
+            ["1", "2", "3", "4", "5", "6", "% lantern deck"],
+            "nothing the program erased is lost, the command that ran it included"
+        );
+        assert!(t.pinned, "and the view is pinned");
+        assert_eq!(t.grid.row(0)[0].ch, 's', "the slide is the live screen");
+    }
+
+    /// ut's redraw after `clear`: its prompt at the top-left, then `\r ESC[J`
+    /// from the block's top on every keystroke. None of it is a clear.
+    #[test]
+    fn typing_after_a_clear_files_no_keystroke_into_the_history() {
+        let mut v = vt::Vt::new(20, 4);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(20, 4, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"% clear\r\n\x1b[H\x1b[2J\x1b[3J% ");
+        assert_eq!(
+            history_lines(&t),
+            ["% clear"],
+            "premise: the clear kept the screen"
+        );
+        for typed in ["% l", "% la", "% lan"] {
+            seam_step(
+                &mut t,
+                &mut p,
+                &mut v,
+                alloc::format!("\r\x1b[J{typed}").as_bytes(),
+            );
+        }
+        assert_eq!(
+            history_lines(&t),
+            ["% clear"],
+            "no keystroke reached the history"
+        );
+        assert!(t.pinned, "and the view stays pinned");
+    }
+
+    /// A fragment that scrolled off stops being continued when row 0 restarts;
+    /// the next rows to leave, in the same chunk, must not glue to it.
+    #[test]
+    fn a_restarted_top_row_never_glues_to_the_fragment_above() {
+        let mut v = vt::Vt::new(4, 2);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(4, 2, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"abcdefghij\x1b[HXY\x1b[2J");
+        assert_eq!(history_lines(&t), ["abcd", "XYgh", "ij"]);
+    }
+
+    /// A reset (RIS) rescues a tile a crashed TUI left on the alt screen: the
+    /// tile returns to the normal screen, the main screen's text moves to
+    /// history, and the view pins like any clear.
+    #[test]
+    fn a_reset_rescues_a_tile_left_on_the_alt_screen() {
+        let mut v = vt::Vt::new(20, 4);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(20, 4, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"% top\r\n\x1b[?1049hcrashed");
+        assert_eq!(
+            t.mode,
+            ScreenMode::AltScreen,
+            "premise: the tile shows the alt screen"
+        );
+        seam_step(&mut t, &mut p, &mut v, b"\x1bc");
+        assert_eq!(
+            t.mode,
+            ScreenMode::Normal,
+            "the reset returned the tile to the normal screen"
+        );
+        assert_eq!(
+            history_lines(&t),
+            ["% top"],
+            "the main screen's text moved to history"
+        );
+        assert!(t.pinned, "and the view is pinned");
+        assert!(
+            t.grid.row(0).iter().all(|c| c.ch == ' '),
+            "the live screen is blank"
+        );
+    }
+
+    /// A line whose head scrolled off before a TUI took the alt screen stays
+    /// one line when a reset, not the TUI's own leave, brings the main screen
+    /// back and moves it into history.
+    #[test]
+    fn a_reset_on_the_alt_screen_keeps_a_held_line_whole() {
+        let mut v = vt::Vt::new(4, 3);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(4, 3, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"abcdefghijklm");
+        seam_step(&mut t, &mut p, &mut v, b"\x1b[?1049hTUI");
+        seam_step(&mut t, &mut p, &mut v, b"\x1bc");
+        assert_eq!(history_lines(&t), ["abcdefghijklm"]);
+    }
+
+    /// In a one-row tile each row that leaves by autowrap is continued by the
+    /// next one on row 0: the line lands whole.
+    #[test]
+    fn a_one_row_tile_keeps_an_autowrapped_line_whole() {
+        let mut v = vt::Vt::new(4, 1);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(4, 1, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"abcdefghij\r\n");
+        assert_eq!(history_lines(&t), ["abcdefghij"]);
+    }
+
+    /// A restart that leaves the screen as the producer last sent it still
+    /// ends the line above: the next line to leave does not glue to it.
+    #[test]
+    fn a_restart_that_changes_nothing_else_still_ends_the_line_above() {
+        let mut v = vt::Vt::new(4, 2);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(4, 2, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"abcde\r\n\x1b[H\x1b[1JXYZ\r\n\r\n");
+        assert_eq!(history_lines(&t), ["abcd", "XYZ"]);
+    }
+
+    /// A clear moves row 0 into history before it reports the restart, so a
+    /// line whose head scrolled off earlier lands whole -- ED 2, ED 3 and a
+    /// reset alike.
+    #[test]
+    fn a_clear_keeps_the_line_row_zero_continues() {
+        for clear in [&b"\x1b[2J"[..], b"\x1b[3J", b"\x1bc"] {
+            let mut v = vt::Vt::new(4, 2);
+            v.set_capture_events(true);
+            let mut p = kaua_term::Producer::new(&v);
+            let mut t = Tile::new(4, 2, libhalcyon::theme::daylight_palette());
+            seam_step(&mut t, &mut p, &mut v, b"abcdef\r\n");
+            seam_step(&mut t, &mut p, &mut v, clear);
+            assert_eq!(history_lines(&t), ["abcdef"], "{clear:?}");
+            assert!(t.pinned, "{clear:?}");
+        }
+    }
+
     #[test]
     fn render_normal_tail_is_proportional_with_a_caret() {
         // PL-4b: the normal-mode tail renders PROPORTIONAL (via live_block, not
@@ -1680,6 +2158,7 @@ mod tests {
             caret_on: true,
             exit: None,
             bell: false,
+            pinned: false,
             heights: VecDeque::new(),
             heights_width: 0,
             frame: Vec::new(),

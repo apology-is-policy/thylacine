@@ -114,9 +114,9 @@ void test_mmio_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("mmio-probe", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/mmio-probe", &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /mmio-probe not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/mmio-probe not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
 

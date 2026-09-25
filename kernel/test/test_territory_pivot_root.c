@@ -104,6 +104,7 @@ void test_territory_shed_drops_nested_orphan(void);
 void test_territory_shed_full_table_boundary(void);
 void test_territory_shed_releases_mp_path_once(void);
 void test_territory_shed_initial_chroot_and_root_as_source(void);
+void test_territory_shed_covered_shares_fate(void);       // Plan 9 unions
 
 // =============================================================================
 // pivot_root_smoke
@@ -608,4 +609,44 @@ void test_territory_shed_initial_chroot_and_root_as_source(void) {
     territory_unref(p);
     TEST_EXPECT_EQ(root_b->ref, 1, "destroy drops the root ref");
     spoor_unref(root_b); spoor_unref(mp_far); spoor_unref(mp_b); spoor_unref(src);
+}
+
+// Plan 9 unions: the covered directory's entry is keyed at its point and its
+// source IS the point, a self-edge, so it shares the fate of the point's other
+// entries. A union in A's tree goes whole at a pivot to B, and the point's own
+// reference is released once; a union in B's tree survives whole, still in
+// search order.
+void test_territory_shed_covered_shares_fate(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *root_a = shed_spoor(1, 0), *root_b = shed_spoor(2, 0);
+    struct Spoor *mp_a = shed_spoor(1, 10), *mp_b = shed_spoor(2, 20);
+    struct Spoor *u = shed_spoor(3, 0), *v = shed_spoor(4, 0);
+    TEST_ASSERT(p && root_a && root_b && mp_a && mp_b && u && v, "alloc");
+    mp_a->qid.type = QTDIR;   // a union starts only at a directory
+    mp_b->qid.type = QTDIR;
+
+    TEST_EXPECT_EQ(territory_chroot(p, root_a), 0, "chroot to A");
+    TEST_EXPECT_EQ(mount(p, u, mp_a, MBEFORE), 0, "a union in A's tree: [u, covered]");
+    TEST_EXPECT_EQ(mount(p, v, mp_b, MAFTER),  0, "a union in B's tree: [covered, v]");
+    TEST_EXPECT_EQ(territory_nmounts(p), 4, "two members + two covered entries");
+    TEST_EXPECT_EQ(mp_a->ref, 2, "A's covered entry holds its point");
+    TEST_EXPECT_EQ(mp_b->ref, 2, "B's covered entry holds its point");
+
+    TEST_EXPECT_EQ(territory_pivot_root(p, root_b), 0, "pivot to B");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "B's union survives whole; A's goes whole");
+    TEST_EXPECT_EQ(mp_a->ref, 1, "A's covered entry released its point once");
+    TEST_EXPECT_EQ(u->ref, 1, "A's member released once");
+    TEST_EXPECT_EQ(mp_b->ref, 2, "B's covered entry kept");
+    u32 f = 0;
+    struct Spoor *g0 = mount_member_at(p, mp_b, 0, &f);
+    TEST_EXPECT_EQ(g0 == mp_b && f == MCOVERED, true, "B's member 0 is still its covered directory");
+    if (g0) spoor_clunk(g0);
+    struct Spoor *g1 = mount_member_at(p, mp_b, 1, NULL);
+    TEST_EXPECT_EQ(g1 == v, true, "then v");
+    if (g1) spoor_clunk(g1);
+
+    territory_unref(p);
+    TEST_EXPECT_EQ(mp_b->ref, 1, "destroy drops the surviving covered entry's ref");
+    spoor_unref(root_a); spoor_unref(root_b); spoor_unref(mp_a); spoor_unref(mp_b);
+    spoor_unref(u);      spoor_unref(v);
 }

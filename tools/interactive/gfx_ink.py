@@ -16,6 +16,12 @@ other theme (the standing `ls-gfx-compose` defect).
 Prints one integer: the non-ground pixel count.
 
     gfx_ink.py <png>
+    gfx_ink.py <png> --rect X0 Y0 X1 Y1
+
+`--rect` counts only inside a rectangle given as FRACTIONS of the image, so a
+gate asks "is this band empty" without pinning a resolution. The ground is still
+the commonest colour of the WHOLE image: a band that is all text must not get to
+call its text the ground.
 """
 
 import struct
@@ -61,7 +67,7 @@ def _unfilter(raw, width, height, bpp):
         prev = line
 
 
-def ink(path):
+def ink(path, rect=None):
     data = open(path, "rb").read()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise SystemExit("gfx_ink: %s is not a PNG" % path)
@@ -88,18 +94,32 @@ def ink(path):
 
     bpp = _BPP[color]
     keep = min(3, bpp)  # RGB, or the grey byte; alpha is not a colour
+    x0, y0, x1, y1 = 0, 0, width, height
+    if rect is not None:
+        x0, y0 = int(rect[0] * width), int(rect[1] * height)
+        x1, y1 = int(rect[2] * width), int(rect[3] * height)
     counts = Counter()
+    inside = Counter()
     raw = zlib.decompress(bytes(idat))
-    for line in _unfilter(raw, width, height, bpp):
+    for y, line in enumerate(_unfilter(raw, width, height, bpp)):
         for x in range(0, width * bpp, bpp):
-            counts[bytes(line[x : x + keep])] += 1
-    total = sum(counts.values())
+            px = bytes(line[x : x + keep])
+            counts[px] += 1
+            if y0 <= y < y1 and x0 <= x // bpp < x1:
+                inside[px] += 1
     if not counts:
         return 0
-    return total - counts.most_common(1)[0][1]
+    ground = counts.most_common(1)[0][0]
+    return sum(inside.values()) - inside[ground]
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) == 2:
+        print(ink(sys.argv[1]))
+    elif len(sys.argv) == 7 and sys.argv[2] == "--rect":
+        r = [float(v) for v in sys.argv[3:7]]
+        if not (0 <= r[0] < r[2] <= 1 and 0 <= r[1] < r[3] <= 1):
+            raise SystemExit("gfx_ink: --rect wants 0 <= X0 < X1 <= 1, 0 <= Y0 < Y1 <= 1")
+        print(ink(sys.argv[1], r))
+    else:
         raise SystemExit(__doc__)
-    print(ink(sys.argv[1]))

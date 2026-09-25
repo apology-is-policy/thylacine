@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -556,7 +556,7 @@ its reasoning fails a test rather than passing quietly.
   as task #163.
 - **`VIV_NATIVE_CEILING`'s declaration comment used to repeat the number the
   symbol exists to stop repeating, and went stale seven times.** The constant
-  is now **125** (`SYS_BURROW_PROTECT`, B-1a). The remedy was never going to be
+  is now **126** (`SYS_BURROW_MAP_FILE`, B-1d). The remedy was never going to be
   a person remembering: since the 2026-09-17 PCI rewrite the assert is pinned
   to the `SYS__NATIVE_TOP - 1` sentinel, which the compiler recomputes on every
   append, and the declaration comment narrates that drift history instead of a
@@ -676,3 +676,13 @@ released and re-read zero; a hole ENOMEM for both kinds; DONTFORK ENOSYS; an
 unaligned start EINVAL; a zero length 0; the probe's own data page declined
 and intact). The sabotage `nodecommit` (the arm answers 0 without the core)
 reddens L23l.
+
+## Native ceiling 126 (2026-09-24, B-1d)
+
+`VIV_NATIVE_CEILING` is 126 (`SYS_BURROW_MAP_FILE`), again moved by the
+sentinel rather than by hand. No vivarium row lies at 126 or 127, and the
+lowest row the ceiling argues for is `restart_syscall` (128), so the move voids
+no row's argument. The phenotype's file-backed `mmap` rows and the new native
+number now call the same three D-3 cores ([[sub-kernel-syscall-dispatch]]):
+each entry decides its own word and hands the cores the same prot encoding, so
+the phenotype's deciders did not change.

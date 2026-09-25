@@ -136,12 +136,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-25 [[chg-2026-09-25-b1d-dlopen]] — B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness
+- 2026-09-25 [[chg-2026-09-25-b1d-round2-close]] — B-1d holotype round 2 close: the bin/ move's four breakers, the escape leg walks its .., the initrd root guarded (4 P0-class closed in the round + 0 P0 / 0 P1 / 1 P2 / 5 P3)
+- 2026-09-25 [[chg-2026-09-25-b1d-round3-close]] — B-1d holotype round 3 close: the confined leg's second control, five EXTINCTION bodies restored, the stale-path sweep finished (0 P0 / 0 P1 / 1 P2 / 6 P3, the P2 self-found)
+- 2026-09-25 [[chg-2026-09-25-b1d-u-unions]] — B-1d-u (Plan 9 unions): an MBEFORE or MAFTER mount at a bare directory keeps the directory it covers as a member; the spec's covered-directory invariants; the Rust target leaves static-PIE
 - 2026-09-25 [[chg-2026-09-25-connection-capacity]] — Prepare bounded Halcyon connection admission
+- 2026-09-25 [[chg-2026-09-25-halcyon-main-reconciliation]] — Reconcile Main loader and cleared TC-1a with Astra interaction foundations
 - 2026-09-25 [[chg-2026-09-25-pty-interaction-kernel]] — Implement bounded terminal ownership observations and lifecycle revocation
 - 2026-09-25 [[chg-2026-09-25-pty-interaction-qualification]] — Qualify terminal ownership fronts and concurrent retirement
-- 2026-09-25 [[chg-2026-09-25-pty-observer-client]] — Add typed native terminal observer client
-- 2026-09-25 [[chg-2026-09-25-readiness-worker]] — Add bounded native readiness worker and repair its runtime harness
-- 2026-09-25 [[chg-2026-09-25-service-backpressure]] — Retain Halcyon service replies and own non-duplicable readiness handles
-- 2026-09-25 [[chg-2026-09-25-session-readiness]] — Connect Halcyon session media to native readiness aggregation
-- 2026-09-24 [[chg-2026-09-24-astra-seal-integration]] — Integrate the cleared Aux seal prerequisite into Astra
 <!-- generated:end -->

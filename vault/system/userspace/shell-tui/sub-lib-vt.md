@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/HALCYON.md section 13.4", "docs/UTOPIA-VISUAL.md section 1", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -36,8 +36,9 @@ implementation drives every consumer.
 The headline of the extraction is not reuse -- it is testability. As a module
 inside the unconditionally-`no_std` aurora crate the parser could not be
 compiled for the host at all; here it is a pure `no_std` + `alloc` crate with
-zero dependencies, and the whole byte machine is exercised by ~46 host tests
-(`cargo test -p vt --target aarch64-apple-darwin`). The most exposed surface
+zero dependencies, and the whole byte machine is exercised by 75 host tests
+(2026-09-25; `cargo test -p vt --lib --no-default-features --target
+aarch64-apple-darwin` from `usr/`, or `tools/test-rust.sh vt`). The most exposed surface
 in the terminal stack -- the machine that eats every byte any program writes
 to the console -- went from untestable to covered by the move alone.
 
@@ -135,6 +136,47 @@ kaua-term turns it on so `feed_until` yields the ordered seam stream: a
 `AltLeave` carry the outgoing/restored buffer so the consumer flushes its
 pending diff against the right grid, `Bell` and `Osc` delimit Beacon zones.
 
+**A whole-screen erase is reported, and what it erased is handed over first
+(TC-1, HALCYON 14.13).** A clear is ED 2 or ED 3 (one arm; DECSED is ED here,
+no cell being protected) or RIS; parameters past 3 are ignored as xterm ignores
+them, and ED 0 and ED 1 never count, whatever they cover -- ED 0 from a prompt's
+top is ut's per-keystroke redraw (`\r ESC[J`), which read by its effect filed
+every keystroke after a clear into the history (TC-1a audit F1). On the normal screen under capture, `screen_to_history` pushes a `Scroll`
+for every row through the last one holding a non-space character -- the tile's
+own content test -- BEFORE the blank, the last of them with its wrap flag cleared
+because nothing continues it once the screen is blank; `note_screen_erased` then
+pushes `Boundary::ScreenErased` AFTER it. So the consumer's history receives the
+erased screen exactly as if it had scrolled off, and the erase arrives after it:
+no clear deletes the record of what ran (the operator's vote, 2026-09-25); the
+live screen itself stays the program's to rewrite.
+The alt screen reports neither, since it has no history and no pin. With capture
+off nothing is pushed and the cells are untouched by the reporting, which a test
+proves by feeding one stream with capture on and off and comparing the grids.
+RIS keeps history too, unlike xterm's, which drops saved lines. RIS returns to
+the main screen FIRST, as xterm, kitty and VTE do: `alt_screen(false)` pushes the
+`AltLeave` (under capture) and the erase then acts on the main screen, so `reset`
+rescues a screen a crashed TUI left on the alt buffer; RIS also restores autowrap
+(`wrap`) and forgets the saved cursor (`saved`, `saved_wrap`). `span` is left
+alone: it is the Beacon frame serial, positional by design, not pen state.
+
+**Row 0's restart is reported on its edge (TC-1a audit F5).** When row 0
+restarts as a line of its own while it continued a row that scrolled off,
+`restart_top` pushes `Boundary::TopRestart` once, on that true-to-false edge,
+under capture only. Its callers: a glyph at (0,0), except one this same call's
+autowrap put there (on a one-row screen that glyph IS the continuation, round-2
+F2); ED reaching row 0's first cell; EL from row 0's column 0; IL/DL at row 0;
+RI/SD at the top margin; RIS. The producer flushes on it, so the consumer ends
+the fragment it holds before the next row leaves; coalesced into one
+`ScrollOff`, the two rows used to glue. Inside an ED 2/3 or RIS byte the erased
+rows are pushed BEFORE the restart, so row 0's continuation reaches the
+fragment before it is ended (round-2 F4).
+
+**AltLeave carries the main screen as it stood (round-2 F1).** The boundary
+holds the restored main's cells, wrap flags, cursor and top flag at the leave,
+because the byte that left can go on to change them: RIS leaves, then erases,
+and a top flag read after the erase ended a fragment the restored row 0 still
+continued.
+
 ## Data structures
 
 `Vt` is the whole interpreter: the two cell buffers (main + alt), cursor and
@@ -160,8 +202,8 @@ a `set_theme` choice. The 16-colour ANSI map derives from the UTOPIA-VISUAL
 role table (slate=blue, sage=cyan, cinnabar=red, ember=bright-red); the bright
 tier is aurora's own derivation, documented in the source.
 
-`Boundary` (Scroll / Bell / Osc / AltEnter / AltLeave) is the KT-1 event
-enum, inert when capture is off.
+`Boundary` (Scroll / Bell / ScreenErased / TopRestart / Osc / AltEnter / AltLeave) is the
+KT-1 event enum, inert when capture is off.
 
 ## Concurrency
 
@@ -240,6 +282,14 @@ beyond the two grid buffers and the (empty, on that path) queues.
   console path is a regression against the shared-crate contract; `feed`
   clears `pending` defensively so a stray capture cannot leak into a later
   `feed_until`.
+- **A whole-screen erase: the rows BEFORE the blank, the report AFTER it, the
+  alt screen never.** Pushed after the blank, the rows would be blank; a report
+  before the rows would let the consumer's pin be released by the erase's own
+  ScrollOff. Each arm -- the effect test per ED mode, both guards on both
+  helpers, the cleared last wrap flag, RIS -- is held by a named test that a
+  one-arm sabotage reds (the TC-1a sweep: 22 legs, each redding exactly its
+  predicted tests; the RIS fix's alt-leave and each of its three mode resets
+  have a leg of their own, the resets checked at their own assertion).
 
 ## Seams
 
@@ -247,7 +297,8 @@ beyond the two grid buffers and the (empty, on that path) queues.
   are not band-confined -- a full-DECOM refinement, deferred.
 - No scrollback in the grid; a normal-mode top-margin scroll hands the
   leaving row out as a `Scroll` boundary (the transcript's job) and forgets
-  it.
+  it, and a whole-screen erase hands out every row through the last with text
+  the same way.
 - Application keypad (DECKPAM/DECKPNM) is deferred with its keycodes -- the
   shared KeyEvent model has no keypad keys to re-encode yet.
 - The SGR sub-parameter separator `:` is folded to `;` (adequate for the
@@ -263,7 +314,7 @@ beyond the two grid buffers and the (empty, on that path) queues.
   cannot compile" caveat (task #153).** Those tests were written against the
   parser while it lived inside the unconditionally-`no_std` aurora crate,
   where `cargo test` could not build them. The extraction made the parser a
-  pure host-testable crate, and the suite -- now ~46 tests -- runs. It
+  pure host-testable crate, and the suite -- 75 tests on 2026-09-25 -- runs. It
   includes the two named security regressions that had *never executed* as
   aurora tests: the escape-laundering fix and the out-of-bounds erase fix,
   both reachable from any console writer.
@@ -277,6 +328,12 @@ beyond the two grid buffers and the (empty, on that path) queues.
 - **vt tracks wide/attribute geometry; it does not render it.** `ATTR_WIDE`
   and the pen attributes are set correctly, but drawing a double-width cell
   two-wide, or italic as slanted, is KT-1c/1d work in the consumer.
+
+- **Currency (2026-09-25): this dossier was brought current for TC-1 only.**
+  The vt's changes between 2026-09-05 and 2026-09-22 (about 1200 lines: the
+  PL-3/PL-4 soft-wrap flags, `top_continues`, the reflowing resize, the palette
+  seam) are not yet described here. Dating this edit stopped `quaestor stale`
+  from flagging the dossier, so the debt is recorded here instead.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -152,3 +152,13 @@
 # __NR_mmap parked at the sentinel it would get ENOSYS and die before main
 # (it does not check). Through __mmap -- CL-4's owed libc-side elimination.
 0046-pouch-init-tls-mmap.patch
+# 0047: B-1d (ARCH 6.5 "Dynamic loading") -- a MAP_PRIVATE file map is
+# SYS_BURROW_MAP_FILE (126): the span R or R|X where the kernel chooses (the
+# hint dropped, so only a PIE or a .so loads), MAP_FIXED windows over it (the
+# writable one an eager private copy). MAP_SHARED, a writable span, no-read
+# and NOREPLACE are ENOSYS, the phenotype's domain; a negative fd is EBADF.
+0047-pouch-map-file.patch
+# 0048: B-1d -- ldso/dynlink.c's RELRO mprotect is a raw Linux call that 0044
+# parked at the sentinel, and the loader accepted its ENOSYS: RELRO was never
+# applied. SYS_BURROW_PROTECT's four words, a reduction; ENOSYS now fails.
+0048-pouch-ldso-relro.patch

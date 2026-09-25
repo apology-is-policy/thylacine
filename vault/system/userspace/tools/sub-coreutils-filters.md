@@ -49,7 +49,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -264,18 +264,19 @@ report a symlink as a plain file even where the mode string shows `l`.
 
 ## Caveats
 
-- **`which` answers from a mirror that has drifted, and its own header
-  says drift is a bug.** The shell resolves a bare command against a
-  six-entry list — `/bin/`, `/`, `/goroot/bin/`, `/clade/bin/`, `/viv/bin/`,
-  `/viv/abin/` — while the environment variable `which` reads is seeded with
-  five, dropping only the namespace root `/`. So a binary that lives at `/`
-  (the pre-pivot initrd root, where the boot-test shell runs) *runs* when
-  typed and reports *not found* when asked about. The lists have since grown
-  together: the `/viv/bin` instance of this drift — `git` ran while `which
-  git` failed because the shell list carried `/viv/bin` and the login seed did
-  not — was closed at X-2 (W1-b) by seeding both surfaces, and `/clade/bin` was
-  added to both at once. The residual is the single `/` entry; the same
-  omission stands against the shell's completion index (task #159).
+- **`which` answers from a mirror, and its own header says drift is a bug.**
+  The shell resolves a bare command against `/bin/`, `/goroot/bin/`,
+  `/clade/bin/`, `/viv/bin/`, `/viv/abin/`; the environment variable `which`
+  reads is seeded with the same five, and the shell's completion index scans
+  them too. The lists drifted twice. The `/viv/bin` instance — `git` ran while
+  `which git` failed because the shell list carried `/viv/bin` and the login
+  seed did not — was closed at X-2 (W1-b) by seeding both surfaces, and
+  `/clade/bin` was added to both at once. The shell's list also carried the
+  namespace root `/`, for the flat pre-pivot initrd root where the boot-test
+  shell ran, so a binary there *ran* when typed and reported *not found* when
+  asked about. B-1d closed that one: the initrd keeps its programs in `bin/`,
+  which is `/bin` on both sides of the pivot, and `/` left the shell's list
+  ([[dec-2026-09-25-initrd-bin-directory]]).
 
 - **The binaries have no host tests.** They are binary crates that link
   the runtime unconditionally, so `cargo test` cannot build them — the same
@@ -314,6 +315,16 @@ report a symlink as a plain file even where the mode string shows `l`.
   failure was: `seq 3 > /dev/full` succeeds. The fix is `OutSink` and `finish`
   in each (`cmp` wants two on a failed write), a sweep owed after B-1c, with
   the network presenters' ([[sub-coreutils-presenters]]).
+
+- **`env` reports an empty environment that is not empty.** `env` prints
+  nothing and refuses every `NAME=VALUE` and `COMMAND` form with status 125.
+  Its header says Thylacine gives a native program no environment and no
+  accessor for one; the per-Proc `/env` device and `libthyla_rs::env::vars`
+  have made that untrue, so the tool is behind the system it reports on
+  (enqueued). `coreutil-smoke` runs before the pivot in the initrd's `bin/`,
+  and a leg pins that a bare `env` reaches the utility; while the initrd was
+  flat, the same name met the `/env` device and the utility could not be
+  reached before the pivot ([[dec-2026-09-25-initrd-bin-directory]]).
 
 - **Thirty-six separate flag loops.** Consistency across them is
   maintained by hand. The `--help` and usage-error behaviour *is* shared,

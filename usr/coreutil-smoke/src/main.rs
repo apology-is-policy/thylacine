@@ -559,7 +559,8 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("basename", "basename", &["/a/b/c.txt"], b"", b"c.txt\n", 0);
     c.expect("basename suf", "basename", &["/a/b/c.txt", ".txt"], b"", b"c\n", 0);
     c.expect("dirname", "dirname", &["/a/b/c"], b"", b"/a/b\n", 0);
-    c.expect("pwd", "pwd", &[], b"", b"/\n", 0);
+    // joey runs the pre-pivot probes in the initrd's bin/, where their names resolve.
+    c.expect("pwd", "pwd", &[], b"", b"/bin\n", 0);
 
     // --- stdin filters ---
     c.expect("cat stdin", "cat", &[], b"hello\n", b"hello\n", 0);
@@ -572,17 +573,17 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect(
         "head - and banners",
         "head",
-        &["-n", "1", "-", "/version"],
+        &["-n", "1", "-", "/bin/version"],
         b"a\nb\n",
-        b"==> standard input <==\na\n\n==> /version <==\nThylacine v0.1-dev\n",
+        b"==> standard input <==\na\n\n==> /bin/version <==\nThylacine v0.1-dev\n",
         0,
     );
     c.expect(
         "tail - and banners",
         "tail",
-        &["-n", "1", "/version", "-"],
+        &["-n", "1", "/bin/version", "-"],
         b"a\nb\n",
-        b"==> /version <==\nThylacine v0.1-dev\n\n==> standard input <==\nb\n",
+        b"==> /bin/version <==\nThylacine v0.1-dev\n\n==> standard input <==\nb\n",
         0,
     );
     c.expect("tail -n", "tail", &["-n", "2"], b"1\n2\n3\n4\n", b"3\n4\n", 0);
@@ -686,12 +687,12 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect(
         "grep -c counts every operand",
         "grep",
-        &["-c", "Thylacine", "/dev/null", "/version"],
+        &["-c", "Thylacine", "/dev/null", "/bin/version"],
         b"",
-        b"/dev/null:0\n/version:1\n",
+        b"/dev/null:0\n/bin/version:1\n",
         0,
     );
-    reader_gone_first(&mut c, "grep -c finds its verdict with no reader", "grep", &["-c", "Thylacine", "/dev/null", "/version"], 0);
+    reader_gone_first(&mut c, "grep -c finds its verdict with no reader", "grep", &["-c", "Thylacine", "/dev/null", "/bin/version"], 0);
     // A write that fails for another reason is reported, a banner or raw text
     // as much as the payload, and the status says so.
     write_fails(&mut c, "head reports a banner it could not write", "head", &["-n", "1", "/dev/null", "/dev/null"]);
@@ -700,8 +701,8 @@ pub extern "C" fn rs_main() -> i64 {
 
     // --- LS-3c misc coreutils ---
     // (#91 landed: a child's real non-zero exit now survives verbatim -- cmp's
-    // error-2 and env's 125 arrive as themselves. Neither is bare-name smoked
-    // here anyway: env is the /env device pre-pivot, and cmp is smoked only for
+    // error-2 and env's 125 arrive as themselves. Neither is smoked here for its
+    // error code: env only answers --help below, and cmp is smoked only for
     // equal/differ, a genuine 0/1.) `yes` is not captured by `expect`: it never
     // ends, so its check could only end at the bound. It feeds the capture's own
     // check and the reader-leaves checks above, which drop its reader and
@@ -709,27 +710,25 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("uname", "uname", &[], b"", b"Thylacine\n", 0);
     c.expect("uname -m", "uname", &["-m"], b"", b"aarch64\n", 0);
     c.expect("uname -a", "uname", &["-a"], b"", b"Thylacine (none) 1.0-dev #1-thylacine aarch64\n", 0);
-    // The `env` coreutil is NOT bare-name smoked here: G15 reserves `/env` as
-    // the per-Proc environment DEVICE (a directory; ARCH 9.7), so a bare-name
-    // `env` spawn (cwd "/" -> "/env") now resolves to the device, not the
-    // coreutil. The Plan 9 location for the env(1) command is `/bin/env` (the
-    // /bin bind -> the cpio `env` binary), reachable post-pivot via the shell's
-    // $path -- exercised there, not in this pre-pivot bare-name smoke.
+    // A bare-name `env` resolves through the working directory, /bin, to the
+    // coreutil. While the initrd was flat the same name met the /env device
+    // (G15, ARCH 9.7), and the utility was unreachable before the pivot.
+    c.expect_contains("env bare name", "env", &["--help"], b"", b"usage: env", 0);
     c.expect("realpath abs", "realpath", &["/a/b/../c"], b"", b"/a/c\n", 0);
-    c.expect("realpath rel", "realpath", &["x/../y"], b"", b"/y\n", 0); // cwd "/" -> "/y"
+    c.expect("realpath rel", "realpath", &["x/../y"], b"", b"/bin/y\n", 0); // cwd "/bin" -> "/bin/y"
     c.expect("sleep 0", "sleep", &["0"], b"", b"", 0);
     c.expect_contains("hexdump hex", "hexdump", &[], b"Hi", b"48 69", 0); // 'H'=0x48 'i'=0x69
     c.expect_contains("hexdump ascii", "hexdump", &[], b"Hi", b"|Hi|", 0);
     c.expect("which miss", "which", &["nope"], b"", b"", 1); // bare name, no PATH (G15)
-    c.expect("which path", "which", &["/version"], b"", b"/version\n", 0);
-    c.expect("cmp equal", "cmp", &["/version", "/version"], b"", b"", 0);
+    c.expect("which path", "which", &["/bin/version"], b"", b"/bin/version\n", 0);
+    c.expect("cmp equal", "cmp", &["/bin/version", "/bin/version"], b"", b"", 0);
     // A binary is many 8 KiB buffers long: cmp streams it.
-    c.expect("cmp equal large", "cmp", &["/grep", "/grep"], b"", b"", 0);
-    c.expect_contains("cmp differ", "cmp", &["/version", "/welcome"], b"", b"differ", 1);
+    c.expect("cmp equal large", "cmp", &["/bin/grep", "/bin/grep"], b"", b"", 0);
+    c.expect_contains("cmp differ", "cmp", &["/bin/version", "/bin/welcome"], b"", b"differ", 1);
 
-    // --- file read via File::open (devramfs /version is read-only, present) ---
-    c.expect("cat FILE", "cat", &["/version"], b"", b"Thylacine v0.1-dev\n", 0);
-    c.expect_contains("wc FILE", "wc", &["-l", "/version"], b"", b"/version", 0);
+    // --- file read via File::open (devramfs /bin/version is read-only, present) ---
+    c.expect("cat FILE", "cat", &["/bin/version"], b"", b"Thylacine v0.1-dev\n", 0);
+    c.expect_contains("wc FILE", "wc", &["-l", "/bin/version"], b"", b"/bin/version", 0);
 
     // --- LS-K: identity + clock. This smoke runs as PRINCIPAL_SYSTEM
     // (joey-spawned), so uid == gid == 0xFFFFFFFE == 4294967294 -- exact-
@@ -755,8 +754,8 @@ pub extern "C" fn rs_main() -> i64 {
     // The flip's proof: `ls` (color now defaults to Auto) into a pipe is
     // BYTE-CLEAN -- no SGR, no frames. Fails on the pre-flip Always default
     // (file operands were SGR-wrapped too).
-    beacon_clean(&mut c, "ls auto pipe clean", "ls", &["/version", "/welcome"]);
-    beacon_clean(&mut c, "ls -l auto pipe clean", "ls", &["-l", "/version", "/welcome"]);
+    beacon_clean(&mut c, "ls auto pipe clean", "ls", &["/bin/version", "/bin/welcome"]);
+    beacon_clean(&mut c, "ls -l auto pipe clean", "ls", &["-l", "/bin/version", "/bin/welcome"]);
 
     beacon_clean(&mut c, "ps auto pipe clean", "ps", &[]);
     // `ps` piped = the verbatim /ctl/procs snapshot (parseable): the kernel
@@ -776,10 +775,10 @@ pub extern "C" fn rs_main() -> i64 {
             &mut c,
             "ls rich strips to plain",
             "ls",
-            &["--beacon=always", "/version", "/welcome"],
-            &["--beacon=never", "--color=never", "/version", "/welcome"],
+            &["--beacon=always", "/bin/version", "/bin/welcome"],
+            &["--beacon=never", "--color=never", "/bin/version", "/bin/welcome"],
             b"",
-            b"\x1b]1936;v1;obj;type=path;ref=/version",
+            b"\x1b]1936;v1;obj;type=path;ref=/bin/version",
         );
         beacon_rich_vs_plain(
             &mut c,
@@ -803,10 +802,10 @@ pub extern "C" fn rs_main() -> i64 {
             &mut c,
             "stat rich strips to plain",
             "stat",
-            &["--beacon=always", "/version"],
-            &["--beacon=never", "--color=never", "/version"],
+            &["--beacon=always", "/bin/version"],
+            &["--beacon=never", "--color=never", "/bin/version"],
             b"",
-            b"\x1b]1936;v1;obj;type=path;ref=/version",
+            b"\x1b]1936;v1;obj;type=path;ref=/bin/version",
         );
         // ps at rich: the beacon table with obj pid cells. Its plain payload
         // is the STYLED aligned table (not the raw snapshot), so assert the
@@ -833,7 +832,7 @@ pub extern "C" fn rs_main() -> i64 {
         // yields the box itself (the top-left corner + a vertical rule):
         // ls -l's tiers differ by design (box at rich/cells, columns at a
         // pipe), so this is NOT a rich-vs-plain strip identity.
-        match run_tool("ls", &["-l", "--beacon=always", "/version"], b"") {
+        match run_tool("ls", &["-l", "--beacon=always", "/bin/version"], b"") {
             Some(Ran { code: Some(0), out, .. }) => {
                 let stripped = beacon::wire::strip(&out);
                 if window_contains(&out, b"\x1b]1936;v1;pre")

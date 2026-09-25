@@ -1,12 +1,13 @@
 // devramfs Dev tests (P4-E).
 //
 // Tests against the actual ramfs initrd loaded by QEMU at boot. The
-// initrd contains 'welcome' and 'version' text files (per
-// tools/build.sh::build_ramfs).
+// initrd keeps its programs and the 'welcome' and 'version' text files in
+// bin/ (per tools/build.sh::build_ramfs).
 
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/devramfs.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
@@ -26,8 +27,18 @@ void test_devramfs_stat_native_system_owned(void);
 void test_spoor_stat_native_stamps_devno(void);
 void test_devramfs_readdir_enumerates_root(void);
 void test_devramfs_readdir_file_returns_neg1(void);
+void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
 void test_devramfs_readdir_paginates_no_dup_no_skip(void);
+void test_devramfs_walk_attrs(void);
+void test_devramfs_tree_walk_and_dotdot(void);
+void test_devramfs_tree_readdir_per_directory(void);
+void test_devramfs_tree_stat_read_lookup(void);
+void test_devramfs_tree_load_refusals(void);
+void test_devramfs_tree_truncates_at_cap(void);
+void test_devramfs_load_complete(void);
+void test_devramfs_live_lib_when_prover_ships(void);
+void test_devramfs_live_bin_holds_the_programs(void);
 
 // =============================================================================
 // Helpers.
@@ -68,10 +79,25 @@ static struct Spoor *walk_one(struct Spoor *c, const char *name) {
     return r;
 }
 
+// bin/<name>, one two-name walk from the root.
+static struct Spoor *walk_bin(struct Spoor *root, const char *name) {
+    const char *names[2] = { "bin", name };
+    struct Walkqid *wq = devramfs.walk(root, NULL, names, 2);
+    if (!wq) return NULL;
+    if (wq->nqid != 2) {
+        spoor_unref(wq->spoor);
+        walkqid_free(wq);
+        return NULL;
+    }
+    struct Spoor *r = wq->spoor;
+    walkqid_free(wq);
+    return r;
+}
+
 static struct Spoor *open_ramfs_file(const char *name) {
     struct Spoor *root = devramfs.attach("");
     if (!root) return NULL;
-    struct Spoor *file = walk_one(root, name);
+    struct Spoor *file = walk_bin(root, name);
     spoor_unref(root);
     if (!file) return NULL;
     if (!devramfs.open(file, 0)) {
@@ -97,7 +123,7 @@ void test_devramfs_initialized_with_files(void) {
     // QEMU -initrd path: tools/build.sh writes 2 files (welcome,
     // version). On a guest without -initrd, the count is 0 and the
     // remaining tests skip.
-    int n = devramfs_file_count();
+    int n = devramfs_entry_count();
     TEST_ASSERT(n >= 2,
                 "expected at least 2 files from initrd (welcome + version)");
 }
@@ -111,12 +137,12 @@ void test_devramfs_attach_returns_dir(void) {
 }
 
 void test_devramfs_walk_to_welcome(void) {
-    if (devramfs_file_count() < 1) return;       // initrd absent
+    if (devramfs_entry_count() < 1) return;       // initrd absent
 
     struct Spoor *root = devramfs.attach("");
-    struct Spoor *welcome = walk_one(root, "welcome");
+    struct Spoor *welcome = walk_bin(root, "welcome");
     spoor_unref(root);
-    TEST_ASSERT(welcome != NULL, "walk('welcome') succeeds");
+    TEST_ASSERT(welcome != NULL, "walk('bin', 'welcome') succeeds");
     TEST_EXPECT_EQ(welcome->qid.type, QTFILE, "welcome is QTFILE");
     spoor_unref(welcome);
 }
@@ -133,7 +159,7 @@ void test_devramfs_walk_unknown_misses(void) {
 }
 
 void test_devramfs_read_welcome(void) {
-    if (devramfs_file_count() < 1) return;
+    if (devramfs_entry_count() < 1) return;
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -150,7 +176,7 @@ void test_devramfs_read_welcome(void) {
 }
 
 void test_devramfs_read_version(void) {
-    if (devramfs_file_count() < 2) return;
+    if (devramfs_entry_count() < 2) return;
 
     struct Spoor *c = open_ramfs_file("version");
     TEST_ASSERT(c != NULL, "open version");
@@ -167,7 +193,7 @@ void test_devramfs_read_version(void) {
 }
 
 void test_devramfs_read_partial_offset(void) {
-    if (devramfs_file_count() < 1) return;
+    if (devramfs_entry_count() < 1) return;
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -203,7 +229,7 @@ void test_devramfs_read_dir_returns_neg1(void) {
 }
 
 void test_devramfs_write_rejected(void) {
-    if (devramfs_file_count() < 1) return;
+    if (devramfs_entry_count() < 1) return;
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -231,9 +257,9 @@ void test_devramfs_stat_native_system_owned(void) {
     TEST_EXPECT_EQ((u64)st.gid, (u64)GID_SYSTEM,       "root gid = SYSTEM");
     TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFDIR,     "root is a directory");
 
-    if (devramfs_file_count() >= 1) {
-        struct Spoor *f = walk_one(root, "welcome");
-        TEST_ASSERT(f != NULL, "walk welcome");
+    if (devramfs_entry_count() >= 1) {
+        struct Spoor *f = walk_bin(root, "welcome");
+        TEST_ASSERT(f != NULL, "walk bin/welcome");
         TEST_EXPECT_EQ((u64)devramfs.stat_native(f, &st), (u64)0,
                         "file stat_native -> 0");
         TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "file uid = SYSTEM");
@@ -272,8 +298,8 @@ void test_spoor_stat_native_stamps_devno(void) {
 }
 
 // =============================================================================
-// readdir (U-6e-b-1). The boot ramfs enumerates its flat root: every cpio file
-// (QTFILE) plus the synthetic mount-point dirs srv/proc (QTDIR). Wire format per
+// readdir (U-6e-b-1). The boot ramfs enumerates per directory: the root lists
+// its children plus the synthetic mount-point dirs (QTDIR). Wire format per
 // entry: qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name -- the same
 // the SYS_READDIR handler parses. These tests drive devramfs.readdir directly
 // and (for pagination) emulate the handler's resume-cookie round-trip.
@@ -320,25 +346,60 @@ static bool ramfs_de_run_has(const u8 *buf, long got, const char *want, u8 *out_
     return false;
 }
 
+// Whether directory `dir` lists `want` anywhere, paging with the resume cookie
+// as the SYS_READDIR handler does -- bin/ outgrows one buffer.
+static bool ramfs_dir_has(struct Spoor *dir, const char *want, u8 *out_qtype) {
+    static u8 buf[1024];
+    s64 off = 0;
+    for (int guard = 0; guard < 4096; guard++) {
+        long got = devramfs.readdir(dir, buf, (long)sizeof(buf), off);
+        if (got <= 0) return false;
+        long pos = 0;
+        u64 ck = (u64)off;
+        char name[128];
+        u8 qt;
+        for (;;) {
+            long len = ramfs_de_parse(buf, got, pos, &qt, &ck, name, sizeof(name));
+            if (len == 0) break;
+            if (name_eq(name, want)) {
+                if (out_qtype) *out_qtype = qt;
+                return true;
+            }
+            pos += len;
+        }
+        if (pos == 0) return false;
+        off = (s64)ck;
+    }
+    return false;
+}
+
 void test_devramfs_readdir_enumerates_root(void) {
-    if (devramfs_file_count() < 2) return;       // initrd absent
+    if (devramfs_entry_count() < 2) return;       // initrd absent
 
     struct Spoor *root = devramfs.attach("");
     TEST_ASSERT(root != NULL, "attach root");
     TEST_ASSERT(devramfs.readdir != NULL, "devramfs has .readdir (U-6e-b-1)");
     TEST_ASSERT(devramfs.open(root, 0) != NULL, "open root");
 
-    // One large-buffer call returns the whole flat root (the live corpus is
-    // ~70 short entries, far under 8 KiB).
-    static u8 buf[8192];
+    // One call returns the whole root: bin/, lib/ and the synthetic mount
+    // points, a handful of short entries.
+    static u8 buf[1024];
     long got = devramfs.readdir(root, buf, (long)sizeof(buf), 0);
     TEST_ASSERT(got > 0, "readdir root returns bytes");
 
     u8 qt = 0;
-    TEST_ASSERT(ramfs_de_run_has(buf, got, "welcome", &qt), "root lists 'welcome'");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "bin", &qt), "root lists 'bin'");
+    TEST_EXPECT_EQ((u64)qt, (u64)QTDIR, "bin is QTDIR");
+    TEST_ASSERT(!ramfs_de_run_has(buf, got, "welcome", NULL), "root does not list 'welcome'");
+
+    // The data files sit in bin/ beside the programs.
+    struct Spoor *bin = walk_one(root, "bin");
+    TEST_ASSERT(bin != NULL, "walk('bin')");
+    TEST_ASSERT(ramfs_dir_has(bin, "welcome", &qt), "bin lists 'welcome'");
     TEST_EXPECT_EQ((u64)qt, (u64)QTFILE, "welcome is QTFILE");
-    TEST_ASSERT(ramfs_de_run_has(buf, got, "version", &qt), "root lists 'version'");
+    TEST_ASSERT(ramfs_dir_has(bin, "version", &qt), "bin lists 'version'");
     TEST_EXPECT_EQ((u64)qt, (u64)QTFILE, "version is QTFILE");
+    spoor_unref(bin);
     // The synthetic mount-point dirs are enumerated and typed as directories.
     TEST_ASSERT(ramfs_de_run_has(buf, got, "srv", &qt), "root lists 'srv'");
     TEST_EXPECT_EQ((u64)qt, (u64)QTDIR, "srv is QTDIR");
@@ -351,7 +412,7 @@ void test_devramfs_readdir_enumerates_root(void) {
 }
 
 void test_devramfs_readdir_file_returns_neg1(void) {
-    if (devramfs_file_count() < 1) return;
+    if (devramfs_entry_count() < 1) return;
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -407,21 +468,21 @@ void test_devramfs_readdir_synth_dir_empty(void) {
 // on (it stores the last entry's cookie into c->offset for the next call). Here
 // we emulate that round-trip with a buffer sized for only 1-2 short entries.
 void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
-    if (devramfs_file_count() < 2) return;
+    if (devramfs_entry_count() < 2) return;
 
     struct Spoor *root = devramfs.attach("");
     TEST_ASSERT(root != NULL, "attach root");
     TEST_ASSERT(devramfs.open(root, 0) != NULL, "open root");
 
-    // Sized to hold the longest boot-corpus entry (24-byte header + the longest
-    // cpio name, ~28 chars) yet small enough to force many runs over the ~70
-    // entries -- the resume-cookie path is exercised across run boundaries
-    // without tripping the "first entry too small" error.
-    u8 buf[96];
+    // Sized to hold the longest root entry (24-byte header + a short name) yet
+    // small enough to force several runs over the root's entries -- the
+    // resume-cookie path is exercised across run boundaries without tripping
+    // the "first entry too small" error.
+    u8 buf[64];
     s64 off = 0;                 // start cookie
     u64 prev_last = 0;           // last cookie seen (monotonic check)
-    int  count = 0;
-    bool saw_welcome = false, saw_srv = false, saw_ctl = false, saw_dev = false,
+    int  count = 0, files = 0;
+    bool saw_bin = false, saw_srv = false, saw_ctl = false, saw_dev = false,
          saw_hw = false;
     bool monotonic = true, well_formed = true;
 
@@ -438,7 +499,8 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
             if (ck <= prev_last) monotonic = false;  // strictly increasing across the whole walk
             prev_last = ck;
             last_cookie = ck;
-            if (name_eq(name, "welcome")) saw_welcome = true;
+            if (qt != QTDIR)              files++;
+            if (name_eq(name, "bin"))     saw_bin = true;
             if (name_eq(name, "srv"))     saw_srv = true;
             if (name_eq(name, "ctl"))     saw_ctl = true;
             if (name_eq(name, "dev"))     saw_dev = true;
@@ -453,16 +515,18 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
 
     TEST_ASSERT(well_formed, "every non-empty run holds >= 1 complete entry");
     TEST_ASSERT(monotonic, "resume cookies strictly increase (no dup, no rewind)");
-    TEST_ASSERT(saw_welcome, "paginated walk still finds 'welcome'");
+    TEST_ASSERT(saw_bin, "paginated walk still finds 'bin'");
+    // Only directories: a program at the root could take a mount point's name.
+    TEST_EXPECT_EQ(files, 0, "the root holds directories only");
     TEST_ASSERT(saw_srv, "paginated walk still finds the 'srv' synth dir");
     TEST_ASSERT(saw_ctl, "paginated walk still finds the 'ctl' synth dir");
     TEST_ASSERT(saw_dev, "paginated walk still finds the 'dev' synth dir (#57b)");
     TEST_ASSERT(saw_hw, "paginated walk still finds the 'hw' synth dir (devhw)");
-    // Total enumerated == files + the synthetic mount-point dirs. Derive the
-    // synth count (devramfs_synth_dir_count) rather than hardcode it, so adding
-    // a future synth dir does not silently break this no-skip/no-dup assertion.
-    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + devramfs_synth_dir_count()),
-                   "paginated count == files + synth dirs (no skip, no dup)");
+    // Total enumerated == the root's children + the synthetic mount-point dirs.
+    // Derive both counts rather than hardcode them, so a new synth dir or a new
+    // archive directory does not silently break this no-skip/no-dup assertion.
+    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_root_child_count() + devramfs_synth_dir_count()),
+                   "paginated count == root children + synth dirs (no skip, no dup)");
 
     spoor_clunk(root);
 }
@@ -526,5 +590,369 @@ void test_devramfs_walk_attrs(void) {
         spoor_unref(nc);
     }
 
+    spoor_unref(root);
+}
+
+// =============================================================================
+// The tree (dec-2026-09-25-devramfs-directories). Crafted archives load into a
+// test-owned table, so every shape runs whatever the boot image carries.
+// =============================================================================
+
+#define FX_BLOB_MAX 8192
+#define FX_CAP      24
+static u8                 g_fx_blob[FX_BLOB_MAX];
+static struct ramfs_entry g_fx_entries[FX_CAP];
+
+static void fx_hex8(u8 *dst, u32 v) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) dst[i] = (u8)hex[(v >> ((7 - i) * 4)) & 0xFu];
+}
+
+// Append one newc entry (header, name, data; each run padded to 4 from the
+// blob's start) at `off` and return the next offset. An entry that would not
+// fit returns FX_BLOB_MAX and writes nothing; so does every later call.
+static size_t fx_put(size_t off, const char *name, u32 mode, const char *data) {
+    size_t namesize = 0;
+    while (name[namesize]) namesize++;
+    namesize++;
+    size_t dsize = 0;
+    while (data && data[dsize]) dsize++;
+    if (off >= FX_BLOB_MAX || off + 110 + namesize + dsize + 8 > FX_BLOB_MAX)
+        return FX_BLOB_MAX;
+    static const char magic[] = "070701";
+    u8 *h = g_fx_blob + off;
+    for (int i = 0; i < 6; i++) h[i] = (u8)magic[i];
+    const u32 f[13] = { 0, mode, 0, 0, 1, 0, (u32)dsize, 0, 0, 0, 0, (u32)namesize, 0 };
+    for (int i = 0; i < 13; i++) fx_hex8(h + 6 + 8 * i, f[i]);
+    size_t p = off + 110;
+    for (size_t i = 0; i < namesize; i++) g_fx_blob[p++] = (u8)name[i];
+    while (p & 3u) g_fx_blob[p++] = 0;
+    for (size_t i = 0; i < dsize; i++) g_fx_blob[p++] = (u8)data[i];
+    while (p & 3u) g_fx_blob[p++] = 0;
+    return p;
+}
+
+#define FX_DIR(perm) (T_S_IFDIR | (perm))
+#define FX_REG(perm) (T_S_IFREG | (perm))
+
+// lib/ holding a file and a nested directory, plus a file at the root.
+static size_t fx_tree(void) {
+    size_t o = 0;
+    o = fx_put(o, "lib",          FX_DIR(0755u), NULL);
+    o = fx_put(o, "lib/libc.so",  FX_REG(0755u), "ELF");
+    o = fx_put(o, "lib/sub",      FX_DIR(0700u), NULL);
+    o = fx_put(o, "lib/sub/deep", FX_REG(0644u), "deep");
+    o = fx_put(o, "top",          FX_REG(0644u), "top!");
+    o = fx_put(o, "TRAILER!!!",   0,             NULL);
+    return o;
+}
+
+static int fx_load(struct ramfs_table *t, size_t len, int cap) {
+    t->e = g_fx_entries;
+    t->cap = cap;
+    return ramfs_table_load(t, g_fx_blob, len);
+}
+
+static bool fx_walk(const struct ramfs_table *t, u64 cur, const char *name,
+                    u64 *path, u8 *type) {
+    struct Qid q;
+    if (!ramfs_table_walk_one(t, cur, name, &q)) return false;
+    *path = q.path;
+    *type = q.type;
+    return true;
+}
+
+void test_devramfs_tree_walk_and_dotdot(void) {
+    size_t len = fx_tree();
+    TEST_ASSERT(len < FX_BLOB_MAX, "fixture fits its buffer");
+    struct ramfs_table t;
+    TEST_EXPECT_EQ(fx_load(&t, len, FX_CAP), 0, "the archive loads");
+    TEST_EXPECT_EQ(t.count, 5, "five entries placed");
+    TEST_EXPECT_EQ(t.skipped, 0, "none skipped");
+
+    u64 lib, so, sub, deep, top, srv, q;
+    u8 ty;
+    TEST_ASSERT(fx_walk(&t, 0, "lib", &lib, &ty) && ty == QTDIR, "root -> lib: a directory");
+    TEST_ASSERT(fx_walk(&t, lib, "libc.so", &so, &ty) && ty == QTFILE, "lib -> libc.so: a file");
+    TEST_ASSERT(fx_walk(&t, lib, "sub", &sub, &ty) && ty == QTDIR, "lib -> sub");
+    TEST_ASSERT(fx_walk(&t, sub, "deep", &deep, &ty) && ty == QTFILE, "sub -> deep");
+    TEST_ASSERT(fx_walk(&t, 0, "top", &top, &ty) && ty == QTFILE, "root -> top");
+
+    // `..` climbs one level at a time and stops at the root.
+    TEST_ASSERT(fx_walk(&t, sub, "..", &q, &ty) && q == lib && ty == QTDIR, "sub/.. is lib");
+    TEST_ASSERT(fx_walk(&t, lib, "..", &q, &ty) && q == 0 && ty == QTDIR, "lib/.. is the root");
+    TEST_ASSERT(fx_walk(&t, 0, "..", &q, &ty) && q == 0 && ty == QTDIR, "the root's .. is the root");
+
+    // A name resolves only among its own directory's children.
+    TEST_ASSERT(!fx_walk(&t, 0, "libc.so", &q, &ty), "libc.so is not at the root");
+    TEST_ASSERT(!fx_walk(&t, 0, "lib/libc.so", &q, &ty), "a step is one component");
+    TEST_ASSERT(!fx_walk(&t, lib, "top", &q, &ty), "top is not in lib");
+    TEST_ASSERT(!fx_walk(&t, lib, "deep", &q, &ty), "deep is two levels down");
+
+    // A step starts at a directory: from a file every name misses, `..` too.
+    TEST_ASSERT(!fx_walk(&t, so, "..", &q, &ty), "no .. from a file");
+    TEST_ASSERT(!fx_walk(&t, top, "lib", &q, &ty), "a file has no children");
+    TEST_ASSERT(!fx_walk(&t, deep, "..", &q, &ty), "no .. from a nested file");
+
+    // The mount points stay at the root, empty, with `..` back to it.
+    TEST_ASSERT(fx_walk(&t, 0, "srv", &srv, &ty) && ty == QTDIR, "srv at the root");
+    TEST_ASSERT(!fx_walk(&t, lib, "srv", &q, &ty), "srv only at the root");
+    TEST_ASSERT(!fx_walk(&t, srv, "lib", &q, &ty), "srv is empty");
+    TEST_ASSERT(fx_walk(&t, srv, "..", &q, &ty) && q == 0, "srv/.. is the root");
+
+    // A qid past the table names nothing.
+    TEST_ASSERT(!fx_walk(&t, (u64)t.count + 1u, "..", &q, &ty), "a qid past the table walks nowhere");
+}
+
+// Count the entries of one readdir run, noting the last cookie.
+static int fx_run_count(const u8 *buf, long got, u64 *last) {
+    long pos = 0;
+    int n = 0;
+    for (;;) {
+        u64 ck;
+        long len = ramfs_de_parse(buf, got, pos, NULL, &ck, NULL, 0);
+        if (len == 0) break;
+        *last = ck;
+        n++;
+        pos += len;
+    }
+    return n;
+}
+
+void test_devramfs_tree_readdir_per_directory(void) {
+    size_t len = fx_tree();
+    TEST_ASSERT(len < FX_BLOB_MAX, "fixture fits its buffer");
+    struct ramfs_table t;
+    TEST_EXPECT_EQ(fx_load(&t, len, FX_CAP), 0, "the archive loads");
+    u64 lib, sub, so, q;
+    u8 ty;
+    TEST_ASSERT(fx_walk(&t, 0, "lib", &lib, &ty), "lib");
+    TEST_ASSERT(fx_walk(&t, lib, "sub", &sub, &ty), "sub");
+    TEST_ASSERT(fx_walk(&t, lib, "libc.so", &so, &ty), "libc.so");
+
+    u8 buf[1024];
+    u64 last = 0;
+    long got = ramfs_table_readdir(&t, 0, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "the root lists");
+    TEST_EXPECT_EQ(fx_run_count(buf, got, &last), 2 + devramfs_synth_dir_count(),
+                   "the root: lib, top and the mount points");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "lib", &ty) && ty == QTDIR, "root lists lib as a directory");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "top", &ty) && ty == QTFILE, "root lists top");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "srv", &ty) && ty == QTDIR, "root lists srv");
+    TEST_ASSERT(!ramfs_de_run_has(buf, got, "libc.so", NULL), "the root does not list lib's files");
+    TEST_ASSERT(!ramfs_de_run_has(buf, got, "lib/libc.so", NULL), "names are components, not paths");
+
+    got = ramfs_table_readdir(&t, lib, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ(fx_run_count(buf, got, &last), 2, "lib: libc.so and sub");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "libc.so", &ty) && ty == QTFILE, "lib lists libc.so");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "sub", &ty) && ty == QTDIR, "lib lists sub");
+    TEST_ASSERT(!ramfs_de_run_has(buf, got, "srv", NULL), "the mount points are the root's alone");
+    TEST_EXPECT_EQ(ramfs_table_readdir(&t, lib, buf, (long)sizeof(buf), (s64)last), 0,
+                   "resuming past lib's last child is end-of-directory");
+
+    got = ramfs_table_readdir(&t, sub, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ(fx_run_count(buf, got, &last), 1, "sub: deep");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "deep", NULL), "sub lists deep");
+
+    TEST_EXPECT_EQ(ramfs_table_readdir(&t, so, buf, (long)sizeof(buf), 0), -1,
+                   "a file does not enumerate");
+    TEST_ASSERT(fx_walk(&t, 0, "srv", &q, &ty), "srv");
+    TEST_EXPECT_EQ(ramfs_table_readdir(&t, q, buf, (long)sizeof(buf), 0), 0,
+                   "a mount point is empty");
+
+    // One entry per call: the cookie resumes lib's listing with no repeat
+    // and no skip.
+    int seen = 0;
+    s64 off = 0;
+    for (int i = 0; i < 8; i++) {
+        got = ramfs_table_readdir(&t, lib, buf, 24 + 8, off);   // fits "sub" or "libc.so" alone
+        if (got == 0) break;
+        TEST_ASSERT(got > 0, "each run holds one entry");
+        TEST_EXPECT_EQ(fx_run_count(buf, got, &last), 1, "one entry per call");
+        TEST_ASSERT(last > (u64)off, "the cookie advances");
+        off = (s64)last;
+        seen++;
+    }
+    TEST_EXPECT_EQ(seen, 2, "paging lib yields its two children exactly once");
+}
+
+void test_devramfs_tree_stat_read_lookup(void) {
+    size_t len = fx_tree();
+    TEST_ASSERT(len < FX_BLOB_MAX, "fixture fits its buffer");
+    struct ramfs_table t;
+    TEST_EXPECT_EQ(fx_load(&t, len, FX_CAP), 0, "the archive loads");
+    u64 lib, sub, so;
+    u8 ty;
+    TEST_ASSERT(fx_walk(&t, 0, "lib", &lib, &ty), "lib");
+    TEST_ASSERT(fx_walk(&t, lib, "sub", &sub, &ty), "sub");
+    TEST_ASSERT(fx_walk(&t, lib, "libc.so", &so, &ty), "libc.so");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ(ramfs_table_stat(&t, lib, &st), 0, "stat lib");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFDIR | 0755u), "a directory keeps the archive's bits");
+    TEST_EXPECT_EQ(st.size, 0, "a directory has size 0");
+    TEST_EXPECT_EQ((u64)st.qid_type, (u64)QTDIR, "QTDIR");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "SYSTEM-owned");
+    TEST_EXPECT_EQ(ramfs_table_stat(&t, sub, &st), 0, "stat sub");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFDIR | 0700u), "sub is 0700");
+    TEST_EXPECT_EQ(ramfs_table_stat(&t, so, &st), 0, "stat libc.so");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFREG | 0755u), "libc.so is 0755");
+    TEST_EXPECT_EQ(st.size, 3, "libc.so is 3 bytes");
+    TEST_EXPECT_EQ((u64)st.qid_type, (u64)QTFILE, "QTFILE");
+
+    char buf[8];
+    TEST_EXPECT_EQ(ramfs_table_read(&t, lib, buf, (long)sizeof(buf), 0), -1,
+                   "a directory's bytes are not readable");
+    TEST_EXPECT_EQ(ramfs_table_read(&t, 0, buf, (long)sizeof(buf), 0), -1,
+                   "nor the root's");
+    TEST_EXPECT_EQ(ramfs_table_read(&t, so, buf, (long)sizeof(buf), 0), 3, "libc.so reads");
+    TEST_ASSERT(buf[0] == 'E' && buf[1] == 'L' && buf[2] == 'F', "libc.so's bytes");
+
+    TEST_ASSERT(ramfs_table_find_file(&t, "lib/libc.so") >= 0, "lookup by full path");
+    TEST_ASSERT(ramfs_table_find_file(&t, "lib/sub/deep") >= 0, "lookup two levels down");
+    TEST_EXPECT_EQ(ramfs_table_find_file(&t, "libc.so"), -1, "a leaf is not a path");
+    TEST_EXPECT_EQ(ramfs_table_find_file(&t, "lib"), -1, "a directory is never a lookup's file");
+}
+
+void test_devramfs_tree_load_refusals(void) {
+    static char longname[SYS_WALK_OPEN_NAME_MAX + 2];
+    for (u32 i = 0; i < SYS_WALK_OPEN_NAME_MAX + 1; i++) longname[i] = 'x';
+    longname[SYS_WALK_OPEN_NAME_MAX + 1] = '\0';
+
+    size_t o = 0;
+    o = fx_put(o, "/abs",       FX_REG(0644u),  "a");     // skipped: absolute
+    o = fx_put(o, "a//b",       FX_REG(0644u),  "a");     // skipped: empty component
+    o = fx_put(o, "./x",        FX_REG(0644u),  "a");     // skipped: `.`
+    o = fx_put(o, "..",         FX_DIR(0755u),  NULL);    // skipped: `..`
+    o = fx_put(o, "",           FX_REG(0644u),  "a");     // skipped: empty name
+    o = fx_put(o, longname,     FX_REG(0644u),  "a");     // skipped: past the walk bound
+    o = fx_put(o, "d",          FX_DIR(0755u),  NULL);    // placed
+    o = fx_put(o, "d/../e",     FX_REG(0644u),  "a");     // skipped: `..`
+    o = fx_put(o, "d/",         FX_REG(0644u),  "a");     // skipped: empty last component
+    o = fx_put(o, "orphan/f",   FX_REG(0644u),  "a");     // skipped: no parent directory
+    o = fx_put(o, "late/c",     FX_REG(0644u),  "a");     // skipped: its parent comes later
+    o = fx_put(o, "late",       FX_DIR(0755u),  NULL);    // placed
+    o = fx_put(o, "f",          FX_REG(0644u),  "one");   // placed
+    o = fx_put(o, "f",          FX_REG(0644u),  "two");   // skipped: a second f
+    o = fx_put(o, "f/g",        FX_REG(0644u),  "a");     // skipped: f is a file
+    o = fx_put(o, "srv",        FX_DIR(0755u),  NULL);    // skipped: a mount point's name
+    o = fx_put(o, "d/srv",      FX_REG(0644u),  "a");     // placed: only the root reserves it
+    o = fx_put(o, "link",       0120777u,       "f");     // skipped: a symlink
+    o = fx_put(o, "d/sx",       FX_REG(04755u), "a");     // placed, setuid dropped
+    o = fx_put(o, "TRAILER!!!", 0,              NULL);
+    TEST_ASSERT(o < FX_BLOB_MAX, "fixture fits its buffer");
+
+    struct ramfs_table t;
+    TEST_EXPECT_EQ(fx_load(&t, o, FX_CAP), 0, "the archive loads");
+    TEST_EXPECT_EQ(t.count, 5, "d, late, f, d/srv, d/sx placed");
+    TEST_EXPECT_EQ(t.skipped, 14, "fourteen refused");
+    TEST_ASSERT(!t.truncated, "not truncated");
+
+    u64 q, d, late;
+    u8 ty;
+    char buf[8];
+    TEST_ASSERT(fx_walk(&t, 0, "f", &q, &ty) && ty == QTFILE, "f");
+    TEST_EXPECT_EQ(ramfs_table_read(&t, q, buf, (long)sizeof(buf), 0), 3, "the first f wins");
+    TEST_ASSERT(buf[0] == 'o' && buf[1] == 'n' && buf[2] == 'e', "f reads one");
+    TEST_ASSERT(fx_walk(&t, 0, "srv", &q, &ty) && q >= 0x1000000000000000ULL,
+                "root srv is still the mount point, not the archive's");
+    TEST_ASSERT(fx_walk(&t, 0, "d", &d, &ty) && ty == QTDIR, "d");
+    TEST_ASSERT(fx_walk(&t, d, "srv", &q, &ty) && ty == QTFILE, "d/srv placed");
+    TEST_ASSERT(fx_walk(&t, 0, "late", &late, &ty) && ty == QTDIR, "late placed");
+    TEST_ASSERT(!fx_walk(&t, late, "c", &q, &ty), "late/c came before late and stays out");
+    TEST_ASSERT(!fx_walk(&t, 0, "orphan", &q, &ty), "no orphan directory is invented");
+    TEST_ASSERT(!fx_walk(&t, 0, "link", &q, &ty), "no symlink");
+    TEST_ASSERT(!fx_walk(&t, 0, "x", &q, &ty), "./x is not x");
+    TEST_ASSERT(!fx_walk(&t, 0, "e", &q, &ty), "d/../e is not e");
+    TEST_ASSERT(fx_walk(&t, d, "sx", &q, &ty), "d/sx");
+    struct t_stat st;
+    TEST_EXPECT_EQ(ramfs_table_stat(&t, q, &st), 0, "stat d/sx");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFREG | 0755u), "setuid dropped, rwx kept");
+    TEST_EXPECT_EQ(ramfs_table_find_file(&t, "f/g"), -1, "f/g refused");
+}
+
+void test_devramfs_tree_truncates_at_cap(void) {
+    size_t len = fx_tree();
+    TEST_ASSERT(len < FX_BLOB_MAX, "fixture fits its buffer");
+    struct ramfs_table t;
+    TEST_ASSERT(fx_load(&t, len, 3) > 0, "the load stops at the cap");
+    TEST_ASSERT(t.truncated, "and says so");
+    TEST_EXPECT_EQ(t.count, 3, "three entries placed");
+    TEST_EXPECT_EQ(fx_load(&t, len, 5), 0, "an exact fit loads whole");
+    TEST_ASSERT(!t.truncated, "and is not truncated");
+    TEST_EXPECT_EQ(t.count, 5, "all five");
+}
+
+// The boot archive itself must load whole: a skipped or truncated entry is a
+// missing file on the device, found here rather than by what later fails.
+void test_devramfs_load_complete(void) {
+    if (devramfs_entry_count() < 1) return;   // no initrd
+    TEST_EXPECT_EQ(devramfs_skipped_count(), 0, "no boot archive entry skipped");
+    TEST_ASSERT(!devramfs_truncated(), "the boot archive fits the entry table");
+}
+
+// An image that ships the dlopen prover was built with libc.so, so its lib/
+// must be served; only an image built without the LLVM fork has neither. The
+// Dev's own path: attach, walk, readdir, stat, `..`.
+void test_devramfs_live_lib_when_prover_ships(void) {
+    const void *d;
+    size_t n;
+    if (devramfs_lookup("bin/pouch-hello-dlopen", &d, &n) != 0) return;   // no LLVM fork
+    TEST_ASSERT(devramfs_lookup("lib/libc.so", &d, &n) == 0 && n > 0,
+                "the prover ships, so lib/libc.so must");
+    TEST_ASSERT(devramfs_lookup("lib/libdlprobe.so", &d, &n) == 0, "and its plugin");
+
+    struct Spoor *root = devramfs.attach("");
+    TEST_ASSERT(root != NULL, "attach");
+    struct Spoor *lib = walk_one(root, "lib");
+    TEST_ASSERT(lib != NULL && lib->qid.type == QTDIR, "lib walks as a directory");
+    struct Spoor *so = walk_one(lib, "libc.so");
+    TEST_ASSERT(so != NULL && so->qid.type == QTFILE, "lib -> libc.so");
+    struct Spoor *up = walk_one(lib, "..");
+    TEST_ASSERT(up != NULL && up->qid.path == root->qid.path, "lib/.. is the root");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ(devramfs.stat_native(lib, &st), 0, "stat lib");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFDIR, "S_IFDIR");
+
+    u8 buf[1024];
+    long got = devramfs.readdir(lib, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "lib lists");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "libc.so", NULL), "lib lists libc.so");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "libdlprobe.so", NULL), "lib lists libdlprobe.so");
+    TEST_ASSERT(!ramfs_de_run_has(buf, got, "joey", NULL), "lib lists only its own children");
+
+    spoor_unref(up);
+    spoor_unref(so);
+    spoor_unref(lib);
+    spoor_unref(root);
+}
+
+// The kernel loads joey from bin/ and starts the boot namespace there. The
+// Dev's own path: walk, `..`, stat, and a root that holds no program.
+void test_devramfs_live_bin_holds_the_programs(void) {
+    if (devramfs_entry_count() < 1) return;   // no initrd
+    const void *d;
+    size_t n;
+    TEST_ASSERT(devramfs_lookup("bin/joey", &d, &n) == 0 && n > 0, "bin/joey is archived");
+    TEST_EXPECT_EQ(devramfs_lookup("joey", &d, &n), -1, "no joey at the archive root");
+
+    struct Spoor *root = devramfs.attach("");
+    TEST_ASSERT(root != NULL, "attach");
+    struct Spoor *bin = walk_one(root, "bin");
+    TEST_ASSERT(bin != NULL && bin->qid.type == QTDIR, "bin walks as a directory");
+    struct Spoor *joey = walk_one(bin, "joey");
+    TEST_ASSERT(joey != NULL && joey->qid.type == QTFILE, "bin -> joey");
+    struct Spoor *up = walk_one(bin, "..");
+    TEST_ASSERT(up != NULL && up->qid.path == root->qid.path, "bin/.. is the root");
+    TEST_ASSERT(walk_one(root, "joey") == NULL, "the root holds no program");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ(devramfs.stat_native(bin, &st), 0, "stat bin");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFDIR, "S_IFDIR");
+
+    spoor_unref(up);
+    spoor_unref(joey);
+    spoor_unref(bin);
     spoor_unref(root);
 }

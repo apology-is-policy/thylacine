@@ -264,10 +264,23 @@ void test_exec_ns_noexec_mount_denied(void);
 void test_exec_ns_pheno_mount_crossing(void);
 void test_mmap_file_noexec_mount_denied(void);
 void test_mmap_file_devenv_never_exec_backs(void);
+void test_map_file_native_arms(void);
+void test_map_file_native_refusals(void);
+void test_map_file_native_noexec_denied(void);
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
 void test_territory_mount_lookup_ref_survives_unmount(void);
+void test_territory_mount_union_keeps_covered(void);   // Plan 9 unions
+void test_territory_mount_no_covered_unless_fresh(void);   // Plan 9 unions
+void test_territory_mount_covered_file_point_stays_plain(void);   // Plan 9 unions
+void test_territory_mount_covered_reposition(void);   // Plan 9 unions
+void test_territory_mount_covered_leaves_with_last(void);   // Plan 9 unions
+void test_territory_mount_covered_needs_two_slots(void);   // Plan 9 unions
+void test_territory_mount_covered_self_mount_refused(void);   // Plan 9 unions
+void test_territory_mount_covered_clone(void);   // Plan 9 unions
+void test_territory_mount_covered_noexec_scoped(void);   // Plan 9 unions
+void test_territory_mount_covered_format_ns(void);   // Plan 9 unions
 void test_territory_root_ref_survives_pivot(void);
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);
@@ -433,7 +446,7 @@ void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
-void test_exec_interp_dispatch_follows_parameter(void); // Design D Leg C (audit F3)
+void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg C)
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1017,6 +1030,14 @@ void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
 void test_devramfs_readdir_paginates_no_dup_no_skip(void);
+void test_devramfs_tree_walk_and_dotdot(void);
+void test_devramfs_tree_readdir_per_directory(void);
+void test_devramfs_tree_stat_read_lookup(void);
+void test_devramfs_tree_load_refusals(void);
+void test_devramfs_tree_truncates_at_cap(void);
+void test_devramfs_load_complete(void);
+void test_devramfs_live_lib_when_prover_ships(void);
+void test_devramfs_live_bin_holds_the_programs(void);
 void test_perm_check_owner_group_other(void);
 void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
@@ -1089,6 +1110,13 @@ void test_stalk_remove_parent_reports_union_point(void);
 void test_stalk_mount_names_crossed_base(void);
 void test_stalk_mount_names_crossed_union_base(void);
 void test_stalk_union_dissolved_helper(void);
+void test_stalk_union_covered_walk(void);
+void test_stalk_union_covered_after(void);
+void test_stalk_union_covered_readdir(void);
+void test_stalk_union_covered_create(void);
+void test_stalk_union_covered_unmount(void);
+void test_stalk_union_covered_dissolved(void);
+void test_stalk_union_covered_holder(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -1577,6 +1605,7 @@ void test_territory_shed_drops_nested_orphan(void);
 void test_territory_shed_full_table_boundary(void);
 void test_territory_shed_releases_mp_path_once(void);
 void test_territory_shed_initial_chroot_and_root_as_source(void);
+void test_territory_shed_covered_shares_fate(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -2007,6 +2036,9 @@ struct test_case g_tests[] = {
     { "exec_ns.pheno_mount_crossing",                   test_exec_ns_pheno_mount_crossing,                    false, NULL },
     { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
     { "mmap_file.devenv_never_exec_backs", test_mmap_file_devenv_never_exec_backs, false, NULL },
+    { "map_file.native_arms", test_map_file_native_arms, false, NULL },
+    { "map_file.native_refusals", test_map_file_native_refusals, false, NULL },
+    { "map_file.native_noexec_denied", test_map_file_native_noexec_denied, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
@@ -2066,6 +2098,16 @@ struct test_case g_tests[] = {
     { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
     { "territory_mount.format_ns",                        test_territory_mount_format_ns,                        false, NULL },
     { "territory_mount.lookup_ref_survives_unmount",      test_territory_mount_lookup_ref_survives_unmount,      false, NULL },
+    { "territory_mount.union_keeps_covered",              test_territory_mount_union_keeps_covered,              false, NULL },
+    { "territory_mount.no_covered_unless_fresh",          test_territory_mount_no_covered_unless_fresh,          false, NULL },
+    { "territory_mount.covered_file_point_stays_plain",   test_territory_mount_covered_file_point_stays_plain,   false, NULL },
+    { "territory_mount.covered_reposition",               test_territory_mount_covered_reposition,               false, NULL },
+    { "territory_mount.covered_leaves_with_last",         test_territory_mount_covered_leaves_with_last,         false, NULL },
+    { "territory_mount.covered_needs_two_slots",          test_territory_mount_covered_needs_two_slots,          false, NULL },
+    { "territory_mount.covered_self_mount_refused",       test_territory_mount_covered_self_mount_refused,       false, NULL },
+    { "territory_mount.covered_clone",                    test_territory_mount_covered_clone,                    false, NULL },
+    { "territory_mount.covered_noexec_scoped",            test_territory_mount_covered_noexec_scoped,            false, NULL },
+    { "territory_mount.covered_format_ns",                test_territory_mount_covered_format_ns,                false, NULL },
     { "territory_mount.root_ref_survives_pivot",          test_territory_root_ref_survives_pivot,                false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
     { "territory.chroot_idempotent_same_spoor",           test_territory_chroot_idempotent_same_spoor,           false, NULL },
@@ -2090,6 +2132,7 @@ struct test_case g_tests[] = {
     { "territory.shed_full_table_boundary",               test_territory_shed_full_table_boundary,               false, NULL },
     { "territory.shed_releases_mp_path_once",             test_territory_shed_releases_mp_path_once,             false, NULL },
     { "territory.shed_initial_chroot_and_root_as_source", test_territory_shed_initial_chroot_and_root_as_source, false, NULL },
+    { "territory.shed_covered_shares_fate", test_territory_shed_covered_shares_fate, false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
@@ -2287,7 +2330,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.load_failure_leaves_phenotype", test_exec_load_failure_leaves_phenotype, false, NULL },
     { "exec.reset_follows_decided_phenotype", test_exec_reset_follows_decided_phenotype, false, NULL },
-    { "exec.interp_dispatch_follows_parameter", test_exec_interp_dispatch_follows_parameter, false, NULL },
+    { "exec.interp_dispatch_every_phenotype", test_exec_interp_dispatch_every_phenotype, false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
@@ -2984,6 +3027,19 @@ struct test_case g_tests[] = {
     { "devramfs.walk_attrs",           test_devramfs_walk_attrs,           false, NULL },
     { "devramfs.readdir_paginates_no_dup_no_skip",
                                        test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
+    { "devramfs.tree_walk_and_dotdot", test_devramfs_tree_walk_and_dotdot, false, NULL },
+    { "devramfs.tree_readdir_per_directory",
+                                       test_devramfs_tree_readdir_per_directory, false, NULL },
+    { "devramfs.tree_stat_read_lookup",
+                                       test_devramfs_tree_stat_read_lookup, false, NULL },
+    { "devramfs.tree_load_refusals",   test_devramfs_tree_load_refusals,   false, NULL },
+    { "devramfs.tree_truncates_at_cap",
+                                       test_devramfs_tree_truncates_at_cap, false, NULL },
+    { "devramfs.load_complete",        test_devramfs_load_complete,        false, NULL },
+    { "devramfs.live_lib_when_prover_ships",
+                                       test_devramfs_live_lib_when_prover_ships, false, NULL },
+    { "devramfs.live_bin_holds_the_programs",
+                                       test_devramfs_live_bin_holds_the_programs, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
     { "devsrv.open_root_dir",          test_devsrv_open_root_dir,          false, NULL },
     { "devsrv.stat_native_root",       test_devsrv_stat_native_root,       false, NULL },
@@ -4004,6 +4060,13 @@ struct test_case g_tests[] = {
     { "stalk.mount_names_crossed_base", test_stalk_mount_names_crossed_base, false, NULL },
     { "stalk.mount_names_crossed_union_base", test_stalk_mount_names_crossed_union_base, false, NULL },
     { "stalk.union_dissolved_helper", test_stalk_union_dissolved_helper, false, NULL },
+    { "stalk.union_covered_walk",        test_stalk_union_covered_walk,     false, NULL },
+    { "stalk.union_covered_after",       test_stalk_union_covered_after,    false, NULL },
+    { "stalk.union_covered_readdir",     test_stalk_union_covered_readdir,  false, NULL },
+    { "stalk.union_covered_create",      test_stalk_union_covered_create,   false, NULL },
+    { "stalk.union_covered_unmount",     test_stalk_union_covered_unmount,  false, NULL },
+    { "stalk.union_covered_dissolved",   test_stalk_union_covered_dissolved, false, NULL },
+    { "stalk.union_covered_holder",      test_stalk_union_covered_holder,   false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },

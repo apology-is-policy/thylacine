@@ -174,3 +174,12 @@ and centralizes the existing pane/controller limit. The readiness checkpoint
 committed as 32734353 with normal hooks; its queue monitor is paused. Capacity
 activation still requires authenticated controller/focus admission, aggregate
 protocol-buffer enforcement and the complete resource ledger.
+
+
+## Main reconciliation
+
+[[chg-2026-09-25-halcyon-main-reconciliation]] brings the loader/initrd changes
+and cleared TC-1a into Astra's interaction foundation. Fresh merged-tree boot,
+SMP/UBSan, native ownership/readiness and graphical media/Lantern evidence is
+recorded in the interaction status. No live clipboard or Main landing is claimed.
+Linux host harness follow-ups HI1-R14 and HI1-R16 remain explicitly tracked.

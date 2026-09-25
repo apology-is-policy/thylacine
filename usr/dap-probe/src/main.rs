@@ -10,9 +10,9 @@
 //
 // So parley's DAP client had been validated exclusively against its own
 // assumptions about the server. This probe closes that gap the way lsp-probe
-// closed it for gopls: it spawns the REAL `/ambush dap-stdio` over piped stdio
+// closed it for gopls: it spawns the REAL `/bin/ambush dap-stdio` over piped stdio
 // (the parley::transport::Server the editor uses), then drives the canonical
-// VS-Code launch sequence against `/ambush-child` entirely through parley::dapc:
+// VS-Code launch sequence against `/bin/ambush-child` entirely through parley::dapc:
 //
 //   1. initialize            -> Action::Initialized (ambush accepted our caps)
 //   2. launch(exec, child)   -> Action::ConfigureBreakpoints (the `initialized`
@@ -51,8 +51,8 @@ use parley::dapc::{self, Action};
 use parley::transport::{Mux, Server, Tag};
 
 /// The debugger + its target, both baked into the image (Stage 8c-1).
-const AMBUSH: &str = "/ambush";
-const CHILD: &str = "/ambush-child";
+const AMBUSH: &str = "/bin/ambush";
+const CHILD: &str = "/bin/ambush-child";
 
 /// The non-inlined park function `main.parkLoop` -- a name-based breakpoint that
 /// resolves to an entry PC and arms a kernel hardware breakpoint.
@@ -340,7 +340,7 @@ pub extern "C" fn rs_main() -> i64 {
     // A fork-absent build bakes neither -- a legitimate config the probe cannot
     // manufacture. Present, both must work, so from here nothing is soft.
     if !fs::exists(AMBUSH) || !fs::exists(CHILD) {
-        t_putstr("dap-probe: /ambush or /ambush-child absent -- skipping\n");
+        t_putstr("dap-probe: /bin/ambush or /bin/ambush-child absent -- skipping\n");
         return 0;
     }
 
@@ -351,7 +351,7 @@ pub extern "C" fn rs_main() -> i64 {
     cmd.arg("dap-stdio");
     let mut srv = match Server::spawn(&mut cmd) {
         Ok(s) => s,
-        Err(_) => fail("Server::spawn(/ambush dap-stdio)"),
+        Err(_) => fail("Server::spawn(/bin/ambush dap-stdio)"),
     };
 
     let mut sess = Session::new();

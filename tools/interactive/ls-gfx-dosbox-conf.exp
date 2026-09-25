@@ -7,7 +7,7 @@
 # [autoexec] section runs on startup. This is how a user configures DOSBox-X
 # declaratively (a persistent config) instead of retyping -c flags.
 #
-# THE CONFIG (dosbox-x.conf): a sample baked at the devramfs root (build.sh,
+# THE CONFIG (dosbox-x.conf): a sample baked into the initrd's bin/ (build.sh,
 # under THYLACINE_BAKE_DOSBOX), reached at /bin/dosbox-x.conf post-pivot. Its
 # [autoexec] mounts C: = /home/michael and runs DX2C.COM (which writes
 # C:\OUT.TXT = "DX-2C-OK"). NO -c flags are passed on the command line, so

@@ -582,21 +582,49 @@ static long reap_bounded(long pid, int *status, unsigned long max_sec) {
 // (a native reap returns the raw status). Overrides expect_fault. Used by
 // /pouch-hello-exitgroup (#91): a specific non-1 code proves the exit byte
 // survived the cross-thread group_exit_code handoff. Pass -1 to disable.
+// `named != 0`: spawn through SYS_SPAWN_FULL_ARGV with argv = { name } and
+// three fds (the pipe as 0, 1 and 2). A dynamic program needs both: exec runs
+// its PT_INTERP loader by the program's own name, which only the argv spawn
+// carries (the nameless variants refuse it, VIVARIUM 13.10.6), and the loader
+// reports a failure before main on fd 2, which must land in the capture.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
                             unsigned long perm_flags,
                             int expect_fault,
                             int drain_first,
-                            int want_status) {
+                            int want_status,
+                            int named) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
         return -1;
     }
-    unsigned int fds[2] = { (unsigned int)wr, (unsigned int)wr };
+    unsigned int fds[3] = { (unsigned int)wr, (unsigned int)wr, (unsigned int)wr };
+    char argv0[64];
     long pid;
-    if (perm_flags != 0) {
+    if (named) {
+        if (name_len >= sizeof(argv0)) {
+            t_putstr("joey: pouch-smoke program name too long for argv[0]\n");
+            (void)t_close(rd);
+            (void)t_close(wr);
+            return -1;
+        }
+        for (size_t i = 0; i < name_len; i++) argv0[i] = name[i];
+        argv0[name_len] = '\0';
+        struct t_sys_spawn_args req = {
+            .name_va       = (unsigned long)name,
+            .argv_data_va  = (unsigned long)argv0,
+            .fd_list_va    = (unsigned long)fds,
+            .name_len      = (unsigned int)name_len,
+            .argv_data_len = (unsigned int)name_len + 1u,
+            .argc          = 1,
+            .fd_count      = 3,
+            .perm_flags    = (unsigned int)perm_flags,
+            .cap_mask      = cap_mask,
+        };
+        pid = t_spawn_full_argv(&req);
+    } else if (perm_flags != 0) {
         pid = t_spawn_with_perms(name, name_len, fds, 2, cap_mask, perm_flags);
     } else if (cap_mask != 0) {
         pid = t_spawn_full(name, name_len, fds, 2, cap_mask);
@@ -620,7 +648,7 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(wr);
         return -1;
     }
-    // Drop joey's writer ref. The child's two refs remain — released only
+    // Drop joey's writer ref. The child's refs remain — released only
     // when the child is reaped below.
     if (t_close(wr) != 0) {
         t_putstr("joey: pouch-smoke t_close(wr) FAILED\n");
@@ -716,7 +744,7 @@ static int pouch_smoke_core(const char *name, size_t name_len,
 // caps variant is used). Pre-existing API; the pouch hellos use this.
 static int pouch_smoke_one(const char *name, size_t name_len,
                            const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, -1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, -1, 0);
 }
 
 // pouch_smoke_one_drain_first — drain-then-reap variant for a THIRD-PARTY child
@@ -726,7 +754,7 @@ static int pouch_smoke_one(const char *name, size_t name_len,
 // child must not use the reap-first order.
 static int pouch_smoke_one_drain_first(const char *name, size_t name_len,
                                        const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 1, -1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 1, -1, 0);
 }
 
 // pouch_smoke_one_status — #91 variant. Like pouch_smoke_one but ALSO requires
@@ -736,7 +764,7 @@ static int pouch_smoke_one_drain_first(const char *name, size_t name_len,
 static int pouch_smoke_one_status(const char *name, size_t name_len,
                                   const char *expect, size_t expect_len,
                                   int want_status) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, want_status);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, want_status, 0);
 }
 
 // pouch_smoke_one_expect_fault — variant for the durable P6 hardening
@@ -749,7 +777,7 @@ static int pouch_smoke_one_status(const char *name, size_t name_len,
 // `Thylacine boot OK`.
 static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
                                         const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1, 0, -1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1, 0, -1, 0);
 }
 
 // pouch_smoke_one_caps — capability-granting variant. Spawns via
@@ -758,7 +786,7 @@ static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
 static int pouch_smoke_one_caps(const char *name, size_t name_len,
                                 const char *expect, size_t expect_len,
                                 unsigned long cap_mask) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0, 0, -1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0, 0, -1, 0);
 }
 
 // pouch_smoke_one_perms — permission-granting variant. Spawns via
@@ -771,7 +799,14 @@ static int pouch_smoke_one_perms(const char *name, size_t name_len,
                                  unsigned long cap_mask,
                                  unsigned long perm_flags) {
     return pouch_smoke_core(name, name_len, expect, expect_len,
-                            cap_mask, perm_flags, 0, 0, -1);
+                            cap_mask, perm_flags, 0, 0, -1, 0);
+}
+
+// pouch_smoke_one_named — a dynamic program: spawned by name with its argv,
+// default perms (see `named` above pouch_smoke_core).
+static int pouch_smoke_one_named(const char *name, size_t name_len,
+                                 const char *expect, size_t expect_len) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, -1, 1);
 }
 
 // argv_marker — one substring expected to appear in the child's stdout.
@@ -1157,6 +1192,32 @@ static int do_pouch_hello_smoke(void) {
                                      pgrd_expect, sizeof(pgrd_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-guard smoke ok (a write into a pthread's guard page died of snare:segv)\n");
+
+    // B-1d (ARCH 6.5 "Dynamic loading"): a dynamic PIE, run through its
+    // PT_INTERP /lib/libc.so, dlopens a Pouch-built .so from /lib and proves
+    // the loader's map shapes, RELRO, and the two refusals (an MNOEXEC mount
+    // and a name outside the namespace) -- the prover's legs are in its header.
+    // Only an image built without the LLVM fork skips: it ships no libc.so and
+    // no prover. The prover is built only with libc.so, so a prover without
+    // its loader is a broken image and fails here rather than passing as a skip.
+    long pdl = t_open(T_WALK_OPEN_FROM_ROOT, "/bin/pouch-hello-dlopen", 23, T_OPATH);
+    if (pdl < 0) {
+        t_putstr("joey: pouch-hello-dlopen SKIPPED (no prover: built without the LLVM fork)\n");
+        return 0;
+    }
+    (void)t_close(pdl);
+    long ldso = t_open(T_WALK_OPEN_FROM_ROOT, "/lib/libc.so", 12, T_OREAD);
+    if (ldso < 0) {
+        t_putstr("joey: pouch-hello-dlopen FAILED: the image ships the prover but no /lib/libc.so\n");
+        return -1;
+    }
+    (void)t_close(ldso);
+    static const char pdl_name[]   = "pouch-hello-dlopen";
+    static const char pdl_expect[] = POUCH_CENSUS_DLOPEN;
+    if (pouch_smoke_one_named(pdl_name, sizeof(pdl_name) - 1,
+                              pdl_expect, sizeof(pdl_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-dlopen smoke ok (a Pouch .so loaded through /lib/libc.so; MNOEXEC and out-of-namespace refused; RELRO holds)\n");
     return 0;
 }
 
@@ -2099,9 +2160,9 @@ static int do_git_workflow_gate(void) {
 // libthyla_rs::process::Command with a piped stdin (fed a known input) +
 // piped stdout (captured), then asserts the output bytes + exit status and
 // reports per-check markers to the UART. It exits 0 iff every check passed.
-// All coreutils resolve from the devramfs cpio (spawn lookup is devramfs-
-// backed regardless of pivot), and the file-read checks use the read-only
-// devramfs /version, so this runs PRE-pivot. Returns 0 on success, -1 on
+// All coreutils resolve from the initrd's bin/ (joey's working directory
+// before the pivot), and the file-read checks use the read-only
+// /bin/version, so this runs PRE-pivot. Returns 0 on success, -1 on
 // any failure (which fails the boot -- the suite is a boot gate).
 static int do_native_coreutil_smoke(void) {
     static const char cs_name[] = "coreutil-smoke";
@@ -4662,13 +4723,13 @@ static int probe_cl5_page_budget(void) {
         unsigned int fds[3] = { 0, 0, 0 };
         unsigned int nfd = 0;
         if (cfd >= 0) { fds[0] = fds[1] = fds[2] = (unsigned int)cfd; nfd = 3; }
-        static const char pa[] = "/pouch-hello";
+        static const char pa[] = "/bin/pouch-hello";
         struct t_sys_spawn_args req = {
             .name_va       = (unsigned long)pa,
             .argv_data_va  = (unsigned long)pa,
             .fd_list_va    = (unsigned long)fds,
-            .name_len      = 12,
-            .argv_data_len = 13,
+            .name_len      = sizeof(pa) - 1,
+            .argv_data_len = sizeof(pa),
             .argc          = 1,
             .fd_count      = nfd,
             .page_budget   = want,
@@ -4724,10 +4785,10 @@ static int probe_cl5_page_budget(void) {
         t_putstr("joey: CL-5 probe: cannot read joey's own budget\n");
         return -1;
     }
-    static const char pa2[] = "/pouch-hello";
+    static const char pa2[] = "/bin/pouch-hello";
     struct t_sys_spawn_args bad = {
         .name_va = (unsigned long)pa2, .argv_data_va = (unsigned long)pa2,
-        .name_len = 12, .argv_data_len = 13, .argc = 1,
+        .name_len = sizeof(pa2) - 1, .argv_data_len = sizeof(pa2), .argc = 1,
         .page_budget = mine + 1u,             // one page over joey's own budget
     };
     if (t_spawn_full_argv(&bad) > 0) {
@@ -5705,6 +5766,16 @@ static int probe_cf3_bulk_io(void) {
     t_putstr(" bytes; clamp short, bytes verified)\n");
     return 0;
 }
+
+// SYS_WALK_OPEN resolves one component, so a file in the initrd's bin/ takes
+// two hops: bin/ as a navigation base (O_PATH), then the file from it.
+static long walk_open_in_bin(const char *name, size_t name_len, unsigned long omode) {
+    long bin = t_walk_open(T_WALK_OPEN_FROM_ROOT, "bin", 3, T_OPATH);
+    if (bin < 0) return bin;
+    long fd = t_walk_open(bin, name, name_len, omode);
+    (void)t_close(bin);
+    return fd;
+}
 #endif /* THYLA_BOOT_PROBES (the boot-test probe helpers) */
 
 
@@ -5733,7 +5804,16 @@ static void sd_stderr_drain_main(void *arg) {
 
 int main(void) {
     char buf[24];
-    t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
+    t_putstr("joey: hello from /bin/joey (real userspace binary, loaded from ramfs)\n");
+
+    // The initrd keeps its programs in bin/, and every bare program name joey
+    // spawns before the pivot -- and its children spawn -- resolves through
+    // the working directory. The kernel starts the boot namespace there; joey
+    // does not lean on that.
+    if (t_chdir("/bin", 4) < 0) {
+        t_putstr("joey: t_chdir(/bin) FAILED\n");
+        return 1;
+    }
 
 #if THYLA_BOOT_PROBES
     // #80: gate the daemon-registry decision logic BEFORE the first real record.
@@ -5911,7 +5991,7 @@ int main(void) {
 
     // === /loom-smoke orchestration (Loom-6d-1) ===
     // First EL0 consumer of the native libthyla_rs::loom ring API: a NOP
-    // round-trip + register a buffer + a /system.key handle + a byte-correct
+    // round-trip + register a buffer + a /bin/system.key handle + a byte-correct
     // READ over the ring + an FSYNC-on-read-only rejection (the I-30 gate from
     // userspace). Proves SYS_LOOM_SETUP/REGISTER/ENTER drive end-to-end from a
     // native binary -- the ring memory model, the registered-handle/buffer pin,
@@ -6376,9 +6456,9 @@ int main(void) {
     // === /u-readdir-test orchestration (Phase 7 U-6e-b-1) ===
     // Directory enumeration: the kernel devramfs_readdir + libthyla_rs
     // fs::read_dir/ReadDir + the #929 root-open fix. Runs PRE-pivot: it
-    // enumerates the flat boot ramfs root (welcome / version / srv / proc /
-    // itself), checks the per-entry qid type (srv/proc are dirs, welcome a
-    // file), confirms fs::is_dir("/") / metadata("/") resolve the root, that
+    // enumerates the boot ramfs root (bin / srv / proc, directories only) and
+    // its bin/ (welcome / version / itself), checks the per-entry qid type
+    // (the root's entries are dirs, welcome a file), confirms fs::is_dir("/") / metadata("/") resolve the root, that
     // an empty synth dir enumerates to zero, and that read_dir on a file +
     // on a missing path fail correctly. status==0 gates the boot.
     const char u_readdir_name[] = "u-readdir-test";
@@ -6398,7 +6478,7 @@ int main(void) {
     // === /u-glob-test orchestration (Phase 7 U-6e-b-2) ===
     // Glob argv expansion: libutopia::eval::glob::expand fs-walk +
     // stmt::evaluate_argv wiring. Runs PRE-pivot: it expands patterns
-    // (u-* / * / versio? / [vw]* / /u-*) against the flat boot ramfs and
+    // (u-* / * / versio? / [vw]* in bin/, then /* / /bin/u-*) against the boot ramfs and
     // asserts the sorted match sets, single-level containment, rc nullglob
     // (no-match -> empty list), absolute-pattern display, and -- via
     // $status -- that a bare glob expands in argv while the same pattern
@@ -6850,30 +6930,29 @@ int main(void) {
     // POST-PIVOT below, so corvus lands on the persistent Stratum root
     // and receives its storage capability at fd 0 (A-1.7).
 
-    // P6-pouch-stratumd-boot 16b-gamma sanity: walk /system.key from the
-    // ramfs root via t_walk_open + t_fstat from joey itself. This isolates
+    // P6-pouch-stratumd-boot 16b-gamma sanity: walk bin/system.key from the
+    // ramfs root via t_walk_open (two hops) + t_fstat from joey itself. This isolates
     // whether the kernel-side SYS_FSTAT + SYS_WALK_OPEN(FROM_ROOT) work
     // BEFORE attempting stratumd's pouch-musl-mediated open+fstat. If
     // joey's direct call fails here, the kernel surface is broken; if it
     // succeeds but stratumd still fails, the pouch musl arm is the issue.
     {
         static const char sk_name[] = "system.key";
-        long sk_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sk_name,
-                                  sizeof(sk_name) - 1, T_OREAD);
+        long sk_fd = walk_open_in_bin(sk_name, sizeof(sk_name) - 1, T_OREAD);
         if (sk_fd < 0) {
-            t_putstr("joey: probe /system.key walk_open FAILED\n");
+            t_putstr("joey: probe /bin/system.key walk_open FAILED\n");
             return 1;
         }
         struct t_stat sk_st;
         long sk_rc = t_fstat(sk_fd, &sk_st);
         if (sk_rc != 0) {
-            t_putstr("joey: probe /system.key fstat FAILED rc=");
+            t_putstr("joey: probe /bin/system.key fstat FAILED rc=");
             t_putstr(itoa_dec(sk_rc, buf, sizeof(buf)));
             t_putstr("\n");
             (void)t_close(sk_fd);
             return 1;
         }
-        t_putstr("joey: probe /system.key fstat OK size=");
+        t_putstr("joey: probe /bin/system.key fstat OK size=");
         t_putstr(itoa_dec((long)sk_st.size, buf, sizeof(buf)));
         t_putstr(" mode=0o");
         // print octal mode manually (itoa_dec is decimal)
@@ -6893,7 +6972,7 @@ int main(void) {
         // Also exercise t_lseek SEEK_END to verify the size path.
         long sk_end = t_lseek(sk_fd, 0, T_SEEK_END);
         if (sk_end != (long)sk_st.size) {
-            t_putstr("joey: probe /system.key lseek SEEK_END mismatch (got ");
+            t_putstr("joey: probe /bin/system.key lseek SEEK_END mismatch (got ");
             t_putstr(itoa_dec(sk_end, buf, sizeof(buf)));
             t_putstr(")\n");
             (void)t_close(sk_fd);
@@ -6901,21 +6980,21 @@ int main(void) {
         }
         long sk_set = t_lseek(sk_fd, 0, T_SEEK_SET);
         if (sk_set != 0) {
-            t_putstr("joey: probe /system.key lseek SEEK_SET FAILED rc=");
+            t_putstr("joey: probe /bin/system.key lseek SEEK_SET FAILED rc=");
             t_putstr(itoa_dec(sk_set, buf, sizeof(buf)));
             t_putstr("\n");
             (void)t_close(sk_fd);
             return 1;
         }
         // A-2a (IDENTITY-DESIGN.md §9.5): chmod/chown surface end-to-end through
-        // the real SYS_FSTAT + SYS_WSTAT handlers. /system.key is on the
+        // the real SYS_FSTAT + SYS_WSTAT handlers. /bin/system.key is on the
         // read-only system boot FS (devramfs): fstat now reports owner/group
         // (system-owned), and wstat must reject structurally-invalid requests
         // AND a chmod on a Dev with no wstat_native. The handle carries
         // RIGHT_WRITE (walk_open grants R|W|T), so the RIGHT_WRITE gate passes
         // and the handler validation + dispatch is what's under test.
         if (sk_st.uid != T_PRINCIPAL_SYSTEM || sk_st.gid != T_GID_SYSTEM) {
-            t_putstr("joey: probe /system.key not system-owned (A-2a)\n");
+            t_putstr("joey: probe /bin/system.key not system-owned (A-2a)\n");
             (void)t_close(sk_fd);
             return 1;
         }
@@ -6937,13 +7016,13 @@ int main(void) {
         // open+fstat result above; a missing path must report -T_E_NOENT
         // (2), the Go os.IsNotExist keystone.
         {
-            static const char sk_path[] = "/system.key";
+            static const char sk_path[] = "/bin/system.key";
             struct t_stat ps;
             long prc = t_stat_path(sk_path, sizeof(sk_path) - 1, &ps);
             if (prc != 0 || ps.size != sk_st.size ||
                 ps.qid_path != sk_st.qid_path ||
                 ps.uid != T_PRINCIPAL_SYSTEM) {
-                t_putstr("joey: probe SYS_STAT /system.key FAILED rc=");
+                t_putstr("joey: probe SYS_STAT /bin/system.key FAILED rc=");
                 t_putstr(itoa_dec(prc, buf, sizeof(buf)));
                 t_putstr("\n");
                 (void)t_close(sk_fd);
@@ -6963,16 +7042,15 @@ int main(void) {
         (void)t_close(sk_fd);
         // #81: the O_PATH read-bypass is CLOSED. An O_PATH (T_OPATH) handle is a
         // navigation base, NOT a byte-I/O channel -- t_read on it MUST return -1
-        // (CWALKONLY). Pre-#81 this LEAKED /system.key's content (T_OPATH skips
+        // (CWALKONLY). Pre-#81 this LEAKED the key's content (T_OPATH skips
         // perm_check and the born-R|W handle was readable). joey is the OWNER here,
         // so this proves the gate is identity-independent (navigation-only for all);
         // the real exploit was a logged-in non-owner via /bin/system.key.
         {
             static const char sk2[] = "system.key";
-            long op_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sk2,
-                                     sizeof(sk2) - 1, T_OPATH);
+            long op_fd = walk_open_in_bin(sk2, sizeof(sk2) - 1, T_OPATH);
             if (op_fd < 0) {
-                t_putstr("joey: probe #81 /system.key T_OPATH open FAILED\n");
+                t_putstr("joey: probe #81 /bin/system.key T_OPATH open FAILED\n");
                 return 1;
             }
             // #100 (ER-3): these two legs used to assert `!= -1`. They now pin
@@ -6984,7 +7062,7 @@ int main(void) {
             unsigned char op_buf[16];
             long op_rd = t_read(op_fd, op_buf, sizeof(op_buf));
             if (op_rd != -9) {
-                t_putstr("joey: #81 LEAK -- T_OPATH read of /system.key not denied with EBADF (got ");
+                t_putstr("joey: #81 LEAK -- T_OPATH read of /bin/system.key not denied with EBADF (got ");
                 t_putstr(itoa_dec(op_rd, buf, sizeof(buf)));
                 t_putstr(")\n");
                 (void)t_close(op_fd);
@@ -7003,9 +7081,9 @@ int main(void) {
             }
             (void)t_close(op_fd);
         }
-        t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
+        t_putstr("joey: probe /bin/system.key lseek SEEK_END/SEEK_SET OK\n");
         t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
-        t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (EBADF) OK\n");
+        t_putstr("joey: probe #81 T_OPATH-read of /bin/system.key DENIED (EBADF) OK\n");
     }
     // #66: fd2path -- the namespace name a fd was reached by (Plan 9 fd2path).
     // Proves SYS_FD2PATH end-to-end on the REAL boot namespace: the "/" attach
@@ -7146,10 +7224,9 @@ int main(void) {
     // the thylacine-pouch-arm branch), finds the second virtio-blk-device
     // (the pool backing; QEMU virt slot 31 — HIGH-to-LOW scan picks the
     // pool first), reads pool.img's superblock via the bdev I/O ops,
-    // mounts the FS, accepts the system.key wrap-keyfile from the literal
-    // ramfs file at /system.key (16b-gamma scope reduction: flat-cpio
-    // root placement; FHS-shaped /etc/stratum/ is a v1.x lift atop the
-    // devramfs subdir walk), and binds /srv/stratum-fs.
+    // mounts the FS, accepts the system.key wrap-keyfile from the initrd
+    // file /bin/system.key (FHS-shaped /etc/stratum/ is a v1.x lift), and
+    // binds /srv/stratum-fs.
     //
     // 16b-gamma closes this: kernel SYS_FSTAT + SYS_LSEEK exposed at the
     // pouch musl ABI (patches 0010-pouch-fstat-lseek); stm_keyfile_load
@@ -7173,7 +7250,7 @@ int main(void) {
     // joey to use stratumd's real FS.
     {
         // argv = { "stratumd", "/dev/virtio-blk", "--listen",
-        //          "/srv/stratum-fs", "--keyfile", "/system.key" }.
+        //          "/srv/stratum-fs", "--keyfile", "/bin/system.key" }.
         // The flat buffer concatenates with explicit NUL terminators;
         // the trailing C-implicit NUL is excluded via the sizeof - 1.
         // bdev_thylacine.c ignores the path argument (slot determined by
@@ -7207,7 +7284,7 @@ int main(void) {
             "--listen\0"
             "/srv/stratum-fs\0"
             "--keyfile\0"
-            "/system.key\0"
+            "/bin/system.key\0"
             "--ctl-listen\0"
             "/srv/stratum-ctl\0"
             "--corvus-socket\0"
@@ -7217,10 +7294,10 @@ int main(void) {
             "--fs-workers\0"
             "4\0";
         // 14 strings: "stratumd"(9) + "/dev/virtio-blk"(16) + "--listen"(9) +
-        // "/srv/stratum-fs"(16) + "--keyfile"(10) + "/system.key"(12) +
+        // "/srv/stratum-fs"(16) + "--keyfile"(10) + "/bin/system.key"(16) +
         // "--ctl-listen"(13) + "/srv/stratum-ctl"(17) + "--corvus-socket"(16) +
         // "/srv/corvus/ctl"(16) + "--system-uid"(13) + "4294967294"(11) +
-        // "--fs-workers"(13) + "4"(2) = 173.
+        // "--fs-workers"(13) + "4"(2) = 177.
         struct t_sys_spawn_args sd_req = {
             .name_va       = (unsigned long)sd_name,
             .argv_data_va  = (unsigned long)sd_argv_data,
@@ -7288,7 +7365,7 @@ int main(void) {
         // SYS_LSEEK kernel surfaces + the pouch open() -> openat()
         // redirect + the devramfs walk reuse-nc + the partial-walk
         // reject. stratumd reaches stm_fs_mount and successfully:
-        //   - opens /system.key
+        //   - opens /bin/system.key
         //   - fstats it (size 3656)
         //   - read-peeks the magic header
         //   - keyfile_load returns OK
@@ -7491,16 +7568,31 @@ int main(void) {
                 return 1;
             }
 
-            // #58: grab a handle to the (pre-pivot) devramfs root NOW so its flat
-            // binary tree can be re-grafted onto /bin AFTER the pivot -- the boot
-            // medium bound into the namespace (Plan 9), so post-pivot spawns of the
-            // system binaries (corvus, login, legate-prover) resolve /bin/<prog>
-            // through stalk. The disk root holds user data only; same pre-pivot-
-            // handle + post-pivot-MREPL idiom as the /srv re-graft above.
-            long bin_src_h = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+            // #58: grab a handle to the (pre-pivot) initrd's bin/ NOW so it can be
+            // re-grafted onto /bin AFTER the pivot -- the boot medium bound into
+            // the namespace (Plan 9), so post-pivot spawns of the system binaries
+            // (corvus, login, legate-prover) resolve /bin/<prog> through stalk,
+            // the same path that names them before the pivot. The disk root holds
+            // user data only; same pre-pivot-handle + post-pivot-MREPL idiom as
+            // the /srv re-graft above.
+            long bin_src_h = t_open(T_WALK_OPEN_FROM_ROOT, "/bin", 4, T_OPATH);
             if (bin_src_h < 0) {
-                t_putstr("joey: #58 pre-pivot t_open(/) for the /bin bind FAILED\n");
+                t_putstr("joey: #58 pre-pivot t_open(/bin) for the /bin bind FAILED\n");
                 return 1;
+            }
+            // B-1d: the initrd's lib/ -- the dynamic loader's directory -- for
+            // the post-pivot /lib union. Only an image built without the LLVM
+            // fork lacks it; one that ships the dlopen prover (built only with
+            // libc.so) must carry it, or the boot stops here.
+            long lib_src_h = t_open(T_WALK_OPEN_FROM_ROOT, "/lib", 4, T_OPATH);
+            if (lib_src_h < 0) {
+                long pdl = t_open(T_WALK_OPEN_FROM_ROOT, "/bin/pouch-hello-dlopen", 23,
+                                  T_OPATH);
+                if (pdl >= 0) {
+                    (void)t_close(pdl);
+                    t_putstr("joey: B-1d pre-pivot t_open(/lib) FAILED (the image ships the dlopen prover, so its initrd must carry lib/)\n");
+                    return 1;
+                }
             }
 
             // #57: grab pre-pivot handles to the kernel introspection Devs the
@@ -7566,6 +7658,22 @@ int main(void) {
                 t_putstr("joey: stratumd-boot t_close(sd_attach_fd) FAILED\n");
                 return 1;
             }
+            // Post-pivot spawns name /bin/<prog>; the services and sessions joey
+            // starts from here inherit the disk root as their working directory.
+            if (t_chdir("/", 1) < 0) {
+                t_putstr("joey: post-pivot t_chdir(/) FAILED\n");
+                return 1;
+            }
+            // Pinned: nothing downstream fails if the reset is lost; every
+            // service started below would just work in /bin instead.
+            {
+                char pcwd[8];
+                long pcl = t_getcwd(pcwd, sizeof(pcwd));
+                if (pcl != 1 || pcwd[0] != '/') {
+                    t_putstr("joey: post-pivot cwd is not / FAILED\n");
+                    return 1;
+                }
+            }
 
             // stalk-3b-β: re-establish the namespace-resident /srv on the pivoted
             // (disk-backed) root. mkdir /srv (idempotent -- the Stratum pool
@@ -7584,8 +7692,8 @@ int main(void) {
             (void)t_close(srv_devsrv_h);
 
             // #58: re-establish /bin on the pivoted root -- bind the pre-pivot
-            // devramfs binary tree onto it so /bin/<prog> resolves post-pivot
-            // (the system binaries live once, in the initrd). mkdir /bin is
+            // initrd's bin/ onto it so /bin/<prog> resolves post-pivot (the
+            // system binaries live once, in the initrd). mkdir /bin is
             // idempotent (the Stratum pool persists across reboots); the MREPL
             // mount takes its own spoor_ref, so the pre-pivot handle closes after.
             // ORDERING INVARIANT (#58 audit F3): every post-pivot /bin/<name>
@@ -7604,6 +7712,30 @@ int main(void) {
                 }
             }
             (void)t_close(bin_src_h);
+
+            // B-1d (ARCH 6.5 "Dynamic loading"): /lib becomes a Plan 9 union,
+            // the initrd's lib/ (libc.so, which every dynamic program names as
+            // its interpreter, and the loader's plugins) in FRONT of the disk's
+            // /lib, which stays searched as the covered directory -- ndb,
+            // aurora, dosbox-x, beacon and shcompat still resolve (the UM-6
+            // open below is the first to go through the union). No member is
+            // MCREATE, so a create directly in /lib is refused (Plan 9); the
+            // device creates nothing there -- the pool is populated host-side.
+            // An image without the LLVM fork has no lib/ (checked pre-pivot)
+            // and leaves the disk's alone.
+            if (lib_src_h >= 0) {
+                long mklib = t_walk_create(T_WALK_OPEN_FROM_ROOT, "lib", 3, T_OREAD,
+                                           T_WALK_CREATE_DMDIR | 0755u);
+                if (mklib >= 0) (void)t_close(mklib);
+                if (t_mount("/lib", 4, lib_src_h, T_MBEFORE) != 0) {
+                    t_putstr("joey: B-1d post-pivot t_mount(/lib MBEFORE) FAILED\n");
+                    return 1;
+                }
+                (void)t_close(lib_src_h);
+                t_putstr("joey: B-1d /lib union mount OK (initrd lib/ before the disk's /lib)\n");
+            } else {
+                t_putstr("joey: B-1d /lib union SKIPPED (no lib/: built without the LLVM fork)\n");
+            }
 
             // UM-6 (X-11): graft the /bin/sh compat shim MAFTER onto /bin,
             // making /bin a UNION [devramfs (MBEFORE, native binaries win),
@@ -7876,11 +8008,9 @@ int main(void) {
                 // NOTE: the argv blob MUST end with a trailing NUL after the
                 // last arg -- the kernel SYS_SPAWN_FULL_ARGV parser reads argc
                 // NUL-terminated strings, and a 4-arg blob without the final
-                // terminator is rejected (spawn returns pid<=0). (make prints a
-                // benign `make: getcwd: I/O error` at startup -- joey's post-pivot
-                // cwd is unset and the kernel getcwd returns EIO -- but make
-                // handles it gracefully, and this ABSOLUTE-path build has zero
-                // cwd dependence, so it is a documented no-op here.)
+                // terminator is rejected (spawn returns pid<=0). (make's
+                // startup getcwd answers joey's post-pivot working directory,
+                // /, and this ABSOLUTE-path build has zero cwd dependence.)
                 static const char mk_path[] = "/bin/make";
                 static const char mk_argv[] =
                     "make\0-f\0/tmp/mkt/Makefile\0-j3\0";
@@ -10503,7 +10633,7 @@ int main(void) {
     }
 #endif /* THYLA_BOOT_PROBES (login + recover boot-test E2Es) */
 
-    // === PTY-2a: spawn /sbin/ptyfs + mount /dev/pts (the pseudoterminal server) ===
+    // === PTY-2a: spawn /bin/ptyfs + mount /dev/pts (the pseudoterminal server) ===
     // A device-less native /srv server (the corvus precedent -- NOT the warden,
     // which is hardware-device-bind driven). joey grants MAY_POST_SERVICE (no fds,
     // no caps), waits for /srv/ptyfs (bounded liveness connect -- the connect_corvus
@@ -10550,10 +10680,10 @@ int main(void) {
             t_close(yw);
         }
         if (!ptyfs_up) {
-            t_putstr("joey: /sbin/ptyfs DOWN (failed to post /srv/ptyfs -- selftest?)\n");
+            t_putstr("joey: /bin/ptyfs DOWN (failed to post /srv/ptyfs -- selftest?)\n");
             return 1;
         }
-        t_putstr("joey: /sbin/ptyfs up pid=");
+        t_putstr("joey: /bin/ptyfs up pid=");
         t_putstr(itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf)));
         t_putstr(" (selftest passed; serving /srv/ptyfs)\n");
 

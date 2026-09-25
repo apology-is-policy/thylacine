@@ -19,11 +19,10 @@
 # exactly the software-framebuffer path the SDL_thylacine backend implements.
 #
 # THE DOS PROGRAM (DX2C.COM): a 49-byte DOS .COM emitted by
-# tools/dx2c-dosprog.py and baked at the devramfs root. It creates C:\OUT.TXT
+# tools/dx2c-dosprog.py and baked into the initrd's bin/. It creates C:\OUT.TXT
 # and writes the marker "DX-2C-OK", then terminates (INT 21h AH=4Ch). It is
-# reached at /bin/DX2C.COM: joey binds the pre-pivot devramfs root onto /bin
-# (usr/joey/joey.c #58), so devramfs-root files survive the pivot to the pool
-# there -- the plain "/DX2C.COM" is GONE post-pivot (/ is the Stratum pool).
+# reached at /bin/DX2C.COM on both sides of the pivot: joey binds the
+# initrd's bin/ onto /bin (usr/joey/joey.c #58) once / is the Stratum pool.
 #
 # WHY BACKGROUND DOSBOX-X (`&`): the FILE is the only reliable "the program
 # ran" signal -- DOSBox-X's own DOS output renders to the pane, not the serial
@@ -106,7 +105,7 @@ set dbx_render_png $repo/build/ls-gfx-dosbox-render.png
 set dbx_color_floor 8
 
 # Stage the baked DOS program into the dir we mount as C:. /bin/DX2C.COM (the
-# devramfs-root file via joey's /bin bind) -> /home/michael (michael's writable
+# initrd's bin/ file via joey's /bin bind) -> /home/michael (michael's writable
 # per-user home, mounted by login), which DOSBox-X then mounts as C:.
 lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
 after 1500
