@@ -1512,6 +1512,20 @@ it) is performed by the compositor itself, exactly as before I-7b. So
 `deliver_chord` returns whether the owner actually has the chord, and
 only the close arm reads that answer.
 
+**Widened at TC-1b (2026-09-25).** `code` 4 is the HISTORY chord
+(`Super+K`, the `history` action; HALCYON §14.13), the user's deletion of
+a tile's record. Like the close it carries the FOCUSED PANE's id, and the
+owner forgets the history of the tile it hosts under that id. Unlike the
+close it has no fallback: the transcript belongs to the environment and
+never to the compositor, so with no rail (the legacy profile, or a seat
+whose rail is not up), onto a rail too full to take it, or for a pane the
+owner does not host (the console seat's renderer hosts only its own), the
+chord is said and dropped and nothing is deleted. There is deliberately no
+verb for it: a program that could write one could delete the record, which
+§14.13 forbids. The key is the one Terminal and iTerm2 use for the same
+act (Cmd+K), and like theirs it does not ask first: unlike the close, it
+cannot end a running job or touch the live screen.
+
 ### 9.4 The theme picker and live switching
 
 The picker is a `Role::Menu` surface halcyond paints and the compositor

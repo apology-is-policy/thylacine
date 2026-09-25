@@ -1801,6 +1801,18 @@ owning block's obj (`grid_run_obj`), and the render bands the marked grid row
 and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
 pts clipboard work).
 
+**Fixed at TC-1b (2026-09-25).** The cursor and the `v` anchor are positions in
+the flat list, and both hosts re-flattened on new output by clamping them into
+range, so when the budget evicted frozen blocks from the front every surviving
+row moved up and the selection landed on OTHER rows (a yank took different text;
+Enter opened the menu of another object) -- short of the `(block, item, col)`
+addressing 13.3 binds. The transcript now counts the flat rows it drops from the
+front (the budget and the TC-1b forget; one per-item row rule shared with
+`select::flatten`), and a re-flatten rebases the cursor and the anchor by that
+count: a row that survived is still selected, and a selection whose row was
+dropped moves to the oldest row that remains, its object cleared. The console
+renderer also re-flattens before it paints, not only before a key.
+
 **14.11.6 Spawn.** halcyond spawns one `kaua-term` per **leaf tile**. The
 enumeration hook already exists: `ChromeSet::reconcile` (`chromeset.rs:129`)
 iterates `parse_leaves` (`chrome.rs:51`) over the compositor's `layout` file per
@@ -2272,8 +2284,22 @@ clean.
   rewrite: an overwrite, a partial erase, DL/IL or a scroll region can remove
   on-screen text without keeping it, as in any terminal. And the transcript is
   bounded, so enough output evicts its oldest lines, as scrollback always has.
-  Deleting a tile's history is a USER action: a
-  chrome chord (TC-1b). This follows Plan 9, where a window's text belongs to the
+  Deleting a tile's history is a USER action: `Super+K` (TC-1b, 2026-09-25;
+  HALCYON-INSTRUMENT 9.3) forgets the focused tile's history -- every line above
+  the live screen, the scrolled-off lines of a command still running included --
+  and nothing else. The live screen stays the program's (the VT that holds it
+  runs in the producer, and halcyond blanking its own copy would desynchronise
+  the next CellDiff), and it keeps its links and its look: a cell resolves its
+  object and its zone's class through the block that was open when the cell was
+  written, so every block the tile's span map still names survives the forget as
+  a HUSK -- its kind, its class and the objects the map names (type and
+  reference, never a line of text), invisible to layout and selection, charged
+  to the budget and the first thing the budget evicts. Inline images that only
+  the forgotten lines named are released. `clear` then `Super+K` leaves an empty
+  tile; `clear` alone already leaves a clean view; with no history the tile is
+  laid as a fresh one. A program cannot trigger it: the compositor reads the
+  chord from the keyboard, Super never reaches a tile, and there is no verb
+  that deletes history. This follows Plan 9, where a window's text belongs to the
   user, and the Genera listener, whose Clear Output History is a command the user
   gives rather than an escape a program sends. xterm, VTE and kitty let ESC[3J
   drop scrollback; Halcyon deliberately does not.
