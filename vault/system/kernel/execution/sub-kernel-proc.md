@@ -215,6 +215,47 @@ single incidental reap before extincting on it. Pinned by
 exact arrangement — an adopted orphan ZOMBIE ahead of the target, with
 distinct statuses so the pid *and* the status each discriminate.
 
+### The image outlives the Proc that made it, so restrictions follow the image
+
+`proc_image_join_locked` and `proc_image_stamp_locked` exist because a Proc and
+its image are separable: `rfork(RFPROC|RFMEM)` gives a second Proc the same
+`AddrSpace`. Any rule keyed on the Proc -- the debug cover rule, both seal bits,
+the debug taint -- therefore guards only one of the doors to what it is
+protecting. The join reads the union over every live mapper; the stamp writes a
+restriction to all of them. Both walk the table and so require
+`g_proc_table_lock`, and both skip the walk when `addrspace_ref_count == 1`,
+which is the ordinary case.
+
+`shared` is **references minus the zombies the traversal saw**, and each half of
+that earns its place. It asks whether another Proc could still *use* the image,
+and a zombie cannot -- an attach refuses a non-`ALIVE` target and the stopped-only
+gate requires `ALIVE`. But a zombie keeps its reference until it is reaped, so
+counting references alone refuses every elevation its parent attempts, forever if
+the parent never waits; a vfork child that `_exit`s rather than exec'ing produces
+exactly that. Subtracting only the *seen* zombies keeps the reap window
+conservative: a Proc unlinked but not yet freed is invisible to the traversal
+while its reference still counts, so it falls in the difference and `shared` stays
+true -- the direction that matters, since a missed sharer at the redeem is a
+privilege question. The caps and flags union still counts zombies: their bytes are
+still in the image.
+
+The traversal is **iterative**. The recursive `proc_for_each_walk` costs one C
+frame per tree level, and the join runs inside a walk already paying that, so
+recursing would put two full-depth descents on one 16 KiB kernel stack -- on a
+path any EL0 program can drive, since `maps` is mode 0444 and its read asks the
+seal, which asks the join. Nothing bounds tree *depth*. The sibling and parent
+links already encode the return path a frame would have held.
+
+Publication inherits the **debug taint**, in the same lock hold as the link, so no
+gate or sweep can observe a child that is visible but not yet restricted. It must
+cross, because a forked child's memory *is* the debugged memory, and because it is
+the one arm the join can never supply: after the child execs there is no sharing
+left to read. The **seals deliberately do not cross**, in either fork shape -- the
+join already refuses an `RFMEM` child by reading the parent's bit at the access,
+so inheriting would add nothing and would leave a one-way bit outliving the
+sharing onto an image the seal was never about; and at a COW fork it would settle
+decision A by accident.
+
 ### Image replacement: what must be reset, and why those things
 
 `proc_exec_replace` swaps a live process's address space in place. The rule

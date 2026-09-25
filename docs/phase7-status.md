@@ -420,6 +420,135 @@ The self-audit found the round's only P1, and it predates the seal: **`/proc/<pi
 
 Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
 
+## TC-1a: a clear in a tile keeps the record and pins the view — 2026-09-25
+
+From the operator's Lantern-over-Haul run: "lantern doesn't clear". halcyond's PL-4 view lays the live tail through
+its content rows and bottom-anchors it, so after an erase a tile with history showed that history filling the view
+above a short tail -- and `clear` was broken the same way. Fresh tiles hid it; every capture of the Lantern arc was
+one. Three operator votes: an EXPLICIT wire record (kaua `Control::ScreenErased`, subtag 6), never an inference; the
+HISTORY IS THE USER'S (ESC[3J never deletes it; TC-1b's chord does); and, found at implementation, a clear MOVES the
+erased screen into the history. The transcript receives only scrolled-off rows, so the pin alone would have let a
+clear delete up to a screenful of the record, which made the history vote's own rule false.
+
+- **vt.** A clear is ED 2/3 (DECSED is ED here) or RIS; ED 0/1 never count (audit F1: ut's per-keystroke `\r ESC[J`
+  redraw), and ED past 3 is ignored. On the
+  normal screen under capture, `screen_to_history` pushes a `Scroll` for every row through the last with text BEFORE
+  the blank (the last row's wrap flag cleared); `note_screen_erased` pushes `Boundary::ScreenErased` AFTER it.
+- **kaua-term.** `Control::ScreenErased`, mapped like `Bell` (flush first), so the wire order is ScrollOff (the
+  erased rows), CellDiff (the blank), the record. Wire subtag 6, no payload.
+- **halcyond.** A `pinned` latch on the tile: set by the record in Normal mode only, cleared by any ScrollOff,
+  untouched by a Mode flip. While pinned and with history, `render` puts a `pad_top` gap before the tail and floors
+  the content height at `viewh + total` inside the lane loop (audit F2), so the history ends at the view's top edge
+  and the tail starts where a fresh tile's does; with no history the tile lays out as a fresh one.
+- **RIS (audit r1 F4).** A reset returns to the main screen first (xterm, kitty, VTE), then resets DECAWM and
+  DECSC; it never drops history. No in-tree tool sends RIS yet.
+- **A restarted row 0 (r1 F5, pre-existing; r2 F2, F3).** vt reports restart_top's true->false edge as
+  `Boundary::TopRestart` (capture only, main screen only), and the producer ships on it with the CellDiff forced,
+  so a restarted row never glues to the fragment above it, even when the restart changes nothing else. An
+  autowrap onto (0,0), on a one-row screen, is the row's continuation and not a restart.
+- **Leaving the alt screen (r2 F1).** `Boundary::AltLeave` carries the restored main screen as it stood at the
+  leave (cells, wrap flags, cursor, top flag): RIS leaves and then erases within the same byte, so the producer
+  never reads the vt's post-byte state for it.
+- **Scripture + dossiers.** HALCYON 14.13 (the move, what counts as a clear, RIS), KAUA-TERM 1b, LANTERN-DESIGN 3
+  (property 1 no longer holds: the slides shown accumulate in the history). sub-lib-vt, sub-kaua-term, sub-halcyond
+  (each carries a currency caveat: edited for TC-1 only) and sub-lantern.
+- **Gate.** `ls-halcyon-lantern` leg 5: 150 lines of history, then the deck; the band below slide one must be ground,
+  with slide one's fresh-tile capture as its control. `gfx_ink.py --rect` counts ink in a fractional rectangle
+  against the WHOLE image's ground.
+
+Audit (KT-1), two rounds, both Opus 5.5 reviewing Opus 5.5 (Fable out of credits; MODEL start == end in each).
+Round 1: 1 P0 (ED 0 from the first cell counted as a clear, so after a clear every keystroke of ut's `\r ESC[J`
+redraw filed the prompt line into history) / 1 P1 (the pinned view showed pad_top px of history) / 1 P2 (the
+"cannot erase the record" claim) / 4 P3. Round 2: 0 / 0 / 0 / 5 P3. All fixed; the close is clean. Closed list:
+memory `audit_tc1_closed_list.md`; the KT-1 row's TC-1a addendum in `docs/AUDIT-TRIGGERS.md`.
+
+Verification: host, the final tree: `tools/test-rust.sh` (every crate) PASS, 27 crates / 1935 tests / 0 failing (the
+known posture: libutopia's 69 stranded tests, tracked in OPEN-BUGS, and haul's one live-server test, quarantined by
+design); the touched crates vt 75 / kaua-term 49 / halcyond 340 / coreutils 5. RED-first on the host: four sabotage
+sweeps, 55 legs, one mechanism per leg, each leg's exact red set written by name before the run, every file restored
+by sha256 -- 22/22 (the mechanism), 10/11 (the RIS fold-in and the legs it touched; V9 redded two tests where one was
+predicted, a wrong prediction, not wrong code), 13/13 (round-1 fixes), 9/9 (round-2 fixes). Device,
+`ls-halcyon-lantern` on an image baked `THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument --config ci`:
+RED with the TC-1a code reverted to 4f2b7797 -- legs 1-3 PASS, leg 5 FAIL by name ("band below slide one is inked
+(312710)"), 3/3 attempts, the capture showing slide one at the bottom under the history and the last screen (101-150
+and the command) gone. GREEN on this tree, same levers: legs 1-5 PASS on the first attempt, leg 5 measuring 0 ink
+below slide one, equal to its fresh-tile control. `tools/test.sh` on the default image: 1669/1669 PASS, 0 FAIL lines,
+0 EXTINCTION. No leg-5 capture can see the moved screen (it sits above the view's top edge): the host seam tests prove
+the move, and TC-1b's device leg (scroll up after the clear, then after the chord) is designed to prove it with the
+delete.
+
+## H3 + C: the image join, and the debug taint — 2026-09-24
+
+astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it
+from her one instance to the whole class. She then stopped (a product restriction on her side), and the
+operator reassigned both halves here.
+
+**The class.** The capability-cover rule (I-39), both seal bits and the planned taint are per-`Proc` facts.
+The thing they guard is not: the image lives in the `AddrSpace`, and `rfork(RFPROC|RFMEM)` shares it. An
+elevated parent's vfork child is born with the elevation-only caps carved away (I-2), so it is a
+*lower-authority Proc holding the same bytes* — a peer that merely matches the child covers it, attaches, and
+writes the parent's live image, which the parent returns into out of `vfork_await_release`. No redeem is
+involved; musl's `posix_spawn` builds the shape on every call. The seals broke the same way round: `NOTRACE`
+on the parent did not refuse an attach to the unsealed child, and `NODUMP` did not refuse reading the child's
+`mem` or `maps`.
+
+**The fix.** `proc_image_join_locked` — the union of every other live mapper's caps and flags — is asked at
+every gate, per operation, under `g_proc_table_lock` (the lock `proc_exec_replace` swaps `->as` under, and the
+one every debug gate already holds), so it is exact at the instant of the access and no fork racing alongside
+can defeat it. Cover must cover the union; `NOTRACE` on any mapper refuses control; `NODUMP` on any mapper
+seals `mem` and `maps` (and only those two — the rest of the image set is per-Proc state no sharer copies);
+`proc_seal` stamps every mapper; `rfork` publication inherits the taint (and, after the audit, ONLY the taint
+— the join already refuses an `RFMEM` child by reading the parent's bit at the access, so inheriting the seals
+would add nothing and would leave a one-way bit outliving the sharing after the child execs). `shared` is
+"references minus the zombies the traversal saw": a zombie keeps its reference until reaped but can be neither
+attached to nor stopped, so counting references alone refused a parent's elevation forever if it never waited.
+The traversal is iterative, because the join runs inside a walk that already recurses one frame per tree level
+and nothing bounds tree depth. Fast path: `ref_count == 1` skips it entirely.
+
+**The taint (C).** `PROC_FLAG_DEBUG_TAINTED`, stamped at the `attach` claim and at every mem/regs write,
+refused at `cap_redeem_grant_for_writer` and `proc_become_legate`. Monotone: it crosses fork because the
+child's memory *is* the debugged memory, and survives exec because the attacker chose what its victim execs.
+The redeem also refuses a SHARED image. Lock order: lifecycle **before** the grant table — the reverse edge
+already exists (`proc_seat_fail_locked` calls into devcap under the lifecycle lock), so the redeem was split
+into a `_locked` inner and a lock-taking wrapper.
+
+**The cost, stated for the operator.** A legitimately-debugged Proc can never elevate afterwards, and neither
+can anything it forks. Debug a shell once and `imperium` is refused for that shell's life. That is the
+promise working, not a defect — but it is a real behavioural change, and the escape is a fresh shell, never a
+flag, because a flag that cleared the taint would be the bypass.
+
+Tests: `devproc.image_cover_join`, `devproc.image_seal_join`, `proc.seal_stamps_the_image`,
+`proc.debug_taint_refuses_elevation`, `proc.debug_taint_crosses_fork`,
+`devcap.taint_refuses_hostowner_redeem`, `proc.elevation_ignores_a_zombie_sharer`, plus taint witnesses folded
+into the existing `devproc.debug_mem` and `devproc.debug_regs` legs. **Thirteen** sabotage legs, one mechanism
+each, every leg read by its named FAIL line and never by its count. -> `docs/DEBUG-FS-DESIGN.md` §3.3.
+
+The evidence was RE-TAKEN on the post-audit source, and the re-take found more than it confirmed. Three of the
+six original anchors had gone stale under the audit's own refactor. Counting MECHANISMS rather than legs found
+six with no leg and two with no test at all: the precursor gate on the redeem's HOSTOWNER arm (that arm ORs the
+capability onto the writer and never reaches the legate stamp, so one line in `devcap.c` is the only refusal
+there, and `test_devcap.c` had never mentioned the taint), and audit F3's zombie subtraction. Both now carry a
+regression and a leg. The joined-taint conjunct's leg reds NOTHING, as predicted in writing before the run: it
+is kept as measured defensive redundancy, not deleted. And the mem-write leg named its assertion and then WEDGED
+the boot 683 tests later, because the assertion sat before its test's cleanup and leaked a linked live Proc into
+a later `wait_pid` loop: deterministic 4 of 4, fixed by verdicting after the cleanup. A red is not finished until
+it is readable.
+
+Evidence, on the committed tree: kernel suite 1669/1669; 13 sabotage legs as above; restored ELF byte-identical to canonical (`069c2073702f05fcde74c4454226c25f`); `tools/ci-smp-gate.sh` PASS, 50 boots across default-smp1/4/8 + ubsan-smp4/8, 0 corruption; imperium.tla clean + 4 buggy and handles.tla 11 buggy cfgs re-run, every buggy cfg still tripping.
+
+Audit: holotype round 1, OPUS FALLBACK (a Fable spawn died on credit exhaustion, and a credit death goes
+straight to the fallback tier) = **0 P0 / 0 P1 / 4 P2 / 6 P3**, all fixed. P1+P2 = 4 and nothing structural,
+so NOT dirty; no round 2. The reviewer independently verified the core sound — all 8 gate sites converted and
+all inside `proc_for_each`, the lock-order edge real, the publication/stamp race closed in both interleavings,
+the taint's monotonicity exhaustive, `pthread_create` NOT address-space-sharing across Procs (so multithreaded
+programs do not regress). What it found was mostly my own prose overreaching the code: three of eleven findings
+were claims the diff asserted and the code did not support. The four P2s: the authoritative ARCH I-39
+*definition* cell still declared the window open while its own new addendum said closed (I had appended to the
+validation cell only); the join doubled kernel-stack depth on an EL0-reachable path; an unreaped vfork zombie
+refused its parent's elevation forever; and three mechanisms — the fork inherit and both write-taint stamps —
+had landed unwitnessed, so my "each shown RED" claim covered less than it said. A Fable diversity pass is owed
+when credits return; that is the operator's budget call. -> memory `audit_h3c_closed_list`.
+
 ## HN-1: haul errors reach the terminal; netd's dial verdict stops racing — 2026-09-24
 
 From the operator's Lantern-over-Haul run in Halcyon: "haul doesn't error". Four defects stacked, each hiding

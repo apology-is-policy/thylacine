@@ -739,6 +739,12 @@ void test_devproc_debug_cap_cover_attach(void);
 void test_devproc_dump_seal_predicate(void);
 void test_devproc_dump_seal_disclosure(void);
 void test_devproc_dump_seal_scope(void);
+void test_devproc_image_cover_join(void);
+void test_devproc_image_seal_join(void);
+void test_proc_seal_stamps_the_image(void);
+void test_proc_elevation_ignores_a_zombie_sharer(void);
+void test_proc_debug_taint_refuses_elevation(void);
+void test_proc_debug_taint_crosses_fork(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_stop_start_resume(void);
@@ -1164,6 +1170,7 @@ void test_devcap_grant_table_full(void);
 void test_devcap_use_gate_no_console(void);
 void test_devcap_use_no_pending(void);
 void test_devcap_use_basic(void);
+void test_devcap_taint_refuses_hostowner_redeem(void);
 void test_devcap_use_one_shot(void);
 void test_devcap_use_mismatched_cap(void);
 void test_devcap_exit_clears_grant(void);
@@ -2694,6 +2701,12 @@ struct test_case g_tests[] = {
     { "devproc.debug_cap_cover_attach",        test_devproc_debug_cap_cover_attach,        false, NULL },
     { "devproc.dump_seal_predicate",           test_devproc_dump_seal_predicate,           false, NULL },
     { "devproc.dump_seal_disclosure",          test_devproc_dump_seal_disclosure,          false, NULL },
+    { "devproc.image_cover_join",              test_devproc_image_cover_join,              false, NULL },
+    { "devproc.image_seal_join",               test_devproc_image_seal_join,               false, NULL },
+    { "proc.seal_stamps_the_image",            test_proc_seal_stamps_the_image,            false, NULL },
+    { "proc.elevation_ignores_a_zombie_sharer", test_proc_elevation_ignores_a_zombie_sharer, false, NULL },
+    { "proc.debug_taint_refuses_elevation",    test_proc_debug_taint_refuses_elevation,    false, NULL },
+    { "proc.debug_taint_crosses_fork",         test_proc_debug_taint_crosses_fork,         false, NULL },
     { "devproc.dump_seal_scope",               test_devproc_dump_seal_scope,               false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
@@ -3052,6 +3065,7 @@ struct test_case g_tests[] = {
     { "devcap.use_gate_no_console",    test_devcap_use_gate_no_console,    false, NULL },
     { "devcap.use_no_pending",         test_devcap_use_no_pending,         false, NULL },
     { "devcap.use_basic",              test_devcap_use_basic,              false, NULL },
+    { "devcap.taint_refuses_hostowner_redeem", test_devcap_taint_refuses_hostowner_redeem, false, NULL },
     { "devcap.use_one_shot",           test_devcap_use_one_shot,           false, NULL },
     { "devcap.use_mismatched_cap",     test_devcap_use_mismatched_cap,     false, NULL },
     { "devcap.exit_clears_grant",      test_devcap_exit_clears_grant,      false, NULL },

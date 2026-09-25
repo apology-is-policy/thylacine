@@ -284,8 +284,32 @@ thread may redeem concurrently, so a plain read-modify-write would clobber
 the sibling's OR and silently lose a capability. This was hardened as RW-5
 F1.
 
+The redeem now takes **two** locks, and the order is not a free choice: the
+lifecycle lock (`g_proc_table_lock`) is taken **before** the grant table. The
+reverse edge already exists and would close the cycle -- `proc_seat_fail_locked`
+calls `cap_cancel_imperium_pending` and `cap_release_seat_grant` from inside a
+lifecycle hold. Holding lifecycle across the whole redeem is also what makes the
+elevation check, the legate stamp and the caps OR one atom against a peer
+thread's `rfork`: publication takes the same lock, so a sharer either exists
+before the check or is published after the caps land, where the fork carve bounds
+the child instead.
+
 ## Invariants enforced
 
+- **A debugged or shared image never gains authority** (2026-09-24). Cover is
+  point-in-time and records nothing about a Proc that *was* driven, so an
+  equal-authority peer could attach to a Proc before its redeem, write its stack,
+  detach, and collect the elevation when the redeem returned through the injected
+  frame. `proc_elevation_allowed_locked` refuses both halves of that: an image
+  carrying `PROC_FLAG_DEBUG_TAINTED` anywhere in its join, and an image still
+  SHARED -- not because caps spread (they do not; the redeem ORs one Proc's word),
+  but because a mapper can DRIVE the elevated Proc's memory and so wield its
+  authority indirectly. Note which mechanism carries which guarantee: the JOIN,
+  not this refusal, is what makes the publication race safe, since a peer's
+  `rfork` takes the address-space reference outside any lock.
+  The taint is monotone, crosses fork and survives exec; each direction is
+  necessary, since the attacker chooses what its victim execs. See
+  [[sub-kernel-devproc]] for the join itself.
 - **I-2** (fork-grantable caps monotonically reduce; elevation-only stripped
   at every fork) — the `rfork` expression is the whole enforcement.
 - **I-25** (legate authority scope-bounded and fully revoked) — via the

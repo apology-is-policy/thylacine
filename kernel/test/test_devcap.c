@@ -308,6 +308,47 @@ void test_devcap_use_basic(void) {
     cap_reset_table();
 }
 
+// The precursor gate on the HOSTOWNER arm. The CLEARANCE arm reaches
+// proc_become_legate_locked, whose own check would refuse a tainted writer even
+// if this one were deleted; this arm ORs the capability onto the writer
+// directly, so the check at the top of cap_redeem_grant_locked is the only thing
+// standing between an image that has been under debug control and CAP_HOSTOWNER.
+// test_devcap_use_basic is this test one variable away -- same fixtures, same
+// grant, untainted writer, admitted -- so a blanket refusal cannot pass both.
+void test_devcap_taint_refuses_hostowner_redeem(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_HOSTOWNER);
+    struct Proc *redeemer = make_test_proc_with_caps_console(0);
+    TEST_ASSERT(grantor && redeemer, "alloc the grantor and the redeemer");
+
+    u64 target = proc_stripes(redeemer);
+    TEST_EXPECT_EQ(cap_register_grant_for_writer(grantor, CAP_HOSTOWNER, target),
+        (long)CAP_GRANT_WRITE_LEN, "grant ok");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "1 pending");
+
+    // Measured, not assumed: a fixture that arrived already tainted would
+    // satisfy the refusal below for the wrong reason.
+    bool premise = (__atomic_load_n(&redeemer->proc_flags, __ATOMIC_ACQUIRE)
+                    & PROC_FLAG_DEBUG_TAINTED) == 0;
+    __atomic_fetch_or(&redeemer->proc_flags, PROC_FLAG_DEBUG_TAINTED,
+                      __ATOMIC_RELAXED);
+
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_HOSTOWNER);
+
+    TEST_ASSERT(premise, "premise: the redeemer starts untainted");
+    TEST_EXPECT_EQ(rc, -1, "a debug-tainted writer is refused the HOSTOWNER redeem");
+    TEST_EXPECT_EQ(redeemer->caps & CAP_HOSTOWNER, (u64)0,
+        "the refused writer gained no CAP_HOSTOWNER");
+    // The refusal returns before the grant lookup, so the grant must survive: a
+    // gate that consumed it would let any tainted Proc deny the console holder
+    // its own elevation.
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "the refusal did not consume the grant");
+
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
 void test_devcap_use_one_shot(void) {
     cap_reset_table();
     struct Proc *grantor = make_test_proc_with_caps(CAP_GRANT_HOSTOWNER);

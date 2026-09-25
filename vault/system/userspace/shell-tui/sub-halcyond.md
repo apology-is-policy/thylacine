@@ -45,7 +45,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -172,6 +172,27 @@ untrusted-drop discipline is unchanged -- the OOB clamp lives in `grid.rs`,
 below the layout swap. `paint_grid` remains for the alt screen and for the
 repainting-TUI case; `main.rs`'s console renderer is untouched (it drives the
 `Transcript` run path, not this one).
+
+**A whole-screen erase pins the view (TC-1, HALCYON 14.13).** The tail is laid
+only through its content rows and the view is bottom-anchored, so after a clear a
+tile with history showed that history filling the view above a short tail: the
+operator's "lantern doesn't clear" (2026-09-24), and `clear` broken the same
+way. The producer now reports the erase as `Control::ScreenErased`, after the
+erased rows (an ordinary `ScrollOff`, so the history keeps them) and the blank
+(a `CellDiff`). `apply_control` sets the tile's `pinned` latch on it in NORMAL
+mode only -- an erase claimed on the alt screen is ignored, whatever the
+untrusted producer says -- and any `ScrollOff` clears it, because output has
+filled the screen; a `Mode` flip leaves it, so `clear`, then an editor, then back
+still shows the pinned screen. While pinned, and only when there is history,
+`render` puts a `pad_top` gap between the history and the tail and floors the
+content height at `viewh + total` INSIDE the lane loop, so the overflow decision
+sees it: the history ends at the view's top edge, the tail sits under its own top
+padding where a fresh tile's does, the history is reachable by scrolling up, and
+the floor is exact whatever the metrics or the padding. The gap rides through
+`natural`, the walk, the GRID_KEY mark span and `live_laid` (TC-1a audit F2: the
+first cut ended the history AT the tail, so its last `pad_top` pixels -- a whole
+line on Instrument -- showed above the slide). It is the
+only way the tile learns of a clear; blank cells are never read as one.
 
 **Beacon presentation rides the span serial, parser-free (H-4d).** A tile renders
 obj/em/hdr markup over its cell grid without a second Beacon parser: the producer
@@ -876,9 +897,36 @@ presents are a recorded optimization.
   is ADDRESSED by the SQPOLL ring (KT-1.5b-i): the kernel poll-thread demuxes
   the console's parked reply on a frame-boundary deadline independent of
   halcyond's loop branch. A targeted repro is owed.
+- **Currency (2026-09-25): this dossier was edited for TC-1 only.** The halcyond
+  changes between 2026-09-17 and 2026-09-22 (about 940 lines of `tile.rs`
+  alone) are not yet described here, beyond what earlier sections already say.
+  Dating this edit stopped `quaestor stale` from flagging the dossier, so the
+  debt is recorded here instead.
 
 ## Tests
 
+- **TC-1 (2026-09-25): 340 lib tests, all green** (`tools/test-rust.sh
+  halcyond`; the per-module figures below are older). TC-1 added ten in
+  `tile.rs`: `a_screen_erase_pins_the_live_tail_to_the_top_of_the_view` (the
+  tail at `pad_top` while pinned, the history reachable, back to the flow's
+  position after a ScrollOff), `the_pin_is_the_normal_screens_and_only_a_
+  scrolloff_releases_it` (the latch), and `a_clear_crosses_the_whole_seam_
+  keeping_the_erased_screen_as_history` (vt -> producer -> wire -> tile in the
+  operator's shape: the command line that started the deck survives the clear),
+  and `a_reset_rescues_a_tile_left_on_the_alt_screen` (RIS on the alt screen
+  returns the tile to Normal, moves the main screen's text to history, pins).
+  Each was seen to fail: a one-mechanism sabotage sweep of 22 legs redded
+  exactly the predicted tests, and the RIS fix's own legs red the rescue test.
+  The audit close added six: the Instrument pin (no history above the tail,
+  the lane reserved by the floor alone), a pinned tile without history laid as
+  a fresh one, a mark on the pinned tail, a pinned tail taller than the view,
+  typing after `clear` (ut's `\r ESC[J` redraw files nothing), and a restarted
+  row 0 that never glues; a 13-leg sweep redded each as predicted. Round 2
+  added four seam tests (vt -> producer -> wire -> tile): a reset on the alt
+  screen keeps a held line whole, a one-row tile keeps an autowrapped line
+  whole, a restart that changes nothing else still ends the line above, and a
+  clear (ED 2, ED 3, RIS) keeps the line row 0 continues; a 9-leg sweep redded
+  each as predicted. In-guest: `ls-halcyon-lantern` leg 5.
 - **Host: 301 `#[test]`, all green** (re-measured 2026-09-16: transcript 54,
   raster 42, layout 37, tile 30, chrome 27, input 12, rail 11, grid 11, tiles 10,
   status 10, help 10, menu 9, outline 7, picker 7, session_init 6, dialog 5,

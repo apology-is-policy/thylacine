@@ -65,6 +65,10 @@ pub enum Control {
     Exit(i32),
     /// A down-channel Resize was applied (winsize set on the pts).
     WinsizeAck,
+    /// The whole NORMAL screen was erased (`vt::Boundary::ScreenErased`).
+    /// The erased rows went first as ScrollOff and the blank as a CellDiff;
+    /// halcyond pins its view on this (HALCYON 14.13).
+    ScreenErased,
 }
 
 /// One ordered seam record, kaua-term -> halcyond (HALCYON 14.3). Cells are the
@@ -222,6 +226,25 @@ impl Producer {
                     self.flush(vt, out);
                     out.push(Record::Control(Control::Bell));
                 }
+                // The flush ships the erased rows (ScrollOff) and the blank
+                // (CellDiff) BEFORE the record, so no ScrollOff can land
+                // after it and release the pin it sets.
+                Boundary::ScreenErased => {
+                    self.flush(vt, out);
+                    out.push(Record::Control(Control::ScreenErased));
+                }
+                // Row 0 restarted: ship the held rows and the top flag now,
+                // or the next row to leave joins the same ScrollOff and the
+                // consumer glues it to a fragment it no longer continues.
+                // The consumer has held that fragment since its row left (to
+                // it, a held fragment is top=true) whatever flag last went
+                // out -- the true never does when the row left and row 0
+                // restarted in one chunk -- so the CellDiff that ends it goes
+                // out even when no cell or cursor changed.
+                Boundary::TopRestart => {
+                    self.last_top = true;
+                    self.flush(vt, out);
+                }
                 Boundary::Osc {
                     serial,
                     body: payload,
@@ -256,14 +279,23 @@ impl Producer {
                     self.reset_shadow(&vt.cells, vt.cx, vt.cy, vt.cursor_visible);
                     out.push(self.full_diff(vt.wrapped(), false));
                 }
-                Boundary::AltLeave(restored) => {
+                Boundary::AltLeave {
+                    cells,
+                    wrapped,
+                    cursor: (cx, cy),
+                    top_continues,
+                } => {
                     // The alt live grid is discarded; announce the mode, reset
                     // the shadow to the restored main and send it whole -- the
                     // consumer's grid still shows the alt screen's last frame.
+                    // The flags and cursor are the leave's own: the byte that
+                    // left can go on to change the vt's (a reset erases), and
+                    // a top flag read after that would end a fragment the
+                    // restored row 0 still continues.
                     self.flush_scroll(out);
                     out.push(Record::Mode(ScreenMode::Normal));
-                    self.reset_shadow(&restored, vt.cx, vt.cy, vt.cursor_visible);
-                    out.push(self.full_diff(vt.wrapped(), vt.top_continues()));
+                    self.reset_shadow(&cells, cx, cy, vt.cursor_visible);
+                    out.push(self.full_diff(&wrapped, top_continues));
                 }
             }
             // Ship whenever the held cells reach the accumulator bound,
@@ -815,6 +847,120 @@ mod tests {
         assert_eq!(cell_chars(&recs[0]), vec![(0, 0, 'A')]);
         assert_eq!(recs[1], Record::Control(Control::Bell));
         assert_eq!(cell_chars(&recs[2]), vec![(0, 1, 'B')]);
+    }
+
+    #[test]
+    fn a_restarted_top_row_ends_the_scroll_before_the_next_row_leaves() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        // "abcd" scrolls off continued by row 0; "XY" at home restarts row 0;
+        // the clear then moves the screen out.
+        p.feed(&mut vt, b"abcdefghij\x1b[HXY\x1b[2J", &mut out);
+        let kinds: Vec<&str> = out
+            .iter()
+            .map(|r| match r {
+                Record::ScrollOff { .. } => "scroll",
+                Record::CellDiff { .. } => "cells",
+                Record::Control(Control::ScreenErased) => "erased",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["scroll", "cells", "scroll", "cells", "erased"]);
+        match (&out[0], &out[1]) {
+            (Record::ScrollOff { rows, wrapped }, Record::CellDiff { top_continues, .. }) => {
+                assert_eq!((rows.len(), wrapped[0]), (1, true), "the fragment alone");
+                assert!(!top_continues, "then the flag that ends it");
+            }
+            other => panic!("expected ScrollOff then CellDiff, got {other:?}"),
+        }
+    }
+
+    /// A restart that leaves the screen, the cursor and the last flag sent
+    /// exactly as they were still ends the fragment the consumer holds.
+    #[test]
+    fn a_restart_that_changes_nothing_else_still_ends_the_fragment() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        // "abcd" leaves wrapped; ED 1 at home erases "e" and restarts row 0,
+        // back to the blank screen and home cursor the producer started with.
+        p.feed(&mut vt, b"abcde\r\n\x1b[H\x1b[1J", &mut out);
+        match (&out[0], out.get(1)) {
+            (Record::ScrollOff { rows, wrapped }, Some(Record::CellDiff { top_continues, .. })) => {
+                assert_eq!((rows.len(), wrapped[0]), (1, true), "the fragment");
+                assert!(!top_continues, "then the flag that ends it");
+            }
+            other => panic!("expected ScrollOff then CellDiff, got {other:?}"),
+        }
+    }
+
+    /// A reset on the alt screen sends the restored main with the top flag it
+    /// had at the leave, not the one the reset left behind.
+    #[test]
+    fn a_reset_on_the_alt_screen_sends_the_main_screen_with_its_own_top_flag() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        p.feed(&mut vt, b"abcdef\r\n\x1b[?1049h", &mut out);
+        out.clear();
+        p.feed(&mut vt, b"\x1bc", &mut out);
+        let at = out
+            .iter()
+            .position(|r| matches!(r, Record::Mode(ScreenMode::Normal)))
+            .expect("the reset leaves the alt screen");
+        match &out[at + 1] {
+            Record::CellDiff { top_continues, .. } => {
+                assert!(top_continues, "row 0 continued a fragment at the leave")
+            }
+            other => panic!("expected the restored main's CellDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_screen_erase_ships_the_erased_rows_then_the_blank_then_the_record() {
+        // The shell's output is on the tile; then lantern clears and draws a
+        // slide. The erased screen leaves as ONE ScrollOff, the blank lands
+        // as a CellDiff, the record follows both and the slide follows it --
+        // so no ScrollOff can arrive after the pin and release it.
+        let mut vt = Vt::new(6, 3);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        p.feed(&mut vt, b"ab\r\ncd", &mut out);
+        out.clear();
+        p.feed(&mut vt, b"\x1b[0m\x1b[H\x1b[2Jslide", &mut out);
+        assert_eq!(out.len(), 4, "{out:?}");
+        match &out[0] {
+            Record::ScrollOff { rows, wrapped } => {
+                let txt: Vec<String> = rows
+                    .iter()
+                    .map(|r| r.iter().map(|c| c.ch).collect::<String>().trim_end().into())
+                    .collect();
+                assert_eq!(txt, ["ab", "cd"]);
+                assert_eq!(wrapped, &[false, false]);
+            }
+            other => panic!("expected the erased rows first, got {other:?}"),
+        }
+        assert_eq!(
+            cell_chars(&out[1]),
+            vec![(0, 0, ' '), (0, 1, ' '), (1, 0, ' '), (1, 1, ' ')],
+            "the blank"
+        );
+        assert_eq!(out[2], Record::Control(Control::ScreenErased));
+        assert_eq!(
+            cell_chars(&out[3]),
+            vec![
+                (0, 0, 's'),
+                (0, 1, 'l'),
+                (0, 2, 'i'),
+                (0, 3, 'd'),
+                (0, 4, 'e')
+            ]
+        );
     }
 
     #[test]

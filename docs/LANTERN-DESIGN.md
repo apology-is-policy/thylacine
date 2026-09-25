@@ -68,6 +68,32 @@ measured properties make it exactly right:
 So the interactive-rich mode the operator asked for **required no halcyond change
 at all.** It was already there; what was missing was a program that used it.
 
+**AMENDED 2026-09-24 — that conclusion is withdrawn.** The three properties are
+true, and they establish exactly one thing: slide two carries no residue of slide
+one. They say nothing about history from BEFORE the deck. In a tile with
+scrollback, the proportional composition bottom-anchors the live tail (HALCYON
+14.13, PL-4), so the slide landed at the BOTTOM of the view with the shell's
+earlier output filling the space above it. That was the operator's first
+Lantern-over-Haul run: "it doesn't clear the console before it starts". Every
+capture in this arc was taken on a fresh tile, which has no history, so none of
+them could show it; the measurement answered the question it was given, and the
+question was too narrow.
+
+The fix is in halcyond's VIEW, not in the presenter. A whole-screen erase now
+reaches the tile as an explicit record, and the view pins the live tail to its
+top until output next scrolls (HALCYON 14.13, AMENDED 2026-09-24).
+`lantern::CLEAR` is unchanged, and the alt screen stays wrong for the reason
+§3.1 gives. So the rich mode did require a halcyond change: one, in the view, and
+nothing in the presenter.
+
+**AMENDED 2026-09-25 — property 1 no longer holds, by the operator's vote.** A
+clear now moves the erased screen into the tile's history before blanking it
+(HALCYON 14.13: a clear keeps the screen it erases, and no escape deletes the history), so the scrollback
+DOES accumulate the slides already shown, in the order they were shown. What
+property 1 was really protecting survives: the pin puts each slide at the top of
+a clean view, so no slide is ever seen beside its predecessor. Scrolling up after
+a talk shows the talk.
+
 ### 3.1 Never the alternate screen
 
 `ScreenMode::AltScreen` makes `Tile::render` paint the raw mono grid and return

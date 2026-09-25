@@ -1879,8 +1879,20 @@ void test_devproc_debug_mem(void) {
     TEST_ASSERT(match, "mem read returns the RW page bytes");
 
     for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x77 + i);
+    bool mem_untainted_before =
+        (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) == 0;
     TEST_EXPECT_EQ(devproc.write(mem, wbuf, 64, (s64)RW_VA), 64L, "mem write of a stopped target");
     TEST_ASSERT(rw_kva[0] == 0x77, "mem write landed in the target page");
+    // The mem path needs authority and a stopped target but NOT the debug-owner
+    // slot, so a caller that never attached reaches it -- which is why it carries
+    // its own taint stamp rather than leaning on the attach's. SAMPLED here and
+    // verdicted after the cleanup below, with this test's other late verdicts: an
+    // assertion placed between here and proc_free returns on failure with a
+    // LINKED, ALIVE, spoor-open Proc and two pages still held, and the next test
+    // to call wait_pid then wedges the entire boot instead of reporting this one
+    // red. Measured -- that is exactly what the mem-stamp sabotage leg did.
+    bool mem_tainted_after =
+        (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) != 0;
     TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)GAP_VA), 0L, "mem read of a hole returns 0");
 
     // Non-owner (a target owned by a different principal; caller has no debug
@@ -1916,6 +1928,8 @@ void test_devproc_debug_mem(void) {
     TEST_EXPECT_EQ(nd_read, (long)-1, "the dump seal refuses a mem READ");
     TEST_EXPECT_EQ(nd_write, 64L, "the dump seal does not refuse a mem WRITE -- that is control, NOTRACE's");
     TEST_ASSERT(nd_landed == 0x33, "the mem write to the NODUMP target landed");
+    TEST_ASSERT(mem_untainted_before, "premise: the mem target was untainted before the write");
+    TEST_ASSERT(mem_tainted_after, "a mem WRITE stamps the debug taint on the target");
 }
 
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a
@@ -1956,6 +1970,11 @@ static void debug_regs_inline_legs(struct Proc *tgt, struct Thread *th,
     TEST_EXPECT_EQ(tf->elr, 0xF00D0000ull, "regs write applied pc (ELR_EL1)");
     TEST_EXPECT_EQ(tf->spsr, 0x60000000ull,
                    "regs write did NOT change SPSR (the EL1-mode pstate was ignored -- privilege guard)");
+    // Control of a target's REGISTERS is control of its image -- point its pc at
+    // a store and it writes for you -- so a regs write taints exactly as a mem
+    // write does.
+    TEST_ASSERT(__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED,
+                "a regs WRITE stamps the debug taint on the target");
     spoor_clunk(regs);
 
     // --- fpregs read + write (all fields; no privilege bits) ---
@@ -2901,4 +2920,413 @@ void test_devproc_read_imperium_format(void) {
                 "kproc imperium line is the not-a-legate line");
 
     spoor_clunk(imp);
+}
+
+// =============================================================================
+// The image join (H3): a guard on a Proc's IMAGE is evaluated over every Proc
+// that MAPS that image, not over the named Proc alone.
+// =============================================================================
+//
+// THE DEFECT, and why the ordinary cover test above could not see it: the
+// capability-cover rule, both seal bits and the debug taint are per-PROC facts,
+// while the image they guard lives in the AddrSpace, which rfork(RFPROC|RFMEM)
+// SHARES. An elevated parent's vfork child is born with the elevation-only caps
+// carved off (I-2), so it is a LOWER-authority Proc holding the SAME bytes --
+// and a peer that merely matches the child covers it, attaches, and writes the
+// parent's live image. musl's posix_spawn is exactly this shape, on every call.
+//
+// The fixture is that shape: E holds CAP_KILL, C shares E's address space with
+// no caps at all, and B is C's equal. RED before the fix -- B was admitted to C,
+// because C's own caps word is empty.
+void test_devproc_image_cover_join(void) {
+    struct Proc *e    = proc_alloc();
+    struct Proc *c    = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *solo = proc_alloc();
+    struct Proc *b    = proc_alloc();
+    bool allocated = e && c && solo && b;
+    bool shared_premise = false, solo_premise = false;
+    bool peer_into_shared = true, covering_peer = false, peer_into_solo = false;
+    bool peer_into_e = true;
+
+    if (allocated) {
+        e->principal_id = c->principal_id = solo->principal_id = 0xA11CEu;
+        b->principal_id = 0xA11CEu;                       // the OWNER axis throughout
+        e->state = c->state = solo->state = PROC_STATE_ALIVE;
+        e->caps    = CAP_KILL;                            // the elevated parent
+        c->caps    = 0;                                   // the carve stripped the child
+        solo->caps = 0;                                   // same caps, no sharing
+        proc_test_link(e);
+        proc_test_link(c);
+        proc_test_link(solo);
+
+        // The premise, asserted rather than assumed: a fixture that failed to
+        // share would satisfy every refusal below for the wrong reason.
+        shared_premise = (e->as != NULL && c->as == e->as &&
+                          addrspace_ref_count(e->as) == 2);
+        solo_premise   = (solo->as != NULL && solo->as != e->as &&
+                          addrspace_ref_count(solo->as) == 1);
+
+        b->caps = 0;
+        peer_into_shared = devproc_debug_authorized(b, c);   // THE REGRESSION
+        peer_into_e      = devproc_debug_authorized(b, e);   // already refused pre-fix
+        peer_into_solo   = devproc_debug_authorized(b, solo);
+        b->caps = CAP_KILL;
+        covering_peer    = devproc_debug_authorized(b, c);
+
+        proc_test_unlink(solo);
+        proc_test_unlink(c);
+        proc_test_unlink(e);
+    }
+    if (c)    { c->state    = PROC_STATE_ZOMBIE; proc_free(c); }
+    if (e)    { e->state    = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (solo) { solo->state = PROC_STATE_ZOMBIE; proc_free(solo); }
+    if (b)    { b->state    = PROC_STATE_ZOMBIE; proc_free(b); }
+
+    TEST_ASSERT(allocated, "alloc the sharing pair, the solo control and the peer");
+    TEST_ASSERT(shared_premise, "premise: E and C really share one address space (ref 2)");
+    TEST_ASSERT(solo_premise, "premise: the solo control shares with nobody (ref 1)");
+    TEST_ASSERT(!peer_into_shared,
+                "the join: a peer that does not cover the SHARER is refused the shared image");
+    TEST_ASSERT(!peer_into_e,
+                "control: the same peer was already refused E itself, on E's own caps");
+    // The two controls that make the refusal mean something: the instrument
+    // admits when the caller DOES cover the join, and an identical Proc that
+    // merely shares with nobody is still debuggable. Without the second, a
+    // blanket "refuse everything" would pass this test.
+    TEST_ASSERT(covering_peer,
+                "control: a peer that covers the whole image IS admitted");
+    TEST_ASSERT(peer_into_solo,
+                "control: an unshared Proc with the same empty caps is still debuggable");
+}
+
+// The seals over the image. Two mechanisms, tested apart because each must be
+// able to fail alone:
+//   - the JOIN reads another mapper's bit at the gate (this test);
+//   - the STAMP puts the bit on every mapper when a Proc seals (the next).
+// Here the sharer's bit is written DIRECTLY rather than through proc_seal,
+// precisely so the stamp cannot supply the answer: with the stamp doing the work
+// the target would carry its own bit and the old per-Proc read would pass too.
+void test_devproc_image_seal_join(void) {
+    struct Proc *e = proc_alloc();
+    struct Proc *c = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *b = proc_alloc();
+    bool allocated = e && c && b;
+    bool premise = false, before_seal = false, after_notrace = true;
+    long maps_before = -2, maps_after = -2, environ_after = -2;
+    char buf[512];
+
+    if (allocated) {
+        struct Thread *th = current_thread();
+        e->principal_id = c->principal_id = th && th->proc ? th->proc->principal_id
+                                                           : 0xA11CEu;
+        b->principal_id = e->principal_id;
+        e->state = c->state = PROC_STATE_ALIVE;
+        e->caps = c->caps = 0;
+        b->caps = 0;
+        proc_test_link(e);
+        proc_test_link(c);
+        premise = (e->as != NULL && c->as == e->as &&
+                   addrspace_ref_count(e->as) == 2 &&
+                   (c->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0);
+
+        before_seal = devproc_debug_authorized(b, c);
+
+        // NODUMP on the OTHER mapper: reading C's maps hands out E's sealed
+        // layout, so the read must refuse. environ is the one-variable control --
+        // per-Proc state that no sharer holds a copy of, so it must NOT be
+        // sealed by a sibling's bit.
+        struct Spoor *m1 = open_pidfile_for(c->pid, "maps", 0);
+        maps_before = m1 ? devproc.read(m1, buf, (long)sizeof(buf), 0) : -2;
+        __atomic_fetch_or(&e->proc_flags, PROC_FLAG_NODUMP, __ATOMIC_RELAXED);
+        maps_after = m1 ? devproc.read(m1, buf, (long)sizeof(buf), 0) : -2;
+        if (m1) spoor_clunk(m1);
+        struct Spoor *en = open_pidfile_for(c->pid, "environ", 0);
+        environ_after = en ? devproc.read(en, buf, (long)sizeof(buf), 0) : -2;
+        if (en) spoor_clunk(en);
+
+        // NOTRACE on the other mapper refuses CONTROL of this one.
+        __atomic_fetch_or(&e->proc_flags, PROC_FLAG_NOTRACE, __ATOMIC_RELAXED);
+        after_notrace = devproc_debug_authorized(b, c);
+
+        proc_test_unlink(c);
+        proc_test_unlink(e);
+    }
+    if (c) { c->state = PROC_STATE_ZOMBIE; proc_free(c); }
+    if (e) { e->state = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (b) { b->state = PROC_STATE_ZOMBIE; proc_free(b); }
+
+    TEST_ASSERT(allocated, "alloc the sharing pair + the peer");
+    TEST_ASSERT(premise, "premise: the pair shares one space and C carries neither seal bit");
+    TEST_ASSERT(before_seal, "control: unsealed, the peer is admitted to C");
+    TEST_ASSERT(maps_before >= 0, "control: C's maps reads while the image is unsealed");
+    TEST_EXPECT_EQ(maps_after, (long)-1,
+                   "the join: NODUMP on a SHARER refuses C's maps (it is E's layout)");
+    TEST_ASSERT(environ_after >= 0,
+                "control: environ is per-Proc, so a sharer's NODUMP does not seal it");
+    TEST_ASSERT(!after_notrace,
+                "the join: NOTRACE on a SHARER refuses control of C");
+}
+
+// The stamp: sealing a Proc seals every Proc that maps its image. Through
+// proc_seal, the production writer, so a regression in the real path is what
+// this catches. RED before the fix -- the bit landed on the sealer alone, and
+// its own vfork child stayed an unsealed door to the same bytes.
+void test_proc_seal_stamps_the_image(void) {
+    struct Proc *e    = proc_alloc();
+    struct Proc *c    = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *solo = proc_alloc();
+    bool allocated = e && c && solo;
+    bool premise = false;
+    u32 c_flags = 0, e_flags = 0, solo_flags = 0;
+
+    if (allocated) {
+        e->state = c->state = solo->state = PROC_STATE_ALIVE;
+        proc_test_link(e);
+        proc_test_link(c);
+        proc_test_link(solo);
+        premise = (e->as != NULL && c->as == e->as &&
+                   addrspace_ref_count(e->as) == 2 &&
+                   (c->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0);
+
+        proc_seal(e, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE);
+
+        e_flags    = __atomic_load_n(&e->proc_flags, __ATOMIC_ACQUIRE);
+        c_flags    = __atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE);
+        solo_flags = __atomic_load_n(&solo->proc_flags, __ATOMIC_ACQUIRE);
+
+        proc_test_unlink(solo);
+        proc_test_unlink(c);
+        proc_test_unlink(e);
+    }
+    if (c)    { c->state    = PROC_STATE_ZOMBIE; proc_free(c); }
+    if (e)    { e->state    = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (solo) { solo->state = PROC_STATE_ZOMBIE; proc_free(solo); }
+
+    TEST_ASSERT(allocated, "alloc the sharing pair + the unrelated control");
+    TEST_ASSERT(premise, "premise: the pair shares one space and C starts unsealed");
+    TEST_ASSERT((e_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE))
+                        == (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE),
+                "control: the sealer itself carries both bits");
+    TEST_ASSERT((c_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE))
+                        == (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE),
+                "the stamp: sealing E seals C, which maps the same image");
+    TEST_ASSERT((solo_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0,
+                "control: an unrelated Proc is NOT swept up by the stamp");
+}
+
+// Audit F3's regression. A ZOMBIE mapper must NOT refuse its parent's elevation.
+// The address-space reference outlives the Proc until the reap, so counting
+// references alone is a FALSE POSITIVE, not a hardening: a non-ALIVE Proc can be
+// neither attached to nor stopped, so it is no door to the image. A vfork child
+// that _exits instead of exec'ing puts its parent in exactly that state, and a
+// parent that never waits would never elevate again.
+// The ALIVE pair is the control ONE VARIABLE away -- same two mappers, same
+// reference count of 2, differing only in the sharer's state -- so a build that
+// simply stopped refusing anything cannot pass both legs.
+void test_proc_elevation_ignores_a_zombie_sharer(void) {
+    struct Proc *e    = proc_alloc();
+    struct Proc *dead = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *live = proc_alloc();
+    struct Proc *sib  = live ? proc_alloc_in(live->as, live->page_budget) : NULL;
+    bool allocated = e && dead && live && sib;
+    bool premise = false;
+    int zombie_rc = 1, alive_rc = 0;
+
+    if (allocated) {
+        struct Thread *th = current_thread();
+        u32 me = th && th->proc ? th->proc->principal_id : 0xA11CEu;
+        e->principal_id = dead->principal_id = me;
+        live->principal_id = sib->principal_id = me;
+        e->caps = dead->caps = live->caps = sib->caps = 0;
+        e->state = live->state = sib->state = PROC_STATE_ALIVE;
+        // LINKED first: the subtraction counts only the zombies the traversal
+        // SAW, so an unlinked zombie would fall in the difference and keep
+        // `shared` true -- this test would then pass for the wrong reason.
+        proc_test_link(e);
+        proc_test_link(dead);
+        proc_test_link(live);
+        proc_test_link(sib);
+        dead->state = PROC_STATE_ZOMBIE;
+
+        premise = (e->as != NULL && dead->as == e->as &&
+                   addrspace_ref_count(e->as) == 2 &&
+                   live->as != NULL && sib->as == live->as &&
+                   addrspace_ref_count(live->as) == 2 &&
+                   dead->state == PROC_STATE_ZOMBIE &&
+                   sib->state == PROC_STATE_ALIVE &&
+                   (e->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                   (live->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0);
+
+        zombie_rc = proc_become_legate(e, CAP_KILL, 1u, 0u, 0u);
+        alive_rc  = proc_become_legate(live, CAP_KILL, 1u, 0u, 0u);
+
+        proc_test_unlink(sib);
+        proc_test_unlink(live);
+        proc_test_unlink(dead);
+        proc_test_unlink(e);
+    }
+    if (sib)  { sib->state  = PROC_STATE_ZOMBIE; proc_free(sib); }
+    if (live) { live->state = PROC_STATE_ZOMBIE; proc_free(live); }
+    if (dead) { proc_free(dead); }                 // already a ZOMBIE above
+    if (e)    { e->state    = PROC_STATE_ZOMBIE; proc_free(e); }
+
+    TEST_ASSERT(allocated, "alloc the zombie-sharer and live-sharer pairs");
+    TEST_ASSERT(premise,
+                "premise: both pairs really share one image at ref 2, one sharer "
+                "dead and one alive, neither parent tainted");
+    TEST_EXPECT_EQ(zombie_rc, 0,
+        "a ZOMBIE sharer does not refuse its parent's elevation");
+    TEST_ASSERT(alive_rc != 0, "control: an ALIVE sharer still refuses it");
+}
+
+// The debug taint (C): a Proc whose image has been under debug CONTROL never
+// gains authority again -- Linux's LSM_UNSAFE_PTRACE half, which the cover rule
+// alone does not supply. Driven through the REAL attach write, so the production
+// stamp site is what is under test, and refused at the REAL legate stamp.
+//
+// The attack it closes: a same-principal peer of EQUAL authority is admitted by
+// cover, attaches to a Proc before that Proc redeems a clearance, writes its
+// stack, detaches -- and the redeem then returns through the peer's address
+// holding the elevation. The cover rule is point-in-time and sees none of it.
+void test_proc_debug_taint_refuses_elevation(void) {
+    struct Proc *clean   = proc_alloc();
+    struct Proc *debugged = proc_alloc();
+    struct Proc *e       = proc_alloc();
+    struct Proc *shared  = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    bool allocated = clean && debugged && e && shared;
+    bool premise = false;
+    long attached = -1, detached = -1;
+    int  clean_rc = 1, debugged_rc = 0, shared_rc = 0;
+    u32  tainted_flags = 0;
+    caps_t debugged_caps = CAP_ALL;
+
+    if (allocated) {
+        struct Thread *th = current_thread();
+        u32 me = th && th->proc ? th->proc->principal_id : 0xA11CEu;
+        clean->principal_id = debugged->principal_id = me;
+        e->principal_id = shared->principal_id = me;
+        clean->state = debugged->state = PROC_STATE_ALIVE;
+        e->state = shared->state = PROC_STATE_ALIVE;
+        clean->caps = debugged->caps = e->caps = shared->caps = 0;
+        proc_test_link(clean);
+        proc_test_link(debugged);
+        proc_test_link(e);
+        proc_test_link(shared);
+        // BOTH fixtures' premises, not just the first: without the second, the
+        // sharing assertion below is equally satisfied by a spuriously-tainted
+        // `shared` -- two causes, one reading.
+        premise = ((debugged->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                   (shared->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                   (e->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                   e->as != NULL && shared->as == e->as &&
+                   addrspace_ref_count(e->as) == 2);
+
+        // The control FIRST: an untouched Proc elevates normally, so the
+        // refusals below are the taint and the sharing rather than a legate
+        // stamp that simply stopped working.
+        clean_rc = proc_become_legate(clean, CAP_KILL, 1u, 0u, 0u);
+
+        struct Spoor *ctl = open_ctl_for_pid(debugged->pid);
+        if (ctl) {
+            attached = devproc.write(ctl, "attach", 6, 0);
+            detached = devproc.write(ctl, "detach", 6, 0);
+            spoor_clunk(ctl);
+        }
+        tainted_flags = __atomic_load_n(&debugged->proc_flags, __ATOMIC_ACQUIRE);
+        debugged_rc   = proc_become_legate(debugged, CAP_KILL, 1u, 0u, 0u);
+        debugged_caps = __atomic_load_n(&debugged->caps, __ATOMIC_ACQUIRE);
+
+        // Never debugged, but its image is still shared: a peer holding the
+        // other door must not be handed this Proc's new authority.
+        shared_rc = proc_become_legate(shared, CAP_KILL, 1u, 0u, 0u);
+
+        proc_test_unlink(shared);
+        proc_test_unlink(e);
+        proc_test_unlink(debugged);
+        proc_test_unlink(clean);
+    }
+    if (shared)   { shared->state   = PROC_STATE_ZOMBIE; proc_free(shared); }
+    if (e)        { e->state        = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (debugged) { debugged->state = PROC_STATE_ZOMBIE; proc_free(debugged); }
+    if (clean)    { clean->state    = PROC_STATE_ZOMBIE; proc_free(clean); }
+
+    TEST_ASSERT(allocated, "alloc the clean, debugged and sharing fixtures");
+    TEST_ASSERT(premise, "premise: the target starts untainted and the pair really shares");
+    TEST_EXPECT_EQ(clean_rc, 0, "control: an untouched Proc still becomes a legate");
+    TEST_EXPECT_EQ(attached, (long)6, "premise: the real attach write succeeded");
+    TEST_EXPECT_EQ(detached, (long)6, "premise: the real detach write succeeded");
+    TEST_ASSERT(tainted_flags & PROC_FLAG_DEBUG_TAINTED,
+                "the attach stamped the taint on the target");
+    TEST_ASSERT(debugged_rc != 0,
+                "the taint: a Proc that has been attached does not become a legate");
+    TEST_EXPECT_EQ((long)debugged_caps, (long)0,
+                   "the refused redeem conferred no caps at all");
+    TEST_ASSERT(shared_rc != 0,
+                "sharing: a Proc whose image another Proc maps does not become a legate");
+}
+
+// The taint crosses FORK -- the one arm of the taint the image join can never
+// cover, and therefore the one that has to be inherited rather than derived.
+//
+// Once a child execs it has a fresh address space and shares nothing, so the
+// join has no mapper left to read and only a copied bit still carries the
+// history. Without it the attack is trivial: a peer drives the shell it has
+// tainted into forking a CLEAN child, and that child elevates instead.
+//
+// Driven through the REAL rfork, on the real publication path, because the
+// inherit lives inside `rfork_internal`'s publication lock hold and a helper
+// would pin nothing. The fixture is kproc -- the Proc a kernel test runs on --
+// so the bit is RESTORED before any assertion runs: TEST_ASSERT returns on
+// failure, and a taint left on kproc would be inherited by every later test's
+// children and surface as an unrelated failure somewhere else (the reap-before-
+// asserting lesson from test_addrspace's rfork leg, applied to a fixture that
+// is shared rather than private).
+static volatile u32 g_fork_inherit_child_flags;
+static void fork_inherit_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    g_fork_inherit_child_flags =
+        (t && t->proc) ? __atomic_load_n(&t->proc->proc_flags, __ATOMIC_ACQUIRE) : 0u;
+    exits("ok");
+}
+
+void test_proc_debug_taint_crosses_fork(void) {
+    struct Proc *me = kproc();
+    TEST_ASSERT(me != NULL, "kproc()");
+    bool premise = (__atomic_load_n(&me->proc_flags, __ATOMIC_ACQUIRE)
+                    & PROC_FLAG_DEBUG_TAINTED) == 0;
+
+    // Leg 1: a tainted parent's child carries the bit.
+    __atomic_fetch_or(&me->proc_flags, PROC_FLAG_DEBUG_TAINTED, __ATOMIC_RELAXED);
+    g_fork_inherit_child_flags = 0xFFFFFFFFu;            // a value neither arm produces
+    int pid = rfork(RFPROC, fork_inherit_thunk, NULL);
+    int st = -1;
+    int reaped = (pid > 0) ? wait_pid_for(pid, 0, &st) : -1;
+    u32 tainted_child = g_fork_inherit_child_flags;
+
+    // RESTORE before the control leg, and before every assertion.
+    __atomic_and_fetch(&me->proc_flags, ~PROC_FLAG_DEBUG_TAINTED, __ATOMIC_RELAXED);
+
+    // Leg 2, the control one variable away: with the parent clean again, the
+    // child must come out clean. Without it, a child born tainted for any other
+    // reason would satisfy leg 1.
+    g_fork_inherit_child_flags = 0xFFFFFFFFu;
+    int cpid = rfork(RFPROC, fork_inherit_thunk, NULL);
+    int cst = -1;
+    int creaped = (cpid > 0) ? wait_pid_for(cpid, 0, &cst) : -1;
+    u32 clean_child = g_fork_inherit_child_flags;
+
+    bool restored = (__atomic_load_n(&me->proc_flags, __ATOMIC_ACQUIRE)
+                     & PROC_FLAG_DEBUG_TAINTED) == 0;
+
+    TEST_ASSERT(premise, "premise: kproc starts untainted");
+    TEST_ASSERT(pid > 0 && reaped == pid, "the tainted-parent fork spawned and reaped");
+    TEST_ASSERT(cpid > 0 && creaped == cpid, "the clean-parent fork spawned and reaped");
+    TEST_ASSERT(tainted_child != 0xFFFFFFFFu, "the child recorded its own flags");
+    TEST_ASSERT(tainted_child & PROC_FLAG_DEBUG_TAINTED,
+                "the taint crosses fork: a tainted parent's child is born tainted");
+    TEST_ASSERT(clean_child != 0xFFFFFFFFu, "the control child recorded its own flags");
+    TEST_ASSERT((clean_child & PROC_FLAG_DEBUG_TAINTED) == 0,
+                "control: a clean parent's child is born clean");
+    TEST_ASSERT(restored, "the fixture was restored -- kproc is untainted again");
 }
