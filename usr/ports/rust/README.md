@@ -173,8 +173,11 @@ rust-std-hello` -> **`PASS: rust-std-hello`** (HVF, ~32 s): login on `ut`, then
 panic (the unwinder + libunwind). File-read + TCP are informational.
 
 - **The binary**: a static `ET_EXEC` aarch64, 499792 B, no PT_DYNAMIC, W^X-clean
-  (the fork toolchain drops `-static-pie` -> ET_EXEC, the pouch-hello shape the
-  kernel loader accepts). Built by `build_rust_progs` (below).
+  (the pouch-hello shape the kernel loader accepts). At R-1 the fork toolchain
+  silently dropped the `-static-pie` rustc asked for; since B-1d the driver
+  refuses `-static-pie` (ARCH 6.5, decided 2026-09-24: PIE only where the loader
+  places code), so the target sets `static-position-independent-executables`
+  false and rustc asks for the `-static` link it was getting anyway. Built by `build_rust_progs` (below).
 - **std arms beyond R-0** (both in `patches/rust-src-thylacine.patch`, now 13
   files): `sys/io/error/unix.rs` errno `__errno_location` (surfaced at LINK);
   and `sys/fd/unix.rs` -- thylacine JOINS the no-`writev`/`readv` cohort
