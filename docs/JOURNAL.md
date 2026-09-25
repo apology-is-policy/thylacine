@@ -22,6 +22,30 @@ needed the operator.
 
 
 ---
+## 2026-09-25, midday (main, Opus 5.5, effort max) -- the aux-3 merge of 1cc9a300: H3 + C and TC-1a, and a row both sides had carried twice for sixteen days
+
+**What came over.** Six aux-3 commits since the last merge (fc234a44, which brought 0a668bb8): H3 + C (0cb5b244), the image join and the debug taint; TC-1a and its scripture (1cc9a300, 4f2b7797); the Rust target's static-PIE fix (67d30cb1) and two prompt fixes (07cd1578, 35572899), which main already carried byte for byte (8a78602a, 8011d7f8).
+
+**The duplicate KT-1 row.** Main's docs/AUDIT-TRIGGERS.md had the KT-1 row twice around the arm-6 row; I found it at the checkpoint and enqueued it. Walking the file's history, the second copy arrived with eb26e8b8, an aux-3 merge of main on 2026-09-09, so every tree since has carried it. The first copy is the second without its CHROME-CONTENT ROUND addendum: compared cell by cell, the only difference is one insertion. TC-1a had already removed it on the aux side. The merge takes the aux's single row and applies main's one edit to it (B-1c 96b51346's "until B-1c"), and the coverage view drops to 175 declared surfaces.
+
+**Checked where no marker could show.** The last aux-3 merge hid two compile errors behind clean auto-merges, so each side's change was checked against the merge, not taken on trust:
+- For every file both sides changed, the lines the merge adds to main equal the aux's diff from the base, and the lines it adds to the aux equal main's (13 files; the skill files and the Rust target are identical on both sides; CLAUDE.md differs by one line per side).
+- H3's join rests on `->as` changing only at allocation, at teardown and in proc_exec_replace under g_proc_table_lock. Main's 25 commits since the base add no other write and no other way to share an address space, and the `tables:`/`file:` status lines B-1a' added read p->as under the same lock.
+- The aux's 2890 added lines carry none of the vocabulary B-1d made false.
+
+**Verified on the merge tree (645f5b38), the Mac held throughout.**
+- Build: `tools/build.sh kernel` (the default image); kernel ELF sha256 dea6a8f16d30c7b9...
+- `tools/test.sh`: 1727/1727 PASS (main's 1720 and the aux's 7, counted from the test table), 0 skipped, 0 EXTINCTION.
+- `tools/test-rust.sh` (host): 28 crates, 1984 tests, 0 failing; libutopia's 69 stranded tests and one quarantined test are the known posture.
+- TC-1a's device gate, `ls-halcyon-lantern`, on a `--config ci` image baked `THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument` from this tree in its own worktree. build/ was cloned before the checkout, so every source was newer than every cloned artifact. Legs 1-5 PASS on the first attempt; leg 5 measures 0 ink below slide one after 150 lines of history, equal to its fresh-tile control.
+- The full `tools/ci-smp-gate.sh` matrix on the merge commit 8c4cb7c8 (H3 + C is invariant-bearing), run before main moved: 50/50 PASS across the five rows (default-smp1/4/8, ubsan-smp4/8; N=10 each): 0 corruption, 0 external-kill, 0 inject-miss, 0 timing, 0 other (mean boot: default-smp1 ~75 s, default-smp4 ~56 s, default-smp8 ~58 s, ubsan-smp4 ~58 s, ubsan-smp8 ~61 s; 12:29:19Z to 13:23:10Z).
+- Main moved to 8c4cb7c8 by fast-forward, confirmed on both mirrors by `git ls-remote`.
+
+**Housekeeping.** Five `tail -f` processes left behind by B-1c's monitors were still running; killed by PID.
+
+**Decisions.** None were new; the operator's votes of the morning stand (B-1d-v implements them next).
+
+---
 ## 2026-09-24 night to 2026-09-25 midday (main, Opus 5.5, effort max) -- B-1d landed: the bin/ move, what each boot could not see past its first failure, and a gate every WIP commit had deferred
 
 **What building the loader taught, before the device ran it.**
