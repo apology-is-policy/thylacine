@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs" }
 kaua-term = { path = "../kaua-term" }
+ptyhold = { path = "../lib/ptyhold" }

@@ -126,3 +126,9 @@ when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
 `prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
 every process. `/proc/<pid>/sched` is readable by the process's owner and by
 holders of `CAP_HOSTOWNER`.
+
+Halcyon seals each terminal host when starting a tile. The host parses terminal
+output and owns the terminal's master connection. Its seal prevents debugger
+attachment and memory extraction, including by a process with administrative
+capabilities. Programs started inside the terminal do not inherit that seal;
+their usual debugging permissions still apply. Process listings remain available.

@@ -86,6 +86,7 @@ pub mod notes;
 pub mod poll;
 pub mod pty_interaction;
 pub use pty_interaction::*;
+pub mod pty_observer;
 pub mod process;
 pub mod rand;
 pub mod sched;

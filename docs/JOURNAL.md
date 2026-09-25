@@ -31262,3 +31262,23 @@ operation. Source review also removed a fixture's duplicate handle-table allocat
 Mac and Pi work used explicit Yip leases and isolated artifacts; both were released.
 This is stronger kernel evidence, not a delivered clipboard workflow or a substitute
 for the repeated SMP matrix. The four authority/settings drafts remain unchanged.
+
+### 2026-09-25: native observer client and production proof
+
+The expanded kernel checkpoint 5ad9ad27 completed all 50 repeated boots:
+default smp1/4/8 and UBSan smp4/8, ten each, every exception bucket zero.
+Only after those fixed images completed did I rebuild with the typed Rust
+observer client and the explicit Halcyon terminal-host spawn seal. The full
+production gate passed; llvm-nm confirmed the test fixtures were absent.
+The new native probe passed real EL0 binding/state/watch/retirement calls,
+checked that ordinary child processes remain unsealed, then returned to a
+shell that successfully ran a pipeline. Positive observer ACK/CHECK and the
+actual tiled host launch still require the Tapestry/clipboard integration.
+
+Tracing that integration exposed HI1-Q2: the approved connection and terminal
+counts reach 72 descriptors before pending writes, above the 64-fd poll limit.
+A direct service-slot increase is therefore blocked. The next step is bounded
+userspace readiness aggregation, keeping admission, revocation and clipboard
+mutation on the ordered UI thread. This finding is documented and reported;
+no poll ABI increase or periodic fallback has been introduced. Both test phases
+released their Mac leases, and the four separate drafts remain byte-identical.

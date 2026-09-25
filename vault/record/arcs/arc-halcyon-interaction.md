@@ -4,7 +4,7 @@ type: arc
 title: "Halcyon interaction: pointer, clipboard and modal text"
 status: active
 design: [docs/HALCYON-INTERACTION.md]
-chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification]
+chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification, chg-2026-09-25-pty-observer-client]
 follow-ons: []
 exit-criteria:
   - "[ ] Portable guest cursor works over composed/fullscreen content and capture transitions"
@@ -134,3 +134,11 @@ concurrent retirement and all counter boundaries now run in the kernel suite.
 The corrected full boot passes 1698/1698; the initial fixture refusal is retained
 as evidence rather than erased. See [[chg-2026-09-25-pty-interaction-qualification]].
 Repeated SMP/UBSan and live userspace integration remain open.
+
+### Native observer adapter
+
+[[chg-2026-09-25-pty-observer-client]] adds typed calls and owning, pollable watch
+handles over the pinned kernel ABI. AArch64 checks and the full
+production/native probe pass. The preceding kernel checkpoint also passes all
+50 SMP/UBSan boots. Positive observer admission and application clipboard/UI
+integration remain open; see the status for the separate evidence boundaries.

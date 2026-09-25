@@ -1,0 +1,19 @@
+#!/usr/bin/expect -f
+# Exercise positive native ownership records, real watcher fds and spawn seals.
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "kaua-term-probe --observer"
+expect {
+    -ex "observer-probe: PASS -- native records, watch readiness, retirement, spawn seals" {
+        lc_pass "PTY observer native ABI and seal lifetime"
+    }
+    -ex "observer-probe: FAIL" { lc_fail "PTY observer probe refused a required leg" }
+    timeout { lc_fail "PTY observer probe did not complete" }
+}
+lc_run_expect "echo observer-shell-live | tr a-z A-Z" "OBSERVER-SHELL-LIVE"
+
+lc_quit
+exit 0

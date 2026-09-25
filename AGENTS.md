@@ -175,7 +175,10 @@ The operator approved kernel-backed terminal ownership and a sealed terminal
 host for HI-1, preserving ordinary job control. Follow
 `docs/HALCYON-INTERACTION-PTY-ABI.md` and the review beside it. This is the
 explicit exception to the earlier no-new-kernel-mechanism scope. Keep existing
-single-agent/draft-preservation rules. Aux will announce the cleared H3+C base
-before lifecycle edits; kaua Control subtag 6 is his ScreenErased, and 7 is
-Astra's binding announcement (Yip 0108 turn 22). No live clipboard is delivered
-by the protocol/storage checkpoints alone.
+single-agent/draft-preservation rules. Aux's cleared H3+C base 0cb5b244 is
+integrated as c252a7f3. Kernel ownership/lifecycle checkpoint 97bf1077 and expanded
+regression checkpoint 5ad9ad27 are on Astra; consult the status for current runtime
+evidence and remaining integration. Kaua Control subtag 6 is Aux's ScreenErased,
+and 7 is Astra's binding announcement (Yip 0108 turn 22). His TC-1a wire/lib/tile
+work is still uncleared as of turn 29: coordinate that landing before edits there.
+No live clipboard is delivered by the kernel/protocol/storage checkpoints alone.

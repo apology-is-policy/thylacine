@@ -355,6 +355,9 @@ impl SessionTile {
         // programs never spawn as another principal (login masks it too; this
         // is the second hop's own guard).
         cmd.caps(!libthyla_rs::T_CAP_SET_IDENTITY)
+            // The terminal host must be sealed before it can bind an observer.
+            // The ordinary application spawned on its slave does not inherit seals.
+            .perm(libthyla_rs::T_SPAWN_PERM_SEAL)
             .stdin(Stdio::Piped)
             .stdout(Stdio::Piped)
             .stderr(Stdio::Inherit);

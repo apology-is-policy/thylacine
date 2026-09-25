@@ -693,3 +693,8 @@ KERNEL_TESTS-only kernel symbols, not added operations or exported user ABI.
 The native operation range, record sizes and mirrors remain unchanged. Faulting
 STATE/ACK/CHECK pointers and malformed lengths are covered through the actual
 marshaller; positive EL0 record transfer remains a distinct qualification step.
+
+The native Rust `pty_observer` adapter consumes these existing records and subops
+without reserving new ABI. [[sub-libthyla-rs]] describes locator validation,
+explicit revocation and RAII watcher ownership. Runtime application integration
+is distinct from compiling that adapter.

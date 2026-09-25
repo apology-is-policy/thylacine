@@ -349,3 +349,127 @@ is retained separately). It is syntax evidence only. Mac was acquired through Yi
 and released after the focused corrected build/boot. The authority drafts remain
 byte-identical. Repeated SMP/UBSan, full production and positive EL0 workflows are
 still owed. No new graphical UI or clipboard endpoint is delivered here.
+
+The expanded regression checkpoint is 5ad9ad27 (normal hooks). A subsequent
+45-minute Mac lease runs the complete ci-smp-gate matrix against images built
+from that checkpoint, with both separate test drafts substituted from the index
+and restored in the runner's finally block. Runner: work/hi1-matrix.py; log:
+work/hi1-smp-matrix.log. It releases Mac on exit. Do not build/rebake these images
+while the gate runs. HALCYON_SESSION=1, HALCYON_PROFILE=instrument, GOROOT=0,
+MKFS_PRESERVE=0; omitted external toolchain fixtures are not coverage.
+
+While those fixed images run, the native Rust pty_observer adapter is prepared
+separately. BindingId is a checked locator, never a credential, and unbind is
+explicit. Watch owns its read-only fd, integrates with PollSet and distinguishes
+retirement from WouldBlock. The isolated AArch64 cargo check passes in
+work/hi1-client-check (log work/hi1-client-check.log). The full matrix images do
+not include this later library source. No application uses the adapter yet, and
+positive EL0 transfers remain part of the live integration gate.
+
+Halcyon's SessionTile spawn now sets T_SPAWN_PERM_SEAL explicitly; ordinary
+slave-side children retain their default unsealed spawn. Isolated AArch64 checks
+of libthyla-rs and halcyond pass (work/hi1-host-check.log). A new optional
+kaua-term-probe --observer mode and tools/interactive/pty-observer.exp prepare
+positive EL0 STATE and watcher coverage using real ptyfs/Tapestry services. The
+probe supervises a sealed child, which verifies its ordinary child is unsealed.
+It still needs its actual interactive run after the fixed-image matrix.
+The initial probe compile caught a PollEvent/tuple mismatch and the HUP constant
+name; these were corrected. An attempted root-directory cargo check failed to
+find the vendored dlmalloc because the usr/.cargo configuration was not loaded;
+logs are preserved. Use the usr working directory for the native checks.
+
+The corrected probe check passes from usr/ using the vendored configuration:
+work/hi1-observer-probe-native-check.log. The native probe remains unrun until
+the image is rebuilt after the matrix. Aux was asked for the cleared TC-1a SHA
+before Control-7 edits, retaining his wire/lib/tile ownership and tag-6 reservation.
+
+Tracked integration constraint HI1-Q2: expanding PanePlaceServer's current two
+connections to the approved 32 controller + 2 media + 4 handshake slots cannot
+simply retain push_fds into Halcyon's main poll. In the design's upper bound,
+32 terminal up-pipes + 38 service connections + listener + EventRing = 72 fds,
+before pending terminal writes, above kernel POLL_MAX_NFDS=64. The current
+session loop only caps down-write entries after appending all service fds.
+No live expanded service exists yet, so this is an integration design constraint,
+not a measured failure of the current two-connection service. Do not enable new
+slots with a timer fallback or silently lower the approved capacity.
+
+Next implementation must specify a bounded userspace transport worker (existing
+poll/thread/pipe facilities) feeding the ordered UI loop, or another verified
+aggregation mechanism. The recommended worker owns transport readiness only;
+UI-thread clipboard ownership, Tapestry admission and revocation ordering remain
+unchanged. Move request buffers through bounded queues without duplicating the
+connection input/output allowance; count queue metadata and credits explicitly,
+and prove wake, cancellation and shutdown/join behavior. Tapestry's own added
+32 watcher fds fit its separate poll budget (two listeners + at most eight total
+connections + 32 watchers = 42). No kernel poll-limit change is authorized or
+implemented by this note. The operator was informed of this architectural issue.
+
+## Complete repeated kernel matrix
+
+The full ci-smp-gate finished with 50/50 PASS: default smp1/4/8 and UBSan
+smp4/8, ten boots per row, zero corruption/external-kill/inject-miss/timing/other
+in every row. Log: work/hi1-smp-matrix.log. The matrix used kernel checkpoint
+5ad9ad27 and the previously baked userspace, before the later observer-wrapper
+source; it is not runtime evidence for that adapter. The runner released Mac
+after 32 minutes and restored both test drafts; all four protected files were
+compared again and match exactly. A separate 20-minute Mac lease now runs the
+production shape and positive native observer scenario via work/hi1-production.py.
+
+## Production image and native observer checkpoint
+
+The separate production runner completed successfully and released Mac after two
+minutes. `tools/check-production.sh --all` PASS: lean joey, lean loginnable joey,
+release/KASLR/hardened kernel and userspace, fresh paired ramfs/pool, and production
+boot authentication for both development accounts. llvm-nm finds none of the three
+KERNEL_TESTS fixture symbols in the production kernel. Logs are
+work/hi1-production.log, work/hi1-production-symbols.log and
+work/hi1-native-prodcheck.boot.log; full build log is build/prodcheck.full.log.
+
+The rebuilt production image passes the new pty-observer interactive scenario
+under HVF (one attempt, five seconds). A real sealed EL0 process mints a PTY,
+opens the actual Tapestry service, binds, closes that temporary observer connection,
+and exercises STATE, WATCH, poll readiness/consumption, duplicate-watch refusal,
+last-watch closure/reopen, UNBIND, HUP/EOF and stale-ID refusal. Binder ACK/CHECK
+are refused. The supervisor waits for successful child exit before printing PASS;
+its ordinary child also proves seals were not inherited. The enclosing shell
+still runs a pipeline after the probe. This verifies native BIND/STATE/WATCH/UNBIND
+and ACK/CHECK role refusal; positive observer ACK/CHECK remains owed through the
+live Tapestry integration. Logs: work/hi1-observer-native-runtime.log and
+work/hi1-native-ls-ci-pty-observer.{log,steps}; accelerator evidence is copied to
+work/hi1-native-ls-ci-timings.tsv.
+
+All four protected drafts were compared again and match exactly. The current
+build artifacts are PRODUCTION, HALCYON_SESSION=0; rebuild an appropriate image
+before any boot-test or graphical gate. No Mac/Pi lease or Astra VM is left running.
+The host spawn seal is compiled but has not yet been exercised through a Halcyon
+tile launch; the native probe exercises the same spawn primitive independently.
+No clipboard endpoint or mode widget is claimed, and no new UI screenshot exists.
+Single-agent self-review covered typed pointer lifetimes, descriptor ownership,
+explicit revocation, reserved roles, cleanup and probe success publication.
+
+## Next source step while Mac is leased by Aux
+
+HI1-Q2's concrete implementation review is in HALCYON-INTERACTION-READINESS.md.
+The narrower recommendation aggregates readiness only: one bounded worker,
+40-fd maximum, one UI wake descriptor, all protocol/admission/buffer ownership
+on the UI thread. It explicitly retains the current terminal-write overflow
+fallback and claims no new idle guarantee. Short-write retention, native worker
+join/rollback, descriptor generation and wake-latch proofs precede activation.
+No worker or expanded endpoint has been implemented. Aux still has no cleared
+TC-1a SHA as of Yip 0108 turn 29, so Control-7 wire/lib/tile integration waits.
+
+Final native-client docs are prepared, including the Processes manual's host
+seal explanation. Manual checking passes for all eight installed sections. Vault render/lint
+passes with zero failures and two existing warnings (sub-kernel-caps line citation,
+48 stale dossiers). Mac was acquired for these checks and normal commit hooks;
+no hook is bypassed. Current production artifacts precede
+that manual paragraph and must be rebaked before claiming it is installed.
+
+
+The first native-client commit was correctly refused by staged Vault lint:
+view-code-coverage was rendered before the new files entered the Git index.
+The renderer uses git ls-files, so the newly staged source changed its census.
+Evidence: work/hi1-observer-commit.log. Re-render after staging the new source,
+co-stage generated views, and retry normal hooks. All four drafts were restored
+and Mac released on this failure; Astra is queued behind Main for the short retry.
+This is a documentation checkpoint failure, not a failed production/native test.

@@ -75,7 +75,19 @@ the test now supplies it, preserving the production refusal. That failed boot an
 the corrected 1698/1698 boot are both retained. The older syscall-gate fixture also
 stopped overwriting proc_alloc's existing handle table, removing a test-only leak.
 
-Before qualification, complete the repeated SMP/UBSan matrix and positive EL0
-frontend tests. Full production kernel qualification must also establish the test
-seams are absent. These obligations are not inferred from one successful boot. The user-facing clipboard additionally requires all host,
+The complete repeated matrix now passes all 50 boots (default smp1/4/8 and
+UBSan smp4/8, ten each), with zero exception buckets. That closes the repeated
+kernel stress obligation for 5ad9ad27. The subsequent full production shape and native EL0 observer probe both pass
+with test-only symbols absent. They establish BIND/STATE/WATCH/UNBIND,
+readiness/retirement, spawn seals and binder ACK/CHECK refusal without test seams.
+Positive observer ACK/CHECK through Tapestry remains an integration obligation. The user-facing clipboard additionally requires all host,
 Tapestry, broker and app integrations listed in HALCYON-INTERACTION-STATUS.md.
+
+## Userspace readiness constraint discovered during integration tracing
+
+The kernel watcher limit is not the whole readiness budget. Tapestry can add 32
+watchers within its 64-fd poll bound (2 + 8 + 32), but Halcyon's approved terminal
+and broker counts reach 72 even before pending writes. The existing main-loop
+append order caps writes only, not broker input. This blocks a direct increase
+of PanePlaceServer's connection count. HI1-Q2 in the status owns the bounded
+userspace aggregation design; the current two-connection service is unchanged.

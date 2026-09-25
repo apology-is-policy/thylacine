@@ -46,7 +46,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -861,7 +861,11 @@ presents are a recorded optimization.
 - **The identity of spawned tiles.** halcyond spawns every kaua-term with
   `.caps(!T_CAP_SET_IDENTITY)`; the kernel intersects with login's `SHELL_CAPS`,
   so no tile program can spawn as another principal (the C-F1 P0: `Command`
-  inherits all caps by default).
+  inherits all caps by default). The terminal host additionally receives
+  T_SPAWN_PERM_SEAL atomically at spawn, before its first instruction. Its
+  ordinary slave-side application uses the default unsealed spawn; H3+C clears
+  seals across that child boundary. No authority binding or clipboard endpoint
+  is activated by the seal alone.
 - **The declared seat.** The takeover rule (idle vs hosting), the retry +
   undeclared fallback, the re-declare after the first mint; a refusal must never
   exit into the login loop.

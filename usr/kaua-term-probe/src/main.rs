@@ -16,6 +16,8 @@
 
 extern crate alloc;
 
+mod observer;
+
 use alloc::string::String;
 use kaua_term::wire::{parse_record, FrameDecoder};
 use kaua_term::{Control, Record};
@@ -128,5 +130,10 @@ fn run() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    if let Some(arg) = libthyla_rs::env::args().nth(1) {
+        if let Some(result) = observer::run(arg) {
+            return result;
+        }
+    }
     run()
 }

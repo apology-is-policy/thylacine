@@ -24,6 +24,7 @@ code:
   - usr/lib/libthyla-rs/src/ninep.rs
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
+  - usr/lib/libthyla-rs/src/pty_observer.rs
   - usr/lib/libthyla-rs/src/process.rs
   - usr/lib/libthyla-rs/src/rand.rs
   - usr/lib/libthyla-rs/src/sched.rs
@@ -635,5 +636,31 @@ fault-injection and the cross-controller matrix remain required.
 `Error::NoSpace` maps ENOSPC=28 in both directions and reports "no space left".
 The kernel terminal interaction pool uses it for bounded capacity or identifier
 exhaustion. Existing unknown-error passthrough and the -1 sentinel treatment are
-unchanged. The `pty_interaction` records remain pure ABI definitions; live
-clipboard/terminal wrappers are a separate integration obligation.
+unchanged. The `pty_interaction` records remain pure ABI definitions.
+
+## Typed terminal observer client
+
+`pty_observer::BindingId` accepts only nonzero locators up to INT64_MAX and is
+copyable. Construction from an announced locator confers no role; every syscall
+rechecks the actual process. `bind` borrows master and observer descriptor numbers,
+`state` supplies a fully initialized 80-byte output, and `acknowledge`/`check` build
+the exact versioned 24-byte input. Subject zero is allowed for APP acknowledgement;
+it cannot pass the kernel's CHECK. A CHECK result does not prove graphical focus.
+Unbinding is explicit, so dropping a copied locator cannot revoke another holder.
+
+`watch` adopts the new read-only descriptor in an owning File. Watch implements
+AsFd for the existing PollSet; Drop closes only this watch, not its binding. A
+read returns one complete state, None on retirement, or the existing WouldBlock
+error for an unchanged revision. Partial records are Io errors. The state has
+only integer fields and compile-time assertions rule out padding; a mutable byte
+view is valid for native reads. Other kernel errors use the shared typed mapping.
+No wrapper allocates a maximum buffer or polls periodically. AArch64 checks and the production native EL0 probe pass. Actual application
+use and positive observer ACK/CHECK remain the integration obligation in the
+Halcyon interaction status.
+
+The native `kaua-term-probe --observer` scenario exercises positive STATE copyout,
+watch read/poll/Drop/reopen, observer-only ACK/CHECK refusal and retirement over
+real ptyfs and Tapestry transports. A supervisor spawns the binding process sealed;
+that process also checks an ordinary child's seals are clear. The probe is added
+beside the existing transport test, which keeps its no-argument behavior. Runtime
+results belong to the interaction status, not to the probe's mere existence.
