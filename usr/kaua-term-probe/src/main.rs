@@ -18,6 +18,8 @@ extern crate alloc;
 
 mod observer;
 mod readiness;
+#[cfg(feature = "readiness-qualification")]
+mod readiness_qualification;
 mod service;
 #[path = "../../halcyond/src/inlineaccum.rs"]
 mod inlineaccum;
@@ -149,6 +151,12 @@ fn run() -> i64 {
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     if let Some(arg) = libthyla_rs::env::args().nth(1) {
+        #[cfg(feature = "readiness-qualification")]
+        if arg == b"--readiness-qualification" { return readiness_qualification::run(); }
+        #[cfg(feature = "readiness-qualification")]
+        if arg == b"--service-readiness-failure" { return readiness_qualification::media_failure(); }
+        #[cfg(feature = "readiness-qualification")]
+        if arg == b"--readiness-failure-server" { return readiness_qualification::failure_server(); }
         if arg == b"--readiness" { return readiness::run(); }
         if arg == b"--service" { return service::run(); }
         if arg == b"--service-transport" { return service::transport_child(); }

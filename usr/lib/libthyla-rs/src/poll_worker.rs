@@ -8,6 +8,10 @@
 //! with their latch under the state mutex. Only these proven one-byte operations
 //! run under that mutex. Poll, allocation, final close and join run outside it.
 
+// All scheduling and fault hooks are absent from normal library builds.
+#[cfg(feature = "poll-worker-test")]
+pub mod qualification;
+
 use crate::err::{Error, Result};
 use crate::fs::File;
 use crate::poll::AsFd;
@@ -22,6 +26,9 @@ use core::time::Duration;
 pub const MAX_WATCHES: usize = 63;
 const STACK_BYTES: u64 = 64 * 1024;
 const GUARD_BYTES: u64 = 4096;
+/// Conservative user-address-space charge: stack+guard and bounded Shared box.
+/// Kernel pipe buffers/handles and the kernel thread object are separate charges.
+pub const MEMORY_RESERVE: u64 = STACK_BYTES + GUARD_BYTES + 4096;
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(0);
 const EXCEPTIONS: i16 = T_POLLERR | T_POLLHUP | T_POLLNVAL;
 
@@ -94,6 +101,13 @@ struct Shared {
     capacity: usize,
 }
 
+#[cfg(feature = "poll-worker-test")]
+impl Drop for Shared {
+    fn drop(&mut self) {
+        qualification::context_dropped();
+    }
+}
+
 // A latch is changed only while State is locked. A false latch means the pipe
 // is empty: the consumer clears it only after reading its sole byte. Both pipe
 // endpoints remain owned by Shared until kernel-confirmed thread exit.
@@ -131,10 +145,17 @@ fn consume(file: &File, pending: &mut bool) -> Result<()> {
 struct Stack(u64);
 impl Stack {
     fn new() -> Result<Self> {
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::Reserve)?;
         let base = Error::from_syscall_return(unsafe {
             crate::t_burrow_reserve(STACK_BYTES + GUARD_BYTES, crate::T_BURROW_PROT_NONE, 0)
         })? as u64;
         let stack = Self(base);
+        #[cfg(feature = "poll-worker-test")]
+        {
+            qualification::stack_created(base);
+            qualification::fail(qualification::Fault::Protect)?;
+        }
         Error::from_syscall_return(unsafe {
             crate::t_burrow_protect(
                 base + GUARD_BYTES,
@@ -171,7 +192,11 @@ impl PollWorker {
         if capacity == 0 || capacity > MAX_WATCHES {
             return Err(Error::InvalidArgument);
         }
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::CommandPipe)?;
         let (command_read, command_write) = crate::process::pipe()?;
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::NoticePipe)?;
         let (notice_read, notice_write) = crate::process::pipe()?;
         let owner = NEXT_OWNER
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
@@ -189,6 +214,8 @@ impl PollWorker {
         };
         // Box::new aborts on allocation failure; constructors must unwind
         // already acquired pipes when the allocator can report refusal.
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::Context)?;
         let ptr = unsafe { alloc(Layout::new::<Shared>()) }.cast::<Shared>();
         if ptr.is_null() {
             return Err(Error::NoMemory);
@@ -203,9 +230,13 @@ impl PollWorker {
                 joined: AtomicU32::new(1),
                 capacity,
             });
+            #[cfg(feature = "poll-worker-test")]
+            qualification::context_created();
             Box::from_raw(ptr)
         };
         let stack = Stack::new()?;
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::Spawn)?;
         unsafe {
             thread::spawn_raw(
                 worker_entry as *const () as u64,
@@ -251,6 +282,8 @@ impl PollWorker {
     /// raw descriptor is sent to the worker for a later, racy duplication.
     pub fn register(&mut self, file: &File, interest: i16) -> Result<WatchId> {
         valid_interest(interest)?;
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::Duplicate)?;
         self.register_owned(file.try_clone()?, interest)
     }
 
@@ -260,6 +293,8 @@ impl PollWorker {
     /// until the worker has returned from any poll that borrowed it.
     pub fn register_owned(&mut self, file: File, interest: i16) -> Result<WatchId> {
         valid_interest(interest)?;
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::Register)?;
         let shared = self.shared()?;
         let mut state = shared.state.lock();
         state.live()?;
@@ -301,6 +336,19 @@ impl PollWorker {
             state.slots[id.slot].as_ref().unwrap().file.as_raw_fd()
         };
         Ok(f(fd))
+    }
+
+    /// Capacity includes retired slots until their old poll has returned.
+    /// The sole owner uses this to suspend acceptance rather than accept and
+    /// then discard a peer while descriptor reclamation is still pending.
+    pub fn free_slots(&self) -> Result<usize> {
+        let shared = self.shared()?;
+        let state = shared.state.lock();
+        state.live()?;
+        Ok(state.slots[..shared.capacity]
+            .iter()
+            .filter(|s| s.is_none())
+            .count())
     }
 
     /// The owner must have consumed any previously returned data itself. A new
@@ -434,6 +482,8 @@ extern "C" fn worker_entry(arg: u64) -> ! {
 }
 
 fn worker_loop(shared: &Shared) -> Result<()> {
+    #[cfg(feature = "poll-worker-test")]
+    qualification::fail(qualification::Fault::Startup)?;
     {
         let mut state = shared.state.lock();
         state.started = true;
@@ -478,7 +528,13 @@ fn worker_loop(shared: &Shared) -> Result<()> {
             }
         }
         drop(retired); // close final duplicates outside the mutex and old poll
+        #[cfg(feature = "poll-worker-test")]
+        qualification::pause(qualification::Point::BeforePoll, &fds[1..count])?;
         let rc = unsafe { crate::t_poll(fds.as_mut_ptr(), count, -1) };
+        #[cfg(feature = "poll-worker-test")]
+        qualification::pause(qualification::Point::AfterPoll, &fds[1..count])?;
+        #[cfg(feature = "poll-worker-test")]
+        qualification::fail(qualification::Fault::Poll)?;
         Error::from_syscall_return(rc)?;
         if fds[0].revents & EXCEPTIONS != 0 {
             return Err(Error::Io);

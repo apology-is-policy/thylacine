@@ -268,72 +268,94 @@ impl Drop for Children {
 fn media() -> Result {
     let user = format!("probe-{}", unsafe { t_getpid() });
     let mut server =
-        crate::paneplace::PanePlaceServer::post(&user).ok_or("post actual media adapter")?;
+        crate::paneplace::PanePlaceServer::post(&user).map_err(|_| "post actual media adapter")?;
     let notes = notes::Notes::open_self().map_err(|_| "child notifications")?;
-    let mut children = Children(Vec::new());
-    for id in 1..=2u32 {
-        server.register(id as u128, id);
-        let mut cmd = process::Command::new("/bin/kaua-term-probe");
-        cmd.arg("--service-media-client")
-            .arg(server.place_address(id as u128))
-            .arg(format!("{}", id));
-        children
-            .0
-            .push(Some(cmd.spawn().map_err(|_| "spawn actual media client")?));
-    }
-    let mut seen = [false; 2];
-    let deadline = time::monotonic_ns() + 10_000_000_000;
-    loop {
-        server.service();
-        for image in server.take_completed() {
-            check((1..=2).contains(&image.leaf), "wrong media leaf")?;
-            let i = image.leaf as usize - 1;
-            check(
-                !seen[i] && image.id == image.leaf as u128 && image.w == 256 && image.h == 256,
-                "media duplicate/id/dimensions",
-            )?;
-            check(
-                image.argb.len() == 65536
-                    && image.argb.iter().all(|p| *p == 0xff123400 + image.leaf),
-                "actual media bytes differ",
-            )?;
-            seen[i] = true;
+    for _wave in 0..2 {
+        let mut children = Children(Vec::new());
+        for id in 1..=2u32 {
+            server.register(id as u128, id);
+            let mut cmd = process::Command::new("/bin/kaua-term-probe");
+            cmd.arg("--service-media-client")
+                .arg(server.place_address(id as u128))
+                .arg(format!("{}", id));
+            children
+                .0
+                .push(Some(cmd.spawn().map_err(|_| "spawn actual media client")?));
         }
-        for slot in &mut children.0 {
-            if let Some(c) = slot {
-                if let Some(status) = c.try_wait().map_err(|_| "reap media client")? {
-                    *slot = None;
-                    check(status.success(), "media client exit")?;
+        let mut seen = [false; 2];
+        let deadline = time::monotonic_ns() + 10_000_000_000;
+        loop {
+            server
+                .service()
+                .map_err(|_| "actual media readiness failed")?;
+            for image in server.take_completed() {
+                check((1..=2).contains(&image.leaf), "wrong media leaf")?;
+                let i = image.leaf as usize - 1;
+                check(
+                    !seen[i] && image.id == image.leaf as u128 && image.w == 256 && image.h == 256,
+                    "media duplicate/id/dimensions",
+                )?;
+                check(
+                    image.argb.len() == 65536
+                        && image.argb.iter().all(|p| *p == 0xff123400 + image.leaf),
+                    "actual media bytes differ",
+                )?;
+                seen[i] = true;
+            }
+            for slot in &mut children.0 {
+                if let Some(c) = slot {
+                    if let Some(status) = c.try_wait().map_err(|_| "reap media client")? {
+                        *slot = None;
+                        check(status.success(), "media client exit")?;
+                    }
                 }
             }
+            if children.0.iter().all(Option::is_none) {
+                break;
+            }
+            let now = time::monotonic_ns();
+            check(now < deadline, "actual media adapter deadline")?;
+            let mut fds = vec![TPollFd {
+                fd: notes.as_raw_fd(),
+                events: T_POLLIN,
+                revents: 0,
+            }];
+            server.push_fds(&mut fds);
+            check(fds.len() == 2, "media adapter exceeds one UI descriptor")?;
+            let timeout = if server.runnable() {
+                0
+            } else {
+                ((deadline - now) / 1_000_000).min(i32::MAX as u64) as i32 + 1
+            };
+            check(
+                unsafe { t_poll(fds.as_mut_ptr(), fds.len(), timeout) } >= 0,
+                "media poll",
+            )?;
+            while notes
+                .try_read()
+                .map_err(|_| "read child notification")?
+                .is_some()
+            {}
         }
-        if children.0.iter().all(Option::is_none) {
-            break;
+        check(seen == [true, true], "missing routed image")?;
+        // Retire the completed clients through real notifications. Once quiet,
+        // the service itself supplies no timer wake; the next wave must reuse its
+        // bounded slots, not progressively lose capacity.
+        let end = time::monotonic_ns() + 2_000_000_000;
+        loop {
+            server.service().map_err(|_| "media cleanup readiness")?;
+            let mut fds = Vec::new();
+            server.push_fds(&mut fds);
+            check(fds.len() == 1, "quiet media descriptor count")?;
+            let rc = unsafe { t_poll(fds.as_mut_ptr(), fds.len(), 50) };
+            check(rc >= 0, "quiet media poll")?;
+            if rc == 0 {
+                break;
+            }
+            check(time::monotonic_ns() < end, "quiet media keeps waking")?;
         }
-        let now = time::monotonic_ns();
-        check(now < deadline, "actual media adapter deadline")?;
-        let mut fds = vec![TPollFd {
-            fd: notes.as_raw_fd(),
-            events: T_POLLIN,
-            revents: 0,
-        }];
-        server.push_fds(&mut fds);
-        let timeout = if server.runnable() {
-            0
-        } else {
-            ((deadline - now) / 1_000_000).min(i32::MAX as u64) as i32 + 1
-        };
-        check(
-            unsafe { t_poll(fds.as_mut_ptr(), fds.len(), timeout) } >= 0,
-            "media poll",
-        )?;
-        while notes
-            .try_read()
-            .map_err(|_| "read child notification")?
-            .is_some()
-        {}
     }
-    check(seen == [true, true], "missing routed image")
+    Ok(())
 }
 pub fn media_client() -> i64 {
     fn upload() -> Result {

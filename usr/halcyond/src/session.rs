@@ -1106,7 +1106,8 @@ fn place_residual(gs: &GlyphSource) -> u64 {
     const BASELINE_RESERVE: u64 = 10 * 1024 * 1024;
     const ATLAS_PAGE_BYTES: u64 = 512 * 512;
     let atlas = gs.evict_pages() as u64 * ATLAS_PAGE_BYTES;
-    BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas)
+    BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas
+        + libthyla_rs::poll_worker::MEMORY_RESERVE)
 }
 
 fn place_cap(gs: &GlyphSource) -> u64 {
@@ -1766,9 +1767,17 @@ pub fn run(home: Option<String>) -> i64 {
     // I-47 (HALCYON.md 14.7.2): the per-user inline-media place service. Posted
     // once (login granted MAY_POST_SERVICE, one hop, as it does for the home
     // proxy); each tile gets a per-pane secret token routed through it. A failed
-    // post degrades cleanly -- the session runs with inline media unavailable.
+    // failure before publication leaves inline media unavailable. Once published,
+    // failure must end the poster so its registry name is retired.
     let user = session_user();
-    let mut places: Option<PanePlaceServer> = user.as_deref().and_then(PanePlaceServer::post);
+    let mut places: Option<PanePlaceServer> = match user.as_deref().map(PanePlaceServer::post) {
+        Some(Ok(server)) => Some(server),
+        Some(Err(crate::paneplace::PostError::Published(error))) => {
+            say!("halcyond: published media service failed: {:?}; ending session", error);
+            return 1;
+        }
+        _ => None,
+    };
     match (&places, user.as_deref()) {
         (Some(_), Some(u)) => say!("halcyond: inline-media service /srv/halcyon-{}", u),
         _ => say!("halcyond: inline-media service unavailable (no user or post failed)"),
@@ -2708,8 +2717,8 @@ pub fn run(home: Option<String>) -> i64 {
         // wait so a `view` write wakes the loop. Appended AFTER the up entries
         // (the up_leaves[i] <-> fds[i+1] map is untouched) and BEFORE the down
         // entries (so it counts toward the POLL_MAX_NFDS cap); serviced below by
-        // its own non-blocking pass, which re-polls its own fds. Bounded to
-        // 1 + MAX_CONNS fds.
+        // its own non-blocking pass. One worker notice fd represents the whole
+        // service; parsing and image delivery still run on this UI thread.
         if let Some(p) = places.as_ref() {
             p.push_fds(&mut fds);
         }
@@ -2787,7 +2796,11 @@ pub fn run(home: Option<String>) -> i64 {
             let stored_cap = tiles.values().map(|t| t.tile.media.max_pixels())
                 .min().unwrap_or(0);
             p.set_budget(place_cap(&gs).min(stored_cap), place_residual(&gs));
-            p.service();
+            if let Err(error) = p.service() {
+                say!("halcyond: media readiness failed: {:?}; ending session", error);
+                logout = Some(1);
+                break;
+            }
             for img in p.take_completed() {
                 if let Some(t) = tiles.get_mut(&img.leaf) {
                     if !t.tile.place_image(img.id, img.w, img.h, img.argb) {

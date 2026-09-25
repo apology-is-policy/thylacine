@@ -33,6 +33,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use halcyond::servicewire::{Handler, Interest, Stream};
 use crate::serviceio::NativeEndpoint;
+use libthyla_rs::err::Error;
+use libthyla_rs::fs::File;
+use libthyla_rs::handle::Rights;
+use libthyla_rs::poll::AsFd;
+use libthyla_rs::poll_worker::{PollWorker, WatchId};
 
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
 use halcyond::paneroute::{self, Node};
@@ -144,23 +149,21 @@ struct Budget {
 // The accepted endpoint is explicitly nonblocking before Conn exists. The
 // common pump owns input/offsets; Protocol owns fids, accumulator and ONE reply.
 struct Conn {
-    handle: i64,
+    watch: WatchId,
+    ready: i16,
     stream: Stream,
     protocol: Protocol,
 }
-impl Drop for Conn {
-    fn drop(&mut self) { unsafe { t_close(self.handle); } }
-}
 impl Conn {
-    fn new(handle: i64) -> Self {
-        Self { handle, stream: Stream::new(), protocol: Protocol::new() }
+    fn new(watch: WatchId) -> Self {
+        Self { watch, ready: 0, stream: Stream::new(), protocol: Protocol::new() }
     }
     fn events(&self) -> i16 {
         match self.stream.interest() { Interest::Read => T_POLLIN, Interest::Write => T_POLLOUT }
     }
-    fn service(&mut self, out: &mut Vec<PaneCompletedImage>, routes: &BTreeMap<u128, u32>, budget: Budget, deadline: u64) -> bool {
+    fn service(&mut self, worker: &mut PollWorker, out: &mut Vec<PaneCompletedImage>, routes: &BTreeMap<u128, u32>, budget: Budget, deadline: u64) -> Result<bool, Error> {
         let mut reply = Reply { protocol: &mut self.protocol, out, routes, budget };
-        self.stream.service(&mut NativeEndpoint(self.handle), &mut reply, deadline)
+        worker.with_fd(self.watch, |fd| self.stream.service(&mut NativeEndpoint(fd as i64), &mut reply, deadline))
     }
 }
 struct Reply<'a> {
@@ -548,11 +551,21 @@ impl Protocol {
     }
 }
 
-/// The per-user session place server: the listener, its live connections, the
-/// token->leaf routing table, and the queue of rasters completed since the last
-/// drain (each tagged with its target leaf).
+/// Once POST succeeds, failure must end the posting process: closing the
+/// listener does not unpost its name. The session caller handles this explicitly.
+#[derive(Debug)]
+pub enum PostError {
+    Unavailable,
+    Published(Error),
+}
+
+/// The per-user session place server. PollWorker owns all watched handles;
+/// token routes, peer checks and completed rasters stay on the UI thread.
 pub struct PanePlaceServer {
-    listener: i64,
+    worker: PollWorker,
+    listener: WatchId,
+    listener_armed: bool,
+    listener_ready: bool,
     conns: Vec<Conn>,
     completed: Vec<PaneCompletedImage>,
     /// token -> live tile leaf. The compositor keeps this current
@@ -581,29 +594,39 @@ pub struct PanePlaceServer {
 impl PanePlaceServer {
     /// Post `/srv/halcyon-<user>` (9P-mode; perm 0). Requires
     /// MAY_POST_SERVICE (login grants the session compositor the bit, one hop).
-    /// None on failure -- the caller keeps running as a plain compositor
-    /// (inline `view` is simply unavailable in its tiles).
-    pub fn post(user: &str) -> Option<PanePlaceServer> {
+    /// Unavailable means no name was published; media may stay unavailable.
+    /// Published means the caller must exit so the registry cannot retain a
+    /// dead endpoint. Start the worker and preallocate connection metadata
+    /// before POST so ordinary allocation/startup failures publish nothing.
+    pub fn post(user: &str) -> Result<PanePlaceServer, PostError> {
+        let mut worker = PollWorker::new(MAX_CONNS + 1).map_err(|_| PostError::Unavailable)?;
+        let mut conns = Vec::new();
+        conns.try_reserve_exact(MAX_CONNS).map_err(|_| PostError::Unavailable)?;
         let uid = unsafe { t_getuid() };
         if uid < 0 {
-            return None; // fail-closed: without a principal the accept gate cannot hold.
+            return Err(PostError::Unavailable); // fail-closed: without a principal the accept gate cannot hold.
         }
         let mut name = String::with_capacity(8 + user.len());
         name.push_str("halcyon-");
         name.push_str(user);
         let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
         if srv < 0 {
-            return None;
+            return Err(PostError::Unavailable);
         }
         let listener =
             unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD, 0) };
         let _ = unsafe { t_close(srv) };
         if listener < 0 {
-            return None;
+            return Err(PostError::Unavailable);
         }
-        Some(PanePlaceServer {
+        let listener = unsafe { File::from_raw_fd(listener as i32, Rights::READ) };
+        let listener = worker.register_owned(listener, T_POLLIN).map_err(PostError::Published)?;
+        Ok(PanePlaceServer {
+            worker,
             listener,
-            conns: Vec::new(),
+            listener_armed: true,
+            listener_ready: false,
+            conns,
             completed: Vec::new(),
             routes: BTreeMap::new(),
             principal: uid as u32,
@@ -659,109 +682,69 @@ impl PanePlaceServer {
         self.conns.iter().any(|c| c.stream.runnable())
     }
 
-    /// Wait for READ or retained-reply WRITE, plus the listener while not full.
+    /// One descriptor represents every service source in the UI poll set.
     pub fn push_fds(&self, fds: &mut Vec<TPollFd>) {
-        if self.conns.len() < MAX_CONNS {
-            fds.push(TPollFd {
-                fd: self.listener as i32,
-                events: T_POLLIN,
-                revents: 0,
-            });
-        }
-        for c in &self.conns {
-            fds.push(TPollFd {
-                fd: c.handle as i32,
-                events: c.events(),
-                revents: 0,
-            });
-        }
+        fds.push(TPollFd { fd: self.worker.as_raw_fd(), events: T_POLLIN, revents: 0 });
     }
 
-    /// One non-blocking pass: accept a pending connection (while there is room,
-    /// gated on the peer being the session's own user) and service every
-    /// ready or buffered one. Completed rasters accumulate tagged with their leaf; the
-    /// caller drains them with `take_completed`.
-    pub fn service(&mut self) {
-        if !self.conns.is_empty() { self.conns.rotate_left(1); }
-        let has_room = self.conns.len() < MAX_CONNS;
-        let mut pfds: Vec<TPollFd> = Vec::with_capacity(1 + self.conns.len());
-        if has_room {
-            pfds.push(TPollFd {
-                fd: self.listener as i32,
-                events: T_POLLIN,
-                revents: 0,
-            });
-        }
-        let listener_slot = has_room as usize;
-        for c in &self.conns {
-            pfds.push(TPollFd {
-                fd: c.handle as i32,
-                events: c.events(),
-                revents: 0,
-            });
-        }
-        let rc = unsafe { libthyla_rs::t_poll(pfds.as_mut_ptr(), pfds.len(), 0) };
-        if rc < 0 {
-            return;
-        }
-        if has_room && pfds[0].revents & T_POLLIN != 0 {
-            let h = unsafe { t_srv_accept(self.listener) };
-            if h >= 0 && unsafe { libthyla_rs::t_set_nonblock(h, true) } < 0 {
-                unsafe { t_close(h); }
-            } else if h >= 0 {
-                // The peer-principal gate: the connection's peer must be the
-                // session's own user, and alive. Fail-closed on a dead/unknown
-                // peer. A DIFFERENT principal is refused -- the secret token is
-                // the primary gate; this closes the leaked-token-across-users
-                // vector entirely.
-                let mut info = TSrvPeerInfo::default();
-                let ok = unsafe { t_srv_peer(h, &mut info) } == 0
-                    && info.alive == 1
-                    && info.principal_id == self.principal;
-                if ok {
-                    say!("halcyond: place conn from principal {}", info.principal_id);
-                    self.conns.push(Conn::new(h));
-                } else {
-                    say!(
-                        "halcyond: place conn REFUSED (peer {} alive {} != self {})",
-                        info.principal_id,
-                        info.alive,
-                        self.principal
-                    );
-                    let _ = unsafe { t_close(h) };
-                }
+    /// One bounded UI pass; the worker reports readiness only. Protocol state,
+    /// peer checks and image delivery never leave this thread. Errors are fatal
+    /// to the posting compositor, not permission to leave a dead service name.
+    pub fn service(&mut self) -> Result<(), Error> {
+        for event in self.worker.take_ready()?.iter() {
+            if event.watch == self.listener {
+                if event.events & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0 { return Err(Error::Io); }
+                self.listener_ready = true;
+                self.listener_armed = false;
+            } else if let Some(c) = self.conns.iter_mut().find(|c| c.watch == event.watch) {
+                c.ready |= event.events;
             }
         }
+        if self.listener_ready && self.conns.len() < MAX_CONNS && self.worker.free_slots()? > 0 {
+            self.listener_ready = false;
+            let h = self.worker.with_fd(self.listener, |fd| unsafe { t_srv_accept(fd as i64) })?;
+            if h >= 0 {
+                let file = unsafe { File::from_raw_fd(h as i32, Rights::READ | Rights::WRITE) };
+                let mut info = TSrvPeerInfo::default();
+                if unsafe { libthyla_rs::t_set_nonblock(h, true) } == 0
+                    && unsafe { t_srv_peer(h, &mut info) } == 0
+                    && info.alive == 1 && info.principal_id == self.principal {
+                    let watch = self.worker.register_owned(file, T_POLLIN)?;
+                    self.conns.push(Conn::new(watch));
+                } // refused peers close via File, before any connection publication
+            } else if h != -11 { return Err(Error::Io); }
+        }
+        if !self.conns.is_empty() { self.conns.rotate_left(1); }
         let deadline = libthyla_rs::time::monotonic_ns().saturating_add(2_000_000);
-        let nc = pfds.len() - listener_slot;
-        let mut i = nc;
+        let mut i = self.conns.len();
         while i > 0 {
             i -= 1;
-            let pf = pfds[listener_slot + i];
-            if pf.revents != 0 || self.conns[i].stream.runnable() {
-                // F2/F5: the buffers the OTHER live connections have reserved
-                // right now -- the live aggregate ceiling for conn[i]'s next new
-                // accum. Computed fresh per conn (the immutable sum completes
-                // before the mutable service borrow), so it reflects earlier
-                // iterations' completions.
-                let others: usize = self
-                    .conns
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, _)| *j != i)
-                    .map(|(_, c)| c.protocol.reserved())
-                    .sum();
-                let budget = Budget {
-                    max_pixels: self.max_pixels,
-                    others_reserved: others,
-                    residual_bytes: self.residual_bytes,
-                };
-                if pf.revents & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
-                    || !self.conns[i].service(&mut self.completed, &self.routes, budget, deadline) {
-                    self.conns.remove(i);
+            if self.conns[i].ready != 0 || self.conns[i].stream.runnable() {
+                let others = self.conns.iter().enumerate().filter(|(j, _)| *j != i)
+                    .map(|(_, c)| c.protocol.reserved()).sum();
+                let budget = Budget { max_pixels: self.max_pixels, others_reserved: others,
+                    residual_bytes: self.residual_bytes };
+                let close = self.conns[i].ready & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
+                    || !self.conns[i].service(&mut self.worker, &mut self.completed, &self.routes, budget, deadline)?;
+                self.conns[i].ready = 0;
+                if close {
+                    let c = self.conns.remove(i);
+                    self.worker.remove(c.watch)?;
+                } else if !self.conns[i].stream.runnable() {
+                    // Buffered work remains disarmed and keeps the UI runnable.
+                    // Partial input or blocked output needs real readiness.
+                    self.worker.rearm(self.conns[i].watch, self.conns[i].events())?;
                 }
             }
         }
+        // A retired connection still consumes a worker slot. Reclamation emits
+        // a notice; only then rearm the listener. A full service cannot spin.
+        if !self.listener_armed && !self.listener_ready && self.conns.len() < MAX_CONNS
+            && self.worker.free_slots()? > 0 {
+            self.worker.rearm(self.listener, T_POLLIN)?;
+            self.listener_armed = true;
+        }
+        Ok(())
     }
 
     /// Take the rasters completed since the last call (each tagged with its
@@ -769,8 +752,4 @@ impl PanePlaceServer {
     pub fn take_completed(&mut self) -> Vec<PaneCompletedImage> {
         core::mem::take(&mut self.completed)
     }
-}
-
-impl Drop for PanePlaceServer {
-    fn drop(&mut self) { unsafe { t_close(self.listener); } }
 }

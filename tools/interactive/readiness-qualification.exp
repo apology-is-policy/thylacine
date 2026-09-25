@@ -1,0 +1,23 @@
+#!/usr/bin/expect -f
+# Explicit opt-in probe build: --features readiness-qualification.
+# The ordinary image cannot claim this gate, because it lacks the command.
+# This binary is deliberately not in a default image. A missing fixture is
+# a skipped qualification, never a guest PASS.
+if {![info exists ::env(THYLACINE_READINESS_QUALIFICATION)] || $::env(THYLACINE_READINESS_QUALIFICATION) ne "1"} {
+    puts "LS-CI SKIP: requires an opt-in readiness-qualification probe image and THYLACINE_READINESS_QUALIFICATION=1"
+    exit 77
+}
+source [file join [file dirname [info script]] lib.exp]
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "kaua-term-probe --readiness-qualification"
+expect {
+    -ex "readiness-qualification: PASS -- controlled rearm, wake, retirement and eight rollback boundaries" {
+        lc_pass "native controlled readiness schedules and constructor rollback"
+    }
+    -re {readiness-qualification: FAIL -- ([^\r\n]+)[\r\n]} { lc_fail "Readiness qualification: $expect_out(1,string)" }
+    timeout { lc_fail "Readiness qualification did not complete" }
+}
+lc_run_expect "echo qualification-shell-live | tr a-z A-Z" "QUALIFICATION-SHELL-LIVE"
+lc_quit
+exit 0

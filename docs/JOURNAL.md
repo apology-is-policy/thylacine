@@ -22,6 +22,29 @@ needed the operator.
 
 
 ---
+## 2026-09-25 (Astra) -- one wake descriptor, with real retirement
+
+Halcyon's two-connection media adapter now uses the native readiness worker;
+the UI keeps protocol and image work. The native service gate checks four
+byte-verified uploads in two waves, one service poll fd and quiet time between
+waves. A separate paired-CI QEMU run passes the media/SAK/manual scenario in
+96 seconds, with actual screenshots retained. This is still groundwork for
+clipboard admission, not clipboard activation.
+
+The controlled retirement test initially demanded POLLHUP on a pipe writer,
+but the kernel correctly reports POLLERR when its last reader closes. The
+corrected test keeps the no-early-close check and the mutant that violates it.
+The process-failure test then repeated a prior fixture mistake: dropping a
+listener did not release its registry name. A short-lived reposting process
+corrected the fixture and made the failure/repost test pass. Both failed runs
+remain evidence; the registry was not expanded to accommodate the test.
+
+Main's TC-1a merge and Aux's TC-1b history work remain independent. Their file
+reservations are recorded in the status. Full interaction admission, its memory
+ledger, Tapestry checks, graphical session recovery and modal clients remain
+open. Resource leases and the separate authority drafts are preserved.
+
+---
 ## 2026-09-25 (Astra) -- a terminal handover needs a lifetime
 
 The operator-approved kernel correction now has an implementation atop Aux's

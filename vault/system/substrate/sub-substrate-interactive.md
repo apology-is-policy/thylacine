@@ -8,6 +8,8 @@ code:
   - tools/lib/ci-pool.sh
   - tools/test-ci-pool.sh
   - tools/interactive/readiness.exp
+  - tools/interactive/readiness-qualification.exp
+  - tools/interactive/service-readiness-failure.exp
   - tools/interactive/service-wire.exp
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
@@ -560,3 +562,14 @@ pipeline afterward. Its failure matcher waits for a complete diagnostic line;
 matching only the prefix previously stopped QEMU before a negative control's
 reason reached the log. No automatic retry is used for qualification. The gate
 honors the requested accelerator, so the same scenario can run under KVM/HVF.
+
+## Controlled native readiness fixture
+
+readiness-qualification and service-readiness-failure require a probe built with
+`--features readiness-qualification` and THYLACINE_READINESS_QUALIFICATION=1.
+Absent the explicit fixture flag they exit 77 (SKIP, not PASS) before boot.
+The first controls before/after-poll schedules and acquisition rollback; the
+second uses the same CI Imperium enrollment as service-wire and checks registry
+recovery after a failing poster exits. Both require a live shell pipeline after
+the exact probe PASS line. Wrong feature/image builds fail, not silently skip.
+The failure probe is not a graphical compositor/Warden recovery test.

@@ -751,3 +751,130 @@ The source is not merged into Main. The worker-to-compositor connection,
 remaining readiness failure/interleaving checks, full admission ledger,
 Tapestry/host admission and clipboard/modal clients remain activation work;
 no new graphical qualification or screenshot is claimed.
+
+### HI1-R11: controlled retirement gate reports descriptor not closed
+
+The first opt-in native readiness qualification reaches the retirement schedule
+and fails at `retired fd not closed`. Preserve the first runtime/console before
+changing either test or implementation. The earlier readiness probe checked a
+positive writer poll result, while this new test requires POLLHUP specifically;
+verify the pipe's writer-end event contract and actual returned bits first.
+
+HI1-R11 is a test assertion error: kernel/pipe.c pipe_revents_locked reports
+POLLERR on the writer when its last reader closes, and POLLHUP on the reader
+when its last writer closes. Correct the writer assertion to require POLLERR;
+the prior zero-event assertion still establishes that close cannot occur while
+the worker is paused with an old poll result. No worker change is indicated.
+
+### HI1-R12: opt-in gates would run against ordinary images
+
+Self-review found that the interactive runner enumerates every .exp file. The
+new qualification scenarios require a nondefault probe feature and would fail
+against a normal image. Add an explicit host-side opt-in guard with exit 77,
+never PASS, before boot. The qualification runs must set that guard and still
+require the exact guest PASS marker; a wrong image cannot pass by skipping.
+
+### HI1-R13: posted-failure probe child readiness absent
+
+The first native service-readiness-failure run fails at `failure server not
+ready` in its second (poll-failure) child, after the first registration-failure
+exit/repost checks succeeded. Preserve the first logs and inspect child exit
+status and fixture registry capacity before changing timing. This is unresolved
+until the actual refusal is identified; no posted-failure PASS is claimed.
+
+HI1-R13 is a fixture lifetime error, repeating the registry lesson from HI1-R6:
+the parent reposted the first service and dropped its local server, but retained
+the registry entry until parent exit. The diagnostic child reports `failure
+post disposition`; the next post was refused. Reposting in a short-lived child
+(and waiting for its exit and inaccessible name) releases that fixture capacity.
+With that correction the same before-post, published-registration, worker-poll
+failure and repost checks pass, followed by the live shell pipeline. No kernel
+registry size or lifetime was changed to make the test pass. The first and
+diagnostic failed logs remain alongside the final run.
+
+### September 25 session readiness checkpoint (in progress)
+
+The existing two-connection PanePlaceServer now transfers its listener/endpoints
+to PollWorker and appends one notification fd to the session UI poll. Parsing,
+peer checks and image handling remain on the UI thread. Listener admission uses
+free_slots: retired registrations consume capacity until the previous poll is
+finished; reclamation sends a wake. Buffered complete frames remain runnable
+without arming another read edge. The worker's 72 KiB reservation is explicitly
+charged against the image residual. Console media retains direct polling.
+
+Worker construction and connection metadata allocation precede POST. A failure
+before publication leaves media unavailable; failure after publication propagates
+through PostError::Published or service Err and ends the posting compositor. The
+new native child test proves process teardown/unpost/repost, not Warden recovery
+or actual graphical session failure. Those recovery checks remain open.
+
+Native service-wire PASS: two waves of two 256x256 routed uploads, all pixel
+bytes verified, clean child exits, one UI service descriptor and a quiet wait
+between waves. QEMU/KVM ls-halcyon-session-media PASS (96 seconds) on an isolated
+paired CI fixture replacing only halcyond: inline view, Gallery/zoom/return,
+trusted takeover/resume, JPEG and manual gallery/history. The gate uses the
+legacy Ctrl+Alt+Delete chord; this is not a new F10 qualification. Screenshot
+and provenance files are in work/hi1-wired-graphics-evidence/.
+
+Aux's TC-1a 1cc9a300 is now cleared (Yip 0108 turn 31). Main is integrating that
+exact SHA and running its gates. TC-1b remains uncleared: transcript/select/tile/
+grid/railset/help/inlinecache, named session/main history regions, Tapestry chords/
+server and libtapestry contract text stay reserved. This checkpoint changes none
+of those regions. Keep source based on 27155f72 until the cleared Main merge is
+announced and this checkpoint has a normal-hook commit.
+
+Final opt-in readiness qualification passes after the complete source changes.
+The three final mutants fail their exact intended diagnostics: removing arm
+ticket validation -> `old poll result acknowledged new arm`; clearing a slot in
+remove -> `retiring capacity published early`; omitting stack detach ->
+`constructor rollback retained stack mapping`. Restored canonical gate passes.
+The tests cover controlled before/after-poll rearm, drain/wake, deferred handle
+close and eight acquisition rollback boundaries (including live-context count,
+actual fd exhaustion/recovery and unmapped-stack refusal). They do not prove
+every possible concurrent schedule. The original kernel and paired ramfs/pool
+remain byte-identical throughout the mutant sequence.
+
+Final default Halcyon and probe release builds pass. Symbol/marker inspection
+finds no qualification control in either ordinary binary, while the opt-in
+probe contains the control STATE as a positive check. Both qualification
+harnesses return SKIP 77 before boot without the fixture flag (HI1-R12 resolved).
+The ordinary native readiness gate passes again. The older 341 pure host tests
+and kernel/SMP evidence are not rerun for unchanged pure/kernel sources.
+
+The final rebuilt ordinary binary also passes the graphical session-media gate
+(97 seconds). Its Halcyon SHA-256 is
+39d1105468a8e25799e3862ebe821437f7c2e988383f1ed549bf581eb936a9b3.
+The final ordinary readiness gate passes in 9 seconds. Final source digests,
+build logs, feature-isolation check, opt-in canonical/mutant/restored evidence,
+service/failure logs and final graphical screenshots are retained under
+work/hi1-session-evidence/. The first graphical evidence is preserved separately.
+Pi was released after the runtime work; no VM or lease is left for the monitor.
+
+Single-agent self-review checked owner/worker synchronization, borrowed-fd
+lifetime, publication/rollback, listener capacity during retirement, buffered
+continuation, fatal error propagation and cleanup. The current probe checks the
+process-exit boundary; actual graphical compositor/login or Warden recovery on
+failure remains owed. This is not an independent adversarial audit.
+
+### Session readiness commit pickup
+
+This is a new checkpoint after 27155f72, not the earlier transport runner. All
+source/prose paths are staged and hashed in work/hi1-session-staged-manifest.json.
+Run python3 work/hi1-session-commit.py from the Astra checkout. It verifies HEAD,
+the exact staged bytes and all four protected drafts, requests a five-minute
+Mac lease with a one-second wait, and only after acquisition renders/lints Vault
+and commits through normal hooks. WAITING/exit 75 only refreshes the queue.
+Finally restores the protected drafts and releases Mac, also after a failure.
+The result is recorded in work/hi1-session-committed.json. If an acquired run
+fails, inspect its log and any generated-view staging before retrying; changed
+manifest/index/base requires reconciliation, never a blind overwrite.
+
+The narrowly scoped session-readiness heartbeat maintains that queue and pauses
+after the verified commit or on cancellation/changed-manifest reconciliation.
+Keep the two older completed monitors paused. Do not rerun the completed native,
+mutant or graphical checks without a relevant change. Announce the actual commit
+and remaining activation limits through existing Main/Aux Yip calls. Do not
+merge Main or start activation within this commit-only pickup. Remaining work:
+full 38-connection/admission and kernel-resource ledger, Tapestry/host Control-7
+path on the reconciled base, actual failure recovery, clipboard clients and
+INS/NOR/VIS UI. No live clipboard or Main landing is claimed.

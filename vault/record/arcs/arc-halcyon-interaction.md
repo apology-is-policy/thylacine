@@ -4,7 +4,7 @@ type: arc
 title: "Halcyon interaction: pointer, clipboard and modal text"
 status: active
 design: [docs/HALCYON-INTERACTION.md]
-chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification, chg-2026-09-25-pty-observer-client, chg-2026-09-25-readiness-worker, chg-2026-09-25-service-backpressure]
+chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification, chg-2026-09-25-pty-observer-client, chg-2026-09-25-readiness-worker, chg-2026-09-25-service-backpressure, chg-2026-09-25-session-readiness]
 follow-ons: []
 exit-criteria:
   - "[ ] Portable guest cursor works over composed/fullscreen content and capture transitions"
@@ -158,3 +158,11 @@ A real SrvConn probe exposes and respects NoSrvSpoorDup through owned worker
 registration; no kernel alias exception is introduced. Native two-client image
 uploads exercise the production PanePlaceServer. The readiness worker still
 awaits activation qualification and connection to the compositor loop.
+
+## Session media readiness integration
+
+[[chg-2026-09-25-session-readiness]] connects the worker to the existing session
+media adapter while preserving its two-connection limit. Protocol state stays
+on the UI thread. Controlled native schedules and fault injection complement
+the real-media probe; graphical evidence uses a separate paired CI fixture.
+Expanded interaction admission and clipboard/modal workflows remain open.

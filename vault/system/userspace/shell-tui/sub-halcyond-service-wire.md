@@ -64,9 +64,11 @@ claimed by this checkpoint.
 
 ## Concurrency
 
-All state and protocol work stay on the UI thread. No locks or worker references
-are introduced here. The standalone native readiness worker remains a separate
-mechanism in [[sub-libthyla-rs]], not yet connected to Halcyon's service loop.
+All protocol work stays on the UI thread. The session adapter uses the native
+readiness worker in [[sub-libthyla-rs]] and polls one notification descriptor.
+It borrows each live endpoint for a bounded I/O turn without holding the worker
+mutex. The console adapter retains direct polling. No protocol work crosses
+into the readiness worker.
 
 ## Invariants enforced
 
@@ -75,7 +77,7 @@ mechanism in [[sub-libthyla-rs]], not yet connected to Halcyon's service loop.
 - Buffered complete frames cannot lose their wake when the kernel ring is empty.
 - A full reply ring yields to other connections and UI events.
 - EOF, invalid lengths and terminal I/O errors close the connection, discarding
-  its uncommitted protocol state. Native Conn and listener handles close on Drop;
+  its uncommitted protocol state. Session handles retire through the worker and join; console handles close on Drop;
   the service name itself remains registered until poster process exit.
 
 ## Error paths
@@ -91,7 +93,8 @@ retry semantics.
 At most 32 KiB input plus 32 KiB output payload allocation per connection, plus
 bounded metadata; image accumulator accounting is unchanged. Each syscall's
 byte count is bounded by the remaining turn credit. No eager input maximum
-allocation, new thread, periodic wake or connection-limit increase.
+allocation, periodic service wake or connection-limit increase. The session
+readiness worker adds one thread, separately accounted in its runtime dossier.
 
 ## Prosecution
 
@@ -100,9 +103,9 @@ ordered replies without redispatch, already-buffered continuation, malformed
 lengths, truncated EOF, byte/deadline yields and another peer's progress.
 `kaua-term-probe --service` compiles this exact pump and native adapter and
 exercises real SrvConn rings plus PollWorker owned-descriptor write readiness.
-It also compiles the production PanePlaceServer source and runs two child
-clients through the real kernel 9P client, checking routed image bytes and clean
-child exits. The `service-wire`
+It also compiles the production PanePlaceServer source and runs two waves of two child
+clients through the real kernel 9P client, checking routed image bytes, clean
+child exits, one UI service fd and quiet waits between slot-reuse waves. The `service-wire`
 interactive gate requires CI Imperium enrollment and uses an explicit serial
 recovery posture. Runtime results and artifact provenance are recorded in
 [[arc-halcyon-interaction]] and docs/HALCYON-INTERACTION-STATUS.md; do not infer
@@ -116,7 +119,7 @@ a graphical or expanded-service pass from the standalone probe.
 
 ## Caveats
 
-Persistent interaction admission, worker failure/interleaving qualification,
+Persistent interaction admission, compositor/session failure recovery,
 38-connection accounting, Tapestry terminal checks and clipboard clients remain
 unfinished. This checkpoint changes transport behavior on the existing media
 paths; it adds no user-facing command or UI mode.

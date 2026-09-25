@@ -25,6 +25,8 @@ code:
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
   - usr/lib/libthyla-rs/src/poll_worker.rs
+  - usr/lib/libthyla-rs/src/poll_worker/qualification.rs
+  - usr/kaua-term-probe/src/readiness_qualification.rs
   - usr/lib/libthyla-rs/src/pty_observer.rs
   - usr/lib/libthyla-rs/src/process.rs
   - usr/lib/libthyla-rs/src/rand.rs
@@ -722,6 +724,15 @@ readiness before registration, one-shot disarming, re-arm, independent peer
 progress, 64 close/reuse cycles, cross-worker token refusal, joined shutdown and
 partial setup rollback. Named mutants remove disarming and worker-ID checks;
 both must fail their corresponding diagnostic, followed by a restored pass.
-This adapter is not yet connected to Halcyon's service loop. Deterministic
-adversarial scheduling of every wake interleaving and the remaining allocation,
-duplication and spawn failure injections remain activation obligations.
+The existing two-connection session media server now uses this worker.
+`free_slots` includes retired entries until reclamation completes; listener
+admission therefore waits for the worker's reclamation notice. The compositor
+charges MEMORY_RESERVE (72 KiB) against its image residual.
+
+The nondefault poll-worker-test feature adds bounded before/after-poll gates,
+one-shot acquisition faults, and test-only stack/context accounting. Its native
+probe controls stale-result/rearm and last-slot retirement schedules; separate
+negative controls must fail the named assertions. The opt-in service-failure
+probe checks unpublished rollback and process-exit/repost, not Warden recovery.
+See the interaction status for actual results and outstanding expanded-service
+qualification. No production ABI or externally writable fault control exists.

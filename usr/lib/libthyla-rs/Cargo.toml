@@ -12,6 +12,10 @@ path = "src/lib.rs"
 # thyla-heap is the policy behind `alloc::ThylaAlloc` (B-1c): dlmalloc over lazy
 # reservations for small blocks, a reservation of its own for a large one. This
 # crate supplies its three kernel calls.
+[features]
+# Explicit native qualification image only; never enabled by default.
+poll-worker-test = []
+
 [dependencies]
 thyla-heap = { path = "../thyla-heap" }
 

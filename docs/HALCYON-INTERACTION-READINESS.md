@@ -2,8 +2,8 @@
 
 Implementation review for HI1-Q2, September 25. This is a proposed internal
 arrangement within the approved userspace service; it adds no syscall, wire
-operation, authority role or clipboard guarantee. The standalone native worker is implemented and guest-tested; the expanded
-service and Halcyon event-loop connection remain unimplemented.
+operation, authority role or clipboard guarantee. The native worker is implemented and connected to the existing two-connection
+session media service. Expanded interaction admission remains unimplemented.
 
 ## The capacity constraint
 
@@ -43,8 +43,8 @@ machine must retain a reply's sent offset on WouldBlock and arm WRITE. Both
 existing media adapters now use the shared servicewire pump for this; their old
 send_all policy closed on a nonpositive write. The native real-SrvConn gate
 qualifies retained replies and short-write progress, and the actual session
-adapter handles two routed uploads. Expanded persistent interaction admission
-and the worker-to-compositor connection are still activation work.
+adapter handles two routed uploads. The UI now waits on one worker notification descriptor; protocol work stays
+on its original thread. Expanded persistent interaction admission remains open.
 
 ## Descriptor and notification ownership
 
@@ -93,8 +93,9 @@ does NOT unpost: KObj_Srv registry lifetime is the poster process. Therefore a
 fatal watcher failure after posting cannot leave a live compositor with a dead
 service name; without a new unpost ABI it must end the posting compositor (session
 recovery must be verified separately). Starting the worker before POST avoids
-publishing on ordinary constructor failure. This activation policy still needs
-a native failure test; no new unpost mechanism is proposed here.
+publishing on ordinary constructor failure. The session caller now exits on a published startup failure or fatal service
+error. Native failure and graphical recovery evidence are tracked separately
+in the status note; no new unpost mechanism is proposed here.
 
 Native libthyla-rs currently provides raw thread spawn and clear-child-tid join,
 not an owning high-level thread abstraction. The adapter therefore needs an
@@ -128,9 +129,9 @@ admission point specified in the main interaction and PTY contracts.
   quiet compositor. Check both progress and absence of periodic service wakes.
   Pure state-machine tests alone cannot establish actual wake/close behavior.
 
-Keep Aux's uncleared TC-1a wire/lib/tile files untouched while developing this
-adapter. The host binding announcement and its decoder still land together
-once his exact cleared base is available.
+Aux cleared TC-1a at 1cc9a300; Main is qualifying that merge. Respect the
+remaining TC-1b file reservations recorded in the status. The host binding
+announcement and its decoder must still land together on the reconciled base.
 
 ## Standalone worker checkpoint
 
@@ -138,6 +139,27 @@ libthyla-rs poll_worker supplies the proposed readiness-only mechanism. It
 supports at most 63 entries; the Halcyon adapter will request 39 (38 connections
 plus listener), for a 40-entry worker poll. Native validation and named negative
 controls are recorded in HALCYON-INTERACTION-STATUS.md. This is not activation:
-complete the remaining failure/interleaving tests and live service integration
-before increasing the connection count. No existing terminal-write fallback
+complete the remaining admission, failure and memory qualification before
+increasing the connection count. No existing terminal-write fallback
 or clipboard admission behavior has changed.
+
+## Existing session media integration (September 25)
+
+PanePlaceServer transfers the listener and accepted endpoints into PollWorker.
+Only the wake descriptor reaches the UI poll vector. The listener disarms when
+full; `free_slots` counts retired entries as occupied until their old poll has
+returned. Reclamation itself notifies the owner, so acceptance resumes without
+a timer or a transient accept-and-drop. Complete buffered work stays UI-runnable
+with its watch disarmed; partial input and blocked replies re-arm actual I/O.
+
+The image residual additionally reserves 72 KiB for the worker: 64 KiB stack,
+4 KiB guard and a conservative 4 KiB context. This is not the complete expanded
+38-connection ledger: kernel allocations and per-connection metadata still need
+explicit accounting before that admission limit is enabled.
+
+The opt-in `poll-worker-test` feature supplies single-owner bounded rendezvous
+outside the worker mutex, and one-shot acquisition/failure injection. The probe
+enables it through `readiness-qualification`; neither feature is default.
+Ordinary builds contain neither control state nor qualification commands. Tests
+must opt in explicitly and use a matching image; default interactive sweeps skip
+these two fixture-dependent gates with status 77.

@@ -621,10 +621,15 @@ Both media servers now explicitly mark accepted connections nonblocking and use
 [[sub-halcyond-service-wire]] for framing, reply offsets and bounded turns. A
 partial reply is retained until writable; complete buffered input makes the UI
 loop runnable without another read edge. Connection order rotates within the
-shared service deadline. Conn Drop closes accepted handles; server Drop closes
-the listener. The existing one-console/two-session capacity and all routing and
-image admission rules remain. The standalone readiness worker is not connected
-to these loops yet, and there is still no live clipboard endpoint.
+shared service deadline. The session server transfers its listener and accepted
+handles into PollWorker and appends one notification fd to the UI poll set.
+Retirement keeps handles alive until the old poll returns; server Drop joins.
+The console keeps direct polling/RAII close. A published session-service failure
+ends the posting compositor: closing a listener alone cannot unpost a service.
+The image residual charges the worker's 72 KiB reservation. Existing one-console/
+two-session capacity and routing/image rules remain; there is no live clipboard
+endpoint. The full 38-connection ledger and session recovery remain separate
+activation obligations.
 
 ### The inline-media place channel (I-47; the `view` reader side)
 

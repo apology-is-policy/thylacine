@@ -7,6 +7,9 @@ edition = "2021"
 name = "kaua-term-probe"
 path = "src/main.rs"
 
+[features]
+readiness-qualification = ["libthyla-rs/poll-worker-test"]
+
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs" }
 kaua-term = { path = "../kaua-term" }

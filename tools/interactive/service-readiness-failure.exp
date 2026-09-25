@@ -1,0 +1,34 @@
+#!/usr/bin/expect -f
+# Native pre/post-publication readiness failures; explicit serial test posture.
+set ::env(THYLACINE_SERIAL_SAK) 1
+# This binary is deliberately not in a default image. A missing fixture is
+# a skipped qualification, never a guest PASS.
+if {![info exists ::env(THYLACINE_READINESS_QUALIFICATION)] || $::env(THYLACINE_READINESS_QUALIFICATION) ne "1"} {
+    puts "LS-CI SKIP: requires an opt-in readiness-qualification probe image and THYLACINE_READINESS_QUALIFICATION=1"
+    exit 77
+}
+source [file join [file dirname [info script]] lib.exp]
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+# This gate needs the CI clearance/key fixture, not just lean login accounts.
+lc_send "imperium --list"
+lc_expect "imperium (distinct key, via the SAK)" "CI imperium enrollment required"
+lc_send "imperium post"
+lc_expect "as pid" "post request"
+lc_raw_send "\001b" "serial SAK fixture"
+lc_expect "CONFERRING IMPERIUM" "trusted provincia"
+lc_expect "CAP_POST_SERVICE" "posting authority"
+lc_expect "imperium key: " "trusted key prompt"
+lc_raw_send "imperium-key-michael-v1\r" "fixture key"
+lc_expect "imperium: conferred" "post capability conferred"
+lc_send "kaua-term-probe --service-readiness-failure"
+expect {
+    -ex "service-readiness-failure: PASS -- before-post rollback, published failure, process exit and repost" {
+        lc_pass "native posted service failure and registry recovery"
+    }
+    -re {service-readiness-failure: FAIL -- ([^\r\n]+)[\r\n]} { lc_fail "Service probe: $expect_out(1,string)" }
+    timeout { lc_fail "Service probe did not complete" }
+}
+lc_run_expect "echo service-shell-live | tr a-z A-Z" "SERVICE-SHELL-LIVE"
+lc_quit
+exit 0
