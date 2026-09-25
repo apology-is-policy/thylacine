@@ -13,7 +13,7 @@ SMP/UBSan matrix, production --all and native HVF observer scenario pass within
 the evidence boundaries recorded below. The staged-census refusal is resolved:
 re-rendering after staging the new source made normal hooks pass. All four
 separate drafts are byte-identical. No live clipboard endpoint is enabled.
-The standalone readiness worker is committed as b2ce61a5. The next checkpoint
+The standalone readiness worker is committed as b2ce61a5. Checkpoint 4feaaece
 repairs explicit nonblocking media I/O and adds owned /srv watch registration;
 source and verification are recorded at the end of this note. No service capacity
 has been raised, and the worker is still not connected to Halcyon's UI loop. Next:
@@ -733,3 +733,21 @@ frontmatter and the appended transport section. The failed render log is retaine
 as work/hi1-service-vault-render-first.log. Generated views remain unstaged until
 the corrected render/lint passes. The lease was released and all four protected
 drafts restored byte-for-byte. No source or runtime test result changed.
+
+
+### Transport checkpoint committed (September 25, 11:27 UTC)
+
+4feaaece commits the media transport repair, owned readiness API, native probe,
+qualification evidence and Vault updates on codex/astra. The corrected Quaestor
+render, lint and normal staged commit hook pass: 1349 notes, zero failures, two
+existing warnings (sub-kernel-caps line citation and stale dossiers). HI1-R10 is
+resolved. All four separate authority drafts remain byte-identical and excluded
+from the commit. The Mac lease was released after the hook completed.
+
+The pending-commit instructions above are historical: the transport heartbeat
+is now paused, as is the earlier pointer heartbeat. Do not rerun its manifest
+runner against the newer HEAD. Completed runtime/host tests were not repeated.
+The source is not merged into Main. The worker-to-compositor connection,
+remaining readiness failure/interleaving checks, full admission ledger,
+Tapestry/host admission and clipboard/modal clients remain activation work;
+no new graphical qualification or screenshot is claimed.

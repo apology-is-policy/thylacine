@@ -4,7 +4,7 @@ type: chg
 title: "Retain Halcyon service replies and own non-duplicable readiness handles"
 date: 2026-09-25
 arc: arc-halcyon-interaction
-commits: ["*(pending)*"]
+commits: ["4feaaece"]
 touched: [sub-halcyond, sub-halcyond-service-wire, sub-libthyla-rs, sub-substrate-interactive]
 established: []
 closed: []
