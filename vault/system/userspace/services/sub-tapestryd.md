@@ -12,8 +12,12 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-09-25
 ---
+## Shared capacity
+
+The pane tree re-exports `libhalcyon::layout::MAX_PANES` (32), the same constant used for interaction controller capacity. No layout, tree capacity or wire value changes.
+
 ## Purpose
 
 The compositor serves

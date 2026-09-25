@@ -136,6 +136,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-25 [[chg-2026-09-25-connection-capacity]] — Prepare bounded Halcyon connection admission
 - 2026-09-25 [[chg-2026-09-25-pty-interaction-kernel]] — Implement bounded terminal ownership observations and lifecycle revocation
 - 2026-09-25 [[chg-2026-09-25-pty-interaction-qualification]] — Qualify terminal ownership fronts and concurrent retirement
 - 2026-09-25 [[chg-2026-09-25-pty-observer-client]] — Add typed native terminal observer client
@@ -143,5 +144,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-25 [[chg-2026-09-25-service-backpressure]] — Retain Halcyon service replies and own non-duplicable readiness handles
 - 2026-09-25 [[chg-2026-09-25-session-readiness]] — Connect Halcyon session media to native readiness aggregation
 - 2026-09-24 [[chg-2026-09-24-astra-seal-integration]] — Integrate the cleared Aux seal prerequisite into Astra
-- 2026-09-24 [[chg-2026-09-24-authority-admission-core]] — Bind immutable issuance approval to live administrative proof
 <!-- generated:end -->

@@ -7,21 +7,20 @@ is claimed. The separate user-authority drafts remain untouched.
 
 ## Current pickup (September 25)
 
-Kernel qualification is committed as 5ad9ad27; the native observer client,
-Halcyon host seal and real guest probe are committed as 3c3d3cbc. Full 50-boot
-SMP/UBSan matrix, production --all and native HVF observer scenario pass within
-the evidence boundaries recorded below. The staged-census refusal is resolved:
-re-rendering after staging the new source made normal hooks pass. All four
-separate drafts are byte-identical. No live clipboard endpoint is enabled.
-The standalone readiness worker is committed as b2ce61a5. Checkpoint 4feaaece
-repairs explicit nonblocking media I/O and adds owned /srv watch registration;
-source and verification are recorded at the end of this note. No service capacity
-has been raised, and the worker is still not connected to Halcyon's UI loop. Next:
-complete its activation obligations and connect Halcyon's service loop, then
-host/Tapestry admission and clipboard integration. Do not rerun completed
-kernel qualification without a relevant change. Await Aux's exact cleared TC-1a
-SHA before touching his wire/lib/tile files. Current build artifacts are production
-with HALCYON_SESSION=0; graphical verification requires the appropriate rebuild.
+Kernel/observer and session-readiness checkpoints are committed, most recently
+32734353 (session media on PollWorker). Its normal hooks passed, all four
+protected drafts were restored byte-for-byte, and all three completed monitors
+are paused. The historical commit-pickup instructions below are CLOSED; do not
+rerun their manifest runners on a later HEAD. Native and graphical evidence is
+recorded below. No live clipboard endpoint is enabled.
+
+The next bounded checkpoint supplies pure connection-capacity admission and a
+shared pane/controller limit. It is not wired into PanePlaceServer yet: current
+media capacity remains two. Controller/host and ordered Tapestry admission,
+aggregate protocol buffers and complete kernel-resource accounting still precede
+38-connection activation. Aux TC-1b remains reserved and uncleared. The operator
+reports Main/Aux asleep until Monday and authorizes resource use (September 25);
+keep Yip informed, preserve their leases/checkouts/processes and authority drafts.
 
 ## Delivered source checkpoint
 
@@ -878,3 +877,44 @@ merge Main or start activation within this commit-only pickup. Remaining work:
 full 38-connection/admission and kernel-resource ledger, Tapestry/host Control-7
 path on the reconciled base, actual failure recovery, clipboard clients and
 INS/NOR/VIS UI. No live clipboard or Main landing is claimed.
+
+### September 25 connection pool checkpoint
+
+`servicepool` is an allocation-free UI-owned capacity machine, with 32 controller,
+two media and four unbound handshake reservations. A peer may have one handshake;
+bound reservations require the adapter to verify owned live leaves first. One
+controller excludes every other connection for that leaf. Failed promotion leaves
+the handshake unchanged. Promotion frees handshake quota, allowing another owned
+leaf from the same process. These APIs grant no clipboard/focus authority.
+
+Connection identities increase without reuse; exhaustion refuses. Handshakes
+expire at exactly two monotonic seconds and expose their nearest timer deadline.
+Retirement preserves class capacity, peer exclusion and leaf exclusion until the
+owner reports worker reclamation/close. Stale release cannot evict a replacement.
+The pool owns no fd and never guesses when a worker has stopped borrowing one.
+Metadata is compile-time bounded at 4 KiB. The declared connection buffer ceiling
+plus clipboard storage is 7.375 MiB; this is NOT the complete active-service/kernel
+allocation ledger. Fid/cache/buffer enforcement and fd/pipe/thread accounting are
+still required before activation. No larger listener capacity is enabled here.
+
+`libhalcyon::layout::MAX_PANES` now owns the existing value 32. Tapestry re-exports
+it, and HIN1 MAX_CONTROLLERS derives from it with a u16 representability assertion.
+There is no wire-value or tree-capacity change and no edit to reserved TC-1b code.
+
+Single-agent self-review checks reservation rollback, deadline equality, identity
+exhaustion, deferred reclamation and class/leaf isolation. 591 Linux/aarch64 host tests pass (348 Halcyon including seven new pool tests,
+148 libhalcyon, 95 Tapestry). Three intended mutants fail their named checks:
+duplicate peer handshakes, expiry one tick too late, and release before retirement.
+Restored code passes the complete affected host suite. Evidence is retained in
+work/hi1-pool-evidence/. This checkpoint adds no graphical behavior.
+
+Guest release-library checks for Halcyon and Tapestry also pass (existing warnings
+only). Pi was released after six minutes. The normal local Vault/hooks use the
+operator's September 25 resource authorization; Main's outstanding lease is
+neither changed nor released. No VM or graphical check was rerun for this pure
+capacity checkpoint. The four separate drafts remain byte-identical.
+
+The first normal commit was refused by the dossier gate: exporting servicepool
+also changes lib.rs, owned by sub-halcyond. Updating that owning dossier resolves
+the omission; the failed hook log is retained as commit-first.log. Protected
+files were restored by finally even on that refusal.

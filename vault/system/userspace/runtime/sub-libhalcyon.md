@@ -32,8 +32,12 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-24
+updated: 2026-09-25
 ---
+## Shared capacity
+
+The existing pane limit now lives in `layout::MAX_PANES` (32), shared by Tapestry and the HIN1 controller bound. `MAX_CONTROLLERS` derives from it with a u16 representability assertion; wire values and capacity are unchanged.
+
 ## Purpose
 
 The Halcyon environment library (HALCYON.md 13): the shared pieces of the

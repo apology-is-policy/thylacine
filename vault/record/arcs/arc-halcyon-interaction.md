@@ -166,3 +166,11 @@ media adapter while preserving its two-connection limit. Protocol state stays
 on the UI thread. Controlled native schedules and fault injection complement
 the real-media probe; graphical evidence uses a separate paired CI fixture.
 Expanded interaction admission and clipboard/modal workflows remain open.
+
+## Connection capacity preparation
+
+[[chg-2026-09-25-connection-capacity]] supplies the pure 32/2/4 reservation pool
+and centralizes the existing pane/controller limit. The readiness checkpoint
+committed as 32734353 with normal hooks; its queue monitor is paused. Capacity
+activation still requires authenticated controller/focus admission, aggregate
+protocol-buffer enforcement and the complete resource ledger.

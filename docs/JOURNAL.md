@@ -31339,3 +31339,15 @@ two actual PanePlaceServer uploads. No full graphical bake or expanded clipboard
 service is claimed. Test setup failures (missing CI key enrollment, graphical
 fixture mismatch, invalid POST mode, poster-process lifetime, two-step /srv open)
 are preserved separately in HALCYON-INTERACTION-STATUS.md.
+
+
+### 2026-09-25: HI-1 bounded connection capacity (Astra)
+
+After session readiness commit 32734353, add the pure 32/2/4 controller/media/
+handshake pool. Retiring entries retain their quotas until worker reclamation;
+monotone IDs prevent stale releases, and one peer cannot occupy all handshake
+slots. A single MAX_PANES definition ties the existing Tapestry bound to HIN1.
+591 affected host tests pass; three deliberate boundary violations fail their
+named tests. Single-agent self-review, no independent audit. The pool is not yet
+activated; media still admits two, clipboard/focus/host integration remains open.
+Authority drafts and Aux TC-1b regions are preserved.

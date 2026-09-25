@@ -82,6 +82,14 @@ console trio; on `/srv/tapestry` the `layout` file (visible leaves), `pane/<id>/
 `/lib/halcyon/renderer` (joey's system-renderer choice) and
 `/lib/halcyon/session` (login's per-user choice) -- both one-token, fail-safe.
 
+## Prepared connection admission
+
+The pure library exports `servicepool`, owned by [[sub-halcyond-service-wire]].
+It reserves controller/media/handshake capacity and retains retiring quotas until
+watch reclamation. No production adapter calls it yet: session media keeps two
+connections and clipboard remains unavailable. Capacity checks cannot replace
+kernel host ownership or ordered Tapestry focus admission.
+
 ## Mechanism
 
 ### Session clipboard storage (HI-1b; no live endpoint yet)

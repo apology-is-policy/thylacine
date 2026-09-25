@@ -5,7 +5,8 @@ use super::interaction_wire::{self as wire, Error, Header, Mode, Operation};
 use alloc::vec::Vec;
 
 pub const SCOPE_BYTES: usize = 32;
-pub const MAX_CONTROLLERS: u16 = 32;
+pub const MAX_CONTROLLERS: u16 = crate::layout::MAX_PANES as u16;
+const _: () = assert!(crate::layout::MAX_PANES <= u16::MAX as usize);
 pub const WRITE_SLOTS: u16 = 2;
 pub const READ_SLOTS: u16 = 2;
 pub const IDLE_MS: u32 = 30_000;

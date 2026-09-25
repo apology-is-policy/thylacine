@@ -6,6 +6,7 @@ parent: moc-userspace-shell-tui
 code:
   - usr/halcyond/src/servicewire.rs
   - usr/halcyond/src/serviceio.rs
+  - usr/halcyond/src/servicepool.rs
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -79,6 +80,25 @@ into the readiness worker.
 - EOF, invalid lengths and terminal I/O errors close the connection, discarding
   its uncommitted protocol state. Session handles retire through the worker and join; console handles close on Drop;
   the service name itself remains registered until poster process exit.
+
+## Connection capacity (prepared, not active)
+
+`servicepool::Pool` is fixed UI-thread metadata (at most 4 KiB), with monotonically
+unique connection IDs, 32 controller slots derived from the shared MAX_PANES,
+two media slots and four two-second handshakes. One handshake per kernel peer;
+one controller per live leaf. The adapter must authenticate leaf ownership before
+promotion; capacity reservation is not authority. Failed promotion retains the
+handshake. Explicit retirement retains its class quota and peer/leaf exclusion
+until worker reclamation/close; release rejects live or stale IDs. Deadline
+reporting permits a nearest-deadline timer without periodic polling. Overflow
+refuses rather than reusing an identity or wrapping a deadline.
+
+The module declares 7.375 MiB for connection buffer budgets plus clipboard
+storage. This excludes the explicitly bounded pool metadata, worker reservation
+and still-owed kernel/protocol allocation ledger. The current media adapter
+continues to admit two connections; it does not yet use this pool. Tests exercise
+full concurrent reserves, failed promotion, peer/leaf exclusion, exact expiry,
+retirement and stale completions. No live clipboard or expanded service is claimed.
 
 ## Error paths
 

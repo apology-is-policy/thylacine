@@ -38,7 +38,7 @@ use libhalcyon::carve::{self, DEFAULT_WEIGHT};
 use libhalcyon::instrument::Profile;
 use libhalcyon::theme;
 
-pub const MAX_PANES: usize = 32;
+pub use libhalcyon::layout::MAX_PANES;
 
 /// HALCYON-WORKSPACES 4 (the ratified bound; I-32): nine workspaces, because
 /// Super+1..9 is the whole keyboard's worth and a client verb must not be

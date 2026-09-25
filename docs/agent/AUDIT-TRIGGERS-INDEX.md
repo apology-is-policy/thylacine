@@ -192,3 +192,5 @@
 - HI-1 bounded media service: `halcyond/{servicewire,serviceio,paneplace,placesrv}.rs`, compositor poll loops; nonblocking acceptance, reply offsets, bounded turns, buffered continuation and native SrvConn/media proof.
 
 - HI-1 session readiness activation: PanePlaceServer/session, opt-in worker qualification and native failure probe; retirement-aware listener capacity, one wake fd, pre/post publication failure policy and test-only controls.
+
+- HI-1 connection capacity: `servicepool.rs`, shared pane/controller bound; full row in `docs/AUDIT-TRIGGERS.md`.
