@@ -188,3 +188,5 @@
 - HI-1 terminal interaction kernel lifecycle: `kernel/pts.c`, `kernel/proc.c`, `kernel/syscall.c`, `pts.h` and errno mirrors; role/epoch admission, retirement, watcher lifetime and lock ordering.
 
 - HI-1 native readiness worker: libthyla-rs poll_worker, File duplication and native probe; descriptor/ticket/wake/stack/join lifetimes and bounded allocation.
+
+- HI-1 bounded media service: `halcyond/{servicewire,serviceio,paneplace,placesrv}.rs`, compositor poll loops; nonblocking acceptance, reply offsets, bounded turns, buffered continuation and native SrvConn/media proof.

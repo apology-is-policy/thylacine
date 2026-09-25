@@ -20,7 +20,7 @@ Generated from note fields — do not edit between the markers
 | [[arc-deep-smp-review]] | active | 4 | seam-hmp-push, seam-sparse-mpidr |
 | [[arc-go-build]] | active | 27 |  |
 | [[arc-go-ide]] | active | 2 |  |
-| [[arc-halcyon-interaction]] | active | 9 |  |
+| [[arc-halcyon-interaction]] | active | 10 |  |
 | [[arc-holotype-rw]] | active | 9 |  |
 | [[arc-identity-detour]] | active | 12 |  |
 | [[arc-life-support]] | active | 2 |  |

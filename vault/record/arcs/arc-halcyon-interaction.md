@@ -4,7 +4,7 @@ type: arc
 title: "Halcyon interaction: pointer, clipboard and modal text"
 status: active
 design: [docs/HALCYON-INTERACTION.md]
-chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification, chg-2026-09-25-pty-observer-client, chg-2026-09-25-readiness-worker]
+chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification, chg-2026-09-25-pty-observer-client, chg-2026-09-25-readiness-worker, chg-2026-09-25-service-backpressure]
 follow-ons: []
 exit-criteria:
   - "[ ] Portable guest cursor works over composed/fullscreen content and capture transitions"
@@ -148,3 +148,13 @@ integration remain open; see the status for the separate evidence boundaries.
 [[chg-2026-09-25-readiness-worker]] adds the bounded native aggregation layer and
 records real descriptor tests plus negative controls. Halcyon service connection,
 expanded persistent IPC and application clipboard workflows remain open.
+
+
+## Media transport and service-owned watches
+
+The September 25 continuation fixes blocking default writes in both Halcyon
+media adapters, retains partial replies and makes buffered requests runnable.
+A real SrvConn probe exposes and respects NoSrvSpoorDup through owned worker
+registration; no kernel alias exception is introduced. Native two-client image
+uploads exercise the production PanePlaceServer. The readiness worker still
+awaits activation qualification and connection to the compositor loop.

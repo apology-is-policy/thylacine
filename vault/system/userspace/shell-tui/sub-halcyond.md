@@ -615,6 +615,17 @@ while the reader is back in history an append keeps them there -- so the
 indicator never reports "at end" until they return.** The picker reuses the same
 arithmetic through `thumb_raw` with its own smaller floor (`PICKER_MIN_THUMB`).
 
+### Bounded service transport (HI-1)
+
+Both media servers now explicitly mark accepted connections nonblocking and use
+[[sub-halcyond-service-wire]] for framing, reply offsets and bounded turns. A
+partial reply is retained until writable; complete buffered input makes the UI
+loop runnable without another read edge. Connection order rotates within the
+shared service deadline. Conn Drop closes accepted handles; server Drop closes
+the listener. The existing one-console/two-session capacity and all routing and
+image admission rules remain. The standalone readiness worker is not connected
+to these loops yet, and there is still no live clipboard endpoint.
+
 ### The inline-media place channel (I-47; the `view` reader side)
 
 halcyond receives decoded rasters from a short-lived `view` process and injects

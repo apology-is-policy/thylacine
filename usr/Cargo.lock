@@ -885,6 +885,7 @@ dependencies = [
 name = "kaua-term-probe"
 version = "0.1.0"
 dependencies = [
+ "inlinewire",
  "kaua-term",
  "libthyla-rs",
  "ptyhold",

@@ -31299,3 +31299,20 @@ MMIO default, which the modern-only backend refused. Pinning the supported v2
 transport made the same image boot. Finally, matching only a FAIL prefix truncated
 a mutant's diagnostic; the scenario now waits for its complete line. Failed logs
 remain in work/. These were explained harness/device-contract failures, not flakes.
+
+
+### 2026-09-25: real service descriptors change the readiness ownership plan
+
+The readiness worker's pipe tests were insufficient for its intended /srv
+consumer: the kernel deliberately refuses duplicating service listeners and
+connection Spoors. A real SrvConn native probe caught the mismatch before
+activation. register_owned/with_fd now transfer and borrow the sole handle,
+keeping kernel identity/lifetime rules intact; no alias exception or new syscall.
+The same investigation found Halcyon's media adapters using blocking default
+server writes. Both now explicitly enable nonblocking mode and share bounded
+framing/reply-offset retention, with buffered-frame continuation in both UI loops.
+Native evidence covers a stalled reader, another peer, byte-exact resumption and
+two actual PanePlaceServer uploads. No full graphical bake or expanded clipboard
+service is claimed. Test setup failures (missing CI key enrollment, graphical
+fixture mismatch, invalid POST mode, poster-process lifetime, two-step /srv open)
+are preserved separately in HALCYON-INTERACTION-STATUS.md.

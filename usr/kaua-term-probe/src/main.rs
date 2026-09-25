@@ -18,6 +18,23 @@ extern crate alloc;
 
 mod observer;
 mod readiness;
+mod service;
+#[path = "../../halcyond/src/inlineaccum.rs"]
+mod inlineaccum;
+#[path = "../../halcyond/src/paneroute.rs"]
+mod paneroute;
+macro_rules! say {
+    ($($arg:tt)*) => { libthyla_rs::t_putstr(&alloc::format!("{}\n", alloc::format!($($arg)*))) };
+}
+#[allow(dead_code)]
+#[path = "../../halcyond/src/paneplace.rs"]
+mod paneplace;
+// Use the shipped pump and syscall adapter, not a probe reimplementation.
+extern crate self as halcyond;
+#[path = "../../halcyond/src/servicewire.rs"]
+mod servicewire;
+#[path = "../../halcyond/src/serviceio.rs"]
+mod serviceio;
 
 use alloc::string::String;
 use kaua_term::wire::{parse_record, FrameDecoder};
@@ -133,6 +150,9 @@ fn run() -> i64 {
 pub extern "C" fn rs_main() -> i64 {
     if let Some(arg) = libthyla_rs::env::args().nth(1) {
         if arg == b"--readiness" { return readiness::run(); }
+        if arg == b"--service" { return service::run(); }
+        if arg == b"--service-transport" { return service::transport_child(); }
+        if arg == b"--service-media-client" { return service::media_client(); }
         if let Some(result) = observer::run(arg) {
             return result;
         }

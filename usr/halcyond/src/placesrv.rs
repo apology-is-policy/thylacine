@@ -20,15 +20,17 @@
 // accumulator instead of an audio ring.
 
 use alloc::vec::Vec;
+use halcyond::servicewire::{Handler, Interest, Stream};
+use crate::serviceio::NativeEndpoint;
 
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_open, t_read, t_srv_accept, t_walk_create, t_write, TPollFd, T_OPATH, T_OREAD,
-    T_POLLHUP, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_srv_accept, t_walk_create, TPollFd, T_OPATH, T_OREAD,
+    T_POLLHUP, T_POLLIN, T_POLLOUT, T_POLLERR, T_POLLNVAL, T_WALK_OPEN_FROM_ROOT,
 };
 
-const SRV_MSIZE: u32 = 32768;
+const SRV_MSIZE: u32 = halcyond::servicewire::MAX_FRAME as u32;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 const MAX_FIDS: usize = 8;
 /// The console spike drives exactly ONE `view` at a time (a user runs `view x`
@@ -132,12 +134,48 @@ enum Disp {
     Fatal,
 }
 
+// The accepted endpoint is explicitly nonblocking before Conn exists. The
+// common pump owns input/offsets; Protocol owns fids, accumulator and ONE reply.
 struct Conn {
     handle: i64,
+    stream: Stream,
+    protocol: Protocol,
+}
+impl Drop for Conn {
+    fn drop(&mut self) { unsafe { t_close(self.handle); } }
+}
+impl Conn {
+    fn new(handle: i64) -> Self {
+        Self { handle, stream: Stream::new(), protocol: Protocol::new() }
+    }
+    fn events(&self) -> i16 {
+        match self.stream.interest() { Interest::Read => T_POLLIN, Interest::Write => T_POLLOUT }
+    }
+    fn service(&mut self, out: &mut Vec<CompletedImage>, max_pixels: u64, deadline: u64) -> bool {
+        let mut reply = Reply { protocol: &mut self.protocol, out, max_pixels };
+        self.stream.service(&mut NativeEndpoint(self.handle), &mut reply, deadline)
+    }
+}
+struct Reply<'a> {
+    protocol: &'a mut Protocol,
+    out: &'a mut Vec<CompletedImage>,
+    max_pixels: u64,
+}
+impl Handler for Reply<'_> {
+    fn dispatch(&mut self, frame: &[u8]) -> Result<(), ()> {
+        let hdr = p9::peek_header(frame)?;
+        match self.protocol.dispatch(frame, hdr, self.out, self.max_pixels) {
+            Disp::Fatal => Err(()),
+            Disp::Reply(n) => { self.protocol.out_buf.truncate(n); Ok(()) }
+        }
+    }
+    fn reply(&self) -> &[u8] { &self.protocol.out_buf }
+}
+
+struct Protocol {
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
-    in_buf: Vec<u8>,
     out_buf: Vec<u8>,
     /// The in-flight place transfer, and the fid it belongs to. One at a time
     /// per connection (a second concurrent place-open is refused E_BUSY), so a
@@ -145,14 +183,12 @@ struct Conn {
     accum: Option<(u32, PlaceAccum)>,
 }
 
-impl Conn {
-    fn new(handle: i64) -> Conn {
-        Conn {
-            handle,
+impl Protocol {
+    fn new() -> Self {
+        Self {
             version_done: false,
             msize: SRV_MSIZE,
             fids: [None; MAX_FIDS],
-            in_buf: Vec::new(),
             out_buf: Vec::new(),
             accum: None,
         }
@@ -184,51 +220,6 @@ impl Conn {
         false
     }
 
-    /// Read available bytes and dispatch every COMPLETE 9P frame (the nocturned
-    /// shape). Completed rasters are pushed to `out`. Returns false to close the
-    /// connection (EOF, a wire violation, or a reply write failure).
-    fn service(&mut self, out: &mut Vec<CompletedImage>, max_pixels: u64) -> bool {
-        let cur = self.in_buf.len();
-        if cur >= SRV_MSIZE_USIZE {
-            return false; // a full msize buffered with no complete frame
-        }
-        let want = SRV_MSIZE_USIZE - cur;
-        self.in_buf.resize(cur + want, 0);
-        let n = unsafe { t_read(self.handle, self.in_buf.as_mut_ptr().add(cur), want) };
-        if n <= 0 {
-            self.in_buf.truncate(cur);
-            return false;
-        }
-        self.in_buf.truncate(cur + n as usize);
-
-        loop {
-            if self.in_buf.len() < p9::P9_HDR_LEN {
-                return true;
-            }
-            let hdr = match p9::peek_header(&self.in_buf) {
-                Ok(h) => h,
-                Err(_) => return false,
-            };
-            let size = hdr.size as usize;
-            if !(p9::P9_HDR_LEN..=SRV_MSIZE_USIZE).contains(&size) {
-                return false;
-            }
-            if self.in_buf.len() < size {
-                return true; // a partial frame waits for the next read
-            }
-            let frame: Vec<u8> = self.in_buf[..size].to_vec();
-            match self.dispatch(&frame, hdr, out, max_pixels) {
-                Disp::Fatal => return false,
-                Disp::Reply(rlen) => {
-                    if !self.send_all(rlen) {
-                        return false;
-                    }
-                }
-            }
-            self.in_buf.drain(..size);
-        }
-    }
-
     fn dispatch(
         &mut self,
         tmsg: &[u8],
@@ -238,6 +229,7 @@ impl Conn {
     ) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
+        if self.out_buf.try_reserve_exact(SRV_MSIZE_USIZE).is_err() { return Disp::Fatal; }
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
         let r = match hdr.mtype {
             p9::P9_TVERSION => self.h_version(tmsg, tag),
@@ -261,19 +253,6 @@ impl Conn {
         } else {
             Disp::Reply(len)
         }
-    }
-
-    fn send_all(&mut self, rlen: usize) -> bool {
-        let mut sent = 0usize;
-        while sent < rlen {
-            let w =
-                unsafe { t_write(self.handle, self.out_buf.as_ptr().add(sent), rlen - sent) };
-            if w <= 0 {
-                return false;
-            }
-            sent += w as usize;
-        }
-        true
     }
 
     fn err(&mut self, tag: u16, code: u32) -> Result<usize, ()> {
@@ -351,7 +330,7 @@ impl Conn {
         let mut qids: [p9::Qid; p9::P9_MAX_WALK] = [p9::Qid::default(); p9::P9_MAX_WALK];
         let mut n = 0usize;
         for k in 0..(a.nwname as usize).min(p9::P9_MAX_WALK) {
-            match Conn::walk_child(cur, a.names[k]) {
+            match Protocol::walk_child(cur, a.names[k]) {
                 Some(p) => {
                     cur = p;
                     qids[n] = qid_of(p);
@@ -553,9 +532,12 @@ impl PlaceServer {
         self.max_pixels = px.clamp(PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD);
     }
 
-    /// Append this server's fds (the listener while there is room, plus every
-    /// live connection) to a caller's poll set, so a place write wakes the
-    /// caller's blocking wait alongside its own events.
+    /// Complete buffered requests need another turn even without a read edge.
+    pub fn runnable(&self) -> bool {
+        self.conns.iter().any(|c| c.stream.runnable())
+    }
+
+    /// Wait for READ or retained-reply WRITE, plus the listener while not full.
     pub fn push_fds(&self, fds: &mut Vec<TPollFd>) {
         if self.conns.len() < MAX_CONNS {
             fds.push(TPollFd {
@@ -572,18 +554,18 @@ impl PlaceServer {
                 // dead conn holds a MAX_CONNS slot until some other event wakes
                 // the loop.
                 fd: c.handle as i32,
-                events: T_POLLIN | T_POLLHUP,
+                events: c.events(),
                 revents: 0,
             });
         }
     }
 
     /// One non-blocking pass: accept a pending connection (while there is room)
-    /// and service every readable one. Completed rasters accumulate; the caller
-    /// drains them with `take_completed`. The caller's outer loop re-polls, so a
-    /// multi-frame transfer proceeds one read per pass -- keeping the render loop
-    /// responsive between chunks.
+    /// and service ready or buffered connections. Completed rasters accumulate; the caller
+    /// drains them with `take_completed`. The common pump bounds frames/bytes;
+    /// one shared deadline bounds this pass, rotating peers to avoid starvation.
     pub fn service(&mut self) {
+        if !self.conns.is_empty() { self.conns.rotate_left(1); }
         let has_room = self.conns.len() < MAX_CONNS;
         let mut pfds: Vec<TPollFd> = Vec::with_capacity(1 + self.conns.len());
         if has_room {
@@ -597,31 +579,34 @@ impl PlaceServer {
         for c in &self.conns {
             pfds.push(TPollFd {
                 fd: c.handle as i32,
-                events: T_POLLIN | T_POLLHUP,
+                events: c.events(),
                 revents: 0,
             });
         }
         let rc = unsafe { libthyla_rs::t_poll(pfds.as_mut_ptr(), pfds.len(), 0) };
-        if rc <= 0 {
+        if rc < 0 {
             return;
         }
         if has_room && pfds[0].revents & T_POLLIN != 0 {
             let h = unsafe { t_srv_accept(self.listener) };
-            if h >= 0 {
+            if h >= 0 && unsafe { libthyla_rs::t_set_nonblock(h, true) } < 0 {
+                unsafe { t_close(h); }
+            } else if h >= 0 {
                 self.conns.push(Conn::new(h));
             }
         }
-        // Service readable conns backward (remove-safe). A conn accepted just now
+        // Service ready/buffered conns backward (remove-safe). A conn accepted just now
         // sits past the polled prefix and is serviced next pass.
+        let deadline = libthyla_rs::time::monotonic_ns().saturating_add(2_000_000);
         let nc = pfds.len() - listener_slot;
         let mut i = nc;
         while i > 0 {
             i -= 1;
             let pf = pfds[listener_slot + i];
-            if pf.revents & (T_POLLIN | T_POLLHUP) != 0
-                && !self.conns[i].service(&mut self.completed, self.max_pixels)
+            if pf.revents & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
+                || ((pf.revents != 0 || self.conns[i].stream.runnable())
+                    && !self.conns[i].service(&mut self.completed, self.max_pixels, deadline))
             {
-                let _ = unsafe { t_close(self.conns[i].handle) };
                 self.conns.remove(i);
             }
         }
@@ -631,4 +616,8 @@ impl PlaceServer {
     pub fn take_completed(&mut self) -> Vec<CompletedImage> {
         core::mem::take(&mut self.completed)
     }
+}
+
+impl Drop for PlaceServer {
+    fn drop(&mut self) { unsafe { t_close(self.listener); } }
 }

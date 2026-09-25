@@ -2734,7 +2734,9 @@ pub fn run(home: Option<String>) -> i64 {
             }
         }
         let nfds = fds.len();
-        let timeout = if init.is_some() {
+        let timeout = if places.as_ref().is_some_and(|p| p.runnable()) {
+            0 // Buffered complete service frames need no new descriptor edge.
+        } else if init.is_some() {
             INIT_REAP_POLL_MS
         } else if omitted {
             DOWN_OMITTED_POLL_MS

@@ -13,7 +13,10 @@ SMP/UBSan matrix, production --all and native HVF observer scenario pass within
 the evidence boundaries recorded below. The staged-census refusal is resolved:
 re-rendering after staging the new source made normal hooks pass. All four
 separate drafts are byte-identical. No live clipboard endpoint is enabled.
-The standalone readiness worker is now implemented and qualified below. Next:
+The standalone readiness worker is committed as b2ce61a5. The next checkpoint
+repairs explicit nonblocking media I/O and adds owned /srv watch registration;
+source and verification are recorded at the end of this note. No service capacity
+has been raised, and the worker is still not connected to Halcyon's UI loop. Next:
 complete its activation obligations and connect Halcyon's service loop, then
 host/Tapestry admission and clipboard integration. Do not rerun completed
 kernel qualification without a relevant change. Await Aux's exact cleared TC-1a
@@ -567,3 +570,166 @@ short-write response retention and the full 38-connection IPC/admission ledger.
 Then integrate Halcyon's service loop and host/Tapestry control flow; Aux's
 TC-1a-cleared SHA still precedes Control-7 wire/lib/tile edits. This checkpoint
 is single-agent implementation/self-review, not an independent audit.
+
+
+## HI1-R4: accepted media service can block the compositor
+
+Source inspection after b2ce61a5 found that paneplace assumes nonblocking server
+I/O without setting CNONBLOCK. devsrv_write now uses
+srvconn_server_send_blocking unless the accepted Spoor is marked nonblocking;
+byte-mode server reads can block too. A stalled reply reader can therefore park
+the UI. This also invalidates the readiness review's claim that the default
+server endpoint supplies nonblocking I/O. Fix before service activation: mark
+every accepted connection nonblocking, retain short writes/WouldBlock, and
+exercise stalled-reader progress and buffered-frame continuation. No failure
+has yet been reproduced at runtime; this is a source-established blocking path.
+
+
+## HI1-R5: first service probe hit SAK before pending request
+
+The first service-wire native run did not execute the probe: after the test
+matched imperium's `as pid` prefix and immediately sent BREAK, Corvus displayed
+`nothing pending`. Preserve work/hi1-service-runtime-first.log and its console.
+Determine the request/arming order and synchronize the test with a real armed
+state rather than treating this as a timing flake. Compilation issues in the
+first adapter/probe builds were corrected; both release binaries now link.
+
+HI1-R5 is a fixture mismatch, not an established arming race. Corvus dispatches
+the request before acknowledging the final Twrite. The lean joey provisions
+login accounts but no imperium clearance/key; `imperium --list` lists only the
+automatic JIT tier. A control run without BREAK confirms `imperium: not eligible
+for the imperium level` (work/hi1-service-fixture.log). The first diagnostic
+incorrectly expected zero eligible levels and failed on that assertion; its
+log is retained as work/hi1-service-fixture-first.log. The gate now requires
+the actual imperium enrollment before requesting SAK. A separate isolated
+hi1-service-runtime copies the September 24 CI ramfs and matching pristine pool
+(key snapshot compared equal), plus the already-qualified production kernel.
+Only its probe ELF is replaced; original production/CI sources remain unchanged.
+
+
+## HI1-R6: native service probe setup refused after enrollment
+
+The corrected isolated fixture reaches successful POST_SERVICE conferred, but
+the probe's generic open/post/accept setup check fails. Preserve the enrolled
+run and add operation-specific errno diagnostics before inferring a cause. The
+CI-session-on attempt was stopped through its own QMP socket after it proved
+that fixture launches graphical login; the final fixture uses the original
+production key/pool/config with only the existing CI joey and new probe replaced.
+
+HI1-R6 is the probe supplying POSIX mode bits to a service POST. Its diagnostic
+reports `post byte service returned -22`; sys_srv_post_perm_ok explicitly
+permits only DMSRV transport bits. Removed the erroneous 0600, retaining the
+existing scope/principal/TCB-dial gates. No production kernel change is needed.
+
+
+## HI1-R7: readiness duplication conflicts with /srv ownership
+
+After setup correction the actual SrvConn pump reaches its first readiness
+registration and fails: `watch blocked writer`. Source confirms
+handle_dup_common refuses every devsrv Spoor and KObj_Srv (NoSrvSpoorDup /
+SrvHandlesAtOrigin). Pipe-only qualification did not cover the intended service
+handle class. Preserve work/hi1-service-runtime-canonical.log. Do not weaken the
+kernel alias/identity contract. Add explicit owned registration: consume a File
+into the worker, borrow its raw descriptor only during a closure under exclusive
+owner access, release the state mutex before I/O, and retain the owned descriptor
+until removal is observed after poll. This adds no allocation or kernel ABI.
+The existing duplicated registration remains useful for transferable sources.
+
+
+## HI1-R8: combined probe assumed listener-close unposts
+
+The owned-watch transport checks now reach completion, then the second, actual
+media adapter POST fails. The probe assumed dropping a listener frees its
+service. KObj_Srv release is intentionally a no-op: service lifetime is the
+poster Proc, and this checkout still has a 16-slot registry. Run the standalone
+transport portion in a child and join its exit before posting the media adapter;
+this honors real registry lifetime and permits cap-slot recycling. Retain the
+failed combined log; a passing rerun must still prove the actual media path.
+
+The poster-process split allows the media POST. Its first clients then fail
+before accept: the test incorrectly tried a flat /srv/service/token/place open.
+The real view client first opens /srv/service (instantiating its kernel 9P
+client), then opens token/place relative to that handle. Correct the probe to
+use this existing contract, and retain work/hi1-service-media-open-first.log.
+This is HI1-R9, a test-client setup error, not a service transport verdict.
+
+
+## Nonblocking media transport and owned /srv watches (September 25)
+
+HI1-R4 is repaired in both console and session adapters: accepted endpoints must
+successfully enable nonblocking mode before Conn publication. Shared servicewire
+retains one reply buffer/offset across short writes and EAGAIN, dispatches each
+request once, caps each turn at eight frames and 64 KiB I/O, and observes a shared
+two-millisecond service-pass deadline. Connection order rotates. Complete buffered
+frames explicitly keep the UI runnable; partial input/blocked output wait on
+READ/WRITE without timer polling. Conn/server handles close on Drop; registry
+unposting remains process-lifetime, not handle-lifetime. Media capacity stays 1/2.
+
+HI1-R7 changes the internal worker adapter, preserving the kernel NoSrvSpoorDup
+contract. register_owned consumes a File with no duplication/allocation. with_fd
+borrows it under exclusive access to the owner, after releasing the state lock;
+remove/shutdown cannot run during that closure, and the worker never closes a
+live slot. Retired IDs refuse I/O. An owned accepted endpoint is closed after
+kernel-confirmed worker join. Transferable-source register still uses SYS_DUP.
+
+The final service-wire native gate PASS on the isolated Pi/KVM: explicit
+POST_SERVICE conferred; full real SrvConn reply ring; unrelated peer progresses;
+17-byte drain creates exact short-write credit; readiness wakes then disarms;
+five 32 KiB replies arrive with exact ordered bytes and no duplicate dispatch;
+owned listener/connection retirement and join; then the production PanePlaceServer
+source handles two child processes through real kernel 9P clients, each uploading
+a 256x256 image whose ID, target leaf and every ARGB pixel are checked. Both
+children exit successfully and a shell pipeline runs afterward. This compiles
+the actual adapter into the probe; it is not a graphical image/rendering test.
+
+The isolated fixture is /home/cora/projects/thylacine-astra-hi1-service-runtime.
+Its production kernel, original paired production ramfs/pool/key/config are
+unchanged; the separate runtime ramfs replaces only kaua-term-probe and the
+previously-built CI joey, needed for test enrollment. The original CI session-on
+pair is preserved under work/ci-session-on-base. These fixture differences and
+failed runs are recorded in HI1-R5/R6/R8/R9 above; no passing claim is drawn from
+them. Final native evidence is work/hi1-service-complete-runtime.log plus the
+console and artifact digests under work/hi1-service-evidence/. All 341 Halcyon
+host tests pass. The lost-offset and suppressed-buffered-work mutants each fail
+their intended named test; all six restored pump tests pass. Both final native
+release binaries link, and the existing native readiness gate passes again after
+the owned-registration refactor (9 seconds). The final service gate takes 43
+seconds. final-provenance.txt compares the original production and service base
+kernel, ramfs and pool byte-for-byte and checks that only joey and the probe differ
+in the runtime ramfs. No kernel source changed in this checkpoint; the earlier
+50-boot matrix was not repeated. Pi is released. Normal Vault render/lint and
+commit hooks await the Mac lease; the source is not yet committed or on Main.
+
+Still owed: readiness failure/interleaving gates, full 38-slot admission/IPC
+ledger, connection of the worker to Halcyon, Tapestry/host Control-7 admission,
+clipboard clients and visible modes. Fatal worker failure after posting cannot
+be handled by merely closing a listener; before activation verify compositor
+exit and session recovery. Aux has not supplied a cleared TC-1a SHA. No new
+screenshot or live clipboard is claimed. This remains single-agent self-review.
+
+### Pending commit pickup
+
+The 24 source/prose paths are staged. work/hi1-service-staged-manifest.json records
+the exact base and hashes. The separate heartbeat
+finish-hi-1-transport-checkpoint-after-yip-lease runs every five minutes to maintain
+the Mac queue and finish this checkpoint; the old pointer heartbeat remains paused.
+Run python3 work/hi1-service-commit.py from Astra: WAITING/exit 75 only refreshes
+queue position. Successful hold permits render/lint and normal git hooks; finally
+restores the four protected drafts and releases Mac even on failure. The script
+refuses changed source/index/base rather than committing unrelated work. Successful
+commit writes work/hi1-service-committed.json; verify it and pause the heartbeat.
+Do not re-run the completed native/host gates solely because the lease was delayed.
+The runner's post-acquisition failure requires inspection before a retry, especially
+if render has staged generated views. Do not bypass the hooks or reset any drafts.
+
+
+### HI1-R10: checkpoint render refused a malformed Record link
+
+The first Mac slot reached Quaestor render, which found a dangling combined
+wikilink in the interaction arc. The source edit had unintentionally changed
+both the chunks frontmatter and an existing body link. Restore that body link
+exactly, preserving the append-only Record contract; the new chunk stays in
+frontmatter and the appended transport section. The failed render log is retained
+as work/hi1-service-vault-render-first.log. Generated views remain unstaged until
+the corrected render/lint passes. The lease was released and all four protected
+drafts restored byte-for-byte. No source or runtime test result changed.

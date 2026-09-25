@@ -1,7 +1,7 @@
 //! Bounded one-shot readiness aggregation for a single owning event loop.
 //!
 //! No data reads, protocol parsing or authorization run on the worker. Owned
-//! descriptor duplicates remain in retired slots until the worker has returned
+//! descriptors remain in retired slots until the worker has returned
 //! from its previous poll, so a close/reuse cannot retarget a borrowed fd.
 //! Every arm has a new ticket; stale poll results cannot acknowledge a re-arm.
 //! The two private notification pipes each hold at most one byte, serialized
@@ -251,7 +251,15 @@ impl PollWorker {
     /// raw descriptor is sent to the worker for a later, racy duplication.
     pub fn register(&mut self, file: &File, interest: i16) -> Result<WatchId> {
         valid_interest(interest)?;
-        let duplicate = file.try_clone()?;
+        self.register_owned(file.try_clone()?, interest)
+    }
+
+    /// Transfer the sole handle into the slot. Required for /srv endpoints and
+    /// listeners, whose kernel ownership contract forbids dup. On refusal the
+    /// consumed File is closed. UI I/O uses with_fd; removal retires the handle
+    /// until the worker has returned from any poll that borrowed it.
+    pub fn register_owned(&mut self, file: File, interest: i16) -> Result<WatchId> {
+        valid_interest(interest)?;
         let shared = self.shared()?;
         let mut state = shared.state.lock();
         state.live()?;
@@ -261,10 +269,10 @@ impl PollWorker {
             .ok_or(Error::Busy)?;
         let generation = state.ticket()?;
         // Publish notification before the slot, under the same mutex; failure
-        // leaves the caller's file and the table untouched.
+        // leaves the table untouched; the consumed File drops after unlocking.
         signal(&shared.command_write, &mut state.command_pending)?;
         state.slots[slot] = Some(Slot {
-            file: duplicate,
+            file,
             generation,
             ticket: generation,
             interest,
@@ -276,6 +284,23 @@ impl PollWorker {
             slot,
             generation,
         })
+    }
+
+    /// Borrow a live registration for one UI operation, with NO state lock
+    /// held during the operation. The exclusive owner borrow prevents remove
+    /// or shutdown. The worker only closes retired slots, never a live slot,
+    /// including on worker failure. Thus the fd stays pinned until f returns.
+    /// The closure must not close the fd or use a saved raw fd after returning;
+    /// those operations require unsafe syscalls, just as for File::as_raw_fd.
+    pub fn with_fd<R>(&mut self, id: WatchId, f: impl FnOnce(i32) -> R) -> Result<R> {
+        let fd = {
+            let shared = self.shared()?;
+            let state = shared.state.lock();
+            state.live()?;
+            check_slot(&state, id)?;
+            state.slots[id.slot].as_ref().unwrap().file.as_raw_fd()
+        };
+        Ok(f(fd))
     }
 
     /// The owner must have consumed any previously returned data itself. A new

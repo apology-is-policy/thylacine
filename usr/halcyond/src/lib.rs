@@ -33,6 +33,7 @@ pub mod paneroute;
 pub mod raster;
 pub mod select;
 pub mod session_init;
+pub mod servicewire;
 pub mod status;
 pub mod tile;
 pub mod tiles;

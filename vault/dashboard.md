@@ -21,7 +21,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-deep-smp-review]] | active | 4 |
 | [[arc-go-build]] | active | 27 |
 | [[arc-go-ide]] | active | 2 |
-| [[arc-halcyon-interaction]] | active | 9 |
+| [[arc-halcyon-interaction]] | active | 10 |
 | [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
 | [[arc-life-support]] | active | 2 |
@@ -140,8 +140,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-25 [[chg-2026-09-25-pty-interaction-qualification]] — Qualify terminal ownership fronts and concurrent retirement
 - 2026-09-25 [[chg-2026-09-25-pty-observer-client]] — Add typed native terminal observer client
 - 2026-09-25 [[chg-2026-09-25-readiness-worker]] — Add bounded native readiness worker and repair its runtime harness
+- 2026-09-25 [[chg-2026-09-25-service-backpressure]] — Retain Halcyon service replies and own non-duplicable readiness handles
 - 2026-09-24 [[chg-2026-09-24-astra-seal-integration]] — Integrate the cleared Aux seal prerequisite into Astra
 - 2026-09-24 [[chg-2026-09-24-authority-admission-core]] — Bind immutable issuance approval to live administrative proof
 - 2026-09-24 [[chg-2026-09-24-authority-canonical-codec]] — Implement bounded canonical authority records
-- 2026-09-24 [[chg-2026-09-24-authority-commit-model]] — Model immutable authority commit and measure dense policy
 <!-- generated:end -->

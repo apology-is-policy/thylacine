@@ -36,22 +36,34 @@ second entry for an unsent reply. Service frame/byte/time budgets and round-robi
 fairness remain required on the UI side, including processing complete frames
 already buffered when the kernel descriptor is no longer readable.
 
-A worker is useful only if all UI I/O is nonblocking. The current SrvConn server
-endpoint supplies nonblocking reads and short writes. The new connection state
-machine must retain a reply's sent offset on WouldBlock and arm WRITE. It must
-not retain paneplace's send_all policy, which closes on a nonpositive write,
-for the new persistent interaction connections. This is a prerequisite to
-activation, not evidence that backpressure already works.
+A worker is useful only if all UI I/O is nonblocking. Accepted SrvConn server
+endpoints must explicitly enable nonblocking mode: default writes block, and
+byte-mode reads block too (HI1-R4). The new connection state
+machine must retain a reply's sent offset on WouldBlock and arm WRITE. Both
+existing media adapters now use the shared servicewire pump for this; their old
+send_all policy closed on a nonpositive write. The native real-SrvConn gate
+qualifies retained replies and short-write progress, and the actual session
+adapter handles two routed uploads. Expanded persistent interaction admission
+and the worker-to-compositor connection are still activation work.
 
 ## Descriptor and notification ownership
 
-Use a fixed slot table sized from the service limits. Each occupied slot has a
-monotone registration generation and an owned duplicate of the descriptor to
-poll. Acquire that duplicate before handing the slot to the worker: copying a
-raw fd for a later worker-side dup permits close/reuse to select another object.
-The UI keeps its own I/O descriptor. Remove the watch before releasing the
-connection's final UI state. A pending result names slot and generation, never
-just the raw fd; results from removed registrations are discarded.
+Use a fixed slot table sized from the service limits. Each occupied slot owns
+one File and a monotone registration generation. Transfer /srv descriptors into
+`register_owned`: the kernel deliberately refuses aliases of devsrv Spoors and
+listeners (NoSrvSpoorDup / SrvHandlesAtOrigin). Transferable sources may instead
+use `register(&File)`, which duplicates before publishing. No raw descriptor is
+sent for a later worker-side dup.
+
+The UI borrows an owned registration through `with_fd` for one I/O closure. Its
+exclusive mutable owner borrow prevents remove/shutdown during that closure.
+The state lock is released BEFORE calling it. The worker closes only retired
+slots, never live ones (including at worker failure), so the raw handle stays
+pinned for the closure. Safe protocol code cannot close it; unsafe callers must
+not close or reuse a saved raw fd beyond that borrow. No reference to mutable
+slot memory escapes the lock. Removal marks retirement and invalidates the ID;
+the worker closes after its old poll has returned. A pending result names slot
+and generation, never just a raw fd. Results for retired registrations are ignored.
 
 Each slot has desired interest, armed interest and latched readiness. After a
 ready result, disarm that slot until the UI acknowledges servicing it and sets
@@ -76,7 +88,13 @@ Start the worker before exposing the interaction endpoint. If allocation,
 descriptor duplication, pipe setup or thread startup fails, unwind all acquired
 resources and keep interaction unavailable. Do not expose a partly watched
 service or fall back to periodic broker polling. Existing media availability
-must have an explicit failure policy in the eventual adapter.
+must have an explicit failure policy in the eventual adapter. A listener close
+does NOT unpost: KObj_Srv registry lifetime is the poster process. Therefore a
+fatal watcher failure after posting cannot leave a live compositor with a dead
+service name; without a new unpost ABI it must end the posting compositor (session
+recovery must be verified separately). Starting the worker before POST avoids
+publishing on ordinary constructor failure. This activation policy still needs
+a native failure test; no new unpost mechanism is proposed here.
 
 Native libthyla-rs currently provides raw thread spawn and clear-child-tid join,
 not an owning high-level thread abstraction. The adapter therefore needs an

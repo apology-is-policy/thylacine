@@ -681,9 +681,19 @@ the kernel rejects amplification. File offset/open-object state remain shared,
 and each descriptor owns its reference. Native raw `t_dup` now mirrors the
 existing C wrapper; no syscall number or behavior changed.
 
+`register_owned(File, interest)` instead consumes the sole owned descriptor,
+closing it on registration refusal. This is required for /srv listeners and
+connection Spoors: the kernel's NoSrvSpoorDup contract deliberately rejects their
+duplication. It is not an exception to that rule. `with_fd(id, closure)` resolves
+a live slot under the mutex, releases the mutex and invokes the closure while
+holding exclusive access to the owner. Removal/shutdown therefore cannot occur;
+the worker cannot close a live slot. The returned integer is borrowed for that
+closure only and may not be closed or retained for later unsafe I/O. No mutable
+slot reference escapes synchronization. This path adds no allocation.
+
 A WatchId includes a process-local monotone worker identity, slot and registration
 generation. Every arm has another monotone ticket. `remove` immediately rejects
-further use of the ID, but the worker retains the duplicate until returning from
+further use of the ID, but the worker retains its owned handle until returning from
 its previous poll; only then can the slot be recycled. Old results require both
 matching registration and arm tickets. A token from another worker is refused.
 All counters refuse exhaustion rather than wrap. Full tables report Busy;
@@ -700,7 +710,7 @@ five-second waits, not periodic service polling.
 Allocation bounds are compile-time asserted: boxed metadata at most 4096 bytes,
 returned batch at most 4096 bytes, owner at most 32 bytes, plus a 64 KiB worker
 stack and a 4 KiB guard reservation. Temporary poll/ticket/retirement arrays use
-that stack. There are at most capacity duplicated handles plus four pipe handles
+that stack. There are at most capacity owned watch handles plus four pipe handles
 and one thread, with no request queue or application-buffer allocation.
 `shutdown` joins before freeing anything borrowed by the worker. On ambiguous
 join failure it retains ownership for retry; Drop reports and retains that

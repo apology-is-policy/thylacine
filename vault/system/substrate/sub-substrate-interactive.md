@@ -8,6 +8,7 @@ code:
   - tools/lib/ci-pool.sh
   - tools/test-ci-pool.sh
   - tools/interactive/readiness.exp
+  - tools/interactive/service-wire.exp
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
   - tools/interactive/serial-listen.py
@@ -59,6 +60,15 @@ closes the chardev — so no keystroke is ever delivered, and two interactive
 regressions shipped silently through a fully green suite: LS-1 (the UART was
 never master-enabled for RX) and LS-2 (external command stdout/stderr were
 dropped). This is the only harness that can catch that class.
+
+## Native service backpressure fixture
+
+`service-wire` requires the CI Imperium clearance and key, checks the eligibility
+list before SAK, and explicitly enables serial recovery for that test VM. Lean
+production login provisioning alone is insufficient. The native probe posts
+its own temporary byte service only after POST_SERVICE is conferred, uses real
+SrvConn rings, stalls one reply reader, verifies another peer progresses and
+checks resumed replies byte-for-byte. It does not exercise the graphical UI.
 
 ## Contract
 
