@@ -186,3 +186,5 @@
 - HI-1 terminal ownership ABI reservation: syscall 93 subops 16..21, compiled C/Rust byte mirrors; role/lifetime/poll covered by the implementation row (`docs/HALCYON-INTERACTION-PTY-ABI.md`).
 
 - HI-1 terminal interaction kernel lifecycle: `kernel/pts.c`, `kernel/proc.c`, `kernel/syscall.c`, `pts.h` and errno mirrors; role/epoch admission, retirement, watcher lifetime and lock ordering.
+
+- HI-1 native readiness worker: libthyla-rs poll_worker, File duplication and native probe; descriptor/ticket/wake/stack/join lifetimes and bounded allocation.

@@ -698,3 +698,7 @@ The native Rust `pty_observer` adapter consumes these existing records and subop
 without reserving new ABI. [[sub-libthyla-rs]] describes locator validation,
 explicit revocation and RAII watcher ownership. Runtime application integration
 is distinct from compiling that adapter.
+
+The native Rust library now supplies T_SYS_DUP=12 and t_dup, matching the existing
+kernel and C ABI. File::try_clone requests its existing rights; the kernel's
+subset check remains authoritative. This adds a client wrapper, not a new syscall.

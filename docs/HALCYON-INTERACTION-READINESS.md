@@ -2,7 +2,8 @@
 
 Implementation review for HI1-Q2, September 25. This is a proposed internal
 arrangement within the approved userspace service; it adds no syscall, wire
-operation, authority role or clipboard guarantee. It is not implemented yet.
+operation, authority role or clipboard guarantee. The standalone native worker is implemented and guest-tested; the expanded
+service and Halcyon event-loop connection remain unimplemented.
 
 ## The capacity constraint
 
@@ -112,3 +113,13 @@ admission point specified in the main interaction and PTY contracts.
 Keep Aux's uncleared TC-1a wire/lib/tile files untouched while developing this
 adapter. The host binding announcement and its decoder still land together
 once his exact cleared base is available.
+
+## Standalone worker checkpoint
+
+libthyla-rs poll_worker supplies the proposed readiness-only mechanism. It
+supports at most 63 entries; the Halcyon adapter will request 39 (38 connections
+plus listener), for a 40-entry worker poll. Native validation and named negative
+controls are recorded in HALCYON-INTERACTION-STATUS.md. This is not activation:
+complete the remaining failure/interleaving tests and live service integration
+before increasing the connection count. No existing terminal-write fallback
+or clipboard admission behavior has changed.

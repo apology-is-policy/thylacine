@@ -5,6 +5,9 @@ parent: moc-substrate
 title: "LS-CI — the only harness that can type, and its fault taxonomy"
 code:
   - tools/test-interactive.sh
+  - tools/lib/ci-pool.sh
+  - tools/test-ci-pool.sh
+  - tools/interactive/readiness.exp
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
   - tools/interactive/serial-listen.py
@@ -46,7 +49,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -525,3 +528,25 @@ The fixture must use the explicit CI image (`HALCYON_SESSION=n`): automatic
 Halcyon login consumes the serial session and invalidates these serial-driving
 scenarios. The updated harness comment removes the obsolete Linux-only server
 restriction. Native Haul tests also pass 53/53 including live server interop.
+
+## Per-attempt pool fallback and readiness witness
+
+The sourced tools/lib/ci-pool.sh always populates the per-scenario destination
+before boot. A key-coherent snapshot supplies pristine state; otherwise each
+attempt copies the current base into its isolated slot and does not claim a
+pristine snapshot. LS_CI_POOL_RESTORE=0 seeds a missing slot from the base, then
+retains that scenario's mutations across retries for deliberate contamination
+reproduction. Missing sources and partial/failed copies refuse boot.
+
+The previous early returns for missing snapshots or opted-out restore left the
+slot absent even though run_attempt exported its path. QEMU then omitted the
+pool device and joey failed with ENODEV. The unchanged-image control reproduced
+this. tools/test-ci-pool.sh covers absent/coherent/stale snapshots, retry
+isolation, opt-out seeding/retention and failed-copy/missing-source refusal on
+Linux and macOS. The diagnostic no longer calls absent-snapshot runs shared.
+
+The readiness scenario runs the native worker probe and requires a live shell
+pipeline afterward. Its failure matcher waits for a complete diagnostic line;
+matching only the prefix previously stopped QEMU before a negative control's
+reason reached the log. No automatic retry is used for qualification. The gate
+honors the requested accelerator, so the same scenario can run under KVM/HVF.

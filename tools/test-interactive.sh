@@ -203,30 +203,9 @@ KEY_SNAP="$KEYFILE.baked-snapshot"
 # once. Semantics are unchanged -- each scenario still begins from the same
 # pristine snapshot, and a scenario's own multiple boots still share its pool
 # (ls-gfx-mode/-font/-osd-persist persist state across boots by design).
-pool_restored=0
-pool_restore() {
-    local dest="${1:-$POOL}"
-    [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]] && return 0
-    [[ -f "$POOL_SNAP" && -f "$POOL" ]] || return 0
-    if ! cmp -s "$KEYFILE" "$KEY_SNAP" 2>/dev/null; then
-        [[ $pool_restored -eq 0 ]] && echo "    (pool restore SKIPPED: system.key does not match its snapshot -- stale twins? re-run tools/build.sh pool)" >&2
-        pool_restored=-1
-        return 0
-    fi
-    # A restore that fails part-way leaves a TRUNCATED pool, and booting on it
-    # would surface as guest corruption -- the #74/#60 fail-open shape, where
-    # the harness's own fault gets read as a Thylacine defect. Refuse to boot on
-    # a fixture whose state we do not know.
-    if ! { cp -c "$POOL_SNAP" "$dest" 2>/dev/null || cp "$POOL_SNAP" "$dest"; }; then
-        echo "==> FATAL: pool restore failed -- $dest may be partial/truncated." >&2
-        echo "    Refusing to boot on an unknown fixture (it would read as guest corruption)." >&2
-        echo "    Check free space, or re-run 'tools/build.sh pool'." >&2
-        exit 1
-    fi
-    pool_restored=1
-}
+source "$REPO_ROOT/tools/lib/ci-pool.sh"
 if [[ ! -f "$POOL_SNAP" ]]; then
-    echo "==> NOTE: no pool snapshot ($POOL_SNAP) -- scenarios will share a mutable pool (#85)." >&2
+    echo "==> NOTE: no pool snapshot ($POOL_SNAP) -- each attempt will copy the current base into its isolated slot (#85)." >&2
     echo "    Re-run 'tools/build.sh pool' to mint the pristine twin." >&2
 fi
 
@@ -311,11 +290,11 @@ fi
 
 mkdir -p "$BUILD_DIR"
 if [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]]; then
-    pool_iso="pool=SHARED (LS_CI_POOL_RESTORE=0 -- contamination possible, #85)"
+    pool_iso="pool=per-scenario retained (LS_CI_POOL_RESTORE=0 -- contamination possible, #85)"
 elif [[ -f "$POOL_SNAP" ]]; then
     pool_iso="pool=per-attempt"
 else
-    pool_iso="pool=SHARED (no snapshot, #85)"
+    pool_iso="pool=isolated base copies (no pristine snapshot, #85)"
 fi
 # --- G-3: the TCG anchor set -------------------------------------------------
 # Accel is not only a speed knob. tools/run-vm.sh derives the CPU model AND the

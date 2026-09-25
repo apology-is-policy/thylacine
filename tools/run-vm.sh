@@ -812,7 +812,11 @@ fi
 # assigns virtio-mmio slots in reverse-creation order, so the first
 # -device lands at slot 31. virtio-blk-probe scans 0..31 either way;
 # the ordering keeps slot 31 conventionally the "primary device."
+# The guest MMIO drivers require VirtIO 1.0 (transport version 2).
+# QEMU builds can default to legacy transport; pin the device contract on
+# every host instead of relying on a distributor-specific default.
 exec qemu-system-aarch64 \
+    -global virtio-mmio.force-legacy=false \
     -machine "virt,gic-version=$gicv,accel=$accel$its_machine_opt" \
     -cpu "$cpu" \
     -smp "$cpus" \

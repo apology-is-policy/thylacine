@@ -17,9 +17,9 @@
 //     gates rights at creation. This preserves the rights-monotonicity
 //     invariant (ARCH §28 I-2 + I-6): rights are set at handle creation
 //     and never rise.
-//   - Cloning is intentionally not implemented. The kernel has no
-//     dup-with-same-rights syscall; a future SYS_HANDLE_DUP would
-//     create a separate handle with new (reduced) rights, not a copy.
+//   - Cloning is intentionally not implemented. Explicit File::try_clone uses SYS_DUP
+//     to obtain another owned slot with the same rights; the kernel
+//     rejects a requested rights increase. Handle itself is not Clone.
 //   - `Drop` calls SYS_CLOSE; any error is silently dropped. EBADF
 //     here would indicate a `Handle` minted for a non-existent slot
 //     (programmer bug, not a runtime concern); Drop has no error
@@ -50,9 +50,8 @@ use crate::t_close;
 /// constructor on a higher-level type (e.g., `t::fs::File::open`),
 /// which gates the rights granted by the kernel at handle creation.
 ///
-/// `Handle` is not `Clone`: the kernel has no dup-with-same-rights
-/// syscall; a future `SYS_HANDLE_DUP` would create a distinct handle
-/// with new rights, never a copy.
+/// `Handle` is not `Clone`. File::try_clone explicitly duplicates its slot
+/// through SYS_DUP, whose requested rights cannot exceed the source rights.
 pub struct Handle {
     idx: i32,
     rights: Rights,

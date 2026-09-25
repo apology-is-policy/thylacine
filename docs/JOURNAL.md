@@ -31282,3 +31282,20 @@ userspace readiness aggregation, keeping admission, revocation and clipboard
 mutation on the ordered UI thread. This finding is documented and reported;
 no poll ABI increase or periodic fallback has been introduced. Both test phases
 released their Mac leases, and the four separate drafts remain byte-identical.
+
+### 2026-09-25: readiness aggregation and the harness beneath it
+
+The standalone native worker passed real descriptor tests on Pi/KVM. Self-review
+caught cross-worker WatchId collisions, fixed with a process-local monotone owner
+ID and a regression. Disarming and owner-check mutants each produced their named
+failure; the restored source passed again. No clipboard authority runs on this
+thread, and it is not yet connected to Halcyon's service loop.
+
+The first boots never reached the probe. Without a baked pool snapshot, LS-CI
+claimed a shared pool but exported an absent per-attempt path; an unchanged
+control boot reproduced ENODEV. The fixture now always seeds the isolated slot,
+with Linux/macOS regression checks. The next boot exposed Linux QEMU's legacy
+MMIO default, which the modern-only backend refused. Pinning the supported v2
+transport made the same image boot. Finally, matching only a FAIL prefix truncated
+a mutant's diagnostic; the scenario now waits for its complete line. Failed logs
+remain in work/. These were explained harness/device-contract failures, not flakes.

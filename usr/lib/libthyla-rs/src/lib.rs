@@ -87,6 +87,7 @@ pub mod poll;
 pub mod pty_interaction;
 pub use pty_interaction::*;
 pub mod pty_observer;
+pub mod poll_worker;
 pub mod process;
 pub mod rand;
 pub mod sched;
@@ -114,6 +115,7 @@ pub const T_SYS_PIPE: u64            = 8;
 pub const T_SYS_READ: u64            = 9;
 pub const T_SYS_WRITE: u64           = 10;
 pub const T_SYS_CLOSE: u64           = 11;
+pub const T_SYS_DUP: u64             = 12;
 // P5-attach-syscall: a 9P attach over a byte-pipe pair (tx, rx). Backs
 // t_attach_9p; the byte-mode /srv twin is T_SYS_ATTACH_9P_SRV (52).
 pub const T_SYS_ATTACH_9P: u64       = 13;
@@ -1483,6 +1485,16 @@ pub unsafe fn t_pipe() -> (i64, i64) {
         options(nostack)
     );
     (x0, x1)
+}
+
+/// Duplicate a descriptor with the requested subset of its current rights.
+/// The caller must keep oldfd live through this call; success owns a new fd.
+#[inline(always)]
+pub unsafe fn t_dup(oldfd: i64, rights: u32) -> i64 {
+    let mut result = oldfd;
+    asm!("svc #0", inlateout("x0") result, in("x1") rights as u64,
+         in("x8") T_SYS_DUP, options(nostack));
+    result
 }
 
 // t_read — read up to `len` bytes from `fd` into `buf`. Returns:

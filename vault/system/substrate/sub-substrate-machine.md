@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -277,3 +277,13 @@ INTx fallback. The boot command reports the actual ITS selection.
 network/GPU/sound functions at slots 9/13/17 or 17/9/13. All three share INTA's
 wire while the two permutations exercise BDF-derived authority independent of
 device ordering. Production defaults are unchanged.
+
+## Explicit modern MMIO transport
+
+run-vm.sh pins `-global virtio-mmio.force-legacy=false` on every host. The guest
+MMIO drivers require transport version 2; QEMU's distributor defaults need not
+match that requirement. On Linux/KVM an unchanged production image with a real
+pool failed backend initialization at version 1 (STM_EBACKEND); the modern
+property made the same image boot. The native readiness scenario then passed.
+This selects the supported emulated device contract and changes no guest driver
+or bare-metal hardware discovery. HI1-R2 in the interaction status owns evidence.

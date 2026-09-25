@@ -24,6 +24,7 @@ code:
   - usr/lib/libthyla-rs/src/ninep.rs
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
+  - usr/lib/libthyla-rs/src/poll_worker.rs
   - usr/lib/libthyla-rs/src/pty_observer.rs
   - usr/lib/libthyla-rs/src/process.rs
   - usr/lib/libthyla-rs/src/rand.rs
@@ -664,3 +665,53 @@ real ptyfs and Tapestry transports. A supervisor spawns the binding process seal
 that process also checks an ordinary child's seals are clear. The probe is added
 beside the existing transport test, which keeps its no-argument behavior. Runtime
 results belong to the interaction status, not to the probe's mere existence.
+
+## Native readiness aggregation
+
+`poll_worker::PollWorker::new(capacity)` accepts 1..63 watches, reserving the
+64th native poll entry for configuration and shutdown. It starts one thread,
+registers its clear-child-tid word before publishing startup, and returns only
+after observing that handshake. The worker reads no application data and grants
+no authority. `AsFd` exposes its private notification reader; `take_ready`
+returns a fixed batch. Every ready slot is disarmed until explicit `rearm`.
+
+`register(&File, interest)` duplicates the open object before publishing it.
+`File::try_clone` uses existing SYS_DUP (12) with the wrapper's current rights;
+the kernel rejects amplification. File offset/open-object state remain shared,
+and each descriptor owns its reference. Native raw `t_dup` now mirrors the
+existing C wrapper; no syscall number or behavior changed.
+
+A WatchId includes a process-local monotone worker identity, slot and registration
+generation. Every arm has another monotone ticket. `remove` immediately rejects
+further use of the ID, but the worker retains the duplicate until returning from
+its previous poll; only then can the slot be recycled. Old results require both
+matching registration and arm tickets. A token from another worker is refused.
+All counters refuse exhaustion rather than wrap. Full tables report Busy;
+retired entries can briefly keep a table full until the worker reclaims them.
+
+Shared metadata and each pipe's pending-byte latch are protected by one mutex.
+A producer writes only to an empty private pipe; its consumer drains exactly that
+one byte before clearing the latch under the same lock. Poll, allocation, final
+reference close and join run outside the lock. Both endpoints stay owned until
+join. All descriptors have one poll entry even for combined READ/WRITE interest.
+The worker blocks indefinitely on readiness; startup and shutdown have separate
+five-second waits, not periodic service polling.
+
+Allocation bounds are compile-time asserted: boxed metadata at most 4096 bytes,
+returned batch at most 4096 bytes, owner at most 32 bytes, plus a 64 KiB worker
+stack and a 4 KiB guard reservation. Temporary poll/ticket/retirement arrays use
+that stack. There are at most capacity duplicated handles plus four pipe handles
+and one thread, with no request queue or application-buffer allocation.
+`shutdown` joins before freeing anything borrowed by the worker. On ambiguous
+join failure it retains ownership for retry; Drop reports and retains that
+storage until process teardown. Allocation/setup/spawn errors unwind acquired
+objects; partial pipe construction is exercised by actual handle exhaustion.
+
+The native readiness probe covers 39 service slots, the 63-slot constructor,
+readiness before registration, one-shot disarming, re-arm, independent peer
+progress, 64 close/reuse cycles, cross-worker token refusal, joined shutdown and
+partial setup rollback. Named mutants remove disarming and worker-ID checks;
+both must fail their corresponding diagnostic, followed by a restored pass.
+This adapter is not yet connected to Halcyon's service loop. Deterministic
+adversarial scheduling of every wake interleaving and the remaining allocation,
+duplication and spawn failure injections remain activation obligations.

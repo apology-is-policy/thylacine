@@ -13,8 +13,9 @@ SMP/UBSan matrix, production --all and native HVF observer scenario pass within
 the evidence boundaries recorded below. The staged-census refusal is resolved:
 re-rendering after staging the new source made normal hooks pass. All four
 separate drafts are byte-identical. No live clipboard endpoint is enabled.
-Next: implement the readiness adapter reviewed in HALCYON-INTERACTION-READINESS.md,
-then host/Tapestry admission and clipboard integration. Do not rerun completed
+The standalone readiness worker is now implemented and qualified below. Next:
+complete its activation obligations and connect Halcyon's service loop, then
+host/Tapestry admission and clipboard integration. Do not rerun completed
 kernel qualification without a relevant change. Await Aux's exact cleared TC-1a
 SHA before touching his wire/lib/tile files. Current build artifacts are production
 with HALCYON_SESSION=0; graphical verification requires the appropriate rebuild.
@@ -487,3 +488,82 @@ Evidence: work/hi1-observer-commit.log. Re-render after staging the new source,
 co-stage generated views, and retry normal hooks. All four drafts were restored
 and Mac released on this failure; Astra is queued behind Main for the short retry.
 This is a documentation checkpoint failure, not a failed production/native test.
+
+
+## HI1-R1: readiness runtime qualification interrupted by boot failure
+
+The first isolated Pi runtime image became extinct before login, so the new
+worker probe did not run. Track this boot failure before any further feature
+work; cause is not yet established. Preserve work/hi1-readiness-pi-runtime-first.log
+and the isolated runtime attempt artifacts. The image used the preceding
+production kernel and paired pool/ramfs, with only the probe ELF replaced in a
+separate ramfs copy; compare an unchanged control image before attributing cause.
+
+HI1-R1's first cause is established: missing baked snapshot made pool_restore
+return without creating the per-attempt pool, although run_attempt always exports
+that slot path. The unmodified control reproduced ENODEV and no block device.
+The repaired fixture path passes its missing/coherent/stale snapshot, opt-out,
+retry and partial-copy tests, and the next VM sees the actual 64 MiB pool.
+That boot now reaches the backend and fails with STM_EBACKEND (-207), before
+login. Track the second failure as HI1-R2. Linux QEMU advertises legacy MMIO by
+default, and the boot also logs LegacyDevice for netdev; verify transport version
+with unchanged artifacts rather than attributing the backend failure yet.
+
+HI1-R2 is established as an emulator device-contract mismatch: Linux QEMU's
+virtio-mmio force-legacy default is on; Stratum's backend explicitly refuses
+version != 2 at initialization, returning STM_EBACKEND. Adding the modern
+transport property to unchanged artifacts made the readiness probe PASS in KVM.
+The launcher now pins that requirement on all hosts, with no guest-driver change.
+The missing-pool fixture repair also passes its regression cases.
+
+During negative-control qualification, the readiness scenario matched the FAIL
+prefix and killed QEMU before the full reason reached its log. This truncated
+the expected foreign-worker-token diagnostic and the outer verifier correctly
+refused to count it. Track HI1-R3: match the entire failure line through its
+newline, then rerun named controls and the restored canonical image. Preserve
+the first truncated evidence in work/hi1-worker-mutant-owner-console.log.
+
+
+## Standalone readiness worker qualification (September 25)
+
+The new poll_worker native library is implemented, but not connected to Halcyon's
+service loop. It owns bounded descriptor duplicates, one-shot interests and
+worker/registration/arm identities, private coalesced notification pipes, a guarded
+64 KiB stack and a kernel-confirmed join. File::try_clone uses existing syscall 12.
+Compile-time bounds cover metadata, UI batch and owner; no protocol data or
+clipboard decision is moved to the worker. The activated service still has only
+two media connections. The approved expanded service remains unimplemented.
+
+Cross-compilation and release linking passed on the leased Pi. The first probe
+check found an i64/i32 timeout mismatch, corrected before runtime. Its isolated
+source directory is /home/cora/projects/thylacine-astra-hi0; a fresh runtime
+checkout is /home/cora/projects/thylacine-astra-hi1-runtime. The verified production
+kernel and paired pool/ramfs were copied there, and a separate ramfs replaces ONLY
+kaua-term-probe. The original pair and kernel hashes stayed unchanged. This is
+native adapter evidence against the production kernel, not a new full-image bake.
+
+The final native readiness scenario PASS in KVM: 39 live service slots,
+63-slot construction, already-ready sources, one-shot disarming, re-arm, independent
+peers, 64 descriptor close/reuse cycles, cross-worker token refusal, joined shutdown,
+and setup rollback after exhausting handles with only three slots available.
+The shell runs a pipeline afterward. An earlier clean pass, two named mutants
+(disarming removed / worker-ID check removed), restored clean pass, and final
+formatted/allocation-asserted source pass establish the controlled sequence.
+Mutants fail on their specific complete diagnostics, without kernel extinction.
+Self-review caught and fixed cross-worker token collision before activation.
+
+Evidence: work/hi1-readiness-final-{build,runtime,console}.log,
+work/hi1-readiness-variants-complete-lines.log, and
+work/hi1-readiness-{canonical,mutant-repeat,mutant-owner,restored}/ containing source,
+ELF, image digests, build and console logs. The initial failed compilation,
+boot/control failures, and truncated mutant diagnostic are retained separately.
+HI1-R1/R2/R3 are resolved by the pool fixture, explicit modern MMIO transport,
+and complete-line matcher fixes. tools/test-ci-pool.sh passes on both Linux and
+macOS. No new visual UI or screenshot is claimed.
+
+Before connecting and activating the persistent service, still owe deterministic
+adversarial wake/rearm schedules, remaining allocation/dup/spawn failure injections,
+short-write response retention and the full 38-connection IPC/admission ledger.
+Then integrate Halcyon's service loop and host/Tapestry control flow; Aux's
+TC-1a-cleared SHA still precedes Control-7 wire/lib/tile edits. This checkpoint
+is single-agent implementation/self-review, not an independent audit.
