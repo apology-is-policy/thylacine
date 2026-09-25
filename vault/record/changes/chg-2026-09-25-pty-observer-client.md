@@ -4,7 +4,7 @@ type: chg
 title: "Add typed native terminal observer client"
 date: 2026-09-25
 arc: arc-halcyon-interaction
-commits: ["*(pending)*"]
+commits: ["3c3d3cbc"]
 touched: [sub-libthyla-rs, sub-kernel-syscall-abi, sub-halcyond]
 established: []
 closed: []

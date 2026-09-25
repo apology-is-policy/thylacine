@@ -5,6 +5,20 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Current pickup (September 25)
+
+Kernel qualification is committed as 5ad9ad27; the native observer client,
+Halcyon host seal and real guest probe are committed as 3c3d3cbc. Full 50-boot
+SMP/UBSan matrix, production --all and native HVF observer scenario pass within
+the evidence boundaries recorded below. The staged-census refusal is resolved:
+re-rendering after staging the new source made normal hooks pass. All four
+separate drafts are byte-identical. No live clipboard endpoint is enabled.
+Next: implement the readiness adapter reviewed in HALCYON-INTERACTION-READINESS.md,
+then host/Tapestry admission and clipboard integration. Do not rerun completed
+kernel qualification without a relevant change. Await Aux's exact cleared TC-1a
+SHA before touching his wire/lib/tile files. Current build artifacts are production
+with HALCYON_SESSION=0; graphical verification requires the appropriate rebuild.
+
 ## Delivered source checkpoint
 
 HI-0 provides the five standard 24-logical-pixel pointer shapes, scale-aware
