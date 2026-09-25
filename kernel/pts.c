@@ -832,3 +832,31 @@ struct Spoor *pts_interaction_watch(struct Proc *p, u64 binding_id, s64 *error) 
     if (*error < 0) { spoor_clunk(sp); return NULL; }
     return sp;
 }
+
+#ifdef KERNEL_TESTS
+// Boundary injection is linked only into the boot-test kernel. It neither
+// extends the native operation range nor provides a production control path.
+bool pts_interaction_test_counters(u64 binding_id, u64 epoch, u64 revision) {
+    spin_lock(&g_pts_lock);
+    struct pti_binding *b = pti_lookup_locked(binding_id);
+    struct pts_entry *e = b && b->live ? pts_lookup_locked(b->pts_id) : NULL;
+    bool okay = e && epoch && revision;
+    if (okay) { e->interaction_epoch = epoch; b->revision = revision; }
+    spin_unlock(&g_pts_lock);
+    return okay;
+}
+
+// Only an EMPTY pool may be seeded/reset: no live observer or retired watcher
+// can see IDs jump back when the fixture restores the boot allocator afterward.
+u64 pts_interaction_test_exchange_next_id(u64 next) {
+    if (!next || next > PTY_INTERACTION_ID_MAX + 1) return 0;
+    spin_lock(&g_pts_lock);
+    for (u32 i = 0; i < PTS_MAX; ++i) {
+        if (g_pti[i].used) { spin_unlock(&g_pts_lock); return 0; }
+    }
+    u64 previous = g_pti_next_id;
+    g_pti_next_id = next;
+    spin_unlock(&g_pts_lock);
+    return previous;
+}
+#endif

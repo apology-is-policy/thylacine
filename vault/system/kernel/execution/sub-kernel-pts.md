@@ -3,7 +3,7 @@ id: sub-kernel-pts
 type: sub
 title: "The pts registry — kernel-side terminal identity, and the seam that gives a server signal power without giving it a target"
 parent: moc-kernel-execution
-code: [kernel/pts.c, kernel/include/thylacine/pts.h]
+code: [kernel/pts.c, kernel/include/thylacine/pts.h, kernel/test/test_pts.c]
 audit: hard
 guarded-by: [inv-i20, inv-i1, inv-i22, inv-i9]
 validated-by: [spec-pty, spec-pty-stop, prose, gate-smp]
@@ -392,6 +392,19 @@ recycle a list in use. Retired watchers return EOF/POLLHUP; stale live watchers
 return EAGAIN. STATE remains available for recovery after a read copyout fault.
 
 Kernel regressions in `test_pts.c` cover role/seal checks, epochs, true lifecycle
-hooks, watch readiness/retirement and bounded retired capacity. Their live-client,
-usercopy and concurrent-race blind spots are recorded in the interaction status;
-these tests do not constitute a completed terminal clipboard workflow.
+hooks, watch readiness/retirement and bounded retired capacity. Real SrvConn-backed
+dev9p and devsrv fixtures exercise master/slave and observer provenance, including
+handle-table exhaustion and successful WATCH retry. A kernel worker retires bindings
+while the test unregisters the last poll hook, closes the watcher and rebinds, for
+256 iterations; it joins before fixture reclamation, including on failure.
+
+KERNEL_TESTS-only helpers seed epoch/revision boundaries on a live binding and
+exchange the next binding ID only when the entire pool, including retired borrowers,
+is empty. Tests restore that allocator after checking INT64_MAX, epoch exhaustion
+and revision exhaustion. These helpers have no native dispatch path and are absent
+when KERNEL_TESTS is off. Legacy acquisition/foreground operations continue after
+interaction epoch exhaustion. Test failures clean up before reporting assertions.
+
+The expanded single QEMU boot passes; repeated SMP/UBSan qualification and positive
+EL0 client workflows remain separate obligations in the interaction status. These
+regressions do not constitute a completed terminal clipboard workflow.

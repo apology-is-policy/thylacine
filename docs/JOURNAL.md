@@ -31244,3 +31244,21 @@ Single-agent self-review caught the Halcyon-vs-observer STATE role mismatch and
 signed syscall ID ceiling, corrected before consumers. No live dispatch, watcher
 or clipboard implementation is claimed. Await Aux's cleared H3+C base before
 lifecycle integration. Separate authority/settings drafts remain untouched.
+
+### 2026-09-25: exercising the terminal ownership boundary
+
+The ownership foundation at 97bf1077 had passed direct kernel tests; this pass
+crossed the real devsrv/dev9p frontend and the native usercopy path. The first
+boot failed because my fixture used the registry helper with server_stripes=0.
+That failure demonstrated the observer check was active. Supplying the actual
+poster incarnation fixed the fixture, and the full corrected boot passed 1698/1698.
+The same suite now races retirement against poll unregister, last watch close and
+rebinding for 256 iterations, and covers WATCH allocation rollback and every
+counter ceiling. The fixtures clean up before assertions, unlike the earlier
+negative fixtures which leaked and timed out after their expected failure.
+
+Test-only injection stays behind KERNEL_TESTS; it creates no native diagnostic
+operation. Source review also removed a fixture's duplicate handle-table allocation.
+Mac and Pi work used explicit Yip leases and isolated artifacts; both were released.
+This is stronger kernel evidence, not a delivered clipboard workflow or a substitute
+for the repeated SMP matrix. The four authority/settings drafts remain unchanged.

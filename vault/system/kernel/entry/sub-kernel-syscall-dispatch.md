@@ -1279,3 +1279,9 @@ Fresh role, incarnation, group, principal and epoch checks live in
 [[sub-kernel-pts]]. The frontend cannot replace them with its earlier fd lookup.
 A copyout fault may lose a consumed watch notification; the caller recovers via
 STATE. A successful CHECK applies only to that admission, not a reusable token.
+
+A KERNEL_TESTS-only wrapper calls the actual static native PTY marshaller using
+the test thread's current process and TTBR0. Boot tests verify unmapped copyin/
+copyout faults, wrong record sizes, wrapping user ranges and unchanged nomination
+after failed copyin. This is fault-path coverage, not a positive EL0 client test.
+The wrapper adds no syscall operation and is excluded from the production build.

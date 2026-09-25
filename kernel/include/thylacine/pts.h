@@ -220,4 +220,11 @@ void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role);
 // Allocate only after reserving one of the two bounded watcher slots.
 struct Spoor *pts_interaction_watch(struct Proc *p, u64 binding_id, s64 *error);
 
+#ifdef KERNEL_TESTS
+// Boot-fixture boundaries only; absent from the lean production kernel.
+bool pts_interaction_test_counters(u64 binding_id, u64 epoch, u64 revision);
+u64 pts_interaction_test_exchange_next_id(u64 next);
+s64 sys_pty_register_test_native(u64 op, u64 a1, u64 a2, u64 a3);
+#endif
+
 #endif // THYLACINE_PTS_H

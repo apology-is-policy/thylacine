@@ -313,3 +313,39 @@ The three compiled ABI mirrors also pass on this Mac using AArch64 ELF C objects
 and native Rust (`work/hi1-pty-abi-mac.log`). Source review is recorded in
 `HALCYON-INTERACTION-KERNEL-REVIEW.md`. Vault render/lint passes with no failures.
 All these checks remain narrower than the still-required SMP and live-client work.
+
+Source checkpoint: `97bf1077` on `codex/astra`, normal hooks passed. Mac was
+released after 28 minutes. Re-requesting it for the full matrix returned WAITING,
+position 3 behind Aux/Main; that is not permission to build. No Astra lease is
+held, and the pointer heartbeat stays paused. Next resource command:
+`yip hold mac 'HI-1 ownership SMP/UBSan matrix and remaining kernel qualification' --for 45m --wait 1s`.
+This final pickup paragraph is a documentation-only working-tree update after the
+checkpoint. Preserve it along with the four separate draft files.
+
+## September 25: expanded qualification in progress
+
+Tracked test defect HI1-Q1: the first expanded boot failed the native BIND
+positive case (1697/1698). The new fixture reused pts_make_conn, which sets
+server_stripes to zero; that helper is adequate for registry-only tests but
+cannot represent a posted observer service. The frontend correctly refused it.
+Fix the new fixture to provide the actual poster incarnation, then rerun the
+whole boot. Evidence retained in work/hi1-qualification-{build,boot,uart}.log.
+The concurrent retirement and counter-boundary assertions passed in that boot.
+
+HI1-Q1 is fixed: the fixture now creates each SrvConn with its actual poster
+stripes. Corrected Clang build and full QEMU boot PASS, 1698/1698, including the
+native transport fronts, actual usercopy faults, WATCH handle-table failure and
+retry, 256 concurrent retirement/unregister/last-close/rebind iterations, and
+ID/epoch/revision exhaustion. Logs: work/hi1-qualification-corrected-{build,boot,uart}.log.
+The first failed boot completed its remaining tests rather than leaking fixtures.
+The old syscall-gate test's duplicate handle_table_alloc was also removed; proc_alloc
+already supplies the table. No production behavior was changed by these test additions.
+
+Before Mac availability, GCC/AArch64 syntax checks passed with and without
+KERNEL_TESTS on Pi in /home/cora/projects/thylacine-astra-hi1-check; this was a
+separate acquired/released lease, with no shared checkout or paired boot artifacts
+modified. Evidence: work/hi1-pi-syntax-final.log (the missing-header staging failure
+is retained separately). It is syntax evidence only. Mac was acquired through Yip
+and released after the focused corrected build/boot. The authority drafts remain
+byte-identical. Repeated SMP/UBSan, full production and positive EL0 workflows are
+still owed. No new graphical UI or clipboard endpoint is delivered here.

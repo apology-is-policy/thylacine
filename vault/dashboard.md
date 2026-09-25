@@ -21,7 +21,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-deep-smp-review]] | active | 4 |
 | [[arc-go-build]] | active | 27 |
 | [[arc-go-ide]] | active | 2 |
-| [[arc-halcyon-interaction]] | active | 4 |
+| [[arc-halcyon-interaction]] | active | 7 |
 | [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
 | [[arc-life-support]] | active | 2 |
@@ -137,11 +137,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-25 [[chg-2026-09-25-pty-interaction-kernel]] — Implement bounded terminal ownership observations and lifecycle revocation
+- 2026-09-25 [[chg-2026-09-25-pty-interaction-qualification]] — Qualify terminal ownership fronts and concurrent retirement
 - 2026-09-24 [[chg-2026-09-24-astra-seal-integration]] — Integrate the cleared Aux seal prerequisite into Astra
 - 2026-09-24 [[chg-2026-09-24-authority-admission-core]] — Bind immutable issuance approval to live administrative proof
 - 2026-09-24 [[chg-2026-09-24-authority-canonical-codec]] — Implement bounded canonical authority records
 - 2026-09-24 [[chg-2026-09-24-authority-commit-model]] — Model immutable authority commit and measure dense policy
 - 2026-09-24 [[chg-2026-09-24-authority-policy-core]] — Bounded authority core and mandate safety model
 - 2026-09-24 [[chg-2026-09-24-authority-provenance]] — Retain authority transaction provenance in the policy ledger
-- 2026-09-24 [[chg-2026-09-24-authority-record-abi]] — Reserve canonical authority record ABI
 <!-- generated:end -->

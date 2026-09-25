@@ -687,3 +687,9 @@ static assertion and uses its POSIX number. [[abi-errno]] owns the full registry
 and mirror obligations. ENOSPC=28 distinguishes bounded interaction-capacity
 exhaustion from allocator failure; libthyla-rs maps it to `Error::NoSpace`.
 The explicit error range passes unchanged through pouch and libt.
+
+The boot suite's native-marshaller wrapper and counter-boundary injection are
+KERNEL_TESTS-only kernel symbols, not added operations or exported user ABI.
+The native operation range, record sizes and mirrors remain unchanged. Faulting
+STATE/ACK/CHECK pointers and malformed lengths are covered through the actual
+marshaller; positive EL0 record transfer remains a distinct qualification step.

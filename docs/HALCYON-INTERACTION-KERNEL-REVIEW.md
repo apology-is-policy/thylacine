@@ -61,8 +61,21 @@ clone/inheritance refusal, bounded retained capacity, and actual image replaceme
 and death. PTY/poll clean and named-mutant models check their existing mechanisms;
 there is no new terminal-ownership model claim.
 
-Before qualification, complete the SMP/UBSan matrix, simultaneous close/unregister/
-retirement stress, fault-allocation/counter-exhaustion cases and native frontend/
-usercopy tests. These obligations remain visible rather than being inferred from
-one successful boot. The user-facing clipboard additionally requires all host,
+The expanded qualification boot adds 256 concurrent close/unregister/rebind versus
+retirement iterations, WATCH handle-allocation rollback, all three counter boundaries,
+and real devsrv/dev9p provenance fronts. The actual native marshaller is called
+with invalid user mappings; copy faults do not nominate a subject. Boundary injection
+and marshaller access are KERNEL_TESTS-only, without a native diagnostic operation.
+An empty-pool guard prevents resetting IDs while any retired borrower remains.
+The fixture joins its worker and reclaims resources before reporting a failure.
+
+The first frontend test exposed a fixture error: the old registry-only helper
+supplied server_stripes zero. A real observer needs the posted server incarnation;
+the test now supplies it, preserving the production refusal. That failed boot and
+the corrected 1698/1698 boot are both retained. The older syscall-gate fixture also
+stopped overwriting proc_alloc's existing handle table, removing a test-only leak.
+
+Before qualification, complete the repeated SMP/UBSan matrix and positive EL0
+frontend tests. Full production kernel qualification must also establish the test
+seams are absent. These obligations are not inferred from one successful boot. The user-facing clipboard additionally requires all host,
 Tapestry, broker and app integrations listed in HALCYON-INTERACTION-STATUS.md.

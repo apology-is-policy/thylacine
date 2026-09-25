@@ -4,7 +4,7 @@ type: arc
 title: "Halcyon interaction: pointer, clipboard and modal text"
 status: active
 design: [docs/HALCYON-INTERACTION.md]
-chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage]
+chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage, chg-2026-09-24-pty-interaction-abi, chg-2026-09-25-pty-interaction-kernel, chg-2026-09-25-pty-interaction-qualification]
 follow-ons: []
 exit-criteria:
   - "[ ] Portable guest cursor works over composed/fullscreen content and capture transitions"
@@ -126,3 +126,11 @@ existing PTY/poll models and mutants behave as claimed. See
 [[chg-2026-09-25-pty-interaction-kernel]] and the phase status for coverage limits.
 Full SMP qualification and all live userspace consumers remain open. The separate
 authority/settings drafts are preserved, and this is not a Main landing.
+
+## Expanded kernel regression checkpoint, September 25
+
+The real transport frontend, faulting native usercopy, WATCH allocation rollback,
+concurrent retirement and all counter boundaries now run in the kernel suite.
+The corrected full boot passes 1698/1698; the initial fixture refusal is retained
+as evidence rather than erased. See [[chg-2026-09-25-pty-interaction-qualification]].
+Repeated SMP/UBSan and live userspace integration remain open.

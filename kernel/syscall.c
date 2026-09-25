@@ -3599,6 +3599,14 @@ static s64 sys_pty_register_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return sys_pty_register_for_proc(p, a0, a1, a2, a3);
 }
 
+#ifdef KERNEL_TESTS
+// Reach the actual marshalling front with the test thread's current Proc and
+// TTBR0. No production symbol or user-facing diagnostic operation is added.
+s64 sys_pty_register_test_native(u64 op, u64 a1, u64 a2, u64 a3) {
+    return sys_pty_register_handler(op, a1, a2, a3);
+}
+#endif
+
 // =============================================================================
 // PTY-1d: the tty seam + controlling-terminal fronts. SYS_TTY_SIGNAL takes a
 // pts_id directly (the server holds it from MINT -- no fd). The fd-keyed

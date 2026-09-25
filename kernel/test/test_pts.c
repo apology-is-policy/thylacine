@@ -47,8 +47,12 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/dev.h>
 #include <thylacine/addrspace.h>
+#include <thylacine/9p_client.h>
+#include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/poll.h>
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/notes.h>
@@ -60,6 +64,9 @@
 #include <thylacine/thread.h>   // PTY-1f: fabricated member Threads
 #include <thylacine/types.h>
 
+static void pts_test_interaction_front(void);
+static void pts_test_interaction_retirement_race(void);
+static void pts_test_interaction_boundaries(void);
 static void pts_test_interaction_lifecycle(void);
 static void pts_test_interaction_ownership(void);
 static void pts_test_interaction_capacity(void);
@@ -280,6 +287,8 @@ void test_pts_binding_dedup_bounds_uniqueness(void) {
 
 void test_pts_full_registry_torn_conn_gc(void) {
     pts_test_interaction_capacity();
+    pts_test_interaction_retirement_race();
+    pts_test_interaction_boundaries();
     struct Proc *srv = proc_alloc();
     TEST_ASSERT(srv != NULL, "proc_alloc");
     struct SrvConn *cn = pts_make_conn(srv);
@@ -320,10 +329,10 @@ void test_pts_full_registry_torn_conn_gc(void) {
 // ---------------------------------------------------------------------------
 
 void test_pts_syscall_gates(void) {
+    pts_test_interaction_front();
     struct Proc *srv = proc_alloc();
     TEST_ASSERT(srv != NULL, "proc_alloc");
-    srv->handles = handle_table_alloc();
-    TEST_ASSERT(srv->handles != NULL, "handle_table_alloc");
+    TEST_ASSERT(srv->handles != NULL, "proc_alloc supplied handle table");
     struct SrvConn *cn = pts_make_conn(srv);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
@@ -1052,4 +1061,345 @@ static void pts_test_interaction_lifecycle(void) {
     }
     TEST_EXPECT_EQ(pts_free(host, (u64)id), 0, "HI1 lifecycle terminal cleanup");
     pts_drop_conn(cn); pts_drop_linked(host);
+}
+
+// Native front over real dev9p/SrvConn objects. Only the qid assignment is a
+// fixture: version/attach consume frozen wire replies; no walk is performed.
+// In particular, no caller supplies the
+// observer's stripes to sys_pty_register_for_proc.
+static struct p9_client pti_front_clients[2];
+static u8 pti_front_rx[2][64];
+static void pts_test_interaction_front(void) {
+    const char *failure = NULL;
+    struct Proc *host = proc_alloc(), *observer = kproc();
+    struct SrvConn *conns[2] = { NULL, NULL };
+    struct p9_srvconn_transport transports[2] = {0};
+    bool linked = false, initialized[2] = {false, false};
+    struct Spoor *roots[2] = {NULL, NULL};
+    s64 terminal = -1, binding = -1;
+    hidx_t master_fd = -1, root_fd = -1, client_fd = -1, server_fd = -1;
+#define PTI_FRONT_CHECK(condition, message) \
+    do { if (!(condition)) { failure = message; goto cleanup; } } while (0)
+    PTI_FRONT_CHECK(host && observer, "HI1 front processes allocated");
+    proc_test_link(host); linked = true;
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    for (unsigned i = 0; i < 2; ++i) {
+        struct Proc *poster = i ? observer : host;
+        conns[i] = srvconn_create(proc_stripes(host), host->pid, false,
+                                  proc_stripes(poster), SRVCONN_MSIZE);
+        PTI_FRONT_CHECK(conns[i], "HI1 front transport allocated");
+        srvconn_set_byte_mode(conns[i]);
+        PTI_FRONT_CHECK(p9_srvconn_transport_init(&transports[i], conns[i]) == 0,
+                        "HI1 front adapter initialized");
+        PTI_FRONT_CHECK(p9_client_init(&pti_front_clients[i], 0, SRVCONN_MSIZE,
+            p9_srvconn_transport_ops(&transports[i]), pti_front_rx[i], 64) == 0,
+            "HI1 front client initialized");
+        initialized[i] = true;
+        // Frozen 9P2000.L Rversion(msize 8192) + Rattach(tag 0, directory qid).
+        // The actual client emits and consumes the handshake through SrvConn.
+        const u8 replies[] = {
+            21,0,0,0,P9_RVERSION,255,255,0,32,0,0,8,0,'9','P','2','0','0','0','.','L',
+            20,0,0,0,P9_RATTACH,0,0,P9_QTDIR,0,0,0,0,42,0,0,0,0,0,0,0,
+        };
+        PTI_FRONT_CHECK(srvconn_server_send(conns[i], replies, sizeof(replies)) == sizeof(replies),
+                        "HI1 front handshake replies staged");
+        PTI_FRONT_CHECK(p9_client_handshake(&pti_front_clients[i], NULL, 0, NULL, 0, 1001) == 0,
+                        "HI1 front real transport handshake");
+        roots[i] = dev9p_attach_client(&pti_front_clients[i], 0);
+        PTI_FRONT_CHECK(roots[i], "HI1 front root attached");
+    }
+    roots[0]->qid.path = 940;
+    roots[0]->qid.type = 0;
+    terminal = pts_mint(host, conns[0], 940);
+    PTI_FRONT_CHECK(terminal > 0, "HI1 front terminal minted");
+    PTI_FRONT_CHECK(pts_bind_slave(host, conns[0], 941, (u64)terminal) == 0,
+                    "HI1 front slave registered");
+    spoor_ref(roots[0]);
+    master_fd = handle_alloc(host, KOBJ_SPOOR, RIGHT_READ, roots[0]);
+    if (master_fd < 0) spoor_clunk(roots[0]);
+    spoor_ref(roots[1]);
+    root_fd = handle_alloc(host, KOBJ_SPOOR, RIGHT_READ, roots[1]);
+    if (root_fd < 0) spoor_clunk(roots[1]);
+    PTI_FRONT_CHECK(master_fd >= 0 && root_fd >= 0, "HI1 front root handles");
+    for (unsigned i = 0; i < 2; ++i) {
+        struct Spoor *sp = spoor_alloc(&devsrv);
+        PTI_FRONT_CHECK(sp, "HI1 front endpoint allocated");
+        srvconn_ref(conns[1]); sp->aux = conns[1];
+        if (!i) sp->flag |= CSRVCLIENT;
+        hidx_t fd = handle_alloc(host, KOBJ_SPOOR, RIGHT_READ, sp);
+        if (fd < 0) spoor_clunk(sp);
+        PTI_FRONT_CHECK(fd >= 0, "HI1 front endpoint handle");
+        if (!i) client_fd = fd; else server_fd = fd;
+    }
+    PTI_FRONT_CHECK(sys_pty_register_for_proc(host, PTY_INTERACTION_BIND,
+        master_fd, server_fd, 0) == -T_E_INVAL, "HI1 server endpoint is not observer proof");
+    roots[1]->qid.path = 55;
+    PTI_FRONT_CHECK(sys_pty_register_for_proc(host, PTY_INTERACTION_BIND,
+        master_fd, root_fd, 0) == -T_E_INVAL, "HI1 non-root dev9p observer refused");
+    roots[1]->qid.path = 0;
+    roots[0]->qid.path = 941;
+    PTI_FRONT_CHECK(sys_pty_register_for_proc(host, PTY_INTERACTION_BIND,
+        master_fd, client_fd, 0) == -T_E_ACCES, "HI1 registered slave cannot bind");
+    roots[0]->qid.path = 940;
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        binding = sys_pty_register_for_proc(host, PTY_INTERACTION_BIND,
+            master_fd, mode ? root_fd : client_fd, 0);
+        PTI_FRONT_CHECK(binding > 0, "HI1 real master and observer front admitted");
+        struct pts_interaction_call c = { .binding_id = (u64)binding };
+        PTI_FRONT_CHECK(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c) == 0,
+                        "HI1 observer derived from service poster");
+        PTI_FRONT_CHECK(c.state.binder_stripes == proc_stripes(host) &&
+            c.state.pts_id == (u64)terminal, "HI1 front identities match held transport");
+        PTI_FRONT_CHECK(sys_pty_register_for_proc(host, PTY_INTERACTION_UNBIND,
+            binding, 0, 0) == 0, "HI1 native front unbind");
+        binding = -1;
+    }
+    binding = sys_pty_register_for_proc(host, PTY_INTERACTION_BIND,
+        master_fd, root_fd, 0);
+    PTI_FRONT_CHECK(binding > 0, "HI1 front allocation rollback binding");
+    // The boot test thread is kproc and has no EL0 mapping at this address
+    // (the existing test_uaccess fixture). Exercise real copyin/copyout fixup,
+    // not merely the public range check or a kernel-pointer substitute.
+    PTI_FRONT_CHECK(current_thread()->proc == observer, "HI1 native front caller is observer");
+    PTI_FRONT_CHECK(sys_pty_register_test_native(PTY_INTERACTION_STATE,
+        binding, 0x10000000ull, 80) == -T_E_FAULT, "HI1 STATE copyout fault reported");
+    PTI_FRONT_CHECK(sys_pty_register_test_native(PTY_INTERACTION_ACK,
+        binding, 0x10000000ull, 24) == -T_E_FAULT, "HI1 ACK copyin fault reported");
+    PTI_FRONT_CHECK(sys_pty_register_test_native(PTY_INTERACTION_CHECK,
+        binding, 0x10000000ull, 24) == -T_E_FAULT, "HI1 CHECK copyin fault reported");
+    PTI_FRONT_CHECK(sys_pty_register_test_native(PTY_INTERACTION_ACK,
+        binding, 0x10000000ull, 23) == -T_E_INVAL, "HI1 record size refused before copyin");
+    PTI_FRONT_CHECK(sys_pty_register_test_native(PTY_INTERACTION_STATE,
+        binding, ~(u64)0, 80) == -T_E_FAULT, "HI1 wrapping user range refused");
+    struct pts_interaction_call after_fault = { .binding_id = (u64)binding };
+    PTI_FRONT_CHECK(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &after_fault) == 0 &&
+        after_fault.state.acknowledged_epoch == 0 && after_fault.state.subject_stripes == 0,
+        "HI1 failed copyin leaves acknowledgement unchanged");
+    hidx_t last = -1;
+    for (;;) {
+        spoor_ref(roots[0]);
+        hidx_t fd = handle_alloc(host, KOBJ_SPOOR, RIGHT_READ, roots[0]);
+        if (fd < 0) { spoor_clunk(roots[0]); break; }
+        last = fd;
+    }
+    PTI_FRONT_CHECK(last >= 0, "HI1 handle table filled");
+    PTI_FRONT_CHECK(sys_pty_register_for_proc(host, PTY_INTERACTION_WATCH,
+        binding, 0, 0) == -T_E_NOMEM, "HI1 WATCH handle allocation failure reported");
+    PTI_FRONT_CHECK(handle_close(host, last) == 0, "HI1 release one handle slot");
+    s64 watch_fd = sys_pty_register_for_proc(host, PTY_INTERACTION_WATCH, binding, 0, 0);
+    PTI_FRONT_CHECK(watch_fd >= 0, "HI1 failed WATCH releases reservation for retry");
+    PTI_FRONT_CHECK(sys_pty_register_for_proc(host, PTY_INTERACTION_WATCH,
+        binding, 0, 0) == -T_E_BUSY, "HI1 successful WATCH owns exactly one reservation");
+cleanup:
+    // Keep failures local: release fixtures before recording an assertion. The
+    // negative legs must not leave live Procs for later lineage tests to visit.
+    if (binding > 0 && host) {
+        struct pts_interaction_call c = { .binding_id = (u64)binding };
+        (void)proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c);
+    }
+    if (terminal > 0) (void)pts_free(host, (u64)terminal);
+    if (host) for (int fd = 0; fd < PROC_HANDLE_MAX; ++fd) (void)handle_close(host, fd);
+    for (unsigned i = 0; i < 2; ++i) {
+        if (roots[i]) spoor_clunk(roots[i]);
+        if (initialized[i]) {
+            (void)p9_client_close(&pti_front_clients[i]);
+            p9_client_destroy(&pti_front_clients[i]);
+        } else if (transports[i].cn) {
+            struct p9_transport_ops ops = p9_srvconn_transport_ops(&transports[i]);
+            (void)ops.close(ops.ctx);
+        }
+        p9_srvconn_transport_destroy(&transports[i]);
+        pts_drop_conn(conns[i]);
+    }
+    if (linked) pts_drop_linked(host); else pts_drop_proc(host);
+    TEST_ASSERT(!failure, failure);
+#undef PTI_FRONT_CHECK
+}
+
+// The retirer holds only the binding locator, not a watcher Spoor. Meanwhile
+// the test thread unregisters the last poll hook, closes the last watch, and
+// tries a new binding. This exercises the post-unlock wake pin against both
+// the poll stack lifetime and reuse of the static binding pool.
+static struct {
+    u64 binding;
+    volatile u32 issued, finished;
+    volatile bool stop, exited;
+    s64 result;
+} pti_retire_job;
+
+static void pti_retire_worker(void) {
+    u32 seen = 0;
+    while (!__atomic_load_n(&pti_retire_job.stop, __ATOMIC_ACQUIRE)) {
+        u32 issued = __atomic_load_n(&pti_retire_job.issued, __ATOMIC_ACQUIRE);
+        if (issued == seen) { sched(); continue; }
+        struct pts_interaction_call c = { .binding_id = pti_retire_job.binding };
+        pti_retire_job.result = proc_pts_interaction(kproc(), PTY_INTERACTION_UNBIND, &c);
+        seen = issued;
+        __atomic_store_n(&pti_retire_job.finished, seen, __ATOMIC_RELEASE);
+    }
+    test_kthread_park_terminal(&pti_retire_job.exited);
+}
+
+static void pts_test_interaction_retirement_race(void) {
+    const char *failure = NULL;
+    struct Proc *host = proc_alloc();
+    struct SrvConn *cn = NULL;
+    struct Spoor *watch = NULL;
+    struct Thread *worker = NULL;
+    bool linked = false, registered = false;
+    s64 terminal = -1, binding = -1;
+    struct poll_waiter waiter;
+    struct Rendez rendez;
+#define PTI_RACE_CHECK(condition, message) \
+    do { if (!(condition)) { failure = message; goto cleanup; } } while (0)
+    PTI_RACE_CHECK(host, "HI1 race host allocated");
+    proc_test_link(host); linked = true;
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    cn = pts_make_conn(host);
+    PTI_RACE_CHECK(cn, "HI1 race transport allocated");
+    terminal = pts_mint(host, cn, 950);
+    PTI_RACE_CHECK(terminal > 0, "HI1 race terminal minted");
+    pti_retire_job.issued = pti_retire_job.finished = 0;
+    pti_retire_job.stop = pti_retire_job.exited = false;
+    worker = thread_create(kproc(), pti_retire_worker);
+    PTI_RACE_CHECK(worker, "HI1 race worker created");
+    ready(worker);
+    for (u32 iteration = 1; iteration <= 256; ++iteration) {
+        struct pts_interaction_call c = { .pts_id = (u64)terminal,
+            .observer_stripes = proc_stripes(kproc()) };
+        binding = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+        PTI_RACE_CHECK(binding > 0, "HI1 race binding created");
+        s64 error;
+        watch = pts_interaction_watch(kproc(), (u64)binding, &error);
+        PTI_RACE_CHECK(watch, "HI1 race watch created");
+        struct t_pty_interaction_state state;
+        PTI_RACE_CHECK(pti_test_read(kproc(), watch, &state, sizeof(state)) == sizeof(state),
+                        "HI1 race initial revision consumed");
+        rendez_init(&rendez);
+        poll_waiter_init(&waiter, &rendez);
+        short events = pti_test_poll(kproc(), watch, &waiter);
+        registered = waiter.list != NULL;
+        PTI_RACE_CHECK(events == 0 && registered, "HI1 race poll armed before retire");
+        pti_retire_job.binding = (u64)binding;
+        __atomic_store_n(&pti_retire_job.issued, iteration, __ATOMIC_RELEASE);
+        poll_waiter_list_unregister(&waiter); registered = false;
+        spoor_clunk(watch); watch = NULL;
+        // Rebinding races the writer's post-unlock wake. Busy is allowed only
+        // until retirement has actually committed; there is no sleep in a lock.
+        s64 replacement = -T_E_BUSY;
+        u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (replacement == -T_E_BUSY && timer_now_ns() < deadline) {
+            replacement = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+            if (replacement == -T_E_BUSY) sched();
+        }
+        if (replacement > 0) binding = replacement;
+        PTI_RACE_CHECK(replacement > 0, "HI1 race replacement eventually admitted");
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&pti_retire_job.finished, __ATOMIC_ACQUIRE) == iteration);
+        PTI_RACE_CHECK(__atomic_load_n(&pti_retire_job.finished, __ATOMIC_ACQUIRE) == iteration &&
+            pti_retire_job.result == 0, "HI1 race retirement completed");
+        c.binding_id = (u64)replacement;
+        PTI_RACE_CHECK(proc_pts_interaction(kproc(), PTY_INTERACTION_STATE, &c) == 0 &&
+            c.state.binding_id == (u64)replacement && c.state.revision == 1,
+            "HI1 race old wake cannot retire or mutate replacement");
+        PTI_RACE_CHECK(proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c) == 0,
+                        "HI1 race replacement released");
+        binding = -1;
+    }
+cleanup:
+    // Stop/join before reclaiming any fixture the worker can name. Even an
+    // assertion failure therefore cannot escape into later tests' lineage.
+    if (worker) {
+        __atomic_store_n(&pti_retire_job.stop, true, __ATOMIC_RELEASE);
+        test_kthread_join_free(worker, &pti_retire_job.exited);
+    }
+    if (registered) poll_waiter_list_unregister(&waiter);
+    if (watch) spoor_clunk(watch);
+    if (binding > 0) {
+        struct pts_interaction_call c = { .binding_id = (u64)binding };
+        (void)proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c);
+    }
+    if (terminal > 0) (void)pts_free(host, (u64)terminal);
+    pts_drop_conn(cn);
+    if (linked) pts_drop_linked(host); else pts_drop_proc(host);
+    TEST_ASSERT(!failure, failure);
+#undef PTI_RACE_CHECK
+}
+
+static void pts_test_interaction_boundaries(void) {
+    const char *failure = NULL;
+    struct Proc *host = proc_alloc();
+    struct SrvConn *cn = NULL;
+    struct Spoor *watch = NULL;
+    bool linked = false;
+    s64 terminal = -1, binding = -1;
+    u64 saved_next_id = 0;
+#define PTI_EDGE_CHECK(condition, message) \
+    do { if (!(condition)) { failure = message; goto cleanup; } } while (0)
+    PTI_EDGE_CHECK(host, "HI1 edge host allocated");
+    proc_test_link(host); linked = true;
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    cn = pts_make_conn(host);
+    PTI_EDGE_CHECK(cn, "HI1 edge transport allocated");
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        terminal = pts_mint(host, cn, 960);
+        PTI_EDGE_CHECK(terminal > 0, "HI1 edge terminal minted");
+        PTI_EDGE_CHECK(pts_bind_slave(host, cn, 961, (u64)terminal) == 0,
+                       "HI1 edge slave registered");
+        if (mode == 2) {
+            saved_next_id = pts_interaction_test_exchange_next_id(PTY_INTERACTION_ID_MAX);
+            PTI_EDGE_CHECK(saved_next_id, "HI1 ID boundary fixture requires empty pool");
+        }
+        struct pts_interaction_call c = { .pts_id = (u64)terminal,
+            .observer_stripes = proc_stripes(kproc()) };
+        binding = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+        PTI_EDGE_CHECK(binding > 0, "HI1 edge binding created");
+        c.binding_id = (u64)binding;
+        s64 error;
+        watch = pts_interaction_watch(kproc(), (u64)binding, &error);
+        PTI_EDGE_CHECK(watch, "HI1 edge watcher created");
+        if (mode == 0) {
+            PTI_EDGE_CHECK(pts_interaction_test_counters(binding, ~(u64)0, 1),
+                           "HI1 epoch boundary injected");
+            PTI_EDGE_CHECK(pts_tty_acquire(host, cn, 961) == 0,
+                           "HI1 epoch exhaustion preserves terminal acquisition");
+            PTI_EDGE_CHECK(pts_tty_set_fg(host, cn, 961, host->pgid) == 0,
+                           "HI1 epoch exhaustion preserves ordinary job control");
+            PTI_EDGE_CHECK(proc_pts_interaction(host, PTY_INTERACTION_BIND, &c) == -T_E_NOSPC,
+                           "HI1 exhausted terminal does not wrap its epoch");
+        } else if (mode == 1) {
+            PTI_EDGE_CHECK(pts_interaction_test_counters(binding, 7, ~(u64)0),
+                           "HI1 revision boundary injected");
+            c.request = (struct t_pty_interaction_check){ .version = 1, .size = 24,
+                .expected_epoch = 7, .subject_stripes = 0 };
+            PTI_EDGE_CHECK(proc_pts_interaction(kproc(), PTY_INTERACTION_ACK, &c) == -T_E_NOENT,
+                           "HI1 revision exhaustion retires before acknowledgement");
+        } else {
+            PTI_EDGE_CHECK((u64)binding == PTY_INTERACTION_ID_MAX,
+                           "HI1 last ID remains a positive success value");
+            PTI_EDGE_CHECK(proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c) == 0,
+                           "HI1 last ID can be revoked");
+            PTI_EDGE_CHECK(proc_pts_interaction(host, PTY_INTERACTION_BIND, &c) == -T_E_NOSPC,
+                           "HI1 ID exhaustion never enters errno space");
+        }
+        PTI_EDGE_CHECK(pti_test_poll(kproc(), watch, NULL) == POLLHUP,
+                       "HI1 exhausted binding wakes retirement");
+        PTI_EDGE_CHECK(proc_pts_interaction(kproc(), PTY_INTERACTION_STATE, &c) == -T_E_NOENT,
+                       "HI1 exhausted binding has no admission state");
+        spoor_clunk(watch); watch = NULL; binding = -1;
+        PTI_EDGE_CHECK(pts_free(host, (u64)terminal) == 0, "HI1 edge terminal released");
+        terminal = -1;
+    }
+cleanup:
+    if (binding > 0) {
+        struct pts_interaction_call c = { .binding_id = (u64)binding };
+        (void)proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c);
+    }
+    if (watch) spoor_clunk(watch);
+    if (terminal > 0) (void)pts_free(host, (u64)terminal);
+    if (saved_next_id && !pts_interaction_test_exchange_next_id(saved_next_id))
+        failure = "HI1 ID fixture could not restore empty-pool allocator";
+    pts_drop_conn(cn);
+    if (linked) pts_drop_linked(host); else pts_drop_proc(host);
+    TEST_ASSERT(!failure, failure);
+#undef PTI_EDGE_CHECK
 }
