@@ -2457,7 +2457,7 @@ _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_r
 #define PTY_REG_SLAVE  1u
 #define PTY_REG_FREE   2u
 
-// HI-1 terminal ownership ABI RESERVATION, not an implemented syscall front.
+// HI-1 terminal ownership ABI; kernel observation and admission operations.
 // SYS_PTY_REGISTER subops 16..21: docs/HALCYON-INTERACTION-PTY-ABI.md.
 // Existing server-only subops 0..2 keep their contract. Records are little-endian
 // on the native AArch64 ABI. No padding, pointer fields or userspace bearer grant.

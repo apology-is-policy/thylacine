@@ -3508,6 +3508,45 @@ s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
     if (!p) return -T_E_INVAL;
 
     switch (op) {
+    case PTY_INTERACTION_BIND: {
+        if (a3 || a1 > 0x7fffffffu || a2 > 0x7fffffffu) return -T_E_INVAL;
+        struct Spoor *master = sys_lookup_spoor(p, (hidx_t)a1, RIGHT_READ);
+        if (!master) return -T_E_BADF;
+        struct Spoor *peer = sys_lookup_spoor(p, (hidx_t)a2, RIGHT_READ);
+        if (!peer) { spoor_clunk(master); return -T_E_BADF; }
+        bool is_master = false;
+        s64 id = pts_resolve_spoor(master, &is_master);
+        struct SrvConn *cn = devsrv_conn_of(peer);
+        if (cn && !(peer->flag & CSRVCLIENT)) cn = NULL;
+        if (!cn && peer->qid.path == 0) {
+            u64 ignored;
+            (void)pts_spoor_conn_qid(peer, &cn, &ignored);
+        }
+        s64 ret = id < 0 ? id : !is_master ? -T_E_ACCES : !cn ? -T_E_INVAL : 0;
+        if (ret == 0) {
+            struct pts_interaction_call c = {
+                .pts_id = (u64)id, .observer_stripes = srvconn_server_stripes(cn),
+            };
+            ret = proc_pts_interaction(p, op, &c);
+        }
+        spoor_clunk(peer);
+        spoor_clunk(master);
+        return ret;
+    }
+    case PTY_INTERACTION_UNBIND:
+    case PTY_INTERACTION_WATCH: {
+        if (a2 || a3 || !a1 || a1 > PTY_INTERACTION_ID_MAX) return -T_E_INVAL;
+        if (op == PTY_INTERACTION_UNBIND) {
+            struct pts_interaction_call c = { .binding_id = a1 };
+            return proc_pts_interaction(p, op, &c);
+        }
+        s64 err;
+        struct Spoor *sp = pts_interaction_watch(p, a1, &err);
+        if (!sp) return err;
+        hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, sp);
+        if (fd < 0) { spoor_clunk(sp); return -T_E_NOMEM; }
+        return fd;
+    }
     case PTY_REG_MINT:
     case PTY_REG_SLAVE: {
         if (op == PTY_REG_MINT && a3 != 0)        return -T_E_INVAL;
@@ -3543,6 +3582,20 @@ s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
 static s64 sys_pty_register_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
+    if (a0 == PTY_INTERACTION_STATE || a0 == PTY_INTERACTION_ACK ||
+        a0 == PTY_INTERACTION_CHECK) {
+        if (!a1 || a1 > PTY_INTERACTION_ID_MAX) return -T_E_INVAL;
+        struct pts_interaction_call c = { .binding_id = a1 };
+        u64 size = a0 == PTY_INTERACTION_STATE ? sizeof(c.state) : sizeof(c.request);
+        if (a3 != size) return -T_E_INVAL;
+        if (!sys_validate_user_buf(a2, size)) return -T_E_FAULT;
+        if (a0 != PTY_INTERACTION_STATE && uaccess_copy_in(&c.request, a2, size) != 0)
+            return -T_E_FAULT;
+        s64 ret = proc_pts_interaction(p, a0, &c);
+        if (ret == 0 && a0 == PTY_INTERACTION_STATE &&
+            uaccess_copy_out(a2, &c.state, size) != 0) return -T_E_FAULT;
+        return ret;
+    }
     return sys_pty_register_for_proc(p, a0, a1, a2, a3);
 }
 

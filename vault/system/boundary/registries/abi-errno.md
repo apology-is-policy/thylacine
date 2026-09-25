@@ -5,12 +5,12 @@ kind: registry
 stability: append-only
 title: "The errno registry — T_E_* and the POSIX-value contract"
 pinned-by:
-  - "_Static_assert per value (kernel/include/thylacine/errno.h, 36 asserts)"
+  - "_Static_assert per value (kernel/include/thylacine/errno.h, 37 asserts)"
 mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## The surface
 
@@ -42,6 +42,7 @@ anywhere.
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
 | 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`) |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
+| 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
 | 38 | `T_E_NOSYS` | ENOSYS | dispatch slot exists, handler is a placeholder |
@@ -105,8 +106,8 @@ The three ranges a return value can fall in, as the seam reads them:
 ## Where the registry is mirrored, and where it has drifted
 
 **`usr/lib/libthyla-rs/src/err.rs`** is the only value-by-value mirror. It
-enumerates **19** of the 35 non-zero values (`as_errno`): 1, 2, 5, 9, 11, 12,
-13, 14, 16, 17, 20, 21, 22, 32, 34, 38, 40, 110, 111. Missing — **16** — is
+enumerates **20** of the 36 non-zero values (`as_errno`): 1, 2, 5, 9, 11, 12,
+13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 38, 40, 110, 111. Missing — **16** — is
 dominated by the V-5 socket family: `SRCH` (3), `INTR` (4), `2BIG` (7),
 `CHILD` (10), `NODEV` (19), `MFILE` (24), `NOTTY` (25), `NOTSOCK` (88),
 `PROTONOSUPPORT` (93), `OPNOTSUPP` (95), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
@@ -157,3 +158,7 @@ the 9P layer translates.
 
 [[sub-pouch-seam]] · [[sub-pouch-fs]] · [[sub-kernel-ninep-client]] ·
 [[abi-caps]] · [[moc-boundary]].
+
+`T_E_NOSPC` (28) maps to Rust `Error::NoSpace` in both directions and in
+Display. The C libt wrappers return it unchanged; pouch already passes -28
+through its existing explicit-errno range. No slot is renumbered.

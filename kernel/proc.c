@@ -36,6 +36,7 @@
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
+#include <thylacine/pts.h>
 #include <thylacine/dtb.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -904,6 +905,7 @@ int proc_setsid(struct Proc *p) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         return -T_E_ACCES;              // POSIX EPERM: already a group leader
     }
+    pts_interaction_invalidate_locked(p, false);
     p->sid  = (u32)p->pid;
     p->pgid = (u32)p->pid;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
@@ -950,6 +952,7 @@ int proc_setpgid(struct Proc *self, int pid, int pgid) {
             return -T_E_ACCES;          // POSIX EPERM: no such group in session
         }
     }
+    pts_interaction_invalidate_locked(target, false);
     target->pgid = want;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return 0;
@@ -3600,6 +3603,7 @@ static void proc_orphan_rule_locked(struct Proc *dying);
 // msg:    captured by reference; caller-owned (typically a string
 //         literal). NULL becomes "ok".
 static void proc_become_zombie_locked(struct Proc *p, int status, const char *msg) {
+    pts_interaction_invalidate_locked(p, true);
     // A-4a (I-25): if p is a legate ROOT, tear down its scope as it dies. Placed
     // at this chokepoint (not in exits() alone) so the sweep fires on EVERY death
     // path -- a clean exit AND a kill / group-terminate (the path A-4b's CAP_KILL
@@ -4509,6 +4513,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);
             extinction("proc_exec_replace: a live peer thread appeared");
         }
+        pts_interaction_invalidate_locked(p, true);
         old   = p->as;
         p->as = nas;
 
@@ -5907,4 +5912,30 @@ void proc_test_unlink(struct Proc *p) {
 void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
     struct legate_teardown_ctx tctx = { .scope_id = scope_id, .except = except };
     proc_for_each(legate_teardown_cb, &tctx);
+}
+
+
+// HI-1: a fresh process lookup and pts comparison share ONE lifecycle hold.
+// Iterative parent/sibling traversal uses O(1) stack at arbitrary fork depth.
+// Returned pointers are borrowed only within that hold, never retained by pts.
+struct Proc *proc_pts_live_locked(u64 stripes) {
+    if (!stripes) return NULL;
+    struct Proc *root = kproc();
+    for (struct Proc *q = root; q;) {
+        if (q->state == PROC_STATE_ALIVE && proc_stripes(q) == stripes) return q;
+        if (q->children) { q = q->children; continue; }
+        while (q != root && !q->sibling) q = q->parent;
+        if (q == root) break;
+        q = q->sibling;
+    }
+    return NULL;
+}
+
+s64 proc_pts_interaction(struct Proc *p, u64 op, struct pts_interaction_call *call) {
+    if (!p || !call) return -T_E_INVAL;
+    irq_state_t irq = spin_lock_irqsave(&g_proc_table_lock);
+    s64 result = proc_pts_live_locked(proc_stripes(p)) == p
+        ? pts_interaction_locked(p, op, call) : -T_E_NOENT;
+    spin_unlock_irqrestore(&g_proc_table_lock, irq);
+    return result;
 }

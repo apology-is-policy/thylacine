@@ -229,6 +229,9 @@
 // alignment violated; size exceeds bound). POSIX: EINVAL.
 #define T_E_INVAL      22
 
+// Fixed interaction pool or identifier space exhausted (HI-1).
+#define T_E_NOSPC     28
+
 // Broken pipe. Use when a pipe/socket write hits a closed read end.
 // POSIX: EPIPE.
 #define T_E_PIPE       32
@@ -377,6 +380,7 @@ _Static_assert(T_E_BUSY      == 16,  "T_E_BUSY ABI pin (POSIX EBUSY)");
 _Static_assert(T_E_EXIST     == 17,  "T_E_EXIST ABI pin (POSIX EEXIST)");
 _Static_assert(T_E_NOTDIR    == 20,  "T_E_NOTDIR ABI pin (POSIX ENOTDIR)");
 _Static_assert(T_E_ISDIR     == 21,  "T_E_ISDIR ABI pin (POSIX EISDIR)");
+_Static_assert(T_E_NOSPC     == 28, "T_E_NOSPC ABI pin (POSIX ENOSPC)");
 _Static_assert(T_E_INVAL     == 22,  "T_E_INVAL ABI pin (POSIX EINVAL)");
 _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");

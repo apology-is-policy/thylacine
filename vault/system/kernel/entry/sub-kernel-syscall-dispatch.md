@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1259,14 +1259,23 @@ this file's comments. The holotype audit of this surface is owed.
 contracts survive the Astra merge;1691/1691 kernel tests pass on the merged CI
 image. The new Aux test calls use the existing non-exempt false argument.
 
+## Terminal interaction suboperations
 
-## Reserved terminal interaction suboperations (2026-09-24)
+SYS_PTY_REGISTER subops 16..21 use [[abi-pty-interaction]]. BIND borrows two
+RIGHT_READ Spoors, resolves the real master, and takes observer stripes from
+an actual devsrv client or SrvConn-backed dev9p root. It refuses the slave side,
+server endpoints and other transports. Spoors stay held until the process/pts
+check completes. No PID argument supplies observer identity. Existing ptyfs
+subops 0..2 keep their server-only gates.
 
-[[abi-pty-interaction]] adds header definitions for SYS_PTY_REGISTER subops
-16..21, but `sys_pty_register_for_proc` still only handles 0..2. Its existing
-entry gates and unknown-operation EINVAL path remain unchanged; no userspace
-consumer can use the reservation as a working ownership grant. The eventual
-front must select the interaction role gates separately from the old ptyfs-only
-registration gate, validate complete operands/records before taking lifecycle
-and pts locks, and copy outputs after releasing them. No frontend code changes
-or runtime admission verification are included in this ABI checkpoint.
+STATE/ACK/CHECK validate exact sizes and user ranges; ACK/CHECK copy into a kernel
+record before the lifecycle/pts hold, STATE copies out afterward. UNBIND/WATCH
+refuse nonzero unused arguments. WATCH installs only RIGHT_READ; handle-table
+failure clunks the new Spoor, releasing its bounded reservation. Allocation and
+uaccess never run under the process or pts spinlocks. Private reservation/read/
+poll operations 32..35 have no native dispatch path.
+
+Fresh role, incarnation, group, principal and epoch checks live in
+[[sub-kernel-pts]]. The frontend cannot replace them with its earlier fd lookup.
+A copyout fault may lose a consumed watch notification; the caller recovers via
+STATE. A successful CHECK applies only to that admission, not a reusable token.

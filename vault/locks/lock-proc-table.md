@@ -4,9 +4,9 @@ type: lock
 title: "g_proc_table_lock — the Proc-lineage lock"
 kind: spin-irqsave
 guards: "children lists + sibling chains + parent pointers, ALIVE->ZOMBIE transitions, exit_status/exit_msg, the companion Thread's THREAD_EXITING commit, p->threads link/unlink + thread_count, sid/pgid, the PTY-1e report latches, the stop flags' set/clear walks, g_init_proc, and the three console-role pointers"
-orders-before: []
+orders-before: [lock-pts]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-09-25
 ---
 ## Discipline
 
@@ -61,3 +61,12 @@ callback must not re-enter `proc_find_by_pid` / `rfork` / `exits` /
 the locking form from a locked context deadlocks, which is why
 `proc_legate_teardown_if_root` documents its precondition explicitly and
 `el0_return_die_check`'s lockless tail correctly uses the *locking* form.
+
+## Terminal interaction lifecycle
+
+The interaction wrapper takes lifecycle before [[lock-pts]] to sample live
+incarnations and foreground ownership atomically. Successful setpgid/setsid
+invalidate the current nomination before changing membership. Exec and the
+ZOMBIE chokepoint retire binder/observer roles before publication. Each hook
+releases pts before waking; bounded wake references protect the poll-list owner.
+It performs no allocation or uaccess while lifecycle is held.

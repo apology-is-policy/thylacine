@@ -22,6 +22,23 @@ needed the operator.
 
 
 ---
+## 2026-09-25 (Astra) -- a terminal handover needs a lifetime
+
+The operator-approved kernel correction now has an implementation atop Aux's
+cleared shared-image/debug-taint base (`0cb5b244`, merged as `c252a7f3`). The
+important extra step was invalidating a controller's epoch on image and group
+changes: merely clearing its nomination would let an old ACK name the same
+process stripes and revive it. Bounded watch reservations and temporary wake
+pins keep pool retirement safe without adding a namespace service or heap list.
+
+QEMU passes 1698/1698 with actual exec and exit retirement, not just calls to a
+test-only cleanup helper. Existing PTY/poll models and named mutants pass; the
+model wrapper's temporal-verdict spelling was fixed, with failed logs retained.
+The design also named ENOSPC before the registry defined it; value 28 and its
+Rust mirror now agree. This remains kernel groundwork: status distinguishes
+these tests from the SMP/race qualification and live clipboard still owed.
+
+---
 ## 2026-09-24, late (aux, Opus 5 1M, effort max) -- the guard was on the Proc; the thing it guarded was not
 
 **What this was.** astra asked a narrow question on yip 0124 -- her debug taint stamped one `Proc`, and

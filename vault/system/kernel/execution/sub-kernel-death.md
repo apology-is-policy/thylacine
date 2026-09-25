@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -481,3 +481,11 @@ The handle sweep also resolves a PCI endpoint's retained function. It therefore
 quiesces DMA and revokes delivery even if both parent handle and register mappings
 were closed while an IRQ endpoint survived. Owner quiescence's terminal flag
 prevents concurrent ARM/COMPLETE from restoring delivery during teardown.
+
+## Terminal observers at death
+
+`proc_become_zombie_locked` retires terminal interaction bindings where the dying
+process is binder or observer and invalidates its controller nomination before
+publishing death. Wake references protect retired poll lists through the later
+wake; no Proc pointer is retained. The existing death, reparenting and wait
+semantics remain unchanged. See [[sub-kernel-pts]].

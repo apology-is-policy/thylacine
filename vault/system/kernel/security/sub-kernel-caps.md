@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 
 ## Administrative authority specification
@@ -425,3 +425,11 @@ drift the Caveats once carried), and `proc.c` gained `rfork_forked_with_caps` â€
 the Linux `clone`'s rfork, `caps_mask = CAP_ALL`. After two borrowed flags a
 reader had every reason to skip the third; this one was the dossier's own. Folded
 at [[chg-2026-09-05-caps-fork-inherit]].
+
+## Terminal host seal consumer
+
+Terminal interaction BIND checks both NOTRACE and NODUMP and refuses DEBUG_TAINTED
+under the process lifecycle lock. It adds no new capability bit and changes no
+capability inheritance rule. Userspace must spawn the terminal host sealed before
+its first user instruction; the kernel's current seal check is not a historical
+proof of when that seal was first stamped. See [[sub-kernel-pts]].

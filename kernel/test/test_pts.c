@@ -45,6 +45,10 @@
 #include "test.h"
 
 #include <thylacine/devsrv.h>
+#include <thylacine/dev.h>
+#include <thylacine/addrspace.h>
+#include <thylacine/poll.h>
+#include <thylacine/rendez.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/notes.h>
@@ -56,6 +60,9 @@
 #include <thylacine/thread.h>   // PTY-1f: fabricated member Threads
 #include <thylacine/types.h>
 
+static void pts_test_interaction_lifecycle(void);
+static void pts_test_interaction_ownership(void);
+static void pts_test_interaction_capacity(void);
 void test_pts_mint_bind_resolve_free(void);
 void test_pts_gen_guard_stale_id(void);
 void test_pts_authority_minting_server_only(void);
@@ -141,6 +148,8 @@ void test_pts_mint_bind_resolve_free(void) {
     TEST_ASSERT(id > 0, "mint returns a positive pts_id");
     TEST_EXPECT_EQ(cn->ref, ref0 + 1, "the master binding holds one conn ref");
 
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 8, (u64)id | (1ull << 48)),
+        -T_E_INVAL, "HI1 noncanonical terminal id cannot alias a live generation");
     TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 8, (u64)id), 0, "slave bind");
     TEST_EXPECT_EQ(cn->ref, ref0 + 2, "the slave binding holds a second ref");
 
@@ -270,6 +279,7 @@ void test_pts_binding_dedup_bounds_uniqueness(void) {
 // ---------------------------------------------------------------------------
 
 void test_pts_full_registry_torn_conn_gc(void) {
+    pts_test_interaction_capacity();
     struct Proc *srv = proc_alloc();
     TEST_ASSERT(srv != NULL, "proc_alloc");
     struct SrvConn *cn = pts_make_conn(srv);
@@ -338,6 +348,22 @@ void test_pts_syscall_gates(void) {
     hidx_t fd_cli = handle_alloc(srv, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
                                  sp_cli);
     TEST_ASSERT(fd_cli >= 0, "handle_alloc (client endpoint)");
+
+    // Interaction fronts reject malformed operands before resolving authority.
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_INTERACTION_BIND,
+        0x100000000ull, (u64)fd_cli, 0), -T_E_INVAL, "HI1 wide fd does not narrow");
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_INTERACTION_BIND,
+        (u64)fd_srv, (u64)fd_cli, 1), -T_E_INVAL, "HI1 BIND unused arg refused");
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_INTERACTION_BIND,
+        9999, (u64)fd_cli, 0), -T_E_BADF, "HI1 BIND missing master fd");
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_INTERACTION_BIND,
+        (u64)fd_srv, (u64)fd_cli, 0), -T_E_INVAL, "HI1 BIND needs real dev9p master");
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_INTERACTION_WATCH,
+        1, 1, 0), -T_E_INVAL, "HI1 WATCH unused arg refused");
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_INTERACTION_UNBIND,
+        1ull << 63, 0, 0), -T_E_INVAL, "HI1 signed-error-space binding refused");
+    TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTS_INTERACTION_RESERVE_WATCH,
+        1, 0, 0), -T_E_INVAL, "HI1 private watcher operation not dispatched");
 
     // The MAY_POST_SERVICE gate precedes fd resolution on MINT.
     TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_REG_MINT, (u64)fd_srv,
@@ -452,6 +478,7 @@ void test_pts_tty_acquire_matrix(void) {
 // ---------------------------------------------------------------------------
 
 void test_pts_tty_set_get_fg_matrix(void) {
+    pts_test_interaction_ownership();
     struct Proc *srv = proc_alloc();
     TEST_ASSERT(srv != NULL, "proc_alloc");
     struct SrvConn *cn = pts_make_conn(srv);
@@ -746,6 +773,7 @@ void test_pts_tty_tstp_stop_cont_seam(void) {
 
 void test_pts_teardown_hup_cont(void);
 void test_pts_teardown_hup_cont(void) {
+    pts_test_interaction_lifecycle();
     struct Proc *srv = proc_alloc();
     TEST_ASSERT(srv != NULL, "proc_alloc srv");
     struct SrvConn *cn = pts_make_conn(srv);
@@ -795,4 +823,233 @@ void test_pts_teardown_hup_cont(void) {
     pts_drop_linked(m);                     // unlinks from leader (its parent)
     pts_drop_linked(leader);
     pts_drop_proc(srv);
+}
+
+// HI-1 regressions are called from the existing pts test entries so the
+// separately preserved authority draft in test.c is never staged or rewritten.
+static long pti_test_read(struct Proc *p, struct Spoor *sp, void *out, long n) {
+    struct Thread *t = current_thread();
+    struct Proc *saved = t->proc;
+    t->proc = p;
+    long result = sp->dev->read(sp, out, n, 0);
+    t->proc = saved;
+    return result;
+}
+
+static short pti_test_poll(struct Proc *p, struct Spoor *sp, struct poll_waiter *pw) {
+    struct Thread *t = current_thread();
+    struct Proc *saved = t->proc;
+    t->proc = p;
+    short result = sp->dev->poll(sp, POLLIN, pw);
+    t->proc = saved;
+    return result;
+}
+
+static void pts_test_interaction_ownership(void) {
+    struct Proc *host = proc_alloc(), *observer = proc_alloc(), *subject = proc_alloc();
+    struct Proc *stranger = proc_alloc();
+    TEST_ASSERT(host && observer && subject && stranger, "HI1 fixture processes");
+    proc_test_link(host); proc_test_link(observer); proc_test_link(subject); proc_test_link(stranger);
+    subject->principal_id = host->principal_id = 1001;
+    stranger->principal_id = 1002;
+    struct SrvConn *cn = pts_make_conn(host);
+    TEST_ASSERT(cn, "HI1 fixture transport");
+    s64 id = pts_mint(host, cn, 900);
+    TEST_ASSERT(id > 0, "HI1 fixture terminal");
+    TEST_EXPECT_EQ(pts_bind_slave(host, cn, 901, (u64)id), 0, "HI1 fixture slave");
+    TEST_EXPECT_EQ(pts_tty_acquire(subject, cn, 901), 0, "HI1 acquire");
+    struct pts_interaction_call c = { .pts_id = (u64)id, .observer_stripes = proc_stripes(observer) };
+    TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_BIND, &c), -T_E_ACCES, "HI1 unsealed host refused");
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    s64 bid = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+    TEST_ASSERT(bid > 0, "HI1 sealed bind");
+    TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_BIND, &c), -T_E_BUSY, "HI1 no binding theft");
+    c.binding_id = (u64)bid;
+    TEST_EXPECT_EQ(proc_pts_interaction(stranger, PTY_INTERACTION_STATE, &c), -T_E_ACCES, "HI1 foreign role denied");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "HI1 observer state");
+    TEST_EXPECT_EQ(c.state.binder_pid, (u32)host->pid, "HI1 actual binder PID");
+    TEST_EXPECT_EQ(c.state.flags, PTY_INTERACTION_LIVE, "HI1 initially unacknowledged");
+    c.request = (struct t_pty_interaction_check){ .version = 1, .size = 24,
+        .expected_epoch = c.state.foreground_epoch, .subject_stripes = proc_stripes(subject) };
+    TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_ACK, &c), -T_E_ACCES, "HI1 host cannot nominate");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_CHECK, &c), -T_E_AGAIN, "HI1 no implicit acknowledgement");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "HI1 nominate foreground");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_CHECK, &c), 0, "HI1 fresh admission");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "HI1 acknowledged state");
+    u64 revision = c.state.revision;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "HI1 duplicate ACK");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "HI1 duplicate state");
+    TEST_EXPECT_EQ(c.state.revision, revision, "HI1 duplicate ACK is idempotent");
+
+    s64 error;
+    struct Spoor *watch = pts_interaction_watch(observer, (u64)bid, &error);
+    TEST_ASSERT(watch && error == 0, "HI1 observer watch");
+    TEST_ASSERT(!pts_interaction_watch(observer, (u64)bid, &error) && error == -T_E_BUSY, "HI1 one watcher per role");
+    struct t_pty_interaction_state out;
+    TEST_EXPECT_EQ(pti_test_read(stranger, watch, &out, sizeof(out)), -T_E_ACCES, "HI1 inherited watch cannot read");
+    TEST_EXPECT_EQ(pti_test_poll(stranger, watch, NULL), POLLERR, "HI1 inherited watch cannot poll");
+    TEST_EXPECT_EQ(pti_test_read(observer, watch, &out, sizeof(out)-1), -T_E_INVAL, "HI1 short read preserves cursor");
+    TEST_EXPECT_EQ(pti_test_read(observer, watch, &out, sizeof(out)), 80, "HI1 initial snapshot unread");
+    TEST_EXPECT_EQ(pti_test_read(observer, watch, &out, sizeof(out)), -T_E_AGAIN, "HI1 no new revision");
+    struct Spoor *clone = spoor_clone(watch);
+    TEST_ASSERT(clone, "HI1 navigation clone fixture");
+    TEST_EXPECT_EQ(pti_test_read(observer, clone, &out, sizeof(out)), -T_E_BADF, "HI1 unopened clone cannot read");
+    spoor_clunk(clone);
+
+    struct Rendez rendez; rendez_init(&rendez);
+    struct poll_waiter waiter; poll_waiter_init(&waiter, &rendez);
+    TEST_EXPECT_EQ(pti_test_poll(observer, watch, &waiter), 0, "HI1 register then observe");
+    // A redundant SET_FG is still a handover barrier. This bypasses every
+    // shell/host notification, the counterexample that required the kernel seam.
+    TEST_EXPECT_EQ(pts_tty_set_fg(subject, cn, 901, subject->pgid), 0, "HI1 direct redundant SET_FG");
+    bool woken = waiter.ready;
+    poll_waiter_list_unregister(&waiter);
+    TEST_ASSERT(woken, "HI1 direct SET_FG wakes observer");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_CHECK, &c), -T_E_AGAIN, "HI1 stale admission after direct SET_FG");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), -T_E_AGAIN, "HI1 delayed ACK refused");
+    TEST_EXPECT_EQ(pti_test_read(observer, watch, &out, sizeof(out)), 80, "HI1 changed snapshot");
+    TEST_EXPECT_EQ(out.subject_stripes, 0, "HI1 controller cleared");
+    c.request.expected_epoch = out.foreground_epoch;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "HI1 fresh renomination");
+    // A live member can be nominated independently of the group leader.
+    struct Proc *member = proc_alloc();
+    TEST_ASSERT(member, "HI1 member fixture");
+    member->principal_id = host->principal_id;
+    member->sid = subject->sid; member->pgid = subject->pgid;
+    proc_test_link(member);
+    c.request.subject_stripes = proc_stripes(member);
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "HI1 pipeline member nominated");
+    TEST_EXPECT_EQ(proc_setpgid(member, 0, 0), 0, "HI1 real setpgid publication");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), -T_E_AGAIN, "HI1 group change rejects old ACK");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "HI1 post-group state");
+    TEST_ASSERT(c.state.foreground_epoch > c.request.expected_epoch && c.state.subject_stripes == 0,
+                "HI1 group hook advances epoch and clears nomination");
+    TEST_EXPECT_EQ(proc_setpgid(member, 0, (int)subject->pgid), 0, "HI1 restore member group");
+    c.request.expected_epoch = c.state.foreground_epoch;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "HI1 member nomination before setsid");
+    TEST_ASSERT(proc_setsid(member) > 0, "HI1 real setsid publication");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_CHECK, &c), -T_E_AGAIN, "HI1 setsid invalidates admission");
+    pts_drop_linked(member);
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "HI1 latest epoch");
+    c.request.expected_epoch = c.state.foreground_epoch;
+    c.request.subject_stripes = proc_stripes(subject);
+    c.request.version = 2;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), -T_E_INVAL, "HI1 unknown request version");
+    c.request.version = 1; c.request.size = 23;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), -T_E_INVAL, "HI1 exact request size");
+    c.request.size = 24;
+    stranger->sid = subject->sid; stranger->pgid = subject->pgid;
+    c.request.subject_stripes = proc_stripes(stranger);
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), -T_E_ACCES, "HI1 foreground principal mismatch");
+    c.request.subject_stripes = 0;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "HI1 APP acknowledgement");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_CHECK, &c), -T_E_INVAL, "HI1 APP grants no admission");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_UNBIND, &c), 0, "HI1 observer revoke");
+    TEST_EXPECT_EQ(pti_test_poll(observer, watch, NULL), POLLHUP, "HI1 retired watcher HUP");
+    TEST_EXPECT_EQ(pti_test_read(observer, watch, &out, sizeof(out)), 0, "HI1 retired watcher EOF");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_CHECK, &c), -T_E_NOENT, "HI1 retired admission denied");
+    spoor_clunk(watch);
+    TEST_EXPECT_EQ(pts_free(host, (u64)id), 0, "HI1 free terminal");
+    pts_drop_conn(cn);
+    pts_drop_linked(stranger); pts_drop_linked(subject); pts_drop_linked(observer); pts_drop_linked(host);
+}
+
+static void pts_test_interaction_capacity(void) {
+    struct Proc *host = proc_alloc(), *observer = proc_alloc();
+    TEST_ASSERT(host && observer, "HI1 capacity procs");
+    proc_test_link(host); proc_test_link(observer);
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    struct SrvConn *cn = pts_make_conn(host);
+    TEST_ASSERT(cn, "HI1 capacity conn");
+    s64 id = pts_mint(host, cn, 910);
+    TEST_ASSERT(id > 0, "HI1 capacity terminal");
+    struct Spoor *held[PTS_MAX];
+    struct pts_interaction_call c = { .pts_id = (u64)id, .observer_stripes = proc_stripes(observer) };
+    u64 previous = 0;
+    for (u32 i = 0; i < PTS_MAX; ++i) {
+        s64 bid = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+        TEST_ASSERT(bid > 0 && (u64)bid > previous, "HI1 unique increasing IDs");
+        c.binding_id = previous = (u64)bid;
+        s64 error;
+        held[i] = pts_interaction_watch(observer, (u64)bid, &error);
+        TEST_ASSERT(held[i], "HI1 bounded retained watch");
+        TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c), 0, "HI1 retain retired slot");
+    }
+    TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_BIND, &c), -T_E_NOSPC, "HI1 retired watchers bound pool");
+    spoor_clunk(held[0]);
+    s64 reused = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+    TEST_ASSERT(reused > 0 && (u64)reused > previous, "HI1 released slot new incarnation");
+    // The old locator cannot alias the recycled slot.
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), -T_E_NOENT, "HI1 old binding stays retired");
+    c.binding_id = (u64)reused;
+    TEST_EXPECT_EQ(pts_free(host, (u64)id), 0, "HI1 free retires live binding");
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), -T_E_NOENT, "HI1 terminal free invalidates binding");
+    for (u32 i = 1; i < PTS_MAX; ++i) spoor_clunk(held[i]);
+    pts_drop_conn(cn); pts_drop_linked(observer); pts_drop_linked(host);
+}
+
+struct pti_lifecycle_fixture {
+    u64 pts_id;
+    struct Proc *observer;
+    struct Spoor *watch;
+    s64 binding_id, after_exec;
+    bool do_exec;
+};
+
+static void pti_lifecycle_child(void *arg) {
+    struct pti_lifecycle_fixture *f = arg;
+    struct Proc *self = current_thread()->proc;
+    proc_seal(self, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    struct pts_interaction_call c = { .pts_id = f->pts_id,
+        .observer_stripes = proc_stripes(f->observer) };
+    f->binding_id = proc_pts_interaction(self, PTY_INTERACTION_BIND, &c);
+    if (f->binding_id <= 0) exits("HI1 bind failed");
+    c.binding_id = (u64)f->binding_id;
+    s64 error;
+    // Kernel fixture opens the observer role on its behalf; no native API can
+    // name another Proc this way. The read below runs as the actual observer.
+    f->watch = pts_interaction_watch(f->observer, c.binding_id, &error);
+    if (!f->watch) exits("HI1 watch failed");
+    if (f->do_exec) {
+        struct AddrSpace *next = addrspace_alloc(1024);
+        if (!next) exits("HI1 image allocation failed");
+        proc_exec_replace(self, next, PHENO_NATIVE);
+        // Measured BEFORE death: death cannot mask a missing exec hook.
+        f->after_exec = proc_pts_interaction(self, PTY_INTERACTION_STATE, &c);
+    }
+    exits("ok");
+}
+
+static void pts_test_interaction_lifecycle(void) {
+    struct Proc *observer = current_thread()->proc;
+    struct Proc *host = proc_alloc();
+    TEST_ASSERT(host, "HI1 lifecycle host");
+    proc_test_link(host);
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    struct SrvConn *cn = pts_make_conn(host);
+    TEST_ASSERT(cn, "HI1 lifecycle connection");
+    s64 id = pts_mint(host, cn, 920);
+    TEST_ASSERT(id > 0, "HI1 lifecycle terminal");
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        struct pti_lifecycle_fixture f = { .pts_id = (u64)id, .observer = observer,
+            .do_exec = mode != 0, .after_exec = 123 };
+        int child = rfork(RFPROC, pti_lifecycle_child, &f);
+        TEST_ASSERT(child > 0, "HI1 lifecycle rfork");
+        int status = -1;
+        TEST_EXPECT_EQ(wait_pid_for(child, 0, &status), child, "HI1 lifecycle reap");
+        TEST_EXPECT_EQ(status, 0, "HI1 lifecycle child completed");
+        TEST_ASSERT(f.watch, "HI1 lifecycle watch retained");
+        if (mode) TEST_EXPECT_EQ(f.after_exec, -T_E_NOENT, "HI1 exec retires before child exits");
+        struct t_pty_interaction_state state;
+        TEST_EXPECT_EQ(pti_test_poll(observer, f.watch, NULL), POLLHUP, "HI1 actual lifecycle HUP");
+        TEST_EXPECT_EQ(pti_test_read(observer, f.watch, &state, sizeof(state)), 0, "HI1 actual lifecycle EOF");
+        spoor_clunk(f.watch);
+        struct pts_interaction_call c = { .pts_id = (u64)id, .observer_stripes = proc_stripes(observer) };
+        s64 next = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+        TEST_ASSERT(next > f.binding_id, "HI1 death releases live terminal binding");
+        c.binding_id = (u64)next;
+        TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c), 0, "HI1 lifecycle cleanup binding");
+    }
+    TEST_EXPECT_EQ(pts_free(host, (u64)id), 0, "HI1 lifecycle terminal cleanup");
+    pts_drop_conn(cn); pts_drop_linked(host);
 }

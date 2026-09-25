@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Graphical seat incarnations
 
@@ -560,3 +560,12 @@ creation decision.
 fork+exec work: `rfork_forked_with_caps` (the Linux clone), the PHENO_LINUX
 note-mask inheritance (#127), and Design D's phenotype commit in
 `proc_exec_replace`.
+
+## Terminal ownership observations
+
+`proc_pts_interaction` takes the lifecycle lock and calls the pts core under it.
+`proc_pts_live_locked` uses an iterative lineage walk and returns a borrowed live
+Proc only for the current lock interval. No observer stores a Proc pointer.
+The setsid/setpgid, exec and ZOMBIE hooks invalidate nominations or retire roles
+before publishing the corresponding process change; [[sub-kernel-pts]] owns the
+contract. Allocation and user copies remain outside lifecycle.

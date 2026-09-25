@@ -1,4 +1,4 @@
-//! Reserved terminal ownership ABI; no kernel front or authority wrapper yet.
+//! Terminal ownership ABI records; live client wrappers are separate.
 //! See docs/HALCYON-INTERACTION-PTY-ABI.md. Native AArch64 is little-endian.
 //! The compile-time assertions and tools/test-pty-interaction-abi.py pin all
 //! three mirrors against literal records independently of syscall availability.

@@ -3,6 +3,10 @@
 // the binding design.
 
 #include <thylacine/pts.h>
+#include <thylacine/dev.h>
+#include <thylacine/poll.h>
+#include <thylacine/thread.h>
+#include <thylacine/extinction.h>
 #include <thylacine/cons.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_srvconn_transport.h>
@@ -31,16 +35,42 @@ struct pts_entry {
     // mint; PTY-1d's acquisition / tcsetpgrp are the only mutators. 0 = none.
     u32  ct_sid;
     u32  fg_pgid;
+    u64 interaction_epoch;
+    bool interaction_disabled;
 };
 
 static struct pts_entry g_pts[PTS_MAX];
 static spin_lock_t      g_pts_lock;
 
+// No namespace attachment: these watch Spoors can only be minted from an
+// existing role-bound binding. The static pool also bounds retired watches.
+struct pti_binding;
+struct pti_watch {
+    struct pti_binding *binding;
+    u64 seen;
+    bool reserved;
+    unsigned role;
+};
+struct pti_binding {
+    bool used, live;
+    u64 id, pts_id, binder, observer, acknowledged, subject, revision;
+    u32 binder_pid, principal;
+    u32 wake_refs;
+    struct pti_watch watches[2];
+    struct poll_waiter_list pollers;
+};
+static struct pti_binding g_pti[PTS_MAX];
+static u64 g_pti_next_id = 1;
+static struct pti_binding *pti_change_locked(struct pts_entry *e, bool retire);
+static void pti_wake(struct pti_binding *b);
+
+
 // Decode + validate a pts_id against the live registry. Lock held by caller.
 static struct pts_entry *pts_lookup_locked(u64 pts_id) {
     u32 idx = (u32)(pts_id & ((1u << PTS_IDX_BITS) - 1u));
     u32 gen = (u32)(pts_id >> PTS_IDX_BITS);
-    if (pts_id == 0 || idx >= PTS_MAX || gen == 0) return NULL;
+    if (pts_id == 0 || (pts_id >> (PTS_IDX_BITS + 32)) != 0 ||
+        idx >= PTS_MAX || gen == 0) return NULL;
     struct pts_entry *e = &g_pts[idx];
     if (!e->live || e->gen != gen) return NULL;
     return e;
@@ -77,7 +107,8 @@ static struct pts_entry *pts_find_binding_locked(struct SrvConn *cn, u64 qid,
 // Lock held.
 static int pts_clear_locked(struct pts_entry *e,
                             struct SrvConn *drop[PTS_BINDINGS_MAX],
-                            u32 *ct_sid_out, u32 *fg_out) {
+                            u32 *ct_sid_out, u32 *fg_out, struct pti_binding **wake) {
+    *wake = pti_change_locked(e, true);
     int ndrop = 0;
     for (u32 j = 0; j < PTS_BINDINGS_MAX; j++) {
         if (e->bindings[j].used) drop[ndrop++] = e->bindings[j].conn;
@@ -134,7 +165,7 @@ static void pts_teardown_fan(struct Proc *caller, u32 ct_sid, u32 fg) {
 // SYS_TTY_CONT resolve, see pts_teardown_fan's composition note).
 static struct pts_entry *pts_gc_one_locked(struct SrvConn *drop[PTS_BINDINGS_MAX],
                                            int *ndrop_out,
-                                           u32 *ct_sid_out, u32 *fg_out) {
+                                           u32 *ct_sid_out, u32 *fg_out, struct pti_binding **wake) {
     for (u32 i = 0; i < PTS_MAX; i++) {
         struct pts_entry *e = &g_pts[i];
         if (!e->live) continue;
@@ -144,7 +175,7 @@ static struct pts_entry *pts_gc_one_locked(struct SrvConn *drop[PTS_BINDINGS_MAX
                 all_torn = false;
         }
         if (all_torn) {
-            *ndrop_out = pts_clear_locked(e, drop, ct_sid_out, fg_out);
+            *ndrop_out = pts_clear_locked(e, drop, ct_sid_out, fg_out, wake);
             return e;
         }
     }
@@ -156,6 +187,7 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
 
     struct SrvConn *drop[PTS_BINDINGS_MAX];
     int ndrop = 0;
+    struct pti_binding *wake = NULL;
     u32 gc_ct_sid = 0, gc_fg = 0;   // the GC'd entry's F8 fan snapshot
     s64 ret;
 
@@ -168,7 +200,7 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
     for (u32 i = 0; i < PTS_MAX; i++) {
         if (!g_pts[i].live) { e = &g_pts[i]; break; }
     }
-    if (!e) e = pts_gc_one_locked(drop, &ndrop, &gc_ct_sid, &gc_fg);
+    if (!e) e = pts_gc_one_locked(drop, &ndrop, &gc_ct_sid, &gc_fg, &wake);
     if (!e) {
         ret = -T_E_AGAIN;
         goto out;
@@ -178,6 +210,8 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
     e->server_pid = (u32)server->pid;
     e->ct_sid     = 0;
     e->fg_pgid    = 0;
+    e->interaction_epoch = 1;
+    e->interaction_disabled = false;
     srvconn_ref(cn);               // atomic; safe under the spinlock
     e->bindings[0] = (struct pts_binding){
         .used = true, .master = true, .conn = cn, .qid = master_qid,
@@ -185,6 +219,7 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
     ret = (s64)pts_id_of_locked(e);
 out:
     spin_unlock(&g_pts_lock);
+    pti_wake(wake);
     for (int k = 0; k < ndrop; k++) srvconn_unref(drop[k]);
     // F8: the GC victim's carrier-loss fan -- after the lock + the unrefs
     // (the fan takes g_proc_table_lock + note queue locks; never under the
@@ -240,6 +275,7 @@ int pts_free(struct Proc *server, u64 pts_id) {
 
     struct SrvConn *drop[PTS_BINDINGS_MAX];
     int ndrop = 0;
+    struct pti_binding *wake = NULL;
     u32 ct_sid = 0, fg = 0;
     int ret;
 
@@ -250,10 +286,11 @@ int pts_free(struct Proc *server, u64 pts_id) {
     } else if (e->server_pid != (u32)server->pid) {
         ret = -T_E_ACCES;
     } else {
-        ndrop = pts_clear_locked(e, drop, &ct_sid, &fg);
+        ndrop = pts_clear_locked(e, drop, &ct_sid, &fg, &wake);
         ret = 0;
     }
     spin_unlock(&g_pts_lock);
+    pti_wake(wake);
     for (int k = 0; k < ndrop; k++) srvconn_unref(drop[k]);
     // F8: the explicit-FREE (last-master-close) carrier-loss fan, after the
     // lock + the unrefs. (ct_sid, fg) stay 0 on the error arms -> no-op.
@@ -392,6 +429,7 @@ s64 pts_tty_acquire(struct Proc *p, struct SrvConn *cn, u64 qid) {
     u32 pgid = p->pgid;
 
     s64 ret;
+    struct pti_binding *wake = NULL;
     spin_lock(&g_pts_lock);
     struct pts_binding *b = NULL;
     struct pts_entry *e = pts_find_binding_locked(cn, qid, &b);
@@ -418,7 +456,9 @@ s64 pts_tty_acquire(struct Proc *p, struct SrvConn *cn, u64 qid) {
             ret = 0;
         }
     }
+    if (ret == 0) wake = pti_change_locked(e, false);
     spin_unlock(&g_pts_lock);
+    pti_wake(wake);
     return ret;
 }
 
@@ -431,6 +471,7 @@ s64 pts_tty_set_fg(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid) {
     if (!proc_pgrp_in_session(pgid, p->sid)) return -T_E_ACCES;
 
     s64 ret;
+    struct pti_binding *wake = NULL;
     spin_lock(&g_pts_lock);
     struct pts_binding *b = NULL;
     struct pts_entry *e = pts_find_binding_locked(cn, qid, &b);
@@ -442,7 +483,9 @@ s64 pts_tty_set_fg(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid) {
         e->fg_pgid = pgid;
         ret = 0;
     }
+    if (ret == 0) wake = pti_change_locked(e, false);
     spin_unlock(&g_pts_lock);
+    pti_wake(wake);
     return ret;
 }
 
@@ -499,4 +542,293 @@ s64 pts_tty_get_fg(struct Proc *p, struct SrvConn *cn, u64 qid) {
     }
     spin_unlock(&g_pts_lock);
     return ret;
+}
+
+// =============================================================================
+// HI-1: bounded terminal ownership observations. Public definitions are in
+// syscall.h; the frontend supplies only identities extracted from held Spoors.
+// Everything ending in _locked below runs with g_pts_lock. The main operation
+// and lifecycle hooks additionally hold g_proc_table_lock (in that order).
+// =============================================================================
+
+static struct pti_binding *pti_lookup_locked(u64 id) {
+    if (!id || id > PTY_INTERACTION_ID_MAX) return NULL;
+    for (u32 i = 0; i < PTS_MAX; ++i)
+        if (g_pti[i].used && g_pti[i].id == id) return &g_pti[i];
+    return NULL;
+}
+
+static void pti_collect_locked(struct pti_binding *b) {
+    if (!b->live && !b->wake_refs &&
+        !b->watches[0].reserved && !b->watches[1].reserved)
+        b->used = false;
+}
+
+static struct pti_binding *pti_retire_locked(struct pti_binding *b) {
+    if (!b || !b->live) return NULL;
+    b->live = false;
+    b->acknowledged = b->subject = 0;
+    if (b->revision != ~(u64)0) ++b->revision;
+    ++b->wake_refs;
+    return b;
+}
+
+// The temporary reference prevents close/rebind from recycling the list between
+// the pts unlock and this wake. The pool slot itself has static storage.
+static void pti_wake(struct pti_binding *b) {
+    if (!b) return;
+    poll_waiter_list_wake(&b->pollers);
+    spin_lock(&g_pts_lock);
+    if (!b->wake_refs) extinction("pts interaction: unbalanced wake");
+    --b->wake_refs;
+    pti_collect_locked(b);
+    spin_unlock(&g_pts_lock);
+}
+
+static struct pti_binding *pti_change_locked(struct pts_entry *e, bool retire) {
+    if (!e) return NULL;
+    if (!retire && !e->interaction_disabled) {
+        if (e->interaction_epoch == ~(u64)0) e->interaction_disabled = true;
+        else ++e->interaction_epoch;
+    }
+    u64 pts_id = pts_id_of_locked(e);
+    for (u32 i = 0; i < PTS_MAX; ++i) {
+        struct pti_binding *b = &g_pti[i];
+        if (!b->used || !b->live || b->pts_id != pts_id) continue;
+        if (retire || e->interaction_disabled || b->revision == ~(u64)0)
+            return pti_retire_locked(b);
+        b->acknowledged = b->subject = 0;
+        ++b->revision;
+        ++b->wake_refs;
+        return b;
+    }
+    return NULL;
+}
+
+void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role) {
+    // Called before group/exec/death publication, with lifecycle held. No
+    // process-table callback or lookup while pts is held on this path.
+    struct pti_binding *wake[PTS_MAX];
+    u32 count = 0;
+    u64 who = proc_stripes(p);
+    spin_lock(&g_pts_lock);
+    for (u32 i = 0; i < PTS_MAX; ++i) {
+        struct pti_binding *b = &g_pti[i], *w = NULL;
+        if (!b->used || !b->live) continue;
+        if (retire_role && (b->binder == who || b->observer == who))
+            w = pti_retire_locked(b);
+        else if (b->subject == who)
+            w = pti_change_locked(pts_lookup_locked(b->pts_id), false);
+        if (w) wake[count++] = w;
+    }
+    spin_unlock(&g_pts_lock);
+    for (u32 i = 0; i < count; ++i) pti_wake(wake[i]);
+}
+
+static void pti_snapshot_locked(struct pti_binding *b, struct pts_entry *e,
+                                 struct t_pty_interaction_state *out) {
+    *out = (struct t_pty_interaction_state){
+        .version = PTY_INTERACTION_VERSION,
+        .flags = PTY_INTERACTION_LIVE |
+            (b->acknowledged == e->interaction_epoch ? PTY_INTERACTION_ACKNOWLEDGED : 0),
+        .binding_id = b->id, .pts_id = b->pts_id,
+        .foreground_epoch = e->interaction_epoch,
+        .acknowledged_epoch = b->acknowledged, .revision = b->revision,
+        .controlling_sid = e->ct_sid, .foreground_pgid = e->fg_pgid,
+        .subject_stripes = b->subject, .binder_stripes = b->binder,
+        .binder_pid = b->binder_pid,
+    };
+}
+
+static void pti_watch_release(struct pti_watch *w) {
+    spin_lock(&g_pts_lock);
+    struct pti_binding *b = w->binding;
+    if (!w->reserved) extinction("pts interaction: duplicate watch close");
+    w->reserved = false;
+    pti_collect_locked(b);
+    spin_unlock(&g_pts_lock);
+}
+
+// Process pointers are borrowed under the lifecycle lock. Do not retain them in
+// a binding or return them to userspace. Group, principal and incarnation are
+// checked in the SAME lock interval as epoch/nomination state.
+s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *c) {
+    s64 result = -T_E_INVAL;
+    struct pti_binding *wake = NULL, *b = NULL;
+    struct pts_entry *e = NULL;
+    u64 who = proc_stripes(p);
+    spin_lock(&g_pts_lock);
+    if (op == PTY_INTERACTION_BIND) {
+        e = pts_lookup_locked(c->pts_id);
+        struct Proc *observer = proc_pts_live_locked(c->observer_stripes);
+        if (!e || !observer) { result = -T_E_NOENT; goto done; }
+        u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+        u32 seal = PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP;
+        if ((flags & seal) != seal || (flags & PROC_FLAG_DEBUG_TAINTED)) {
+            result = -T_E_ACCES; goto done;
+        }
+        if (e->interaction_disabled || g_pti_next_id > PTY_INTERACTION_ID_MAX) {
+            result = -T_E_NOSPC; goto done;
+        }
+        for (u32 i = 0; i < PTS_MAX; ++i) {
+            if (g_pti[i].used && g_pti[i].live && g_pti[i].pts_id == c->pts_id) {
+                result = -T_E_BUSY; goto done;
+            }
+            if (!g_pti[i].used && !b) b = &g_pti[i];
+        }
+        if (!b) { result = -T_E_NOSPC; goto done; }
+        *b = (struct pti_binding){
+            .used = true, .live = true, .id = g_pti_next_id++, .pts_id = c->pts_id,
+            .binder = who, .observer = c->observer_stripes,
+            .binder_pid = (u32)p->pid,
+            .principal = __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE), .revision = 1,
+        };
+        poll_waiter_list_init(&b->pollers);
+        for (unsigned i = 0; i < 2; ++i) {
+            b->watches[i].binding = b;
+            b->watches[i].role = i;
+        }
+        result = (s64)b->id;
+        goto done;
+    }
+    b = pti_lookup_locked(c->binding_id);
+    if (!b) { result = -T_E_NOENT; goto done; }
+    if (who != b->binder && who != b->observer) { result = -T_E_ACCES; goto done; }
+    struct pti_watch *w = NULL;
+    if (op == PTS_INTERACTION_READ_WATCH || op == PTS_INTERACTION_POLL_WATCH ||
+        op == PTS_INTERACTION_PUBLISH_WATCH) {
+        w = c->reservation;
+        if (!w || (w != &b->watches[0] && w != &b->watches[1]) || !w->reserved ||
+            who != (w->role ? b->observer : b->binder)) {
+            result = -T_E_ACCES; goto done;
+        }
+        if (!b->live) {
+            result = op == PTS_INTERACTION_READ_WATCH ? 0 :
+                     op == PTS_INTERACTION_POLL_WATCH ? POLLHUP : -T_E_NOENT;
+            goto done;
+        }
+    }
+    e = pts_lookup_locked(b->pts_id);
+    if (!b->live || !e || !proc_pts_live_locked(b->binder) ||
+        !proc_pts_live_locked(b->observer)) { result = -T_E_NOENT; goto done; }
+    switch (op) {
+    case PTY_INTERACTION_UNBIND:
+        wake = pti_retire_locked(b); result = 0; break;
+    case PTY_INTERACTION_STATE:
+        pti_snapshot_locked(b, e, &c->state); result = 0; break;
+    case PTY_INTERACTION_ACK:
+    case PTY_INTERACTION_CHECK: {
+        const struct t_pty_interaction_check *r = &c->request;
+        if (r->version != PTY_INTERACTION_VERSION || r->size != sizeof(*r) ||
+            !r->expected_epoch || (op == PTY_INTERACTION_CHECK && !r->subject_stripes))
+            break;
+        if (who != b->observer) { result = -T_E_ACCES; break; }
+        if (r->expected_epoch != e->interaction_epoch) { result = -T_E_AGAIN; break; }
+        if (r->subject_stripes) {
+            struct Proc *subject = proc_pts_live_locked(r->subject_stripes);
+            if (!subject) { result = -T_E_NOENT; break; }
+            if (!e->ct_sid || !e->fg_pgid || subject->sid != e->ct_sid ||
+                subject->pgid != e->fg_pgid ||
+                __atomic_load_n(&subject->principal_id, __ATOMIC_ACQUIRE) != b->principal) {
+                result = -T_E_ACCES; break;
+            }
+        }
+        if (op == PTY_INTERACTION_CHECK) {
+            result = b->acknowledged == e->interaction_epoch &&
+                     b->subject == r->subject_stripes ? 0 : -T_E_AGAIN;
+            break;
+        }
+        if (b->acknowledged == e->interaction_epoch && b->subject == r->subject_stripes) {
+            result = 0; break; // identical ACK changes no durable state
+        }
+        if (b->revision == ~(u64)0) {
+            wake = pti_retire_locked(b); result = -T_E_NOENT; break;
+        }
+        b->acknowledged = e->interaction_epoch;
+        b->subject = r->subject_stripes;
+        ++b->revision;
+        ++b->wake_refs;
+        wake = b;
+        result = 0;
+        break;
+    }
+    case PTS_INTERACTION_RESERVE_WATCH:
+        w = &b->watches[who == b->observer ? 1 : 0];
+        if (w->reserved) { result = -T_E_BUSY; break; }
+        w->reserved = true; w->seen = 0;
+        c->reservation = w;
+        result = 0; break;
+    case PTS_INTERACTION_PUBLISH_WATCH:
+        result = 0; break;
+    case PTS_INTERACTION_READ_WATCH:
+        if (w->seen == b->revision) { result = -T_E_AGAIN; break; }
+        pti_snapshot_locked(b, e, &c->state);
+        w->seen = b->revision;
+        result = sizeof(c->state); break;
+    case PTS_INTERACTION_POLL_WATCH:
+        if (c->waiter) poll_waiter_list_register(&b->pollers, c->waiter);
+        result = (w->seen != b->revision) ? (c->events & POLLIN) : 0;
+        break;
+    default: break;
+    }
+done:
+    spin_unlock(&g_pts_lock);
+    pti_wake(wake);
+    return result;
+}
+
+static struct Proc *pti_caller(void) {
+    struct Thread *t = current_thread();
+    return t ? t->proc : NULL;
+}
+
+static long pti_read(struct Spoor *sp, void *buf, long n, s64 off) {
+    (void)off;
+    if (!(sp->flag & COPEN)) return -T_E_BADF;
+    if (!buf || n < (long)sizeof(struct t_pty_interaction_state)) return -T_E_INVAL;
+    struct pti_watch *w = sp->aux;
+    struct pts_interaction_call c = { .binding_id = w->binding->id, .reservation = w };
+    s64 ret = proc_pts_interaction(pti_caller(), PTS_INTERACTION_READ_WATCH, &c);
+    if (ret > 0) {
+        // Dev.read accepts an arbitrary byte-aligned kernel scratch buffer.
+        const u8 *src = (const u8 *)&c.state;
+        for (u64 i = 0; i < sizeof(c.state); ++i) ((u8 *)buf)[i] = src[i];
+    }
+    return (long)ret;
+}
+
+static short pti_poll(struct Spoor *sp, short events, struct poll_waiter *pw) {
+    if (!(sp->flag & COPEN)) return POLLERR;
+    struct pti_watch *w = sp->aux;
+    struct pts_interaction_call c = {
+        .binding_id = w->binding->id, .reservation = w, .events = events, .waiter = pw,
+    };
+    s64 ret = proc_pts_interaction(pti_caller(), PTS_INTERACTION_POLL_WATCH, &c);
+    return ret < 0 ? POLLERR : (short)ret;
+}
+
+static void pti_close(struct Spoor *sp) {
+    if ((sp->flag & COPEN) && sp->aux) pti_watch_release(sp->aux);
+    sp->aux = NULL;
+}
+
+// Distinct private Dev identity; no attach/walk/register and no namespace path.
+// Permission, exec-backing, write and seek all stay disabled by default.
+static struct Dev pti_dev = { .dc = 'T', .name = "pts-watch",
+    .read = pti_read, .poll = pti_poll, .close = pti_close };
+
+struct Spoor *pts_interaction_watch(struct Proc *p, u64 binding_id, s64 *error) {
+    struct pts_interaction_call c = { .binding_id = binding_id };
+    *error = proc_pts_interaction(p, PTS_INTERACTION_RESERVE_WATCH, &c);
+    if (*error < 0) return NULL;
+    struct Spoor *sp = spoor_alloc(&pti_dev); // outside lifecycle and pts locks
+    if (!sp) {
+        pti_watch_release(c.reservation); *error = -T_E_NOMEM; return NULL;
+    }
+    sp->aux = c.reservation;
+    sp->flag = COPEN;
+    sp->qid.path = binding_id;
+    *error = proc_pts_interaction(p, PTS_INTERACTION_PUBLISH_WATCH, &c);
+    if (*error < 0) { spoor_clunk(sp); return NULL; }
+    return sp;
 }

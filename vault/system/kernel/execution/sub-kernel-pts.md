@@ -9,10 +9,10 @@ guarded-by: [inv-i20, inv-i1, inv-i22, inv-i9]
 validated-by: [spec-pty, spec-pty-stop, prose, gate-smp]
 locks: [lock-pts]
 hazards: []
-abis: []
+abis: [abi-pty-interaction]
 design: ["docs/PTY-DESIGN.md section 3"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -28,7 +28,8 @@ identity the controlling session and its foreground process group. The server
 holds an opaque id and can say *"a suspend character arrived on the pts I
 serve."* It cannot say to whom.
 
-That asymmetry is the file's entire reason to exist. Everything else here —
+That asymmetry is the registry's signal-authority boundary. Terminal interaction
+adds role-bound ownership observation and admission, described below. Everything else here —
 the generation counter, the pointer-identity correlation, the staged unrefs —
 is machinery in service of it.
 
@@ -55,9 +56,9 @@ different authorities for two different questions — which is the seam.
 
 ### Naming a terminal without a handle
 
-The design called this `KObj_Pts`, and it is not one. There is no handle
-kind, no dup, no transfer, no leak surface — because there is nothing for
-userspace to hold. A pts is named in exactly two ways:
+The design called this `KObj_Pts`, and it is not one. There is no pts KObj or terminal-byte authority handle. Interaction WATCH
+returns an anonymous observation Spoor; it grants no signal or terminal-byte
+authority and rechecks the reading process on every operation. A pts is named in exactly two ways:
 
 - The **server** holds an integer the kernel gave it at mint.
 - **Everyone else** names it implicitly, by holding a slave or master fd; the
@@ -173,13 +174,14 @@ on a torn connection because the resolve is pure pointer identity.
 
 ## Data structures
 
-Two, both file-static, both fixed-size, no allocation anywhere in the file.
+The terminal registry and interaction binding pool are file-static and fixed-size.
+Only the watch Spoor is allocated, outside lifecycle/pts locks.
 
 `struct pts_binding` — a used flag, a master/slave discriminator, the
 connection pointer with its held reference, and the qid on that connection.
 
 `struct pts_entry` — liveness, the generation, the minting server's pid, four
-binding rows, and the controlling pair. Four rows covers a master and a slave
+binding rows, the controlling pair, interaction epoch and exhaustion flag. Four rows covers a master and a slave
 on the shared mount with slack for per-user mounts, where a slave opened on a
 second connection binds a second row.
 
@@ -189,10 +191,10 @@ server-held, so no server bug can corrupt it.
 
 ## Concurrency
 
-One spinlock, [[lock-pts]], covering everything. It is a strict leaf and the
-strictness is the design — see the lock note for the staged-unref rule and the
-snapshot-then-fan shape that keeps the process-table lock from nesting under
-it.
+[[lock-pts]] covers terminal and interaction state. The legacy staged-unref
+and snapshot-then-fan paths keep process-table acquisition out from under pts.
+Interaction instead acquires lifecycle first and then pts; poll registration
+may acquire the poll-list lock under pts. See the lock note for wake pins.
 
 Three things read process state, and each one solves the ordering differently,
 which is worth seeing side by side:
@@ -202,6 +204,7 @@ which is worth seeing side by side:
 | the signal fan | snapshot under the lock, post after release |
 | the foreground-group membership gate | check **before** taking the lock, accept a benign race |
 | acquisition's liveness question | **not checked at all** — see Caveats |
+| interaction admission | hold lifecycle then pts across the complete live-membership/epoch comparison |
 
 The first two are correct and argued. The third is the gap.
 
@@ -335,7 +338,7 @@ mechanisms.
 
 ## Tests
 
-Ten tests, and between them they cover every gate in the file:
+The legacy tests cover terminal registry and job-control gates:
 `pts.mint_bind_resolve_free`, the generation's stale-id rejection, the
 cross-server authority matrix, the binding-row exhaustion, the torn-connection
 reclaim, `pts.tty_acquire_matrix` (including the inherit-not-steal case and the
@@ -352,3 +355,43 @@ built from the implementation cannot see an absence.
 [[sub-ptyfs]] is the other half of the seam. [[sub-kernel-jobctl]] receives
 the suspend and continue fans. [[sub-kernel-proc]] owns the session and group
 fields this file reads. [[inv-i20]] · [[spec-pty]] · [[spec-pty-stop]].
+
+## Terminal interaction ownership
+
+A fixed 64-slot pool observes pts incarnations. BIND requires the real master
+at the syscall front, a live sealed and untainted binder, and a live exact
+observer service-poster incarnation. A live binding cannot be replaced. Positive
+IDs never wrap into negative errno; pool/ID exhaustion is ENOSPC. Retired entries
+remain charged while a watcher or post-unlock wake reference exists.
+
+`proc_pts_interaction` holds [[lock-proc-table]] before [[lock-pts]]. Its iterative
+borrowed lookup retains no Proc pointers. Under that same hold, ACK/CHECK verify
+the observer role, exact foreground epoch, live nominated process, controlling
+session, foreground group and binder principal. ACK with subject zero records
+APP ownership but supplies no CHECK authority. Identical ACK is idempotent.
+Tapestry must separately enforce graphical focus and one matching request.
+
+Every successful ACQUIRE/SET_FG, including redundant seating, advances the
+foreground epoch and clears acknowledgement. Changing a nominated subject's
+group/session or replacing its image also advances the epoch, so an older ACK
+cannot revive the prior nomination. Binder/observer exec or death retires the
+binding before publication. Pts free/GC retires it before reuse. Epoch/revision
+exhaustion disables interaction admission while legacy job control continues.
+
+Each role has one bounded watcher reservation. Allocation happens outside the
+locks, followed by revalidation before publication; failed publication/allocation
+rolls the reservation back. Dups share the cursor; inherited fds do not transfer
+role. Read/poll recheck the actual current process. Generic navigation clones
+clear COPEN and cannot operate or release the original watch's reservation.
+WATCH has no attach/walk/write/exec/seek backend and no namespace or /srv slot.
+
+Poll registers under pts before sampling the revision. State changes pin the
+binding under pts, then wake its poll list after dropping pts, then drop the pin.
+The polling caller's Spoor reference survives unregister, so close/rebind cannot
+recycle a list in use. Retired watchers return EOF/POLLHUP; stale live watchers
+return EAGAIN. STATE remains available for recovery after a read copyout fault.
+
+Kernel regressions in `test_pts.c` cover role/seal checks, epochs, true lifecycle
+hooks, watch readiness/retirement and bounded retired capacity. Their live-client,
+usercopy and concurrent-race blind spots are recorded in the interaction status;
+these tests do not constitute a completed terminal clipboard workflow.

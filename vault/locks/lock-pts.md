@@ -4,16 +4,19 @@ type: lock
 title: "g_pts_lock — the pseudoterminal registry"
 kind: spin
 guards: "the whole 64-entry pts registry: liveness, generation, minting server, the connection/qid bindings, and the controlling-terminal pair (session, foreground group)"
-orders-before: []
+orders-before: [lock-poll-list]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-25
 ---
 ## Discipline
 
-A **leaf**, and unusually strict about it — the interesting content of this
-lock is not what it nests but what it refuses to.
+The legacy registry stages heavyweight work after release. Interaction extends
+the guarded state with epochs, bindings and bounded watcher reservations. The
+process lifecycle lock may precede pts; pts never acquires lifecycle. Poll
+registration nests the poll-list lock under pts. No allocation/uaccess/final
+free occurs under these locks.
 
-Two things happen under it and nothing else does:
+The legacy connection operations under it are:
 
 - `srvconn_ref` — an atomic increment, which takes no lock.
 - `srvconn_is_live` — a magic check and a single read of a one-way
@@ -66,3 +69,14 @@ gate is available here too; it simply was never applied.
   in place is a lock-order inversion into the slab.
 - The snapshot-then-fan shape is a correctness argument, not a style — a
   future "just hold the lock across the post" collapses it.
+
+## Interaction ordering and retirement
+
+`proc_pts_interaction` and process lifecycle invalidation enter with
+[[lock-proc-table]] already held, then acquire pts. Their borrowed live-process
+walk does not acquire another lock. Poll registration is `proc -> pts -> poll
+list`; post-change wake is `proc (when held) -> poll list -> rendez`, with pts
+released. Wake pins are acquired under pts before release and collected under
+pts after waking. A retired binding is reusable only after both watcher
+reservations and all wake pins disappear. Generic poll holds its Spoor reference
+until unregister, which keeps the watcher and embedded poll list alive.

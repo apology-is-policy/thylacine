@@ -10,14 +10,14 @@ mirrors:
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libthyla-rs/src/pty_interaction.rs
 created: 2026-09-24
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Layout / semantics
 
-**Reserved, not dispatched.** The approved contract is
+**Implemented kernel operations; userspace broker pending.** The approved contract is
 `docs/HALCYON-INTERACTION-PTY-ABI.md`. SYS_PTY_REGISTER remains 93. Its existing
 server operations 0..2 are unchanged; interaction BIND/UNBIND/WATCH/STATE/ACK/CHECK
-reserve 16..21 respectively. Version is 1. Binding IDs lie in 1..INT64_MAX,
+use 16..21 respectively. Version is 1. Binding IDs lie in 1..INT64_MAX,
 so successful syscall results cannot alias a negative errno.
 
 The native little-endian state is 80 bytes, aligned to eight: version/flags
@@ -42,3 +42,7 @@ Update all three mirrors and the frozen fixture in one commit, and record
 syscall number space and native ceiling do not move for suboperations.
 No live admission path may consume this reservation before the kernel roles,
 epochs, lifecycle retirement and bounded watcher ownership are implemented.
+
+Kernel role, epoch and watcher semantics live in [[sub-kernel-pts]] and
+[[sub-kernel-syscall-dispatch]]. The layout fixture remains a layout-only gate;
+it cannot establish admission or lifetime correctness.

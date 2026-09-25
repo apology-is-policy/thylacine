@@ -136,6 +136,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-25 [[chg-2026-09-25-pty-interaction-kernel]] — Implement bounded terminal ownership observations and lifecycle revocation
 - 2026-09-24 [[chg-2026-09-24-astra-seal-integration]] — Integrate the cleared Aux seal prerequisite into Astra
 - 2026-09-24 [[chg-2026-09-24-authority-admission-core]] — Bind immutable issuance approval to live administrative proof
 - 2026-09-24 [[chg-2026-09-24-authority-canonical-codec]] — Implement bounded canonical authority records
@@ -143,5 +144,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-24 [[chg-2026-09-24-authority-policy-core]] — Bounded authority core and mandate safety model
 - 2026-09-24 [[chg-2026-09-24-authority-provenance]] — Retain authority transaction provenance in the policy ledger
 - 2026-09-24 [[chg-2026-09-24-authority-record-abi]] — Reserve canonical authority record ABI
-- 2026-09-24 [[chg-2026-09-24-b1c-filters-stream]] — B-1c WIP 3: a direct block counted for as long as it is held; the six filters that do not need their whole input stream it (HT09.R4-F2 reopened by the uncapped slurp, closed)
 <!-- generated:end -->

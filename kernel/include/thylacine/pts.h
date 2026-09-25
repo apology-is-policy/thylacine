@@ -4,8 +4,8 @@
 //
 // The design names this "KObj_Pts". The realization is a gen-stamped kernel
 // REGISTRY (the Weft share_id shape, kernel/weft.c), NOT a handle-table
-// kobj kind: no userspace-holdable pts handle exists, so there is nothing
-// to dup / transfer / leak -- the pts is named EITHER by a `pts_id` the
+// kobj kind: no terminal-byte/signal authority handle exists. HI-1 watch
+// Spoors observe ownership only and recheck the caller; the pts is named EITHER by a `pts_id` the
 // kernel returned to the registered server (ptyfs) OR by resolving a
 // slave/master fd the caller already holds (the grant-is-the-share
 // correlation). This is the recorded ABI narrowing, flagged at signoff.
@@ -59,7 +59,9 @@
 // kernel state, never server-held (the F1 seam) -- zeroed at mint; PTY-1d's
 // acquisition / tcsetpgrp syscalls are the only mutators.
 //
-// Locking: one leaf `g_pts_lock` spinlock covers the whole registry.
+// Locking: `g_pts_lock` covers the registry and interaction pool. The HI-1
+// path takes process lifecycle before pts; poll registration nests its list
+// lock under pts. A wake pin protects the list after pts is released.
 // srvconn_ref (atomic) is taken under it; srvconn_unref is NEVER called
 // under it (the last unref tears down + frees, which takes chan/slab locks
 // -- the #847 leaf discipline): drops are staged and run after release.
@@ -189,5 +191,33 @@ s64 pts_tty_get_fg(struct Proc *p, struct SrvConn *cn, u64 qid);
 // (pgid not a live group in the caller's session / not the caller's
 // controlling terminal); -T_E_NOENT (unbound fd); -T_E_INVAL.
 s64 pts_tty_cont(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid);
+
+
+// HI-1: process-lifecycle lock precedes pts. These are kernel-only arguments;
+// the syscall front captures transport identities and marshals user records.
+#include <thylacine/syscall.h>
+struct poll_waiter;
+struct pts_interaction_call {
+    u64 binding_id;
+    u64 pts_id;
+    u64 observer_stripes;
+    struct t_pty_interaction_check request;
+    struct t_pty_interaction_state state;
+    void *reservation;
+    struct poll_waiter *waiter;
+    short events;
+};
+#define PTS_INTERACTION_RESERVE_WATCH 32u
+#define PTS_INTERACTION_PUBLISH_WATCH 33u
+#define PTS_INTERACTION_READ_WATCH 34u
+#define PTS_INTERACTION_POLL_WATCH 35u
+// The sole lock-taking process wrapper. No allocation/uaccess while held.
+s64 proc_pts_interaction(struct Proc *p, u64 op, struct pts_interaction_call *call);
+// The following two helpers REQUIRE the process lifecycle lock.
+struct Proc *proc_pts_live_locked(u64 stripes);
+s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *call);
+void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role);
+// Allocate only after reserving one of the two bounded watcher slots.
+struct Spoor *pts_interaction_watch(struct Proc *p, u64 binding_id, s64 *error);
 
 #endif // THYLACINE_PTS_H

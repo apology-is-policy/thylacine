@@ -130,4 +130,4 @@ fn main() {{
     if actual != EXPECTED:
         raise SystemExit(f'Rust: byte fixture differs: {actual.hex()}')
     print('Rust: constants, all offsets/alignment and 200-byte fixture PASS')
-print('Reservation only: no kernel authority, poll/lifetime or guest behavior tested.')
+print('Layout only: no kernel authority, poll/lifetime or guest behavior tested.')

@@ -116,3 +116,13 @@ now pin the reservation ([[chg-2026-09-24-pty-interaction-abi]]). This adds no
 live syscall operation. Tapestry verifies the host identity in its observer role;
 Halcyon receives a registration result, not broader STATE access. Aux's cleared
 lifecycle base is still required before the kernel implementation.
+
+## Kernel observer checkpoint, September 25
+
+Aux's cleared `0cb5b244` was integrated as `c252a7f3`. The pts ownership operations,
+bounded watch lifetime and process hooks are implemented on Astra. Current QEMU
+regressions cover role/epoch checks, capacity and actual exec/death retirement;
+existing PTY/poll models and mutants behave as claimed. See
+[[chg-2026-09-25-pty-interaction-kernel]] and the phase status for coverage limits.
+Full SMP qualification and all live userspace consumers remain open. The separate
+authority/settings drafts are preserved, and this is not a Main landing.

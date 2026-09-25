@@ -243,3 +243,73 @@ read-copyout recovery rules. These are implementation obligations, not completed
 kernel behavior. Aux was asked for the cleared base on Yip 0108 turn 23; none
 has been announced at this checkpoint. No resource lease or VM is held, and
 no background automation was restarted for this new dependency.
+
+## September 25: kernel ownership implementation
+
+Aux cleared `0cb5b2443dce`; Astra integrated that exact base as `c252a7f3`
+with normal hooks. The earlier waiting-for-base statements are historical.
+SYS_PTY_REGISTER suboperations 16..21 now implement master/observer binding,
+role-bound state and bounded watch Spoors, acknowledgement and fresh admission.
+The combined check holds process lifecycle before pts. Successful foreground
+changes invalidate old epochs; nominated membership/image changes do too.
+Binder/observer exec/death and terminal teardown retire bindings before their
+state can be reused. Watch allocation is outside locks, and reservations and
+wake pins retain retired pool entries until every borrower is gone.
+
+Three successive QEMU build/boot checks pass all 1698 registered kernel tests;
+the last includes actual process exit/reap and actual image replacement before
+exit. These new assertions extend existing pts entries because the separate
+`test.c` authority draft is preserved. Logs: `work/hi1-kernel-{tests,refined,lifecycle}-build.log`,
+`work/hi1-kernel-boot-first.log`, `work/hi1-kernel-{refined,lifecycle}-boot.log`.
+The lean production compile also passes. External Alpine/clade fixture rows
+skip explicitly; they are not coverage.
+
+The existing pty/pty_stop clean and liveness configurations pass. Their six
+mutants violate the expected named invariant/property. All four poll clean
+configurations and seven named mutants pass the existing checker. Logs are in
+`work/hi1-models/`, with the original and corrected harness summaries retained.
+The local checker initially expected an invariant instead of a temporal-property
+failure, then used the wrong TLC message spelling; the model itself consistently
+reported `DeathWinsOverJobStop` as expected. The corrected checker matches that
+exact name. No new model coverage is implied.
+
+Self-review corrected several implementation details: epoch advancement on a
+nominated process's image/group change prevents an old ACK reviving admission;
+watch reads copy bytes without assuming destination alignment; generic navigation
+clones cannot operate or release the original watcher reservation; malformed
+high bits in pts IDs are refused before narrowing. The ENOSPC named by the design
+was absent from the kernel registry; it is now pinned at POSIX 28 with Rust's
+`NoSpace` conversion and display. The standalone native Rust mapping/sentinel
+checks pass (`work/hi1-errno.log`). Review remains single-agent.
+
+Still required before claiming this kernel checkpoint qualified: the complete
+SMP/UBSan matrix, concurrent close/unregister/retirement stress, allocation and
+counter-exhaustion cases, and actual syscall-front/usercopy integration. Before
+exposing the clipboard: sealed host spawn, Control tag 7 (Aux owns tag 6),
+authenticated host/session/Tapestry registration, matched focus admissions,
+watcher-driven revocation, full broker accounting/cancellation and Nora/ut/Boosty
+consumers. No live clipboard endpoint, new mode widget or new UI capture is
+claimed by this implementation checkpoint.
+
+The four authority/settings drafts remain byte-identical to
+`work/hi1-sep25-preserved/`. After the Aux merge their two test files intentionally
+differ from HEAD. `work/hi1-build.py` temporarily substitutes the index test files
+for a build and restores the draft bytes in `finally`; use that preservation
+pattern for all further build/render operations. Never stage those four files.
+
+Five deliberate source regressions each produce their exact named FAIL:
+unsealed BIND, binder-side nomination, delayed ACK after foreground change,
+missing exec retirement, and missing death retirement. Evidence is in
+`work/hi1-negative/` and `work/hi1-negative-resumed-summary.log`. The failing
+fixtures short-circuit cleanup, and those negative boots subsequently reach the
+harness timeout; their verdict is the named assertion, not a completed boot.
+The original runner refused its first mutation because indentation did not match;
+no mutant ran in that attempt. It restored and rebuilt the canonical source.
+After all five actual mutations, the canonical rebuild/boot passes again.
+
+A final build/boot after adding syscall malformed-operand/private-op refusal and
+noncanonical pts-ID tests passes 1698/1698 (`work/hi1-kernel-final-{build,boot,uart}.log`).
+The three compiled ABI mirrors also pass on this Mac using AArch64 ELF C objects
+and native Rust (`work/hi1-pty-abi-mac.log`). Source review is recorded in
+`HALCYON-INTERACTION-KERNEL-REVIEW.md`. Vault render/lint passes with no failures.
+All these checks remain narrower than the still-required SMP and live-client work.

@@ -5,6 +5,7 @@ parent: moc-kernel-entry
 title: "The syscall ABI — the number space, the argument records, and the three copies of both"
 code:
   - kernel/include/thylacine/syscall.h
+  - kernel/include/thylacine/errno.h
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libt/include/thyla/poll.h
   - usr/lib/libt/src/start.S
@@ -18,7 +19,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -673,25 +674,16 @@ No number changed and no record grew; the operator voted the additive shape
   checks repeat the handlers', so the syscall's answers and precedence are
   unchanged ([[sub-kernel-syscall-dispatch]]).
 
-## HI-1 terminal interaction reservation (2026-09-24)
+## Terminal interaction operations and errno
 
-`PTY_INTERACTION_*` in the kernel header and the `T_` mirrors reserve six
-SYS_PTY_REGISTER suboperations 16..21. Existing operations 0..2 and every syscall
-number are unchanged. There is no dispatch implementation yet; the definitions
-alone grant no new authority. Rust exports the pure `pty_interaction` module
-through lib.rs, with `TPtyInteractionState` and `TPtyInteractionCheck`; the C
-names are `t_pty_interaction_state` and `t_pty_interaction_check`.
+SYS_PTY_REGISTER implements suboperations 16..21 without moving any syscall
+number or ceiling. [[abi-pty-interaction]] pins all three mirrors, the 80-byte
+state, 24-byte input, offsets, alignments and signed-ID ceiling. The independent
+200-byte compiled oracle checks layout; [[sub-kernel-pts]] owns the implemented
+role, epoch and watch contract. No live clipboard is supplied by the kernel ABI.
 
-[[abi-pty-interaction]] pins the complete 80-byte state and 24-byte request,
-every offset and alignment, the version/flag values and positive signed-ID
-ceiling. `tools/test-pty-interaction-abi.py` compiles both actual C headers and
-the standalone Rust module against an independent literal byte fixture. It
-runs on Linux/AArch64 without executing a Thylacine syscall. All three mirrors
-pass (`work/hi1-pty-abi-pi-headers.log`). The preceding attempt lacked the
-isolated staging directory's kernel headers and failed before compilation;
-that failed evidence is retained in `work/hi1-pty-abi-pi.log`.
-
-The approved future contract binds a sealed master holder to a service-poster
-incarnation, observes monotonic foreground epochs and checks a live nominated
-member. This checkpoint does **not** implement those semantics, poll/lifetime
-handling or the Halcyon clipboard transport; no runtime authority test is claimed.
+`kernel/include/thylacine/errno.h` is also owned here: each value is pinned by a
+static assertion and uses its POSIX number. [[abi-errno]] owns the full registry
+and mirror obligations. ENOSPC=28 distinguishes bounded interaction-capacity
+exhaustion from allocator failure; libthyla-rs maps it to `Error::NoSpace`.
+The explicit error range passes unchanged through pouch and libt.

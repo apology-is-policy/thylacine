@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -629,3 +629,11 @@ retain the kernel-reported selection, and drivers skip ISR reads in MSI-X mode.
 This helper runs before DMA setup; a subsequent driver reset would erase the
 selected vectors and is forbidden until rollback or shutdown. Full fallback
 fault-injection and the cross-controller matrix remain required.
+
+## Terminal interaction capacity error
+
+`Error::NoSpace` maps ENOSPC=28 in both directions and reports "no space left".
+The kernel terminal interaction pool uses it for bounded capacity or identifier
+exhaustion. Existing unknown-error passthrough and the -1 sentinel treatment are
+unchanged. The `pty_interaction` records remain pure ABI definitions; live
+clipboard/terminal wrappers are a separate integration obligation.

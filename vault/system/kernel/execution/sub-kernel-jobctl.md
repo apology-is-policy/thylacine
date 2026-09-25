@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -410,3 +410,12 @@ One code-comment drift was surfaced and left for its owner: `proc.h` still reads
 fields grew the struct after that comment was written. The compile-time assert is
 sound; only the prose comment drifted, so this is a [[sub-kernel-vivarium]]-arc
 code fix, not a vault edit.
+
+## Interaction epochs on membership changes
+
+Successful setsid/setpgid invalidates any nomination of the changing process
+before publishing new sid/pgid, under lifecycle then pts. Successful terminal
+ACQUIRE/SET_FG also advances the pts epoch, including redundant calls. These
+operations never wait for compositor acknowledgement. Interaction CHECK samples
+membership and epoch together; the ordinary signal/foreground snapshot behavior
+is unchanged. See [[sub-kernel-pts]].

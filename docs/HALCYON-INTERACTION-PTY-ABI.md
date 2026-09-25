@@ -1,9 +1,10 @@
 # Halcyon terminal ownership: implementation contract
 
 Scope approved September 24, 2026; see HALCYON-INTERACTION-PTY-REVIEW.md.
-This pins the implementation direction before consumers. No operation below is
-implemented yet. The constants and record mirrors are now reserved and tested;
-that does not enable the operations. Existing SYS_PTY_REGISTER operations 0..2 remain unchanged.
+The kernel implements these operations on Astra, with userspace consumers still
+pending. The constants and record mirrors are pinned independently of runtime
+verification. See HALCYON-INTERACTION-STATUS.md for the measured coverage.
+Existing SYS_PTY_REGISTER operations 0..2 remain unchanged.
 New operations use that syscall's unused suboperation range 16..21, not a new
 syscall number. Main's pending SYS_BURROW_MAP_FILE = 126 remains untouched.
 
@@ -102,7 +103,8 @@ leaf/surface incarnation, controller/context epochs and normal-seat state while
 processing the one matching operation. It then replies with the broker request
 ID and its focus epoch. No reusable application bearer credential is returned.
 
-Errors use existing errnos: EINVAL for malformed operands/record; EBADF for a
+Errors use POSIX-aligned errnos (ENOSPC=28 is added to the kernel/Rust registry):
+EINVAL for malformed operands/record; EBADF for a
 bad handle; EACCES for missing master/role/membership/seal authority; ENOENT for
 retired identity or binding; EAGAIN for an epoch/acknowledgement mismatch or a
 watch with no unread revision; EBUSY for an occupied per-terminal binding or
@@ -120,7 +122,10 @@ ordinary path. Binding identifiers lie in 1..INT64_MAX so a successful syscall r
 alias a negative errno; they never wrap or alias a retired binding.
 
 An acknowledged controller's exit, exec, setpgid or setsid invalidates that
-nomination before the process lifecycle change is published. Binder/observer
+nomination and advances the foreground epoch before the process lifecycle
+change is published, even if the numeric foreground group remains the same.
+This prevents a delayed ACK from reviving the previous nomination after exec
+or a group change. Binder/observer
 death or exec retires the entire binding. Other foreground-group members need
 not invalidate a still-live nomination merely by forking; CHECK validates the
 nominated process itself. A fork does not create a controller registration.
