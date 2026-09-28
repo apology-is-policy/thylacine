@@ -4,7 +4,7 @@ type: chg
 title: "B-1d-v: SYS_MOUNT refuses Plan 9's Emount (only MREPL at a file), joey's extinction bodies name bin/joey, the musl loader is secure-always; a per-post /srv qid.path"
 date: 2026-09-25
 arc: arc-boosty
-commits: ["(pending)"]
+commits: ["46d943c5"]
 touched:
   - sub-kernel-territory
   - sub-kernel-syscall-dispatch
