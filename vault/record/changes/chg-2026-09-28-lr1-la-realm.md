@@ -4,7 +4,7 @@ type: chg
 title: "LR-1: a remote mount says so -- the declaration rides the 9P session, /proc/<pid>/ns ends its lines in remote, and ls/stat/realm/ns read it"
 date: 2026-09-28
 arc: arc-net
-commits: ["*(pending)*"]
+commits: ["728d627c"]
 touched:
   - sub-haul
   - sub-kernel-syscall-abi
