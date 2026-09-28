@@ -22,6 +22,25 @@ needed the operator.
 
 
 ---
+## 2026-09-28 (aux, Opus 5.5 1M, effort max) -- FL-1, synchronized output: the program says where its frame ends
+
+**What the flicker was, read from the code.** The operator saw a Lantern slide change flicker over Haul (2026-09-24) and called it acceptable ("we're a console"), but put "flicker (DEC ?2026)" in their order. It has two causes, and the second was not in the 2026-09-24 triage. `lantern`'s `Out` wraps the unbuffered `io::OutSink`, and `lantern::cook` writes once per line segment and once per CRLF, so one slide is about forty writes. And `paint` reads the slide file INSIDE the paint, after the clear has been written (usr/lantern/src/main.rs:282-296), so over Haul the screen sits blank for a network round trip. halcyond renders every dirty tile at the top of each pass and ingests one read of at most 8 KiB per tile per pass (usr/halcyond/src/session.rs ~2106 and ~2841, `INGEST_BUF` = 8192), so each piece is a painted frame. Even one read of a whole slide carries the clear's own four records (ScrollOff, the blank CellDiff, ScreenErased, the slide's CellDiff), and a read boundary between the blank and the slide shows the blank.
+
+**Research before the fork.** A subagent read thirteen terminals in source, plus Plan 9's draw(3) and 9front's vt(1). Every implementation keeps parsing and holds only the render. The timeouts run from 100 ms to 2 s, and neovim, helix, notcurses and Textual use the mode only after DECRQM says yes. The render is halcyond's, so the frame boundary has to reach halcyond: a hold in the kaua-term cannot stop a paint between two reads of a burst larger than one read, and a full 80x24 CellDiff is 40,320 bytes (21 per cell).
+
+**The operator's vote (2026-09-28).** A seam record is a wire ABI change, so it went to the operator as three options: the seam record; a kaua-term hold with no wire change; lantern alone. They chose the seam record: `sync_begin` and `sync_end`, Control subtags 7 and 8, with halcyond holding only the tile's paint until the close, a resize, the program's exit, or 150 ms. The 150 ms is mine, not part of the vote. It comes from the short camp (Alacritty, contour, mintty) because the committed frame budget (VISION 4.5, p99.9 < 33 ms) treats a tail spike as a bug. Recorded as `dec-2026-09-28-sync-output-seam`.
+
+**Subtag 7 was said to be taken, and was not.** TC-1a's wire test comment and the sub-kaua-term dossier (both 1cc9a300, both mine) say "subtag 7 is allocated to another record". No scripture on aux-3 or on main (4109ad1f) allocates it, main's wire.rs ends at 6 like ours, and the one "tag 7" in AUDIT-TRIGGERS.md is the cartoon `Op` tag. The claim was wrong when it was written. FL-1 corrects both texts.
+
+**A parser defect found on the way.** Reading `csi()` for the DECRQM parse turned up three faults:
+- `<`, `=` and `>` hit `_ => State::Ground`, so `CSI > 4;1 m` (vim's modifyOtherKeys) left `4;1m` on the screen.
+- Intermediates were swallowed.
+- The `u`, `s` and `m` arms ignored the marker, so `CSI ? u`, the kitty keyboard query that neovim, helix and fish send at startup, restored the cursor.
+
+It was enqueued first (OPEN-BUGS) and fixed in WIP 1 (d4770ffd): markers are read on the first byte only, intermediates are tracked, an out-of-order byte spoils the sequence, a C0 control runs in place, ESC restarts, and dispatch routes by (marker, intermediate). There are nine new vt tests (84 in all). In the sabotage, with predictions written first, every test went red as predicted except one. On the ORIGINAL parser, the DECCARA test passed: its parameters formed an invalid region, so the aliased DECSTBM reset to full screen, which is exactly what the fix's ignore produces. That was a negative assertion satisfied by a broken fixture. With the fixture changed to a valid aliased region (rows 2-5), all six went red on the original parser.
+
+**A classifier outage** (~13:00-13:40Z) returned no verdict for Bash, Edit and quaestor ten times running and ended the turn. The vote and the state had already been written to the design memory.
+
 ## 2026-09-28 (aux, Opus 5.5 1M, effort max) -- LR-1, the `la` realm: the label goes where the truth is born
 
 **The dependency, pulled forward.** The realm's kernel half renders a label on the mount list, and the mount list now has main's B-1d unions (the covered entry). main (c5e057c6) had not merged TC-1b, so aux-3 merged main instead of waiting: 4662ddc1. Two conflicts, both keep-both: the journal (TC-1b's entry is newer, 09:45 against 08:55, so it stays first) and a generated vault view, re-rendered. main's side of the five auto-merged code files was B-1c's heap lines only; I read the diff before claiming it. On the merge, in my own worktree because the aux worktree's `build/` is the operator's image: kernel tests 1732/1732, zero `[skip]`, boot OK, L-6c and D-5; `tools/test-rust.sh` 28 crates, 2067 tests, none failing.

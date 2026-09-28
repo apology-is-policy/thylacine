@@ -88,6 +88,17 @@ producer (the VT parser) or a consumer (the blit) of it. Note the kinship with t
 rasterizes a cell grid to a framebuffer (an episode / a crash / the live environment);
 they should share the baked-font blit.
 
+**Synchronized output (FL-1, 2026-09-28; HALCYON 14.3).** While a program holds a
+DEC mode 2026 frame open (`CSI ? 2026 h` ... `CSI ? 2026 l`), Aurora keeps feeding
+the VT and holds only its paint, so a half-drawn screen is never presented. Aurora
+never captures boundary events, so it reads the VT's state once per pass: the
+mode, and a count of the frames opened, so a frame that closed and a new one that
+opened between two passes still count as a new frame. The hold ends at the close
+or 150 ms after the first pass it held, and a timeout abandons the frame, so a
+program that never closes one costs the console a single 150 ms stall. The VT
+answers DECRQM for the mode (`CSI ? 2026 $ p`), so a program that asks before
+using it (neovim, notcurses) gets a true answer here as in a Halcyon tile.
+
 ---
 
 ## 4. The swappable `/dev/cons` backend, and the Kaua boundary

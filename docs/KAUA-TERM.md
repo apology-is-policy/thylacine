@@ -141,7 +141,7 @@ kaua-term -> halcyond (ordered):
   broke a logical line at `cols`) and continues into row `i+1`, so halcyond rejoins
   the fragments and re-wraps at word boundaries (PL-3).
 - `Control { osc1936_raw(bytes) | bell | title(str) | exit(code) | winsize_ack
-  | osc7_raw(bytes) | screen_erased }`
+  | osc7_raw(bytes) | screen_erased | sync_begin | sync_end }`
   -- the kaua-term forwards OSC 1936 (Beacon-zone frames) RAW, uninterpreted
   (halcyond keeps the Beacon parser -- R5 + its format-fuzz surface), plus BEL,
   OSC 0/2 title, the hosted child's exit code, and a winsize ack. The ack answers
@@ -165,6 +165,26 @@ kaua-term -> halcyond (ordered):
   the blank follows as a CellDiff, so the record always arrives after both and no
   ScrollOff can land after it. halcyond pins its view on it (HALCYON 14.13), and
   it is the only way halcyond learns of a clear: blank cells are never read as one.
+  AMENDED 2026-09-28 (operator vote; FL-1): `sync_begin` (tag 7) and `sync_end`
+  (tag 8), no payload, are DEC private mode 2026 opening and closing a
+  synchronized frame (HALCYON 14.3). The VT reports each CHANGE of the mode in
+  stream order -- a second `?2026h` inside a frame and an `l` with none open are
+  not reported -- and the producer flushes the pending CellDiff before each, so
+  the cells before a frame are never inside it and its last cells precede its
+  close. RIS closes an open frame last, after the erase it does. Both are emitted
+  under event capture, on either screen. halcyond holds the tile's paint between
+  them; the kaua-term holds nothing, and a hold upstream could not stop a paint
+  between two of halcyond's reads anyway (HALCYON 14.3). The VT answers DECRQM
+  (`CSI ? Ps $ p` -> `CSI ? Ps ; Pm $ y`, Pm 1 set / 2 reset) for the DEC modes
+  it tracks (1, 6, 7, 25, 47, 1047, 1049, 2026) and Pm 0 for any other mode,
+  ANSI modes included; the reply goes back to the app on the master like a CPR.
+  The same chunk made the VT's CSI parser read what DEC STD-070 and ECMA-48 put
+  in a sequence: a private marker (`?` `<` `=` `>`, first byte only),
+  intermediates (0x20-0x2F), and C0 controls, which run in place (ESC begins
+  the next sequence; CAN and SUB cancel). A marked or intermediate sequence
+  reaches only a handler that expects its marks and every other is ignored
+  whole, so `CSI > 4 ; 1 m` no longer prints `4;1m` and `CSI ? u` no longer
+  restores the cursor.
 - `Mode { normal | alt_screen }` -- the ?1049/47/1047 flip; `alt_screen` => a full
   live grid, NO ScrollOff; `normal` => ScrollOff appends to the transcript.
 

@@ -1369,9 +1369,11 @@ pollable (§14.11.7 / §14.11.7a). The record set:
 - **Up** (kaua-term → halcyond): `CellDiff{ changed (row,col,cell)[], cursor(row,col,vis) }`
   (the live screen) · `ScrollOff{ rows: cell[] }` (normal-mode lines off the top →
   the transcript) · `Control{ osc1936_raw | bell | title | exit(code) | winsize_ack
-  | osc7_raw | screen_erased }` (the last two AMENDED 2026-09-24: `osc7_raw`, the
-  cwd report, had been on the wire as tag 5 and missing from this list;
-  `screen_erased` is TC-1's, §14.13)
+  | osc7_raw | screen_erased | sync_begin | sync_end }` (`osc7_raw` and
+  `screen_erased` AMENDED 2026-09-24: `osc7_raw`, the cwd report, had been on the
+  wire as tag 5 and missing from this list; `screen_erased` is TC-1's, §14.13.
+  `sync_begin` and `sync_end` AMENDED 2026-09-28, operator vote: FL-1's
+  synchronized output, at the end of this section)
   (the kaua-term forwards OSC 1936 Beacon frames **raw** — halcyond keeps the Beacon
   parser, R5) · `Mode{ normal | alt_screen }`. **Ordering is load-bearing** (a Beacon
   zone-frame must land at the exact point between the cells it separates), so the
@@ -1398,6 +1400,42 @@ The native-`ut` VT-round-trip (a native Kaua app feeding cells more directly tha
 emitting VT to be re-parsed) stays a **v1.x optimization**; v1.0 native `ut` emits VT
 to its pts and the kaua-term parses it, as terminals do. The aux track's producer side
 of this contract is `docs/KAUA-TERM.md`.
+
+**AMENDED 2026-09-28 (operator vote; FL-1) — synchronized output: the program
+says where its frame ends.** A program opens a frame with DEC private mode 2026
+(`CSI ? 2026 h`) and closes it with `CSI ? 2026 l`; between the two the screen is
+half drawn and must not be shown. The producer's VT tracks the mode and answers
+DECRQM (`CSI ? 2026 $ p` → `CSI ? 2026 ; 1 $ y` while a frame is open and `; 2`
+otherwise; it answers the same way for every DEC mode it tracks, and 0 for the
+rest). It reports each CHANGE of the mode in stream order, and the kaua-term
+forwards it as `sync_begin` or `sync_end` (Control subtags 7 and 8, no payload).
+Like every control, each follows the pending `CellDiff`, so the cells written
+before a frame are never inside it and a frame's last cells always precede its
+close. A second open inside a frame, or a close with none open, is not reported.
+RIS closes an open frame, and does so last, so the reset's own erase is inside it.
+
+halcyond applies every record exactly as it arrives, so the ordering contracts
+above and in §14.13 are untouched, and holds only the tile's PAINT while a frame
+is open. Every other tile paints as usual. The hold ends at whichever comes first:
+the close, a resize of the tile (its surface reconfigured), the program's exit or
+the tile's crash, or 150 ms after the first paint it deferred. A timeout abandons
+the frame, so a program that never closes one costs its tile a single 150 ms
+stall, never a standing slowdown. A repeated open does not extend the hold, so a
+stream of back-to-back frames that never leaves a paint point outside a frame
+still paints at least every 150 ms.
+
+The research (13 terminals read in source; `dec-2026-09-28-sync-output-seam`):
+every implementation keeps parsing and holds only the render. Timeouts run from
+100 ms (Windows Terminal) and 150 ms (Alacritty, contour, mintty) through 1 s
+(foot, iTerm2, tmux, Ghostty, Konsole) to 2 s (kitty). Halcyon takes 150 ms, from
+the short camp, because the committed frame budget (VISION §4.5, p99.9 < 33 ms)
+treats a tail spike as a bug; contour chose the same value after measuring
+notcurses frames at about 35 ms. Holding the records in the kaua-term instead,
+with no wire change, was rejected. halcyond paints after every read of the pipe
+(at most 8 KiB) and one full-screen `CellDiff` is about 40 KB, so a hold upstream
+cannot stop a paint between two reads. Heritage: Plan 9's draw(3) buffers a
+client's drawing until `flushimage` makes it visible. There, too, the program
+says where a frame ends, not the screen.
 
 ### 14.4 The split
 
