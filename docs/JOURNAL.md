@@ -22,6 +22,105 @@ needed the operator.
 
 
 ---
+## 2026-09-25 afternoon to 2026-09-28 (main, Opus, effort max) -- B-1d-v: only MREPL at a file, and the audit that found the guarantee rested on a key two calls could forge
+
+**The vote, and why cmount did not translate literally.** The B-1d-v scripture
+took Plan 9's second Emount case to be "an MBEFORE or MAFTER mount at a
+non-directory point". cmount actually tests `order != MREPL`, and Plan 9's flag
+0 *is* MREPL, so the two readings agree there -- but in Thylacine a mount with
+no placement flag APPENDS (territory.c mount()), where Plan 9 has no such mode.
+So a flagless mount of a second file at a file point that already holds one
+makes a two-member group, which stalk searches as a union directory whose
+listing skips the non-directory members: the mount returns 0 and never shows.
+The operator's 13:35Z vote (dec-2026-09-25-mrepl-only-at-a-file, superseding
+the emount dec) took cmount literally: at a point that is not a directory,
+refuse every mount but MREPL. The check is `source_dir != point_dir ||
+(!point_dir && !(flags & MREPL))` in sys_mount_for_proc -- flags and the two
+types only, no table read, no lock, no TOCTOU.
+
+**Round 1 (Opus on Opus at max; Fable out of credits, so the fallback tier --
+context-independent, same family).** 0 P0 / 0 P1 / 2 P2 / 5 P3. The P2s: an
+alloc-smoke success path that mounted `/lib`, which only an LLVM-fork image
+ships (fixed with `/bin`, on every image); and the flagless-at-a-file case,
+which went to the operator. The spec had pinned nothing -- territory_file_point
+checked nothing territory.cfg did not -- so the guard split into `EmountOK` for
+the syscall's refusal and `CovGuard` for the covered member, with the invariant
+`NoMemberAtFile` and a buggy cfg that fails it. My own call (not asked; DISTRO
+D-1 and the vote compose): a directory over a symlink point stays refused, and
+the trailing-slash spelling is documented.
+
+**Round 2's F1 [P2] was the run's real finding, and it was not in the changed
+code.** The new refusal rests on the mount key being an identity: mount_key_eq
+is `(dc, devno, qid.path)`. devsrv gave the /srv registry root qid.path 0 -- and
+`devsrv_walk` gave every /srv/<name> service node qid.path 0 as well, cloned
+from the root with the same dc and devno. So the key of every live service
+aliased the registry root's. Any unprivileged Proc could MREPL a readable file
+over /srv/<name> (file over file passes the new check) and the entry was keyed
+exactly where /srv itself is: the next resolution crossed /srv into the file,
+and every /srv/<x> answered ENOTDIR, after a SYS_MOUNT that returned 0. A
+chroot to /srv then an MBEFORE at "/" put a two-member union at the same key,
+i.e. at every service node. Two unprivileged calls defeated both halves of the
+guarantee the chunk had just documented. The alias predates the chunk (stalk-3a);
+the vote turned a latent identity bug into a defeated invariant. Fixed: a
+per-registry counter stamps each reservation's qid_path (never 0, as Plan 9's
+srvcreate), and devsrv_walk reads the name, the LIVE state and the path in one
+hold of the registry lock, since a tombstoned slot can be recycled under
+another name. Regression devsrv.service_keys_distinct. The lesson is the general
+one: **a refusal keyed on a tuple is only as sound as that tuple's uniqueness**
+-- audit the key, not just the check.
+
+**The lead the fix surfaced.** That same key rests on devno being unique among
+live instances, and `spoor_next_devno` is a monotonic u32 that wraps with no
+refusal (kernel/spoor.c). Three consumers assume uniqueness: the mount key,
+MNOEXEC coverage (a collision there only over-restricts) and the REVENANT image
+cache (a collision there could serve one instance's cached pages for another's
+file). spoor.c's own comment already named the image-cache alias as pre-existing
+but nobody had enqueued it. Now owned in OPEN-BUGS, orthogonal to B-1d-v (it
+needs 2^32 attaches in one boot to reach).
+
+**Round 2's five P3s** were prose that had called the install-time check an
+invariant (a 9P server the caller attached answers a later walk's type from its
+reply, so a directory point can read as a file afterwards -- the resolver's
+use-time QTDIR gates stay), the ENOTDIR producer count (five of eight), the
+superseded status row, a buggy cfg that had been given a SYMMETRY line against
+the convention that buggy cfgs read unreduced, and imprecise comments -- one of
+which ("a kernel test over every refused flag set") I made true by extending the
+test from 7 refused sets to all 24.
+
+**Rounds 1 and 2 ran Opus on Opus** because Fable was out of credits for the
+third day running. A same-family round keeps context independence and loses
+family diversity; it is a real review, and the rule is never to skip a round
+for want of Fable.
+
+**Round 3 found the witness, not the bug.** Fable came back for it -- the
+chunk's one cross-family round -- and read the regression test the devsrv fix
+shipped with. It was RED on the very kernel it was written to guard. Both of
+its resolution legs mounted a `devnone` source and then resolved through it,
+and `devnone_walk` returns NULL for every call, the zero-element clone that
+`clone_walk_zero` needs included: the cross failed, the walks came back NULL,
+and the `!= NULL` assertions fired before a single identity was compared. The
+commit said NOT BUILT, so it had never run. **A witness that has never turned
+red is not a witness** -- and this one would have gone to main as the evidence
+for the P2 it was guarding. It now asserts on the mount TABLE
+(`mount_is_point_id`), which is what crossing actually consults and needs no
+crossable source. Verified both ways this time: reverting the one-line fix
+turns exactly one test red, on the exact property (`a service node's path is
+not the registry root's`), and the fix turns it green. Round 3 also caught a
+placeholder I had committed into scripture unfilled, and a stranding the fix
+introduces: a mount placed at `/srv/<name>` is bound to that post, so a
+re-post leaves it unreachable and un-unmountable by name until the namespace
+ends (documented; the general fix is a generation in the mount key).
+
+**Cost and close.** The suite 1732/1732 with no extinction and alloc-smoke
+exiting 0; eight sabotage legs red, each failing exactly the tests it should;
+a clean rebuild after the sabotage reproducing the kernel hash the suite had
+passed on (`3e0f0436`), because a sabotage run leaves its own kernel in
+`build/` and the next boot would take it; the SMP gate 50 boots of 50 across five configurations (default at 1, 4 and 8
+CPUs, UBSan at 4 and 8) with no corruption, no timing failure and nothing else;
+`territory.tla`'s 22 cfgs each as claimed on a fresh 33-minute run, the four
+clean state counts unchanged. Squashed to 46d943c5 on 8c4cb7c8 and
+fast-forwarded onto main.
+
 ## 2026-09-25, midday (main, Opus 5.5, effort max) -- the aux-3 merge of 1cc9a300: H3 + C and TC-1a, and a row both sides had carried twice for sixteen days
 
 **What came over.** Six aux-3 commits since the last merge (fc234a44, which brought 0a668bb8): H3 + C (0cb5b244), the image join and the debug taint; TC-1a and its scripture (1cc9a300, 4f2b7797); the Rust target's static-PIE fix (67d30cb1) and two prompt fixes (07cd1578, 35572899), which main already carried byte for byte (8a78602a, 8011d7f8).
