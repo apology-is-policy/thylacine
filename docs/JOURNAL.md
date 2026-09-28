@@ -74,6 +74,105 @@ It was enqueued first (OPEN-BUGS) and fixed in WIP 1 (d4770ffd): markers are rea
 Scripture: HAUL-DESIGN 4.8, COREUTILS-THYLACINE-DESIGN (REALM, `realm`, `ns`), the ARCH `/proc/<pid>/ns` paragraph (its suffixes were never listed), manual 14 (a task and a technical section), the LR-1 audit row. Dossiers: sub-haul, sub-kernel-{syscall-abi, syscall-dispatch, devsrv, srvconn, ninep-attach, ninep-client, ninep-dev9p, territory}, sub-coreutils-{lib (now claims `nsmount.rs`), presenters}, sub-substrate-interactive; the change note `chg-2026-09-28-lr1-la-realm` flips the old carrier note to superseded.
 
 ---
+## 2026-09-28 (main, Opus 5.5, effort max) -- #98: one read was doing two jobs, and a checker that could not pass on the jar I had given it
+
+**The red.** The SMP gate on aux-3 06ebe868 -- the tree the aux-3 fast-forward
+would put on main -- came back 49/50. ubsan-smp8 boot 10 failed viv-pheno-probe
+leg L113: a `ppoll(POLLOUT, 0)` on a freshly accepted socket returned 0 (the
+boot's log is in session scratch, not the tree). main stays at c5e057c6 until
+#98 is closed.
+
+**The mechanism, read, not guessed.** dev9p's readiness bridge had one
+primitive for two jobs: a readiness Tread on the socket's `ready` fid, offset =
+the event mask, which netd answers only once the socket is ready. It was the
+SAMPLE a verdict rests on and the ARM that wakes a parked poller, and a truthful
+"not ready" could not be said on the wire at all. A poll that had to return
+read a per-Spoor cache of whatever the relay had delivered (`cached_revents`,
+`DEV9P_POLL_VALID`). The vivarium widened a literal 0 to a 10 ms budget
+(`VIV_PPOLL_PROBE_MS`, vivarium.h:1940), and under UBSan at -smp 8 the reply
+lost that race. A budget only moves the deadline the relay races.
+
+**A second pair of eyes.** My first framing offered the snapshot bit as a
+cache-miss fallback. The operator asked for a Fable review -- "a more proper
+systemic solution, not something bolted on". It found the defect structural and
+wider:
+- The kthread's stranded-probe collector runs before its pump
+  (`dev9p_poll_service_once`, Phase 1 before Phase 3). A ready reply then lands
+  as `demux_orphan_late` and is discarded, which starves a socket beside an
+  always-ready local fd; this is deterministic at -smp 1.
+- A VALID cache survives across calls and can report a level that a competing
+  reader has already lowered.
+- A submit that fails under tag exhaustion reports POLLERR
+  (dev9p_poll.c:276-279).
+
+The research agreed. The Hurd hit this exact bug in 2012: Debian's first
+workaround was a 1 ms floor, and the fix, `io_select_timeout`, carries the
+deadline to the server. QNX's `_IO_NOTIFY` separates POLL from POLLARM.
+
+**Three votes** (dec-2026-09-28-poll-sample-arm-split):
+1. The SAMPLE/ARM split. A SNAPSHOT read, answered at once, is the only sample.
+   The deferred read is only the arm, sent before a park. Every pass settles
+   before it decides, and the cache goes.
+2. A server that never answers a snapshot is handled by a bounded, counted
+   fail-safe.
+3. The bound is a fixed 1 s from the send, never cut short by the call's
+   timeout.
+
+The third vote exists because my own option text was wrong. I had offered "the
+call's own deadline" as a bound. For timeout 0 that deadline has passed before
+the snapshot is sent, which is #98 again, one layer down. I surfaced it before
+the vote. NP-1 (195fdd73) landed the scripture.
+
+**NP-2, the model first.** `net_poll.tla` was rewritten, not extended. The old
+module's `ready` was monotonic and its poller only parked, so it had no state in
+which #98 could happen. It now models the timed and zero-timeout poller, a
+level, the snapshot, the settle, a server that may hang, and the collector.
+Every red cfg is one flag from a clean one and fires by the mechanism it names:
+- The #98 path is `AdvanceTime SocketReady Scan Verdict`.
+- The rejected bound (`BUGGY_SETTLE_CUT_BY_DEADLINE`) fails the same invariant
+  against a healthy server.
+- `net_poll_failsafe_fires.cfg` is red by design. Against a hung server
+  `FailSafeSilent` must fail, or the counter could never move.
+
+`poll.tla` gained remote fds, the settle, the arm and sample-only passes.
+`BUGGY_VERDICT_BEFORE_SETTLE` reproduces the local-fd starvation Fable found
+(`MakeReady MakeReady Register EvaluateFirst`). Distinct states: net_poll 118
+(timed), 36 (poll(-1)), 308 (hung server); poll 3562 (timed), 1206 (poll(-1)),
+3242 (every fd local).
+
+**The wrong turn: a checker that could not pass on the jar I had given it.**
+Before touching `check-poll.sh`, I ran it on the unmodified tree. It FAILED its
+two temporal cfgs, a gate b7132455 had recorded green. The cause was mine.
+Earlier this session I had refilled a missing /tmp/tla2tools.jar from
+~/tla2tools.jar, a TLC2 2.19 build from Aug 2024. That build reports a liveness
+violation as "Temporal properties were violated." without naming the property.
+SPEC-POLICY's documented v1.8.0 download (TLC2 2026.09.25) names it.
+check-cow.sh and check-syscall-irqs.sh failed the same way on 2.19 and pass,
+unmodified, on the documented jar. The two scripts NP-2 touches now accept
+either wording, and accept the unnamed one only from a cfg that checks that one
+property. The lesson: run the baseline before the change. Had I run the new
+model first, I would have blamed the model.
+
+**Found in passing, fixed here.** Since b7132455 the SPEC-TO-CODE poll table
+had carried the counts from before ARCH 8.12 (2194/968), `IrqLatencyBounded`,
+and the deleted `poll_buggy_no_point.cfg`. The quaestor MCP server reads a
+stale vault root (it returned spec-poll's 08-01 text); the CLI with `--root`
+reads this tree.
+
+**Open.**
+- NP-3: netd and ptyfs gain the snapshot branch and refuse unknown offset bits.
+- NP-4, the kernel: the dev9p_poll rewrite, poll.c's settle and arm, deleting
+  VIV_PPOLL_PROBE_MS, and fixing the tag-exhaustion POLLERR. Its tests include
+  a red control and a deferring server. Then a Fable audit, the suite and the
+  SMP gate.
+- Then the aux-3 fast-forward, and after it NP-5 (the vivarium's per-call open
+  of each socket's `ready` file).
+- ~/tla2tools.jar is still the stale 2.19 build. It is the operator's file, and
+  I have not replaced it.
+- check-syscall-irqs.sh does not sweep its TTrace files; specs/ holds 152 old
+  ones.
+
+---
 ## 2026-09-25 to 09-28 (aux, Opus 5.5 1M, effort max) -- the fix keyed on a counter that the tile never moved
 
 **What this was.** TC-1b, the operator's second vote made code: THE HISTORY IS THE USER'S, so no escape deletes it

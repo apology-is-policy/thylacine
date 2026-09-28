@@ -5,10 +5,11 @@ title: "poll.tla"
 models: [sub-kernel-poll]
 pins: [inv-i9]
 cfgs:
-  - "poll.cfg -- clean: every invariant, HAS_TIMEOUT (2146 states)"
-  - "poll_notimeout.cfg -- poll(-1), the infinite wait; safety holds (944)"
-  - "poll_liveness.cfg -- Spec_Live: PollTerminates + StableReadyReturns + DeathTerminates + StopHonoured (2146)"
-  - "poll_liveness_notimeout.cfg -- Spec_Live, poll(-1): StableReadyReturns + DeathTerminates + StopHonoured (944)"
+  - "poll.cfg -- clean: every invariant, HAS_TIMEOUT, one local fd beside one remote (3562 states)"
+  - "poll_notimeout.cfg -- poll(-1), the infinite wait; safety holds (1206)"
+  - "poll_liveness.cfg -- Spec_Live: PollTerminates + StableReadyReturns + DeathTerminates + StopHonoured (3562)"
+  - "poll_liveness_notimeout.cfg -- Spec_Live, poll(-1): StableReadyReturns + DeathTerminates + StopHonoured (1206)"
+  - "poll_local.cfg -- Remote = {}: every fd local, the as-built configuration until NP-4 (3242)"
   - "poll_buggy_check_before_register.cfg -- sample-then-register: a readiness edge in the gap reaches no hook (NoMissedPoll counterexample)"
   - "poll_buggy_no_wake.cfg -- producer sets the flag but never signals the Rendez (NoMissedPoll counterexample)"
   - "poll_buggy_lazy_unregister.cfg -- poll returns still-listed (NoStaleHook counterexample)"
@@ -16,9 +17,11 @@ cfgs:
   - "poll_buggy_return_on_wake.cfg -- an empty re-sample returns 0 (NoSpuriousZero counterexample)"
   - "poll_buggy_no_loop_die_check.cfg -- death left to tsleep's die-check, which a set flag short-circuits (DeathTerminates counterexample; needs no bound disabled, since the point checks neither death nor stop)"
   - "poll_buggy_no_loop_stop_check.cfg -- a stop left to tsleep's detour (StopHonoured counterexample)"
-gate: "any change to the register/sample atomicity, the re-arm pass, the sweep, the loop's death/stop checks, the preemption point, or a producer wake site -- specs/check-poll.sh"
+  - "poll_buggy_verdict_before_settle.cfg -- a pass decides on a ready local fd without waiting for its snapshots; the socket beside it goes unreported (NoFalseNotReady counterexample)"
+  - "poll_buggy_sweep_leaves_snapshot.cfg -- a death during the settle returns with a snapshot in flight (NoSnapshotOutlivesCall counterexample)"
+gate: "any change to the register/sample atomicity, the settle, the arm, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop checks, or a producer wake site -- specs/check-poll.sh"
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-09-28
 ---
 ## Abstraction
 
@@ -62,6 +65,16 @@ cross-lock handoff.
   first scan's install-and-sample again). Why that matters is not
   visible here — one list per fd — and is pinned by [[spec-cons-poll]],
   where the Dev chooses its list by state.
+- **NoFalseNotReady** + **NoSnapshotOutlivesCall** (2026-09-28, #98;
+  [[dec-2026-09-28-poll-sample-arm-split]]): REMOTE fds (`Remote`) are sampled
+  by a snapshot their server answers at once, so every pass SETTLES before it
+  decides, and they are hooked only by `Arm`, just before the park, where the
+  server's level-on-arrival evaluation is a register-then-observe. A pass that
+  returns whatever it finds (timeout 0, the TIMEDOUT pass, a wake past the
+  deadline) hooks nothing. Every fd a returned poll reports not ready was not
+  ready at some instant of the pass that decided, and no call returns with a
+  snapshot in flight -- its answer would complete into the per-call batch the
+  return releases. The server's side is [[spec-net-poll]]'s.
 
 ## What it cannot see
 
@@ -81,8 +94,10 @@ re-registering scan (round 5's SpinLapse / BackoffCommit / BackoffTimeout, and
 then ARCH 8.12's Point / PointDone, are all GONE with the code they named);
 MakeReady ↔
 `poll_waiter_list_wake`; the timeout
-composes with [[spec-tsleep]]. `specs/check-poll.sh` asserts every
-cfg's verdict (clean counts pinned; each buggy cfg's NAMED property).
+composes with [[spec-tsleep]]; SnapshotAnswer / Arm / SettleDeath are
+filled at NP-4, when the split lands. `specs/check-poll.sh` asserts every
+cfg's verdict (each buggy cfg's NAMED property, with the counterexample's
+actions printed).
 
 ## The CPU half moved, twice
 
