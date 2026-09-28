@@ -3907,3 +3907,148 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);
 }
+
+// A full send ring on an ASYNC submit is back-pressure, not a break -- the rule
+// the sync path (client_send_flow) and the abandon Tflush already keep. The
+// transport pushed zero bytes, so the op completes with the retryable
+// -P9_E_AGAIN, it is taken back whole -- the tag, and the fid this Tclunk
+// unbound at build, which the server still holds -- and the SHARED session
+// keeps serving; resubmitted, the same op goes out. A latched-dead session here
+// would fail every op of every Proc that resolves through it.
+void test_9p_client_async_send_eagain_keeps_session_alive(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                       aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 40, (const u8 *)"f", 1, NULL),
+                   0, "walk root -> fid 40");
+    size_t idle  = p9_session_inflight(&g_client.session);
+    size_t bound = p9_session_n_bound_fids(&g_client.session);
+    g_async_op.loom            = l;
+    g_async_op.user_data       = 0xA6A6A6A6ULL;
+    g_async_op.last_result     = 0x7fffffff;
+    g_async_op.completed       = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid = 40;
+
+    g_mq.eagain_budget = 1;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the async send met the full ring");
+    TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-P9_E_AGAIN,
+                   "submit_async returns the retryable -P9_E_AGAIN");
+    TEST_ASSERT(g_async_op.completed, "the op completed");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)-P9_E_AGAIN,
+                   "its completion carries -P9_E_AGAIN, not a dead session's -EIO");
+    TEST_ASSERT(!g_client.dead, "the shared session stays LIVE");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)idle,
+                   "the never-sent tag is reclaimed");
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)bound,
+                   "the never-sent Tclunk's fid is bound again (the server still holds it)");
+
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "resubmitted, the same op goes out");
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "its reply is demuxed");
+    TEST_ASSERT(g_async_op.completed, "the resubmitted op completed");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0, "with success");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)idle,
+                   "the tag pool is back to idle");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// A full tag pool is a shortage, not a failure: an ASYNC submit that finds no
+// free tag sends nothing and completes with the retryable -P9_E_AGAIN (it used
+// to be -EIO, which a poll reported as a socket error), and once a reply frees
+// a tag the same op goes out. The mq transport stages every unread reply, so
+// P9_SESSION_MAX_OUTSTANDING unpumped async ops genuinely fill the pool.
+static struct test_async_op g_pool_ops[P9_SESSION_MAX_OUTSTANDING];
+static u32                  g_pool_fids[P9_SESSION_MAX_OUTSTANDING + 1];
+
+static void test_async_record(struct p9_rpc *rpc, int status,
+                              struct p9_dispatch_result *dr) {
+    struct test_async_op *op = (struct test_async_op *)rpc;   // rpc is first
+    (void)dr;
+    op->last_result = (s32)status;
+    op->completed   = true;
+}
+
+void test_9p_client_async_full_tag_pool_is_eagain(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                       aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    const u32 N = P9_SESSION_MAX_OUTSTANDING;
+    for (u32 i = 0; i <= N; i++) {
+        g_pool_fids[i] = 100u + i;
+        TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, g_pool_fids[i],
+                                          (const u8 *)"f", 1, NULL),
+                       0, "walk binds a fid (sync; drains its own reply)");
+    }
+    for (u32 i = 0; i < N; i++) {
+        g_pool_ops[i].loom            = NULL;
+        g_pool_ops[i].last_result     = 0x7fffffff;
+        g_pool_ops[i].completed       = false;
+        g_pool_ops[i].rpc.on_complete = test_async_record;
+        TEST_EXPECT_EQ(p9_client_submit_async(&g_client, &g_pool_ops[i].rpc,
+                                              test_build_clunk, &g_pool_fids[i]),
+                       0, "an async clunk goes out; its reply stays unpumped");
+    }
+    TEST_ASSERT(!p9_session_has_free_tag(&g_client.session), "the tag pool is full");
+
+    u64 sends = g_mq.sends;
+    g_async_op.loom            = NULL;
+    g_async_op.last_result     = 0x7fffffff;
+    g_async_op.completed       = false;
+    g_async_op.rpc.on_complete = test_async_record;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk,
+                                &g_pool_fids[N]);
+    TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-P9_E_AGAIN,
+                   "a submit that finds no free tag returns -P9_E_AGAIN");
+    TEST_ASSERT(g_async_op.completed, "the op completed");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)-P9_E_AGAIN,
+                   "its completion carries -P9_E_AGAIN, not -EIO");
+    TEST_EXPECT_EQ(g_mq.sends, sends, "nothing was sent");
+    TEST_ASSERT(!g_client.dead, "the session stays LIVE");
+
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "one staged reply is demuxed");
+    TEST_ASSERT(p9_session_has_free_tag(&g_client.session), "its tag is free again");
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk,
+                                &g_pool_fids[N]);
+    TEST_EXPECT_EQ(rc, 0, "with a tag free, the same op goes out");
+
+    for (u32 i = 0; i < N; i++)
+        TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "drain a staged reply");
+    u32 ok = 0;
+    for (u32 i = 0; i < N; i++)
+        if (g_pool_ops[i].completed && g_pool_ops[i].last_result == 0) ok++;
+    TEST_EXPECT_EQ((u64)ok, (u64)N, "every pool op completed with success");
+    TEST_ASSERT(g_async_op.completed, "the resubmitted op completed");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0, "with success");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
+                   "the tag pool is empty");
+
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}

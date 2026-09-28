@@ -104,6 +104,20 @@ death; then retries from the spill. Never-sent exits (`CLIENT_SEND_NEVER`:
 self-dying, dead-observed, spill-OOM) reclaim their tag immediately via
 `p9_session_abort_unsent` — zero bytes reached the wire, so I-10-safe.
 
+**An async submit cannot wait, so a shortage is its retryable error (NP-4b,
+2026-09-28).** `p9_client_submit_async` checks for a free tag BEFORE it
+builds, and on a send that meets a full ring (`P9_TRANSPORT_EAGAIN`) it
+clears `inflight[tag]` and takes the op back whole with
+`p9_session_retract_unsent` (the tag, and the fid a Tclunk unbound at
+build). Either way the op completes with `-P9_E_AGAIN` (== T_E_AGAIN), and
+the shared session stays live. Before, a full ring latched the WHOLE session
+dead (every op of every Proc on the mount failed) and a full pool read as
+`-EIO`, which dev9p's poll reported as a socket error. A resubmitted op goes
+out (`9p_client.async_send_eagain_keeps_session_alive`,
+`9p_client.async_full_tag_pool_is_eagain`, both seen red first). The sync
+front-end still answers a full tag pool with `-EIO` (OPEN-BUGS: the pool is
+shared with poll arms held until readiness).
+
 **Abandon on death.** A Proc dying mid-op NULLs `inflight[tag]`, frees its
 reply_buf, and sends `Tflush(oldtag)`; the tag stays reserved
 (`awaiting_flush`) until its Rflush — never freed by a late original reply.

@@ -1463,6 +1463,8 @@ void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
 void test_9p_client_abandon_async_eagain_keeps_session_alive(void);
+void test_9p_client_async_send_eagain_keeps_session_alive(void);
+void test_9p_client_async_full_tag_pool_is_eagain(void);
 void test_larder_install_serve(void);
 void test_larder_serve_miss(void);
 void test_larder_invalidate(void);
@@ -3576,6 +3578,12 @@ struct test_case g_tests[] = {
                                        test_9p_client_send_backpressure_spill_survives_outbuf_reuse, false, NULL },
     { "9p_client.abandon_async_eagain_keeps_session_alive",
                                        test_9p_client_abandon_async_eagain_keeps_session_alive,
+                                                                           false, NULL },
+    { "9p_client.async_send_eagain_keeps_session_alive",
+                                       test_9p_client_async_send_eagain_keeps_session_alive,
+                                                                           false, NULL },
+    { "9p_client.async_full_tag_pool_is_eagain",
+                                       test_9p_client_async_full_tag_pool_is_eagain,
                                                                            false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },

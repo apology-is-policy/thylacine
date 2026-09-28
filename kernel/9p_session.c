@@ -444,6 +444,25 @@ void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
     clear_outstanding(s, tag);
 }
 
+// abort_unsent leaves a never-sent Tclunk's fid unbound: its callers are a
+// dying sender, a dead session and a spill-OOM, whose fid nobody clunks
+// again, and it then leaks only server-side (the monotonic fid allocator
+// never re-issues the number). An async submit that met a full ring is
+// different -- its owner is alive and told to resubmit, and a resubmitted
+// Tclunk needs its fid bound -- so a take-back restores the fid too, which
+// is also what 9p_client.tla says: it has no step for a send that never
+// happened. fid_bind cannot fail here: the build's unbind freed a slot and
+// the caller has held the lock since.
+void p9_session_retract_unsent(struct p9_session *s, u16 tag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
+    struct p9_outstanding *op = &s->outstanding[tag];
+    if (!op->active || op->awaiting_flush || op->abandoned) return;
+    if (op->kind == P9_TCLUNK) (void)fid_bind(s, op->fid);
+    clear_outstanding(s, tag);
+}
+
 // #53: roll back a Tflush whose frame could NOT be pushed because the c2s
 // ring is transiently FULL (P9_TRANSPORT_EAGAIN) -- back-pressure, not a
 // break. The DIED-path / abandon-path senders must neither park (a dying

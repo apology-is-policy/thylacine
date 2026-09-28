@@ -296,6 +296,14 @@ int p9_session_send_flush(struct p9_session *s,
 // reuse). No-op on an inactive or awaiting_flush tag (fail-soft).
 void p9_session_abort_unsent(struct p9_session *s, u16 tag);
 
+// Take back an op whose frame never reached the wire and whose submitter
+// is alive and may resubmit it: free the tag as abort_unsent does, AND
+// re-bind the fid a Tclunk unbound at build, since the server still holds
+// it. The session is then exactly as it was before the build. Call it with
+// the session lock held continuously since the build, so the fid-table
+// slot the build freed is still free. Fail-soft like abort_unsent.
+void p9_session_retract_unsent(struct p9_session *s, u16 tag);
+
 // #53: undo send_flush after its frame hit c2s back-pressure (EAGAIN): free
 // the never-sent flush tag + clear the victim's awaiting_flush, restoring
 // the pre-#845 ownerless reclaim. No-op unless the (victim, flush-slot)

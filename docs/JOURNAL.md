@@ -252,6 +252,27 @@ invariant and not the property. With the invariants taken out of the sabotage
 cfg, it fails `StableReadyReturns`. TLC's coverage shows the new actions taken
 in the clean runs (PollerArmFails 12 times, RetryTick 12, RetryWake 32).
 
+**NP-4b, and what the retry test found.** The fix is small. An async submit now
+checks for a free tag before it builds, and on a full ring it clears its
+in-flight slot and reclaims the tag; either way the op completes with
+`-P9_E_AGAIN` and the session stays up. Both regression tests failed first on
+the unfixed code, at their return-code check (-5 where -11 was owed, and the
+session dead). With the tag-only reclaim, the full-ring test still failed, one
+step later: the same Tclunk, resubmitted, would not build.
+`p9_session_send_clunk` unbinds its fid when it builds the frame, so a Tclunk
+that never left took the fid binding with it, while the server still held the
+fid. The sync never-sent paths have done this since #52 by choice: their owner
+is dying or failed, and a fid nobody clunks again leaks only server-side, since
+fid numbers are never reused. An async submitter that is told to resubmit is the
+case that choice did not cover. `p9_session_retract_unsent` takes the op back
+whole (the tag, and the fid) under the lock the build held, which is also what
+9p_client.tla says: it has no step for a send that never happened. The suite is
+1734/1734. Reading the sync path for the header's errno text turned up one more
+thing: a sync op that finds the pool full still fails with `-EIO`, and the pool
+is shared with poll arms that are held until readiness. That is enqueued in
+OPEN-BUGS as a design question. It needs one, because a sync op that waits on
+tags held by readiness waits could wait forever.
+
 **Open.**
 - NP-4, the kernel: the dev9p_poll rewrite, poll.c's settle and arm, deleting
   VIV_PPOLL_PROBE_MS, and fixing the tag-exhaustion POLLERR. Its tests include

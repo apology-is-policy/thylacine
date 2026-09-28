@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-08-14
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -42,7 +42,8 @@ retirement rules are mechanically enforced.
   `struct p9_dispatch_result` (zeroed on every call by the dispatcher; the
   caller must not read fields after a `-1`).
 - Repair surface (#845/#52/#53): `p9_session_send_flush(oldtag)`,
-  `p9_session_abort_unsent(tag)`, `p9_session_flush_rollback(oldtag)`,
+  `p9_session_abort_unsent(tag)`, `p9_session_retract_unsent(tag)`,
+  `p9_session_flush_rollback(oldtag)`,
   `p9_session_mark_abandoned(tag)`.
 - Queries: `is_open`, `fid_bound`, `inflight`, `has_free_tag` (the
   async-clunk pool-full pre-check), `n_bound_fids`.
@@ -118,6 +119,11 @@ legal before the Rflush arrives.
    pushed ⇒ the server never saw the tag ⇒ no late reply can exist).
    Fail-soft guards: inactive / `awaiting_flush` / `abandoned` tags are left
    alone.
+   `retract_unsent` (NP-4b, the async submit's full-ring path) also re-binds
+   the fid a never-sent Tclunk unbound at build: that owner is alive and
+   resubmits, and 9p_client.tla has no step for a send that never happened.
+   The sync never-sent paths keep `abort_unsent` -- their owner is gone, and
+   the unclunked fid leaks only server-side (fid numbers are never reused).
 4. Its owner is gone with NO flush in flight (#53): `flush_rollback` (the
    flush frame itself hit EAGAIN — undo: free the never-sent flush tag,
    clear `awaiting_flush`, set `abandoned`) or `mark_abandoned` (the flush

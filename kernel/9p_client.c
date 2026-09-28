@@ -1113,6 +1113,15 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         rpc->on_complete(rpc, -P9_E_IO, NULL);   // own it: complete + bail
         return -P9_E_IO;
     }
+    // A full tag pool is a shortage, not a failure of this op: the sync path
+    // drains a tag (client_drain_until_free_tag), but an async submitter must
+    // not block, so the op completes with the retryable -P9_E_AGAIN before
+    // anything is built -- a build failure would read as -EIO.
+    if (!p9_session_has_free_tag(&c->session)) {
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
+        return -P9_E_AGAIN;
+    }
     // Build the Tmsg into the shared out_buf under the lock (allocating the tag
     // + marking session.outstanding[tag]); a >0 return is a well-formed frame.
     int built = build(&c->session, c->out_buf, c->out_buf_cap, build_ctx);
@@ -1148,6 +1157,19 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     c->inflight[tag] = rpc;
 
     int src = p9_transport_send(&c->transport, c->out_buf, (size_t)built);
+    if (src == P9_TRANSPORT_EAGAIN) {
+        // A full send ring is back-pressure, not a break, as on the sync path
+        // (client_send_flow) and the abandon Tflush. The transport pushed zero
+        // bytes, so the server never saw this op: take it back whole -- the
+        // tag (never-sent, so I-10-safe) and a Tclunk's fid -- and leave the
+        // SHARED session live. The submitter cannot wait the ring out, so the
+        // op completes with the retryable -P9_E_AGAIN.
+        c->inflight[tag] = NULL;
+        p9_session_retract_unsent(&c->session, tag);
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
+        return -P9_E_AGAIN;
+    }
     if (src < 0) {
         // The byte stream is broken: latch dead + complete every in-flight op.
         // `rpc` is registered, so mark_dead fires its on_complete (error CQE).

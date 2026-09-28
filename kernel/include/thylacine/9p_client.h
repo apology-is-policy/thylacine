@@ -595,7 +595,9 @@ typedef int (*p9_session_build_fn)(struct p9_session *s, u8 *out, size_t cap,
 // front-end). Under c->lock: build the Tmsg via `build` (which allocates the
 // tag), register `rpc` as an async in-flight op, and send -- then return
 // WITHOUT waiting. Returns 0 if the op is in flight (its reply will drive
-// on_complete), or -P9_E_IO / -P9_E_INVAL on failure.
+// on_complete); -P9_E_AGAIN if it cannot be sent now (no free tag, or a full
+// send ring: nothing reached the server, the session is intact, and the op
+// may be resubmitted); or -P9_E_IO / -P9_E_INVAL on failure.
 //
 // TAKES OWNERSHIP of `rpc`: on EVERY return exactly one on_complete has fired
 // or will fire -- a build/peek/send failure fires on_complete(rpc, -errno,
@@ -694,7 +696,12 @@ void p9_client_mark_devgone(struct p9_client *c);
 //             arg too long).
 //   -EBUSY  — session not OPEN (handshake hasn't run).
 //   -EIO    — lower-layer failure: send/recv error, frame malformed,
-//             tag pool full, fid bookkeeping conflict, etc.
+//             tag pool full (a SYNC op), fid bookkeeping conflict, etc.
+//   -EAGAIN — an ASYNC op could not be sent now: the session's tag pool
+//             or its send ring was full. Nothing reached the server and
+//             the session is intact; the op may be resubmitted. The sync
+//             front-end never returns it: it waits a full ring out
+//             (client_send_flow), and a full tag pool is its -EIO.
 //   -ENODEV — the backing device/service disappeared: the session died
 //             because the SERVER endpoint vanished (a clean peer-gone
 //             EOF), distinct from a generic -EIO transport error. The
@@ -709,6 +716,9 @@ void p9_client_mark_devgone(struct p9_client *c);
 #define P9_E_BUSY    16       // EBUSY
 #define P9_E_IO       5       // EIO
 #define P9_E_NODEV   19       // ENODEV (the device-gone terminal; T_E_NODEV)
+#define P9_E_AGAIN   11       // EAGAIN (== T_E_AGAIN): an async op could not be sent
+                              // now -- no free tag, or a full send ring. Nothing
+                              // reached the server; the session is intact.
 #define P9_E_INTR     4       // EINTR (== T_E_INTR); item 11 caught-note unwind of a
                               // blocked client read/wait -- the thread LIVES, the note
                               // delivers at its EL0-return tail (11b-9p, ARCH 8.8.3)
