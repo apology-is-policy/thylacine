@@ -968,6 +968,7 @@ dependencies = [
 name = "libthyla-rs"
 version = "0.1.0"
 dependencies = [
+ "ninep",
  "thyla-heap",
 ]
 
@@ -1136,6 +1137,10 @@ dependencies = [
  "coreutils",
  "libthyla-rs",
 ]
+
+[[package]]
+name = "ninep"
+version = "0.1.0"
 
 [[package]]
 name = "nocturne-capture-probe"

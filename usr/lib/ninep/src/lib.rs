@@ -1,4 +1,5 @@
-// t::ninep -- 9P2000.L wire-format codec for native Thylacine servers.
+// ninep -- 9P2000.L wire-format codec for native Thylacine servers, reached
+// as `libthyla_rs::ninep`. Its own crate so that its tests run on the host.
 //
 // At v1.0 the codec is server-side only: T-message parsers consume
 // inbound frames; R-message builders produce outbound frames. The
@@ -32,7 +33,7 @@
 // caller's own logic. Promoting to t::err::Error is a v1.x cleanup
 // when a non-corvus consumer surfaces that needs richer error context.
 //
-// What this module does NOT do:
+// What this crate does NOT do:
 //   - No fid table -- the server (corvus, future others) owns the
 //     per-connection fid lifecycle (I-11).
 //   - No tag allocation -- tags arrive in inbound Tmsgs and echo in
@@ -43,6 +44,8 @@
 //     is the caller's concern.
 //   - No session state -- msize is negotiated once at Tversion and
 //     stored by the caller; subsequent buffers are sized to msize.
+
+#![no_std]
 
 // =============================================================================
 // 9P2000.L message types (the subset corvus serves; matches the kernel
@@ -817,4 +820,137 @@ pub fn build_rreaddir(out: &mut [u8], tag: u16, data: &[u8]) -> Result<usize, ()
     let total = p + data.len();
     patch_header_size(out, total)?;
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A framed message: the common header, `body`, the size back-patched.
+    fn frame(mtype: u8, tag: u16, body: &[u8], out: &mut [u8]) -> usize {
+        let p = build_header(out, mtype, tag).unwrap();
+        out[p..p + body.len()].copy_from_slice(body);
+        let n = p + body.len();
+        patch_header_size(out, n).unwrap();
+        n
+    }
+
+    // A Twalk from fid 1 to newfid 2 declaring `nwname` names, each `name`.
+    fn twalk(nwname: u16, name: &[u8], out: &mut [u8]) -> usize {
+        let mut body = [0u8; 1024];
+        let p = pack_u32(&mut body, 0, 1).unwrap();
+        let p = pack_u32(&mut body, p, 2).unwrap();
+        let mut p = pack_u16(&mut body, p, nwname).unwrap();
+        for _ in 0..nwname {
+            p = pack_str(&mut body, p, name).unwrap();
+        }
+        frame(P9_TWALK, 1, &body[..p], out)
+    }
+
+    #[test]
+    fn integers_round_trip_little_endian_at_an_offset() {
+        let mut b = [0u8; 16];
+        assert_eq!(pack_u16(&mut b, 1, 0xBEEF), Ok(3));
+        assert_eq!(b[1..3], [0xEF, 0xBE]);
+        assert_eq!(unpack_u16(&b, 1), Ok((0xBEEF, 3)));
+        assert_eq!(pack_u32(&mut b, 3, 0x0102_0304), Ok(7));
+        assert_eq!(unpack_u32(&b, 3), Ok((0x0102_0304, 7)));
+        assert_eq!(pack_u64(&mut b, 7, 0x1122_3344_5566_7788), Ok(15));
+        assert_eq!(b[7], 0x88);
+        assert_eq!(unpack_u64(&b, 7), Ok((0x1122_3344_5566_7788, 15)));
+        assert_eq!(pack_u8(&mut b, 15, 0xA5), Ok(16));
+        assert_eq!(unpack_u8(&b, 15), Ok((0xA5, 16)));
+    }
+
+    #[test]
+    fn a_short_buffer_is_refused_never_overrun() {
+        let b = [0u8; 7];
+        assert_eq!(unpack_u8(&b, 7), Err(()));
+        assert_eq!(unpack_u16(&b, 6), Err(()));
+        assert_eq!(unpack_u32(&b, 4), Err(()));
+        assert_eq!(unpack_u64(&b, 0), Err(()));
+        assert!(peek_header(&b[..P9_HDR_LEN - 1]).is_err());
+        let mut o = [0u8; 7];
+        assert_eq!(pack_u8(&mut o, 7, u8::MAX), Err(()));
+        assert_eq!(pack_u16(&mut o, 6, u16::MAX), Err(()));
+        assert_eq!(pack_u32(&mut o, 4, u32::MAX), Err(()));
+        assert_eq!(pack_u64(&mut o, 0, u64::MAX), Err(()));
+        assert_eq!(o, [0u8; 7], "a refused pack writes nothing");
+    }
+
+    #[test]
+    fn a_string_is_length_prefixed_and_bounded_by_its_buffer() {
+        let mut o = [0u8; 8];
+        assert_eq!(pack_str(&mut o, 0, b"net"), Ok(5));
+        assert_eq!(o[..5], [3, 0, b'n', b'e', b't']);
+        assert_eq!(unpack_str(&o, 0), Ok((&b"net"[..], 5)));
+        // The prefix claims five bytes and three follow.
+        assert_eq!(unpack_str(&[5, 0, b'a', b'b', b'c'], 0), Err(()));
+        assert_eq!(pack_str(&mut o, 4, b"toolong"), Err(()));
+    }
+
+    #[test]
+    fn a_qid_is_thirteen_bytes_kind_version_path() {
+        let q = Qid { kind: P9_QTDIR, version: 0x0102_0304, path: 0x0506_0708_090A_0B0C };
+        let mut o = [0u8; P9_QID_LEN];
+        assert_eq!(pack_qid(&mut o, 0, &q), Ok(P9_QID_LEN));
+        assert_eq!(o, [0x80, 4, 3, 2, 1, 0x0C, 0x0B, 0x0A, 9, 8, 7, 6, 5]);
+        assert_eq!(pack_qid(&mut o[..P9_QID_LEN - 1], 0, &q), Err(()));
+    }
+
+    #[test]
+    fn a_reply_back_patches_its_total_size() {
+        let mut o = [0u8; 32];
+        let n = build_rread(&mut o, 0x1234, &[9, 8, 7]).unwrap();
+        assert_eq!(n, P9_HDR_LEN + 4 + 3);
+        let h = peek_header(&o).unwrap();
+        assert_eq!((h.size as usize, h.mtype, h.tag), (n, P9_RREAD, 0x1234));
+        assert_eq!(unpack_u32(&o, P9_HDR_LEN), Ok((3, P9_HDR_LEN + 4)));
+        assert_eq!(o[P9_HDR_LEN + 4..n], [9, 8, 7]);
+
+        let n = build_rlerror(&mut o, 7, E_INVAL).unwrap();
+        let h = peek_header(&o).unwrap();
+        assert_eq!((n, h.size as usize, h.mtype, h.tag), (P9_HDR_LEN + 4, n, P9_RLERROR, 7));
+        assert_eq!(unpack_u32(&o, P9_HDR_LEN), Ok((E_INVAL, n)));
+    }
+
+    #[test]
+    fn a_reply_too_big_for_its_buffer_is_refused() {
+        let mut o = [0u8; P9_HDR_LEN + 4 + 2];
+        assert_eq!(build_rread(&mut o, 1, &[1, 2, 3]), Err(()));
+        assert_eq!(build_rread(&mut o, 1, &[1, 2]), Ok(o.len()));
+        assert_eq!(build_rlerror(&mut o[..P9_HDR_LEN + 3], 1, E_INVAL), Err(()));
+    }
+
+    #[test]
+    fn tread_carries_the_whole_offset() {
+        let mut body = [0u8; 16];
+        let p = pack_u32(&mut body, 0, 7).unwrap();
+        let p = pack_u64(&mut body, p, 0x8000_0000_0001_0004).unwrap();
+        pack_u32(&mut body, p, 4).unwrap();
+        let mut f = [0u8; 32];
+        let n = frame(P9_TREAD, 3, &body, &mut f);
+        let a = parse_tread(&f[..n]).unwrap();
+        assert_eq!((a.fid, a.offset, a.count), (7, 0x8000_0000_0001_0004, 4));
+        assert!(parse_tread(&f[..n - 1]).is_err());
+    }
+
+    #[test]
+    fn twalk_bounds_the_name_count_and_each_name() {
+        let mut f = [0u8; 1100];
+        let n = twalk(2, b"tcp", &mut f);
+        let a = parse_twalk(&f[..n]).unwrap();
+        assert_eq!((a.fid, a.newfid, a.nwname), (1, 2, 2));
+        assert_eq!((a.names[0], a.names[1]), (&b"tcp"[..], &b"tcp"[..]));
+
+        let n = twalk(P9_MAX_WALK as u16, b"a", &mut f);
+        assert!(parse_twalk(&f[..n]).is_ok());
+        let n = twalk(P9_MAX_WALK as u16 + 1, b"a", &mut f);
+        assert!(parse_twalk(&f[..n]).is_err());
+
+        let n = twalk(1, &[b'x'; P9_NAME_MAX], &mut f);
+        assert!(parse_twalk(&f[..n]).is_ok());
+        let n = twalk(1, &[b'x'; P9_NAME_MAX + 1], &mut f);
+        assert!(parse_twalk(&f[..n]).is_err());
+    }
 }

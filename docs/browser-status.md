@@ -32,6 +32,7 @@ the JIT question (B-2) instead of guessing.
 | `3df67cb0` | `vault/record/`: 43 notes -- 10 audit rounds, 27 findings, 5 changes, 1 decision, 1 arc | `quaestor lint` 0 fail |
 | `195fdd73` | scripture (#98): a poll samples remote readiness with a SNAPSHOT and arms only before it parks -- NET-DESIGN 12.2 amendment, ARCH 23.3, `dec-2026-09-28-poll-sample-arm-split` (three operator votes) | docs only |
 | `95ade2dc` | spec (#98): `net_poll.tla` rewritten for the split (level `ready`, timed + zero-timeout poller, snapshot, settle, hung server, collector); `poll.tla` gains remote fds, the settle, the arm, sample-only passes; `specs/check-net-poll.sh` NEW | `specs/check-net-poll.sh` 15/15, `specs/check-poll.sh` 14/14, on SPEC-POLICY's TLC |
+| *(NP-3a, this commit)* | the userspace 9P codec becomes its own crate, `usr/lib/ninep`, re-exported as `libthyla_rs::ninep`, so that its tests run on the host (libthyla-rs cannot be host-built); 8 tests of the invariants its dossier claimed | `tools/test-rust.sh` ninep 8/8, each test seen red with its invariant broken; the 11 consumer crates build for aarch64 |
 
 ## B-0 (built, audited over ten rounds, gated; landed as nine commits)
 

@@ -21,7 +21,6 @@ code:
   - usr/lib/libthyla-rs/src/jit.rs
   - usr/lib/libthyla-rs/src/loom.rs
   - usr/lib/libthyla-rs/src/net.rs
-  - usr/lib/libthyla-rs/src/ninep.rs
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
   - usr/lib/libthyla-rs/src/process.rs
@@ -32,6 +31,7 @@ code:
   - usr/lib/libthyla-rs/src/time.rs
   - usr/lib/libthyla-rs/src/torpor.rs
   - usr/lib/libthyla-rs/src/weft.rs
+  - usr/lib/ninep/src/lib.rs
 audit: light
 guarded-by: [inv-i5, inv-i12, inv-i32]
 validated-by: [prose, gate-interactive, gate-smp]
@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -212,16 +212,23 @@ it. Only the server side landed; the client side (T-builders + R-parsers) is a
 mechanical mirror deferred until a native program needs to make *outgoing* 9P
 calls.
 
+It is a crate of its own, `usr/lib/ninep`, which libthyla-rs re-exports as
+`libthyla_rs::ninep`, so no caller names it differently. libthyla-rs cannot be
+built for the host (its `_start` is ELF assembly), so a test inside it would run
+nowhere; the codec's tests run on the host under `tools/test-rust.sh`.
+
 Its codec invariants are pure wire properties: `pack_X` then `unpack_X` is the
 identity; every unpack short-circuits to `Err(())` rather than over-reading a
 short buffer, and every pack rather than over-writing; `build_r*` writes a
 placeholder size, then the body, then back-patches the total (so a
 variable-length body needs no length known up front); and `parse_twalk` bounds
-the wname array twice (`nwname <= 16`, each name `<= 255`). The distinction worth
-stating is what these are **not**: the 9P *session* invariants — [[inv-i10]] tag
+the wname array twice (`nwname <= 16`, each name `<= 255`). A host test asserts
+each of these, and each test was seen to fail with its invariant broken. The
+distinction worth stating is what these are **not**: the 9P *session*
+invariants — [[inv-i10]] tag
 uniqueness, [[inv-i11]] fid stability — are **server-state** invariants the
 dispatcher enforces *above* the codec, never codec invariants. The wire
-constants, message-type numbers, and struct layouts are the code's (`ninep.rs`),
+constants, message-type numbers, and struct layouts are the code's (`ninep`),
 pinned by the pack/unpack that reads them rather than by `#[repr(C)]`.
 
 ### Two invariants are enforced by absence rather than by checking

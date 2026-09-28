@@ -8,10 +8,10 @@ pinned-by:
   - "docs/9P-EXTENSIONS.md: the cross-project allocation authority (rules + burn policy + history + next-free pointer)"
 mirrors:
   - "kernel/include/thylacine/9p_wire.h: P9_T*/P9_R* (the kernel wire enum)"
-  - "usr/lib/libthyla-rs/src/ninep.rs: P9_T*/P9_R* (the codec netd serves with)"
+  - "usr/lib/ninep/src/lib.rs: P9_T*/P9_R* (the codec netd serves with)"
   - "stratum v2 include/stratum/9p.h: STM_9P_T*/STM_9P_R* (the other project's enum)"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-28
 ---
 ## The surface
 

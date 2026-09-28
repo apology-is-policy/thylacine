@@ -14,6 +14,8 @@ path = "src/lib.rs"
 # crate supplies its three kernel calls.
 [dependencies]
 thyla-heap = { path = "../thyla-heap" }
+# The 9P codec, re-exported as `ninep`.
+ninep = { path = "../ninep" }
 
 # Thylacine userspace runtime — Rust side.
 #

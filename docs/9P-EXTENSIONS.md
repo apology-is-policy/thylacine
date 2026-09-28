@@ -62,7 +62,7 @@ by the .L dialect, which is why Stratum repurposed 124-127 (below).
 ## Cross-references
 
 - Thylacine: `kernel/include/thylacine/9p_wire.h` (the kernel wire
-  enum), `usr/lib/libthyla-rs/src/ninep.rs` (the userspace codec netd
+  enum), `usr/lib/ninep/src/lib.rs` (the userspace codec netd
   serves with), `docs/POUNCE-DESIGN.md` §3, `docs/NET-THROUGHPUT.md` §6.
 - Stratum: `include/stratum/9p.h` (the `STM_9P_*` enum),
   `docs/reference/20-9p.md`.

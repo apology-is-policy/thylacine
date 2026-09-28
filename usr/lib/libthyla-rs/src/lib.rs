@@ -48,7 +48,8 @@ use core::panic::PanicInfo;
 // U-2e: notes + poll.
 // U-2f: territory + cap.
 // U-2g: torpor + time + rand + thread.
-// U-2h-ninep: ninep (9P2000.L server-side codec, lifted from corvus).
+// U-2h-ninep: ninep (9P2000.L server-side codec, lifted from corvus; now its
+//   own crate, re-exported here, so that its tests run on the host).
 // U-2h-hardware: hardware::{Mmio, Irq, Dma} (typed RAII over KObj_MMIO/IRQ/DMA).
 //
 // `extern crate alloc` brings the standard `alloc` crate (String,
@@ -81,7 +82,7 @@ pub mod io;
 pub mod jit;
 pub mod loom;
 pub mod net;
-pub mod ninep;
+pub use ninep;
 pub mod notes;
 pub mod poll;
 pub mod process;
