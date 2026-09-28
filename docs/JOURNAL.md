@@ -208,6 +208,28 @@ and one in the abi-ninep-wire pin. They surfaced while I was checking whether
 9P-EXTENSIONS should record the readiness wire. It should not, since it
 registers message types only. They are repointed in NP-3b.
 
+**NP-4, designed before a line of it was written.** The voted design says what
+the kernel does when a server answers or hangs. It does not say what it does
+when the kernel cannot ask: no free 9P tag, a full send ring, no memory. Reading
+`p9_client_submit_async` for that answer found a bug. A send that meets a full
+ring returns `P9_TRANSPORT_EAGAIN` (-11, `9p_transport.h:174`), and the async
+path treats every negative send as a broken stream (`9p_client.c:1150-1156`,
+`client_mark_dead_locked`), so one full ring kills the whole shared session. The
+synchronous path has handled that case as back-pressure since #349 (and its
+Tflush twin since #53); the async path, used by every dev9p arm and every Loom
+op, never did. NP-4 would multiply it, since every poll pass sends snapshots.
+It is enqueued, and fixed first as its own sub-chunk (NP-4b): a send that cannot
+go out now returns a retryable `-P9_E_AGAIN`, and the session stays alive.
+
+What poll does then follows from votes 2 and 3 rather than from a new question.
+A snapshot that cannot go out is sent again, within the same fixed 1 s that
+bounds its answer, and past it the fail-safe answers and is counted, as for a
+hung server. An arm that cannot go out leaves nothing that would ever wake the
+parked poller, so the park is bounded by a 10 ms retry timer and the next pass
+samples again. Neither case reports an error or a readiness that was not
+observed. The model owes this before the code: net_poll.tla gains an arm that
+may fail and the retry, with a sabotage that parks without it (NP-4a).
+
 **Open.**
 - NP-4, the kernel: the dev9p_poll rewrite, poll.c's settle and arm, deleting
   VIV_PPOLL_PROBE_MS, and fixing the tag-exhaustion POLLERR. Its tests include
