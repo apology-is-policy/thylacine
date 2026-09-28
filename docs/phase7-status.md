@@ -574,6 +574,46 @@ cut detection red. Device, CI image: `ergo-1`, `haul-npxf` and `haul-post` green
 `corvus.tla` (PostService maps to `srv_reserve`, which LR-1 changed; the spec does not model a service's attributes):
 its eight buggy cfgs re-run, each still violated.
 
+## FL-1: a slide change is one synchronized frame — 2026-09-28
+
+The operator saw a lantern slide change flicker over Haul (2026-09-24) and put synchronized output in their order. Two
+causes, read from the code: lantern wrote the clear, then read the slide (a network round trip over Haul), then wrote it
+in some forty unbuffered writes; and halcyond paints a tile after every read of its record pipe (at most 8 KiB), so the
+blank and each partial slide were shown in turn. Scripture 574f4d05 (HALCYON 14.3 AMENDED, KAUA-TERM 1b, LANTERN-DESIGN
+13, AURORA 3; `dec-2026-09-28-sync-output-seam`; the FL-1 audit-trigger row).
+
+- **The seam record** (operator vote 2026-09-28). A program's DEC private mode 2026 frame crosses the kaua seam as
+  `Control::SyncBegin` / `SyncEnd` (subtags 7 and 8, no payload), each after the pending `CellDiff`. halcyond applies
+  every record as it arrives and holds only that tile's paint until the close, a reconfigure, the program's exit or
+  crash, or 150 ms after the first paint it deferred; a timeout abandons the frame.
+- **The vt.** It reads a CSI's marks (a private marker on the first byte only, intermediates, C0 in place, ESC
+  restarts, CAN/SUB cancel), so a marked sequence no longer runs a plain handler or prints its tail; it answers DECRQM
+  for the DEC modes it tracks; it reports each change of mode 2026 in stream order, RIS closing a frame last.
+  `FrameHold` (shared by halcyond and aurora) bounds the wait.
+- **halcyond** skips a held tile's paint at the render step and, while the paint is held, waits in the poll for the
+  rest of the frame or the deadline; a loop that came back for the tile instead would never read the close (the first
+  device run: 91612 held passes). A reconfigure or the program's exit cuts the hold.
+- **aurora** reads the mode and a count of frames opened once per pass (`follow_frame`), holds the paint, and the
+  compositor's FRAME tick re-runs the pass.
+- **lantern** reads and renders a slide into memory, then writes `?2026h`, the clear, the slide and `?2026l` in one
+  write.
+- **A correction.** TC-1a's claim that subtag 7 was "allocated to another record" (the wire test comment and
+  sub-kaua-term) was false; nothing allocated it.
+
+Audit (the FL-1 row), 2 rounds: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end. r1: 1 P0 (the
+session loop spun on a held tile, which the device leg had found first) / 0 P1 / 0 P2 / 3 P3; dirty, so r2 on the
+fixes: 0 / 0 / 0 / 4 P3 (leg 8 saw the hold's accounting, not its effect -- now only the program's own close reads as a
+frame shown whole, and a paint made while the frame is open reads `cut short`; the abandonment report's reach; a cut
+told apart from a close; 14.3's resize wording). All addressed; closed. Closed list: memory `audit_fl1_closed_list.md`.
+
+Verification: host vt 92, kaua-term 55, halcyond 424, aurora 11, lantern 25. Sabotage S4-S24, predictions written
+first, each red on exactly its predicted tests (S20-S24 at the predicted assertion). Device (the CI image with the
+session and the Instrument profile, `ls-halcyon-lantern`): red without lantern's marks (leg 8 at its timeout); the first
+real run red with `abandoned at its bound (91612 paint(s) held)`, the spin, so that fix's red; red with the render
+step's skip removed (leg 8 at `cut short (1 paint(s) held)`); green, all eight legs, leg 8 `shown (3 paint(s) held)`.
+Default image: `tools/test.sh` 1740/1740 (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 28 crates, 2105
+tests, 0 failing. No kernel change, so no sanitizer run or spec is owed.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

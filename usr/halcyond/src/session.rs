@@ -268,7 +268,17 @@ struct SessionTile {
     rows: u16,
     dirty: bool,
     /// The one-shot "this tile presents objects" witness (test builds).
+    #[cfg(feature = "test-mode")]
     objs_said: bool,
+    /// The one-shot witnesses that a synchronized frame held this tile's
+    /// paint (test builds): shown when its program closed it, abandoned at
+    /// its bound, or cut short.
+    #[cfg(feature = "test-mode")]
+    sync_said: bool,
+    #[cfg(feature = "test-mode")]
+    sync_late_said: bool,
+    #[cfg(feature = "test-mode")]
+    sync_cut_said: bool,
     /// H-4d: the Helix-modal transcript mode (HALCYON.md 4): Esc leaves
     /// Insert for Normal, where the cursor walks the rows and `w`/`b` walk
     /// the obj runs; Enter opens the run's verb menu; `i` returns.
@@ -417,7 +427,14 @@ impl SessionTile {
             cols,
             rows,
             dirty: true,
+            #[cfg(feature = "test-mode")]
             objs_said: false,
+            #[cfg(feature = "test-mode")]
+            sync_said: false,
+            #[cfg(feature = "test-mode")]
+            sync_late_said: false,
+            #[cfg(feature = "test-mode")]
+            sync_cut_said: false,
             mode: Mode::Insert,
             flat: Vec::new(),
             flat_seq: u64::MAX,
@@ -900,6 +917,44 @@ impl SessionTile {
                 false
             }
         }
+    }
+
+    /// The tile's paint reached the screen: whatever its synchronized frame
+    /// held is shown, and the next paint it defers starts a new bound.
+    fn painted(&mut self) {
+        let held = self.tile.hold.painted();
+        // Test builds: the premise the device leg measures -- a frame's
+        // records spanned reads, so without the hold a torn screen showed.
+        #[cfg(feature = "test-mode")]
+        match held {
+            vt::Held::UntilClose(n) if !self.sync_said => {
+                self.sync_said = true;
+                say!(
+                    "halcyond: session tile leaf={} synchronized frame shown ({} paint(s) held)",
+                    self.leaf,
+                    n
+                );
+            }
+            vt::Held::UntilTimeout(n) if !self.sync_late_said => {
+                self.sync_late_said = true;
+                say!(
+                    "halcyond: session tile leaf={} synchronized frame abandoned at its bound ({} paint(s) held)",
+                    self.leaf,
+                    n
+                );
+            }
+            vt::Held::Cut(n) if !self.sync_cut_said => {
+                self.sync_cut_said = true;
+                say!(
+                    "halcyond: session tile leaf={} synchronized frame cut short ({} paint(s) held)",
+                    self.leaf,
+                    n
+                );
+            }
+            _ => {}
+        }
+        #[cfg(not(feature = "test-mode"))]
+        let _ = held;
     }
 
     /// Drain one wake's worth of records from the up-pipe into the tile.
@@ -2106,12 +2161,18 @@ pub fn run(home: Option<String>) -> i64 {
         // any wait (first-present-wins scanout; frame ticks reach only visible
         // surfaces).
         for t in tiles.values_mut() {
+            // HALCYON 14.3: an open synchronized frame holds this tile's
+            // paint, and only this tile's; a gone child's never waits.
+            if t.dirty && t.exit.is_none() && t.tile.hold.holds(now_ns) {
+                continue;
+            }
             let was_dirty = t.dirty;
             let ok = t.render_if_dirty(&mut cart, &mut gs, &sheet);
             if !was_dirty {
                 continue;
             }
             if ok {
+                t.painted();
                 present_fails = 0;
                 // "session up" witnesses a SUCCESSFUL present (the post-present
                 // marker rule), not merely the connect -- printed once, on the
@@ -2159,6 +2220,10 @@ pub fn run(home: Option<String>) -> i64 {
                             Ok(_) => {
                                 t.fit_to_surface(geom, &mut wire_out);
                                 t.dirty = true;
+                                // A reconfigure cuts a synchronized frame's
+                                // hold short (HALCYON 14.3): the slots are new
+                                // or suspect, and the program redraws anyway.
+                                t.tile.hold.cut();
                                 // A relayout may have added or removed leaves.
                                 relayout = true;
                             }
@@ -2705,8 +2770,14 @@ pub fn run(home: Option<String>) -> i64 {
         }
 
         // If any tile needs a paint (a new tile, a resize), render before we
-        // block, so no dirty tile waits on the next wake.
-        if tiles.values().any(|t| t.dirty) {
+        // block, so no dirty tile waits on the next wake. A live tile whose
+        // paint a synchronized frame holds waits in the poll instead, for the
+        // rest of its frame or the hold's deadline; looping back for it would
+        // spin without ever reading the frame's close (14.3).
+        if tiles
+            .values()
+            .any(|t| t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
+        {
             continue;
         }
 
@@ -2790,6 +2861,15 @@ pub fn run(home: Option<String>) -> i64 {
             None
         };
         let timeout = libhalcyon::motion::fold_timeout(timeout, caret_tick);
+        // A held paint is due at its bound whatever the program does
+        // (HALCYON 14.3), so the wait ends there at the latest.
+        let hold_now = libthyla_rs::time::monotonic_ns();
+        let hold_due = tiles
+            .values()
+            .filter(|t| t.dirty && t.exit.is_none())
+            .filter_map(|t| t.tile.hold.due_ms(hold_now))
+            .min();
+        let timeout = libhalcyon::motion::fold_timeout(timeout, hold_due);
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);

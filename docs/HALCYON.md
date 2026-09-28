@@ -1417,12 +1417,18 @@ RIS closes an open frame, and does so last, so the reset's own erase is inside i
 halcyond applies every record exactly as it arrives, so the ordering contracts
 above and in §14.13 are untouched, and holds only the tile's PAINT while a frame
 is open. Every other tile paints as usual. The hold ends at whichever comes first:
-the close, a resize of the tile (its surface reconfigured), the program's exit or
-the tile's crash, or 150 ms after the first paint it deferred. A timeout abandons
+the close; a reconfigure of the tile's surface (a resize, or the compositor's
+request to redraw -- a scale change that only reshapes the grid leaves the
+surface's pixels whole and keeps the hold); the program's exit or the tile's
+crash; or 150 ms after the first paint it deferred. A timeout abandons
 the frame, so a program that never closes one costs its tile a single 150 ms
 stall, never a standing slowdown. A repeated open does not extend the hold, so a
 stream of back-to-back frames that never leaves a paint point outside a frame
-still paints at least every 150 ms.
+still paints at least every 150 ms. While a paint is held the session WAITS for
+the rest of the frame: its loop blocks on the tile's pipe and the hold's
+deadline, and never comes back for the held tile without waiting. A loop that
+did would never read the frame's close (FL-1's first device run: 91612 passes in
+the 150 ms, and every frame that spanned reads abandoned).
 
 The research (13 terminals read in source; `dec-2026-09-28-sync-output-seam`):
 every implementation keeps parsing and holds only the render. Timeouts run from

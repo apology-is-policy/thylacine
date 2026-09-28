@@ -16,9 +16,9 @@ validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
 abis: []
-design: ["docs/AURORA.md", "docs/AURORA-CONFIG.md"]
+design: ["docs/AURORA.md", "docs/AURORA-CONFIG.md", "docs/HALCYON.md section 14.3"]
 created: 2026-08-04
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -110,6 +110,23 @@ fd (a terminal answering on the keyboard wire), and apply its
 `settings_req` lines. The aurora half of the settings threat model lives
 here: an OSC-applied setting is session-scoped and **never persisted**, so a
 later overlay save cannot make a console writer's cosmetic push permanent.
+
+**A program's synchronized frame holds the paint (FL-1, AURORA.md 3).** A
+program that opens a DEC mode 2026 frame (`CSI ? 2026 h`) is drawing a screen
+that must not be shown half done; aurora keeps feeding the VT and holds only
+its paint, with the same `vt::FrameHold` halcyond uses ([[sub-lib-vt]]). Aurora
+captures no VT events, so after the drain `follow_frame` (lib.rs, host-tested)
+reads the VT's state once per pass: a change in `sync_frames()` is a new frame
+and opens the hold, and `sync_output()` down closes it. The count is what makes
+it right: a frame that closed and a new one that opened between two passes
+leave the flag up throughout, and a frame the 150 ms bound abandoned must not be
+held again after every paint. While the hold says wait, a pass with a paint due
+skips the render entirely and its damage stays dirty. The compositor's FRAME
+tick, sent to every visible surface on every tick and not only after a present,
+runs the pass again, so the close or the bound is honoured within one tick. A
+successful present ends the hold (`painted()`), and a CONFIGURE cuts it: the
+program redraws for a reconfigured surface anyway. A backgrounded aurora gets no
+ticks, so it neither drains nor paints, which is unchanged.
 
 ## Data structures
 
@@ -203,6 +220,11 @@ did not reach.
   console, which takes the writer role and can wait for room — so an
   unlatched report against a stalled reader makes aurora stall on its own
   logging.
+- **The frame hold opens on a new frame, never on the flag alone.** Keyed on
+  `sync_output()`, a frame the bound abandoned is held again after every
+  paint, the standing slowdown AURORA.md 3 rules out;
+  `an_abandoned_frame_is_not_held_again_but_the_next_one_is` pins it, and
+  `a_frame_that_closed_between_passes_is_painted_at_once` pins the close.
 - **Every present rect covers only rows this pass rendered.** Slot
   rotation makes any wider rect a transfer of stale pixels.
 - **A shrinking resize invalidates the remembered cursor.** The remembered

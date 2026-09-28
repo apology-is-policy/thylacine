@@ -55,7 +55,12 @@ The library (`lib.rs` + `wire.rs`, host-buildable) is a pure event model:
   frame plus its span serial -- and the wire cell is now 17 bytes (`ch`/`fg`/`bg`
   u32, `attrs` u8, `span` u32; the trailing `span` is what the H-4d Beacon
   threading added). TC-1 added `Control::ScreenErased`, subtag 6, no payload
-  (KAUA-TERM 1b; subtag 7 is allocated to another record).
+  (KAUA-TERM 1b). FL-1 added `Control::SyncBegin` and `SyncEnd`, subtags 7 and
+  8, no payload: a program's synchronized frame (DEC private mode 2026) opening
+  and closing, which halcyond holds the tile's paint between (HALCYON 14.3).
+  This line said until then that subtag 7 was "allocated to another record";
+  nothing allocated it (an exhaustive search of scripture on aux-3 and main,
+  2026-09-28), and the claim was the TC-1a author's own error.
 
 The bin (`main.rs`): `kaua-term [--beacon none|cells|rich] <cols> <rows> [prog
 [args...]]` — fd 0 is the DOWN channel (halcyond's `Input` frames), fd 1 the UP
@@ -95,6 +100,18 @@ since its row left, whatever flag last went out, and a restart that leaves the
 screen and cursor as last sent would otherwise send nothing (round-2 F3). The
 AltLeave arm sends the restored main with the wrap flags, cursor and top flag
 the boundary carries, never the vt's post-byte state (round-2 F1).
+
+**A synchronized frame is two records around exactly its cells (FL-1,
+HALCYON 14.3).** The vt reports each CHANGE of mode 2026 as `Boundary::Sync(on)`;
+the producer maps it like `Bell`: `flush` first, then `Control::SyncBegin` or
+`SyncEnd`. So the cells written before a frame ship before its open, its last
+cells ship before its close, and a clear inside a frame (lantern's slide change)
+puts all three erase records inside it: `SyncBegin`, `ScrollOff`, `CellDiff`
+(blank), `ScreenErased`, `CellDiff` (the slide), `SyncEnd`. A RIS inside a frame
+ends it after the erase. Both records go out on either screen. The kaua-term
+holds nothing: the render is halcyond's, and a hold here could not stop a paint
+between two of halcyond's 8 KiB reads of a 40 KB screen anyway. The DECRQM
+answer the vt writes for `?2026$p` goes back to the app on the master like a CPR.
 
 **The bounds are per record CLASS, not per read — this is the security core.**
 The number of rows a chunk yields is the VT's to decide, not the chunk's size:
@@ -142,8 +159,9 @@ top_continues }` | `ScrollOff { rows: Vec<Vec<Cell>>, wrapped }` |
 `Control(Control)` | `Mode(ScreenMode)`. `Control` = `Osc1936Raw { serial,
 frame }` (a Beacon frame, passed through opaque) | `Bell` | `Title(String)` |
 `Exit(i32)` | `WinsizeAck` | `Osc7Raw(Vec<u8>)` (the cwd report, raw) |
-`ScreenErased` -- wire subtags 0 through 6 in that order of allocation (0
-osc1936, 1 bell, 2 title, 3 exit, 4 winsize_ack, 5 osc7, 6 screen_erased).
+`ScreenErased` | `SyncBegin` | `SyncEnd` -- wire subtags 0 through 8 in that
+order of allocation (0 osc1936, 1 bell, 2 title, 3 exit, 4 winsize_ack, 5 osc7,
+6 screen_erased, 7 sync_begin, 8 sync_end).
 `Producer` holds a shadow screen (`cols x rows` cells) it diffs against; a
 `Scroll` never shifts it, because the tile's grid changes only by CellDiff.
 
@@ -227,6 +245,11 @@ plus one capped record regardless of how much the app dumps at once.
   the producer's order test and the whole-seam test in halcyond). Its subtag is
   pinned to the LITERAL 6 by a byte-level test, so a renumbering on both sides
   at once still fails.
+- **A frame's records flush first, and their subtags are literals.** Without
+  the flush, the cells written before the open ship inside the frame and the
+  frame's last cells after its close (sabotage S9 reds three producer tests).
+  A renumbering of 7 and 8 on both sides at once passes the round trip and is
+  caught only by the literal pin (S10); a one-sided one reds both (S11).
 - **The identity of the spawned app.** Prosecuted on the halcyond spawn side
   (`.caps(!T_CAP_SET_IDENTITY)`), but kaua-term's own `Command::new` for the
   slave inherits caps by default — the KT-1 audit's recurring footgun.
@@ -248,7 +271,7 @@ plus one capped record regardless of how much the app dumps at once.
   `emit_celldiff` resyncs silently. It is a guard only — the bin's call order
   (`drain_pending` without a diff, then `resized`) never diffs across a
   geometry change, equal cell counts included.
-- **Currency (2026-09-28): this dossier was brought current for TC-1 and TC-1b only.**
+- **Currency (2026-09-28): this dossier was brought current for TC-1, TC-1b and FL-1 only.**
   The lib and wire changes between 2026-09-06 and 2026-09-22 (the PL-3/PL-4
   soft-wrap flags, `top_continues`, the OSC 7 report, the palette input) are
   corrected in the record lists above but not otherwise described. Dating this
@@ -258,12 +281,15 @@ plus one capped record regardless of how much the app dumps at once.
 ## Tests
 
 `cargo test -p kaua-term --lib --no-default-features --target
-aarch64-apple-darwin` from `usr/` (49 host tests on 2026-09-25, `tools/
+aarch64-apple-darwin` from `usr/` (55 host tests on 2026-09-28, `tools/
 test-rust.sh kaua-term`; the "30" this row carried predates PL-3/PL-4 and TC-1).
 TC-1 added `a_screen_erase_ships_the_erased_rows_then_the_blank_then_the_record`
 (the three-record order) and `the_screen_erase_is_control_subtag_6_with_no_payload`
 (the literal byte pin, the trailing byte and an unallocated subtag both
-Malformed). They pin: the codec round-trips + the malformed/oversize/truncated
+Malformed). FL-1 added `a_synchronized_frame_brackets_exactly_the_cells_written_inside_it`,
+`a_cleared_slide_is_one_frame`, `a_reset_inside_a_frame_closes_it_after_its_erase`,
+`only_a_change_of_the_mode_is_a_record_on_either_screen` and
+`a_synchronized_frame_is_control_subtags_7_and_8_with_no_payload`. They pin: the codec round-trips + the malformed/oversize/truncated
 frames; the producer's boundary order; `bulk_scroll_splits_into_bounded_
 scrolloffs`; the alt-screen full diffs;
 `feed_into_ships_each_capped_scrolloff_so_a_chunk_never_piles_them_up` (the

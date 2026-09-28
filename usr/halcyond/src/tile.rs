@@ -134,6 +134,10 @@ pub struct Tile {
     lane: bool,
     /// The lane passes the last render took (bounded at three; r2 B-F1).
     lane_passes: u8,
+    /// HALCYON 14.3: the program's synchronized frame (DEC mode 2026) and
+    /// the bound on how long it may hold this tile's paint. The records
+    /// open and close it; the session asks it before painting.
+    pub hold: vt::FrameHold,
 }
 
 impl Tile {
@@ -189,6 +193,7 @@ impl Tile {
             live_laid: None,
             lane: false,
             lane_passes: 0,
+            hold: vt::FrameHold::default(),
         }
     }
 
@@ -469,7 +474,10 @@ impl Tile {
             // one decoder applies it, as on the console path.
             Control::Osc7Raw(body) => self.scrollback.apply_cwd_report(&body),
             Control::Bell => self.bell = true,
-            Control::Exit(code) => self.exit = Some(code),
+            Control::Exit(code) => {
+                self.exit = Some(code);
+                self.hold.cut();
+            }
             // The down-channel resize was applied on the pts: the next
             // CellDiff is the producer's repaint of the whole grid.
             Control::WinsizeAck => self.resize_acked = true,
@@ -481,6 +489,9 @@ impl Tile {
                     self.pinned = true;
                 }
             }
+            // The frame's records apply as they arrive; only the paint waits.
+            Control::SyncBegin => self.hold.open(),
+            Control::SyncEnd => self.hold.close(),
         }
     }
 
@@ -2323,6 +2334,7 @@ mod tests {
             live_laid: None,
             lane: false,
             lane_passes: 0,
+            hold: vt::FrameHold::default(),
         }
     }
 
@@ -5025,5 +5037,77 @@ mod tests {
         assert!(t.place_image(0xe, 1, 1, vec![1]));
         t.forget_history();
         assert!(t.media.contains(0xe), "the open obj keeps its image");
+    }
+
+    const T_NS: u64 = 5_000_000_000;
+
+    #[test]
+    fn the_frame_records_open_and_close_the_hold_and_an_exit_cuts_it() {
+        let mut t = tile();
+        assert!(!t.hold.holds(T_NS), "no frame, no hold");
+        t.apply(Record::Control(Control::SyncBegin));
+        assert!(t.hold.holds(T_NS));
+        t.apply(Record::Control(Control::SyncEnd));
+        assert!(!t.hold.holds(T_NS + 1));
+        assert_eq!(t.hold.painted(), vt::Held::UntilClose(1));
+        t.apply(Record::Control(Control::SyncBegin));
+        assert!(t.hold.holds(T_NS + 2));
+        t.apply(Record::Control(Control::Exit(0)));
+        assert!(!t.hold.holds(T_NS + 3), "the program's exit ends its frame");
+        assert_eq!(
+            t.hold.painted(),
+            vt::Held::Cut(1),
+            "cut short, never shown whole"
+        );
+    }
+
+    /// FL-1 across every link, in lantern's shape: the slide's frame reaches
+    /// the tile in two reads of the pipe, as the session reads it. The blank
+    /// the first read leaves is held, never painted; the close lets the
+    /// slide through.
+    #[test]
+    fn a_slide_split_across_two_reads_is_held_until_its_close() {
+        let mut v = vt::Vt::new(20, 4);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(20, 4, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"% lantern deck\r\n");
+        let mut recs = Vec::new();
+        p.feed(
+            &mut v,
+            b"\x1b[?2026h\x1b[0m\x1b[H\x1b[2Jslide one\x1b[?2026l",
+            &mut recs,
+        );
+        let mut wire = Vec::new();
+        let mut cut = 0;
+        for r in &recs {
+            kaua_term::wire::encode_record(r, &mut wire);
+            if *r == Record::Control(Control::ScreenErased) {
+                cut = wire.len();
+            }
+        }
+        assert!(
+            cut > 0 && cut < wire.len(),
+            "the read ends inside the frame"
+        );
+        let mut dec = kaua_term::wire::FrameDecoder::new();
+        let mut read = |t: &mut Tile, bytes: &[u8]| {
+            dec.push(bytes);
+            while let Some(f) = dec.next_frame() {
+                let (tag, payload) = f.expect("the producer's frames decode");
+                t.apply(kaua_term::wire::parse_record(tag, &payload).expect("and parse"));
+            }
+        };
+        read(&mut t, &wire[..cut]);
+        assert_eq!(
+            grid_text(&t, 0).trim_end(),
+            "",
+            "the first read leaves the blank"
+        );
+        assert!(t.hold.holds(T_NS), "and the paint waits");
+        read(&mut t, &wire[cut..]);
+        assert_eq!(grid_text(&t, 0).trim_end(), "slide one");
+        assert!(!t.hold.holds(T_NS + 1), "the close lets the slide through");
+        assert_eq!(t.hold.painted(), vt::Held::UntilClose(1));
     }
 }

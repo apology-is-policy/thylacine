@@ -19,9 +19,9 @@ validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
 abis: []
-design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md"]
+design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3"]
 created: 2026-09-22
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -113,6 +113,26 @@ screen). Then two screens of output make a history again (a line or two would
 scroll nothing off the mostly empty grid the clear left). Normal mode is the only way into a tile's history, because a tile takes
 no wheel.
 
+**A slide change is one synchronized frame, in one write (FL-1, LANTERN-DESIGN
+13).** The operator saw a slide change flicker over Haul (2026-09-24). `present`
+wrote the clear, then read the slide (over Haul, a network round trip, with the
+screen blank), then wrote it through an unbuffered sink: one write per line
+segment and one per line ending. halcyond paints after every read of a tile's
+pipe, so the blank and each partial slide showed in turn. Now `show` renders the
+slide into memory first, through `lantern::slide_frame`: `SYNC_BEGIN` (`CSI ?
+2026 h`), the clear, the slide and its footer, `SYNC_END` (`CSI ? 2026 l`). It
+hands the whole buffer to `Out::put`, which cooks it once and writes it once.
+The read happens before the screen changes, so a slow read delays the change and
+never shows a blank screen, and the marks let halcyond (HALCYON 14.3) and aurora
+(AURORA.md 3) hold the paint until the frame closes. A renderer that does not
+know the mode ignores both, as ECMA-48 requires of an unknown private mode, and
+still gains the single write. `cat` renders each slide into one buffer too, one
+write per slide, with no clear and no marks. The device leg
+(`ls-halcyon-lantern` 8) requires halcyond's one-shot line that a frame held the
+tile's paint until lantern closed it; a frame painted before its close reads
+`cut short` and fails the leg, and so does a run in which every frame hits the
+150 ms bound (a slide crosses the pipe in milliseconds).
+
 **The alt screen is the one thing to avoid**, and the avoidance is structural
 rather than a convention: `ScreenMode::AltScreen` makes a tile paint its raw
 mono grid, discarding the rich rendering the facility exists for. lantern
@@ -165,7 +185,8 @@ position.
 
 `Deck { title: Option<String>, slides: Vec<String> }` -- the parsed manifest;
 `slides` is never empty. `Problem` / `Diagnostic` carry the refusal and its
-line. `Action` is the key map's output. `Out` wraps stdout with the cook flag.
+line. `Action` is the key map's output. `Out` wraps stdout with the cook flag,
+and each `put` is one write: it cooks into one buffer first.
 No shared or persistent state: a slide is re-read from the filesystem on every
 paint, so an edit mid-rehearsal shows on the next keypress.
 
@@ -217,6 +238,15 @@ Low-value target, but the two places worth attacking:
 - **The tier gate**: lantern must not emit frames into a pipe or a file. It
   resolves the tier through `beacon::effective_tier` and computes nothing
   itself; the check is that no other emission path exists.
+- **One slide change stays one frame and one write.** Nothing may reach stdout
+  between the frame's open and its close except through the one buffer, or a
+  write lands between two of halcyond's reads outside the frame. The marks must
+  be DEC private mode 2026 exactly (`the_frame_marks_are_dec_private_mode_2026`:
+  without the `?` the VT reads an ANSI mode it does not implement and no frame
+  opens), and the clear must sit inside the frame
+  (`a_slide_change_is_one_frame_with_the_clear_inside`). `ls-halcyon-lantern`
+  measures it on the device: the tile's witness line says the frame held the
+  paint, and a deck presented without the marks never prints it.
 
 ## Seams
 

@@ -12,7 +12,7 @@ validated-by: [prose]
 locks: []
 hazards: []
 abis: []
-design: ["docs/AURORA.md", "docs/HALCYON.md section 13.4", "docs/UTOPIA-VISUAL.md section 1", "docs/AURORA-CONFIG.md"]
+design: ["docs/AURORA.md", "docs/HALCYON.md section 13.4", "docs/HALCYON.md section 14.3", "docs/KAUA-TERM.md", "docs/UTOPIA-VISUAL.md section 1", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
 updated: 2026-09-28
 ---
@@ -36,8 +36,8 @@ implementation drives every consumer.
 The headline of the extraction is not reuse -- it is testability. As a module
 inside the unconditionally-`no_std` aurora crate the parser could not be
 compiled for the host at all; here it is a pure `no_std` + `alloc` crate with
-zero dependencies, and the whole byte machine is exercised by 75 host tests
-(2026-09-25; `cargo test -p vt --lib --no-default-features --target
+zero dependencies, and the whole byte machine is exercised by 90 host tests
+(2026-09-28; `cargo test -p vt --lib --no-default-features --target
 aarch64-apple-darwin` from `usr/`, or `tools/test-rust.sh vt`). The most exposed surface
 in the terminal stack -- the machine that eats every byte any program writes
 to the console -- went from untestable to covered by the move alone.
@@ -62,9 +62,14 @@ given palette (a per-tile kaua-term uses `DAYLIGHT` so its cells carry the
 compositor's theme, since the seam ships resolved RGB). `resize(ncols, nrows)`
 reweaves content-preserving. `set_theme(idx)` remaps live cells to a new
 palette. `app_cursor()` exposes DECCKM for the key re-encoder.
+`sync_output()` says a program holds a synchronized frame open (DEC private
+mode 2026) and `sync_frames()` counts the frames it has opened, wrapping.
+`FrameHold` is a renderer's bound on how long such a frame may hold its paint
+(`SYNC_HOLD_NS`, 150 ms): it lives here because both renderers, halcyond and
+[[sub-aurora]], depend on vt and share no other crate.
 
 Two public queues are the caller's to drain: `reply` holds bytes the terminal
-must answer (the CPR report), which the main loop writes into the keyboard
+must answer (the CPR report, a DECRQM mode report), which the main loop writes into the keyboard
 wire exactly as a real terminal would; `settings_req` holds `key value` lines
 pushed through the in-band config channel. The pixel side -- atlas blit,
 damage-to-present -- stays entirely with each consumer; vt never sees a pixel.
@@ -77,6 +82,51 @@ finals and malformed sequences abort to `Ground` without touching the grid --
 "parse and drop, never desync" is the governing rule, and it is why a hostile
 or simply unfamiliar stream can only ever produce wrong-looking output, never
 a wedged interpreter.
+
+**A CSI sequence is read whole, marks included (FL-1, DEC STD-070 and
+ECMA-48).** A private marker (`?` `<` `=` `>`) counts only as the first byte;
+intermediates (0x20-0x2F) are recorded, more than one making the sequence one
+no handler knows; a marker after a parameter, or a parameter after an
+intermediate, marks it malformed, and it is read to its final and ignored whole.
+C0 controls inside a CSI run in place, ESC abandons it and begins the next, CAN
+and SUB cancel it. `dispatch_csi` routes on (marker, intermediate): plain to the
+ANSI handlers, `?` to the DEC ones (`h`/`l` modes, `J`/`K` as DECSED/DECSEL,
+which are ED/EL here since no cell is protected, `n`), `$ p` with or without
+`?` to DECRQM, and anything else is ignored whole. The parser used to drop the
+marks and run the plain handler, so xterm's `CSI > 4 ; 1 m` printed `4;1m`
+(its marker aborted the parse and the tail fell to ground as text), kitty's
+`CSI ? u` restored the cursor, and DECCARA (`CSI ... $ r`) reset the scroll
+region as a DECSTBM.
+
+**Synchronized output, DEC private mode 2026 (FL-1, HALCYON 14.3).**
+`?2026h` opens a frame and `?2026l` closes it; `set_sync` records the mode and,
+on a CHANGE only, counts an open (`sync_frames`) and pushes `Boundary::Sync(on)`
+under capture, in stream order with the cells, so a second open inside a frame
+and a close with none open are nothing. RIS closes an open frame LAST, after its
+erase, so the reset's own erase is inside the frame it closes. The parser keeps
+applying every byte while a frame is open; only a renderer waits. DECRQM (`CSI
+[?] Ps $ p`) answers `CSI [?] Ps ; Pm $ y` into `reply`: 1 set or 2 reset for
+the DEC modes the parser tracks (1, 6, 7, 25, 47, 1047, 1049, 2026), 0 for any
+other and for every ANSI mode, so a program that asks before using the mode
+(neovim, notcurses) gets a true answer.
+
+**`FrameHold` bounds the wait on the renderer's side.** `open()` and `close()`
+follow the frame, and `cut()` ends the hold without the frame's close (a
+reconfigured surface, the program's end); `holds(now)` asks whether the paint
+due at `now` waits, and the first paint it defers starts the bound; `painted()`
+ends it and reports `Held::No`, `UntilClose(n)` (the program closed its frame:
+shown whole), `Cut(n)` (cut, or painted while the frame was still open) or
+`UntilTimeout(n)`, so only the program's own close reads as a whole frame;
+`waiting()` says a paint is
+deferred inside an open frame, the renderer's cue to block rather than loop
+back; `due_ms(now)` is the wait to the deadline, rounded UP so a wakeup never
+lands before it and spins, and 0 whenever the next `holds` would paint instead
+(a clock gone dead, or run backwards). The bound
+survives a close and a reopen, so no due paint waits longer than 150 ms even
+under back-to-back frames; a timeout abandons the frame (the same frame is
+never held again, so a program that never closes one costs one stall, never a
+standing slowdown); and a clock reading 0 (`monotonic_ns` failing soft) or
+running backwards never holds.
 
 **The span serial threads Beacon frames to cells, without a second parser
 (H-4d).** In capture mode the parser keeps a monotonic `span_serial`: a Beacon
@@ -189,9 +239,15 @@ continued.
 
 `Vt` is the whole interpreter: the two cell buffers (main + alt), cursor and
 saved-cursor state including autowrap, the parser state machine and its param
-array (`MAX_PARAMS` = 16), the DECSTBM band, the DECOM flag, the two output
-queues, UTF-8 assembly, the per-row `dirty` vector, and the KT-1 capture
-flag + pending-boundary queue.
+array (`MAX_PARAMS` = 16) with the CSI marks (`csi_marker`, `csi_inter` where
+0xFF means more than one, `csi_bad`), the DECSTBM band, the DECOM flag, the
+mode-2026 state (`sync`, `sync_frames`), the two output queues, UTF-8
+assembly, the per-row `dirty` vector, and the KT-1 capture flag +
+pending-boundary queue.
+
+`FrameHold` is five words: `open`, `since` (when the oldest paint not yet
+shown was first deferred; 0 = none), `held` (paints deferred), `expired` and
+`cut` (the hold ended while the frame was open).
 
 `Cell` bakes *resolved* colours at write time (`ch`, `fg`, `bg`, `attrs`),
 which is exactly what makes a theme switch a remap-by-exact-match rather than
@@ -210,7 +266,7 @@ a `set_theme` choice. The 16-colour ANSI map derives from the UTOPIA-VISUAL
 role table (slate=blue, sage=cyan, cinnabar=red, ember=bright-red); the bright
 tier is aurora's own derivation, documented in the source.
 
-`Boundary` (Scroll / Bell / ScreenErased / TopRestart / Osc / AltEnter / AltLeave) is the
+`Boundary` (Scroll / Bell / ScreenErased / TopRestart / Sync / Osc / AltEnter / AltLeave) is the
 KT-1 event enum, inert when capture is off.
 
 ## Concurrency
@@ -245,7 +301,9 @@ than by a kernel check:
 Everything degrades rather than faults, which is correct for a machine fed
 untrusted bytes:
 
-- Malformed escape/CSI aborts to `Ground`; the sequence is dropped.
+- Malformed escape aborts to `Ground`; a malformed CSI (a marker after a
+  parameter, a parameter after an intermediate) and one carrying marks no
+  handler expects are read to their final and ignored whole.
 - CSI parameters saturate on overflow (`saturating_mul`/`add`) -- no panic
   on `CSI 99999999999m`.
 - Zero geometry is clamped to `max(1)` at birth *and* on resize, so a
@@ -263,7 +321,7 @@ untrusted bytes:
 
 Per-row damage: the consumer re-renders only rows whose `dirty` flag is set.
 The byte machine avoids `core::fmt` on the hot path -- the CPR formatter is a
-hand-rolled decimal (`push_dec`). No allocation occurs on the console path
+hand-rolled decimal (`push_dec`, and `push_u32` for DECRQM). No allocation occurs on the console path
 beyond the two grid buffers and the (empty, on that path) queues.
 
 ## Prosecution
@@ -298,6 +356,22 @@ beyond the two grid buffers and the (empty, on that path) queues.
   one-arm sabotage reds (the TC-1a sweep: 22 legs, each redding exactly its
   predicted tests; the RIS fix's alt-leave and each of its three mode resets
   have a leg of their own, the resets checked at their own assertion).
+- **A marked or intermediate CSI must reach only a handler that expects its
+  marks.** Each aliasing shape (a private marker spilling as text, a marked
+  sequence running the plain handler, DECCARA running as DECSTBM, an
+  out-of-order sequence, a C0 or ESC inside one) has a named test; all six went
+  red on the parser before FL-1 (sabotage S0).
+- **Mode 2026: only a change is an event, and RIS closes last.** A set without
+  the change check (S2) and a RIS that closes before its erase (S3) each red
+  their tests.
+- **The hold's bound runs from the first deferred paint, and an open never
+  re-arms it.** Re-armed, a stream of back-to-back frames holds the paint
+  forever (S6 reds `back_to_back_frames_do_not_extend_the_hold`). A timeout
+  that does not abandon the frame re-holds the same frame after every paint
+  (S5); a hold on a dead clock never ends (S4); a deadline rounded down wakes
+  early and spins (S7); `waiting()` true on an open frame with nothing deferred,
+  or a dead clock's deadline read as none (S17, S18). Each sabotage reds exactly
+  its predicted tests.
 
 ## Seams
 
@@ -311,7 +385,8 @@ beyond the two grid buffers and the (empty, on that path) queues.
   shared KeyEvent model has no keypad keys to re-encode yet.
 - The SGR sub-parameter separator `:` is folded to `;` (adequate for the
   tree's emitters, which use `;`).
-- ANSI (non-private) `h`/`l` modes (IRM etc.) are not implemented.
+- ANSI (non-private) `h`/`l` modes (IRM etc.) are not implemented, and
+  DECRQM says so (Pm 0).
 - Heavy/double line-weight box characters render as light at these cell sizes
   in the consumers; diagonal box characters are unsupported. (These are
   rendering seams in [[sub-aurora]], not the parser's.)
@@ -322,7 +397,7 @@ beyond the two grid buffers and the (empty, on that path) queues.
   cannot compile" caveat (task #153).** Those tests were written against the
   parser while it lived inside the unconditionally-`no_std` aurora crate,
   where `cargo test` could not build them. The extraction made the parser a
-  pure host-testable crate, and the suite -- 75 tests on 2026-09-25 -- runs. It
+  pure host-testable crate, and the suite -- 90 tests on 2026-09-28 -- runs. It
   includes the two named security regressions that had *never executed* as
   aurora tests: the escape-laundering fix and the out-of-bounds erase fix,
   both reachable from any console writer.
@@ -337,7 +412,7 @@ beyond the two grid buffers and the (empty, on that path) queues.
   and the pen attributes are set correctly, but drawing a double-width cell
   two-wide, or italic as slanted, is KT-1c/1d work in the consumer.
 
-- **Currency (2026-09-28): this dossier was brought current for TC-1 and TC-1b only.**
+- **Currency (2026-09-28): this dossier was brought current for TC-1, TC-1b and FL-1 only.**
   The vt's changes between 2026-09-05 and 2026-09-22 (about 1200 lines: the
   PL-3/PL-4 soft-wrap flags, `top_continues`, the reflowing resize, the palette
   seam) are not yet described here. Dating this edit stopped `quaestor stale`

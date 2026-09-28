@@ -29,6 +29,17 @@
 #      tile holds no history row at all, the view three screens up is ground
 #      where it showed history, the live screen looks as it did, its grid is
 #      the size it was, and new output starts a history again.
+#   8. A slide change is ONE synchronized frame (FL-1, LANTERN-DESIGN 13): the
+#      tile says, once, that a frame held its paint until its program closed
+#      it. That line is the premise measured, not assumed -- the slide's
+#      records spanned reads of the pipe, so without the hold the blank and a
+#      partial slide showed. The same deck without the marks never prints it,
+#      and neither does a render step that counts the hold but paints anyway:
+#      its paint lands while the frame is open, which the tile reports as cut
+#      short (a RED bake of each, FL-1). A frame the 150 ms bound let through
+#      before one was shown whole is reported in the pass line. If every frame
+#      hit the bound the leg fails: a slide crosses the pipe in milliseconds,
+#      so a frame that needs 150 ms is a finding to hunt, not a slow host.
 #
 # The captures are kept at build/lantern-rich-*.png whatever the verdict: the
 # reason to run this is as much to LOOK at the result as to gate it, and a gate
@@ -156,6 +167,48 @@ if {$ink_two < 2000} {
     lc_fail "slide two is effectively blank (ink $ink_two): the clear erased and did not repaint"
 }
 lc_pass "ls-halcyon-lantern(3): slide two is DRAWN, not merely different -- the clear repainted"
+
+# (8) FL-1. Slides one and two have changed by now, and the tile has said once
+# how its first held frame of each kind ended. Nothing read the console since
+# the status bar (the captures go over QMP), so every line is still buffered,
+# and expect tries its patterns in list order against all of it: `shown` wins
+# whenever it is there, and an `abandoned` line before it is reported. With no
+# `shown`, an `abandoned` or a `cut` line fails, each with its own reason.
+set timeout 20
+set late ""
+expect {
+    -re {halcyond: session tile leaf=[0-9]+ synchronized frame shown \(([0-9]+) paint\(s\) held\)} {
+        set held $expect_out(1,string)
+        if {[regexp {synchronized frame abandoned at its bound \(([0-9]+) paint} $expect_out(buffer) -> n]} {
+            set late "; a frame before it hit the 150 ms bound ($n paint(s) held)"
+            lc_step "a frame hit the 150 ms bound before one was shown whole ($n paint(s) held)"
+        }
+    }
+    -re {halcyond: session tile leaf=[0-9]+ synchronized frame abandoned at its bound \(([0-9]+) paint\(s\) held\)} {
+        set n $expect_out(1,string)
+        if {$n >= 1000} {
+            lc_fail "the session loop spun while a frame held its paint ($n passes), so the frame's close was never read"
+        }
+        lc_fail "every frame hit the 150 ms bound ($n paint(s) held): the marks reached the tile and a paint waited, but no frame closed in time"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ synchronized frame cut short \(([0-9]+) paint\(s\) held\)} {
+        lc_fail "a frame was painted before its program closed it, and none was shown whole: the render step counted the hold and painted anyway, or a reconfigure or an exit cut the frame"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "synchronized frame" }
+    timeout {
+        lc_fail "no frame held a paint: lantern's marks did not reach the tile, or every slide fit one read of the pipe (the premise)"
+    }
+    eof { lc_fail "EOF waiting for the synchronized-frame line" }
+}
+set timeout 120
+# Each held pass is one wake of the session loop: an ingest, an event, the
+# hold's deadline. A loop that comes back for a held tile without waiting
+# spins, and piles up tens of thousands in the 150 ms (the first GREEN run:
+# 91612, and the spin kept the frame's close unread until the bound).
+if {$held >= 1000} {
+    lc_fail "the session loop spun while the frame held its paint ($held passes)"
+}
+lc_pass "ls-halcyon-lantern(8): a slide change is one synchronized frame -- the tile held $held paint(s) until it closed$late"
 
 # (5) TC-1, the operator's "lantern doesn't clear". Before the fix the view
 # bottom-anchored the live tail, so after a clear the slide sat at the BOTTOM of

@@ -90,12 +90,17 @@ they should share the baked-font blit.
 
 **Synchronized output (FL-1, 2026-09-28; HALCYON 14.3).** While a program holds a
 DEC mode 2026 frame open (`CSI ? 2026 h` ... `CSI ? 2026 l`), Aurora keeps feeding
-the VT and holds only its paint, so a half-drawn screen is never presented. Aurora
+the VT and holds only its paint, so a half-drawn screen is not presented while
+the frame arrives within the bound. Aurora
 never captures boundary events, so it reads the VT's state once per pass: the
 mode, and a count of the frames opened, so a frame that closed and a new one that
-opened between two passes still count as a new frame. The hold ends at the close
+opened between two passes still count as a new frame. The hold ends at the close,
+when the compositor reconfigures the surface (the program redraws for it anyway),
 or 150 ms after the first pass it held, and a timeout abandons the frame, so a
-program that never closes one costs the console a single 150 ms stall. The VT
+program that never closes one costs the console a single 150 ms stall. A frame
+whose bytes take longer than the bound to arrive -- aurora drains at most 16 KiB a
+pass, and a pass rides the compositor's frame tick (60 Hz, or 15 Hz after a quiet
+second) -- is shown as it stands at the bound, as a tile's is. The VT
 answers DECRQM for the mode (`CSI ? 2026 $ p`), so a program that asks before
 using it (neovim, notcurses) gets a true answer here as in a Halcyon tile.
 

@@ -69,6 +69,11 @@ pub enum Control {
     /// The erased rows went first as ScrollOff and the blank as a CellDiff;
     /// halcyond pins its view on this (HALCYON 14.13).
     ScreenErased,
+    /// The program opened a synchronized frame (DEC mode 2026): halcyond
+    /// holds the tile's paint until `SyncEnd`, bounded (HALCYON 14.3).
+    SyncBegin,
+    /// The program closed its synchronized frame.
+    SyncEnd,
 }
 
 /// One ordered seam record, kaua-term -> halcyond (HALCYON 14.3). Cells are the
@@ -232,6 +237,17 @@ impl Producer {
                 Boundary::ScreenErased => {
                     self.flush(vt, out);
                     out.push(Record::Control(Control::ScreenErased));
+                }
+                // After the pending cells, like every control: the cells
+                // before a frame are never inside it, and its last cells
+                // reach halcyond before its close.
+                Boundary::Sync(on) => {
+                    self.flush(vt, out);
+                    out.push(Record::Control(if on {
+                        Control::SyncBegin
+                    } else {
+                        Control::SyncEnd
+                    }));
                 }
                 // Row 0 restarted: ship the held rows and the top flag now,
                 // or the next row to leave joins the same ScrollOff and the
@@ -971,6 +987,73 @@ mod tests {
                 (0, 4, 'e')
             ]
         );
+    }
+
+    fn kinds(out: &[Record]) -> Vec<&'static str> {
+        out.iter()
+            .map(|r| match r {
+                Record::ScrollOff { .. } => "scroll",
+                Record::CellDiff { .. } => "cells",
+                Record::Control(Control::ScreenErased) => "erased",
+                Record::Control(Control::SyncBegin) => "begin",
+                Record::Control(Control::SyncEnd) => "end",
+                Record::Mode(_) => "mode",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_synchronized_frame_brackets_exactly_the_cells_written_inside_it() {
+        let recs = produce(6, 1, b"a\x1b[?2026hbc\x1b[?2026ld");
+        assert_eq!(kinds(&recs), ["cells", "begin", "cells", "end", "cells"]);
+        assert_eq!(cell_chars(&recs[0]), vec![(0, 0, 'a')]);
+        assert_eq!(cell_chars(&recs[2]), vec![(0, 1, 'b'), (0, 2, 'c')]);
+        assert_eq!(cell_chars(&recs[4]), vec![(0, 3, 'd')]);
+    }
+
+    #[test]
+    fn a_cleared_slide_is_one_frame() {
+        // Lantern's slide change: every record the clear makes is inside.
+        let mut vt = Vt::new(6, 3);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        p.feed(&mut vt, b"ab\r\ncd", &mut out);
+        out.clear();
+        p.feed(
+            &mut vt,
+            b"\x1b[?2026h\x1b[0m\x1b[H\x1b[2Jslide\x1b[?2026l",
+            &mut out,
+        );
+        assert_eq!(
+            kinds(&out),
+            ["begin", "scroll", "cells", "erased", "cells", "end"]
+        );
+    }
+
+    #[test]
+    fn a_reset_inside_a_frame_closes_it_after_its_erase() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        p.feed(&mut vt, b"hi", &mut out);
+        out.clear();
+        p.feed(&mut vt, b"\x1b[?2026h\x1bc", &mut out);
+        assert_eq!(kinds(&out), ["begin", "scroll", "cells", "erased", "end"]);
+    }
+
+    #[test]
+    fn only_a_change_of_the_mode_is_a_record_on_either_screen() {
+        let recs = produce(4, 1, b"\x1b[?2026h\x1b[?2026hx\x1b[?2026l\x1b[?2026l");
+        assert_eq!(kinds(&recs), ["begin", "cells", "end"]);
+        let recs = produce(4, 2, b"\x1b[?1049h\x1b[?2026hx\x1b[?2026l");
+        let at = recs
+            .iter()
+            .position(|r| *r == Record::Control(Control::SyncBegin))
+            .expect("a frame opens on the alt screen too");
+        assert_eq!(kinds(&recs[at..]), ["begin", "cells", "end"]);
     }
 
     #[test]

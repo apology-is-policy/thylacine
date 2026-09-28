@@ -194,6 +194,37 @@ first cut ended the history AT the tail, so its last `pad_top` pixels -- a whole
 line on Instrument -- showed above the slide). It is the
 only way the tile learns of a clear; blank cells are never read as one.
 
+**A synchronized frame holds the tile's paint, and nothing else (FL-1, HALCYON
+14.3).** `Tile.hold` (`vt::FrameHold`, [[sub-lib-vt]]) follows the program's
+frame: `apply_control` opens it on `SyncBegin`, closes it on `SyncEnd` and cuts
+it on `Exit`. Every record still applies as it arrives, so the seam's ordering
+contracts, the pin above among them, are untouched. The session's render step
+skips a tile whose paint is due while `hold.holds(now)` says wait, leaving it
+dirty; a skipped tile is not a present, so it counts neither toward the "session
+up" witness nor toward the present-failure limit. A gone child's tile (`exit`
+set, which also covers a crash that sent no `Exit`) never waits. Only that tile
+waits: every other tile paints as usual. A successful present calls `painted()`,
+which ends the hold, and test builds then say once per tile `synchronized frame
+shown (N paint(s) held)` when the program closed the frame, `... abandoned at its
+bound ...` if the 150 ms bound let it through, or `... cut short ...` if a
+reconfigure or the program's end cut it, or the paint landed while it was still
+open -- so a render step that counts the hold but paints anyway never reads as a
+whole frame. That line is the premise the device leg measures: the frame
+spanned reads, so without the hold a torn screen would have shown. The poll
+timeout folds the nearest `due_ms` over the held tiles, so a program that never
+closes its frame gets its tile painted at the bound, not at the next unrelated
+event. A surface CONFIGURE (a resize, or the compositor's redraw request) cuts
+the hold; a scale change that only reshapes the grid does not, since the
+surface still shows the last whole paint. The loop's pre-poll rule -- any dirty
+tile loops back to render before
+blocking -- excepts a live tile whose paint is `waiting()`: it waits in the poll
+for the rest of its frame or the deadline. The first device run had no such
+exception, and the held tile spun the loop (91612 held passes in 150 ms) without
+ever reading the frame's close, so the bound abandoned every frame; leg 8 now
+fails on a held count of 1000 or more. The hold lives here, not in the kaua-term, because halcyond paints
+after every read of a tile's pipe (at most `INGEST_BUF` = 8 KiB) and one
+full-screen `CellDiff` is about 40 KB.
+
 **Super+K forgets the history, and only the history (TC-1b, HALCYON 14.13).**
 The chord is the user's: the compositor delivers `TEV_CHORD` code 4 with the
 focused pane's id to the rail's owner ([[sub-tapestryd]]), and `railset` maps it
@@ -1012,7 +1043,7 @@ presents are a recorded optimization.
   is ADDRESSED by the SQPOLL ring (KT-1.5b-i): the kernel poll-thread demuxes
   the console's parked reply on a frame-boundary deadline independent of
   halcyond's loop branch. A targeted repro is owed.
-- **Currency (2026-09-25): this dossier was edited for TC-1 and TC-1b only.** The halcyond
+- **Currency (2026-09-28): this dossier was edited for TC-1, TC-1b and FL-1 only.** The halcyond
   changes between 2026-09-17 and 2026-09-22 (about 940 lines of `tile.rs`
   alone) are not yet described here, beyond what earlier sections already say.
   Dating this edit stopped `quaestor stale` from flagging the dossier, so the
@@ -1020,6 +1051,17 @@ presents are a recorded optimization.
 
 ## Tests
 
+- **FL-1 (2026-09-28): 424 lib tests, all green** (`tools/test-rust.sh
+  halcyond`). `the_frame_records_open_and_close_the_hold_and_an_exit_closes_it`
+  pins the records' effect on `Tile.hold`;
+  `a_slide_split_across_two_reads_is_held_until_its_close` runs lantern's slide
+  change through the real vt, producer and wire, cut in two reads right after
+  the erase: after the first read the tile holds the blank, after the second
+  the slide is through. Sabotage: SyncBegin opening nothing (S12) and SyncEnd
+  closing nothing (S14) red both; an Exit that leaves the hold open (S13) reds
+  the first. The render step's skip, the witness line, the poll deadline and the
+  CONFIGURE close live in the bin and are proven on the device
+  (`ls-halcyon-lantern`).
 - **TC-1b (2026-09-28): 422 lib tests, all green** (`tools/test-rust.sh
   halcyond`). TC-1b's tests pin the forget (what goes, what stays, the husks,
   the budget, the obj charge, the continuation, the cap's freeze in a tile), the

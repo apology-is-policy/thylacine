@@ -47,7 +47,7 @@ use aurora::{config, osd, render};
 use alloc::string::String;
 use alloc::vec::Vec;
 use cornucopia::Atlas;
-use libthyla_rs::time::{sleep, Duration};
+use libthyla_rs::time::{monotonic_ns, sleep, Duration};
 use libthyla_rs::{
     t_close, t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
     T_WALK_OPEN_FROM_ROOT,
@@ -595,6 +595,9 @@ pub extern "C" fn rs_main() -> i64 {
     let mut frames: u64 = 0;
     let mut blink_on = true;
     let mut prev_cursor: Option<(usize, usize)> = Some((0, 0));
+    // AURORA.md 3: a program's synchronized frame holds the paint.
+    let mut hold = vt::FrameHold::default();
+    let mut sync_seen: u32 = 0;
     let mut keybuf: Vec<u8> = Vec::new();
     // #129: bytes the console REFUSED, held for the next loop pass.
     //
@@ -820,6 +823,9 @@ pub extern "C" fn rs_main() -> i64 {
                     // generation; the compositor crops the top-left).
                     // No diagnostic print on the hot arms: aurora shares
                     // /dev/cons with whatever it renders.
+                    // A reconfigured surface cuts a synchronized frame's
+                    // hold short: the program redraws for it anyway.
+                    hold.cut();
                     let ow = (e.value >> 16) as usize;
                     let oh = (e.value & 0xffff) as usize;
                     let sub_floor =
@@ -999,6 +1005,14 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
 
+        // (2b) Follow the program's synchronized frame.
+        aurora::follow_frame(
+            &mut hold,
+            &mut sync_seen,
+            term.sync_frames(),
+            term.sync_output(),
+        );
+
         // (3) Damage: cursor movement dirties its old + new rows; then the
         // contiguous dirty span renders into the CURRENT slot + presents.
         // Blink off (the OSD setting) means always-solid, not never-shown.
@@ -1042,6 +1056,11 @@ pub extern "C" fn rs_main() -> i64 {
         // A damage-only present there would leave undefined pixels around the
         // fresh rows, so it routes through the full-frame branch instead.
         let stale_slot = r0 < r1 && surf.age() == 0;
+        // A paint due inside an open frame waits for the close or the bound;
+        // the next FRAME tick runs this pass again.
+        if (full_fill || osd_pass || r0 < r1) && hold.holds(monotonic_ns()) {
+            continue;
+        }
         if full_fill || osd_pass || stale_slot {
             // #55: the post-reweave full frame (the frame-0 pattern applied
             // through the single present site so the retry discipline holds).
@@ -1070,6 +1089,7 @@ pub extern "C" fn rs_main() -> i64 {
                 // re-fills + re-composes the next slot.
             } else {
                 present_fails = 0;
+                hold.painted();
                 full_fill = false;
                 ui.dirty = false;
                 for d in term.dirty.iter_mut() {
@@ -1124,6 +1144,7 @@ pub extern "C" fn rs_main() -> i64 {
                 // present, so the retry MUST re-render before re-presenting.
             } else {
                 present_fails = 0;
+                hold.painted();
                 for d in term.dirty[r0..r1].iter_mut() {
                     *d = false;
                 }
