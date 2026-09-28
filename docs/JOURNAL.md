@@ -30,7 +30,7 @@ needed the operator.
 
 **The operator's vote (2026-09-28).** A seam record is a wire ABI change, so it went to the operator as three options: the seam record; a kaua-term hold with no wire change; lantern alone. They chose the seam record: `sync_begin` and `sync_end`, Control subtags 7 and 8, with halcyond holding only the tile's paint until the close, a resize, the program's exit, or 150 ms. The 150 ms is mine, not part of the vote. It comes from the short camp (Alacritty, contour, mintty) because the committed frame budget (VISION 4.5, p99.9 < 33 ms) treats a tail spike as a bug. Recorded as `dec-2026-09-28-sync-output-seam`.
 
-**Subtag 7 was said to be taken, and was not.** TC-1a's wire test comment and the sub-kaua-term dossier (both 1cc9a300, both mine) say "subtag 7 is allocated to another record". No scripture on aux-3 or on main (4109ad1f) allocates it, main's wire.rs ends at 6 like ours, and the one "tag 7" in AUDIT-TRIGGERS.md is the cartoon `Op` tag. The claim was wrong when it was written. FL-1 corrects both texts.
+**Subtag 7 was said to be taken, and was not.** TC-1a's wire test comment and the sub-kaua-term dossier (both 1cc9a300, both mine) say "subtag 7 is allocated to another record". No scripture on aux-3 or on main (6a57d37a) allocates it, main's wire.rs ends at 6 like ours, and the one "tag 7" in AUDIT-TRIGGERS.md is the cartoon `Op` tag. The claim was wrong when it was written. FL-1 corrects both texts.
 
 **A parser defect found on the way.** Reading `csi()` for the DECRQM parse turned up three faults:
 - `<`, `=` and `>` hit `_ => State::Ground`, so `CSI > 4;1 m` (vim's modifyOtherKeys) left `4;1m` on the screen.
@@ -121,7 +121,7 @@ deadline to the server. QNX's `_IO_NOTIFY` separates POLL from POLLARM.
 The third vote exists because my own option text was wrong. I had offered "the
 call's own deadline" as a bound. For timeout 0 that deadline has passed before
 the snapshot is sent, which is #98 again, one layer down. I surfaced it before
-the vote. NP-1 (195fdd73) landed the scripture.
+the vote. NP-1 (7c1dc314) landed the scripture.
 
 **NP-2, the model first.** `net_poll.tla` was rewritten, not extended. The old
 module's `ready` was monotonic and its poller only parked, so it had no state in
@@ -165,7 +165,7 @@ libthyla-rs unconditionally. libthyla-rs cannot be built for the host, because
 its `_start` is ELF assembly. So tools/test-rust.sh classes all three NO-HOST,
 and a test added to any of them would be counted and never run. The 9P codec
 inside libthyla-rs has 820 lines, no dependencies and no system calls, and for
-the same reason it had never had a test. NP-3a (a4efecd9) moved it unchanged
+the same reason it had never had a test. NP-3a (5caa79ae) moved it unchanged
 into its own crate, `usr/lib/ninep`, re-exported under the old path so that no
 caller changed. It added eight tests of invariants its dossier already claimed,
 and I ran four sabotages, one per invariant family; each turned its test red.
@@ -342,13 +342,54 @@ check is unconditional. Plan 9 queues exit-time closes to a kernel process
 until unmount. The fix is a design choice, so it waits for the operator's vote
 (OPEN-BUGS).
 
+**The audit.** Fable 5.1 prosecuted NP-1 through NP-4c at `d785bd70`,
+now `24e0ac0d` (its first and last lines named the same model). It found 0 P0,
+0 P1, 0 P2 and 2 P3, and ran both spec scripts itself: every clean cfg reached
+its documented state count, and all 21 red cfgs broke their named property by
+the documented path. F1: a `ready` fd's Tclunk at close is refused for a dying
+sender, so a netd slot leaks. That is one more instance of the Tclunk leak
+below; the arm's own Tflush is not exposed. Its prosecution was wrong about
+where, though. The at-exit handle drain runs inside #68's exit-close window,
+where the Tclunk is sent; the exposure is a last reference dropped by a dying
+thread outside that window. F2: a widened arm wakes a co-poller for events it
+did not ask about. The co-poller samples again and parks again, so it costs
+CPU, not correctness. My own two findings were P3 as well, closed with reasons.
+A clean round, so no second one.
+
+**Where the killed thread closes it.** A second instrumented boot printed who
+made each never-sent close and walked the caller's frame records. The saved
+return addresses carry pointer-authentication bits; stripped and slid by the
+KASLR offset, they symbolize. All three are the same: a `go` process whose
+group-exit message is `killed`, still in its kernel spawn thunk.
+`sys_spawn_full_argv_thunk` clunks its exec Spoor after `exec_setup_from_spoor`
+(`kernel/syscall.c:9383`). gopls kills a `go` child it has just spawned, before
+the child reaches its first user instruction. My triage note had guessed the
+address-space teardown; the chain says otherwise. The readiness paths are not
+exposed to the same refusal: the async submit and the abandon's Tflush write
+the ring without the dying check.
+
+**The operator's vote: a closer thread.** Offered four ways to deliver the
+Tclunk of a dying thread: Plan 9's `ccloseq`/`closeproc`, the Linux v9fs shape
+(send if the ring has room, else leak), both, or a third setter of the #68
+exit-close window. The operator chose the closer (my recommendation): a
+Tclunk a dying thread cannot send is taken back whole
+(`p9_session_retract_unsent` re-binds the fid) and sent by a kernel thread
+that is not dying, holding a session ref. The refusal line will print only
+while the session is live, so it names a real leak and a gate can require
+zero. The capability microkernels agree on the principle: Zircon closes a
+dead process's handles, Mach sends no-senders, Genode's parent closes a dead
+child's sessions. The fix comes after the NP-4 merge, scripture first.
+
 **Open.**
-- NP-4's Fable audit (NP-1 through NP-4c), the suite on the squash, and the
-  SMP gate (ubsan-smp8 and default-smp1).
-- The kill-time Tclunk leak: a design vote, then the fix, its test and an
-  audit.
-- Then the aux-3 fast-forward, and after it NP-5 (the vivarium's per-call open
-  of each socket's `ready` file).
+- The suite and the SMP gate (ubsan-smp8 and default-smp1) on NP-4 rebased
+  onto aux-3 `eb9a74ea`, then the fast-forward of main and the push.
+- The kill-time Tclunk leak: the closer thread, scripture first, then the
+  fix, its tests and an audit.
+- Found while planning it (pre-existing, enqueued, not yet seen on a boot): a
+  flushed Twalk whose Rwalk beats the Rflush leaks its new fid. The session
+  absorbs the late reply without binding the fid (`kernel/9p_session.c`
+  around 1043), and flush(5) says such a reply must be honoured.
+- Then NP-5 (the vivarium's per-call open of each socket's `ready` file).
 - ~/tla2tools.jar is still the stale 2.19 build. It is the operator's file, and
   I have not replaced it.
 - check-syscall-irqs.sh does not sweep its TTrace files; specs/ holds 152 old
