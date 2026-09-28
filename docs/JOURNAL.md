@@ -380,15 +380,67 @@ zero. The capability microkernels agree on the principle: Zircon closes a
 dead process's handles, Mach sends no-senders, Genode's parent closes a dead
 child's sessions. The fix comes after the NP-4 merge, scripture first.
 
+**The rebase.** While the audit ran, aux-3 moved to `eb9a74ea`, carrying
+LR-1 and FL-1. LR-1's code (`728d627c`) touched seven of the kernel files
+NP-4 touches: `kernel/9p_client.c`, `kernel/dev9p.c`, their two headers,
+`kernel/syscall.c`, `kernel/test/test_dev9p.c` and `kernel/test/test.c`. Git
+merged all seven without a conflict. `git range-diff` shows no NP-4 code line
+changed. What differs is context, this journal (both sides kept), the
+rendered coverage view (rendered again), and three dossier `updated:` stamps
+that LR-1 had already moved to the same day. A clean text merge says nothing
+about how the two kernels behave together, so everything ran again on the
+combined tree (`a402cb70`):
+- the suite, 1750/1750, with no `poll: FAILSAFE`;
+- the SMP gate, all five rows: ubsan-smp8 and default-smp1 25/25 and
+  25/25, then default-smp4, default-smp8 and ubsan-smp4 10/10 each;
+- on the CI image, the PTY and network legs, 14/14: ls-ci, pty-4,
+  pty-susp-pouch, item10-ctrlc, viv-console-ctrlc, viv-run, the five haul
+  legs, git-shell, ergo-1 and prowl;
+- the Rust host tests, 2120 in 29 crates with none failing, and haul's live
+  npxf interop test, which is ignored unless a server is up.
+
+The spec files are byte-identical to the tree the two spec scripts ran on, so
+their counts stand.
+
+The early gate on `d785bd70`, 50 of 50, was evidence about NP-4 on its old
+base only.
+
+**pty-4 was red, and not because of NP-4.** Its type-ahead leg waited for the
+editor's redraw to end with cursor-forward 35, which is 4 columns of inner
+prompt plus the 31 typed characters. Since `1e5d2751` (09-23) the inner shell
+that ptyhost starts shows its inherited working directory, `/home/michael`, so
+the redraw ends at 47 and the anchor could never match. It failed three
+attempts of three, with the whole line visibly in the editor each time: 31
+redraws, one per delivered character. The leg has been red on main since that
+commit, because no merge since then ran the interactive legs, and NP-4 touches
+neither the shell nor ptyhost. The anchor is now the editor's redraw of the
+whole line (`8d747730`), and it passes on this tree. To see it fail, ptyfs was
+sabotaged to discard any pending line longer than 8 bytes. Its boot selftest
+types 2 bytes and still passed, and the leg failed at this step: after the
+cooked echo the editor stayed empty. Discarding every line instead stops the
+boot at that selftest (`modeflush-raw-delivered`) before the leg can run.
+haul-npxf and haul-post need an npxf server on the host, so the first run
+skipped them; both passed against a read-only fixture on ports 5640 and 15640.
+
 **Open.**
-- The suite and the SMP gate (ubsan-smp8 and default-smp1) on NP-4 rebased
-  onto aux-3 `eb9a74ea`, then the fast-forward of main and the push.
 - The kill-time Tclunk leak: the closer thread, scripture first, then the
-  fix, its tests and an audit.
-- Found while planning it (pre-existing, enqueued, not yet seen on a boot): a
-  flushed Twalk whose Rwalk beats the Rflush leaks its new fid. The session
-  absorbs the late reply without binding the fid (`kernel/9p_session.c`
-  around 1043), and flush(5) says such a reply must be honoured.
+  fix, its tests and an audit. One question goes to the operator first. Plan
+  9's closeproc is a pool: `ccloseq` spawns another close proc whenever none
+  is idle, so a close stuck on one server never delays another. One thread
+  here could be wedged by a single stuck server, because a session attached
+  over a pipe has no receive deadline.
+- The flushed-request class, all found by reading, none seen on a boot yet:
+  - the kernel absorbs a late reply to a flushed request without its state
+    change, so a walk's new fid leaks (`kernel/9p_session.c` around 1043);
+  - a sync Tclunk answered by a bare Rflush was cancelled, so its fid is
+    still live on the server, but the client unbound it when it built the
+    Tclunk;
+  - stratumd runs a request flushed mid-execution and then discards its
+    reply (`src/cmd/stratumd/fs_pool.c`), where flush(5) says a completed
+    request's reply must reach the client.
+- ptyhost starts its inner shell without `--home`, so a nested shell has no
+  `$home`: `cd` alone does not go home, and the prompt shows the full path.
+  Whether ptyhost should forward the session's home is still to decide.
 - Then NP-5 (the vivarium's per-call open of each socket's `ready` file).
 - ~/tla2tools.jar is still the stale 2.19 build. It is the operator's file, and
   I have not replaced it.
