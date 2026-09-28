@@ -4,7 +4,7 @@ type: chg
 title: "FL-1: a synchronized frame (DEC ?2026) holds the paint -- the vt tracks and reports the mode, the kaua seam carries it as sync_begin/sync_end, halcyond and aurora hold the paint, and lantern writes one frame per slide"
 date: 2026-09-28
 arc: arc-tapestry
-commits: ["SQUASH"]
+commits: ["d43f9454"]
 touched:
   - sub-lib-vt
   - sub-kaua-term
