@@ -663,6 +663,50 @@ poll-state-lock (walk/reap) **separately**, never nested. The spec
 action↔impl map (`PollerRegister` / `NetdReplyDemux` / `KthreadWalk`) is in
 `specs/SPEC-TO-CODE.md`.
 
+**Amendment (#98, 2026-09-28; operator vote, `dec-2026-09-28-poll-sample-arm-split`):
+the SAMPLE/ARM split.** The bridge above sent one message to do two jobs. The
+deferred readiness `Tread` was the *sample* a poll's verdict rests on, and it was
+also the *arm* that wakes a parked poller. A poll that had to return (timeout 0,
+or a deadline lapsing) could only read a cache of whatever the relay had delivered.
+So a truthful "not ready" could not be said, and the vivarium's 10 ms budget for a
+zero timeout failed the SMP gate. The two jobs now have two messages. Both use the
+same `ready` fid and the same read authority, so no new 9P message and no new
+syscall are added, and the 2026-06-18 terms hold:
+
+- **The sample is a SNAPSHOT.** A readiness `Tread` whose offset carries
+  `mask | P9_POLL_SNAPSHOT` (bit 16, the first bit above the 16-bit event mask) is
+  answered **at once** with the current revents as a u32. The answer may be 0, and
+  the read is never deferred. It is the kernel's only way to sample a `QTPOLL`
+  file: the per-Spoor cached bitmap and its consume-on-return are retired. A server
+  answers an offset carrying any other bit above the mask with `Rlerror`, so a
+  future bit is never silently read as a mask.
+- **The arm is the deferred read, and nothing else.** It is sent only when a poll is
+  about to park, for each `QTPOLL` fd whose snapshot said not-ready, after that
+  poller's hook is installed. The server evaluates it on arrival, level-triggered,
+  so an edge between the snapshot and the arm is answered at once and I-9 holds
+  across the round trip. The arm's completion is a wake: the woken poll samples
+  again and never reads the arm's bitmap as the answer.
+- **The poll core settles.** A pass submits every `QTPOLL` fd's snapshot, waits until
+  all of them have answered, and only then decides. That costs one server round
+  trip per pass however many sockets the pass holds. The settle is also what makes a
+  socket that was ready at entry appear beside a ready local fd. A timeout-0 poll is
+  one sample-only pass, with no hook, no arm and no `Tflush`. If a timed poll's
+  deadline passes while a pass settles, that pass's snapshots are its answer: each
+  one linearizes at the instant the server evaluated it, inside the call.
+- **The fail-safe.** A snapshot still unanswered 1 s after it was sent is flushed and
+  reported not-ready. The call's timeout never cuts that interval short, so a poll
+  may return late by one round trip but never early on a guess. Every expiry is
+  counted and printed, and the boot gates fail on one. A server that defers the
+  snapshot is the witness that the fail-safe fires. A server that has died is not
+  this case: its session fails every op, and the poll reports `POLLERR` as before.
+
+`specs/net_poll.tla` (spec-first) gains the timed and zero-timeout poller, the
+snapshot, the settle and a non-monotonic `ready`, with counterexamples for a
+cache-only sample and for a verdict given before the settle. `specs/poll.tla` gains
+the settle phase. The vivarium's per-call open of each socket's `ready` file costs a
+Twalk, a Tlopen, a Tclunk and a guest fd per socket per call. It is retired
+separately, with a Spoor held outside the guest fd table.
+
 **As-built (net-6b-3): the pouch `poll()` translation.** `0018-pouch-net-poll.patch`
 makes pouch/Linux `poll()`/`select()`/`pselect`/`ppoll` work over an `AF_INET`
 `/net` socket. The hazard: a tagged socket fd's `kernel_fd` is the
