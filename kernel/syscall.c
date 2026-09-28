@@ -5921,7 +5921,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
 
     // #65 (I-32): charge this Proc's anon-page floor BEFORE committing the
     // eager allocation. Under vma_lock, so the check+charge is atomic against a
-    // sibling attach (the cap is exact). A non-TCB Proc over PROC_PAGE_MAX is
+    // sibling attach (the cap is exact). A non-TCB Proc over its budget is
     // refused with -ENOMEM here -- it never reaches the allocator. Uncharged on
     // every failure path below + on SYS_BURROW_DETACH.
     //
@@ -5943,11 +5943,11 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
 
     // burrow_create_anon: handle_count = 1 (the construction reference),
     // mapping_count = 0; pages allocated eagerly (power-of-2 rounded).
-    struct Burrow *b = burrow_create_anon(length);
+    struct Burrow *b = burrow_create_anon(length, proc_resource_exempt(p));
     if (!b) {
         proc_page_uncharge(p, npages);
         spin_unlock(&p->as->lock);
-        return -1;
+        return -T_E_NOMEM;              // the pool refused: the cap's verdict (audit F10)
     }
 
     // burrow_map installs the VMA (vma_alloc → burrow_acquire_mapping,
@@ -6006,15 +6006,23 @@ static s64 detach_shape_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
     return 0;
 }
 
-// The address half: the burrow-attach window (F1, P6-pouch-mem-a audit).
-// burrow_unmap matches a VMA by geometry alone, so without a bound a caller
-// could pass the coordinates of its own ELF segment, stack, or stack-guard VMA
-// and have burrow_unmap dismantle it (removing the stack guard silently retires
-// a security page). Every kernel-placed region lives in the window and every
-// ELF / stack / guard / vDSO VMA sits below it. BURROW_ATTACH_MAX keeps
-// TOP - length from underflowing.
+// B-1a': every lazy-reservation, decommit, fixed-window and detach length is
+// bounded by the window itself; syscall.h spells the bound in the window's own
+// numbers (it cannot include exec.h), so the two are pinned equal here.
+_Static_assert(BURROW_RESERVE_MAX == EXEC_USER_BURROW_TOP - EXEC_USER_BURROW_BASE,
+               "BURROW_RESERVE_MAX must be the burrow window (syscall.h spells it numerically)");
+
+// The address half: the burrow-attach window (F1, P6-pouch-mem-a audit). A
+// detach removes by geometry alone, so without a bound a caller could pass the
+// coordinates of its own ELF segment, stack, or stack-guard VMA and have them
+// dismantled (removing the stack guard silently retires a security page).
+// Every kernel-placed region lives in the window and every ELF / stack / guard
+// / vDSO VMA sits below it. B-1a': the length is bounded by the window, not by
+// BURROW_ATTACH_MAX -- a 4 GiB reservation detaches in one call (the >256 MiB
+// refusal that stranded every large lazy region); the window bound is what
+// keeps TOP - length from underflowing.
 static bool detach_in_window(u64 vaddr, u64 length) {
-    if (length > BURROW_ATTACH_MAX)                  return false;
+    if (length > BURROW_RESERVE_MAX)                 return false;
     if (vaddr < EXEC_USER_BURROW_BASE)               return false;
     if (vaddr > EXEC_USER_BURROW_TOP - length)       return false;
     return true;
@@ -6040,319 +6048,55 @@ static bool detach_is_hw_map_locked(struct Proc *p, u64 vaddr, u64 length) {
     return b->type == BURROW_TYPE_DMA || b->type == BURROW_TYPE_MMIO;
 }
 
-// The phenotype munmap range's admission: shape + window. It removes a RANGE,
-// so the identity half would have to hold per VMA; a Linux-phenotype Proc
-// cannot reach the three hardware-map syscalls, so the window is the whole rule
-// there.
-static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
-                             u64 *length_out) {
-    u64 length;
-    if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
-        return -1;
-    if (!detach_in_window(vaddr_raw, length))        return -1;
-    *length_out = length;
-    return 0;
-}
-
-// The per-VMA detach body (#199 factored it from sys_burrow_detach_for_proc,
-// byte-identical semantics): exact-match [vaddr_raw, vaddr_raw+length) against
-// ONE installed VMA, remove it, settle the I-32 accounting. Caller holds
-// as->lock and has already admitted the span (detach_args_check, or the native
-// path's window-or-identity test).
-//
-// D-3c F1: `*out_free` receives the Burrow whose mapping-drop was the last ref
-// (or NULL) -- the caller pushes it onto a local stack and frees it with
-// burrow_free_deferred AFTER dropping as->lock, because a FILE Burrow's free
-// reaches a possibly-sleeping spoor_clunk and a sleeping free under a spinlock
-// is the lock-across-sleep extinction. The I-32 uncharge stays here (under the
-// lock); only the physical free is deferred.
-static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
-                             struct Burrow **out_free) {
-    // D-3c re-audit F6: this ALWAYS runs under as->lock, so an inline
-    // (possibly-sleeping FILE) free here is the lock-across-sleep extinction.
-    // out_free is therefore MANDATORY -- the helper always DEFERS the physical
-    // free to the caller. A NULL out_free would silently reintroduce F1, so fail
-    // loud rather than take the inline-free arm.
-    if (!out_free) extinction("detach_one_locked without out_free (would free under as->lock)");
-    *out_free = NULL;
-    // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
-    // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
-    // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
-    // the VMA type BEFORE burrow_unmap frees the VMA/Burrow; under vma_lock so the
-    // state is stable. (For a wrong-base/length detach, burrow_unmap returns -1
-    // and nothing is uncharged.)
-    //
-    // B-1a: a LAZY VMA may be one PIECE of a Burrow that a protect (or a D-3b
-    // window) split, so "the Burrow's resident count" is no longer this
-    // mapping's charge -- the other pieces still map the rest, and uncharging
-    // the whole count here refunded the same pages once per piece. The refund
-    // is now the piece's OWN range: burrow_decommit frees and uncharges exactly
-    // the resident slots inside it (COW-aware, PTEs cleared first), and the
-    // unmap that follows finds nothing left to release. For a mapping that is
-    // the whole Burrow this is the same pages freed a few lines earlier; for a
-    // piece it is the only correct answer, and it is also what the bar asks --
-    // a detached range's pages return to the system at once.
-    struct Vma *dvma = vma_lookup(p, vaddr_raw);
-
-    // I-42 (CL-7k self-audit): a CODE alias is NOT detachable here. A code
-    // region is a PAIR of aliases over one charge, and this syscall has no
-    // concept of the pair, so it gets both halves of that wrong:
-    //
-    //   - ACCOUNTING (the I-32 defeat). Create charges npages ONCE for the
-    //     region. Detaching the exec alias uncharges npages and detaching the
-    //     writer alias uncharges npages AGAIN -- one charge, two refunds. The
-    //     clamp in proc_page_uncharge stops the wrap but not the drift: a
-    //     CAP_JIT holder could loop create-then-detach-both, driving its
-    //     page_count to 0 while its real usage never changed, and then allocate
-    //     a full PROC_PAGE_MAX again. That defeats the per-Proc bound for
-    //     exactly the class of Proc (a JIT-capable app) it exists to bound.
-    //
-    //   - LIFETIME. Detaching one alias leaves the other orphaned: its peer is
-    //     gone, so SYS_JIT_DESTROY refuses it and the region survives until
-    //     Proc exit with no way to release it.
-    //
-    // Refusing is the right fix rather than teaching detach to find the peer:
-    // the JIT syscalls own this lifetime, and one condition here keeps that
-    // ownership total. Self-inflicted either way -- a Proc can only do this to
-    // its own region -- but a bound that a capability holder can zero is not a
-    // bound.
-    if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
-        dvma->burrow->type == BURROW_TYPE_CODE) {
-        // Return WITH the lock held -- the caller owns the lock pair (#199
-        // factoring; the pre-factor body unlocked here, and leaving that in
-        // made the wrapper's unlock a preempt-underflow double).
-        return -1;
-    }
-
-    // #122: a POSITIVE allowlist -- uncharge page_count only for the two VMA
-    // shapes that ever CHARGED it. The previous shape was "everything except
-    // ANON_LAZY gets length / PAGE_SIZE", which refunded page_count for two
-    // reachable classes that were charged somewhere else, or nowhere:
-    //
-    //   - SHARED_IN (SYS_WEFT_MAP). burrow_share_into charges the CLIENT's
-    //     shared_map_pages and deliberately leaves page_count alone -- "the
-    //     pages are the SHARER's commit". It places the VMA with vma_find_gap
-    //     in the burrow-attach window, i.e. inside THIS syscall's range, and a
-    //     shared Burrow's type is ANON (or weave-DMA), so it landed squarely in
-    //     the eager default. burrow_unmap below already refunds shared_map_pages
-    //     off the SHARED_IN flag, so the page_count refund on top was pure drift.
-    //   - MMIO / DMA. Both take a CALLER-SUPPLIED vaddr, so a CAP_HW_CREATE
-    //     driver can place one inside the window and then detach it. Neither
-    //     ever charged page_count.
-    //
-    // proc_page_uncharge clamps at 0, so this never wrapped -- but it is the
-    // same "drift, not wrap" shape as the CODE alias refused above, and the
-    // same conclusion applies: a bound a Proc can drive to zero while its real
-    // occupancy is unchanged is not a bound. Listing what DID charge (rather
-    // than subtracting what didn't) also means a future Burrow type is
-    // uncharged by default -- the fail-safe direction.
-    // #130: SPLIT the two shapes, because the event that ends the charge is
-    // different for each.
-    //
-    //   - ANON_LAZY charged per FAULT, so the refund is the resident count --
-    //     read BEFORE the unmap (the pages are gone after) and applied on a
-    //     successful unmap. A lazy Burrow has no second owner (it cannot be
-    //     Loom-registered -- loom_resolve_buf requires BURROW_TYPE_ANON -- and
-    //     cannot be Weft-shared), so unmapping it always frees it.
-    //
-    //   - ANON charged the whole buddy-rounded occupancy ONCE, and its pages
-    //     can outlive the VMA: a Loom ring, a Loom registered buffer, and a
-    //     Weft share each hold a handle_count ref. So the refund is applied iff
-    //     the unmap was the drop that actually FREED the pages -- reported by
-    //     burrow_unmap_reporting rather than predicted from the type.
-    //
-    // The predicted form is what #106-F1 got wrong twice over. Refunding on the
-    // TYPE let EL0 detach a Loom ring, take the refund, keep the pages on the
-    // Loom's ref, and re-attach a full PROC_PAGE_MAX -- an unprivileged ~1.5x
-    // breach of the floor. Then refunding on a handle_count SAMPLED BEFORE THE
-    // DROP swung it the other way: on the ordinary teardown order (detach, then
-    // close -- what Ring::drop does) the sample reads 1, the refund is skipped,
-    // and loom_free went on to free the pages with nothing uncharging -- a
-    // PERMANENT over-charge, and a registered buffer can be the entire budget.
-    // Both directions come from treating "the mapping went away" as if it were
-    // "the pages went away". They are separate events; only the drop itself
-    // knows which one happened.
-    //
-    // #131 amends the eager arm: `freed` is a SUFFICIENT release condition (if
-    // nothing at all still holds the region, this Proc certainly does not), but
-    // it is not a NECESSARY one. When the region survives because it was shared
-    // into another Proc, this Proc has walked away from pages it can no longer
-    // reach -- charging it for them caps it for nothing, and nothing downstream
-    // can settle the charge either, because the last drop is then the CONSUMER's
-    // vma_drain: generic code, in another Proc, holding that Proc's vma_lock,
-    // with no way to name the payer. That is the shape netd hits on every closed
-    // zero-copy flow (it detaches its ring at slot_unref while the guest's
-    // mapping and the binding pin live on), and it leaked 64 pages a flow.
-    //
-    // shared_out is the discriminator, and it must be shared_out rather than
-    // "does anything else still hold this": the Proc's OWN other claim (a Loom
-    // registered-buffer pin on its own buffer) also keeps the region alive, and
-    // there the charge must STAY until that claim drops.
-    // `paid` replaces the old eager_anon boolean outright: a nonzero claim IS
-    // "this Proc is the recorded payer for this eager region", which is strictly
-    // narrower than "this is an eager ANON VMA". An eager ANON region that was
-    // never charged (nothing recorded a payer) now refunds nothing instead of
-    // the recomputed occupancy -- the #122 rule, enforced by attribution rather
-    // than by enumerating shapes.
-    bool shared_out   = false;
-    u32  paid         = 0;
-    // Snapshot the BURROW pointer, not the VMA: burrow_unmap_reporting frees the
-    // Vma struct, so `dvma` is dangling the moment it returns. The Burrow itself
-    // survives whenever the drop did not free it -- which is exactly the case
-    // where anything below still needs it.
-    struct Burrow *dv = NULL;
-    if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
-        !(dvma->flags & VMA_FLAG_SHARED_IN)) {
-        dv = dvma->burrow;
-        if (dv->type == BURROW_TYPE_ANON_LAZY) {
-            // Only on the exact match the unmap below will accept, so a refused
-            // detach frees nothing.
-            //
-            // KNOWN OVER-CHARGE (B-1a audit F5; B-1a' owns the fix): a D-3b
-            // window replaced INSIDE a touched lazy mapping leaves the replaced
-            // slots resident and charged, and this per-piece refund never
-            // reaches them -- the Burrow's last free returns those pages to the
-            // system uncharged (burrow_free_internal is Proc-agnostic). Safe
-            // direction only: the Proc is capped tighter, never looser. The fix
-            // is vma_replace_range_in decommitting the replaced window of the
-            // OLD Burrow before the swap.
-            if (dvma->vaddr_start == vaddr_raw &&
-                dvma->vaddr_end   == vaddr_raw + length)
-                (void)burrow_decommit(p, vaddr_raw, (size_t)length);
-        } else if (dv->type == BURROW_TYPE_ANON) {
-            shared_out = burrow_is_shared_out(dv);
-            // Claim BEFORE the drop: a freeing drop takes the record with it.
-            // Returns 0 unless this Proc is the recorded payer -- which is what
-            // keeps a consumer from ever refunding the sharer's charge.
-            paid = burrow_charge_claim(dv, p);
-        }
-    }
-
-    // burrow_unmap exact-matches [vaddr, vaddr + length) against an
-    // installed VMA (no partial detach at v1.0), removes it, and frees
-    // the Burrow's pages -- for an ANON_LAZY Burrow that is the resident
-    // sparse slots (burrow_free_internal's ANON_LAZY arm).
-    bool freed = false;
-    // D-3c F1: hand `out_free` down so the FREE is deferred past as->lock. The
-    // dead Burrow (if any) rides back to the caller, which frees it after the
-    // unlock. `dv` here (the pre-drop snapshot) is only touched below for the
-    // charge-restore path, which by construction runs when the Burrow SURVIVED.
-    struct Burrow *tf = NULL;
-    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed, &tf);
-    *out_free = tf;
-    if (paid) {
-        // The refund is the RECORDED charge, not a recomputation: the record is
-        // what the attach actually billed, so the two cannot drift even if this
-        // path's view of `length` ever did.
-        if (rc == 0 && (freed || shared_out))
-            proc_page_uncharge(p, paid);
-        else
-            // Either the detach failed (nothing dropped) or the region survives
-            // on one of THIS Proc's own remaining claims -- a Loom registered
-            // buffer being the only one that exists. Put the claim back so that
-            // claim's own drop settles it. `dv` is live in both cases:
-            // !freed means something still holds it, and rc != 0 means nothing
-            // was dropped at all.
-            burrow_charge_restore(dv, p, paid);
-    }
-
-    return (s64)rc;
-}
-
+// The native detach (SYS_BURROW_DETACH; ARCH 6.5 "Range detach"). B-1a': the
+// RANGE form over vma_detach_range_in -- [vaddr, vaddr+length) is removed
+// whatever it cuts (a mapping wholly inside goes, one cut at an end is trimmed,
+// one the range lies strictly inside is split), holes are fine, and an empty
+// range answers 0 (Linux munmap's rule; the exact-match detach this replaced
+// answered -1 to a second detach of the same range). The I-32 settlement -- the
+// lazy overlap released before the geometry changes, the eager record claimed
+// and refunded iff the drop freed the pages or the region lives on only in
+// another Proc (#130/#131), a CODE alias refused (I-42) -- lives in the core,
+// once, for every caller. The admission is unchanged: a span inside the burrow
+// window, or the exact geometry of a DMA / MMIO map wherever it sits (the
+// identity rule). The ABI stays 0 / -1; the phenotype row carries the errno.
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
     if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
         return -1;
-    struct Burrow *to_free = NULL;
-    s64 rc = -1;
+    struct Burrow *dead = NULL;
+    int rc = -1;
     spin_lock(&p->as->lock);
     if (detach_in_window(vaddr_raw, length) ||
         detach_is_hw_map_locked(p, vaddr_raw, length))
-        rc = detach_one_locked(p, vaddr_raw, length, &to_free);
+        rc = vma_detach_range_in(p->as, proc_resource_exempt(p), p,
+                                 vaddr_raw, length, 0, &dead);
     spin_unlock(&p->as->lock);
-    // D-3c F1: free OUTSIDE as->lock -- a FILE Burrow's free reaches a
-    // possibly-sleeping spoor_clunk (a 9P Tclunk), and sleeping under a plain
-    // spinlock is the lock-across-sleep extinction.
-    if (to_free) burrow_free_deferred(to_free);
-    return rc;
+    // D-3c F1: the possibly-sleeping frees (a FILE Burrow's spoor_clunk) run
+    // with no lock held.
+    burrow_free_deferred(dead);
+    return rc == 0 ? 0 : -1;
 }
 
-// #199: the RANGE detach the phenotype munmap row needs -- D-3b's MAP_FIXED
-// split turns one library map into 2-3 VMAs, and musl's unmap_library then
-// munmaps the WHOLE span in one call (its error path and dlclose both do), so
-// an exact-match-only munmap leaks the entire library. Linux semantics over
-// the D-3 shapes: every VMA WHOLLY inside [vaddr, vaddr+len) is detached (each
-// one whole -- this is NOT partial unmap), holes are fine, an empty range
-// succeeds. Refused whole -- nothing detached -- when any VMA straddles a
-// boundary (true partial unmap, post-v1.0) or a CODE-alias region is inside
-// (the I-42 pair-lifetime rule detach_one_locked enforces; refusing UP FRONT
-// keeps the range atomic instead of stopping half-torn-down).
-//
-// NATIVE SYS_BURROW_DETACH deliberately keeps exact-match: this widening is a
-// LINUX semantic, and the native ABI does not change under a phenotype chunk.
+// #199 / B-1a': the phenotype munmap (VIV_LINUX_MUNMAP). Linux semantics inside
+// the burrow window -- the same range core, with the errno passed through: the
+// detach's INVAL (shape), ACCES (a CODE region) or NOMEM (no headroom to
+// split). Outside the window the row is not served: every ELF, stack, guard and
+// vDSO mapping lives below it, and a munmap there is declined (NOSYS) rather
+// than faked, exactly as before.
 s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
-    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
-        return -1;
-    u64 end = vaddr_raw + length;
-
-    spin_lock(&p->as->lock);
-
-    // Validation pass -- ALL refusals decided before the first removal, under
-    // the same lock hold, so the detach loop below cannot stop midway.
-    // One scan from the head, then successors -- the list is sorted (B-1a
-    // audit F2: a re-scan per mapping was O(k x N) under the lock).
-    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end);
-         v && v->vaddr_start < end; v = v->next) {
-        if (v->vaddr_start < vaddr_raw || v->vaddr_end > end) {
-            spin_unlock(&p->as->lock);
-            return -1;                   // boundary straddle: partial unmap
-        }
-        if (v->burrow && v->burrow->magic == VMO_MAGIC &&
-            v->burrow->type == BURROW_TYPE_CODE) {
-            spin_unlock(&p->as->lock);
-            return -1;                   // I-42 pair lifetime: JIT syscalls own it
-        }
-    }
-
-    // Detach loop. Each iteration removes the first remaining VMA whole, via
-    // the SAME per-VMA body the exact syscall uses (so the I-32 refund logic
-    // exists ONCE). Validation makes a failure unreachable; if one happens
-    // anyway, stop rather than spin -- the guard is against an infinite loop,
-    // not a real path.
-    //
-    // D-3c F1: the sleeping burrow frees are DEFERRED so the whole range removes
-    // under ONE continuous as->lock hold (the atomicity the straddle-refusal
-    // validation depends on), while the possibly-sleeping spoor_clunk frees run
-    // AFTER the unlock. Each detach hands back its dead Burrow (if any); they
-    // stack via deferred_free_next -- an uncapped chain that needs no allocation
-    // and no lock (each Burrow is at {0,0}, unreachable by any other path).
+    if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -(s64)T_E_INVAL;
+    if (!detach_in_window(vaddr_raw, length))
+        return -(s64)T_E_NOSYS;
     struct Burrow *dead = NULL;
-    // The successor is read BEFORE the detach frees `v`; the detach removes
-    // exactly `v` (an exact-geometry match), so `nx` stays valid. The old
-    // re-scan per removal walked the same prefix k times (B-1a audit F2).
-    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end), *nx = NULL;
-         v && v->vaddr_start < end; v = nx) {
-        nx = v->next;
-        struct Burrow *tf = NULL;
-        if (detach_one_locked(p, v->vaddr_start,
-                              v->vaddr_end - v->vaddr_start, &tf) != 0) {
-            spin_unlock(&p->as->lock);
-            // Free what we already collected before returning the error --
-            // those VMAs are gone; leaking their Burrows would be worse.
-            while (dead) { struct Burrow *n = dead->deferred_free_next;
-                           dead->deferred_free_next = NULL;
-                           burrow_free_deferred(dead); dead = n; }
-            return -1;
-        }
-        if (tf) { tf->deferred_free_next = dead; dead = tf; }
-    }
+    spin_lock(&p->as->lock);
+    int rc = vma_detach_range_in(p->as, proc_resource_exempt(p), p,
+                                 vaddr_raw, length, 0, &dead);
     spin_unlock(&p->as->lock);
-    // The sleeping frees, now with no lock held.
-    while (dead) { struct Burrow *n = dead->deferred_free_next;
-                   dead->deferred_free_next = NULL;
-                   burrow_free_deferred(dead); dead = n; }
-    return 0;                            // incl. the nothing-mapped no-op (Linux)
+    burrow_free_deferred(dead);
+    return (s64)rc;
 }
 
 static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
@@ -6379,10 +6123,11 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
-    // BURROW_RESERVE_MAX (1 GiB), NOT BURROW_ATTACH_MAX (256 MiB): a lazy reservation
-    // commits no data pages, so the eager-sized bound would defeat the purpose
-    // (audit F1; Go-stock reserves a ~512-MiB page-summary). page_count (at fault) +
-    // PROC_VMA_MAX bound the real resource use.
+    // BURROW_RESERVE_MAX is the whole burrow window (B-1a'), NOT the eager
+    // BURROW_ATTACH_MAX: a lazy reservation commits no data pages and, with the
+    // pagemap, no metadata until a slot is touched. page_count (at fault: pages
+    // and nodes) + PROC_VMA_MAX bound the real resource use, never the
+    // reservation's byte size.
     if (length_raw > BURROW_RESERVE_MAX)             return -1;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
@@ -6435,7 +6180,7 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 //
 // The I-36 conditions are re-satisfied here rather than inherited, because this
 // is a NEW entry to the fault arm and I-36's premise ("kernel-internal") is what
-// D-3 relaxes. Taking them in order: (1) install-once is filepages[]'s, unchanged;
+// D-3 relaxes. Taking them in order: (1) install-once is the pagemap's, unchanged;
 // (2) the page-in is death-interruptible by inheritance from dev9p's read, and
 // reachable from mmap now rather than only from exec -- the same unwind either
 // way, since the fault arm does not know which entry created the Burrow;
@@ -6449,11 +6194,13 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 //
 // I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (they
 // are shared, so charging them per-mapper would count one physical page N times);
-// the VMA-count axis IS charged inside vma_insert. The `filepages` array is an
-// uncharged kernel allocation proportional to `length` -- task #191, which is the
-// PRE-EXISTING lazy-anon hazard this arm sits beside rather than widens: the cap
-// below is BURROW_ATTACH_MAX (256 MiB), 4x TIGHTER than the lazy path's
-// BURROW_RESERVE_MAX. Measured, the largest library in a stock Alpine rootfs is
+// the VMA-count axis IS charged inside vma_insert. The per-page slot table is
+// the pagemap (B-1a'): a FILE Burrow's nodes are uncharged like its pages, but
+// they exist only as slots fill -- at most one per 512 resident pages plus a
+// root -- so the kernel memory a mapping costs follows what was paged in, never
+// `length` (task #191's uncharged array proportional to `length` went with the
+// array). The cap below stays BURROW_ATTACH_MAX (256 MiB): a file mapping's span
+// is the file's, and measured, the largest library in a stock Alpine rootfs is
 // libcrypto.so.3 at ~4.2 MiB of map span, so the cap is ~60x real need.
 //
 // exec_map_vouched (#217) -- may this file's bytes become EXECUTABLE pages?
@@ -6613,11 +6360,18 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
 static s64 mmap_fixed_window(u64 addr, u64 length_raw, u32 pr,
                              u64 *length_out, u32 *prot_out) {
     if (length_raw == 0)                             return -(s64)T_E_INVAL;
-    if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
+    if (length_raw > BURROW_RESERVE_MAX)             return -(s64)T_E_NOMEM;
     if (addr == 0 || (addr & (u64)(PAGE_SIZE - 1)))  return -(s64)T_E_INVAL;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
     if (addr + length < addr)                        return -(s64)T_E_INVAL;
+    // B-1a': the burrow window, both ends. A fixed mapping below
+    // EXEC_USER_BURROW_BASE could never be unmapped (the munmap row is
+    // window-confined), so the vivarium declines such a request up front
+    // (fixed_addr_ok); this is the kernel half of the same rule, plus the end
+    // bound the 256 MiB length cap used to imply.
+    if (addr < EXEC_USER_BURROW_BASE)                return -(s64)T_E_NOMEM;
+    if (addr > EXEC_USER_BURROW_TOP - length)        return -(s64)T_E_NOMEM;
 
     u32 prot = 0;
     if (pr & VIV_PROT_READ)  prot |= (u32)VMA_PROT_READ;
@@ -6812,10 +6566,10 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     // nothing and owes nothing.
     if (rc != 0 && writable) {
         mmap_eager_unwind(p->as, b, (size_t)(length / PAGE_SIZE));
-        return -(s64)T_E_NOMEM;
+        return (s64)rc;                              // the surgery's -T_E_* (B-1a')
     }
     burrow_unref(b);
-    if (rc != 0)                                     return -(s64)T_E_NOMEM;
+    if (rc != 0)                                     return (s64)rc;
     return (s64)addr;
 }
 
@@ -6833,9 +6587,9 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
     struct Burrow *b = burrow_create_anon_lazy((size_t)length);
     if (!b)                                          return -(s64)T_E_NOMEM;
 
-    // D-3c re-audit F5: even the anon arm can EXACT-COVER an existing FILE mapping
-    // (the old VMA at `addr` need not be anon), so its replaced Burrow is deferred
-    // and freed past the unlock exactly as the file arm does.
+    // D-3c re-audit F5: even the anon arm can replace an existing FILE mapping
+    // (the old VMA at `addr` need not be anon), so the replaced Burrows are
+    // deferred and freed past the unlock exactly as the file arm does.
     struct Burrow *fx_free = NULL;
     spin_lock(&p->as->lock);
     int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0, &fx_free);
@@ -6849,7 +6603,7 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
     spin_unlock(&p->as->lock);
     if (fx_free) burrow_free_deferred(fx_free);
     burrow_unref(b);
-    if (rc != 0)                                     return -(s64)T_E_NOMEM;
+    if (rc != 0)                                     return (s64)rc;   // the surgery's -T_E_* (B-1a')
     return (s64)addr;
 }
 
@@ -6877,32 +6631,44 @@ static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
     return sys_burrow_attach_lazy_for_proc(t->proc, length_raw);
 }
 
-// SYS_BURROW_DECOMMIT: release the resident pages of a BURROW_TYPE_ANON_LAZY mapping
-// WITHOUT removing the VMA (the madvise(MADV_DONTNEED) analog). Confined to the
-// burrow-attach window (the SYS_BURROW_DETACH discipline -- a decommit only makes
-// sense on a lazy attach region, all of which live in the window); burrow_decommit
-// additionally rejects any non-ANON_LAZY VMA + a range not within one VMA.
-s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
-    if (!p)                                          return -1;
-    if (length_raw == 0)                             return -1;
-    // BURROW_RESERVE_MAX, not BURROW_ATTACH_MAX -- a lazy region can be up to the
-    // reservation max, so a decommit range may span up to that (audit F1).
-    if (length_raw > BURROW_RESERVE_MAX)             return -1;
-    if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
+// SYS_BURROW_DECOMMIT: release the resident pages of BURROW_TYPE_ANON_LAZY
+// mappings WITHOUT removing them (the madvise(MADV_DONTNEED) analog). Confined
+// to the burrow-attach window (the SYS_BURROW_DETACH discipline -- a decommit
+// only makes sense on a lazy region, all of which live in the window). B-1a':
+// the range may span the pieces a protect cut (burrow_decommit_in walks it as a
+// range); it still refuses, changing nothing, any mapping in it that is not a
+// plain ANON_LAZY one, and any hole.
+// B-1b: the decommit core with its errno, the sys_munmap_range_for_proc shape,
+// for the phenotype madvise row: INVAL for the shape, NOSYS below the window
+// (every ELF, stack, guard and vDSO mapping lives there -- not the phenotype's
+// to release), else burrow_decommit_in's own answer (NOMEM for a hole, INVAL
+// for a mapping that is not plain lazy anonymous memory of this Proc).
+s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    // BURROW_RESERVE_MAX is the window (B-1a'): a decommit range may span any
+    // lazy region, and a lazy region may be the whole window.
+    if (length_raw > BURROW_RESERVE_MAX)             return -(s64)T_E_INVAL;
+    if (vaddr_raw & (PAGE_SIZE - 1))                 return -(s64)T_E_INVAL;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
     // Window confinement (matches SYS_BURROW_DETACH): overflow-safe since
-    // length <= BURROW_ATTACH_MAX, far below EXEC_USER_BURROW_TOP.
-    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
-    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
+    // length <= BURROW_RESERVE_MAX = TOP - BASE, so TOP - length >= BASE.
+    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -(s64)T_E_NOSYS;
+    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -(s64)T_E_NOSYS;
 
     spin_lock(&p->as->lock);
-    // burrow_decommit does the per-page PTE clear (+ TLBI before free) + page free +
-    // page_count uncharge, and rejects a non-ANON_LAZY / out-of-VMA range.
+    // burrow_decommit_in does the range's PTE clear (+ TLBI before any free),
+    // the per-slot page + node free and the page_count uncharge for both.
     int rc = burrow_decommit(p, vaddr_raw, length);
     spin_unlock(&p->as->lock);
     return (s64)rc;
+}
+
+// The native SYS_BURROW_DECOMMIT (84) keeps its 0 / -1 ABI over the core.
+s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    return sys_burrow_decommit_core(p, vaddr_raw, length_raw) == 0 ? 0 : -1;
 }
 
 static s64 sys_burrow_decommit_handler(u64 vaddr_raw, u64 length_raw) {
@@ -7012,6 +6778,61 @@ s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
     return (s64)rc;
 }
 
+// SYS_BURROW_MAP_FILE: the native form of D-3's three arms (ARCH 6.5 "Dynamic
+// loading"). The phenotype's mmap rows decide Linux's word and call the same
+// three cores; this entry decides the native word and calls them, so the
+// vouching, the eager copy and the Image cache are each spelled once. The word
+// passes straight through because the two encodings are one.
+_Static_assert(BURROW_PROT_READ  == (u64)VIV_PROT_READ &&
+               BURROW_PROT_WRITE == (u64)VIV_PROT_WRITE &&
+               BURROW_PROT_EXEC  == (u64)VIV_PROT_EXEC,
+               "SYS_BURROW_MAP_FILE hands its prot word to the phenotype's "
+               "fixed-window cores unconverted");
+
+s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+                                 u64 length_raw, u64 prot_raw, u64 flags_raw,
+                                 u64 addr_raw) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    const u64 rwx = BURROW_PROT_READ | BURROW_PROT_WRITE | BURROW_PROT_EXEC;
+    if (prot_raw & ~rwx)                             return -(s64)T_E_INVAL;
+    if (flags_raw & ~(u64)BURROW_MAP_FIXED)          return -(s64)T_E_INVAL;
+    // W|X is unspeakable (I-12), and refused before any lookup.
+    if ((prot_raw & BURROW_PROT_WRITE) && (prot_raw & BURROW_PROT_EXEC))
+        return -(s64)T_E_ACCES;
+    if ((prot_raw & BURROW_PROT_WRITE) && !(prot_raw & BURROW_PROT_READ))
+        return -(s64)T_E_INVAL;                       // no write-only AP (RW-1 C-F3)
+
+    const bool anon = (s64)fd_raw == -1;
+    s64 rc;
+    if (!(flags_raw & BURROW_MAP_FIXED)) {
+        // The whole-span map. `addr` is not a hint here -- Linux's quiet
+        // ignoring of one is what lets musl ask for an ET_EXEC's fixed address
+        // and fail later with EBUSY -- so a nonzero one is refused outright.
+        if (addr_raw != 0)                           return -(s64)T_E_INVAL;
+        if (anon)                                    return -(s64)T_E_BADF;
+        // A writable span would be a writable file mapping, which does not
+        // exist (I-36); the writable segment is a FIXED eager copy below.
+        if (prot_raw & BURROW_PROT_WRITE)            return -(s64)T_E_ACCES;
+        if (!(prot_raw & BURROW_PROT_READ))          return -(s64)T_E_INVAL;
+        rc = sys_mmap_file_for_proc(p, fd_raw, length_raw,
+                                    (prot_raw & BURROW_PROT_EXEC) != 0, offset);
+    } else if (anon) {
+        // The bss tail. Anonymous bytes become code only through the JIT
+        // syscalls (I-42), never here.
+        if (prot_raw & BURROW_PROT_EXEC)             return -(s64)T_E_ACCES;
+        if (offset != 0)                             return -(s64)T_E_INVAL;
+        rc = sys_mmap_fixed_anon_for_proc(p, addr_raw, length_raw, (u32)prot_raw);
+    } else {
+        if (!(prot_raw & BURROW_PROT_READ))          return -(s64)T_E_INVAL;
+        rc = sys_mmap_fixed_file_for_proc(p, addr_raw, fd_raw, length_raw,
+                                          (u32)prot_raw, offset);
+    }
+    // The cores refuse an exec map off an MNOEXEC mount with the Linux
+    // phenotype's EPERM. Returned natively, -T_E_PERM is Pouch's flat -1, which
+    // decodes as EIO (errno.h); the registry's permission-denied code is ACCES.
+    return rc == -(s64)T_E_PERM ? -(s64)T_E_ACCES : rc;
+}
+
 static s64 sys_burrow_reserve_handler(u64 length_raw, u64 prot_raw, u64 align_log2) {
     struct Thread *t = current_thread();
     if (!t)                                          return -(s64)T_E_INVAL;
@@ -7024,6 +6845,14 @@ static s64 sys_burrow_protect_handler(u64 vaddr_raw, u64 length_raw,
     if (!t)                                          return -(s64)T_E_INVAL;
     return sys_burrow_protect_for_proc(t->proc, vaddr_raw, length_raw,
                                        prot_raw, flags_raw);
+}
+
+static s64 sys_burrow_map_file_handler(u64 fd_raw, u64 offset, u64 length_raw,
+                                       u64 prot_raw, u64 flags_raw, u64 addr_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -(s64)T_E_INVAL;
+    return sys_burrow_map_file_for_proc(t->proc, fd_raw, offset, length_raw,
+                                        prot_raw, flags_raw, addr_raw);
 }
 
 // =============================================================================
@@ -7126,7 +6955,7 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
         return -T_E_NOMEM;
     }
 
-    struct Burrow *b = burrow_create_code(length);
+    struct Burrow *b = burrow_create_code(length, proc_resource_exempt(p));
     if (!b) {
         proc_page_uncharge(p, npages);
         spin_unlock(&p->as->lock);
@@ -7708,8 +7537,8 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // LOOM_MAX_ENTRIES, so cq_entries is a power of two <= 2*LOOM_MAX_ENTRIES.
     u32 cq_entries = entries * 2u;
 
-    struct Loom *l = loom_create(entries, cq_entries);
-    if (!l)                                          return -1;
+    struct Loom *l = loom_create(entries, cq_entries, proc_resource_exempt(p));
+    if (!l)                                          return -T_E_NOMEM;   // the pool or the cap refused (audit F10)
     // LOOM.md 8.5.1: the directory-mutation identity, bound before anything
     // below can publish the ring (the handle, or an SQPOLL kthread).
     l->ident     = p;
@@ -7724,7 +7553,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // same vma_lock as the map -> exact); relief comes from SYS_BURROW_DETACH on
     // the ring VA (the ring is a normal VMA in the burrow window, so the existing
     // detach uncharge fires) or vma_drain at exit. The close-without-detach
-    // accumulation therefore hits PROC_PAGE_MAX instead of RAM.
+    // accumulation therefore hits the budget (or the pool) instead of RAM.
     // #106: the buddy-rounded occupancy. loom_create's ring Burrow is an
     // ordinary burrow_create_anon, and ring_size is page-rounded but NOT
     // power-of-two rounded (it is the sum of four 64-aligned regions), so a
@@ -8087,9 +7916,11 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
-// does the source rights gate + flags check + the mount-table op). The mount
+// does the source rights gate + flags check + Plan 9's Emount (-T_E_NOTDIR;
+// every other refusal is -1) + the mount-table op). The mount
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
-// inside territory.c::mount -- the mountpoint Spoor is NOT retained.
+// inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
+// only as the covered member of a union the mount starts.
 int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
                        struct Spoor *mountpoint, u32 flags) {
     if (!p)                                          return -1;
@@ -8111,6 +7942,20 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     // not for the mount installation itself.
     struct Spoor *source = sys_lookup_spoor(p, source_fd, RIGHT_READ);
     if (!source)                                     return -1;
+
+    // Plan 9 cmount's Emount (ARCH 9.6.1): a source whose type differs from the
+    // point's would leave a name walked as one kind of file resolving as the
+    // other, whatever the flags; and only a replacement may stand at a file,
+    // because every other placement keeps the members already there and stalk
+    // searches two or more members as a directory. Plan 9 refuses
+    // `order != MREPL` at a file, where its flag 0 is MREPL; here a flagless
+    // mount appends, so it is refused with MBEFORE and MAFTER.
+    bool source_dir = (source->qid.type & QTDIR) != 0;
+    bool point_dir  = (mountpoint->qid.type & QTDIR) != 0;
+    if (source_dir != point_dir || (!point_dir && !(flags & (u32)MREPL))) {
+        spoor_clunk(source);
+        return -T_E_NOTDIR;
+    }
 
     // territory.c::mount handles: idempotency (no-op on duplicate), MREPL
     // (replace existing entry), full-table rejection, and the per-entry
@@ -8182,7 +8027,8 @@ static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,
 
     s64 rc = (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw, mp,
                                      (u32)flags_raw);
-    // territory.c::mount copied mp's identity, not mp itself -- release it.
+    // territory.c::mount copied mp's identity (and took its own ref where it
+    // keeps mp as a union's covered member) -- release ours.
     spoor_clunk(mp);
     return rc;
 }
@@ -9020,7 +8866,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     // (console-attached OR an existing holder), so joey -> login -> shell ->
     // build-driver can carry it without any of them being console-attached.
     // Note this gates conferring the AUTHORITY; the raise it authorizes is
-    // still bounded by PROC_PAGE_HARD_MAX in proc_spawn_budget_resolve.
+    // still bounded by proc_page_budget_hard_max() in proc_spawn_budget_resolve.
     if ((perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
             && !proc_is_console_attached(p)
             && !proc_may_raise_page_budget(p))                     return -1;
@@ -9853,7 +9699,9 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     // "must be 0" reject is REPLACED by a range check. 0 still means inherit.
     // The authority decision (raise vs reduce) is NOT made here -- it needs the
     // caller's Proc, so it lives in proc_spawn_budget_resolve at the entry.
-    if (req->page_budget > PROC_PAGE_HARD_MAX)         return -1;
+    // B-1a': the hard maximum is the user pool -- RAM minus the TCB reserve
+    // (proc_page_budget_hard_max), no longer a constant.
+    if (req->page_budget > proc_page_budget_hard_max()) return -1;
     // VIVARIUM V-1b: pheno_flags. Both this and page_budget were authored
     // against _pad_allow on separate branches -- the collision the aux-2 merge
     // had to arbitrate, and the reason the struct grew to 104 rather than one
@@ -10214,7 +10062,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
                                            territory_root_pheno(p->territory));
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, proc_resource_exempt(p), p, new_pheno, exe, exe_size,
+    int rc = exec_load_into(nas, proc_resource_exempt(p), p, exe, exe_size,
                             path, (u32)path_len,
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
                             env_kbuf, (u32)env_data_len, (u32)envc,
@@ -10233,8 +10081,9 @@ static s64 sys_execve_core(struct exception_context *ctx,
         // rather than closed by fiat -- the same disposition T_E_SPIPE (#106)
         // carries. It matters at L-6: a shell reads ENOEXEC as "run it as a
         // script", so until the code exists a shell cannot make that
-        // distinction.
-        return -(s64)T_E_INVAL;
+        // distinction. A refused allocation is NOT that case: it travels up
+        // as -T_E_NOMEM and is reported as such (B-1a' audit F15).
+        return rc == -T_E_NOMEM ? -(s64)T_E_NOMEM : -(s64)T_E_INVAL;
     }
 
     // 4. COMMIT. Infallible from here -- there is no path back to the caller's
@@ -13844,29 +13693,21 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_MUNMAP: {
         // munmap(addr, len): x0 addr, x1 len.
         //
-        // #199 widened this row from exact-match to the RANGE form: D-3b's
-        // MAP_FIXED split turns one library map into 2-3 VMAs, and musl's
-        // unmap_library munmaps the WHOLE span in one call, so exact-match
-        // leaked every library torn down on map_library's error path or
-        // dlclose. sys_munmap_range_for_proc detaches every VMA WHOLLY inside
-        // the range (whole VMAs only -- never partial), treats nothing-mapped
-        // as the Linux no-op success, and refuses atomically on a boundary
-        // straddle. The range scan it needed (vma_next_overlap_in) now exists,
-        // which is what the previous decline-comment said was missing.
+        // #199 widened this row from exact-match to whole VMAs inside a range
+        // (musl's unmap_library munmaps a D-3b-split library in one call);
+        // B-1a' made it the Linux range form outright: a mapping the range
+        // cuts is trimmed or split, holes are fine, an empty range succeeds.
+        // The errno passes through -- ACCES for a CODE region (I-42's pair
+        // lifetime), NOMEM for no headroom to split -- and coordinates outside
+        // the burrow window, where every ELF, stack, guard and vDSO mapping
+        // lives and this row is not served, are declined (NOSYS): claiming
+        // success would leave a mapping the guest believes is gone.
         //
         // The two argument errors are reproduced up front because Linux gives
         // them a specific errno that a decline would replace with ENOSYS.
         if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
         if (args[1] == 0)              return -(s64)T_E_INVAL;
-
-        if (sys_munmap_range_for_proc(p, args[0], args[1]) == 0) return 0;
-
-        // Outside the served subset: a boundary-straddling partial overlap
-        // (Linux would SPLIT the VMA; partial unmap is post-v1.0), a CODE
-        // region (I-42's pair lifetime), or out-of-window coordinates.
-        // Claiming success would leave a mapping the guest believes is gone.
-        // Declining is honest; faking is not.
-        return -(s64)T_E_NOSYS;
+        return sys_munmap_range_for_proc(p, args[0], args[1]);
     }
 
     case VIV_LINUX_MPROTECT: {
@@ -13896,6 +13737,49 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (mpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
         if (mpr & VIV_PROT_EXEC)  nprot |= BURROW_PROT_EXEC;   // refused at the boundary
         return sys_burrow_protect_for_proc(p, args[0], args[1], nprot, 0);
+    }
+
+    case VIV_LINUX_MADVISE: {
+        // madvise(addr, len, advice): x0 addr, x1 len, x2 advice. B-1b: the
+        // release row over SYS_BURROW_DECOMMIT (ARCH 6.5 "Capacity"), so a
+        // Linux allocator's MADV_DONTNEED / MADV_FREE returns pages the way
+        // Pouch's and the native one's do.
+        //
+        // The domain is the advice word (vivarium_madvise_decide): the two
+        // release advices translate to the decommit core, whose errnos are
+        // Linux's (ENOMEM for a hole, EINVAL for a mapping the release cannot
+        // apply to); the pure hints answer as Linux does -- 0 over a mapped
+        // range, ENOMEM over a hole -- and change nothing; an advice we do not
+        // model (the fork-semantic pair, KSM, the poison testers) declines.
+        // Linux's argument order (do_madvise): the advice first, then the
+        // alignment, then a zero length succeeds having touched nothing.
+        //
+        // The core is window-confined (like the range detach): text, data, the
+        // stack and the vDSO lie below the burrow window and are never the
+        // phenotype's to release, so it declines them. Linux answers ENOMEM for
+        // a hole wherever the hole lies, so an UNMAPPED range outside the
+        // window says so (pheno-probe L23m); a mapped one stays declined, its
+        // bytes untouched (L23s / L23t) -- a false ENOMEM there would tell an
+        // allocator its own .bss is unmapped.
+        enum viv_madvise_kind kind;
+        if (vivarium_madvise_decide(args[2], &kind) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
+        if (args[1] == 0) return 0;
+        u64 hlen = (args[1] + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+        if (hlen < args[1] || args[0] + hlen < args[0]) return -(s64)T_E_INVAL;
+        if (kind == VIV_MADVISE_RELEASE) {
+            s64 rc = sys_burrow_decommit_core(p, args[0], args[1]);
+            if (rc != -(s64)T_E_NOSYS) return rc;
+            spin_lock(&p->as->lock);
+            bool held = vma_range_is_mapped_in(p->as, args[0], args[0] + hlen);
+            spin_unlock(&p->as->lock);
+            return held ? -(s64)T_E_NOSYS : -(s64)T_E_NOMEM;
+        }
+        spin_lock(&p->as->lock);
+        bool mapped = vma_range_is_mapped_in(p->as, args[0], args[0] + hlen);
+        spin_unlock(&p->as->lock);
+        return mapped ? 0 : -(s64)T_E_NOMEM;
     }
 
     case VIV_LINUX_RT_SIGACTION: {
@@ -15510,16 +15394,23 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_BURROW_ATTACH_LAZY: {
         // CL-4: accept BOTH the native 1-arg ABI (length in x0) AND the Linux
         // 6-arg anon-mmap ABI (addr in x0, length in x1). musl's __init_tls
-        // issues a RAW 6-arg mmap for a large-TLS binary such as clang++,
-        // bypassing the patched 1-arg __mmap wrapper -- and it is the ONLY raw
-        // SYS_mmap site in musl's whole src/ tree (src/env/__init_tls.c).
+        // issued a RAW 6-arg mmap for a large-TLS binary such as clang++,
+        // bypassing the patched 1-arg __mmap wrapper -- the ONLY raw SYS_mmap
+        // site in musl's whole src/ tree (src/env/__init_tls.c). Since B-1b no
+        // libc built from this tree sends it: pouch 0044 parks __NR_mmap at the
+        // seam's sentinel and 0046 routes __init_tls through __mmap (which
+        // mints over SYS_BURROW_RESERVE). A binary linked against an older libc
+        // still does -- the Clade toolchain is cross-built and staged by its
+        // own steps, never relinked by a sysroot rebuild -- so the arm stays
+        // until no pool carries a pre-0046 binary; retiring it is an ABI-shape
+        // change.
         //
         // The split is exact rather than heuristic, on three checked facts:
         // that site passes a LITERAL 0 addr under a `tls_size > builtin_tls`
-        // guard (so x0==0 and x1>0 always); the patched __mmap rejects both
-        // len==0 and MAP_FIXED, so no wrapper call can present a non-zero x0
-        // that is really an address; and the native ABI's length is never
-        // legally 0 (sys_burrow_attach_lazy_for_proc rejects it).
+        // guard (so x0==0 and x1>0 always); no wrapper call presents a non-zero
+        // x0 that is really an address (0003's __mmap rejected len==0 and
+        // MAP_FIXED; 0044's never calls 83); and the native ABI's length is
+        // never legally 0 (sys_burrow_attach_lazy_for_proc rejects it).
         //
         // But selecting the 6-arg reading is NOT sufficient. The wrapper's
         // refusals (file-backed, MAP_FIXED) are LIBC-side only -- the kernel
@@ -15557,6 +15448,12 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_BURROW_PROTECT:
         ctx->regs[0] = (u64)sys_burrow_protect_handler(ctx->regs[0], ctx->regs[1],
                                                        ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_BURROW_MAP_FILE:
+        ctx->regs[0] = (u64)sys_burrow_map_file_handler(ctx->regs[0], ctx->regs[1],
+                                                        ctx->regs[2], ctx->regs[3],
+                                                        ctx->regs[4], ctx->regs[5]);
         return;
 
     case SYS_LOOM_SETUP:

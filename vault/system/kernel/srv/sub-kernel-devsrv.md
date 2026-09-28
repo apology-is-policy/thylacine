@@ -3,7 +3,7 @@ id: sub-kernel-devsrv
 type: sub
 title: "devsrv — the /srv service registry, Dev, and accept/peer syscalls"
 parent: moc-kernel-srv
-code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h]
+code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c]
 audit: hard
 guarded-by: [inv-i1]
 validated-by: [spec-corvus, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Nonblocking endpoints
 
@@ -211,7 +211,20 @@ LIVE service yields a QTFILE service Spoor whose aux is a kmalloc'd
 `SrvService *`: a tombstone-rebind reuses the slot, so the connect
 resolves the name fresh). Roots carry a per-instance `devno`
 (stalk-3a F1 — [[fnd-stalk3a-r1-f1]]) so two registry roots have
-distinct mount-key identity.
+distinct mount-key identity. A service node's `qid.path` is its post's own:
+`srv_reserve_in` stamps each reservation with the next value of a
+per-registry counter, never 0 (the root's), and the walk reads it in the same
+lock hold as the name and the LIVE check, since a tombstoned slot can be
+recycled under another name. Until B-1d-v every node carried the root's 0,
+and a service node shares the root's `dc` and `devno`, so a mount at
+`/srv/<name>` was keyed at the registry root and at every other service
+(B-1d-v audit round 2, F1). A new post of a name gets a new path, so a mount at
+the old post does not carry over, as with Plan 9's `srvcreate`. That also
+strands such a mount: a file a Proc mounts at `/srv/<name>` is keyed on that
+post's node, and after a re-post the name walks to the new node, so the old
+entry is unreachable and cannot be unmounted by name -- it holds its slot and
+its source ref until the namespace ends (B-1d-v audit round 3, F3; the general
+fix is a generation in the mount key, tracked in OPEN-BUGS).
 
 **open=connect** (`devsrv_open_connect`): global soft cap
 (`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
@@ -480,6 +493,8 @@ CONTROLS against a gate that refused unconditionally) ·
 `registered` · `post_gate` · `post_basic` · `tombstone` ·
 `registry_full` · `registry_full_tombstone_rebinds` (#30's at-capacity
 asymmetry) · `post_rollback` · `post_listener` · `walk_service` ·
+`service_keys_distinct` (B-1d-v r2 F1: an MREPL over `/srv/a` shows at `a`
+alone, a union at the registry root leaves `/srv/b` its service node) ·
 `registry_lifecycle` · `svc_ref_holds_registry` · `open_connect_byte` ·
 `open_root_dir` (#957) · `stat_native_root` · `accept_immediate` ·
 `accept_blocks_then_wakes` · `conn_io` · `conn_release` ·

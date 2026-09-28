@@ -329,7 +329,7 @@ supervisor Proc could actually serve is **empty**.
 
 It is not a corner case. `third_party/musl/src/env/__init_tls.c:137` mmaps for
 TLS whenever it exceeds the builtin block, and mallocng needs
-`mmap`/`madvise`/`mremap` — a Linux guest cannot reach `main` without `mmap`.
+`mmap`/`madvise`/`mremap` (`madvise` translated since B-1b, 6.28) — a Linux guest cannot reach `main` without `mmap`.
 
 **Why the peers do not have this problem.** The research that should have
 accompanied §4 originally:
@@ -2282,7 +2282,9 @@ with its reason: musl tolerates `ENOSYS` here by construction, and Thylacine has
 no prot-mutation syscall to translate to. [SUPERSEDED at B-1a (2026-09-23): a translated row over `burrow_protect` — the amendment above. The row is `VIV_TIER2`; `rejects_are_deliberate` asserts that, not `ENOSYS`.]
 
 **`munmap` (215) → `SYS_BURROW_DETACH` (38), over a domain the arguments cannot
-express.** V-2a's rejection stands on its facts: detach demands an exact VMA
+express.** (**SUPERSEDED at B-1a', 2026-09-23 — see the closing paragraph of
+this row; the exact-match facts below are the V-2d record.**) V-2a's rejection
+stands on its facts: detach demands an exact VMA
 match while Linux permits partial and multi-mapping unmaps, and — the part that
 makes a bare renumber worse than merely incomplete — *Linux `munmap` of an
 unmapped range succeeds*, while detach returns `-1`. So the translation is wrong
@@ -2310,6 +2312,20 @@ and mallocng frees whole groups it allocated whole. It is also not load-bearing
 for liveness — measured, mallocng **ignores `munmap`'s return** at both of its
 call sites (`free.c:148`, `malloc.c:318`), so a declined unmap costs memory, not
 correctness.
+
+**B-1a' (2026-09-23): `munmap` is the range form.** The row is now
+`sys_munmap_range_for_proc` over `vma_detach_range_in` (ARCH 6.5 "Range
+detach"): partial and multi-mapping unmaps trim or split, an unmapped range
+succeeds (0, the Linux no-op), and every refusal is a named shape with -errno
+through — EINVAL malformed, EACCES a CODE alias or a cut shared-in mapping,
+ENOMEM no VMA slot for a middle cut — decided before the first mutation. The
+range must lie inside the burrow window: below `EXEC_USER_BURROW_BASE` the
+phenotype declines (ENOSYS), because the exec image, the stack and the pouch
+guard are not its to unmap. The divergence named above is closed, and the
+"costs memory" caveat with it: mallocng's freed groups now return their pages.
+Witnesses: pheno-probe L21 (a MAP_FIXED window at 0x1_4000_0000), L21c (its
+`munmap` answers 0) and L21d (a fixed request below the window is declined),
+plus `detach.*` in `kernel/test/test_capacity.c`.
 
 Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
 name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-is-T2
@@ -3055,6 +3071,50 @@ not already gate.
 break (the omode bit is additive; native opens that don't set it are unaffected).
 The whole arm is "carry two flags/numbers to machinery that already exists" —
 Stratum's server-side append and the native pread/pwrite handlers.
+
+### 6.28 Tier 2 — `madvise` (233): the decommit row (B-1b, as-built 2026-09-23)
+
+A Linux guest returns memory with `madvise(MADV_DONTNEED)` / `MADV_FREE`
+(glibc's arena trimming, Go's scavenger, every GC's decommit), and until B-1b
+the row was FORWARD: ENOSYS, which every caller ignores, so a guest's footprint
+only ever grew — the third substrate's share of ARCH 6.5's bar (Pouch's and the
+native allocator are the other two). The row is a Tier-2 translator over
+`SYS_BURROW_DECOMMIT`'s core (`sys_burrow_decommit_core`, the -errno form the
+native 84 flattens to -1). `vivarium_madvise_decide` sorts the advice into
+RELEASE (`MADV_DONTNEED` 4, `MADV_FREE` 8: the pages go, the mapping stays, a
+later touch re-faults zero — MADV_FREE's lazy reclaim taken at once, inside its
+contract), HINT ({NORMAL, RANDOM, SEQUENTIAL, WILLNEED, HUGEPAGE, NOHUGEPAGE,
+DONTDUMP, DODUMP, COLD, PAGEOUT, POPULATE_READ, POPULATE_WRITE}: nothing here
+to steer — 0 on a mapped range, ENOMEM on a hole, as Linux answers, and nothing
+changes), and FORWARD for everything else (the fork-semantic quartet DONTFORK /
+DOFORK / WIPEONFORK / KEEPONFORK, KSM's MERGEABLE / UNMERGEABLE, REMOVE,
+HWPOISON / SOFT_OFFLINE, an unknown value): the tier's rule that declining is
+always safe, since none of those can be given Linux's meaning here and a false
+"0" is a lie a later fork would expose. Linux's argument order is kept: the
+advice is judged first, an unaligned start is EINVAL, a zero length is 0. The
+release inherits the core's answers inside the burrow window — a hole ENOMEM,
+a mapping that is not plain anonymous memory of this space EINVAL — and the
+core DECLINES a range outside it (text, data, the stack and the vDSO lie below
+the window and are never the phenotype's to release): an unmapped range there
+is still Linux's ENOMEM (a hole is a hole wherever it lies), a mapped one is
+ENOSYS with its bytes untouched — a false ENOMEM would tell an allocator its
+own `.bss` is unmapped. The comparison narrows to 32 bits, as the `mprotect`
+row's prot does. Three divergences are recorded rather than served: a
+RELEASE over a private FILE window is EINVAL, where Linux drops the private
+pages and re-reads the file; a range mixing mapped and unmapped parts
+releases nothing and answers ENOMEM, where Linux releases the mapped parts
+first; and a length past the window (`BURROW_RESERVE_MAX`) is EINVAL before
+any hole is looked for, where Linux answers ENOMEM. I-43 holds: the row
+confers no authority the native decommit does not gate (the same window
+confinement, the same admission), and a phenotype Proc's release reaches only
+its own address space.
+
+Witnesses: `vivarium.madvise_domain` (the three sets and the narrowing),
+`vma.range_is_mapped`, and pheno-probe legs L23j–L23t (a written page released
+and re-read zero; a hole ENOMEM for both kinds; DONTFORK ENOSYS; an unaligned
+start EINVAL; a zero length 0; a page of the probe's own data segment declined
+and intact). The RED `nodecommit` (the arm answers 0 without the core) reddens
+L23l: the page keeps its bytes.
 
 ---
 
@@ -4096,6 +4156,11 @@ that reads `p->phenotype` at any of these three sites is wrong even if it passes
   at the resolver but the dispatch sees native and the binary hits the "dynamic Linux binary
   rejected" refusal (`exec.c:1399-1406`) — D's symmetry unmet for exactly the case DISTRO
   D-4 exists to serve.
+  **AMENDED 2026-09-24 (B-1d; ARCH §6.5 "Dynamic loading", DISTRO D-4 amended): the
+  PT_INTERP dispatch consults no phenotype now — the PHENO_LINUX gate is lifted, and every
+  exec with a namespace runs the interpreter its program names — so Leg C's hazard has no
+  dispatch left to mislead, and `exec_load_into` lost the `pheno` parameter that carried the
+  decided value. Leg C's fixture is now `exec.interp_dispatch_every_phenotype`; Leg B stands.**
 
 **The fix is one shape, three sites.** Decide the phenotype from the resolver into a
 **local**, before the load. **Thread that decided value as a parameter** into
@@ -4203,8 +4268,11 @@ makes that name cosmetic, never load-bearing — so a **dynamic** pheno-mount bi
 through `SYS_SPAWN_FULL_ARGV` and **refuses loudly** through `SYS_SPAWN` / `_WITH_FDS` /
 `_WITH_PERMS` / `_WITH_CAPS` (`exec.c`'s nameless-entry refusal, which this section's first
 draft called "unreachable"). A *static* pheno-mount binary is decided and loaded identically
-on every variant. Every shipped pheno-mount binary is static, so no caller meets the asymmetry
-today; a future dynamic one is served by FULL_ARGV, which is what every shell uses.
+on every variant. Every shipped pheno-mount binary is static. Since B-1d the rewrite serves
+native programs too (DISTRO D-4; ARCHITECTURE.md 6.5 "Dynamic loading"), so the asymmetry
+reaches every dynamic binary, native or Linux: it loads through FULL_ARGV, which the shell,
+`posix_spawn` and `execve` all use, and refuses through the nameless variants. joey spawns the
+dynamic loader's prover, `/pouch-hello-dlopen`, through FULL_ARGV for this reason.
 
 #### 13.10.7 Authority (review F5): the one coupling, and I-43
 

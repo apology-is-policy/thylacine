@@ -264,6 +264,157 @@ replace-whole-group); `Unmount` -> `::unmount` (shift-down, order-preserving);
 `RemoveSel` -> `kernel/stalk.c::stalk_union_member_holding` (UM-8c, the F3 remove
 member-selection) via the `STALK_REMOVE` amode + `syscall.c::viv_union_member`.
 
+### B-1d-u: the covered directory (Plan 9 unions, 2026-09-25)
+
+> **Currency note (B-1d-u, 2026-09-25).** The UM paragraph above says the
+> mounted-on directory's own contents are NOT an implicit member
+> ("grafted-sources-only"). Superseded by the operator's vote for Plan 9
+> unions (vault `dec-2026-09-24-union-covered-directory`): an MBEFORE / MAFTER
+> mount at a directory point hosting no member makes the covered directory a
+> member, as Plan 9's cmount adds the old node. The UM table above is the
+> pre-B-1d-u run; the table below supersedes it.
+
+Model additions: `CovDirs` (each Path's own directory, disjoint from `Spoors`,
+so every Spoor pairing of the UM model is still explored) and the fixed
+injection `Covered`; `Member.cv`; `FilePaths` (the points that are not
+directories); `COV_MOUNTABLE` (a covered directory may also be mounted at
+another point); the history variable `unioned` (a group a fresh ordered mount
+started that nothing has since replaced or emptied -- it tells a union that
+lost its covered member from an MREPL group that never had one); the UM-8 F6
+`Reposition` action, modelled for the first time (freshness is judged before
+the move removes the member); `SYMMETRY Symm` over Procs and Spoors on the two
+large clean cfgs (the soundness argument is the comment at `Symm`).
+
+Seven invariants, each failed by its own buggy cfg:
+
+- `UnionHasCovered` -- a union a fresh MBEFORE / MAFTER started keeps its
+  covered member. `BUGGY_UNION_NO_COVERED` (the pre-vote union).
+- `CoveredOnlyInUnion` -- nothing else grows one. `BUGGY_FRESH_AFTER_REMOVE`
+  (a reposition judges freshness after removing the member).
+- `CoveredIsItsPoint` -- at most one, the point's own directory, never MBEFORE
+  or MCREATE. `BUGGY_COVERED_TAKES_FLAGS` (added at holotype round 3's close,
+  vault `fnd-b1d-r3-s3`: until then no cfg failed it).
+- `CoveredPlacement` -- MBEFORE members ahead of it, MAFTER members behind.
+  `BUGGY_COVERED_LAST` (a fresh MAFTER puts the new tree first).
+- `NoOrphanCovered` -- it leaves with the last mounted member.
+  `BUGGY_UNMOUNT_ORPHANS_COVERED`.
+- `NoSelfMount` (I-3) -- a point's own directory is never mounted at it as an
+  ordinary member. `BUGGY_SELF_MOUNT`.
+- `NoCoveredFile` -- a file point never grows one. `BUGGY_COVER_FILE`.
+
+TLC at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, CovDirs = {ca,
+cb}, Names = {n1}` (+ `CONSTRAINT StateConstraint`); every cfg lists every
+invariant, so a buggy cfg is judged against the whole set, not only its target.
+Run 2026-09-25 on thyla-keep (TLC 2026.09.17 rev 142d0ba, OpenJDK 21, 32 aarch64 cores):
+
+| Config | Constants | Verdict | Distinct |
+|---|---|---|---|
+| `territory.cfg` | all flags FALSE, `Symm` | clean, depth 11 | 8,052,876 |
+| `territory_file_point.cfg` | `FilePaths = {b}`, `Symm` | clean, depth 11 | 1,372,428 (4,380,876 before the 2026-09-25 Emount refusal) |
+| `territory_cov_alias.cfg` | `COV_MOUNTABLE`, `Procs = {p1}`, `Spoors = {s1}` | clean, depth 9 | 202,800 |
+| `territory_buggy.cfg` | `BUGGY_CYCLE` | `NoCycle` violated | (fast) |
+| `territory_buggy_mount_no_refbump.cfg` | `BUGGY_MOUNT_NO_REFBUMP` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_unmount_no_refdrop.cfg` | `BUGGY_UNMOUNT_NO_REFDROP` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_destroy_leak.cfg` | `BUGGY_DESTROY_LEAK` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_chroot_no_refbump.cfg` | `BUGGY_CHROOT_NO_REFBUMP` | `MountRefcountConsistency` violated | (fast) |
+| `territory_buggy_mount_order.cfg` | `BUGGY_MOUNT_ORDER` | `OrderCorrect` violated | (fast) |
+| `territory_buggy_walk_last_hit.cfg` | `BUGGY_WALK_LAST_HIT` | `WalkFirstHit` violated | (fast) |
+| `territory_buggy_readdir_last_wins.cfg` | `BUGGY_READDIR_LAST_WINS` | `ReaddirDedupFirstWins` violated | (fast) |
+| `territory_buggy_create_any_member.cfg` | `BUGGY_CREATE_ANY_MEMBER` | `CreateTargetCorrect` violated | (fast) |
+| `territory_buggy_remove_mcreate.cfg` | `BUGGY_REMOVE_MCREATE_MEMBER` | `RemoveTargetCorrect` violated | (fast) |
+| `territory_buggy_union_no_covered.cfg` | `BUGGY_UNION_NO_COVERED` | `UnionHasCovered` violated | (fast) |
+| `territory_buggy_fresh_after_remove.cfg` | `BUGGY_FRESH_AFTER_REMOVE` | `CoveredOnlyInUnion` violated | (fast) |
+| `territory_buggy_covered_takes_flags.cfg` | `BUGGY_COVERED_TAKES_FLAGS` | `CoveredIsItsPoint` violated | (fast) |
+| `territory_buggy_covered_last.cfg` | `BUGGY_COVERED_LAST` | `CoveredPlacement` violated | (fast) |
+| `territory_buggy_unmount_orphans_covered.cfg` | `BUGGY_UNMOUNT_ORPHANS_COVERED` | `NoOrphanCovered` violated | (fast) |
+| `territory_buggy_self_mount.cfg` | `BUGGY_SELF_MOUNT` | `NoSelfMount` violated | (fast) |
+| `territory_buggy_cover_file.cfg` | `BUGGY_COVER_FILE` | `NoCoveredFile` violated | (fast) |
+
+`specs/check-territory.sh` runs all twenty, pins the three clean counts, and
+asserts WHICH invariant each buggy cfg violates; the buggy cfgs run on one
+worker, so the attribution is the model's and not a worker race's. The script
+refuses a cfg it does not judge. Checked before use by a sabotaged copy that
+dropped two clean cfgs, mis-pinned `cov_alias` by one state and named the
+wrong invariant for `buggy_self_mount`: all three failed, by name. The two
+large clean cfgs came out identical across two independent runs: first on
+16 and 14 workers side by side, then under the script on 32, 8,052,876 and
+4,380,876 both times.
+
+Impl mapping: `CovAdded` / `Placed` -> `kernel/territory.c::mount`'s
+`starts_union` (judged before the UM-8 reposition scan: an MBEFORE / MAFTER,
+never MREPL or flagless, at a directory point hosting no member; `CovGuard` is
+its QTDIR check, and `EmountOK`, which guards `MountBefore` / `MountAfter` /
+`MountRepl`, is `kernel/syscall.c::sys_mount_for_proc`'s type check, Plan 9's
+Emount, since the 2026-09-25 votes: every source in the model is a directory,
+so no EL0 mount reaches a file point, and the kernel answers `-T_E_NOTDIR`)
+and the two `mount_install_at` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
+MAFTER); `Reposition` -> the #219 / F6 reposition arm (the point is not fresh,
+so no covered entry); `Unmount` -> `::unmount` (the covered entry is never
+removed by name and leaves with the last mounted member); `NoSelfMount` ->
+`would_create_mount_cycle` (the covered entry is the one self-edge, and only
+`mount` builds it); a walk through a covered member -> `kernel/stalk.c::
+stalk_cross_src` (clones it without crossing into its own mount; a mount chain
+stops at a point whose member[0] is covered). Runtime: the 18 B-1d-u kernel
+tests (`territory_mount.covered_*`, `union_keeps_covered`,
+`no_covered_unless_fresh`, `territory.shed_covered_shares_fate`,
+`stalk.union_covered_*`).
+
+### B-1d-v: SYS_MOUNT's Emount (2026-09-25)
+
+The two 2026-09-25 votes (vault `dec-2026-09-25-sys-mount-emount`, replaced by
+`dec-2026-09-25-mrepl-only-at-a-file`) put Plan 9's `Emount` in
+`sys_mount_for_proc`: a source whose type differs from the point's is refused
+under any flag, and at a point that is not a directory only `MREPL` is
+accepted. Every source in the model is a directory, so the half the model can
+see is that no EL0 mount reaches a file point. A file mounted over a file with
+`MREPL` sits beneath the model, and so does the flagless append the second vote
+refuses, which needs two file members at one point; the kernel test
+`sys_mount.refuses_all_but_mrepl_at_a_file` carries both.
+
+Model changes. The file-point guard is split in two: `EmountOK(pt) ==
+DirPoint(pt) \/ KERNEL_MOUNTS \/ BUGGY_EMOUNT` guards `MountBefore`,
+`MountAfter` and `MountRepl` (the syscall's check), and `CovGuard(pt) ==
+DirPoint(pt) \/ BUGGY_COVER_FILE` guards the covered member in `CovAdded`
+(`starts_union`'s QTDIR conjunct). `KERNEL_MOUNTS` models `mount()`'s kernel
+callers, which the syscall check does not cover. One invariant,
+`NoMemberAtFile`: no file point holds a member (it does not bind the kernel's
+callers). `territory_buggy_cover_file.cfg` now sets `KERNEL_MOUNTS`, since
+without it no mount reaches a file point and `BUGGY_COVER_FILE` could not fail.
+
+| Config | Constants | Verdict | Distinct |
+|---|---|---|---|
+| `territory_file_point_kernel.cfg` | `FilePaths = {b}`, `KERNEL_MOUNTS`, `Symm` | clean, depth 11 | 4,380,876 (the pre-refusal `file_point` count: with `KERNEL_MOUNTS` the mount actions are unguarded) |
+| `territory_buggy_emount.cfg` | `FilePaths = {b}`, `BUGGY_EMOUNT` | `NoMemberAtFile` violated, depth 2 (one `MountBefore` at `b`) | (fast) |
+| `territory_buggy_cover_file.cfg` | `FilePaths = {b}`, `BUGGY_COVER_FILE`, `KERNEL_MOUNTS` | `NoCoveredFile` violated, depth 2 | (fast) |
+
+Run 2026-09-25 on thyla-keep (TLC 2026.09.17, OpenJDK 21, 32 aarch64 cores).
+`specs/check-territory.sh` now runs all twenty-two and pins four clean counts:
+`territory` 8,052,876, `territory_file_point` 1,372,428,
+`territory_file_point_kernel` 4,380,876 and `territory_cov_alias` 202,800. Every
+cfg came out as claimed, and each buggy cfg violated the invariant it names, on
+one worker.
+
+`SYMMETRY Symm` reduces three clean cfgs now: `territory`, `territory_file_point`
+and `territory_file_point_kernel`. The buggy cfgs stay unreduced, so their
+traces read directly; `territory_buggy_emount` lost the `SYMMETRY` line it had
+been given (audit round 2). The whole set was re-run on 2026-09-28 (thyla-keep,
+about 33 minutes): all twenty-two came out as claimed, the four clean counts
+unchanged, and `territory_buggy_emount` violated `NoMemberAtFile` as claimed
+with no reduction.
+
+Impl mapping: `EmountOK` -> `sys_mount_for_proc`'s check (`source_dir !=
+point_dir || (!point_dir && !(flags & MREPL))`, `-T_E_NOTDIR`, the lookup's
+reference released); `CovGuard` -> `starts_union`'s QTDIR conjunct in
+`kernel/territory.c::mount`. Runtime: `sys_mount.refuses_a_type_mismatch`,
+`refuses_all_but_mrepl_at_a_file`, `type_check_reads_only_qtdir` and
+`accepts_an_ordered_mount_at_a_directory` at the syscall; the `mount()` layer's
+`territory_mount.covered_file_point_stays_plain` for `KERNEL_MOUNTS`; on the
+device, alloc-smoke's U-2f leg (a file over the `/srv` directory under every
+placement, `/bin` over `/srv` through the three `bind_*` wrappers with the
+placement read back from `/proc/<pid>/ns`, and `/bin/joey` over the
+`/bin/system.key` file: refused without `MREPL`, and read back through the
+key's name under it).
+
 ### P2-Ea landed (this chunk)
 
 - `bindings` variable + Reachable transitive-closure helper.
@@ -2302,10 +2453,25 @@ that true, and reversing it (a per-Burrow lock) would NOT be sound. See
   from the act is `cow_buggy_break`: two sharers each drop, both then read zero,
   and both take the SAME page in place -> `NoAliasedWritable`.
 - **The pin across the copy** (`DecideLocked`'s `pin + 1`, released in
-  `BreakFinish`) -> `arch/arm64/fault.c`, the copy arm. The implementation
-  refines the model's explicit pin as a RETAINED SHARE: the breaker does not
-  drop its share until after the copy, so the count cannot reach zero while it
-  is reading. Same property, one counter instead of two.
+  `BreakFinish` -- or, under `MODEL_LEAF`, in `BreakRelease`) ->
+  `arch/arm64/fault.c`, the copy arm. The implementation refines the model's
+  explicit pin as a RETAINED SHARE: the breaker does not drop its share until
+  after the copy AND after the leaf write (`cow_release`, put after step 5's
+  replace), so the count cannot reach zero while it is reading, nor while its
+  own read-only leaf still translates to the original. Same property, one
+  counter instead of two.
+- **`BreakReplace` then `BreakRelease`** (B-1a', 2026-09-23; `MODEL_LEAF`) ->
+  step 5 of `demand_page_locked`: `mmu_replace_user_pte_attr` (the copy's
+  writable leaf over the read-only one, one break-before-make), THEN
+  `cow_page_put(cow_release)`. Until the round-3 audit's F12 the code put the
+  share BEFORE the replace -- `cow_buggy_put_before_replace` -- and the model
+  could not have caught it: `BreakFinish` is the two as one step, and a
+  read-only leaf had no variable. `pter[s]` (set by `ReadFault`, the read arm's
+  install) is that variable now; `NoReadableFreed` / `NoCrossSpaceRead` are the
+  two chains F12 named (a peer's exit frees the page under the leaf; a peer's
+  break takes it in place under the leaf). The window the model still does not
+  see: the leaf write itself is a TLB break-before-make; a sibling thread's
+  fault inside it is answered by step 2b (`mmu_user_pte_admits`, audit F13).
 - **`FreePristine`** -> the three release sites, all routed through
   `cow_page_put` so the rule stays checkable by inspection:
   `kernel/burrow.c`'s populate-unwind, `burrow_decommit`, and the ANON_LAZY free
@@ -2333,6 +2499,13 @@ Gate (2026-08-02): `cow.cfg` clean at **580 distinct states, depth 13** (3
 sharers) with Safety + `EventuallyReleased`; `cow_buggy_break` ->
 `NoAliasedWritable` violated; `cow_buggy_teardown` -> `NoUseAfterFree`
 violated; `cow_buggy_vfork` -> temporal property violated with Safety intact.
+
+Gate (2026-09-23, B-1a'): `specs/check-cow.sh` on the round-4 tree -- the
+eight older cfgs at their pinned counts (580 / 10636 / 231 and the five buggy
+cfgs by name; `MODEL_LEAF` off is additive by measurement), `cow_leaf` clean at
+**2996 distinct states** (3 sharers, Safety + `LeafSafety` +
+`EventuallyReleased`), `cow_buggy_put_before_replace` -> `NoReadableFreed`
+violated.
 
 ### The B-1a extension (2026-09-23; ARCH 6.5 "The permission ceiling") -- the protect actions behind `ALLOW_PROTECT`
 
@@ -2446,6 +2619,91 @@ violated. Three sabotages of the closure in scratch copies (rule too small,
 rule = every tree, truth too small) each fail -- the property round 1's module
 lacked. `specs/check-territory-shed.sh` runs all seven cfgs, pins the two
 clean state counts, and asserts WHICH invariant each buggy cfg violates.
+Re-run 2026-09-25 for B-1d-u (the shed spec itself unchanged), on thyla-keep:
+both clean counts reproduced (744,864 at depth 13, 793,408 at depth 14) and
+the five buggy verdicts as pinned.
+
+## `capacity.tla` -- the I-32 page-accounting conservation law (B-1a', 2026-09-23)
+
+**Model-first, in the same chunk as the code it constrains.** The module landed
+in B-1a''s first WIP commit, before `vma_detach_range_in` existed, and the
+range detach core was then written to it: the release BEFORE the geometry
+change, and the D-3b replace as detach-then-insert. The trigger was two
+occurrences of one shape -- the pre-B-1a piece-detach bug and the B-1a audit's
+F5 (an over-charge after a MAP_FIXED window inside a touched lazy mapping) were
+both a path that unmapped a slot without releasing it, in a system whose free
+is Proc-agnostic. The model says why that is fatal rather than merely untidy:
+`burrow_free_internal` frees a resident page but has no Proc to refund, so a
+slot that loses its mapping while resident is charged for the address space's
+life. `ChargeConserved` (page_count == the resident count) is blind to it --
+the orphan is resident AND charged -- which is why `NoOrphan` exists as a
+second invariant and why both buggy cfgs are judged on it.
+
+- **`Touch(b, s)`** -> `arch/arm64/fault.c`, the ANON_LAZY miss: the data page
+  is charged first (`proc_page_charge(p, 1)`), then `pagemap_install(&v->pm,
+  .., p->as, ..)` charges the node pages it allocates to the SAME address space
+  (a refused charge installs nothing and takes the graceful per-Proc
+  terminate). Metadata rides the slot it indexes -- not modelled separately.
+- **`Decommit(b, s)`** -> `kernel/burrow.c::burrow_decommit_in`
+  (`SYS_BURROW_DECOMMIT` 84): take, free, uncharge per slot; the mapping kept.
+- **`Detach(b, s)`** -> `kernel/vma.c::vma_detach_range_in`, phase 3:
+  `burrow_release_lazy_range_in(as, v, lo, hi)` over the overlap BEFORE the
+  head/tail trim, the middle split or the whole removal. The release walks
+  the pagemap by PRESENT nodes (`pagemap_take_next`), puts each page
+  (`cow_page_put`) and uncharges the data pages plus the nodes each take
+  emptied. The mapping's own free is `vma_free_deferred` ->
+  `burrow_free_deferred` -> `burrow_free_internal`, after `as->lock` drops.
+- **`Replace(s)`** -> `kernel/vma.c::vma_replace_range_in` = allocate the new
+  piece, `vma_detach_range_in(.., extra_vmas = 1, ..)` the window (which
+  releases the window's slots of the OLD Burrow), insert. F5 closed by
+  construction: there is no second copy of the release to forget.
+- **`FreeIfLast`** -> `burrow_free_internal` (`pagemap_destroy` with the COW
+  put): Proc-agnostic, refunds nothing. The load-bearing fact.
+- **The address space's death** (not modelled: one address space that never
+  dies) -> `kernel/addrspace.c::addrspace_unref`: `vma_drain_in` frees
+  Proc-agnostically and `page_count` dies with the space; the pool is PHYSICAL
+  (`mm/phys.c`, the round-1 close), so every page the drain frees returns its
+  charge at `free_pages` and nothing is left to settle. (The first fix -- a
+  death return of the leftover count, found by the test that names it,
+  `capacity.death_returns_charges_to_pool`: before the pool existed a charge
+  that died with its counter cost nothing; with a machine-wide bound above it,
+  every death leaked its RSS forever -- was superseded by the physical pool: a
+  holder count returned at death would double-return what the frees return.)
+- **`ChargeConserved`** -> `detach.range_trims_left_right_middle`,
+  `detach.four_gib_reservation_round_trips` (8 pages + 13 nodes charged, 4 + 6
+  back at the middle detach, 0 at the end),
+  `capacity.pagemap_nodes_charged_and_reclaimed` (root included).
+- **`NoOrphan`** -> `capacity.replace_window_releases_orphans` (the Replace)
+  and `detach.range_across_burrows_and_holes` (a held Burrow ref sees the
+  whole mapping ALIVE with nothing resident: the release ran before the
+  mapping went).
+
+What the model cannot see, listed so the green reads no larger: one address
+space, so no fork clone of the pagemap (`pagemap_mirror` is `cow.tla`'s
+territory); the pool as a second bound above `page_count`, PHYSICAL since the round-1
+close -- charged at `alloc_user_pages`, returned at `free_pages`, a mirror of
+no counter (`capacity.pool_refuses_users_keeps_tcb`: refused at exactly K
+pages, nodes and tables counted, the TCB not;
+`capacity.memory_bomb_leaves_the_reserve`: the round-1 attack refused within
+one touch of the room, everything returned by the decommit); the hardware page
+tables, charged to the space and reclaimed as they empty (the model's slots
+have no tables; `capacity.page_tables_charged_and_reclaimed`); the Image
+cache's pages, charged to each space that maps them per leaf and reclaimed
+from idle images under pressure (the model has no cache; the round-2 audit's
+F8: `demand_page.file_pages_charge_the_holder`,
+`demand_page.idle_image_reclaimed_under_pressure`); the walk bound (`pagemap_walk_steps`;
+`capacity.window_sized_reservation_releases_in_bounded_steps`: the whole
+64 TiB window reserved, two pages touched, released in a few thousand entry
+visits, not 2^34).
+
+Gate: `specs/check-capacity.sh`. `capacity.cfg` clean, pinned at
+**625 distinct states** (4 slots x 2 Burrows);
+`capacity_buggy_replace_orphans.cfg` and `capacity_buggy_detach_no_refund.cfg`
+must each violate `NoOrphan` with `ChargeConserved` listed ahead of it and
+HOLDING -- a run that reported the counter instead would mean the model no
+longer says the counter is blind.
+
+---
 
 ## Spec-first re-enablement record (moved verbatim from CLAUDE.md, 2026-08-05)
 
@@ -2484,6 +2742,8 @@ pty_stop, reader_frame, ...) are recorded per-row in
 | `NoElevatedOutlivesScope` | the union of the above; runtime witnesses `proc.rfork_refused_while_terminating`, `devcap.imperium_nest_refused`, `devcap.further_redeem_keeps_scope` |
 | `FlowOnlyUnderPropagating` / `FlowNeverWidens` | `caps.rfork_flows_under_propagating_scope` / `caps.rfork_no_flow_without_propagating` / `caps.rfork_flow_bounded_by_mask` |
 | `OneScopePerProc` / `ScopeTraitsSetOnce` / `MembersNeverRoot` / `PropagatingIsScopeWide` | `devcap.further_redeem_keeps_scope` (tag + traits kept) + `devcap.imperium_nest_refused` + the rfork inherit (`caps.rfork_inherits_legate_scope`: the ROOT flag never inherits) |
+
+**RE-ENABLED for the page-accounting conservation law (B-1a', 2026-09-23; ARCH 6.5 "Capacity, and the I-32 default").** The ninth instance, and the first applied to an ACCOUNTING law rather than a state machine. The B-1a holotype audit's F5 (an orphan-slot over-charge after a D-3b window inside a touched lazy mapping) and the pre-B-1a piece-detach bug it echoed were one defect twice: a path that unmaps a slot without first releasing it, in a system whose free (`burrow_free_internal`) is Proc-agnostic and so can never refund. The second occurrence is the trigger. `specs/capacity.tla` states the law -- `ChargeConserved` (page_count == the resident count) and `NoOrphan` (a resident slot is always mapped) -- with the range detach and the MAP_FIXED replace as actions, one buggy cfg per historical shape, and B-1a''s `vma_detach_range_in` / `vma_replace_range_in` were written to it (the release BEFORE the geometry change; replace = detach + insert). The map, the gate (`specs/check-capacity.sh`) and what the model does not cover are in the `capacity.tla` section above.
 
 ---
 

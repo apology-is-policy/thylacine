@@ -100,6 +100,13 @@ void test_stalk_mount_names_crossed_union_base(void); // shed r4 F4
 void test_stalk_remove_parent_reports_union_point(void); // shed r3 F3
 void test_stalk_mount_names_crossed_base(void);          // shed r3 F4
 void test_stalk_union_dissolved_helper(void);            // shed r3 F5
+void test_stalk_union_covered_walk(void);   // Plan 9 unions
+void test_stalk_union_covered_after(void);   // Plan 9 unions
+void test_stalk_union_covered_readdir(void);   // Plan 9 unions
+void test_stalk_union_covered_create(void);   // Plan 9 unions
+void test_stalk_union_covered_unmount(void);   // Plan 9 unions
+void test_stalk_union_covered_dissolved(void);   // Plan 9 unions
+void test_stalk_union_covered_holder(void);   // Plan 9 unions
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -221,6 +228,12 @@ static const struct fixnode g_fix[] = {
     { 31,  0, "umb",    QTDIR,  0755u, NULL },   // searchable union member
     { 32, 31, "tgt",    QTFILE, 0644u, NULL },   // the one that wins
     { 33,  0, "umpt2",  QTDIR,  0755u, NULL },   // X-skip union mount point
+    // Plan 9 unions: `umpt3` is a union mount point with CONTENTS of its own --
+    // "own", which no member holds, and a "shared" colliding with um1's (23) and
+    // um2's (26). A union started there searches it as the covered member.
+    { 34,  0, "umpt3",  QTDIR,  0755u, NULL },
+    { 35, 34, "own",    QTFILE, 0644u, NULL },
+    { 36, 34, "shared", QTFILE, 0644u, NULL },
 };
 #define FIX_LOOP_PATH 7u
 // The first symlink qid -- the boundary the fixture walk uses to answer
@@ -1986,7 +1999,8 @@ void test_stalk_union_readdir_paginate(void) {
 
 // Control: a plain directory open and a SINGLE-member mount are NOT unions, so
 // union_snap stays NULL -- readdir takes the ordinary single-Dev path. Proves
-// the tag is set only for a >= 2-member mount (no over-tagging regression).
+// the tag is set only for a >= 2-member mount (no over-tagging regression). One
+// MBEFORE graft IS a union: the directory it covers is its second member.
 void test_stalk_union_readdir_nontagged(void) {
     struct Proc p;
     struct Spoor *root = cross_setup(&p);
@@ -1998,15 +2012,23 @@ void test_stalk_union_readdir_nontagged(void) {
     TEST_ASSERT(q1->union_snap == NULL, "plain dir open is not tagged");
     spoor_clunk(q1);
 
-    // (b) single-member mount (one graft on umpt) is not a union.
+    // (b) single-member mount (one MREPL graft on umpt) is not a union.
     struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
     struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
     TEST_ASSERT(um2 && pt, "resolve um2 + umpt");
-    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "single mount um2 -> umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MREPL), 0, "single mount um2 -> umpt");
     struct Spoor *q2 = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
     TEST_ASSERT(q2 != NULL, "open single-mount umpt");
     TEST_ASSERT(q2->union_snap == NULL, "single-member mount is not a union");
     spoor_clunk(q2);
+
+    // (c) the same lone graft MBEFORE starts a union with the covered umpt.
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount the single mount");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "um2 MBEFORE -> [um2, covered umpt]");
+    struct Spoor *q3 = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q3 != NULL, "open the union umpt");
+    TEST_ASSERT(q3->union_snap != NULL, "one MBEFORE graft is a union (the covered directory)");
+    spoor_clunk(q3);
 
     territory_unref(p.territory);
     spoor_clunk(um2); spoor_clunk(pt);
@@ -2122,7 +2144,9 @@ void test_stalk_union_create_no_target(void) {
 // use (SYS_WALK_CREATE, rename's destination, viv's mutation parent), answered
 // NULL -> EACCES for the same point, so openat(O_CREAT) created what a create
 // through the union dirfd refused. um2 is member[0] and the only MCREATE member;
-// unmount drops member[0], leaving um1 (qid 22), which has no MCREATE.
+// unmount drops member[0], leaving um1 (qid 22), which has no MCREATE. um2 is
+// grafted MREPL: an MBEFORE graft would start a union with the covered umpt,
+// which then outlives um2 (the point never drops to one member that way).
 void test_stalk_union_one_member_creates_alike(void) {
     struct Proc p;
     struct Spoor *root = cross_setup(&p);
@@ -2132,7 +2156,7 @@ void test_stalk_union_one_member_creates_alike(void) {
     struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
     struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
     TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
-    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE | MCREATE), 0, "um2 MBEFORE|MCREATE (member[0])");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MREPL | MCREATE), 0, "um2 MREPL|MCREATE (member[0])");
     TEST_EXPECT_EQ(mount(p.territory, um1, pt, MAFTER),            0, "um1 MAFTER (no MCREATE)");
 
     int e = 0;
@@ -2770,6 +2794,329 @@ void test_stalk_union_dissolved_helper(void) {
     spoor_clunk(ufd);
     territory_unref(p.territory);
     spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// Plan 9 unions: an MBEFORE / MAFTER graft at a directory hosting no member also
+// makes the directory it covers a member (MCOVERED), so the union searches it --
+// `bind -b um1 umpt3` shows um1's names, then umpt3's own. Before the vote the
+// union searched only its grafts, and umpt3/own, which only umpt3 holds, was
+// hidden.
+// =============================================================================
+
+// MBEFORE: [um1, covered umpt3]. A name um1 holds wins; a name only the covered
+// directory holds is found there; a name in neither misses.
+void test_stalk_union_covered_walk(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    root->path = path_make_root();
+    TEST_ASSERT(root->path != NULL, "seed root path /");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && pt, "resolve um1 + umpt3");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt3 -> [um1, covered]");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    struct Spoor *q = stalk(&p, root, "umpt3/own", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "umpt3/own resolves: the covered directory is searched");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)35, "own is the covered directory's (35)");
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/umpt3/own"),
+        "its name is the mount point's (/umpt3/own)");
+    spoor_clunk(q);
+
+    q = stalk(&p, root, "umpt3/shared", 12, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "umpt3/shared resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "shared is um1's (23): the MBEFORE member first");
+    spoor_clunk(q);
+
+    q = stalk(&p, root, "umpt3/only1", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "umpt3/only1 resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)24, "only1 is um1's (24)");
+    spoor_clunk(q);
+
+    int err = 0;
+    q = stalk_err(&p, root, "umpt3/nosuch", 12, STALK_OPEN, 0, &err);
+    TEST_ASSERT(q == NULL, "umpt3/nosuch misses");
+    TEST_EXPECT_EQ(err, T_E_NOENT, "every member misses -> ENOENT");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the covered walks");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// MAFTER: [covered umpt3, um2]. The covered directory is searched FIRST, so its
+// "shared" (36) shadows um2's (26); um2's own names resolve behind it. An opened
+// union handle is member[0] -- here the covered directory, the point's own
+// identity (34) -- and resolution relative to it still searches every member.
+void test_stalk_union_covered_after(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um2 = stalk(&p, root, "um2",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um2 && pt, "resolve um2 + umpt3");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER), 0, "um2 MAFTER umpt3 -> [covered, um2]");
+
+    struct Spoor *q = stalk(&p, root, "umpt3/shared", 12, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "umpt3/shared resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)36, "shared is the covered directory's (36), not um2's (26)");
+    spoor_clunk(q);
+    q = stalk(&p, root, "umpt3/only2", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "umpt3/only2 resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "only2 falls through to um2 (27)");
+    spoor_clunk(q);
+
+    struct Spoor *ufd = stalk(&p, root, "umpt3", 5, STALK_OPEN, 0);
+    TEST_ASSERT(ufd != NULL && ufd->union_snap != NULL, "open the union");
+    TEST_EXPECT_EQ((u64)ufd->qid.path, (u64)34, "the handle is member[0]: the covered umpt3 (34)");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    q = stalk(&p, ufd, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative only2");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "a base that is the covered directory still reaches um2 (27)");
+    spoor_clunk(q);
+    q = stalk(&p, ufd, "own", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative own");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)35, "and the covered directory's own name (35)");
+    spoor_clunk(q);
+    q = stalk(&p, ufd, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)36, "first hit off the fd too (36)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the fd-relative resolves");
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Readdir merges the covered directory in its place: [um1, covered umpt3, um2]
+// lists um1's names, then umpt3's own ("own"; its "shared" deduped behind
+// um1's), then um2's ("only2").
+void test_stalk_union_covered_readdir(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",   3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt3");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE -> [um1, covered]");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER  -> [um1, covered, um2]");
+
+    struct Spoor *q = stalk(&p, root, "umpt3", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL && q->union_snap != NULL, "open + tag union");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    u8  buf[512];
+    s64 got = union_readdir_run(&p, q, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "union readdir returns a run");
+
+    static const char *const want_nm[4] = { "shared", "only1", "own", "only2" };
+    static const u64 want_q[4] = { 23, 24, 35, 27 };
+    for (int i = 0; i < 4; i++) {
+        u64 qp = 0, ck = 0; char nm[64];
+        TEST_ASSERT(urd_entry(buf, (long)got, i, &qp, &ck, nm, sizeof(nm)) > 0, "entry present");
+        TEST_ASSERT(urd_name_eq(nm, want_nm[i]), "merged order: um1, the covered umpt3, um2");
+        TEST_EXPECT_EQ(qp, want_q[i], "each name from its first holder");
+        TEST_EXPECT_EQ(ck, (u64)(i + 1), "ordinal cookie");
+    }
+    TEST_EXPECT_EQ(urd_entry(buf, (long)got, 4, NULL, NULL, NULL, 0), (long)0,
+                   "exactly four: umpt3's shared and um2's deduped");
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the readdir");
+
+    spoor_clunk(q);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// A create at a union lands in its first MCREATE member, and the covered
+// directory is never one (Plan 9: a union with no member mounted MCREATE
+// refuses creates). So one `bind -b` refuses a create the plain directory took,
+// on both routes; re-mounting the member MCREATE -- a reposition, which adds no
+// second covered entry -- sends the create there.
+void test_stalk_union_covered_create(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+
+    struct Spoor *root = p->territory->root_spoor;
+    struct Spoor *um1 = stalk(p, root, "um1",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && pt, "resolve um1 + umpt3");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/umpt3/plain", 12, 1 /*OWRITE*/, 0644);
+    TEST_ASSERT(fd >= 0, "control: a create in the plain umpt3");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)34, "control: it landed in umpt3 (34)");
+
+    int n0 = territory_nmounts(p->territory);
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE), 0, "um1 MBEFORE (no MCREATE) -> [um1, covered]");
+    fixmade_reset();
+    fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                        "/umpt3/newfile", 14, 1 /*OWRITE*/, 0644);
+    TEST_EXPECT_EQ((long)fd, (long)(-(s64)T_E_ACCES), "no MCREATE member -> the create is refused");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)-1, "nothing was created, not even in the covered umpt3");
+    int e = 0;
+    struct Spoor *cm = stalk_union_create_member(p, pt, &e);
+    TEST_ASSERT(cm == NULL && e == 0, "the dirfd route agrees: no create member");
+    if (cm) spoor_clunk(cm);
+
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE | MCREATE), 0, "um1 re-mounted MBEFORE|MCREATE");
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), n0 + 2, "a reposition: still um1 + the covered entry");
+    fixmade_reset();
+    fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                        "/umpt3/newfile", 14, 1 /*OWRITE*/, 0644);
+    TEST_ASSERT(fd >= 0, "create in the union");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)22, "it landed in the MCREATE member um1 (22)");
+    e = 0;
+    cm = stalk_union_create_member(p, pt, &e);
+    TEST_ASSERT(cm != NULL && (u64)cm->qid.path == (u64)22, "the dirfd route names um1 (22) too");
+    if (cm) spoor_clunk(cm);
+
+    spoor_clunk(um1); spoor_clunk(pt);
+    ocp_teardown(p);
+}
+
+// Unmounting a union's members never unmounts the covered directory by itself:
+// [um1, covered, um2] loses um1 and is still a union of umpt3 and um2; losing
+// um2 takes the covered entry with it, and umpt3 is a plain directory again --
+// it opens untagged, its own names resolve, and nothing is left to unmount.
+void test_stalk_union_covered_unmount(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",   3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt3");
+    int n0 = territory_nmounts(p.territory);
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER -> [um1, covered, um2]");
+    TEST_EXPECT_EQ(territory_nmounts(p.territory), n0 + 3, "three entries");
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount um1");
+    TEST_EXPECT_EQ(territory_nmounts(p.territory), n0 + 2, "[covered, um2]");
+    struct Spoor *q = stalk(&p, root, "umpt3/shared", 12, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "shared resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)36, "now the covered directory's (36): um1 is gone");
+    spoor_clunk(q);
+    q = stalk(&p, root, "umpt3/only2", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "um2 is still a member (only2)");
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "umpt3/only1", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "um1's only1 is gone");
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount um2");
+    TEST_EXPECT_EQ(territory_nmounts(p.territory), n0, "the covered entry left with it");
+    TEST_EXPECT_NE(unmount(p.territory, pt), 0, "nothing is left to unmount");
+    q = stalk(&p, root, "umpt3", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "umpt3 opens");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)34, "as itself (34)");
+    TEST_ASSERT(q->union_snap == NULL, "a plain directory, no union");
+    spoor_clunk(q);
+    q = stalk(&p, root, "umpt3/own", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL && (u64)q->qid.path == (u64)35, "its own names resolve (own, 35)");
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "umpt3/only2", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "um2's only2 is gone");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// ARCH 9.6.10: a dissolved union degrades to member[0] -- the directory the
+// HANDLE named when it was opened. When that was the covered directory (an
+// MAFTER union), it is the point's own directory, legitimately: "." and its own
+// names resolve there, the departed member's do not.
+void test_stalk_union_covered_dissolved(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um2 = stalk(&p, root, "um2",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um2 && pt, "resolve um2 + umpt3");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER), 0, "um2 MAFTER -> [covered, um2]");
+
+    struct Spoor *ufd = stalk(&p, root, "umpt3", 5, STALK_OPEN, 0);
+    TEST_ASSERT(ufd && ufd->union_snap, "a union fd");
+    TEST_EXPECT_EQ((u64)ufd->qid.path, (u64)34, "member[0] is the covered umpt3 (34)");
+
+    struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "live: \".\"");
+    TEST_ASSERT(q->union_snap != NULL, "live: \".\" is still a union handle");
+    spoor_clunk(q);
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount um2 -- the covered entry goes with it");
+    TEST_EXPECT_NE(unmount(p.territory, pt), 0, "the point hosts nothing now");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    q = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "dissolved: \".\" resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)34, "dissolved: member[0], the directory the handle named (34)");
+    TEST_ASSERT(q->union_snap == NULL, "dissolved: a plain handle");
+    spoor_clunk(q);
+    q = stalk(&p, ufd, "own", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL && (u64)q->qid.path == (u64)35, "dissolved: its own name (own, 35)");
+    if (q) spoor_clunk(q);
+    q = stalk(&p, ufd, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "dissolved: the departed member's only2 is gone");
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the dissolved resolves");
+
+    struct Spoor *m0 = NULL;
+    TEST_ASSERT(stalk_union_dissolved(&p, ufd, &m0), "the helper agrees: dissolved");
+    TEST_ASSERT(m0 != NULL && (u64)m0->qid.path == (u64)34, "and hands out member[0] (34)");
+    if (m0) spoor_clunk(m0);
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// A remove in a union acts on the member HOLDING the name (UM-7 F3), and the
+// covered directory is a member like any other: umpt3/own is held by umpt3
+// itself, umpt3/shared by um1 ahead of it.
+void test_stalk_union_covered_holder(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",   3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt3", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && pt, "resolve um1 + umpt3");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE -> [um1, covered]");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    int e = 0;
+    struct Spoor *m = stalk_union_member_holding(&p, pt, "own", &e);
+    TEST_ASSERT(m != NULL, "own has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)34, "the covered umpt3 holds own (34)");
+    spoor_clunk(m);
+    m = stalk_union_member_holding(&p, pt, "shared", &e);
+    TEST_ASSERT(m != NULL, "shared has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)22, "um1 holds shared first (22)");
+    spoor_clunk(m);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the holder lookups");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(pt);
     spoor_unref(root);
 }
 

@@ -149,9 +149,9 @@ void test_driver_crash_recovery(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("virtio-blk-probe", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
 

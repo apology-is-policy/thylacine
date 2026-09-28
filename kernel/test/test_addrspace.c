@@ -33,7 +33,7 @@
 //     were the same event only while nothing shared.
 //
 //   addrspace.proc_alloc_in_shares
-//     proc_alloc_in(as, PROC_PAGE_MAX) gives the Proc that exact space and takes a reference,
+//     proc_alloc_in(as, proc_default_page_budget()) gives the Proc that exact space and takes a reference,
 //     so the Proc's later death drops a reference rather than the space. This
 //     is the mechanism rfork(RFPROC|RFMEM) is built from.
 //
@@ -69,7 +69,7 @@ void test_addrspace_proc_alloc_in_shares(void);
 void test_proc_rfork_rfmem_refuses_without_addrspace(void);
 
 void test_addrspace_alloc_shape(void) {
-    struct AddrSpace *as = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc returned NULL");
     TEST_ASSERT(__atomic_load_n(&as->ref, __ATOMIC_ACQUIRE) == 1,
                 "a fresh AddrSpace starts at ref 1");
@@ -85,7 +85,7 @@ void test_addrspace_alloc_shape(void) {
 }
 
 void test_addrspace_refcount(void) {
-    struct AddrSpace *as = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc returned NULL");
 
     addrspace_ref(as);
@@ -109,10 +109,10 @@ void test_addrspace_refcount(void) {
 }
 
 void test_addrspace_share_drains_at_last_ref(void) {
-    struct AddrSpace *as = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc returned NULL");
 
-    struct Burrow *b = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(b != NULL, "burrow_create_anon failed");
     int mapped_before = burrow_mapping_count(b);
 
@@ -150,10 +150,10 @@ void test_addrspace_share_drains_at_last_ref(void) {
 }
 
 void test_addrspace_proc_alloc_in_shares(void) {
-    struct AddrSpace *as = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc returned NULL");
 
-    struct Proc *p = proc_alloc_in(as, PROC_PAGE_MAX);
+    struct Proc *p = proc_alloc_in(as, proc_default_page_budget());
     TEST_ASSERT(p != NULL, "proc_alloc_in returned NULL");
     TEST_ASSERT(p->as == as,
                 "proc_alloc_in must adopt the space it was handed, not a copy "
@@ -172,9 +172,9 @@ void test_addrspace_proc_alloc_in_shares(void) {
 
     // The counterpart: the NULL form is the old behaviour exactly -- a fresh
     // space of its own, which is what every pre-L-3 caller wants and gets.
-    struct Proc *q = proc_alloc_in(NULL, PROC_PAGE_MAX);
-    TEST_ASSERT(q != NULL, "proc_alloc_in(NULL, PROC_PAGE_MAX) returned NULL");
-    TEST_ASSERT(q->as != NULL, "proc_alloc_in(NULL, PROC_PAGE_MAX) allocates a fresh space");
+    struct Proc *q = proc_alloc_in(NULL, proc_default_page_budget());
+    TEST_ASSERT(q != NULL, "proc_alloc_in(NULL, proc_default_page_budget()) returned NULL");
+    TEST_ASSERT(q->as != NULL, "proc_alloc_in(NULL, proc_default_page_budget()) allocates a fresh space");
     TEST_EXPECT_EQ(addrspace_ref_count(q->as), 1,
                    "a fresh space is held by exactly its one Proc");
     q->state = 2;

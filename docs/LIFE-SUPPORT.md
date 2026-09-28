@@ -200,10 +200,11 @@ most of #925. Split:
   rejecting it; **which**'s explicit-path probe (`fs::exists`) likewise resolves
   relative-to-cwd. Verified by `coreutil-smoke` (13 new checks; 41 total) +
   `ls-3c` LS-CI (`uname -a`, `realpath`, `yes | head`, `echo | hexdump` through
-  the real shell). **`yes` is deliberately excluded from `coreutil-smoke`**: it
-  is an unbounded producer, and the capture harness holds the pipe read-end open
-  (no BrokenPipe), so its write never errors and `wait()` would deadlock -- it is
-  covered interactively (`yes | head`, where the reader closes the pipe).
+  the real shell). **`yes` was excluded from `coreutil-smoke` then**: an
+  unbounded producer, it would have deadlocked a capture that reaped before it
+  read, so it was covered interactively (`yes | head`, where the reader closes
+  the pipe). Since B-1c the capture reads as the pipes fill and kills a tool at
+  its bound, and `yes` runs in the smoke.
 
 Each verified by `coreutil-smoke` + an LS-CI assertion (`ls /` lists the root).
 

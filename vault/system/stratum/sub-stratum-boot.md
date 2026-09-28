@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -58,9 +58,43 @@ contents, seal, X refused before the lookup, the malformed-word refusals, a
 touching the guard")` -- the expect-fault census, which requires BOTH the
 marker in the child's stdout pipe AND a non-zero exit status, so a page sealed
 at none that did not guard (the child prints SURVIVED and exits 0) fails the
-boot. Both rungs are boot-fatal like every other. The marker goes out on fd 1
+boot. B-1b adds the Pouch side: `pouch_smoke_one("pouch-hello-mem",
+POUCH_CENSUS_MEM)` after the malloc smoke (twelve legs of the exact memory
+seam, the mallocng witness among them -- [[sub-pouch-mem]]), and
+`pouch_smoke_one_expect_fault("pouch-hello-guard", POUCH_CENSUS_GUARD)` after
+the fault smoke (a worker's write into its own guard dies of `snare:segv`);
+`/pouch-hello-threads`'s census grew by three legs. Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
+
+**B-1a' rung (2026-09-23).** After the guard child, joey spawns
+`/capacity-probe` and reaps it by pid with `t_wait_pid_for`, requiring status
+0 -- the EL0 half of ARCH 6.5's capacity contract through the native syscalls,
+reading the census joey's own probes read (`/proc/<pid>/status`, the pid from
+`t_getpid`; there is no `/proc/self`, the Plan 9 shape; `pages:` is data plus
+the pagemap's nodes): a 4 GiB reservation admitted and costing nothing
+untouched, the census rising by 8 pages + 13 nodes when touched every 512 MiB,
+a protect of the middle GiB releasing nothing, a 2 GiB range detach across the
+pieces returning exactly 4 pages + 6 nodes with the survivors' bytes intact,
+the rest detached in one range with the census back at its baseline (and an
+empty range answering 0), a 512 MiB reservation detaching, an eager region
+staying charged until its last piece goes, and the refusals (unaligned, zero
+length, below the window) changing nothing. Boot-fatal like every other rung
+(`joey: /capacity-probe FAILED`). **B-1c rung (2026-09-24).** After it, joey
+spawns `/heap-probe` and reaps it by pid, requiring status 0 -- libthyla-rs's
+heap as a program sees it ([[sub-thyla-heap]]): 64 MiB of small blocks raise the
+data view by at least their pages and by no more than the heap's footprint, and
+fall back to within dlmalloc's kept top of the base with no trim asked for and
+to the base after one; a 32 MiB block returns every page while a small block
+stays live; a reservation switch releases the emptied first reservation; and the
+churn is timed on either side of dlmalloc's trim threshold. Boot-fatal
+(`joey: /heap-probe FAILED`). The CL-5 probe (`probe_cl5_page_budget`)
+reads joey's OWN `budget:` from its status file (`proc_status_field`) rather
+than restating a constant, asks for one page more (refused: a raise without
+authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum
+on any machine short of 16 TiB); since the default IS the hard maximum, the
+authority refusal proper -- a narrowed parent asking above itself but below
+the maximum -- is the kernel suite's (`resource.spawn_budget_resolve`).
 
 
 Ordered, and every step is boot-fatal:
@@ -169,26 +203,46 @@ So the init program's mount question is not "carry it or lose it" but **"should
 this tree be global at all?"** — and the answer is no whenever the served tree's
 authority is per-connection.
 
-**The pivot is a swap, so everything else must be carried by hand.** Eight
-O_PATH handles are taken *before* the swap and re-grafted after: `/srv`,
-the whole devramfs root (→ `/bin`), `/proc`, `/ctl`, `/dev`, `/hw`,
-`/hw/pci`, `/env`. The eighth is new (2026-09-21) and replaces an accident.
+**The pivot is a swap, so everything else must be carried by hand.** Nine
+O_PATH handles (eight on an image built without the LLVM fork, which ships no
+`lib/`) are taken *before* the swap and re-grafted after: `/srv`,
+the initrd's `bin/` (→ `/bin`) and `lib/` (→ `/lib`, before the disk's own:
+[[dec-2026-09-24-union-covered-directory]]), `/proc`, `/ctl`, `/dev`, `/hw`,
+`/hw/pci`, `/env`. `/hw/pci` (2026-09-21) replaces an accident.
 `/hw/pci` is mounted INSIDE the devhw tree, on its synthetic `pci` child;
 it used to work post-pivot only because the orphaned boot-generation entry
 was keyed on that child, which the `/hw` re-graft made reachable again.
 The pivot now SHEDS the boot generation ([[sub-kernel-territory]]), so the
 re-graft is explicit — and the aliases the old devramfs root used to carry
 into `/bin` (`/bin/proc`, `/bin/srv`, `/bin/dev/cons`) are gone with it.
-O_PATH crosses each mount and yields the *Dev root*, not the synthetic
-mount point — that distinction is what makes the re-graft land the real
-tree. Each re-graft onto the DISK root is `mkdir`-then-`MREPL` (`/hw/pci`
-alone has no `mkdir`: its point is devhw's synthetic `pci` child), and the
+Since B-1d the bind's source is the initrd's `bin/`, not its root
+([[dec-2026-09-25-initrd-bin-directory]]), so `/bin` lists programs only —
+never the mount points or `lib/`.
+For the seven device trees, O_PATH crosses the mount and yields the *Dev
+root*, not the synthetic mount point — that distinction is what makes the
+re-graft land the real tree; `bin/` and `lib/` are plain directories of the
+initrd, and no mount is crossed. Each re-graft onto the DISK root is
+`mkdir`-then-`MREPL`, except `/lib`, which is `mkdir`-then-`MBEFORE` so the
+disk's own `/lib` stays in the union (`/hw/pci` has no `mkdir`: its point is
+devhw's synthetic `pci` child), and the
 `mkdir` must be idempotent because the pool persists across reboots and a later boot finds
 its own directories already there.
 
+**joey works in `/bin` until the pivot, and in `/` after it.** Its first act
+is `t_chdir("/bin")`, fatal on failure (the kernel starts the boot namespace
+there too, and joey does not lean on it): every bare program name joey spawns
+before the pivot, and every one its children spawn, resolves through the
+working directory, and the programs live in the initrd's `bin/`. The working
+directory is a name (LS-4), so the same `/bin` means the initrd's `bin/` before
+the pivot and the bound `/bin` after it. Right after the pivot joey sets it back
+to `/`, so the services and sessions it starts from then on inherit the disk
+root; its post-pivot spawns name `/bin/<prog>`, which also resolves before the
+pivot. A pre-pivot probe therefore sees `/bin` as its working directory (the
+`coreutil-smoke` `pwd` leg).
+
 **`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
-not one of the seven carried handles because its tree does not exist until joey
-spawns `/sbin/ptyfs`. After the spawn and a liveness connect, joey does a fresh
+not one of the carried handles because its tree does not exist until joey
+spawns `/bin/ptyfs`. After the spawn and a liveness connect, joey does a fresh
 open-is-connect of `/srv/ptyfs` (a 9P-mode service open yields a mountable
 dev9p root) and `MREPL`-mounts it over the `pts` synthetic stub the `/dev`
 (devdev) tree already provides — **no `mkdir`**, because the devdev walk is the
@@ -200,6 +254,25 @@ namespace and its replacement — open-is-connect — resolves *through* it.
 `/bin` exists because the disk root holds user data only; the boot medium
 is bound into the namespace, Plan 9 style, so post-pivot spawns of the
 system binaries resolve through [[inv-i28]].
+
+`/lib` (B-1d) is the loader's directory. `libc.so` is every native dynamic
+program's interpreter (`PT_INTERP /lib/libc.so`,
+[[dec-2026-09-24-b1d-loader-shape]]), and it ships in the initrd's `lib/`
+beside the binaries it serves. The disk keeps its own `/lib` (`ndb/local`,
+`aurora/config`, `dosbox-x/`, the `shcompat` shim), so joey does not replace
+it. Before the pivot it takes an `O_PATH` handle on the initrd's `/lib`;
+after it, it makes `/lib` (idempotent) and mounts that handle `MBEFORE` the
+disk's `/lib`: a Plan 9 union whose covered member keeps the disk's files in
+view ([[dec-2026-09-24-union-covered-directory]], [[sub-kernel-territory]]).
+No member is `MCREATE`, so a create directly in `/lib` is refused; nothing on
+the device creates there. The bind precedes the UM-6 shim mount, whose
+`/lib/shcompat` open is the first to resolve through the covered member.
+Only an image built without the LLVM fork has no `lib/`, and it skips the bind
+(logged). An image that ships the dlopen prover was built with `libc.so`, so
+joey stops the boot before the pivot when that image lacks `lib/`, and a failed
+mount is boot-fatal ([[dec-2026-09-25-devramfs-directories]]). Until B-1d made
+devramfs a tree ([[sub-kernel-content]]) the packer dropped `lib/` from every
+image and this bind skipped every boot, which the soft skip hid.
 
 **The failure branch carries a corrected comment.** When stratumd dies
 before signalling, joey drains bounded and returns non-zero — deliberately
@@ -264,9 +337,9 @@ event-driven; no timing constant appears in this path.
   served tree's authority is per-connection, a boot-time mount collapses every
   process onto init's single connection and is a privilege breach, not a
   convenience. Ask where the tree's authority lives before asking how to carry
-  it. The seven carried handles are the trees for which "global" is the right
-  answer; that list has not grown since, and one candidate was explicitly
-  refused.
+  it. The carried handles are the trees for which "global" is the right
+  answer; each later addition (`/hw/pci`, then B-1d's `lib/`) is one, and one
+  candidate was explicitly refused.
 - The loose-mode premise list is a claim about the whole system, not this
   file. A change that gives some other writer access to this pool revokes
   it here.
@@ -299,8 +372,8 @@ event-driven; no timing constant appears in this path.
   manifest declares `caps = ["csprng"]` (tapestryd, which mints unguessable
   placement claims) -- under I-2 a child holds at most its parent's caps, so
   joey must hand the warden every bit it may pass down ([[sub-warden]]).
-- The keyfile is read from a literal `/system.key` at the initrd root; the
-  FHS-shaped `/etc/stratum/` placement is a deferred lift.
+- The keyfile is read from a literal `/bin/system.key`, in the initrd's `bin/`;
+  the FHS-shaped `/etc/stratum/` placement is a deferred lift.
 - `--fs-workers 4` is a flat constant, not probed: in-VM musl `sysconf` has
   no substrate and reports 1, so the deployment states its worker count
   explicitly.

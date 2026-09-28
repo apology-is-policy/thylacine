@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -95,7 +95,9 @@ the mark only on a byte-mode post, whose attacher holds the raw connection.
 the fd that actually carries readiness: TCP uses its `/ready` sibling; a pipe
 or accepted byte connection uses its own fd. `STOPPED` atomically publishes
 which pump ended. Tokens are wiped after handshake; record buffers are bounded
-by MSG_MAX (64 KiB).
+by MSG_MAX (64 KiB), set when libthyla-rs's heap was a fixed 4 MiB (two records
+were a quarter of it); since B-1c the heap grows, and the bound stays the
+record's own.
 
 ## Concurrency
 
@@ -124,7 +126,10 @@ Bad arguments, inaccessible tokens, denied posts, handshake failures, thread
 creation failures, and relay completion all exit the process and release its
 service/connection resources. Post creation failure never dials. An unexpected
 remote close fails a blocked attach via transport teardown. Mount/unmount
-builtins expose failures through `$status` and `$errstr`. A failed dial exits 1
+builtins expose failures through `$status` and `$errstr`. A private mount at a
+point that is not a directory fails with `haul: mount PATH: not a directory`,
+the kernel's `ENOTDIR` for Plan 9's `Emount`; the kernel names no other cause,
+so any other refusal says only `haul: mount`. A failed dial exits 1
 before anything is mounted or pumped. It says `connection refused` for a RST,
 and `no answer (timed out)` at netd's deadline, preceded by the 2 s progress
 line. The texts are the operator's (manual 14).

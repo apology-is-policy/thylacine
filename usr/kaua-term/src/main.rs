@@ -50,12 +50,8 @@ use libthyla_rs::{
     torpor,
 };
 
-// A lazy 32 MiB span: one capped ScrollOff is held as cells, serialized and
-// framed before the up-pipe write, and the 4 MiB default could not hold the
-// three copies of a wide bulk scroll (pages commit only as touched).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 32 * 1024 * 1024 }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 const DOWN_FD: i64 = 0;
 const UP_FD: i64 = 1;

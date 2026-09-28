@@ -11,11 +11,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// One parsed /ctl/procs data line. The kernel format (kernel/devctl.c
-/// format_procs) is 8 whitespace-separated columns after a header line (PPID +
-/// STOPPED landed with prowl-4):
-///   PID  PPID  NAME  STATE  THREADS  PAGES  CHILDREN  CPU_NS
+/// format_procs) is 9 whitespace-separated columns after a header line (PPID +
+/// STOPPED landed with prowl-4, TABLES with prowl-6):
+///   PID  PPID  NAME  STATE  THREADS  PAGES  TABLES  CHILDREN  CPU_NS
 /// NAME is a binary basename (no embedded spaces, <=31 bytes); STATE is one
-/// token (ALIVE/ZOMBIE/STOPPED/INVALID). So an 8-token whitespace split is exact.
+/// token (ALIVE/ZOMBIE/STOPPED/INVALID). So a 9-token whitespace split is exact.
 /// (CHILDREN is parsed for column alignment but not surfaced.)
 pub struct ProcRow {
     pub pid: i64,
@@ -25,6 +25,9 @@ pub struct ProcRow {
     pub state: State,
     pub threads: u32,
     pub pages: u32,
+    /// The page-table share of `pages` (prowl-6; the kernel charges a space's
+    /// tables to it), so the data view is pages - tables.
+    pub tables: u32,
     pub cpu_ns: u64,
     /// Per-poll CPU usage in tenths of a percent (100% == one core). Filled by
     /// `Sampler::update` from the cpu_ns delta; 0 on the first sighting of a pid.
@@ -62,23 +65,23 @@ impl State {
 }
 
 /// Parse the `/ctl/procs` text into rows. The header line and any malformed
-/// (non-8-token, unparseable-pid) line are skipped -- a truncated last line (the
+/// (non-9-token, unparseable-pid) line are skipped -- a truncated last line (the
 /// kernel's DEVCTL_READ_BUF overflow early-return) drops cleanly rather than
 /// producing a bogus row.
 pub fn parse_procs(text: &str) -> Vec<ProcRow> {
     let mut rows = Vec::new();
     for line in text.lines() {
         let mut it = line.split_whitespace();
-        let (pid, ppid, name, state, threads, pages, _children, cpu_ns) = match (
-            it.next(), it.next(), it.next(), it.next(),
+        let (pid, ppid, name, state, threads, pages, tables, _children, cpu_ns) = match (
+            it.next(), it.next(), it.next(), it.next(), it.next(),
             it.next(), it.next(), it.next(), it.next(),
         ) {
-            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h)) => {
-                (a, b, c, d, e, f, g, h)
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i)) => {
+                (a, b, c, d, e, f, g, h, i)
             }
             _ => continue, // header / blank / short line
         };
-        // A trailing 9th token means a space in a field (a name with a space)
+        // A trailing 10th token means a space in a field (a name with a space)
         // would desync the columns -- reject the whole line rather than
         // mis-attribute it.
         if it.next().is_some() {
@@ -95,6 +98,7 @@ pub fn parse_procs(text: &str) -> Vec<ProcRow> {
             state: State::parse(state),
             threads: threads.parse().unwrap_or(0),
             pages: pages.parse().unwrap_or(0),
+            tables: tables.parse().unwrap_or(0),
             cpu_ns: cpu_ns.parse().unwrap_or(0),
             cpu_pct_x10: 0,
         });
@@ -173,6 +177,71 @@ fn field_u64(s: &str, key: &str) -> Option<u64> {
         return None;
     }
     rest[..end].parse().ok()
+}
+
+/// The unsigned integer after `key` at the start of a line of `s`, past any run
+/// of spaces (the padded `key:   N` shape of /ctl/memory and /proc/<pid>/status).
+fn field_u64_padded(s: &str, key: &str) -> Option<u64> {
+    // Anchored at a line start: the status file's first line is `name:`, and a
+    // process name may contain any key (`pages:7`), so a whole-text find could
+    // be steered by data the parser does not own.
+    let rest = s.lines().find_map(|l| l.strip_prefix(key))?;
+    let rest = rest.trim_start_matches(' ');
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse().ok()
+}
+
+// ============================================================================
+// prowl-6: the memory view -- the user pool (from /ctl/memory) and one
+// process's footprint (from /proc/<pid>/status), the B-1a' capacity figures.
+// Every number is a kernel counter; the only arithmetic here is none.
+// ============================================================================
+
+/// The three /ctl/memory lines the meter shows (kernel/devctl.c format_memory
+/// also prints total, reserved and reserve), all in pages: `pool` is what user
+/// address spaces may hold together, `charged` what they hold now, `free` the
+/// physical allocator's count. The meter is charged over pool.
+pub struct MemRow {
+    pub free: u64,
+    pub pool: u64,
+    pub charged: u64,
+}
+
+/// Parse /ctl/memory. None when the `pool:` line is absent (an empty read).
+pub fn parse_memory(text: &str) -> Option<MemRow> {
+    Some(MemRow {
+        free: field_u64_padded(text, "free:").unwrap_or(0),
+        pool: field_u64_padded(text, "pool:")?,
+        charged: field_u64_padded(text, "charged:").unwrap_or(0),
+    })
+}
+
+/// One process's footprint from /proc/<pid>/status (kernel/devproc.c), in
+/// pages: `pages` is the holder count -- the anonymous pages it wrote, the file
+/// pages it maps, its page map's nodes and its `tables`; `file` the mapped file
+/// share; `peak` the monotonic high-water mark; `budget` what peak is measured
+/// against.
+pub struct MemDetail {
+    pub pages: u64,
+    pub tables: u64,
+    pub file: u64,
+    pub peak: u64,
+    pub budget: u64,
+}
+
+/// Parse the memory lines of /proc/<pid>/status. None when `pages:` is absent
+/// (an empty read: the process exited).
+pub fn parse_status_mem(text: &str) -> Option<MemDetail> {
+    Some(MemDetail {
+        pages: field_u64_padded(text, "pages:")?,
+        tables: field_u64_padded(text, "tables:").unwrap_or(0),
+        file: field_u64_padded(text, "file:").unwrap_or(0),
+        peak: field_u64_padded(text, "peak:").unwrap_or(0),
+        budget: field_u64_padded(text, "budget:").unwrap_or(0),
+    })
 }
 
 /// The cross-poll %CPU deriver. Holds the previous poll's (pid -> cpu_ns) so the

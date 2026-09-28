@@ -10,13 +10,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-// Decoding an image needs far more than the default 4 MiB heap (peak ~= 8*npx +
-// the compressed input, all live during decode); size it for a ~6 Mpx inline
-// image, with VIEW_MAX_PIXELS the REAL bound (a bare MAX_PIXELS that exceeds the
-// heap is a phantom the allocator OOMs past).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::eprintln;
 use libthyla_rs::env;
@@ -27,18 +22,20 @@ use libthyla_rs::{t_close, t_open, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_
 
 use view::{decode_jpeg, decode_png, jpeg_dimensions, png_dimensions, sniff, within_pixel_budget, Kind, Raster};
 
-// The compressed-input cap, coherent with the 64 MiB heap (a 6 Mpx image's
-// decode peak is ~48 MiB, so the input must stay well under the remainder).
+// The compressed-input cap, held alongside the decode peak it is counted with
+// (VIEW_MAX_PIXELS below).
 const READ_CAP: usize = 16 * 1024 * 1024;
 
-// view's own decode pixel budget, sized to the heap for the WORST-CASE decode
-// peak + the held compressed input, checked from the headers BEFORE decode so an
-// over-budget image is a clean report rather than a silent OOM-exit. The worst
+// view's own decode pixel budget, bounding the WORST-CASE decode peak + the held
+// compressed input, checked from the headers BEFORE decode so an image past it
+// is a clean report, never a death at a page fault when the system runs out of
+// memory mid-decode. The worst
 // case is a PROGRESSIVE JPEG: zune holds a full-image coefficient buffer per
 // input component (~2 B * components * npx, up to 4 for CMYK, zune mcu_prog.rs)
 // ALONGSIDE the output during decode -- peak ~= READ_CAP + 12*npx, vs a
-// baseline/PNG ~8*npx. So 12*3M + 16 MiB = 52 MiB fits the 64 MiB heap with
-// margin; the former 6M (88 MiB) OOM-exited a progressive JPEG (holotype F1).
+// baseline/PNG ~8*npx. So 12*3M + 16 MiB = 52 MiB, set when the heap was a
+// fixed 64 MiB; the former 6M (88 MiB) OOM-exited a progressive JPEG there
+// (holotype F1).
 // halcyond re-caps the CHANNEL downstream to ~1 Mpx (display-adaptive), so this
 // rarely binds the inline path; it bounds view's local decode.
 const VIEW_MAX_PIXELS: u64 = 3 * 1024 * 1024;
@@ -167,9 +164,9 @@ fn place_on_halcyon(r: &Raster) -> Result<u128, &'static str> {
 }
 
 /// Reject an over-budget image from its headers BEFORE the heap-hungry decode
-/// (the decode peak can dwarf a fixed heap; a pixel cap above the heap is a
-/// phantom the allocator OOMs past). `Err(code)` bails with that exit code; the
-/// dimension read itself failing (malformed headers) is also a clean bail.
+/// (the heap grows to hold whatever the decode asks, so the pixel budget is its
+/// only bound). `Err(code)` bails with that exit code; the dimension read itself
+/// failing (malformed headers) is also a clean bail.
 fn check_budget(path: &str, dims: Result<(u32, u32), &'static str>, max: u64) -> Result<(), i64> {
     match dims {
         Ok((w, h)) if !within_pixel_budget(w, h, max) => {

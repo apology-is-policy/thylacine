@@ -111,6 +111,8 @@ static void jit_fault_in(struct Proc *p, u64 vaddr, bool is_write) {
     fi.is_translation  = true;
     fi.is_permission   = false;
     fi.is_access_flag  = false;
+    fi.is_alignment  = false;
+    fi.is_external  = false;
     enum fault_result r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "demand_page must resolve a code-region VA");
 }
@@ -357,7 +359,7 @@ void test_jit_destroy_rejects_non_writer(void) {
 // The pair carries ONE I-32 charge. Detach knows nothing about the pair, so
 // letting it through would refund that charge TWICE -- and a CAP_JIT holder
 // looping create-then-detach-both could drive its page_count to zero while its
-// real usage never moved, then allocate a fresh PROC_PAGE_MAX. A bound a
+// real usage never moved, then allocate a fresh budget's worth. A bound a
 // capability holder can zero is not a bound. It would also orphan the surviving
 // alias, which SYS_JIT_DESTROY then refuses (no peer) -- unreleasable until
 // Proc exit.

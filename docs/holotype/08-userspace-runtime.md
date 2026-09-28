@@ -142,7 +142,7 @@ is compiler-only, hardware `virtio_rmb` mandatory); R4-F4 (net-arp/loop RX
 | R5-F8 | C | getpid/getuid/... return -ENOSYS garbage (4294967258) -- needs a getpid surface |
 | R5-F9 | S | siglongjmp out of a handler wedges note delivery (in_handler stuck) -- doc + v1.x |
 | SA-3 | C | print!/println! swallow write errors (a coreutil-output footgun) |
-| SA-4 | C | alloc 4 MiB fixed heap, no growth (OOM -> clean exit) |
+| SA-4 | C | alloc 4 MiB fixed heap, no growth (OOM -> clean exit) -- **RESOLVED by B-1c**: thyla-heap grows and gives memory back; running out is ARCH 6.5's fault kill (HT09.R4-F2's pressure half) |
 
 The registered pouch items (R5-F4/F5/F3b/F6/F8/F9 + the 0007/0011/0012
 patch-header stale-comment sweep) form one coherent **"pouch boundary-line

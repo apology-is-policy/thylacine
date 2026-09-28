@@ -12,7 +12,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -39,6 +39,16 @@ world's readers loop to EOF. Sibling Devs that report *real* sizes are correct t
 do so: their content is a static device-tree property or a config register, which
 does not move between the stat and the read.
 
+`procs` renders nine columns per process — `PID PPID NAME STATE THREADS PAGES
+TABLES CHILDREN CPU_NS` — the counters as atomic loads, since a cross-Proc
+reader holds no per-Proc lock. `TABLES` (prowl-6) is the page-table share of
+`PAGES`, the holder count, so a reader takes the data view without opening
+`/proc/<pid>/status`. The layout has consumers that parse by count (prowl) and
+from the end (`ps`, whose beacon table also carries one alignment per column)
+and one that checks the frame (coreutil-smoke); a column change moves all
+three in the same commit, while the leading-column readers (Halcyon's loaded
+systems, diorama) need nothing.
+
 ## Mechanism
 
 ### One table drives everything
@@ -47,6 +57,15 @@ A single leaf table carries `{name, kind, formatter}`, and walk, stat and read
 all resolve through it. That is structurally better than the sibling `/proc`,
 where adding a file means four separate registrations — here there is one, and a
 leaf that is in the table is automatically walkable, stattable and readable.
+
+**`/ctl/memory` carries the user pool since B-1a'** (2026-09-23): after the
+physical totals, `format_memory` emits three more lines -- `reserve:` (the TCB
+reserve, `capacity_reserve_pages`), `pool:` (RAM minus it,
+`capacity_pool_pages`: every Proc's default budget and hard maximum) and
+`charged:` (`capacity_pool_charged`: what every address space together holds
+of it, exempt ones included) -- all in pages, in the same `key:   value pages`
+shape as the lines above them. Two are boot-static and one is an atomic, so
+nothing here takes a lock ([[sub-kernel-addrspace]]).
 
 ### The gate is a special case, and it is default-allow
 
@@ -245,8 +264,9 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   mechanism fired once and landed benignly, which is what a default-allow shape
   does until the one time it does not.
 - **The process list is a full-system disclosure.** Names, parents, states,
-  thread and page counts and CPU time for every process, to any reader. This is
-  the Plan 9 posture and is shared with `/proc/<pid>/status`, but it is worth
+  thread, page and page-table counts and CPU time for every process, to any
+  reader. This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
+  but it is worth
   stating plainly rather than leaving implied: `/ctl/procs` is the broadest
   ambient disclosure either introspection Dev makes.
 - **The formatting helpers are duplicated** from the sibling Dev, noted in the

@@ -43,8 +43,16 @@ sleep 2
 
 # The banner "procs: N   cpus: N" (proves launch + the /ctl/sched ncpus read).
 lc_expect "cpus:" "prowl banner rendered"
+# prowl-6: the header's third row, the user-pool meter from /ctl/memory. The
+# label alone would render over a dead read (zeros), so the leg asserts the
+# FIGURES -- "<charged>/<pool> pg  free <free>" with a non-zero pool and free
+# count -- which only a parsed /ctl/memory produces. The frame arrives in
+# screen order (row-major), so the meter row is expected before the table header.
+lc_expect_re {[0-9]+/[1-9][0-9]+ pg  free [1-9][0-9]*} "prowl-6: the pool meter's figures from /ctl/memory"
 # The process-list Table header (proves the table rendered).
 lc_expect "MEM(pg)" "prowl table header rendered"
+# prowl-6: the page-table column, right of MEM(pg) on the same header row.
+lc_expect "TBL" "prowl-6: the page-table column rendered"
 # A real process -- kproc is always pid 1, ALIVE, and the initial frame is
 # pid-sorted (all %CPU 0 until the first delta) so kproc is at the top: proves
 # /ctl/procs was read + parsed + drawn as real data.
@@ -68,6 +76,10 @@ sleep 1
 lc_step "prowl: open the scheduler detail pane (d)"
 send "d"
 sleep 1
+# prowl-6: the pane's first row is the footprint from /proc/<pid>/status, which
+# is readable by everyone -- "budget" renders whether or not the sched half does,
+# and it precedes the sched row in screen order.
+lc_expect "budget" "prowl-6: the mem line rendered from /proc/<pid>/status"
 lc_expect "sched" "prowl detail pane rendered (per-thread view or gated-unavailable)"
 send "d"
 sleep 1

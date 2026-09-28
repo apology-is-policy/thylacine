@@ -134,7 +134,198 @@ prediction's error: T30 also asserts the finished line's object is blanked.
 
 **Still open.** r7 F2 is closed with a reason, not fixed: an arrived dropped row restarts at the prompt rather than following its text into history. Queued in OPEN-BUGS, each pre-existing or tracked from a round: the device leg drives Super+K with the focused pane zoomed and never checks the other pane (r2 F12); kaua-term's output-only mode never applies a resize (r5); a tile's table past the byte cap stops counting columns; a block-cap continuation kills open spans; past the style cap a cell takes the last style's look; foreign structural rows re-class the open zone; five dead-code warnings in halcyond's release builds; libutopia's 69 stranded tests.
 
+## 2026-09-25 afternoon to 2026-09-28 (main, Opus, effort max) -- B-1d-v: only MREPL at a file, and the audit that found the guarantee rested on a key two calls could forge
+
+**The vote, and why cmount did not translate literally.** The B-1d-v scripture
+took Plan 9's second Emount case to be "an MBEFORE or MAFTER mount at a
+non-directory point". cmount actually tests `order != MREPL`, and Plan 9's flag
+0 *is* MREPL, so the two readings agree there -- but in Thylacine a mount with
+no placement flag APPENDS (territory.c mount()), where Plan 9 has no such mode.
+So a flagless mount of a second file at a file point that already holds one
+makes a two-member group, which stalk searches as a union directory whose
+listing skips the non-directory members: the mount returns 0 and never shows.
+The operator's 13:35Z vote (dec-2026-09-25-mrepl-only-at-a-file, superseding
+the emount dec) took cmount literally: at a point that is not a directory,
+refuse every mount but MREPL. The check is `source_dir != point_dir ||
+(!point_dir && !(flags & MREPL))` in sys_mount_for_proc -- flags and the two
+types only, no table read, no lock, no TOCTOU.
+
+**Round 1 (Opus on Opus at max; Fable out of credits, so the fallback tier --
+context-independent, same family).** 0 P0 / 0 P1 / 2 P2 / 5 P3. The P2s: an
+alloc-smoke success path that mounted `/lib`, which only an LLVM-fork image
+ships (fixed with `/bin`, on every image); and the flagless-at-a-file case,
+which went to the operator. The spec had pinned nothing -- territory_file_point
+checked nothing territory.cfg did not -- so the guard split into `EmountOK` for
+the syscall's refusal and `CovGuard` for the covered member, with the invariant
+`NoMemberAtFile` and a buggy cfg that fails it. My own call (not asked; DISTRO
+D-1 and the vote compose): a directory over a symlink point stays refused, and
+the trailing-slash spelling is documented.
+
+**Round 2's F1 [P2] was the run's real finding, and it was not in the changed
+code.** The new refusal rests on the mount key being an identity: mount_key_eq
+is `(dc, devno, qid.path)`. devsrv gave the /srv registry root qid.path 0 -- and
+`devsrv_walk` gave every /srv/<name> service node qid.path 0 as well, cloned
+from the root with the same dc and devno. So the key of every live service
+aliased the registry root's. Any unprivileged Proc could MREPL a readable file
+over /srv/<name> (file over file passes the new check) and the entry was keyed
+exactly where /srv itself is: the next resolution crossed /srv into the file,
+and every /srv/<x> answered ENOTDIR, after a SYS_MOUNT that returned 0. A
+chroot to /srv then an MBEFORE at "/" put a two-member union at the same key,
+i.e. at every service node. Two unprivileged calls defeated both halves of the
+guarantee the chunk had just documented. The alias predates the chunk (stalk-3a);
+the vote turned a latent identity bug into a defeated invariant. Fixed: a
+per-registry counter stamps each reservation's qid_path (never 0, as Plan 9's
+srvcreate), and devsrv_walk reads the name, the LIVE state and the path in one
+hold of the registry lock, since a tombstoned slot can be recycled under
+another name. Regression devsrv.service_keys_distinct. The lesson is the general
+one: **a refusal keyed on a tuple is only as sound as that tuple's uniqueness**
+-- audit the key, not just the check.
+
+**The lead the fix surfaced.** That same key rests on devno being unique among
+live instances, and `spoor_next_devno` is a monotonic u32 that wraps with no
+refusal (kernel/spoor.c). Three consumers assume uniqueness: the mount key,
+MNOEXEC coverage (a collision there only over-restricts) and the REVENANT image
+cache (a collision there could serve one instance's cached pages for another's
+file). spoor.c's own comment already named the image-cache alias as pre-existing
+but nobody had enqueued it. Now owned in OPEN-BUGS, orthogonal to B-1d-v (it
+needs 2^32 attaches in one boot to reach).
+
+**Round 2's five P3s** were prose that had called the install-time check an
+invariant (a 9P server the caller attached answers a later walk's type from its
+reply, so a directory point can read as a file afterwards -- the resolver's
+use-time QTDIR gates stay), the ENOTDIR producer count (five of eight), the
+superseded status row, a buggy cfg that had been given a SYMMETRY line against
+the convention that buggy cfgs read unreduced, and imprecise comments -- one of
+which ("a kernel test over every refused flag set") I made true by extending the
+test from 7 refused sets to all 24.
+
+**Rounds 1 and 2 ran Opus on Opus** because Fable was out of credits for the
+third day running. A same-family round keeps context independence and loses
+family diversity; it is a real review, and the rule is never to skip a round
+for want of Fable.
+
+**Round 3 found the witness, not the bug.** Fable came back for it -- the
+chunk's one cross-family round -- and read the regression test the devsrv fix
+shipped with. It was RED on the very kernel it was written to guard. Both of
+its resolution legs mounted a `devnone` source and then resolved through it,
+and `devnone_walk` returns NULL for every call, the zero-element clone that
+`clone_walk_zero` needs included: the cross failed, the walks came back NULL,
+and the `!= NULL` assertions fired before a single identity was compared. The
+commit said NOT BUILT, so it had never run. **A witness that has never turned
+red is not a witness** -- and this one would have gone to main as the evidence
+for the P2 it was guarding. It now asserts on the mount TABLE
+(`mount_is_point_id`), which is what crossing actually consults and needs no
+crossable source. Verified both ways this time: reverting the one-line fix
+turns exactly one test red, on the exact property (`a service node's path is
+not the registry root's`), and the fix turns it green. Round 3 also caught a
+placeholder I had committed into scripture unfilled, and a stranding the fix
+introduces: a mount placed at `/srv/<name>` is bound to that post, so a
+re-post leaves it unreachable and un-unmountable by name until the namespace
+ends (documented; the general fix is a generation in the mount key).
+
+**Cost and close.** The suite 1732/1732 with no extinction and alloc-smoke
+exiting 0; eight sabotage legs red, each failing exactly the tests it should;
+a clean rebuild after the sabotage reproducing the kernel hash the suite had
+passed on (`3e0f0436`), because a sabotage run leaves its own kernel in
+`build/` and the next boot would take it; the SMP gate 50 boots of 50 across five configurations (default at 1, 4 and 8
+CPUs, UBSan at 4 and 8) with no corruption, no timing failure and nothing else;
+`territory.tla`'s 22 cfgs each as claimed on a fresh 33-minute run, the four
+clean state counts unchanged. Squashed to 46d943c5 on 8c4cb7c8 and
+fast-forwarded onto main.
+
+## 2026-09-25, midday (main, Opus 5.5, effort max) -- the aux-3 merge of 1cc9a300: H3 + C and TC-1a, and a row both sides had carried twice for sixteen days
+
+**What came over.** Six aux-3 commits since the last merge (fc234a44, which brought 0a668bb8): H3 + C (0cb5b244), the image join and the debug taint; TC-1a and its scripture (1cc9a300, 4f2b7797); the Rust target's static-PIE fix (67d30cb1) and two prompt fixes (07cd1578, 35572899), which main already carried byte for byte (8a78602a, 8011d7f8).
+
+**The duplicate KT-1 row.** Main's docs/AUDIT-TRIGGERS.md had the KT-1 row twice around the arm-6 row; I found it at the checkpoint and enqueued it. Walking the file's history, the second copy arrived with eb26e8b8, an aux-3 merge of main on 2026-09-09, so every tree since has carried it. The first copy is the second without its CHROME-CONTENT ROUND addendum: compared cell by cell, the only difference is one insertion. TC-1a had already removed it on the aux side. The merge takes the aux's single row and applies main's one edit to it (B-1c 96b51346's "until B-1c"), and the coverage view drops to 175 declared surfaces.
+
+**Checked where no marker could show.** The last aux-3 merge hid two compile errors behind clean auto-merges, so each side's change was checked against the merge, not taken on trust:
+- For every file both sides changed, the lines the merge adds to main equal the aux's diff from the base, and the lines it adds to the aux equal main's (13 files; the skill files and the Rust target are identical on both sides; CLAUDE.md differs by one line per side).
+- H3's join rests on `->as` changing only at allocation, at teardown and in proc_exec_replace under g_proc_table_lock. Main's 25 commits since the base add no other write and no other way to share an address space, and the `tables:`/`file:` status lines B-1a' added read p->as under the same lock.
+- The aux's 2890 added lines carry none of the vocabulary B-1d made false.
+
+**Verified on the merge tree (645f5b38), the Mac held throughout.**
+- Build: `tools/build.sh kernel` (the default image); kernel ELF sha256 dea6a8f16d30c7b9...
+- `tools/test.sh`: 1727/1727 PASS (main's 1720 and the aux's 7, counted from the test table), 0 skipped, 0 EXTINCTION.
+- `tools/test-rust.sh` (host): 28 crates, 1984 tests, 0 failing; libutopia's 69 stranded tests and one quarantined test are the known posture.
+- TC-1a's device gate, `ls-halcyon-lantern`, on a `--config ci` image baked `THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument` from this tree in its own worktree. build/ was cloned before the checkout, so every source was newer than every cloned artifact. Legs 1-5 PASS on the first attempt; leg 5 measures 0 ink below slide one after 150 lines of history, equal to its fresh-tile control.
+- The full `tools/ci-smp-gate.sh` matrix on the merge commit 8c4cb7c8 (H3 + C is invariant-bearing), run before main moved: 50/50 PASS across the five rows (default-smp1/4/8, ubsan-smp4/8; N=10 each): 0 corruption, 0 external-kill, 0 inject-miss, 0 timing, 0 other (mean boot: default-smp1 ~75 s, default-smp4 ~56 s, default-smp8 ~58 s, ubsan-smp4 ~58 s, ubsan-smp8 ~61 s; 12:29:19Z to 13:23:10Z).
+- Main moved to 8c4cb7c8 by fast-forward, confirmed on both mirrors by `git ls-remote`.
+
+**Housekeeping.** Five `tail -f` processes left behind by B-1c's monitors were still running; killed by PID.
+
+**Decisions.** None were new; the operator's votes of the morning stand (B-1d-v implements them next).
+
 ---
+## 2026-09-24 night to 2026-09-25 midday (main, Opus 5.5, effort max) -- B-1d landed: the bin/ move, what each boot could not see past its first failure, and a gate every WIP commit had deferred
+
+**What building the loader taught, before the device ran it.**
+- **The RELRO gap no census saw.** Patch 0046 had surveyed libc.a's sources for raw Linux memory calls and found one (`src/env/__init_tls.c`). `ldso/dynlink.c` compiles only into `libc.so`, so it was outside that census, and its RELRO call (`dynlink.c:1426`) was a raw `SYS_mprotect`. 0044 had parked that number at the sentinel, and the check beside the call accepted `-ENOSYS`: every loaded object would have kept its RELRO pages writable, silently. Patch 0048 makes it `SYS_thyla_burrow_protect` (a reduction, not a seal: Linux does not seal RELRO) and fails the load on any error; `tools/build.sh:2493-2498` pins it at the seam. A census covers the artifact it was run over, and the one that ships can be a different artifact.
+- **The nameless spawns now refuse native programs too.** The register-argument spawns thread no program name, and the PT_INTERP rewrite needs one, so they refuse a dynamic binary (VIVARIUM 13.10.6). Before B-1d only Linux binaries were dynamic. Real launchers (the shell, `posix_spawn`, `execve`) thread the name, so the asymmetry stays, and joey spawns the prover through the argv spawn with posix_spawn's three descriptors. `kernel/exec.c:1355-1365` says so now.
+- **A flag I should not have passed.** I committed in the LLVM fork with `-c core.hooksPath=/dev/null`, unasked. Checked afterwards: the fork has no hooks and no `core.hooksPath`, so nothing was bypassed. It is not done again.
+- **A column that was two columns.** The program-header listing prints a PT_LOAD's flags as `R E`, which awk splits into two fields, so a parse by field number reads the wrong column for exactly the executable segment. Reading sample output before trusting the parse caught it.
+
+**Where the run stood.** The four B-1d votes, the union vote and the directory vote had landed as scripture (the entry below). The layout vote came in at ~06:50Z: the initrd root keeps only the six synthetic mount points, `bin/` and `lib/` (`dec-2026-09-25-initrd-bin-directory`, scripture 18b20684). WIP 7 (54892232) moved every program and data file into `bin/` and was committed unbuilt.
+
+**The census missed dependents in three waves.** The plan's census was an exact-literal search for `"/<name>"` over every initrd name. It found the obvious sites and missed these:
+- **Found by reading further, before the commit (five):** the warden spawned every driver as `format!("/{}", name)`, which would have failed the boot at the first driver. Also `source /builtin-test.rc` inside a script string, two probes that relied on `Env::new()`'s cwd of `/`, and a root listing (u-readdir-test).
+- **Found by the build and the first boots (three):**
+  - `tools/build.sh:409` read `local ramfs_bin="$ramfs_bin/bin"`: the bulk rename that moved every staging write had also rewritten the variable's own definition, and `set -u` stopped the bake.
+  - coreutil-smoke's `realpath x/../y` expected `/y`, which only holds under a cwd of `/`.
+  - joey's `system.key` probes passed `bin/system.key` to `t_walk_open`, whose syscall takes one component (`kernel/syscall.c:2997` refuses a `/`).
+- **Found by self-audit before the first boot (one):** `devproc.read_cwd` read `/proc/0/cwd` and expected `/`. But `kernel/main.c:854` stamps kproc's dot at `/bin` before the suite runs.
+
+The lesson generalizes past paths. A census of one syntactic form finds that form. The dependents that matter here were names built at run time, names resolved against a working directory, and names given to a primitive with a narrower grammar than the path. None of those three can be found by searching for the literal.
+
+**Each boot proves nothing past its first failure.** A joey probe failure fails the boot, so the first boot reported coreutil-smoke and nothing after it. The `system.key` probes sat about 140 lines further down. The round-2 reviewer (Opus; Fable was out of credits) reported them by reading joey past the point where the boot died, while the second boot was on its way to the same failure. So a fix-and-reboot loop sees one defect per boot. A reader can see them all in one pass.
+
+**What the move also fixed, and exposed.**
+- The native `env` utility had been unreachable since G15 (2026-06-23), because its name met the `/env` mount point. It now answers a bare `env --help` before the pivot, and a coreutil-smoke leg pins that.
+- Pinning it showed the utility itself is behind the system: it prints an empty environment and says in its header that no environment exists, though `/env` and `libthyla_rs::env::vars` do. That is enqueued, not fixed.
+- The shell's `$path` and libhalcyon's `PROG_DIRS` dropped a `/` entry that existed only for the flat initrd. That also closed a drift the coreutils dossier recorded: `which`, completion and the evaluator now search the same five directories.
+
+**Every new check was broken once on purpose.** Eighteen legs, one variable each, the target restored and the image rebuilt between legs (`$SP/sabotage/results.txt`):
+- Kernel (K1-K7): the covered member off (20 union tests fail), the directory-point guard off (1), the exec vouching off (3), the tree's parent-before-child rule off (1), `..` from a file (1), the native EACCES mapping off (1), kproc's `/bin` stamp off (19). Each failed on its own assertion text.
+- Build (U2, B1, S2): nothing staged in `lib/` (mkcpio names both missing files and deletes the archive); a stray file at the initrd root (the new guard names it); patch 0048 dropped (the sysroot's seam pin refuses the loader's raw RELRO call).
+- Device (U4, S1, S3): the confined child not pivoting (it exits 4); 0047's FIXED arm off (the loader cannot map the prover: `Not a valid dynamic program`); 0048 applying no reduction (the RELRO write survives, exit 4). S3 matters because it shows the device witness does not lean on S2's pin.
+- Two came back green. U1 (joey's own chdir to `/bin` removed) was predicted green: the kernel stamps kproc's dot before joey exists, and K7 shows the stamp is witnessed. U6 (the confined child's chdir removed) was green at a157d47c. That is round 3's F1, measured: the fix round 2 asked for had no witness. With the round-3 control it fails on that control: `child confined exited 8`.
+- U3 (the image ships the prover but not `libc.so`) was caught by the kernel test, which ends the boot before joey runs. So joey's own fail-closed check, the only one a build without kernel tests has, never ran. U3b turns the kernel check off to reach it, and joey refuses: `pouch-hello-dlopen FAILED: the image ships the prover but no /lib/libc.so`. U5 (joey's post-pivot chdir removed) fails on round 2's getcwd witness.
+
+**Round 3.** Opus on Opus again (Fable still at 429): 0 P0 / 0 P1 / 0 P2 / 5 P3, clean. Its F1 was the U6 gap, which my parallel self-audit had found independently; the fix is a post-pivot `open("..")` that must succeed, and Pouch passes that name to the kernel verbatim. F2 and F3 were prose the fixes had garbled or not swept: fourteen `/system.key` sites in joey (the round listed ten), ARCH's "kproc loads `/joey`", a comment the round-2 edit had fused into nonsense, and a reference to a read the stdio prover never made. F4 (joey's SYS_WSTAT bad-argument legs cannot fail) and ARCH's pre-REVENANT resolution paragraph went to OPEN-BUGS. F5 sent me back to the ABI registry, and from there to the rule below.
+
+**A rule I read the convenient way, and reverted.** Five kernel EXTINCTION bodies named the program `/joey`, which B-1d moved to `bin/joey`. CLAUDE.md and `docs/agent/BOOT-BANNER.md` both call rewording an EXTINCTION string a format break ("surface it, do not just sweep"). The vault note `abi-boot-banner`, which BOOT-BANNER.md names as the authority on the strings' consumers, says only the prefix is ABI, plus the bodies `tools/test-fault.sh` matches. None of the five is among those, and no tool of 1046 files matches them. I took the note's reading and renamed them in WIP 8 and 9. At the round-3 close I read BOOT-BANNER.md's sentence again: the note decides which programs consume a string, not whether changing one needs the operator, and when two binding documents disagree, choosing the permissive one is the operator's call. The five bodies say `/joey` again, with a comment giving the reason, and the rename and the conflict are queued for the operator. The note had also undercounted its own set: the fault gate runs `el1_sync_runaway` (`tools/test-fault.sh:61`) and matches its body (`:82`), eight variants and six bodies, which the note had left as an open question since 2026-09-05.
+
+**Closing round 3: two claims I had written before checking them.**
+- F5 closed on a live run. `tools/test-fault.sh` passed all eight variants on 44ef3a5d (8 PASS, 0 FAIL; `el1_sync_runaway` "saw 'EXTINCTION: el1-sync recursion'; 'console-ring: NOT held' absent"), and the registry now counts eight variants and six bodies. The variant joined the gate on 2026-08-18 (5de6093f), two days after the note counted seven, and the 2026-09-05 recount kept the count.
+- S3 (fnd-b1d-r3-s3). My landing draft said each new covered-member invariant had a buggy configuration that fails it. Writing the SPEC-TO-CODE table meant pairing every buggy cfg with its invariant, and `CoveredIsItsPoint` had none: its flag clause was true by construction, because `CovMember` wrote both flags FALSE. `BUGGY_COVERED_TAKES_FLAGS` now fails it. Enumerating the set caught what recalling it had not.
+- A record committed with a placeholder is frozen with it. I had committed round 3's audit and change notes in WIP 10 with F5 "PENDING", meaning to fill them in WIP 11. The staged lint freezes a record file against HEAD (the vault's R3), so that edit could not commit. A mirrors failure from a different edit sent me to the schema, where the rule is, before I tried. The filled versions ride the landing, where the files are new on main. Records are written complete, or not yet.
+
+**TLC off an 8 GB Mac.** The Mac has 8 cores and 8 GB. TLC's two workers had run beside every build and boot, and the clean `territory.cfg` would have run for hours past the lease, beside an smp matrix whose ubsan boots take 150-300 s against a 420 s ceiling. I started thyla-keep (32 cores; stopped when idle, about $1.2 an hour) and ran all 27 territory cfgs there on the final spec, and stopped the Mac's run. The control that the new flag changed no clean model: `territory_cov_alias.cfg` came out at 5,114,208 states generated and 202,800 distinct, the Mac's pre-edit figures exactly. The new `specs/check-territory.sh` was broken on purpose before use (two cfgs left unjudged, a count off by one, the wrong invariant named for `buggy_self_mount`), and each break failed by name.
+
+**Commit A needed its own tree, and two traps said where.** The plan was to clone `build/` into the scratch worktree and build A there. That test would have been hollow twice over:
+- make and cargo judge freshness by mtime, and the worktree's sources were checked out at about 08:30Z, older than every object built since. B-1d's kernel objects, Rust binaries and libc would have passed for A's. The fix is order: clone `build/` first, create the worktree after it, so every source is newer than every artifact; then drop the trees whose CMake caches name the main tree (kernel, host-stratum, prodcheck.devacct, cxx-runtimes), the staging and the sysroot.
+- The scratch path is too long for stratumd's populate socket (macOS `sun_path` is 104 bytes; the CI-image recipe records the 2026-09-24 failure). A's worktree is `~/projects/thylacine-la`.
+A alone: 1709/1709, zero `[skip]` lines, boot OK, a flat initrd (231 files) and no dlopen or `/lib` union line. The test table has 1691 entries on main, 1709 in A and 1720 at the tip, and all 18 of A's new tests ran by name.
+
+**The landing: a gate every WIP commit had deferred.** Each WIP commit carried a `No-dossier-change:` trailer, most of them blanket ones ("the dossier pass rides the B-1d close"), so the commit-msg dossier gate never judged B-1d as a whole. I ran it on commits A and B in a throwaway worktree before making them.
+- On A it refused `kernel/syscall.c`, whose change is two comments. A's trailer says so owner by owner, with the evidence: neither syscall dossier mentions the mountpoint's lifetime, and `SYS_MOUNT_VALID_FLAGS` is unchanged.
+- On B it named five owners. Three had changed in paths, comments or test accessors only, and B carries a trailer for each (and one for the four dosbox gates, which the gate does not scan). Two were misses of the dossier pass. `sub-pouch-seam` and `sub-pouch-mem` counted four numbers in `_pouch_mman.h`, where 0047 adds a fifth, and the seam's census rule searched `src/` only, the very blind spot 0048 exists for. `sub-utopia-interactive` still described completion and the resolver disagreeing by `/`, a disagreement B-1d removed; my own paragraph above records the removal, and I had not looked for the note that described the disagreement. B corrects all three dossiers.
+- The control: with the trailers stripped, the gate names exactly the three owners they cover, so a trailer, which silences the gate for the whole commit, hides nothing else.
+A deferral is a promise to run the check later, and the landing is where it comes due. Found beside it, by the census of `*(pending)*` placeholders: six change notes from 2026-08-15 had never been given their commits; C names them.
+
+**Evidence at the landing.**
+- Landed and pushed to both mirrors: 3b52d769 (B-1d-u), dfdd6344 (B-1d), 00a7ea74 (the hash fixup, with the six 2026-08-15 notes).
+- `tools/test.sh` on the final code (44ef3a5d's; WIP 11 changed no code): 1720/1720, zero `[skip]` lines, all seven prover legs, joey's three B-1d lines, boot OK.
+- `tools/test-fault.sh`: 8/8.
+- `tools/ci-smp-gate.sh`, the full matrix: 50/50 (default-smp1/4/8, ubsan-smp4/8), 0 corruption, 0 timing. The ubsan boots ran an instrumented kernel, checked by content: 6,370 UBSan trap sites (`brk #0x55xx`) against 0 in the default kernel.
+- TLC on thyla-keep: `territory.tla`'s 20 cfgs, three clean (`territory.cfg` 8,052,876 distinct, depth 11; `territory_file_point.cfg` 4,380,876 distinct, depth 11; `territory_cov_alias.cfg` 202,800, depth 9) and 17 buggy, each on its own invariant; `territory_shed.tla`'s 7 cfgs, the pinned 744,864 and 793,408 reproduced and the five buggy verdicts as pinned.
+- Commit A alone (3b52d769): 1709/1709, zero `[skip]` lines, boot OK.
+- Host tests (WIP 8): libhalcyon 134, halcyon 26, libutopia 393.
+
+**Still open, each in the queue.**
+- OPEN-BUGS: ut's completion and resolver directory lists are two literals no test ties together (libhalcyon's `PROG_DIRS` is a third copy); the kernel's ramfs tests skip-and-pass on a missing binary; the unprivileged-spawn refusal tests pass on a Territory-less fixture; `env` ignores the environment; libhalcyon's PROG_DIRS lists two of five directories (r2 F5); the warden spawns an unvalidated manifest name (r2 F6); joey's SYS_WSTAT bad-argument legs cannot fail (r3 F4); ARCH's pre-REVENANT resolution paragraph.
+- The operator's: whether joey's five EXTINCTION bodies follow the program to `bin/joey`, and which document's ABI rule stands; SYS_MOUNT's refusal of an ordered mount on a file point (Plan 9's Emount); musl reading a missing AT_UID as secure, so LD_LIBRARY_PATH is ignored; the `ns` tool's missing suffixes.
+
 ## 2026-09-25, morning (aux, Opus 5.5 1M, effort max) -- the trigger I widened by effect was a proxy too
 
 **What this was.** The close of TC-1a: two KT-1 audit rounds on the tile clear, the device red and green, the squash.
@@ -349,6 +540,106 @@ than quote them. Re-taking it was meant to be clerical. It was not.
   each also redded the zombie test's ALIVE control. Correctly -- that control is refused by the very arm both
   remove -- but my written expectations predated the test and were never revised.
 
+## 2026-09-24, evening (main, Opus 5.5, effort max) -- B-1d's four open questions, and two of my own claims corrected after the vote
+
+**What the ratified design left open.** B-1's scripture (@96f24314) fixed the loader model -- `libc.so` is the loader, D-4's PT_INTERP rewrite serves native execs, `burrow_map_file` exposes D-3's file-map arms natively -- and left one point open by name: PIE, "decided at B-1d". Reading the ratified text against the tree found three more:
+- **Direct mode places the program.** D-4 execs the interpreter with the program's path in argv, and musl's `map_library` maps the program itself. It places an `ET_EXEC` only through an address hint, without MAP_FIXED (`third_party/musl/ldso/dynlink.c:809-816`), and D-3 ignores hints. So a dynamic program must be an `ET_DYN`, whatever the PIE policy for static programs.
+- **The ratified call has no address.** `burrow_map_file(fd, offset, length, prot, flags)` cannot say where the FIXED overlay goes, and musl maps every later segment (:842) and the bss tail (:848) at fixed addresses. The kernel cores it exposes all take one (`kernel/syscall.c:6232`, `:6484`, `:6579`).
+- **The device has no `/lib`.** The ramfs is flat and served as `/bin`; ARCH 9.6's tree has none.
+- **The handle form's dependencies.** ARCH adopted "the library as a handle" but not how a library loaded by handle finds its own `DT_NEEDED` objects.
+
+I read FreeBSD's `fdlopen(3)` and `rtld(1)` for the last one rather than citing them from memory: `LD_LIBRARY_PATH_FDS` is "a colon separated list of file descriptor numbers for library directories ... for use within capsicum(4) sandboxes". Exec grants no authority by which image it loads, so direct mode re-opening the program by name is no confused deputy.
+
+**The vote.** Under the away grant's Opus clause these were the first items needing the operator, so I asked all four by blocking question and stopped. The operator answered each on the recommended option:
+- PIE only where the loader places code: static stays `ET_EXEC`, `-pie` is a dynamic PIE, `-shared` a `.so`, `-static-pie` refused.
+- `burrow_map_file` gains `addr` as its sixth argument, read only under `BURROW_MAP_FIXED`.
+- PT_INTERP `/lib/libc.so`, with `/lib` bound from the initrd.
+- `fdlopen` plus directory handles endowed at spawn.
+
+The scripture commit lands those, and nothing else, before any code.
+
+**Two claims in my questions were wrong, caught while writing the scripture.**
+- The PIE question said "Measured: PIC code adds no instruction beyond the ARMv8.0 floor". That was reasoning, not measurement. Measured since: musl's non-PIC (`.o`) and PIC (`.lo`) compiles of eight sources emit identical instruction sets. On a C11 atomic, PIC adds only `ldr` (the GOT load). The control is the same atomic at `-march=armv8.1-a`, which adds `ldaddal`, so the comparison can see an addition. My first control used musl's `__lock` and saw nothing: musl's aarch64 atomics are inline-assembly LL/SC, which `-march` does not touch. A control that could not fail, caught because it came back empty.
+- The interpreter question said `dlopen` searches `/lib` "then LD_LIBRARY_PATH". musl's order is the reverse (`dynlink.c:1119-1163`). And on Thylacine the loader ignores `LD_LIBRARY_PATH` and `LD_PRELOAD` entirely. musl reads a missing `AT_UID` / `AT_EUID` / `AT_GID` / `AT_EGID` as a secure process (:1819-1826), and `exec_fill_auxv` (`kernel/exec.c:596-612`) emits none of them, for both phenotypes. So Alpine's dynamic binaries in a vivarium already run that way, and every static Pouch start runs musl's fd 0-2 sanitisation. Nobody chose it. It fails safe: no injected library rides into a Proc that later elevates through the cap device. It is enqueued in OPEN-BUGS as the operator's call, and the scripture states it as found rather than as designed.
+
+**A fifth question, found while building joey's `/lib` bind.** The third vote's `/lib`, "bound from the initrd as `/bin` is", would have hidden every file the disk keeps in `/lib`: `ndb/local`, `beacon/verbs`, `dosbox-x/`, and the `shcompat` shim that joey's own UM-6 mount opens a few lines later. The bind I had planned was an `MBEFORE`, which assumed Plan 9's behaviour. Reading the union resolver before writing it showed the tree did not have it. `mount()` recorded only mounted sources, the walk (`stalk_union_member_holding`), readdir and create iterate only those, and `test_stalk.c` asserted that a lone `MBEFORE` is "not a union". Plan 9's `cmount` does the opposite ("if this is a union mount, add the old node to the mount chain"), and ARCH 9.6.1 says our flags "mirror Plan 9". I asked by blocking question, and the operator chose Plan 9 unions (`dec-2026-09-24-union-covered-directory`). It lands as B-1d-u, before B-1d.
+
+**One refinement the vote's wording carried.** The vote says "the covered directory", but a mount point can be a file. Plan 9 refuses an ordered mount on a non-directory (`Emount`). Refusing at `SYS_MOUNT` would narrow a syscall, which is the operator's to decide, so the kernel does the conservative half: a file point gets a plain mount and never a covered member. The spec carries it as `FilePaths` / `NoCoveredFile`, with a buggy configuration that fails it. The refusal is enqueued for the operator.
+
+**A sixth question: the initrd had no directories.** The first build of B-1d passed the suite at 1712/1712, and the device witness never ran. joey printed `pouch-hello-dlopen SKIPPED (no /lib/libc.so in this image)` and `B-1d /lib union SKIPPED (no lib/ in the initrd)`. `tools/mkcpio.py` packs only the top-level files of its source ("flat layout only"), and devramfs serves one flat directory, so the `lib/` the build staged never reached `ramfs.cpio` (232 entries, none with a `/`). Both `/lib` votes had assumed an initrd `lib/`, and so had I when I put them to the operator. The suite passed because the prover skipped when its subject was missing: a negative satisfied by a broken fixture, the class this project has pinned more than once. I asked by blocking question, and the operator chose directories in devramfs (`dec-2026-09-25-devramfs-directories`). The skip now fails whenever the image ships the prover.
+
+**A seventh question: a program and a mount point shared a name.** The tree's first boot failed `devramfs.load_complete` at 1718/1719: `ramfs: 233 files, 1 dirs ... 1 SKIPPED -- not placeable`. The refused entry was `env`, the native coreutils utility, which the initrd root shipped beside the `/env` mount point G15 added on 2026-06-23. The old walk checked mount points first under a comment that said none shipped by those names, so `/bin/env` had been the `/env` directory for three months, and nothing ran `env` to notice. The test I had written to catch a dropped entry caught a defect three months older than the rule that exposed it. An experiment image without `env`, booted with `THYLACINE_RAMFS_CPIO`, then passed 1719/1719 with all seven prover legs, apart from one leg that found a real bug: the native map call handed the cores' `-T_E_PERM` to Pouch, which reads `-1` as its flat sentinel, so the noexec refusal surfaced as EIO. `map_file.native_noexec_denied` had asserted `-T_E_PERM`, so the test itself encoded the defect (fixed at e4502da9: the native door answers EACCES). Two searches of mine were wrong on the way: a `head -20` cut the list of `T_E_PERM` asserts and I read the capped list as the whole set, and a sweep for EPERM claims searched `vault/subsystems` while the dossiers live under `vault/system`. I asked the layout question by blocking question, and the operator chose programs under the initrd's `bin/` (`dec-2026-09-25-initrd-bin-directory`).
+
+**Decisions.** The operator's four votes above (`dec-2026-09-24-b1d-loader-shape`), the union vote (`dec-2026-09-24-union-covered-directory`), the directory vote (`dec-2026-09-25-devramfs-directories`) and the layout vote (`dec-2026-09-25-initrd-bin-directory`). Mine: a file point stays a plain mount rather than refusing the call (the refusal is the operator's); the prover fails closed when the image ships it.
+
+## 2026-09-24, evening (main, Opus 5.5, effort max) -- the aux-3 merge: two conflicts no conflict marker showed, a journal the squash had re-dated, and a sabotage that tested nothing
+
+**The target moved twice before it landed.** The aux cleared d819d8f1 (yip 0106), then 3fd54782, the seal arc's round-3 close (0122), then 0a668bb8, which adds HN-1 (0129). Each clearance superseded the one before. Each was rehearsed in a scratch worktree against the tree main was about to become: B-1c's WIP tips b409f80b and 92a1f11c, then b65bedc7 once B-1c had landed. The real merge on main (fc234a44) hit exactly the rehearsal's ten conflicts, and the scripts written against the rehearsal resolved them. Each script asserts its hunk count before it writes.
+
+**Two compile errors behind no conflict marker.** Each came from a change on one side meeting a new use on the other:
+- `loom_create` took a third argument (`exempt`) in B-1a' 387ffcd8, and the aux's new tests called it with two.
+- B-1c removed `ThylaAllocN`, and the aux's new lantern declared it.
+
+The rehearsal's build found both. I then checked every kernel prototype main had changed against every call the aux added, and every public Rust item main had changed against every use the aux added; neither found a third. After the fix, the search for a two-argument call still matched 36 lines: all of them assertion messages that quote the call (`"loom_create(8,16) returned NULL"`). The count of all 101 call sites is what showed the search had real calls to find.
+
+**A journal the squash had re-dated.** The resolver interleaves both sides' entries by when each header was added. B-1c's squash gave every main entry of that arc a single time, so they sorted as one block above the aux's HN-1 entry. Dating main's side by the pre-squash tip (c995c98e) restored the real order: r4 13:51Z, the aux's HN-1 13:19Z, r3 11:41Z, and so on down.
+
+**Prose no build can check.** B-1c made "the fixed heap" false, and the aux's 73 commits were written while it was true. I searched the merge's 20,928 added lines for the old mechanism's vocabulary (`ThylaAllocN`, `HEAP_BYTES`, "fixed heap", "4 MiB heap"). The only hit was the lantern line this merge rewrote. The control was the 14 added lines that mention a heap at all; I read each, and none claims a fixed one.
+
+**A sabotage leg that tested nothing.** To save a boot, I put HN-1's netd sabotage in the same leg as the seal's first kernel sabotage. The kernel checks failed by name as intended, and a kernel check that fails ends the boot before userspace starts, so netd never ran. The report's netd section was empty. A verdict read only from the kernel FAIL lines would have counted the leg as proof. Run alone, with the kernel suite passing, the netd sabotage failed tools/test.sh on exactly the three dial-verdict legs the aux named. The lesson: a leg that sabotages two layers is evidence only for the layer the boot reaches, so give each layer its own leg.
+
+**Verified on the merged tree (41083444).**
+- The kernel suite at -smp 4: 1691/1691 (main's 1667 plus the aux's 24). Two builds from the tree gave the same ELF (506853ab9f128938).
+- At -smp 1: 1691/1691.
+- The seal legs failed exactly the aux's named checks: 1687/1691 with four, and 1688/1691 with three.
+- The netd leg failed exactly the three dial-verdict legs.
+- The CI image, baked from the merged tree: haul-unreachable (three legs), haul-hangup, haul-cape, srv-connect-gate, ls-imperium, lantern and rust-std-hello all passed on the first attempt. rust-std-hello ran `/r1hello`, built against main's B-1b musl. With haul's `tell()` forced to the console, haul-unreachable failed on the aux's own hard-fail line. The first bake died at populate: stratumd's socket lives under `build/fixtures`, and a worktree under the session scratchpad pushed its path past macOS's 104-byte `sun_path` limit. The worktree moved to a short path; the tooling fix is enqueued in OPEN-BUGS.
+- `tools/test-rust.sh` on the host: 28 crates and 1953 tests, 0 failing. libutopia's 69 stranded tests, an aux-side figure, are now an OPEN-BUGS item.
+
+**After the merge.**
+- a7e3b9ab: the kernel comment at proc.c's `proc_close_handles_at_exit` said a multi-thread Proc keeps its handles until reap, false since #68. The holotype record's R3-F1 fix note said the same, and now carries a note. Both were enqueued at B-1c's round-4 close.
+- 6fb09f3b: B-1b's round-1 audit and its finding, recorded in the vault. The landing had closed the round without them.
+
+**Decisions.** None were new. The operator gave H3 and C back to the aux (about 14:05Z); they will arrive in a later merge.
+
+---
+## 2026-09-24, late afternoon (main, Opus 5.5, effort max) -- B-1c round 4: clean, and a sweep that needed the old mechanism's own words
+
+**Round 3's fixes verified, as WIP 12 (7c54ef71).** Host coreutils 42/42. Restoring the reap-first capture hung the boot at the first capture check. A capture that dropped a cut-off tool's pipes and reaped it for its own code, with tail and uniq at their round-2 code, failed exactly six checks by name ("got code=Some(0)" for `yes`). Both smp: 1667/1667, heap-probe ALL OK, smoke 101/101.
+
+**Round 4: 0 P0 / 0 P1 / 0 P2 / 9 P3 (Opus 5.5 fallback; Fable was out of credits at spawn; MODEL start == end).** Clean by count, and every fix is local, so no round 5. The P3s, and what "fixed" covers for each:
+- F4, F5, F6 and F9 are harness edges no correct boot reaches.
+  - F4: converse could spin. The kernel reports POLLOUT with one byte free (pipe.c:552), but a non-blocking write of n <= PIPE_BUF needs n free (pipe.c:493-519). It now pauses 1 ms on WouldBlock. The kernel's parity with Linux, which sets POLLOUT only with PIPE_BUF free, is enqueued: every poll-driven non-blocking writer can spin the same way.
+  - F5: `yes`'s one second counted its exec setup. The second now starts at its first output.
+  - F6: a failed kill led to a wait with no bound. `end()` bounds it and reports a survivor.
+  - F9: the spawn error's cause is printed.
+  - None of the four has a RED, because none of their conditions occurs on a correct boot.
+- F8 was behaviour, pre-existing: `tail` refused POSIX's `-n -N`, and `tail` and `head` read `--` as a file. Fixed with three device checks.
+- F1, F2, F3 and F7 were my own docs overreaching.
+  - F1: the presenters' #54 paragraph was false for 8 of its 16 tools. `nc` and `con` report a gone reader as a failure, enqueued; six others swallow every failed write.
+  - F2: `seq` and `yes` exit 0 on any failed write. The census pattern behind C2-2 could not see that loop shape.
+  - F3: round 3's finding note claimed its check pinned the kill-before-drop order, but the cut-off path reports None whichever order it takes. The RED came from the sabotage's reap. Corrected in the squash.
+  - F7: four places still described the replaced capture.
+
+**Closing it found three more (C4-1..3).**
+- C4-1, pre-existing: `head`'s attached and legacy counts fell back to 10 on overflow, so `head -99999999999999999999` printed ten lines and exited 0. The parse is now one path, and an overflow is refused with a check.
+- C4-2: round 4 advised searching by the replaced mechanism's own vocabulary. That search (`ThylaAllocN`, `linked_list_allocator`, "fixed 4 MiB", "dies mute": 73 hits over 2402 files) found fixed-heap claims C3-1 had missed:
+  - the Halcyon traps list still told a binary to declare `ThylaAllocN`. C3-1 skipped status docs as history, but a traps list is live instruction.
+  - five AUDIT-TRIGGERS rows, one index line and AUX-ROADMAP's reclaim arc, now done by B-1b and B-1c;
+  - B-1c's own trigger row, which said every native program's memory rides thyla-heap. corvus's does not: it keeps a static 24 MiB arena, an operator question in OPEN-BUGS.
+- C4-3: the same words ("silent exit") surfaced a warden comment saying a child's pipes close at its reap, false since #68. A wider census found:
+  - two more such comments in warden, and the same claim in its dossier. My first census missed the dossier because it italicizes *reap*, so the census now strips markup before matching.
+  - the holotype register's HT02.SA-3, still TRACKED although #68's kernel test (`test_sys_spawn_killed_child_delivers_pipe_eof_before_reap`) resolves it;
+  - a kernel comment, proc.c:3523, which I enqueued as a separate comment-only commit after the land, not this squash. The kernel is a shared surface.
+
+  warden's code was right either way.
+- My first pass at that census, a `grep -o` with a bounded repeat, returned ZERO lines, because ugrep exceeded its complexity limit. A census that finds nothing proves nothing, so it was redone in Python with the known historical hits as the control.
+
+**A wrong turn in the run script.** run8.sh began with `rm -f run8.*.log`, which matched its own driver log. Its restore check also compared whole-tree diffs while I was editing docs, so it stopped after the sabotage leg. I re-verified the restore per file (sha256 of the kept copies, and each file's diff equal to its pre-run diff), and ran the clean phases as run9. A cleanup glob can match the script's own output, and a restore check must compare only what the sabotage touched.
+
+**Verified.** Host 42/42, and no clippy warning in any touched file. Before the sabotage, smp4: 1667/1667, heap-probe ALL OK, smoke 105/105. With `tail.rs` and `head.rs` at 7c54ef71, exactly the four new checks went RED by name and the other 101 passed. After a clean rebuild, smp4 and smp1 each gave 1667/1667, heap-probe ALL OK and smoke 105/105.
+
+---
 ## 2026-09-24, evening (aux, Opus 5.5 1M, effort max) -- "haul doesn't error": three faults, each hiding the next
 
 The operator's first working Lantern-over-Haul run (Halcyon, cocoa) came back with "haul doesn't error" when the
@@ -393,6 +684,31 @@ free port, so it tripped the 2 s progress line. I had adopted that fixture on th
 failure is what made me measure both, and the free port is chosen on the measurement. Decisions: none needed from the operator.
 The open question to them (hang vs silent vs sub-shell) is now answered from code: silent in the tile, on serial.
 
+---
+## 2026-09-24, afternoon (main, Opus 5.5, effort max) -- B-1c round 3, and what a merge rehearsal found
+
+**While round 3 ran: B-1c had left present-tense claims about the heap it removed.** A census covered every `git grep heap` line that also names MiB, fixed, arena or OOM, over docs/, vault/system/ and usr/ (1198 + 208 files). It skipped the JOURNAL, the status docs and the record plane, whose history may name the old heap. It found 17 files still describing a fixed heap in the present tense:
+- tapestryd's `fx_save` comment and dossier ("tapestryd's is 4 MiB"), and HALCYON-INSTRUMENT's matching sentence;
+- netd's "explicit 16 MiB heap" in server.rs, NET-DESIGN and NET-CLOSE-DESIGN;
+- view and gallery's "a pixel cap above the heap is a phantom", and sub-view's "the REAL bound is the caller's heap";
+- sub-parley's caveat that the 64 MiB body cap "cannot fire". Since B-1c it can; it is still untested.
+- the shell MOC's "the same fixed heap", and holotype RW-8's SA-4, which B-1c resolves.
+
+All of them are fixed in the tree. The miss has a cause: round 1's sweep searched for the removed NAMES (`ThylaAllocN`, `SLURP_CAP`), and a claim about the old heap need not name it. The census also found ut's history (HT09.R3-F6: an entry cap and no byte cap) to be one more unbounded consumer that lost its 4 MiB containment. It is added to that OPEN-BUGS entry.
+
+**The aux-3 merge, rehearsed in a scratch worktree.** `git merge d819d8f1` onto b409f80b gave the plan's eight textual conflicts, whose resolutions are now scripted. It also showed two conflicts that no textual merge reports, both compile errors:
+- aux's new tests call `loom_create` with two arguments, but main's has taken three since B-1a' (387ffcd8, `exempt`);
+- aux's new `lantern` declares `ThylaAllocN`, which B-1c removed.
+
+A census of the prototypes and pub items main changed, against the calls aux added, found no third. Main added no caller of the syscall aux widened (SYS_ATTACH_9P's x5 flags), so no silent ABI mismatch comes the other way. The aux has since cleared 3fd54782 (yip 0122), which supersedes d819d8f1: the same rehearsal against it gives nine textual conflicts and the same two semantic ones, and the scripts apply clean.
+
+**Round 3: 0 P0 / 0 P1 / 1 P2 / 9 P3 (Opus 5.5 fallback, MODEL start == end).** Its P2 was in the harness I reworked in round 2, not in the filters. `run_tool` fed a tool its input, waited for it with no bound, and only then read its stdout, so any output past the 4096-byte pipe blocked the tool and hung the boot where a check should have failed (joey waits for the smoke unbounded, usr/joey/joey.c:2112). The order dated from before #68, when a child's pipes did not close at its exit, and outlived its reason. My own round-2 check `grep -o every match of a line` expected 3000 bytes, a margin of 1.37x. The fix, `converse`, feeds a non-blocking stdin and reads stdout and stderr under one poll, within the check's bound, and every helper now goes through it. One wrong turn while writing it: my first version dropped the pipes and then killed a tool cut off at the bound, and `yes` would have exited 0 on the EPIPE in between, a code produced by losing its reader rather than by the tool. It now kills first. Two checks hold the capture itself: 18.9 KB through `cat` (the old capture deadlocks on it) and a `yes` cut off at one second.
+
+**Two P3s were behaviour, and one of them was GNU's.** The reviewer read GNU uniq's `check_file`: the default mode has its own loop that prints a line as its run begins, and only `-c`, `-d` and `-u` wait for the run's end. Ours waited in every mode, so `yes | uniq` printed nothing and a read error lost the open run. `runs_within` gained a `begin` hook and `stream::firsts` uses it. The other was pre-existing: Rust's `usize` parse accepts a leading `+`, so `tail -n +2`, POSIX's "from line 2", printed the last two lines and exited 0. tail now parses `[+]N` itself and copies through `stream::Skip`, which holds nothing.
+
+**The docs owed by round 3 are written; the code is not yet compiled.** The mac was leased to astra for the whole of it. One census of my own needed its control: my first pattern for the tools that swallow write errors matched `eprintln!`, and cat.rs, the control, hit four times. The corrected pattern reproduces round 2's nineteen, fifteen of them in the filters dossier. "Fixed" above means the code is in WIP 11 (92a1f11c) and the docs are in the working tree. Neither is verified until the host tests, the sabotages and both smp have run.
+
+---
 ## 2026-09-24, late night (aux, Opus 5.5 1M, effort max) -- the round where the seal held and my own "verified" did not
 
 Round 3 on `34d1f14a`, the round-2 close. I wrote the brief to aim the reviewer at the fixes -- the lock above all, since round 2 had replaced an ordering argument with it -- and self-audited the same surface while it ran.
@@ -408,6 +724,68 @@ Round 3 on `34d1f14a`, the round-2 close. I wrote the brief to aim the reviewer 
 Merged: 0 P0 / 1 P1 (self) / 3 P2 / 10 P3; P1+P2 = 4 and nothing structural, so the close is not dirty and no round 4 is owed. Tracked rather than fixed: the diorama's empty file where Linux says EACCES, and seal refusals reading as "I/O error" (an errno ABI change -- the operator's vote).
 
 Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
+
+---
+## 2026-09-24, midday (main, Opus 5.5, effort max) -- B-1c round 2: a bound on the bytes a filter holds is not a bound on what it builds from them
+
+**The round (Opus 5.5 fallback, start == end), on `82b5f0d7`.** 0 P0 / 0 P1 / 1 P2 / 8 P3, merged with my parallel self-audit (SA2-1..SA2-8). The round and I found the same P2 (F1 = SA2-1). Round 1's `LINE_MAX` bounded the line a filter held, and I had written in both registers that R4-F2's input half was CLOSED. It was not. grep built a `Vec` of match spans for every styled line: 16 B a match, and `grep -o x` on a line of `x` finds as many matches as bytes, so 1 GiB at the bound. cut built a `Vec` of the line's fields, 16 B each and doubling as it grew: up to 2 GiB. The lesson was already pinned from kt1 ("stored bytes don't bound the DERIVED set"), and I did not apply it to my own fix.
+
+My SA2-2 had wider reach. cat's line mode read through `BufReader::read_until`, which has no bound, so `cat -A /dev/zero` grew until the pool ran out. It is the only `BufRead` line reader in native code (a census of 395 .rs files, with cat.rs as the control). Round 1's list missed it because it enumerated the six rewritten filters instead of searching for the pattern. The round rated it P3 (its F6); round 1's precedent is to take the higher severity.
+
+**The fixes (WIP 9 `49ab2157`, then part 2).**
+- `coreutils::find` and `coreutils::select` hand each match or field to a callback and never collect them.
+- `stream::CatLines` applies cat's transforms a read at a time, with three scalars of state.
+- The claim is measured, not argued. A test-only counting global allocator (per-thread, with its own positive control) shows that a 1 MiB line of matches, or of delimiters, allocates 0 bytes.
+
+The P3s:
+- F2: `grep -c` after a gone reader stopped at its first operand and exited 1 for files it never searched. It now searches the rest silently, only as far as a first match (`-q`'s semantics).
+- F3: #54's gaps:
+  - `head`/`tail` banners went through the swallowing `print!`;
+  - hexdump's operand loop never stopped;
+  - pelt's walk and ls's directory loop never checked for a failed write;
+  - cat and head went on after a write error and blamed the input.
+- F4: ns's raw path swallowed a write error.
+- F5: an input's EPIPE was read as a gone reader.
+- F7: the reader-leaves harness had four faults:
+  - its first read had no deadline;
+  - a filter that ended by itself passed;
+  - stderr was drained only after the wait;
+  - the header was stale since #68.
+- F9: four doc wordings.
+- SA2-3: uniq reserved amortized.
+- SA2-4: `tail -n 0` read an endless input.
+
+F8 is pre-existing and the operator's: `grep -r` opens netd's `clone` and reads conversations' `data`, which netd types as regular files.
+
+**Two of my own claims were wrong.**
+- SA2-7 said `grep -r /` would read `/srv` and `/proc`. Neither device has a `.readdir` (SYS_READDIR returns -1), so -r cannot list them; withdrawn.
+- My new `readable_within` comment said descriptors close at reap. I had copied that from the smoke header, and the round's F7(d) showed the header stale since #68 (`proc_close_handles_at_exit`, kernel/proc.c:3527). Both are corrected.
+
+**Closing round 2 found two more.**
+- C2-1: head and tail documented `-` as stdin but opened a file named `-`. Fixed, with GNU's "standard input" banner.
+- C2-2: a census of stdout writes (52 bins, echo.rs the control) found 19 one-shot tools still writing through `io::out`/`print!`, so `echo x > /dev/full` exits 0. Enqueued in OPEN-BUGS as its own chunk.
+
+While writing the presenters dossier I also found its grep caveat described the removed spans. `emit_match` now reads the colour flags itself, so no caller can style a payload by forgetting the check.
+
+**A device check built so it cannot race.** A "reader gone before the first write" check that dropped the read end after the spawn would race the child's first write. `reader_gone_first` closes the pipe's reader before the spawn, so the child's first write always finds none.
+
+**Verification.**
+- Host:
+  - coreutils lib 36/36;
+  - six sabotages RED by name: find and select collecting, cat holding a line, cat restarting a line per read, the counter counting nothing, uniq reserving amortized.
+- run8 (-smp 4): 1667/1667 and coreutil-smoke 93/93. It ran before the styling gate and the capture fix.
+- run9, one device sabotage leg. It set head, tail and ns back to WIP 9, dropped tail's n == 0 return, and reverted grep's verdict search. Exactly the eight new checks of 93 failed, each by its own mechanism:
+  - code 1 with the tool's `-` diagnostic;
+  - "still running 20 s";
+  - code 1 for grep's verdict;
+  - code 0 on `/dev/full`.
+  The kernel suite held at 1667/1667.
+- **The leg's own report found one more (C2-3).** Its tail `-` failure said stderr "". `stderr_of`, which re-runs a failed tool to capture what it said, dropped the re-run's stdout. Since #54 a tool stops at its first write once its reader is gone, so the re-run ended before the error it was meant to show. head's report showed its message only because its `-` came first. This is the verdict-and-capture lesson again: the verdict half was sound and the capture half was not. The fix reads both pipes as they fill, within the bound. run10, the same leg, now shows "tail: -: no such file or namespace entry".
+- run11/run12, the final tree rebuilt clean, at -smp 1 (1/1 cpus online, read from the log) and at -smp 4 (4/4): 1667/1667, heap-probe ALL OK and coreutil-smoke 93/93 in each.
+
+**Owed.**
+- Round 3, on the fixes.
+- To the operator: F8 (netd's stat types); the one-shot tools' sweep; and the items round 1 left open (the 64 MiB figure, victim selection or per-consumer caps, R4-F2's pressure half, the ERRORS.md correction, the `/dev` listing).
 
 ---
 ## 2026-09-24, night (aux, Opus 5.5 1M, effort max) -- the round where the seal stopped being a list
@@ -470,6 +848,22 @@ decision C) as its prerequisite, so C is astra's -- to start from my round-3-cle
 because it edits the exact callbacks round 2 changed. Semantics sent on yip 0117.
 
 Verified: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree); final rebuild after the sabotage legs ELF `9418e7b48163ea01`, no source newer (270 compared). RED-first in three legs, each redding ONLY its own guard: the read-dispatch check + mem + regs read refusals removed together -> exactly `refuses cmdline` / `a mem READ` / `a regs READ` (1659); environ on the unsealed predicate -> exactly `refuses environ` (1661); imperium on the sealed predicate -> exactly the imperium I-25 leg (1661). Restores byte-identical. F5's lock is argued, not unit-tested.
+
+---
+## 2026-09-24, late morning (main, Opus 5.5, effort max) -- B-1c round 1 closed: the fix for R4-F2 had an unbounded line of its own, and two of the close's own tests were wrong
+
+**The round (Opus 5.5 fallback: Fable died of credits at spawn; start == end).** 0 P0 / 1 P1 / 1 P2 / 10 P3 on `f7da956e`, merged with my parallel self-audit (S-A1..S-A4). The P1 was a defect in my own fix for HT09.R4-F2. `coreutils::stream` removed the slurp's cap without a bound of its own: `grep x /dev/zero`, or `grep -r` walking into `/dev`, grew one line until the pool refused a page, and the fault kill's exit 1 is grep's "no match" -- the class R4-F2 names, reopened by the streaming that closed it. The fix is `stream::LINE_MAX` = 64 MiB. POSIX lets a text utility refuse a line past its LINE_MAX; the number is my call and is flagged for the operator. `hold` grows a line by a fallible reservation that never passes the bound. grep exits 2 and cut, uniq and tail exit 1, each saying "a line longer than 64 MiB". The pressure-driven half stays open for the operator: with no victim selection, another program exhausting the pool still ends grep at any page with exit 1. The P2 and my S-A4 were the two halves of #54 (HT09.RND2-F2's follow-up, unblocked since #100 returns `-T_E_PIPE`): a reader that left was an error (`cat big | grep -l x` failed under ut's pipefail), and the streaming filters kept reading after it left (`yes | grep y | head -1` never ended). `OutSink::reader_gone` / `finish` is now the one place a filter's output failure becomes a status, and all nineteen filters follow it. The self-audit's findings: a witness leg that could not fail (S-A1 = the round's F4: `trim-returns-the-rest` read 14 pages before and after the trim on all three run4 boots, because the frees had already trimmed), `Tail` with n = 0 holding its whole input (S-A2), and `add_direct` able to overflow with two concurrent near-`isize::MAX` requests (S-A3 = F12). All fixed in WIP 4 `e335d005`.
+
+**A wrong premise in my own check found a hazard in my own fix (run5, WIP 5 `4e583ff2`).** run5 verified WIP 4 at 1667/1667 on both smp, and the no-op-trim sabotage failed the new leg by name (`got=211 want<=32`). The one smoke failure was mine: `grep -r .. /dev` exited 2, because `/dev` has no directory listing (`devdev_read` answers `DEV_KIND_ROOT` with -1, "readdir deferred"; errno 95; enqueued in OPEN-BUGS). The check was removed, and a failed smoke check now re-runs its tool and prints its stderr. Reading why exposed a live hazard in WIP 4's `-r` rule: it skipped whatever `is_file()` denied, and dev9p never sets `S_IFREG`, so `grep -r` could have skipped every file on Stratum. The rule is now GNU's: skip a character device the walk finds (the only device type the kernel reports) and read everything else.
+
+**A test of a helper is not a test of its call site (WIP 6 `20bc9d48`).** Every round-1 regression test was sabotaged on the host, one at a time. Nine went RED by name. One did not: deleting the `release_long` call in `lines` left every test green, because the F11 test called the helper and never the loop that uses it. The loops now take their buffers from the caller, so a test reads the buffer the loop used. uniq's grouping held a third copy of the rule in a binary that no host test reaches. It moved into the library as `stream::runs`, checked against the whole-input answer at every read size, exact and case-folded. Seven more sabotages went RED, among them the helper releasing always, each call site deleted, and runs ignoring a stop.
+Then every host sabotage the chunk had written was re-run on the final code (the older batteries' anchors updated to it): all 39 RED by name, 26 of `stream` and 13 of the heap.
+
+**A device check that lent what it did not have (WIP 7 `d82ce0f0`).** The #54 regression is `reader_leaves` in coreutil-smoke: `yes` (or `seq`) feeds the filter, whose output is read to its first bytes and dropped. The filter must then exit 0 within 20 s with nothing on stderr, and the producer must stop too. The producer never ends, so a filter that kept reading would never exit. run6's CLEAN boot failed all five with "producer spawn failed", seq included, which the same program spawns fine through `run_tool`. I stopped the run, restored the sabotage the driver had already applied, and read joey: it starts coreutil-smoke with a bare `t_spawn`, so the program has no descriptors of its own, and my producer inherited stdin and stderr. `run_tool` pipes all three for exactly that reason; the check now does too, and a failed spawn reports its cause.
+
+**run7 (WIP 7, 09:23-09:33Z).** 1667/1667 at -smp 4 and at -smp 1 (`4/4` and `1/1 cpus online` read from the boot logs, not assumed), heap-probe ALL OK (13 pages over the base after the frees; the trim leg 243 pages kept and returned), coreutil-smoke 77/77. Leg A broke the status half: grep's guard, `OutSink::finish`, cat's and tee's arms. Exactly the five checks failed (5 of 77), each with its own tool's status and message: grep 2 "write error", cut and uniq 1 through `finish`, cat 1 "broken pipe", tee 1. Leg B broke the stop half: grep, cut and uniq ignoring the failed write, tee never breaking. Exactly those four failed with "still running 20 s after its reader left", and cat, left intact as the control, passed.
+
+**Owed.** To the operator: the 64 MiB figure; victim selection or per-consumer caps for the unbounded consumers (F3: ut's `$(...)`, `source`, sort); R4-F2's pressure half (the exit-status ABI); the drafted ERRORS.md correction; the `/dev` listing (kernel). The manual has no section for the native utilities yet (OPERATORS-MANUAL.md lists it as planned). The filters' behaviour changes -- the line bound, the silent gone reader, `-r`'s device skip, and cmp, cut and uniq printing what they read before an error -- are recorded in the sub-coreutils dossiers for that section to carry. "Processes and memory" gained the native heap's return policy, and which process an exhaustion ends.
 
 ---
 ## 2026-09-24, evening (aux, Opus 5 1M, effort max) -- three checks caught three things the step before them was confident about
@@ -711,6 +1105,227 @@ mutation and is better discrimination for it.
 vs cannot be EXTRACTED FROM), decision A (yes, and now load-bearing), the debug
 taint at the redeem, and the one-line seal on halcyond whose cost is an
 undebuggable compositor mid-arc.
+
+---
+## 2026-09-24, morning (main, Opus 5.5, effort max) -- B-1c: the native heap, designed from the crate's source
+
+**The design came from reading dlmalloc, not from the plan's parenthetical.** B-1c replaces libthyla-rs's fixed 4 MiB `linked_list_allocator` heap (`alloc.rs:77`) with `dlmalloc-rs`. ARCH 6.5 and B-1 vote 9 mapped its platform trait as `alloc` = lazy attach, `free` = detach, `free_part` = decommit. The crate is dlmalloc 0.2.14, the copy Rust's own standard library vendors: rust-src `library/vendor/dlmalloc-0.2.14`, whose `.cargo-checksum.json` package hash `ad5208a1...` is the crates.io checksum rust-src's `Cargo.lock` pins. Its only dependency on our target is cfg-if; libc and windows-sys are gated to unix and windows, and every vendored version satisfies it, so vendoring adds one directory. Reading `dlmalloc.rs` gave three facts the parenthetical did not contain:
+
+- **No large-block path.** `sys_alloc` (`dlmalloc.rs:440`) only makes or extends segments. C dlmalloc's `mmap_alloc` (256 KiB threshold) was never ported, a wasm-ism. The pages of a free chunk below a live one are never returned. Memory goes back only when the top segment's tail is trimmed (`sys_trim` :1351, once the top chunk passes 2 MiB) or a wholly free non-head segment is released (`release_unused_segments` :1407).
+- **`free_part` shrinks the segment in dlmalloc's own view.** The crate's unix platform unmaps the tail. Implemented as a decommit over a fresh attach per call, the tail stays behind as a live VMA dlmalloc has forgotten, and the later `free(base, newsize)` orphans it: one leaked VMA per trim-and-release cycle, heading toward `PROC_VMA_MAX` (65536, `proc.h:152`). That is a refusal while free memory exists, the first half of the bar. An attach per 64 KiB growth step also costs a VMA each, and `vma_find_gap` (`vma.c:542`) is a first-fit list walk.
+- **The merge test is `seg.flags >> 1 == flags`**, so any nonzero flags value disables merging: a quirk to design around, not a lever.
+
+**Two votes (the operator, by blocking question).** On Opus the away grant says stop at the first question that needs the operator; these were those questions.
+
+1. **Large blocks: direct-map at 256 KiB and above**, C dlmalloc's own threshold, restored one layer up. GlobalAlloc hands dealloc the layout, so no header is needed.
+2. **The manual's bounds test: peak use under dlmalloc.** MANUAL-DESIGN 8.1 named `ThylaAllocN`'s `linked_list_allocator`, and `HEAP_BYTES` becomes the reader's working-set bound.
+
+The third call needed no vote because scripture's own mapping requires it: **the platform owns reservations.** dlmalloc's `alloc` carves at a bump pointer from the latest lazy reservation. `free_part` decommits and rolls the bump back, so the address space is reused. `free` detaches a whole reservation. One reservation is one segment and one VMA. Recorded as `dec-2026-09-24-native-heap-large-blocks`; ARCH 6.5, MANUAL-DESIGN 8.1 and browser-status decisions 12 and 13 carry it.
+
+**A tool trap, found on the way.** The quaestor MCP server is still registered against the retired `thylacine-vault` worktree: `vault_new_note` wrote the decision note there. The stray file was removed and that worktree is clean again. Vault operations go through the CLI with `--root` until the operator re-registers it.
+
+**Building it (WIP 1 `d7a714f8`, WIP 2 `16f51cf2`).** The policy is its own crate, `usr/lib/thyla-heap`, so the real dlmalloc over the real `Reservations` runs on the host against a model of the kernel's three calls: first-fit placement in one arena (as `vma_find_gap` places them, so adjacency is the normal case), every page it takes back poisoned, a decommit or detach outside one live mapping refused. Each platform rule has a sabotage that turns the host tests red: orphaned tail, no bump rollback, decommit of the head (a SIGSEGV, counted red by the crash), a carve that fills its reservation, a leaked direct block, the literal attach-per-call mapping, no halving retry, a direct block missing from the peak.
+
+**Four things the tests and the self-audit caught that the design did not.**
+
+- **The peak missed its own worst moment.** The manual harness first sampled the footprint after each call. A realloc that moves a block holds both copies for an instant and is back to one by the time the call returns, so that instant was never sampled. The heap now keeps the peak itself, at the only two points the footprint grows (a carve; a direct block counted). A host test pins the realloc's both-live moment.
+- **A comment claimed a bound that did not hold.** `RESERVATIONS_MAX` said doubling "toward 64 GiB puts this beyond the burrow window". But 32 reservations of up to 64 GiB is about 1.6 TiB of a 64 TiB window, so a fragmented window could fill the table while memory stayed free. Now: 17 doublings to 32 TiB, 64 slots, and a refused length asked again at half down to the carve itself (a host test fills the arena with a wall and counts the halvings).
+- **The probe's own bookkeeping would have pinned what it measured.** The reservation-switch leg recorded its blocks in a `Vec` that grew inside the first reservation, so dlmalloc could never have released it: the leg would have failed for a reason in the probe, not the heap. The records vector is 256 KiB up front, a direct block of its own.
+- **A reader could see less than was held (SA-1).** A direct block was counted after its reservation came back, outside the lock, so for an instant the footprint under-read. It is now counted before the reserve (uncounted if refused) and uncounted after the detach. A host backend that reads the footprint, as a peer thread would, at each reserve and detach pins the order, and three new sabotages go red on it.
+
+**Measured, not assumed.** B-1b's F4 asked what churn across the trim threshold costs. `/heap-probe` times it: 1070 ns per page per cycle for 4 MiB blocks (freeing trims past the 2 MiB threshold every cycle) against 48 for 1.5 MiB blocks (under it). Small-block alloc+touch 1630 ns/page, free 351; a large block's touch 1062, its detach 344. On the device (16f51cf2, both smp): 64 MiB of small blocks +16432 pages, then +14 after free with no trim asked; a 32 MiB block +8209, then +0 with a small block still live; a reservation switch releases the emptied first reservation. The device sabotage (the backend's decommit and detach answering true without the syscall) went red by name, `small-blocks-fall got=16432 want<=560` and four more, with the boot's `joey: /heap-probe FAILED`.
+
+**The regression the cap had been hiding (HT09.R4-F2).** `io::slurp`'s 2 MiB cap existed because the heap was 4 MiB, and B-1c removed both. The cap had also been doing a second job. Reservations are lazy, so `try_reserve` sees a refusal only when address space runs out. An input larger than free memory ends the program at the first page the system cannot back, and v1.0 reports that fault as exit status 1 (`exits()` maps every non-"ok" message to 1; #91 carries an explicit code's low byte, but a fault is a message). That is `cmp`'s "differ" and `grep`'s "no match": a silently wrong verdict, the finding the cap had closed. The fix is the streaming R4-F2 had deferred, pulled forward to all six filters that do not need their whole input, through one pure module, `coreutils::stream`:
+- `lines` for grep, cut and uniq;
+- `compare` for cmp, two buffers at their own pace;
+- `Tail` for tail, a window drained only at twice what it keeps;
+- wc counts a buffer at a time, its word state carried across reads.
+
+The module is host-tested against reads cut at every boundary and against the old whole-input answers, and thirteen sabotages go red. Two behaviours changed with it, both toward GNU: an empty input has no lines (`grep -v x </dev/null` used to print a blank line), and `grep -l` stops reading at its first match. Only `sort` still holds its input; its status 1 is an error status, so no verdict collides. Two claims written earlier in this chunk were false and are corrected: `alloc.rs`'s FAULT POLICY and the libthyla-rs dossier both said a program survives exhaustion with the fallible forms, but those see only the address space running out. Separately, `docs/ERRORS.md` (lines 55, 183) and the `kernel/proc.c:3694` comment still say every non-zero exit collapses to 1, stale since #91. ERRORS.md needs the operator's signoff, so that is queued for them.
+
+**Around the chunk.** The operator granted pushes ("authorized to push at will"); main went to both mirrors at `5ed51ff5`. The aux cleared aux-3 (`d819d8f1`) to merge after its audit round, and main merges it right after B-1c. A trial merge conflicts in 7 files, 3 of which carry audit corrections; the aux left a three-leg verifier for the merged tree. A memory-stamp script of mine spliced `s[:i] + new` without `s[j:]`, which truncated the B-1c design memory to its STATE line. It was restored from the session transcript an hour later.
+
+**WIP 3 verified on the device.** 1667/1667 at -smp 4 and at -smp 1, with `heap-probe: ALL OK` and coreutil-smoke's 70 checks, 15 of them new. The streaming's device checks were proven to discriminate. A build with the line carry dropped, wc's word state reset per read, and tail holding n-1 lines failed six checks by name (`grep -c long line`, `cut long line`, `wc -w long word`, `wc long input`, `tail -n window`, and the old `tail -n`), and the boot stopped on `joey: /coreutil-smoke FAILED`. One design correction came out of sabotaging the host tests: tail's window was first sized at n+1 newlines. The sabotage that cut it to n stayed green, because a window that starts at a line and holds n newlines already contains the last n lines, whether or not the input ends in one. So n is the true bound. The comment had claimed n+1 was needed; it now says n, and the sabotage now cuts to n-1, which goes red.
+
+---
+## 2026-09-24, early (main, Opus 5.5, effort max) -- B-1b closed: the holotype round withdrew the chunk's own headline
+
+**The ask.** Close B-1b: take the holotype round the previous context spawned,
+fix what it found, land. The round ran on Fable 5.1 (MODEL start == end); the
+operator switched this session to Opus 5.5 at max effort after its report
+arrived, so the close is Opus's -- under the OPERATOR AWAY grant's Opus clause
+(proceed on the regular autonomy rules, stop at the first escalation item).
+
+**The round: 0 P0 / 0 P1 / 1 P2 / 5 P3, and the P2 was the chunk's headline.**
+F1: the seam bug B-1b said it had found -- `__init_tls`'s raw six-argument
+mmap through the one-argument alias 83, "every large-TLS Pouch program dead
+before `main` for sixteen months" -- never existed. The kernel's 83 arm has
+read that exact shape since Clade CL-4 (4d6f0680; item 2 of its commit
+message; `burrow_lazy_len_from_args`, pinned by `test_sys_burrow.c`), and
+memory held it twice: `audit_cl4_closed_list.md` (line 26 verified the caller
+at disassembly; line 155 named the libc-side elimination as owed) and
+`bug_clade_multicall_startup.md` (layer 2 of clang++'s five). The design pass
+read the libc side and stopped. The evidence it cited was a sabotage on the
+NEW tree: `notls` drops 0046 but keeps 0044's sentinel, so it measures "0044
+without 0046" and could not confirm anything about the old libc -- the design
+memory had PLANNED the old-libc measurement, and the sabotage was taken for
+it. The previous context's concurrent self-audit re-read the libc side of the
+same claim and passed it. What stands: 0044's parking of `__NR_mmap` (a raw
+Linux-shaped mmap must not reach a number that maps RW whatever it asks)
+WOULD have broken `__init_tls`, so 0046 is required -- by 0044, not by a
+defect. Every copy was rewritten: 0044's and 0046's headers and in-file
+comments, the series, ARCH 6.5, POUCH-DESIGN 8.1, browser-status, AT row 194's
+title and body, the INDEX line, the entry below, two dossiers, the change
+note, `build.sh`'s SEAM comment, the kernel's CL-4 comment (the arm stays: a
+Clade stage linked before 0046 still sends the shape; retiring it is an
+ABI-shape change, left to the operator) and the unit test's comment; in memory
+the bug file is now a WITHDRAWN note carrying the lesson. A sweep of the tree
+for the claim's phrasings (control: 19 files name 0046) found only the
+generated dashboard, which the render rewrites.
+
+**A helper that failed its own control.** The F3 comment grew a hunk of 0044
+by three lines, so I wrote a recount helper and ran it first over the 46
+patches that apply cleanly: it disagreed with 12 headers. It had taken an empty
+body line -- a context line whose single space was stripped, as 0012's third
+line is -- for the end of the hunk. Dropped; the one header was moved by the
+exact three lines (`+2,93` -> `+2,96`) and checked by the project's
+`tools/check-patch-hunks.py` -- which, handed FILE arguments, said "0 hunks
+checked" (it takes ROOT directories; a search that found nothing proved
+nothing) and, run as `build.sh` runs it, 589 hunks / 0 warnings, while HEAD's
+malformed 0012 in a scratch root still drew its one warning. The whole series
+then applied at fuzz 0 into a scratch musl: 0 failures, 0 rejects.
+
+**F2-F6.** F2: `pouch-hello-guard` printed its marker before writing the first
+usable byte, so a boundary reported low faulted after the marker and satisfied
+`expect_fault` -- the "exact boundary" control was unobservable. `s[0] = 1`
+now precedes the marker, and the eighth sabotage, `guardlow` (the prover's own boundary moved one page down, the shape of a libc that reports it low), reddens the guard smoke by name: the child dies of `snare:segv` at 0x100003000 -- inside the guard, one page under the usable base 0x100004000 -- before its marker, joey reports the marker absent and the boot extincts; before the fix the same shape printed the marker first and passed. F3 (MAP_FIXED's second call can refuse
+after the discard: a range sealed below the asked prot is EACCES, no VMA slot
+for a middle cut is ENOMEM) is documented and queued in OPEN-BUGS: the atomic
+discard-and-protect is a `BURROW_PROTECT` flag bit, a syscall-interface change
+and so the operator's. F4 (the eager release's churn against Linux's lazy
+MADV_FREE: a TLBI, a re-fault and a zeroing per page-sized alloc/free) is a
+design note in the dossier; the cheap skip is a `free.c` change, which P-4
+forbids, and the heritage lazy-free list is tracked with the arc. F5:
+`exec.h`'s layout still drew the 1 MiB stack and taught the retired mirror;
+fixed, with the CL-4 comment and the previous context's "Thylacine has no
+fork" (Pouch has none; the kernel has the phenotype's). F6: three phenotype
+madvise divergences are written into VIVARIUM 6.28.
+
+**Results.** Re-verified on the final tree: 1667/1667 at -smp 4 with every owed line, `Thylacine boot OK`, the witness unchanged (madvise 10 -> 1038 -> 11; mallocng 11 -> 4263 -> 2339 -> 11); 1667/1667 at -smp 1 with every owed line and the same witness. Seven chunk sabotages + `guardlow`: eight, each scored by the lines that went red in its own boot log.
+
+**The landing.** One squashed commit on local `main` (the three WIP commits and
+this close), then the hash fixup that names it in the change note and
+browser-status. NOT pushed: the operator pushes both mirrors by URL with the
+merge-base guard (a1a030dd..; the auto-mode classifier denies the push here).
+
+**Lesson.** A defect claimed at a boundary is a hypothesis until the other
+side's handler for that exact call has been read -- and memory's closed lists
+are part of the other side. A sabotage on the new tree cannot stand in for a
+measurement of the old one.
+
+---
+## 2026-09-23, night (main, Fable 5.1, effort max) -- B-1b: the Pouch memory seam made exact, a census finding that was not a bug, and the sabotage that never reached its leg
+
+**The ask.** The next chunk of the browser arc after prowl-6: the Pouch (musl)
+substrate's half of the ARCH 6.5 memory bar -- `mprotect` / `madvise` /
+partial `munmap` / real pthread guards, the main stack to 8 MiB with its
+extent in the auxv (decision 4), the witness RED on the old libc. Designed in
+the previous context from the code at 2a5a2b3d, with every anchor in the
+design memory; executed here on the branch `b1b-pouch-mem` across three WIP
+commits and a self-compaction.
+
+**What it is.** Three patches on the musl series. 0044 rewrites `src/mman/`:
+`mmap` mints at the prot asked for over `SYS_BURROW_RESERVE` (PROT_NONE
+reserves; W implies R; X is EACCES), `mprotect` is `SYS_BURROW_PROTECT` with
+FOUR arguments (the seam's three-argument form would pass x3 as the flags word
+and a stray 1 would SEAL), `madvise` DONTNEED / FREE is `SYS_BURROW_DECOMMIT`,
+`MAP_FIXED` over one's own anonymous mapping is discard + reprotect and never
+a creation, and mallocng's `USE_MADV_FREE` is on. 0045 has
+`pthread_getattr_np` derive the main stack from the kernel's new
+`AT_STACK_BASE` / `AT_STACK_SIZE` and refuse a kernel that writes neither.
+0046 routes `__init_tls` through `__mmap` (below). Kernel: the 8 MiB stack, the pair (eleven auxv
+entries), `burrow_decommit_in` speaking errno behind `sys_burrow_decommit_core`
+(the native 84 still 0 / -1), `vma_range_is_mapped_in`, and the phenotype
+`madvise` row pulled forward so a Linux guest's allocator returns pages too.
+
+**The finding -- WITHDRAWN at the close (the entry above).** While censusing
+raw `SYS_mmap` callers (control: the wrapper itself must appear) the design
+pass found `src/env/__init_tls.c:137` issuing a six-argument Linux-shaped
+`SYS_mmap2` through 0003's one-argument alias 83, and concluded that x0 = 0
+reached the kernel as the length and that every Pouch program with static
+TLS past `builtin_tls` died before `main`. It read only the libc side. The
+kernel's 83 arm has read that exact shape since Clade CL-4 (4d6f0680; its
+comment names `__init_tls`), so the defect did not exist -- the holotype round
+read the arm, I did not. What stands: 0044 parks `__NR_mmap` at the sentinel,
+which WOULD break `__init_tls`, so 0046 routes it through `__mmap`; the tls
+leg witnesses that dependency, and the RED `notls` is 0044 without 0046 --
+it could never have confirmed a claim about the old libc.
+
+**Wrong turns, and what caught them.** (1) The patched `madvise.c` used the
+`MADV_*` names without `_GNU_SOURCE`; musl compiles with
+`-D_XOPEN_SOURCE=700`, so the first bake failed -- caught by the bake, fixed
+with musl's own idiom (`posix_madvise.c` has the define). (2) The sysroot's
+SEAM verification in `tools/build.sh` pinned `'#define SYS_mmap 83'` by
+literal, so the second bake failed verification: a guard pinned to a NAME only
+ever checks that nobody changed the thing it names -- re-pointed at the
+sentinel plus the four numbers of `_pouch_mman.h`, with a control that a wrong
+number is refused. (3) Two `test_exec` pins said "one node for the stack":
+2048 slots need a root and a leaf where 256 needed one -- the suite caught it
+(1665/1667) before joey ran. (4) The first green suite failed pheno-probe
+L23m: the phenotype `madvise` arm answered ENOSYS for a hole at `0x50000000`,
+which lies BELOW the burrow window the decommit core confines itself to. The
+decision, auto-accepted under the OPERATOR AWAY grant: Linux's ENOMEM for a
+hole wherever it lies; ENOSYS only for a MAPPED range outside the window, its
+bytes untouched (a false ENOMEM would tell an allocator its own `.bss` is
+unmapped) -- pinned by two new legs on the probe's own data page (L23s /
+L23t). (5) The change note named the new dossier before it existed and the
+vault lint refused the WIP commit -- the note and the seam close were parked
+in the scratchpad until the dossier was written.
+
+**Measured.** Identical at -smp 4 and -smp 1: madvise over 4 MiB touched page
+by page, data view 10 -> 1038 -> 11; mallocng-trim (400 x 40000 B) 11 -> 4263
+-> 2339 -> 11 -- a fall of 1924 pages with every group retained, against 4023
+(a fall of 240) on the sabotaged libc; the floor is 1200. `pouch-hello-guard`:
+"guard 2000 bytes below 0x100004000; touching", then `snare:segv`.
+`pouch-hello-threads`: 8388608 bytes, a 4 MiB frame at both ends, 5/5 workers'
+`---p` rows. 1667/1667 with every owed boot line.
+
+**The sabotages, scored by what went red, not by what I predicted.** joey
+stops at the first red prover, so a boot shows ONE prover's red: `noprot`
+(mmap minting RW whatever the prot) was caught by mem's x-refused, and the
+guard child behind it was never reached. That is why a seventh sabotage,
+`nonerw` (PROT_NONE alone minted RW), was added: it reddens the threads
+prover's guard-vma leg (`rw-p` where `---p` is required) -- the guard child
+still sits behind it, so its own red remains a property of joey's
+`expect_fault` (a status 0 is refused) rather than a measured boot. The rest
+went red where expected: `nomadvfree` at mallocng-trim alone; `nomadvise` at
+four legs; `noauxv` at `exec.setup_auxv` (the suite, before joey); `notls`
+(0044 without 0046) with no output at all; `nodecommit` at L23l.
+
+**While the holotype round ran: the self-audit on the same surface.** Read
+against the kernel arms, not the patch headers: every length the seam
+passes -- RESERVE, PROTECT, DECOMMIT, DETACH -- is rounded up to a page by
+the kernel (`sys_burrow_reserve_for_proc`, `sys_burrow_protect_for_proc`,
+`sys_burrow_decommit_core`, `detach_shape_check`), so a `MAP_FIXED` or a
+`madvise` with an unaligned length gets Linux's round-up and the two steps
+of `MAP_FIXED` see the same page-multiple; no libc rounding is owed. The
+one divergence not yet written down: `MAP_SHARED | MAP_ANON` mints the same
+private reservation as `MAP_PRIVATE` -- Pouch has no `fork` (0026), so
+within one process the two are indistinguishable; a caveat now, not a
+finding. Two records were wrong in a way the sabotage rule forbids: the
+dossier's Tests section and the change note still carried the PREDICTED
+reds ("`mmap` minting RW -> the guard child exits 0, threads' guard-vma,
+mem's x-refused") where the audit-trigger row carries the SCORED ones (joey
+stops at the first red prover: `noprot` showed x-refused alone, and `nonerw`
+was added to reach the guard legs) -- both now say seven, scored. And the
+census control was misstated: after the series `grep 'SYS_mmap' src` finds
+no CODE line at all (two comments), so "the wrapper only" named a control
+that no longer exists; the control is `SYS_munmap` in `munmap.c` /
+`__unmapself.c`, and the dossier says so. The aux's 0012 hunk-count fix
+(`@@ -29,8 +30,17 @@`, counted from the hunk body: 8 old / 17 new) rides
+this landing.
+
+**Closed** 2026-09-24: the holotype round and the landing are the entry above.
 
 ---
 ## 2026-09-24, early (aux, Opus 5.5 1M, effort max) -- the seal, renamed before anyone could depend on it
@@ -1109,6 +1724,7 @@ second checker blind spot, and the consumer's silence is what settles that.
 device-level, adding no kernel test), the `xproc-gate` leg green on device, leg 2
 sabotage-proven with leg 1 uncollateral. Re-measured after the last edit rather
 than recalled.
+
 ---
 ## 2026-09-23, afternoon, later (aux, Opus 5.5 1M, effort max) -- the mounter owns every file on a Haul mount
 
@@ -1201,6 +1817,234 @@ control on the restored tree passes in 88 s.
 **Open:** the Fable audit round (dev9p is an audit-trigger surface), then the
 fold into one commit and the push to both mirrors.
 
+---
+## 2026-09-23, evening (main, Fable 5.1, effort max) -- prowl-6: the capacity figures reach the screen, and the census found two consumers the design had not
+
+**The ask.** The operator's next sub-chunk after B-1a' (recorded with the
+landing): a prowl telemetry sub-chunk on the figures capacity produces, a
+`/ctl/procs` tables column, and the manual folding in `tables:` and
+`/ctl/memory`. Designed in the previous context (the design memory carried
+every anchor) and executed here from a clean `main` at daf88c2d.
+
+**What it is.** `/ctl/procs` gains `TABLES` after `PAGES` (kernel/devctl.c,
+the address space's `pgtable_pages` as an atomic load under the same
+zero-means-overflow rule as its neighbours). prowl gains a third header row
+(the user-pool meter from `/ctl/memory`), a `TBL` column, and a first line in
+the `d` pane from `/proc/<pid>/status` -- which is ungated, unlike the sched
+half, so the footprint renders for every process. `ps` gains `TBL`. The manual
+gains `13-processes.md`.
+
+**The census, with its control.** The design listed the layout's consumers
+as prowl, `ps`, coreutil-smoke (header only) and diorama (two columns). The
+re-run here used the header string as the control (it lives in exactly one
+file, kernel/devctl.c, and the census must find it) and found two more that
+the design had not examined: coreutil-smoke ALSO asserts `ps`'s beacon table
+frame by its alignment string (`cols=rrllrrrr`, eight characters -- nine now),
+and Halcyon's `loaded_systems` parses `/ctl/procs` (usr/halcyon/src/main.rs:1451;
+it takes the first three tokens, so it needed nothing). The `Table::new("rrllrrrr")`
+in ps.rs was the third miss: an alignment string is a column count in disguise.
+Lesson kept: a column change has to be searched by every SHAPE the layout takes
+(a header, a token count, an alignment string), not by the file name.
+
+**The test's fixture order.** `devctl.procs_tables_column` tears its Proc and
+Burrow down BEFORE its assertions, because `TEST_ASSERT` returns on failure
+and a Proc left alive would carry its page in the pool for the rest of the
+boot -- the B-1a' fixture-leak lesson (daf88c2d) applied at the design stage
+rather than after a cascade.
+
+**Cores.** The aux held the mac for its (U) build through this chunk's
+verification window; the yip queue kept the place and the audit round ran on
+the diff in the meantime (a static round: the prompt forbade builds and boots
+while the lease was a peer's).
+
+**The fixture the design had, and the one that landed.** The design's kernel
+test mapped an eager page into a `proc_alloc` Proc and expected the holder
+count to be the page plus its tables. The first boot said otherwise, twice:
+the accounting assertion failed (an eager `burrow_map` page is charged to no
+address space -- the eager charge lives at the attach syscall, so PAGES was 3,
+equal to TABLES, and the fixture could not have told a renderer that prints
+PAGES twice from a correct one), and after the rewrite to a lazy reservation
+the row was never found, because `/ctl/procs` walks the TREE from kproc
+(kernel/proc.c:836) and an orphan from `proc_alloc` is in no tree. The landed
+fixture is an `rfork(RFPROC)` child of the test's Proc that reserves a lazy
+page, touches it (4 pages, 3 tables -- a one-slot pagemap is an inline leaf,
+uncharged), reads its own row, and is reaped before the assertions. The audit
+round, running statically on the diff while the suite ran, reported the same
+two defects against the first draft: the suite and the prosecutor converged
+on them independently.
+
+**The gate needed an image the operator's tree cannot hold.** `prowl.exp` logs
+in at a `ut` prompt; the operator's `build/` holds the Halcyon-session image,
+where the serial login lands in the tiled environment (observed: the steps
+stalled at the password with tapestryd throttling in the transcript). Rather
+than bake `--config ci` there, a git worktree (`prowl6-gate`, the diff
+applied) got an APFS-cloned `build/` (`cp -Rc`, 42 s, space-free) and its own
+CI bake; the clone's CMake caches (kernel, usr, stratumd) and two git-ignored
+vendored files cargo's fingerprints name had to be dropped or copied, and the
+clade LLVM archives restored, before the bake went through. The gate then
+PASSED in 52 s with the three prowl-6 legs seen. The recipe is in memory for
+the next chunk that needs a CI image beside the operator's.
+
+**Verification, re-taken on the final tree.** Kernel suite 1665/1665 at
+`-smp 4` and at `-smp 1` (one new test, `devctl.procs_tables_column`; the
+extended `devctl.read_procs_format` pins the header's column order), joey
+clean (CL-5 OK, bus-probe-child ok, `capacity-probe: ALL OK` + reaped, net-8a
+PASS), the snare baseline 8, coreutil-smoke's ps-rich leg RAN with `/ctl/procs`
+at 347 B (the budget is 500). The RED (TABLES rendering `page_count`): 1664/1665,
+exactly `devctl.procs_tables_column` red on "TABLES is the page-table count,
+not PAGES again", no cascade. `tools/test-interactive.sh prowl` PASS on the
+worktree's CI image. The manual checker (host, 72 tests) and the bake's own
+`manual-check` accept `13-processes.md`. Holotype round (Fable 5.1, static):
+0 P0 / 0 P1 / 0 P2 / 9 P3 -- eight fixed in the chunk, F5 closed with reason
+(`memory/audit_prowl6_closed_list.md`). Landed as one commit plus its hash
+fixup on `main`; not pushed (the operator pushes).
+
+---
+## 2026-09-23, day (main, Fable 5.1, effort max) -- B-1a' (capacity): the tests found two defects the design had not, and the boot found a third
+
+The chunk is ARCH 6.5's "Range detach" and "Capacity, and the I-32 default"
+as built: the flat, uncharged `filepages[]` array becomes a charged radix
+pagemap (`kernel/pagemap.{c,h}`), `burrow_detach` and the phenotype `munmap`
+become one range-detach core (`vma_detach_range_in`), and the I-32 default
+becomes a user pool of RAM minus a boot-sized reserve. The design was derived
+from the code at `ee680a2b` into a memory file before a line was written, and
+the three WIP commits (`48e89c2b` does not build, `63b61384` compiles,
+`a1649f92` green) were executed from it. The chunk lands as one commit on top
+of main; the WIP commits are the working record, not the history.
+
+**Wrong turn 1 -- the design said "walk the overlap"; the pagemap made the
+overlap 2^34 slots.** `burrow_release_lazy_range_in` as first written walked
+every SLOT of the detached range, which was fine at the old 1 GiB reservation cap
+(262,144 iterations) and is not fine once a reservation may be the whole
+64 TiB window: a detach of an untouched window-sized reservation would have
+spun under `as->lock` for hours. Nothing in the suite would have said so --
+the suite reserves small. What caught it was writing the test the design
+listed LAST (`capacity.window_sized_reservation_releases_in_bounded_steps`)
+and asking, before running it, what its cost would be. The fix is
+`pagemap_take_next`: take the first resident slot in `[from, hi)` walking
+present nodes only, so a release costs O(depth x 512) per resident page and
+O(depth) for an empty range -- a present node always holds a resident slot
+beneath it, because the take that empties a node unlinks it. The test pins the
+bound with a step counter (`pagemap_walk_steps`: a few thousand for the whole
+window with two pages touched, not 2^34); the shape is `vma_scan_steps` from
+the B-1a audit's F2, which is the second time this run a walk was made linear
+by asking what it visits rather than what it covers.
+
+**Wrong turn 2 -- a machine-wide bound above a counter that dies with its
+owner.** The pool is a bound ABOVE the per-address-space `page_count`, so
+every charge is counted twice and every uncharge must be too. Deriving the
+death test's expectation (`capacity.death_returns_charges_to_pool`) showed
+that `vma_drain_in` frees a dying address space's pages Proc-agnostically
+(`burrow_free_internal` refunds nothing, by design -- that is `capacity.tla`'s
+`FreeIfLast`) and the counter simply died with the space. Harmless while the
+counter was the only bound; with the pool above it, every Proc death leaked
+its RSS into the pool forever, and a long-lived machine would have refused
+everyone. `addrspace_unref` now returns whatever is left after the drain --
+exactly what no release path settled. This is the model's blind spot made
+concrete: `capacity.tla` has one address space that never dies, and says so.
+
+**Wrong turn 3 -- an oracle built on a refusal is inverted by the change that
+makes the refusal a success.** The first boot with the kernel half green
+failed one line: `net-8a resident lo E2E FAIL (weft-not-detached)`. netd's
+proof that a ring was detached was a SECOND detach being refused (`-1`, the
+exact-match form's answer for "no such mapping"); the Linux range form answers
+`0` for an empty range, so the proof inverted -- a real regression the suite
+could not see because it lives in a daemon's oracle, not the kernel's. The
+oracle now asks the STATE (`t_burrow_protect(va, 4096, R, 0) == -ENOMEM`: a
+hole), not an error. The same boot failed joey's CL-5 probe for the same
+family of reason: it asked for 65,537 pages as "an unauthorized raise" -- a
+number chosen above the old `PROC_PAGE_MAX`, and below the new pool. It now
+reads its own `budget:` and asks for one more.
+
+**Decisions recorded as tests rather than prose.** Five older tests encoded
+the old semantics and each became a decision: eager pages go with the LAST
+piece of a cut eager mapping (`detach.eager_pages_go_with_the_last_piece`); a
+wrong-length piece detach TRIMS instead of refusing; a head or tail trim
+needs no VMA slot (the control in `detach.range_refusals_change_nothing`); a
+below-window `munmap` is ENOSYS, a native one `-1`; the fixed arms are
+window-confined. The exec charge assertions became `data + nodes(segment) +
+nodes(stack)`, which is the pagemap's cost stated where it is paid.
+
+**What the boot showed.** The first boot with the userspace fixes failed on the
+new probe's FIRST leg: `/capacity-probe` opened `/proc/self/status`, and
+Thylacine's devproc has no `self` -- it is Plan 9's `/proc/<pid>`, which
+joey's own reader has always used. A probe written against a Linux reflex,
+caught only by running it; it now builds the path from `t_getpid()`. The
+second boot is clean at both CPU counts: 1650/1650, joey clean (CL-5 OK,
+`capacity-probe: ALL OK` over seven legs, `net-8a resident lo E2E PASS`,
+`viv-pheno-probe: native PASS`), every `snare:` line a fixture's own fault
+(protect-guard-child, pouch-hello-fault, fork-probe, thread-fault-probe;
+the census identical at -smp 1).
+
+**The REDs.** Six sabotages, each baked and booted, each reverted (the anchor
+script asserts every anchor before it writes and the revert asserts the
+sabotage): `nodetachrefund` (the release call in phase 3 removed) reddens
+`detach.range_trims_left_right_middle` and `capacity.replace_window_releases_
+orphans` and, because a leaked charge is visible to every later charge-balance
+test, 31 more (torpor, loom, devsrv); `nonodecharge` (the fault arm installs
+nodes uncharged) reddens `capacity.pagemap_nodes_charged_and_reclaimed` and
+`detach.four_gib_reservation_round_trips` among 28; `nopool` (the pool charge
+skipped) reddens exactly `capacity.pool_refuses_users_keeps_tcb` and
+`capacity.death_returns_charges_to_pool`; `nowindow` (the fixed arms'
+window test dropped) reddens exactly `vivarium.mmap_fixed_domain`;
+`nodeathrefund` reddens exactly `capacity.death_returns_charges_to_pool` and
+`detach.range_refusals_change_nothing`; `noheadroom` (the phase-1 VMA
+headroom refusal dropped) does not produce a red assertion at all -- the
+suite EXTINCTS inside `detach.range_refusals_change_nothing` at the fail-loud
+tripwire (`the tail piece was refused after the headroom check`), which is
+the designed behaviour of phase 3 when phase 1's bookkeeping lies. The
+mechanism's absence is caught either way; the record says which way.
+
+**Wrong turn 4 -- a function written and never called.** The self-audit that
+the audit-round skill requires while the prosecutor runs re-derived the fork
+clone's charge from the code: `burrow_clone_cow` mirrors every NODE page of
+the source map (`want = pagemap_node_count(src)`), and `pagemap_take` refunds
+the nodes it empties to the address space that releases them -- but
+`clone_one_vma` charged the child `burrow_lazy_resident_count(minted)`, the
+resident DATA pages alone. `burrow_lazy_footprint` (pages plus nodes) existed,
+documented as "what a clone charges", with zero callers: the design was
+written into the header and not into the call. The consequence is the
+reverse of the death leak: a forked child that detaches a touched mapping
+refunds nodes it never paid for, its `page_count` drifts below the truth and
+`pool_uncharge(actual drop)` walks the machine-wide pool down with it -- fork
+and detach in a loop drive `charged` below what is held, and the bound is not
+a bound. Twelve tests and a green boot did not see it because none of them
+forked a touched lazy mapping and then released it from the child. Fixed by
+the one call; `capacity.fork_clone_charges_pages_and_nodes` is the witness
+(the parent's 3 pages + 5 nodes charged again to the child, a detach in the
+child refunding exactly one mapping's footprint, the pool exact throughout),
+and its RED is the bug itself. With the one call reverted the suite
+reads 1650/1651 and the red test is exactly that one.
+
+**The spec.** `specs/capacity.tla` (ChargeConserved, NoOrphan) was written in
+the first WIP commit and the detach core to it: the release BEFORE the
+geometry change, the replace as detach + insert (the B-1a audit's F5 closed
+by construction). `specs/check-capacity.sh` pins the clean cfg at 625 distinct states (4
+slots x 2 Burrows) and judges both buggy cfgs on `NoOrphan` with
+`ChargeConserved` listed AHEAD of it and holding: TLC reported `NoOrphan`
+both times, which is the proof that the counter cannot see an orphan -- the
+whole reason the second invariant exists. `check-cow.sh` (8 cfgs) still reads
+AS CLAIMED after the pagemap moved under the COW break. `burrow.tla`'s clean cfg still
+explores exactly 100 distinct states and its three buggy cfgs still violate
+(the reservation cap that moved to the window is below that model).
+
+**The SMP gate.** `tools/ci-smp-gate.sh` on `a08ac177` (WIP 12, the tree that lands): five configs times ten boots, 50/50, `ci-smp-gate: PASS -- 0 corruption across all configs` -- default-smp1 72-75 s a boot, default-smp4 53-55 s, default-smp8 55-72 s, ubsan-smp4 55-57 s, ubsan-smp8 58-60 s; 14:34Z to 15:25Z. **The sixteen REDs**, each a sabotage baked and booted on the same tree and reverted (`red.py` asserts every anchor before it writes and the sabotaged text before it reverts): every one reddened its named test, read back from the boot logs by name. nodetachrefund 1650/1664 (the fourteen detach-refund witnesses), nonodecharge 1580 (84), nopool 1655 (nine: round 1's four pool witnesses and the five the later rounds added), nofreereturn 1493, notablecharge 1581 (83), notablereclaim 1575 (89), nowindow 1663 (`vivarium.mmap_fixed_domain` alone), noclonefootprint 1588 (76), nocowpin 1662 (the pin witness and round 4's last-share witness), nopeercheck 1661 (the queued read and the two read legs), nowantstrip 1493, noexecnomem 1663, nostackerr 1663, noshortfall 1494, nobusgate 1663 (the alignment test; the failed suite extincts the boot before joey, so the EL0 child's livelock is not reached). noheadroom has no suite line: with the pre-mutation headroom check gone the boot EXTINCTS inside `detach.range_refusals_change_nothing` at `kernel/vma.c:415`, the kernel's own "the tail piece was refused after the headroom check" witness -- the guard is what makes that line unreachable. **And a fixture leak the REDs exposed.** Three REDs (nofreereturn, nowantstrip, noshortfall) cascade to 170-171 failures with an identical tail: after the first, every FILE page-in and every fork is refused, because the pool is FULL. `capacity_pool_park_for_test` is an exempt charge and the parking test unparks on its last line, while `TEST_EXPECT_EQ` is `test_fail(); return;` -- so the first failing assertion of `demand_page.idle_image_reclaimed_under_pressure` (or of `reclaim_asks_for_the_shortfall`) returned with the pool parked at its edge. Green on a clean tree (nothing fails, so nothing leaks), it would destroy the diagnosis of a real regression, which is exactly the class the runner's #130-R2 F2 block names for console state. The fix is that block's own discipline applied to the pool -- the runner releases what a test left parked, prints `POOL-PARKED(n pages released)` and reddens a test that passed while leaking -- and it lands as the commit after this one, with the three REDs re-run to show their true sets.
+
+**The audit.** Holotype round 1 (Fable 5.1, start == end) on the WIP tree: 0 P0 / 2 P1 / 0 P2 / 5 P3. F2 [P1] was the clone-footprint defect the self-audit had already found and fixed (`c35ec420`) -- the reviewer found it independently, which is the coverage signal the discipline asks for. F1 [P1] is the finding of the day, and it is a SYSTEM finding: hardware page tables (L1/L2/L3 under a user L0) were allocated uncharged at `mmu_install_user_pte` and never reclaimed before address-space death; with the reservation cap lifted to the window, an unprivileged Proc touching one page per 2 MiB and decommitting it left one uncharged, unreclaimable table page per iteration -- the buddy empty at a charged count of three, the reserve a fiction. Attribution: the uncharged, death-reclaimed tables PREDATE the chunk (P3-Dc); ownership: the chunk removed the last incidental cost of the attack and its scripture claim ("the reserve keeps PRINCIPAL_SYSTEM allocating") depended on it. Fixed before landing. F5 [P3] was a design tension the reviewer named honestly: under a holder-counted pool a fork of a Proc holding more than half the pool's room was refused while free memory existed -- against the ratified bar. One move resolves F5 and gives F1 its return path: the pool becomes PHYSICAL (`mm/phys.c`): `alloc_user_pages` charges it at allocation and tags the head page `PG_USER`, and `free_pages` -- the ONE place a page can leave -- returns the charge, whoever frees it (a detach, a decommit, a COW put, a pagemap take, a table reclaim, `proc_pgtable_destroy`, a failed install's unwind). The per-address-space count keeps the holder reading (a COW-shared page charged to both sharers; the cap bounds a fork), which is the Linux memcg shape; `addrspace_unref`'s pool return -- WIP 3's own fix -- is GONE, because it would now double-return. Every user-page allocation site converted (the ANON_LAZY miss, the COW copy, the FILE page-ins, the pagemap nodes, the eager and CODE chunks, `burrow_lazy_populate`, the Loom ring, the vDSO page, the tables); the creators gained an `exempt` parameter (`burrow_create_anon` / `_code`, `burrow_clone_cow`, `loom_create`, `pagemap_pool_alloc`), so the TCB's own Burrows are counted but never refused. F1 as built: each table is `addrspace_charge_table` (page_count + the new `pgtable_pages` telemetry) then `alloc_user_pages` BEFORE it is linked; occupancy in `page->refcount`, established at 0 (an L3 counts leaves, an L2 its L3s, an L1 its L2s; the L0 is per-space fixed overhead like a kernel stack); a clear that empties a table unlinks it (write invalid, `dsb ishst`, `tlbi vaae1is` on one VA under it -- a by-VA invalidate reaches every cached entry that could translate that VA, the walk cache included, and every leaf beneath was invalidated as it was cleared -- `dsb ish`), re-reads the 512 entries and extincts on a live one (the count is load-bearing; the scan is its witness), frees it and uncharges it, then asks the same of the parent; a failed install unwinds the tables it linked. `mmu_install_user_pte*` now take `(as, exempt)` and the uninstalls `as`; the range form walks a present L3 directly (the leaf-visit gauge kept its meaning: 512 per present table). F3: `burrow_release_lazy_range_in` ends on the take's answer (`if (!pg) break;`), and `vma_alloc` refuses a mapping past its Burrow's `page_count` -- the one constructor (it turned out `burrow_map_in` never checked the length against the Burrow). F4: `Burrow.charge_pid` -> `charge_as_id` (a global counter at `addrspace_alloc`), so a non-CLOEXEC Loom's close after exec never refunds against the successor's space; a dead space's record is simply never claimed. F6: netd's retirement oracle asks RW (a no-op on a live ring; ENOMEM on a hole). F7: `capacity.default_is_ram_minus_reserve` asserts pool + reserve == RAM, pool > 0, RAM/8 <= reserve <= RAM/2, the 256 MiB floor when RAM can spare it, and pins the 2 GiB guest's 65536 / 458752. Three new tests -- `capacity.page_tables_charged_and_reclaimed` (the path grows and shrinks table by table down to the L0 entry), `capacity.memory_bomb_leaves_the_reserve` (the round-1 attack refused within one touch's cost of the pool, tables counted, footprint bounded by the room, a decommit returning everything and the second round refused at the same point), `capacity.fork_costs_the_pool_only_its_nodes` (the fork served with room for four pages, not eight) -- and seven figures in four other files re-expressed as the data view (`page_count - pgtable_pages`): a first touch now costs its three tables, a protect to none or a clone's phase-1 uninstall reclaims them, and `cow.break_sole_holder_takes_in_place` measures the pool, not `phys_free_pages`, because a take-in-place of a page alone in its L3 churns that table (a refinement, not a defect: `mmu_uninstall_user_pte` + install is uninstall-then-rebuild). The REDs are nine: nopool moved to `mm/phys.c`, nodeathrefund retired with its mechanism, nofreereturn / notablecharge / notablereclaim new. The suite: 1654/1654 at the round-1 close, 1656 after round 2, 1659 after round 3, and on the final tree (WIP 11) 1664/1664 at `-smp 4` and again at `-smp 1`, no FAIL line, joey clean -- `/bus-probe-child ok (a misaligned load-exclusive died via snare:bus)` over the kernel's `user fault: pid=2180 reason="snare:bus" addr=0x10000000e pc=0x400060`, `CL-5 page-budget probe OK`, `capacity-probe: ALL OK` then reaped, `net-8a resident lo E2E`; eight `snare:` lines in the log, each a probe child dying the way its probe owed.
+
+**Rounds 2 and 3, and what one round's fix taught the next.** Round 2 (Fable 5.1, on the round-1 close) returned 0 P0 / 0 P1 / 2 P2 / 2 P3: F8, the Image cache as a pool hoard -- a FILE page-in pool-charged but counted against no space, surviving its toucher's death as an idle entry nothing reclaimed, so a dead Proc's cached text could hold the pool while free-able memory sat idle; F9, the copy-on-write break's unconditional uninstall freeing the leaf's tables to a pool it held no lock against -- a pool-edge termination race and a table churn per break. The fixes (WIP 7 `f1497e7f`): the pool reclaims before it refuses (`capacity_set_reclaim` / `image_cache_reclaim` / `burrow_image_strip`; Plan 9's `imagereclaim`), a FILE page charged to its holder per leaf (`addrspace_charge_file`; `file:` in status), the break's leaf replaced in place (`mmu_replace_user_pte_attr`, break-before-make on the entry), a fork keeping the parent's tables. Round 3 (Fable 5.1, on those fixes) then found what the replace had voided: 0 P0 / 2 P1 / 0 P2 / 3 P3. F12 is the lesson of the day and a regression of my own F9 fix: the uninstall I removed had been the load-bearing half of the I-44 argument -- with the only invalidation moved to the END of the fault, the copy branch's early `cow_page_put` left a window in which the space's own stale read-only leaf still translated to the original while the other holder, now sole, could take the page in place and write into what a sibling thread still read, or exit and free it under a live leaf. The fix is the order Linux's `wp_page_copy` keeps (the old page released after the new PTE is set): `cow_release`, put after the replace on every exit (WIP 9 `25cb0d5b`). A tests-only probe between the swap and the replace lets the regression test assert the control (the stale leaf still names the original there -- the window is real) and the claim (the share is still two). F13 was older than the chunk and sat in the function the fix rewrote: a read queued behind a peer thread's break asked the read arm -- the one arm that narrows -- for a read-only install over the writable leaf, the install refused the mismatch, and the Proc was terminated for reading a page it holds. Fixed the way Linux's fault path does it (re-check the PTE under the lock): step 2b, `mmu_user_pte_admits`, answers a fault whose access a valid leaf already admits before any arm runs. F14 (the strip took a whole image per pick: bounded to the pages wanted; its "give up when over-full" half declined with a reason -- the cache is the pool's only slack by design), F15 (a pool refusal inside exec reported EINVAL: `-T_E_NOMEM` through both mappers and `sys_execve_core`), F16 (the F9 witness was satisfied by the defect it named -- a free-then-realloc of the L3 leaves every count equal -- so both break tests now pin the table's PA and the uninstall gauge; the F8 refund witness could not tell leaves from slots, so the unfaulted half is detached first). Thirteen REDs (four new). The reviewer's open lock-order question -- a uaccess under a held Burrow lock against the reclaim's `g_image_lock -> v->lock` -- was answered by a census with a control: 130 uaccess-family call sites, one under a spinlock (`torpor.c:227`, `torpor_lock`, not a Burrow's), none of the 53 uaccess-calling helpers invoked inside the 20 Burrow-lock regions. Wrong turn worth recording: the round-3 patch's first bake failed on `PTE_OA_MASK`, defined two hundred lines below the new probe; the literal mask the sibling walkers use went in instead.
+
+**Round 4, and the witness that survived.** Round 4 (Fable 5.1, on the round-3 fixes) returned 0 P0 / 1 P1 / 0 P2 / 4 P3 and re-derived all five round-3 closes. F17 was older than the chunk and hid behind the very pre-check round 3 had added: an EL0 abort that is neither a translation, an access-flag nor a permission fault -- an alignment fault (FSC 0x21: an exclusive, an ordered or a Device access at an address the instruction cannot take) or a synchronous external abort -- reached `userland_demand_page` and was answered `FAULT_HANDLED`, by step 2b now and by the idempotent install's 1 before it, so the ERET re-executed the instruction into the same abort forever: a livelock where Linux delivers SIGBUS. The fix is a class gate at the top of the pager (`is_alignment` / `is_external` decoded; `!is_translation && !is_access_flag && !is_permission` -> `FAULT_USER_BUS` -> `snare:bus`), with a unit witness and an EL0 one. The EL0 one is the lesson of the round: the first draft of `/bus-probe-child` did `ldar` from `va + 1` and SURVIVED on the Apple core under HVF -- no fault, no loop, just a value. Not a kernel defect and not a QEMU one: FEAT_LSE2 with `SCTLR_EL1.nAA = 0` permits a misaligned ordered access inside one 16-byte quantity and faults only across a boundary, and the kernel's SCTLR (0x30D00800 | PAC | BT0 | M,C,I) leaves nAA clear. Exclusives keep their natural alignment under every rule, so the witness is an `ldxr` at offset 14 -- misaligned AND crossing -- and it died as owed (`pid=2180 reason="snare:bus" addr=0x10000000e`). The reviewer had flagged QEMU's version-dependent alignment enforcement as the chain's soft spot; the measurement found the soft spot one layer up, in the architecture's own relaxation. F18-F21 (WIP 11 `f2d8e329`): `-T_E_NOMEM` through `vma_insert_in`'s cap, `burrow_map_in` and the exec frame's `err_out` (F15's claim had held for the mappers' allocation arms only); `pool_shortfall(n)` so an exempt overshoot costs one reclaim request, not one full cache scan per page under the faulter's lock; the F12 probe moved to step 5 with two witnesses for the exits it could not see (the failed replace's put, the last share's free); and `cow.tla` extended behind `MODEL_LEAF` -- `pter[s]`, `BreakReplace` then `BreakRelease`, bug 7 `BUGGY_PUT_BEFORE_REPLACE`, `NoReadableFreed` / `NoCrossSpaceRead` -- so the model can now say what F12 exploited: `cow_leaf` clean at 2996 states, the buggy cfg failing on F12's exact chain (read, fault, copy, PUT, the peer exits, the page freed under the live leaf), the eight older cfgs at their pinned counts with the switch off. Sixteen REDs. Also found while there: `docs/ERRORS.md`'s `snare:bus` row still read "RESERVED -- no v1.0 emitter", stale since REVENANT made it one; corrected and flagged for the operator as a scripture note.
+
+**Decisions the operator made this run:** none new -- the eleven B-1 votes and
+the memory bar stand (`96f24314`); the two live asks (the CLAUDE.md trim, the
+resume note's working set) were answered and pushed before this chunk's boot.
+
+**Open, owned:** the pouch substrate's `mprotect` / `madvise` / partial
+`munmap` (B-1b); dlmalloc-rs for native (B-1c); the eager charge record is
+pid-keyed (enqueued); the operator's prowl telemetry sub-chunk is next.
+
+---
 ## 2026-09-23, afternoon (aux, Opus 5.5 1M, effort max) -- a directory handle carried a write right nobody had checked
 
 **Found while reading for the Haul cape, not while looking for it.** The cape
@@ -1344,6 +2188,7 @@ LIFE-SUPPORT LS-9's "symlinks force the handle-based cwd" is stale -- symlinks
 landed without it -- so that scripture is corrected first. Main's
 context-economy-2 relay -> merge main right after this lands.
 
+---
 ## 2026-09-23, midday (aux, Opus 5.5 1M, effort max) -- the recipe failed on the operator's own deck, and a shell that forgot where it started
 
 **The plan was queue item (H).** A ut started without `--home` (imperium's
@@ -1422,6 +2267,7 @@ The kernel change is the next chunk.
 **Queued:** (N) `cd`'s "not a directory" for a permission failure; (J);
 (O); (P); the cape itself (L).
 
+---
 ## 2026-09-23, late morning, later (aux, Opus 5.5 1M, effort max) -- main merged in, and a deck read from the Mac over Haul
 
 The operator asked for two things: merge main into aux-3, then see where lantern
@@ -1502,6 +2348,7 @@ shifted characters since H-4c, but its header still said "lowercase, digits and
 four marks", and my own lantern gate repeated the claim. The new gate types `>`
 and `!`, which is how it surfaced.
 
+---
 ## 2026-09-23, late morning, continued (aux, Opus 5.5 1M, effort max) -- a word keeps its backslash, and `rm \*` no longer removes everything
 
 Queue item 0c, found while writing completion's quoting: the lexer resolved a

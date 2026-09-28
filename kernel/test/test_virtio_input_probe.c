@@ -98,9 +98,9 @@ void test_virtio_input_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("virtio-input", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/virtio-input", &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /virtio-input not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/virtio-input not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
 

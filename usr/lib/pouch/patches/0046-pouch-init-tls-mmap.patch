@@ -1,0 +1,61 @@
+pouch boundary-line patch 0046 - __init_tls maps its TLS image through __mmap (B-1b).
+
+REQUIRED BY 0044, which parks __NR_mmap back at the sentinel. src/env/
+__init_tls.c is musl's one raw mmap caller (B-1b's census; control:
+src/mman/mmap.c must appear, and did): when the static TLS exceeds
+builtin_tls it issues
+
+    __syscall(SYS_mmap2, 0, libc.tls_size, PROT_READ|PROT_WRITE,
+              MAP_ANONYMOUS|MAP_PRIVATE, -1, 0)
+
+-- Linux's six-argument shape; aarch64 has no SYS_mmap2, so it is SYS_mmap.
+Under 0003 that reached 83 (SYS_BURROW_ATTACH_LAZY, natively one argument:
+the length in x0), and Clade CL-4 (4d6f0680, where clang++'s 1232 B of TLS
+met it) taught the kernel's 83 arm this exact shape: burrow_lazy_len_from_args
+takes the length from x1 when x0 is 0, the flags word is anonymous-private and
+fd is -1. So it worked. With 0044 the raw call meets the sentinel instead:
+-ENOSYS, which musl deliberately does not check ("-4095...-1 cast to void *
+will crash on dereference anyway"), so every program with static TLS past
+builtin_tls would copy its TLS image to (void *)-38 and die before main. This
+is the libc-side elimination CL-4's round named as the clean one. One file:
+
+  src/env/__init_tls.c  The mapping goes through __mmap (the lower-half
+      wrapper, exact since 0044), MAP_FAILED -> a_crash() (failure to map
+      the TLS image is fatal, as upstream says). P-4: the file is the
+      startup path that meets the kernel, the 0004 __syscall_cp.c argument.
+
+The witness is pouch-hello-mem's `tls` leg: a 16 KiB __thread array written
+and read in main and in a worker; the RED that drops this patch from the
+series (0044 without 0046) dies before main with no output. The kernel's
+dual-shape arm stays while a binary linked against a pre-0046 libc can run
+(the Clade toolchain is cross-built and staged by its own steps, never
+relinked by a sysroot rebuild).
+
+--- a/src/env/__init_tls.c
++++ b/src/env/__init_tls.c
+@@ -131,16 +131,16 @@
+ 		+ MIN_TLS_ALIGN-1 & -MIN_TLS_ALIGN;
+ 
+ 	if (libc.tls_size > sizeof builtin_tls) {
+-#ifndef SYS_mmap2
+-#define SYS_mmap2 SYS_mmap
+-#endif
+-		mem = (void *)__syscall(
+-			SYS_mmap2,
+-			0, libc.tls_size, PROT_READ|PROT_WRITE,
++		/* pouch (B-1b, patch 0046): through __mmap, never a raw SYS_mmap.
++		 * 0044 parks __NR_mmap at the seam's sentinel, so upstream's raw
++		 * six-argument call would get -ENOSYS back and copy the TLS image
++		 * to (void *)-38 before main. (Until 0044 it reached SYS 83, whose
++		 * kernel arm has read this Linux shape since Clade CL-4.) Failure
++		 * to map the TLS image is fatal, as upstream says: a_crash(), never
++		 * a copy to an error value. */
++		mem = __mmap(0, libc.tls_size, PROT_READ|PROT_WRITE,
+ 			MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+-		/* -4095...-1 cast to void * will crash on dereference anyway,
+-		 * so don't bloat the init code checking for error codes and
+-		 * explicitly calling a_crash(). */
++		if (mem == MAP_FAILED) a_crash();
+ 	} else {
+ 		mem = builtin_tls;
+ 	}

@@ -1643,15 +1643,21 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // by the absolute `path` (`path_len` bytes) in the calling Proc's territory
 // (stalk-2: path-keyed; was an abstract target_path_id). The kernel `stalk`s
 // `path` to the mount point's (dc, devno, qid.path) identity. `flags` is a
-// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC; bits outside that union
-// are rejected. The mount point MUST EXIST as a walkable directory.
+// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
+// T_MPHENO_LINUX; bits outside that union are rejected. The mount point MUST
+// EXIST and be of the source's type (a directory over a directory, a file over
+// a file), and at a file only T_MREPL is accepted.
 //
-// Returns 0 on success, -1 on:
-//   - path absent / empty / too long / not resolvable
+// Returns 0 on success, -20 (T_E_NOTDIR) on Plan 9's Emount (ARCH 9.6.1), and
+// -1 on every other refusal:
+//   - path absent / empty / too long / not resolvable (a trailing '/' on a
+//     point that is not a directory is unresolvable)
 //   - source_spoor_fd not a KOBJ_SPOOR or out-of-range
 //   - missing RIGHT_READ on source
-//   - flags has bits outside the supported set
+//   - flags has bits outside the supported set, or more than one of
+//     T_MREPL / T_MBEFORE / T_MAFTER
 //   - territory mount table full
+//   - the mount would close a cycle in the mount graph (I-3)
 #[inline(always)]
 pub unsafe fn t_mount(path: *const u8, path_len: usize,
                       source_spoor_fd: i64, flags: u32) -> i64 {
@@ -2364,20 +2370,24 @@ pub unsafe fn t_burrow_attach(length: u64) -> i64 {
     x0
 }
 
-// t_burrow_detach — release one mapping: a region t_burrow_attach* returned,
-// or a hardware map the caller placed with t_dma_map / t_mmio_map /
-// t_pci_map_bar, wherever it sits (the kernel decides by identity: a
-// sub-window mapping that is not DMA- or MMIO-backed -- ELF, stack, guard,
-// vDSO -- stays refused). The (vaddr, page-rounded length) must match an
-// installed VMA exactly — no partial detach at v1.0 (mirrors the
-// kernel-side burrow_unmap constraint). Returns 0 on success, -1 on:
+// t_burrow_detach — unmap [vaddr, vaddr + round_up(length)): the Linux munmap
+// form since B-1a' (ARCH 6.5 "Range detach"). Inside the burrow window the
+// range is served whatever it cuts -- a mapping wholly inside it goes, one it
+// cuts at an end is trimmed, one it lies strictly inside is split around it,
+// holes are fine, and a range that maps nothing answers 0. Pages the range
+// covered are released and uncharged (a lazy region's per page; an eager
+// region's block with its LAST piece). Below the window only a hardware map
+// the caller placed with t_dma_map / t_mmio_map / t_pci_map_bar is detachable,
+// by identity and whole (ELF, stack, guard and vDSO stay refused). Returns 0
+// on success, -1 on:
 //   - length == 0, vaddr not page-aligned, or the span leaves user VA
-//   - an in-window span with length > BURROW_ATTACH_MAX
 //   - an out-of-window span that is not a hardware map
-//   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
+//   - a JIT code alias anywhere in the range (the JIT syscalls own it)
+//   - a range that CUTS a mapping shared in from another Proc (whole is fine)
+//   - no headroom for the extra mapping a split needs (PROC_VMA_MAX)
 //
-// `length` may be the original request OR any value that page-rounds
-// to the same span; the kernel matches on the rounded range.
+// `length` may be the original request OR any value that page-rounds to the
+// same span; the kernel works on the rounded range.
 #[inline(always)]
 pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
     let mut x0: i64 = vaddr as i64;
@@ -2397,7 +2407,9 @@ pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
 // zero-fills + installs RW/XN on the first fault, charging the page to the
 // Proc then (so RSS == what was touched, not what was reserved). Returns the
 // page-aligned base user-VA on success, -1 on:
-//   - length == 0 or length > BURROW_RESERVE_MAX (= 1 GiB)
+//   - length == 0 or length > BURROW_RESERVE_MAX (= the whole burrow window
+//     since B-1a': an untouched reservation costs nothing, so its size is not
+//     the resource; the pages touched and the mappings held are)
 //   - no free gap of round_up(length) in the burrow window
 //   - VMA-slab cap (PROC_VMA_MAX) or burrow OOM
 //

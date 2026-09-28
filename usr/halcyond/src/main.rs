@@ -16,15 +16,8 @@
 
 extern crate alloc;
 
-// A 64 MiB LAZY heap (demand-zero; physical pages commit as touched):
-// halcyond's working set -- four parsed IBM Plex Sans faces, atlas pages, the
-// transcript's 13.3 content budget -- does not fit the 4 MiB default,
-// and the death is a SILENT exit(1) (the no_std OOM panics into
-// t_exits). Found the honest way: the first on-device boot died between
-// the rich advertisement and console-up.
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use alloc::vec::Vec;
 
@@ -215,23 +208,25 @@ fn summon(
 }
 
 
-/// The heap-residual inline-media place cap (I-47 audit F4): how many pixels the
-/// `/srv/halcyon` channel may accept, given the display-scaled atlas. The 64 MiB
-/// heap (`ThylaAllocN`) is shared by the transcript's 32 MiB content budget, the
+/// The budget-residual inline-media place cap (I-47 audit F4): how many pixels the
+/// `/srv/halcyon` channel may accept, given the display-scaled atlas. The
+/// renderer's 64 MiB working budget -- the size its heap was fixed at until the
+/// heap became growable, kept as the bound on what the place path may take -- is
+/// shared by the transcript's 32 MiB content budget, the
 /// atlas (which scales with the scanout -- ~6 MiB at 1280x800, ~18 MiB at 4K),
 /// the layout cache + faces + misc, and the place path (peak 8 bytes/px: the
 /// accumulator plus its completion `Vec<u32>`). So place gets the RESIDUAL after
 /// the atlas, over 8; `PlaceServer::set_max_pixels` clamps it to the placesrv
 /// floor/ceiling. This holds the full 1 Mpx (native-size images) through
 /// 2560x1600 (the operator's HiDPI) and shrinks it only past ~3K, where the atlas
-/// would otherwise crowd the heap and OOM the renderer.
+/// would otherwise crowd the budget.
 fn place_cap_for(atlas_pages: usize) -> u64 {
-    const HEAP: u64 = 64 * 1024 * 1024;
+    const BUDGET: u64 = 64 * 1024 * 1024;
     const TRANSCRIPT_RESERVE: u64 = 32 * 1024 * 1024; // the transcript's max_cost
     const BASELINE_RESERVE: u64 = 10 * 1024 * 1024; // layout cache + faces + misc
     const ATLAS_PAGE_BYTES: u64 = 512 * 512; // one 8-bit atlas page
     let atlas = atlas_pages as u64 * ATLAS_PAGE_BYTES;
-    let residual = HEAP.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas);
+    let residual = BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas);
     residual / 8 // 8 bytes/px place peak; set_max_pixels clamps to [MIN, HARD]
 }
 

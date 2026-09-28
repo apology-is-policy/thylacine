@@ -11,14 +11,13 @@ code:
   - usr/lib/pouch/patches/0011-pouch-abort.patch
   - usr/lib/pouch/patches/0012-pouch-mallocng-crash.patch
   - usr/lib/pouch/patches/0013-pouch-mallocng-diag.patch
-  - usr/lib/pouch/patches/0003-pouch-mman.patch
 audit: hard
 guarded-by: [inv-i24]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -85,8 +84,8 @@ is a Burrow.
   shim. `dup2`/`dup3` onto a chosen target: `ENOSYS`.
 - `abort()` and mallocng's internal `assert` → `_Exit(127)`.
 - `__pouch_env_init()` populates `__environ` from `/env` before the ctors.
-- `mmap(MAP_ANON)` → `SYS_BURROW_ATTACH_LAZY` (83); `munmap` →
-  `SYS_BURROW_DETACH` (38). File-backed and `MAP_FIXED`: `ENOSYS`.
+- `mmap` / `munmap` / `mprotect` / `madvise`: the memory seam, [[sub-pouch-mem]]
+  (0003, made exact at B-1b by 0044). `brk` stays a sentinel here.
 
 ## Mechanism
 
@@ -153,15 +152,14 @@ value, and builds a `"NAME=value"` vector for `__environ`. Fail-soft:
 a missing `/env` leaves the kernel's empty envp. `/env` stays the source
 of truth; a later `setenv` mutates only this in-process copy.
 
-**`mmap` is one argument wide.** Only the anonymous subset maps: the
-kernel chooses the VA, the region is demand-zero RW (I-12 forbids X at
-attach, so PROT bits are upgraded to RW), and an anon region has no
-offset — so `start`, `prot`, `fd`, `off` are all ignored and the call
-passes only the length. mallocng tolerates this: it asks for `PROT_NONE`
-metadata pages then `mprotect`s up, and its `&& errno != ENOSYS` guard
-makes the failed mprotect a no-op. `brk` stays a sentinel, so mallocng's
-first `brk(0)` fails, it sets `ctx.brk = -1`, and metadata allocation
-routes through mmap permanently — a documented mallocng fallback.
+**The memory seam lives in [[sub-pouch-mem]] since B-1b.** Here `mmap` was
+one argument wide (0003: the anonymous subset only, demand-zero RW whatever
+the prot, `MAP_FIXED` refused) and mallocng's `PROT_NONE`-then-`mprotect`
+metadata idiom survived on its `&& errno != ENOSYS` guard; 0044 mints at the
+prot asked for and routes `mprotect` / `madvise` / `MAP_FIXED` to the kernel.
+What stays here is `brk`: a sentinel, so mallocng's first `brk(0)` fails, it
+sets `ctx.brk = -1`, and metadata allocation routes through mmap permanently
+— a documented mallocng fallback.
 
 ## Data structures
 
@@ -289,8 +287,6 @@ the child inherits `/env` via the kernel clone).
 - The `/env` populate caps at 512 variables / 256-byte names /
   8 KiB values, and silently skips a variable removed between readdir and
   open.
-- `mmap`'s PROT upgrade to RW means no PROT_NONE guard pages anywhere —
-  the same root as [[seam-pouch-guard-pages]].
 
 ## Provenance
 

@@ -24,6 +24,7 @@
 
 #include <thylacine/9p_attach.h>  // #210: p9_attached_ctl_iterate (/ctl/9p-sessions)
 #include <thylacine/9p_client.h>  // #210: struct p9_client_ctl
+#include <thylacine/addrspace.h>  // B-1a': the user pool figures (/ctl/memory)
 #include <thylacine/caps.h>
 #include <thylacine/cons.h>      // #95: cons_rx_drops + cons_tx_drops (/ctl/cons)
 #include <thylacine/dev.h>
@@ -208,7 +209,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n && tc != 0) { s->overflow = true; return 1; }
     s->off += n;
 
-    // #65 (I-32): the resource-floor counters as two trailing columns (the SEAM
+    // #65 (I-32): the resource-floor counters as three trailing columns (the SEAM
     // counters). Atomic loads -- a cross-Proc reader holds no per-Proc lock.
     n = fmt_str(s->buf, s->cap, s->off, "    ");
     if (!n) { s->overflow = true; return 1; }
@@ -217,6 +218,18 @@ static int format_procs_cb(struct Proc *p, void *arg) {
         u32 pages = p->as ? __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) : 0u;
         n = fmt_sdec(s->buf, s->cap, s->off, (int)pages);
         if (!n && pages != 0) { s->overflow = true; return 1; }
+        s->off += n;
+    }
+
+    // prowl-6: the page-table share of PAGES (B-1a' F1 charges the tables to
+    // the space), so a reader takes the data view without /proc/<pid>/status.
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+    {
+        u32 tables = p->as ? __atomic_load_n(&p->as->pgtable_pages, __ATOMIC_ACQUIRE) : 0u;
+        n = fmt_sdec(s->buf, s->cap, s->off, (int)tables);
+        if (!n && tables != 0) { s->overflow = true; return 1; }
         s->off += n;
     }
 
@@ -253,7 +266,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
 static size_t format_procs(char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
-    n = fmt_str(buf, cap, off, "PID    PPID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS\n");
+    n = fmt_str(buf, cap, off, "PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n");
     if (!n) return 0;
     off += n;
 
@@ -412,6 +425,21 @@ static size_t format_memory(char *buf, size_t cap) {
 
     n = fmt_str(buf, cap, off, "reserved: "); if (!n) return 0; off += n;
     n = fmt_udec(buf, cap, off, phys_reserved_pages()); off += n;
+    n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
+
+    // B-1a' (ARCH 6.5 "Capacity"): the user pool -- the TCB reserve, the pool
+    // that is every Proc's default budget and hard maximum, and what every
+    // address space together holds of it.
+    n = fmt_str(buf, cap, off, "reserve:  "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, capacity_reserve_pages()); off += n;
+    n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
+
+    n = fmt_str(buf, cap, off, "pool:     "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, capacity_pool_pages()); off += n;
+    n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
+
+    n = fmt_str(buf, cap, off, "charged:  "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, capacity_pool_charged()); off += n;
     n = fmt_str(buf, cap, off, " pages\n"); if (!n) return 0; off += n;
 
     return off;

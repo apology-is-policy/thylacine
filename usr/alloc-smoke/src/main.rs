@@ -1,4 +1,4 @@
-// /alloc-smoke — incremental runtime validation for libthyla-rs's
+// /bin/alloc-smoke — incremental runtime validation for libthyla-rs's
 // typed Rust modules (U-2a onward).
 //
 // First native Thylacine binary that uses the alloc crate. Declares
@@ -9,7 +9,7 @@
 //   U-2b alloc:    Box / Vec / String / small-alloc loop
 //   U-2c-path:     Path / PathBuf / parent / join / components
 //   U-2c-io:       Cursor (in-mem Read/Seek), File::open + Read over
-//                  /system.key in devramfs (validates SYS_WALK_OPEN
+//                  /bin/system.key in devramfs (validates SYS_WALK_OPEN
 //                  + SYS_READ + SYS_LSEEK round-trip via t::io traits)
 //   U-2c-fs:       File::metadata, free fs::{metadata, exists, is_file,
 //                  is_dir}, OpenOptions builder (validates SYS_FSTAT
@@ -23,16 +23,15 @@
 // tagged FAIL message + exits 1.
 //
 // The failure modes this binary catches:
-//   - SYS_BURROW_ATTACH return-value misinterpretation in
-//     ensure_initialized.
-//   - linked_list_allocator init pointer/size mistakes.
-//   - alloc/dealloc protocol mismatches that would corrupt the free
-//     list before another binary noticed.
+//   - a heap that cannot serve its first allocation (the first
+//     reservation refused or misread).
+//   - alloc/dealloc protocol mismatches that would corrupt the heap
+//     before another binary noticed.
 //   - Path/PathBuf method off-by-one bugs that would surface as wrong
 //     parent / file_name results once a real shell parses paths.
 //
 // Not a comprehensive stress test (no concurrency, no fragmentation
-// scenarios, no large allocations near INITIAL_HEAP_SIZE). The
+// scenarios; the heap's growth and give-back are /heap-probe's). The
 // libthyla-rs U-2-test sub-chunk exercises the integrated surface
 // across all U-2X modules.
 
@@ -393,14 +392,14 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    // File::open of /system.key (devramfs, 3656 bytes, read-only).
+    // File::open of /bin/system.key (devramfs, 3656 bytes, read-only).
     // Validates: multi-step walk-or-single-step (this is single
     // component "system.key"), SYS_WALK_OPEN return decoding, Read
     // over SYS_READ, Seek over SYS_LSEEK, Drop via SYS_CLOSE.
-    let mut sk = match File::open("/system.key") {
+    let mut sk = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("alloc-smoke: File::open(/system.key) FAILED\n");
+            t_putstr("alloc-smoke: File::open(/bin/system.key) FAILED\n");
             return 1;
         }
     };
@@ -473,10 +472,10 @@ pub extern "C" fn rs_main() -> i64 {
     // ====================================================================
 
     // File::metadata on an open File.
-    let sk = match File::open("/system.key") {
+    let sk = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("alloc-smoke: File::open(/system.key) for metadata FAILED\n");
+            t_putstr("alloc-smoke: File::open(/bin/system.key) for metadata FAILED\n");
             return 1;
         }
     };
@@ -495,7 +494,7 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("alloc-smoke: Metadata::is_file/is_dir FAILED\n");
         return 1;
     }
-    // /system.key is chmod 0400 (a keyfile: read-only, owner-only). Since #58,
+    // /bin/system.key is chmod 0400 (a keyfile: read-only, owner-only). Since #58,
     // mkcpio preserves the source mode (was a hardcoded 0644), so permissions()
     // (type bits masked off) is 0o400.
     if md.permissions() != 0o400 {
@@ -505,7 +504,7 @@ pub extern "C" fn rs_main() -> i64 {
     drop(sk);
 
     // Free-function metadata: same checks, single line.
-    let md2 = match fs::metadata("/system.key") {
+    let md2 = match fs::metadata("/bin/system.key") {
         Ok(m) => m,
         Err(_) => {
             t_putstr("alloc-smoke: fs::metadata FAILED\n");
@@ -518,25 +517,25 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // exists / is_file / is_dir.
-    if !fs::exists("/system.key") {
-        t_putstr("alloc-smoke: fs::exists(/system.key) FAILED\n");
+    if !fs::exists("/bin/system.key") {
+        t_putstr("alloc-smoke: fs::exists(/bin/system.key) FAILED\n");
         return 1;
     }
     if fs::exists("/no-such-file-thylacine") {
         t_putstr("alloc-smoke: fs::exists(missing) unexpectedly true\n");
         return 1;
     }
-    if !fs::is_file("/system.key") {
-        t_putstr("alloc-smoke: fs::is_file(/system.key) FAILED\n");
+    if !fs::is_file("/bin/system.key") {
+        t_putstr("alloc-smoke: fs::is_file(/bin/system.key) FAILED\n");
         return 1;
     }
-    if fs::is_dir("/system.key") {
-        t_putstr("alloc-smoke: fs::is_dir(/system.key) unexpectedly true\n");
+    if fs::is_dir("/bin/system.key") {
+        t_putstr("alloc-smoke: fs::is_dir(/bin/system.key) unexpectedly true\n");
         return 1;
     }
 
     // OpenOptions: explicit-read open.
-    let mut sk3 = match OpenOptions::new().read(true).open("/system.key") {
+    let mut sk3 = match OpenOptions::new().read(true).open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
             t_putstr("alloc-smoke: OpenOptions::new().read(true).open FAILED\n");
@@ -551,7 +550,7 @@ pub extern "C" fn rs_main() -> i64 {
     drop(sk3);
 
     // OpenOptions: no read or write -> InvalidArgument.
-    match OpenOptions::new().open("/system.key") {
+    match OpenOptions::new().open("/bin/system.key") {
         Err(Error::InvalidArgument) => {}
         _ => {
             t_putstr("alloc-smoke: OpenOptions::new()-no-mode unexpectedly succeeded\n");
@@ -560,7 +559,7 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // OpenOptions: truncate without write -> InvalidArgument.
-    match OpenOptions::new().read(true).truncate(true).open("/system.key") {
+    match OpenOptions::new().read(true).truncate(true).open("/bin/system.key") {
         Err(Error::InvalidArgument) => {}
         _ => {
             t_putstr("alloc-smoke: OpenOptions::truncate-without-write unexpectedly succeeded\n");
@@ -1079,36 +1078,120 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // mount/unmount round-trip (stalk-2: path-keyed). alloc-smoke is spawned by
-    // joey PRE-pivot, so FROM_ROOT resolves on the devramfs boot root. Source =
-    // /system.key (a cpio leaf, opened RDONLY -> RIGHT_READ); mount point = the
-    // devramfs synthetic /srv dir (stalk-2 D4) -- a DISTINCT, purpose-built,
-    // empty mount point (the mount cycle check, stalk-2 audit F1, rejects a
-    // self-mount where the source identity == the mount-point identity, so the
-    // source and the mount point must differ). A plumbing smoke for the
-    // territory:: API + the new path-keyed ABI.
+    // joey PRE-pivot, so FROM_ROOT resolves on the devramfs boot root. The mount
+    // point is the devramfs synthetic /srv dir (stalk-2 D4), a distinct,
+    // purpose-built mount point (the mount cycle check, stalk-2 audit F1,
+    // refuses a self-mount, so the source and the mount point must differ).
     const TEST_MP: &str = "/srv";
-    let src = match File::open("/system.key") {
+    const PLACEMENTS: [(MountFlags, &str); 4] = [
+        (MountFlags::NONE, "flagless"),
+        (MountFlags::REPL, "REPL"),
+        (MountFlags::BEFORE, "BEFORE"),
+        (MountFlags::AFTER, "AFTER"),
+    ];
+
+    // A FILE over that directory is Plan 9's Emount under every placement
+    // (ARCH 9.6.1): refused with the NAMED errno, NotADirectory -- the kernel's
+    // generic -1 would map to InvalidArgument -- and /srv stays a directory.
+    let file_src = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("alloc-smoke: U-2f File::open(/system.key) FAILED\n");
+            t_putstr("alloc-smoke: U-2f File::open(/bin/system.key) FAILED\n");
             return 1;
         }
     };
-    if territory::mount(&src, TEST_MP, MountFlags::REPL).is_err() {
-        t_putstr("alloc-smoke: territory::mount REPL FAILED\n");
+    for (flags, name) in PLACEMENTS {
+        match territory::mount(&file_src, TEST_MP, flags) {
+            Err(Error::NotADirectory) => {}
+            Ok(()) => {
+                t_putstr("alloc-smoke: U-2f a file mounted over the /srv directory (");
+                t_putstr(name);
+                t_putstr(") was ACCEPTED\n");
+                return 1;
+            }
+            Err(_) => {
+                t_putstr("alloc-smoke: U-2f a file over the /srv directory (");
+                t_putstr(name);
+                t_putstr(") refused, but not with NotADirectory\n");
+                return 1;
+            }
+        }
+        if !fs::is_dir(TEST_MP) {
+            t_putstr("alloc-smoke: U-2f /srv is no longer a directory after a refused mount (");
+            t_putstr(name);
+            t_putstr(")\n");
+            return 1;
+        }
+    }
+    drop(file_src);
+
+    // A DIRECTORY over it is the success path, through the three bind_*
+    // shorthands. The source is /bin, which every image ships (the initrd
+    // requires bin/joey; lib/ exists only when the LLVM fork built libc.so).
+    // While the mount stands /srv/system.key shows, and /proc/<pid>/ns names the
+    // placement: one entry at /srv for bind_replace, the new member before the
+    // covered /srv for bind_before and after it for bind_after. The unmount
+    // takes both away. bind_replace runs first and replaces the devsrv entry
+    // this Proc's territory was cloned with, so the other two each start a
+    // union at a point with nothing mounted.
+    fn srv_entries_covered() -> Option<Vec<bool>> {
+        let path = alloc::format!("/proc/{}/ns", libthyla_rs::identity::pid());
+        let mut ns = String::new();
+        File::open(path.as_str()).ok()?.read_to_string(&mut ns).ok()?;
+        Some(ns.lines()
+            .filter(|l| l.starts_with("mount /srv "))
+            .map(|l| l.ends_with(" covered"))
+            .collect())
+    }
+    let dir_src = match File::open("/bin") {
+        Ok(f) => f,
+        Err(_) => {
+            t_putstr("alloc-smoke: U-2f File::open(/bin) FAILED\n");
+            return 1;
+        }
+    };
+    if fs::exists("/srv/system.key") {
+        t_putstr("alloc-smoke: U-2f /srv/system.key shows before any mount\n");
         return 1;
     }
-    // Cleanup: unmount the entry we just installed. If we leak the
-    // mount, future boots that share territory layout could be
-    // affected; alloc-smoke is an ALIVE Proc and joey's territory is
-    // its parent's (rfork inherits), so leakage matters even for one
-    // boot.
-    if territory::unmount(TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::unmount after mount FAILED\n");
-        return 1;
+    let binds: [(fn(&File, &str) -> Result<(), Error>, &str, &[bool]); 3] = [
+        (territory::bind_replace::<File>, "bind_replace", &[false]),
+        (territory::bind_before::<File>, "bind_before", &[false, true]),
+        (territory::bind_after::<File>, "bind_after", &[true, false]),
+    ];
+    for (bind, name, placed) in binds {
+        if bind(&dir_src, TEST_MP).is_err() {
+            t_putstr("alloc-smoke: U-2f ");
+            t_putstr(name);
+            t_putstr(" of the /bin directory over /srv FAILED\n");
+            return 1;
+        }
+        if !fs::exists("/srv/system.key") {
+            t_putstr("alloc-smoke: U-2f ");
+            t_putstr(name);
+            t_putstr(" of /bin over /srv does not show /srv/system.key\n");
+            return 1;
+        }
+        if srv_entries_covered().as_deref() != Some(placed) {
+            t_putstr("alloc-smoke: U-2f ");
+            t_putstr(name);
+            t_putstr(": /proc/<pid>/ns does not show the placement\n");
+            return 1;
+        }
+        if territory::unmount(TEST_MP).is_err() {
+            t_putstr("alloc-smoke: U-2f territory::unmount after ");
+            t_putstr(name);
+            t_putstr(" FAILED\n");
+            return 1;
+        }
+        if fs::exists("/srv/system.key") {
+            t_putstr("alloc-smoke: U-2f /srv/system.key still shows after the unmount (");
+            t_putstr(name);
+            t_putstr(")\n");
+            return 1;
+        }
     }
-    // Double-unmount: must return NotFound (no entry at this path_id
-    // any more).
+    // Double-unmount: must return NotFound (no entry at /srv any more).
     match territory::unmount(TEST_MP) {
         Err(Error::NotFound) => {}
         _ => {
@@ -1116,51 +1199,82 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     }
-    drop(src);
+    drop(dir_src);
 
-    // bind_before / bind_after / bind_replace: same plumbing as
-    // mount(); a syscall-success round-trip is enough to verify the
-    // shorthand wiring.
-    let src2 = match File::open("/system.key") {
-        Ok(f) => f,
-        Err(_) => {
-            t_putstr("alloc-smoke: U-2f File::open #2 FAILED\n");
+    // At a point that is not a directory only REPL is accepted (ARCH 9.6.1).
+    // /bin/joey over the /bin/system.key file is refused with NotADirectory
+    // flagless (a flagless mount appends; Plan 9's flag 0 is MREPL), BEFORE
+    // and AFTER, and the key still reads as itself. Under REPL the key's name
+    // reads joey's bytes, and the unmount gives it back its own.
+    const FILE_MP: &str = "/bin/system.key";
+    fn head16(path: &str) -> Option<[u8; 16]> {
+        let mut head = [0u8; 16];
+        match File::open(path).ok()?.read(&mut head) {
+            Ok(16) => Some(head),
+            _ => None,
+        }
+    }
+    let (key_head, joey_head) = match (head16(FILE_MP), head16("/bin/joey")) {
+        (Some(k), Some(j)) if k != j && j.starts_with(b"\x7fELF") => (k, j),
+        _ => {
+            t_putstr("alloc-smoke: U-2f /bin/system.key and /bin/joey do not read as two files\n");
             return 1;
         }
     };
-    if territory::bind_before(&src2, TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::bind_before FAILED\n");
+    let joey = match File::open("/bin/joey") {
+        Ok(f) => f,
+        Err(_) => {
+            t_putstr("alloc-smoke: U-2f File::open(/bin/joey) FAILED\n");
+            return 1;
+        }
+    };
+    for (flags, name) in PLACEMENTS {
+        if flags == MountFlags::REPL {
+            continue;
+        }
+        match territory::mount(&joey, FILE_MP, flags) {
+            Err(Error::NotADirectory) => {}
+            Ok(()) => {
+                t_putstr("alloc-smoke: U-2f a file mounted over the /bin/system.key file (");
+                t_putstr(name);
+                t_putstr(") was ACCEPTED\n");
+                return 1;
+            }
+            Err(_) => {
+                t_putstr("alloc-smoke: U-2f a file over the /bin/system.key file (");
+                t_putstr(name);
+                t_putstr(") refused, but not with NotADirectory\n");
+                return 1;
+            }
+        }
+        if head16(FILE_MP) != Some(key_head) {
+            t_putstr("alloc-smoke: U-2f /bin/system.key changed after a refused mount (");
+            t_putstr(name);
+            t_putstr(")\n");
+            return 1;
+        }
+    }
+    if territory::bind_replace(&joey, FILE_MP).is_err() {
+        t_putstr("alloc-smoke: U-2f bind_replace of /bin/joey over /bin/system.key FAILED\n");
         return 1;
     }
-    if territory::unmount(TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::unmount after bind_before FAILED\n");
+    if head16(FILE_MP) != Some(joey_head) {
+        t_putstr("alloc-smoke: U-2f /bin/system.key does not read /bin/joey's bytes under REPL\n");
         return 1;
     }
-    if territory::bind_after(&src2, TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::bind_after FAILED\n");
+    if territory::unmount(FILE_MP).is_err() {
+        t_putstr("alloc-smoke: U-2f territory::unmount(/bin/system.key) FAILED\n");
         return 1;
     }
-    if territory::unmount(TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::unmount after bind_after FAILED\n");
+    if head16(FILE_MP) != Some(key_head) {
+        t_putstr("alloc-smoke: U-2f /bin/system.key does not read its own bytes after the unmount\n");
         return 1;
     }
-    if territory::bind_replace(&src2, TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::bind_replace FAILED\n");
-        return 1;
-    }
-    if territory::unmount(TEST_MP).is_err() {
-        t_putstr("alloc-smoke: territory::unmount after bind_replace FAILED\n");
-        return 1;
-    }
-    drop(src2);
+    drop(joey);
 
-    // mount with a non-Spoor fd: the kernel rejects with -1. Use the
-    // alloc-smoke's notes fd (KOBJ_SPOOR via devnotes; this actually
-    // DOES type-check as a Spoor, so the kernel would accept it).
-    // The clean negative is a closed/invalid fd -- a u32 like 999
-    // that's never been allocated. We can't construct an AsFd with
-    // arbitrary fd directly, but mount() takes &impl AsFd, so we
-    // construct a small adapter.
+    // mount with a handle that names nothing: the kernel refuses it with its
+    // generic -1 (InvalidArgument), before any type check. The index 999 was
+    // never allocated; mount() takes &impl AsFd, so a small adapter carries it.
     struct RawFdRef(i32);
     impl libthyla_rs::poll::AsFd for RawFdRef {
         fn as_raw_fd(&self) -> i32 {
@@ -1169,9 +1283,13 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let bogus = RawFdRef(999);
     match territory::mount(&bogus, TEST_MP, MountFlags::REPL) {
-        Err(_) => {}
+        Err(Error::InvalidArgument) => {}
         Ok(_) => {
             t_putstr("alloc-smoke: territory::mount bogus fd unexpectedly succeeded\n");
+            return 1;
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: territory::mount bogus fd refused, but not with InvalidArgument\n");
             return 1;
         }
     }

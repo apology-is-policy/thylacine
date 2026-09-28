@@ -10,8 +10,9 @@
 // 9P codec is the shared `libthyla_rs::ninep` server codec, and every untrusted
 // place-payload decision lives in the PURE, host-tested `inlineaccum::PlaceAccum`
 // (validate-before-allocate, the heap-safe per-image cap, sequential-only,
-// no over-accumulation). The renderer runs the whole session on one fixed heap,
-// so PLACE_MAX_PIXELS is deliberately BELOW the wire's own ceiling.
+// no over-accumulation). The renderer keeps the whole session within one
+// working budget (THE WORKING BUDGET below), so PLACE_MAX_PIXELS is deliberately
+// BELOW the wire's own ceiling.
 //
 // The structure (frame read + fid table + dispatch) mirrors nocturned's proven
 // /srv server (usr/nocturned/src/server.rs); what differs is the tiny namespace
@@ -67,8 +68,9 @@ const S_IFREG: u32 = 0o100000;
 /// loop by `set_max_pixels` from the renderer's remaining heap): it never exceeds
 /// this ceiling and never drops below `PLACE_MIN_PIXELS`.
 ///
-/// THE HEAP BUDGET (audit F1/F2/F4). The renderer runs the whole session on a
-/// fixed 64 MiB heap (`main.rs` ThylaAllocN) shared by the transcript's 32 MiB
+/// THE WORKING BUDGET (audit F1/F2/F4). The renderer budgets 64 MiB for the
+/// whole session -- the size its heap was fixed at until the heap became
+/// growable, kept as the bound on the place path -- shared by the transcript's 32 MiB
 /// content budget, the atlas (which SCALES WITH THE SCANOUT -- ~6 MiB at
 /// 1280x800, ~18 MiB at 4K), the layout cache, and this place path. With
 /// `reserve_exact` (F2) one transfer holds EXACTLY total_len (no Vec doubling)
@@ -77,7 +79,7 @@ const S_IFREG: u32 = 0o100000;
 /// WHOLE place footprint. The F4 defect was budgeting at 1280x800 only, where
 /// this 1 Mpx ceiling (an 8 MiB peak) is comfortable but the atlas is smallest;
 /// at 4K the atlas alone is ~18 MiB and a fixed 8 MiB place peak leaves a thin,
-/// unproven margin. So the cap is now the heap RESIDUAL after the display-scaled
+/// unproven margin. So the cap is now the budget RESIDUAL after the display-scaled
 /// atlas (`main.rs place_cap_for` -> `set_max_pixels`): it stays at this 1 Mpx
 /// ceiling through 2560x1600 (the operator's HiDPI, native-size images) and
 /// shrinks only past ~3K, where the atlas would otherwise crowd it out. A source

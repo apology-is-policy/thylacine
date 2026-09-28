@@ -7,6 +7,10 @@ code:
   - usr/coreutils/src/lib.rs
   - usr/coreutils/src/path.rs
   - usr/coreutils/src/size.rs
+  - usr/coreutils/src/stream.rs
+  - usr/coreutils/src/find.rs
+  - usr/coreutils/src/select.rs
+  - usr/coreutils/src/counting.rs
   - usr/coreutils/src/beacon_gate.rs
   - usr/coreutils/src/meta.rs
   - usr/coreutils/src/ui.rs
@@ -21,7 +25,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-05
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -35,8 +39,9 @@ crate re-exports it (`pub use beacon::{boxd, color, palette}`, so every bin's
 
 What remains here is the bins' side of the Beacon system plus the utilities
 that were never presentation: lexical path canonicalization, human-readable
-sizes, the per-bin Beacon emission gate, metadata presentation, the card
-renderer, `--help` plumbing, and the `/net` byte pumps.
+sizes, the loops the filters stream their input through, the per-bin Beacon
+emission gate, metadata presentation, the card renderer, `--help` plumbing,
+and the `/net` byte pumps.
 
 The old discipline did not leave with the code -- it moved up a layer. Colour
 belongs on presentation and diagnostics, never on a payload another program
@@ -45,8 +50,9 @@ here at one chokepoint, `beacon_gate`.
 
 ## Contract
 
-Two modules are pure and ungated -- `path` and `size` -- with no syscall and
-no runtime dependency, so they compile and test on the host. Five are
+Five modules are pure and ungated -- `path`, `size`, `stream`, `find` and
+`select` -- with no syscall and no runtime dependency, so they compile and test
+on the host; a sixth, `counting`, exists only in the host tests. Five are
 backend-gated behind a Cargo feature because they touch the runtime:
 `beacon_gate`, `meta`, `ui`, `usage`, `netpump`.
 
@@ -79,6 +85,50 @@ form -- a relative or dirty ref is a wrong ref.
 one decimal below ten of a unit, none at or above, with the rounding carry
 handled explicitly so 9.96 K becomes 10 K rather than 9.10 K.
 
+**`stream` is how a filter reads an input of any length.** `lines` hands each
+line to a closure and holds only that line (the start of one a read cut short
+is carried in a single buffer); `runs` builds on it for `uniq`, handing over
+each run of equal adjacent lines as its first line and a count once the run
+ends, and `firsts` hands over each run's first line as the run begins, for a
+`uniq` that needs no count; `compare` walks two inputs a buffer each, at their
+own pace; `Tail` keeps a window of the last lines or bytes, drained only once
+it holds twice what it keeps, and `Skip` passes on what follows the first N - 1
+lines or bytes, holding nothing (`tail +N`). Each takes its reads as a closure
+or its input a piece at a time, so all are pure and host-tested against reads
+cut at every boundary, checked against the answer the whole-input code gave. The
+module exists because slurping stopped being bounded: since B-1c the heap grows
+until memory runs out, and a program that outgrows it ends at a fault, exit
+status 1 (docs/ERRORS.md) -- which is `cmp`'s "differ" and `grep`'s "no
+match". A streamed filter holds a line, and a line is bounded too: past
+`LINE_MAX`, 64 MiB (POSIX lets a text utility refuse a line longer than its
+LINE_MAX), `lines`, `runs`, `firsts` and a line-counting `Tail` stop with
+`Error::TooLong` instead of
+growing toward that fault, so `grep x /dev/zero` exits 2 and never reads as "no
+match". The carried line grows by a fallible reservation that never passes the
+bound, and a buffer that held a long line is given back once it holds more than
+twice what the next line needs. A closure returns false to stop the reading,
+which is how a filter stops once its reader has gone. Two behaviours changed
+with streaming, both toward GNU: an empty input has no lines (the whole-buffer
+split read one, so `grep -v x`, `cut` and `uniq` of nothing printed a blank
+line), and `grep -l` stops reading at its first match.
+
+**A bound on a line is not a bound on what is built from it.** `LINE_MAX` bounds
+the bytes held, but a list derived from them can be many times larger: a match
+or a field is two words, sixteen bytes, and a line holds as many of either as it
+has bytes, so one line at the bound could ask for a gigabyte of positions
+(`grep -o`, any coloured `grep` line, `cut -f`). So nothing here collects. `find::each_match` hands `grep`
+each match of its literal (ignoring ASCII case, or bounded to whole words, on
+request) as it is found; `select::fields` and `select::bytes` hand `cut` each
+selected field or run of bytes; and `stream::CatLines` applies `cat`'s line
+transforms -- numbering, squeezing blank runs, showing line ends, tabs and
+nonprinting bytes -- a read at a time with no line held at all. What it carries
+across reads is a line number, whether the last line was blank and whether a
+line is open, and it carries them across operands too, so `cat -n a b` numbers
+the concatenation. Each is host-tested against the answer the collecting code
+gave, and the cost is measured, not argued: `counting` is a test-only global
+allocator that counts what each thread asks for, and a mebibyte line of matches
+or of delimiters is searched and cut with no allocation at all.
+
 **`meta` classifies an entry by what failed.** A directory that `readdir`
 reports but `fstat` cannot cross is a *graft* -- a live kernel namespace
 mount. The failure is the signal, which turns what would be an unexplained
@@ -103,8 +153,11 @@ Small and mostly stateless: a card row carrying its plain and coloured forms,
 an entry-kind enum, and -- in the pumps -- a fixed staging buffer with a
 sent/pending cursor plus half-close bookkeeping, one per direction. The
 staging buffer is deliberately fixed and stack-resident; these are short-lived
-programs with a small heap, and a per-transfer allocation would be the wrong
-trade. The palette and colour-mode types live in [[sub-beacon]].
+programs, and a per-transfer allocation would buy nothing. `stream` holds one
+8 KiB read buffer (two for `compare`) plus the carried line, the current run's
+first line or the tail window, and none of them holds a line past `LINE_MAX`;
+`CatLines` holds three scalars and `Skip` two, and no bytes, and `find` and
+`select` hold nothing. The palette and colour-mode types live in [[sub-beacon]].
 
 ## Concurrency
 
@@ -140,16 +193,44 @@ finished either way -- a judgement call that reports a genuine transport error
 and a clean close identically. An un-canonicalizable path ref emits no frame
 rather than a dirty one.
 
+`stream` stops for one of three reasons, each the caller's to report: the read
+failed (`Error::Read`, carrying the reader's own error), a line outgrew what the
+heap would give (`NoMemory`), or a line passed `LINE_MAX` (`TooLong`, displayed
+as "a line longer than 64 MiB"). What came before has already been handed
+over -- every line for `lines`, every run's first line for `firsts`, every
+finished run for `runs`, which drops the run still open -- so a filter has
+printed what it could.
+
 ## Performance
 
 Irrelevant at this layer with two exceptions inherited from the cells tier:
 the box-fitting pass walks every row to find the widest before drawing (a
 listing is measured twice, free for directory listings), and the pumps size
 their staging above the network daemon's send window so a read rarely
-straddles a chunk boundary -- a deliberate constant, not a guess.
+straddles a chunk boundary -- a deliberate constant, not a guess. `stream`
+copies only a line a read cut short, and `Tail`'s draining moves a bounded
+amount per byte fed and shrinks the window back once a long line has passed.
 
 ## Prosecution
 
+- **A program whose exit status 1 is a verdict must not hold an unbounded
+  input.** At v1.0 a fault past free memory also exits 1, so `cmp` and `grep`
+  read through `stream`; a verdict-bearing tool that slurps reopens HT09.R4-F2
+  as a silently wrong answer.
+- **A held line must stay under `LINE_MAX`.** A streaming consumer that grows a
+  line outside `hold`, or grows it with an infallible `extend`, reopens the path
+  from an endless line to a fault that reads as a verdict.
+- **A bound on a line must also bound what is built from it.** A list of the
+  matches, fields or spans in one line costs sixteen bytes an entry, up to
+  thirty-two times the line once a `Vec` has doubled; hand each to the caller
+  as it is found, and show the cost with `counting` rather than argue it.
+- **`firsts` must hand a run's line over as the run begins.** Handing it over
+  at the run's end holds a plain `uniq` behind its input -- `yes | uniq` shows
+  nothing -- and loses the open run on a read error, where GNU's has printed it.
+- **A buffer's release must be tested where it is used.** The first test of the
+  rule called the helper and stayed green with the call deleted; `lines_within`
+  and `runs_within` take their buffers from the caller so a test reads the
+  buffer the loop used.
 - **The pumps must keep treating a zero-count write as back-pressure.**
   Treating it as an error is the documented naive failure, and the runtime's
   write-everything helper does exactly that -- so the two must not be confused
@@ -181,8 +262,13 @@ emits truecolour only.
 
 - **The cells tier and the bulk of the old test suite left for
   [[sub-beacon]]** (2026-09-01). This crate's host-testable surface is now the
-  two pure modules, `path` and `size`, which carry five host tests between
-  them (size's rounding-carry cases, path's normalization). The colour-gate,
+  five pure modules and the test allocator, which carry forty-two host tests:
+  five for size's rounding-carry cases and path's normalization, twenty-eight
+  for `stream` (every line and run at every read size, a run's first line
+  handed over as it arrives, the compare positions, the tail window, the skip
+  to line or byte N, the line bound, a long line's room given back, and `cat`'s
+  transforms under every flag combination and piece size), four each for
+  `find` and `select`, and `counting`'s own control, which shows it counts. The colour-gate,
   palette, and box-geometry tests -- the majority of the fifteen this dossier
   once counted -- moved with their code and are beacon's now.
 

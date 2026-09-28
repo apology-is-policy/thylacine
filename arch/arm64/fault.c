@@ -32,6 +32,10 @@
 
 #include "../../mm/phys.h"           // REVENANT R-2: alloc_pages/free_pages for the demand-read page
 
+#ifdef KERNEL_TESTS
+void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+#endif
+
 // Linker symbols — boot stack guard region + kernel image bounds.
 extern char _boot_stack_guard[];
 extern char _boot_stack_bottom[];
@@ -92,6 +96,16 @@ static volatile bool g_in_kernel_fault[DTB_MAX_CPUS];
 #define FSC_PERM_FAULT_L2   0x0E
 #define FSC_PERM_FAULT_L3   0x0F
 
+// Neither class below is resolved by a page install: the page is mapped and
+// the access is refused by the instruction's own alignment rule (exclusives,
+// LDAR/STLR, Device memory) or by the bus. The pager answers them snare:bus.
+#define FSC_ALIGN_FAULT     0x21
+#define FSC_EXT_ABORT       0x10    /* synchronous external abort, not on a walk */
+#define FSC_EXT_ABORT_L0    0x14    /* ... on the translation-table walk, per level */
+#define FSC_EXT_ABORT_L1    0x15
+#define FSC_EXT_ABORT_L2    0x16
+#define FSC_EXT_ABORT_L3    0x17
+
 // =============================================================================
 // fault_info_decode — pure decoder.
 // =============================================================================
@@ -139,6 +153,15 @@ void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out) {
         fsc == FSC_PERM_FAULT_L1 ||
         fsc == FSC_PERM_FAULT_L2 ||
         fsc == FSC_PERM_FAULT_L3;
+
+    out->is_alignment = fsc == FSC_ALIGN_FAULT;
+
+    out->is_external =
+        fsc == FSC_EXT_ABORT    ||
+        fsc == FSC_EXT_ABORT_L0 ||
+        fsc == FSC_EXT_ABORT_L1 ||
+        fsc == FSC_EXT_ABORT_L2 ||
+        fsc == FSC_EXT_ABORT_L3;
 }
 
 // =============================================================================
@@ -365,7 +388,7 @@ struct file_fault_req {
     struct Spoor  *spoor;        // the pinned backing Chan to dev->read
     u64            file_offset;  // byte offset in the backing file for this page
     u64            page_va;      // page-aligned fault VA (the PTE target)
-    size_t         slot;         // page index within burrow->filepages
+    size_t         slot;         // page index within the Burrow's pagemap
     bool           exec;         // mapping is executable -> I-cache sync the page-in
 };
 
@@ -414,6 +437,23 @@ static enum fault_result demand_page_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;
     }
 
+    // 2b. Already resolved by a peer. This fault was decoded before as->lock
+    //     was taken; a sibling faulter of the same address space may have
+    //     installed a leaf that admits the access while it waited. The
+    //     idempotent install covers the identical re-install, but not the
+    //     read that queued behind a copy-on-write BREAK: the break leaves a
+    //     WRITABLE leaf and the read arm asks for a read-only one -- a
+    //     mismatch the install refuses, and the Proc was terminated for
+    //     reading a page it holds (B-1a' audit F13). Whatever leaf admits the
+    //     access IS the answer -- nothing charged, nothing installed, the
+    //     instruction retried -- for every arm, so no arm can narrow itself
+    //     into a refusal. The replace's break-before-make gap lands here too:
+    //     a read that faulted between the invalid write and the new leaf
+    //     finds the new leaf.
+    if (mmu_user_pte_admits(p->as, fi->vaddr & ~(PAGE_SIZE - 1),
+                            fi->is_write, fi->is_instruction))
+        return FAULT_HANDLED;
+
     // 3. Resolve the BURROW offset for the page covering fi->vaddr.
     u64 page_va        = fi->vaddr & ~(PAGE_SIZE - 1);
     u64 in_vma_offset  = page_va - vma->vaddr_start;
@@ -449,6 +489,23 @@ static enum fault_result demand_page_locked(struct Proc *p,
     // VMA keeps VMA_PROT_WRITE throughout (see vma.h), so it is the PTE alone that
     // carries the copy-on-write restriction.
     u32     install_prot = vma->prot;
+    // B-1a' audit F9: the copy-on-write break lands on a VA that is very likely
+    // already mapped read-only (the read that preceded the write installed
+    // it), and both break outcomes change the leaf -- the copy its PA, the
+    // take-in-place its permission bits. The write arm sets this so step 5
+    // REPLACES the leaf in place (break-before-make on the entry) instead of
+    // the install refusing the mismatch; the tables stay where they are.
+    bool    cow_replace  = false;
+    // B-1a' audit F8: a FILE page's MAPPING is charged to the holder at the
+    // install (step 5), whichever arm resolved the page -- the resident hit
+    // below, or the slow path's own install tails.
+    bool    file_charge  = false;
+    // B-1a' audit F12: the page a copy-on-write COPY replaced, whose share is
+    // released only after step 5 -- while this space's own read-only leaf can
+    // still translate to it, that share is what keeps the other holder from
+    // taking the page in place (and writing into what this space still reads,
+    // I-44) or from exiting and freeing it under a live leaf (I-13).
+    struct page *cow_release = NULL;
     switch (vma->burrow->type) {
     case BURROW_TYPE_ANON:
     case BURROW_TYPE_CODE:
@@ -496,20 +553,20 @@ static enum fault_result demand_page_locked(struct Proc *p,
         mair_idx = vma->burrow->hostmem_mair;
         break;
     case BURROW_TYPE_FILE: {
-        // REVENANT R-2 / I-36: the page comes from the sparse filepages[] array,
+        // REVENANT R-2 / I-36: the page comes from the sparse pagemap,
         // demand-read from the pinned backing Spoor. Slot index within the
         // segment (burrow_byte_off < size was checked above, so slot is in range).
         struct Burrow *v = vma->burrow;
         size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
         spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
-        struct page *resident =
-            (v->filepages && slot < v->page_count) ? v->filepages[slot] : NULL;
+        struct page *resident = pagemap_get(&v->pm, slot);
         spin_unlock(&v->lock);
         if (resident) {
             // Fast path: resident hit. Each FILE slot is its own order-0 page,
             // so page_pa is the slot page's PA (no contiguous-chunk offset).
             page_pa = page_to_pa(resident);
             mair_idx = MAIR_IDX_NORMAL_WB;
+            file_charge = true;         // the mapping is this space's (audit F8)
             break;                      // -> step-5 PTE install (R+X for text)
         }
         // Miss: pin the Burrow across the lockless read (so freq->burrow cannot
@@ -539,8 +596,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
         size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
 
         spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
-        struct page *resident =
-            (v->filepages && slot < v->page_count) ? v->filepages[slot] : NULL;
+        struct page *resident = pagemap_get(&v->pm, slot);
         spin_unlock(&v->lock);
         if (resident) {
             // Resident hit (a re-fault, or a sibling faulter filled it): the page was
@@ -562,25 +618,22 @@ static enum fault_result demand_page_locked(struct Proc *p,
                     break;              // -> step-5 PTE install, read-only
                 }
 
-                // A WRITE. Clear the stale read-only PTE FIRST: this VA is very
-                // likely already mapped (the read that preceded this write
-                // installed it read-only, just above), and mmu_install_user_pte
-                // REFUSES a mismatching install over a valid leaf -- it returns -1
-                // rather than overwriting. Both break outcomes mismatch: the copy
-                // path changes the PA, and the take-in-place path changes the
-                // permission bits. Without this the first write after a read would
-                // fail the install and kill the Proc.
-                //
-                // Idempotent when nothing is mapped (the common first-touch case,
-                // where addrspace_clone's uninstall already cleared it), so it is
-                // unconditional rather than guarded on a re-walk of the tree.
-mmu_uninstall_user_pte(p->as->pgtable_root, 0, page_va);
+                // A WRITE. Either break outcome changes the leaf the read
+                // installed -- the copy its PA, the take-in-place its
+                // permission bits -- so step 5 REPLACES it in place instead of
+                // the install refusing the mismatch (B-1a' audit F9: the
+                // uninstall that used to run here freed the leaf's tables and
+                // the re-install re-allocated them, a pool-edge kill for a
+                // page the space already held). Nothing is mapped on the
+                // first touch (addrspace_clone's clear took the leaf and kept
+                // its table); the replace is then a plain install.
+                cow_replace = true;
 
                 // cow_page_break_is_sole is the whole decision, taken as one step
                 // under the global COW lock -- splitting it is what
                 // cow.tla::BUGGY_BREAK_UNLOCKED models, where two sharers each
                 // observe themselves alone.
-if (!cow_page_break_is_sole(resident)) {
+                if (!cow_page_break_is_sole(resident)) {
                     // Someone else still holds this page: copy it.
                     //
                     // Our own share stays HELD across the alloc and the copy, and
@@ -588,7 +641,7 @@ if (!cow_page_break_is_sole(resident)) {
                     // concurrent exit in the other address space from driving the
                     // count to zero and freeing the page we are reading from
                     // (cow.tla::BUGGY_TEARDOWN_NO_PIN).
-struct page *priv = alloc_pages(0, KP_ZERO);
+struct page *priv = alloc_user_pages(0, KP_ZERO, proc_resource_exempt(p));
                     if (!priv) return FAULT_UNHANDLED_USER;  // graceful per-Proc OOM
 
                     copy_page_words((void *)pa_to_kva(page_to_pa(priv)),
@@ -611,12 +664,17 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
                         return FAULT_UNHANDLED_USER;
                     }
 
-                    // The copy is done and `priv` is installed, so the pin has
-                    // served its purpose: release our share of the original. If
-                    // that was the last one (the other holder exited mid-break)
-                    // the page is ours to free.
-if (cow_page_put(resident))
-                        free_pages(resident, 0);
+                    // The copy is done and `priv` holds the slot, but the pin is
+                    // NOT done: until step 5 replaces it, this space's own
+                    // read-only leaf (the read that preceded the write installed
+                    // it) still translates to the original, and a sibling thread
+                    // reads through it without faulting. Released here, the
+                    // other holder would be sole -- free to take the page in
+                    // place and write into what this space can still see, or to
+                    // exit and free it under a live leaf. The share is put after
+                    // the replace (B-1a' audit F12; the old flow's uninstall
+                    // before the decide was what made an early put safe).
+                    cow_release = resident;
 
                     // No I-32 charge: one mapped page became one mapped page. The
                     // child was charged for this page at fork (addrspace_clone),
@@ -639,13 +697,15 @@ if (cow_page_put(resident))
         }
 
         // Miss: charge the I-32 page_count BEFORE the alloc so page_count == true RSS
-        // and a cap-hit frees nothing. An over-PROC_PAGE_MAX commit on a non-TCB Proc
+        // and a cap-hit frees nothing. An over-budget commit on a non-TCB Proc
         // fails the fault here -> the caller proc_fault_terminates (graceful OOM,
         // never a box extinction -- I-32; the same backstop the eager attach gives at
         // attach time, moved to fault time for the free reservation).
         if (!proc_page_charge(p, 1))
             return FAULT_UNHANDLED_USER;
-        struct page *newpg = alloc_pages(0, KP_ZERO);
+        // The page itself is the user pool's charge (alloc_user_pages): the
+        // machine-wide bound is decided at the allocation and returns at the free.
+        struct page *newpg = alloc_user_pages(0, KP_ZERO, proc_resource_exempt(p));
         if (!newpg) {
             proc_page_uncharge(p, 1);
             return FAULT_UNHANDLED_USER;    // OOM -> graceful per-Proc terminate
@@ -657,32 +717,29 @@ if (cow_page_put(resident))
         // slot. (page.h states the contract; cow.h says why it is not inherited.)
         cow_page_set_sole(newpg);
 
-        // Install-once into the slot. Under vma_lock (held by the caller across the
-        // whole demand_page_locked) no sibling faulter of this Proc can touch
-        // filepages -- they serialize on vma_lock -- so at v1.0 (one mapping, one
-        // Proc) the slot is still NULL here. The v->lock re-check + loser-free is the
-        // audited FILE-arm install-once shape, defensive against a future shared-lazy
-        // mapping; the loser branch is unreachable at v1.0.
-        struct page *winner;
-        struct page *loser = NULL;
-        spin_lock(&v->lock);
-        if (!v->filepages || slot >= v->page_count) {
-            spin_unlock(&v->lock);
+        // Install-once into the slot. Under as->lock (held by the caller across
+        // the whole demand_page_locked) no sibling faulter of this address space
+        // can touch the map -- they serialize on as->lock -- so the slot is still
+        // empty here. The install's own re-check + loser-free is the audited
+        // FILE-arm install-once shape, defensive against a future shared-lazy
+        // mapping; the loser branch is unreachable today. B-1a': the install
+        // also allocates the map's missing nodes -- outside v->lock, charged to
+        // this address space BEFORE they are allocated -- so a cap hit or a
+        // node OOM installs nothing and takes the same graceful per-Proc
+        // terminate as a refused page.
+        struct page *winner = NULL;
+        int irc = pagemap_install(&v->pm, &v->lock, slot, newpg, p->as,
+                                  proc_resource_exempt(p), &winner);
+        if (irc < 0) {
             free_pages(newpg, 0);
             proc_page_uncharge(p, 1);
-            return FAULT_UNHANDLED_USER;    // impossible shape change; bail safe
+            return FAULT_UNHANDLED_USER;    // node OOM / cap hit -> graceful per-Proc terminate
         }
-        if (v->filepages[slot]) {
-            winner = v->filepages[slot];    // a sibling won the race
-            loser  = newpg;
-        } else {
-            v->filepages[slot] = newpg;     // we win -- the Burrow owns newpg now
-            winner = newpg;
-        }
-        spin_unlock(&v->lock);
-        if (loser) {
-            free_pages(loser, 0);           // free OUTSIDE v->lock (leaf order)
+        if (irc == 1) {
+            free_pages(newpg, 0);           // a sibling won: free OUTSIDE v->lock (leaf order)
             proc_page_uncharge(p, 1);       // we double-charged; give it back
+        } else {
+            winner = newpg;                 // we win -- the Burrow owns newpg now
         }
         page_pa = page_to_pa(winner);
         mair_idx = MAIR_IDX_NORMAL_WB;
@@ -696,10 +753,30 @@ if (cow_page_put(resident))
     // 5. Install the leaf PTE in the per-Proc TTBR0 tree. The asid arg is
     // vestigial (the install does an all-ASID `tlbi vaae1is`); pass 0 -- the
     // Proc's rolling ASID is resolved at context switch, not here (RW-1 B-F1).
-    int rc = mmu_install_user_pte_attr(p->as->pgtable_root, 0,
-                                       page_va, page_pa, install_prot,
-                                       mair_idx);
-    if (rc != 0)                         return FAULT_UNHANDLED_USER;
+    // B-1a' audit F8: a FILE mapping is charged to the holder per leaf; a
+    // leaf already there (rc 1) was paid for by whoever installed it, so this
+    // charge goes back. Audit F9: the copy-on-write break replaces in place.
+    if (file_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
+        return FAULT_UNHANDLED_USER;
+#ifdef KERNEL_TESTS
+    // The F12 witness fires at the last instant the original's share must
+    // still be held: the leaf write is next (audit F20).
+    if (cow_release && g_cow_copy_probe_for_test)
+        g_cow_copy_probe_for_test(p, cow_release);
+#endif
+    int rc = cow_replace
+           ? mmu_replace_user_pte_attr(p->as, proc_resource_exempt(p),
+                                       page_va, page_pa, install_prot, mair_idx)
+           : mmu_install_user_pte_attr(p->as, proc_resource_exempt(p),
+                                       page_va, page_pa, install_prot, mair_idx);
+    if (rc != 0 && file_charge)          addrspace_uncharge_file(p->as, 1);
+    // B-1a' audit F12: the copy's original is released only now, when no leaf
+    // of this space can translate to it (on a failed replace too: the Proc
+    // dies, and the share must not leak). If that was the last share (the
+    // other holder exited mid-break) the page is ours to free.
+    if (cow_release && cow_page_put(cow_release))
+        free_pages(cow_release, 0);
+    if (rc < 0)                          return FAULT_UNHANDLED_USER;
 
     return FAULT_HANDLED;
 }
@@ -717,7 +794,8 @@ if (cow_page_put(resident))
 // memory -> a wild/kernel pointer in the faulting Proc's address space (the
 // observed 0xffff.. fault). The same lock also serializes two concurrent
 // faults that would otherwise race the intermediate page-table construction
-// in mmu_install_user_pte (orphaning a sub-table). Uncontended for
+// in mmu_install_user_pte (a table linked twice, or reclaimed under a peer's
+// walk). Uncontended for
 // single-thread Procs (the v1.0 common case). Lock order vma_lock ->
 // buddy_lock matches SYS_BURROW_ATTACH (vma_lock held across
 // burrow_create_anon -> alloc_pages), so no inversion.
@@ -804,22 +882,23 @@ static enum fault_result file_install_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;     // geometry moved -> our bytes are stale
     }
 
-    struct page *resident;
-    spin_lock(&v->lock);                 // vma_lock -> v->lock (established order)
-    if (!v->filepages || freq->slot >= v->page_count) {
-        spin_unlock(&v->lock);
+    // B-1a': the install-once takes v->lock itself and allocates the map's
+    // missing nodes outside it, charged to no address space (a FILE Burrow's
+    // pages are the Image cache's, shared by every space that maps the file)
+    // but counted in the user pool like every user page; a node OOM or a pool
+    // refusal installs nothing and the fault is refused under the same
+    // per-Proc OOM policy as a page.
+    struct page *resident = NULL;
+    int irc = pagemap_install(&v->pm, &v->lock, freq->slot, newpg, NULL,
+                              proc_resource_exempt(p), &resident);
+    if (irc < 0) {
         free_pages(newpg, 0);
-        return FAULT_UNHANDLED_USER;     // impossible shape change; bail safe
+        return FAULT_UNHANDLED_USER;     // node OOM, or an impossible shape change; bail safe
     }
-    if (v->filepages[freq->slot]) {
-        resident = v->filepages[freq->slot];   // a sibling faulter won the race
-    } else {
-        v->filepages[freq->slot] = newpg;      // we win -- the Burrow owns newpg now
-        resident = newpg;
-    }
-    spin_unlock(&v->lock);
-    if (resident != newpg)
-        free_pages(newpg, 0);            // discard the loser's freshly-read page
+    if (irc == 1)
+        free_pages(newpg, 0);            // a sibling faulter won: discard the loser's freshly-read page
+    else
+        resident = newpg;                // we win -- the Burrow owns newpg now
 
     // B-1a audit F1: the prot may have moved while we slept. The slot keeps
     // its page; no PTE is installed under a prot that never admitted this
@@ -830,9 +909,19 @@ static enum fault_result file_install_locked(struct Proc *p,
     // I-12 holds by construction). Each FILE slot is its own order-0 page, so
     // the PA is the slot page's PA (no contiguous-chunk offset). The asid arg
     // is vestigial (all-ASID tlbi); pass 0 (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->as->pgtable_root, 0, freq->page_va,
+    // B-1a' audit F8: the page is the Image cache's, but the MAPPING is this
+    // space's -- charged to the holder per leaf installed, like a COW-shared
+    // page, and refunded per leaf cleared (vma_uninstall_range_in). A refused
+    // charge installs nothing; a leaf a sibling already installed (rc 1) was
+    // paid for by the sibling, so this charge goes back.
+    if (!addrspace_charge_file(p->as, proc_resource_exempt(p)))
+        return FAULT_UNHANDLED_USER;
+    int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
                                   page_to_pa(resident), vma->prot, /*device=*/false);
-    if (rc != 0) return FAULT_UNHANDLED_USER;
+    if (rc != 0) {
+        addrspace_uncharge_file(p->as, 1);
+        if (rc < 0) return FAULT_UNHANDLED_USER;
+    }
     return FAULT_HANDLED;
 }
 
@@ -853,9 +942,9 @@ static enum fault_result file_demand_page_single(struct Proc *p,
                                                struct file_fault_req *freq) {
     enum fault_result r;
 
-    struct page *newpg = alloc_pages(0, KP_ZERO);
+    struct page *newpg = alloc_user_pages(0, KP_ZERO, proc_resource_exempt(p));
     if (!newpg) {
-        r = FAULT_UNHANDLED_USER;        // OOM -> graceful per-Proc terminate
+        r = FAULT_UNHANDLED_USER;        // OOM / pool refusal -> graceful per-Proc terminate
         goto out;
     }
 
@@ -923,7 +1012,7 @@ out:
 // touch hits the resident fast path (demand_page_locked FILE resident-hit) and
 // installs its own PTE with no read. The Linux page-cache readahead model.
 //
-// filepages[] semantics are UNCHANGED (each slot an independent order-0 page), so
+// The pagemap's slot semantics are UNCHANGED (each slot an independent order-0 page), so
 // the free arm / decommit / install-once / resident-check are untouched -- the
 // cluster path only batches the FILL. It is byte-identical to N sequential
 // single-page reads (same offsets, same EOF-tail-stays-zero), preserves W^X (R+X
@@ -937,7 +1026,7 @@ out:
 
 // Install a filled cluster under the RE-ACQUIRED vma_lock: re-validate the VMA
 // still maps the SAME pinned FILE Burrow, install-once each cluster slot into
-// filepages[] (a sibling faulter may have won a slot -- benign; the loser page is
+// the pagemap (a sibling faulter may have won a slot -- benign; the loser page is
 // freed), then install ONLY the faulting slot's PTE (cluster-mates install on
 // their own resident-hit faults). clpages[i] is NULL'd when the Burrow adopts it
 // (winner) and left set when WE still own it (loser, or an early bail) so the
@@ -974,24 +1063,28 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     struct Burrow *v = vma->burrow;
 
     struct page *fault_pg = NULL;
-    spin_lock(&v->lock);                 // vma_lock -> v->lock (established order)
-    if (!v->filepages || cstart + ncluster > v->page_count) {
-        spin_unlock(&v->lock);
+    if (!pagemap_live(&v->pm) || cstart + ncluster > v->page_count)
         return FAULT_UNHANDLED_USER;     // impossible shape change; caller frees clpages
-    }
+    // B-1a': one install-once per slot, each taking v->lock itself and
+    // allocating the map's missing nodes outside it (no address-space charge
+    // -- the Image cache's posture -- but the pool's). A node OOM midway
+    // leaves the earlier slots adopted --
+    // the bytes are the Burrow's -- and the rest in clpages for the caller to
+    // free; the faulting slot decides the verdict below exactly as a lost
+    // race would.
     for (size_t i = 0; i < ncluster; i++) {
         size_t s = cstart + i;
-        struct page *winner;
-        if (v->filepages[s]) {
-            winner = v->filepages[s];        // sibling won; clpages[i] stays a loser
-        } else {
-            v->filepages[s] = clpages[i];    // we win -- the Burrow owns it now
-            winner = clpages[i];
+        struct page *winner = NULL;
+        int irc = pagemap_install(&v->pm, &v->lock, s, clpages[i], NULL,
+                                  proc_resource_exempt(p), &winner);
+        if (irc == 0) {
+            winner = clpages[i];             // we win -- the Burrow owns it now
             clpages[i] = NULL;               // adopted: caller must not free it
-        }
+        } else if (irc < 0) {
+            winner = NULL;                   // node OOM: clpages[i] stays the caller's
+        }                                    // irc == 1: a sibling won; clpages[i] stays a loser
         if (s == freq->slot) fault_pg = winner;
     }
-    spin_unlock(&v->lock);
 
     // freq->slot is in [cstart, cstart+ncluster) by construction, so fault_pg is
     // always set; defensive bail keeps the invariant local.
@@ -1003,14 +1096,22 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
 
     // Install the leaf PTE at vma->prot (R+X for text, never writable -- W^X /
     // I-12). The asid arg is vestigial (all-ASID tlbi); pass 0.
-    int rc = mmu_install_user_pte(p->as->pgtable_root, 0, freq->page_va,
+    // B-1a' audit F8: the faulting page's mapping is charged to the holder (the
+    // read-ahead pages are the cache's until a fault maps them); see the
+    // single-page tail.
+    if (!addrspace_charge_file(p->as, proc_resource_exempt(p)))
+        return FAULT_UNHANDLED_USER;
+    int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
                                   page_to_pa(fault_pg), vma->prot, /*device=*/false);
-    if (rc != 0) return FAULT_UNHANDLED_USER;
+    if (rc != 0) {
+        addrspace_uncharge_file(p->as, 1);
+        if (rc < 0) return FAULT_UNHANDLED_USER;
+    }
     return FAULT_HANDLED;
 }
 
 // REVENANT read-ahead: the cluster FILL (NO lock held). Batches ONE dev->read of
-// up to REVENANT_READAHEAD_PAGES pages into filepages[] around the faulting slot.
+// up to REVENANT_READAHEAD_PAGES pages into the pagemap around the faulting slot.
 // Degrades to file_demand_page_single on any alloc shortfall / degenerate cluster
 // so a fault always makes progress. Does NOT drop the Burrow pin (the entry does).
 static enum fault_result file_demand_page_cluster(struct Proc *p,
@@ -1081,7 +1182,7 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     for (size_t i = 0; i < ncluster; i++) clpages[i] = NULL;
     bool alloc_ok = true;
     for (size_t i = 0; i < ncluster; i++) {
-        struct page *pg = alloc_pages(0, 0);    // fully memcpy'd below; no KP_ZERO
+        struct page *pg = alloc_user_pages(0, 0, proc_resource_exempt(p));  // fully memcpy'd below; no KP_ZERO
         if (!pg) { alloc_ok = false; break; }
         void *pkva = pa_to_kva(page_to_pa(pg));
         copy_page_words(pkva, sbuf + i * PAGE_SIZE);
@@ -1141,6 +1242,20 @@ enum fault_result userland_demand_page(struct Proc *p,
     if (!p || !fi)                       return FAULT_UNHANDLED_USER;
     if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
     if (!p->as)                          return FAULT_UNHANDLED_USER;
+
+    // The pager resolves what a page install can resolve: a missing leaf
+    // (translation), a leaf the hardware has not marked (access flag), a leaf
+    // whose permission the VMA has outgrown (permission). An ALIGNMENT fault
+    // (an exclusive, an acquire/release or a Device access at an address the
+    // instruction cannot take) or a synchronous EXTERNAL abort is raised on a
+    // MAPPED page by the instruction itself: answered HANDLED, the ERET
+    // re-executes it into the same abort, forever -- a livelock where the
+    // Proc owes a snare:bus death (Linux: SIGBUS from do_alignment_fault /
+    // do_sea). Decided on the fault's class alone, before any lookup, so no
+    // arm can answer it (B-1a' audit F17). The kernel-mode uaccess entry
+    // (exception.c) already admits only the three classes.
+    if (!fi->is_translation && !fi->is_access_flag && !fi->is_permission)
+        return FAULT_USER_BUS;
 
     // Fast path under vma_lock: resolve + install (ANON/MMIO/DMA + a FILE
     // resident-hit). On a BURROW_TYPE_FILE miss, demand_page_locked sets

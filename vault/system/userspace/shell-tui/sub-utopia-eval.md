@@ -26,7 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -54,7 +54,11 @@ operator can tell "denied" from "no such service" and from a broken transport.
 Discarding it left that channel leading nowhere at the one place the operator
 reads it. Both legs now append the rendered cause via
 `libthyla_rs::err::Error::from_syscall_return`. `$errstr` keeps its existing
-PREFIX, so assertions matching on "mount: cannot connect" still hold.
+PREFIX, so assertions matching on "mount: cannot connect" still hold. The third
+leg, the mount itself, names a cause only when the kernel gives one: since the
+2026-09-25 Emount refusal a file mount point reads "mount: cannot mount at
+PATH: not a directory" (an attach root is a directory), and the kernel's flat
+-1 still reads "mount: cannot mount at PATH".
 
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
@@ -98,13 +102,17 @@ tests. The live shell replaces it with the kernel's cwd at startup
 `eval_command` expands argv[0] through the alias table, then resolves
 **function → builtin → external**. A function runs in a pushed scope; a builtin
 runs in-process because it mutates shell state; anything else is spawned, with
-`$path` handled shell-side (a bare name is searched over `/bin`, `/`,
+`$path` handled shell-side (a bare name is searched over `/bin`,
 `/goroot/bin`, `/clade/bin`, `/viv/bin`, `/viv/abin` in order — first existing
 hit wins, a miss falls back to `/bin/<name>` for a clean spawn error; the
 toolchain and phenotype dirs come last so `/bin` stays authoritative, and the
 two `/viv` dirs are `MPHENO_LINUX` mounts so a Linux binary there runs
 seamlessly; a `/`-bearing name is used as-is) and the actual resolution done by
-the kernel against the caller's namespace. There are seventeen builtins under
+the kernel against the caller's namespace. `/` left the list at B-1d: it was
+there for the flat initrd root, where the pre-pivot shell found its programs;
+the initrd now keeps them in `bin/`, which is `/bin` on both sides of the pivot
+([[dec-2026-09-25-initrd-bin-directory]]), and a `/` entry would only have
+searched the disk root ahead of the toolchain dirs. There are seventeen builtins under
 nineteen names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
 option processing — the one way to enter a directory whose name begins with
 `-`), and `BUILTIN_NAMES` — the list

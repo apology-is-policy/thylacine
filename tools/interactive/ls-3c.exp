@@ -7,12 +7,11 @@
 #             (a token that cannot appear in the typed line).
 #   realpath  `realpath /a/b/../c` -> "/a/c" (lexical .. collapse).
 #   yes       `yes z9q7 | head -2` -> "z9q7". This is the headline: yes is an
-#             UNBOUNDED producer, so it is deliberately NOT in coreutil-smoke
-#             (the capture harness holds the read-end open -> no BrokenPipe ->
-#             yes never exits -> wait() deadlocks). The shell pipe is the
-#             correct exerciser: head reads 2 lines then closes the pipe, yes
-#             gets BrokenPipe on its next write and exits. This proves the
-#             producer/consumer pipe teardown end to end.
+#             UNBOUNDED producer, and a shell pipe is its natural exerciser:
+#             head reads 2 lines then closes the pipe, yes gets BrokenPipe on
+#             its next write and exits. This proves the producer/consumer pipe
+#             teardown end to end, through the real shell (coreutil-smoke
+#             drives yes too, under its bounded capture).
 #   hexdump   `echo Hi | hexdump` -> the hex of 'H','i' ("48 69"), proving the
 #             stdin-filter path through a pipe.
 #

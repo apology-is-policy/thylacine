@@ -160,6 +160,7 @@ const NR_BRK: u64 = 214;
 const NR_MUNMAP: u64 = 215;
 const NR_MMAP: u64 = 222;
 const NR_MPROTECT: u64 = 226;
+const NR_MADVISE: u64 = 233;
 const NR_RT_SIGACTION: u64 = 134;
 const NR_RT_SIGRETURN: u64 = 139;
 const NR_RT_SIGPROCMASK: u64 = 135;
@@ -225,6 +226,12 @@ static mut SIG_UC_END_MAGIC: u32 = 0xFFFF_FFFF;
 /// back and never returns, which is exactly the shape an optimiser is entitled
 /// to delete.
 static mut COW_WITNESS: u64 = 0x1111_1111;
+// A page of this binary's own data segment: mapped, and BELOW the burrow window
+// (L23s / L23t -- a release the phenotype may not perform is declined, not
+// misreported as a hole, and the page keeps its bytes).
+#[repr(C, align(4096))]
+struct Page([u8; 4096]);
+static mut BELOW_WINDOW_PAGE: Page = Page([0; 4096]);
 
 extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
     unsafe {
@@ -486,6 +493,9 @@ const PROT_EXEC: u64 = 4;
 const MAP_PRIVATE: u64 = 0x02;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANON: u64 = 0x20;
+const MADV_WILLNEED: u64 = 3;
+const MADV_DONTNEED: u64 = 4;
+const MADV_DONTFORK: u64 = 10;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
@@ -1032,13 +1042,19 @@ unsafe fn run_linux() -> ! {
     // would pass on any address the kernel felt like picking, which is the one
     // thing MAP_FIXED forbids.
     //
-    // 0x40000000 is unmapped here, so this is the FREE-space shape. It is served
-    // (Linux places a fixed mapping at an unmapped address rather than failing);
-    // answering ENOMEM instead was #196, and ENOMEM is the worse reply because an
-    // allocator cannot tell it from real memory pressure.
-    let f = svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+    // 0x1_4000_0000 -- a GiB into the burrow window, above anything this guest
+    // has mapped -- is unmapped here, so this is the FREE-space shape. It is
+    // served (Linux places a fixed mapping at an unmapped address rather than
+    // failing); answering ENOMEM instead was #196, and ENOMEM is the worse
+    // reply because an allocator cannot tell it from real memory pressure.
+    // Since B-1a' the fixed arms are CONFINED to the window: a fixed mapping
+    // below it could never be unmapped (munmap is the range row, itself
+    // window-confined), so such a request is declined (L21d) rather than
+    // served into a per-call leak.
+    const FIXED_VA: u64 = 0x1_4000_0000;
+    let f = svc6(NR_MMAP, FIXED_VA, MAP_LEN, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0);
-    leg!(rep, f == 0x40000000, b"L21\n");
+    leg!(rep, f == FIXED_VA as i64, b"L21\n");
     // It is real memory, not just a bookkeeping entry: write and read back
     // through the LAST page, which also proves the whole span got mapped.
     (f as *mut u64).add((MAP_LEN / 8 - 1) as usize).write_volatile(0x5A5A_A5A5);
@@ -1048,7 +1064,17 @@ unsafe fn run_linux() -> ! {
             == 0x5A5A_A5A5,
         b"L21b\n"
     );
-    let _ = svc3(NR_MUNMAP, f as u64, MAP_LEN, 0);
+    // And it can be given back: the range munmap serves it (B-1a'), asserted
+    // rather than swallowed -- a fixed mapping that cannot be unmapped is a
+    // leak per call. Then the shape the window refuses: a fixed request below
+    // it is declined, never faked.
+    leg!(rep, svc3(NR_MUNMAP, f as u64, MAP_LEN, 0) == 0, b"L21c\n");
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0) == NEG_ENOSYS,
+        b"L21d\n"
+    );
 
     // mprotect is a TRANSLATED row since B-1a (the permission ceiling, ARCH
     // 6.5): SYS_BURROW_PROTECT under each mapping's mint-time ceiling. Until
@@ -1059,10 +1085,7 @@ unsafe fn run_linux() -> ! {
     // with EACCES ("X is never a target"): the same unmapped range answers two
     // different errnos on the prot word alone, which is the order made
     // observable. The range is 0x50000000, never mapped by anything in this
-    // image: L21's fixed mapping at 0x40000000 is not a safe "unmapped" range
-    // to reuse, because its munmap rides the range row and that row can
-    // decline (the ladder's nr=215 line) -- a leaked mapping there would turn
-    // ENOMEM into a silent 0.
+    // image -- a range no leg has ever mapped is the only honest "unmapped".
     leg!(
         rep,
         svc3(NR_MPROTECT, 0x50000000, 4096, PROT_READ | PROT_WRITE) == NEG_ENOMEM,
@@ -1093,6 +1116,31 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_MPROTECT, n as u64, 0, PROT_READ) == 0, b"L23g\n");           // len 0: nothing to do
     leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 4096, PROT_READ) == NEG_EINVAL, b"L23h\n");
     leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 0, PROT_READ) == NEG_EINVAL, b"L23i\n");     // alignment before len 0 (Linux order)
+
+    // madvise is a TRANSLATED row since B-1b (ARCH 6.5 "Capacity"): DONTNEED
+    // and FREE are the decommit core -- the page goes and a later read faults a
+    // fresh zero page in -- while a pure hint answers 0 over a mapped range and
+    // ENOMEM over a hole and changes nothing. An advice the tree does not
+    // model (DONTFORK: a phenotype fork exists) declines. Linux's argument
+    // order: alignment before a zero length.
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_READ | PROT_WRITE) == 0, b"L23j\n");
+    (n as *mut u64).write_volatile(0xDEAD_BEEF);
+    leg!(rep, svc3(NR_MADVISE, n as u64, 4096, MADV_DONTNEED) == 0, b"L23k\n");
+    leg!(rep, (n as *const u64).read_volatile() == 0, b"L23l\n");             // released: zero again
+    leg!(rep, svc3(NR_MADVISE, 0x50000000, 4096, MADV_DONTNEED) == NEG_ENOMEM, b"L23m\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64, 4096, MADV_WILLNEED) == 0, b"L23n\n");
+    leg!(rep, svc3(NR_MADVISE, 0x50000000, 4096, MADV_WILLNEED) == NEG_ENOMEM, b"L23o\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64, 4096, MADV_DONTFORK) == NEG_ENOSYS, b"L23p\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64 + 1, 4096, MADV_DONTNEED) == NEG_EINVAL, b"L23q\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64, 0, MADV_DONTNEED) == 0, b"L23r\n");
+    // Outside the burrow window the decommit core declines; a hole there is
+    // still Linux's ENOMEM (L23m), a MAPPED page -- this binary's own data --
+    // is ENOSYS and keeps its bytes (the positive control that "declined"
+    // means untouched).
+    let bw = &raw mut BELOW_WINDOW_PAGE as *mut u8;
+    bw.write_volatile(0x5a);
+    leg!(rep, svc3(NR_MADVISE, bw as u64, 4096, MADV_DONTNEED) == NEG_ENOSYS, b"L23s\n");
+    leg!(rep, bw.read_volatile() == 0x5a, b"L23t\n");
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
 
     // --- L24-L31: signals (V-6b) --------------------------------------------

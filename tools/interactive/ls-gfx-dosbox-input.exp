@@ -10,7 +10,7 @@
 #   BIOS keyboard buffer -> INT 21h AH=08h in the guest program.
 #
 # THE DOS PROGRAM (DX3K.COM): a 67-byte DOS .COM emitted by
-# tools/dx3-keyprog.py, baked at the devramfs root (reached at /bin/DX3K.COM
+# tools/dx3-keyprog.py, baked into the initrd's bin/ (reached at /bin/DX3K.COM
 # post-pivot, joey's /bin bind). It prints "HITKEY", reads ONE key with no echo
 # (AH=08h), and writes "KEY=<c>" to C:\OUT.TXT where <c> is the byte read. The
 # file readback is the verifiable signal (DOS console output paints the pane,
@@ -57,7 +57,7 @@ lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
 # Stage the baked keystroke program into the dir we mount as C: (same /bin bind
-# path as DX2C.COM -- devramfs root survives joey's pivot only under /bin).
+# path as DX2C.COM -- the initrd's bin/ survives joey's pivot under /bin).
 lc_send "cp /bin/DX3K.COM /home/michael/DX3K.COM"
 after 1500
 

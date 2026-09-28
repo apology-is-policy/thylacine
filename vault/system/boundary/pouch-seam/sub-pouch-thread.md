@@ -7,6 +7,7 @@ code:
   - usr/lib/pouch/patches/0004-pouch-pthread.patch
   - usr/lib/pouch/patches/0022-pouch-nanosleep.patch
   - usr/lib/pouch/patches/0033-pouch-getattr-np-main-stack.patch
+  - usr/lib/pouch/patches/0045-pouch-main-stack-auxv.patch
   - usr/pouch-hello/pouch-hello-threads.c
 audit: hard
 guarded-by: [inv-i9]
@@ -14,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -35,9 +36,12 @@ because on Thylacine a sleep IS a wait-on-address with a timeout.
 - `__unmapself` (asm) → `SYS_BURROW_DETACH` then `SYS_THREAD_EXIT`.
 - `clock_nanosleep(clk, flags, req, rem)` → a torpor wait on a private
   stack word nobody wakes, looped against a deadline.
-- `pthread_getattr_np(main thread)` → the exec mapping itself:
-  `[0x7ff00000, 0x80000000)`, 1 MiB (0033). A created thread still reports
-  musl's own `t->stack` / `t->stack_size`.
+- `pthread_getattr_np(main thread)` → the extent the kernel STATES in the
+  auxv pair `AT_STACK_BASE` / `AT_STACK_SIZE` (0045; 8 MiB since B-1b —
+  0033's mirror of `exec.h` is gone); a kernel that writes neither tag is
+  refused with ENOSYS, never guessed. A created thread still reports musl's
+  own `t->stack` / `t->stack_size`, and its `guardsize` is a real PROT_NONE
+  piece of the mapping since 0044 ([[sub-pouch-mem]]).
 
 ## Mechanism
 
@@ -109,8 +113,9 @@ JavaScriptCore did — `WTF::StackBounds` feeds the VM's recursion limit, so
 `jsc` threw a stack overflow on its first call and could not even print it.
 A conservative collector or Rust std's main-thread guard would read the
 same wrong answer. The fix returns the mapping the kernel actually makes —
-`POUCH_MAIN_STACK_TOP` / `_SIZE` MIRROR `EXEC_USER_STACK_TOP` / `_SIZE` in
-`kernel/include/thylacine/exec.h` — a 1 MiB SPARSE demand-zero reservation
+`POUCH_MAIN_STACK_TOP` / `_SIZE` MIRRORED `EXEC_USER_STACK_TOP` / `_SIZE` in
+`kernel/include/thylacine/exec.h` until 0045 derived them from the auxv
+(below) — a 1 MiB (8 MiB since B-1b) SPARSE demand-zero reservation
 (`exec_map_user_stack` is `burrow_create_anon_lazy` since LINEAGE L-4a)
 over a real one-page `prot==0` guard VMA. So the main thread, unlike a
 created one, HAS a working guard page. `/pouch-hello-threads` pins the
@@ -126,6 +131,19 @@ maps-row leg ([[sub-pouch-seam]]). The
 first version of the second half compared libc with two literals written in
 the prover — a copy of the copy, which stays green when the kernel's constant
 moves and libc does not (audit r1 F3); the prover holds no literal now.
+
+**Derived, not mirrored (0045, B-1b, 2026-09-23).** The mirror constants are
+gone. exec writes the pair `AT_STACK_BASE` (0x5342) / `AT_STACK_SIZE` (0x5353)
+— private tags above musl's `AUX_CNT`, beside `AT_VDSO_CLOCK` — from the very
+constants that size the mapping ([[sub-kernel-exec]]), and
+`pthread_getattr_np` walks `libc.auxv` for them; a kernel that writes neither
+is refused with ENOSYS, never guessed (0034's rule: a skew is loud). The stack
+is 8 MiB (decision 4 of the browser arc; JavaScriptCore asks for 5). The
+prover keeps the maps-row equality and adds `size >= 8 MiB`, a 4 MiB
+`volatile` frame touched at both ends (fatal under 1 MiB), and every worker's
+`---p` row of exactly its `guardsize` immediately below its `stackaddr` in
+`/proc/<pid>/maps` — the guard VMA exists; `/pouch-hello-guard` proves it
+faults ([[sub-pouch-mem]]).
 
 ## Data structures
 
@@ -191,21 +209,18 @@ already changed does not even take `torpor_lock`.
 
 ## Seams
 
-[[seam-pouch-guard-pages]] (stack guard pages are silently absent) ·
+[[seam-pouch-guard-pages]] (closed at B-1b: the guard is real) ·
 [[seam-pouch-process-shared]] (`PTHREAD_PROCESS_SHARED` compiles and
 links but does not synchronize cross-Proc — torpor's wake set is keyed on
 the caller's Proc).
 
 ## Caveats
 
-- **Stack guard pages do not exist for CREATED threads** (the main
-  thread's exec mapping has a real guard VMA; see 0033 above). musl allocates the stack
-  `PROT_NONE` then mprotects the usable part RW; pouch's `mmap` ignores
-  `prot` (always RW) and `mprotect` returns `ENOSYS`, which
-  `pthread_create` tolerates by design (`&& errno != ENOSYS`). Overflow
-  therefore corrupts the guard region instead of faulting, until it runs
-  past the whole region into an unmapped page. Needs a kernel
-  VMA-permission syscall.
+- A created thread's guard is musl's `DEFAULT_GUARD_SIZE` (8 KiB) unless
+  the attr says otherwise; it and the usable part are two pieces of ONE
+  mapping at two prots, and `__unmapself` (0004) detaches both in one range
+  detach. (Until B-1b the guard was writable — pouch's `mmap` minted RW
+  whatever the prot and `mprotect` was ENOSYS; [[sub-pouch-mem]].)
 - `pthread_cancel` sets the flag but cannot interrupt a blocked syscall
   (no `SIGCANCEL`); `pthread_atfork` is a no-op (no fork);
   `SYS_set_robust_list` is a sentinel, so a thread that dies mid-hold

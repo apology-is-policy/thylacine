@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/PROWL-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -45,6 +45,19 @@ control file, and the kernel's two-axis check — owner, or the relevant
 capability — decides. A confined user acts only on processes it could
 already act on. The monitor confers nothing and validates nothing on the
 kernel's behalf.
+
+**The memory view (prowl-6) shows the capacity figures as the kernel holds
+them.** The header's third row is the user pool from `/ctl/memory`, filled to
+charged over pool with the free physical count beside it; the table's `TBL`
+column is the page-table share of each process's charge, read from the
+`TABLES` column the kernel added to `/ctl/procs` for it; and the detail
+pane's first line is the selected process's footprint from
+`/proc/<pid>/status` — charge, tables, file pages, peak and budget — which is
+readable by everyone, so it renders where the sched half below it is denied.
+prowl adds no figure of its own: every number is a kernel counter, and the
+only arithmetic is the meter's fill. The parsers are exercised by the
+interactive gate alone (the manifest's "no host-tested lib half" stands; see
+Caveats).
 
 ## Mechanism
 
@@ -142,7 +155,8 @@ pane covers one process at a time.
 
 - **It reports a truncated process list as the complete one, and it cannot
   do otherwise.** The kernel's process-table renderer stops walking when
-  its fixed buffer fills, at roughly thirty processes. prowl's header row
+  its fixed buffer fills — four kilobytes, some fifty to sixty processes
+  since the buffer doubled (#210). prowl's header row
   prints the count of rows it parsed — presented, reasonably, as the
   number of processes.
 
@@ -155,13 +169,13 @@ pane covers one process at a time.
   marker, no count, no short read — and no amount of care in prowl can
   recover the fact.
 
-  The workload that reaches thirty processes is a parallel build, which is
+  The workload that reaches the cut is a parallel build, which is
   exactly when a person opens a process monitor. So it under-reports
   precisely under the load it exists to observe (task #158).
 
-- **The staging buffer's stated headroom does not exist.** prowl reads
-  into four kilobytes, noting that the kernel caps at two. Harmless, but
-  the comment implies a margin that is unreachable.
+- **The staging buffer has no headroom.** prowl reads into four kilobytes
+  and the kernel's cap is four kilobytes since #210 doubled it; the comment
+  once claimed a margin and now states the equality.
 
 - **The pure layer is built for testing and has no tests.** The sampler is
   terminal-free, clock-free, and takes its elapsed interval as a
@@ -171,9 +185,9 @@ pane covers one process at a time.
 
   What goes untested is the arithmetic that is the whole product: the
   cross-poll rate derivation, the counter-went-backwards case on
-  identifier reuse, the idle-inversion clamp, the eight-column parse and
-  its deliberate rejection of a nine-token line, and the cycle-safe tree
-  walk. Each is a pure function over a string and an integer. The
+  identifier reuse, the idle-inversion clamp, the nine-column parse and
+  its deliberate rejection of a ten-token line, the padded-field reads behind
+  the memory view, and the cycle-safe tree walk. Each is a pure function over a string and an integer. The
   refactor that would run them is one manifest line and a feature gate —
   the pattern two sibling crates already carry.
 

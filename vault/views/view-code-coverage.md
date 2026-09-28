@@ -65,15 +65,15 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**532 owned · 47 unowned · 579 files (91% owned) · ~12653 unswept lines.**
+**544 owned · 47 unowned · 591 files (92% owned) · ~12688 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **76 files, ~34263 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~35754 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 7 | 17 | 2487 |
-| kernel | 127 | 14 | 1981 |
+| usr/pouch-hello | 11 | 17 | 2486 |
+| kernel | 130 | 13 | 1954 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/kaua-term | 3 | 1 | 276 |
@@ -81,11 +81,12 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34263 lin
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 66 | 1 | 72 |
+| usr/lib | 67 | 1 | 72 |
+| usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
-| usr/coreutils | 60 | 0 | 0 |
+| usr/coreutils | 64 | 0 | 0 |
 | usr/corvus | 2 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
@@ -135,7 +136,7 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34263 lin
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/smp.h | 282 |
-| usr/pouch-hello/pouch-hello.c | 278 |
+| usr/pouch-hello/pouch-hello.c | 277 |
 | usr/kaua-term/src/cmdline.rs | 276 |
 | kernel/include/thylacine/spinlock.h | 275 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
@@ -164,6 +165,7 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34263 lin
 | kernel/vdso.c | 68 |
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
+| usr/bus-probe-child/src/main.rs | 63 |
 | kernel/include/thylacine/cpio.h | 61 |
 | usr/ports/rust/r1-hello/src/main.rs | 60 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
@@ -172,7 +174,6 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34263 lin
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
-| kernel/include/thylacine/devramfs.h | 27 |
 | usr/tapestryd/src/lib.rs | 19 |
 | usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

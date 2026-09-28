@@ -15,11 +15,13 @@
 //
 //   sys_mount.happy_path_grafts_pipe_spoor
 //     sys_pipe_for_proc gives a KOBJ_SPOOR fd; sys_mount_for_proc grafts it at
-//     mount point mp; territory_nmounts goes 0->1; the mount-table holds one
+//     mount point mp with MREPL (a pipe is a file, and only a replacement
+//     mounts at a file); territory_nmounts goes 0->1; the mount-table holds one
 //     extra spoor_ref so the Spoor survives handle_close on the original fd.
 //
 //   sys_mount.idempotent_on_duplicate
-//     Mount the same (mp, source) twice; nmounts stays at 1; no refcount churn.
+//     A flagless mount of the same directory at the same directory point
+//     twice; nmounts stays at 1 and the source's ref at 2 (no refcount churn).
 //
 //   sys_mount.rejects_bad_fd
 //     Out-of-range / negative / closed fd -> -1.
@@ -44,10 +46,36 @@
 //   sys_mount.caller_close_keeps_mount_alive
 //     After mount, handle_close on the source fd; the mount-table entry's ref
 //     keeps the Spoor alive; only Territory destruction frees it.
+//
+//   sys_mount.refuses_a_type_mismatch
+//     Plan 9's Emount, first half (ARCH 9.6.1): a file over a directory and a
+//     directory over a file -> -T_E_NOTDIR under every placement, no entry, the
+//     source's ref unchanged. Controls: a directory over a directory and a file
+//     over a file (MREPL) are accepted.
+//
+//   sys_mount.refuses_all_but_mrepl_at_a_file
+//     Emount's second half: at a file point every mount without MREPL ->
+//     -T_E_NOTDIR: MBEFORE, MAFTER, and a flagless mount (it appends here;
+//     Plan 9's flag 0 is MREPL), each with every subset of MCREATE / MNOEXEC /
+//     MPHENO_LINUX -- all 24 refused sets. MREPL with each subset is accepted,
+//     each replacing the last, and a flagless mount beside the member it
+//     installed is refused and leaves the point as it was.
+//
+//   sys_mount.type_check_reads_only_qtdir
+//     The check compares directory-ness, not the type byte: a file carrying
+//     QTAPPEND|QTEXCL over a plain file or a symlink point, and a directory
+//     carrying QTAPPEND over a plain directory, are accepted; a directory over
+//     a symlink point (the point is the link, DISTRO D-1) -> -T_E_NOTDIR.
+//
+//   sys_mount.accepts_an_ordered_mount_at_a_directory
+//     The refusals' positive control through the inner: MBEFORE and MAFTER of
+//     a directory over a directory each start a union (the new member and the
+//     covered point), and the unmount takes both away with the point's ref.
 
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
@@ -72,12 +100,35 @@ void test_sys_mount_rejects_null_territory(void);
 void test_sys_unmount_removes_entry_and_drops_ref(void);
 void test_sys_unmount_rejects_nonexistent_target(void);
 void test_sys_mount_caller_close_keeps_mount_alive(void);
+void test_sys_mount_refuses_a_type_mismatch(void);
+void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
+void test_sys_mount_type_check_reads_only_qtdir(void);
+void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
 
 // Mint a synthetic mount-point Spoor with a distinct identity (devnone dc '-',
 // devno 0, the given qid.path). The mount table keys on (dc, devno, qid.path).
 static struct Spoor *mkmp(u64 qid_path) {
     struct Spoor *mp = spoor_alloc(&devnone);
     if (mp) mp->qid.path = qid_path;
+    return mp;
+}
+
+// A devnone Spoor of the given type, installed in `p`'s handle table with
+// RIGHT_READ (the table owns the ref and clunks it at proc_free). *out gets the
+// Spoor so a test can watch its ref.
+static hidx_t install_typed_source(struct Proc *p, u8 type, u64 qid_path,
+                                   struct Spoor **out) {
+    struct Spoor *s = spoor_alloc(&devnone);
+    if (!s) return -1;
+    s->qid.path = qid_path;
+    s->qid.type = type;
+    *out = s;
+    return handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, s);
+}
+
+static struct Spoor *mkdirmp(u64 qid_path) {
+    struct Spoor *mp = mkmp(qid_path);
+    if (mp) mp->qid.type = QTDIR;
     return mp;
 }
 
@@ -116,7 +167,7 @@ void test_sys_mount_happy_path_grafts_pipe_spoor(void) {
 
     // Mount the read end at mount point mp. territory.c::mount
     // bumps the Spoor's refcount; the handle still holds its own ref.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), 0,
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL), 0,
         "sys_mount returns 0");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 1,
         "one entry installed");
@@ -128,25 +179,29 @@ void test_sys_mount_happy_path_grafts_pipe_spoor(void) {
 void test_sys_mount_idempotent_on_duplicate(void) {
     struct Proc *p = make_test_proc_with_territory();
     TEST_ASSERT(p != NULL, "proc + territory alloc");
-    struct Spoor *mp = mkmp(42u);
+    struct Spoor *dsrc = NULL;
+    hidx_t dfd = install_typed_source(p, QTDIR, 101u, &dsrc);
+    TEST_ASSERT(dfd >= 0, "install the directory source");
+    struct Spoor *mp = mkdirmp(42u);
     TEST_ASSERT(mp != NULL, "mkmp");
 
-    hidx_t fd_rd = -1, fd_wr = -1;
-    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
-
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), 0, "first mount");
+    // Flagless, so the second call takes mount()'s converge path, which only a
+    // directory point can reach from SYS_MOUNT.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, mp, 0), 0, "first mount");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 1,
         "one entry after first mount");
+    TEST_EXPECT_EQ(dsrc->ref, 2, "the handle and the entry hold the source");
 
     // Duplicate (same mount-point identity + same Spoor source) -> no-op
     // success. The C-API returns 0 without touching nmounts or the refcount.
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), 0,
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, mp, 0), 0,
         "duplicate mount is idempotent (returns 0)");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 1,
         "still one entry after duplicate");
+    TEST_EXPECT_EQ(dsrc->ref, 2, "the duplicate took no ref");
 
-    spoor_unref(mp);
     drop_test_proc(p);
+    spoor_unref(mp);
 }
 
 void test_sys_mount_rejects_bad_fd(void) {
@@ -244,8 +299,8 @@ void test_sys_mount_rejects_invalid_flags(void) {
         "MREPL|MNOEXEC accepted at the syscall boundary");
     // VIVARIUM section 13: MPHENO_LINUX (0x20) is likewise now in the allowlist --
     // userspace (joey composing /viv/bin) can SET it, or the phenotype channel is
-    // unreachable from EL0. A re-mount converges the flags (idempotent), so
-    // layering it onto the MREPL entry above is a valid op that must return 0.
+    // unreachable from EL0. MREPL of the pair already mounted replaces it (the
+    // group replace), so layering it onto the entry above must return 0.
     TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | MPHENO_LINUX), 0,
         "MREPL|MPHENO_LINUX accepted at the syscall boundary");
 
@@ -281,7 +336,7 @@ void test_sys_unmount_removes_entry_and_drops_ref(void) {
 
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), 0, "mount");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL), 0, "mount");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 1, "1 mount");
 
     // Close the handle table fds. Mount-table entry's ref keeps the
@@ -315,7 +370,7 @@ void test_sys_unmount_rejects_nonexistent_target(void) {
     // Add a mount; unmount of a DIFFERENT mount point still fails.
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp42, 0), 0, "mount at 42");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp42, MREPL), 0, "mount at 42");
     TEST_EXPECT_EQ(sys_unmount_for_proc(p, mp43), -1,
         "unmount of unrelated point -> -1");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 1,
@@ -345,7 +400,7 @@ void test_sys_mount_caller_close_keeps_mount_alive(void) {
 
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0), 0, "mount fd_rd");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL), 0, "mount fd_rd");
 
     // Caller closes the source fd. The mount-table's ref keeps the
     // Spoor alive.
@@ -371,4 +426,150 @@ void test_sys_mount_caller_close_keeps_mount_alive(void) {
         "both pipe Spoors freed");
 
     spoor_unref(mp);
+}
+
+void test_sys_mount_refuses_a_type_mismatch(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    struct Spoor *fsrc = NULL, *dsrc = NULL;
+    hidx_t ffd = install_typed_source(p, QTFILE, 100u, &fsrc);
+    hidx_t dfd = install_typed_source(p, QTDIR, 101u, &dsrc);
+    TEST_ASSERT(ffd >= 0 && dfd >= 0, "install the file and directory sources");
+    struct Spoor *dir_mp  = mkdirmp(42u);
+    struct Spoor *file_mp = mkmp(43u);
+    TEST_ASSERT(dir_mp && file_mp, "mkmp");
+
+    const u32 placements[4] = { 0u, MREPL, MBEFORE, MAFTER };
+    for (int i = 0; i < 4; i++) {
+        TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, dir_mp, placements[i]),
+            -T_E_NOTDIR, "a file over a directory -> ENOTDIR");
+        TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, file_mp, placements[i]),
+            -T_E_NOTDIR, "a directory over a file -> ENOTDIR");
+    }
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 0, "nothing installed");
+    TEST_EXPECT_EQ(fsrc->ref, 1, "the refusal released the file source's lookup ref");
+    TEST_EXPECT_EQ(dsrc->ref, 1, "the refusal released the directory source's lookup ref");
+    TEST_EXPECT_EQ(dir_mp->ref, 1, "the directory point is not retained");
+
+    // Controls one variable away: the same sources over a point of their own
+    // type are accepted.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, dir_mp, MREPL), 0,
+        "control: a directory over a directory");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, file_mp, MREPL), 0,
+        "control: a file over a file (MREPL)");
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 2, "control: two entries");
+
+    drop_test_proc(p);
+    spoor_unref(dir_mp);
+    spoor_unref(file_mp);
+}
+
+void test_sys_mount_refuses_all_but_mrepl_at_a_file(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    struct Spoor *fsrc = NULL, *fsrc2 = NULL;
+    hidx_t ffd  = install_typed_source(p, QTFILE, 100u, &fsrc);
+    hidx_t ffd2 = install_typed_source(p, QTFILE, 101u, &fsrc2);
+    TEST_ASSERT(ffd >= 0 && ffd2 >= 0, "install the file sources");
+    struct Spoor *file_mp  = mkmp(43u);
+    struct Spoor *file_mp2 = mkmp(44u);
+    TEST_ASSERT(file_mp && file_mp2, "mkmp");
+
+    // Every placement short of MREPL, each with every subset of the rest.
+    const u32 placements[3] = { 0u, MBEFORE, MAFTER };
+    const u32 extras[3]     = { MCREATE, MNOEXEC, MPHENO_LINUX };
+    for (int i = 0; i < 3; i++) {
+        for (u32 m = 0; m < 8u; m++) {
+            u32 f = placements[i];
+            for (int b = 0; b < 3; b++)
+                if (m & (1u << b)) f |= extras[b];
+            TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, file_mp, f), -T_E_NOTDIR,
+                "a mount at a file without MREPL -> ENOTDIR");
+        }
+    }
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 0, "nothing installed");
+    TEST_EXPECT_EQ(fsrc->ref, 1, "the refusal released the source's lookup ref");
+
+    for (u32 m = 0; m < 8u; m++) {
+        u32 f = MREPL;
+        for (int b = 0; b < 3; b++)
+            if (m & (1u << b)) f |= extras[b];
+        TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, file_mp, f), 0,
+            "control: MREPL of the same pair, with each subset");
+    }
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 1,
+        "control: each MREPL replaced the last");
+    TEST_EXPECT_EQ(fsrc->ref, 2, "control: the table and one mount hold the source");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, file_mp2, MREPL | MNOEXEC), 0,
+        "control: MREPL|MNOEXEC of a file over a file");
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 2, "control: two entries");
+
+    // What the flagless refusal prevents: appended beside the file already
+    // mounted there, a second file would make a two-member group that stalk
+    // searches as a directory, and the mount would return 0 and never show.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd2, file_mp, 0u), -T_E_NOTDIR,
+        "a flagless mount beside a mounted file -> ENOTDIR");
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 2,
+        "the point keeps its one member");
+    TEST_EXPECT_EQ(fsrc2->ref, 1, "the refusal released the second source's ref");
+
+    drop_test_proc(p);
+    spoor_unref(file_mp);
+    spoor_unref(file_mp2);
+}
+
+void test_sys_mount_type_check_reads_only_qtdir(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    struct Spoor *fsrc = NULL, *dsrc = NULL;
+    hidx_t ffd = install_typed_source(p, QTAPPEND | QTEXCL, 100u, &fsrc);
+    hidx_t dfd = install_typed_source(p, QTDIR | QTAPPEND, 101u, &dsrc);
+    TEST_ASSERT(ffd >= 0 && dfd >= 0, "install the file and directory sources");
+    struct Spoor *link_mp = mkmp(45u);
+    struct Spoor *file_mp = mkmp(46u);
+    struct Spoor *dir_mp  = mkdirmp(47u);
+    TEST_ASSERT(link_mp && file_mp && dir_mp, "mkmp");
+    link_mp->qid.type = QTSYMLINK;
+
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, link_mp, MREPL), -T_E_NOTDIR,
+        "a directory over a symlink point -> ENOTDIR");
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 0, "nothing installed");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, link_mp, MREPL), 0,
+        "a file with QTAPPEND|QTEXCL over a symlink point (MREPL)");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, file_mp, MREPL), 0,
+        "a file with QTAPPEND|QTEXCL over a plain file (MREPL)");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, dir_mp, MREPL), 0,
+        "a directory with QTAPPEND over a plain directory");
+    TEST_EXPECT_EQ(territory_nmounts(p->territory), 3, "three entries");
+
+    drop_test_proc(p);
+    spoor_unref(link_mp);
+    spoor_unref(file_mp);
+    spoor_unref(dir_mp);
+}
+
+void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void) {
+    struct Proc *p = make_test_proc_with_territory();
+    TEST_ASSERT(p != NULL, "proc + territory alloc");
+    struct Spoor *dsrc = NULL;
+    hidx_t dfd = install_typed_source(p, QTDIR, 101u, &dsrc);
+    TEST_ASSERT(dfd >= 0, "install the directory source");
+    struct Spoor *dir_mp = mkdirmp(42u);
+    TEST_ASSERT(dir_mp != NULL, "mkmp");
+
+    const u32 ordered[2] = { MBEFORE, MAFTER };
+    for (int i = 0; i < 2; i++) {
+        TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, dir_mp, ordered[i]), 0,
+            "an ordered mount of a directory over a directory");
+        TEST_EXPECT_EQ(territory_nmounts(p->territory), 2,
+            "the union holds the new member and the covered point");
+        TEST_EXPECT_EQ(dir_mp->ref, 2, "the covered member holds the point");
+        TEST_EXPECT_EQ(sys_unmount_for_proc(p, dir_mp), 0, "unmount");
+        TEST_EXPECT_EQ(territory_nmounts(p->territory), 0,
+            "the covered point left with the last member");
+        TEST_EXPECT_EQ(dir_mp->ref, 1, "and released the point");
+    }
+
+    drop_test_proc(p);
+    spoor_unref(dir_mp);
 }

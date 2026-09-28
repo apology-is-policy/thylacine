@@ -22,6 +22,7 @@
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
+#include "../../mm/phys.h"   // the pool park a failing test leaves behind
 #include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
 
@@ -263,10 +264,23 @@ void test_exec_ns_noexec_mount_denied(void);
 void test_exec_ns_pheno_mount_crossing(void);
 void test_mmap_file_noexec_mount_denied(void);
 void test_mmap_file_devenv_never_exec_backs(void);
+void test_map_file_native_arms(void);
+void test_map_file_native_refusals(void);
+void test_map_file_native_noexec_denied(void);
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
 void test_territory_mount_lookup_ref_survives_unmount(void);
+void test_territory_mount_union_keeps_covered(void);   // Plan 9 unions
+void test_territory_mount_no_covered_unless_fresh(void);   // Plan 9 unions
+void test_territory_mount_covered_file_point_stays_plain(void);   // Plan 9 unions
+void test_territory_mount_covered_reposition(void);   // Plan 9 unions
+void test_territory_mount_covered_leaves_with_last(void);   // Plan 9 unions
+void test_territory_mount_covered_needs_two_slots(void);   // Plan 9 unions
+void test_territory_mount_covered_self_mount_refused(void);   // Plan 9 unions
+void test_territory_mount_covered_clone(void);   // Plan 9 unions
+void test_territory_mount_covered_noexec_scoped(void);   // Plan 9 unions
+void test_territory_mount_covered_format_ns(void);   // Plan 9 unions
 void test_territory_root_ref_survives_pivot(void);
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);
@@ -378,6 +392,10 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_pages_charge_the_holder(void);
+void test_demand_page_idle_image_reclaimed_under_pressure(void);
+void test_demand_page_reclaim_asks_for_the_shortfall(void);
+void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
@@ -422,11 +440,13 @@ void test_exec_writable_segment_is_sparse(void);
 void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
+void test_execve_load_refuses_nomem_at_the_pool_edge(void);
+void test_execve_load_refuses_nomem_on_the_frame(void);
 void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
-void test_exec_interp_dispatch_follows_parameter(void); // Design D Leg C (audit F3)
+void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg C)
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -474,6 +494,10 @@ void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
 void test_cow_clone_shares_readonly_eager_anon(void);
 void test_cow_break_read_then_write_copies(void);
 void test_cow_break_sole_holder_takes_in_place(void);
+void test_cow_break_copy_pins_the_original_until_replaced(void);
+void test_cow_read_queued_behind_break_is_handled(void);
+void test_cow_break_copy_releases_the_share_on_a_failed_replace(void);
+void test_cow_break_copy_last_share_frees_after_the_replace(void);
 void test_fork_frame_init(void);
 void test_fork_rfork_arg_rejection(void);
 void test_fork_table_copy(void);
@@ -533,12 +557,30 @@ void test_burrow_map_fixed_refusals(void);
 void test_burrow_map_fixed_successive(void);
 void test_burrow_map_fixed_into_free_space(void);
 void test_burrow_munmap_range_tiled(void);                    // #199 (D-3c)
-void test_burrow_munmap_range_partial_refused(void);
+void test_burrow_munmap_range_partial_trims(void);
 void test_burrow_munmap_range_empty_ok(void);
 void test_burrow_detach_file_frees_outside_lock(void);       // #F1 (D-3c round)
 void test_burrow_munmap_range_file_frees_outside_lock(void);
 void test_burrow_map_fixed_replace_file_frees_outside_lock(void);   // #F5 (D-3c re-audit)
 void test_burrow_map_fixed_refuses_code_alias(void);                 // #F8 (D-3c re-audit)
+// B-1a' (capacity): kernel/test/test_capacity.c
+void test_detach_range_trims_left_right_middle(void);
+void test_detach_range_across_burrows_and_holes(void);
+void test_detach_range_refusals_change_nothing(void);
+void test_detach_eager_pages_go_with_the_last_piece(void);
+void test_detach_lazy_over_256mib_detaches(void);
+void test_detach_four_gib_reservation_round_trips(void);
+void test_capacity_window_sized_reservation_releases_in_bounded_steps(void);
+void test_capacity_replace_window_releases_orphans(void);
+void test_capacity_pagemap_nodes_charged_and_reclaimed(void);
+void test_capacity_default_is_ram_minus_reserve(void);
+void test_capacity_pool_refuses_users_keeps_tcb(void);
+void test_capacity_death_returns_charges_to_pool(void);
+void test_capacity_fork_clone_charges_pages_and_nodes(void);
+void test_capacity_page_tables_charged_and_reclaimed(void);
+void test_capacity_memory_bomb_leaves_the_reserve(void);
+void test_capacity_fork_costs_the_pool_only_its_nodes(void);
+void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -806,6 +848,7 @@ void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
 void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
 void test_vivarium_mprotect_domain(void);                // B-1a
+void test_vivarium_madvise_domain(void);                 // B-1b
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d + N-3
 void test_vivarium_futex_decide(void);                   // N-3
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
@@ -883,6 +926,7 @@ void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
 void test_devctl_walk_unknown_misses(void);
 void test_devctl_read_procs_format(void);
+void test_devctl_procs_tables_column(void);
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
@@ -986,6 +1030,14 @@ void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
 void test_devramfs_readdir_paginates_no_dup_no_skip(void);
+void test_devramfs_tree_walk_and_dotdot(void);
+void test_devramfs_tree_readdir_per_directory(void);
+void test_devramfs_tree_stat_read_lookup(void);
+void test_devramfs_tree_load_refusals(void);
+void test_devramfs_tree_truncates_at_cap(void);
+void test_devramfs_load_complete(void);
+void test_devramfs_live_lib_when_prover_ships(void);
+void test_devramfs_live_bin_holds_the_programs(void);
 void test_perm_check_owner_group_other(void);
 void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
@@ -1058,6 +1110,13 @@ void test_stalk_remove_parent_reports_union_point(void);
 void test_stalk_mount_names_crossed_base(void);
 void test_stalk_mount_names_crossed_union_base(void);
 void test_stalk_union_dissolved_helper(void);
+void test_stalk_union_covered_walk(void);
+void test_stalk_union_covered_after(void);
+void test_stalk_union_covered_readdir(void);
+void test_stalk_union_covered_create(void);
+void test_stalk_union_covered_unmount(void);
+void test_stalk_union_covered_dissolved(void);
+void test_stalk_union_covered_holder(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -1100,6 +1159,7 @@ void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
 void test_devsrv_post_listener(void);
+void test_devsrv_service_keys_distinct(void);
 void test_devcap_registered(void);
 void test_devcap_walk_grant_use(void);
 void test_devcap_walk_unknown(void);
@@ -1546,6 +1606,7 @@ void test_territory_shed_drops_nested_orphan(void);
 void test_territory_shed_full_table_boundary(void);
 void test_territory_shed_releases_mp_path_once(void);
 void test_territory_shed_initial_chroot_and_root_as_source(void);
+void test_territory_shed_covered_shares_fate(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -1627,6 +1688,10 @@ void test_sys_mount_rejects_null_territory(void);
 void test_sys_unmount_removes_entry_and_drops_ref(void);
 void test_sys_unmount_rejects_nonexistent_target(void);
 void test_sys_mount_caller_close_keeps_mount_alive(void);
+void test_sys_mount_refuses_a_type_mismatch(void);
+void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
+void test_sys_mount_type_check_reads_only_qtdir(void);
+void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
 void test_attach_probe_round_trip(void);
 void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);
@@ -1976,6 +2041,9 @@ struct test_case g_tests[] = {
     { "exec_ns.pheno_mount_crossing",                   test_exec_ns_pheno_mount_crossing,                    false, NULL },
     { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
     { "mmap_file.devenv_never_exec_backs", test_mmap_file_devenv_never_exec_backs, false, NULL },
+    { "map_file.native_arms", test_map_file_native_arms, false, NULL },
+    { "map_file.native_refusals", test_map_file_native_refusals, false, NULL },
+    { "map_file.native_noexec_denied", test_map_file_native_noexec_denied, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
@@ -2035,6 +2103,16 @@ struct test_case g_tests[] = {
     { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
     { "territory_mount.format_ns",                        test_territory_mount_format_ns,                        false, NULL },
     { "territory_mount.lookup_ref_survives_unmount",      test_territory_mount_lookup_ref_survives_unmount,      false, NULL },
+    { "territory_mount.union_keeps_covered",              test_territory_mount_union_keeps_covered,              false, NULL },
+    { "territory_mount.no_covered_unless_fresh",          test_territory_mount_no_covered_unless_fresh,          false, NULL },
+    { "territory_mount.covered_file_point_stays_plain",   test_territory_mount_covered_file_point_stays_plain,   false, NULL },
+    { "territory_mount.covered_reposition",               test_territory_mount_covered_reposition,               false, NULL },
+    { "territory_mount.covered_leaves_with_last",         test_territory_mount_covered_leaves_with_last,         false, NULL },
+    { "territory_mount.covered_needs_two_slots",          test_territory_mount_covered_needs_two_slots,          false, NULL },
+    { "territory_mount.covered_self_mount_refused",       test_territory_mount_covered_self_mount_refused,       false, NULL },
+    { "territory_mount.covered_clone",                    test_territory_mount_covered_clone,                    false, NULL },
+    { "territory_mount.covered_noexec_scoped",            test_territory_mount_covered_noexec_scoped,            false, NULL },
+    { "territory_mount.covered_format_ns",                test_territory_mount_covered_format_ns,                false, NULL },
     { "territory_mount.root_ref_survives_pivot",          test_territory_root_ref_survives_pivot,                false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
     { "territory.chroot_idempotent_same_spoor",           test_territory_chroot_idempotent_same_spoor,           false, NULL },
@@ -2059,6 +2137,7 @@ struct test_case g_tests[] = {
     { "territory.shed_full_table_boundary",               test_territory_shed_full_table_boundary,               false, NULL },
     { "territory.shed_releases_mp_path_once",             test_territory_shed_releases_mp_path_once,             false, NULL },
     { "territory.shed_initial_chroot_and_root_as_source", test_territory_shed_initial_chroot_and_root_as_source, false, NULL },
+    { "territory.shed_covered_shares_fate", test_territory_shed_covered_shares_fate, false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
@@ -2181,6 +2260,18 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_pages_charge_the_holder",
+                                       test_demand_page_file_pages_charge_the_holder,
+                                                                           false, NULL },
+    { "demand_page.idle_image_reclaimed_under_pressure",
+                                       test_demand_page_idle_image_reclaimed_under_pressure,
+                                                                           false, NULL },
+    { "demand_page.reclaim_asks_for_the_shortfall",
+                                       test_demand_page_reclaim_asks_for_the_shortfall,
+                                                                           false, NULL },
+    { "demand_page.alignment_abort_is_bus_not_handled",
+                                       test_demand_page_alignment_abort_is_bus_not_handled,
+                                                                           false, NULL },
     { "demand_page.file_rodata_prot",  test_demand_page_file_rodata_prot,  false, NULL },
     { "demand_page.file_geometry_shift_bails", test_demand_page_file_geometry_shift_bails, false, NULL },
     { "demand_page.file_geometry_shift_bails_single", test_demand_page_file_geometry_shift_bails_single, false, NULL },
@@ -2232,6 +2323,10 @@ struct test_case g_tests[] = {
     { "exec.setup_constraints",        test_exec_setup_constraints,        false, NULL },
     { "execve.load_into_detached",     test_execve_load_into_detached,     false, NULL },
     { "execve.load_into_rejects_dirty", test_execve_load_into_rejects_dirty, false, NULL },
+    { "execve.load_refuses_nomem_at_the_pool_edge",
+                                       test_execve_load_refuses_nomem_at_the_pool_edge, false, NULL },
+    { "execve.load_refuses_nomem_on_the_frame",
+                                       test_execve_load_refuses_nomem_on_the_frame, false, NULL },
     { "execve.failed_load_leaves_target_drainable",
                                        test_execve_failed_load_leaves_target_drainable,
                                                                            false, NULL },
@@ -2240,7 +2335,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.load_failure_leaves_phenotype", test_exec_load_failure_leaves_phenotype, false, NULL },
     { "exec.reset_follows_decided_phenotype", test_exec_reset_follows_decided_phenotype, false, NULL },
-    { "exec.interp_dispatch_follows_parameter", test_exec_interp_dispatch_follows_parameter, false, NULL },
+    { "exec.interp_dispatch_every_phenotype", test_exec_interp_dispatch_every_phenotype, false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
@@ -2340,6 +2435,14 @@ struct test_case g_tests[] = {
                                        test_cow_break_read_then_write_copies, false, NULL },
     { "cow.break_sole_holder_takes_in_place",
                                        test_cow_break_sole_holder_takes_in_place, false, NULL },
+    { "cow.break_copy_pins_the_original_until_replaced",
+                                       test_cow_break_copy_pins_the_original_until_replaced, false, NULL },
+    { "cow.read_queued_behind_break_is_handled",
+                                       test_cow_read_queued_behind_break_is_handled, false, NULL },
+    { "cow.break_copy_releases_the_share_on_a_failed_replace",
+                                       test_cow_break_copy_releases_the_share_on_a_failed_replace, false, NULL },
+    { "cow.break_copy_last_share_frees_after_the_replace",
+                                       test_cow_break_copy_last_share_frees_after_the_replace, false, NULL },
     { "addrspace.alloc_shape",         test_addrspace_alloc_shape,         false, NULL },
     { "addrspace.refcount",            test_addrspace_refcount,            false, NULL },
     { "addrspace.kproc_has_none",      test_addrspace_kproc_has_none,      false, NULL },
@@ -2415,12 +2518,30 @@ struct test_case g_tests[] = {
     { "burrow.map_fixed_successive",          test_burrow_map_fixed_successive,          false, NULL },
     { "burrow.map_fixed_into_free_space",     test_burrow_map_fixed_into_free_space,     false, NULL },
     { "burrow.munmap_range_tiled",            test_burrow_munmap_range_tiled,            false, NULL },
-    { "burrow.munmap_range_partial_refused",  test_burrow_munmap_range_partial_refused,  false, NULL },
+    { "burrow.munmap_range_partial_trims",    test_burrow_munmap_range_partial_trims,    false, NULL },
     { "burrow.munmap_range_empty_ok",         test_burrow_munmap_range_empty_ok,         false, NULL },
     { "burrow.detach_file_frees_outside_lock", test_burrow_detach_file_frees_outside_lock, false, NULL },
     { "burrow.munmap_range_file_frees_outside_lock", test_burrow_munmap_range_file_frees_outside_lock, false, NULL },
     { "burrow.map_fixed_replace_file_frees_outside_lock", test_burrow_map_fixed_replace_file_frees_outside_lock, false, NULL },
     { "burrow.map_fixed_refuses_code_alias", test_burrow_map_fixed_refuses_code_alias, false, NULL },
+    { "detach.range_trims_left_right_middle",  test_detach_range_trims_left_right_middle,  false, NULL },
+    { "detach.range_across_burrows_and_holes", test_detach_range_across_burrows_and_holes, false, NULL },
+    { "detach.range_refusals_change_nothing",  test_detach_range_refusals_change_nothing,  false, NULL },
+    { "detach.eager_pages_go_with_the_last_piece", test_detach_eager_pages_go_with_the_last_piece, false, NULL },
+    { "detach.lazy_over_256mib_detaches",      test_detach_lazy_over_256mib_detaches,      false, NULL },
+    { "detach.four_gib_reservation_round_trips", test_detach_four_gib_reservation_round_trips, false, NULL },
+    { "capacity.window_sized_reservation_releases_in_bounded_steps",
+                                               test_capacity_window_sized_reservation_releases_in_bounded_steps, false, NULL },
+    { "capacity.replace_window_releases_orphans", test_capacity_replace_window_releases_orphans, false, NULL },
+    { "capacity.pagemap_nodes_charged_and_reclaimed", test_capacity_pagemap_nodes_charged_and_reclaimed, false, NULL },
+    { "capacity.default_is_ram_minus_reserve", test_capacity_default_is_ram_minus_reserve, false, NULL },
+    { "capacity.pool_refuses_users_keeps_tcb", test_capacity_pool_refuses_users_keeps_tcb, false, NULL },
+    { "capacity.death_returns_charges_to_pool", test_capacity_death_returns_charges_to_pool, false, NULL },
+    { "capacity.fork_clone_charges_pages_and_nodes", test_capacity_fork_clone_charges_pages_and_nodes, false, NULL },
+    { "capacity.page_tables_charged_and_reclaimed", test_capacity_page_tables_charged_and_reclaimed, false, NULL },
+    { "capacity.memory_bomb_leaves_the_reserve",   test_capacity_memory_bomb_leaves_the_reserve,   false, NULL },
+    { "capacity.fork_costs_the_pool_only_its_nodes", test_capacity_fork_costs_the_pool_only_its_nodes, false, NULL },
+    { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
@@ -2712,6 +2833,7 @@ struct test_case g_tests[] = {
     { "vivarium.mmap_file_domain",       test_vivarium_mmap_file_domain,       false, NULL },
     { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
     { "vivarium.mprotect_domain",        test_vivarium_mprotect_domain,        false, NULL },
+    { "vivarium.madvise_domain",         test_vivarium_madvise_domain,         false, NULL },
     { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.futex_decide",           test_vivarium_futex_decide,           false, NULL },
@@ -2794,6 +2916,7 @@ struct test_case g_tests[] = {
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },
     { "devctl.walk_unknown_misses",    test_devctl_walk_unknown_misses,    false, NULL },
     { "devctl.read_procs_format",      test_devctl_read_procs_format,      false, NULL },
+    { "devctl.procs_tables_column",    test_devctl_procs_tables_column,    false, NULL },
     { "devctl.cpu_sources_live",       test_devctl_cpu_sources_live,       false, NULL },
     { "devctl.read_memory_format",     test_devctl_read_memory_format,     false, NULL },
     { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },
@@ -2909,6 +3032,19 @@ struct test_case g_tests[] = {
     { "devramfs.walk_attrs",           test_devramfs_walk_attrs,           false, NULL },
     { "devramfs.readdir_paginates_no_dup_no_skip",
                                        test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
+    { "devramfs.tree_walk_and_dotdot", test_devramfs_tree_walk_and_dotdot, false, NULL },
+    { "devramfs.tree_readdir_per_directory",
+                                       test_devramfs_tree_readdir_per_directory, false, NULL },
+    { "devramfs.tree_stat_read_lookup",
+                                       test_devramfs_tree_stat_read_lookup, false, NULL },
+    { "devramfs.tree_load_refusals",   test_devramfs_tree_load_refusals,   false, NULL },
+    { "devramfs.tree_truncates_at_cap",
+                                       test_devramfs_tree_truncates_at_cap, false, NULL },
+    { "devramfs.load_complete",        test_devramfs_load_complete,        false, NULL },
+    { "devramfs.live_lib_when_prover_ships",
+                                       test_devramfs_live_lib_when_prover_ships, false, NULL },
+    { "devramfs.live_bin_holds_the_programs",
+                                       test_devramfs_live_bin_holds_the_programs, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
     { "devsrv.open_root_dir",          test_devsrv_open_root_dir,          false, NULL },
     { "devsrv.stat_native_root",       test_devsrv_stat_native_root,       false, NULL },
@@ -2923,6 +3059,7 @@ struct test_case g_tests[] = {
     { "devsrv.registry_lifecycle",     test_devsrv_registry_lifecycle,     false, NULL },
     { "devsrv.svc_ref_holds_registry", test_devsrv_svc_ref_holds_registry, false, NULL },
     { "devsrv.post_listener",          test_devsrv_post_listener,          false, NULL },
+    { "devsrv.service_keys_distinct",  test_devsrv_service_keys_distinct,  false, NULL },
     { "devcap.registered",             test_devcap_registered,             false, NULL },
     { "devcap.walk_grant_use",         test_devcap_walk_grant_use,         false, NULL },
     { "devcap.walk_unknown",           test_devcap_walk_unknown,           false, NULL },
@@ -3654,6 +3791,10 @@ struct test_case g_tests[] = {
     { "sys_unmount.removes_entry_and_drops_ref",       test_sys_unmount_removes_entry_and_drops_ref,       false, NULL },
     { "sys_unmount.rejects_nonexistent_target",        test_sys_unmount_rejects_nonexistent_target,        false, NULL },
     { "sys_mount.caller_close_keeps_mount_alive",      test_sys_mount_caller_close_keeps_mount_alive,      false, NULL },
+    { "sys_mount.refuses_a_type_mismatch",             test_sys_mount_refuses_a_type_mismatch,             false, NULL },
+    { "sys_mount.refuses_all_but_mrepl_at_a_file",     test_sys_mount_refuses_all_but_mrepl_at_a_file,     false, NULL },
+    { "sys_mount.type_check_reads_only_qtdir",         test_sys_mount_type_check_reads_only_qtdir,         false, NULL },
+    { "sys_mount.accepts_an_ordered_mount_at_a_directory", test_sys_mount_accepts_an_ordered_mount_at_a_directory, false, NULL },
     { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
     { "sys_mlockall.cap_gate",                         test_sys_mlockall_cap_gate,                         false, NULL },
     { "sys_set_dumpable.one_way_to_zero",              test_sys_set_dumpable_one_way_to_zero,              false, NULL },
@@ -3929,6 +4070,13 @@ struct test_case g_tests[] = {
     { "stalk.mount_names_crossed_base", test_stalk_mount_names_crossed_base, false, NULL },
     { "stalk.mount_names_crossed_union_base", test_stalk_mount_names_crossed_union_base, false, NULL },
     { "stalk.union_dissolved_helper", test_stalk_union_dissolved_helper, false, NULL },
+    { "stalk.union_covered_walk",        test_stalk_union_covered_walk,     false, NULL },
+    { "stalk.union_covered_after",       test_stalk_union_covered_after,    false, NULL },
+    { "stalk.union_covered_readdir",     test_stalk_union_covered_readdir,  false, NULL },
+    { "stalk.union_covered_create",      test_stalk_union_covered_create,   false, NULL },
+    { "stalk.union_covered_unmount",     test_stalk_union_covered_unmount,  false, NULL },
+    { "stalk.union_covered_dissolved",   test_stalk_union_covered_dissolved, false, NULL },
+    { "stalk.union_covered_holder",      test_stalk_union_covered_holder,   false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
@@ -4059,6 +4207,21 @@ void test_run_all(void) {
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left global console state armed (see LEAKED-STATE)");
+        }
+
+        // The user pool's test park is the seventh piece of that state. A
+        // capacity test parks the pool to its edge, asserts, and unparks on its
+        // last line, so the first failing assert left the pool FULL and every
+        // allocation after it refused: one red test became a hundred and
+        // seventy under the nowantstrip and noshortfall sabotages. Same
+        // discipline: release it, name it, redden a test that passed leaking it.
+        u32 parked = capacity_pool_unpark_all_for_test();
+        if (parked != 0) {
+            uart_puts("POOL-PARKED(");
+            uart_putdec(parked);
+            uart_puts(" pages released) ");
+            if (!current_test->failed)
+                test_fail("test left the pool parked (see POOL-PARKED)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the

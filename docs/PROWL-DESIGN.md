@@ -338,6 +338,27 @@ nothing on the kernel's behalf (the kernel gates the reads).
   READ-ONLY-telemetry claim, the stamp single-writer discipline, the OQ-4 gate,
   walk-safety, and the buffer discipline all held. Closed list:
   `memory/audit_prowl5_closed_list.md`.
+- **prowl-6 (the memory view): LANDED.** The B-1a' capacity figures on the
+  screen. `/ctl/procs` gains a `TABLES` column after `PAGES` (the page-table
+  share of the holder count, an atomic load like its neighbours, so a reader
+  takes the data view without `/proc/<pid>/status`); every consumer of the
+  layout moved with it, found by a census with a control (prowl's fixed-count
+  parse, `ps`'s end-anchored parse + its `TBL` column + the beacon table's nine
+  alignments, coreutil-smoke's frame check; Halcyon and diorama read only the
+  leading columns). prowl's header gains a third row, the user-pool meter
+  (`MEM [` charged over pool with the free physical count beside it, from
+  `/ctl/memory`), the table a `TBL` column, the `d` pane a first line
+  `mem: pages P (tables T, file F)  peak K  budget B` from `/proc/<pid>/status`
+  (readable by everyone, so it renders where the OQ-4 gate denies the sched
+  half). Tests: `devctl.procs_tables_column` (a child of the test's Proc -- the
+  walker lists the tree, never an orphan -- reserves a lazy page and touches
+  it: 4 pages, 3 tables; its own row reads both back, so a renderer printing
+  PAGES twice reads 4 4; reaped before the asserts) + the extended
+  `devctl.read_procs_format` (the header's column order); the `prowl.exp` E2E
+  gained the pool-meter figures, `TBL` and `budget` legs. The manual gained `13-processes.md` (Processes and memory).
+  No new authority, no new surface: a small holotype round on the diff,
+  recorded on the B-1a' audit-trigger row. As-built: the vault dossiers
+  `sub-kernel-devctl`, `sub-prowl`, `sub-coreutils-presenters`.
 
 ---
 

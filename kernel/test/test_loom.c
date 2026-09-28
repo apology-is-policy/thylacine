@@ -84,7 +84,7 @@ static void test_proc_drop(struct Proc *p) {
 void test_loom_create_geometry(void) {
     u64 created0 = loom_total_created();
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16) returned NULL");
     TEST_EXPECT_EQ(loom_total_created() - created0, (u64)1, "created counter +1");
 
@@ -125,18 +125,18 @@ void test_loom_create_geometry(void) {
 }
 
 void test_loom_create_rejects_bad_args(void) {
-    TEST_ASSERT(loom_create(0, 0) == NULL, "sq_entries 0 rejected");
-    TEST_ASSERT(loom_create(3, 6) == NULL, "non-power-of-2 sq rejected");
-    TEST_ASSERT(loom_create(LOOM_MAX_ENTRIES * 2u, LOOM_MAX_ENTRIES * 4u) == NULL,
+    TEST_ASSERT(loom_create(0, 0, false) == NULL, "sq_entries 0 rejected");
+    TEST_ASSERT(loom_create(3, 6, false) == NULL, "non-power-of-2 sq rejected");
+    TEST_ASSERT(loom_create(LOOM_MAX_ENTRIES * 2u, LOOM_MAX_ENTRIES * 4u, false) == NULL,
                 "sq over max rejected");
-    TEST_ASSERT(loom_create(8, 4) == NULL, "cq < sq rejected");
-    TEST_ASSERT(loom_create(8, 6) == NULL, "non-power-of-2 cq rejected");
+    TEST_ASSERT(loom_create(8, 4, false) == NULL, "cq < sq rejected");
+    TEST_ASSERT(loom_create(8, 6, false) == NULL, "non-power-of-2 cq rejected");
 }
 
 void test_loom_refcount_lifecycle(void) {
     u64 destroyed0 = loom_total_destroyed();
 
-    struct Loom *l = loom_create(4, 8);
+    struct Loom *l = loom_create(4, 8, false);
     TEST_ASSERT(l != NULL, "loom_create(4,8) returned NULL");
 
     loom_ref(l);   // refcount 1 -> 2
@@ -432,7 +432,7 @@ void test_loom_register_buffers_replace(void) {
 // `Cardinality(cq) < CQ_CAP` guard + CqNeverOverfull.
 // ---------------------------------------------------------------------------
 void test_loom_post_cqe_back_pressure(void) {
-    struct Loom *l = loom_create(4, 4);   // cq_entries = 4 (smallest exercising wrap)
+    struct Loom *l = loom_create(4, 4, false);   // cq_entries = 4 (smallest exercising wrap)
     TEST_ASSERT(l != NULL, "loom_create(4,4)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -476,7 +476,7 @@ void test_loom_post_cqe_back_pressure(void) {
 // Loom-3 trap, since the ring is userspace-controlled there). Here we corrupt
 // the shared header and assert the CQE still lands at the kernel-private index.
 void test_loom_post_cqe_ignores_hostile_header(void) {
-    struct Loom *l = loom_create(4, 4);
+    struct Loom *l = loom_create(4, 4, false);
     TEST_ASSERT(l != NULL, "loom_create(4,4)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -523,7 +523,7 @@ static void loom_stage_sqe(struct Loom *l, u32 slot, u8 opcode, u8 flags,
 // NOP: the io_uring smoke op completes inline with result 0 (no engine, no
 // handle). Also pins the SQ consume + the kernel-private sq_head mirror.
 void test_loom_enter_nop(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -548,7 +548,7 @@ void test_loom_enter_nop(void) {
 // an empty registered slot (-EBADF), a still-unimplemented-but-in-range opcode
 // (-ENOSYS -- the direct-descriptor seam #916), and an out-of-range opcode (-EINVAL).
 void test_loom_enter_submit_rejects(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -580,7 +580,7 @@ void test_loom_enter_submit_rejects(void) {
 // (Loom-5), so CQE_SKIP is the remaining reserved flag (deferred out of Loom-5b
 // -- it suppresses a success CQE, which needs a loom_order.tla carve-out first).
 void test_loom_enter_flags_and_bad_index(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -608,7 +608,7 @@ void test_loom_enter_flags_and_bad_index(void) {
 // "an admitted op always reaches a CQE" -- the impl back-pressures at submit
 // instead of dropping at completion.
 void test_loom_enter_cq_admission_backpressure(void) {
-    struct Loom *l = loom_create(4, 4);   // sq 4, cq 4 (cq == sq exercises the cap fast)
+    struct Loom *l = loom_create(4, 4, false);   // sq 4, cq 4 (cq == sq exercises the cap fast)
     TEST_ASSERT(l != NULL, "loom_create(4,4)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
 
@@ -649,7 +649,7 @@ void test_loom_enter_cq_admission_backpressure(void) {
 // batch that runs the fast path, a HELD drain entry admitted later, and a LINK
 // whose failed head cancels its successor, `admitting` is 0 again.
 void test_loom_admission_counts_admitting(void) {
-    struct Loom *l = loom_create(4, 4);
+    struct Loom *l = loom_create(4, 4, false);
     TEST_ASSERT(l != NULL, "loom_create(4,4)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
 
@@ -699,7 +699,7 @@ void test_loom_admission_counts_admitting(void) {
 // that window a parent-stat RPC wide. The bare admit pass after the release is the
 // control: the drain held, not stuck.
 void test_loom_drain_waits_for_admitting(void) {
-    struct Loom *l = loom_create(4, 4);
+    struct Loom *l = loom_create(4, 4, false);
     TEST_ASSERT(l != NULL, "loom_create(4,4)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -756,7 +756,7 @@ void test_loom_dup_rejected(void) {
 // re-evaluates. poll_waiter_list_wake writes pw->ready before signalling, so
 // the flag is the cross-lock hand-off loom_cqw_cond reads under the rendez lock.
 void test_loom_cq_waiter_wake(void) {
-    struct Loom *l = loom_create(4, 8);
+    struct Loom *l = loom_create(4, 8, false);
     TEST_ASSERT(l != NULL, "loom_create(4,8)");
 
     struct Rendez r;
@@ -782,7 +782,7 @@ void test_loom_cq_waiter_wake(void) {
 // re-sample an unchanged (already-full) CQ. (The wake lives only on the
 // success path, after the cq_tail bump; the CQ-full path returns -1 first.)
 void test_loom_cq_waiter_no_spurious_wake_on_full(void) {
-    struct Loom *l = loom_create(4, 4);   // cq_entries = 4
+    struct Loom *l = loom_create(4, 4, false);   // cq_entries = 4
     TEST_ASSERT(l != NULL, "loom_create(4,4)");
 
     for (u32 i = 0; i < 4; i++) {
@@ -809,7 +809,7 @@ void test_loom_cq_waiter_no_spurious_wake_on_full(void) {
 // path test_loom_cq_waiter_wake pins) and a re-poll reports POLLIN. A POLLOUT-only
 // request registers nothing and reports nothing (SQ-space is unmodelled at v1.0).
 void test_loom_poll(void) {
-    struct Loom *l = loom_create(4, 8);
+    struct Loom *l = loom_create(4, 8, false);
     TEST_ASSERT(l != NULL, "loom_create(4,8)");
 
     struct Rendez r;
@@ -848,7 +848,7 @@ void test_loom_poll(void) {
 // sample and returns without ever sleeping (async_inflight stays 0 -- there is
 // no reader to drive). CqWaitCommitOrSleep: flag/level satisfied -> return.
 void test_loom_enter_inline_min_complete(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
 
@@ -868,7 +868,7 @@ void test_loom_enter_inline_min_complete(void) {
 // can never arrive. A blocking enter with no SQEs staged and async_inflight == 0
 // must NOT hang.
 void test_loom_enter_min_complete_no_inflight(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
 
     int n = loom_enter(l, 0, 5, 0);   // min_complete = 5, BLOCKING, but no work
@@ -1104,7 +1104,7 @@ void test_loom_sqpoll_charges_thread_budget(void) {
 // the accounting wrong on each of them in turn:
 //
 //   - refunding on the VMA's TYPE let EL0 detach the ring, take the refund,
-//     keep the pages on the Loom's ref, and re-attach a full PROC_PAGE_MAX --
+//     keep the pages on the Loom's ref, and re-attach a full budget --
 //     an unprivileged breach of the per-Proc floor;
 //   - refunding on a handle_count SAMPLED BEFORE the drop then swung it the
 //     other way: on the ordinary teardown order (detach, then close -- what
@@ -1342,7 +1342,7 @@ static struct Thread *lwa_spawn(void) {
 }
 
 void test_loom_wait_counts_admitting(void) {
-    struct Loom *l = loom_create(4, 4);
+    struct Loom *l = loom_create(4, 4, false);
     TEST_ASSERT(l != NULL, "loom_create");
     g_lwa_ring = l;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);

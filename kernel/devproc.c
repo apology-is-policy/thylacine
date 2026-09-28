@@ -268,18 +268,32 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
 
     // #65 (I-32): the per-Proc resource-floor counters (the SEAM counters a
     // future aggregate quota reads). Atomic loads -- a cross-Proc reader holds
-    // no per-Proc lock. page_count == live SYS_BURROW_ATTACH anon pages;
-    // child_count == live direct children.
+    // no per-Proc lock. page_count is the HOLDER count: the data pages this
+    // address space maps (anon, and the Image cache's file pages), the pagemap
+    // nodes and the page tables that map them; tables: and file: beside it let
+    // a reader take the data view. child_count == live direct children.
     {
         u32 pages = p->as ? __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) : 0u;
         u32 kids  = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
         n = fmt_str(buf, cap, off, "pages:   ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, (int)pages);   if (!n && pages != 0) return 0; off += n;
         n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+        // B-1a' audit F1: how much of `pages` is page tables (charged since the
+        // close, reclaimed as they empty), so a reader can tell the data view.
+        u32 tables = p->as ? __atomic_load_n(&p->as->pgtable_pages, __ATOMIC_ACQUIRE) : 0u;
+        n = fmt_str(buf, cap, off, "tables:  ");   if (!n) return 0; off += n;
+        n = fmt_sdec(buf, cap, off, (int)tables);  if (!n && tables != 0) return 0; off += n;
+        n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+        // B-1a' audit F8: and how much is FILE pages (the Image cache's,
+        // charged to this space per leaf it maps), the other non-data share.
+        u32 files = p->as ? __atomic_load_n(&p->as->file_pages, __ATOMIC_ACQUIRE) : 0u;
+        n = fmt_str(buf, cap, off, "file:    ");   if (!n) return 0; off += n;
+        n = fmt_sdec(buf, cap, off, (int)files);   if (!n && files != 0) return 0; off += n;
+        n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
         n = fmt_str(buf, cap, off, "children:");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, (int)kids);    if (!n && kids != 0) return 0; off += n;
         n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
-        // CL-5: the peak anon commit (Linux VmHWM). Monotonic, so a read taken
+        // CL-5: the peak holder count (Linux VmHWM). Monotonic, so a read taken
         // any time after the peak reports it -- and a read of a ZOMBIE (which
         // can no longer charge) reports the FINAL peak with no sampling race.
         // That is how a short-lived compiler's true footprint is measured.
@@ -443,7 +457,7 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //
 //   start-end            perms off        type file      role
 //   0x400000-0x452000    r-xp 0x0         file 0x3:0x412 -
-//   0x7ff00000-0x80000000 rw-p 0x0        anon -         stack
+//   0x7f800000-0x80000000 rw-p 0x0        anon -         stack
 //
 // Columns are FIXED (never omitted) -- an optional trailing column would make
 // the line ambiguous to split. Absent values render "-".
@@ -588,7 +602,7 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
 // newline-terminated: a path is a byte string and Linux's readlink("/proc/self/
 // exe") yields the bare path, so a trailing newline here would land inside every
 // consumer's buffer. Empty (0 bytes) when the Proc has no recorded name -- kproc
-// and the blob-loaded init /joey, or a #66 Path alloc failure (I-33 fail-soft).
+// and the blob-loaded init bin/joey, or a #66 Path alloc failure (I-33 fail-soft).
 //
 // Runs under g_proc_table_lock (proc_for_each), which keeps `p` alive; the Path
 // itself is immutable + ref-held for p's whole life, so the string is stable for
@@ -604,11 +618,11 @@ static size_t format_exe(struct Proc *p, char *buf, size_t cap) {
     // Return the CLAMPED length, like every sibling generator (each fmt_* is
     // cap-checked, so format_status/ns also return only what they produced).
     // Load-bearing, not stylistic: devproc_read trusts this as the total and
-    // copies content[off .. off+n) out of a DEVPROC_READ_BUF (512) stack
-    // buffer. A Path may be up to SYS_OPEN_PATH_MAX (1024), so returning the
-    // TRUE length would let a read at off >= 512 copy adjacent kernel stack to
-    // EL0 -- an OOB read and an I-13 leak. Clamping makes a pathological path
-    // read as truncated (honest) instead.
+    // copies content[off .. off+n) out of its DEVPROC_READ_BUF stack buffer,
+    // so a length past the bytes written would copy adjacent kernel stack to
+    // EL0 -- an OOB read and an I-13 leak. Today the buffer (2 KiB) outgrows
+    // any Path (SYS_OPEN_PATH_MAX, 1 KiB), so the clamp is the defence for the
+    // day either bound moves: a longer path reads as truncated (honest).
     size_t n = (size_t)path->len;
     if (n > cap) n = cap;
     for (size_t i = 0; i < n; i++) buf[i] = path->s[i];
@@ -1009,7 +1023,7 @@ static void devproc_close(struct Spoor *c) {
 // buffer, then copies the requested [off, off+n) slice.
 //
 // Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
-// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS=12).
+// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS, 32).
 // prowl-3b bumped 512 -> 2048: /proc/<pid>/sched formats one row per thread of a
 // possibly heavily-threaded Proc (a Go binary / stratumd), each ~40-50 B; 512
 // truncated at ~8 threads. 2048 holds ~30 thread rows (the format bounds the

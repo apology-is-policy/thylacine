@@ -19,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -79,6 +79,14 @@ behaviour, and exec init.
 - **Interrupt reservations before any driver can ask for one.** Kernel-owned
   interrupt numbers and memory ranges are claimed so that a userspace driver's
   later request cannot take one out from under the kernel.
+- **The user pool sized after the physical allocator and before the first
+  Proc** (B-1a', 2026-09-23). `capacity_init` reads `phys_total_pages()`
+  immediately after `phys_init` to fix the TCB reserve and the pool, and
+  `proc_init`'s kproc and every later `proc_alloc` seed their budget from it
+  -- a Proc created earlier would carry a zero budget and refuse every charge,
+  and the pool refuses every non-exempt charge until it is sized
+  (fail-closed). A second call extincts, as does a machine that leaves no pool
+  ([[sub-kernel-addrspace]]).
 - **The idle thread before the suite**, because tests block, and a blocking
   thread with nothing else runnable needs somewhere to go.
 - **Console receive and the manager thread after the scheduler**, because the

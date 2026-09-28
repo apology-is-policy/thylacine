@@ -6,7 +6,7 @@ title: "The fault dispatcher — classification, demand paging, seven backing ar
 code: [arch/arm64/fault.c, arch/arm64/fault.h]
 audit: hard
 guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36, inv-i44]
-validated-by: [spec-cow, prose, gate-smp]
+validated-by: [spec-cow, spec-capacity, prose, gate-smp]
 locks: []
 hazards: []
 abis: []
@@ -38,7 +38,7 @@ a user fault. Four outcomes:
 |---|---|
 | `FAULT_HANDLED` | resolved; the return-from-exception re-runs the faulting instruction |
 | `FAULT_UNHANDLED_USER` | bad address or denied permission — the caller terminates the Proc with `snare:segv` |
-| `FAULT_USER_BUS` | a **valid** mapping whose backing store failed — `snare:bus` |
+| `FAULT_USER_BUS` | a **valid** mapping whose backing store failed, or an abort no page install can resolve — an alignment fault or a synchronous external abort on a mapped page (B-1a' round 4, F17) — `snare:bus` |
 | `FAULT_FATAL` | reserved; fatal kernel paths extinct in place |
 
 The `FAULT_USER_BUS` / `FAULT_UNHANDLED_USER` distinction is the substance, not
@@ -129,8 +129,14 @@ interesting part of this file:
    down), but that `freq->page_va` is still inside `[vaddr_start, vaddr_end)` AND
    `slot_now == freq->slot`. On a mismatch, BAIL: free the read page, return
    `FAULT_UNHANDLED_USER`, and let a re-fault re-resolve against the new geometry.
-4. Install-once under the Burrow lock: if a sibling filled the slot, keep
-   theirs and free ours.
+4. Install-once through `pagemap_install` (B-1a'), which takes the Burrow
+   lock itself and allocates the map's missing nodes OUTSIDE it (uncharged
+   for FILE): if a sibling filled the slot, keep theirs and free ours; if the
+   nodes could not be had, free ours and refuse the fault. The cluster path
+   installs each slot the same way, and a node OOM midway leaves the earlier
+   slots adopted (the bytes are the Burrow's) and the rest in `clpages` for
+   the caller to free; the faulting slot decides the verdict as a lost race
+   would.
 
 **Step 3 verifies geometry because DISTRO D-3 retired the premise that once let
 it check only identity (#190).** The R-5 audit's F2 justified trusting the cached
@@ -177,6 +183,25 @@ were read.
 [[inv-i32]] — the lazy-anonymous arm charges the page budget **before** the
 allocation, so the count equals true resident-set size and a cap hit frees
 nothing. Over-budget fails the fault, which terminates one Proc — never the box.
+B-1a': the miss charges the DATA page first (`proc_page_charge(p, 1)`), then
+`pagemap_install` charges the map's missing nodes to `p->as` (under
+`proc_resource_exempt(p)`) before allocating them; a refused node charge, or a
+node OOM, installs nothing, the data page is freed and uncharged, and the fault
+answers `FAULT_UNHANDLED_USER` exactly as a refused page does -- so
+`page_count` reads as data plus the nodes that index it ([[sub-kernel-pagemap]];
+`capacity.pagemap_nodes_charged_and_reclaimed`, and `test_exec.c`'s charge
+assertions read data + nodes). Since the round-1 close every page an arm
+mints comes from `alloc_user_pages(0, .., proc_resource_exempt(p))` -- the
+demand-zero page, the COW private copy, the FILE page-in's pages -- so the
+machine-wide bound is decided at the allocation ([[sub-kernel-mm-phys]]: a
+non-exempt Proc refused when the pool is full, the TCB never), and the PTE
+install (`mmu_install_user_pte[_attr](p->as, proc_resource_exempt(p), ..)`)
+charges the hardware tables it grows ([[sub-kernel-mmu]]); a refused table --
+the cap or the pool -- returns -1 and every arm answers
+`FAULT_UNHANDLED_USER` with the data page already resident and charged in
+its slot, which the dying Proc's drain releases. The FILE arm installs with
+`as = NULL`: an Image-cached page is shared and charged to no address space,
+and so are its nodes -- but both are pool pages, counted.
 
 ## The backing arms
 
@@ -194,8 +219,8 @@ now.
 | MMIO | device PA + offset, device attributes | |
 | DMA | every page resolved through `kobj_dma_pa_at` (a weave is a SKEIN of blocks since 2026-09-09; `Burrow.pa` is 0 for a DMA Burrow, deliberately), cacheable | coherent on this platform's transports |
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
-| file-backed | sparse per-slot pages, demand-read | the arm that sleeps |
-| lazy-anonymous | allocate + zero + install-once, all under the lock | no backing read, so no slow path |
+| file-backed | sparse per-slot pages in the pagemap, demand-read | the arm that sleeps; its nodes are uncharged (`as = NULL`); each LEAF it installs is charged to the holder (`addrspace_charge_file`; the round-2 close) |
+| lazy-anonymous | allocate + zero + install-once under the lock; the map's nodes charged and allocated by the install outside `v->lock` | no backing read, so no slow path |
 
 **The install attribute widened from a bool to a MAIR index for HOSTMEM (V-2).**
 Every arm used to hand `mmu_install_user_pte` a `device_memory` bool — a two-way
@@ -246,27 +271,39 @@ writable.
 
 ### The defect found by reading, not by testing
 
-**Closed, at the site, in the code as it stands.** The write branch of the
-break *uninstalls* the stale read-only leaf before installing anything, and
-says why in a comment there. What follows is why that line is load-bearing
-rather than redundant — not an open hazard.
+**Closed, at the site, in the code as it stands -- and re-closed differently
+by the round-2 audit.** `mmu_install_user_pte` **refuses** a mismatching
+install over a valid leaf -- it returns failure rather than overwriting.
+**Both break outcomes mismatch**: the copy path changes the physical address,
+and take-in-place changes the permission bits. Since a *read* of a COW page
+installs a read-only PTE, the first **write after a read** would fail its
+install and kill the Proc if nothing dealt with the stale leaf -- which is
+exactly what makes the step read as redundant to anyone who does not know the
+install primitive's refusal contract.
 
-`mmu_install_user_pte` **refuses** a mismatching install over a valid leaf — it
-returns failure rather than overwriting. **Both break outcomes mismatch**: the
-copy path changes the physical address, and take-in-place changes the
-permission bits.
+The first close *uninstalled* the stale leaf before the break, unconditionally.
+The round-2 audit (F9) prosecuted that line under the round-1 close's table
+reclaim: the clear freed the leaf's (now empty) tables to the pool, and the
+install that followed re-allocated them through `pool_charge`, which respects
+no lock the faulter holds -- so at the pool's edge a peer's allocation could
+take the released pages and the Proc was terminated for writing a page it
+already held; and every sparse break paid a table free and an allocation. The
+write arm now sets `cow_replace`, and step 5 calls
+`mmu_replace_user_pte_attr` instead of the install: a break-before-make on the
+LEAF alone (invalid, TLBI, the new entry, TLBI; [[sub-kernel-mmu]]), the
+tables untouched, 1 if the leaf is already what is asked (a sibling thread
+broke it first), the plain install when nothing is mapped (the first touch
+after a fork, whose phase-1 clear took the leaf and kept its table).
+`cow.break_sole_holder_takes_in_place` pins the pool and `pgtable_pages`
+unchanged across the break.
 
-Since a *read* of a COW page installs a read-only PTE, the first **write after
-a read** would fail its install and kill the Proc if the uninstall were removed
-— which is exactly what makes it read as a redundant step to anyone who does
-not know the install primitive's refusal contract. Revert-probed: the suite
-fails at exactly that assertion and nothing else.
-
-It is worth noting how this was found. Not by a test — a test would have caught
-it only if some case did read-then-write on a COW page — but by **reading the
-contract of the primitive being called**. The same shape as the through-a-file
-gate in [[sub-kernel-stalk]], where the answer was already a field on the object
-and nobody had asked it.
+It is worth noting how the first defect was found. Not by a test -- a test
+would have caught it only if some case did read-then-write on a COW page --
+but by **reading the contract of the primitive being called**. The same shape
+as the through-a-file gate in [[sub-kernel-stalk]], where the answer was
+already a field on the object and nobody had asked it. And the second was
+found by reading the first fix against a mechanism that landed later: a line
+that was load-bearing under one allocator became a hazard under the next.
 
 ### Three properties that look like details and are not
 
@@ -278,7 +315,8 @@ refines the model rather than deviating from it.
 
 **The parent is modified by the fork, and must be.** Its already-installed
 writable PTEs for every COW range are uninstalled, so its next touch re-faults
-read-only. Leaving them is the [[inv-i44]] violation directly: the parent
+read-only -- the leaves only: the tables stay linked for the re-faults to find
+(`mmu_uninstall_user_range_keep_tables`, the round-2 close; [[sub-kernel-mmu]]). Leaving them is the [[inv-i44]] violation directly: the parent
 writing through a stale writable translation into a page the child now shares.
 That pass runs on **success only**, so a refused fork leaves the parent exactly
 as it was found.
@@ -296,6 +334,113 @@ deliberately, in the safe direction**: the fork fails up front where the
 failure can be reported, rather than the break running out later where there is
 nowhere good to put it. The break itself takes no charge, since one mapped page
 becomes one mapped page. See [[sub-kernel-burrow]] for the attribution half.
+
+### The copy keeps its share until the leaf is replaced, and a queued fault is answered by the leaf that is there (2026-09-23; B-1a' audit F12 / F13)
+
+Round 3 prosecuted the replace and found the argument it had voided. Under
+the first close the write arm cleared the stale leaf BEFORE the decide, so
+during a break no thread of the space could reach the page without faulting
+and waiting on `as->lock`; the replace moved the only invalidation to the END
+of the fault, and the copy branch still put its share of the original right
+after the slot swap. In that window the space's own read-only leaf (the read
+that preceded the write installed it) still translated to the original, a
+sibling thread read through it without faulting, and the other holder -- now
+sole -- was free to take the page in place and write into what this space
+could still see (I-44), or to exit and free it under a live leaf (I-13). F12
+is a regression of the F9 fix, and the fix is the order Linux's
+`wp_page_copy` keeps: `cow_release` carries the original past step 5 and the
+put (with the free on the last share) runs after the replace, on the
+failed-replace path too. A tests-only probe (`g_cow_copy_probe_for_test`,
+`KERNEL_TESTS`) fires between the swap and the replace, and
+`cow.break_copy_pins_the_original_until_replaced` asserts the control (the
+stale leaf still names the original at the probe -- the window is real) and
+the pin (the share is still two there).
+
+F13 is older than the replace and lives in the same lines: two threads touch
+one page after a fork, the writer wins `as->lock` and its break leaves a
+WRITABLE leaf; the reader's fault, decoded while the leaf was invalid, then
+runs the read arm, which asks for a READ-ONLY install over it -- the one arm
+that narrows -- and `mmu_install_user_pte_attr` refuses the mismatch, so the
+Proc was terminated for reading a page it holds. The same shape reaches a
+read that faulted inside the replace's break-before-make gap. The answer is
+the one Linux gives (the fault re-checks the PTE under the lock): step 2b,
+after the prot admission and before any arm, asks `mmu_user_pte_admits(as,
+va, write, exec)` ([[sub-kernel-mmu]]) and returns `FAULT_HANDLED` when a
+valid leaf already admits the access -- nothing charged, nothing installed,
+the instruction retried -- for every arm, so no arm can narrow itself into a
+refusal. `cow.read_queued_behind_break_is_handled` drives both break shapes;
+`cow.break_read_then_write_copies` and `cow.break_sole_holder_takes_in_place`
+each end with the queued read.
+
+### The pager refuses the abort classes it cannot resolve, and the probe fires at the leaf write (2026-09-23; B-1a' audit F17 / F20)
+
+Round 4 prosecuted the pre-check and found a class it answered that no arm
+should: an EL0 abort that is neither a translation, an access-flag nor a
+permission fault. An ALIGNMENT fault (FSC 0x21 -- an exclusive, an ordered
+load or store, or a Device access at an address the instruction cannot take;
+ARM ARM D5.10.3, regardless of `SCTLR.A`) or a synchronous EXTERNAL abort
+(0x10, 0x14-0x17) is raised on a MAPPED page by the instruction itself.
+`fault_info_decode` classified only the three resolvable classes and nothing
+consumed a fourth, `arch_fault_handle` dispatched on `from_user` alone, and
+the pager answered the fault `FAULT_HANDLED` -- since round 3 through step 2b
+(the leaf admits the access), before it through the idempotent install's 1 --
+so the ERET re-executed the instruction into the same abort, forever: a
+livelock, preemptible and killable only because the return tail delivers
+notes, where the Proc owes a `snare:bus` death (Linux's `do_alignment_fault`
+/ `do_sea` deliver SIGBUS). Pre-existing since P3-Dc; the pre-check made it
+the one site every arm passes through, so it is where the class is refused.
+As built: `fault_info` decodes `is_alignment` / `is_external`, and the top of
+`userland_demand_page`, before `as->lock` and any lookup, returns
+`FAULT_USER_BUS` when none of `is_translation` / `is_access_flag` /
+`is_permission` holds -- the class decides, not the page. The kernel-mode
+uaccess entry (`arch/arm64/exception.c`) already admitted only the three
+classes, so a kernel-side alignment fault through a user pointer still
+extincts as the kernel bug it is. Witnesses:
+`demand_page.alignment_abort_is_bus_not_handled` (a synthetic 0x21 and a 0x10
+on a mapped, admitting page -> `FAULT_USER_BUS`; CONTROL: a translation fault
+on the same VA -> `FAULT_HANDLED`) and `/bus-probe-child` from EL0 (joey: a
+4-byte load-exclusive from offset 14 of a touched page must die via
+`snare:bus`, not hang the boot). The first draft of that child did `ldar` from
+`va + 1` and SURVIVED on the Apple core under HVF: FEAT_LSE2 with
+`SCTLR_EL1.nAA = 0` (the kernel never sets it) permits a misaligned ORDERED
+access inside one 16-byte quantity and faults only across a boundary, while
+exclusives keep their natural alignment under every rule -- so the witness is
+an `ldxr` at an offset that is both misaligned and crossing.
+
+F20 moved the F12 probe: it fired right after `cow_release` was set, so
+"share == 2 at the probe" bounded the put only to "after the probe", and a
+put reintroduced between the probe and the replace would have passed. The
+probe now fires at step 5, immediately before the replace (nothing runs
+between the probe and the leaf write), and two witnesses cover the paths the
+first one could not: `cow.break_copy_releases_the_share_on_a_failed_replace`
+(a child with no tables under the page and the pool parked to one free page:
+the copy's page is served, the install's first table refused,
+`FAULT_UNHANDLED_USER`, the share released -- no leak -- the slot holding the
+copy, no leaf) and `cow.break_copy_last_share_frees_after_the_replace` (the
+probe drains the other holder's mapping, so the copy's own share is the last
+and is held through the drain; after the replace the original returns to the
+buddy exactly once).
+
+### A file page is the cache's; its mapping is the holder's (2026-09-23; B-1a' audit F8)
+
+A FILE page-in takes a pool page (`alloc_user_pages`) and installs it into the
+Burrow's map with `as = NULL` -- the page and the map's nodes are the Image
+cache's, shared by every space that maps the file. Until the round-2 close
+that was the whole story, and the round-2 audit named what it left: a
+toucher's text pages counted against no space (a confined Proc never saw its
+own text on its cap), and outlived the toucher as an idle cache entry that
+held the physical pool with nothing to reclaim it. The mapping is charged
+now, per leaf, like a COW-shared page: every FILE leaf install is preceded by
+`addrspace_charge_file(p->as, exempt)` -- the resident-hit fast path through
+step 5's `file_charge` flag, and both slow-path install tails -- and the charge
+goes back when the install returns 1 (the leaf was already there: a sibling
+paid) or refuses; a range clear refunds per leaf it removes
+(`vma_uninstall_range_in`, [[sub-kernel-vma]]; the drain refunds nothing, the
+space dies). `page_count` is the holder count -- data, file pages, nodes,
+tables -- with `tables:` and `file:` beside it ([[sub-kernel-devproc]]). The
+pages themselves stay the cache's, which is what the pool's reclaim strips
+under pressure ([[sub-kernel-image]]). `demand_page.file_pages_charge_the_holder`
+is the witness.
 
 ## The permission a fault is checked against can now change (B-1a, 2026-09-23)
 
@@ -365,6 +510,19 @@ the matching `snare:*` note. A read failure in the file arm is **fail-closed**:
 `FAULT_USER_BUS`, never a silent zero-fill of executable text — filling text
 with zeros on an I/O error would execute them.
 
+**A node OOM, a refused node charge, a refused pool allocation or a refused
+table charge refuses the fault** (B-1a'): `FAULT_UNHANDLED_USER` from the
+ANON_LAZY miss (the data page freed and uncharged first), the two FILE
+install paths and the PTE install of every arm -- the same per-Proc OOM
+policy as a refused page, never an extinction; a refused table install
+leaves the slot resident and charged for the drain, a refused node install
+nothing.
+
+**An abort no page install can resolve is `FAULT_USER_BUS` too** (B-1a' round
+4, F17): an alignment fault or a synchronous external abort on a mapped page
+is refused on its class at the top of `userland_demand_page`, before any
+lookup -- answered `FAULT_HANDLED`, the ERET would raise it again forever.
+
 **A fault WHOLLY past the file's last page is `FAULT_USER_BUS`, not a zero-fill
 (#194).** Demand-zeroing it would mint real memory the I-32 page axis never sees
 — anonymous in effect, accounted as FILE, i.e. not at all (the R-5 uncharged
@@ -403,7 +561,11 @@ On any change here: that the file arm's four-step protocol keeps its pin across
 the sleep and its re-validation after it; that install-once stays install-once
 on both the single and cluster paths, with the loser's page freed outside the
 Burrow lock; that the lazy arm charges before allocating and uncharges on every
-failure; that read-ahead stays byte-identical to sequential reads and stays
+failure, the node charge included (a refused pagemap install must leave the
+data page uncharged too, and the install itself must reach the buddy only
+with `v->lock` dropped); that every page an arm mints comes from
+`alloc_user_pages` with the faulting Proc's exemption and is freed through
+`free_pages` on every losing path, so the pool never drifts; that read-ahead stays byte-identical to sequential reads and stays
 degradable; that no arm invents a permission (they must all pass `vma->prot`);
 and that the fail-closed posture on read errors is never relaxed into a
 zero-fill.
@@ -472,6 +634,26 @@ B-1a: `protect.pte_uninstalled_then_reinstalled_at_prot`,
 (`kernel/test/test_protect.c`) drive `arch_fault_handle` on synthetic faults
 after a protect; `/protect-guard-child` is the EL0 witness of the step-2
 refusal.
+
+B-1a' (2026-09-23): `capacity.pagemap_nodes_charged_and_reclaimed` drives this
+arm's misses on a 1 GiB map and watches the nodes appear in `page_count` as
+touched (root + leaf, then a second leaf) and go as decommitted; `test_exec.c`'s
+`exec_writable_segment_is_sparse` / `exec_stack_is_sparse` read the charge as
+data + exactly the nodes the two maps hold ([[sub-kernel-pagemap]]).
+
+B-1a' round 3 (2026-09-23): `cow.break_copy_pins_the_original_until_replaced`
+(the probe between the swap and the replace: the stale leaf as the control,
+the share as the claim), `cow.read_queued_behind_break_is_handled` (a read
+decoded before a peer's break, run after it, for the copy and the
+take-in-place), and the read legs at the end of the two older break tests.
+
+B-1a' round 4 (2026-09-23): `demand_page.alignment_abort_is_bus_not_handled`
+(a synthetic alignment fault and a synthetic external abort on a mapped,
+admitting page are `FAULT_USER_BUS`; the control is a translation fault on the
+same VA, `FAULT_HANDLED`), `cow.break_copy_releases_the_share_on_a_failed_replace`
+and `cow.break_copy_last_share_frees_after_the_replace` (the probe at step
+5, the two exits the F12 witness could not see); `/bus-probe-child` is the
+EL0 witness of the class gate.
 
 ## Referenced by
 

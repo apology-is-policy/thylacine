@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::env::{self, Args};
+use libthyla_rs::err::Error;
 use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{self, Read, Write};
 use libthyla_rs::eprintln;
@@ -107,11 +108,16 @@ fn run(args: Args) -> i64 {
         let chunk = &buf[..n];
         // The stdout leg is payload too: a swallowed write silently truncates
         // tee's primary output. Report once, stop writing the dead sink, but
-        // keep the files flowing (the tee contract).
-        if !stdout_failed && stdout.write_all(chunk).is_err() {
-            eprintln!("tee: stdout: write error");
-            status = 1;
-            stdout_failed = true;
+        // keep the files flowing (the tee contract). A reader that went away
+        // had what it wanted, which is no error.
+        if !stdout_failed {
+            if let Err(e) = stdout.write_all(chunk) {
+                if e != Error::BrokenPipe {
+                    eprintln!("tee: stdout: write error");
+                    status = 1;
+                }
+                stdout_failed = true;
+            }
         }
         // Fan out to the files, dropping any that error mid-stream.
         let mut keep = Vec::with_capacity(sinks.len());

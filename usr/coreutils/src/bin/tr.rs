@@ -255,11 +255,7 @@ fn run(args: Args) -> i64 {
             break;
         }
     }
-    if out.failed() {
-        eprintln!("tr: write error");
-        return 1;
-    }
-    0
+    out.finish("tr", 0)
 }
 
 fn reject_class() -> i64 {

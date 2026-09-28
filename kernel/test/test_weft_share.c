@@ -85,7 +85,7 @@ void test_weft_share_register_claim(void) {
     struct Proc *netd = make_proc();
     TEST_ASSERT(netd != NULL, "proc_alloc failed");
 
-    struct Burrow *v = burrow_create_anon(PAGE_SIZE);   // {h:1, m:0}
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE, false);   // {h:1, m:0}
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int h_before = burrow_handle_count(v);
@@ -134,7 +134,7 @@ void test_weft_share_full(void) {
     // The registry holds WEFT_MAX_SHARES (64). Register that many + assert the
     // next one is refused (0) without leaking a pin. We register over ONE shared
     // Burrow (the pin count is the witness): each register takes a pin.
-    struct Burrow *v = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     int h0 = burrow_handle_count(v);
 
@@ -169,8 +169,8 @@ void test_weft_share_owner_gc(void) {
     struct Proc *b = make_proc();
     TEST_ASSERT(a != NULL && b != NULL, "proc_alloc failed");
 
-    struct Burrow *va = burrow_create_anon(PAGE_SIZE);
-    struct Burrow *vb = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *va = burrow_create_anon(PAGE_SIZE, false);
+    struct Burrow *vb = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(va != NULL && vb != NULL, "burrow_create_anon failed");
     int ha = burrow_handle_count(va);
     int hb = burrow_handle_count(vb);
@@ -241,7 +241,7 @@ void test_weft_map_binding_lifetime(void) {
 
     // Build the ring with the real refcount shape: netd maps it whole, then the
     // construction handle drops (the SYS_BURROW_ATTACH posture: {h:0, m:1}).
-    struct Burrow *v = burrow_create_anon(PAGE_SIZE);   // {h:1, m:0}
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE, false);   // {h:1, m:0}
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     TEST_EXPECT_EQ(burrow_map(netd, v, WEFT_TEST_VA, PAGE_SIZE, VMA_PROT_RW), 0,
         "netd maps the ring");
@@ -580,7 +580,7 @@ void test_weft_unshare_disarm(void) {
     struct Proc *b = make_proc();
     TEST_ASSERT(a != NULL && b != NULL, "proc_alloc failed");
 
-    struct Burrow *v = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon");
     int h0 = burrow_handle_count(v);
 
@@ -626,7 +626,7 @@ void test_weft_shared_map_budget_cap(void) {
     TEST_ASSERT(client != NULL, "proc_alloc failed");
     TEST_ASSERT(!proc_resource_exempt(client), "test Proc is non-exempt");
 
-    struct Burrow *v = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon");
     int m0 = burrow_mapping_count(v);
 
@@ -704,7 +704,7 @@ void test_weft_weave_clunk_unmap_guard(void) {
     // (b) THE F1 GUARD: an unrelated mapping now sits at the recorded VA
     // (the detach-and-reuse shape); a second close attempt must leave it
     // untouched -- the binding's burrow no longer backs the VMA at guest_va.
-    struct Burrow *other = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *other = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(other != NULL, "burrow_create_anon");
     spin_lock(&client->as->lock);
     TEST_EXPECT_EQ(burrow_map(client, other, WEFT_TEST_VA, PAGE_SIZE, VMA_PROT_RW), 0,
@@ -1225,7 +1225,7 @@ void test_weft_hostmem_refcount(void) {
         (s64)(-T_E_INVAL), "zero len is refused");
 
     // A non-hostmem VMA (an anon burrow) is refused -- no general introspection.
-    struct Burrow *anon = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *anon = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(anon != NULL, "burrow_create_anon");
     u64 anon_va = WEFT_TEST_VA + 0x1000000ull;
     spin_lock(&a->as->lock);

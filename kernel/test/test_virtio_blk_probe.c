@@ -10,7 +10,7 @@
 //   - SYS_IRQ_CREATE + SYS_IRQ_WAIT for the device's completion IRQ.
 //
 // Setup:
-//   1. devramfs_lookup("virtio-blk-probe", ...) — pre-built userspace
+//   1. devramfs_lookup("bin/virtio-blk-probe", ...) — pre-built userspace
 //      ELF from the cpio. Graceful skip if not built.
 //   2. Verify a virtio-mmio slot with DeviceID = 2 (block) exists in
 //      the kernel's probe table (populated by virtio_init at boot).
@@ -132,9 +132,9 @@ void test_virtio_blk_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("virtio-blk-probe", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
 

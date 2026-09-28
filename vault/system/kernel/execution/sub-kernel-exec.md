@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -81,6 +81,15 @@ comment on the line reads *clean target only* — because the target is no longe
 the process. It is a **freshly allocated, detached address space**, and the swap
 happens one layer up ([[sub-kernel-proc]]) after the load has completely
 succeeded.
+
+**A refused allocation travels as `-T_E_NOMEM`** (2026-09-23; B-1a' audit
+F15). Both segment mappers return it from their allocation arms -- a creator
+that returned NULL, a refused `burrow_lazy_populate`, a refused VMA -- and
+`exec_setup_argv_body`'s segment loop and `exec_load_body`'s PT_LOAD arm pass
+it up unchanged; every other failure is still `-1`, which `sys_execve_core`
+reports as EINVAL (the tracked ENOEXEC gap). Before this a Proc that ran out
+of pool during exec was told its binary was malformed.
+`execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better
 answer to the problem the seam described. Teaching exec to replace in place
@@ -172,22 +181,25 @@ is what makes the coupling checkable.
 Either way `[filesz, size)` reads as zero. Only *when* the page is allocated
 differs.
 
-### The phenotype shapes the load, threaded as a parameter and never read from the Proc
+### The load no longer reads the phenotype at all (B-1d)
 
-Since Design D (VIVARIUM 13.10.4) the phenotype that gates the PT_INTERP
-rewrite arrives as `exec_load_into`/`exec_load_body`'s `pheno` parameter,
-decided at the resolver *before* the load; the loader consults it and never
-reads `nsp->phenotype`. The review found three consumers of the phenotype
-during `execve`, each unsound in a different way if it read the live field —
-and one of the three is this file's:
+Design D (VIVARIUM 13.10.4) threaded the decided phenotype into
+`exec_load_into`/`exec_load_body` as a `pheno` parameter, because the PT_INTERP
+dispatch was gated `pheno == PHENO_LINUX` and `execve` commits
+`nsp->phenotype` only after the load. B-1d (ARCH 6.5 "Dynamic loading") lifted
+the gate: a native program's interpreter is Pouch's `/lib/libc.so`, resolved
+the same way, because the loader is the same object under both ABIs. Nothing in
+the load depends on the phenotype any more, so the parameter went with the
+gate. The review found three consumers of the phenotype during `execve`, each
+unsound in a different way if it read the live field — and one of the three
+was this file's:
 
-- **Leg C is here.** `exec_load_body` decides the PT_INTERP dispatch on the
-  parameter (`if r == ELF_LOAD_HAS_INTERP && pheno == PHENO_LINUX`). A native
-  caller `execve`ing a *dynamic* `/viv/bin` binary is decided Linux at the
-  resolver; had the dispatch read `nsp->phenotype` (still native before the
-  commit) it would fall through to the "dynamic Linux binary rejected" refusal
-  — D's symmetry unmet for exactly the case [DISTRO D-4] exists to serve.
-  Reading `pheno` takes the rewrite path.
+- **Leg C was here, and has nothing left to mislead.** The dispatch is now
+  `if (r == ELF_LOAD_HAS_INTERP && nsp)`; a stale field has no branch to steer.
+  Which loader a program gets is its namespace's answer to the path the
+  program names, and the phenotypes name different paths (`/lib/libc.so`,
+  `/lib/ld-musl-aarch64.so.1`), so a namespace holding both hands neither
+  program the other's.
 - **Leg B is why the loader never *writes* `nsp->phenotype`.** A failed load
   returns to the surviving old image (built detached), and an already-flipped
   phenotype would leave that image decoding its own calls under the wrong ABI.
@@ -195,16 +207,23 @@ and one of the three is this file's:
   store inside the infallible region after the address-space swap.
 - Leg A (the signal-state reset) is also [[sub-kernel-proc]]'s.
 
-**The PT_INTERP rewrite (DISTRO D-4)** is what that dispatch enables: a
-`PHENO_LINUX` exec of a binary carrying `PT_INTERP` rewrites the argv to run
-the interpreter, so a stock dynamic musl binary runs by name. The
-interpreter's *own* resolution stays phenotype-agnostic — it inherits the
-program's decided `pheno`; re-deciding by the interpreter's location (a rootfs
-`ld-musl`, crossing no pheno-mount) would flip it native and break every
+**The PT_INTERP rewrite (DISTRO D-4)** is what that dispatch enables: an exec
+of a binary carrying `PT_INTERP` rewrites the argv to run the interpreter, so a
+dynamic program runs by name — a stock musl binary in a vivarium, and since
+B-1d a native one through `/lib/libc.so`. ONE level, structurally: the path is
+straight-line, so an interpreter that itself carries `PT_INTERP` meets the
+unchanged refusal. The interpreter's *own* resolution stays
+phenotype-agnostic — it runs under the program's decided phenotype, which the
+caller commits after the load; re-deciding by the interpreter's location (a
+rootfs `ld-musl`, crossing no pheno-mount) would flip it native and break every
 dynamic Linux binary. One asymmetry (F5): the register-argument spawn variants
-thread no program name, which the rewrite needs, so a *dynamic* pheno-mount
-binary loads through `SYS_SPAWN_FULL_ARGV` and refuses loudly on the others —
-every shipped pheno-mount binary is static, so no caller meets it today.
+thread no program name, which the rewrite needs, so a *dynamic* binary —
+native or Linux — loads through `SYS_SPAWN_FULL_ARGV` (the shell,
+`posix_spawn`, `execve`) and refuses loudly on the others. Native dynamic
+binaries meet it since B-1d, which is why joey spawns the dlopen prover through
+the argv form. The "dynamic Linux binary rejected" message now says where such
+a binary's interpreter lives (a `PHENO_LINUX` vivarium's namespace), no longer
+that native execs are static.
 
 ### Two execve front ends, one core, and the blob that belongs to the caller (L-6a)
 
@@ -249,8 +268,9 @@ No types of its own. It consumes `struct elf_image` from [[sub-kernel-elf]] and
 produces VMAs and Burrows.
 
 The one layout it owns is the **System V startup frame**, in two shapes. Shape A
-is a fixed 176 bytes: argc, two NULL terminators, up to eight auxv entries, and a
-16-byte `AT_RANDOM` block at the end. Shape B is variable — real argc, an argv
+is a fixed 224 bytes: argc, two NULL terminators, `EXEC_INIT_AUXV_COUNT` (11: up
+to ten auxv entries and the terminator) slots of 16, and a 16-byte `AT_RANDOM`
+block at the end. Shape B is variable — real argc, an argv
 array pointing into a strings region, **an envp array between argv and auxv**,
 the same auxv block, the same random block 16-aligned, then both strings regions.
 
@@ -264,7 +284,7 @@ Both shapes route through one auxv builder, deliberately, *"so the entry set
 cannot diverge"* — which is the right instinct and the reason a reader can trust
 that a binary sees the same auxiliary vector however it was spawned.
 
-The frame always reserves room for all eight auxv entries even though
+The frame always reserves room for all the auxv entries even though
 `AT_VDSO_CLOCK` is written only when the clock page mapped. That is what keeps
 the random block and strings region at stable offsets: a conditional entry that
 *moved* everything after it would make the layout depend on a boot-time
@@ -304,8 +324,9 @@ allocation failure leaves it empty. Neither fails an exec.
 [[inv-i32]] — page charging happens in the map layer, not here.
 
 [[inv-i43]] — exec is a *consumer* of the phenotype decision, never its
-enforcer. The load's shape (the PT_INTERP rewrite) follows the decided `pheno`
-threaded in, and the file confers no authority from it and reads none — the
+enforcer. Since B-1d the load's shape does not depend on the phenotype at all
+— the interpreter is whatever the namespace answers for the path the program
+names — and the file confers no authority from it and reads none — the
 "shape, never authority" half of I-43 realized as "the image loads the way its
 decided phenotype says, and nothing more." The enforcement that a phenotype
 grants no extra privilege lives at the fork cap-strip ([[sub-kernel-proc]]);
@@ -340,12 +361,14 @@ sentence that was true when written and had been false since LINEAGE L-4a
 `burrow_create_anon_lazy`: exec commits only the pages the argv/auxv frame
 occupies at the top, and the rest demand-zeroes as the program descends.
 `exec.h`'s two comment blocks carried the same stale claim and were corrected
-in the same change. What the 1 MiB is now: a RESERVATION and an I-32 ceiling
-for a runaway recursion, not memory. It was caught because pouch patch 0033
+in the same change. What the 8 MiB (1 MiB until B-1b) is now: a RESERVATION
+and an I-32 ceiling for a runaway recursion, not memory. It was caught because pouch patch 0033
 repeated the claim from the header, and the code was read before the patch
-landed. The size has ONE mirror outside the kernel — the pouch libc's
-`POUCH_MAIN_STACK_TOP` / `_SIZE` ([[sub-pouch-thread]]) — so changing it is a
-two-place edit. What makes forgetting the second place loud is
+landed. The size HAD one mirror outside the kernel — the pouch libc's
+`POUCH_MAIN_STACK_TOP` / `_SIZE` — until B-1b, when exec began STATING the
+extent in the auxv pair `AT_STACK_BASE` / `AT_STACK_SIZE` and the libc derived
+it (patch 0045; [[sub-pouch-thread]]): the kernel is the single source now.
+What still makes a skew loud is
 `/pouch-hello-threads`, which reads the `stack` row of `/proc/<pid>/maps`
 (`format_maps`, keyed on `vaddr_start == EXEC_USER_STACK_BASE`) at run time
 and requires libc's answer to equal it. The prover's first version compared
@@ -430,6 +453,48 @@ writes. A ninth entry added without bumping the macro would overrun the
 `AT_RANDOM` block in every process, and the assert would still pass. Correct
 today; the coupling is a comment.
 
+## The segments and the stack are user-pool allocations (2026-09-23; B-1a' round-1 close)
+
+Exec's eager writable segments and its stack reservation pass exec's own
+`exempt` into `burrow_create_anon` / `burrow_create_anon_lazy`, so every page
+they mint comes from the physical user pool with the new image's exemption
+and returns at `free_pages` ([[sub-kernel-mm-phys]]); the populate's pages
+and the pagemap nodes under them charge the same way ([[sub-kernel-burrow]]).
+Nothing else changed here.
+
+B-1a' round 4 (2026-09-23; F18): the round-3 claim -- a refused allocation
+inside the load travels as `-T_E_NOMEM` -- held for the two mappers'
+allocation arms only. `burrow_map_in` returned -1 for everything, so the
+"refused VMA" arm was dead and a Proc at `PROC_VMA_MAX` got EINVAL; and the
+frame builder answered 0 on a refused populate, so at the pool's edge execve
+reported ENOMEM or EINVAL depending on whether the refusal landed on a
+segment's populate or on the startup frame's pages. Now `vma_insert_in`'s cap
+refusal is `-T_E_NOMEM` ([[sub-kernel-vma]]), `burrow_map_in` propagates it
+([[sub-kernel-burrow]]), and `exec_map_user_stack`, its guard,
+`map_file_backed` and `exec_build_init_stack` (a new `int *err_out`:
+`-T_E_NOMEM` when the frame's populate or its `kzalloc` is refused, -1
+otherwise; 0 stays the unambiguous failed sp) carry it to `exec_load_into`
+and the blob entry.
+
+## B-1b: the 8 MiB stack and its extent in the auxv (2026-09-23)
+
+`EXEC_USER_STACK_SIZE` is 8 MiB (decision 4 of the browser arc: JavaScriptCore
+asks for 5, glibc and musl programs assume Linux's 8), the base 0x7f800000;
+`ELF_PIE_LOAD_LIMIT` (0x60000000) still lies below the guard page, so no PIE
+segment can meet the stack. `exec_fill_auxv` writes two more entries after
+`AT_ENTRY` — `AT_STACK_BASE` (0x5342, the lowest usable VA) and
+`AT_STACK_SIZE` (0x5353) — from `EXEC_USER_STACK_BASE` / `_SIZE`, the
+constants that size the mapping, and BEFORE the optional `AT_VDSO_CLOCK`, so
+the mandatory indices stay fixed whether or not the clock page mapped
+(`EXEC_INIT_AUXV_COUNT` 9 → 11; the private tags sit above musl's `AUX_CNT` 38
+like `AT_VDSO_CLOCK`). A libc DERIVES the extent from the pair and never
+mirrors `exec.h` (pouch patch 0045 refuses a kernel that writes neither tag).
+`test_exec.setup_auxv` pins the pair against the `stack` VMA the same exec
+mapped (`vma_lookup(p, EXEC_USER_STACK_BASE)`), not against the constants; the
+two "one node for the stack" pins moved to root + leaf, since 2048 slots need
+two pagemap levels where 256 needed one. The sabotage `noauxv` (the pair
+mis-tagged) reddens that test and the threads prover's stack query.
+
 ## Provenance
 
 Born as the P3-Eb blob loader; grew argv at the pouch-stratumd boot chunk;
@@ -454,6 +519,14 @@ I-30 argv/envp bound, and the envp #140 decline-as-detector + the native-preserv
 / Linux-empty asymmetry.
 
 ## Tests
+
+B-1a' round 3 (2026-09-23): `execve.load_refuses_nomem_at_the_pool_edge` --
+the idle images evicted, the pool parked full, the RW segment's populate
+refused: the load answers `-T_E_NOMEM`, not `-1`. Round 4:
+`execve.load_refuses_nomem_on_the_frame` -- an ELF with no populated RW head
+at a parked pool: the frame's pages are the refused allocation and the load
+answers `-T_E_NOMEM`; CONTROLS: the text, the RW segment and the stack are
+mapped, so the refusal was the frame's.
 
 `exec.setup_*` covers both frame shapes, the auxv block with and without a
 covering phdr segment, multi-segment loads, the constraint rejects, a lifecycle

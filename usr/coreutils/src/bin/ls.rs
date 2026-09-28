@@ -180,6 +180,9 @@ fn run(args: Args) -> i64 {
             render_long(&mut out, &here, &fe, human, on, classify_force, rich);
         } else {
             for &p in &files {
+                if out.failed() {
+                    break;
+                }
                 emit_name(&mut out, "", p, false, on, classify_force, rich);
                 out.put(b"\n");
             }
@@ -189,6 +192,10 @@ fn run(args: Args) -> i64 {
 
     // Then directories.
     for &dir in &dirs {
+        // Nothing more reaches stdout, so no more directories are read.
+        if out.failed() {
+            break;
+        }
         if multi && !long {
             if !first {
                 out.put(b"\n");
@@ -206,11 +213,7 @@ fn run(args: Args) -> i64 {
             status = 1;
         }
     }
-    if out.failed() {
-        eprintln!("ls: write error");
-        return 1;
-    }
-    status
+    out.finish("ls", status)
 }
 
 /// `--color=auto` resolution: stdout is the interactive console iff its Dev
@@ -248,6 +251,9 @@ fn list_short_dir(
     rich: bool,
 ) -> Result<()> {
     for (name, rd_dir) in read_entries(dir, all)? {
+        if out.failed() {
+            break;
+        }
         emit_name(out, dir, &name, rd_dir, on, classify_force, rich);
         out.put(b"\n");
     }

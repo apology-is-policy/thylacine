@@ -298,7 +298,7 @@ tools/check-v80-floor.py                 # ARMv8.0 floor; make test-a72 for the 
 
 Every other gate, and what each one proves: `docs/agent/GATES.md`.
 
-**Boot banner and `EXTINCTION:` strings are tooling ABI**: rewording one is a format break (escalate). Find their consumers with `quaestor owner`; detail in `docs/agent/BOOT-BANNER.md`.
+**The boot banner and the `EXTINCTION:` prefix are tooling ABI, and so is each extinction body a tool matches** (the six `tools/test-fault.sh` checks; the vault note `abi-boot-banner` keeps the set): rewording one is a format break (escalate). Any other extinction body is prose (operator vote 2026-09-25, `dec-2026-09-25-extinction-bodies`). Find the consumers with `quaestor owner`; detail in `docs/agent/BOOT-BANNER.md`.
 
 **Hosts.** thyla-pi (`ssh thyla-pi`) is a permanent ARM64/KVM/V3D box: one QEMU at a time, and `pool.img` + `ramfs.cpio` ship together or not at all -- read `docs/agent/THYLA-PI.md` first. Stratum host sanitizers run on a disposable GCP VM, never locally.
 

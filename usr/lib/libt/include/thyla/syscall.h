@@ -510,13 +510,17 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_SPAWN_MAX_FDS   16u
 
 // Mount flags — mirror kernel/include/thylacine/territory.h (Plan 9
-// MREPL / MBEFORE / MAFTER / MCREATE). At v1.0 only MREPL has
-// distinguished semantics (replace existing entry at the same target);
-// MBEFORE / MAFTER / MCREATE are stored for future union-mount work.
+// MREPL / MBEFORE / MAFTER / MCREATE). MREPL replaces the entry at the
+// target; MBEFORE / MAFTER add a member to a union there.
 #define T_MREPL    0x0001u
 #define T_MBEFORE  0x0002u
 #define T_MAFTER   0x0004u
 #define T_MCREATE  0x0008u
+
+// MNOEXEC: nothing on the mounted device instance may become executable
+// pages in this namespace -- exec refuses it and a file map asking for X is
+// EPERM (the vouching rule, I-12).
+#define T_MNOEXEC  0x0010u
 
 // MPHENO_LINUX (mirror kernel/include/thylacine/territory.h): a per-mount-point
 // declaration that a binary whose exec RESOLUTION crosses this mount is a Linux
@@ -775,17 +779,24 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
 // successful mount; the mount table keeps the Spoor alive until `t_unmount`
 // or Territory destruction.
 //
-// The MOUNT POINT MUST EXIST as a walkable directory (Plan 9 M1; devramfs
-// ships /srv + /proc, the disk FS provides its own).
+// The MOUNT POINT MUST EXIST and be of the source's type: a directory over a
+// directory (Plan 9 M1; devramfs ships /srv + /proc, the disk FS provides its
+// own), a file over a file, and at a file only with T_MREPL
+// (kernel/include/thylacine/syscall.h, SYS_MOUNT).
 //
-// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE (bit-or'd).
+// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
+// T_MPHENO_LINUX (bit-or'd; at most one of the first three).
 //
-// Returns 0 on success, -1 on:
-//   - path absent / empty / too long / not resolvable
+// Returns 0 on success, -T_E_NOTDIR (-20) on Plan 9's Emount (ARCH 9.6.1),
+// and -1 on every other refusal:
+//   - path absent / empty / too long / not resolvable (a trailing '/' on a
+//     point that is not a directory is unresolvable)
 //   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
 //   - source handle missing T_RIGHT_READ
-//   - flags has bits outside the valid set
-//   - Territory mount table full (8 entries at v1.0)
+//   - flags has bits outside the valid set, or more than one of
+//     T_MREPL / T_MBEFORE / T_MAFTER
+//   - Territory mount table full (PGRP_MAX_MOUNTS, 32)
+//   - the mount would close a cycle in the mount graph (I-3)
 __attribute__((always_inline))
 static inline long t_mount(const char *path, unsigned long path_len,
                            long source_spoor_fd, unsigned long flags) {

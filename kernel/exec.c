@@ -6,9 +6,9 @@
 // backing pages) populated with blob bytes via the kernel direct map,
 // then mapped into the per-Proc TTBR0 tree via burrow_map.
 //
-// The user stack is a dedicated 1 MiB VMA at `[EXEC_USER_STACK_BASE,
-// EXEC_USER_STACK_TOP)` (sized for ML-KEM-768's stack-heavy FO transform
-// in corvus — see exec.h). v1.0 doesn't grow the stack; Phase 5+ adds
+// The user stack is a dedicated 8 MiB VMA at `[EXEC_USER_STACK_BASE,
+// EXEC_USER_STACK_TOP)` (1 MiB until B-1b, sized then for ML-KEM-768's
+// stack-heavy FO transform in corvus — see exec.h). v1.0 doesn't grow the stack; Phase 5+ adds
 // demand-grow on faults below stack base. The top EXEC_INIT_STACK_SIZE
 // bytes carry the System V process-startup frame (argc / argv / envp /
 // auxv) a C runtime reads at entry — see exec.h + exec_build_init_stack.
@@ -337,8 +337,8 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     // (seg_may_be_sparse: the I-cache reason).
     bool sparse = seg_may_be_sparse(seg);
     struct Burrow *burrow = sparse ? burrow_create_anon_lazy(g.size)
-                                   : burrow_create_anon(g.size);
-    if (!burrow)                               return -1;
+                                   : burrow_create_anon(g.size, exempt);
+    if (!burrow)                               return -T_E_NOMEM;   // the pool or the slab refused
 
     // L-7 F4: hoisted to function scope so the map-in failure below -- which is
     // outside the sparse block but still after the populate -- can unwind the
@@ -353,7 +353,7 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
             // back on every internal failure (burrow.c, "the whole charge,
             // matching the grant"). Only failures AFTER it succeeded owe one.
             burrow_unref(burrow);
-            return -1;
+            return -T_E_NOMEM;
         }
         // #149: the segment's bytes start `lead` into the Burrow; [0, lead)
         // stays demand-zero.
@@ -424,13 +424,13 @@ static int exec_map_user_stack(struct AddrSpace *as, bool exempt) {
     // populates the run its argv/auxv frame occupies at the top. The stack is RW
     // (never executable), so seg_may_be_sparse's I-cache reason does not arise.
     struct Burrow *burrow = burrow_create_anon_lazy(EXEC_USER_STACK_SIZE);
-    if (!burrow)                               return -1;
+    if (!burrow)                               return -T_E_NOMEM;   // the slab refused
 
     int rc = burrow_map_in(as, exempt, burrow, EXEC_USER_STACK_BASE,
                            EXEC_USER_STACK_SIZE, VMA_PROT_RW);
     if (rc != 0) {
         burrow_unref(burrow);
-        return -1;
+        return rc == -(int)T_E_NOMEM ? rc : -1;   // a refused VMA is a resource refusal (F18)
     }
     burrow_unref(burrow);
 
@@ -444,10 +444,11 @@ static int exec_map_user_stack(struct AddrSpace *as, bool exempt) {
     // disposes the partially-built Proc.
     struct Vma *guard = vma_alloc_guard(EXEC_USER_STACK_GUARD_BASE,
                                         EXEC_USER_STACK_BASE);
-    if (!guard)                                return -1;
-    if (vma_insert_in(as, exempt, guard) != 0) {
+    if (!guard)                                return -T_E_NOMEM;   // the slab (the bounds are constants)
+    int grc = vma_insert_in(as, exempt, guard);
+    if (grc != 0) {
         vma_free(guard);
-        return -1;
+        return grc == -(int)T_E_NOMEM ? grc : -1;
     }
     return 0;
 }
@@ -574,10 +575,12 @@ static bool exec_fill_ptr_vector(u64 *out, u64 base_va,
 // the user VA of the frame's `argc` word.
 // Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_HWCAP (the
 // Linux-compatible feature word from g_hw_features.linux_hwcap — read-only
-// after boot, so a plain read is coherent), AT_RANDOM, AT_ENTRY, the OPTIONAL
+// after boot, so a plain read is coherent), AT_RANDOM, AT_ENTRY, the stack
+// pair AT_STACK_BASE / AT_STACK_SIZE (B-1b: the mapping exec_map_user_stack
+// makes, so a libc derives the main thread's extent), the OPTIONAL
 // AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the AT_NULL
-// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (9) entries; with no
-// vDSO it writes 8 and the 9th 16-byte slot stays the caller-zeroed padding
+// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (11) entries; with no
+// vDSO it writes 10 and the 11th 16-byte slot stays the caller-zeroed padding
 // before the AT_RANDOM block (the reader stops at the AT_NULL terminator). Both
 // frame shapes route through here, so the entry set cannot diverge.
 //
@@ -585,10 +588,11 @@ static bool exec_fill_ptr_vector(u64 *out, u64 base_va,
 // carries the PIE bias. Unconditional: an ET_EXEC's entry is as real as a
 // PIE's, and a tag that appears only sometimes is the harder contract to
 // reason about. See elf.h for what it is and is not load-bearing for.
-_Static_assert(EXEC_INIT_AUXV_COUNT == 9,
-               "exec_fill_auxv reserves room for exactly 9 auxv entries "
+_Static_assert(EXEC_INIT_AUXV_COUNT == 11,
+               "exec_fill_auxv reserves room for exactly 11 auxv entries "
                "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM, "
-               "AT_ENTRY, AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
+               "AT_ENTRY, AT_STACK_BASE, AT_STACK_SIZE, AT_VDSO_CLOCK, AT_NULL) "
+               "— keep this in sync with the macro");
 static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
                            u64 rand_va, u64 vdso_va, u64 entry_va) {
     *a++ = AT_PHDR;   *a++ = phdr_va;
@@ -598,6 +602,10 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
     *a++ = AT_HWCAP;  *a++ = g_hw_features.linux_hwcap;
     *a++ = AT_RANDOM; *a++ = rand_va;
     *a++ = AT_ENTRY;  *a++ = entry_va;
+    // The stack pair states the mapping exec_map_user_stack made, from the
+    // same two constants it mapped with -- the one place both are read.
+    *a++ = AT_STACK_BASE; *a++ = EXEC_USER_STACK_BASE;
+    *a++ = AT_STACK_SIZE; *a++ = EXEC_USER_STACK_SIZE;
     if (vdso_va) { *a++ = AT_VDSO_CLOCK; *a++ = vdso_va; }
     *a++ = AT_NULL;   *a++ = 0;
 }
@@ -607,13 +615,16 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
 // Returns the initial user sp, or 0 on failure -- LINEAGE L-4a made this failable
 // (the stack Burrow is sparse now, so the frame's pages must be populated and the
 // frame staged, both of which can hit OOM). 0 is unambiguous: a real sp is always
-// just below EXEC_USER_STACK_TOP.
+// just below EXEC_USER_STACK_TOP. `*err_out` names the failure: -T_E_NOMEM for a
+// refused allocation (the frame's pages at the pool's edge used to surface as
+// EINVAL -- B-1a' audit F18), -1 for anything else.
 static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
                                  const struct elf_image *img,
                                  const char *argv_data, u32 argv_data_len,
                                  u32 argc,
                                  const char *env_data, u32 env_data_len,
-                                 u32 envc, u64 vdso_va) {
+                                 u32 envc, u64 vdso_va, int *err_out) {
+    *err_out = -1;
     // Structural invariants. The syscall bodies have already checked all of
     // these -- this entry is reached from several of them and owns the contract
     // too, so they are re-asserted as defense-in-depth. Reaching one is a
@@ -675,7 +686,7 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     // environment; 176 bytes with no argv and an empty env), against the 1 MiB
     // the eager stack used to cost unconditionally.
     u8 *frame = kzalloc((size_t)frame_size, 0);
-    if (!frame) return 0;
+    if (!frame) { *err_out = -T_E_NOMEM; return 0; }
 
     // AT_PHDR — the user VA of the program-header table. The phdrs sit
     // at file offset img->phoff; find the PT_LOAD segment whose file
@@ -754,7 +765,11 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     size_t first = (size_t)(frame_off / PAGE_SIZE);
     size_t n     = (size_t)(EXEC_USER_STACK_SIZE / PAGE_SIZE) - first;
     int rc = burrow_lazy_populate(as, exempt, sv->burrow, first, n);
-    if (rc == 0) {
+    if (rc != 0) {
+        // The frame's pages are the load's last allocation; a refusal here is
+        // the cap's or the pool's (the arguments hold by construction).
+        *err_out = -T_E_NOMEM;
+    } else {
         rc = lazy_write(sv->burrow, frame_off, frame, (size_t)frame_size);
         // L-7 F4: the populate succeeded, so its charge for the whole run is
         // outstanding and a lazy_write failure owes it back. Deliberately inside
@@ -816,15 +831,18 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
 
     // Map each PT_LOAD segment.
     for (int i = 0; i < img.n_segments; i++) {
-        if (exec_map_segment(as, exempt, blob, &img.segments[i]) != 0) {
-            // Partial state: caller disposes the target address space.
-            return -1;
+        int mrc = exec_map_segment(as, exempt, blob, &img.segments[i]);
+        if (mrc != 0) {
+            // Partial state: caller disposes the target address space. A
+            // refused allocation says so (-T_E_NOMEM); anything else is -1.
+            return mrc;
         }
     }
 
-    // Allocate user stack.
-    if (exec_map_user_stack(as, exempt) != 0) {
-        return -1;
+    // Allocate user stack. A refused allocation travels as -T_E_NOMEM.
+    int src = exec_map_user_stack(as, exempt);
+    if (src != 0) {
+        return src == -T_E_NOMEM ? src : -1;
     }
 
     // Map the shared vDSO clock page RO (best-effort; 0 -> no AT_VDSO_CLOCK).
@@ -834,10 +852,11 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
     // strings region under Shape B) at the top of the user stack;
     // *sp_out points at its `argc` word.
     *entry_out = img.entry;
+    int ferr   = -1;
     *sp_out    = exec_build_init_stack(as, exempt, &img, argv_data, argv_data_len,
                                        argc, env_data, env_data_len, envc,
-                                       vdso_va);
-    if (*sp_out == 0)                          return -1;   // L-4a: frame OOM
+                                       vdso_va, &ferr);
+    if (*sp_out == 0)                          return ferr;  // L-4a: frame OOM (-T_E_NOMEM at the pool's edge)
     return 0;
 }
 
@@ -939,7 +958,7 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
     struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
                                               (seg->flags & PF_X) != 0,
                                               spoor_file_size(exe));
-    if (!b) { spoor_clunk(exe); return -1; }
+    if (!b) { spoor_clunk(exe); return -T_E_NOMEM; }   // the slab (the arguments hold by the gate)
 
     // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X
     // (I-12) holds by construction: the gate admits only NOT-PF_W segments, so
@@ -952,7 +971,7 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
     // strong ref keep the image alive; on map failure the image stays validly
     // cached (idle) for a later exec -- never leaked.
     burrow_unref(b);
-    return rc == 0 ? 0 : -1;
+    return rc == 0 ? 0 : (rc == -(int)T_E_NOMEM ? rc : -1);   // a refused VMA (F18)
 }
 
 // map_eager_from_file -- a non-shared PT_LOAD eager-copied from the file into a
@@ -981,8 +1000,8 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
     // allocate AND zero a 32 MiB order-13 block for 128 bytes of data (#130).
     bool sparse = seg_may_be_sparse(seg);
     struct Burrow *b = sparse ? burrow_create_anon_lazy(size)
-                              : burrow_create_anon(size);
-    if (!b)                                  return -1;
+                              : burrow_create_anon(size, exempt);
+    if (!b)                                  return -T_E_NOMEM;   // the pool or the slab refused
 
     // L-7 F4: function-scoped so the map-in failure below can unwind the same
     // charge; 0 on the eager path, where nothing was charged.
@@ -997,7 +1016,7 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
         if (nfile > 0 &&
             burrow_lazy_populate(as, exempt, b, 0, nfile) != 0) {
             burrow_unref(b);   // populate self-unwinds its charge; nothing owed
-            return -1;
+            return -T_E_NOMEM;
         }
         size_t got = 0;
         while (got < seg->filesz) {
@@ -1056,7 +1075,10 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
     // L-7 F4: on FAILURE the charge is owed back (nfile == 0 on the eager path,
     // where none was taken). On SUCCESS the mapping keeps the pages and the
     // charge correctly describes them, so only the construction handle drops.
-    if (rc != 0) return lazy_populate_unwind(as, b, nfile);
+    if (rc != 0) {
+        (void)lazy_populate_unwind(as, b, nfile);
+        return rc == -(int)T_E_NOMEM ? rc : -1;   // a refused VMA is a resource refusal too
+    }
     burrow_unref(b);
     return 0;
 }
@@ -1237,7 +1259,6 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
 // than by a reviewer checking twelve paths (the F1/F5 lesson from D-3c, where a
 // cleanup that was right at three sites was missing at the fourth).
 static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
-                          u32 pheno,
                           struct Spoor *exe, size_t exe_size,
                           const char *prog_name, u32 prog_name_len,
                           const char *argv_data, u32 argv_data_len, u32 argc,
@@ -1246,7 +1267,6 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                           struct Spoor **interp_out, char **rw_argv_out);
 
 int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
-                   u32 pheno,
                    struct Spoor *exe, size_t exe_size,
                    const char *prog_name, u32 prog_name_len,
                    const char *argv_data, u32 argv_data_len, u32 argc,
@@ -1254,7 +1274,7 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                    u64 *entry_out, u64 *sp_out) {
     struct Spoor *interp = NULL;    // owned HERE once the body sets it; the
     char *rw_argv        = NULL;    // caller's own `exe` is untouched either way
-    int rc = exec_load_body(as, exempt, nsp, pheno, exe, exe_size,
+    int rc = exec_load_body(as, exempt, nsp, exe, exe_size,
                             prog_name, prog_name_len,
                             argv_data, argv_data_len, argc,
                             env_data, env_data_len, envc,
@@ -1268,7 +1288,6 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 }
 
 static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
-                          u32 pheno,
                           struct Spoor *exe, size_t exe_size,
                           const char *prog_name, u32 prog_name_len,
                           const char *argv_data, u32 argv_data_len, u32 argc,
@@ -1316,31 +1335,31 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     int r = elf_load(hdr, exe_size, &img);
 
     // DISTRO D-4: PT_INTERP -> the interpreter. `elf_load` already reports the
-    // segment as ELF_LOAD_HAS_INTERP, which was previously only a refusal; this
-    // upgrades it from diagnosis to dispatch for a PHENO_LINUX image, and
-    // leaves it a refusal for every native one.
+    // segment as ELF_LOAD_HAS_INTERP, which was once only a refusal; this
+    // upgrades it from diagnosis to dispatch. B-1d (ARCH 6.5 "Dynamic loading")
+    // lifted the PHENO_LINUX gate: a native program's interpreter is Pouch's
+    // /lib/libc.so, resolved the same way, because the loader is the same
+    // object under both ABIs. Which loader a program gets is its namespace's
+    // answer to the path the program names, and the phenotypes name different
+    // paths (/lib/libc.so, /lib/ld-musl-aarch64.so.1), so a namespace holding
+    // both can hand neither program the other's.
     //
     // ONE LEVEL, structurally: this is straight-line, not a loop, so the second
     // `elf_load` below sees the INTERPRETER's phdrs and an interpreter that
     // itself carries PT_INTERP falls through to the unchanged refusal.
-    // Design D (VIVARIUM 13.10.4, review F1 Leg C): dispatch on the DECIDED
-    // phenotype threaded in as `pheno`, never on nsp->phenotype -- execve
-    // stores the field only at its commit, after this load, so for a native
-    // caller exec'ing a dynamic /viv/bin binary the field still reads native
-    // here while the resolve already decided Linux. `nsp` stays required: the
-    // interpreter is resolved in ITS namespace.
-    if (r == ELF_LOAD_HAS_INTERP && nsp && pheno == PHENO_LINUX) {
+    // The interpreter runs under the program's decided phenotype, which the
+    // caller commits after this load (VIVARIUM 13.10.4); nothing here reads
+    // it. `nsp` stays required: the interpreter is resolved in ITS namespace.
+    if (r == ELF_LOAD_HAS_INTERP && nsp) {
         if (!prog_name || prog_name_len == 0) {
-            // REACHABLE (Design D, VIVARIUM 13.10.6 -- this said "unreachable"
-            // until audit F5): the register-argument spawn variants stamp
-            // LINUX for a pheno-mount binary too, and they thread NO name.
-            // prog_name is the argv-side identity, and substituting the
-            // resolved Spoor's ->path for it is forbidden -- I-33 makes the
-            // retained name cosmetic, never load-bearing. So a DYNAMIC
-            // pheno-mount binary loads through SYS_SPAWN_FULL_ARGV and refuses
-            // here through SYS_SPAWN / _WITH_FDS / _WITH_PERMS / _WITH_CAPS:
-            // the static/dynamic asymmetry 13.10.6 states. Every shipped
-            // pheno-mount binary is static, so no caller meets it today. Loud
+            // REACHABLE (VIVARIUM 13.10.6): the register-argument spawn
+            // variants thread NO name. prog_name is the argv-side identity,
+            // and substituting the resolved Spoor's ->path for it is
+            // forbidden -- I-33 makes the retained name cosmetic, never
+            // load-bearing. So a DYNAMIC binary, native or Linux, loads
+            // through SYS_SPAWN_FULL_ARGV (the shell, posix_spawn, execve)
+            // and refuses here through SYS_SPAWN / _WITH_FDS / _WITH_PERMS /
+            // _WITH_CAPS: the static/dynamic asymmetry 13.10.6 states. Loud
             // rather than silent because the failure mode is "dynamic
             // binaries mysteriously do not run here".
             exec_report_fail("PT_INTERP rewrite needs the program's own name and "
@@ -1425,9 +1444,12 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
             exec_say("exec: the PT_INTERP interpreter is itself dynamic -- "
                      "one interpreter level only (DISTRO section 7.1)\n");
         } else if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
-            exec_say("exec: dynamic Linux binary rejected -- a NATIVE exec "
-                     "runs statically-linked ELF only; a dynamic one needs a "
-                     "PHENO_LINUX vivarium (DISTRO section 7.1)\n");
+            // B-1d: a native exec runs dynamic ELF too, so the rule this states
+            // is where a LINUX binary's interpreter lives, not that native
+            // execs are static.
+            exec_say("exec: dynamic Linux binary rejected -- its interpreter "
+                     "lives in a PHENO_LINUX vivarium's namespace, not this one "
+                     "(DISTRO section 7.1)\n");
         }
     }
     kfree(hdr);
@@ -1505,20 +1527,26 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                                  ? "file-backed PT_LOAD map failed at vaddr"
                                  : "eager PT_LOAD map failed at vaddr",
                              seg->vaddr);
-            return -1;   // partial -> caller disposes target
+            // Partial -> the caller disposes the target. A refused allocation
+            // travels as -T_E_NOMEM (B-1a' audit F15: the pool's refusal used
+            // to surface as EINVAL, a malformed binary's code); anything else
+            // is -1.
+            return rc == -T_E_NOMEM ? rc : -1;
         }
     }
 
     // 3. User stack + the vDSO clock page + the System V startup frame (reads
     //    img metadata, not the file -- AT_PHDR resolves into the first mapped
     //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
-    if (exec_map_user_stack(as, exempt) != 0)  return -1;
+    int src = exec_map_user_stack(as, exempt);
+    if (src != 0)                              return src == -T_E_NOMEM ? src : -1;
     u64 vdso_va = exec_map_vdso(as, exempt);   // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
+    int ferr   = -1;
     *sp_out    = exec_build_init_stack(as, exempt, &img, argv_data, argv_data_len,
                                        argc, env_data, env_data_len, envc,
-                                       vdso_va);
-    if (*sp_out == 0)                          return -1;   // L-4a: frame OOM
+                                       vdso_va, &ferr);
+    if (*sp_out == 0)                          return ferr;  // L-4a: frame OOM (-T_E_NOMEM at the pool's edge)
     return 0;
 }
 
@@ -1556,11 +1584,7 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         return -1;
     }
 
-    // Design D: the spawn thunks stamp p->phenotype (phenotype_decide) BEFORE
-    // calling here, so the field IS the decided value on this entry; execve's
-    // entry (sys_execve_core) threads a local instead, because there the field
-    // is written only at the commit.
-    int rc = exec_load_into(p->as, proc_resource_exempt(p), p, p->phenotype, exe, exe_size,
+    int rc = exec_load_into(p->as, proc_resource_exempt(p), p, exe, exe_size,
                             prog_name, prog_name_len,
                             argv_data, argv_data_len, argc,
                             env_data, env_len, envc, entry_out, sp_out);

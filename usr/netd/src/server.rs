@@ -95,7 +95,7 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 /// product at the Tier-A target over the NIC round-trip, 2x the 32 KiB per-op
 /// chunk so the NIC pipeline stays full while the next 9P op crosses. MAX_SLOTS
 /// is the public slot limit; MAX_TCP_TRANSPORTS * (rx + tx) bounds live plus
-/// retiring TCP buffers at 8 MiB within netd's explicit 16 MiB heap.
+/// retiring TCP buffers at 8 MiB.
 const TCP_RX_BUF: usize = 65536;
 const TCP_TX_BUF: usize = 65536;
 
@@ -3318,7 +3318,22 @@ fn close_retirement_legs(
     if net.slot_live(cn) || net.retired.len() != 1 {
         return "last-owner";
     }
-    if unsafe { libthyla_rs::t_burrow_detach(va as u64, 4096) } >= 0 {
+    // The range detach answers 0 for a range that maps nothing (the Linux
+    // form since B-1a'), so a second detach cannot tell "gone" from "there".
+    // A protect can: it looks the range up and answers ENOMEM for a hole, 0
+    // for a live mapping. Asked at RW -- the ring's own prot -- so the oracle
+    // is a no-op on a ring that is still there rather than a lowering that
+    // would mutate what it was meant to observe (B-1a' audit F6). Blind to
+    // VA reuse either way: a fresh mapping at the same VA reads as "there".
+    if unsafe {
+        libthyla_rs::t_burrow_protect(
+            va as u64,
+            4096,
+            libthyla_rs::T_BURROW_PROT_READ | libthyla_rs::T_BURROW_PROT_WRITE,
+            0,
+        )
+    } != -12
+    {
         return "weft-not-detached";
     }
     let replacement = match net.tcp_clone() {

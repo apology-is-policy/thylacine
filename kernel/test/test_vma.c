@@ -48,7 +48,7 @@ void test_vma_alloc_free_smoke(void) {
     u64 alloc_before = vma_total_allocated();
     u64 free_before  = vma_total_freed();
 
-    struct Burrow *burrow = burrow_create_anon(VA_PAGE);
+    struct Burrow *burrow = burrow_create_anon(VA_PAGE, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     struct Vma *v = vma_alloc(VA_BASE, VA_BASE + VA_PAGE,
@@ -69,7 +69,7 @@ void test_vma_alloc_free_smoke(void) {
 }
 
 void test_vma_alloc_constraints(void) {
-    struct Burrow *burrow = burrow_create_anon(VA_PAGE);
+    struct Burrow *burrow = burrow_create_anon(VA_PAGE, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     // Zero-length range.
@@ -105,7 +105,7 @@ void test_vma_insert_lookup_smoke(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     // Three non-overlapping VMAs at distinct VA offsets.
@@ -143,7 +143,7 @@ void test_vma_insert_overlap_rejected(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     struct Vma *v1 = vma_alloc(VA_BASE, VA_BASE + 2 * VA_PAGE,
@@ -187,7 +187,7 @@ void test_vma_insert_sorted_invariant(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     // Insert in mixed order: 4, 2, 6, 1, 3.
@@ -219,7 +219,7 @@ void test_vma_drain_releases_all(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     u64 alloc_before = vma_total_allocated();
@@ -262,7 +262,7 @@ void test_vma_drain_releases_all(void) {
 void test_vma_find_gap_smoke(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     u64 out = 0;
@@ -310,7 +310,7 @@ void test_vma_find_gap_smoke(void) {
 void test_vma_find_gap_no_fit(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     u64 out = 0;
@@ -373,7 +373,7 @@ void test_vma_find_gap_constraints(void) {
 void test_vma_find_gap_straddle(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     u64 out = 0;

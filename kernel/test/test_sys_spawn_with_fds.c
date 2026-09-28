@@ -89,7 +89,7 @@ void test_sys_spawn_with_fds_rejects_non_spoor_fd(void) {
     // Allocate an anonymous Burrow handle in kproc; verify spawn
     // rejects it because kind != KOBJ_SPOOR. Use a small page-aligned
     // size so the Burrow allocation is cheap.
-    struct Burrow *b = burrow_create_anon(4096);
+    struct Burrow *b = burrow_create_anon(4096, false);
     TEST_ASSERT(b != NULL, "burrow_create_anon");
 
     hidx_t bh = handle_alloc(t->proc, KOBJ_BURROW,

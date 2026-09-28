@@ -14,7 +14,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | arc | status | chunks |
 |---|---|---|
 | [[arc-arch81]] | active | 1 |
-| [[arc-boosty]] | active | 3 |
+| [[arc-boosty]] | active | 5 |
 | [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
 | [[arc-deep-smp-review]] | active | 4 |
@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 91
+## Open seams: 90
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -101,7 +101,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-pouch-dup2-target]] (sub-pouch-process)
 - [[seam-pouch-errno-channel]] (sub-pouch-seam, sub-pouch-fs, sub-pouch-net)
 - [[seam-pouch-forkpty]] (sub-pouch-tty)
-- [[seam-pouch-guard-pages]] (sub-pouch-thread, sub-pouch-process)
 - [[seam-pouch-process-shared]] (sub-pouch-thread)
 - [[seam-pouch-readyfd-aba]] (sub-pouch-net)
 - [[seam-pouch-select-fd-bound]] (sub-pouch-net)
@@ -134,12 +133,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
-- 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
-- 2026-09-22 [[chg-2026-09-22-arch81-scripture]] — ARCH 8.12: the design for syscall bodies with interrupts on, landed as scripture before any code
-- 2026-09-22 [[chg-2026-09-22-poll-preemption-point]] — poll crosses a preemption point each re-loop: the masked CPU gets a window the noise cannot close
-- 2026-09-21 [[chg-2026-09-21-boosty-b0-jsc]] — Boosty B-0: JavaScriptCore runs on Thylacine (JIT off) -- the port wiring
-- 2026-09-21 [[chg-2026-09-21-mount-shed]] — The mount-table shed at pivot / chroot (#80): the cap stays 32 and the orphans go
-- 2026-09-21 [[chg-2026-09-21-pouch-b0-libc]] — Pouch 0033-0041: nine libc patches a JavaScript engine shook out -- lies, not errors
-- 2026-09-21 [[chg-2026-09-21-srvconn-two-endpoint-poll]] — poll: a wake is a hint (the re-arm), and a /srv connection is pollable from BOTH endpoints with a list walk on every ring mutation
-- 2026-09-18 [[chg-2026-09-18-npxf-host]] — Supported OpenSSL npxf hosts and pending graphical SAK ownership review
+- 2026-09-25 [[chg-2026-09-25-b1d-dlopen]] — B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness
+- 2026-09-25 [[chg-2026-09-25-b1d-round2-close]] — B-1d holotype round 2 close: the bin/ move's four breakers, the escape leg walks its .., the initrd root guarded (4 P0-class closed in the round + 0 P0 / 0 P1 / 1 P2 / 5 P3)
+- 2026-09-25 [[chg-2026-09-25-b1d-round3-close]] — B-1d holotype round 3 close: the confined leg's second control, five EXTINCTION bodies restored, the stale-path sweep finished (0 P0 / 0 P1 / 1 P2 / 6 P3, the P2 self-found)
+- 2026-09-25 [[chg-2026-09-25-b1d-u-unions]] — B-1d-u (Plan 9 unions): an MBEFORE or MAFTER mount at a bare directory keeps the directory it covers as a member; the spec's covered-directory invariants; the Rust target leaves static-PIE
+- 2026-09-25 [[chg-2026-09-25-b1d-v-emount]] — B-1d-v: SYS_MOUNT refuses Plan 9's Emount (only MREPL at a file), joey's extinction bodies name bin/joey, the musl loader is secure-always; a per-post /srv qid.path
+- 2026-09-24 [[chg-2026-09-24-b1c-filters-stream]] — B-1c WIP 3: a direct block counted for as long as it is held; the six filters that do not need their whole input stream it (HT09.R4-F2 reopened by the uncapped slurp, closed)
+- 2026-09-24 [[chg-2026-09-24-b1c-native-heap]] — B-1c (the native heap): thyla-heap -- dlmalloc 0.2.14 over reservations the platform owns, a block of 256 KiB or more its own mapping -- under libthyla-rs's ThylaAlloc; the fixed heaps, ThylaAllocN and slurp's cap gone; the manual's bound under dlmalloc; /heap-probe
+- 2026-09-24 [[chg-2026-09-24-b1c-round1-close]] — B-1c holotype round 1 close: a line bound, filters that stop quietly when their reader leaves, small over-aligned blocks in dlmalloc, witness legs that can fail (0 P0 / 1 P1 / 1 P2 / 10 P3, four self-found)
 <!-- generated:end -->

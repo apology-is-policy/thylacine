@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -54,8 +54,9 @@ touches EL0.
 | `vivarium_{socket,listen}_decide`, the sockaddr/ctl codecs | bool + errno | V-5 |
 | `vivarium_{sigaction,sigprocmask}_decide`, the note maps | verdict / mask | V-6 |
 | `vivarium_{openat_create,mkdirat,unlinkat,renameat}_decide` | verdict + params | #50 path-mutation family (the create/remove decisions) |
-| `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36; the fixed-anon arm admits PROT_NONE since B-1a |
+| `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36; the fixed-anon arm admits PROT_NONE since B-1a; both fixed arms are confined to the burrow window since B-1a' (`fixed_addr_ok`) |
 | `vivarium_mprotect_decide` | verdict | B-1a: the prot word alone; `addr` / `len` are the shell's (a zero length succeeds, an unaligned address is EINVAL) |
+| `vivarium_madvise_decide` | verdict + kind | B-1b: the advice word alone -- RELEASE (`DONTNEED` / `FREE`) over the decommit core, HINT (twelve) answers 0 / ENOMEM and changes nothing, everything else declines; `addr` / `len` are the shell's |
 | `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths) |
 | `vivarium_{recvfrom,recvmsg,sendto}_decide` | bool + errno | V-5 socket data path |
 | `vivarium_{faccessat,ioctl,futex,getsockopt}_decide` | verdict | the 6.26 git batch + misc |
@@ -83,10 +84,15 @@ semantics, and no policy.
 they are the best short statement of what this layer is for:
 
 - `munmap(addr, len)` and `SYS_BURROW_DETACH(vaddr, length)` take the same
-  two words in the same order — and burrow_detach requires an **exact VMA
-  match** while Linux explicitly permits partial and multi-mapping unmaps
-  *and succeeds on an unmapped range*. A renumber is wrong in two
-  directions for a legal class of inputs, with no error anywhere.
+  two words in the same order — and until B-1a' burrow_detach required an
+  **exact VMA match** while Linux explicitly permits partial and
+  multi-mapping unmaps *and succeeds on an unmapped range*, so a renumber
+  was wrong in two directions for a legal class of inputs, with no error
+  anywhere. Since B-1a' both are the range form over one core, and what
+  still makes a renumber wrong is the ERROR CONVENTION (the native answers
+  -1, the row must answer Linux's errno) and the WINDOW (a `munmap` below it
+  is declined, never faked) -- which is why the row is a tier-2 shell rather
+  than a renumber.
 - `writev(fd, iov, iovcnt)` and `SYS_WRITE(fd, buf, len)` are three
   arguments each — and arg 1 is a **pointer to an array of pointers**, arg
   2 an **entry count**. The renumber would write `iovcnt` bytes of the
@@ -199,6 +205,20 @@ only honest answer: a writable page where a guard was asked for would have
 been a hole, not a degradation. `PROT_NONE` still DECLINES on the FILE arm: a
 none file window is a pure reservation with no raise path for file-backed
 pages at v1.
+
+**Both fixed arms are confined to the burrow window (B-1a').** `fixed_addr_ok`
+refuses, beside NULL and a misaligned address, any `addr` outside
+`[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP)`: the `munmap` row is
+window-confined, so a fixed mapping placed below the window could never be
+unmapped and leaked for the life of the process (pheno-probe L21, every boot,
+until this chunk). musl's `map_library` overlays land inside the reservation it
+just made, which is in the window, so nothing served is lost; a request below
+it is declined honestly (`VIV_FORWARD` -> ENOSYS + the unserved line) instead
+of half-served, and the kernel's `mmap_fixed_window` bounds the same window
+again ([[sub-kernel-syscall-dispatch]]). `vivarium.mmap_fixed_domain` pins both
+arms' decline at `0x40001000`, and the arms-disjoint sweep gained
+`0x100001000` beside it so a real page inside the window still reaches
+admission.
 
 **The #50 path-mutation family is the create/remove half of the layer.**
 `openat`'s `O_CREAT` (`vivarium_openat_create_decide`), `mkdirat`, `unlinkat` and
@@ -440,8 +460,9 @@ states.
 
 The disposition is itself a decision, and the file distinguishes three:
 
-- **ENOSYS** — the surface is absent. `brk` (no break pointer to move),
-  `mprotect` (no prot-mutation syscall exists at all), `sigaltstack`,
+- **ENOSYS** — the surface is absent. `brk` (no break pointer to move), a
+  `munmap` or a fixed `mmap` below the burrow window (a mapping there is not
+  the phenotype's to place or unmap; B-1a'), `sigaltstack`,
   `setsockopt`/`getsockopt` (`/net` exposes no option surface; answering
   "success" to a TCP_NODELAY the stack ignores is the silent lie).
 - **A reproduced Linux errno** — where our domain *equals* Linux's, an
@@ -535,7 +556,7 @@ its reasoning fails a test rather than passing quietly.
   as task #163.
 - **`VIV_NATIVE_CEILING`'s declaration comment used to repeat the number the
   symbol exists to stop repeating, and went stale seven times.** The constant
-  is now **125** (`SYS_BURROW_PROTECT`, B-1a). The remedy was never going to be
+  is now **126** (`SYS_BURROW_MAP_FILE`, B-1d). The remedy was never going to be
   a person remembering: since the 2026-09-17 PCI rewrite the assert is pinned
   to the `SYS__NATIVE_TOP - 1` sentinel, which the compiler recomputes on every
   append, and the declaration comment narrates that drift history instead of a
@@ -600,3 +621,68 @@ they fired as designed on the chunk's first boot.
 The header's `mprotect` paragraph (the old "ENOSYS; musl tolerates it, glibc
 would not") and the 6.21 degradation prose are rewritten; the "WHAT IS
 DELIBERATELY ABSENT" block (task #163, the first caveat above) is not.
+
+## B-1a': the fixed arms are window-confined; the munmap row is the range form (2026-09-23)
+
+`fixed_addr_ok` gained the window test (Mechanism, above), and `vivarium.c`
+includes `exec.h` for the two bounds. The `VIV_LINUX_MUNMAP` row's shell
+([[sub-kernel-syscall-dispatch]]) now returns `sys_munmap_range_for_proc`'s
+value as is after Linux's two argument errors: the native core's `-T_E_INVAL`
+/ `-T_E_ACCES` / `-T_E_NOMEM` reach the guest as EINVAL / EACCES / ENOMEM, and
+a range below the window as ENOSYS -- where the row used to answer ENOSYS for
+every refusal including a boundary straddle, which Linux serves and the core
+now serves too. The EL0 witnesses in `viv-pheno-probe` (`run_linux`): L21 maps
+`MAP_FIXED | MAP_ANON` at `0x1_4000_0000` (a GiB into the window, above
+anything the guest has mapped) and L21b writes and reads back through its last
+page; L21c asserts its `munmap` answers 0 -- asserted rather than swallowed,
+since a fixed mapping that cannot be unmapped is a leak per call; L21d asserts
+a fixed request at `0x40000000` answers ENOSYS. The mprotect legs' "never
+mapped" range stays `0x50000000` -- a range no leg has ever mapped is the only
+honest unmapped. `test_vivarium.c`'s `mmap_fixed_domain` adds the two
+below-window declines and its arms-disjoint sweep the in-window page. The
+probe itself remains unowned ([[sub-kernel-protect-witness]] Seams).
+
+## The madvise row (2026-09-23, B-1b)
+
+`{ VIV_LINUX_MADVISE, VIV_TIER2 }` (233) lands with its shell, so a Linux
+guest's allocator returns memory the way Pouch's and the native one do (ARCH
+6.5 "Capacity"; VIVARIUM 6.28). `vivarium_madvise_decide(advice, &kind)` judges
+the advice word ALONE, narrowed to 32 bits as the mprotect row's prot is:
+`MADV_DONTNEED` (4) and `MADV_FREE` (8) are RELEASE; the twelve pure hints
+(NORMAL, RANDOM, SEQUENTIAL, WILLNEED, HUGEPAGE, NOHUGEPAGE, DONTDUMP, DODUMP,
+COLD, PAGEOUT, POPULATE_READ, POPULATE_WRITE) are HINT; the fork-semantic
+quartet, KSM's pair, REMOVE, the poison testers and any unknown value decline
+(the tier's rule: none can be given Linux's meaning here, and a false 0 is a
+lie a later fork would expose). The shell ([[sub-kernel-syscall-dispatch]])
+keeps Linux's argument order -- the advice first, an unaligned address EINVAL,
+a zero length 0 -- and hands a RELEASE to `sys_burrow_decommit_core` (the
+-errno form of `SYS_BURROW_DECOMMIT`, which the native 84 flattens to -1): a
+hole ENOMEM, a mapping that is not plain anonymous memory of this space EINVAL.
+The core is window-confined like the range detach, and the shell refines its
+`-T_E_NOSYS` for a range outside the window with `vma_range_is_mapped_in`: an
+UNMAPPED range is still ENOMEM (a hole is a hole wherever it lies -- the first
+B-1b boot failed pheno-probe L23m, a hole at `0x50000000` answered ENOSYS), a
+MAPPED one is ENOSYS with its bytes untouched (a false ENOMEM would tell an
+allocator its own `.bss` is unmapped). A HINT is 0 over a mapped range and
+ENOMEM over a hole. Three divergences are recorded, not served (holotype F6;
+VIVARIUM 6.28): a RELEASE over a private FILE window is EINVAL (Linux drops
+the private pages); a range mixing mapped and unmapped parts releases nothing
+(Linux releases the mapped parts, then answers ENOMEM); a length past the
+window is EINVAL before any hole is looked for (Linux: ENOMEM). I-43 holds: the
+row confers no authority the native decommit does not gate. Witnesses: `vivarium.madvise_domain` (the three sets,
+the narrowing, a NULL out-parameter declining), the tier asserts at both
+sites, `vma.range_is_mapped`, and pheno-probe legs L23j-L23t (a written page
+released and re-read zero; a hole ENOMEM for both kinds; DONTFORK ENOSYS; an
+unaligned start EINVAL; a zero length 0; the probe's own data page declined
+and intact). The sabotage `nodecommit` (the arm answers 0 without the core)
+reddens L23l.
+
+## Native ceiling 126 (2026-09-24, B-1d)
+
+`VIV_NATIVE_CEILING` is 126 (`SYS_BURROW_MAP_FILE`), again moved by the
+sentinel rather than by hand. No vivarium row lies at 126 or 127, and the
+lowest row the ceiling argues for is `restart_syscall` (128), so the move voids
+no row's argument. The phenotype's file-backed `mmap` rows and the new native
+number now call the same three D-3 cores ([[sub-kernel-syscall-dispatch]]):
+each entry decides its own word and hands the cores the same prot encoding, so
+the phenotype's deciders did not change.

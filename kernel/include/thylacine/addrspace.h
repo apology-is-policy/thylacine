@@ -101,7 +101,7 @@ struct AddrSpace {
     // I-32 resource axes. All three are charged/uncharged under `lock` so they
     // are exact, and stored with __atomic_store_n so lockless /proc readers get
     // a coherent snapshot.
-    u32            page_count;         // live anonymous pages (true committed RSS)
+    u32            page_count;         // the HOLDER count: anon + mapped file pages, and the nodes + tables that map them
     u32            vma_count;          // VMA-slab bound
     u32            shared_map_pages;   // pages shared IN from other Procs (G-2)
 
@@ -132,13 +132,33 @@ struct AddrSpace {
     // nearly shipped a silently-reverted CL-5.
     u32            page_peak;
 
-    u32            _pad;               // explicit tail padding; struct is 56 B
+    // B-1a' audit F1: how much of page_count is user PAGE TABLES (L1/L2/L3,
+    // charged by the MMU install, refunded by the reclaim that frees an
+    // emptied table). Telemetry -- the cap reads page_count -- so a reader
+    // can tell tables from data.
+    u32            pgtable_pages;
+
+    // B-1a' audit F8: how much of page_count is FILE pages -- the Image cache's
+    // pages this space maps, charged per leaf installed (the holder reading,
+    // like a COW-shared page) and refunded per leaf cleared. The page itself
+    // is the cache's: it outlives the mapping, and it is what the pool
+    // reclaims from an idle image under pressure. Telemetry, like
+    // pgtable_pages.
+    u32            file_pages;
+
+    // B-1a' audit F4: this space's identity, for the records that outlive it.
+    // The eager charge record on a Burrow names the address space that PAID
+    // (Burrow.charge_as_id), never the pid: a pid survives exec and would name
+    // the successor's space, which never paid. From a global counter at
+    // addrspace_alloc; never 0, never reused.
+    u64            id;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 56,
-               "AddrSpace is 56 bytes: ref+lock (8) + pgtable_root (8) + "
+_Static_assert(sizeof(struct AddrSpace) == 72,
+               "AddrSpace is 72 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
-               "page_budget + page_peak + pad (24). "
+               "page_budget + page_peak + pgtable_pages + file_pages (28, "
+               "padded to 32) + id (8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM
@@ -150,7 +170,9 @@ _Static_assert(sizeof(struct AddrSpace) == 56,
 // seeds this address space's enforced cap -- I-32 shape (A). Pass the creating
 // Proc's own budget; 0 is refused as a programming error rather than silently
 // meaning "unlimited", because an address space with no cap is exactly the DoS
-// hole I-32 exists to close.
+// hole I-32 exists to close. (B-1a': the machine-wide bound is the user pool
+// below, which every charge is ALSO held to; the budget is the parent's
+// narrowing of this Proc, and its default is the pool itself.)
 struct AddrSpace *addrspace_alloc(u32 page_budget);
 
 // Take a reference. L-3 (RFMEM) is the first caller with a real second sharer:
@@ -308,5 +330,29 @@ bool addrspace_charge_vma(struct AddrSpace *as, bool exempt);
 void addrspace_uncharge_vma(struct AddrSpace *as);
 bool addrspace_charge_shared_map(struct AddrSpace *as, u32 npages, bool exempt);
 void addrspace_uncharge_shared_map(struct AddrSpace *as, u32 npages);
+
+// =============================================================================
+// B-1a' (ARCH 6.5 "Capacity, and the I-32 default"): the user pool lives with
+// the physical allocator (mm/phys.h: capacity_init, capacity_pool_pages,
+// capacity_pool_charged, alloc_user_pages). It is PHYSICAL -- charged at
+// allocation, returned at free_pages -- so the counters here keep the HOLDER
+// reading (a COW-shared page is charged to every space that maps it) while the
+// pool counts each page once. Nothing in this file charges or refunds the
+// pool, and nothing returns to it at death: the drain's frees do.
+// =============================================================================
+
+// B-1a' audit F1: a user page-table page is charged like a pagemap node -- to
+// page_count (the I-32 cap decides) and to pgtable_pages (telemetry). Called by
+// the MMU install and reclaim with the tree's lock held; the page itself comes
+// from alloc_user_pages, which is the pool's charge.
+bool addrspace_charge_table(struct AddrSpace *as, bool exempt);
+void addrspace_uncharge_table(struct AddrSpace *as);
+
+// B-1a' audit F8: a FILE page this space maps is charged like a COW-shared
+// page -- to page_count (the cap decides) and to file_pages (telemetry) -- per
+// leaf the fault installs, and refunded per leaf a range clear removes
+// (vma_uninstall_range_in attributes the count by the mapping's Burrow type).
+bool addrspace_charge_file(struct AddrSpace *as, bool exempt);
+void addrspace_uncharge_file(struct AddrSpace *as, u32 npages);
 
 #endif // THYLACINE_ADDRSPACE_H

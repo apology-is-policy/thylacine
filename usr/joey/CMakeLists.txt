@@ -6,7 +6,7 @@
 # emits two PT_LOAD segments (RX text+rodata, RW data+bss).
 #
 # Output: build/usr/joey/joey — the ELF that tools/build.sh kernel
-# (build_ramfs) copies into the cpio so devramfs exposes it as /joey.
+# (build_ramfs) copies into the cpio's bin/, where devramfs serves it as bin/joey.
 # kernel/joey.c looks it up by name and exec_setup's the bytes into the
 # child Proc.
 

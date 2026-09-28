@@ -10,7 +10,7 @@
 //                        a missing dir without changing cwd.
 //   unset             -- removes a binding.
 //   eval              -- evaluates a string in the current scope.
-//   source            -- reads + evaluates /builtin-test.rc in the
+//   source            -- reads + evaluates /bin/builtin-test.rc in the
 //                        current scope (assignment + fn registration
 //                        persist into the caller's Env).
 //   type              -- reports a name's kind ($status 0).
@@ -253,10 +253,10 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // 10. source runs a file in the current scope: the assignment AND the
-    //     fn definition in /builtin-test.rc persist into this Env.
+    //     fn definition in /bin/builtin-test.rc persist into this Env.
     {
         let mut e = fresh();
-        if run(&mut e, "source /builtin-test.rc") != 0 {
+        if run(&mut e, "source /bin/builtin-test.rc") != 0 {
             return fail("source status");
         }
         if e.get("sourced_var").as_scalar() != "ok" {

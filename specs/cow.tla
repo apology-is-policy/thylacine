@@ -14,7 +14,9 @@
 (*   atomically, under the COW lock:                                        *)
 (*     if (share == 1)  -> take the page IN PLACE, re-install writable      *)
 (*                         (no copy: the common case after one side execs)  *)
-(*     else             -> pin, copy out, then drop the share and install   *)
+(*     else             -> pin, copy out, install the copy, THEN drop the   *)
+(*                         share (the leaf write precedes the put: B-1a'    *)
+(*                         audit F12; modelled behind MODEL_LEAF below)     *)
 (*                                                                          *)
 (*   That lock is GLOBAL, not per-Burrow: two sharers of a page hold        *)
 (*   DIFFERENT Burrow locks, so no per-Burrow lock can serialise the        *)
@@ -120,6 +122,30 @@
 (* them). There ptew is a function of pc and prot is constant, so the       *)
 (* count is preserved by construction as well as by measurement.            *)
 (***************************************************************************)
+
+(***************************************************************************)
+(* B-1a' EXTENSION (2026-09-23; the round-3 audit's F12, recorded by F21). *)
+(* The break's tail is TWO steps in the kernel: the leaf write (the space's *)
+(* read-only leaf, installed by an earlier read, is REPLACED in place by a  *)
+(* writable leaf naming the copy) and then the put of the share held across *)
+(* the copy. BreakFinish has them as ONE step, so their order was outside   *)
+(* the model -- and the wrong order carried a P1: put first, and for one    *)
+(* step this space's read-only leaf still translates to a page it holds no  *)
+(* share of, which the other holder is now free to take in place (I-44) or  *)
+(* to free (I-13). Behind MODEL_LEAF, additive by measurement (with it      *)
+(* FALSE, pter is constant and every pinned count reproduces):              *)
+(*                                                                         *)
+(*   pter[s]  -- a READ-ONLY leaf naming the pristine page is installed in  *)
+(*               s: set by ReadFault (the read arm's install), cleared by   *)
+(*               the leaf write, the in-place take, an exit or a protect.   *)
+(*   BreakReplace(s) then BreakRelease(s) stand in for BreakFinish: the     *)
+(*               leaf write (ptew, ~pter), then the pin and the share.      *)
+(*                                                                         *)
+(*  7. BUGGY_PUT_BEFORE_REPLACE -- the put runs first (PutFirst, then       *)
+(*     ReplaceLate). With this space's read-only leaf still up, a peer's    *)
+(*     exit frees the page under it (-> NoReadableFreed) or a peer's break  *)
+(*     takes it in place, writable, under it (-> NoCrossSpaceRead).         *)
+(***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -131,9 +157,12 @@ CONSTANTS
     Pieces,                           \* B-1a: VMA pieces one Burrow is split into
     BUGGY_PROTECT_KEEPS_PTE,          \* 4: prot lowered, writable PTE kept
     BUGGY_FAULT_IGNORES_PROT,         \* 5: the break entered before the prot check
-    BUGGY_CLONE_PER_PIECE             \* 6: one clone Burrow per VMA piece
+    BUGGY_CLONE_PER_PIECE,            \* 6: one clone Burrow per VMA piece
+    MODEL_LEAF,                       \* B-1a': the read-only leaf + the two-step tail exist at all
+    BUGGY_PUT_BEFORE_REPLACE          \* 7: the share put before the leaf write
 
 ASSUME Cardinality(Sharers) >= 2
+ASSUME BUGGY_PUT_BEFORE_REPLACE => MODEL_LEAF
 ASSUME Pieces \in Nat /\ Pieces >= 1
 
 (* At most one bug is enabled at a time, so a counterexample is unambiguous
@@ -146,7 +175,8 @@ ASSUME (IF BUGGY_BREAK_UNLOCKED           THEN 1 ELSE 0)
      + (IF BUGGY_VFORK_OBSERVE_BEFORE_PARK THEN 1 ELSE 0)
      + (IF BUGGY_PROTECT_KEEPS_PTE         THEN 1 ELSE 0)
      + (IF BUGGY_FAULT_IGNORES_PROT        THEN 1 ELSE 0)
-     + (IF BUGGY_CLONE_PER_PIECE           THEN 1 ELSE 0) <= 1
+     + (IF BUGGY_CLONE_PER_PIECE           THEN 1 ELSE 0)
+     + (IF BUGGY_PUT_BEFORE_REPLACE        THEN 1 ELSE 0) <= 1
 
 (* Sharer program counters:
      "shared"  -- mapped READ-ONLY on the pristine page (the post-fork state)
@@ -154,10 +184,15 @@ ASSUME (IF BUGGY_BREAK_UNLOCKED           THEN 1 ELSE 0)
      "dropped" -- BUGGY_BREAK_UNLOCKED only: share already dropped, count not
                   yet inspected (the window in which two can both read zero)
      "copying" -- allocated a private page, copying OUT of the pristine one
+     "replaced" -- MODEL_LEAF: the copy's writable leaf is in, the share of
+                  the pristine page still held (the put is the next step)
+     "released" -- BUGGY_PUT_BEFORE_REPLACE only: the share put, the read-only
+                  leaf to the pristine page still up (the window F12 opened)
      "private" -- broken: owns a private writable page (no longer a sharer)
      "inplace" -- took the pristine page itself, writable (last-sharer path)
      "gone"    -- exited without ever breaking                               *)
-PCs == {"shared", "acq", "dropped", "copying", "private", "inplace", "gone"}
+PCs == {"shared", "acq", "dropped", "copying", "replaced", "released",
+        "private", "inplace", "gone"}
 
 (* The vfork parent's sub-machine (L-3c-2). *)
 VPCs == {"forked", "checked", "parked", "resumed"}
@@ -176,9 +211,10 @@ VARIABLES
     vpc,        \* VPCs: the vfork parent
     vreleased,  \* BOOLEAN: the vfork child stopped sharing (exec or exit)
     prot,       \* [Sharers -> Prots]: each sharer's VMA prot (B-1a)
-    ptew        \* [Sharers -> BOOLEAN]: a WRITABLE PTE is installed (B-1a)
+    ptew,       \* [Sharers -> BOOLEAN]: a WRITABLE PTE is installed (B-1a)
+    pter        \* [Sharers -> BOOLEAN]: a READ-ONLY leaf to the pristine page is installed (B-1a')
 
-vars == <<pc, share, pin, nfree, vpc, vreleased, prot, ptew>>
+vars == <<pc, share, pin, nfree, vpc, vreleased, prot, ptew, pter>>
 
 (* How many shares of the page a sharer's fork left it holding. The correct
    fork holds exactly one per address space. Under bug 6 every non-parent
@@ -200,7 +236,7 @@ TakesPin == ~BUGGY_TEARDOWN_NO_PIN
 (* Sharers that still REFERENCE the pristine page: mapped on it, mid-break and
    still reading it, or holding it in place. *)
 Referencing == {s \in Sharers :
-                  pc[s] \in {"shared", "acq", "dropped", "copying", "inplace"}}
+                  pc[s] \in {"shared", "acq", "dropped", "copying", "released", "inplace"}}
 
 TypeOk ==
     /\ pc        \in [Sharers -> PCs]
@@ -211,6 +247,7 @@ TypeOk ==
     /\ vreleased \in BOOLEAN
     /\ prot      \in [Sharers -> Prots]
     /\ ptew      \in [Sharers -> BOOLEAN]
+    /\ pter      \in [Sharers -> BOOLEAN]
 
 Init ==
     /\ pc        = [s \in Sharers |-> "shared"]
@@ -221,10 +258,11 @@ Init ==
     /\ vreleased = FALSE
     /\ prot      = [s \in Sharers |-> "rw"]
     /\ ptew      = [s \in Sharers |-> FALSE]   \* the fork uninstalled them all
+    /\ pter      = [s \in Sharers |-> FALSE]   \* and the read-only leaves with them
 
 vunchanged    == UNCHANGED <<vpc, vreleased>>
-protunchanged == UNCHANGED <<prot, ptew>>
-pgunchanged   == UNCHANGED <<pc, share, pin, nfree, prot, ptew>>
+protunchanged == UNCHANGED <<prot, ptew, pter>>
+pgunchanged   == UNCHANGED <<pc, share, pin, nfree, prot, ptew, pter>>
 pgunchanged_but_prot == UNCHANGED <<pc, share, pin, nfree>>
 
 (***************************************************************************)
@@ -255,11 +293,12 @@ DecideLocked(s) ==
     /\ IF share = 1
          THEN /\ pc'   = [pc EXCEPT ![s] = "inplace"]
               /\ ptew' = [ptew EXCEPT ![s] = TRUE]   \* re-installed writable
+              /\ pter' = [pter EXCEPT ![s] = FALSE]  \* in place of the read-only leaf
               /\ UNCHANGED <<share, pin, nfree>>
          ELSE /\ pc'    = [pc EXCEPT ![s] = "copying"]
               /\ pin'   = IF TakesPin THEN pin + 1 ELSE pin
               /\ share' = IF BUGGY_TEARDOWN_NO_PIN THEN share - 1 ELSE share
-              /\ UNCHANGED <<nfree, ptew>>
+              /\ UNCHANGED <<nfree, ptew, pter>>
     /\ UNCHANGED prot
     /\ vunchanged
 
@@ -284,10 +323,11 @@ LookUnlocked(s) ==
          THEN \* "nobody else is left" -- take the page in place
               /\ pc'   = [pc EXCEPT ![s] = "inplace"]
               /\ ptew' = [ptew EXCEPT ![s] = TRUE]
+              /\ pter' = [pter EXCEPT ![s] = FALSE]
               /\ UNCHANGED <<share, pin, nfree>>
          ELSE /\ pc'  = [pc EXCEPT ![s] = "copying"]
               /\ pin' = pin + 1
-              /\ UNCHANGED <<share, nfree, ptew>>
+              /\ UNCHANGED <<share, nfree, ptew, pter>>
     /\ UNCHANGED prot
     /\ vunchanged
 
@@ -296,12 +336,68 @@ LookUnlocked(s) ==
 (* the correct path -- drop the share now that we are off the pristine one. *)
 (***************************************************************************)
 BreakFinish(s) ==
+    /\ ~MODEL_LEAF                            \* B-1a': the two-step tail replaces it
     /\ pc[s] = "copying"
     /\ pc'    = [pc EXCEPT ![s] = "private"]
     /\ ptew'  = [ptew EXCEPT ![s] = TRUE]     \* the private page, writable
     /\ pin'   = IF TakesPin THEN pin - 1 ELSE pin
     /\ share' = IF EarlyDrop THEN share ELSE share - 1
-    /\ UNCHANGED <<nfree, prot>>
+    /\ UNCHANGED <<nfree, prot, pter>>
+    /\ vunchanged
+
+(***************************************************************************)
+(* B-1a' (MODEL_LEAF): the read-only leaf, and the break's tail as the two  *)
+(* steps the kernel takes. A sharer's READ installs a read-only leaf naming *)
+(* the pristine page (fault.c's read arm; nothing to break). The copy's     *)
+(* tail is the leaf write -- the writable leaf naming the copy REPLACES the *)
+(* read-only one in place, one break-before-make -- and THEN the put of the *)
+(* share held across the copy. Bug 7 puts first: for one step this space's  *)
+(* read-only leaf still translates to a page it holds no share of.          *)
+(***************************************************************************)
+ReadFault(s) ==
+    /\ MODEL_LEAF
+    /\ pc[s] = "shared"
+    /\ prot[s] # "none"
+    /\ ~pter[s]
+    /\ pter' = [pter EXCEPT ![s] = TRUE]
+    /\ UNCHANGED <<pc, share, pin, nfree, prot, ptew>>
+    /\ vunchanged
+
+BreakReplace(s) ==
+    /\ MODEL_LEAF /\ ~BUGGY_PUT_BEFORE_REPLACE
+    /\ pc[s] = "copying"
+    /\ pc'   = [pc EXCEPT ![s] = "replaced"]
+    /\ ptew' = [ptew EXCEPT ![s] = TRUE]      \* the copy, writable, in place of
+    /\ pter' = [pter EXCEPT ![s] = FALSE]     \* the read-only leaf
+    /\ UNCHANGED <<share, pin, nfree, prot>>
+    /\ vunchanged
+
+BreakRelease(s) ==
+    /\ MODEL_LEAF /\ ~BUGGY_PUT_BEFORE_REPLACE
+    /\ pc[s] = "replaced"
+    /\ pc'    = [pc EXCEPT ![s] = "private"]
+    /\ pin'   = IF TakesPin THEN pin - 1 ELSE pin
+    /\ share' = IF EarlyDrop THEN share ELSE share - 1
+    /\ UNCHANGED <<nfree, prot, ptew, pter>>
+    /\ vunchanged
+
+(* Bug 7: the put, then the leaf write. *)
+PutFirst(s) ==
+    /\ BUGGY_PUT_BEFORE_REPLACE
+    /\ pc[s] = "copying"
+    /\ pc'    = [pc EXCEPT ![s] = "released"]
+    /\ pin'   = IF TakesPin THEN pin - 1 ELSE pin
+    /\ share' = IF EarlyDrop THEN share ELSE share - 1
+    /\ UNCHANGED <<nfree, prot, ptew, pter>>
+    /\ vunchanged
+
+ReplaceLate(s) ==
+    /\ BUGGY_PUT_BEFORE_REPLACE
+    /\ pc[s] = "released"
+    /\ pc'   = [pc EXCEPT ![s] = "private"]
+    /\ ptew' = [ptew EXCEPT ![s] = TRUE]
+    /\ pter' = [pter EXCEPT ![s] = FALSE]
+    /\ UNCHANGED <<share, pin, nfree, prot>>
     /\ vunchanged
 
 (***************************************************************************)
@@ -315,9 +411,10 @@ Exit(s) ==
     /\ share >= Held(s)
     /\ share' = share - Held(s)
     /\ pc'    = [pc EXCEPT ![s] = "gone"]
+    /\ pter'  = [pter EXCEPT ![s] = FALSE]    \* the space's leaves go with it
     /\ UNCHANGED <<pin, nfree>>
     /\ vunchanged
-    /\ protunchanged
+    /\ UNCHANGED <<prot, ptew>>
 
 (***************************************************************************)
 (* The pristine page returns to the buddy when the count says nothing maps  *)
@@ -355,6 +452,7 @@ ProtectDown(s) ==
          /\ Rank(q) < Rank(prot[s])
          /\ prot' = [prot EXCEPT ![s] = q]
     /\ ptew' = [ptew EXCEPT ![s] = IF BUGGY_PROTECT_KEEPS_PTE THEN ptew[s] ELSE FALSE]
+    /\ pter' = [pter EXCEPT ![s] = IF BUGGY_PROTECT_KEEPS_PTE THEN pter[s] ELSE FALSE]
     /\ pgunchanged_but_prot
     /\ vunchanged
 
@@ -364,7 +462,7 @@ ProtectUp(s) ==
     /\ \E q \in Prots :
          /\ Rank(q) > Rank(prot[s])
          /\ prot' = [prot EXCEPT ![s] = q]
-    /\ UNCHANGED ptew
+    /\ UNCHANGED <<ptew, pter>>
     /\ pgunchanged_but_prot
     /\ vunchanged
 
@@ -378,7 +476,7 @@ Reinstall(s) ==
     /\ ~ptew[s]
     /\ prot[s] = "rw"
     /\ ptew' = [ptew EXCEPT ![s] = TRUE]
-    /\ UNCHANGED prot
+    /\ UNCHANGED <<prot, pter>>
     /\ pgunchanged_but_prot
     /\ vunchanged
 
@@ -416,6 +514,8 @@ Next ==
          \/ Fault(s) \/ DecideLocked(s)
          \/ DropUnlocked(s) \/ LookUnlocked(s)
          \/ BreakFinish(s) \/ Exit(s)
+         \/ ReadFault(s) \/ BreakReplace(s) \/ BreakRelease(s)
+         \/ PutFirst(s) \/ ReplaceLate(s)
          \/ ProtectDown(s) \/ ProtectUp(s) \/ Reinstall(s)
     \/ FreePristine
     \/ VChildRelease \/ VParentCheck \/ VParentParkLate
@@ -476,6 +576,26 @@ ProtectSafety ==
     /\ ShareIsHolderCount
     /\ NoWritablePteBeyondProt
     /\ BreakOnlyWhenWritable
+
+(***************************************************************************)
+(* SAFETY -- B-1a' (MODEL_LEAF). Kept OUT of Safety like ProtectSafety;     *)
+(* cow_leaf checks it.                                                      *)
+(***************************************************************************)
+
+(* A read-only leaf never outlives the page it names: this space's own
+   translation to the pristine page is gone BEFORE its share is, so no exit
+   can free the page under it (bug 7 puts first: I-13's stale translation). *)
+NoReadableFreed == (nfree > 0) => (\A s \in Sharers : ~pter[s])
+
+(* A page one space still reads through a read-only leaf is never taken in
+   place, writable, by another: the in-place take needs share = 1, and a space
+   with its read-only leaf up still holds its share (bug 7: I-44's aliasing). *)
+NoCrossSpaceRead ==
+    \A s, t \in Sharers : (s # t /\ pter[s]) => pc[t] # "inplace"
+
+LeafSafety ==
+    /\ NoReadableFreed
+    /\ NoCrossSpaceRead
 
 (***************************************************************************)
 (* LIVENESS -- the vfork parent is always released (L-3c-2's NoStrand).     *)

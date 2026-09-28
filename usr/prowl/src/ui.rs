@@ -41,10 +41,10 @@ fn meter_empty() -> Style {
     Style::new().fg(Color::Rgb(0x55, 0x50, 0x4c))
 }
 
-const COLUMNS: [u16; 6] = [6, 18, 8, 9, 5, 8];
-const HEADERS: [&str; 6] = ["PID", "NAME", "%CPU", "MEM(pg)", "THR", "STATE"];
+const COLUMNS: [u16; 7] = [6, 18, 8, 9, 6, 5, 8];
+const HEADERS: [&str; 7] = ["PID", "NAME", "%CPU", "MEM(pg)", "TBL", "THR", "STATE"];
 
-/// Draw one frame: header (2 rows) + process table (fills) + [detail pane] +
+/// Draw one frame: header (3 rows) + process table (fills) + [detail pane] +
 /// footer (1 row). The detail pane appears only when toggled (`d`).
 pub fn render(term: &mut Terminal, app: &App) -> Result<()> {
     let area = term.area();
@@ -57,7 +57,7 @@ pub fn render(term: &mut Terminal, app: &App) -> Result<()> {
             // the process list always keeps at least a few rows.
             let detail_h = detail_height(app, area.height);
             let chunks = Layout::vertical(&[
-                Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Min(1),
                 Constraint::Length(detail_h),
                 Constraint::Length(1),
@@ -69,7 +69,7 @@ pub fn render(term: &mut Terminal, app: &App) -> Result<()> {
             render_footer(buf, chunks[3], app);
         } else {
             let chunks = Layout::vertical(&[
-                Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
@@ -83,15 +83,16 @@ pub fn render(term: &mut Terminal, app: &App) -> Result<()> {
     term.flush()
 }
 
-/// The detail pane height: 1 title + 1 column header + one row per thread, capped
-/// so the process list keeps >= 3 rows (and never negative on a tiny console).
+/// The detail pane height: 1 mem line + 1 title + 1 column header + one row per
+/// thread, capped so the process list keeps >= 3 rows (and never negative on a
+/// tiny console).
 fn detail_height(app: &App, total_h: u16) -> u16 {
     let want = match &app.detail {
-        Some(d) => 2 + d.threads.len() as u16,
-        None => 2, // the "unavailable" line + a title
+        Some(d) => 3 + d.threads.len() as u16,
+        None => 2, // the mem line + the "unavailable" line
     };
-    // Leave header(2) + a >=3-row list + footer(1) = 6 for the rest.
-    let cap = total_h.saturating_sub(6);
+    // Leave header(3) + a >=3-row list + footer(1) = 7 for the rest.
+    let cap = total_h.saturating_sub(7);
     want.min(cap.max(1))
 }
 
@@ -111,6 +112,10 @@ fn render_header(buf: &mut Buffer, area: Rect, app: &App) {
         } else {
             render_cpubars(buf, area, y + 1, app);
         }
+    }
+    if area.height >= 3 {
+        // prowl-6: the user-pool meter (charged over pool, from /ctl/memory).
+        render_membar(buf, area, y + 2, app);
     }
 }
 
@@ -148,34 +153,48 @@ fn render_cpubars(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     }
 }
 
-/// The per-thread scheduler detail for the selected process (`/proc/<pid>/sched`),
-/// or an "unavailable" line when the OQ-4 gate denied the read (not owner / no
-/// CAP_HOSTOWNER) or the process exited.
+/// The selected process's detail pane: first its footprint (`/proc/<pid>/status`,
+/// readable by everyone -- prowl-6), then the per-thread scheduler view
+/// (`/proc/<pid>/sched`), or an "unavailable" line when the OQ-4 gate denied that
+/// read (not owner / no CAP_HOSTOWNER) or the process exited.
 fn render_detail(buf: &mut Buffer, area: Rect, app: &App) {
     if area.is_empty() {
         return;
     }
     let y = area.y;
+    // prowl-6: the memory line. The status read is ungated, so it renders even
+    // where the sched half below is denied; an empty read means the process exited.
+    let mem = match &app.mem_detail {
+        Some(m) => format!(
+            "mem: pages {} (tables {}, file {})  peak {}  budget {}",
+            m.pages, m.tables, m.file, m.peak, m.budget
+        ),
+        None => String::from("mem: unavailable (exited)"),
+    };
+    buf.set_str(area.x, y, &mem, normal());
+    if area.height < 2 {
+        return;
+    }
     match &app.detail {
         None => {
             buf.set_str(
                 area.x,
-                y,
+                y + 1,
                 "sched detail unavailable (not owner / no CAP_HOSTOWNER, or exited)",
                 dim(),
             );
         }
         Some(d) => {
-            // Title on line 1; the column header on line 2 in the SAME fixed-width
+            // Title on line 2; the column header on line 3 in the SAME fixed-width
             // layout as the value rows below, so the columns align (prowl-4 fix:
             // the header labels were crammed onto the title line with single
             // spaces, misaligned with the fixed-width values). detail_height
-            // reserves 2 + threads.len() for exactly title + header + N rows.
-            buf.set_str(area.x, y, &format!("sched: {} (pid {})", d.name, d.pid), head());
-            if area.height >= 2 {
+            // reserves 3 + threads.len() for exactly mem + title + header + N rows.
+            buf.set_str(area.x, y + 1, &format!("sched: {} (pid {})", d.name, d.pid), head());
+            if area.height >= 3 {
                 buf.set_str(
                     area.x,
-                    y + 1,
+                    y + 2,
                     &format!(
                         "  {:<4} {:<4} {:<3} {:<12} {:<8} {:<8} {:<5} {}",
                         "tid", "band", "cpu", "run_ns", "nsched", "parks", "nmig", "state"
@@ -183,7 +202,7 @@ fn render_detail(buf: &mut Buffer, area: Rect, app: &App) {
                     head(),
                 );
             }
-            let mut row = y + 2;
+            let mut row = y + 3;
             for t in &d.threads {
                 if row >= area.bottom() {
                     break;
@@ -238,6 +257,41 @@ fn render_meter(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     buf.set_str(x, y, &trailing, normal());
 }
 
+/// `MEM [████░░░░] 1234/458752 pg  free 490112` -- the user-pool meter (prowl-6):
+/// fill = charged over pool from /ctl/memory, the figures in pages, the physical
+/// free count beside them (the pool is a bound, not a free list). All zero when
+/// the read was empty.
+fn render_membar(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
+    let (charged, pool, free) = match &app.mem {
+        Some(m) => (m.charged, m.pool, m.free),
+        None => (0, 0, 0),
+    };
+    let trailing = format!(" {}/{} pg  free {}", charged, pool, free);
+    let trailing_w = trailing.chars().count() as u16;
+
+    let x0 = buf.set_str(area.x, y, "MEM ", dim());
+    let avail = area.right().saturating_sub(x0);
+    let bar_w = avail.saturating_sub(2 + trailing_w);
+
+    let mut x = buf.set_str(x0, y, "[", dim());
+    let filled = if bar_w == 0 || pool == 0 {
+        0
+    } else {
+        (charged.saturating_mul(bar_w as u64) / pool).min(bar_w as u64) as u16
+    };
+    for i in 0..bar_w {
+        let (ch, st) = if i < filled {
+            ('\u{2588}', meter_fill()) // █
+        } else {
+            ('\u{2591}', meter_empty()) // ░
+        };
+        buf.set_cell(x.saturating_add(i), y, Cell::new(ch, st));
+    }
+    x = x.saturating_add(bar_w);
+    x = buf.set_str(x, y, "]", dim());
+    buf.set_str(x, y, &trailing, normal());
+}
+
 fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
     if area.is_empty() {
         return;
@@ -261,7 +315,7 @@ fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
 
     // The Table borrows &[&str] cells, so the owned display strings must outlive
     // the Row borrows -- keep `cells` + `cell_refs` alive through the render call.
-    let mut cells: Vec<[String; 6]> = Vec::with_capacity(order.len());
+    let mut cells: Vec<[String; 7]> = Vec::with_capacity(order.len());
     for &(oi, depth) in &order {
         let r = &app.rows[oi];
         let name = if app.show_tree && depth > 0 {
@@ -282,11 +336,12 @@ fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
             name,
             fmt_pct1(r.cpu_pct_x10),
             r.pages.to_string(),
+            r.tables.to_string(),
             r.threads.to_string(),
             r.state.as_str().to_string(),
         ]);
     }
-    let cell_refs: Vec<[&str; 6]> = cells
+    let cell_refs: Vec<[&str; 7]> = cells
         .iter()
         .map(|c| {
             [
@@ -296,6 +351,7 @@ fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
                 c[3].as_str(),
                 c[4].as_str(),
                 c[5].as_str(),
+                c[6].as_str(),
             ]
         })
         .collect();

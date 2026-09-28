@@ -318,9 +318,11 @@ Run with `cd usr && cargo test -p manual --lib --no-default-features --target aa
   cells are as wide as section 3.2 allows, dense inline forms, a problem on every
   line, one long line of problems) are read, checked, and rendered at both tiers as
   the binary does it, including a read whose length is not known in advance and a
-  diagnostic formatted into a newly allocated string, under the allocator
-  `ThylaAllocN` uses (`linked_list_allocator`). The heap's high-water mark stays
-  below the reader's heap. The same sections, and the inline forms whose matching
+  diagnostic formatted into a newly allocated string, under the allocator the
+  reader runs on in the guest (`dlmalloc`, libthyla-rs's heap since B-1c). Its
+  peak footprint -- every region it took from its platform, counted -- stays
+  within the reader's working set, half of `HEAP_BYTES`. The same sections, and
+  the inline forms whose matching
   searches ahead, are checked and rendered in time, and into output, that grow
   linearly with their size.
 - **Controls.** Each hygiene and identity test is shown to fail with its mechanism

@@ -39,6 +39,15 @@
 //   pouch-hello-threads: ok
 //
 // Return non-zero on mismatch — joey treats it as a regression.
+//
+// B-1b (the Pouch memory seam) adds three legs. main-stack-8mib: the initial
+// thread's stack is at least 8 MiB (decision 4 of the browser arc; libc derives
+// the extent from the kernel's AT_STACK_BASE / AT_STACK_SIZE auxv pair -- patch
+// 0045 -- and the maps-row equality pins it against the kernel's own statement).
+// deep-frame: a 4 MiB frame touched at both ends, fatal under the old 1 MiB
+// stack. guard-vma: every worker finds, in /proc/<pid>/maps, a `---p` row of
+// exactly its guardsize immediately below its own stack -- the guard VMA exists,
+// the positive control beside /pouch-hello-guard, which proves that it faults.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -56,6 +65,46 @@
 
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static unsigned long long g_counter = 0;
+static int g_guard_ok[NTHREADS];
+
+// B-1b: the worker's own guard VMA. libc reports the stack as [stackaddr,
+// stackaddr + size) with guardsize bytes below it that musl minted PROT_NONE
+// (the whole mapping is minted PROT_NONE and the usable part raised, patch
+// 0044); the kernel's maps file must show that guard as a `---p` row ending
+// exactly at stackaddr and exactly guardsize long -- one mapping, two prots.
+static int guard_row_below_self(void) {
+    pthread_attr_t at;
+    void *addr = NULL;
+    size_t size = 0, guard = 0;
+    if (pthread_getattr_np(pthread_self(), &at) != 0 ||
+        pthread_attr_getstack(&at, &addr, &size) != 0 ||
+        pthread_attr_getguardsize(&at, &guard) != 0 || guard == 0)
+        return 0;
+    uintptr_t hi = (uintptr_t)addr, lo = hi - guard;
+    char path[64], line[256];
+    snprintf(path, sizeof path, "/proc/%d/maps", (int)getpid());
+    FILE *mf = fopen(path, "r");
+    if (!mf) return 0;
+    int found = 0;
+    while (fgets(line, sizeof line, mf)) {
+        unsigned long a = 0, b = 0;
+        char perms[8] = "";
+        if (sscanf(line, "%lx-%lx %7s", &a, &b, perms) != 3) continue;
+        if (a == lo && b == hi && strcmp(perms, "---p") == 0) found++;
+    }
+    fclose(mf);
+    return found == 1;
+}
+
+// B-1b: a frame deeper than the old 1 MiB stack, touched at both ends. Under
+// the 8 MiB mapping both touches fault pages in; under 1 MiB the low touch
+// lands in the guard page below the stack and the process dies of a snare.
+__attribute__((noinline)) static int deep_frame(void) {
+    volatile char frame[4u << 20];
+    frame[0] = 1;
+    frame[sizeof frame - 1] = 2;
+    return frame[0] + frame[sizeof frame - 1];
+}
 
 // F14 audit close: error diagnostics use stdout (fd 1, pipe-relayed by joey
 // + UART) rather than stderr (fd 2, not installed in joey's pouch-smoke
@@ -63,7 +112,7 @@ static unsigned long long g_counter = 0;
 // and the user would see only the non-zero exit status without any clue
 // what went wrong.
 static void *worker(void *arg) {
-    (void)arg;
+    unsigned idx = (unsigned)(uintptr_t)arg;
     for (unsigned i = 0; i < ITER_PER_THREAD; i++) {
         if (pthread_mutex_lock(&g_mtx) != 0) {
             printf("pouch-hello-threads: pthread_mutex_lock failed\n");
@@ -77,6 +126,7 @@ static void *worker(void *arg) {
             _Exit(3);
         }
     }
+    g_guard_ok[idx] = guard_row_below_self();
     return NULL;
 }
 
@@ -140,11 +190,26 @@ int main(void) {
         printf("pouch-hello-threads: main stack [%p, %p) size=%lu == kernel maps row OK\n",
                base, (void *)hi, (unsigned long)size);
         fflush(stdout);
+        // B-1b decision 4: 8 MiB, derived from the kernel's auxv pair.
+        if (size < (8ul << 20)) {
+            printf("pouch-hello-threads: main stack is %lu bytes, below the 8 MiB of B-1b\n",
+                   (unsigned long)size);
+            fflush(stdout);
+            return 10;
+        }
     }
+
+    if (deep_frame() != 3) {
+        printf("pouch-hello-threads: deep frame WRONG\n");
+        fflush(stdout);
+        return 11;
+    }
+    printf("pouch-hello-threads: a 4 MiB frame touched at both ends OK\n");
+    fflush(stdout);
 
     pthread_t tids[NTHREADS];
     for (unsigned i = 0; i < NTHREADS; i++) {
-        int rc = pthread_create(&tids[i], NULL, worker, NULL);
+        int rc = pthread_create(&tids[i], NULL, worker, (void *)(uintptr_t)i);
         if (rc != 0) {
             printf("pouch-hello-threads: pthread_create[%u] failed: %d\n",
                    i, rc);
@@ -175,6 +240,16 @@ int main(void) {
         fflush(stdout);
         return 6;
     }
+    unsigned guarded = 0;
+    for (unsigned i = 0; i < NTHREADS; i++) guarded += g_guard_ok[i] ? 1u : 0u;
+    if (guarded != NTHREADS) {
+        printf("pouch-hello-threads: only %u/%u workers found a ---p row of exactly guardsize below their stack\n",
+               guarded, NTHREADS);
+        fflush(stdout);
+        return 12;
+    }
+    printf("pouch-hello-threads: %u/%u workers found their ---p guard row in /proc/%d/maps\n",
+           NTHREADS, NTHREADS, (int)getpid());
     printf("pouch-hello-threads: ok (%u workers, mutex-protected counter, joined)\n",
            NTHREADS);
     /* The census is what joey matches: a stale binary prints the old marker. */

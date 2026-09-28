@@ -6,7 +6,7 @@ parent: moc-kernel-memory
 code: ["kernel/addrspace.c", "kernel/include/thylacine/addrspace.h", "kernel/cow.c", "kernel/include/thylacine/cow.h"]
 audit: hard
 guarded-by: [inv-i44, inv-i32]
-validated-by: [spec-cow, gate-smp]
+validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
@@ -41,7 +41,9 @@ stay on `Proc`.
 | `addrspace_unref(as)` | -1; the last drop **drains the VMA list**, destroys the table, frees |
 | `addrspace_clone(src, exempt)` | the COW fork; a fresh space, or NULL having freed everything |
 | `addrspace_ref_count(as)` | for "am I the last holder" only — **not a lock** |
-| `addrspace_charge_*` / `uncharge_*` | the six I-32 counter operations |
+| `addrspace_charge_*` / `uncharge_*` | the six I-32 counter operations, per address space only: the machine-wide bound is physical and lives with the allocator ([[sub-kernel-mm-phys]]; B-1a' round-1 close) |
+| `addrspace_charge_table(as, exempt)` / `addrspace_uncharge_table(as)` | one hardware page table charged to the space (`page_count` + the `pgtable_pages` telemetry) or returned; the MMU calls them around `alloc_user_pages` / `free_pages` ([[sub-kernel-mmu]]; B-1a' audit F1) |
+| `addrspace_charge_file(as, exempt)` / `addrspace_uncharge_file(as, n)` | one mapped FILE page charged to the space (`page_count` + the `file_pages` telemetry) per leaf the fault installs; `n` returned per leaf a range clear removes ([[sub-kernel-fault]], [[sub-kernel-vma]]; B-1a' audit F8) |
 | `cow_page_set_sole(pg)` | establish `cow_share = 1` — **overwrites** |
 | `cow_page_get/put(pg)` | +1 / -1; `put` returns "you were the last, you own the free" |
 | `cow_page_break_is_sole(pg)` | the break's decide, as one atomic step |
@@ -67,6 +69,50 @@ were never about a Proc.
 `page_budget == 0` is refused rather than read as "unlimited", because an
 uncapped address space is precisely the DoS hole [[inv-i32]] exists to
 close.
+
+**The user pool is physical, and lives with the allocator** (B-1a' round-1
+close, 2026-09-23; ARCH 6.5 "Capacity, and the I-32 default";
+[[sub-kernel-mm-phys]] "The user pool"). As first built the pool was a counter
+above `page_count`, charged by `addrspace_charge_pages` before the space's own
+cap -- and that shape refused a fork of a Proc holding more than half the
+pool's room while free memory existed (the round-1 audit's F5: a COW-shared
+page charged to both sharers is one physical page), and had no return path
+for the hardware page tables the audit's F1 made chargeable. So the pool
+moved: `alloc_user_pages(order, flags, exempt)` in `mm/phys.c` charges it at
+ALLOCATION and tags the head page `PG_USER`, and `free_pages` -- the one place
+a page can leave -- returns the charge, whoever frees it. This file's counters
+keep the HOLDER reading under the space's cap: `addrspace_charge_pages` and
+`_uncharge_pages` are per-space only (the CAS loops and the clamp unchanged), a
+COW-shared page is charged to both sharers and a fork is bounded by the cap,
+which is the Linux memcg shape; and `addrspace_charge_table` /
+`addrspace_uncharge_table` are the same pair for a page table, with
+`pgtable_pages` beside `page_count` as telemetry, and `addrspace_charge_file`
+/ `_uncharge_file` the same pair for a FILE page this space MAPS (the page is
+the Image cache's; the mapping is the holder's -- charged per leaf installed,
+refunded per leaf cleared; `file_pages`; the round-2 audit's F8)
+(`/proc/<pid>/status` `tables:` and `file:`; the capacity probe's data census
+is `pages:` minus both). The
+address space carries a `u64 id` from a global counter at `addrspace_alloc`
+-- never reused, unlike a pid -- because the eager charge record
+([[sub-kernel-burrow]]) must name the space that PAID: a non-CLOEXEC Loom that
+outlives its exec would otherwise refund against the successor's space (the
+round-1 audit's F4).
+
+**A dying address space returns nothing to the pool, because its frees
+already do.** WIP 3 of the chunk had `addrspace_unref` read `page_count` after
+the drain and uncharge it from the counter-shaped pool: `vma_drain_in` frees
+Proc-agnostically (`burrow_free_internal` refunds nothing) and the count used
+to die with the space, which was fine while it was the only bound and a leak
+of every dead Proc's RSS once a machine-wide bound sat above it
+(`capacity.death_returns_charges_to_pool` found it in the chunk's first
+build). With the pool physical that return would DOUBLE-return what the
+drain's `free_pages` calls return page by page, so it is gone; the test still
+stands, now asserting the pool exact after the death, tables included, and
+`proc_pgtable_destroy` frees the tables the drain's reclaim left (the L0, and
+any table under a leaf the drain did not clear) through the same `free_pages`
+([[sub-kernel-mmu]]). The counter dies with the space, as it always did; the
+model's one address space never dies ([[spec-capacity]]), and now there is
+nothing for it to miss.
 
 ## Mechanism
 
@@ -110,7 +156,13 @@ entry, no lock — so with the uninstall after the snapshot there is a
 window, lasting the rest of the clone, in which the child already holds a
 share of a page the parent can still write, silently. Uninstalling first
 closes it by construction: once the PTE is gone the peer *must* fault, and
-faulting needs this lock. Zero window, and it is Linux's own structure.
+faulting needs this lock. Zero window, and it is Linux's own structure. The
+clear KEEPS the parent's tables (`mmu_uninstall_user_range_keep_tables`, the
+round-2 close): every leaf it takes the parent re-faults, so the emptied
+tables stay linked -- charged, at occupancy 0 -- for the re-installs to find,
+as Linux keeps them across fork; reclaiming them made every break free and
+rebuild the path, and at the pool's edge could refuse a page the parent
+already held ([[sub-kernel-mmu]]).
 
 Phase 3 is separate from phase 1 *despite both touching the parent*
 because the two are asymmetric in recoverability: the uninstall is undone
@@ -163,7 +215,13 @@ while `src->lock` still excludes the next clone of this space -- and on the
 two failure paths inside `clone_one_vma` before the minted clone is unreffed
 -- so a failed child's drain can never leave a cursor naming a freed Burrow.
 `cow.clone_dedupes_split_pieces` counts it: every page has exactly TWO
-holders, and the child is charged the resident count once. The holotype
+holders, and the child is charged the resident count once. (B-1a': the clone's
+slot table is a `pagemap_mirror` over a pool the source's node count sizes,
+allocated uncharged by `burrow_clone_cow`; `clone_one_vma` charges
+`burrow_lazy_footprint` -- the resident pages PLUS the mirrored nodes -- so the
+child pays for exactly what its own takes will refund. It charged the resident
+count alone at first; the chunk's self-audit caught it, and
+`capacity.fork_clone_charges_pages_and_nodes` is the witness. Seams, below.) The holotype
 audit's F3 (P3): the `vma_alloc` failure arm cleared the cursor through the
 `backing` local, which the lazy arm had REBOUND to the clone -- so it wrote
 the clone's own (already NULL) slot and freed the clone while the source still
@@ -192,9 +250,13 @@ have a buggy cfg in [[spec-cow]].
 
 ## Data structures
 
-`struct AddrSpace` — 56 bytes, asserted (a drift alarm, not an ABI).
+`struct AddrSpace` — 72 bytes, asserted (a drift alarm, not an ABI).
 `ref` / `lock` / `pgtable_root` / `context_id` / `vmas` / `page_count` /
-`vma_count` / `shared_map_pages` / `page_budget` / `page_peak` / pad.
+`vma_count` / `shared_map_pages` / `page_budget` / `page_peak` /
+`pgtable_pages` (B-1a' audit F1: the hardware tables inside `page_count`,
+telemetry) / `file_pages` (audit F8: the mapped FILE pages inside it,
+telemetry) / `id` (a u64 from a global counter, never reused; the eager
+charge record's key, audit F4).
 
 `context_id` lives here because **the ASID names a translation table**,
 which is what the allocator always semantically meant. Two Procs sharing
@@ -292,7 +354,18 @@ accounting bound cannot do without; exactness is not.
   Proc, with the page cap beside its count. The uncharges clamp at 0
   rather than wrapping: every uncharge pairs with a charge, so a wrap
   means the pairing is already broken and a silent 4-billion-page counter
-  would hide it.
+  would hide it. B-1a' added the machine-wide half, and its round-1 close made it
+  physical: the user pool is charged where a page is ALLOCATED and returned
+  where it is freed ([[sub-kernel-mm-phys]]), exempt allocations counted but
+  never refused, so this file's counters are per-space holder counts under a
+  cap that IS the pool by default (`proc_default_page_budget`,
+  [[sub-kernel-proc]]) -- the cap a parent's narrowing, the pool the everyday
+  bound -- and the hardware page tables and the mapped file pages are inside
+  them (`addrspace_charge_table`, `addrspace_charge_file`;
+  `demand_page.file_pages_charge_the_holder`, `capacity.pool_refuses_users_keeps_tcb`,
+  `capacity.page_tables_charged_and_reclaimed`,
+  `capacity.fork_costs_the_pool_only_its_nodes`,
+  `capacity.death_returns_charges_to_pool`).
 - [[inv-i31]] — by construction: one address space, one `context_id`.
 - [[inv-i12]] / [[inv-i44]] — the eager-`ANON` share is sound only because
   the CEILING is permanent. `SYS_BURROW_PROTECT` exists since B-1a, so
@@ -363,6 +436,28 @@ What a change must re-establish:
   new site;
 - **the drop-after-copy ordering.** Dropping first and taking no pin is
   `BUGGY_TEARDOWN_NO_PIN` and is a use-after-free.
+- **that the pool is decided at the allocation, never here** (B-1a' round-1
+  close). A user page minted by a bare `alloc_pages` instead of
+  `alloc_user_pages`, or a `PG_USER` page freed at another order than it was
+  allocated, drifts the machine-wide count in the loosening or the tightening
+  direction respectively; both are silent ([[sub-kernel-mm-phys]]
+  Prosecution). This file's counters bound one space; they never touch the
+  pool.
+- **that no death return comes back.** `addrspace_unref` returns nothing to
+  the pool; the drain's `free_pages` calls do. A return added here would
+  double-return (the pool drifting below what is held, the loosening
+  direction) -- `capacity.death_returns_charges_to_pool` asserts the pool
+  exact after a death, tables included.
+- **that the table pair stays symmetric with the MMU.**
+  `addrspace_charge_table` runs before `alloc_user_pages` and
+  `addrspace_uncharge_table` after `free_pages` ([[sub-kernel-mmu]]
+  `user_table_alloc` / `user_table_free`); a table freed by any other path
+  (`proc_pgtable_destroy` at death) returns its pool charge through
+  `free_pages` and leaves `page_count` to die with the space, which is what
+  every other page does.
+- **that `id` is never reused and never 0.** The charge record's claim
+  compares it; a recycled id would let a successor space claim a predecessor's
+  refund -- the pid bug (audit F4) in a new coat.
 
 ## Seams
 
@@ -376,6 +471,19 @@ What a change must re-establish:
   than provisional — one indivisible buddy block has no per-page ownership
   — but it is a real reach limit, and the fix is to make eager anon
   page-granular rather than to weaken the check.
+- **The fork clone's nodes were uncharged** (B-1a'; found by the chunk's
+  self-audit and, independently, by the documentation pass; FIXED in the
+  chunk). `burrow_clone_cow`'s node pool is allocated uncharged on the
+  promise that `clone_one_vma` charges the footprint; it charged the resident
+  count, and the child's later takes refunded the nodes anyway, so its
+  `page_count` and the pool dropped below what is held -- the loosening
+  direction, by the node count of each touched lazy Burrow per fork. One call
+  (`burrow_lazy_footprint` for `burrow_lazy_resident_count`) closed it;
+  `capacity.fork_clone_charges_pages_and_nodes` counts the nodes across a
+  fork and its RED (`noclonefootprint`) is the bug itself
+  ([[sub-kernel-pagemap]]).
+- **The pool's counters are u32 pages** (16 TiB), clamped at
+  `capacity_init`; a machine above that reads a smaller pool than it has.
 
 ## Caveats
 
@@ -444,6 +552,19 @@ the child's break on a page in one piece copies, the parent's page is
 untouched). The `nodedupe` sabotage -- a clone per VMA again -- fails exactly
 "each page has exactly TWO holders, not one per piece". The three new
 counterexample cfgs are [[spec-cow]]'s.
+
+B-1a' (`kernel/test/test_capacity.c`, [[sub-kernel-pagemap]]):
+`capacity.default_is_ram_minus_reserve` (the reserve and pool formulas; the
+default budget and the hard maximum are the pool; a fresh Proc and its space
+carry it), `capacity.pool_refuses_users_keeps_tcb` (with the pool parked at K
+pages a user Proc far below its own budget is refused at exactly K, the TCB is
+not, every charge returns), `capacity.death_returns_charges_to_pool` (a Proc
+dying with pages, nodes and an eager region returns all of it) and
+`capacity.replace_window_releases_orphans` (through `burrow_map_fixed_in`).
+`test_resource.c`'s cap tests run on a NARROWED budget (`proc_alloc_in(NULL,
+4096)`) because the default is now a figure every live space draws on, and its
+spawn-resolve test exercises the raise from a narrowed parent -- the only
+parent a raise can matter to when the default is already the maximum.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

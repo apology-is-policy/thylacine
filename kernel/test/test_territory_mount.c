@@ -8,8 +8,9 @@
 // mount-point Spoor via mkmp() with a distinct qid.path (a devnone Spoor; dc
 // '-', devno 0 -- the distinguishing axis here is qid.path). mount() copies the
 // identity, not the Spoor, so a single mp can drive both the mount and its
-// matching unmount; the test clunks every mp at the end. The SOURCE ref
-// assertions are unchanged (mount bumps the SOURCE, never the mount point).
+// matching unmount; the test clunks every mp at the end. mount bumps the
+// SOURCE, and the mount point only when an MBEFORE / MAFTER mount starts a
+// union there: the covered directory's entry (MCOVERED) holds the point itself.
 //
 // Tests:
 //
@@ -71,13 +72,25 @@ void test_territory_mount_noexec_covers(void);       // #217
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);   // #66
 void test_territory_mount_format_ns(void);           // #66
+void test_territory_mount_union_keeps_covered(void);           // Plan 9 unions
+void test_territory_mount_no_covered_unless_fresh(void);       // Plan 9 unions
+void test_territory_mount_covered_file_point_stays_plain(void); // Plan 9 unions
+void test_territory_mount_covered_reposition(void);            // Plan 9 unions
+void test_territory_mount_covered_leaves_with_last(void);      // Plan 9 unions
+void test_territory_mount_covered_needs_two_slots(void);       // Plan 9 unions
+void test_territory_mount_covered_self_mount_refused(void);    // Plan 9 unions
+void test_territory_mount_covered_clone(void);                 // Plan 9 unions
+void test_territory_mount_covered_noexec_scoped(void);         // Plan 9 unions
+void test_territory_mount_covered_format_ns(void);             // Plan 9 unions
 
 // Mint a mount-point Spoor with a distinct identity (devnone dc '-', devno 0,
 // the given qid.path). The mount table keys on (dc, devno, qid.path), so a
-// distinct qid.path = a distinct mount point.
+// distinct qid.path = a distinct mount point. A directory, as mount points are:
+// only a directory can start a union (covered_file_point_stays_plain mints the
+// exception).
 static struct Spoor *mkmp(u64 qid_path) {
     struct Spoor *mp = spoor_alloc(&devnone);
-    if (mp) mp->qid.path = qid_path;
+    if (mp) { mp->qid.path = qid_path; mp->qid.type = QTDIR; }
     return mp;
 }
 
@@ -266,19 +279,22 @@ void test_territory_mount_mrepl_existing_replaces_group(void) {
     struct Spoor *mp = mkmp(11u);
     TEST_ASSERT(p && a && b && mp, "alloc");
 
-    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE), 0, "A MBEFORE -> [A]");
-    TEST_EXPECT_EQ(mount(p, b, mp, MAFTER),  0, "B MAFTER  -> [A, B]");
-    TEST_EXPECT_EQ(territory_nmounts(p), 2, "union has 2 members");
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE), 0, "A MBEFORE -> [A, covered]");
+    TEST_EXPECT_EQ(mount(p, b, mp, MAFTER),  0, "B MAFTER  -> [A, covered, B]");
+    TEST_EXPECT_EQ(territory_nmounts(p), 3, "union has 3 members (A, the covered dir, B)");
+    TEST_EXPECT_EQ(mp->ref, 2, "the covered entry holds the point");
 
-    // MREPL the EXISTING member A: the whole group collapses to [A].
+    // MREPL the EXISTING member A: the whole group collapses to [A] -- the
+    // covered directory included.
     TEST_EXPECT_EQ(mount(p, a, mp, MREPL), 0, "MREPL existing A");
-    TEST_EXPECT_EQ(territory_nmounts(p), 1, "group replaced -> 1 member (B removed)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "group replaced -> 1 member (covered + B removed)");
     struct Spoor *m0 = mount_member_at(p, mp, 0, NULL);
     struct Spoor *m1 = mount_member_at(p, mp, 1, NULL);
     TEST_ASSERT(m0 == a, "sole member is A");
     TEST_ASSERT(m1 == NULL, "no second member after MREPL");
     if (m0) spoor_clunk(m0);
     TEST_EXPECT_EQ(b->ref, 1, "B's per-entry ref dropped by the group replace");
+    TEST_EXPECT_EQ(mp->ref, 1, "the covered entry's ref on the point dropped with it");
 
     TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount");
     spoor_unref(mp); spoor_unref(a); spoor_unref(b);
@@ -294,7 +310,9 @@ void test_territory_mount_mbefore_moves_existing(void) {
     struct Spoor *mp = mkmp(12u);
     TEST_ASSERT(p && a && b && mp, "alloc");
 
-    TEST_EXPECT_EQ(mount(p, a, mp, MAFTER), 0, "A MAFTER -> [A]");
+    // A starts the point with MREPL, so the union B joins holds no covered
+    // directory (covered_reposition moves members around one).
+    TEST_EXPECT_EQ(mount(p, a, mp, MREPL),  0, "A MREPL  -> [A]");
     TEST_EXPECT_EQ(mount(p, b, mp, MAFTER), 0, "B MAFTER -> [A, B]");
     struct Spoor *m0 = mount_member_at(p, mp, 0, NULL);
     TEST_ASSERT(m0 == a, "member 0 is A before the move");
@@ -310,6 +328,7 @@ void test_territory_mount_mbefore_moves_existing(void) {
     if (m0) spoor_clunk(m0);
     if (m1) spoor_clunk(m1);
     TEST_EXPECT_EQ(b->ref, 2, "B ref net-unchanged by the move (self + one entry)");
+    TEST_EXPECT_EQ(mp->ref, 1, "no covered entry: the point hosted A when B joined");
 
     TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount B (first match)");
     TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount A");
@@ -780,4 +799,342 @@ void test_territory_mount_format_ns(void) {
     spoor_unref(sb);
     spoor_unref(msrv);
     spoor_unref(mproc);
+}
+
+// =============================================================================
+// Plan 9 unions (ARCH 9.5; territory.tla, the covered directory): an MBEFORE /
+// MAFTER mount at a DIRECTORY hosting no member also makes the directory it
+// covers a member, so the union searches it too.
+// =============================================================================
+
+// <new, covered> for MBEFORE, <covered, new> for MAFTER. The covered entry's
+// source is the point's own Spoor, and it carries MCOVERED ALONE: a member's
+// MCREATE / MNOEXEC / MPHENO_LINUX says nothing about the directory under it.
+void test_territory_mount_union_keeps_covered(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *b  = spoor_alloc(&devnone);
+    struct Spoor *mb = mkmp(21u);
+    struct Spoor *ma = mkmp(22u);
+    TEST_ASSERT(p && a && b && mb && ma, "alloc");
+
+    const u32 every = MCREATE | MNOEXEC | MPHENO_LINUX;
+    TEST_EXPECT_EQ(mount(p, a, mb, MBEFORE | every), 0, "A MBEFORE at a fresh point");
+    TEST_EXPECT_EQ(mount(p, b, ma, MAFTER | every),  0, "B MAFTER at a fresh point");
+    TEST_EXPECT_EQ(territory_nmounts(p), 4, "each mount installed two entries");
+    TEST_EXPECT_EQ(mb->ref, 2, "the covered entry holds its point (test + entry)");
+    TEST_EXPECT_EQ(ma->ref, 2, "likewise at the MAFTER point");
+    TEST_EXPECT_EQ(a->ref, 2, "the member's own entry ref, as ever");
+
+    u32 f0 = 0, f1 = 0;
+    struct Spoor *m0 = mount_member_at(p, mb, 0, &f0);
+    struct Spoor *m1 = mount_member_at(p, mb, 1, &f1);
+    TEST_ASSERT(m0 == a && f0 == (MBEFORE | every), "MBEFORE: member 0 is A, its flags intact");
+    TEST_ASSERT(m1 == mb && f1 == MCOVERED, "MBEFORE: member 1 is the covered directory, MCOVERED alone");
+    if (m0) spoor_clunk(m0);
+    if (m1) spoor_clunk(m1);
+    TEST_ASSERT(mount_member_at(p, mb, 2, NULL) == NULL, "MBEFORE: exactly two members");
+
+    m0 = mount_member_at(p, ma, 0, &f0);
+    m1 = mount_member_at(p, ma, 1, &f1);
+    TEST_ASSERT(m0 == ma && f0 == MCOVERED, "MAFTER: member 0 is the covered directory, MCOVERED alone");
+    TEST_ASSERT(m1 == b && f1 == (MAFTER | every), "MAFTER: member 1 is B");
+    if (m0) spoor_clunk(m0);
+    if (m1) spoor_clunk(m1);
+
+    // The resolver's base cross takes member 0 -- under MAFTER the covered
+    // directory, which stalk_cross_src clones rather than crosses.
+    u32 lf = 0;
+    struct Spoor *l = mount_lookup(p, ma, &lf);
+    TEST_ASSERT(l == ma && lf == MCOVERED, "mount_lookup answers the covered member first under MAFTER");
+    if (l) spoor_clunk(l);
+
+    territory_unref(p);
+    TEST_EXPECT_EQ(mb->ref, 1, "destroy drops the covered entry's ref on the point");
+    TEST_EXPECT_EQ(ma->ref, 1, "at both points");
+    spoor_unref(a); spoor_unref(b); spoor_unref(mb); spoor_unref(ma);
+}
+
+// No covered entry unless an MBEFORE / MAFTER mount STARTS the union: MREPL
+// replaces whatever the point shows, a flagless mount is a plain mount, and a
+// member joining a point that already hosts one finds the union formed.
+void test_territory_mount_no_covered_unless_fresh(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *b  = spoor_alloc(&devnone);
+    struct Spoor *mr = mkmp(23u);
+    struct Spoor *mf = mkmp(24u);
+    struct Spoor *mu = mkmp(25u);
+    TEST_ASSERT(p && a && b && mr && mf && mu, "alloc");
+
+    TEST_EXPECT_EQ(mount(p, a, mr, MREPL), 0, "A MREPL at a fresh point");
+    TEST_EXPECT_EQ(mount(p, a, mf, 0),     0, "A flagless at a fresh point");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "one entry each");
+    TEST_EXPECT_EQ(mr->ref, 1, "MREPL added no covered entry");
+    TEST_EXPECT_EQ(mf->ref, 1, "nor did the flagless mount");
+
+    TEST_EXPECT_EQ(mount(p, b, mr, MBEFORE), 0, "B MBEFORE at the MREPL point");
+    TEST_EXPECT_EQ(mount(p, b, mf, MAFTER),  0, "B MAFTER at the flagless point");
+    TEST_EXPECT_EQ(territory_nmounts(p), 4, "one more entry each: the points already hosted A");
+    TEST_EXPECT_EQ(mr->ref, 1, "still no covered entry at the MREPL point");
+    TEST_EXPECT_EQ(mf->ref, 1, "nor at the flagless one");
+    struct Spoor *m = mount_member_at(p, mr, 0, NULL);
+    TEST_ASSERT(m == b, "MBEFORE still put B ahead of A");
+    if (m) spoor_clunk(m);
+
+    // MREPL over a union replaces its covered member with the rest.
+    TEST_EXPECT_EQ(mount(p, a, mu, MAFTER), 0, "A MAFTER at a fresh point -> [covered, A]");
+    TEST_EXPECT_EQ(mu->ref, 2, "a covered entry");
+    TEST_EXPECT_EQ(mount(p, b, mu, MREPL), 0, "B MREPL over the union");
+    TEST_EXPECT_EQ(mu->ref, 1, "the covered entry went with the group");
+    u32 f = 0;
+    m = mount_member_at(p, mu, 0, &f);
+    TEST_ASSERT(m == b && f == MREPL, "B alone, as mounted");
+    if (m) spoor_clunk(m);
+    TEST_ASSERT(mount_member_at(p, mu, 1, NULL) == NULL, "nothing after B");
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(b); spoor_unref(mr); spoor_unref(mf); spoor_unref(mu);
+}
+
+// A point that is not a directory has nothing a union could search: an MBEFORE
+// / MAFTER mount there stays a plain mount and never retains the point
+// (territory.tla NoCoveredFile). The same mount at a directory, the control,
+// adds the covered member.
+void test_territory_mount_covered_file_point_stays_plain(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *fp = spoor_alloc(&devnone);   // a FILE point
+    struct Spoor *dp = mkmp(27u);               // the control: a directory
+    TEST_ASSERT(p && a && fp && dp, "alloc");
+    fp->qid.path = 26u;
+    fp->qid.type = QTFILE;
+
+    TEST_EXPECT_EQ(mount(p, a, fp, MBEFORE), 0, "A MBEFORE at a file point");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "one entry: no union at a file");
+    TEST_EXPECT_EQ(fp->ref, 1, "the file point is not retained");
+    TEST_EXPECT_EQ(unmount(p, fp), 0, "unmount");
+    TEST_EXPECT_EQ(mount(p, a, fp, MAFTER), 0, "A MAFTER at the file point");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "one entry under MAFTER too");
+    TEST_EXPECT_EQ(fp->ref, 1, "still not retained");
+    TEST_EXPECT_EQ(unmount(p, fp), 0, "unmount");
+
+    TEST_EXPECT_EQ(mount(p, a, dp, MBEFORE), 0, "control: A MBEFORE at a directory");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "control: the member and the covered directory");
+    TEST_EXPECT_EQ(dp->ref, 2, "control: the directory is retained");
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(fp); spoor_unref(dp);
+}
+
+// A reposition (UM-8 F6) moves a member around the covered directory without
+// adding a second one; and re-mounting the SOLE member of an MREPL group with
+// MBEFORE repositions it at a point that was not fresh, so it grows none
+// (territory.tla BUGGY_FRESH_AFTER_REMOVE).
+void test_territory_mount_covered_reposition(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *b  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(28u);
+    struct Spoor *m2 = mkmp(29u);
+    TEST_ASSERT(p && a && b && mp && m2, "alloc");
+
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE), 0, "A MBEFORE -> [A, covered]");
+    TEST_EXPECT_EQ(mount(p, b, mp, MAFTER),  0, "B MAFTER  -> [A, covered, B]");
+    TEST_EXPECT_EQ(mount(p, b, mp, MBEFORE), 0, "B MBEFORE (reposition) -> [B, A, covered]");
+    struct Spoor *want1[3] = { b, a, mp };
+    for (int i = 0; i < 3; i++) {
+        struct Spoor *m = mount_member_at(p, mp, i, NULL);
+        TEST_ASSERT(m == want1[i], "after the MBEFORE move: [B, A, covered]");
+        spoor_clunk(m);
+    }
+    TEST_EXPECT_EQ(mount(p, a, mp, MAFTER), 0, "A MAFTER (reposition) -> [B, covered, A]");
+    struct Spoor *want2[3] = { b, mp, a };
+    for (int i = 0; i < 3; i++) {
+        struct Spoor *m = mount_member_at(p, mp, i, NULL);
+        TEST_ASSERT(m == want2[i], "after the MAFTER move: [B, covered, A]");
+        spoor_clunk(m);
+    }
+    TEST_EXPECT_EQ(territory_nmounts(p), 3, "moves add no entry");
+    TEST_EXPECT_EQ(mp->ref, 2, "exactly one covered entry");
+
+    TEST_EXPECT_EQ(mount(p, a, m2, MREPL),   0, "A MREPL at a second point -> [A]");
+    TEST_EXPECT_EQ(mount(p, a, m2, MBEFORE), 0, "A MBEFORE: a reposition of the sole member");
+    TEST_EXPECT_EQ(territory_nmounts(p), 4, "one entry at the second point");
+    TEST_EXPECT_EQ(m2->ref, 1, "no covered entry: the point hosted A");
+
+    territory_unref(p);
+    TEST_EXPECT_EQ(mp->ref, 1, "destroy released the covered entry once");
+    spoor_unref(a); spoor_unref(b); spoor_unref(mp); spoor_unref(m2);
+}
+
+// unmount never removes the covered directory by itself, and removes it with
+// the last member actually mounted at the point: a point left holding only its
+// own directory would be a union of itself.
+void test_territory_mount_covered_leaves_with_last(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *b  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(30u);
+    TEST_ASSERT(p && a && b && mp, "alloc");
+
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE), 0, "A MBEFORE -> [A, covered]");
+    TEST_EXPECT_EQ(mount(p, b, mp, MAFTER),  0, "B MAFTER  -> [A, covered, B]");
+
+    TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount: A goes, not the covered directory");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "[covered, B]");
+    u32 f = 0;
+    struct Spoor *m = mount_member_at(p, mp, 0, &f);
+    TEST_ASSERT(m == mp && f == MCOVERED, "member 0 is now the covered directory");
+    if (m) spoor_clunk(m);
+    TEST_EXPECT_EQ(a->ref, 1, "A's entry ref dropped");
+    TEST_EXPECT_EQ(mp->ref, 2, "the covered entry still holds the point");
+
+    TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount: B goes, and the covered directory with it");
+    TEST_EXPECT_EQ(territory_nmounts(p), 0, "the point is a plain directory again");
+    TEST_EXPECT_EQ(b->ref, 1, "B's entry ref dropped");
+    TEST_EXPECT_EQ(mp->ref, 1, "the covered entry's ref on the point dropped");
+    TEST_EXPECT_EQ(unmount(p, mp), -1, "nothing is left to unmount");
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(b); spoor_unref(mp);
+}
+
+// A union's first mount installs two entries, so it needs two free slots. With
+// one free it fails -2 and installs NOTHING -- no member without its covered
+// directory, no reference taken -- while a mount needing one slot still fits.
+void test_territory_mount_covered_needs_two_slots(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc");
+    struct Spoor *sources[PGRP_MAX_MOUNTS - 1];
+    struct Spoor *mps[PGRP_MAX_MOUNTS - 1];
+    for (int i = 0; i < PGRP_MAX_MOUNTS - 1; i++) {
+        sources[i] = spoor_alloc(&devnone);
+        mps[i]     = mkmp((u64)(300u + i));
+        TEST_ASSERT(sources[i] != NULL && mps[i] != NULL, "alloc");
+        TEST_EXPECT_EQ(mount(p, sources[i], mps[i], 0), 0, "fill");
+    }
+    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS - 1, "one slot free");
+
+    struct Spoor *s  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(400u);
+    TEST_ASSERT(s && mp, "alloc");
+    TEST_EXPECT_EQ(mount(p, s, mp, MBEFORE), -2, "MBEFORE starting a union needs two slots");
+    TEST_EXPECT_EQ(mount(p, s, mp, MAFTER),  -2, "so does MAFTER");
+    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS - 1, "nothing installed");
+    TEST_EXPECT_EQ(s->ref, 1, "no ref on the source");
+    TEST_EXPECT_EQ(mp->ref, 1, "no ref on the point");
+    TEST_EXPECT_EQ(mount(p, s, mp, 0), 0, "a plain mount needs one slot and fits");
+    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS, "full");
+
+    territory_unref(p);
+    for (int i = 0; i < PGRP_MAX_MOUNTS - 1; i++) {
+        spoor_unref(sources[i]);
+        spoor_unref(mps[i]);
+    }
+    spoor_unref(s); spoor_unref(mp);
+}
+
+// A self-mount stays an I-3 cycle even though a union's covered entry is keyed
+// at its own source: that entry is the kernel's, never crossed, and no caller
+// can install one. Nor is the covered self-edge a cycle for a later mount: the
+// union's point, mounted elsewhere, installs.
+void test_territory_mount_covered_self_mount_refused(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *mp   = mkmp(31u);
+    struct Spoor *same = mkmp(31u);   // another Spoor with the point's identity
+    struct Spoor *a    = spoor_alloc(&devnone);
+    struct Spoor *q    = mkmp(32u);
+    TEST_ASSERT(p && mp && same && a && q, "alloc");
+
+    TEST_EXPECT_EQ(mount(p, mp, mp, MBEFORE),  -3, "the point at itself, MBEFORE: refused");
+    TEST_EXPECT_EQ(mount(p, same, mp, MAFTER), -3, "the point's identity at it, MAFTER: refused");
+    TEST_EXPECT_EQ(territory_nmounts(p), 0, "nothing installed");
+    TEST_EXPECT_EQ(mp->ref, 1, "no ref taken");
+
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE), 0, "A MBEFORE -> [A, covered]");
+    TEST_EXPECT_EQ(mount(p, same, mp, MBEFORE), -3, "the point's identity into its own union: refused");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "still [A, covered]");
+
+    TEST_EXPECT_EQ(mount(p, mp, q, 0), 0, "the union's point mounted at another point");
+    TEST_EXPECT_EQ(territory_nmounts(p), 3, "three entries");
+
+    territory_unref(p);
+    TEST_EXPECT_EQ(mp->ref, 1, "both of mp's entry refs released");
+    spoor_unref(mp); spoor_unref(same); spoor_unref(a); spoor_unref(q);
+}
+
+// A clone copies the covered entry like any other (one ref on the point per
+// table), and each Territory's union then lives on its own (I-1): unmounting
+// in the child dissolves the child's union, covered entry included, and leaves
+// the parent's whole.
+void test_territory_mount_covered_clone(void) {
+    struct Territory *parent = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(33u);
+    TEST_ASSERT(parent && a && mp, "alloc");
+    TEST_EXPECT_EQ(mount(parent, a, mp, MAFTER), 0, "A MAFTER -> [covered, A]");
+
+    struct Territory *child = territory_clone(parent);
+    TEST_ASSERT(child != NULL, "territory_clone");
+    TEST_EXPECT_EQ(territory_nmounts(child), 2, "the child has the covered entry too");
+    TEST_EXPECT_EQ(mp->ref, 3, "the point: test + parent's covered entry + child's");
+
+    TEST_EXPECT_EQ(unmount(child, mp), 0, "the child unmounts A");
+    TEST_EXPECT_EQ(territory_nmounts(child), 0, "the child's union is gone, covered entry included");
+    TEST_EXPECT_EQ(territory_nmounts(parent), 2, "the parent's union is untouched");
+    TEST_EXPECT_EQ(mp->ref, 2, "only the child's covered entry released the point");
+
+    territory_unref(child);
+    territory_unref(parent);
+    TEST_EXPECT_EQ(mp->ref, 1, "every table's ref on the point released");
+    TEST_EXPECT_EQ(a->ref, 1, "and on A");
+    spoor_unref(a); spoor_unref(mp);
+}
+
+// MNOEXEC restricts the device a member's entry names. The covered entry names
+// the point's own device and carries no MNOEXEC, so marking the member noexec
+// leaves the directory under it executable -- and the table shows why: the
+// covered entry is present, on its own device, flagged MCOVERED alone.
+void test_territory_mount_covered_noexec_scoped(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(34u);
+    TEST_ASSERT(p && a && mp, "alloc");
+    a->devno  = 11;   // the member's device instance
+    mp->devno = 12;   // the covered directory's
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE | MNOEXEC), 0, "A MBEFORE|MNOEXEC -> [A, covered]");
+
+    u32 f = 0;
+    struct Spoor *m = mount_member_at(p, mp, 1, &f);
+    TEST_ASSERT(m == mp && f == MCOVERED, "the covered entry is there, MCOVERED alone");
+    if (m) spoor_clunk(m);
+    TEST_ASSERT(mount_noexec_covers(p, '-', 11) == true, "the member's device is restricted");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 12) == false,
+        "the covered directory's device is not: the flag did not travel to its entry");
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(mp);
+}
+
+// ns shows the covered directory as the member it is: in search order, its
+// line names the point twice and carries " covered" alone.
+void test_territory_mount_covered_format_ns(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(35u);
+    TEST_ASSERT(p && a && mp, "alloc");
+    mp->path = mkname("u");
+    TEST_ASSERT(mp->path != NULL, "mkname u");
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE | MNOEXEC), 0, "A MBEFORE|MNOEXEC -> [A, covered]");
+
+    char buf[128];
+    u64 n = territory_format_ns(p, buf, sizeof(buf));
+    TEST_ASSERT(n > 0 && n < sizeof(buf), "bounded output");
+    buf[n] = '\0';
+    TEST_ASSERT(mnt_streq(buf, "mount /u #- noexec\nmount /u /u covered\nbinds: 0\n"),
+        "the member, then the covered directory named by its point, suffixed covered alone");
+
+    territory_unref(p);
+    spoor_unref(a); spoor_unref(mp);
 }

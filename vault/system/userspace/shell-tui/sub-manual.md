@@ -23,7 +23,7 @@ hazards: []
 abis: []
 design: ["docs/MANUAL-DESIGN.md", "docs/thylacine-operators-manual-writing-guide.md", "docs/BEACON.md"]
 created: 2026-09-16
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -151,7 +151,8 @@ Table{align, widths}, Row, Cell{width}}; `format::Run` {Text, Code, Emph, Strong
 (flat: emphasis never nests); `format::Problem` (one variant per rejection, the
 message in its `Display`); `catalog::Entry {number, name, file}`;
 `render::Listed {name, title}`. `SECTION_MAX` = 1 MiB; `HEAP_BYTES` = 16 MiB (the
-binary's `ThylaAllocN`); `TABLE_COLUMNS_MAX` = 16; `TABLE_CELL_MAX` = 256. The binary reads into a buffer sized from `fstat`
+reader's memory budget; the binary runs on libthyla-rs's growable heap since
+B-1c); `TABLE_COLUMNS_MAX` = 16; `TABLE_CELL_MAX` = 256. The binary reads into a buffer sized from `fstat`
 (`read_capped`). The test-only `format::tree` rebuilds the old block tree from
 events and asserts they are well formed, in line order, and identical whether or
 not tables are measured.
@@ -167,9 +168,13 @@ None. Single-threaded, short-lived, no shared state.
   prints none of its rendering).
 - Memory: the section (plus the holes its buffer leaves when `fstat` gives no
   length), at most a few copies of its largest block, and one output chunk
-  (`bounds::the_heap_bounds_hold`, under the guest's `linked_list_allocator`, with
-  each diagnostic formatted into a String as libthyla-rs does: worst 6648 KiB of
-  an 8 MiB working-set bound at 1 MiB, the 16 MiB heap above it).
+  (`bounds::the_heap_bounds_hold`, on the guest's heap -- [[sub-thyla-heap]],
+  dlmalloc over reservations, over an arena standing in for the kernel -- with
+  each diagnostic formatted into a String as libthyla-rs does: the heap's peak
+  footprint, counted where it grows, worst 5504 KiB of an 8 MiB working-set bound
+  at 1 MiB, half of `HEAP_BYTES`; a positive twin requires every peak to hold at
+  least the section, and goes red when the heap never sees the reader's
+  allocations).
 - Time linear in the section (`bounds::the_time_bounds_hold`).
 - Strip identity: `wire::strip(render(Rich)) == render(None)` without wrapping,
   for every fixture and every installed section (host test).
@@ -190,12 +195,16 @@ write latches (`io::OutSink`) and exits 1 with "write error".
 ## Performance
 
 Measured on thyla-pi (A72, release) through `bounds`: every expensive shape
-scales 4.0x from 64 to 256 KiB in time and in output. Heap high-water marks at
-1 MiB (the section itself is 1024 KiB of it): 1088 KiB for block-per-line shapes,
-2112 KiB for one 1 MiB block, 3136 KiB for one emphasis or code span across it,
-6208 KiB with wrapping on a console wider than the block. A read with no length
-hint adds the grown buffer's holes: 2040 KiB for block-per-line shapes, 6648 KiB
-worst (2026-09-16, round 2 F4). Table output at the cell limit: 255 KiB of empty
+scales 4.0x from 64 to 256 KiB in time and in output. Peak footprints at 1 MiB on
+the guest's heap (host, 2026-09-24; the section itself is 1024 KiB of it): 1088
+to 1216 KiB for block-per-line shapes, up to 3264 KiB for one 1 MiB block or one
+emphasis or code span across it, 5504 KiB worst, with wrapping on a console wider
+than the block (one code span across a paragraph). A read with no length hint
+raises the floor to 1728 KiB and leaves the worst unchanged: its growing buffer
+moves into a mapping of its own once past 256 KiB, and each move gives the old one
+back. Under the fixed `linked_list_allocator` heap these were first-fit high-water
+marks (2026-09-16, round 2 F4): 1088, 2112, 3136 and 6208 KiB, and 6648 KiB worst
+unhinted, the grown buffer's holes counted. Table output at the cell limit: 255 KiB of empty
 rows under sixteen 256-character header cells writes 116,182 KiB across the rich
 and the 80-column plain rendering together (63 KiB writes 27,635 KiB; the ratio is
 the constant header's). Before the 2026-09-16 rewrite the

@@ -201,6 +201,9 @@ struct SrvService {
     bool           cap_posted; // retained on tombstone; never reclaim a TCB name
     u64            cap_scope;  // zero means a non-propagating/poster-local quota
     u64            generation; // increases at reservation, never wraps or clears
+    u64            qid_path;   // this post's node identity, unique in the registry
+                               // and never the root's 0 (Plan 9 devsrv's path):
+                               // a mount at /srv/<name> keys this post alone
     u8             name_len;         // 1..SRV_NAME_MAX; bytes valid in name[]
     char           name[SRV_NAME_MAX];
     u64            poster_stripes;   // poster Proc's stripes tag (by value)

@@ -70,6 +70,7 @@ struct SrvRegistry {
     u64               magic;          // SRV_REGISTRY_MAGIC; 0 once freed
     int               ref;            // instance refcount (atomic)
     spin_lock_t       lock;
+    u64               last_qid_path;  // the last service qid.path handed out
     struct SrvService entries[SRV_MAX_SERVICES];
 };
 
@@ -405,11 +406,12 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         *prior_out = SRV_STATE_FREE;
     }
 
-    if (e->generation == ~(u64)0) {
+    if (e->generation == ~(u64)0 || reg->last_qid_path == ~(u64)0) {
         spin_unlock_irqrestore(&reg->lock, s);
         return -1;
     }
     ++e->generation;
+    e->qid_path = ++reg->last_qid_path;
     e->cap_posted = cap_post;
     e->cap_scope = cap_post ? scope : 0;
     // e->magic is already SRV_SERVICE_MAGIC + e->reg is already set —
@@ -841,11 +843,15 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
     while (len < SRV_NAME_MAX && s[len] != '\0') len++;
     if (len == 0 || s[len] != '\0') return NULL;   // empty or over-long
 
-    struct SrvService *svc = srv_lookup_in(reg, s, (u8)len);
-    if (!svc) return NULL;
+    // One hold for the name, the state and the path: a tombstoned slot can be
+    // recycled under another name, and a path read in a later hold would key
+    // this node as that post.
+    u64 qpath = 0;
     {
         irq_state_t st = spin_lock_irqsave(&reg->lock);
-        bool live = (svc->state == SRV_STATE_LIVE);
+        struct SrvService *svc = srv_find_locked(reg, s, (u8)len);
+        bool live = svc && svc->state == SRV_STATE_LIVE;
+        if (live) qpath = svc->qid_path;
         spin_unlock_irqrestore(&reg->lock, st);
         if (!live) return NULL;        // only a LIVE service is walkable
     }
@@ -867,7 +873,7 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
 
     nc->aux      = ref;        // commit: nc is a service-ref Spoor
     nc->qid.type = QTFILE;
-    nc->qid.path = 0;
+    nc->qid.path = qpath;      // never the root's 0: the mount key is (dc, devno, qid.path)
     nc->qid.vers = 0;
     w->nqid    = 1;
     w->qid[0]  = nc->qid;

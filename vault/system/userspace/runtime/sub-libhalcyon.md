@@ -27,7 +27,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-16
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -285,7 +285,10 @@ namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`.
   tile. Each tagged leaf is claimed (`pane/<id>/claim`), named, seeded with its
   one-shot `TAPESTRY_CLAIM` token into the tool's `/env`, and spawned as the user
   (`resolve_prog` mirrors the shell's `/bin` search, since the kernel resolves a
-  spawn name against CWD, not `$path`); the child's libtapestry auto-consumes the
+  spawn name against CWD, not `$path`: `tag::PROG_DIRS` is `/bin/` then
+  `/goroot/bin/`, and lost its `/` entry with the shell's at B-1d, when the
+  initrd's programs moved into `bin/` [[dec-2026-09-25-initrd-bin-directory]]);
+  the child's libtapestry auto-consumes the
   token on its first `open`. Under a session compositor (H-4d-1) the tool instead
   tags each leaf for the compositor to host and replays focus, anchoring the built
   part before a pre-existing environment tile (`anchor_last` / `active_is_env`).

@@ -12,7 +12,7 @@
 //     proc_resource_exempt is true ONLY for PRINCIPAL_SYSTEM -- a real user,
 //     PRINCIPAL_NONE, PRINCIPAL_INVALID, and NULL are all non-exempt.
 //   resource.page_charge_caps
-//     proc_page_charge refuses a non-exempt Proc over PROC_PAGE_MAX (charging
+//     proc_page_charge refuses a non-exempt Proc over its budget (charging
 //     nothing), uncharge clamps at 0, and the overflow guard refuses a wrapping
 //     charge. proc_page_charge on an exempt Proc bypasses the cap.
 //   resource.thread_cap_ok / resource.child_cap_ok
@@ -93,23 +93,31 @@ void test_resource_exempt_only_system(void) {
 }
 
 void test_resource_page_charge_caps(void) {
-    struct Proc *p = res_make(A_REAL_USER);   // non-exempt
+    // B-1a': the default budget is the user pool, which every other live
+    // address space also draws on, so the cap is exercised on a NARROWED
+    // budget (the parent-narrowing shape): "to the cap" is then a figure this
+    // Proc alone controls. proc_page_charge only moves the COUNTER -- no real
+    // allocation.
+    const u32 CAP = 4096u;
+    struct Proc *p = proc_alloc_in(NULL, CAP);
+    if (!p) extinction("test_resource: proc_alloc_in(narrowed) failed");
+    p->principal_id = A_REAL_USER;            // non-exempt
+    TEST_EXPECT_EQ(p->as->page_budget, CAP, "the narrowed cap reached the space");
 
-    // Charge exactly to the cap, then one more must be refused (charging
-    // nothing). proc_page_charge only moves the COUNTER -- no real allocation.
-    TEST_ASSERT(proc_page_charge(p, PROC_PAGE_MAX), "charge to the cap must succeed");
-    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX, "page_count == cap after full charge");
+    // Charge exactly to the cap, then one more must be refused (charging nothing).
+    TEST_ASSERT(proc_page_charge(p, CAP), "charge to the cap must succeed");
+    TEST_EXPECT_EQ(p->as->page_count, CAP, "page_count == cap after full charge");
     TEST_ASSERT(!proc_page_charge(p, 1u), "charge past the cap must be refused");
-    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX, "a refused charge charges nothing");
+    TEST_EXPECT_EQ(p->as->page_count, CAP, "a refused charge charges nothing");
 
     // Uncharge, then re-charge the freed pages.
     proc_page_uncharge(p, 100u);
-    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX - 100u, "uncharge 100");
+    TEST_EXPECT_EQ(p->as->page_count, CAP - 100u, "uncharge 100");
     TEST_ASSERT(proc_page_charge(p, 100u), "re-charge the freed 100 pages");
-    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX, "back at the cap");
+    TEST_EXPECT_EQ(p->as->page_count, CAP, "back at the cap");
 
     // Uncharge everything, then an over-uncharge clamps at 0 (no underflow).
-    proc_page_uncharge(p, PROC_PAGE_MAX);
+    proc_page_uncharge(p, CAP);
     TEST_EXPECT_EQ(p->as->page_count, 0u, "full uncharge -> 0");
     proc_page_uncharge(p, 50u);
     TEST_EXPECT_EQ(p->as->page_count, 0u, "over-uncharge clamps at 0 (no underflow)");
@@ -120,11 +128,15 @@ void test_resource_page_charge_caps(void) {
     TEST_ASSERT(!proc_page_charge(p, 0xFFFFFFFFu), "overflowing charge refused");
     TEST_EXPECT_EQ(p->as->page_count, 1u, "the overflowing charge charged nothing");
 
-    // Exempt Procs bypass the cap entirely.
-    struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
-    TEST_ASSERT(proc_page_charge(sys, PROC_PAGE_MAX), "exempt charge to cap");
-    TEST_ASSERT(proc_page_charge(sys, PROC_PAGE_MAX), "exempt charge PAST the cap");
-    TEST_EXPECT_EQ(sys->as->page_count, 2u * PROC_PAGE_MAX, "exempt is unbounded by the cap");
+    // Exempt Procs bypass the cap entirely (the same narrowed cap, so the
+    // bypass is what the second charge proves).
+    struct Proc *sys = proc_alloc_in(NULL, CAP);
+    if (!sys) extinction("test_resource: proc_alloc_in(narrowed, system) failed");
+    sys->principal_id = (u32)PRINCIPAL_SYSTEM;
+    TEST_ASSERT(proc_page_charge(sys, CAP), "exempt charge to cap");
+    TEST_ASSERT(proc_page_charge(sys, CAP), "exempt charge PAST the cap");
+    TEST_EXPECT_EQ(sys->as->page_count, 2u * CAP, "exempt is unbounded by the cap");
+    proc_page_uncharge(sys, 2u * CAP);        // hand the pool's count back
 
     res_drop(p); res_drop(sys);
 }
@@ -161,7 +173,7 @@ void test_resource_page_peak_high_water(void) {
     // A REFUSED charge charges nothing, so it must not move the peak either --
     // otherwise a Proc that merely ASKED for the cap would report having used it.
     u32 before = p->as->page_peak;
-    TEST_ASSERT(!proc_page_charge(p, PROC_PAGE_MAX), "over-cap charge refused");
+    TEST_ASSERT(!proc_page_charge(p, p->as->page_budget), "over-cap charge refused");
     TEST_EXPECT_EQ(p->as->page_peak, before, "a refused charge does not move the peak");
     TEST_ASSERT(!proc_page_charge(p, 0xFFFFFFFFu), "overflowing charge refused");
     TEST_EXPECT_EQ(p->as->page_peak, before, "a refused overflow does not move the peak");
@@ -172,39 +184,59 @@ void test_resource_page_peak_high_water(void) {
 // CL-5: the spawn-time budget resolver -- the single authority decision.
 // Rules: 0 inherits; <= the parent's own budget needs no authority (monotonic
 // reduction, the I-2 shape); above it needs PROC_FLAG_MAY_RAISE_PAGE_BUDGET;
-// over PROC_PAGE_HARD_MAX is refused for EVERYONE (the cap is what preserves
-// the box-cliff protection, so no authority may exceed it).
+// over the hard maximum is refused for EVERYONE. B-1a': the default AND the
+// hard maximum are the user pool (RAM minus the reserve), so a fresh Proc
+// already carries the maximum and the authority path is exercised from a
+// NARROWED parent, which is the only parent a raise can matter to.
 void test_resource_spawn_budget_resolve(void) {
+    const u32 hard = proc_page_budget_hard_max();
+    const u32 dflt = proc_default_page_budget();
+    TEST_ASSERT(hard != 0 && dflt == hard, "the default budget IS the hard maximum (the pool)");
+
     struct Proc *plain = res_make(A_REAL_USER);      // no raise authority
-    TEST_EXPECT_EQ(plain->page_budget, PROC_PAGE_MAX,
+    TEST_EXPECT_EQ(plain->page_budget, dflt,
                    "a fresh Proc carries the default budget");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 0u), dflt,
+                   "0 inherits the parent's budget");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, hard), hard,
+                   "exactly the maximum needs no authority when the parent holds it");
+
+    // A NARROWED parent: the authority decision has room to bite.
+    const u32 NARROW = 65536u;
+    struct Proc *narrow = proc_alloc_in(NULL, NARROW);
+    if (!narrow) extinction("test_resource: proc_alloc_in(narrow) failed");
+    narrow->principal_id = A_REAL_USER;
 
     // 0 == inherit. This is the compatibility contract: every pre-CL-5 caller
     // zero-fills sys_spawn_args, so it MUST resolve to the parent's budget.
-    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 0u), PROC_PAGE_MAX,
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(narrow, 0u), NARROW,
                    "0 inherits the parent's budget");
 
     // Reduction is always allowed -- a free sandboxing primitive.
-    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 1024u), 1024u,
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(narrow, 1024u), 1024u,
                    "a smaller budget needs no authority");
-    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, PROC_PAGE_MAX), PROC_PAGE_MAX,
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(narrow, NARROW), NARROW,
                    "exactly the parent's budget needs no authority");
 
     // A RAISE without authority is refused (0 == refuse the spawn).
-    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, PROC_PAGE_MAX + 1u), 0u,
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(narrow, NARROW + 1u), 0u,
                    "raising without authority is refused");
 
     // With the flag, the raise is granted...
-    struct Proc *raiser = res_make(A_REAL_USER);
+    struct Proc *raiser = proc_alloc_in(NULL, NARROW);
+    if (!raiser) extinction("test_resource: proc_alloc_in(raiser) failed");
+    raiser->principal_id = A_REAL_USER;
     proc_mark_may_raise_page_budget(raiser);
     TEST_ASSERT(proc_may_raise_page_budget(raiser), "the raise flag reads back");
-    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, PROC_PAGE_HARD_MAX),
-                   PROC_PAGE_HARD_MAX, "an authorized raise to the hard cap");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, NARROW + 1u), NARROW + 1u,
+                   "an authorized raise past the parent's own budget");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, hard), hard,
+                   "an authorized raise to the hard maximum");
 
-    // ...but NEVER past the hard cap, flag or not. This is the property the
-    // box-cliff protection rests on.
-    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, PROC_PAGE_HARD_MAX + 1u), 0u,
-                   "even an authorized raise cannot exceed PROC_PAGE_HARD_MAX");
+    // ...but NEVER past the hard maximum, flag or not: no Proc can be granted
+    // more than the machine has.
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, hard + 1u), 0u,
+                   "even an authorized raise cannot exceed the hard maximum");
     TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 0xFFFFFFFFu), 0u,
                    "a wild budget is refused, not clamped");
 
@@ -212,52 +244,49 @@ void test_resource_spawn_budget_resolve(void) {
     TEST_EXPECT_EQ(proc_spawn_budget_resolve(NULL, 0u), 0u,
                    "NULL parent is refused (fail-closed)");
 
-    res_drop(plain); res_drop(raiser);
+    res_drop(plain); res_drop(narrow); res_drop(raiser);
 }
 
-// CL-5: the measurement that motivates the whole mechanism, pinned as a test.
-// The clade gate measured a 1959-byte template-heavy C++ TU at 64066 pages
-// (250 MiB) through cc1 -- see the CL-5 probe in usr/joey/joey.c. Note the gate
-// runs it as PRINCIPAL_SYSTEM (joey's child), which is resource-EXEMPT, so that
-// boot never consults a budget at all; the numbers below are what a real
-// (non-exempt) user would be measured against. If these stop holding, the
-// budget constant moved and LLVM-DESIGN.md
-// section 7 needs re-deriving. NOTE the stressor FITS the default (64066 of
-// 65536 = 97.8%); it is a REAL project TU (~2x+) that does not.
+// CL-5: the measurement that motivated the budget mechanism, pinned as a
+// test. The clade gate measured a 1959-byte template-heavy C++ TU at 64066
+// pages (250 MiB) through cc1 -- see the CL-5 probe in usr/joey/joey.c -- and a
+// real project TU projects to 500-650 MiB, which did not fit the old 256 MiB
+// default. B-1a' (ARCH 6.5 "Capacity"): the default is the user pool, RAM
+// minus the reserve, so BOTH fit it now, and the narrowing half of the
+// mechanism (a parent's cap reaching the child's space) is what remains to
+// prove. Note the gate runs cc1 as PRINCIPAL_SYSTEM (joey's child), which is
+// resource-EXEMPT, so that boot never consults a budget at all.
 #define CL5_MEASURED_CC1_PEAK_PAGES 64066u
 
 void test_resource_measured_compile_needs_raise(void) {
     struct Proc *p = res_make(A_REAL_USER);          // NOT exempt -- a real user
 
-    // The measured stressor FITS the default -- but only just. 64066 of 65536
-    // pages is 97.8% of the budget, i.e. 1470 pages (5.7 MiB) of headroom for a
-    // 1959-BYTE source file. Asserted as a fact, and as a tripwire: if a future
-    // change pushes this over, the default budget stopped covering even the
-    // trivial case.
-    _Static_assert(CL5_MEASURED_CC1_PEAK_PAGES < PROC_PAGE_MAX,
-                   "the measured stressor is expected to fit the default budget");
+    // The measured stressor fits the default with room: the default is the
+    // pool, and the pool is most of the machine (a 2 GiB guest: 1792 MiB).
+    TEST_ASSERT(CL5_MEASURED_CC1_PEAK_PAGES < proc_default_page_budget(),
+                "the measured stressor fits the default budget");
     TEST_ASSERT(proc_page_charge(p, CL5_MEASURED_CC1_PEAK_PAGES),
-                "the measured cc1 peak fits the default budget (97.8% of it)");
+                "the measured cc1 peak fits the default budget");
     TEST_EXPECT_EQ(p->as->page_peak, CL5_MEASURED_CC1_PEAK_PAGES,
                    "the high-water recorded the measured peak");
     proc_page_uncharge(p, CL5_MEASURED_CC1_PEAK_PAGES);
 
-    // A REAL project TU does not. The stressor is 1959 bytes; DAGCombiner.cpp
-    // is 1.2 MB and measured 735 MiB RSS on the host, which scales to ~500-650
-    // MiB of device anon at the 0.70 anon fraction measured between the two
-    // device data points. 2x the stressor is the CONSERVATIVE bottom of that
-    // range and already exceeds the default -- so the collision is real without
-    // needing the projection to be precise.
+    // A REAL project TU fits it too (B-1a'). The stressor is 1959 bytes;
+    // DAGCombiner.cpp is 1.2 MB and measured 735 MiB RSS on the host, ~500-650
+    // MiB of device anon at the measured 0.70 anon fraction; 2x the stressor is
+    // the conservative bottom of that range. Under the old 256 MiB default this
+    // was the refusal that motivated CL-5's raise authority.
     u32 real_tu = CL5_MEASURED_CC1_PEAK_PAGES * 2u;   // ~500 MiB
-    TEST_ASSERT(real_tu > PROC_PAGE_MAX, "a real TU exceeds the default budget");
-    TEST_ASSERT(!proc_page_charge(p, real_tu),
-                "a real project TU does NOT fit the default 256 MiB budget");
-    TEST_EXPECT_EQ(p->as->page_count, 0u, "the refused charge committed nothing");
+    TEST_ASSERT(real_tu < proc_default_page_budget(), "a real TU fits the default budget");
+    TEST_ASSERT(proc_page_charge(p, real_tu),
+                "a real project TU fits the default budget (the pool)");
+    TEST_EXPECT_EQ(p->as->page_count, real_tu, "the charge committed in full");
+    proc_page_uncharge(p, real_tu);
 
-    // ...and DOES fit for a Proc CREATED with a raised budget. That is the
-    // whole mechanism -- and it is driven through the real seeding path
-    // (proc_alloc_in's page_budget parameter, which is what rfork hands the
-    // parent's authorization to) rather than by writing p->page_budget.
+    // ...and for a Proc CREATED with an explicit budget the SEEDING path is
+    // what carries it -- driven through proc_alloc_in's page_budget parameter
+    // (what rfork hands the parent's authorization to) rather than by writing
+    // p->page_budget.
     //
     // I-32 (A) makes that distinction load-bearing: Proc.page_budget is the
     // AUTHORIZATION, AddrSpace.page_budget is the cap addrspace_charge_pages
@@ -378,36 +407,41 @@ void test_resource_page_cap_attach_enforced(void) {
     struct Proc *p = res_make((u32)PRINCIPAL_INVALID);   // non-exempt (bare default)
 
     // Pre-charge one below the cap so the boundary is exercised WITHOUT a
-    // 256-MiB allocation. The 2-page attach would push to cap+1 -> refused at
-    // the cap check, which precedes burrow_create_anon (nothing allocated).
-    __atomic_store_n(&p->as->page_count, PROC_PAGE_MAX - 1u, __ATOMIC_RELEASE);
+    // budget-sized allocation (a direct store: the pool's count is untouched).
+    // The 2-page attach would push to cap+1 -> refused at the cap check, which
+    // precedes burrow_create_anon (nothing allocated).
+    const u32 cap = p->as->page_budget;
+    __atomic_store_n(&p->as->page_count, cap - 1u, __ATOMIC_RELEASE);
     s64 over = sys_burrow_attach_for_proc(p, 2u * PAGE_SIZE);
     TEST_EXPECT_EQ(over, (s64)(-T_E_NOMEM), "over-cap attach -> -ENOMEM");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX - 1u,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), cap - 1u,
                    "an over-cap attach charges/allocates nothing");
 
     // A 1-page attach fits exactly (page_count + 1 == cap) -> succeeds + charges.
     s64 fit = sys_burrow_attach_for_proc(p, PAGE_SIZE);
     TEST_ASSERT(fit >= 0, "the boundary-fitting attach succeeds");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), cap,
                    "the fitting attach charged 1 page");
 
     // Detach uncharges exactly.
     s64 d = sys_burrow_detach_for_proc(p, (u64)fit, PAGE_SIZE);
     TEST_EXPECT_EQ(d, 0L, "detach ok");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX - 1u,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), cap - 1u,
                    "detach uncharged 1 page");
 
+    __atomic_store_n(&p->as->page_count, 0u, __ATOMIC_RELEASE);   // the parked count, undone
     res_drop(p);
 
     // An exempt Proc's attach bypasses the cap in the real syscall path.
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
-    __atomic_store_n(&sys->as->page_count, PROC_PAGE_MAX - 1u, __ATOMIC_RELEASE);
+    const u32 scap = sys->as->page_budget;
+    __atomic_store_n(&sys->as->page_count, scap - 1u, __ATOMIC_RELEASE);
     s64 ex = sys_burrow_attach_for_proc(sys, 2u * PAGE_SIZE);
     TEST_ASSERT(ex >= 0, "exempt attach past the cap succeeds");
-    TEST_EXPECT_EQ(__atomic_load_n(&sys->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX + 1u,
+    TEST_EXPECT_EQ(__atomic_load_n(&sys->as->page_count, __ATOMIC_ACQUIRE), scap + 1u,
                    "exempt charged past the cap");
     (void)sys_burrow_detach_for_proc(sys, (u64)ex, 2u * PAGE_SIZE);
+    __atomic_store_n(&sys->as->page_count, 0u, __ATOMIC_RELEASE);
     res_drop(sys);
 }
 
@@ -521,7 +555,7 @@ void test_resource_detach_retained_handle_keeps_page_count(void) {
     // 3 pages -> the buddy rounds to 4; the charge and any refund are both
     // burrow_backing_pages(length), so a non-power-of-two also keeps this test
     // honest about the #106 unit.
-    struct Burrow *v = burrow_create_anon(3u * PAGE_SIZE);
+    struct Burrow *v = burrow_create_anon(3u * PAGE_SIZE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     size_t vsize = burrow_get_size(v);
     u32    vpages = (u32)burrow_backing_pages(vsize);
@@ -581,7 +615,7 @@ void test_resource_detach_shared_in_keeps_page_count(void) {
 
     // A 3-page ANON Burrow standing in for a sharer's ring. burrow_share_into
     // maps the WHOLE Burrow, so the share length is v->size.
-    struct Burrow *v = burrow_create_anon(3u * PAGE_SIZE);
+    struct Burrow *v = burrow_create_anon(3u * PAGE_SIZE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     size_t vsize = burrow_get_size(v);
 

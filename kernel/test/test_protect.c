@@ -158,6 +158,8 @@ static void mkfi(struct fault_info *fi, u64 vaddr, bool is_write) {
     fi->is_translation = true;
     fi->is_permission  = false;
     fi->is_access_flag = false;
+    fi->is_alignment = false;
+    fi->is_external = false;
 }
 
 static enum fault_result fault(struct Proc *p, u64 va, bool is_write) {
@@ -200,7 +202,7 @@ static s64 protect(struct Proc *p, u64 va, u64 len, u64 prot, u64 flags) {
 
 // Map an EAGER anon Burrow at a chosen VA and prot (the vDSO / ring shapes).
 static struct Burrow *map_eager(struct Proc *p, u64 va, u64 len, u32 prot) {
-    struct Burrow *b = burrow_create_anon((size_t)len);
+    struct Burrow *b = burrow_create_anon((size_t)len, false);
     if (!b) return NULL;
     spin_lock(&p->as->lock);
     int rc = burrow_map(p, b, va, (size_t)len, prot);
@@ -224,7 +226,7 @@ static u32 *slot_words(struct Vma *v, u64 va) {
 // proc_alloc_in takes its own reference, so the caller drops the one it holds
 // and the child owns the space outright (test_cow.c's cow_adopt).
 static struct Proc *adopt(struct AddrSpace *as) {
-    struct Proc *p = proc_alloc_in(as, PROC_PAGE_MAX);
+    struct Proc *p = proc_alloc_in(as, proc_default_page_budget());
     if (p) addrspace_unref(as);
     return p;
 }
@@ -317,14 +319,14 @@ void test_protect_raise_and_write_keeps_contents(void) {
     TEST_ASSERT(w != NULL, "the page is resident");
     w[0] = 0x5a5a5a5au;
     struct page *pg = slot_page(v, va);
-    u32 charged = p->as->page_count;
+    u32 charged = p->as->page_count - p->as->pgtable_pages;   // the data page; its tables come and go with the PTE
 
     // Lower to none: the PTE goes, the page and the charge stay.
     TEST_EXPECT_EQ(protect(p, va, 2 * P, PR_NONE, 0), 0, "lower RW -> none");
     TEST_EXPECT_EQ(pte_of(p->as->pgtable_root, va), 0ull, "the PTE is uninstalled");
     TEST_EXPECT_EQ(fault(p, va, true), FAULT_UNHANDLED_USER, "a write is refused at none");
     TEST_ASSERT(slot_page(vma_lookup(p, va), va) == pg, "the page stays resident (Linux keeps a PROT_NONE mapping's contents)");
-    TEST_EXPECT_EQ(p->as->page_count, charged, "and stays charged");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, charged, "and stays charged");
 
     // Raise again: the SAME page comes back with its bytes.
     TEST_EXPECT_EQ(protect(p, va, 2 * P, PR_RW, 0), 0, "raise none -> RW again");
@@ -332,7 +334,7 @@ void test_protect_raise_and_write_keeps_contents(void) {
     v = vma_lookup(p, va);
     TEST_ASSERT(slot_page(v, va) == pg, "the same page");
     TEST_EXPECT_EQ(slot_words(v, va)[0], 0x5a5a5a5au, "with its bytes");
-    TEST_EXPECT_EQ(p->as->page_count, charged, "charged exactly once");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, charged, "charged exactly once");
 
     drop(p);
 }
@@ -532,7 +534,7 @@ void test_protect_refusals_change_nothing(void) {
 
     // A CODE alias (the I-42 pair).
     u64 cva = EXPLICIT_VA + 4 * P;
-    struct Burrow *bc = burrow_create_code(P);
+    struct Burrow *bc = burrow_create_code(P, false);
     TEST_ASSERT(bc != NULL, "code Burrow");
     spin_lock(&p->as->lock);
     TEST_EXPECT_EQ(burrow_map(p, bc, cva, P, VMA_PROT_RW), 0, "map the writer alias");
@@ -683,7 +685,7 @@ void test_cow_clone_dedupes_split_pieces(void) {
     for (u64 i = 0; i < 4; i++)
         TEST_EXPECT_EQ(fault(parent, va + i * P, true), FAULT_HANDLED, "parent faults a page in");
     struct Burrow *pb = vma_lookup(parent, va)->burrow;
-    u32 pc_before = parent->as->page_count;
+    u32 pc_before = parent->as->page_count - parent->as->pgtable_pages;   // the data view: the clone takes the parent's PTEs, and their tables with them
 
     // Four pieces of one Burrow: RW | R | none | RW.
     TEST_EXPECT_EQ(protect(parent, va + P, P, PR_R, 0), 0, "piece 1 -> R");
@@ -709,7 +711,7 @@ void test_cow_clone_dedupes_split_pieces(void) {
     }
     TEST_EXPECT_EQ(burrow_mapping_count(cb), 4, "the clone has four mappings");
     TEST_EXPECT_EQ(child->page_count, 4u, "the child is charged the resident count ONCE");
-    TEST_EXPECT_EQ(parent->as->page_count, pc_before, "the parent's charge is unchanged");
+    TEST_EXPECT_EQ(parent->as->page_count - parent->as->pgtable_pages, pc_before, "the parent's charge is unchanged");
     TEST_ASSERT(pb->clone_cursor == NULL, "the dedupe cursor is retired before the clone returns");
 
     addrspace_unref(child);
@@ -761,7 +763,7 @@ void test_sys_burrow_detach_piece_frees_only_its_pages(void) {
     for (u64 i = 0; i < 4; i++)
         TEST_EXPECT_EQ(fault(p, va + i * P, true), FAULT_HANDLED, "fault a page in");
     struct Burrow *b = vma_lookup(p, va)->burrow;
-    u32 pc0 = p->as->page_count;
+    u32 pc0 = p->as->page_count - p->as->pgtable_pages;   // the data view: a piece's tables go with its PTEs
     TEST_ASSERT(pc0 >= 4, "four pages charged");
 
     TEST_EXPECT_EQ(protect(p, va + 2 * P, 2 * P, PR_NONE, 0), 0, "split into two pieces");
@@ -769,7 +771,7 @@ void test_sys_burrow_detach_piece_frees_only_its_pages(void) {
 
     // Detach the first piece: exactly ITS two pages go, the other two stay.
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, 2 * P), 0, "detach piece 0");
-    TEST_EXPECT_EQ(p->as->page_count, pc0 - 2, "uncharged exactly the piece's two pages");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, pc0 - 2, "uncharged exactly the piece's two pages");
     TEST_ASSERT(burrow_lazy_slot_for_test(b, 0) == NULL && burrow_lazy_slot_for_test(b, 1) == NULL,
                 "the detached piece's pages are freed");
     TEST_ASSERT(burrow_lazy_slot_for_test(b, 2) != NULL && burrow_lazy_slot_for_test(b, 3) != NULL,
@@ -778,12 +780,15 @@ void test_sys_burrow_detach_piece_frees_only_its_pages(void) {
     TEST_EXPECT_EQ(protect(p, va + 2 * P, 2 * P, PR_RW, 0), 0, "the survivor still protects");
     TEST_EXPECT_EQ(fault(p, va + 2 * P, false), FAULT_HANDLED, "and still faults");
 
-    // A wrong-length detach of the survivor frees nothing.
-    TEST_ASSERT(sys_burrow_detach_for_proc(p, va + 2 * P, P) != 0, "a partial detach is refused");
-    TEST_ASSERT(burrow_lazy_slot_for_test(b, 2) != NULL, "a refused detach freed nothing");
-    TEST_EXPECT_EQ(p->as->page_count, pc0 - 2, "and uncharged nothing");
+    // B-1a': a wrong-length detach of the survivor is the range form -- it
+    // trims the piece and frees exactly the cut page, nothing else.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va + 2 * P, P), 0, "a partial detach trims (B-1a')");
+    TEST_ASSERT(burrow_lazy_slot_for_test(b, 2) == NULL, "the cut page is freed");
+    TEST_ASSERT(burrow_lazy_slot_for_test(b, 3) != NULL, "the kept page stays resident");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, pc0 - 3, "and exactly it is uncharged");
+    TEST_EXPECT_EQ(count_vmas(p->as), 1u, "one trimmed piece");
 
-    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va + 2 * P, 2 * P), 0, "detach the survivor");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va + 3 * P, P), 0, "detach the survivor");
     TEST_EXPECT_EQ(p->as->page_count, pc0 - 4, "everything uncharged");
     TEST_EXPECT_EQ(count_vmas(p->as), 0u, "nothing mapped");
 
@@ -849,14 +854,14 @@ void test_protect_uninstall_range_skips_absent_subtrees(void) {
     TEST_ASSERT(pte_of(p->as->pgtable_root, (u64)va) != 0, "the leaf is installed");
 
     u64 before = mmu_uninstall_pte_calls();
-    TEST_EXPECT_EQ(mmu_uninstall_user_range(p->as->pgtable_root, 0, (u64)va, (u64)va + GIB),
-                   0, "uninstall the whole GiB");
+    TEST_EXPECT_EQ(mmu_uninstall_user_range(p->as, (u64)va, (u64)va + GIB),
+                   1, "uninstall the whole GiB: the one leaf cleared");
     TEST_EXPECT_EQ(mmu_uninstall_pte_calls() - before, 512ull,
                    "only the one present 2 MiB table is visited page by page");
     TEST_ASSERT(pte_of(p->as->pgtable_root, (u64)va) == 0, "the leaf is gone");
 
     before = mmu_uninstall_pte_calls();
-    TEST_EXPECT_EQ(mmu_uninstall_user_range(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_uninstall_user_range(p->as,
                                             (u64)va + GIB, (u64)va + 2 * GIB),
                    0, "an empty GiB");
     TEST_EXPECT_EQ(mmu_uninstall_pte_calls() - before, 0ull,
@@ -910,13 +915,16 @@ void test_sys_mmap_fixed_anon_w_alone_maps_rw(void) {
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
 
-    s64 rc = sys_mmap_fixed_anon_for_proc(p, EXPLICIT_VA, P, (u32)VIV_PROT_WRITE);
-    TEST_EXPECT_EQ(rc, (s64)EXPLICIT_VA, "PROT_WRITE alone maps (was ENOMEM)");
-    struct Vma *v = vma_lookup(p, EXPLICIT_VA);
+    // B-1a': the fixed arms are confined to the burrow window (a mapping below
+    // it could never be unmapped), so the address is inside it.
+    const u64 fixed_va = EXEC_USER_BURROW_BASE + 0x1000000ull;
+    s64 rc = sys_mmap_fixed_anon_for_proc(p, fixed_va, P, (u32)VIV_PROT_WRITE);
+    TEST_EXPECT_EQ(rc, (s64)fixed_va, "PROT_WRITE alone maps (was ENOMEM)");
+    struct Vma *v = vma_lookup(p, fixed_va);
     TEST_ASSERT(v != NULL, "mapped");
     TEST_EXPECT_EQ(v->prot, (u32)VMA_PROT_RW, "as RW, the Linux/AArch64 promotion");
     TEST_EXPECT_EQ(vma_prot_max(v), (u32)VMA_PROT_RW, "under an RW ceiling");
-    TEST_EXPECT_EQ((int)fault(p, EXPLICIT_VA, true), (int)FAULT_HANDLED, "and it is writable");
+    TEST_EXPECT_EQ((int)fault(p, fixed_va, true), (int)FAULT_HANDLED, "and it is writable");
 
     drop(p);
 }

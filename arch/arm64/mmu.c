@@ -1509,6 +1509,7 @@ paddr_t proc_pgtable_create(void) {
 // =============================================================================
 
 #include <thylacine/vma.h>          // VMA_PROT_* bits
+#include <thylacine/addrspace.h>    // B-1a' audit F1: the table charge (addrspace_charge_table)
 
 // Build a user-mode L3 page descriptor from a PA + VMA prot bits.
 // Encoding (ARM ARM D5.4.1):
@@ -1594,20 +1595,142 @@ static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, u32 mair_idx) {
 // `false` would supply to an index parameter. The index-aware entry below
 // (mmu_install_user_pte_attr) is for the V-2 host-visible / write-combining
 // (NORMAL_NC) path, which the bool cannot express.
-int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
+// =============================================================================
+// B-1a' audit F1: user page-table pages are CHARGED and RECLAIMED.
+// =============================================================================
+//
+// Every L1 / L2 / L3 table under a user L0 is one page the address space
+// caused to exist, so it is charged to that space (addrspace_charge_table:
+// page_count under the I-32 cap, plus the pgtable_pages telemetry) and taken
+// from the user pool (alloc_user_pages) BEFORE it is linked, exactly as a
+// pagemap node is; a refused charge or an empty buddy installs nothing, and
+// a table this call linked but could not fill goes back. Uncharged,
+// death-reclaimed tables were the hole the round-1 audit named: with the
+// reservation cap lifted to the window, one page per 2 MiB touched and
+// decommitted left one uncharged, unreclaimable table page per iteration --
+// the buddy empty at a charged count of three, the reserve a fiction.
+//
+// OCCUPANCY lives in the table page's own descriptor, page->refcount --
+// ESTABLISHED at 0 when the table is allocated (the buddy hands the head page
+// over holding 1), never inherited (the pagemap's rule; page.h's cow_share
+// contract): an L3 counts its valid leaves, an L2 its L3 tables, an L1 its L2
+// tables. The L0 is not counted and never reclaimed here: one page per
+// address space, bounded by the Proc axes like a kernel stack, freed by
+// proc_pgtable_destroy. A clear that brings a table to 0 unlinks it from its
+// parent, invalidates, frees it (free_pages returns the pool's charge) and
+// uncharges it, then asks the same of the parent (user_tables_reclaim). That
+// is what turns "emptiness needs a 512-entry scan" -- the reason this file
+// used to keep every table until death -- into O(1).
+//
+// The unlink is a break-before-make on a TABLE descriptor: the parent entry
+// is written invalid, `dsb ishst` orders that write before the invalidate,
+// `tlbi vaae1is` on one VA under the table drops any translation-walk cache
+// entry holding the old descriptor (a by-VA invalidate reaches every cached
+// entry that could translate that VA, the intermediate levels included, ARM
+// ARM D5.10.1 -- and every leaf beneath was invalidated the same way as it
+// was cleared, so nothing under the table is cached), and `dsb ish` waits
+// for every CPU before the page can be reused. A table freed while an entry
+// in it is still valid would be a translation walk through recycled memory,
+// so the free re-reads the 512 entries and extincts on a live one: the
+// occupancy count is load-bearing and the scan is its witness, at the cost
+// of one page read per table freed.
+//
+// SERIALISATION: the caller holds the address space's lock across every
+// install and uninstall of its tree (the fault path, the detach, the
+// decommit, the protect, the clone's phase 1), so the counts are plain
+// increments and a parent-entry write never races a peer's walk-and-grow.
+
+static inline struct page *table_page(paddr_t pa) { return pa_to_page(pa); }
+
+// One fresh, charged, empty table page, or 0 with nothing changed.
+static paddr_t user_table_alloc(struct AddrSpace *as, bool exempt) {
+    if (!addrspace_charge_table(as, exempt)) return 0;
+    struct page *pg = alloc_user_pages(0, KP_ZERO, exempt);
+    if (!pg) { addrspace_uncharge_table(as); return 0; }
+    pg->refcount = 0;                    // occupancy: ESTABLISHED, never inherited
+    return page_to_pa(pg);
+}
+
+// Drain a descriptor write, then invalidate by VA (all ASIDs, inner-shareable)
+// and wait for it everywhere: the tail every leaf install and clear has
+// always had, shared with the table unlink. R7 F129: ARM ARM D5.7.6 permits
+// caching INVALID descriptors, so an install needs it as much as a clear.
+static inline void user_tlbi_va(u64 vaddr) {
+    dsb_ishst();
+    __asm__ __volatile__(
+        "tlbi vaae1is, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r" ((u64)vaddr >> 12)        // tlbi VA encoding: bits[55:12] of VA
+        : "memory"
+    );
+}
+
+// Unlink the empty table at `pa` from `*parent_entry`, invalidate, prove it
+// empty, free it (the pool takes the page back) and uncharge it.
+static void user_table_free(struct AddrSpace *as, u64 *parent_entry, paddr_t pa,
+                            u64 vaddr) {
+    *parent_entry = 0;
+    user_tlbi_va(vaddr);
+    const u64 *t = (const u64 *)pa_to_kva(pa);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++)
+        if (t[i] & PTE_VALID)
+            extinction("user page table freed while an entry in it is still valid");
+    free_pages(pa_to_page(pa), 0);
+    addrspace_uncharge_table(as);
+}
+
+// Free every empty table on vaddr's path, leaf upward, stopping at the first
+// occupied one (its ancestors are then occupied too). Called by a clear that
+// emptied an L3, and by an install that linked a table it could not finish
+// under.
+static void user_tables_reclaim(struct AddrSpace *as, u64 vaddr) {
+    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
+    u64 e0 = l0[idx0];
+    if (!(e0 & PTE_VALID) || !(e0 & PTE_TYPE_TABLE)) return;
+    paddr_t l1_pa = e0 & ~0xFFFull;
+    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
+    u64 e1 = l1[idx1];
+    if ((e1 & PTE_VALID) && (e1 & PTE_TYPE_TABLE)) {
+        paddr_t l2_pa = e1 & ~0xFFFull;
+        u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+        u64 e2 = l2[idx2];
+        if ((e2 & PTE_VALID) && (e2 & PTE_TYPE_TABLE)) {
+            paddr_t l3_pa = e2 & ~0xFFFull;
+            if (table_page(l3_pa)->refcount != 0) return;
+            user_table_free(as, &l2[idx2], l3_pa, vaddr);
+            table_page(l2_pa)->refcount--;
+        }
+        if (table_page(l2_pa)->refcount != 0) return;
+        user_table_free(as, &l1[idx1], l2_pa, vaddr);
+        table_page(l1_pa)->refcount--;
+    }
+    if (table_page(l1_pa)->refcount != 0) return;
+    user_table_free(as, &l0[idx0], l1_pa, vaddr);
+}
+
+// A table's occupancy only ever falls by a clear of something this file
+// counted; 0 -> -1 is a miscount that would free a live table later.
+static inline void table_occupancy_drop(struct page *pg) {
+    if (pg->refcount == 0) extinction("user page table occupancy underflow");
+    pg->refcount--;
+}
+
+int mmu_install_user_pte(struct AddrSpace *as, bool exempt,
                          u64 vaddr, paddr_t pa, u32 prot, bool device_memory) {
-    return mmu_install_user_pte_attr(pgtable_root, asid, vaddr, pa, prot,
+    return mmu_install_user_pte_attr(as, exempt, vaddr, pa, prot,
                                      device_memory ? MAIR_IDX_DEVICE
                                                    : MAIR_IDX_NORMAL_WB);
 }
 
-int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
+int mmu_install_user_pte_attr(struct AddrSpace *as, bool exempt,
                               u64 vaddr, paddr_t pa, u32 prot,
                               u32 mair_idx) {
-    (void)asid;       // reserved for replace-PTE paths
-
     // Argument validation.
-    if (pgtable_root == 0)               return -1;
+    if (!as || as->pgtable_root == 0)    return -1;
     if (vaddr & (PAGE_SIZE - 1))         return -1;
     if (pa & (PAGE_SIZE - 1))            return -1;
     // VA must be in the TTBR0 user-half. With 48-bit VAs and no TBI,
@@ -1616,7 +1739,7 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
     // or all-1 for TTBR1). R10 F158 (P3) close: tightened from
     // `vaddr >> 48 != 0` (which let bit-47=1 vaddrs through, producing
     // PTEs in the per-Proc tree at addresses the MMU would never walk
-    // → fault storm on first access) to `vaddr >> 47 != 0`. R12-vaddr
+    // -> fault storm on first access) to `vaddr >> 47 != 0`. R12-vaddr
     // (P4) adds the matching reject at burrow_map's VMA layer so callers
     // fail fast before any per-Proc tree mutation; this check remains as
     // per-page defense-in-depth for the demand-page path.
@@ -1631,14 +1754,13 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
     u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
     u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
 
-    // L0 → L1 walk + grow.
-    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    // L0 -> L1 walk + grow.
+    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
     u64 e = l0[idx0];
     paddr_t l1_pa;
     if (!(e & PTE_VALID)) {
-        struct page *l1_pg = alloc_pages(0, KP_ZERO);
-        if (!l1_pg) return -1;
-        l1_pa = page_to_pa(l1_pg);
+        l1_pa = user_table_alloc(as, exempt);
+        if (!l1_pa) return -1;
         l0[idx0] = make_table_pte_pa(l1_pa);
     } else {
         // L0 has no block-descriptor form on AArch64 with 4-KiB granule
@@ -1647,30 +1769,30 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
         l1_pa = e & ~0xFFFull;
     }
 
-    // L1 → L2 walk + grow.
+    // L1 -> L2 walk + grow.
     u64 *l1 = (u64 *)pa_to_kva(l1_pa);
     e = l1[idx1];
     paddr_t l2_pa;
     if (!(e & PTE_VALID)) {
-        struct page *l2_pg = alloc_pages(0, KP_ZERO);
-        if (!l2_pg) return -1;
-        l2_pa = page_to_pa(l2_pg);
+        l2_pa = user_table_alloc(as, exempt);
+        if (!l2_pa) { user_tables_reclaim(as, vaddr); return -1; }   // an L1 this call linked goes back
         l1[idx1] = make_table_pte_pa(l2_pa);
+        table_page(l1_pa)->refcount++;
     } else {
         // 1-GiB block at L1 not expected for v1.0 user mappings.
         if (!(e & PTE_TYPE_TABLE)) return -1;
         l2_pa = e & ~0xFFFull;
     }
 
-    // L2 → L3 walk + grow.
+    // L2 -> L3 walk + grow.
     u64 *l2 = (u64 *)pa_to_kva(l2_pa);
     e = l2[idx2];
     paddr_t l3_pa;
     if (!(e & PTE_VALID)) {
-        struct page *l3_pg = alloc_pages(0, KP_ZERO);
-        if (!l3_pg) return -1;
-        l3_pa = page_to_pa(l3_pg);
+        l3_pa = user_table_alloc(as, exempt);
+        if (!l3_pa) { user_tables_reclaim(as, vaddr); return -1; }   // the L2, and the L1 if this call linked it
         l2[idx2] = make_table_pte_pa(l3_pa);
+        table_page(l2_pa)->refcount++;
     } else {
         // 2-MiB block at L2 not expected for v1.0 user mappings.
         if (!(e & PTE_TYPE_TABLE)) return -1;
@@ -1682,42 +1804,130 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
     u64 want = make_user_pte_l3(pa, prot, mair_idx);
     u64 existing = l3[idx3];
     if (existing & PTE_VALID) {
-        // Already mapped. If matching, the install is idempotent (a
-        // legitimate concurrent-fault retry from a future multi-thread
-        // Proc, or a same-Proc replay during fault unwinding). If
-        // mismatching, that's a bug in the caller — return -1 so the
-        // demand-paging path can extinct loudly rather than silently
-        // overwriting the prior mapping.
-        if (existing == want) return 0;
+        // Already mapped. If matching, the install is idempotent -- nothing
+        // written, and the 1 tells a caller that paid for the leaf that
+        // someone else already did (a sibling faulter of a multi-thread Proc,
+        // or a same-Proc replay during fault unwinding). If mismatching,
+        // that's a bug in the caller -- return -1 so the demand-paging path
+        // can refuse loudly rather than silently overwriting the prior
+        // mapping. The demand-page path never asks for a mismatch: a leaf
+        // that already admits the access is answered by mmu_user_pte_admits
+        // before any arm runs (B-1a' audit F13 -- the read arm's read-only
+        // install over the writable leaf a sibling's copy-on-write break left
+        // was exactly such a mismatch), and the break's own rewrite is
+        // mmu_replace_user_pte_attr. A valid leaf means the whole path
+        // predates this call, so there is nothing to unwind either way.
+        if (existing == want) return 1;
         return -1;
     }
     l3[idx3] = want;
+    table_page(l3_pa)->refcount++;
 
     // Drain stores so the MMU walker on this CPU (and any peer that
     // happens to walk later) sees the new PTE. R7 F129 close: ARM ARM
     // D5.7.6 explicitly permits implementations to cache invalid
     // translation table descriptors in TLB / walker caches. Without an
     // invalidate of the by-VA translation, a peer (or this CPU's
-    // speculative walker) may keep returning a stale invalid → fault →
+    // speculative walker) may keep returning a stale invalid -> fault ->
     // dispatcher would loop. R6-B F121 closed the same hazard for
     // mmu_map_mmio's table-descriptor install; the same discipline
     // applies to L3 leaf installs here. tlbi vaae1is invalidates by VA
-    // for all ASIDs at EL1 broadcast inner-shareable — tightest scope
+    // for all ASIDs at EL1 broadcast inner-shareable -- tightest scope
     // for a single-page install.
-    dsb_ishst();
-    __asm__ __volatile__(
-        "tlbi vaae1is, %0\n"
-        "dsb ish\n"
-        "isb\n"
-        :: "r" ((u64)vaddr >> 12)        // tlbi VA encoding: bits[55:12] of VA
-        : "memory"
-    );
-
+    user_tlbi_va(vaddr);
     return 0;
 }
 
-// B-1a audit F2: calls into mmu_uninstall_user_pte -- the diagnostic the range
-// form's subtree skip is pinned against (a test, not a gauge).
+// B-1a' audit F9: the copy-on-write break's install. A valid leaf at `vaddr`
+// is replaced in place -- break-before-make on the ENTRY (ARM ARM D5.10.1:
+// changing a valid descriptor's output address or permissions needs an invalid
+// write and a TLBI in between, or two translations for one VA can coexist in
+// a TLB) -- so the table's occupancy is unchanged and nothing is freed or
+// allocated for a write to a page the space already maps. The clear this
+// replaced (an uninstall before the break) freed the leaf's tables and the
+// re-install re-allocated them from the pool: at the pool's edge a peer took
+// the released pages and the Proc was terminated for writing a page it held.
+// Without a valid leaf it is the install.
+int mmu_replace_user_pte_attr(struct AddrSpace *as, bool exempt,
+                              u64 vaddr, paddr_t pa, u32 prot,
+                              u32 mair_idx) {
+    if (!as || as->pgtable_root == 0) return -1;
+    if (vaddr & (PAGE_SIZE - 1)) return -1;
+    if (pa & (PAGE_SIZE - 1)) return -1;
+    if (vaddr >> 47)                     return -1;
+    if (pa >> 40)                        return -1;
+    if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return -1;
+
+    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
+
+    // A non-growing walk: anything short of a valid leaf means nothing is
+    // mapped here, and the install grows the path as it always did.
+    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
+    u64 e = l0[idx0];
+    if (!(e & PTE_VALID))
+        return mmu_install_user_pte_attr(as, exempt, vaddr, pa, prot, mair_idx);
+    if (!(e & PTE_TYPE_TABLE))           return -1;
+    u64 *l1 = (u64 *)pa_to_kva(e & ~0xFFFull);
+    e = l1[idx1];
+    if (!(e & PTE_VALID))
+        return mmu_install_user_pte_attr(as, exempt, vaddr, pa, prot, mair_idx);
+    if (!(e & PTE_TYPE_TABLE))           return -1;
+    u64 *l2 = (u64 *)pa_to_kva(e & ~0xFFFull);
+    e = l2[idx2];
+    if (!(e & PTE_VALID))
+        return mmu_install_user_pte_attr(as, exempt, vaddr, pa, prot, mair_idx);
+    if (!(e & PTE_TYPE_TABLE))           return -1;
+    u64 *l3 = (u64 *)pa_to_kva(e & ~0xFFFull);
+    u64 want = make_user_pte_l3(pa, prot, mair_idx);
+    u64 existing = l3[idx3];
+    if (!(existing & PTE_VALID))
+        return mmu_install_user_pte_attr(as, exempt, vaddr, pa, prot, mair_idx);
+    if (existing == want)                return 1;
+
+    l3[idx3] = 0;
+    user_tlbi_va(vaddr);
+    l3[idx3] = want;
+    user_tlbi_va(vaddr);
+    return 0;
+}
+
+// B-1a' audit F13: the demand-page path's "resolved by a peer" probe. A
+// non-growing read of the leaf alone; the encoder's bits decide
+// (make_user_pte_l3: AP[1] set for EL0, AP[2] clear for writable, UXN clear
+// for executable).
+bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec) {
+    if (!as || as->pgtable_root == 0) return false;
+    if (vaddr >> 47)                  return false;
+
+    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
+
+    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
+    u64 e = l0[idx0];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return false;
+    u64 *l1 = (u64 *)pa_to_kva(e & 0x0000FFFFFFFFF000ull);
+    e = l1[idx1];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return false;
+    u64 *l2 = (u64 *)pa_to_kva(e & 0x0000FFFFFFFFF000ull);
+    e = l2[idx2];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return false;
+    u64 *l3 = (u64 *)pa_to_kva(e & 0x0000FFFFFFFFF000ull);
+    e = l3[idx3];
+    if (!(e & PTE_VALID))             return false;
+    if (!(e & (1ull << 6)))           return false;   // AP[1] clear: no EL0 access
+    if (write && (e & (1ull << 7)))   return false;   // AP[2] set: read-only
+    if (exec && (e & PTE_UXN))        return false;
+    return true;
+}
+
+// B-1a audit F2: leaf visits -- one per mmu_uninstall_user_pte call, one per
+// page visited inside a PRESENT table by the range form -- the diagnostic the
+// range form's subtree skip is pinned against (a test, not a gauge).
 static u64 g_mmu_uninstall_pte_calls;
 
 // =============================================================================
@@ -1734,26 +1944,22 @@ static u64 g_mmu_uninstall_pte_calls;
 // to clear (return 0 idempotently). Same idempotence applies if the
 // L3 leaf PTE is already not-VALID.
 //
-// Why not also collapse empty sub-tables (free the L3/L2/L1 page
-// chunks when their last leaf is cleared)? Two reasons: (1) the
-// sub-tables are reused by sibling VAs in the same Proc; deciding
-// emptiness requires scanning all 512 slots of each level, adding
-// up to ~10000 ns per burrow_unmap (vs ~50 ns for the leaf-clear
-// + TLBI we do here). (2) The pages eventually go free when the
-// Proc dies via proc_pgtable_destroy, which (per F4 hardening)
-// zeroes each table page before returning it to the buddy; in the
-// rolling-ASID model (RW-1 B-F1) there is no per-Proc asid_free --
-// the leaf flush here covers the live unmap, and a dead Proc's
-// remaining translations need no flush at all: every user PTE is
-// non-global, so they are reachable only under that address space's
-// own ASID, which cannot go live again until the rollover's per-CPU
-// flush_pending has run. (The drain issues no TLBI -- measured at
-// L-2; an earlier version of this comment said otherwise.)
-int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
-    (void)asid;   // reserved (tlbi vaae1is is all-ASID broadcast)
+// A clear that empties its L3 reclaims it, and its ancestors if they empty
+// too (B-1a' audit F1, above). This file used to keep every table until
+// proc_pgtable_destroy, arguing that deciding emptiness meant scanning 512
+// slots and that the pages went free at death anyway; the first reason is
+// gone (occupancy is a count) and the second was the hole -- a Proc whose
+// tables never return is a Proc whose footprint never shrinks. In the
+// rolling-ASID model (RW-1 B-F1) there is no per-Proc asid_free: the leaf
+// flush here covers the live unmap, and a dead Proc's remaining translations
+// need no flush at all -- every user PTE is non-global, so they are reachable
+// only under that address space's own ASID, which cannot go live again until
+// the rollover's per-CPU flush_pending has run. (The drain issues no TLBI --
+// measured at L-2; an earlier version of this comment said otherwise.)
+int mmu_uninstall_user_pte(struct AddrSpace *as, u64 vaddr) {
     __atomic_add_fetch(&g_mmu_uninstall_pte_calls, 1, __ATOMIC_RELAXED);
 
-    if (pgtable_root == 0)               return -1;
+    if (!as || as->pgtable_root == 0)    return -1;
     if (vaddr & (PAGE_SIZE - 1))         return -1;
     // Mirror mmu_install_user_pte's VA bound: bit 47 must be 0 for
     // the TTBR0 user-half. R10 F158 close.
@@ -1765,7 +1971,7 @@ int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
 
     // L0 walk (no grow).
-    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
     u64 e = l0[idx0];
     if (!(e & PTE_VALID))                return 0;     // nothing mapped
     if (!(e & PTE_TYPE_TABLE))           return -1;    // malformed
@@ -1798,15 +2004,9 @@ int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     // for the tlbi to complete on all CPUs; isb flushes the local
     // pipeline so any subsequent EL1 access sees the new mapping
     // state.
-    dsb_ishst();
-    __asm__ __volatile__(
-        "tlbi vaae1is, %0\n"
-        "dsb ish\n"
-        "isb\n"
-        :: "r" ((u64)vaddr >> 12)
-        : "memory"
-    );
-
+    user_tlbi_va(vaddr);
+    table_occupancy_drop(table_page(l3_pa));
+    if (table_page(l3_pa)->refcount == 0) user_tables_reclaim(as, vaddr);
     return 0;
 }
 
@@ -1817,13 +2017,15 @@ static u64 uninstall_next_block(u64 v, u32 shift, u64 end) {
     return (nb < end) ? nb : end;
 }
 
-int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
-                             u64 vaddr_start, u64 vaddr_end) {
-    if (pgtable_root == 0)                  return -1;
-    if (vaddr_start & (PAGE_SIZE - 1))      return -1;
-    if (vaddr_end   & (PAGE_SIZE - 1))      return -1;
-    if (vaddr_start >= vaddr_end)           return -1;
-    if (vaddr_end > (1ULL << 47))           return -1;
+// The range clear behind the two public forms: `reclaim` says whether a table
+// the clears empty goes back to the pool once its block is done.
+static long uninstall_range(struct AddrSpace *as, u64 vaddr_start, u64 vaddr_end,
+                            bool reclaim) {
+    if (!as || as->pgtable_root == 0) return -1;
+    if (vaddr_start & (PAGE_SIZE - 1)) return -1;
+    if (vaddr_end & (PAGE_SIZE - 1)) return -1;
+    if (vaddr_start >= vaddr_end) return -1;
+    if (vaddr_end > (1ULL << 47)) return -1;
 
     // Walk by SUBTREE, not by page (B-1a audit F2). An absent L0 / L1 / L2
     // entry means nothing is mapped under it, so the walk skips 512 GiB /
@@ -1832,17 +2034,25 @@ int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
     // per-page loop under a non-preemptible lock, bounded only by the range
     // (the burrow window is 64 TiB; SYS_BURROW_PROTECT caps no length, on
     // purpose: a whole-region protect over a 4 GiB engine reservation is the
-    // producer this chunk exists for). Inside a PRESENT L3 table each page
-    // still goes through mmu_uninstall_user_pte, so every valid leaf is
-    // cleared with exactly the TLBI + DSB ISH it always got: the load-bearing
-    // invariant (no stale cached translation observable when this returns) is
-    // untouched, only the no-op iterations are gone. The per-leaf cost is
-    // bounded by the pages the address space has faulted in, which I-32
-    // bounds. A malformed (non-table) intermediate entry is skipped like an
-    // absent one -- the per-page walk answered -1 for it and this loop ignored
-    // that, so the behaviour is the same.
-    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    // producer this chunk exists for). Inside a PRESENT L3 table each page in
+    // the range is still visited (the diagnostic counts the visits), so every
+    // valid leaf is cleared with exactly the TLBI + DSB ISH it always got: the
+    // load-bearing invariant (no stale cached translation observable when
+    // this returns) is untouched, only the no-op iterations are gone. The
+    // per-leaf cost is bounded by the pages the address space has faulted
+    // in, which I-32 bounds. A malformed (non-table) intermediate entry is
+    // skipped like an absent one -- the per-page walk answered -1 for it and
+    // this loop ignored that, so the behaviour is the same. A table the
+    // clears empty is reclaimed once its block is done (B-1a' audit F1), its
+    // ancestors with it if they empty too -- unless the caller keeps its
+    // tables (audit F9: the leaves are about to be put back, so the path
+    // stays); l0 is the root, never freed, and l1 / l2 are re-derived per
+    // block, so a reclaim never leaves a dangling pointer in this walk. The
+    // count of leaves cleared is returned: it is what a FILE mapping's holder
+    // is refunded (vma_uninstall_range_in).
+    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
     u64 v = vaddr_start;
+    long cleared = 0;
     while (v < vaddr_end) {
         u64 e0 = l0[(v >> BLOCK_SHIFT_L0) & 0x1ff];
         if (!(e0 & PTE_VALID) || !(e0 & PTE_TYPE_TABLE)) {
@@ -1861,13 +2071,35 @@ int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
             v = uninstall_next_block(v, BLOCK_SHIFT_L2, vaddr_end);
             continue;
         }
-        // A present L3 table: its pages in the range, one by one, each with
-        // its own clear + TLBI (per-page failures stay benign, as before).
+        // A present L3 table: its pages in the range, one by one, each valid
+        // leaf cleared with its own clear + TLBI (per-page, as before).
+        paddr_t l3_pa = e2 & ~0xFFFull;
+        u64 *l3 = (u64 *)pa_to_kva(l3_pa);
+        struct page *l3_pg = table_page(l3_pa);
+        u64 blk_va = v;
         u64 blk_end = uninstall_next_block(v, BLOCK_SHIFT_L2, vaddr_end);
-        for (; v < blk_end; v += PAGE_SIZE)
-            (void)mmu_uninstall_user_pte(pgtable_root, asid, v);
+        for (; v < blk_end; v += PAGE_SIZE) {
+            __atomic_add_fetch(&g_mmu_uninstall_pte_calls, 1, __ATOMIC_RELAXED);
+            u32 idx3 = (u32)((v >> PAGE_SHIFT) & 0x1ff);
+            if (!(l3[idx3] & PTE_VALID)) continue;
+            l3[idx3] = 0;
+            user_tlbi_va(v);
+            table_occupancy_drop(l3_pg);
+            cleared++;
+        }
+        if (reclaim && l3_pg->refcount == 0) user_tables_reclaim(as, blk_va);
     }
-    return 0;
+    return cleared;
+}
+
+long mmu_uninstall_user_range(struct AddrSpace *as,
+                              u64 vaddr_start, u64 vaddr_end) {
+    return uninstall_range(as, vaddr_start, vaddr_end, true);
+}
+
+long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
+                                          u64 vaddr_start, u64 vaddr_end) {
+    return uninstall_range(as, vaddr_start, vaddr_end, false);
 }
 
 u64 mmu_uninstall_pte_calls(void) {

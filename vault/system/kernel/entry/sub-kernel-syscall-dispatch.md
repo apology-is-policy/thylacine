@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -189,6 +189,11 @@ rule for exactly one arm: execve's result is stored **only if non-zero**,
 because on success the handler has already zeroed `x0` on purpose and storing a
 return value would hand a fresh program a register it never asked for. rfork's
 store is unconditional and safe for the reason above; noted's arm stores nothing.
+
+One more execve detail since B-1a' (round 3, F15): `sys_execve_core` maps the
+loader's `-T_E_NOMEM` -- a refused allocation, [[sub-kernel-exec]] -- to
+ENOMEM and every other loader failure to EINVAL, so a Proc at the pool's edge
+is no longer told its binary is malformed.
 
 ### Two layers, and the rule about which one may hold a gate
 
@@ -669,10 +674,10 @@ staging buffers are private by construction. Three shared concerns:
   lock, drops the lock, does the maintenance, and releases — so a sibling
   tearing the region down concurrently frees it there instead of underneath.
 - **A charge claim is taken before the drop that could free its record.** The
-  detach path snapshots the Burrow pointer rather than the VMA — the unmap frees
-  the VMA struct, so that pointer dangles the moment it returns — and claims the
-  page charge *before* the drop, because a freeing drop takes the payment record
-  with it.
+  detach core (`vma_detach_range_in`, [[sub-kernel-vma]] since B-1a') snapshots
+  the Burrow pointer rather than the VMA — the removal frees the VMA struct, so
+  that pointer dangles the moment it returns — and claims the page charge
+  *before* the drop, because a freeing drop takes the payment record with it.
 
 ### Detach admission is decided by identity (2026-09-16)
 
@@ -682,8 +687,11 @@ staging buffers are private by construction. Three shared concerns:
 - `detach_is_hw_map_locked` admits a DMA- or MMIO-backed VMA outside the window,
   read under `as->lock`.
 
-`sys_munmap_range_for_proc` keeps the window whole through `detach_args_check`,
-because it removes a range. The rule and its soundness argument live in
+`sys_munmap_range_for_proc` keeps the window whole (a range below it answers
+`-T_E_NOSYS`; `detach_args_check` went with the exact-match form at B-1a'),
+because it removes a range the phenotype cannot have placed elsewhere -- the
+fixed arms are confined to the same window ([[sub-kernel-vivarium]]). Both
+syscalls are then one call into the core (below). The rule and its soundness argument live in
 [[sub-kernel-vma]]'s Prosecution section; ARCH 6.5 is the scripture. The gate is
 a caller-entitlement decision made before a geometry-only remover runs, which is
 exactly the kind of gate this file is allowed to hold.
@@ -1126,41 +1134,40 @@ or a reservation ldso will raise), and `sys_mmap_fixed_anon_for_proc` raises
 the new piece's ceiling to RW after `burrow_map_fixed` succeeds, under the
 same lock hold.
 
-**A lazy PIECE refunds its own range at detach (the first of the chunk's three
-findings).** `detach_one_locked` used to uncharge the WHOLE lazy Burrow's
-resident count once per detached VMA -- correct while a lazy Burrow had one
-VMA, an I-32 under-count once one has several (a D-3b window reached it; a
-protect split reaches it on every thread stack). It now runs `burrow_decommit(p,
-vaddr, length)` over the piece's exact range, only on the exact match the unmap
-below will accept (so a refused detach frees nothing), before
-`burrow_unmap_reporting`; the ANON arm's claim-before-drop attribution is
-unchanged. That also returns a detached piece's pages to the system at once.
-The native detach itself stays exact-match per VMA: the pieces a protect
-leaves detach one by one, and the range form is B-1a'.
+**The lazy-piece refund (B-1a, the first of the chunk's three findings) is
+the range core's release since B-1a'.** `detach_one_locked` used to uncharge
+the WHOLE lazy Burrow's resident count once per detached VMA -- correct while a
+lazy Burrow had one VMA, an I-32 under-count once one has several (a D-3b
+window reached it; a protect split reaches it on every thread stack); B-1a made
+it the piece's own range through `burrow_decommit` on the exact match. B-1a'
+deleted `detach_one_locked` and `detach_args_check` outright: the refund, the
+ANON arm's claim-before-drop attribution and the CODE refusal all live in
+`vma_detach_range_in`, once, for every caller (the B-1a' section below).
 
-**Pre-existing, OWNED, not fixed here: the phenotype `munmap` is
-window-confined, so a MAP_FIXED mapping below the window leaks.**
-`sys_munmap_range_for_proc` runs `detach_args_check` -> `detach_in_window`
-(`vaddr < EXEC_USER_BURROW_BASE` refused), while the two D-3b fixed arms accept
-any page-aligned non-zero address -- so `viv-pheno-probe` L21's `MAP_FIXED`
-mapping at `0x40000000` is served and its `munmap` is declined
-(`vivarium: unserved linux syscall nr=215` in every boot log); the mapping
-leaks for the Proc's life. Real ldso overlays land inside the whole-span
-reservation (in the window), so libraries are unaffected; a caller-chosen
-`MAP_FIXED` below the window is the exposed shape. Surfaced by B-1a's L22
-rewrite (the "range just unmapped" was still mapped); the leg now uses a
-never-mapped range. Home: B-1a' (the range-detach rework), either refusing
-fixed addresses outside the window at the two decides or letting the range
-detach admit anything the phenotype itself mapped. Memory:
-`bug_pheno_munmap_below_window_leaks_fixed_mapping`.
+**The phenotype `munmap`'s window confinement no longer leaks a MAP_FIXED
+mapping below the window (closed at B-1a').** The row is window-confined
+(`vaddr < EXEC_USER_BURROW_BASE` is `-T_E_NOSYS`), and until B-1a' the two
+D-3b fixed arms accepted any page-aligned non-zero address, so
+`viv-pheno-probe` L21's `MAP_FIXED` mapping at `0x40000000` was served and its
+`munmap` declined (`vivarium: unserved linux syscall nr=215` in every boot
+log) -- a mapping leaked for the Proc's life. Now `fixed_addr_ok`
+([[sub-kernel-vivarium]]) declines a fixed request outside
+`[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP)` (`VIV_FORWARD` -> ENOSYS +
+the unserved line) and `mmap_fixed_window` bounds it again in the kernel
+(`-T_E_NOMEM` outside, the length by `BURROW_RESERVE_MAX`), so every fixed
+mapping the phenotype serves lies where its `munmap` row can remove it. Real
+ldso overlays land inside the whole-span reservation (in the window), so
+nothing served is lost. L21 moved to `0x1_4000_0000`; L21c asserts its
+`munmap` answers 0; L21d asserts a fixed request at `0x40000000` is ENOSYS.
+Memory `bug_pheno_munmap_below_window_leaks_fixed_mapping` closes.
 
 **The holotype audit's corrections in this file (the close commit).** F2
 (P2): `sys_munmap_range_for_proc`'s two loops re-scanned the list from the
 head per mapping (the pre-existing twin of the reprotect's four passes,
-[[sub-kernel-vma]]); the validation loop now walks successors after one scan,
-and the detach loop reads `nx = v->next` BEFORE `detach_one_locked` frees `v`
--- the detach removes exactly `v` (an exact-geometry match), so the successor
-stays valid. F4 (P3): B-1a's fixed-anon arm admits `PROT_WRITE` alone (the
+[[sub-kernel-vma]]); the validation loop walked successors after one scan and
+the detach loop read `nx = v->next` BEFORE `detach_one_locked` freed `v`; at
+B-1a' both loops were replaced by the one core's single scan
+(`vma_detach_range_in`). F4 (P3): B-1a's fixed-anon arm admits `PROT_WRITE` alone (the
 R-required gate went when `PROT_NONE` was admitted), and `mmap_fixed_window`
 mapped the word bit for bit, so `vma_alloc`'s W-without-R refusal surfaced as
 ENOMEM for a legal request; the window now promotes W to RW as the non-fixed
@@ -1169,11 +1176,136 @@ anon arm and the `mprotect` arm do, for both fixed arms
 short-circuited a zero length before testing the alignment; Linux's
 `do_mprotect_pkey` tests the alignment first, so `mprotect(unaligned, 0,
 prot)` is EINVAL there and answered 0 here -- reordered, and viv-pheno-probe
-L23i pins it. F5 (P3, OWNED, B-1a' owns the fix): the per-piece refund never
-reaches ORPHANED slots -- a D-3b window replaced inside a touched lazy mapping
-leaves the replaced slots resident and charged, `burrow_decommit` over a
-detached piece's own range does not see them, and the Burrow's last free
-returns them uncharged; a regression from the whole-Burrow refund, in the
-SAFE direction only (the Proc is capped tighter). Named at the site; the fix
-is `vma_replace_range_in` decommitting the replaced window of the old Burrow
-before the swap.
+L23i pins it. F5 (P3, closed at B-1a'): the per-piece refund never
+reached ORPHANED slots -- a D-3b window replaced inside a touched lazy mapping
+left the replaced slots resident and charged, `burrow_decommit` over a
+detached piece's own range did not see them, and the Burrow's last free
+returned them uncharged; a regression from the whole-Burrow refund, in the
+SAFE direction only (the Proc capped tighter). Closed by construction: the
+replace is a detach of the window, whose release runs before the swap
+(`capacity.replace_window_releases_orphans`; [[spec-capacity]]'s
+`BUGGY_REPLACE_KEEPS_ORPHANS` is the shape as it was).
+
+## B-1a': the range detach over one core, and the window (2026-09-23)
+
+**`sys_burrow_detach_for_proc(p, vaddr, length)`** is a shape check
+(`detach_shape_check`: -1 for a zero length, an unaligned base, a span
+leaving user VA), the window-or-identity admission (`detach_in_window` OR
+`detach_is_hw_map_locked`, under `as->lock`), and ONE call:
+`vma_detach_range_in(p->as, proc_resource_exempt(p), p, vaddr, length, 0,
+&dead)`; the chain of dead Burrows goes to `burrow_free_deferred` after the
+unlock (the possibly-sleeping FILE frees run with no lock held). The ABI stays
+`0 / -1` (`rc == 0 ? 0 : -1`): `SYS_BURROW_DETACH` 38 answers the Linux
+`munmap` shape inside the window -- a mapping wholly inside the range goes,
+one cut at an end is trimmed in place, one the range lies strictly inside is
+split around it, holes are fine, and a range that maps nothing answers 0 (the
+exact-match detach answered -1 to a second detach of the same range; netd's
+retirement oracle depended on that and was rewritten, [[sub-netd-server]]).
+The I-32 settlement -- the lazy overlap released before the geometry changes,
+the eager record claimed and refunded iff the drop freed the pages or the
+region lives on only in another Proc (#130/#131), a whole shared-in mapping
+refunding its shared-in budget, a CODE alias anywhere refused (I-42), a CUT
+shared-in mapping refused, a middle cut refused at `PROC_VMA_MAX` -- is the
+core's ([[sub-kernel-vma]]), and the identity rule is unchanged: outside the
+window only the exact geometry of a DMA / MMIO map, whole. Any length up to
+the window: `detach_in_window` bounds it by `BURROW_RESERVE_MAX`, which is the
+window since B-1a' (`_Static_assert(BURROW_RESERVE_MAX == EXEC_USER_BURROW_TOP
+- EXEC_USER_BURROW_BASE)` in this file, because `syscall.h` cannot include
+`exec.h` and spells the bound numerically); the >256 MiB refusal that
+stranded every large lazy region is gone (`detach.lazy_over_256mib_detaches`).
+
+**`sys_munmap_range_for_proc(p, vaddr, length)`** is the same core with the
+errno through: the shape answers `-T_E_INVAL`, a range below the window
+`-T_E_NOSYS` (every ELF, stack, guard and vDSO mapping lives there and the
+row is not served; claiming success would leave a mapping the guest believes
+is gone), and the core's `-T_E_ACCES` (a CODE region) / `-T_E_NOMEM` (no
+headroom to split) pass through. `VIV_LINUX_MUNMAP` (tier 2) reproduces
+Linux's two argument errors first (an unaligned `addr`, a zero `len`: EINVAL)
+and then returns the call's value as is -- the row no longer maps every
+refusal to ENOSYS.
+
+**The fixed arms are window-bounded and speak the surgery's errno.**
+`mmap_fixed_window` refuses a length over `BURROW_RESERVE_MAX` (`-T_E_NOMEM`),
+a zero or unaligned address (`-T_E_INVAL`), and -- the kernel half of the
+vivarium's `fixed_addr_ok` rule -- an address below `EXEC_USER_BURROW_BASE` or
+a span past `EXEC_USER_BURROW_TOP` (`-T_E_NOMEM`); the W-to-RW promotion
+(B-1a's F4) stays. `sys_mmap_fixed_file_for_proc` and
+`sys_mmap_fixed_anon_for_proc` return `burrow_map_fixed`'s `-T_E_*` (INVAL for
+the shape, ACCES for a CODE alias or a cut shared-in mapping, NOMEM for
+headroom or slab) where they answered a flat ENOMEM, and the anon arm's
+replaced Burrows are a chain, freed past the unlock.
+
+**The other window bounds.** `sys_burrow_attach_lazy_for_proc` and
+`sys_burrow_reserve_for_proc` admit any length up to the window: a lazy
+reservation commits no data pages and, with the pagemap, no metadata until a
+slot is touched, so `page_count` (pages and nodes, at fault) and `PROC_VMA_MAX`
+bound the real resource use, never the reservation's byte size -- which is why
+a JS engine's 4 GiB region and a Wasm linear memory's reservation are both
+admitted. `sys_burrow_decommit_for_proc` is bounded by the window too and, via
+`burrow_decommit_in`, spans the pieces a protect cut -- refusing, changing
+nothing, a hole or any mapping in the range that is not a plain ANON_LAZY one
+([[sub-kernel-burrow]]). The spawn validator
+(`sys_spawn_full_argv_validate_req`) refuses a `page_budget` over
+`proc_page_budget_hard_max()` -- the user pool, no longer a constant
+([[sub-kernel-proc]]).
+
+Deleted: `detach_one_locked` and `detach_args_check` (their bodies are the
+core's phases), and every `PROC_PAGE_MAX` / `PROC_PAGE_HARD_MAX` mention in
+this file's comments. The holotype audit of this surface is owed.
+
+## B-1d: SYS_BURROW_MAP_FILE over the three D-3 cores (2026-09-24)
+
+**`sys_burrow_map_file_for_proc(p, fd, offset, length, prot, flags, addr)`**
+is the native door onto the three cores the phenotype's file-backed `mmap`
+rows already used, so the vouching, the eager copy and the Image cache are each
+spelled once. It decides the native word and dispatches:
+
+- no `BURROW_MAP_FIXED` -> `sys_mmap_file_for_proc` (arm 1: a kernel-chosen
+  window, R or R|X, through the Image cache);
+- FIXED with fd -1 -> `sys_mmap_fixed_anon_for_proc` (arm 3: demand-zero at
+  none / R / RW);
+- FIXED with a file -> `sys_mmap_fixed_file_for_proc` (arm 2: R or R|X
+  through the Image cache, RW as `mmap_eager_copy`'s private copy).
+
+The order is fixed and observable: the prot and flag masks, W|X (`-EACCES`),
+W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`
+without FIXED (`-EINVAL`), fd -1 without FIXED (`-EBADF`), W without FIXED
+(`-EACCES`), X or a nonzero offset on the anonymous window, a file map without
+R -- and only then the cores, which own the lookups, the window check
+(`mmap_fixed_window`: `[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP]`), the
+vouching (`exec_map_vouched`: a `may_back_exec` Dev AND a mount not marked
+`MNOEXEC`) and the replace (`burrow_map_fixed` -> `vma_replace_range_in`, the
+B-1a' range detach, whose refusal set is the munmap gate's). The prot word
+passes straight through: a `_Static_assert` pins `BURROW_PROT_*` equal to
+`VIV_PROT_*`. One answer does not: the cores refuse an unvouched exec map with
+the Linux phenotype's `-T_E_PERM`, which natively is Pouch's flat `-1` (EIO),
+so the native door returns `-T_E_ACCES` in its place (`errno.h`'s rule; the
+device prover's noexec leg saw the EIO first).
+
+**What changed for the cores is who reaches them.** They were
+phenotype-only ("Native scope: NONE", DISTRO D-3); a native Proc can now hold
+mappings a container never could -- JIT dual maps, MMIO / DMA allowances, Loom
+rings, weft shares, GPU contexts, tapestry surfaces, sealed ranges -- so the
+FIXED replace's refusal set is prosecuted against every such kind (the B-1d row
+in `docs/AUDIT-TRIGGERS.md`).
+
+Two smaller moves ride the same chunk. `exec_load_into` lost its `pheno`
+parameter, so `sys_execve_core` no longer threads the decided phenotype into
+the load ([[sub-kernel-exec]]). And `sys_mount_for_proc`'s comment now says
+what B-1d-u made true: `territory.c::mount` retains the mountpoint Spoor, with
+its own reference, only as the covered member of a union the mount starts
+([[sub-kernel-territory]]); the handler still releases its own.
+
+**B-1d-v (2026-09-25): `SYS_MOUNT`'s type check.** `sys_mount_for_proc` looks
+the source up (RIGHT_READ), then refuses Plan 9's `Emount` cases before
+`mount()` runs: a source whose `QTDIR` bit differs from the point's, under any
+flag, and any mount without `MREPL` at a point without `QTDIR` (Plan 9's
+`order != MREPL`; a flagless mount appends here, where Plan 9's flag 0 is
+`MREPL`). The check reads the flags and the two types only, so it takes no
+lock, and it is made once, on the point's own Spoor at install: a 9P server
+can re-type the point afterwards, so the resolver keeps its own type gates
+([[sub-kernel-stalk]]). The refusal clunks the lookup's reference and returns `-T_E_NOTDIR`, the
+one named errno in a call whose other refusals stay the flat -1
+([[sub-kernel-syscall-abi]]); the votes are
+[[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
+[[dec-2026-09-25-sys-mount-emount]].

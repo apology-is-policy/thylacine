@@ -36,6 +36,7 @@
 #include <thylacine/smp.h>         // prowl-3a: smp_cpu_count() -- last_cpu bound
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
+#include <thylacine/territory.h>     // V-4b-1: a fresh Territory for the cwd target
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -1836,8 +1837,8 @@ void test_devproc_debug_mem(void) {
     u8 *rw_kva = (u8 *)pa_to_kva(rw_pa);
     u8 *ro_kva = (u8 *)pa_to_kva(ro_pa);
     for (int i = 0; i < 64; i++) { rw_kva[i] = (u8)(0xA0 + i); ro_kva[i] = (u8)(0x50 + i); }
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as->pgtable_root, 0, RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as->pgtable_root, 0, RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
 
     // --- Layer 1: the raw cross-Proc resolver ---
     u8 buf[64], wbuf[64];
@@ -2534,12 +2535,12 @@ void test_devproc_maps(void) {
 
     // (1) a plain RW anon mapping, well clear of the exec layout constants.
     const u64 plain_va = 0x0000000010000000ull;
-    struct Burrow *b1 = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b1 = burrow_create_anon(PAGE_SIZE, false);
     int rc1 = b1 ? burrow_map(tgt, b1, plain_va, PAGE_SIZE, VMA_PROT_RW) : -1;
     if (b1) burrow_unref(b1);            // the mapping ref keeps it alive
 
     // (2) an anon mapping exactly at the stack base -> role "stack".
-    struct Burrow *b2 = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b2 = burrow_create_anon(PAGE_SIZE, false);
     int rc2 = b2 ? burrow_map(tgt, b2, EXEC_USER_STACK_BASE, PAGE_SIZE, VMA_PROT_RW) : -1;
     if (b2) burrow_unref(b2);
 
@@ -2722,21 +2723,44 @@ void test_devproc_environ(void) {
 }
 
 void test_devproc_read_cwd(void) {
-    // kproc always exists and has a territory, so its cwd is renderable and --
-    // never having chdir'd -- is the "/" default. That pins BOTH the wiring and
-    // the never-empty property in one read.
-    struct Spoor *c = open_pidfile_for(0, "cwd", 0);
-    TEST_ASSERT(c != NULL, "open /proc/0/cwd");
-    char buf[64];
-    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
-    long n = devproc.read(c, buf, (long)sizeof(buf), 0);
-    spoor_clunk(c);
+    // (1) A Proc that never chdir'd holds the NULL dot sentinel, which renders
+    //     "/": the never-empty property. It needs its own fresh Territory --
+    //     kproc's dot is stamped by the boot, below.
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc cwd target");
+    tgt->territory = territory_alloc();
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
 
-    TEST_EXPECT_EQ(n, 1L, "V-4b-1: an un-chdir'd Proc's cwd is \"/\" (1 byte)");
-    TEST_ASSERT(n == 1 && buf[0] == '/',
+    char fresh[64];
+    for (size_t i = 0; i < sizeof(fresh); i++) fresh[i] = (char)0xAA;
+    long nf = -999;
+    struct Spoor *cf = tgt->territory ? open_pidfile_for(tgt->pid, "cwd", 0) : NULL;
+    if (cf) { nf = devproc.read(cf, fresh, (long)sizeof(fresh), 0); spoor_clunk(cf); }
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);                      // drops the Territory with the Proc
+
+    // (2) kproc: joey_root_kproc_at_devramfs ran before the suite and put its
+    //     dot where the initrd keeps its programs, so every boot child inherits
+    //     /bin. Also pins the render of a non-sentinel dot.
+    char kbuf[64];
+    for (size_t i = 0; i < sizeof(kbuf); i++) kbuf[i] = (char)0xAA;
+    long nk = -999;
+    struct Spoor *ck = open_pidfile_for(0, "cwd", 0);
+    if (ck) { nk = devproc.read(ck, kbuf, (long)sizeof(kbuf), 0); spoor_clunk(ck); }
+
+    TEST_EXPECT_EQ(nf, 1L, "V-4b-1: an un-chdir'd Proc's cwd is \"/\" (1 byte)");
+    TEST_ASSERT(nf == 1 && fresh[0] == '/',
                 "V-4b-1: cwd renders \"/\" -- bare, no NUL, no newline");
     // Revert-probe anchor: appending a terminator makes n == 2 and fails above.
-    TEST_ASSERT(buf[1] == (char)0xAA, "V-4b-1: nothing written past the path");
+    TEST_ASSERT(fresh[1] == (char)0xAA, "V-4b-1: nothing written past the path");
+
+    TEST_EXPECT_EQ(nk, 4L, "V-4b-1: kproc's cwd is the boot stamp \"/bin\" (4 bytes)");
+    TEST_ASSERT(nk == 4 && kbuf[0] == '/' && kbuf[1] == 'b' && kbuf[2] == 'i' &&
+                kbuf[3] == 'n', "V-4b-1: kproc's cwd renders \"/bin\"");
+    TEST_ASSERT(kbuf[4] == (char)0xAA, "V-4b-1: nothing written past kproc's path");
 }
 
 

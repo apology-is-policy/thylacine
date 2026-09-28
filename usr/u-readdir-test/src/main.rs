@@ -1,14 +1,15 @@
-// /u-readdir-test -- U-6e-b-1 directory-enumeration boot probe.
+// /bin/u-readdir-test -- U-6e-b-1 directory-enumeration boot probe.
 //
 // Runs PRE-pivot (devramfs root). Drives libthyla_rs::fs::read_dir against the
-// flat boot ramfs and asserts the contract the kernel devramfs_readdir + the
+// boot ramfs and asserts the contract the kernel devramfs_readdir + the
 // ReadDir iterator + the #929 root-open fix establish:
 //
-//   1. read_dir("/") enumerates the flat root: welcome / version / srv / proc /
-//      this binary are all present.
-//   2. The synthetic mount-point dirs srv/proc type as directories (is_dir),
-//      and welcome types as a regular file (is_file) -- the qid.type byte the
-//      kernel emits per dirent, read with no extra fstat.
+//   1. read_dir("/") enumerates the root: bin / srv / proc, every entry a
+//      directory (the initrd keeps its files in bin/).
+//   2. read_dir("/bin") enumerates the programs: welcome / version / this
+//      binary; welcome types as a regular file (is_file) and the root's
+//      entries as directories (is_dir) -- the qid.type byte the kernel emits
+//      per dirent, read with no extra fstat.
 //   3. #929 is closed: fs::is_dir("/") and fs::metadata("/") resolve the
 //      Territory root (via the stalk resolver), no longer InvalidArgument.
 //   4. An empty synthetic dir (/srv) enumerates to zero entries (clean EOD).
@@ -35,27 +36,19 @@ static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    // 1 + 2. Enumerate the flat boot root; record names + the per-entry type.
-    let mut names: Vec<String> = Vec::new();
-    let mut srv_is_dir = false;
-    let mut proc_is_dir = false;
-    let mut welcome_is_file = false;
+    // 1. The root: bin/, the synthetic mount points, and lib/ when the image
+    //    ships the loader -- directories only.
+    let mut root: Vec<String> = Vec::new();
+    let mut root_all_dirs = true;
     match fs::read_dir("/") {
         Ok(rd) => {
             for ent in rd {
                 match ent {
                     Ok(e) => {
-                        let n = e.file_name();
-                        if n == "srv" && e.is_dir() {
-                            srv_is_dir = true;
+                        if !e.is_dir() {
+                            root_all_dirs = false;
                         }
-                        if n == "proc" && e.is_dir() {
-                            proc_is_dir = true;
-                        }
-                        if n == "welcome" && e.is_file() {
-                            welcome_is_file = true;
-                        }
-                        names.push(String::from(n));
+                        root.push(String::from(e.file_name()));
                     }
                     Err(_) => return fail("read_dir / yielded an error entry"),
                 }
@@ -63,34 +56,55 @@ pub extern "C" fn rs_main() -> i64 {
         }
         Err(_) => return fail("read_dir / failed to open the root"),
     }
-    if !contains(&names, "welcome") {
-        return fail("root missing welcome");
+    if !contains(&root, "bin") {
+        return fail("root missing bin");
     }
-    if !contains(&names, "version") {
-        return fail("root missing version");
-    }
-    if !contains(&names, "srv") {
+    if !contains(&root, "srv") {
         return fail("root missing srv");
     }
-    if !contains(&names, "proc") {
+    if !contains(&root, "proc") {
         return fail("root missing proc");
     }
+    if !root_all_dirs {
+        return fail("root lists an entry that is not a directory");
+    }
+
+    // 2. bin/: the programs and data files; record names + the per-entry type.
+    let mut names: Vec<String> = Vec::new();
+    let mut welcome_is_file = false;
+    match fs::read_dir("/bin") {
+        Ok(rd) => {
+            for ent in rd {
+                match ent {
+                    Ok(e) => {
+                        let n = e.file_name();
+                        if n == "welcome" && e.is_file() {
+                            welcome_is_file = true;
+                        }
+                        names.push(String::from(n));
+                    }
+                    Err(_) => return fail("read_dir /bin yielded an error entry"),
+                }
+            }
+        }
+        Err(_) => return fail("read_dir /bin failed to open"),
+    }
+    if !contains(&names, "welcome") {
+        return fail("bin missing welcome");
+    }
+    if !contains(&names, "version") {
+        return fail("bin missing version");
+    }
     if !contains(&names, "u-readdir-test") {
-        return fail("root missing self");
-    }
-    if !srv_is_dir {
-        return fail("srv not typed as a directory");
-    }
-    if !proc_is_dir {
-        return fail("proc not typed as a directory");
+        return fail("bin missing self");
     }
     if !welcome_is_file {
         return fail("welcome not typed as a file");
     }
-    // The live boot corpus is dozens of entries; a tiny count means a parse /
+    // The live boot corpus is hundreds of entries; a tiny count means a parse /
     // pagination bug truncated the listing.
     if names.len() < 10 {
-        return fail("root entry count implausibly low");
+        return fail("bin entry count implausibly low");
     }
 
     // 3. #929: the root resolves through metadata/is_dir now.
@@ -115,7 +129,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 4. read_dir on a regular file: the open succeeds (stalk resolves it) but
     //    the kernel readdir rejects a non-directory -> first item is Err.
-    if let Ok(mut rd) = fs::read_dir("/welcome") {
+    if let Ok(mut rd) = fs::read_dir("/bin/welcome") {
         match rd.next() {
             Some(Err(_)) => {}
             _ => return fail("read_dir on a file should error on the first item"),

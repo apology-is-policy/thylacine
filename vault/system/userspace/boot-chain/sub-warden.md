@@ -15,13 +15,14 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-09-18
+updated: 2026-09-25
 ---
 ## Trusted graphical seat bootstrap
 
 The GPU/input gather manifest starts [[sub-lictor]] with its physical function
 grants and seat-service role. After Lictor reports READY, Warden starts Tapestry
-as a separate leaf with only the DMA budget and normal-client designation. It
+(`/bin/tapestryd`) as a separate leaf with only the DMA budget and normal-client
+designation. It
 waits for both services before reporting the graphical bind ready. Startup failure
 reaps the relevant children before bounded retry. The narrowed-driver no-child
 rule is unchanged: Lictor does not spawn the compositor. Runtime owner death
@@ -68,7 +69,10 @@ the grant) are computed from one value, so they cannot disagree.
 
 To the machine, its contract is a prohibition: **it never reads a device
 register.** A bus whose device types are only knowable by asking the hardware
-is enumerated by a separate sandboxed process, not by the broker itself.
+is enumerated by a separate sandboxed process (`/bin/virtio-mmio-source`), not
+by the broker itself. Both named binaries are spelled under `/bin`, the path
+that names the initrd's programs before the pivot and after it
+([[dec-2026-09-25-initrd-bin-directory]]).
 
 ## Mechanism
 
@@ -152,14 +156,15 @@ worth cannot deadlock against a broker waiting to reap it. The read is capped
 so that a runaway or hostile helper cannot exhaust the broker's memory — the
 broker is trusted, the helper is not.
 
-**Detecting an exit without reading the pipe.** A driver's pipe does *not*
-reach end-of-file when the driver exits: a single-threaded process defers
-closing its descriptors to *reap*, not to exit. So blocking on the pipe to
-learn that a driver died would deadlock — the broker holds the only read end
-and cannot reap while blocked reading it. It therefore polls for the exit
-separately and uses the pipe only for the readiness data. This is the same
-asymmetry that makes a shell's drain-before-reap work, seen from the side
-that must not rely on it.
+**Detecting an exit without reading the pipe.** The broker polls for the
+driver's exit separately and uses the pipe only for the readiness data, with
+every wait bounded. Blocking on the pipe could not tell it that a driver had
+died or stalled: a live service may hold the pipe open for its whole life,
+and a driver that neither says READY nor exits would hold a blocking read
+forever. A dead
+driver's pipe does reach end-of-file, since the kernel closes a process's
+descriptors at its exit rather than at its reap, but the broker does not rely
+on that.
 
 ## Invariants enforced
 

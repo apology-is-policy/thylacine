@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -118,6 +118,12 @@ unknown operations fail closed.
 runs to 125 with the same three holes (26, 30, 43), `syscall_dispatch` has
 exactly 123 arms, and both set differences are empty. The section at the end
 of this dossier carries the two records.
+
+**B-1d append (2026-09-24).** `SYS_BURROW_MAP_FILE` = 126; `SYS__NATIVE_TOP` is
+127 and `VIV_NATIVE_CEILING` 126. Re-measured on this tree (2026-09-25), not
+incremented: **124** live numbers, the span runs to 126 with the same three
+holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
+are empty.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -546,6 +552,25 @@ caller pivoted back; with the shed it would strip the table for good) -- and
 0040: ports pass the kernel's `OAPPEND` omode bit instead of emulating append
 with one seek at open.
 
+## B-1d-v: SYS_MOUNT names one errno (2026-09-25)
+
+No number or record changed. `SYS_MOUNT` (14), a flat -1 call, now also answers
+`-T_E_NOTDIR` for Plan 9's `Emount` cases
+([[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
+[[dec-2026-09-25-sys-mount-emount]]; ARCH 9.6.1): a source whose type differs
+from the mount point's, under any flag, and any mount without `MREPL` at a
+point that is not a directory. A flagless mount appends here, where Plan 9's
+flag 0 is `MREPL`, so at a file it is refused with `MBEFORE` and `MAFTER`. The
+final component is never followed, so a symbolic link is a point that is not a
+directory; a trailing `/` follows it to its target, unless a file is mounted
+on the link itself (the mount wins, and the path is refused). Every other
+refusal is still -1, so the call now mixes the two conventions, and its enum
+comment in
+`syscall.h` (mirrored in libt's `syscall.h` and in `libthyla_rs`) lists which
+cause gets which. A caller that tested `rc < 0` is unaffected;
+`libthyla_rs::territory::mount` passes the errno through as `NotADirectory` and
+keeps mapping -1 to `InvalidArgument`.
+
 ## B-1a: SYS_BURROW_RESERVE 124 and SYS_BURROW_PROTECT 125 (2026-09-23)
 
 Two new numbers rather than flags on `SYS_BURROW_ATTACH_LAZY`, per the
@@ -559,7 +584,10 @@ demand-zero anonymous reservation in the burrow-attach window, minted at
 `prot` in {none, R, RW} under a ceiling of RW, its base aligned to
 `2^align_log2` (0 = page; else 12..30, `BURROW_RESERVE_ALIGN_MIN/MAX_LOG2`).
 Same page rounding and I-32 posture as `SYS_BURROW_ATTACH_LAZY` (pages charged
-at fault, the VMA count at reserve; `BURROW_RESERVE_MAX` = 1 GiB). Refused: a
+at fault, the VMA count at reserve; `BURROW_RESERVE_MAX` = the burrow window
+since B-1a', spelled numerically in `syscall.h` and pinned equal to
+`EXEC_USER_BURROW_TOP - EXEC_USER_BURROW_BASE` by a `_Static_assert` in
+`kernel/syscall.c`). Refused: a
 prot with X (`-EACCES`, first), W-without-R / other bits / an alignment out of
 range / length 0 (`-EINVAL`), over the max / no aligned gap / OOM / the VMA cap
 (`-ENOMEM`).
@@ -593,6 +621,42 @@ neither (no C consumer; the subset rule above, still holding visibly).
 Consumers: `/protect-probe`, `/protect-guard-child`
 ([[sub-kernel-protect-witness]]) and the phenotype `mmap` / `mprotect` rows,
 which are the first production callers.
+
+## B-1a': behaviour changes on existing numbers -- 38, 83, 84 (2026-09-23)
+
+No number, argument record or errno value moved; three existing numbers
+answer differently, and the header comments plus the Rust mirror's doc
+comments carry the new contracts.
+
+`SYS_BURROW_DETACH` (38) is the Linux `munmap` form inside the burrow window:
+`[vaddr, vaddr + round_up(length))` is removed whatever it cuts -- a mapping
+wholly inside goes, one cut at an end is trimmed, one the range lies strictly
+inside is split around it (one new mapping), holes are fine, and a range that
+maps nothing answers 0 (the exact-match form answered -1 to a wrong base, a
+wrong length and a second detach; all three are served or 0 now). The
+refusals, still `-1` with nothing changed: the shape (a zero length, an
+unaligned base, a span leaving user VA); an out-of-window span that is not a
+DMA / MMIO map covered exactly; a JIT code alias anywhere in the range; a
+shared-in mapping the range CUTS (whole is fine); no `PROC_VMA_MAX` headroom
+or slab for the mapping a split adds. Any length up to the window.
+
+`SYS_BURROW_ATTACH_LAZY` (83) admits any length up to `BURROW_RESERVE_MAX`,
+which is the whole burrow window (it was 1 GiB): an untouched reservation
+costs nothing, so its size is not the resource. `SYS_BURROW_DECOMMIT` (84)
+may span the pieces a protect cut, but every mapping in the range must be a
+plain ANON_LAZY one and there may be no hole -- else -1 with nothing changed;
+the pagemap's nodes emptied by the release are freed and uncharged with the
+pages. The spawn record's `page_budget` is bounded by the user pool
+(`proc_page_budget_hard_max()`) rather than a constant, and a `PROC_PAGE_MAX`
+/ `PROC_PAGE_HARD_MAX` no longer exists in `syscall.h`'s comments.
+
+Mirrors: `t_burrow_detach` and `t_burrow_attach_lazy` in
+`usr/lib/libthyla-rs/src/lib.rs` carry the new doc comments (the range
+semantics, the refusal list, the window-sized `BURROW_RESERVE_MAX`); no
+constant changed, so the C mirror is untouched. Consumers: `/capacity-probe`
+([[sub-kernel-protect-witness]]) is the first caller of the range form from
+EL0, and netd's retirement self-test could no longer use a second detach as
+its "gone" oracle ([[sub-netd-server]]).
 
 ## The identity cape: an x5 flags word and one perm bit ((L), 2026-09-23)
 
@@ -632,3 +696,47 @@ No number changed and no record grew; the operator voted the additive shape
   `sys_walk_create_kname_for_proc` and `sys_attach_9p_srv_for_proc`. Their
   checks repeat the handlers', so the syscall's answers and precedence are
   unchanged ([[sub-kernel-syscall-dispatch]]).
+
+## B-1d: SYS_BURROW_MAP_FILE 126 (2026-09-24)
+
+`SYS_BURROW_MAP_FILE(fd x0, offset x1, length x2, prot x3, flags x4, addr x5)
+-> vaddr / -errno`: the native form of DISTRO D-3's three file-map arms, for
+the dynamic loader (ARCH 6.5 "Dynamic loading"; the `addr` argument is the
+operator's second vote of 2026-09-24, [[dec-2026-09-24-b1d-loader-shape]]).
+One flag, `BURROW_MAP_FIXED` = 1; `addr` is read only under it.
+
+- **Without FIXED:** `length` bytes of the file from `offset`, R or R|X, at an
+  address the kernel chooses in the burrow window, demand-paged through the
+  Image cache. `addr` is not a hint: a nonzero one is `-EINVAL`, because a
+  quietly ignored hint is what lets musl ask for an `ET_EXEC` address and fail
+  later. fd -1 is `-EBADF`; W is `-EACCES` (there is no writable file
+  mapping, [[inv-i36]]).
+- **With FIXED:** `[addr, addr + length)` inside the burrow window is mapped
+  over whatever the caller held there (a CODE alias or a cut shared-in mapping
+  refuses, as munmap does). An R or R|X file window rides the Image cache; an
+  RW file window is an eager private copy; fd -1 is an anonymous demand-zero
+  window at none, R or RW (X is `-EACCES`: anonymous code comes only from the
+  JIT syscalls, I-42; a nonzero offset is `-EINVAL`).
+- **Refused before any lookup:** W|X and X on the anonymous window
+  (`-EACCES`); unknown prot or flag bits, W without R, a file map without R
+  (`-EINVAL`). Then the arms' own answers: an unaligned offset or addr and
+  length 0 (`-EINVAL`), a bad fd (`-EBADF`), a directory, symlink, append-only
+  or `O_PATH` handle or a Dev with no read (`-EINVAL`), an unknown file size
+  (`-EIO`), a window outside the burrow window or over the length cap, no gap,
+  OOM, the VMA cap (`-ENOMEM`), and executable bytes from a Dev that does not
+  vouch or a mount marked `MNOEXEC` (`-EACCES`, [[inv-i12]]). The phenotype's
+  cores answer Linux's `-EPERM` there; returned natively, `-T_E_PERM` is
+  Pouch's flat `-1` and decodes as `EIO` (the `errno.h` rule above), so the
+  native entry maps it to `-T_E_ACCES`, POSIX's `mmap` answer.
+
+The prot word is `BURROW_PROT_*` = Linux's `PROT_*`, and `kernel/syscall.c`
+pins it equal to `VIV_PROT_*` with a `_Static_assert`, which is what lets the
+native entry hand its word to the phenotype's cores unconverted.
+
+Mirrors: Pouch's `src/internal/_pouch_mman.h` (patch 0047) carries
+`SYS_thyla_burrow_map_file 126` and `POUCH_BURROW_MAP_FIXED`, pinned by the
+sysroot seam check in `tools/build.sh`. libt carries neither the number nor the
+flag (no native C consumer; the subset rule), and gains `T_MNOEXEC` (0x10), the
+mount flag the deny paths use. The Rust mirror is unchanged.
+Consumers: musl's loader through 0047 (`libc.so`), and the device prover
+`/pouch-hello-dlopen` ([[sub-pouch-seam]]).

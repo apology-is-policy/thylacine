@@ -268,10 +268,10 @@ void test_perm_devramfs_enforced_real_metadata(void) {
 
     // Walk a real file and prove the owner-vs-other branch selection runs off
     // its actual stored mode (robust to the exact cpio mode).
-    const char *names[1] = { "welcome" };
-    struct Walkqid *wq = devramfs.walk(root, NULL, names, 1);
+    const char *names[2] = { "bin", "welcome" };
+    struct Walkqid *wq = devramfs.walk(root, NULL, names, 2);
     spoor_unref(root);
-    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk welcome OK");
+    TEST_ASSERT(wq != NULL && wq->nqid == 2, "walk bin/welcome OK");
     struct Spoor *f = wq->spoor;
     walkqid_free(wq);
 

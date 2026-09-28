@@ -15,6 +15,11 @@
 # rather than an assertion: a protect action leaking past its gate would move
 # one of these numbers.
 #
+# B-1a' (2026-09-23): cow_leaf is the clean cfg with MODEL_LEAF (the read-only
+# leaf + the two-step tail), pinned at its own count; cow_buggy_put_before_replace
+# is bug 7, judged by NoReadableFreed. With MODEL_LEAF off the eight older cfgs
+# reproduce their counts exactly -- that is the additivity claim of the extension.
+#
 # What this script CANNOT see, said so the green reads no larger: the ceiling
 # (prot <= prot_max, X never a target) is a pure per-call comparison and is
 # not in the model at all -- the kernel tests are its witness.
@@ -28,14 +33,16 @@ STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
 CLEAN="cow:580
-cow_protect:10636"
+cow_protect:10636
+cow_leaf:2996"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="cow_buggy_break:NoAliasedWritable
 cow_buggy_teardown:NoUseAfterFree
 cow_buggy_protect_keeps_pte:NoWritablePteBeyondProt
 cow_buggy_fault_ignores_prot:BreakOnlyWhenWritable
-cow_buggy_clone_per_piece:ShareIsHolderCount"
+cow_buggy_clone_per_piece:ShareIsHolderCount
+cow_buggy_put_before_replace:NoReadableFreed"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states (the whole space is explored before liveness is judged, so the count

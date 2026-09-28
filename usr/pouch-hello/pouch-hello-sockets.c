@@ -1,4 +1,4 @@
-/* /pouch-hello-sockets — the eighth pouch binary.
+/* /bin/pouch-hello-sockets — the eighth pouch binary.
  *
  * P6-pouch-sockets (sub-chunk 12) proving binary. Exercises the FULL
  * AF_UNIX SOCK_STREAM round trip end-to-end against Thylacine's /srv
@@ -52,9 +52,9 @@
 
 extern char **environ;
 
-/* This prover runs PRE-pivot: the root is the initrd and the binary sits at
- * its top level. */
-static const char SELF[] = "/pouch-hello-sockets";
+/* This prover runs PRE-pivot: the root is the initrd, and the binary sits in
+ * its bin/. */
+static const char SELF[] = "/bin/pouch-hello-sockets";
 
 static const char SOCK_PATH[]    = "/srv/pouch-sock-demo";
 static const char XPROC_PATH[]   = "/srv/pouch-sock-xproc";

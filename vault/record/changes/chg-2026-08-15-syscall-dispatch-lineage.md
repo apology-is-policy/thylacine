@@ -4,7 +4,7 @@ type: chg
 title: "The dispatcher re-swept after LINEAGE and VIVARIUM: the prologue, the frame-taking arms, and the core split"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["768567f0"]
 touched: [sub-kernel-syscall-dispatch]
 established: []
 closed: []
