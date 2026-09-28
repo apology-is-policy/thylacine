@@ -22,6 +22,21 @@ needed the operator.
 
 
 ---
+## 2026-09-28 (aux, Opus 5.5 1M, effort max) -- LR-1, the `la` realm: the label goes where the truth is born
+
+**The dependency, pulled forward.** The realm's kernel half renders a label on the mount list, and the mount list now has main's B-1d unions (the covered entry). main (c5e057c6) had not merged TC-1b, so aux-3 merged main instead of waiting: 4662ddc1. Two conflicts, both keep-both: the journal (TC-1b's entry is newer, 09:45 against 08:55, so it stays first) and a generated vault view, re-rendered. main's side of the five auto-merged code files was B-1c's heap lines only; I read the diff before claiming it. On the merge, in my own worktree because the aux worktree's `build/` is the operator's image: kernel tests 1732/1732, zero `[skip]`, boot OK, L-6c and D-5; `tools/test-rust.sh` 28 crates, 2067 tests, none failing.
+
+**A duplicate row, in both parents.** Checking the merged `docs/AUDIT-TRIGGERS.md` for repeated headings found the HALCYON-THEME row twice: the TH-1 row one line above its own superset, which carries the TH-3..TH-4c addendum. Both parents had it, so the merge did not make it. Before deleting I proved the first row, less its closing ` |`, is an exact prefix of the second (the second adds 4993 characters): 06ebe868. Pushed to both mirrors; main told (call 0136) that its merge of aux-3 is now a fast-forward.
+
+**The carrier moved, and why.** The vote (2026-09-24) recorded the mechanism as a label passed with `SYS_MOUNT`. The manual's own primary example is `haul --post`, then the shell's `mount /srv/remote /tmp/remote /` (manual 14): there the program that mounts is the shell, and it never learns what is behind the service. A mount-call label is right only for Haul's private form, and a subtree of a remote mount mounted elsewhere would be wrong too. The truth is born where the session is created, and the identity cape already travels exactly that way: `SYS_ATTACH_9P_CAPE` on the private attach, `DMSRVCAPE` on the post, inherited by every attach over the service. So the label follows the cape: `SYS_ATTACH_9P_REMOTE` and `DMSRVREMOTE`, a flag on the session, and the mount list reads it from each entry's source when it renders. The ABI signoff stands; the bits it lands on moved, and I said so to main.
+
+**Two more decisions of mine, under the operator's "go with your guts".** `ns` with no operand showed pid 0, the system root, which never holds a shell's mounts, so the tool the vote named could not show the Haul mount at all; Plan 9's `ns` defaults to the caller, and now so does this one (`ns 0` keeps the root). No gate runs `ns` bare (grep of `tools/interactive`; coreutil-smoke's leg is a write failure either way). And `#9` now reads `9p`: `disk` was wrong for `/net`, the diorama and a Haul mount. main's queued item (the boxed view drops the `noexec`/`pheno-linux`/`covered` suffixes) folds in as a FLAGS column.
+
+**Stale claims met on the way.** `realm`'s usage says `realm /srv` prints `graft`. devsrv has a `stat_native` (it is not among the six Devs without one: devcap, devnone, full, null, random, zero), so the stat crosses and the tool prints `fs`. Under LR-1 a mount point prints `mount`, so the example gets rewritten to what the guest leg shows.
+
+Scripture: HAUL-DESIGN 4.8, COREUTILS-THYLACINE-DESIGN (REALM, `realm`, `ns`), the ARCH `/proc/<pid>/ns` paragraph (its suffixes were never listed), manual 14 (a task and a technical section), the LR-1 audit row.
+
+---
 ## 2026-09-25 to 09-28 (aux, Opus 5.5 1M, effort max) -- the fix keyed on a counter that the tile never moved
 
 **What this was.** TC-1b, the operator's second vote made code: THE HISTORY IS THE USER'S, so no escape deletes it

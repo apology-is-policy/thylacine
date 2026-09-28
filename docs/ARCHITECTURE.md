@@ -2475,7 +2475,13 @@ per I-33), captured by `path_ref`'ing the resolved mountpoint Spoor's `→path` 
 shared per entry at `territory_clone`. `territory_format_ns` (in `territory.c`, so the
 `ns_lock` discipline stays encapsulated) renders one `mount <mountpoint> <source>` line
 per entry — the source column is its Spoor's `→path` when it has a namespace name, else
-`#<dc>` (the Plan 9 device spec) for a device root — plus a `binds: <N>` count.
+`#<dc>` (the Plan 9 device spec) for a device root — plus a `binds: <N>` count. A line
+may end in suffixes, each a word after the source so a parse of the first two fields is
+unchanged: ` noexec` (`MNOEXEC`, #217), ` pheno-linux` (`MPHENO_LINUX`), ` covered` (a
+union's covered entry, 9.5) and ` remote` (LR-1: a member entry whose source belongs to a
+9P session declared remote at its attach or its `/srv` post; never the covered entry;
+display only, read by nothing else in the kernel -- HAUL-DESIGN.md 4.8). A Territory that
+declares the Linux phenotype adds a `root: pheno-linux` line after the count.
 `devproc.c::format_ns` calls it inside the `proc_for_each` callback, so the read runs
 under `g_proc_table_lock` (the #57a F2 envelope keeps `p→territory` alive) AND, briefly,
 `ns_lock` (the mount entries + their ref-held immutable `Path` strings are stable for the

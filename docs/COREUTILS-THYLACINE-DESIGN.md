@@ -116,10 +116,20 @@ User-chosen: **boxed header**, **both** the realm and qid columns.
   with columns `MODE OWNER SIZE REALM QID NAME`.
 - **REALM** (the Thylacine column): the namespace *nature* of each entry --
   `fs` (a real filesystem object), `dev` (a char device), `graft` (a live
-  kernel-served namespace mount). Derivation is honest and reliable: a graft is
-  exactly an entry whose `fstat` **fails** (the synthetic Dev has no
-  `stat_native`) while `readdir` reported it -- so the old ugly `??????` row
-  becomes a first-class, explained `graft`.
+  kernel-served namespace mount), and since LR-1 `mount` and `remote` (a mount
+  point; operator vote 2026-09-24). Derivation: a graft is exactly an entry
+  whose `fstat` **fails** (the synthetic Dev has no `stat_native`) while
+  `readdir` reported it -- so the old ugly `??????` row becomes a first-class,
+  explained `graft`. A MOUNT POINT is read from the ground truth instead: `ls`
+  reads its own `/proc/<pid>/ns` once per long listing (the mount table it
+  inherited from the shell) and an entry whose cleaned absolute path is a
+  mount-point name there is `remote` when any member entry at that point ends in
+  ` remote`, else `mount` -- ahead of the `fstat` inference, so a mount point
+  `fstat` cannot cross is `mount`, and `graft` stays the inference for what the
+  table does not name. The union's covered entry is not a member for this purpose
+  (nobody mounted it). The names are introspection-only (I-33): a mount point
+  reached under another name shows its ordinary realm. The kernel side, and why
+  the label rides the 9P session rather than the mount call: HAUL-DESIGN.md 4.8.
 - **QID** (the exotic identity): the 9P qid the kernel knows the object by --
   `{t}:0x{path}` where `t` is `d`/`f`/`c`. Grafts show `-` (fstat doesn't cross
   the mount, so there is no qid to report). This is Plan-9 made visible: unix
@@ -155,8 +165,19 @@ zero-ESC legs.
 
 ## Thylacine-specific tool ideas (the user invited these)
 
-- **`realm <path>...`** -- print each path's realm (fs/dev/graft) + which Dev
-  serves it. Folds the ls REALM column into a standalone query.
+- **`realm <path>...`** -- print each path's realm (fs/dev/graft, and since LR-1
+  mount/remote for a mount point, by the ls rule above) + which Dev serves it.
+  Folds the ls REALM column into a standalone query.
+- **`ns [pid]`** (LR-1 revision) -- with no operand, the CALLER's namespace
+  (Plan 9's default: "the process with the named pid, or by default itself");
+  `ns 0` is the system root, the pre-LR-1 default, which never held the shell's
+  own mounts. The boxed view's REALM reads `remote` for a line the kernel marks
+  ` remote`, and `9p` for a `#9` source (it used to read `disk`, which is wrong
+  for `/net`, the container diorama and a Haul mount -- 9P sessions that are not
+  the disk). A FLAGS column carries the other suffixes the kernel renders
+  (`noexec`, `pheno-linux`, `covered`) instead of dropping them; an unknown
+  suffix is shown as written. `--color=never` still passes the kernel text
+  through untouched.
 - **`qid <path>...`** -- print the 9P qid of each path (type:vers:path). The
   Plan-9 identity, standalone.
 - **`pelt`** (BUILT 2026-06-16) -- a `tree`-like recursive lister that colors by
