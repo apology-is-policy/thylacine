@@ -1874,6 +1874,25 @@ owner`, then the confirmation dialog, then a Cancel that keeps both the tile
 and its job.
 
 
+## The delivered history chord -- Super+K forgets a tile's history (2026-09-25, TC-1b)
+
+`ChordAction::History` (the `history` action name; by default Super+K, keycode
+37, the Cmd+K of Terminal and iTerm2, and K was free) is DELIVERED like the
+picker and the reference: `exec_chord` sends `deliver_chord(4, id)` with the
+focused pane's id to the registered rail's owner, which forgets that tile's
+history ([[sub-halcyond]]). Unlike the close there is no fallback on a false:
+the compositor holds no transcript, and nothing but this chord may delete one.
+So with no rail (the legacy profile, or a seat whose rail is not up) the chord
+is said (`tapestryd: chord history: no rail`) and dropped. `deliver_chord`'s
+name match is now exact: 1 picker, 2 help, 3 close, 4 history, anything else
+`unknown`. There is deliberately no verb: a program able to write one could
+delete the record, which HALCYON 14.13 forbids.
+
+Ground truth: `usr/tapestryd/src/chords.rs` (the action, its name both ways,
+the default table) and `server.rs` (`exec_chord`'s `History` arm). Witnessed
+in-guest by `ls-halcyon-lantern` leg 7 ([[sub-lantern]]).
+
+
 ## The pointer path's witnesses -- a lost press could not be told from a swallowed one (2026-09-15, the I-6 hunt)
 
 `ptr_btn` had one say on its way in (`ptr btn ... -> chrome`, and only for a

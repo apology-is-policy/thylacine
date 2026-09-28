@@ -1179,6 +1179,16 @@ impl Vt {
         self.top_continues
     }
 
+    /// The MAIN screen's wrap flags whichever screen shows -- for the same
+    /// diff: on the alt screen the main's sit in the swapped-away buffer.
+    pub fn main_wrapped(&self) -> &[bool] {
+        if self.on_alt {
+            &self.alt_wrapped
+        } else {
+            &self.wrapped
+        }
+    }
+
     /// Row 0 restarted as a line of its own (main screen only): the row
     /// above it, if a consumer still holds it, is complete as it stands.
     fn restart_top(&mut self) {

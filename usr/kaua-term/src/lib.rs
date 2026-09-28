@@ -261,17 +261,16 @@ impl Producer {
                     // AND send it whole: the consumer keeps one grid, so the
                     // alt screen's blank rows must overwrite the main's text.
                     self.flush_scroll(out);
-                    // The outgoing MAIN's wrap is now in the (swapped-away) alt
-                    // buffer, so vt.wrapped() here is the blank alt's -- but this
-                    // CellDiff is overwritten by the blank-alt full_diff below
-                    // before any render, and the alt screen renders the raw mono
-                    // grid (no join), so the wrap it carries is never read.
+                    // The outgoing MAIN's wrap is in the swapped-away buffer
+                    // (vt.wrapped() is the blanked alt's). The consumer paints
+                    // this frame until the blank alt below lands, which can be
+                    // reads later, so its soft-wrapped rows must stay joined.
                     self.emit_celldiff(
                         &outgoing,
                         mcx,
                         mcy,
                         vt.cursor_visible,
-                        vt.wrapped(),
+                        vt.main_wrapped(),
                         vt.main_top_continues(),
                         out,
                     );
@@ -307,14 +306,17 @@ impl Producer {
     }
 
     /// After the caller resizes the vt (a down-channel Resize; the compositor is
-    /// the geometry authority), resync the shadow to the new geometry and emit a
-    /// FULL CellDiff of the resized screen (halcyond already knows the new dims).
+    /// the geometry authority), resync the shadow to the new geometry and emit
+    /// the winsize ack, then a FULL CellDiff of the resized screen: halcyond
+    /// already knows the new dims, and the ack tells it this repaint is the
+    /// resize's (its own reflow of the grid was a guess until then).
     pub fn resized(&mut self, vt: &Vt, out: &mut Vec<Record>) {
         self.flush_scroll(out);
         self.cols = vt.cols;
         let cursor = (vt.cy as u16, vt.cx as u16, vt.cursor_visible);
         self.shadow = vt.cells.clone();
         self.last_cursor = cursor;
+        out.push(Record::Control(Control::WinsizeAck));
         out.push(self.full_diff(vt.wrapped(), vt.top_continues()));
     }
 
@@ -755,9 +757,13 @@ mod tests {
         );
         assert_eq!(
             out.len(),
-            2,
-            "exactly [ScrollOff, CellDiff(full)], got {}",
+            3,
+            "exactly [ScrollOff, WinsizeAck, CellDiff(full)], got {}",
             out.len()
+        );
+        assert!(
+            matches!(out[1], Record::Control(Control::WinsizeAck)),
+            "the ack comes between the rows and the repaint"
         );
         assert!(
             matches!(out.last(), Some(Record::CellDiff { changed, .. }) if changed.len() == 96 * 20),
@@ -790,7 +796,11 @@ mod tests {
             matches!(out.last(), Some(Record::CellDiff { changed, .. }) if changed.len() == 8 * 2),
             "last record is the full diff of the 8x2 screen"
         );
-        assert_eq!(out.len(), 2, "exactly [ScrollOff, CellDiff]: {}", out.len());
+        assert_eq!(out.len(), 3, "exactly [ScrollOff, WinsizeAck, CellDiff]: {}", out.len());
+        assert!(
+            matches!(out[1], Record::Control(Control::WinsizeAck)),
+            "the ack comes right before the repaint it announces"
+        );
     }
 
     use alloc::vec; // the vec! macro (no_std crate; host tests only)
@@ -1194,6 +1204,33 @@ mod tests {
     }
 
     #[test]
+    fn alt_enter_carries_the_main_wrap() {
+        // The main CellDiff flushed at alt-enter carries the MAIN's wrap flags,
+        // not the blanked alt's: halcyond paints that frame, its soft-wrapped
+        // rows joined, until the app's first paint lands.
+        let mut vt = Vt::new(4, 3);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let mut out = Vec::new();
+        p.feed(&mut vt, b"abcdef\x1b[?1049h", &mut out);
+        let alt_idx = out
+            .iter()
+            .position(|r| *r == Record::Mode(ScreenMode::AltScreen))
+            .unwrap();
+        let main_cd = out[..alt_idx]
+            .iter()
+            .rev()
+            .find(|r| matches!(r, Record::CellDiff { .. }))
+            .expect("a main CellDiff before the alt switch");
+        match main_cd {
+            Record::CellDiff { wrapped, .. } => {
+                assert_eq!(wrapped.first(), Some(&true), "row 0 wraps into row 1")
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn bulk_scroll_splits_into_bounded_scrolloffs() {
         // A large scroll run (seq 100000, yes '') must NOT pile every row into
         // one ScrollOff whose frame exceeds wire::MAX_FRAME (halcyond would
@@ -1254,8 +1291,13 @@ mod tests {
         out.clear();
         vt.resize(4, 3); // the compositor grew the tile
         p.resized(&vt, &mut out);
-        assert_eq!(out.len(), 1);
-        match &out[0] {
+        assert_eq!(out.len(), 2);
+        assert!(
+            matches!(out[0], Record::Control(Control::WinsizeAck)),
+            "the ack announces the repaint, got {:?}",
+            out[0]
+        );
+        match &out[1] {
             Record::CellDiff { changed, .. } => assert_eq!(changed.len(), 12), // full 4x3 grid
             other => panic!("expected a full CellDiff, got {other:?}"),
         }

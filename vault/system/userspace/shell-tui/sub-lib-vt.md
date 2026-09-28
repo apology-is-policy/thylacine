@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/HALCYON.md section 13.4", "docs/UTOPIA-VISUAL.md section 1", "docs/AURORA-CONFIG.md"]
 created: 2026-09-05
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -135,6 +135,14 @@ kaua-term turns it on so `feed_until` yields the ordered seam stream: a
 `Scroll` carries the row leaving the top into the transcript, `AltEnter`/
 `AltLeave` carry the outgoing/restored buffer so the consumer flushes its
 pending diff against the right grid, `Bell` and `Osc` delimit Beacon zones.
+
+**The main screen's wrap flags, whichever screen shows (TC-1b).**
+`main_wrapped()` returns the main screen's soft-wrap flags on either screen:
+while the alt screen shows, they sit in the swapped-away buffer
+(`alt_wrapped`), which `wrapped()` does not read. It pairs with
+`main_top_continues()`. kaua-term's `AltEnter` flush sends the outgoing main
+screen's last diff with them, because its consumer paints that frame until the
+alt screen's blank diff lands ([[sub-kaua-term]]).
 
 **A whole-screen erase is reported, and what it erased is handed over first
 (TC-1, HALCYON 14.13).** A clear is ED 2 or ED 3 (one arm; DECSED is ED here,
@@ -329,7 +337,7 @@ beyond the two grid buffers and the (empty, on that path) queues.
   and the pen attributes are set correctly, but drawing a double-width cell
   two-wide, or italic as slanted, is KT-1c/1d work in the consumer.
 
-- **Currency (2026-09-25): this dossier was brought current for TC-1 only.**
+- **Currency (2026-09-28): this dossier was brought current for TC-1 and TC-1b only.**
   The vt's changes between 2026-09-05 and 2026-09-22 (about 1200 lines: the
   PL-3/PL-4 soft-wrap flags, `top_continues`, the reflowing resize, the palette
   seam) are not yet described here. Dating this edit stopped `quaestor stale`

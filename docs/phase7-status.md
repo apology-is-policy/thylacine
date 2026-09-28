@@ -477,6 +477,71 @@ below slide one, equal to its fresh-tile control. `tools/test.sh` on the default
 the move, and TC-1b's device leg (scroll up after the clear, then after the chord) is designed to prove it with the
 delete.
 
+## TC-1b: Super+K forgets a tile's history, and the selection stops drifting — 2026-09-28
+
+The operator's second TC-1 vote made code: THE HISTORY IS THE USER'S. No escape deletes it (TC-1a); a user chord
+does. Scripture 283f3a60 (HALCYON 14.13, 14.11.5; HALCYON-INSTRUMENT 9.3; the TC-1b audit-trigger row). Before the
+chord, a census of every consumer of a block's position found two defects the chord would have worsened, both
+pre-existing and both pulled forward: the Normal-mode selection held flat POSITIONS and landed on other rows when the
+budget evicted in front of them, and a tile never re-read its flat list across scroll-off.
+
+- **The chord.** `ChordAction::History` (`history`, default Super+K, keycode 37) is delivered to the rail owner as
+  TEV_CHORD code 4 with the focused pane's id: no verb, no escape, no fallback -- with no rail, a full rail queue or a
+  pane the owner does not host, it is said and dropped and nothing is deleted.
+- **The forget.** `Transcript::forget` drops every frozen block, the open block's items, the held scroll-off half,
+  a byte-fed zone's gathered pre lines and finished table rows (the header flag with them); it keeps the open block's
+  identity (id, kind, cmd, styles, objs, its class latched), the pending line, the row still being written, the live
+  grid and all in-flight structure. The blocks the tile's span ring still names survive as sparse HUSKS (kind, class,
+  the named objects at their indices; sorted by id, binary-searched), charged `size_of::<Block>()` plus each kept
+  object, and evicted before any frozen block. The bar's exit label goes with its command; an image not yet captioned
+  stays; images only forgotten lines named are released.
+- **The selection.** A `Stamp` (rows dropped from the front, rows scrolled off the grid, the history's share of the
+  list) travels with the selection. A history row moves up by what went from the front; a grid row that stays moves
+  up one per row scrolled; one that left is found through the transcript's record of the lines scroll-off completed
+  (a ring of 1024: where each line's rows end and the flat rows it added), counted back from the end -- exact because
+  every history row of a tile arrives through such a line. A held half rides the grid's first row. The count is the
+  rows the grid has SHOWN leaving (`rows_left`): a resize's reflow moves it at once, and the end of every CellDiff
+  publishes what has arrived -- a ScrollOff alone moves nothing, because the grid still shows its rows until the
+  repaint lands and the session paints between reads. Every change to the flat list bumps `seq`, and refresh also
+  re-reads on a grid height change. A width change restarts each grid end at the prompt and a height change slides
+  it with its row (`Tile::resize_selected`); the rows a shrinking resize drops leave the grid then, and the
+  ScrollOff that later delivers them does not count them again. The producer answers each resize it applies with a
+  winsize ack (on the wire and never sent before) and a full repaint: the acknowledged repaint at the grid's dims
+  settles the mirror's guess (the count can go down: rows the producer kept are back, and grid ends move down).
+  From a width change until that repaint, on either screen, rows of other widths are no distance: grid ends hold
+  their rows and the repaint restarts them at its prompt; a reply at another width (the ack names no resize)
+  reopens the window. The forget also blanks the
+  open block's objects that only forgotten rows used.
+- **Between a mode flip and the other screen's first paint** the grid still holds the old screen's last frame
+  (`Tile::screen_pending`, set at a flip, cleared by the next CellDiff). After an app exits, Esc is the app's, a resize
+  crops the frame rather than reflowing it (a reflow would count rows that never left the normal screen), and it paints
+  as the app's. At an app's start the shell's frame paints as it did (`Tile::holds_normal_frame`), soft-wrapped rows
+  joined: the producer's last diff before the swap now carries the main screen's wrap flags (`Vt::main_wrapped`), not
+  the blanked alt screen's.
+- **Pre-existing, fixed on the way.** An obj was charged its text only and objects bypassed the open-block cap (a bare
+  obj was free); a block-cap continuation dropped the running command (Super+Q then closed a running job unasked); a
+  tile's block frozen mid-pre by the cap gained an empty fence (a history row no line added), and the cap's
+  continuation ended a tile's open pre and table; a block dropped at its freeze kept its charges, drifting the budget
+  up until it evicted history it had room for.
+- **Gate.** `ls-halcyon-lantern` legs 6 (TC-1a's move: a clear over a full screen adds more than half a screen of
+  history, `true` the control) and 7 (Super+K: history 0, the grid unchanged, three screens up shows ground where it
+  showed history, the live screen's top rows inked as before; two screens of output then start a history again).
+
+Audit (the TC-1b row), 8 rounds: rounds 1-6 Opus 5.5 reviewing Opus 5.5 (Fable out of credits), rounds 7-8 Fable 5.1
+reviewing Opus 5.5 (cross-family); MODEL start == end in every round.
+Round 1: 1 P0 (the seq bumps: the rebase never ran in a tile) / 3 P1 (a wrapped line's first half mapped to the line
+before; the obj charge; the continuation's cmd) / 2 P2 / 10 P3. Round 2: 0 P0 / 1 P1 (a shrinking resize counted its rows twice) / 5 P2 (four already fixed by the self-audit beside
+it; round 1's obj freeze cutting the console's line/table/pre; the dropped block's charges) / 6 P3. Round 3: 0 P0 / 1 P1 (the shed guess never settled: kaua-term coalesces resizes and a mirror lags -- the producer's full repaint now settles it, found by the reviewer and the self-audit alike) / 1 P2 (the kept set is what the span ring names, not what a live cell shows: the prose and T27) / 6 P3. Round 4: 0 P0 / 1 P1 (across a width change the count mixed rows of different widths: the re-cut window + the ack-keyed settle) / 0 P2 / 3 P3; the self-audit then found SA-r5-1 [P2] (an early settle; a reply at another width reopens). Round 5: 0 P0 / 0 P1 / 3 P2 (the window missed the alt screen; rows counted before the reply that reopens; the selection moved before the grid -- the last two fixed by one change, the count at the repaint) / 3 P3. Round 6: 0 P0 / 1 P1 (a shrink before the repaint counted the rows that had already arrived a second time -- found by the reviewer and the self-audit alike, and repro'd on the unfixed tree; the shed now counts only the rows still on their way, and a count that passes a row not here yet reports the end) / 0 P2 / 4 P3 (a held run survived a repaint that moved no count; Esc before the main screen's repaint entered Normal mode on the app's last frame, pre-existing; docs; tests). Sweep r7: 121 of 125 first, then 125 of 125 after closing its one test gap (P9, an end on grid row 0 at a shrink). Round 7 (Fable 5.1, cross-family): 0 P0 / 0 P1 / 1 P2 (a resize while the main screen's repaint read behind an app's exit reflowed the app's last frame, counting rows that never left; the mirror now crops that frame until the repaint, and paints it as the app's) / 2 P3 (the Esc gate moved into the lib where tests reach it; an arrived dropped row restarting at the prompt, closed with a reason). Round 8 (Fable 5.1): 0 P0 / 0 P1 / 0 P2 / 3 P3 -- clean (the shell's frame now paints as it did until an app's first paint, with the main screen's wrap flags from the producer; the entering Esc is a press; five doc comments).
+Closed list: memory `audit_tc1b_closed_list.md`.
+
+Verification: host halcyond 422, kaua-term 50, vt 75; `tools/test-rust.sh` 27 crates, 2018 tests, 0 failing; both
+halcyond release builds (default, guest); the default image's `tools/test.sh` (kernel tests 1669/1669, arc gates L-6c and
+D-5 PASS; the clade gates not baked). Device, `ls-halcyon-lantern`: red with the session's forget call removed (legs 1-6
+PASS; leg 7 FAIL by name, the tile still held 345 history rows) and green on the tree (legs 1-7 PASS; Super+K took 345 history rows to 0, kept the grid,
+and the tile recorded again). Host sabotage sweeps,
+every leg predicted before its run: r6 110/114, r7 121/125 then 125/125 after closing its test gap, r9 136/138 (one test
+gap: the frame test compared heights only) and r9b 138/138 after the fix.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

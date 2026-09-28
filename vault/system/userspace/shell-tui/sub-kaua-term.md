@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -41,7 +41,10 @@ The library (`lib.rs` + `wire.rs`, host-buildable) is a pure event model:
   `sink` whenever the cells held in `out` reach the bound — the form the bin
   must use for bulk output.
 - `Producer::resized(vt, out)` resyncs the shadow screen after a geometry
-  change and emits the full diff.
+  change and emits `Control::WinsizeAck`, then the full diff: the ack tells
+  halcyond this repaint is a resize's, which settles its own reflow's guess
+  (TC-1b; before it the record was defined, encoded and decoded, and never
+  sent).
 - `wire::encode_record` / `parse_record` are the framed codec up (records) and
   `encode_input` / `FrameDecoder` down, with `MAX_FRAME` = 4 MiB the decoder's
   hard bound and `MAX_TITLE` = 256 the parse-time title cap. The DOWN channel
@@ -117,7 +120,11 @@ close this, and both had to be found the hard way (rounds 2-3):
 so an alt-screen enter must push a full CellDiff of blank rows (to overwrite
 the main's text) and a leave a full CellDiff of the restored main (to overwrite
 the alt's last frame). The producer resets its shadow and emits the full diff
-on each toggle.
+on each toggle. The enter first flushes the outgoing main screen's diff, with
+the MAIN screen's wrap flags (`Vt::main_wrapped`), since by then `wrapped()` is
+the blanked alt's. The consumer paints that frame until the blank lands, and a
+full diff (about 21 bytes a cell) spans several 4 KiB reads, so a soft-wrapped
+row sent with the alt's flags showed broken in two (TC-1b round 8).
 
 **Resize ordering vs a SIGWINCH repaint.** `apply_resize` runs BEFORE and AFTER
 the parked master read (B-F6: the bytes that read returns are usually the app's
@@ -203,7 +210,9 @@ plus one capped record regardless of how much the app dumps at once.
   piles tens of MiB before the first write.
 - **The alt screen vs a one-grid consumer.** Enter and leave each ship a full
   diff; a missing one leaves the alt's frame bleeding through the restored
-  main or vice versa.
+  main or vice versa. The enter's pre-swap diff must carry `main_wrapped()`:
+  with `wrapped()` the shell's last frame shows its soft-wrapped rows split
+  until the blank lands (`alt_enter_carries_the_main_wrap`).
 - **The resize ordering.** `drain_pending` (rows only) must precede `resized`
   (the full diff), or an equal-cell-count resize diffs the new cells at the old
   pitch. The producer's shadow-length mismatch guard is a silent resync — a
@@ -238,7 +247,7 @@ plus one capped record regardless of how much the app dumps at once.
   `emit_celldiff` resyncs silently. It is a guard only — the bin's call order
   (`drain_pending` without a diff, then `resized`) never diffs across a
   geometry change, equal cell counts included.
-- **Currency (2026-09-25): this dossier was brought current for TC-1 only.**
+- **Currency (2026-09-28): this dossier was brought current for TC-1 and TC-1b only.**
   The lib and wire changes between 2026-09-06 and 2026-09-22 (the PL-3/PL-4
   soft-wrap flags, `top_continues`, the OSC 7 report, the palette input) are
   corrected in the record lists above but not otherwise described. Dating this
@@ -262,7 +271,7 @@ control accumulates everything — the one-variable pair);
 `feed_into_ships_alt_screen_full_diffs_too` (256 toggle pairs in one chunk);
 `a_shrink_ships_its_scrolled_off_rows_before_the_full_celldiff`;
 `an_equal_count_resize_ships_no_stale_geometry_diff` (exactly [ScrollOff,
-CellDiff(full)]). The bin's use of the sink and the resize call order are
+WinsizeAck, CellDiff(full)]; the ack comes between the rows and the repaint). The bin's use of the sink and the resize call order are
 guest-only. In-guest: `ls-gfx-session` (the tile spawn, the ingest, the
 caps-probe, the zoom survival, the lone-tile and 1264/1280 geometry legs).
 

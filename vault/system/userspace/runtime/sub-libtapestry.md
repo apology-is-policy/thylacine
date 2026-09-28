@@ -412,6 +412,16 @@ HALCYON-INSTRUMENT 14.5 running-close dialog when the named tile's last
 command is RUNNING, and closes by verb otherwise, carrying NO final-tile
 protection -- section 6.5 reads `Super+Q` as the structural act.
 
+## `TEV_CHORD` code 4: the history chord (2026-09-25, TC-1b)
+
+**`code` 4 = forget the focused pane's history**, its `value` the FOCUSED
+PANE's id, as the close's is. Unlike the close it has no fallback: the
+compositor holds no transcript, and nothing but this chord may delete one, so
+with no registered rail the chord is said and dropped, like the picker and the
+reference. The owner ([[sub-halcyond]]) resolves the id against the tiles it
+hosts and forgets that tile's history, and only its history. There is
+deliberately no verb that does the same.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
 

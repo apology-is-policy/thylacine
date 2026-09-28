@@ -144,7 +144,12 @@ kaua-term -> halcyond (ordered):
   | osc7_raw(bytes) | screen_erased }`
   -- the kaua-term forwards OSC 1936 (Beacon-zone frames) RAW, uninterpreted
   (halcyond keeps the Beacon parser -- R5 + its format-fuzz surface), plus BEL,
-  OSC 0/2 title, the hosted child's exit code, and a winsize ack.
+  OSC 0/2 title, the hosted child's exit code, and a winsize ack. The ack answers
+  every applied Resize: after the rows the resize pushed off the top (ScrollOff)
+  and just before the full CellDiff of the resized screen, so halcyond knows
+  that repaint answers a resize; at its grid's dims it settles halcyond's own
+  reflow of the grid (the ack names no resize; HALCYON 14.11.5; TC-1b,
+  2026-09-25 -- the record was on the wire and listed here, and never sent).
   AMENDED 2026-09-24: `osc7_raw` (tag 5, the OSC 7 cwd report) had been on the
   wire and absent from this list. `screen_erased` (tag 6, TC-1) is new: the VT
   cleared the normal screen -- ED 2 or ED 3 (which the VT treats identically;

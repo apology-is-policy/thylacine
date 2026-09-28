@@ -28,6 +28,7 @@
 //     PERSISTS across blocks (terminal semantics).
 
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -140,6 +141,7 @@ pub enum LineClass {
 
 /// A presented object (BEACON.md 12.2 `obj`): `ty` is the type token,
 /// `refv` the canonical ref (`ref` is a keyword).
+#[derive(Default)]
 pub struct Obj {
     pub ty: String,
     pub refv: String,
@@ -224,6 +226,19 @@ pub enum Item {
     Image { w: u32, h: u32, argb: Vec<u32> },
 }
 
+impl Item {
+    /// The rows this item contributes to the flat selection list
+    /// (`select::flatten`): a table one per row, a rule none, any other item
+    /// one. The transcript counts the rows it drops by the same rule.
+    pub fn flat_rows(&self) -> usize {
+        match self {
+            Item::Table(t) => t.rows.len(),
+            Item::Rule => 0,
+            _ => 1,
+        }
+    }
+}
+
 pub struct Block {
     /// Stable identity for layout caching (survives freeze; never reused).
     pub id: u64,
@@ -271,6 +286,11 @@ impl Block {
         !self.items.is_empty() || self.exit.is_some()
     }
 
+    /// The rows this block contributes to the flat selection list.
+    pub fn flat_rows(&self) -> usize {
+        self.items.iter().map(Item::flat_rows).sum()
+    }
+
     /// Any Beacon structure at all: an annotated style, or a table / rule /
     /// pre item. A block with none is a program's raw terminal output.
     pub fn annotated(&self) -> bool {
@@ -292,6 +312,63 @@ impl Block {
             LineClass::Raw
         }
     }
+}
+
+/// What a forget keeps of a block the live screen names (HALCYON 14.13): the
+/// block with no items, no styles and no objects -- its kind and its class,
+/// latched, since the items that decided the class go -- and the named objects
+/// alone, by index. Nothing of it is laid out or selected.
+struct Husk {
+    block: Block,
+    /// (obj idx+1, the object), ascending.
+    objs: Vec<(u16, Obj)>,
+}
+
+impl Husk {
+    fn of(mut b: Block, named: &BTreeSet<(u64, u16)>) -> Husk {
+        let mut objs = Vec::new();
+        for &(_, o) in named.range((b.id, 1)..=(b.id, u16::MAX)) {
+            if let Some(slot) = b.objs.get_mut(o as usize - 1) {
+                objs.push((o, core::mem::take(slot)));
+            }
+        }
+        let mut block = Block::new(b.id, b.kind);
+        block.continuation = b.continuation;
+        block.annotated_own = b.annotated();
+        Husk::charged(block, objs)
+    }
+
+    /// Kept again by a later forget: only what the live screen names now.
+    fn keep_named(mut self, named: &BTreeSet<(u64, u16)>) -> Husk {
+        let id = self.block.id;
+        self.objs.retain(|(o, _)| named.contains(&(id, *o)));
+        Husk::charged(self.block, self.objs)
+    }
+
+    /// A husk costs the block it is and each kept object's entry and text.
+    fn charged(mut block: Block, objs: Vec<(u16, Obj)>) -> Husk {
+        block.cost = HUSK_OVERHEAD
+            + objs
+                .iter()
+                .map(|(_, o)| core::mem::size_of::<(u16, Obj)>() + o.ty.len() + o.refv.len())
+                .sum::<usize>();
+        Husk { block, objs }
+    }
+
+    fn obj(&self, obj: u16) -> Option<&Obj> {
+        let i = self.objs.binary_search_by_key(&obj, |(o, _)| *o).ok()?;
+        Some(&self.objs[i].1)
+    }
+}
+
+/// What a block with no items still holds against the budget: the charges
+/// its obj and cmd-mark sites made (its styles are charged at the freeze).
+fn retained_cost(b: &Block) -> usize {
+    b.objs
+        .iter()
+        .map(|o| OBJ_OVERHEAD + o.ty.len() + o.refv.len())
+        .sum::<usize>()
+        + b.cmd.as_ref().map_or(0, |c| c.len())
 }
 
 /// H-4d: the span state a tile's cell was written under -- the block that
@@ -375,6 +452,17 @@ impl SpanMap {
             em: tag.em,
             hdr: tag.hdr,
         };
+    }
+
+    /// Every `(block, obj)` a live serial resolves to -- all a cell on the
+    /// grid, or on the screen the producer holds behind an alt screen, can
+    /// name (obj 0: the block alone, for its class). What a forget keeps.
+    pub fn named(&self) -> BTreeSet<(u64, u16)> {
+        self.ring
+            .iter()
+            .filter(|e| e.serial != 0)
+            .map(|e| (e.block, e.obj))
+            .collect()
     }
 
     /// The state a cell stamped `serial` was written under.
@@ -737,6 +825,49 @@ pub struct Transcript {
     /// boundary); the consumer clears it when it acts.
     pub raw_vt_intent: bool,
     next_id: u64,
+    /// TC-1b (HALCYON 14.13): what a forget kept of the blocks the live
+    /// screen still names, in id order. Found by id, never laid out or
+    /// selected; charged to the budget and evicted before any frozen block
+    /// (every one is older than all of them).
+    husks: VecDeque<Husk>,
+    /// The flat selection rows dropped from the FRONT so far (every budget
+    /// eviction and every forget). Monotonic: a selection rebases by the
+    /// difference since it last looked (`select::Sel::rebase`).
+    rows_dropped: u64,
+    /// The rows `push_scrolled_rows` has taken off a tile's grid so far
+    /// (monotonic). Each moved every live-grid row up one, whatever the
+    /// transcript made of it: a soft-wrapped half is held, a pre line joins
+    /// its fence, so the transcript's rows are no count of them.
+    rows_scrolled: u64,
+    /// Rows a resize's reflow dropped off the grid that no ScrollOff has
+    /// carried here yet: they left the grid at the resize, so
+    /// `rows_scrolled()` counts them from then, and each row that arrives
+    /// takes one back rather than leaving twice -- until the producer's
+    /// repaint of the whole grid settles what never comes (`settle_grid_shed`).
+    rows_shed: u64,
+    /// The rows that had left a tile's grid as it last showed it: what a
+    /// selection counts. A row that scrolls here is still on the grid until
+    /// the producer's repaint shows it gone (`note_grid_moved`); a resize's
+    /// reflow takes its rows off at once.
+    rows_left: u64,
+    /// Odd while the rows arriving may be cut at a width the grid does not
+    /// show: from a width change of a tile's grid, or a reply to a resize at
+    /// another width, until the producer's repaint at the grid's dims. Rows
+    /// cut at another width are no count of how far the grid's rows moved.
+    rewraps: u64,
+    /// The producer's repaints of a tile's grid so far, one per CellDiff: a
+    /// run a re-cut holds in place goes once the grid is repainted under it.
+    repaints: u64,
+    /// One entry per logical line a scroll-off finalized, oldest first, the
+    /// last `SCROLL_LINES_MAX`: where a selection on a grid row that left the
+    /// grid finds the history row its text joined (`scrolled_row`).
+    scroll_lines: VecDeque<ScrollLine>,
+    /// Where the oldest remembered line's rows start, in `rows_scrolled`'s
+    /// numbering.
+    scroll_base: u64,
+    /// Where the newest finalized line's rows end: every scrolled row past it
+    /// is still held in `scroll_pending`.
+    scroll_end: u64,
     stored_cost: usize,
     max_blocks: usize,
     max_cost: usize,
@@ -786,6 +917,41 @@ pub const OPEN_BLOCK_MAX_COST: usize = 512 << 10;
 /// model that charged only cells let an empty line be free, and a count cap
 /// alone is a budget the item count can spend past.
 const ITEM_OVERHEAD: usize = core::mem::size_of::<Item>() + core::mem::size_of::<Line>() + 16;
+/// What a husk costs beyond its objects: the block itself. Never zero, so the
+/// byte budget bounds how many husks a tile keeps.
+const HUSK_OVERHEAD: usize = core::mem::size_of::<Block>();
+/// What an obj costs beyond its text: its slot in the block's table. Never
+/// zero, so a stream of bare `obj` frames cannot grow a table the budget does
+/// not see.
+const OBJ_OVERHEAD: usize = core::mem::size_of::<Obj>();
+/// How many lines a scroll-off finalized the transcript remembers. A
+/// selection that looks less often than this falls back to counting every
+/// scrolled row as one history row.
+const SCROLL_LINES_MAX: usize = 1024;
+
+/// One logical line a scroll-off finalized: where its rows end in
+/// `rows_scrolled`'s numbering, and the flat rows it added -- 0 when it joined
+/// the last row (a pre line into its fence).
+#[derive(Clone, Copy)]
+struct ScrollLine {
+    end: u64,
+    added: u32,
+}
+
+/// Where the text of a row a scroll-off took lies now (`scrolled_row`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrolledRow {
+    /// This history row.
+    History(usize),
+    /// Still held, half of a line the grid's first row goes on with.
+    Held,
+    /// Not here yet: counted as gone before it arrived.
+    Ahead,
+    /// Dropped: the budget or a forget took its row.
+    Gone,
+    /// Older than the lines remembered.
+    Unknown,
+}
 
 impl Transcript {
     pub fn new(pal: Palette) -> Transcript {
@@ -842,6 +1008,16 @@ impl Transcript {
             utf8_need: 0,
             raw_vt_intent: false,
             next_id: 1,
+            husks: VecDeque::new(),
+            rows_dropped: 0,
+            rows_scrolled: 0,
+            rows_shed: 0,
+            rows_left: 0,
+            rewraps: 0,
+            repaints: 0,
+            scroll_lines: VecDeque::new(),
+            scroll_base: 0,
+            scroll_end: 0,
             stored_cost: 0,
             max_blocks,
             max_cost,
@@ -941,15 +1117,18 @@ impl Transcript {
     /// ARGB raster as its own frozen block, so the inline-image RENDER PATH --
     /// layout letterbox + `cartoon::Op::Image` blit -- can be witnessed on real
     /// hardware BEFORE the out-of-band channel (slice 3) or the decoder (slice
-    /// 2) exist. The only producer is main's `thylacine.viewtest` bootarg gate;
+    /// 2) exist. Its producers are the console renderer's: the
+    /// `thylacine.viewtest` bootarg gate and the inline-media place channel;
     /// there is no wire op for an image (that IS slice 3). `argb` is `w`-tight,
     /// `h` rows; a length mismatch or a zero dimension is ignored (fail-safe,
     /// like every other malformed reference on the render path). An image is a
     /// non-Line item, so the block's `class()` is Doc (the PROSE margins the
     /// Role::Image arm wants) with no styles table needed.
-    pub fn inject_image(&mut self, w: u32, h: u32, argb: Vec<u32>) {
+    /// Returns whether it placed one: the image freezes in FRONT of the open
+    /// block's rows, and a selection there must move with them.
+    pub fn inject_image(&mut self, w: u32, h: u32, argb: Vec<u32>) -> bool {
         if w == 0 || h == 0 || argb.len() != (w as usize).saturating_mul(h as usize) {
-            return;
+            return false;
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -961,6 +1140,7 @@ impl Transcript {
         self.frozen.push_back(b);
         self.enforce_budget();
         self.seq = self.seq.wrapping_add(1);
+        true
     }
 
     /// (em_stack, obj_stack) depths -- the nesting bound witness (F4).
@@ -1089,10 +1269,27 @@ impl Transcript {
                 self.em_push(class);
             }
             Op::Obj => {
-                // At the count cap, degrade to the no-obj sentinel (0): the
-                // block's obj table stops growing, the idx+1 encoding stays
-                // in u16, and the open/close still balance via obj_push/pop.
-                let idx = if self.open.objs.len() >= MAX_OBJS_PER_BLOCK {
+                // The open block's cap binds objects too: a stream of objs
+                // alone must still freeze the block, where the budget can
+                // reach it. Checked before the push, so this obj lands whole
+                // in whichever block is open -- but only where a freeze
+                // splits nothing: a tile (its text is on the grid), or a
+                // byte-fed zone between lines and outside a table or pre.
+                // Anywhere else the line, the table or the pre would be cut
+                // in two, so the obj waits for the next line to freeze it.
+                let free = self.cells_mode
+                    || (self.line.is_empty() && self.table.is_none() && self.pre.is_none());
+                if free {
+                    self.enforce_block_cap();
+                }
+                // At the count cap, or past the byte cap where no freeze was
+                // free, degrade to the no-obj sentinel (0): the text stays,
+                // unlinked; the block's obj table stops growing, the idx+1
+                // encoding stays in u16, and the open/close still balance via
+                // obj_push/pop.
+                let idx = if self.open.objs.len() >= MAX_OBJS_PER_BLOCK
+                    || self.open.cost >= self.max_open_cost
+                {
                     0
                 } else {
                     let ty = Self::arg(args, "type").unwrap_or("");
@@ -1101,7 +1298,7 @@ impl Transcript {
                     sty.push_str(ty);
                     let mut srf = String::new();
                     srf.push_str(refv);
-                    let bytes = sty.len() + srf.len();
+                    let bytes = OBJ_OVERHEAD + sty.len() + srf.len();
                     self.open.cost += bytes;
                     // Symmetric with cells/tables/styles: charge stored_cost
                     // too, so eviction's `sub(dead.cost)` cannot drift the
@@ -1402,29 +1599,39 @@ impl Transcript {
     /// Beacon spans die at the boundary; the SGR pen persists.
     fn freeze_open(&mut self, next: BlockKind, continuation: bool) {
         self.flush_line();
+        // A tile's table and pre hold no text -- their rows are on its grid,
+        // tagged -- only the state its frames tag cells under; a continuation
+        // is the same zone going on, so they stay open across it.
+        let keep_structure = self.cells_mode && continuation;
         // An abandoned table capture at a block boundary flushes as-is
         // (renderer hygiene: content beats loss).
-        if self.table.is_some() {
+        if self.table.is_some() && !keep_structure {
             self.close_op(Op::Table);
         }
         // Symmetric with the table arm: an open `pre` at a block boundary is
         // finalized into THIS block, where its cells' block-relative style
         // indices are valid. Without it the Item::Pre commits to the fresh block
         // below (0 styles) and layout_block's `b.styles[sid]` panics on a stale
-        // index -- reachable from an untrusted tile stream interleaving a
-        // ScrollOff (or a tile-split's set_max_cost) between pre-open and
-        // pre-close. Inline (no re-entrant enforce_block_cap -- the mem::replace
-        // below freezes this block); a pre spanning a block-freeze is split, its
-        // post-freeze content resuming as ordinary lines.
-        if let Some(lines) = self.pre.take() {
-            let mut cost = 0usize;
-            for l in lines.iter() {
-                cost += l.cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+        // index -- reachable from a byte stream interleaving a ScrollOff (or a
+        // tile-split's set_max_cost) between pre-open and pre-close. Inline (no
+        // re-entrant enforce_block_cap -- the mem::replace below freezes this
+        // block); a pre spanning a block-freeze is split, its post-freeze
+        // content resuming as ordinary lines. An empty accumulator (a tile's
+        // always is) finalizes to nothing: an empty fence would be a history
+        // row that no line added.
+        if !keep_structure {
+            if let Some(lines) = self.pre.take() {
+                if !lines.is_empty() {
+                    let mut cost = 0usize;
+                    for l in lines.iter() {
+                        cost += l.cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
+                    }
+                    self.open.cost += cost;
+                    self.stored_cost += cost;
+                    self.open.items.push(Item::Pre(lines));
+                }
+                self.pre_bytes = 0;
             }
-            self.open.cost += cost;
-            self.stored_cost += cost;
-            self.open.items.push(Item::Pre(lines));
-            self.pre_bytes = 0;
         }
         // Cells mode: a zone-less block whose text is still on the grid has
         // no items, but its obj table is what the grid's tags index -- drop
@@ -1453,12 +1660,27 @@ impl Transcript {
         // laid as a mono island where its first half laid as a document.
         if continuation {
             self.open.annotated_own = b.annotated_own;
+            // ...and the same command still runs: without its mark here,
+            // `running()` reads false and Super+Q closes the job unasked
+            // (HALCYON-INSTRUMENT 14.5).
+            if b.exit.is_none() {
+                if let Some(cmd) = b.cmd.as_ref() {
+                    self.open.cost += cmd.len();
+                    self.stored_cost += cmd.len();
+                    self.open.cmd = Some(cmd.clone());
+                }
+            }
         }
         if keep {
             b.cost += b.styles.len() * core::mem::size_of::<Style>();
             self.stored_cost += b.styles.len() * core::mem::size_of::<Style>();
             self.frozen.push_back(b);
             self.enforce_budget();
+        } else {
+            // What it was charged (its objs, a carried command) leaves the
+            // budget with it, or stored_cost drifts up past every block that
+            // remains and the budget evicts history it has room for.
+            self.stored_cost = self.stored_cost.saturating_sub(b.cost);
         }
         self.em_stack.clear();
         self.obj_stack.clear();
@@ -1469,14 +1691,206 @@ impl Transcript {
 
     fn enforce_budget(&mut self) {
         while self.frozen.len() > self.max_blocks
-            || (self.stored_cost > self.max_cost && self.frozen.len() > 1)
+            || (self.stored_cost > self.max_cost
+                && (self.frozen.len() > 1 || !self.husks.is_empty()))
         {
+            // Over on bytes, the husks go first: each is older than every
+            // frozen block, and none holds anything a view shows.
+            if self.stored_cost > self.max_cost {
+                if let Some(h) = self.husks.pop_front() {
+                    self.stored_cost = self.stored_cost.saturating_sub(h.block.cost);
+                    continue;
+                }
+            }
             if let Some(dead) = self.frozen.pop_front() {
                 self.stored_cost = self.stored_cost.saturating_sub(dead.cost);
+                self.rows_dropped += dead.flat_rows() as u64;
             } else {
                 break;
             }
         }
+    }
+
+    /// TC-1b (HALCYON 14.13): forget the history -- every frozen block, the
+    /// open block's items, the half-rejoined scrolled-off line, and the lines
+    /// a byte-fed zone's open pre has gathered and the rows its open table
+    /// has finished -- and nothing else. The open block keeps its identity,
+    /// its tables and its zone's class, so a running command's later rows and
+    /// its zone close still land in it; the in-flight structure stays open,
+    /// with the row still being written; of its objects, those the span
+    /// ring, an open span or that row still uses. A block `named` names --
+    /// the `(block, obj)` pairs the tile's span ring holds (every cell on
+    /// the grid, in flight or on a hidden main screen resolves through one),
+    /// obj 0 for the block's
+    /// class alone -- survives as a husk.
+    pub fn forget(&mut self, named: &BTreeSet<(u64, u16)>) {
+        let mut rows = self.open.flat_rows();
+        for h in core::mem::take(&mut self.husks) {
+            if named
+                .range((h.block.id, 0)..=(h.block.id, u16::MAX))
+                .next()
+                .is_some()
+            {
+                self.husks.push_back(h.keep_named(named));
+            }
+        }
+        for b in core::mem::take(&mut self.frozen) {
+            rows += b.flat_rows();
+            if named.range((b.id, 0)..=(b.id, u16::MAX)).next().is_some() {
+                self.husks.push_back(Husk::of(b, named));
+            }
+        }
+        // In id order, whatever order the blocks froze in (an injected image
+        // freezes ahead of the block open when it came).
+        self.husks.make_contiguous().sort_by_key(|h| h.block.id);
+        // A zone's class is decided per zone: latch it before its items go.
+        self.open.annotated_own = self.open.annotated();
+        self.open.items.clear();
+        // The held half ends here: no later row joins a line it began.
+        if !self.scroll_pending.is_empty() {
+            self.scroll_pending.clear();
+            self.note_scroll_line(0);
+        }
+        // A byte-fed zone gathers an open pre's lines and an open table's
+        // finished rows itself: they are history. The row still being written
+        // stays, as the pending line does -- and with it the column a tile's
+        // next cell is tagged with (a tile's accumulators hold no text).
+        if let Some(p) = self.pre.as_mut() {
+            p.clear();
+        }
+        self.pre_bytes = 0;
+        if let Some(t) = self.table.as_mut() {
+            if !t.rows.is_empty() {
+                t.rows.clear();
+                // The header row was the first of them.
+                t.hdr = false;
+            }
+            t.bytes = t.cell.len() * core::mem::size_of::<TCell>()
+                + t.row
+                    .iter()
+                    .map(|c| core::mem::size_of::<Vec<TCell>>() + c.len() * core::mem::size_of::<TCell>())
+                    .sum::<usize>();
+        }
+        // The open block's objects only forgotten rows used go with them (a
+        // copy a scrolled row brought in, an own object whose cells are
+        // gone): blanked, not removed, so the indices the rest use still
+        // hold. Kept: what the span ring names, an open obj span, and what
+        // the pending line or the table row still being written uses.
+        let mut used: BTreeSet<u16> = named
+            .range((self.open.id, 1)..=(self.open.id, u16::MAX))
+            .map(|&(_, o)| o)
+            .collect();
+        used.extend(self.obj_stack.iter().copied().filter(|&o| o != 0));
+        let styles = &self.open.styles;
+        let writing = self
+            .table
+            .iter()
+            .flat_map(|t| t.cell.iter().chain(t.row.iter().flatten()));
+        used.extend(
+            self.line
+                .iter()
+                .chain(writing)
+                .map(|c| styles.get(c.style as usize).map_or(0, |st| st.obj))
+                .filter(|&o| o != 0),
+        );
+        for (i, o) in self.open.objs.iter_mut().enumerate() {
+            if !used.contains(&(i as u16 + 1)) {
+                *o = Obj::default();
+            }
+        }
+        self.open.cost = retained_cost(&self.open);
+        // The bar's `exit N` names a command the history held.
+        self.last_exit_code = None;
+        self.stored_cost = self.open.cost + self.husks.iter().map(|h| h.block.cost).sum::<usize>();
+        self.rows_dropped += rows as u64;
+        // A husk can cost more than the block it was.
+        self.enforce_budget();
+        self.seq = self.seq.wrapping_add(1);
+    }
+
+    /// The flat selection rows dropped from the front so far (monotonic).
+    pub fn rows_dropped(&self) -> u64 {
+        self.rows_dropped
+    }
+
+    /// The rows that have left a tile's grid so far: scrolled into this
+    /// transcript, or dropped by a resize and still on their way. It goes
+    /// down only when a resize's repaint settles rows the producer kept.
+    pub fn rows_scrolled(&self) -> u64 {
+        self.rows_scrolled.saturating_add(self.rows_shed)
+    }
+
+    /// The rows that had left a tile's grid as it last showed it -- the
+    /// count a selection follows (`select::Stamp`). It moves when the grid
+    /// does: at a resize's reflow, and at each repaint of the producer's.
+    pub fn rows_left(&self) -> u64 {
+        self.rows_left
+    }
+
+    /// A resize's reflow dropped `n` rows off the top of the grid
+    /// (`Grid::resize`). The grid's top rows that scrolled here before the
+    /// repaint that shows them gone are here already; the producer's
+    /// ScrollOff delivers the rest later.
+    pub fn note_grid_shed(&mut self, n: usize) {
+        if n > 0 {
+            let here = self.rows_scrolled().saturating_sub(self.rows_left);
+            self.rows_shed = self.rows_shed.saturating_add((n as u64).saturating_sub(here));
+            self.rows_left = self.rows_left.saturating_add(n as u64);
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
+    /// The producer's repaint is on the grid: the rows that left its grid
+    /// before it are gone from what the grid shows (one cut before a resize
+    /// can show rows the reflow dropped; they stay counted). While a re-cut
+    /// is unsettled every repaint is a change, count or none: it paints over
+    /// rows the re-cut holds in place.
+    pub fn note_grid_moved(&mut self) {
+        self.repaints = self.repaints.wrapping_add(1);
+        let left = self.rows_scrolled();
+        if left != self.rows_left || self.rewraps % 2 == 1 {
+            self.rows_left = left;
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
+    /// The producer has repainted the whole grid at its present dims, which
+    /// it does after applying a resize and its ScrollOff: a dropped row
+    /// nothing carried here is on the grid again, and the grid is the
+    /// producer's cut again. The producer sheds fewer than the mirror when
+    /// it applies only the last of several resizes, or when the mirror was
+    /// behind it.
+    pub fn settle_grid_shed(&mut self) {
+        if self.rows_shed > 0 {
+            self.rows_shed = 0;
+            self.seq = self.seq.wrapping_add(1);
+        }
+        if self.rewraps % 2 == 1 {
+            self.rewraps += 1;
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
+    /// The grid's width changed, or a reply to a resize arrived at another
+    /// width: the producer re-cuts its main screen at every width it
+    /// applies, beneath the alt screen too, so until its repaint at the
+    /// grid's dims settles it, rows arrive cut at widths the grid does not
+    /// show.
+    pub fn note_grid_recut(&mut self) {
+        if self.rewraps % 2 == 0 {
+            self.rewraps += 1;
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
+    /// Odd while a re-cut is unsettled (`rewraps`).
+    pub fn rewraps(&self) -> u64 {
+        self.rewraps
+    }
+
+    /// The producer's repaints of the grid so far.
+    pub fn repaints(&self) -> u64 {
+        self.repaints
     }
 
     /// The per-block caps: an endless un-zoned stream must not grow one
@@ -1896,6 +2310,8 @@ impl Transcript {
     /// console's invariant every run/menu consumer relies on).
     pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>], wrapped: &[bool], spans: &SpanMap) {
         for (i, row) in rows.iter().enumerate() {
+            self.rows_scrolled += 1;
+            self.rows_shed = self.rows_shed.saturating_sub(1);
             // PL-3: a soft-wrapped grid row is half of a logical line the grid
             // broke at `cols` (often mid-word, s5). Accumulate the raw cells
             // until a row that did NOT wrap ends the logical line, then
@@ -1915,6 +2331,59 @@ impl Transcript {
                 self.finalize_scroll_pending(spans);
             }
         }
+        // The flat list changed -- rows arrived, and a freeze or an eviction
+        // they caused moved the blocks under it -- so a Normal-mode selection
+        // must re-read it.
+        if !rows.is_empty() {
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
+    /// Record a logical line a scroll-off finalized: its rows end at the
+    /// present `rows_scrolled`, and it added `added` flat rows.
+    fn note_scroll_line(&mut self, added: usize) {
+        self.scroll_lines.push_back(ScrollLine {
+            end: self.rows_scrolled,
+            added: u32::try_from(added).unwrap_or(u32::MAX),
+        });
+        self.scroll_end = self.rows_scrolled;
+        if self.scroll_lines.len() > SCROLL_LINES_MAX {
+            if let Some(old) = self.scroll_lines.pop_front() {
+                self.scroll_base = old.end;
+            }
+        }
+    }
+
+    /// Where the text of the scrolled row numbered `a` (in `rows_scrolled`'s
+    /// numbering) lies in a flat list whose history holds `hist` rows. Every
+    /// row a tile's transcript holds came off the grid through a line
+    /// recorded here, so counting back from the end finds it: its line's row
+    /// is the last one, less what every later line added.
+    pub fn scrolled_row(&self, a: u64, hist: usize) -> ScrolledRow {
+        if a >= self.rows_scrolled {
+            return ScrolledRow::Ahead;
+        }
+        if a >= self.scroll_end {
+            return ScrolledRow::Held;
+        }
+        if a < self.scroll_base {
+            return ScrolledRow::Unknown;
+        }
+        let mut later = 0usize;
+        for (i, line) in self.scroll_lines.iter().enumerate().rev() {
+            let start = match i {
+                0 => self.scroll_base,
+                _ => self.scroll_lines[i - 1].end,
+            };
+            if a >= start {
+                return match hist.checked_sub(later.saturating_add(1)) {
+                    Some(r) => ScrolledRow::History(r),
+                    None => ScrolledRow::Gone,
+                };
+            }
+            later = later.saturating_add(line.added as usize);
+        }
+        ScrolledRow::Unknown
     }
 
     /// Intern the pending soft-wrapped logical line into the open block as one
@@ -1984,6 +2453,10 @@ impl Transcript {
         } else {
             foreign_class.unwrap_or(LineClass::Inherit)
         };
+        // The line lands at the end: a new item, or the last one grown (a pre
+        // line, a table row). What it added is the tail's growth.
+        let before = self.open.items.len();
+        let tail = self.open.items.last().map_or(0, Item::flat_rows);
         let _ = place_tagged_line(
             &mut self.open.items,
             cells,
@@ -1994,6 +2467,11 @@ impl Transcript {
             spans,
             &mut last_rule,
         );
+        let grown = self.open.items[before.saturating_sub(1)..]
+            .iter()
+            .map(Item::flat_rows)
+            .sum::<usize>();
+        self.note_scroll_line(grown - if before > 0 { tail } else { 0 });
         self.last_rule_serial = last_rule;
         self.enforce_block_cap();
     }
@@ -2015,7 +2493,10 @@ impl Transcript {
     /// restarted, so the fragment is complete as it stands). No-op when
     /// nothing is pending.
     pub fn flush_scroll_pending(&mut self, spans: &SpanMap) {
-        self.finalize_scroll_pending(spans);
+        if !self.scroll_pending.is_empty() {
+            self.finalize_scroll_pending(spans);
+            self.seq = self.seq.wrapping_add(1);
+        }
     }
 
     /// PL-4: build the LIVE grid as a transient block for the normal-mode
@@ -2131,11 +2612,7 @@ impl Transcript {
                     idx
                 } else {
                     let src = self
-                        .frozen
-                        .iter()
-                        .chain(core::iter::once(&self.open))
-                        .find(|b| b.id == tag.block)
-                        .and_then(|b| b.objs.get((tag.obj as usize).wrapping_sub(1)))
+                        .source_obj(tag.block, tag.obj)
                         .map(|o| (o.ty.clone(), o.refv.clone()));
                     let idx = match src {
                         None => 0,
@@ -2183,11 +2660,7 @@ impl Transcript {
                 _ if shape.prompt => LineClass::Prompt,
                 None => LineClass::Raw,
                 Some(id) => *zone_class.entry(id).or_insert_with(|| {
-                    let blk = self
-                        .frozen
-                        .iter()
-                        .chain(core::iter::once(&self.open))
-                        .find(|b| b.id == id);
+                    let blk = self.block_by_id(id);
                     match blk {
                         _ if zone_tagged.get(&id).copied().unwrap_or(false) => LineClass::Doc,
                         Some(b) if b.annotated() => LineClass::Doc,
@@ -2245,16 +2718,13 @@ impl Transcript {
             return idx;
         }
         let src = self
-            .frozen
-            .iter()
-            .find(|b| b.id == tag.block)
-            .and_then(|b| b.objs.get((tag.obj as usize).wrapping_sub(1)))
+            .source_obj(tag.block, tag.obj)
             .map(|o| (o.ty.clone(), o.refv.clone()));
         let idx = match src {
             None => 0,
             Some(_) if self.open.objs.len() >= MAX_OBJS_PER_BLOCK => 0,
             Some((ty, refv)) => {
-                let bytes = ty.len() + refv.len();
+                let bytes = OBJ_OVERHEAD + ty.len() + refv.len();
                 self.open.cost += bytes;
                 self.stored_cost += bytes;
                 self.open.objs.push(Obj { ty, refv });
@@ -2334,20 +2804,57 @@ impl Transcript {
         self.cells_mode = on;
     }
 
-    /// The block with id `id` -- the open one or a frozen one; None once
-    /// evicted.
+    /// The block with id `id` -- the open one, a frozen one, or the husk a
+    /// forget kept of it (HALCYON 14.13); None once evicted.
     pub fn block_by_id(&self, id: u64) -> Option<&Block> {
         if self.open.id == id {
             Some(&self.open)
         } else {
-            self.frozen.iter().find(|b| b.id == id)
+            self.frozen
+                .iter()
+                .find(|b| b.id == id)
+                .or_else(|| self.husk(id).map(|h| &h.block))
         }
+    }
+
+    /// The husk a forget kept of block `id` (the store is in id order).
+    fn husk(&self, id: u64) -> Option<&Husk> {
+        let i = self.husks.binary_search_by_key(&id, |h| h.block.id).ok()?;
+        self.husks.get(i)
+    }
+
+    /// Obj `obj` (idx+1) of block `id`, wherever the block lives: open,
+    /// frozen, or the husk a forget kept, which holds only the objects the
+    /// live screen named.
+    fn source_obj(&self, id: u64, obj: u16) -> Option<&Obj> {
+        let i = (obj as usize).checked_sub(1)?;
+        if self.open.id == id {
+            return self.open.objs.get(i);
+        }
+        if let Some(b) = self.frozen.iter().find(|b| b.id == id) {
+            return b.objs.get(i);
+        }
+        self.husk(id)?.obj(obj)
+    }
+
+    /// Every object the transcript still holds, as (type, ref): the open
+    /// block's, the frozen blocks' and the husks'.
+    pub fn objs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.open
+            .objs
+            .iter()
+            .chain(self.frozen.iter().flat_map(|b| b.objs.iter()))
+            .chain(
+                self.husks
+                    .iter()
+                    .flat_map(|h| h.objs.iter().map(|(_, o)| o)),
+            )
+            .map(|o| (o.ty.as_str(), o.refv.as_str()))
     }
 
     /// The (type, resolved ref) of obj `obj` (idx+1) in block `id`.
     pub fn obj_in_block(&self, id: u64, obj: u16) -> Option<(&str, &str)> {
-        let b = self.block_by_id(id)?;
-        let o = b.objs.get((obj as usize).checked_sub(1)?)?;
+        let o = self.source_obj(id, obj)?;
         Some((o.ty.as_str(), o.refv.as_str()))
     }
 
@@ -2363,6 +2870,7 @@ impl Transcript {
         self.max_open_cost = open_cap(max_cost);
         self.enforce_block_cap();
         self.enforce_budget();
+        self.seq = self.seq.wrapping_add(1);
     }
 
     /// This transcript's current content budget (its share of the session
@@ -2387,7 +2895,8 @@ impl Transcript {
         (self.max_cost / 2).max(OPEN_BLOCK_MAX_COST)
     }
 
-    /// The retained cost the budget bounds (frozen blocks + the open one).
+    /// The retained cost the budget bounds (the frozen blocks, the open one
+    /// and the husks).
     pub fn stored_cost(&self) -> usize {
         self.stored_cost
     }
@@ -3481,6 +3990,40 @@ mod tests {
     }
 
     #[test]
+    fn a_shed_counts_only_the_rows_still_on_their_way() {
+        // Two rows arrived and the repaint that shows them gone did not: they
+        // are the grid's top rows, here already. A reflow that drops one of
+        // them sends nothing on its way; of three more it drops, the one here
+        // already is not counted either.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.push_scrolled_rows(&[wrow("a"), wrow("b")], &[false, false], &SpanMap::new());
+        assert_eq!((t.rows_scrolled(), t.rows_left()), (2, 0), "premise: two rows here, none shown gone");
+        t.note_grid_shed(1);
+        assert_eq!((t.rows_scrolled(), t.rows_left()), (2, 1), "a dropped row that arrived counts once");
+        t.note_grid_shed(3);
+        assert_eq!((t.rows_scrolled(), t.rows_left()), (4, 4), "two of the three are on their way");
+        t.push_scrolled_rows(&[wrow("c"), wrow("d")], &[false, false], &SpanMap::new());
+        assert_eq!(t.rows_scrolled(), 4, "and arrive once");
+        t.note_grid_moved();
+        assert_eq!(t.rows_left(), 4, "a repaint shows nothing more gone");
+    }
+
+    #[test]
+    fn a_repaint_inside_an_open_re_cut_is_a_change() {
+        // Outside a re-cut a repaint that shows no row gone changes nothing a
+        // selection reads; inside one it paints over rows the re-cut holds.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let seq = t.seq;
+        t.note_grid_moved();
+        assert_eq!((t.seq, t.repaints()), (seq, 1), "counted, and no change");
+        t.note_grid_recut();
+        let seq = t.seq;
+        t.note_grid_moved();
+        assert_ne!(t.seq, seq, "inside a re-cut every repaint is a change");
+        assert_eq!(t.repaints(), 2);
+    }
+
+    #[test]
     fn a_pending_soft_wrapped_line_spans_push_calls() {
         // The last row of a batch may soft-wrap (its continuation is still on
         // the live grid); the fragment carries to the next call and rejoins,
@@ -4438,5 +4981,1047 @@ mod tests {
             "em nesting bounded across feeds: {}",
             em_depth
         );
+    }
+
+    // --- TC-1b: the user's history chord (HALCYON 14.13) --------------------
+
+    /// A cells-mode transcript fed the way a tile feeds it: every frame noted
+    /// in a span ring, rows arriving as they leave the grid.
+    struct Tc1b {
+        t: Transcript,
+        spans: SpanMap,
+        serial: u32,
+    }
+
+    impl Tc1b {
+        fn new() -> Tc1b {
+            let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+            t.set_cells_mode(true);
+            Tc1b {
+                t,
+                spans: SpanMap::new(),
+                serial: 0,
+            }
+        }
+
+        fn frame(&mut self, f: &dyn Fn(&mut Vec<u8>)) -> u32 {
+            let mut b = Vec::new();
+            f(&mut b);
+            self.serial += 1;
+            self.t.feed_frame(&b, self.serial);
+            self.spans.note(self.serial, self.t.span_tag());
+            self.serial
+        }
+
+        fn cells(text: &str, span: u32) -> Vec<vt::Cell> {
+            text.chars()
+                .map(|ch| vt::Cell {
+                    ch,
+                    fg: 0,
+                    bg: 0,
+                    attrs: 0,
+                    span,
+                })
+                .collect()
+        }
+
+        fn row(&mut self, text: &str, span: u32) {
+            self.t
+                .push_scrolled_rows(&[Self::cells(text, span)], &[false], &self.spans);
+        }
+
+        fn zone(&mut self) -> u32 {
+            self.frame(&|b| wire::open(b, Op::Zone, &[("k", "output")]))
+        }
+
+        fn close(&mut self) -> u32 {
+            self.frame(&|b| wire::close(b, Op::Zone))
+        }
+
+        fn path(&mut self, p: &str) -> u32 {
+            let s = self.frame(&|b| wire::open(b, Op::Obj, &[("type", "path"), ("ref", p)]));
+            self.frame(&|b| wire::close(b, Op::Obj));
+            s
+        }
+
+        fn texts(b: &Block) -> Vec<String> {
+            b.items
+                .iter()
+                .filter_map(|it| match it {
+                    Item::Line(l) => Some(line_str(l)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn forget_drops_the_history_and_keeps_the_running_zone() {
+        let mut c = Tc1b::new();
+        let s_a = c.zone();
+        c.row("a1", s_a);
+        c.close();
+        let s_b = c.zone();
+        let open_id = c.t.open_block().id;
+        c.row("b1", s_b);
+        c.row("b2", s_b);
+        assert_eq!(c.t.frozen_blocks().len(), 1, "A is history");
+        assert_eq!(Tc1b::texts(c.t.open_block()), ["b1", "b2"]);
+        c.t.forget(&BTreeSet::new());
+        assert!(c.t.frozen_blocks().is_empty(), "every frozen block is gone");
+        assert!(
+            c.t.open_block().items.is_empty(),
+            "so are the running zone's scrolled-off lines"
+        );
+        assert_eq!(
+            c.t.open_block().id,
+            open_id,
+            "the running zone keeps its identity"
+        );
+        // Its next row and its close still land in the same block.
+        c.row("b3", s_b);
+        c.close();
+        let b = c.t.frozen_blocks().back().expect("the zone froze");
+        assert_eq!(b.id, open_id);
+        assert_eq!(Tc1b::texts(b), ["b3"]);
+    }
+
+    #[test]
+    fn forget_keeps_the_running_zones_class() {
+        // Any structure makes a zone a document; the forget takes the
+        // structure, never the zone's class.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Rule, &[]),
+            F::Text("under the rule\n"),
+        ]));
+        assert_eq!(
+            t.open_block().class(),
+            LineClass::Doc,
+            "premise: the rule makes it a document"
+        );
+        t.forget(&BTreeSet::new());
+        assert!(t.open_block().items.is_empty());
+        assert_eq!(t.open_block().class(), LineClass::Doc, "still a document");
+    }
+
+    #[test]
+    fn forget_drops_the_scrolled_off_half_of_a_wrapped_line() {
+        let mut c = Tc1b::new();
+        let s = c.zone();
+        c.t.push_scrolled_rows(&[Tc1b::cells("hello ", s)], &[true], &c.spans);
+        assert!(
+            c.t.open_block().items.is_empty(),
+            "held: the line continues on the grid"
+        );
+        c.t.forget(&BTreeSet::new());
+        c.row("world", s);
+        assert_eq!(
+            Tc1b::texts(c.t.open_block()),
+            ["world"],
+            "the forgotten half never rejoins"
+        );
+    }
+
+    #[test]
+    fn forget_keeps_a_husk_of_a_block_the_live_screen_names() {
+        let mut c = Tc1b::new();
+        c.zone();
+        let a = c.t.open_block().id;
+        let s_path = c.path("/lib/aurora");
+        assert!(c.t.open_block().annotated(), "A's own object annotates it");
+        c.close();
+        c.zone();
+        let b_id = c.t.open_block().id;
+        // A's path is still on the screen: the ring names (A, 1).
+        c.t.forget(&c.spans.named());
+        assert!(c.t.frozen_blocks().is_empty(), "a husk is not history");
+        assert_eq!(
+            c.t.obj_in_block(a, 1),
+            Some(("path", "/lib/aurora")),
+            "the path on screen still resolves"
+        );
+        let h = c.t.block_by_id(a).expect("the husk");
+        assert!(h.items.is_empty() && h.styles.is_empty(), "no text");
+        assert_eq!(h.class(), LineClass::Doc, "A's class, latched");
+        // The path's row leaves the grid now: it brings its object and keeps
+        // A's class -- never the raw default, never B's.
+        c.row("/lib/aurora", s_path);
+        let o = c.t.open_block();
+        assert_eq!(o.id, b_id);
+        let Some(Item::Line(l)) = o.items.last() else {
+            panic!("the row landed in B")
+        };
+        assert_eq!(l.class, LineClass::Doc);
+        let obj = o.styles[l.cells[0].style as usize].obj;
+        assert_ne!(obj, 0, "its object came along");
+        assert_eq!(o.objs[obj as usize - 1].refv, "/lib/aurora");
+    }
+
+    #[test]
+    fn forget_keeps_nothing_of_a_block_no_live_cell_names() {
+        let mut c = Tc1b::new();
+        c.zone();
+        let a = c.t.open_block().id;
+        c.path("/tmp/a");
+        c.close();
+        c.zone();
+        // Every cell A's frames stamped has left the ring.
+        let mut named = c.spans.named();
+        named.retain(|&(b, _)| b != a);
+        c.t.forget(&named);
+        assert!(c.t.block_by_id(a).is_none(), "no husk");
+        assert_eq!(c.t.obj_in_block(a, 1), None);
+    }
+
+    #[test]
+    fn a_husk_keeps_only_the_objects_the_screen_names() {
+        let mut c = Tc1b::new();
+        c.zone();
+        let a = c.t.open_block().id;
+        for p in ["/one", "/two", "/three"] {
+            c.path(p);
+        }
+        c.close();
+        c.zone();
+        let named: BTreeSet<(u64, u16)> = [(a, 2)].into_iter().collect();
+        c.t.forget(&named);
+        assert_eq!(c.t.obj_in_block(a, 2), Some(("path", "/two")));
+        assert_eq!(
+            c.t.obj_in_block(a, 1),
+            None,
+            "an unnamed slot resolves to nothing"
+        );
+        assert_eq!(
+            c.t.obj_in_block(a, 3),
+            None,
+            "nor does one past the last named"
+        );
+        let h = c.t.block_by_id(a).unwrap();
+        assert_eq!(
+            h.cost,
+            HUSK_OVERHEAD + core::mem::size_of::<(u16, Obj)>() + "path".len() + "/two".len(),
+            "a husk costs its block and its named objects"
+        );
+    }
+
+    #[test]
+    fn a_husk_naming_no_object_still_costs_its_block() {
+        // The ring can name a block for its class alone. Such a husk holds
+        // no text, but it is still a block, and a budget that did not see it
+        // would bound nothing.
+        let mut c = Tc1b::new();
+        let mut ids = Vec::new();
+        for text in ["a", "b", "c"] {
+            let s = c.zone();
+            ids.push(c.t.open_block().id);
+            c.row(text, s);
+        }
+        c.zone();
+        c.t.forget(&c.spans.named());
+        for &id in ids.iter() {
+            assert!(
+                c.t.block_by_id(id).is_some(),
+                "a husk for each zone the ring names, for its class alone"
+            );
+        }
+        assert!(
+            c.t.stored_cost >= ids.len() * core::mem::size_of::<Block>(),
+            "each husk charges at least its block: {}",
+            c.t.stored_cost
+        );
+        let cost = c.t.stored_cost;
+        c.t.set_max_cost(cost - 1);
+        assert!(c.t.block_by_id(ids[0]).is_none(), "the oldest husk went");
+        assert!(
+            c.t.block_by_id(ids[1]).is_some() && c.t.block_by_id(ids[2]).is_some(),
+            "one husk freed enough"
+        );
+    }
+
+    #[test]
+    fn the_budget_evicts_husks_before_any_history() {
+        let mut c = Tc1b::new();
+        c.zone();
+        let a = c.t.open_block().id;
+        c.path("/lib/aurora");
+        c.close();
+        c.zone();
+        c.t.forget(&c.spans.named());
+        assert!(c.t.block_by_id(a).is_some(), "the husk");
+        for text in ["x1", "x2"] {
+            let s = c.zone();
+            c.row(text, s);
+            c.close();
+        }
+        let hist = c.t.frozen_blocks().len();
+        assert!(hist >= 2, "history after the forget: {}", hist);
+        // One byte over: one thing must go, and it is the husk.
+        let cost = c.t.stored_cost;
+        c.t.set_max_cost(cost - 1);
+        assert!(c.t.block_by_id(a).is_none(), "the husk went first");
+        assert_eq!(c.t.frozen_blocks().len(), hist, "and no history with it");
+    }
+
+    #[test]
+    fn a_forget_leaves_stored_cost_the_sum_of_what_remains() {
+        // The invariant every content site upholds -- stored_cost == every
+        // live block's cost -- now counting the husks, and the open block's
+        // retained tables (its objects and its cmd mark) once its items go.
+        let live = |t: &Transcript| {
+            t.frozen_blocks().iter().map(|b| b.cost).sum::<usize>()
+                + t.open_block().cost
+                + t.husks.iter().map(|h| h.block.cost).sum::<usize>()
+        };
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("$ "),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "make -j8 all")]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/src/main.rs")]),
+            F::Text("main.rs"),
+            F::Close(Op::Obj),
+            F::Text(" built\n"),
+        ]));
+        assert!(!t.frozen_blocks().is_empty() && !t.open_block().items.is_empty());
+        t.forget(&BTreeSet::new());
+        assert_eq!(
+            t.open_block().cost,
+            "make -j8 all".len() + OBJ_OVERHEAD,
+            "exactly the retained charges: the command, and the slot of an object only a forgotten line used"
+        );
+        assert_eq!(t.stored_cost, live(&t));
+        assert!(t.running(), "the command still runs: its mark stays");
+        t.feed(&frames(&[
+            F::Text("more\n"),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("$ "),
+            F::Close(Op::Zone),
+        ]));
+        assert_eq!(t.stored_cost, live(&t));
+        t.set_max_cost(1);
+        assert_eq!(
+            t.stored_cost,
+            live(&t),
+            "eviction subtracts exactly what was charged"
+        );
+    }
+
+    #[test]
+    fn rows_dropped_counts_the_budget_and_the_forget_by_the_selection_rule() {
+        let mut t = Transcript::with_caps(daylight(), 2, 1 << 20, 10_000);
+        let zone = |t: &mut Transcript, lines: &str| {
+            t.feed(&frames(&[
+                F::Open(Op::Zone, &[("k", "output")]),
+                F::Text(lines),
+                F::Close(Op::Zone),
+            ]));
+        };
+        zone(&mut t, "a\nb\nc\n");
+        zone(&mut t, "d\n");
+        assert_eq!(t.rows_dropped(), 0);
+        zone(&mut t, "e\nf\n");
+        assert_eq!(
+            t.rows_dropped(),
+            3,
+            "the budget dropped the three-line block"
+        );
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Text("g\n"),
+        ]));
+        t.forget(&BTreeSet::new());
+        assert_eq!(
+            t.rows_dropped(),
+            3 + 1 + 2 + 1,
+            "every frozen row and the open zone's"
+        );
+    }
+
+    #[test]
+    fn a_forget_ends_within_the_budget() {
+        // One frozen block, which the budget's one-block floor keeps however
+        // small the budget, and the ring names it. Its husk has no floor, and
+        // a husk can cost more than the block it was.
+        let mut c = Tc1b::new();
+        let s = c.zone();
+        let a = c.t.open_block().id;
+        c.row("a", s);
+        c.zone();
+        c.t.set_max_cost(1);
+        assert_eq!(c.t.frozen_blocks().len(), 1, "premise: the floor keeps A");
+        c.t.forget(&c.spans.named());
+        assert!(
+            c.t.block_by_id(a).is_none(),
+            "the forget itself evicted A's husk"
+        );
+        assert!(c.t.stored_cost <= 1, "{}", c.t.stored_cost);
+    }
+
+    #[test]
+    fn forget_empties_a_byte_fed_zones_open_pre_and_table() {
+        // The console's zone gathers a pre's lines and a table's rows until
+        // they close; gathered before the chord, they are history.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Pre, &[]),
+            F::Text("old pre\n"),
+        ]));
+        t.forget(&BTreeSet::new());
+        t.feed(&frames(&[F::Text("new pre\n"), F::Close(Op::Pre)]));
+        let Some(Item::Pre(lines)) = t.open_block().items.last() else {
+            panic!("the pre closed into the zone")
+        };
+        let texts: Vec<String> = lines.iter().map(line_str).collect();
+        assert_eq!(texts, ["new pre"]);
+        // A header table: the header and a body row finish, and a third row
+        // is half written when the chord comes.
+        t.feed(&frames(&[
+            F::Open(Op::Table, &[("cols", "ll"), ("hdr", "1")]),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Text("head"),
+            F::Close(Op::Cell),
+            F::Close(Op::Row),
+            F::Text("\n"),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Text("old"),
+            F::Close(Op::Cell),
+            F::Close(Op::Row),
+            F::Text("\n"),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Text("k1"),
+            F::Close(Op::Cell),
+        ]));
+        t.forget(&BTreeSet::new());
+        t.feed(&frames(&[
+            F::Open(Op::Cell, &[]),
+            F::Text("k2"),
+            F::Close(Op::Cell),
+            F::Close(Op::Row),
+            F::Text("\n"),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Text("new"),
+            F::Close(Op::Cell),
+            F::Close(Op::Row),
+            F::Text("\n"),
+            F::Close(Op::Table),
+        ]));
+        let Some(Item::Table(tb)) = t.open_block().items.last() else {
+            panic!("the table closed into the zone")
+        };
+        let rows: Vec<Vec<String>> = tb
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.iter().map(|x| x.ch).collect()).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [alloc::vec!["k1", "k2"], alloc::vec!["new"]],
+            "the finished rows went; the row being written stayed whole"
+        );
+        assert!(!tb.hdr, "the header row went with them: `k1` is no header");
+    }
+
+    #[test]
+    fn a_bare_obj_costs_its_slot_and_objects_alone_freeze_the_open_block() {
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Obj, &[]),
+            F::Close(Op::Obj),
+        ]));
+        assert_eq!(t.open_block().objs.len(), 1);
+        assert_eq!(t.open_block().cost, OBJ_OVERHEAD, "a bare obj is not free");
+        // Objects with long refs and no text: the open block's cap binds them,
+        // so the budget can reach what they hold.
+        let long = "r".repeat(1000);
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.feed(&frames(&[F::Open(Op::Zone, &[("k", "output")])]));
+        let cap = t.max_open_cost;
+        let mut fed = 0;
+        while t.frozen_blocks().is_empty() && fed < 5000 {
+            t.feed(&frames(&[
+                F::Open(Op::Obj, &[("type", "path"), ("ref", long.as_str())]),
+                F::Close(Op::Obj),
+            ]));
+            fed += 1;
+        }
+        assert!(
+            !t.frozen_blocks().is_empty(),
+            "objects alone froze the open block ({} fed)",
+            fed
+        );
+        let one = OBJ_OVERHEAD + "path".len() + long.len();
+        assert!(
+            t.frozen_blocks()[0].cost <= cap + one,
+            "the frozen block holds at most one obj past the cap: {} against {}",
+            t.frozen_blocks()[0].cost,
+            cap
+        );
+    }
+
+    #[test]
+    fn a_continuation_keeps_the_running_command() {
+        // The block cap freezes a long command's output mid-run; the rest goes
+        // on in a continuation, and the command is still running.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 3);
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "make")]),
+            F::Text("1\n2\n3\n4\n"),
+        ]));
+        assert!(
+            !t.frozen_blocks().is_empty(),
+            "premise: the line cap froze the block"
+        );
+        assert!(t.open_block().continuation);
+        assert!(t.running(), "the job still runs");
+        assert_eq!(t.last_command(), Some("make"));
+        let live = |t: &Transcript| {
+            t.frozen_blocks().iter().map(|b| b.cost).sum::<usize>() + t.open_block().cost
+        };
+        assert_eq!(t.stored_cost, live(&t), "the carried mark is charged");
+        t.feed(&frames(&[F::Point(
+            Op::Mark,
+            &[("k", "exit"), ("code", "0")],
+        )]));
+        assert!(!t.running(), "its exit ends it");
+    }
+
+    #[test]
+    fn a_named_bare_obj_keeps_resolving_through_its_husk() {
+        // An obj with neither type nor ref is still an object: the cells it
+        // covers keep the look it gave them.
+        let mut c = Tc1b::new();
+        c.zone();
+        let a = c.t.open_block().id;
+        c.frame(&|b| wire::open(b, Op::Obj, &[]));
+        c.frame(&|b| wire::close(b, Op::Obj));
+        c.close();
+        c.zone();
+        assert_eq!(
+            c.t.obj_in_block(a, 1),
+            Some(("", "")),
+            "premise: it resolves while frozen"
+        );
+        c.t.forget(&c.spans.named());
+        assert_eq!(
+            c.t.obj_in_block(a, 1),
+            Some(("", "")),
+            "and through the husk"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_row_is_found_in_the_history_row_its_line_joined() {
+        let mut c = Tc1b::new();
+        let s = c.zone();
+        let rows = |texts: &[&str]| texts.iter().map(|t| Tc1b::cells(t, s)).collect::<Vec<_>>();
+        c.t.push_scrolled_rows(&rows(&["before"]), &[false], &c.spans);
+        // Rows 1-2 are one line wrapped over two rows, 3 a plain line, and 4
+        // half a line still held.
+        c.t.push_scrolled_rows(
+            &rows(&["long ", "line", "plain", "held "]),
+            &[true, false, false, true],
+            &c.spans,
+        );
+        let hist = c.t.open_block().flat_rows();
+        assert_eq!(hist, 3, "before, the joined line, plain");
+        assert_eq!(c.t.scrolled_row(0, hist), ScrolledRow::History(0));
+        assert_eq!(
+            c.t.scrolled_row(1, hist),
+            ScrolledRow::History(1),
+            "the first half"
+        );
+        assert_eq!(
+            c.t.scrolled_row(2, hist),
+            ScrolledRow::History(1),
+            "the second half"
+        );
+        assert_eq!(c.t.scrolled_row(3, hist), ScrolledRow::History(2));
+        assert_eq!(c.t.scrolled_row(4, hist), ScrolledRow::Held);
+        assert_eq!(c.t.scrolled_row(5, hist), ScrolledRow::Ahead, "no row this far is here");
+        c.t.forget(&BTreeSet::new());
+        assert_eq!(
+            c.t.scrolled_row(1, 0),
+            ScrolledRow::Gone,
+            "a forget takes the row"
+        );
+        assert_eq!(
+            c.t.scrolled_row(4, 0),
+            ScrolledRow::Gone,
+            "and ends the held half"
+        );
+    }
+
+    #[test]
+    fn a_forget_takes_the_last_exit_label_with_its_command() {
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "false")]),
+            F::Point(Op::Mark, &[("k", "exit"), ("code", "1")]),
+            F::Close(Op::Zone),
+        ]));
+        assert_eq!(
+            (t.last_command(), t.last_exit_code()),
+            (Some("false"), Some(1))
+        );
+        t.forget(&BTreeSet::new());
+        assert_eq!(
+            (t.last_command(), t.last_exit_code()),
+            (None, None),
+            "no `exit 1` for a command the history no longer holds"
+        );
+    }
+
+    #[test]
+    fn husks_are_found_whatever_order_their_blocks_froze_in() {
+        // An injected image freezes ahead of the block open when it came, so
+        // the frozen deque is not in id order; the husk store must be.
+        let mut c = Tc1b::new();
+        let s = c.zone();
+        let a = c.t.open_block().id;
+        c.row("a", s);
+        assert!(c.t.inject_image(1, 1, alloc::vec![0]));
+        let img = c.t.frozen_blocks().back().expect("the image").id;
+        c.zone();
+        let ids: Vec<u64> = c.t.frozen_blocks().iter().map(|b| b.id).collect();
+        assert_eq!(ids, [img, a], "premise: frozen out of id order");
+        let named: BTreeSet<(u64, u16)> = [(a, 0), (img, 0)].into_iter().collect();
+        c.t.forget(&named);
+        assert!(c.t.block_by_id(a).is_some() && c.t.block_by_id(img).is_some());
+    }
+
+    #[test]
+    fn a_forget_mid_table_leaves_a_tiles_tag_state_alone() {
+        // A tile's table accumulator holds no text, only the state its grid's
+        // cells are tagged under: the column a cell sits in, and whether its
+        // row is the header. A forget mid-row restarts neither.
+        let mut c = Tc1b::new();
+        c.zone();
+        c.frame(&|b| wire::open(b, Op::Table, &[("cols", "ll"), ("hdr", "1")]));
+        for _ in 0..2 {
+            c.frame(&|b| wire::open(b, Op::Row, &[]));
+            c.frame(&|b| wire::open(b, Op::Cell, &[]));
+            c.frame(&|b| wire::close(b, Op::Cell));
+            c.frame(&|b| wire::close(b, Op::Row));
+        }
+        c.frame(&|b| wire::open(b, Op::Row, &[]));
+        c.frame(&|b| wire::open(b, Op::Cell, &[]));
+        c.frame(&|b| wire::close(b, Op::Cell));
+        c.t.forget(&BTreeSet::new());
+        let s = c.frame(&|b| wire::open(b, Op::Cell, &[]));
+        let tag = c.spans.get(s).expect("noted");
+        assert_ne!(tag.em & TAG_CELL, 0, "premise: inside a cell");
+        assert_eq!(tag_col(tag.hdr), 1, "the row's second cell, not its first again");
+        assert_eq!(tag.em & TAG_ROW_HDR, 0, "a body row, not a header again");
+    }
+
+    #[test]
+    fn a_tile_block_frozen_mid_pre_adds_no_row_and_keeps_the_pre() {
+        // The block cap freezing a tile's open block mid-pre adds no item (an
+        // empty fence was a history row no scrolled line added, so every row
+        // before it resolved one row off), and the pre goes on in the
+        // continuation: the frames after the freeze still tag it.
+        let mut c = Tc1b::new();
+        c.t = Transcript::with_caps(daylight(), 1000, 1 << 20, 2);
+        c.t.set_cells_mode(true);
+        let z = c.zone();
+        c.row("one", z);
+        let p = c.frame(&|b| wire::open(b, Op::Pre, &[]));
+        c.row("pre a", p);
+        assert_eq!(c.t.frozen_blocks().len(), 1, "premise: the cap froze the block mid-pre");
+        let q = c.path("/bin");
+        c.row("pre b", q);
+        let blocks: Vec<&Block> = c
+            .t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(c.t.open_block()))
+            .collect();
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.items.iter().any(|it| matches!(it, Item::Pre(l) if l.is_empty()))),
+            "no empty fence"
+        );
+        let hist: usize = blocks.iter().map(|b| b.flat_rows()).sum();
+        assert_eq!(hist, 3, "one, the fence holding pre a, the fence holding pre b");
+        assert_eq!(c.t.scrolled_row(0, hist), ScrolledRow::History(0), "one");
+        assert_eq!(c.t.scrolled_row(1, hist), ScrolledRow::History(1), "pre a");
+        assert_eq!(c.t.scrolled_row(2, hist), ScrolledRow::History(2), "pre b");
+        let Some(Item::Pre(lines)) = c.t.open_block().items.last() else {
+            panic!("pre b is a pre line: the pre went on past the freeze")
+        };
+        assert_eq!(line_str(&lines[0]), "pre b");
+    }
+
+    #[test]
+    fn a_pre_with_nothing_gathered_leaves_no_fence_at_a_freeze() {
+        // A byte-fed pre still empty when the block cap freezes its block
+        // leaves no empty fence behind in the frozen block.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Text("before\n"),
+            F::Open(Op::Pre, &[]),
+        ]));
+        t.set_max_cost(1);
+        assert_eq!(t.frozen_blocks().len(), 1, "premise: the cap froze the block mid-pre");
+        assert!(
+            !t.frozen_blocks()
+                .iter()
+                .chain(core::iter::once(t.open_block()))
+                .any(|b| b.items.iter().any(|it| matches!(it, Item::Pre(l) if l.is_empty()))),
+            "no empty fence"
+        );
+    }
+
+    #[test]
+    fn a_tile_table_goes_on_across_a_continuation() {
+        // The block cap freezing a tile's open block mid-table keeps the
+        // table open: a row written after the freeze is still the same
+        // table's, laid by its spec.
+        let mut c = Tc1b::new();
+        c.t = Transcript::with_caps(daylight(), 1000, 1 << 20, 1);
+        c.t.set_cells_mode(true);
+        c.zone();
+        c.frame(&|b| wire::open(b, Op::Table, &[("cols", "rl")]));
+        let row = |c: &mut Tc1b, a: &str, b: &str| {
+            c.frame(&|w| wire::open(w, Op::Row, &[]));
+            let s0 = c.frame(&|w| wire::open(w, Op::Cell, &[]));
+            c.frame(&|w| wire::close(w, Op::Cell));
+            let s1 = c.frame(&|w| wire::open(w, Op::Cell, &[]));
+            c.frame(&|w| wire::close(w, Op::Cell));
+            c.frame(&|w| wire::close(w, Op::Row));
+            let mut cells = Tc1b::cells(a, s0);
+            cells.extend(Tc1b::cells(" ", 0));
+            cells.extend(Tc1b::cells(b, s1));
+            c.t.push_scrolled_rows(&[cells], &[false], &c.spans);
+        };
+        row(&mut c, "a1", "b1");
+        assert_eq!(c.t.frozen_blocks().len(), 1, "premise: the cap froze the block mid-table");
+        row(&mut c, "a2", "b2");
+        let tables: Vec<&TableModel> = c
+            .t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(c.t.open_block()))
+            .flat_map(|b| b.items.iter())
+            .filter_map(|it| match it {
+                Item::Table(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 2, "each row laid as a table row");
+        assert!(
+            tables.iter().all(|t| t.cols == b"rl" && t.src == tables[0].src),
+            "one table, its spec kept across the freeze"
+        );
+    }
+
+    #[test]
+    fn an_obj_past_the_block_cap_leaves_the_line_it_is_in_whole() {
+        // Objects mid-line take the open block past its cap: the line is not
+        // cut there, the objects past the cap lose their link, and the line's
+        // own push freezes the block.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let long = "r".repeat(1000);
+        let obj = |text: &'static str| {
+            frames(&[
+                F::Open(Op::Obj, &[("type", "path"), ("ref", long.as_str())]),
+                F::Text(text),
+                F::Close(Op::Obj),
+            ])
+        };
+        t.feed(&frames(&[F::Open(Op::Zone, &[("k", "output")]), F::Text("start ")]));
+        let cap = t.max_open_cost;
+        let mut fed = 0;
+        while t.open_block().cost < cap && fed < 5000 {
+            t.feed(&obj("x"));
+            fed += 1;
+        }
+        assert!(t.open_block().cost >= cap, "premise: the objects took the block past its cap");
+        for _ in 0..3 {
+            t.feed(&obj("y"));
+        }
+        assert!(t.frozen_blocks().is_empty(), "no freeze mid-line");
+        assert_eq!(t.open_block().objs.len(), fed, "the three past the cap are unlinked");
+        t.feed(&frames(&[F::Text(" end\n")]));
+        let b = t.frozen_blocks().front().expect("the line's push froze the block");
+        assert_eq!(
+            Tc1b::texts(b),
+            [alloc::format!("start {}yyy end", "x".repeat(fed))],
+            "the line landed whole"
+        );
+    }
+
+    #[test]
+    fn an_obj_past_the_block_cap_leaves_the_table_it_is_in_whole() {
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let long = "r".repeat(1000);
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Table, &[("cols", "l")]),
+        ]));
+        let per = OBJ_OVERHEAD + "path".len() + long.len();
+        let rows = t.max_open_cost / per + 4;
+        for _ in 0..rows {
+            t.feed(&frames(&[
+                F::Open(Op::Row, &[]),
+                F::Open(Op::Cell, &[]),
+                F::Open(Op::Obj, &[("type", "path"), ("ref", long.as_str())]),
+                F::Text("x"),
+                F::Close(Op::Obj),
+                F::Close(Op::Cell),
+                F::Close(Op::Row),
+                F::Text("\n"),
+            ]));
+        }
+        assert!(t.open_block().cost >= t.max_open_cost, "premise: past the cap mid-table");
+        assert!(t.frozen_blocks().is_empty(), "no freeze mid-table");
+        t.feed(&frames(&[F::Close(Op::Table)]));
+        let tables: Vec<&TableModel> = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .flat_map(|b| b.items.iter())
+            .filter_map(|it| match it {
+                Item::Table(tb) => Some(tb),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 1, "one table");
+        assert_eq!(tables[0].rows.len(), rows, "with every row");
+    }
+
+    #[test]
+    fn a_dropped_block_takes_its_charges_out_of_the_budget() {
+        // A zone-less byte-fed block holding objects and no line is dropped
+        // at its freeze; what it was charged goes with it.
+        let live = |t: &Transcript| {
+            t.frozen_blocks().iter().map(|b| b.cost).sum::<usize>()
+                + t.open_block().cost
+                + t.husks.iter().map(|h| h.block.cost).sum::<usize>()
+        };
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/a")]),
+            F::Close(Op::Obj),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/b")]),
+            F::Close(Op::Obj),
+        ]));
+        assert!(t.open_block().cost > 0, "premise: the objects were charged");
+        t.feed(&frames(&[F::Open(Op::Zone, &[("k", "output")])]));
+        assert!(t.frozen_blocks().is_empty(), "premise: the block was dropped");
+        assert_eq!(t.stored_cost, live(&t));
+    }
+
+    #[test]
+    fn past_the_scroll_line_ring_a_row_falls_back_and_the_oldest_remembered_resolves() {
+        // More lines than the ring remembers within one refresh window.
+        // Each line its own zone, so the budget evicts the oldest meanwhile.
+        use crate::select::{flatten_with_grid, Sel, Stamp};
+        let mut c = Tc1b::new();
+        c.t = Transcript::with_caps(daylight(), SCROLL_LINES_MAX + 66, 1 << 20, 10_000);
+        c.t.set_cells_mode(true);
+        let flat = flatten_with_grid(&c.t, 16);
+        let mut sel = Sel::at(12, Stamp::of(&c.t, &flat));
+        let n = SCROLL_LINES_MAX + 76;
+        for i in 0..n {
+            let z = c.zone();
+            c.row(&alloc::format!("r{}", i), z);
+            c.close();
+        }
+        let hist: usize = c
+            .t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(c.t.open_block()))
+            .map(|b| b.flat_rows())
+            .sum();
+        assert_eq!(hist, n - 10, "premise: the budget evicted the ten oldest lines");
+        assert_eq!(c.t.scrolled_row(75, hist), ScrolledRow::Unknown, "older than the ring");
+        assert_eq!(
+            c.t.scrolled_row(76, hist),
+            ScrolledRow::History(66),
+            "the oldest remembered, less the ten evicted"
+        );
+        assert_eq!(
+            c.t.scrolled_row(n as u64 - 1, hist),
+            ScrolledRow::History(hist - 1),
+            "the newest"
+        );
+        // A selection that last looked before all of it, brought current at
+        // the repaint that shows the rows gone: one history row per scrolled
+        // row, less what went from the front -- exact here, where no line
+        // wrapped.
+        c.t.note_grid_moved();
+        let flat = flatten_with_grid(&c.t, 16);
+        sel.rebase(&c.t, Stamp::of(&c.t, &flat), flat.len());
+        assert_eq!(sel.cursor, 2, "grid row 12 became r12, history row 2 once r0-r9 went");
+    }
+
+    #[test]
+    fn a_forget_blanks_the_objects_only_forgotten_rows_used() {
+        let mut c = Tc1b::new();
+        c.zone();
+        let a_obj = c.path("/a");
+        c.close();
+        c.zone();
+        let open_id = c.t.open_block().id;
+        // A row written under A's object lands here: the object is copied.
+        c.row("from a", a_obj);
+        c.path("/b");
+        let d_obj = c.path("/d");
+        c.row("d", d_obj);
+        c.frame(&|b| wire::open(b, Op::Obj, &[("type", "path"), ("ref", "/c")]));
+        let refs = |t: &Transcript| -> Vec<String> {
+            t.open_block().objs.iter().map(|o| o.refv.clone()).collect()
+        };
+        assert_eq!(refs(&c.t), ["/a", "/b", "/d", "/c"], "premise");
+        // /d's frames age out of the ring (later frames take their slots).
+        for s in [d_obj, d_obj + 1] {
+            c.spans.note(s + SPAN_MAP_ENTRIES as u32, SpanTag::default());
+        }
+        let named = c.spans.named();
+        assert!(!named.contains(&(open_id, 3)), "premise: the ring no longer names /d");
+        assert!(named.contains(&(open_id, 2)), "premise: it still names /b");
+        c.t.forget(&named);
+        assert_eq!(
+            refs(&c.t),
+            ["", "/b", "", "/c"],
+            "the copy and /d only forgotten rows used; the ring names /b; /c is an open span"
+        );
+        // /a itself stays in A's husk: the ring still names A's frame.
+        assert!(!c.t.objs().any(|(_, r)| r == "/d"), "/d is gone from the transcript");
+        assert_eq!(
+            c.t.open_block().cost,
+            4 * OBJ_OVERHEAD + 2 * "path".len() + "/b".len() + "/c".len()
+        );
+    }
+
+    #[test]
+    fn an_obj_past_the_block_cap_leaves_the_pre_it_is_in_whole() {
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        let long = "r".repeat(1000);
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Pre, &[]),
+        ]));
+        let per = OBJ_OVERHEAD + "path".len() + long.len();
+        let lines = t.max_open_cost / per + 4;
+        for _ in 0..lines {
+            t.feed(&frames(&[
+                F::Open(Op::Obj, &[("type", "path"), ("ref", long.as_str())]),
+                F::Text("x"),
+                F::Close(Op::Obj),
+                F::Text("\n"),
+            ]));
+        }
+        assert!(t.open_block().cost >= t.max_open_cost, "premise: past the cap mid-pre");
+        assert!(t.frozen_blocks().is_empty(), "no freeze mid-pre");
+        t.feed(&frames(&[F::Close(Op::Pre)]));
+        let fences: Vec<usize> = t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(t.open_block()))
+            .flat_map(|b| b.items.iter())
+            .filter_map(|it| match it {
+                Item::Pre(l) => Some(l.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fences, [lines], "one fence, every line");
+    }
+
+    #[test]
+    fn a_tiles_objects_past_the_block_cap_freeze_it_inside_a_table() {
+        // A tile's text is on its grid and its table goes on across a
+        // continuation, so a freeze at an object splits nothing: every object
+        // keeps its link.
+        let mut c = Tc1b::new();
+        c.zone();
+        c.frame(&|b| wire::open(b, Op::Table, &[("cols", "l")]));
+        let long = "r".repeat(1000);
+        let mut fed = 0;
+        while c.t.frozen_blocks().is_empty() && fed < 5000 {
+            c.path(&long);
+            fed += 1;
+        }
+        assert!(
+            !c.t.frozen_blocks().is_empty(),
+            "objects alone froze the block ({} fed)",
+            fed
+        );
+        let linked: usize = c
+            .t
+            .frozen_blocks()
+            .iter()
+            .chain(core::iter::once(c.t.open_block()))
+            .map(|b| b.objs.iter().filter(|o| !o.refv.is_empty()).count())
+            .sum();
+        assert_eq!(linked, fed, "none lost its link");
+    }
+
+    #[test]
+    fn a_forget_keeps_the_objects_the_pending_line_and_the_row_being_written_use() {
+        let refs = |t: &Transcript| -> Vec<String> {
+            t.open_block().objs.iter().map(|o| o.refv.clone()).collect()
+        };
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/old")]),
+            F::Text("old"),
+            F::Close(Op::Obj),
+            F::Text("\n"),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/pending")]),
+            F::Text("pending"),
+            F::Close(Op::Obj),
+        ]));
+        t.forget(&BTreeSet::new());
+        assert_eq!(refs(&t), ["", "/pending"], "the pending line still uses its object");
+        // A table's finished row is history; the row still being written is not.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Table, &[("cols", "l")]),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/done")]),
+            F::Text("done"),
+            F::Close(Op::Obj),
+            F::Close(Op::Cell),
+            F::Close(Op::Row),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/writing")]),
+            F::Text("writing"),
+            F::Close(Op::Obj),
+            F::Close(Op::Cell),
+        ]));
+        t.forget(&BTreeSet::new());
+        assert_eq!(refs(&t), ["", "/writing"], "the row still being written uses its object");
+        // An obj span opened with nothing written under it yet: only the obj
+        // stack holds it (the console has no ring), and the text still to
+        // come must link to it.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Obj, &[("type", "path"), ("ref", "/open")]),
+        ]));
+        t.forget(&BTreeSet::new());
+        assert_eq!(refs(&t), ["/open"], "the open span keeps its object");
     }
 }

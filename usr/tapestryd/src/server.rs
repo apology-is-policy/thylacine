@@ -10019,12 +10019,23 @@ impl Comp {
             ChordAction::Help => {
                 self.deliver_chord(2, 1);
             }
+            // HALCYON 14.13 / HALCYON-INSTRUMENT 9.3 (TC-1b): the history is
+            // the environment's record, so the compositor only delivers the
+            // request with the pane it says is focused. There is no fallback
+            // on a false: the compositor holds no transcript to forget, and
+            // nothing but this chord may delete one.
+            ChordAction::History => {
+                let f = self.layout.focused;
+                if let Some(id) = self.layout.id_of(f) {
+                    self.deliver_chord(4, id);
+                }
+            }
         }
     }
 
-    /// Deliver a picker (1), help (2) or close (3) chord to the registered
-    /// rail's owner as TEV_CHORD (9.3); `value` is 1 for the first two and
-    /// the focused pane's id for the close. Returns whether the owner
+    /// Deliver a picker (1), help (2), close (3) or history (4) chord to the
+    /// registered rail's owner as TEV_CHORD (9.3); `value` is 1 for the first
+    /// two and the focused pane's id for the last two. Returns whether the owner
     /// actually has it: false with no rail (the legacy profile, or a seat
     /// whose rail is not up) and false when the queue was too full to take
     /// it, which retires the rail. Only the CLOSE chord has anything to do
@@ -10034,7 +10045,9 @@ impl Comp {
         let name = match code {
             1 => "picker",
             2 => "help",
-            _ => "close",
+            3 => "close",
+            4 => "history",
+            _ => "unknown",
         };
         match self.rail {
             Some(r) => {

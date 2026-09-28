@@ -100,6 +100,19 @@ ground, with slide one's fresh-tile capture as the control. Its recipe bakes
 the Instrument profile, whose top padding is what the pinned view has to keep
 history out of.
 
+Legs 6 and 7 measure what leg 5 cannot see, because it sits above the view's top
+edge. On entering Normal mode the tile says how many of its flat rows are
+history (a test-mode line beside `normal mode (N rows)`). Leg 6 (TC-1a's move):
+after `seq 1 150`, `true` (the control, one variable away) may add a row or two
+of history, and `clear` over a full screen must add more than half a screen.
+Leg 7 (TC-1b's delete): after Super+K the history count is 0, the grid is the
+size it was, and three screens up (`u` six times) the band below the cursor row
+is ground where it showed history before the chord, while the live screen's top
+rows are as inked as before (the positive control: the chord must not take the
+screen). Then two screens of output make a history again (a line or two would
+scroll nothing off the mostly empty grid the clear left). Normal mode is the only way into a tile's history, because a tile takes
+no wheel.
+
 **The alt screen is the one thing to avoid**, and the avoidance is structural
 rather than a convention: `ScreenMode::AltScreen` makes a tile paint its raw
 mono grid, discarding the rich rendering the facility exists for. lantern

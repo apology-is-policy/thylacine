@@ -147,17 +147,19 @@ pub const TEV_LAYOUT: u16 = 10;
 /// A header un-hovers on it; content surfaces never receive it.
 pub const TEV_PTR_LEAVE: u16 = 11;
 
-/// HALCYON-INSTRUMENT 9.3 (I-7, widened at I-7b): a Super chord the
-/// compositor does not act on itself -- the picker, the keyboard reference
-/// and the ask-before-closing-a-running-job live in the environment, not the
-/// compositor -- delivered to the REGISTERED RAIL's owner so it can act
-/// under its own authority. `code` names the request (1 = picker, 2 = help,
-/// 3 = close the focused pane); `value` is 1 for the first two and the
-/// FOCUSED PANE's id for the close, so the owner acts on the compositor's
-/// focus rather than re-deriving it from a layout file it may have read a
-/// wake ago. Sent only when a rail is registered: with none, the picker and
-/// the reference are said and dropped (the environment has neither there),
-/// while the CLOSE falls back to the compositor's own structural close.
+/// HALCYON-INSTRUMENT 9.3 (I-7, widened at I-7b and TC-1b): a Super chord
+/// the compositor does not act on itself -- the picker, the keyboard
+/// reference, the ask-before-closing-a-running-job and the tile's history
+/// live in the environment, not the compositor -- delivered to the
+/// REGISTERED RAIL's owner so it can act under its own authority. `code`
+/// names the request (1 = picker, 2 = help, 3 = close the focused pane, 4 =
+/// forget its history); `value` is 1 for the first two and the FOCUSED
+/// PANE's id for the last two, so the owner acts on the compositor's focus
+/// rather than re-deriving it from a layout file it may have read a wake
+/// ago. Sent only when a rail is registered: with none, the picker, the
+/// reference and the history chord are said and dropped (the environment
+/// has none of them there), while the CLOSE falls back to the compositor's
+/// own structural close.
 pub const TEV_CHORD: u16 = 12;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).

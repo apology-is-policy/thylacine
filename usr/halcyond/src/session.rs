@@ -28,7 +28,7 @@ use halcyond::menu::{
     build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
 };
 use halcyond::raster::GlyphSource;
-use halcyond::select::{flatten_with_grid, FlatRow, Sel, GRID_BLOCK};
+use halcyond::select::{FlatRow, Sel, Stamp, GRID_BLOCK};
 use halcyond::session_init;
 use halcyond::tile::Tile;
 use halcyond::tile::{Mark, GRID_KEY};
@@ -484,17 +484,12 @@ impl SessionTile {
         })
     }
 
-    /// Keep the flat row list current: new output moves the rows.
+    /// Keep the flat row list current: new output moves the rows, and the
+    /// budget or a forget drops some from the front. The live grid's rows
+    /// trail the transcript's (14.11.5).
     fn refresh_flat(&mut self) {
-        let sb = &self.tile.scrollback;
-        if self.flat_seq != sb.seq {
-            self.flat_seq = sb.seq;
-            // The live grid's rows trail the transcript's (14.11.5).
-            self.flat = flatten_with_grid(sb, self.tile.grid.dims().1);
-            if let Some(s) = self.sel.as_mut() {
-                s.clamp(self.flat.len());
-            }
-        }
+        self.tile
+            .refresh_selected(&mut self.flat, &mut self.flat_seq, self.sel.as_mut());
     }
 
     /// A row's obj runs: the transcript's for its rows, the cell spans' for
@@ -569,17 +564,24 @@ impl SessionTile {
                 let (crow, _, _) = self.tile.grid.cursor();
                 let grid_rows = self.tile.grid.dims().1;
                 let cursor = (n.saturating_sub(grid_rows) + crow).min(n.saturating_sub(1));
-                self.sel = Some(Sel {
+                self.sel = Some(Sel::at(
                     cursor,
-                    anchor: None,
-                    obj: None,
-                });
+                    Stamp::of(&self.tile.scrollback, &self.flat),
+                ));
                 self.dirty = true;
                 #[cfg(feature = "test-mode")]
                 say!(
                     "halcyond: session tile leaf={} normal mode ({} rows)",
                     self.leaf,
                     self.flat.len()
+                );
+                // The history's share of those rows: what Super+K deletes
+                // (the rest is the live grid, which it never touches).
+                #[cfg(feature = "test-mode")]
+                say!(
+                    "halcyond: session tile leaf={} history {} rows",
+                    self.leaf,
+                    n.saturating_sub(grid_rows)
                 );
             }
             return None;
@@ -830,7 +832,17 @@ impl SessionTile {
         if (nc != self.cols || nr != self.rows) && self.exit.is_none() {
             self.cols = nc;
             self.rows = nr;
-            self.tile.resize(nc as usize, nr as usize);
+            if self.mode == Mode::Normal {
+                self.tile.resize_selected(
+                    nc as usize,
+                    nr as usize,
+                    &mut self.flat,
+                    &mut self.flat_seq,
+                    self.sel.as_mut(),
+                );
+            } else {
+                self.tile.resize(nc as usize, nr as usize);
+            }
             wire_out.clear();
             encode_input(&Input::Resize { cols: nc, rows: nr }, wire_out);
             self.queue_resize(wire_out);
@@ -2159,10 +2171,9 @@ pub fn run(home: Option<String>) -> i64 {
                             // H-4d: on the VT's normal screen, Esc enters the
                             // transcript's Normal mode and Normal keeps every
                             // key (the Helix-modal boundary, HALCYON.md 4); a
-                            // full-screen app (the alt screen) owns Esc.
-                            let modal = t.tile.mode == ScreenMode::Normal
-                                && e.value >= 1
-                                && (t.mode == Mode::Normal || e.rune == 0x1b);
+                            // full-screen app (the alt screen) owns Esc, until
+                            // the normal screen's repaint is on the grid.
+                            let modal = t.tile.modal_key(t.mode == Mode::Normal, e.rune, e.value);
                             if modal {
                                 if let Some(req) = t.normal_input(&e, &rules, &sheet, &mut gs) {
                                     menu_req = Some((leaf, req));
@@ -2648,6 +2659,24 @@ pub fn run(home: Option<String>) -> i64 {
                             // nothing is worse than one that reports.
                             say!("halcyond: close of pane {} refused", id);
                             status.notify("CLOSE REFUSED", true);
+                        }
+                    }
+                    railset::RailAction::ForgetHistory(id) => {
+                        // HALCYON 14.13 / HALCYON-INSTRUMENT 9.3 (TC-1b):
+                        // Super+K forgets the history of the tile this
+                        // session hosts under `id`. Any other pane's is said
+                        // and dropped: the record is never the compositor's,
+                        // so there is nobody else to hand it to.
+                        match tiles.get_mut(&id) {
+                            Some(t) => {
+                                t.tile.forget_history();
+                                t.dirty = true;
+                                say!("halcyond: session tile leaf={} history forgotten", id);
+                            }
+                            None => say!(
+                                "halcyond: history chord for pane {} -- no tile here, dropped",
+                                id
+                            ),
                         }
                     }
                     railset::RailAction::Workspaces { x, y } => {

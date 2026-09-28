@@ -45,7 +45,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -193,6 +193,121 @@ the floor is exact whatever the metrics or the padding. The gap rides through
 first cut ended the history AT the tail, so its last `pad_top` pixels -- a whole
 line on Instrument -- showed above the slide). It is the
 only way the tile learns of a clear; blank cells are never read as one.
+
+**Super+K forgets the history, and only the history (TC-1b, HALCYON 14.13).**
+The chord is the user's: the compositor delivers `TEV_CHORD` code 4 with the
+focused pane's id to the rail's owner ([[sub-tapestryd]]), and `railset` maps it
+to `RailAction::ForgetHistory`. The session resolves the id against the tiles it
+hosts, the console renderer only against its own pane; any other id is said and
+dropped. There is no verb and no fallback. `Transcript::forget` drops every
+frozen block, the open block's items, the half-rejoined `scroll_pending`, and
+what a byte-fed zone's open `pre` has gathered and its open table has finished
+(the header flag with those rows). It keeps the open block's identity, cmd mark,
+styles and objs, with its class latched first (a zone is a document once any of
+its content was structure), and every piece of in-flight structure (`pre`,
+`table`, the em/obj stacks, `table_specs`) with the row still being written, as
+it keeps the pending line; so a running command's later rows and its zone close
+land where they would have. The bar's `exit N` goes with the command it named.
+The live screen keeps its links and its look. A grid cell resolves its obj and
+its zone's class through the block that was open when it was written (the span
+ring), usually a frozen one, so every block `SpanMap::named` names survives as a
+HUSK in `Transcript.husks`: a `Block` with no items or styles, its kind and its
+latched class, plus only the named objs, kept sparse by index (`Husk.objs`,
+ascending) so an unnamed index resolves to nothing. The store is sorted by
+block id (an injected image freezes out of id order) and searched by binary
+search. Husks are never laid out or selected; `block_by_id`, `obj_in_block`,
+`local_obj` and `live_block` find them. Each costs `HUSK_OVERHEAD` (its
+`Block`) plus each kept obj's entry and text, and the budget evicts husks before
+any frozen block, including at the end of the forget itself.
+`Tile::forget_history` keeps the inline images a ring-named obj names and those
+no obj names yet (an upload still to be captioned), releases the rest, and
+clears the pin (the history it pinned against is gone) and the height and frame
+caches. `clear` then Super+K leaves an empty tile.
+
+**What the budget charges, and what the cap's freeze keeps (TC-1b rounds).** An
+obj costs its table slot (`OBJ_OVERHEAD`, one `Obj`) as well as its text at
+every site that stores one (`open_op`, `local_obj`, `retained_cost`), and an obj
+frame meets the open block's cap before it is pushed, so objects alone freeze a
+block where the budget can reach it (a bare obj used to be free). A block-cap
+continuation carries the running command's mark while it has no exit (else
+`running()` read false and Super+Q closed a running job unasked). In a tile the
+cap's continuation keeps an open `pre` and table open -- their text is on the
+grid, and the accumulators hold only the state cells are tagged under -- and an
+empty accumulator finalizes to nothing (an empty fence would be a history row
+that no line added).
+
+**The Normal-mode selection follows its rows (TC-1b, HALCYON 14.11.5).** `Sel`'s
+cursor and anchor are flat positions, and both hosts used to clamp them after a
+re-flatten, so a budget eviction moved the selection onto other rows, and yank
+and Enter acted on those. `Sel` now keeps a `select::Stamp` of the list it
+indexes: the transcript's `rows_dropped` (front drops, budget evictions and
+forgets alike, counted by `Item::flat_rows`, the one row rule `select::flatten`
+uses), `rows_left`, `rewraps` and `repaints` (below), and how many leading rows
+were the transcript's. `Sel::rebase` moves a transcript row up by the front
+drops. A live-grid row follows its text. It moves up one per row the grid has
+SHOWN leaving, and one that left is found through the transcript's record of
+the lines scroll-off completed (`ScrollLine { end, added }`, a ring of
+`SCROLL_LINES_MAX` = 1024). `Transcript::scrolled_row` counts back from the end
+to the history row its line joined (`ScrolledRow::History`: both halves of a
+wrapped line, a pre line joining its fence), the grid's first row while its
+line is still held (`Held`), nothing once forgotten or evicted (`Gone`), the old
+end-anchored estimate past the ring (`Unknown`), or, for a number no row has
+reached yet, `Ahead`, which the rebase reports and the tile restarts at the
+prompt. Counting back is exact only because every history row a tile holds
+arrives through such a line.
+
+The count is two counters. `rows_scrolled()` is the live count: the rows
+`push_scrolled_rows` took off the grid, plus `rows_shed`, the rows the mirror's
+own reflow dropped at a resize that have not arrived yet (a ScrollOff consumes
+`rows_shed` before it raises the count). `rows_left` is the published count the
+stamp reads: `note_grid_moved` sets it to `rows_scrolled()` at the end of every
+CellDiff, and `note_grid_shed` moves it at the mirror's reflow. A ScrollOff and
+its repaint can straddle reads, and the session paints between them, so rows
+alone move no end until the repaint shows them gone. A shed of n adds n to
+`rows_left` but only n - min(n, k) to `rows_shed`, where k = `rows_scrolled()` -
+`rows_left` counts the rows that arrived ahead of their repaint (the grid's top
+k rows, here already). So `rows_shed` > 0 implies k = 0, and every grid end's
+`rows_left` + g is its text's number in the ring. The producer answers each
+resize it applies with a `WinsizeAck` and then a full repaint
+([[sub-kaua-term]]). That acknowledged repaint at the grid's dims settles the
+mirror's guess (`settle_grid_shed`: kaua-term coalesces resizes and can be ahead
+of the mirror): the ends move DOWN by the rows the producer kept, and one moved
+past the grid's last row is reported. A width change, on either screen (the
+producer re-cuts its main screen beneath the alt screen), opens a re-cut window
+(`rewraps` odd) until that repaint. Rows cut at other widths are no distance, so
+the grid ends keep their places, a run goes at the grid's first repaint
+(`repaints`; every repaint in the window bumps `seq`), and the settle restarts
+the ends at the prompt. An acknowledged reply at another width opens the window
+again, because the ack names no resize. `Tile::resize_selected` slides the grid
+ends with their rows at a height change (by the `rows_left` delta), restarts at
+the prompt those on rows it slid past or cut off, and restarts all of them at a
+width change. A selection whose row went moves to the oldest row left; a grid
+end that left the grid drops its run.
+
+After a full-screen app exits, the mode flip arrives ahead of the main screen's
+repaint, and until that repaint lands (`Tile::screen_pending`, set at a flip and
+cleared by the next CellDiff) the grid holds the app's last frame.
+`Tile::normal_screen_shown` is false then, so the session's Esc gate
+(`Tile::modal_key`; an Esc press enters Normal mode, and a held Esc's repeats
+in Insert are the program's) leaves Esc to the app, and a resize crops the
+frame rather than reflowing it: a reflow would count rows that never left the
+normal screen. Starting an app is the mirror of it: the flip to the alt screen
+arrives ahead of the app's first paint, and until that lands the grid still
+holds the shell's screen, while keys and a resize are already the app's. The
+render paints what the grid holds (`Tile::holds_normal_frame`, true when the
+mode is Normal XOR `screen_pending`): the app's last frame as the mono grid,
+and the shell's last frame as it was, proportional on the sheet's ground. The
+producer's diff of that frame carries the main screen's wrap flags
+([[sub-kaua-term]]), so its soft-wrapped rows stay joined. The held-fragment
+flush and the ScreenErased pin still ask the mode, since they read the
+producer's state. The
+console's one mid-list insert (a placed inline image freezes in front of the
+open block's rows) is followed by `Sel::shift_from`. `select::refresh` is the
+one re-flatten and rebase: both hosts call it before a key and before a paint,
+and it re-reads on a `seq` change or a grid height change. Every transcript
+entry point that changes the flat list bumps `seq`; before TC-1b, scroll-off, a
+held half's flush and a budget re-share did not, so a tile's list could index
+blocks the budget had already dropped until the next Beacon frame arrived.
 
 **Beacon presentation rides the span serial, parser-free (H-4d).** A tile renders
 obj/em/hdr markup over its cell grid without a second Beacon parser: the producer
@@ -897,7 +1012,7 @@ presents are a recorded optimization.
   is ADDRESSED by the SQPOLL ring (KT-1.5b-i): the kernel poll-thread demuxes
   the console's parked reply on a frame-boundary deadline independent of
   halcyond's loop branch. A targeted repro is owed.
-- **Currency (2026-09-25): this dossier was edited for TC-1 only.** The halcyond
+- **Currency (2026-09-25): this dossier was edited for TC-1 and TC-1b only.** The halcyond
   changes between 2026-09-17 and 2026-09-22 (about 940 lines of `tile.rs`
   alone) are not yet described here, beyond what earlier sections already say.
   Dating this edit stopped `quaestor stale` from flagging the dossier, so the
@@ -905,6 +1020,17 @@ presents are a recorded optimization.
 
 ## Tests
 
+- **TC-1b (2026-09-28): 422 lib tests, all green** (`tools/test-rust.sh
+  halcyond`). TC-1b's tests pin the forget (what goes, what stays, the husks,
+  the budget, the obj charge, the continuation, the cap's freeze in a tile), the
+  selection across front drops, a forget, a wrapped scroll-off, a held half and
+  the image insert, and, through the real producer and vt on the seam, every
+  resize case the audit rounds raised: rows split from their repaint, the shed
+  counted once, the settle, the re-cut window on either screen, a reply at
+  another width, a row cut off below, a run held in the window, a reply at an
+  earlier, taller size landing between two shrinks, the app's last frame (Esc,
+  paint, crop), the shell's frame until an app's first paint (paint, ground)
+  and the modal gate.
 - **TC-1 (2026-09-25): 340 lib tests, all green** (`tools/test-rust.sh
   halcyond`; the per-module figures below are older). TC-1 added ten in
   `tile.rs`: `a_screen_erase_pins_the_live_tail_to_the_top_of_the_view` (the
