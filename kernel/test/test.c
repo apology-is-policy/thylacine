@@ -462,6 +462,8 @@ void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_devno_full_width(void);
+void test_territory_mount_devno_minter_crosses_2_32(void);
 void test_territory_mount_noexec_covers(void);
 void test_exec_ns_noexec_mount_denied(void);
 void test_exec_ns_pheno_mount_crossing(void);
@@ -529,6 +531,7 @@ void test_vmo_file_resident_pages_freed(void);
 void test_image_miss_then_hit_shares(void);
 void test_image_distinct_qid_distinct_entry(void);
 void test_image_qid_vers_bump_new_entry(void);
+void test_image_devno_full_width_distinct_entry(void);
 void test_image_distinct_offset_distinct_entry(void);
 void test_image_exec_discriminates_key(void);
 void test_image_eviction_bounds_cache(void);
@@ -1053,6 +1056,7 @@ void test_cons_winsize_roundtrip(void);          // #55
 void test_cons_beacon_roundtrip(void);           // H-1 (BEACON.md 12.3)
 void test_cons_winsize_winch_iff_changed(void);  // #55
 void test_cons_stat_native_qid_contract(void);   // #55
+void test_cons_stat_devno_full_width(void);      // devno-u64
 void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_delivers(void);    // PTY-DESIGN: mode writes deliver, never discard
 void test_cons_cook_isig_discards_pending_line(void); // PTY-DESIGN F5: an ISIG char discards the pending line
@@ -2478,6 +2482,8 @@ struct test_case g_tests[] = {
     { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },
     { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
     { "territory_mount.devno_disambiguates",              test_territory_mount_devno_disambiguates,              false, NULL },
+    { "territory_mount.devno_full_width",                 test_territory_mount_devno_full_width,                 false, NULL },
+    { "territory_mount.devno_minter_crosses_2_32",        test_territory_mount_devno_minter_crosses_2_32,        false, NULL },
     { "territory_mount.noexec_covers",                    test_territory_mount_noexec_covers,                    false, NULL },
     { "territory_mount.rejects_cycle",                    test_territory_mount_rejects_cycle,                    false, NULL },
     { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
@@ -2558,6 +2564,7 @@ struct test_case g_tests[] = {
     { "image.miss_then_hit_shares",       test_image_miss_then_hit_shares,       false, NULL },
     { "image.distinct_qid_distinct_entry", test_image_distinct_qid_distinct_entry, false, NULL },
     { "image.qid_vers_bump_new_entry",    test_image_qid_vers_bump_new_entry,    false, NULL },
+    { "image.devno_full_width_distinct_entry", test_image_devno_full_width_distinct_entry, false, NULL },
     { "image.distinct_offset_distinct_entry", test_image_distinct_offset_distinct_entry, false, NULL },
     { "image.exec_discriminates_key",       test_image_exec_discriminates_key,       false, NULL },
     { "image.eviction_bounds_cache",      test_image_eviction_bounds_cache,      false, NULL },
@@ -3212,6 +3219,7 @@ struct test_case g_tests[] = {
     { "cons.beacon_roundtrip",         test_cons_beacon_roundtrip,         false, NULL },
     { "cons.winsize_winch_iff_changed", test_cons_winsize_winch_iff_changed, false, NULL },
     { "cons.stat_native_qid_contract", test_cons_stat_native_qid_contract, false, NULL },
+    { "cons.stat_devno_full_width",    test_cons_stat_devno_full_width,    false, NULL },
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
     { "cons.cook_mode_flip_delivers", test_cons_cook_mode_flip_delivers, false, NULL },
     { "cons.cook_isig_discards_pending_line", test_cons_cook_isig_discards_pending_line, false, NULL },

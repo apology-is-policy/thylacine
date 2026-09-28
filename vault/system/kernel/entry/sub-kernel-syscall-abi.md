@@ -347,13 +347,16 @@ check will see.
 `t_stat` is the same story in the other growth mode. It has grown twice — uid+gid
 (A-2a) took it from 72 to 80, then a per-instance device number plus pad (#100)
 from 80 to 88 — both **appended past the end**, because a stat result is written
-into the caller's buffer and there was no reserved slot to reuse. Its size
-assertion is unusually loud about the consequence: the kernel writes `sizeof(88)`
-bytes, so a mirror left at 80 *overflows the caller's buffer*, and the message
-names all four copies that must grow in lockstep — libt, libthyla-rs, the pouch
-stat patch, and the go-thylacine `Stat_t`. Four mirrors, not two: the drift hazard
-is wider here than anywhere else on the surface, and nothing but that comment binds
-them.
+into the caller's buffer and there was no reserved slot to reuse. The device
+number is 64 bits, laid over what was the pad after it, so no offset moved and
+a reader of the low 32 bits at 80 reads what it always did
+([[dec-2026-09-28-t-stat-devno-u64]]); a width assertion pins it. Its size
+assertion is unusually loud about the consequence of a growth: the kernel writes
+`sizeof(88)` bytes, so a mirror left short *overflows the caller's buffer*, and
+the message names the copies that must change in lockstep — libt, libthyla-rs,
+the four pouch patches that read the record, and the go-thylacine `Stat_t`
+([[abi-t-stat]] keeps the list). The drift hazard is wider here than anywhere
+else on the surface, and nothing but that comment binds them.
 
 ### The all-or-nothing rule, stated twice and broken once
 

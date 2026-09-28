@@ -194,13 +194,15 @@ void union_snap_free(struct union_snap *snap);
 struct Spoor {
     u64           magic;       // SPOOR_MAGIC; clobbered by SLUB on free
     int           dc;          // matches dev->dc; cached for cheap dispatch
-    u32           devno;       // Plan 9 Chan.dev: per-instance device number.
+    u64           devno;       // Plan 9 Chan.dev: per-instance device number.
                                // qid.path is unique only WITHIN a (dc, devno)
                                // pair -- e.g. every dev9p session shares dc='9'
                                // but gets a distinct devno (spoor_next_devno),
                                // so two attach sessions' roots (both qid.path=0)
                                // do not collide. Static single-instance Devs
-                               // (devramfs/devsrv/devproc/...) leave it 0.
+                               // (devramfs/devproc/...) leave it 0. 64 bits:
+                               // the minter never wraps (spoor.c), which is
+                               // what keeps (dc, devno, qid.path) an identity.
                                // The mount table keys on (dc, devno, qid.path)
                                // -- the full Plan 9 (type, dev, qid) identity.
     struct Dev   *dev;         // back-pointer; set at spoor_alloc
@@ -345,7 +347,11 @@ struct Spoor *spoor_clone(struct Spoor *c);
 // single-instance default. dev9p stamps each attach session's root Spoor
 // with one of these so the mount table's (dc, devno, qid.path) key
 // distinguishes two concurrent 9P sessions whose roots both have qid.path 0.
-u32 spoor_next_devno(void);
+u64 spoor_next_devno(void);
+#ifdef KERNEL_TESTS
+// Move the minter forward to `v`, never back, so a test can straddle 2^32.
+void spoor_devno_advance_for_test(u64 v);
+#endif
 
 // Clunk: the canonical "I'm done with this Spoor" entry. Calls dev->close
 // (if non-NULL and the Spoor was opened) before dropping the caller's ref

@@ -3007,20 +3007,23 @@ struct t_stat {
     u64 blocks;          // 64: count of 512-byte blocks
     u32 uid;             // 72: A-2a owner principal-id (PRINCIPAL_SYSTEM/NONE/real)
     u32 gid;             // 76: A-2a owning group (GID_SYSTEM/NONE/real)
-    u32 devno;           // 80: #100 -- per-instance device number (Plan 9 Chan.dev /
+    u64 devno;           // 80: #100 -- per-instance device number (Plan 9 Chan.dev /
                          //     POSIX st_dev): the mount/session identity that makes a
                          //     qid.path unambiguous ACROSS datasets. A static single-
                          //     instance Dev reports 0; dev9p mints one per attach
                          //     session (spoor_next_devno), inherited by walked/cloned
                          //     descendants. Consumers key file identity on (devno,
-                         //     qid.path) -- e.g. gopls robustio FileID.
-    u32 _pad_dev;        // 84: pad to 8-byte alignment (t_stat carries u64 members)
+                         //     qid.path) -- e.g. gopls robustio FileID. 64 bits since
+                         //     devno-u64, over the old _pad_dev at 84: the minter
+                         //     never wraps, so the pair stays an identity, and a
+                         //     reader of the low 32 bits at 80 sees what it always did.
 };
 
 _Static_assert(sizeof(struct t_stat) == 88,
                "struct t_stat is a SYS_FSTAT/SYS_STAT ABI type — pinned at 88 bytes "
-               "(A-2a appended u32 uid+gid -> 80; #100 appended u32 devno+pad -> 88). "
-               "EVERY mirror (libt, libthyla-rs, pouch patch 0010, the go-thylacine "
+               "(A-2a appended u32 uid+gid -> 80; #100 appended u32 devno+pad -> 88; "
+               "devno-u64 widened devno over the pad, still 88). "
+               "EVERY mirror (libt, libthyla-rs, pouch patches 0010/0019/0021/0024, the go-thylacine "
                "syscall.Stat_t) MUST grow in lockstep: the kernel writes sizeof(88) "
                "bytes into the caller's buffer, so a mirror left at 80 overflows it.");
 _Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at ABI offset 0");
@@ -3037,6 +3040,7 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 _Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at ABI offset 72 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at ABI offset 76 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, devno)     == 80, "t_stat.devno at ABI offset 80 (#100)");
+_Static_assert(sizeof(((struct t_stat *)0)->devno)          ==  8, "t_stat.devno is 64 bits (devno-u64, in place over _pad_dev)");
 
 // 8a-1b-gamma-2 (I-39; docs/DEBUG-FS-DESIGN.md 4.5): the /proc/<pid>/regs read/
 // write format -- the saved EL0 GPR frame in the Linux arm64 `user_pt_regs`

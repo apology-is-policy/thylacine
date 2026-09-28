@@ -753,7 +753,10 @@ static inline bool mount_key_eq(const struct PgrpMount *m,
 
 // A mount-point / source identity (Plan 9 type+dev+qid). Used by the mount
 // cycle check below.
-struct mkey { int dc; u32 devno; u64 path; };
+struct mkey { int dc; u64 devno; u64 path; };
+_Static_assert(sizeof(((struct mkey *)0)->devno) == sizeof(((struct Spoor *)0)->devno) &&
+               sizeof(((struct PgrpMount *)0)->mp_devno) == sizeof(((struct Spoor *)0)->devno),
+               "the mount key carries the whole devno (spoor_next_devno never wraps)");
 
 static inline bool mkey_eq(struct mkey a, struct mkey b) {
     return a.dc == b.dc && a.devno == b.devno && a.path == b.path;
@@ -795,7 +798,6 @@ static void mount_install_at(struct Territory *t, int ins, struct Spoor *source,
     e->mp_dc       = mountpoint->dc;
     e->mp_devno    = mountpoint->devno;
     e->flags       = flags;
-    e->_pad        = 0;
     t->nmounts++;
 }
 
@@ -1189,7 +1191,7 @@ int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
     return n;
 }
 
-bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
+bool mount_is_point_id(struct Territory *territory, int dc, u64 devno,
                        u64 qid_path) {
     if (!territory)                    return false;
     if (territory->magic != PGRP_MAGIC) extinction("mount_is_point_id on corrupted Territory");
@@ -1208,7 +1210,7 @@ bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
     return hit;
 }
 
-bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
+bool mount_noexec_covers(struct Territory *territory, int dc, u64 devno) {
     if (!territory)                    return false;
     if (territory->magic != PGRP_MAGIC) extinction("mount_noexec_covers on corrupted Territory");
 
@@ -1258,9 +1260,9 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
 // (union_base = base->union_snap->point). The point lives in the tree the union
 // was mounted in, so its instance is a second seed; without it the shed drops
 // the union's own entries and every name under the new root is ENOENT.
-struct shed_inst { int dc; u32 devno; bool any_devno; };
+struct shed_inst { int dc; u64 devno; bool any_devno; };
 
-static bool shed_has(const struct shed_inst *r, int n, int dc, u32 devno) {
+static bool shed_has(const struct shed_inst *r, int n, int dc, u64 devno) {
     for (int i = 0; i < n; i++)
         if (r[i].dc == dc && (r[i].any_devno || r[i].devno == devno)) return true;
     return false;

@@ -242,7 +242,7 @@ struct Burrow {
     // immutable ramfs -- argued at the image.c stamp site).
     u64               file_limit;   // FILE: backing file size in bytes at create
     int               file_dc;      // FILE: cache key — backing dc       (sampled at create)
-    u32               file_devno;   // FILE: cache key — backing devno    (sampled at create)
+    u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
     struct pagemap    pm;           // FILE / ANON_LAZY: the sparse slot table; not live for other types

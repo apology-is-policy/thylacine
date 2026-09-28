@@ -67,7 +67,7 @@ diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
 + * sentinels and re-define them to the Thylacine kernel ABI numbers.
 + *
 + * src/stat/fstat.c is rewritten to call SYS_fstat directly with a
-+ * struct t_stat buffer (80 bytes; A-2a uid+gid) and translate to
++ * struct t_stat buffer (88 bytes; A-2a uid+gid, #100 devno) and translate to
 + * musl's struct stat. src/unistd/lseek.c is unchanged - it calls
 + * SYS_lseek(fd, offset, whence) which matches the kernel ABI
 + * one-to-one.
@@ -82,11 +82,11 @@ diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
 diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 --- a/src/stat/fstat.c
 +++ b/src/stat/fstat.c
-@@ -1,13 +1,98 @@
+@@ -1,13 +1,97 @@
 -#define _BSD_SOURCE
 +/*
 + * pouch fstat() — translate the Thylacine native SYS_fstat surface
-+ * (struct t_stat, 80 bytes; kernel/include/thylacine/syscall.h) into
++ * (struct t_stat, 88 bytes; kernel/include/thylacine/syscall.h) into
 + * musl's aarch64 struct stat (arch/aarch64/bits/stat.h).
 + *
 + * P6-pouch-stratumd-boot sub-chunk 16b-gamma. The upstream
@@ -130,8 +130,7 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 +	unsigned long blocks;      /* 64 */
 +	unsigned int  uid;         /* 72 */
 +	unsigned int  gid;         /* 76 */
-+	unsigned int  devno;       /* 80: #100 per-instance device number */
-+	unsigned int  _pad_dev;    /* 84 */
++	unsigned long devno;       /* 80: #100 per-instance device number (64-bit: devno-u64) */
 +};
 +_Static_assert(sizeof(struct t_stat) == 88,
 +               "pouch fstat: t_stat ABI must match Thylacine kernel (88 bytes; #100 devno)");

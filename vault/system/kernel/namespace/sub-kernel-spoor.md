@@ -40,7 +40,7 @@ void          spoor_ref(struct Spoor *c);             // +1; extincts on NULL/co
 void          spoor_unref(struct Spoor *c);           // -1, free at 0; NO dev->close
 void          spoor_clunk(struct Spoor *c);           // -1, dev->close THEN free at 0
 struct Spoor *spoor_clone(struct Spoor *c);           // fresh Spoor, copied state, ref 1
-u32           spoor_next_devno(void);                 // monotonic from 1
+u64           spoor_next_devno(void);                 // monotonic from 1; never wraps, never reused
 int           spoor_stat_native(struct Spoor *c, struct t_stat *out);
 
 struct Walkqid *walkqid_alloc(int max_qids);          // >= 1 slot even at 0
@@ -98,10 +98,15 @@ id so the mount table can key on the full Plan 9 `(type, dev, qid)`
 identity. This is load-bearing for dev9p specifically: every 9P session
 shares `dc='9'` and every session root has `qid.path == 0`, so without
 `devno` two concurrent sessions' roots would be indistinguishable to
-the mount table. The counter wraps at 2^32 attaches; the source argues
-the wrap is benign because a collision needs two LIVE same-devno
-sessions in one Territory's table, and the key is identity
-disambiguation rather than a capability.
+the mount table. Three identity keys rest on a live instance's devno
+being unique -- the mount key and `MNOEXEC` coverage
+([[sub-kernel-territory]]) and the Image cache key ([[sub-kernel-image]])
+-- and every Env and every dev9p / devsrv attach mints one, so an
+unprivileged fork loop drives the counter. It is therefore 64 bits wide
+(2^64 mints at one per nanosecond is ~584 years) and never reused: a
+recycled number could match an Image cache entry that outlived its Spoor.
+`t_stat.devno` carries all 64 bits ([[abi-t-stat]]).
+`spoor_devno_advance_for_test` moves the counter forward, never back.
 
 **Walkqid** is the Plan 9 walk result, preserved verbatim: the Spoor at
 the deepest successful step plus the qid of every step that succeeded,
@@ -117,7 +122,7 @@ struct Qid { u64 path; u32 vers; u8 type; u8 pad[3]; };   // 16 B, asserted
 struct Spoor {
     u64          magic;    // SPOOR_MAGIC, offset 0 — asserted
     int          dc;       // cached dev->dc
-    u32          devno;    // per-instance device number
+    u64          devno;    // per-instance device number; never wraps
     struct Dev  *dev;
     struct Qid   qid;
     spin_lock_t  lock;     // DEAD — see Caveats
@@ -278,7 +283,9 @@ executed on every allocation and every clone.
 
 Covered by `spoor.alloc_unref_round_trip`, `ref_lifecycle`,
 `clone_lifecycle`, `clone_copies_state`, `clunk_dispatches_close`,
-`alloc_10k_no_leak`, `stat_native_stamps_devno`.
+`alloc_10k_no_leak`, `stat_native_stamps_devno`; the minter by
+`territory_mount.devno_minter_crosses_2_32` and the stamp's width by
+`cons.stat_devno_full_width`.
 
 ## Seams
 

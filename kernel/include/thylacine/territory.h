@@ -111,17 +111,16 @@ struct PgrpBind {
 // changes only what /proc/<pid>/ns displays, never which entry stalk crosses.
 // NULL when the mountpoint had no retained name (kernel-internal direct walks).
 //
-// Field order: two pointers first (16B, 8-aligned), u64 qid_path (8B), then the
-// three u32s + pad fill the last 16B. sizeof(PgrpMount) = 40.
+// Field order: two pointers first (16B, 8-aligned), the two u64 key halves
+// (16B), then mp_dc + flags fill the last 8B. sizeof(PgrpMount) = 40.
 struct PgrpMount {
     struct Spoor   *source;
     struct Path    *mp_path;  // #66 (I-33): mount-point namespace name; ref-held
     u64             mp_qid_path;
+    u64             mp_devno;
     int             mp_dc;
-    u32             mp_devno;
     u32             flags;    // MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC /
                               // MPHENO_LINUX, or MCOVERED alone
-    u32             _pad;     // 8-byte array-stride alignment for source
 };
 
 // Mount flags (ARCH §9.6.1 — mirror Plan 9). MREPL replaces every member at
@@ -277,7 +276,7 @@ struct Territory {
 
 _Static_assert(sizeof(struct PgrpMount) == 40,
                "struct PgrpMount pinned at 40 bytes (8 source + 8 mp_path + "
-               "8 mp_qid_path + 4 mp_dc + 4 mp_devno + 4 flags + 4 pad). #66 "
+               "8 mp_qid_path + 8 mp_devno + 4 mp_dc + 4 flags). #66 "
                "added the 8-byte mp_path (the mount-point namespace name, I-33); "
                "stalk-2 re-keyed the target to the (dc, devno, qid.path) identity.");
 _Static_assert(sizeof(struct Territory)
@@ -531,7 +530,7 @@ int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
 // mount_lookup; the boolean is a snapshot (the resolver's cross machinery
 // re-tests via mount_lookup on the materialized Spoor, so a racing
 // mount/unmount degrades to today's unsynchronized-snapshot behavior).
-bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
+bool mount_is_point_id(struct Territory *territory, int dc, u64 devno,
                        u64 qid_path);
 
 // mount_noexec_covers (#217): does ANY mount entry in this Territory carry
@@ -554,7 +553,7 @@ bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
 // and the mmap path is PHENO_LINUX-only where every Proc carries a cloned
 // Territory. Recorded because the false version actively warned a reader off a
 // change that would have broken nothing.
-bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno);
+bool mount_noexec_covers(struct Territory *territory, int dc, u64 devno);
 
 // territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so
 // the read+ref cannot race a concurrent territory_pivot_root / territory_chroot

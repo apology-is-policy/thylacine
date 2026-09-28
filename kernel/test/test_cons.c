@@ -1851,7 +1851,25 @@ void test_cons_stat_native_qid_contract(void) {
     // I-13: the poisoned pad bytes were overwritten by the zero-fill.
     TEST_ASSERT(st._pad_qid[0] == 0 && st._pad_qid[1] == 0 && st._pad_qid[2] == 0,
                 "qid pad zero-filled");
-    TEST_ASSERT(st._pad_blksize == 0 && st._pad_dev == 0, "tail pads zero-filled");
+    TEST_ASSERT(st._pad_blksize == 0, "blksize pad zero-filled");
+    TEST_ASSERT(st.devno == 0, "all 64 bits of devno zero (a static Dev; no poison in the high half)");
+
+    spoor_unref(cs);
+}
+
+// devno-u64: t_stat.devno is 64 bits (widened in place over the old _pad_dev),
+// so the stamp spoor_stat_native applies after a clean fill carries a devno
+// above 2^32 whole. Poisoned first: a 32-bit store would leave 0xAA above it.
+void test_cons_stat_devno_full_width(void) {
+    struct Spoor *cs = devcons.attach(NULL);
+    TEST_ASSERT(cs != NULL, "devcons attach");
+    const u64 wide = (1ull << 32) + 5u;
+    cs->devno = wide;
+
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;  // poison
+    TEST_EXPECT_EQ((long)spoor_stat_native(cs, &st), 0L, "spoor_stat_native fills");
+    TEST_ASSERT(st.devno == wide, "all 64 bits of the Spoor's devno reach t_stat");
 
     spoor_unref(cs);
 }

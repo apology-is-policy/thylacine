@@ -348,7 +348,8 @@ charge record (`charge_as_id` / `charge_pages` / `shared_out`), B-1a's
 source's lock during one clone -- NULL at all other times), and then a
 union-by-convention of per-type fields — `pages`/`order` for contiguous
 backings, a hardware-object pointer and PA for the foreign ones, a Spoor plus
-file offset plus cache-key scalars for file-backed, the pagemap `pm` (32
+file offset plus cache-key scalars for file-backed (`file_devno` is the whole
+64-bit devno, as [[sub-kernel-image]]'s key requires), the pagemap `pm` (32
 bytes, embedded) shared between file-backed and lazy-anon
 ([[sub-kernel-pagemap]]).
 

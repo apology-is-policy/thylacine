@@ -84,8 +84,12 @@ load-bearing: `qid.path` is unique only *within* a `(dc, devno)`
 instance, and every dev9p session shares `dc == '9'` with root
 `qid.path == 0` — so `(dc, qid.path)` alone collides corvus against a
 per-user stratum-fs. `devno` (minted per attach by `spoor_next_devno`)
-is what separates them. This is the stalk-2 re-key; before it the target
-was an abstract `path_id_t`.
+is what separates them. It is 64 bits and never reused
+([[sub-kernel-spoor]]), so the triple stays an identity for the life of
+the boot; `territory_mount.devno_full_width` holds two points and two
+sources 2^32 mints apart distinct, each refusal paired with its control.
+This is the stalk-2 re-key; before it the target was an abstract
+`path_id_t`.
 
 **`SYS_MOUNT`/`SYS_UNMOUNT` resolve with `STALK_MOUNT`** — resolve, do
 NOT cross the final mount, do NOT open. That carve-out is what makes
@@ -254,10 +258,12 @@ root keeping its own, and a nameless transport's device spec.
 ## Data structures
 
 `struct PgrpMount` is pinned at **40 bytes**: `source` (8) + `mp_path`
-(8) + `mp_qid_path` (8) + `mp_dc` (4) + `mp_devno` (4) + `flags` (4) +
-`_pad` (4). Two pointers first for 8-alignment; the pad gives the array
-its 8-byte stride. It was 16 bytes before stalk-2 re-keyed it and 32
-before #66b added `mp_path`.
+(8) + `mp_qid_path` (8) + `mp_devno` (8) + `mp_dc` (4) + `flags` (4).
+Two pointers first for 8-alignment, then the two u64 key halves; `mp_dc`
+and `flags` fill the last 8 bytes, so the array keeps its 8-byte stride
+with no pad. `mp_devno` and `struct mkey`'s devno are pinned by a
+`_Static_assert` to the Spoor field's width: a narrower copy would read
+instances 2^32 mints apart as one.
 
 `struct Territory` is pinned at **1400 bytes** — a 24-byte header
 (`magic`, `ref`, `nbinds`, `nmounts`, `_pad`), `root_spoor` at 24,

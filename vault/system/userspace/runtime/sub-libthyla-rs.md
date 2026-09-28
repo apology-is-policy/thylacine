@@ -321,6 +321,10 @@ None crossing a boundary; every ABI record belongs to
   the two would wait on each other until the spawner is killed. The builder sets
   `T_SPAWN_DEBUG_HELD` in `TSpawnArgs.debug_flags`, a record the build now checks
   against the kernel's layout ([[sub-kernel-syscall-abi]]).
+- **`Metadata`** (`fs/metadata.rs`) — the crate's mirror of `t_stat`
+  ([[abi-t-stat]]), size-asserted at 88 bytes and nothing more. `dev()`
+  returns the whole 64-bit device number, which with `qid_path()` names a
+  file across datasets.
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.
