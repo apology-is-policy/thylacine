@@ -678,12 +678,10 @@ performance backlog.
   [[seam-proc-name-torn-read]]. Memory-safe by an unstated bound, cosmetic in
   effect, but a genuine data race that the surrounding code's own atomic
   discipline would otherwise have caught.
-- **The `exe` clamp's comment has drifted from its numbers.** It justifies
-  clamping the returned length by describing an out-of-bounds read "at offset >=
-  512" against a 512-byte buffer; the buffer has since been raised to 2 KiB and
-  the maximum path is 1 KiB, so the clamp is currently inert. The clamp is still
-  correct defence — it is the arithmetic in the comment that no longer holds, and
-  a reader who checks it will conclude the guard is unnecessary.
+- **The `exe` clamp is inert today, and kept.** The read buffer (2 KiB)
+  outgrows any path (1 KiB), so the clamp cuts nothing; it is the defence for
+  the day either bound moves, and its comment now says so rather than
+  describing an overflow past a 512-byte buffer the code no longer has.
 - **The focus-thread selector cites a test case that does not exist under that
   name.** The coverage is real and load-bearing — four assertions, including the
   foreign-focus fallback the comment insists must not be deleted — but it lives

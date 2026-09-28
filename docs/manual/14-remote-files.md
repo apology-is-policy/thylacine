@@ -171,8 +171,14 @@ or group is refused before it reaches the server.
 
 `mount` and `unmount` set `$status` and `$errstr`. Run `echo $errstr` to display
 a failure reason. A second mount of one post is refused; a missing post, busy
-name or exhausted quota also fails. Confirm the service announcement before
-mounting, and use `haul -v` for connection and handshake progress.
+name or exhausted quota also fails. PATH must be a directory: a mounted service
+is a directory tree, and mounting one over a file fails with
+`mount: cannot mount at PATH: not a directory`. A symbolic link counts as a file
+here, because the mount point is the link itself. End PATH with `/`, as in
+`/tmp/ln/`, to mount on the directory the link points to. That fails while a
+file is mounted on the link itself; unmount it first. Confirm the service
+announcement before mounting, and use `haul -v` for connection and handshake
+progress.
 
 Haul writes its messages to standard error, so they appear in the terminal or
 Halcyon tile that ran it. When the server cannot be reached, Haul names the

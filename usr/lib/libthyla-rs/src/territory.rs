@@ -14,8 +14,9 @@
 //   The kernel mount table is keyed by the mount point's Spoor identity
 //   (dc, devno, qid.path). mount/unmount take an absolute mount-point PATH;
 //   the kernel `stalk`s it from the Territory root and keys the entry on the
-//   resolved directory's identity. The mount point MUST EXIST as a walkable
-//   directory (Plan 9 M1). This replaces the pre-stalk-2 abstract path_id_t.
+//   resolved point's identity. The mount point MUST EXIST and be of the
+//   source's type (Plan 9's Emount; see `mount`). This replaces the pre-stalk-2
+//   abstract path_id_t.
 //
 // SOURCE TYPE — AsFd:
 //   Mount / chroot / pivot_root take `&impl AsFd` from `t::poll`. The
@@ -46,32 +47,35 @@ use crate::{
 
 /// Plan 9 mount-flag bitmask. Compose with `|`; query with `contains`.
 ///
-/// At v1.0 only `REPL` has distinguished semantics in the kernel; the
-/// remaining flags are accepted and recorded but treated additively at
-/// the C-API level. The shell's bind builtin uses BEFORE/AFTER to
-/// position one mount relative to another at the same path_id (a
-/// future kernel extension).
+/// At most one placement (`REPL`, `BEFORE`, `AFTER`); the kernel refuses two.
+/// With none the mount appends like `AFTER`, except that it never makes the
+/// covered directory a member, and a source already mounted at the point keeps
+/// its place, where `AFTER` would move it last. At a point that is not a
+/// directory only `REPL` is accepted (see `mount`).
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct MountFlags(u32);
 
 impl MountFlags {
-    /// No flags set. Equivalent to "add to table; fail if already
-    /// present" -- though the v1.0 kernel may collapse semantics.
+    /// No placement: the new mount is searched after the point's members.
+    /// Plan 9 has no such mode (its flag 0 is `REPL`).
     pub const NONE: MountFlags = MountFlags(0);
 
-    /// Replace any existing mount at the target path_id.
+    /// Replace every mount at the mount point.
     pub const REPL: MountFlags = MountFlags(T_MREPL);
 
-    /// Position the new mount BEFORE the existing entry at the same
-    /// path_id (lookup hits the new mount first).
+    /// Search the new mount before the point's members. At a directory with
+    /// nothing mounted on it, the covered directory stays a member, searched
+    /// after the new one.
     pub const BEFORE: MountFlags = MountFlags(T_MBEFORE);
 
-    /// Position the new mount AFTER the existing entry at the same
-    /// path_id (lookup hits the existing first; new is the fallback).
+    /// Search the new mount after the point's members. At a directory with
+    /// nothing mounted on it, the covered directory stays a member, searched
+    /// first.
     pub const AFTER: MountFlags = MountFlags(T_MAFTER);
 
-    /// Reserved for "create the target if missing" semantics; not
-    /// distinguished from no-create at v1.0.
+    /// A create in the union lands in the first member mounted with this flag
+    /// (Plan 9's `MCREATE`); at a point with one member it lands there either
+    /// way.
     pub const CREATE: MountFlags = MountFlags(T_MCREATE);
 
     /// #217: nothing reached through this mount may become executable --
@@ -147,16 +151,22 @@ impl core::ops::BitOrAssign for MountFlags {
 /// `source` is any handle with a kernel-side spoor type (typically a
 /// `t::fs::File`); the kernel validates the KOBJ kind + rights and resolves
 /// `mount_point` to its (dc, devno, qid.path) identity at the syscall boundary.
-/// The mount point MUST EXIST as a walkable directory (Plan 9 M1).
+/// The mount point must exist, and be of the source's type: a directory over a
+/// directory, a file over a file (Plan 9's `Emount`; ARCH 9.6.1). At a file only
+/// `REPL` is accepted. A symbolic link at the mount point is not followed, so it
+/// counts as a file; end the path with `/` to mount on the link's target.
 ///
 /// `flags` follows Plan 9 mount-semantics; see `MountFlags`.
 ///
 /// Errors:
-///   - `Error::BadHandle`: `source` is not a KOBJ_SPOOR / out-of-range.
-///   - `Error::PermissionDenied`: missing RIGHT_READ on `source`.
-///   - `Error::InvalidArgument`: `flags` outside the supported set, or
-///     `mount_point` absent / unresolvable.
-///   - `Error::OutOfRange`: territory mount table is full.
+///   - `Error::NotADirectory`: `source` and `mount_point` differ in type, or
+///     `flags` lacks REPL at a point that is not a directory.
+///   - `Error::InvalidArgument`: every other refusal, which the kernel still
+///     reports as one generic -1: a bad or rightless `source`, `flags` outside
+///     the supported set or naming two placements, an absent or unresolvable
+///     `mount_point` (a trailing `/` on a point that is not a directory is
+///     unresolvable), a full mount table, a mount that would close a cycle in
+///     the mount graph (I-3).
 pub fn mount<F: AsFd + ?Sized>(
     source: &F,
     mount_point: &str,
@@ -168,11 +178,10 @@ pub fn mount<F: AsFd + ?Sized>(
         t_mount(mount_point.as_ptr(), mount_point.len(),
                 source.as_raw_fd() as i64, flags.bits())
     };
-    if rc < 0 {
-        // v1.0 kernel collapses every failure to -1; map to a
-        // representative variant. v1.x will return -errno.
+    if rc == -1 {
         return Err(Error::InvalidArgument);
     }
+    Error::from_syscall_return(rc)?;
     Ok(())
 }
 
@@ -184,13 +193,15 @@ pub fn bind_replace<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<(
 }
 
 /// Bind-before: shorthand for `mount(source, mount_point, MountFlags::BEFORE)`.
-/// Positions the new mount BEFORE any existing at the same mount point.
+/// Positions the new mount BEFORE any existing at the same mount point, which
+/// must be a directory.
 pub fn bind_before<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<()> {
     mount(source, mount_point, MountFlags::BEFORE)
 }
 
 /// Bind-after: shorthand for `mount(source, mount_point, MountFlags::AFTER)`.
-/// Positions the new mount AFTER any existing at the same mount point.
+/// Positions the new mount AFTER any existing at the same mount point, which
+/// must be a directory.
 pub fn bind_after<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<()> {
     mount(source, mount_point, MountFlags::AFTER)
 }

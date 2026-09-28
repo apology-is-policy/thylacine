@@ -1295,3 +1295,17 @@ the load ([[sub-kernel-exec]]). And `sys_mount_for_proc`'s comment now says
 what B-1d-u made true: `territory.c::mount` retains the mountpoint Spoor, with
 its own reference, only as the covered member of a union the mount starts
 ([[sub-kernel-territory]]); the handler still releases its own.
+
+**B-1d-v (2026-09-25): `SYS_MOUNT`'s type check.** `sys_mount_for_proc` looks
+the source up (RIGHT_READ), then refuses Plan 9's `Emount` cases before
+`mount()` runs: a source whose `QTDIR` bit differs from the point's, under any
+flag, and any mount without `MREPL` at a point without `QTDIR` (Plan 9's
+`order != MREPL`; a flagless mount appends here, where Plan 9's flag 0 is
+`MREPL`). The check reads the flags and the two types only, so it takes no
+lock, and it is made once, on the point's own Spoor at install: a 9P server
+can re-type the point afterwards, so the resolver keeps its own type gates
+([[sub-kernel-stalk]]). The refusal clunks the lookup's reference and returns `-T_E_NOTDIR`, the
+one named errno in a call whose other refusals stay the flat -1
+([[sub-kernel-syscall-abi]]); the votes are
+[[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
+[[dec-2026-09-25-sys-mount-emount]].

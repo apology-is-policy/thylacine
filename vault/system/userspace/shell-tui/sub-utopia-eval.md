@@ -54,7 +54,11 @@ operator can tell "denied" from "no such service" and from a broken transport.
 Discarding it left that channel leading nowhere at the one place the operator
 reads it. Both legs now append the rendered cause via
 `libthyla_rs::err::Error::from_syscall_return`. `$errstr` keeps its existing
-PREFIX, so assertions matching on "mount: cannot connect" still hold.
+PREFIX, so assertions matching on "mount: cannot connect" still hold. The third
+leg, the mount itself, names a cause only when the kernel gives one: since the
+2026-09-25 Emount refusal a file mount point reads "mount: cannot mount at
+PATH: not a directory" (an attach root is a directory), and the kernel's flat
+-1 still reads "mount: cannot mount at PATH".
 
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects

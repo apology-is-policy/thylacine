@@ -3,7 +3,7 @@ id: sub-kernel-territory
 type: sub
 title: "Territory — the per-Proc namespace (mount table, root, cwd)"
 parent: moc-kernel-namespace
-code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_pivot_root.c", "usr/symlink-probe/src/main.rs"]
+code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
 audit: hard
 guarded-by: [inv-i1, inv-i3, inv-i33]
 validated-by: [spec-territory, gate-smp]
@@ -697,9 +697,29 @@ directory as a member.
   `MREPL` group with `MBEFORE` finds the point hosting a member, so it grows
   no covered one (`territory.tla` `BUGGY_FRESH_AFTER_REMOVE`). `MREPL` wins
   over the ordering flags and replaces the whole group, covered entry
-  included; a flagless mount adds none. A file point stays a plain mount
-  (`NoCoveredFile`); Plan 9 refuses it (`Emount`), and whether `SYS_MOUNT`
-  should is owed to the operator.
+  included; a flagless mount adds none. No union starts at a file point
+  (`NoCoveredFile`), and since the 2026-09-25 votes
+  ([[dec-2026-09-25-mrepl-only-at-a-file]]) `SYS_MOUNT` installs only a
+  replacement at a point that is not a directory:
+  `sys_mount_for_proc` refuses Plan 9's `Emount` cases with `-T_E_NOTDIR`
+  before the table op -- a source whose type (directory or not) differs from
+  the point's, under any flag, and any mount but `MREPL` at a point that is
+  not a directory. A flagless mount appends, so a second one at a file would
+  make a two-member group there, which `stalk` treats as a union directory
+  whose listing skips the files. Only `MREPL` of a file over a file stays
+  legal, so `SYS_MOUNT` never gives a file point a second member
+  (`sys_mount.refuses_a_type_mismatch`,
+  `sys_mount.refuses_all_but_mrepl_at_a_file`). The check is made once, at
+  install, on the point's own Spoor: a 9P server the caller attached can
+  answer a later walk to the same point with the other type, so a directory
+  point with several members can read as a file afterwards, and `stalk`'s
+  use-time `QTDIR` gates stay. The key must also name the point alone:
+  devsrv gives each posted service a `qid.path` of its own, since a mount at
+  `/srv/<name>` was once keyed at the registry root and at every other
+  service (`devsrv.service_keys_distinct`). The QTDIR test in
+  `starts_union` stays for kernel-internal callers, whose boot mounts (joey's
+  `/dev` and `/srv`) are all directories over directories (`territory.tla`
+  `KERNEL_MOUNTS` and `CovGuard`; `territory_mount.covered_file_point_stays_plain`).
 - **Order and slots.** Both entries append in Plan 9's order (`mount_install_at`):
   `<new, covered>` for `MBEFORE`, `<covered, new>` for `MAFTER`. Later ordered
   mounts place around the covered entry like any member. The first mount

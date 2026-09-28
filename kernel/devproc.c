@@ -618,11 +618,11 @@ static size_t format_exe(struct Proc *p, char *buf, size_t cap) {
     // Return the CLAMPED length, like every sibling generator (each fmt_* is
     // cap-checked, so format_status/ns also return only what they produced).
     // Load-bearing, not stylistic: devproc_read trusts this as the total and
-    // copies content[off .. off+n) out of a DEVPROC_READ_BUF (512) stack
-    // buffer. A Path may be up to SYS_OPEN_PATH_MAX (1024), so returning the
-    // TRUE length would let a read at off >= 512 copy adjacent kernel stack to
-    // EL0 -- an OOB read and an I-13 leak. Clamping makes a pathological path
-    // read as truncated (honest) instead.
+    // copies content[off .. off+n) out of its DEVPROC_READ_BUF stack buffer,
+    // so a length past the bytes written would copy adjacent kernel stack to
+    // EL0 -- an OOB read and an I-13 leak. Today the buffer (2 KiB) outgrows
+    // any Path (SYS_OPEN_PATH_MAX, 1 KiB), so the clamp is the defence for the
+    // day either bound moves: a longer path reads as truncated (honest).
     size_t n = (size_t)path->len;
     if (n > cap) n = cap;
     for (size_t i = 0; i < n; i++) buf[i] = path->s[i];
@@ -1023,7 +1023,7 @@ static void devproc_close(struct Spoor *c) {
 // buffer, then copies the requested [off, off+n) slice.
 //
 // Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
-// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS=12).
+// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS, 32).
 // prowl-3b bumped 512 -> 2048: /proc/<pid>/sched formats one row per thread of a
 // possibly heavily-threaded Proc (a Go binary / stratumd), each ~40-50 B; 512
 // truncated at ~8 threads. 2048 holds ~30 thread rows (the format bounds the

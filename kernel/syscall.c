@@ -7916,7 +7916,8 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
-// does the source rights gate + flags check + the mount-table op). The mount
+// does the source rights gate + flags check + Plan 9's Emount (-T_E_NOTDIR;
+// every other refusal is -1) + the mount-table op). The mount
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
 // inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
 // only as the covered member of a union the mount starts.
@@ -7941,6 +7942,20 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     // not for the mount installation itself.
     struct Spoor *source = sys_lookup_spoor(p, source_fd, RIGHT_READ);
     if (!source)                                     return -1;
+
+    // Plan 9 cmount's Emount (ARCH 9.6.1): a source whose type differs from the
+    // point's would leave a name walked as one kind of file resolving as the
+    // other, whatever the flags; and only a replacement may stand at a file,
+    // because every other placement keeps the members already there and stalk
+    // searches two or more members as a directory. Plan 9 refuses
+    // `order != MREPL` at a file, where its flag 0 is MREPL; here a flagless
+    // mount appends, so it is refused with MBEFORE and MAFTER.
+    bool source_dir = (source->qid.type & QTDIR) != 0;
+    bool point_dir  = (mountpoint->qid.type & QTDIR) != 0;
+    if (source_dir != point_dir || (!point_dir && !(flags & (u32)MREPL))) {
+        spoor_clunk(source);
+        return -T_E_NOTDIR;
+    }
 
     // territory.c::mount handles: idempotency (no-op on duplicate), MREPL
     // (replace existing entry), full-table rejection, and the per-entry

@@ -1643,15 +1643,21 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // by the absolute `path` (`path_len` bytes) in the calling Proc's territory
 // (stalk-2: path-keyed; was an abstract target_path_id). The kernel `stalk`s
 // `path` to the mount point's (dc, devno, qid.path) identity. `flags` is a
-// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC; bits outside that union
-// are rejected. The mount point MUST EXIST as a walkable directory.
+// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
+// T_MPHENO_LINUX; bits outside that union are rejected. The mount point MUST
+// EXIST and be of the source's type (a directory over a directory, a file over
+// a file), and at a file only T_MREPL is accepted.
 //
-// Returns 0 on success, -1 on:
-//   - path absent / empty / too long / not resolvable
+// Returns 0 on success, -20 (T_E_NOTDIR) on Plan 9's Emount (ARCH 9.6.1), and
+// -1 on every other refusal:
+//   - path absent / empty / too long / not resolvable (a trailing '/' on a
+//     point that is not a directory is unresolvable)
 //   - source_spoor_fd not a KOBJ_SPOOR or out-of-range
 //   - missing RIGHT_READ on source
-//   - flags has bits outside the supported set
+//   - flags has bits outside the supported set, or more than one of
+//     T_MREPL / T_MBEFORE / T_MAFTER
 //   - territory mount table full
+//   - the mount would close a cycle in the mount graph (I-3)
 #[inline(always)]
 pub unsafe fn t_mount(path: *const u8, path_len: usize,
                       source_spoor_fd: i64, flags: u32) -> i64 {

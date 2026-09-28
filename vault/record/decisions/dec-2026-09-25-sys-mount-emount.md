@@ -3,10 +3,11 @@ id: dec-2026-09-25-sys-mount-emount
 type: dec
 title: "SYS_MOUNT refuses what Plan 9's cmount refuses"
 date: 2026-09-25
-status: standing
+status: superseded
 decided-by: user-vote
 affects: [sub-kernel-territory, sub-kernel-syscall-abi, spec-territory]
 created: 2026-09-25
+superseded-by: dec-2026-09-25-mrepl-only-at-a-file
 ---
 ## Fork
 

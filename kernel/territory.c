@@ -863,17 +863,19 @@ int mount(struct Territory *territory, struct Spoor *source,
     // grow a covered member (territory.tla BUGGY_FRESH_AFTER_REMOVE).
     // MREPL wins over the ordering flags (Plan 9 encodes the three as one
     // field), so it never starts a union; SYS_MOUNT refuses the combinations.
-    // Only a directory can be searched as a member: at a file point the mount
-    // stays plain (territory.tla FilePaths; Plan 9 refuses it, Emount).
+    // Only a directory can be searched as a member, so no union starts at a
+    // file point. SYS_MOUNT refuses an ordered mount there (Plan 9's Emount,
+    // ARCH 9.6.1); this conjunct holds the line for mount()'s kernel callers
+    // (territory.tla BUGGY_COVER_FILE; territory_mount.covered_file_point_stays_plain).
     bool starts_union = !(flags & MREPL) && (flags & (MBEFORE | MAFTER)) &&
                         (mountpoint->qid.type & QTDIR) &&
                         !mount_point_hosts_member(territory, mountpoint);
 
     // Idempotency: (key(mountpoint), source) pair already in the table → no new
-    // entry, no refcount bump. Spec: <<path, s>> \notin mounts[p] precondition
-    // under the re-keyed identity (territory.tla models mounts as a set of
-    // <<point, source>> pairs and does not model `flags` at all, so the
-    // convergence below sits beneath the model).
+    // entry, no refcount bump. territory.tla keeps each point's members in
+    // order, with their MBEFORE and MCREATE bits, but has no flagless mount,
+    // so the convergence below sits beneath the model (its Reposition is the
+    // MBEFORE / MAFTER arm).
     //
     // #219: the arm used to `goto out` with rc = 0 WITHOUT consulting flags, so
     // mount(..., MNOEXEC) over an already-mounted pair reported success and

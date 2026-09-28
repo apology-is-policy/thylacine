@@ -155,26 +155,40 @@ enum {
     // a pipe-as-mount mostly produces -1, but the lifetime discipline
     // composes regardless), or a future cross-territory share.
     //
-    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0/-1
+    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0/-1/-T_E_NOTDIR
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX; bytes, NUL-free)
     //   x2 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
-    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC)
+    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC /
+    //        MPHENO_LINUX)
     // stalk-2: path-keyed (was an abstract target_path_id). The kernel
     // `stalk`s `path` from the caller's Territory root to the mount-point
     // Spoor (STALK_MOUNT: resolve, do NOT cross the final mount, do NOT
     // open -- so re-mounting onto an already-mounted point MREPL-replaces
     // it) and records the mount keyed by the mount point's
-    // (dc, devno, qid.path) identity. The MOUNT POINT MUST EXIST as a
-    // walkable directory (Plan 9 M1; devramfs ships /srv + /proc, the
-    // disk FS provides its own). Resolves from root only at v1.0 (absolute
-    // paths); a relative-mount start_fd is a v1.x add.
+    // (dc, devno, qid.path) identity. The MOUNT POINT MUST EXIST and be
+    // of the source's type: a directory over a directory (Plan 9 M1;
+    // devramfs ships /srv + /proc, the disk FS provides its own), a file
+    // over a file, and at a file only with MREPL. The final component is
+    // never followed (DISTRO D-1), so a symlink point is not a directory; a
+    // trailing '/' follows it to its target, unless a file is mounted on the
+    // link itself (the mount wins, and the path is refused). Resolves from
+    // root only at v1.0 (absolute paths); a relative-mount start_fd is a v1.x
+    // add.
     // Returns: 0 on success, -1 on:
     //   - path absent / empty / too long / not resolvable / NUL-embedded
+    //     (a trailing '/' on a point that is not a directory is unresolvable:
+    //     stalk refuses it before the type check below can run)
     //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
     //   - missing RIGHT_READ on the source (it must be consumable as a tree)
-    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC set
+    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC|
+    //     MPHENO_LINUX set, or more than one of MREPL / MBEFORE / MAFTER
     //   - territory mount table full (PGRP_MAX_MOUNTS reached)
+    //   - the mount would close a cycle in the mount graph (I-3)
+    // and -T_E_NOTDIR on Plan 9's Emount (ARCH 9.6.1): the source's type
+    // (directory or not) differs from the mount point's, under any flag,
+    // or the flags lack MREPL at a point that is not a directory (a flagless
+    // mount appends; Plan 9's flag 0 is MREPL).
     //
     // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount
     // (the mount-table entry holds its own ref). The caller can close
@@ -182,8 +196,10 @@ enum {
     // alive. unmount() (or Territory destruction) drops the per-entry
     // ref; if it was the last ref, the Spoor's Dev close runs (which,
     // for dev9p-backed Spoors set up by SYS_ATTACH_9P, tears down the
-    // entire 9P session). The transient mount-point Spoor is clunked
-    // immediately -- the table keeps only its identity, not the Spoor.
+    // entire 9P session). The handler clunks its transient mount-point
+    // Spoor; the table keeps the point's identity, and its own reference to
+    // the Spoor only when the mount starts a union (the covered member,
+    // ARCH 9.5).
     SYS_MOUNT       = 14,   // arg: path_va, path_len, source_spoor_fd, flags
 
     // SYS_UNMOUNT(path_va, path_len) → 0/-1

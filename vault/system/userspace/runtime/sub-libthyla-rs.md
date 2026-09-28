@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -477,6 +477,12 @@ instant, and falling back to the syscall when the page is absent.
   one end. `territory::chroot` / `pivot_root` fail flat — every refusal is
   `InvalidArgument`, whatever the doc comments once promised — and a real swap
   also drops the mount entries the new root cannot reach (ARCH 9.6.10).
+  `territory::mount` (and the three `bind_*` shorthands) maps the kernel's flat
+  -1 the same way, and since 2026-09-25 passes a NAMED errno through:
+  `NotADirectory` for Plan 9's `Emount` (ARCH 9.6.1), a source and mount
+  point of different types, or a mount without `REPL` at a point that is not
+  a directory. `MountFlags`' doc comments state the kernel's placements: at
+  most one of `REPL` / `BEFORE` / `AFTER`, and with none the mount appends.
 
 - **`Stdio::Null` is unimplemented for a reason that expired.** Three places
   say the discard mode cannot be built for want of a kernel bit-bucket device.

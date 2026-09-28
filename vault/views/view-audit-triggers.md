@@ -35,7 +35,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9, inv-i44 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
-| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h | inv-i1 | What an auditor attacks here: |
+| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, tools/test-pci-msi-dtb.py, kernel/include/thylacine/dtb.h, kernel/test/test_dtb.c | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
@@ -81,7 +81,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
 | [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
 | [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |
-| [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h, kernel/test/test_territory_pivot_root.c, usr/symlink-probe/src/main.rs | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
+| [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h, kernel/test/test_territory_pivot_root.c, kernel/test/test_sys_mount.c, usr/symlink-probe/src/main.rs | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
 | [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h | inv-i21, inv-i31, inv-i44 | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |

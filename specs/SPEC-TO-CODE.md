@@ -310,7 +310,7 @@ Run 2026-09-25 on thyla-keep (TLC 2026.09.17 rev 142d0ba, OpenJDK 21, 32 aarch64
 | Config | Constants | Verdict | Distinct |
 |---|---|---|---|
 | `territory.cfg` | all flags FALSE, `Symm` | clean, depth 11 | 8,052,876 |
-| `territory_file_point.cfg` | `FilePaths = {b}`, `Symm` | clean, depth 11 | 4,380,876 |
+| `territory_file_point.cfg` | `FilePaths = {b}`, `Symm` | clean, depth 11 | 1,372,428 (4,380,876 before the 2026-09-25 Emount refusal) |
 | `territory_cov_alias.cfg` | `COV_MOUNTABLE`, `Procs = {p1}`, `Spoors = {s1}` | clean, depth 9 | 202,800 |
 | `territory_buggy.cfg` | `BUGGY_CYCLE` | `NoCycle` violated | (fast) |
 | `territory_buggy_mount_no_refbump.cfg` | `BUGGY_MOUNT_NO_REFBUMP` | `MountRefcountConsistency` violated | (fast) |
@@ -342,9 +342,12 @@ large clean cfgs came out identical across two independent runs: first on
 
 Impl mapping: `CovAdded` / `Placed` -> `kernel/territory.c::mount`'s
 `starts_union` (judged before the UM-8 reposition scan: an MBEFORE / MAFTER,
-never MREPL or flagless, at a directory point hosting no member; `DirPoint` is
-its QTDIR check) and the two `mount_install_at` calls that place the covered
-entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
+never MREPL or flagless, at a directory point hosting no member; `CovGuard` is
+its QTDIR check, and `EmountOK`, which guards `MountBefore` / `MountAfter` /
+`MountRepl`, is `kernel/syscall.c::sys_mount_for_proc`'s type check, Plan 9's
+Emount, since the 2026-09-25 votes: every source in the model is a directory,
+so no EL0 mount reaches a file point, and the kernel answers `-T_E_NOTDIR`)
+and the two `mount_install_at` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
 MAFTER); `Reposition` -> the #219 / F6 reposition arm (the point is not fresh,
 so no covered entry); `Unmount` -> `::unmount` (the covered entry is never
 removed by name and leaves with the last mounted member); `NoSelfMount` ->
@@ -355,6 +358,62 @@ stops at a point whose member[0] is covered). Runtime: the 18 B-1d-u kernel
 tests (`territory_mount.covered_*`, `union_keeps_covered`,
 `no_covered_unless_fresh`, `territory.shed_covered_shares_fate`,
 `stalk.union_covered_*`).
+
+### B-1d-v: SYS_MOUNT's Emount (2026-09-25)
+
+The two 2026-09-25 votes (vault `dec-2026-09-25-sys-mount-emount`, replaced by
+`dec-2026-09-25-mrepl-only-at-a-file`) put Plan 9's `Emount` in
+`sys_mount_for_proc`: a source whose type differs from the point's is refused
+under any flag, and at a point that is not a directory only `MREPL` is
+accepted. Every source in the model is a directory, so the half the model can
+see is that no EL0 mount reaches a file point. A file mounted over a file with
+`MREPL` sits beneath the model, and so does the flagless append the second vote
+refuses, which needs two file members at one point; the kernel test
+`sys_mount.refuses_all_but_mrepl_at_a_file` carries both.
+
+Model changes. The file-point guard is split in two: `EmountOK(pt) ==
+DirPoint(pt) \/ KERNEL_MOUNTS \/ BUGGY_EMOUNT` guards `MountBefore`,
+`MountAfter` and `MountRepl` (the syscall's check), and `CovGuard(pt) ==
+DirPoint(pt) \/ BUGGY_COVER_FILE` guards the covered member in `CovAdded`
+(`starts_union`'s QTDIR conjunct). `KERNEL_MOUNTS` models `mount()`'s kernel
+callers, which the syscall check does not cover. One invariant,
+`NoMemberAtFile`: no file point holds a member (it does not bind the kernel's
+callers). `territory_buggy_cover_file.cfg` now sets `KERNEL_MOUNTS`, since
+without it no mount reaches a file point and `BUGGY_COVER_FILE` could not fail.
+
+| Config | Constants | Verdict | Distinct |
+|---|---|---|---|
+| `territory_file_point_kernel.cfg` | `FilePaths = {b}`, `KERNEL_MOUNTS`, `Symm` | clean, depth 11 | 4,380,876 (the pre-refusal `file_point` count: with `KERNEL_MOUNTS` the mount actions are unguarded) |
+| `territory_buggy_emount.cfg` | `FilePaths = {b}`, `BUGGY_EMOUNT` | `NoMemberAtFile` violated, depth 2 (one `MountBefore` at `b`) | (fast) |
+| `territory_buggy_cover_file.cfg` | `FilePaths = {b}`, `BUGGY_COVER_FILE`, `KERNEL_MOUNTS` | `NoCoveredFile` violated, depth 2 | (fast) |
+
+Run 2026-09-25 on thyla-keep (TLC 2026.09.17, OpenJDK 21, 32 aarch64 cores).
+`specs/check-territory.sh` now runs all twenty-two and pins four clean counts:
+`territory` 8,052,876, `territory_file_point` 1,372,428,
+`territory_file_point_kernel` 4,380,876 and `territory_cov_alias` 202,800. Every
+cfg came out as claimed, and each buggy cfg violated the invariant it names, on
+one worker.
+
+`SYMMETRY Symm` reduces three clean cfgs now: `territory`, `territory_file_point`
+and `territory_file_point_kernel`. The buggy cfgs stay unreduced, so their
+traces read directly; `territory_buggy_emount` lost the `SYMMETRY` line it had
+been given (audit round 2). The whole set was re-run on 2026-09-28 (thyla-keep,
+about 33 minutes): all twenty-two came out as claimed, the four clean counts
+unchanged, and `territory_buggy_emount` violated `NoMemberAtFile` as claimed
+with no reduction.
+
+Impl mapping: `EmountOK` -> `sys_mount_for_proc`'s check (`source_dir !=
+point_dir || (!point_dir && !(flags & MREPL))`, `-T_E_NOTDIR`, the lookup's
+reference released); `CovGuard` -> `starts_union`'s QTDIR conjunct in
+`kernel/territory.c::mount`. Runtime: `sys_mount.refuses_a_type_mismatch`,
+`refuses_all_but_mrepl_at_a_file`, `type_check_reads_only_qtdir` and
+`accepts_an_ordered_mount_at_a_directory` at the syscall; the `mount()` layer's
+`territory_mount.covered_file_point_stays_plain` for `KERNEL_MOUNTS`; on the
+device, alloc-smoke's U-2f leg (a file over the `/srv` directory under every
+placement, `/bin` over `/srv` through the three `bind_*` wrappers with the
+placement read back from `/proc/<pid>/ns`, and `/bin/joey` over the
+`/bin/system.key` file: refused without `MREPL`, and read back through the
+key's name under it).
 
 ### P2-Ea landed (this chunk)
 

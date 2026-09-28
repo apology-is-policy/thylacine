@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -172,7 +172,10 @@ The dot gates read `qid.type` **uncrossed**; the trailing-slash gate reads it
 questions of one field. `.` and `..` are about **where resolution stands**, so
 `/mnt/.` must equal `/mnt` and crossing would move it; a trailing slash is
 about **what the quarry is**, so a directory mounted over a file legitimately
-makes `file/` resolve. Unifying them would silently break whichever one lost.
+makes `file/` resolve. (`SYS_MOUNT` never installs that mount -- it refuses
+it, Plan 9's `Emount`, ARCH 9.6.1 -- but a kernel caller of `mount()` can, and
+a 9P server can answer a later walk to a directory point with a file's type.)
+Unifying them would silently break whichever one lost.
 
 The dot gates also had to be written **separately from** the through-a-file
 gate, for a structural reason worth keeping: `.` and `..` are handled by stalk
@@ -683,7 +686,9 @@ authoritative audit-trigger copy):
   quarry CROSSED.** They ask different questions of one field — *where
   resolution stands* versus *what the quarry is* — and unifying them
   silently breaks whichever loses. `/mnt/.` must equal `/mnt`; a directory
-  mounted over a file must make `file/` legal.
+  mounted over a file must make `file/` legal (`SYS_MOUNT` never installs
+  one, but a kernel caller of `mount()` can, and a 9P server can re-type the
+  point after the mount).
 - **A dot arm needs its own copy of every gate.** `.` and `..` never reach
   `Dev.walk`, so anything added to the real-component arm does not cover
   them. Both tokens, not just `..`: two separate tasks named only `..` and

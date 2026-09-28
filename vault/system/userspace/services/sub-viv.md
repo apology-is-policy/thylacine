@@ -10,7 +10,7 @@ validated-by: [prose]
 locks: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-06
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -205,7 +205,7 @@ through the diorama's `/proc/<pid>/ctl` path; after it, through the ctl fd
 pre-opened for exactly that. A diorama that already died is reaped either
 way.
 
-Two error messages are unusually detailed, and both earn it:
+Three error messages are unusually detailed, and each earns it:
 
 - **the failed-attach message** points at the diorama's selftest line on
   the console, because a diorama that dies before serving is the likely
@@ -214,7 +214,11 @@ Two error messages are unusually detailed, and both earn it:
   and reports whether *that* passes. OEXEC runs the same leaf permission
   gate and Dev open the spawn-time resolve runs, so a failed spawn with a
   passing OEXEC open points past resolution — it names the failure class
-  for the operator rather than handing them an rc.
+  for the operator rather than handing them an rc;
+- **the failed-recipe-mount message** names the anchor, and when the kernel
+  answers `ENOTDIR` (Plan 9's `Emount`) it says the rootfs anchor has the
+  wrong type: a directory where a device leaf needs a file, or the reverse.
+  Any other refusal still reads as a missing anchor.
 
 A non-zero container exit is reported with `stdio_born`, the phenotype,
 the entrypoint and the pid. Until that line existed, "the container

@@ -265,16 +265,14 @@ void joey_run(void) {
     if (devramfs_lookup(JOEY_RAMFS_NAME, &cpio_blob, &blob_size) != 0) {
         // Missing bin/joey is unrecoverable at v1.0: boot path requires
         // it. Surfaces as EXTINCTION: in the boot log so tools/test.sh
-        // reports failure. The EXTINCTION bodies in this file name the
-        // program "/joey", its path before the initrd kept programs in bin/:
-        // a body is tooling ABI (docs/agent/BOOT-BANNER.md).
-        extinction("joey: /joey not found in initrd (devramfs_lookup failed)");
+        // reports failure.
+        extinction("joey: bin/joey not found in initrd (devramfs_lookup failed)");
     }
     if (blob_size == 0) {
-        extinction("joey: /joey in initrd has zero size");
+        extinction("joey: bin/joey in initrd has zero size");
     }
     if ((u64)blob_size > EXEC_FILE_MAX) {
-        extinction_with_addr("joey: /joey ELF exceeds EXEC_FILE_MAX", (u64)blob_size);
+        extinction_with_addr("joey: bin/joey ELF exceeds EXEC_FILE_MAX", (u64)blob_size);
     }
 
     // #85: copy cpio's 4-aligned bytes into an exact-size 8-aligned heap
@@ -473,10 +471,10 @@ void joey_run(void) {
         // Now reachable only as -1: no child with that pid (structurally
         // impossible immediately after a successful rfork) or a death-
         // interrupted sleep (kproc never dies). Neither is a "wrong pid".
-        extinction_with_addr("joey: wait for /joey failed", (u64)reaped);
+        extinction_with_addr("joey: wait for bin/joey failed", (u64)reaped);
     }
     if (status != 0) {
-        extinction_with_addr("joey: /joey exited non-zero", (u64)status);
+        extinction_with_addr("joey: bin/joey exited non-zero", (u64)status);
     }
 
     uart_puts("  joey: /bin/joey pid=");

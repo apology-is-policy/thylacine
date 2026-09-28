@@ -552,6 +552,25 @@ caller pivoted back; with the shed it would strip the table for good) -- and
 0040: ports pass the kernel's `OAPPEND` omode bit instead of emulating append
 with one seek at open.
 
+## B-1d-v: SYS_MOUNT names one errno (2026-09-25)
+
+No number or record changed. `SYS_MOUNT` (14), a flat -1 call, now also answers
+`-T_E_NOTDIR` for Plan 9's `Emount` cases
+([[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
+[[dec-2026-09-25-sys-mount-emount]]; ARCH 9.6.1): a source whose type differs
+from the mount point's, under any flag, and any mount without `MREPL` at a
+point that is not a directory. A flagless mount appends here, where Plan 9's
+flag 0 is `MREPL`, so at a file it is refused with `MBEFORE` and `MAFTER`. The
+final component is never followed, so a symbolic link is a point that is not a
+directory; a trailing `/` follows it to its target, unless a file is mounted
+on the link itself (the mount wins, and the path is refused). Every other
+refusal is still -1, so the call now mixes the two conventions, and its enum
+comment in
+`syscall.h` (mirrored in libt's `syscall.h` and in `libthyla_rs`) lists which
+cause gets which. A caller that tested `rc < 0` is unaffected;
+`libthyla_rs::territory::mount` passes the errno through as `NotADirectory` and
+keeps mapping -1 to `InvalidArgument`.
+
 ## B-1a: SYS_BURROW_RESERVE 124 and SYS_BURROW_PROTECT 125 (2026-09-23)
 
 Two new numbers rather than flags on `SYS_BURROW_ATTACH_LAZY`, per the

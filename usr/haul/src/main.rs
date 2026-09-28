@@ -1101,7 +1101,13 @@ fn run(argv: Args) -> Result<(), String> {
     };
     let _ = unsafe { t_close(root) };
     if rc < 0 {
-        return Err("mount".into());
+        // The kernel names one cause, Plan 9's Emount (-ENOTDIR: an attach root
+        // is a directory, so the mount point is not); every other refusal is
+        // its generic -1.
+        return Err(match Error::from_syscall_return(rc) {
+            Err(e) if rc != -1 => alloc::format!("mount {}: {}", args.mountpoint, e),
+            _ => "mount".into(),
+        });
     }
 
     // Under -v, prove the mount from INSIDE this Proc before anyone else tries

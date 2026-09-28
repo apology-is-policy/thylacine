@@ -779,17 +779,24 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
 // successful mount; the mount table keeps the Spoor alive until `t_unmount`
 // or Territory destruction.
 //
-// The MOUNT POINT MUST EXIST as a walkable directory (Plan 9 M1; devramfs
-// ships /srv + /proc, the disk FS provides its own).
+// The MOUNT POINT MUST EXIST and be of the source's type: a directory over a
+// directory (Plan 9 M1; devramfs ships /srv + /proc, the disk FS provides its
+// own), a file over a file, and at a file only with T_MREPL
+// (kernel/include/thylacine/syscall.h, SYS_MOUNT).
 //
-// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE (bit-or'd).
+// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
+// T_MPHENO_LINUX (bit-or'd; at most one of the first three).
 //
-// Returns 0 on success, -1 on:
-//   - path absent / empty / too long / not resolvable
+// Returns 0 on success, -T_E_NOTDIR (-20) on Plan 9's Emount (ARCH 9.6.1),
+// and -1 on every other refusal:
+//   - path absent / empty / too long / not resolvable (a trailing '/' on a
+//     point that is not a directory is unresolvable)
 //   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
 //   - source handle missing T_RIGHT_READ
-//   - flags has bits outside the valid set
-//   - Territory mount table full (8 entries at v1.0)
+//   - flags has bits outside the valid set, or more than one of
+//     T_MREPL / T_MBEFORE / T_MAFTER
+//   - Territory mount table full (PGRP_MAX_MOUNTS, 32)
+//   - the mount would close a cycle in the mount graph (I-3)
 __attribute__((always_inline))
 static inline long t_mount(const char *path, unsigned long path_len,
                            long source_spoor_fd, unsigned long flags) {

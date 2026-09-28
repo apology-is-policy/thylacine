@@ -30,6 +30,11 @@
 //     A handle_alloc failure after the reserve phase rolls the
 //     reservation back — the registry is left with no stale entry.
 //
+//   devsrv.service_keys_distinct
+//     Each post's node has a qid.path of its own, never the root's: a file
+//     MREPLed over /srv/a shows at a alone, and a union at the registry root
+//     leaves /srv/b its service node.
+//
 // Each test calls srv_registry_reset() first so it starts from an empty
 // registry (the harness runs tests sequentially in one address space).
 
@@ -42,6 +47,8 @@
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>
+#include <thylacine/territory.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
@@ -50,6 +57,9 @@
 extern void srv_registry_reset(void);
 extern bool srv_test_accept_pin(struct SrvService *svc, int mode);
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
+extern int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+                              struct Spoor *mountpoint, u32 flags);
+extern int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint);
 
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
@@ -62,6 +72,7 @@ void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
 void test_devsrv_post_listener(void);
+void test_devsrv_service_keys_distinct(void);
 
 static struct Proc *make_test_proc(void) {
     return proc_alloc();
@@ -631,4 +642,82 @@ void test_devsrv_accept_lifetime(void) {
     TEST_ASSERT(pinned && refused, "second concurrent accept fails without a second Rendez waiter");
     TEST_ASSERT(released && ended, "tombstone wakes and releases the old accepter");
     TEST_ASSERT(rebound >= 0 && stale_refused, "reuse succeeds only for the new owner");
+}
+
+// A devnone Spoor of the given type in `p`'s handle table (RIGHT_READ; the
+// table owns the ref).
+static hidx_t install_source(struct Proc *p, u8 type, u64 qid_path) {
+    struct Spoor *s = spoor_alloc(&devnone);
+    if (!s) return -1;
+    s->qid.type = type;
+    s->qid.path = qid_path;
+    return handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, s);
+}
+
+// devsrv.service_keys_distinct -- the mount key is (dc, devno, qid.path), and
+// a service node shares the registry root's dc and devno. When every node's
+// path was the root's 0, a file MREPLed over /srv/a was keyed at the root and
+// at every other service too: /srv crossed into the file and /srv/b answered
+// ENOTDIR, and a union at the root made every service node a directory.
+void test_devsrv_service_keys_distinct(void) {
+    srv_registry_reset();
+
+    struct Proc *p = make_marked_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc + mark");
+    p->territory = territory_alloc();
+    TEST_ASSERT(p->territory != NULL, "territory_alloc");
+    TEST_ASSERT(post_svc_9p(p, "a", 1) >= 0, "post a");
+    TEST_ASSERT(post_svc_9p(p, "b", 1) >= 0, "post b");
+
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(root != NULL, "attach the boot registry");
+    struct Spoor *a  = stalk(p, root, "a", 1, STALK_MOUNT, 0);
+    struct Spoor *a2 = stalk(p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *b  = stalk(p, root, "b", 1, STALK_WALK, 0);
+    TEST_ASSERT(a != NULL && a2 != NULL && b != NULL, "walk a twice and b");
+    TEST_EXPECT_NE((u64)a->qid.path, (u64)root->qid.path,
+        "a service node's path is not the registry root's");
+    TEST_EXPECT_NE((u64)a->qid.path, (u64)b->qid.path,
+        "two posts' nodes have different paths");
+    TEST_EXPECT_EQ((u64)a2->qid.path, (u64)a->qid.path,
+        "one post keeps its path across walks");
+    spoor_clunk(a2);
+
+    // The identities above are the fix; the mount TABLE is what a shared key
+    // would break. mount_is_point_id keys on (dc, devno, qid.path) -- exactly
+    // what stalk crossing consults -- so it discriminates without crossing (a
+    // devnone mount source cannot be crossed; a raw registry root as base
+    // resolves member 0 only). Pre-fix a, b and the root share the key 0.
+    hidx_t ffd = install_source(p, QTFILE, 0x5au);
+    TEST_ASSERT(ffd >= 0, "install a file source");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, ffd, a, MREPL), 0,
+        "MREPL a file over /srv/a");
+    TEST_ASSERT(mount_is_point_id(p->territory, a->dc, a->devno, a->qid.path),
+        "the entry is keyed at /srv/a");
+    TEST_ASSERT(!mount_is_point_id(p->territory, b->dc, b->devno, b->qid.path),
+        "no entry is keyed at /srv/b (pre-fix b shared a's key)");
+    TEST_ASSERT(!mount_is_point_id(p->territory, root->dc, root->devno,
+                                   root->qid.path),
+        "no entry is keyed at the registry root (pre-fix a was keyed there)");
+    TEST_EXPECT_EQ(sys_unmount_for_proc(p, a), 0, "unmount /srv/a");
+    spoor_clunk(a);
+
+    // A directory MBEFORE at the registry root starts a union at the ROOT key.
+    hidx_t dfd = install_source(p, QTDIR, 0x5bu);
+    TEST_ASSERT(dfd >= 0, "install a directory source");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, dfd, root, MBEFORE), 0,
+        "MBEFORE a directory at the registry root");
+    TEST_ASSERT(mount_is_point_id(p->territory, root->dc, root->devno,
+                                  root->qid.path),
+        "the union is keyed at the registry root");
+    TEST_ASSERT(!mount_is_point_id(p->territory, b->dc, b->devno, b->qid.path),
+        "the union is not keyed at /srv/b (pre-fix it was)");
+    TEST_ASSERT(mount_member_at(p->territory, b, 0, NULL) == NULL,
+        "/srv/b hosts no mount member");
+    TEST_EXPECT_EQ(sys_unmount_for_proc(p, root), 0, "unmount the root's union");
+    spoor_clunk(b);
+
+    spoor_clunk(root);
+    drop_test_proc(p);
+    srv_registry_reset();
 }

@@ -1159,6 +1159,7 @@ void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
 void test_devsrv_post_listener(void);
+void test_devsrv_service_keys_distinct(void);
 void test_devcap_registered(void);
 void test_devcap_walk_grant_use(void);
 void test_devcap_walk_unknown(void);
@@ -1687,6 +1688,10 @@ void test_sys_mount_rejects_null_territory(void);
 void test_sys_unmount_removes_entry_and_drops_ref(void);
 void test_sys_unmount_rejects_nonexistent_target(void);
 void test_sys_mount_caller_close_keeps_mount_alive(void);
+void test_sys_mount_refuses_a_type_mismatch(void);
+void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
+void test_sys_mount_type_check_reads_only_qtdir(void);
+void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
 void test_attach_probe_round_trip(void);
 void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);
@@ -3054,6 +3059,7 @@ struct test_case g_tests[] = {
     { "devsrv.registry_lifecycle",     test_devsrv_registry_lifecycle,     false, NULL },
     { "devsrv.svc_ref_holds_registry", test_devsrv_svc_ref_holds_registry, false, NULL },
     { "devsrv.post_listener",          test_devsrv_post_listener,          false, NULL },
+    { "devsrv.service_keys_distinct",  test_devsrv_service_keys_distinct,  false, NULL },
     { "devcap.registered",             test_devcap_registered,             false, NULL },
     { "devcap.walk_grant_use",         test_devcap_walk_grant_use,         false, NULL },
     { "devcap.walk_unknown",           test_devcap_walk_unknown,           false, NULL },
@@ -3785,6 +3791,10 @@ struct test_case g_tests[] = {
     { "sys_unmount.removes_entry_and_drops_ref",       test_sys_unmount_removes_entry_and_drops_ref,       false, NULL },
     { "sys_unmount.rejects_nonexistent_target",        test_sys_unmount_rejects_nonexistent_target,        false, NULL },
     { "sys_mount.caller_close_keeps_mount_alive",      test_sys_mount_caller_close_keeps_mount_alive,      false, NULL },
+    { "sys_mount.refuses_a_type_mismatch",             test_sys_mount_refuses_a_type_mismatch,             false, NULL },
+    { "sys_mount.refuses_all_but_mrepl_at_a_file",     test_sys_mount_refuses_all_but_mrepl_at_a_file,     false, NULL },
+    { "sys_mount.type_check_reads_only_qtdir",         test_sys_mount_type_check_reads_only_qtdir,         false, NULL },
+    { "sys_mount.accepts_an_ordered_mount_at_a_directory", test_sys_mount_accepts_an_ordered_mount_at_a_directory, false, NULL },
     { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
     { "sys_mlockall.cap_gate",                         test_sys_mlockall_cap_gate,                         false, NULL },
     { "sys_set_dumpable.one_way_to_zero",              test_sys_set_dumpable_one_way_to_zero,              false, NULL },

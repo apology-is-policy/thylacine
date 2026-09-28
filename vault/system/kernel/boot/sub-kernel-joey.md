@@ -42,9 +42,10 @@ over-`EXEC_FILE_MAX` blob is boot-fatal,
 as is any failure in the namespace construction or the rfork. There is no
 degraded mode — a boot that cannot build its namespace or start init is
 unrecoverable, and each failure extincts with a message a boot log can diagnose
-from. Those messages name the program `/joey`, its path before the initrd kept
-programs in `bin/`: an EXTINCTION body is tooling ABI
-(`docs/agent/BOOT-BANNER.md`).
+from. Those messages name the program by its archive path, `bin/joey`; they
+said `/joey` until 2026-09-25. No tool matches any of them, so they are prose:
+the `EXTINCTION:` prefix and the bodies a tool matches are the ABI
+([[dec-2026-09-25-extinction-bodies]], [[abi-boot-banner]]).
 
 ## Mechanism
 
