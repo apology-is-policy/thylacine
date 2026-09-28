@@ -39,7 +39,10 @@ CLEAN="poll:-
 poll_notimeout:-
 poll_liveness:-
 poll_liveness_notimeout:-
-poll_local:-"
+poll_local:-
+poll_armfail:-
+poll_armfail_liveness:-
+poll_armfail_liveness_notimeout:-"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="poll_buggy_check_before_register:NoMissedPoll
@@ -50,7 +53,9 @@ poll_buggy_return_on_wake:NoSpuriousZero
 poll_buggy_no_loop_die_check:DeathTerminates
 poll_buggy_no_loop_stop_check:StopHonoured
 poll_buggy_verdict_before_settle:NoFalseNotReady
-poll_buggy_sweep_leaves_snapshot:NoSnapshotOutlivesCall"
+poll_buggy_sweep_leaves_snapshot:NoSnapshotOutlivesCall
+poll_buggy_no_retry:NoMissedPoll
+poll_buggy_retry_is_timeout:NoSpuriousZero"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"

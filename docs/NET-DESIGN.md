@@ -699,13 +699,27 @@ syscall are added, and the 2026-06-18 terms hold:
   counted and printed, and the boot gates fail on one. A server that defers the
   snapshot is the witness that the fail-safe fires. A server that has died is not
   this case: its session fails every op, and the poll reports `POLLERR` as before.
+- **A shortage is not an answer.** The kernel can fail to send a readiness read at
+  all: every tag of the session is in use, its send ring is full, or there is no
+  memory for the poll state. None of these says anything about the file, so a poll
+  neither fails nor guesses. A snapshot that cannot be sent is resent every
+  millisecond inside its fixed 1 s, and one still unsent at the end of it fail-safes
+  like an unanswered one, counted the same way. An arm that cannot be sent leaves
+  its poller parked with the sleep bounded by a 10 ms retry timer, and the pass
+  after the timer samples again. The timer's expiry is a wake and never the call's
+  timeout: the clock decides the call's deadline. The 9P client reports a full send
+  ring or a full tag pool to an asynchronous submitter as a retryable `EAGAIN` and
+  keeps the session. (Until 2026-09-28 an asynchronous submit that met a full send
+  ring marked the whole shared session dead.)
 
 `specs/net_poll.tla` (spec-first) gains the timed and zero-timeout poller, the
 snapshot, the settle and a non-monotonic `ready`, with counterexamples for a
 cache-only sample and for a verdict given before the settle. `specs/poll.tla` gains
-the settle phase. The vivarium's per-call open of each socket's `ready` file costs a
-Twalk, a Tlopen, a Tclunk and a guest fd per socket per call. It is retired
-separately, with a Spoor held outside the guest fd table.
+the settle phase. Both model the arm that cannot be sent and its retry timer, with
+counterexamples for a park left without the timer and, in `poll.tla`, for the
+timer's expiry taken as the call's timeout. The vivarium's per-call open of each
+socket's `ready` file costs a Twalk, a Tlopen, a Tclunk and a guest fd per socket
+per call. It is retired separately, with a Spoor held outside the guest fd table.
 
 **As-built (net-6b-3): the pouch `poll()` translation.** `0018-pouch-net-poll.patch`
 makes pouch/Linux `poll()`/`select()`/`pselect`/`ppoll` work over an `AF_INET`

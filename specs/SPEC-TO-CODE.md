@@ -996,12 +996,35 @@ the arm's relay, the 1 s fail-safe, a server that hangs -- is
 `net_poll.tla`'s. Every cfg but `poll_local.cfg` now polls one local fd
 beside one remote one, which is why the clean counts grew.
 
+**An arm that cannot be sent (NP-4a, 2026-09-28).** `ARM_MAY_FAIL` lets
+`Arm` leave any subset of the remote fds unarmed -- the session's tags all
+in use, its send ring full, no memory for the poll state -- and bounds the
+park by a retry timer (`retry`) when any arm failed. An unarmed fd is left
+unregistered in the model: in the code its hook may be on the list, but
+nothing walks it for that fd's own readiness. The timer's expiry is
+`RetryWake`, a wake with no flag and one of the poller's steps.
+`NoMissedPoll` now also forbids sleeping, with no timer, on a ready fd the
+park does not cover. Without `ARM_MAY_FAIL` a sleeping poller holds a hook
+on every fd, so the new conjunct changes nothing there, and the five older
+clean counts are unchanged. Two red cfgs pin the code's obligations: a park
+any arm failed to cover gets the timer (`no_retry`), and the timer's expiry
+is never the call's timeout -- tsleep returns TIMEDOUT for either, so the
+clock decides (`retry_is_timeout`). `poll_armfail.cfg` polls one local fd
+beside two remote ones, so one arm can fail while the other is sent;
+TLC's coverage shows `Arm` and `RetryWake` taken there. The liveness side
+was shown able to fail: `poll_armfail_liveness_notimeout.cfg` with
+`BUGGY_NO_RETRY` and its invariants removed violates `StableReadyReturns`
+(`StopRequest Register SnapshotAnswer EvaluateFirst Arm MakeReady
+TSleepCommit StopResume TSleepCommit`, then stuttering).
+
 State universe: one poller, N fds (`Fds`, of which `Remote` are remote), one
 timeout, at most one stop request. CONSTANTS: `HAS_TIMEOUT` (FALSE =
 poll(-1)), `Remote`, `BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`,
 `BUGGY_LAZY_UNREGISTER`, `BUGGY_CLEAR_AFTER_SAMPLE`, `BUGGY_RETURN_ON_WAKE`,
 `BUGGY_NO_LOOP_DIE_CHECK`, `BUGGY_NO_LOOP_STOP_CHECK`,
-`BUGGY_VERDICT_BEFORE_SETTLE`, `BUGGY_SWEEP_LEAVES_SNAPSHOT`.
+`BUGGY_VERDICT_BEFORE_SETTLE`, `BUGGY_SWEEP_LEAVES_SNAPSHOT`,
+`ARM_MAY_FAIL` (not a bug: the kernel may be unable to send an arm),
+`BUGGY_NO_RETRY`, `BUGGY_RETRY_IS_TIMEOUT`.
 `specs/check-poll.sh` checks every cfg's verdict (buggy cfgs by the NAMED
 property, with the counterexample's actions printed); `TLC_WORKERS=1` on a
 shared host. Its temporal verdicts need SPEC-POLICY's documented TLC, which
@@ -1024,6 +1047,11 @@ script accepts that wording only from a cfg that checks that one property.
 | `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
 | `poll_buggy_verdict_before_settle.cfg` | `BUGGY_VERDICT_BEFORE_SETTLE` | `NoFalseNotReady` | violation (`MakeReady MakeReady Register EvaluateFirst`: both fds ready, the local one decides, the socket goes unreported) | — |
 | `poll_buggy_sweep_leaves_snapshot.cfg` | `BUGGY_SWEEP_LEAVES_SNAPSHOT` | `NoSnapshotOutlivesCall` | violation (`Register Die SettleDeath`) | — |
+| `poll_armfail.cfg`                     | `ARM_MAY_FAIL`, `Fds = {f1, f2, f3}`, `Remote = {f2, f3}` | `Invariants` | clean | 38844 |
+| `poll_armfail_liveness.cfg`            | `ARM_MAY_FAIL`, `Spec_Live` | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 4306 |
+| `poll_armfail_liveness_notimeout.cfg`  | `ARM_MAY_FAIL`, `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1304 |
+| `poll_buggy_no_retry.cfg`              | `ARM_MAY_FAIL`, `BUGGY_NO_RETRY` | `NoMissedPoll` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit MakeReady`: the socket's arm is not sent, the park has no timer, and the socket readies) | — |
+| `poll_buggy_retry_is_timeout.cfg`      | `ARM_MAY_FAIL`, `BUGGY_RETRY_IS_TIMEOUT` | `NoSpuriousZero` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit RetryWake FinalSample SnapshotAnswer EvaluateFinal`: the timer's expiry takes the final pass, and the call returns 0 before its deadline) | — |
 
 Both liveness properties were shown able to FAIL before being trusted
 (2026-09-21): deleting `EvaluateWake`'s explicit `Expired` test violates
@@ -1051,13 +1079,14 @@ Spec action ↔ impl mapping:
 | `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., &waiters[i], &held[i])` loop) | The first scan's install-and-sample again; a TIMEDOUT pass runs the same code (the model folds it into `FinalSample`). |
 | `Die` / `StopRequest` waking a sleeper | `kernel/proc.c::proc_group_terminate`'s cascade; `proc_stop_wake_sleepers_locked` | Wake the private rendez; tsleep re-loops through `TSleepCommit`. |
 | `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the loop tail) | Ready -> return; TIMEDOUT -> return; else the explicit `timer_now_ns() >= deadline_ns` test -> return 0; else count a re-sleep (`g_poll_resleeps`), `sched_yield_hint`, and go round to the tsleep. (The noise backstop this row used to name is gone with the preemption point, ARCH 8.12.) |
-| `SnapshotAnswer(f)` / `Arm` / `SettleDeath` | **NP-4** (the settle and the arm in `kernel/poll.c::sys_poll_for_proc`; the snapshot and the arm themselves in `kernel/dev9p_poll.c`) | Filled when the mechanism lands. Until then every fd is local in the code: `poll_local.cfg` is the as-built configuration. |
+| `SnapshotAnswer(f)` / `Arm` / `SettleDeath` | **NP-4** (the settle and the arm in `kernel/poll.c::sys_poll_for_proc`; the snapshot and the arm themselves in `kernel/dev9p_poll.c`) | Filled when the mechanism lands. Until then every fd is local in the code: `poll_local.cfg` is the as-built configuration. An `Arm` that leaves an fd unarmed is `poll_arm` returning 0 (NP-4c). |
+| `RetryWake` | **NP-4c** (`kernel/poll.c::sys_poll_for_proc`: a park any arm failed to cover sleeps to `min(deadline, now + 10 ms)`) | On TIMEDOUT the clock decides: before the call's deadline the loop goes round like any wake (`retry_is_timeout`'s obligation). |
 | `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: EVERY ring mutation and the teardown — `srvconn_client_send` / `_send_frame` / `_send_blocking` (c2s fill), `srvconn_server_send` / `_send_blocking` (s2c fill), `srvconn_client_recv` (s2c drain), `srvconn_server_recv` / `_recv_blocking` (c2s drain), `srvconn_io_nonblock` (all four), `srvconn_teardown`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every readiness site calls `poll_waiter_list_wake` AFTER releasing the object lock it mutated under. For a SrvConn the one list carries four edges for two endpoints, so each walk is `MakeReady` for some pollers and `OtherEvent` for the rest. |
 | `OtherEvent(f)` | the same walks, seen from a poller that asked about something else | Until 2026-09-21 only the c2s-fill edge and the teardown walked the SrvConn list: a client poller was never woken by its reply, and a nonblocking server polling POLLOUT was never woken by a blocking client drain. |
 | `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
 | `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
 | `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label -> `poll_unhook_all`) | Every exit path goes through the sweep; it is idempotent over a pass that already unhooked. |
-| the nine `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, and abandon every unanswered one at the sweep. |
+| the eleven `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, abandon every unanswered one at the sweep, bound a park any arm failed to cover by the retry timer, and never take that timer's expiry for the call's timeout. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
@@ -1550,7 +1579,8 @@ code is the design before #98, and `BUGGY_CACHE_ONLY_SAMPLE` is its model:
 (`AdvanceTime SocketReady Scan Verdict` -- a zero-timeout poll of a socket
 that was ready before the call returns 0 off an empty cache). The design is
 NET-DESIGN.md 12.2's #98 amendment and ARCH 23.3, voted in
-`dec-2026-09-28-poll-sample-arm-split`.
+`dec-2026-09-28-poll-sample-arm-split`. NP-4a (2026-09-28) added the arm
+the kernel cannot send, and the retry timer that covers its park.
 
 A 9P socket's or pty's readiness lives in the server that holds it (netd,
 ptyfs). The kernel asks with a readiness READ on the file's `ready` fid, the
@@ -1577,7 +1607,12 @@ obligation (hook, then ensure an arm, then park).
 
 State universe: one poller, one socket, its server, the relay. CONSTANTS:
 `HAS_TIMEOUT` (FALSE = poll(-1)), `HUNG_SERVER` (the server may stop
-answering, so the fail-safe is reachable), and five `BUGGY_*`.
+answering, so the fail-safe is reachable), `ARM_MAY_FAIL` (the kernel may
+be unable to send the arm: no free tag, a full send ring, no memory for the
+poll state), and six `BUGGY_*`. An unsendable SNAPSHOT is not modeled
+separately: the kernel resends it inside its fixed 1 s, so for the settle it
+is one more reason an answer is late, and `HUNG_SERVER` stands for all of
+them.
 `specs/check-net-poll.sh` runs every cfg of this module and of
 `net_poll_teardown.tla`, judging each red cfg by the NAME of the property it
 violates and printing its counterexample's actions, so a red cfg that fires by
@@ -1597,6 +1632,10 @@ an unintended path shows.
 | `net_poll_buggy_gc_snapshot.cfg`            | `BUGGY_GC_SNAPSHOT`, timed | `NoFalseNotReady` | violation (`AdvanceTime SocketReady Scan GcSnapshot Verdict`) | — |
 | `net_poll_buggy_lost_ready.cfg`             | `BUGGY_LOST_READY`, poll(-1) | `NoMissedNetPoll` | violation (a park with no arm) | — |
 | `net_poll_buggy_edge_arm.cfg`               | `BUGGY_EDGE_ARM`, poll(-1), `Spec_Live` | `PollerEventuallyServed` | violation (the socket readies between the verdict and the arm, and the arm waits for a rise that never comes) | — |
+| `net_poll_armfail.cfg`                      | `ARM_MAY_FAIL`, timed | `Invariants` + `FailSafeSilent` | clean | 155 |
+| `net_poll_armfail_liveness.cfg`             | `ARM_MAY_FAIL`, poll(-1), `Spec_Live` | `PollerEventuallyServed` | clean | 55 |
+| `net_poll_armfail_liveness_timeout.cfg`     | `ARM_MAY_FAIL`, timed, `Spec_Live` | `PollTerminates` + `PollerEventuallyServed` | clean | 155 |
+| `net_poll_buggy_no_retry.cfg`               | `ARM_MAY_FAIL`, `BUGGY_NO_RETRY`, poll(-1) | `NoMissedNetPoll` | violation (`Scan SnapshotReply SocketReady Verdict PollerArmFails TSleepCommit`: the arm is not sent and the park has no timer) | — |
 
 What each red cfg pins, as an obligation on the code: the verdict comes from
 the snapshot, never a cache (`cache_only_sample`, `stale_cache`); the settle
@@ -1605,7 +1644,11 @@ operator's third vote); the stranded-op collector takes arms only
 (`gc_snapshot`); a poller parks hooked with an arm ensured (`lost_ready`); the
 server evaluates an arm's level when it ARRIVES (`edge_arm` -- NP-3's
 obligation on netd and ptyfs, and one no safety invariant sees, since an arm
-IS outstanding). `FailSafeSilent` holding against a server that answers is
+IS outstanding); a park no arm covers is bounded by the retry timer
+(`no_retry`; `net_poll_armfail_liveness.cfg` with it violates
+`PollerEventuallyServed` too, shown 2026-09-28, and TLC's coverage shows
+`PollerArmFails` and `RetryTick` taken in `net_poll_armfail.cfg`).
+`FailSafeSilent` holding against a server that answers is
 the model's half of the runtime rule that the fail-safe counter stays zero on
 every gate; that a healthy server answers within 1 s is a timing assumption
 the model states and cannot check, and the runtime owns it (the counter, the

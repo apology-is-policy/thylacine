@@ -45,11 +45,12 @@
 (*   below, and it is counted.                                             *)
 (*                                                                         *)
 (*   A PARKED POLLER ALWAYS HAS A WAKE COMING. It parks hooked, with an    *)
-(*   arm outstanding, the arm's answer in the relay, or its flag already   *)
-(*   set (ArmBeforePark), so it is never asleep on a ready socket with     *)
-(*   nothing left to deliver (NoMissedNetPoll -- I-9 across the relay). A  *)
-(*   poller whose socket becomes ready and stays ready returns             *)
-(*   (PollerEventuallyServed).                                             *)
+(*   arm outstanding, the arm's answer in the relay or its flag already    *)
+(*   set -- or, when the arm could not be sent, with its sleep bounded by  *)
+(*   the retry timer (ArmBeforePark). So it is never asleep on a ready     *)
+(*   socket with nothing left to deliver (NoMissedNetPoll -- I-9 across    *)
+(*   the relay). A poller whose socket becomes ready and stays ready       *)
+(*   returns (PollerEventuallyServed).                                     *)
 (*                                                                         *)
 (*   THE SETTLE IS BOUNDED BY THE SERVER, NOT BY THE CALL. A snapshot the  *)
 (*   server has not answered a fixed 1 s after it was sent is flushed and  *)
@@ -57,6 +58,15 @@
 (*   own timeout never cuts that interval short, so a server that is       *)
 (*   answering is never guessed about: a poll may return one round trip    *)
 (*   late, never early on a guess.                                         *)
+(*                                                                         *)
+(*   A SHORTAGE IS NOT AN ANSWER. The kernel can fail to send a readiness  *)
+(*   read at all: every tag of the session is in use, its send ring is     *)
+(*   full, or there is no memory for the poll state. That says nothing     *)
+(*   about the socket, so the poller neither fails nor guesses. An arm     *)
+(*   that cannot be sent (ARM_MAY_FAIL) leaves the poller parked with its  *)
+(*   sleep bounded by a short retry timer (RetryTick), and the pass after  *)
+(*   the timer samples again. A snapshot that cannot be sent is resent     *)
+(*   inside its fixed 1 s; see MODELING ASSUMPTIONS.                       *)
 (*                                                                         *)
 (* THE BUGS THIS PINS                                                      *)
 (*                                                                         *)
@@ -95,6 +105,11 @@
 (*     an arm IS outstanding -- which is why the liveness property is      *)
 (*     checked. The fix is the server's: evaluate the level on arrival.    *)
 (*                                                                         *)
+(*   BUGGY_NO_RETRY -- a poller whose arm could not be sent parks with no  *)
+(*     retry timer. The socket readies with no request at the server to    *)
+(*     answer, and the poller sleeps on a ready socket (NoMissedNetPoll).  *)
+(*     The fix: the retry timer bounds every park that no arm covers.      *)
+(*                                                                         *)
 (* CFG MATRIX (specs/check-net-poll.sh runs it and judges each red cfg by  *)
 (* the NAME of the property it violates)                                   *)
 (*                                                                         *)
@@ -106,6 +121,14 @@
 (*                            PollerEventuallyServed.                      *)
 (*   net_poll_hung.cfg        HUNG_SERVER, Spec_Live, timed: Invariants +  *)
 (*                            PollTerminates (the fail-safe ends it).      *)
+(*   net_poll_armfail.cfg     ARM_MAY_FAIL, timed: Invariants +            *)
+(*                            FailSafeSilent.                              *)
+(*   net_poll_armfail_liveness.cfg                                         *)
+(*                            ARM_MAY_FAIL, Spec_Live, poll(-1):           *)
+(*                            PollerEventuallyServed.                      *)
+(*   net_poll_armfail_liveness_timeout.cfg                                 *)
+(*                            ARM_MAY_FAIL, Spec_Live, timed:              *)
+(*                            PollTerminates + PollerEventuallyServed.     *)
 (*   net_poll_failsafe_fires.cfg                                           *)
 (*                            HUNG_SERVER: FailSafeSilent VIOLATED -- the  *)
 (*                            fail-safe is reachable (the sabotage server  *)
@@ -117,6 +140,8 @@
 (*   net_poll_buggy_lost_ready.cfg                 NoMissedNetPoll.        *)
 (*   net_poll_buggy_edge_arm.cfg   Spec_Live, poll(-1):                    *)
 (*                                 PollerEventuallyServed.                 *)
+(*   net_poll_buggy_no_retry.cfg   ARM_MAY_FAIL, poll(-1):                 *)
+(*                                 NoMissedNetPoll.                        *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                    *)
 (*                                                                         *)
@@ -147,6 +172,17 @@
 (*   is printed, the boot gates require it to stay zero, and a test server *)
 (*   that defers the snapshot must make it fire.                           *)
 (*                                                                         *)
+(*   ARM_MAY_FAIL lets the kernel fail to send the arm (PollerArmFails):   *)
+(*   its session has no free tag or a full send ring, or the poll state    *)
+(*   cannot be allocated, in which case no hook goes on either. The poller *)
+(*   parks anyway, bounded by the retry timer, whose expiry (RetryTick) is *)
+(*   one of the poller's own steps and so is granted weak fairness. The    *)
+(*   model does not fail the SNAPSHOT's send separately: the kernel        *)
+(*   resends it inside the snapshot's fixed 1 s, so from the settle's side *)
+(*   it is one more reason the answer is late, and HUNG_SERVER stands for  *)
+(*   every such reason. A snapshot the kernel could not send for its whole *)
+(*   1 s fail-safes, and is counted, like one a hung server holds.         *)
+(*                                                                         *)
 (*   The collector's teardown of a stranded arm, and the Tclunk that frees *)
 (*   the server's slot, are net_poll_teardown.tla's.                       *)
 (*                                                                         *)
@@ -166,6 +202,9 @@ CONSTANTS
                                   \*   timeout (0 included). FALSE: poll(-1).
     HUNG_SERVER,                  \* BOOLEAN -- TRUE: the server may stop
                                   \*   answering, so the fail-safe is reachable.
+    ARM_MAY_FAIL,                 \* BOOLEAN -- TRUE: the kernel may be unable
+                                  \*   to send the arm: no free tag, a full
+                                  \*   send ring, no memory for the poll state.
     BUGGY_CACHE_ONLY_SAMPLE,      \* BOOLEAN -- TRUE: the sample reads what the
                                   \*   last answered arm recorded.
     BUGGY_SETTLE_CUT_BY_DEADLINE, \* BOOLEAN -- TRUE: the settle gives up when
@@ -174,16 +213,20 @@ CONSTANTS
                                   \*   takes a snapshot too.
     BUGGY_LOST_READY,             \* BOOLEAN -- TRUE: the poller parks without
                                   \*   ensuring an arm is outstanding.
-    BUGGY_EDGE_ARM                \* BOOLEAN -- TRUE: the server answers an arm
+    BUGGY_EDGE_ARM,               \* BOOLEAN -- TRUE: the server answers an arm
                                   \*   only for a rise after it arrived.
+    BUGGY_NO_RETRY                \* BOOLEAN -- TRUE: a park no arm covers gets
+                                  \*   no retry timer.
 
 ASSUME HAS_TIMEOUT                  \in BOOLEAN
 ASSUME HUNG_SERVER                  \in BOOLEAN
+ASSUME ARM_MAY_FAIL                 \in BOOLEAN
 ASSUME BUGGY_CACHE_ONLY_SAMPLE      \in BOOLEAN
 ASSUME BUGGY_SETTLE_CUT_BY_DEADLINE \in BOOLEAN
 ASSUME BUGGY_GC_SNAPSHOT            \in BOOLEAN
 ASSUME BUGGY_LOST_READY             \in BOOLEAN
 ASSUME BUGGY_EDGE_ARM               \in BOOLEAN
+ASSUME BUGGY_NO_RETRY               \in BOOLEAN
 
 VARIABLES
     ready,           \* BOOLEAN -- the server's truth: the socket is ready for
@@ -200,6 +243,8 @@ VARIABLES
                      \*   the last answered arm recorded.
     hooked,          \* BOOLEAN -- the poller's hook is on the socket's list.
     flagged,         \* BOOLEAN -- the hook's flag, set by the kthread's walk.
+    retry,           \* BOOLEAN -- the park is bounded by the retry timer: the
+                     \*   arm could not be sent.
     pc,              \* the poll call's lifecycle (see PCs).
     deadline_passed, \* BOOLEAN -- the call's deadline has passed. Monotonic.
     failsafe,        \* BOOLEAN -- the fail-safe counter is nonzero.
@@ -208,8 +253,8 @@ VARIABLES
     pass_notready    \* BOOLEAN -- ghost: `ready` failed at some instant of
                      \*   the current pass.
 
-vars == <<ready, hung, snap, arm, rose, pending, cache, hooked, flagged, pc,
-          deadline_passed, failsafe, pass_ready, pass_notready>>
+vars == <<ready, hung, snap, arm, rose, pending, cache, hooked, flagged, retry,
+          pc, deadline_passed, failsafe, pass_ready, pass_notready>>
 
 \* "none"     -- no pass has scanned yet.
 \* "sent"     -- the snapshot is in flight: the pass is settling.
@@ -225,7 +270,8 @@ SnapStates == {"none", "sent", "ready", "notready", "failsafe", "cut", "gc"}
 \* "arming"       -- the verdict was not ready and the call will park.
 \* "armed"        -- hooked and armed: the tsleep commit point.
 \* "sleeping"     -- parked on the poller's private Rendez.
-\* "woken"        -- tsleep returned (a flag, or the deadline).
+\* "woken"        -- tsleep returned (a flag, the deadline, or the retry
+\*                   timer).
 \* "done_ready"   -- poll returned the socket ready.
 \* "done_timeout" -- poll returned 0.
 PCs      == {"start", "settling", "arming", "armed", "sleeping", "woken",
@@ -242,6 +288,7 @@ TypeOk ==
     /\ cache           \in BOOLEAN
     /\ hooked          \in BOOLEAN
     /\ flagged         \in BOOLEAN
+    /\ retry           \in BOOLEAN
     /\ pc              \in PCs
     /\ deadline_passed \in BOOLEAN
     /\ failsafe        \in BOOLEAN
@@ -258,6 +305,7 @@ Init ==
     /\ cache           = FALSE
     /\ hooked          = FALSE
     /\ flagged         = FALSE
+    /\ retry           = FALSE
     /\ pc              = "start"
     /\ deadline_passed = FALSE
     /\ failsafe        = FALSE
@@ -279,7 +327,7 @@ SocketReady ==
     /\ ready'      = TRUE
     /\ pass_ready' = TRUE
     /\ rose'       = (rose \/ (BUGGY_EDGE_ARM /\ arm))
-    /\ UNCHANGED <<hung, snap, arm, pending, cache, hooked, flagged, pc,
+    /\ UNCHANGED <<hung, snap, arm, pending, cache, hooked, flagged, retry, pc,
                    deadline_passed, failsafe, pass_notready>>
 
 SocketRetract ==
@@ -287,8 +335,8 @@ SocketRetract ==
     /\ ready
     /\ ready'         = FALSE
     /\ pass_notready' = TRUE
-    /\ UNCHANGED <<hung, snap, arm, rose, pending, cache, hooked, flagged, pc,
-                   deadline_passed, failsafe, pass_ready>>
+    /\ UNCHANGED <<hung, snap, arm, rose, pending, cache, hooked, flagged,
+                   retry, pc, deadline_passed, failsafe, pass_ready>>
 
 \* Hang -- the server stops answering reads (HUNG_SERVER only).
 Hang ==
@@ -296,8 +344,9 @@ Hang ==
     /\ Live
     /\ ~hung
     /\ hung' = TRUE
-    /\ UNCHANGED <<ready, snap, arm, rose, pending, cache, hooked, flagged, pc,
-                   deadline_passed, failsafe, pass_ready, pass_notready>>
+    /\ UNCHANGED <<ready, snap, arm, rose, pending, cache, hooked, flagged,
+                   retry, pc, deadline_passed, failsafe, pass_ready,
+                   pass_notready>>
 
 \* AdvanceTime -- the monotonic clock reaches the call's deadline.
 AdvanceTime ==
@@ -306,7 +355,7 @@ AdvanceTime ==
     /\ ~deadline_passed
     /\ deadline_passed' = TRUE
     /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache, hooked,
-                   flagged, pc, failsafe, pass_ready, pass_notready>>
+                   flagged, retry, pc, failsafe, pass_ready, pass_notready>>
 
 (***************************************************************************)
 (* Scan -- a pass begins: the poller sends the snapshot. No hook is        *)
@@ -325,7 +374,7 @@ Scan ==
     /\ pass_ready'    = ready
     /\ pass_notready' = ~ready
     /\ UNCHANGED <<ready, hung, arm, rose, pending, cache, hooked, flagged,
-                   deadline_passed, failsafe>>
+                   retry, deadline_passed, failsafe>>
 
 (***************************************************************************)
 (* SnapshotReply -- the server serves the snapshot: it evaluates the level *)
@@ -337,7 +386,8 @@ SnapshotReply ==
     /\ ~hung
     /\ snap' = IF ready THEN "ready" ELSE "notready"
     /\ UNCHANGED <<ready, hung, arm, rose, pending, cache, hooked, flagged,
-                   pc, deadline_passed, failsafe, pass_ready, pass_notready>>
+                   retry, pc, deadline_passed, failsafe, pass_ready,
+                   pass_notready>>
 
 (***************************************************************************)
 (* SnapshotFailSafe -- the snapshot is still unanswered a fixed 1 s after  *)
@@ -357,7 +407,7 @@ SnapshotFailSafe ==
     /\ snap'     = "failsafe"
     /\ failsafe' = TRUE
     /\ UNCHANGED <<ready, hung, arm, rose, pending, cache, hooked, flagged,
-                   pc, deadline_passed, pass_ready, pass_notready>>
+                   retry, pc, deadline_passed, pass_ready, pass_notready>>
 
 SnapshotCut ==
     /\ BUGGY_SETTLE_CUT_BY_DEADLINE
@@ -366,7 +416,7 @@ SnapshotCut ==
     /\ snap'     = "cut"
     /\ failsafe' = TRUE
     /\ UNCHANGED <<ready, hung, arm, rose, pending, cache, hooked, flagged,
-                   pc, deadline_passed, pass_ready, pass_notready>>
+                   retry, pc, deadline_passed, pass_ready, pass_notready>>
 
 (***************************************************************************)
 (* Verdict -- the settle is over (the snapshot is terminal). Ready         *)
@@ -382,7 +432,7 @@ Verdict ==
              ELSE IF Expired  THEN "done_timeout"
              ELSE                  "arming"
     /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache, hooked,
-                   flagged, deadline_passed, failsafe, pass_ready,
+                   flagged, retry, deadline_passed, failsafe, pass_ready,
                    pass_notready>>
 
 (***************************************************************************)
@@ -401,7 +451,28 @@ PollerArm ==
     /\ hooked' = TRUE
     /\ arm'    = (arm \/ ~BUGGY_LOST_READY)
     /\ rose'   = (arm /\ rose)
-    /\ UNCHANGED <<ready, hung, snap, pending, cache, flagged,
+    /\ UNCHANGED <<ready, hung, snap, pending, cache, flagged, retry,
+                   deadline_passed, failsafe, pass_ready, pass_notready>>
+
+(***************************************************************************)
+(* PollerArmFails -- the call will park, and the arm cannot be sent: every *)
+(* tag of the session is in use, its send ring is full, or there is no     *)
+(* memory for the poll state, in which case no hook goes on either. None   *)
+(* of these is an answer about the socket, so the poller neither fails nor *)
+(* guesses: it parks with its sleep bounded by the retry timer, and the    *)
+(* pass after the timer samples again. Only a poller with no arm           *)
+(* outstanding sends one, so only such a poller can fail to.               *)
+(*                                                                         *)
+(* BUGGY_NO_RETRY parks with no timer.                                     *)
+(***************************************************************************)
+PollerArmFails ==
+    /\ ARM_MAY_FAIL
+    /\ pc = "arming"
+    /\ ~arm
+    /\ pc'     = "armed"
+    /\ hooked' \in BOOLEAN
+    /\ retry'  = ~BUGGY_NO_RETRY
+    /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache, flagged,
                    deadline_passed, failsafe, pass_ready, pass_notready>>
 
 (***************************************************************************)
@@ -423,8 +494,8 @@ ArmReply ==
     /\ rose'    = FALSE
     /\ pending' = TRUE
     /\ cache'   = (cache \/ BUGGY_CACHE_ONLY_SAMPLE)
-    /\ UNCHANGED <<ready, hung, snap, hooked, flagged, pc, deadline_passed,
-                   failsafe, pass_ready, pass_notready>>
+    /\ UNCHANGED <<ready, hung, snap, hooked, flagged, retry, pc,
+                   deadline_passed, failsafe, pass_ready, pass_notready>>
 
 (***************************************************************************)
 (* KthreadWalk -- the kthread, after the pump and with `c->lock` released, *)
@@ -439,7 +510,7 @@ KthreadWalk ==
     /\ pending' = FALSE
     /\ flagged' = (flagged \/ hooked)
     /\ pc'      = IF hooked /\ pc = "sleeping" THEN "woken" ELSE pc
-    /\ UNCHANGED <<ready, hung, snap, arm, rose, cache, hooked,
+    /\ UNCHANGED <<ready, hung, snap, arm, rose, cache, hooked, retry,
                    deadline_passed, failsafe, pass_ready, pass_notready>>
 
 (***************************************************************************)
@@ -457,8 +528,8 @@ GcArm ==
     /\ ~hooked
     /\ arm'  = FALSE
     /\ rose' = FALSE
-    /\ UNCHANGED <<ready, hung, snap, pending, cache, hooked, flagged, pc,
-                   deadline_passed, failsafe, pass_ready, pass_notready>>
+    /\ UNCHANGED <<ready, hung, snap, pending, cache, hooked, flagged, retry,
+                   pc, deadline_passed, failsafe, pass_ready, pass_notready>>
 
 GcSnapshot ==
     /\ BUGGY_GC_SNAPSHOT
@@ -466,7 +537,8 @@ GcSnapshot ==
     /\ ~hooked
     /\ snap' = "gc"
     /\ UNCHANGED <<ready, hung, arm, rose, pending, cache, hooked, flagged,
-                   pc, deadline_passed, failsafe, pass_ready, pass_notready>>
+                   retry, pc, deadline_passed, failsafe, pass_ready,
+                   pass_notready>>
 
 (***************************************************************************)
 (* TSleepCommit -- the `tsleep` call: the flag scan and the sleep are      *)
@@ -480,7 +552,7 @@ TSleepCommit ==
     /\ pc = "armed"
     /\ pc' = IF flagged \/ Expired THEN "woken" ELSE "sleeping"
     /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache, hooked,
-                   flagged, deadline_passed, failsafe, pass_ready,
+                   flagged, retry, deadline_passed, failsafe, pass_ready,
                    pass_notready>>
 
 Timeout ==
@@ -488,20 +560,35 @@ Timeout ==
     /\ Expired
     /\ pc' = "woken"
     /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache, hooked,
-                   flagged, deadline_passed, failsafe, pass_ready,
+                   flagged, retry, deadline_passed, failsafe, pass_ready,
+                   pass_notready>>
+
+(***************************************************************************)
+(* RetryTick -- the retry timer ends a park the arm did not cover. It is   *)
+(* not the call's timeout: the woken poller goes round to sample again,    *)
+(* and its next park tries the arm again.                                  *)
+(***************************************************************************)
+RetryTick ==
+    /\ pc = "sleeping"
+    /\ retry
+    /\ pc' = "woken"
+    /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache, hooked,
+                   flagged, retry, deadline_passed, failsafe, pass_ready,
                    pass_notready>>
 
 (***************************************************************************)
 (* Rearm -- the woken poller takes its hook off the list (clearing it) and *)
 (* goes round to a new pass. A flag is a hint, never a verdict: the pass   *)
 (* samples again. The arm, if still outstanding, stays -- another poller   *)
-(* may want it, and the collector takes it if nobody does.                 *)
+(* may want it, and the collector takes it if nobody does. The retry       *)
+(* timer, if the park had one, is spent.                                   *)
 (***************************************************************************)
 Rearm ==
     /\ pc = "woken"
     /\ pc'      = "start"
     /\ hooked'  = FALSE
     /\ flagged' = FALSE
+    /\ retry'   = FALSE
     /\ UNCHANGED <<ready, hung, snap, arm, rose, pending, cache,
                    deadline_passed, failsafe, pass_ready, pass_notready>>
 
@@ -512,8 +599,10 @@ PollerStep ==
     \/ Scan
     \/ Verdict
     \/ PollerArm
+    \/ PollerArmFails
     \/ TSleepCommit
     \/ Timeout
+    \/ RetryTick
     \/ Rearm
 
 Next ==
@@ -552,20 +641,21 @@ NoFalseNotReady ==
 \* competing reader then lowered.
 NoFalseReady == (pc = "done_ready") => pass_ready
 
-\* ArmBeforePark -- a poller at or past its tsleep commit is hooked, and a
-\* wake is on its way: an arm outstanding, its answer in the relay, or the
-\* flag already set.
+\* ArmBeforePark -- a poller at or past its tsleep commit has a wake on its
+\* way: hooked, with an arm outstanding, its answer in the relay or the flag
+\* already set -- or, when the arm could not be sent, a sleep the retry
+\* timer bounds.
 ArmBeforePark ==
     (pc \in {"armed", "sleeping"}) =>
-        (hooked /\ (arm \/ pending \/ flagged))
+        ((hooked /\ (arm \/ pending \/ flagged)) \/ retry)
 
 \* NoMissedNetPoll -- ARCH section 28 I-9 across the relay: the poller is
-\* never asleep on a ready socket, hooked, with no flag, nothing in the
-\* relay and no arm outstanding -- nothing that will ever deliver.
-\* Violated by BUGGY_LOST_READY.
+\* never asleep on a ready socket with nothing that will ever deliver: no
+\* hook with a flag, a walk owed or an arm outstanding behind it, and no
+\* retry timer. Violated by BUGGY_LOST_READY and BUGGY_NO_RETRY.
 NoMissedNetPoll ==
-    ~( pc = "sleeping" /\ hooked /\ ready
-       /\ ~flagged /\ ~pending /\ ~arm )
+    ~( pc = "sleeping" /\ ready /\ ~retry
+       /\ ~(hooked /\ (flagged \/ pending \/ arm)) )
 
 \* NoStaleHook -- a returned poll holds no hook.
 NoStaleHook == (pc \in Terminal) => ~hooked
@@ -601,8 +691,8 @@ Invariants ==
 (* Fairness grants the server nothing but its answers: WF on SnapshotReply *)
 (* and ArmReply (a request it holds is eventually served while it can      *)
 (* be), on SnapshotFailSafe (the 1 s timer fires), on the kthread's walk,  *)
-(* on the clock, and on the poller's own steps. The socket's level, the    *)
-(* hang and the collector get none.                                        *)
+(* on the clock, and on the poller's own steps, the retry timer's expiry   *)
+(* among them. The socket's level, the hang and the collector get none.    *)
 (***************************************************************************)
 PollTerminates == <>(pc \in Terminal)
 

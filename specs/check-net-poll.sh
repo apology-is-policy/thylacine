@@ -27,6 +27,9 @@ net_poll:net_poll_notimeout
 net_poll:net_poll_liveness
 net_poll:net_poll_liveness_timeout
 net_poll:net_poll_hung
+net_poll:net_poll_armfail
+net_poll:net_poll_armfail_liveness
+net_poll:net_poll_armfail_liveness_timeout
 net_poll_teardown:net_poll_teardown
 net_poll_teardown:net_poll_teardown_liveness"
 
@@ -38,6 +41,7 @@ net_poll:net_poll_buggy_settle_cut_by_deadline:NoFalseNotReady
 net_poll:net_poll_buggy_gc_snapshot:NoFalseNotReady
 net_poll:net_poll_buggy_lost_ready:NoMissedNetPoll
 net_poll:net_poll_buggy_edge_arm:PollerEventuallyServed
+net_poll:net_poll_buggy_no_retry:NoMissedNetPoll
 net_poll_teardown:net_poll_teardown_buggy_leak:Liveness"
 
 run() {  # $1 = module, $2 = cfg basename -> sets RC and LOG

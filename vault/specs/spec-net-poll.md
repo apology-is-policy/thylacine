@@ -17,7 +17,11 @@ cfgs:
   - "net_poll_buggy_gc_snapshot.cfg -- the stranded-op collector flushes a snapshot (NoFalseNotReady counterexample)"
   - "net_poll_buggy_lost_ready.cfg -- a park with no arm ensured (NoMissedNetPoll counterexample)"
   - "net_poll_buggy_edge_arm.cfg -- the server answers an arm only for a later rise (PollerEventuallyServed counterexample)"
-gate: "specs/check-net-poll.sh for ANY change to the dev9p readiness protocol -- the snapshot, the settle and its fail-safe, the arm, the relay, the stranded-op collector, or the server's `ready` file (spec-first re-enabled for this surface)"
+  - "net_poll_armfail.cfg -- ARM_MAY_FAIL, timed: the arm may not be sent, and the retry timer bounds the park; Invariants + FailSafeSilent (155)"
+  - "net_poll_armfail_liveness.cfg -- ARM_MAY_FAIL, Spec_Live, poll(-1): PollerEventuallyServed (55)"
+  - "net_poll_armfail_liveness_timeout.cfg -- ARM_MAY_FAIL, Spec_Live, timed: PollTerminates + PollerEventuallyServed (155)"
+  - "net_poll_buggy_no_retry.cfg -- a park no arm covers gets no retry timer (NoMissedNetPoll counterexample)"
+gate: "specs/check-net-poll.sh for ANY change to the dev9p readiness protocol -- the snapshot, the settle and its fail-safe, the arm and its retry timer, the relay, the stranded-op collector, or the server's `ready` file (spec-first re-enabled for this surface)"
 created: 2026-07-31
 updated: 2026-09-28
 ---
@@ -38,8 +42,15 @@ N-fd loop, the local fds beside a socket, death, stops and the snapshot's
 lifetime are [[spec-poll]]'s; the arm's teardown and the Tclunk that frees the
 server's slot are [[spec-net-poll-teardown]]'s. Deliberately beneath the
 model: the multi-client pump fairness, the widening of one arm's mask across
-pollers, OOM degrades, and the 9P client's discard of a flushed op's late
-reply (tag uniqueness, [[spec-9p-client]]).
+pollers, and the 9P client's discard of a flushed op's late reply (tag
+uniqueness, [[spec-9p-client]]).
+
+A readiness read the kernel cannot send at all -- no free tag, a full send
+ring, no memory -- is a shortage, not an answer (`ARM_MAY_FAIL`, NP-4a). An
+arm that cannot be sent leaves the poller parked with its sleep bounded by a
+retry timer (`RetryTick`). A snapshot that cannot be sent is resent inside
+its fixed 1 s, so for the model it is one more reason an answer is late, and
+`HUNG_SERVER` stands for every such reason.
 
 ## What it pins
 
@@ -48,8 +59,9 @@ reply (tag uniqueness, [[spec-9p-client]]).
   one excused guess is the counted fail-safe against a server that had stopped
   answering.
 - **ArmBeforePark / NoMissedNetPoll** -- [[inv-i9]] across the relay: a parked
-  poller is hooked and has a wake coming (an arm outstanding, its answer in
-  the relay, or its flag already set).
+  poller has a wake coming: hooked, with an arm outstanding, its answer in
+  the relay or its flag already set -- or, when the arm could not be sent,
+  a sleep the retry timer bounds (`net_poll_buggy_no_retry` is the red).
 - **PollerEventuallyServed / PollTerminates** -- a socket that becomes ready
   and stays ready returns the poll; a timed poll returns even against a hung
   server.

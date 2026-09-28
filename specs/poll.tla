@@ -71,6 +71,13 @@
 (*   in flight (NoSnapshotOutlivesCall): the per-call batch its answer     *)
 (*   would complete into is gone.                                          *)
 (*                                                                         *)
+(*   An arm the kernel cannot send (ARM_MAY_FAIL: every tag of the session *)
+(*   in use, a full send ring, no memory) leaves its fd with no wake of    *)
+(*   its own, so the park is bounded by a retry timer, and a sleeping      *)
+(*   poller is never left on a ready fd its park does not cover            *)
+(*   (NoMissedPoll). The timer's expiry is a wake with no flag, never the  *)
+(*   call's timeout (RetryWake).                                           *)
+(*                                                                         *)
 (* THE BUGS THIS PINS                                                       *)
 (*                                                                         *)
 (*   BUGGY_CHECK_BEFORE_REGISTER — the poller samples each fd's readiness  *)
@@ -134,6 +141,18 @@
 (*     released (NoSnapshotOutlivesCall counterexample). The fix: the      *)
 (*     sweep every exit crosses abandons every unanswered snapshot.        *)
 (*                                                                         *)
+(*   BUGGY_NO_RETRY -- a poller whose arm could not be sent parks with no  *)
+(*     retry timer. The fd readies with no request at its server to answer *)
+(*     and no timer to end the sleep (NoMissedPoll counterexample). The    *)
+(*     fix: a park any arm failed to cover is bounded by the retry timer.  *)
+(*                                                                         *)
+(*   BUGGY_RETRY_IS_TIMEOUT -- the retry timer's expiry is taken for the   *)
+(*     call's timeout. tsleep returns TIMEDOUT for either, and the code    *)
+(*     takes the final pass, so a poll(fd, 10 s) whose arm met a full send *)
+(*     ring returns 0 ten milliseconds in (NoSpuriousZero counterexample). *)
+(*     The fix: the clock decides the call's deadline, never which timer   *)
+(*     woke the poller.                                                    *)
+(*                                                                         *)
 (*   (BUGGY_NO_POINT was here until ARCH 8.12 deleted the preemption      *)
 (*   point. It modelled a syscall body that ran IRQ-MASKED, where an      *)
 (*   unprivileged producer could hold a CPU's interrupts -- the SAK       *)
@@ -186,9 +205,20 @@
 (*   poll_buggy_sweep_leaves_snapshot.cfg BUGGY_SWEEP_LEAVES_SNAPSHOT --   *)
 (*                                        NoSnapshotOutlivesCall           *)
 (*                                        counterexample.                  *)
+(*   poll_armfail.cfg                    ARM_MAY_FAIL, Fds = {f1, f2, f3}, *)
+(*                                        Remote = {f2, f3}: any arm       *)
+(*                                        may fail; safety holds.          *)
+(*   poll_armfail_liveness.cfg           ARM_MAY_FAIL, Spec_Live, timed:   *)
+(*                                        the four liveness properties.    *)
+(*   poll_armfail_liveness_notimeout.cfg ARM_MAY_FAIL, Spec_Live,          *)
+(*                                        poll(-1).                        *)
+(*   poll_buggy_no_retry.cfg             BUGGY_NO_RETRY -- NoMissedPoll    *)
+(*                                        counterexample.                  *)
+(*   poll_buggy_retry_is_timeout.cfg     BUGGY_RETRY_IS_TIMEOUT --         *)
+(*                                        NoSpuriousZero counterexample.   *)
 (*                                                                         *)
-(*   Every cfg but poll_local.cfg polls Fds = {f1, f2} with Remote = {f2}: *)
-(*   one local fd beside one remote one.                                   *)
+(*   Every cfg but poll_local.cfg and poll_armfail.cfg polls one local fd  *)
+(*   beside one remote one: Fds = {f1, f2}, Remote = {f2}.                 *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -269,6 +299,15 @@
 (*   holds; death during one unwinds it (SettleDeath) and the sweep        *)
 (*   abandons the snapshots.                                               *)
 (*                                                                         *)
+(*   Under ARM_MAY_FAIL any arm may fail to be sent. Its fd is left        *)
+(*   unregistered here: in the code its hook may be on the list, but       *)
+(*   nothing will walk it for that fd's own readiness, and the code's      *)
+(*   unhook takes it off with the rest. If any arm failed, the park is     *)
+(*   bounded by the retry timer (`retry`), whose expiry, RetryWake, is one *)
+(*   of the poller's steps. A snapshot the kernel cannot send is           *)
+(*   net_poll.tla's: it is resent inside its fixed 1 s, so here it is only *)
+(*   a settle that takes longer.                                           *)
+(*                                                                         *)
 (* See ARCHITECTURE.md §23.3 (poll/select), §28 invariant I-9; tsleep.tla  *)
 (* (the deadline-bounded `Rendez` sleep poll builds on); scheduler.tla     *)
 (* (the single-`Rendez` wait/wake proof); net_poll.tla (a remote fd's     *)
@@ -284,6 +323,9 @@ CONSTANTS
     HAS_TIMEOUT,                  \* BOOLEAN — TRUE: the poll call carries a
                                   \*   finite timeout (timeout_ms >= 0).
                                   \*   FALSE: poll(-1), an unbounded wait.
+    ARM_MAY_FAIL,                 \* BOOLEAN -- TRUE: the kernel may be unable
+                                  \*   to send a remote fd's arm (no free
+                                  \*   tag, a full send ring, no memory).
     BUGGY_CHECK_BEFORE_REGISTER,  \* BOOLEAN — TRUE: the poller samples each
                                   \*   fd's readiness BEFORE installing its
                                   \*   hook (check, register, sleep).
@@ -307,8 +349,12 @@ CONSTANTS
     BUGGY_VERDICT_BEFORE_SETTLE,  \* BOOLEAN -- TRUE: a pass that has seen an
                                   \*   fd ready decides without waiting for
                                   \*   its snapshots.
-    BUGGY_SWEEP_LEAVES_SNAPSHOT   \* BOOLEAN -- TRUE: the settle's death unwind
+    BUGGY_SWEEP_LEAVES_SNAPSHOT,  \* BOOLEAN -- TRUE: the settle's death unwind
                                   \*   returns with snapshots in flight.
+    BUGGY_NO_RETRY,               \* BOOLEAN -- TRUE: a park an arm failed to
+                                  \*   cover gets no retry timer.
+    BUGGY_RETRY_IS_TIMEOUT        \* BOOLEAN -- TRUE: the retry timer's expiry
+                                  \*   is taken for the call's timeout.
     \* BUGGY_NO_POINT is GONE (ARCH 8.12), with the preemption point it
     \* turned off: a syscall body now runs interrupts-on throughout, so
     \* there is no masked span for this module to bound.
@@ -316,6 +362,7 @@ CONSTANTS
 ASSUME Fds # {}
 ASSUME Remote \subseteq Fds
 ASSUME HAS_TIMEOUT                 \in BOOLEAN
+ASSUME ARM_MAY_FAIL                \in BOOLEAN
 ASSUME BUGGY_CHECK_BEFORE_REGISTER \in BOOLEAN
 ASSUME BUGGY_NO_WAKE               \in BOOLEAN
 ASSUME BUGGY_LAZY_UNREGISTER       \in BOOLEAN
@@ -325,6 +372,8 @@ ASSUME BUGGY_NO_LOOP_DIE_CHECK     \in BOOLEAN
 ASSUME BUGGY_NO_LOOP_STOP_CHECK    \in BOOLEAN
 ASSUME BUGGY_VERDICT_BEFORE_SETTLE \in BOOLEAN
 ASSUME BUGGY_SWEEP_LEAVES_SNAPSHOT \in BOOLEAN
+ASSUME BUGGY_NO_RETRY              \in BOOLEAN
+ASSUME BUGGY_RETRY_IS_TIMEOUT      \in BOOLEAN
 
 VARIABLES
     pc,               \* the poll call's lifecycle ∈ PCs (see below).
@@ -349,11 +398,13 @@ VARIABLES
                       \*   made (see MODELING ASSUMPTIONS).
     snapping,         \* [Fds -> BOOLEAN] -- fd f's snapshot is in flight: the
                       \*   pass has asked f's server and not yet heard.
-    pass_notready     \* [Fds -> BOOLEAN] -- ghost: f was not ready at some
+    pass_notready,    \* [Fds -> BOOLEAN] -- ghost: f was not ready at some
                       \*   instant of the current pass.
+    retry             \* BOOLEAN -- the park is bounded by the retry timer:
+                      \*   some remote fd's arm could not be sent.
 
 vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req,
-          stop_used, snapping, pass_notready>>
+          stop_used, snapping, pass_notready, retry>>
 
 \* "start"         — poll() entered; no hook installed, nothing sampled.
 \* "checked"       — BUGGY path only: readiness sampled, no hook installed.
@@ -365,7 +416,8 @@ vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req
 \* "armed"         — about to call tsleep: the commit point.
 \* "sleeping"      — committed to sleep on the poller's private Rendez.
 \* "tsparked"      — tsleep's own stop detour: parked, hooks STILL listed.
-\* "woken"         — tsleep returned AWOKEN (some flag was set).
+\* "woken"         — tsleep returned AWOKEN (some flag was set), or the
+\*                   retry timer ended the park (RetryWake).
 \* "unhooked"      — every hook is off its list; the loop's own death and
 \*                   stop checks are next.
 \* "loopparked"    — the loop's stop park: parked with NO hook listed.
@@ -402,6 +454,7 @@ TypeOk ==
     /\ stop_used       \in BOOLEAN
     /\ snapping        \in [Fds -> BOOLEAN]
     /\ pass_notready   \in [Fds -> BOOLEAN]
+    /\ retry           \in BOOLEAN
 
 NoneSet == [f \in Fds |-> FALSE]
 AllSet  == [f \in Fds |-> TRUE]
@@ -418,6 +471,7 @@ Init ==
     /\ stop_used       = FALSE
     /\ snapping        = NoneSet
     /\ pass_notready   = NoneSet
+    /\ retry           = FALSE
 
 (***************************************************************************)
 (* Expired — the deadline-reached predicate. FALSE whenever the modeled    *)
@@ -469,7 +523,7 @@ MakeReady(f) ==
     /\ ready' = [ready EXCEPT ![f] = TRUE]
     /\ Walk(f)
     /\ UNCHANGED <<registered, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* Retract — readiness falls again before the poller looks: a competing    *)
@@ -482,7 +536,7 @@ Retract(f) ==
     /\ ready' = [ready EXCEPT ![f] = FALSE]
     /\ pass_notready' = [pass_notready EXCEPT ![f] = TRUE]
     /\ UNCHANGED <<pc, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping>>
+                   snapping, retry>>
 
 (***************************************************************************)
 (* OtherEvent — f's hook list is walked for an event this poller did NOT   *)
@@ -495,7 +549,7 @@ OtherEvent(f) ==
     /\ pc \notin Terminal
     /\ Walk(f)
     /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* AdvanceTime — the monotonic counter reaches the poll timeout.           *)
@@ -506,7 +560,7 @@ AdvanceTime ==
     /\ pc \notin Terminal
     /\ deadline_passed' = TRUE
     /\ UNCHANGED <<pc, ready, registered, flagged, seen, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* Die — the Proc starts group-terminating. The #811 death cascade wakes a *)
@@ -519,7 +573,7 @@ Die ==
     /\ dying' = TRUE
     /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* StopRequest — a debugger `stop` or a job-control suspend. The delivery  *)
@@ -533,7 +587,7 @@ StopRequest ==
     /\ stop_used' = TRUE
     /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* StopResume — the stop is lifted and the parked poller resumes. From     *)
@@ -549,7 +603,7 @@ StopResume ==
     /\ pc' = CASE pc = "tsparked"   -> "armed"
                 [] pc = "loopparked" -> "cleared"
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* ParkDeath — DEATH WINS over a stop: proc_stop_sleeper_park returns      *)
@@ -561,7 +615,7 @@ ParkDeath ==
     /\ pc'         = "done_intr"
     /\ registered' = Unhook
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* Register — the CORRECT entry. For every LOCAL fd, `dev->poll` installs  *)
@@ -580,7 +634,7 @@ Register ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used>>
+    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
 
 (***************************************************************************)
 (* BuggyCheck / BuggyRegisterLate — the BUGGY entry: sample, THEN install. *)
@@ -594,7 +648,7 @@ BuggyCheck ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used>>
+    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
 
 BuggyRegisterLate ==
     /\ BUGGY_CHECK_BEFORE_REGISTER
@@ -602,7 +656,7 @@ BuggyRegisterLate ==
     /\ pc'         = "scanned"
     /\ registered' = [f \in Fds |-> f \in Local]
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* SnapshotAnswer — fd f's server answers its snapshot: the level at this  *)
@@ -617,7 +671,7 @@ SnapshotAnswer(f) ==
     /\ snapping' = [snapping EXCEPT ![f] = FALSE]
     /\ seen'     = [seen EXCEPT ![f] = ready[f]]
     /\ UNCHANGED <<pc, ready, registered, flagged, deadline_passed, dying, stop_req,
-                   stop_used, pass_notready>>
+                   stop_used, pass_notready, retry>>
 
 (***************************************************************************)
 (* SettleDeath — the #811 death cascade wakes a settling poller and it     *)
@@ -637,7 +691,7 @@ SettleDeath ==
     /\ registered' = Unhook
     /\ snapping'   = IF BUGGY_SWEEP_LEAVES_SNAPSHOT THEN snapping ELSE NoneSet
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   pass_notready>>
+                   pass_notready, retry>>
 
 (***************************************************************************)
 (* EvaluateFirst — the first scan's verdict, once it has settled. Anything *)
@@ -650,7 +704,7 @@ EvaluateFirst ==
     /\ pc = "scanned"
     /\ MayDecide
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   pass_notready>>
+                   pass_notready, retry>>
     /\ IF \E f \in Fds : seen[f]
        THEN /\ pc' = "done_ready"
             /\ registered' = Unhook
@@ -670,12 +724,22 @@ EvaluateFirst ==
 (* that became ready after its snapshot answered is caught here: its arm   *)
 (* answers at once and walks the fresh hook -- register-then-observe       *)
 (* across the settle. The local hooks went on at the scan.                  *)
+(*                                                                         *)
+(* Under ARM_MAY_FAIL any of the arms may not be sent. Such an fd is left  *)
+(* unregistered here, since nothing will walk its hook for its own         *)
+(* readiness, and if ANY arm failed the park is bounded by the retry       *)
+(* timer. BUGGY_NO_RETRY parks without it.                                 *)
 (***************************************************************************)
+ArmFailures == IF ARM_MAY_FAIL THEN SUBSET Remote ELSE {{}}
+
 Arm ==
     /\ pc = "arming"
-    /\ pc'         = "armed"
-    /\ registered' = [f \in Fds |-> registered[f] \/ f \in Remote]
-    /\ flagged'    = [f \in Fds |-> flagged[f] \/ (f \in Remote /\ ready[f])]
+    /\ \E failed \in ArmFailures :
+          /\ registered' = [f \in Fds |-> registered[f] \/ f \in Remote \ failed]
+          /\ flagged'    = [f \in Fds |-> flagged[f] \/
+                                         (f \in Remote \ failed /\ ready[f])]
+          /\ retry'      = (failed # {} /\ ~BUGGY_NO_RETRY)
+    /\ pc' = "armed"
     /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready>>
 
@@ -689,7 +753,7 @@ Arm ==
 TSleepCommit ==
     /\ pc = "armed"
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
     /\ IF \E f \in Fds : flagged[f] THEN /\ pc' = "woken"
                                          /\ registered' = registered
        ELSE IF Expired                THEN /\ pc' = "timedout"
@@ -709,7 +773,21 @@ Timeout ==
     /\ deadline_passed
     /\ pc' = "timedout"
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
+
+(***************************************************************************)
+(* RetryWake -- the retry timer ends a park an arm did not cover. It is a  *)
+(* wake with no flag and NOT the call's timeout: the poller goes round to  *)
+(* sample again, and the clock still decides the deadline.                 *)
+(* BUGGY_RETRY_IS_TIMEOUT takes it for tsleep's TIMEDOUT and makes the     *)
+(* final pass.                                                             *)
+(***************************************************************************)
+RetryWake ==
+    /\ pc = "sleeping"
+    /\ retry
+    /\ pc' = IF BUGGY_RETRY_IS_TIMEOUT THEN "timedout" ELSE "woken"
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* Rearm -- every hook comes off its list. Off the list no producer can    *)
@@ -722,6 +800,7 @@ Rearm ==
     /\ pc'         = "unhooked"
     /\ registered' = NoneSet
     /\ flagged'    = IF BUGGY_CLEAR_AFTER_SAMPLE THEN flagged ELSE NoneSet
+    /\ retry'      = FALSE
     /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready>>
 
@@ -735,7 +814,7 @@ LoopCheck ==
              ELSE IF stop_req /\ ~BUGGY_NO_LOOP_STOP_CHECK THEN "loopparked"
              ELSE "cleared"
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* Resample -- the first scan again: each local fd's `dev->poll` WITH the  *)
@@ -751,7 +830,7 @@ Resample ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used>>
+    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
 
 \* The BUGGY order's second half: the flags are cleared after the sample.
 BuggyClearLate ==
@@ -759,7 +838,7 @@ BuggyClearLate ==
     /\ pc'      = "rescanned"
     /\ flagged' = NoneSet
     /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used,
-                   snapping, pass_notready>>
+                   snapping, pass_notready, retry>>
 
 (***************************************************************************)
 (* EvaluateWake — the verdict after a wake. Ready returns. NOT ready is    *)
@@ -776,7 +855,7 @@ EvaluateWake ==
     /\ pc = "rescanned"
     /\ MayDecide
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   pass_notready>>
+                   pass_notready, retry>>
     /\ IF \E f \in Fds : seen[f]
        THEN /\ pc' = "done_ready"
             /\ registered' = Unhook
@@ -819,7 +898,7 @@ FinalSample ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used>>
+    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
 
 EvaluateFinal ==
     /\ pc = "final"
@@ -828,7 +907,7 @@ EvaluateFinal ==
     /\ registered' = Unhook
     /\ snapping'   = NoneSet
     /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
-                   pass_notready>>
+                   pass_notready, retry>>
 
 (***************************************************************************)
 (* Done — terminal self-loop (keeps TLC's deadlock check quiet).            *)
@@ -843,6 +922,7 @@ PollerStep ==
     \/ Arm
     \/ TSleepCommit
     \/ Timeout
+    \/ RetryWake
     \/ Rearm
     \/ LoopCheck
     \/ Resample
@@ -884,12 +964,15 @@ HookedReadyIsFlagged ==
         (\A f \in Fds : (registered[f] /\ ready[f]) => flagged[f])
 
 \* NoMissedPoll — ARCH §28 I-9 across N fds: a poller is never left asleep
-\* while a registered fd is ready. The headline property. Violated by
-\* BUGGY_CHECK_BEFORE_REGISTER (stale sample), BUGGY_NO_WAKE (the event
-\* never wakes the sleeper) and BUGGY_CLEAR_AFTER_SAMPLE (the re-arm wipes
-\* the flag of an event its own sample was too early to see).
+\* while a registered fd is ready, nor on a ready fd its park does not
+\* cover -- one whose arm could not be sent is covered only by the retry
+\* timer. The headline property. Violated by BUGGY_CHECK_BEFORE_REGISTER
+\* (stale sample), BUGGY_NO_WAKE (the event never wakes the sleeper),
+\* BUGGY_CLEAR_AFTER_SAMPLE (the re-arm wipes the flag of an event its own
+\* sample was too early to see) and BUGGY_NO_RETRY (an uncovered park with
+\* no timer).
 NoMissedPoll ==
-    ~(pc = "sleeping" /\ \E f \in Fds : ready[f] /\ registered[f])
+    ~(pc = "sleeping" /\ \E f \in Fds : ready[f] /\ (registered[f] \/ ~retry))
 
 \* NoStaleHook — a returned poll holds no poll_waiter hook. Violated by
 \* BUGGY_LAZY_UNREGISTER.
@@ -967,6 +1050,10 @@ Invariants ==
 (* fairness, because net_poll.tla's fail-safe answers for a server that    *)
 (* stops. So a settle adds a bounded wait to a pass, and no new way for    *)
 (* any of the four properties to fail.                                     *)
+(*                                                                         *)
+(* RetryWake is one of the poller's steps, so a park the retry timer       *)
+(* bounds ends. A retry loop that never finds anything ready is a poll(-1) *)
+(* that waits, which none of the four properties forbids.                  *)
 (*                                                                         *)
 (* IrqLatencyBounded IS GONE (ARCH 8.12), with the preemption point it    *)
 (* was about. A syscall body now runs interrupts-on throughout, so there  *)

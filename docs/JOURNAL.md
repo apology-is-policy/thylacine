@@ -230,6 +230,28 @@ samples again. Neither case reports an error or a readiness that was not
 observed. The model owes this before the code: net_poll.tla gains an arm that
 may fail and the retry, with a sabotage that parks without it (NP-4a).
 
+**NP-4a, the model first.** net_poll.tla gains `ARM_MAY_FAIL`: the arm can fail
+to go out (`PollerArmFails`, which may leave no hook either, as a poll-state
+allocation failure would), and the park is then bounded by the retry timer
+(`RetryTick`). poll.tla lets any subset of the remote fds go unarmed and gains
+`RetryWake`. Each I-9 invariant gained one conjunct: a poller asleep on a ready
+fd must have a hook with a wake behind it, or the timer. Without `ARM_MAY_FAIL`
+a sleeping poller holds a hook on every fd, so the conjunct cannot change the
+older cfgs, and their state counts came back identical (118/36/36/118/308 and
+3562/1206/3562/1206/3242). That is the check that the extension left the old
+model alone. There are three new reds: a park with no timer, once in each module
+(NoMissedNetPoll, NoMissedPoll), and one the design memo had not listed,
+`poll_buggy_retry_is_timeout`. It came from reading the loop the code will
+change. Today's `sys_poll_for_proc` takes its final pass on any TIMEDOUT, and a
+retry timer is also a tsleep deadline, so the obvious implementation returns 0
+ten milliseconds into a ten-second poll (NoSpuriousZero). The clock has to
+decide, not tsleep's return code. Each new liveness cfg was shown able to fail
+with the retry removed. My first try at the poll one reported `Invariants`
+instead: the cfg checks both, and the invariant fires first, which proves the
+invariant and not the property. With the invariants taken out of the sabotage
+cfg, it fails `StableReadyReturns`. TLC's coverage shows the new actions taken
+in the clean runs (PollerArmFails 12 times, RetryTick 12, RetryWake 32).
+
 **Open.**
 - NP-4, the kernel: the dev9p_poll rewrite, poll.c's settle and arm, deleting
   VIV_PPOLL_PROBE_MS, and fixing the tag-exhaustion POLLERR. Its tests include

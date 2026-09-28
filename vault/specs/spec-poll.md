@@ -19,7 +19,12 @@ cfgs:
   - "poll_buggy_no_loop_stop_check.cfg -- a stop left to tsleep's detour (StopHonoured counterexample)"
   - "poll_buggy_verdict_before_settle.cfg -- a pass decides on a ready local fd without waiting for its snapshots; the socket beside it goes unreported (NoFalseNotReady counterexample)"
   - "poll_buggy_sweep_leaves_snapshot.cfg -- a death during the settle returns with a snapshot in flight (NoSnapshotOutlivesCall counterexample)"
-gate: "any change to the register/sample atomicity, the settle, the arm, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop checks, or a producer wake site -- specs/check-poll.sh"
+  - "poll_armfail.cfg -- ARM_MAY_FAIL, one local fd beside two remote: any arm may fail; every invariant (38844)"
+  - "poll_armfail_liveness.cfg -- ARM_MAY_FAIL, Spec_Live: the four liveness properties (4306)"
+  - "poll_armfail_liveness_notimeout.cfg -- ARM_MAY_FAIL, Spec_Live, poll(-1) (1304)"
+  - "poll_buggy_no_retry.cfg -- a park an arm failed to cover gets no retry timer (NoMissedPoll counterexample)"
+  - "poll_buggy_retry_is_timeout.cfg -- the retry timer's expiry taken for the call's timeout returns 0 early (NoSpuriousZero counterexample)"
+gate: "any change to the register/sample atomicity, the settle, the arm and its retry timer, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop checks, or a producer wake site -- specs/check-poll.sh"
 created: 2026-08-01
 updated: 2026-09-28
 ---
@@ -75,6 +80,13 @@ cross-lock handoff.
   ready at some instant of the pass that decided, and no call returns with a
   snapshot in flight -- its answer would complete into the per-call batch the
   return releases. The server's side is [[spec-net-poll]]'s.
+- **The retry timer** (NP-4a, 2026-09-28): under `ARM_MAY_FAIL` any arm may
+  fail to be sent (no free tag, a full send ring, no memory). A park that any
+  arm failed to cover is bounded by the retry timer -- `NoMissedPoll` forbids
+  sleeping on a ready fd the park does not cover without it (`no_retry`) --
+  and the timer's expiry, `RetryWake`, is a wake with no flag and never the
+  call's timeout: the clock decides the deadline (`retry_is_timeout`, a
+  `NoSpuriousZero` counterexample).
 
 ## What it cannot see
 
@@ -94,8 +106,8 @@ re-registering scan (round 5's SpinLapse / BackoffCommit / BackoffTimeout, and
 then ARCH 8.12's Point / PointDone, are all GONE with the code they named);
 MakeReady ↔
 `poll_waiter_list_wake`; the timeout
-composes with [[spec-tsleep]]; SnapshotAnswer / Arm / SettleDeath are
-filled at NP-4, when the split lands. `specs/check-poll.sh` asserts every
+composes with [[spec-tsleep]]; SnapshotAnswer / Arm / SettleDeath / RetryWake
+are filled at NP-4, when the split lands. `specs/check-poll.sh` asserts every
 cfg's verdict (each buggy cfg's NAMED property, with the counterexample's
 actions printed).
 
