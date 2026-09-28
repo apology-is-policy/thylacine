@@ -58,7 +58,7 @@ fn type_word(m: &Metadata) -> &'static str {
     }
 }
 
-fn print_one(out: &mut io::OutSink, path: &str, m: &Metadata, on: bool, rich: bool) {
+fn print_one(out: &mut io::OutSink, path: &str, m: &Metadata, realm: &str, on: bool, rich: bool) {
     let dim = color::col(palette::DIM, on);
     let rst = color::reset(on);
     // Kind / realm / perms / owner / qid presentation are shared via meta.
@@ -93,7 +93,7 @@ fn print_one(out: &mut io::OutSink, path: &str, m: &Metadata, on: bool, rich: bo
     let _ = write!(
         out,
         "{} Realm:{} {}{}{}   {}Qid:{} {}{}{}   {}Links:{} {}\n",
-        dim, rst, color::col(kc, on), kind.realm(), rst,
+        dim, rst, color::col(kc, on), realm, rst,
         dim, rst, color::col(palette::GOLD, on), meta::qid_full(m), rst,
         dim, rst, m.nlink()
     );
@@ -172,10 +172,17 @@ fn run(args: Args) -> i64 {
     let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
     let on = !rich && mode.resolve(stdout_is_console);
 
+    let realms = meta::mount_realms();
+    if realms.truncated() {
+        meta::warn_mount_list_cut("stat");
+    }
     for path in &paths {
         had = true;
         match fs::metadata(path) {
-            Ok(m) => print_one(&mut out, path, &m, on, rich),
+            Ok(m) => {
+                let realm = meta::realm_of(&realms, path, meta::kind_of(&m));
+                print_one(&mut out, path, &m, realm, on, rich)
+            }
             Err(e) => {
                 // An unstattable path is very likely a graft (a live kernel
                 // namespace with no stat_native) -- name that, don't just errno.

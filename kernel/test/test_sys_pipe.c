@@ -35,6 +35,9 @@
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>   // #148: struct t_stat + the T_S_IF* type bits
 #include <thylacine/types.h>
+#include <thylacine/9p_client.h>
+#include <thylacine/9p_wire.h>
+#include <thylacine/dev9p.h>
 
 // The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
 // tests read (/welcome is pinned by tools/build.sh).
@@ -60,6 +63,8 @@ void test_sys_rw_write_after_read_close_returns_epipe(void);
 void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
+void test_sys_attach_9p_rejection_paths(void);
+void test_sys_attach_9p_declarations(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
 // independent so the two test files can be reordered without import
@@ -297,55 +302,155 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
     drop_test_proc(p);
 }
 
-void test_sys_attach_9p_rejection_paths(void) {
-    // SYS_ATTACH_9P's user-VA copy + handshake-with-server happy path
-    // is exercised by a userspace probe (deferred — needs a 9P
-    // responder server). The kernel-internal sanity tests cover the
-    // rejection paths: bad tx_fd / bad rx_fd / out-of-range rights /
-    // out-of-range aname_len.
-    //
-    // We call the SVC dispatch with crafted ctx->regs to exercise the
-    // handler; on rejection it returns -1 without touching anything
-    // beyond the Spoor refs (no allocations, no installations).
+// ---------------------------------------------------------------------------
+// SYS_ATTACH_9P through its inner (sys_attach_9p_for_proc). The replies wait in
+// the server-to-client pipe before the call -- Rversion, then Rattach on tag 0,
+// the first tag a fresh session allocates -- and the transport reads exactly one
+// frame at a time, so the handshake needs no responder thread. The staging also
+// guards the refusal legs: a refusal that regressed would attach and fail its
+// assertion instead of blocking the suite on a handshake nobody answers. What
+// the attach sent is read back non-blocking, so "nothing sent" is a measured 0.
+// ---------------------------------------------------------------------------
+
+extern s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
+                                  const u8 *aname, u64 aname_len, u64 n_uname,
+                                  u64 flags);
+extern int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+                               u8 *resp, size_t resp_cap);
+extern struct Dev devnone;
+
+enum pa_ends { PA_PIPES, PA_BOGUS_TX, PA_BOGUS_RX, PA_DEVNONE_TX };
+
+struct pa_seen {
+    s64  ret;
+    bool attached, cape, remote;
+    s64  sent;       // bytes written to the client-to-server pipe; < 0: fixture failed
+};
+
+static int pa_stage(struct Proc *p, hidx_t wr, u8 type, u16 tag) {
+    u8 req[P9_HDR_LEN] = { P9_HDR_LEN, 0, 0, 0, type,
+                           (u8)(tag & 0xff), (u8)((tag >> 8) & 0xff) };
+    u8 resp[64];
+    int rlen = canonical_responder(NULL, req, sizeof(req), resp, sizeof(resp));
+    if (rlen <= 0) return -1;
+    return sys_write_for_proc(p, wr, resp, (u64)rlen) == (s64)rlen ? 0 : -1;
+}
+
+static s64 pa_drain(struct Proc *p, hidx_t rd) {
+    struct Handle h;
+    if (handle_get(p, rd, &h) != 0) return -2;
+    spoor_flag_set((struct Spoor *)h.obj, CNONBLOCK);
+    handle_put(&h);
+    s64 total = 0;
+    u8 buf[128];
+    for (;;) {
+        s64 n = sys_read_for_proc(p, rd, buf, sizeof(buf));
+        if (n == -(s64)T_E_AGAIN) return total;
+        if (n <= 0) return -3;
+        total += n;
+    }
+}
+
+static const u8 g_pa_aname[SYS_ATTACH_ANAME_MAX + 8] = { '/' };
+
+static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
+                                     bool null_aname, enum pa_ends ends) {
+    struct pa_seen r = { 0x7BAD, false, false, false, -1 };
     struct Proc *p = make_test_proc();
-    TEST_ASSERT(p != NULL, "proc_alloc");
-
-    // Get two valid KOBJ_SPOOR fds via sys_pipe_for_proc — they have
-    // READ|WRITE|TRANSFER rights so they pass both gates.
-    hidx_t fd_a_rd = -1, fd_a_wr = -1;
-    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_a_rd, &fd_a_wr), 0, "pipe A");
-    hidx_t fd_b_rd = -1, fd_b_wr = -1;
-    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_b_rd, &fd_b_wr), 0, "pipe B");
-
-    // The actual SVC dispatcher entry. Use it via exception_context
-    // arg-shape (regs[0..4] = arguments; regs[8] = syscall number).
-    // We can't easily fabricate an exception_context here; instead,
-    // since sys_attach_9p_handler is static, we exercise rejection
-    // paths via the public failure conditions:
-    //
-    //   - Pass an out-of-range fd → sys_lookup_spoor returns NULL →
-    //     -1 returned.
-    //
-    // Without exposing sys_attach_9p_for_proc as the others do, the
-    // test calls handle_get directly to check what would happen on
-    // each rejection path.
-
-    // 1. Verify a bogus fd doesn't pass handle_get (the helper used
-    //    by sys_attach_9p_handler internally). This is a structural
-    //    pre-check: if handle_get rejects, sys_attach_9p_handler
-    //    returns -1 before any allocation.
-    struct Handle bogus_tmp;
-    TEST_EXPECT_EQ(handle_get(p, 9999, &bogus_tmp), -1,
-        "out-of-range fd returns -1 from handle_get");
-
-    // 2. Verify a closed fd doesn't pass.
-    TEST_EXPECT_EQ(handle_close(p, fd_b_wr), 0, "close fd_b_wr");
-    TEST_EXPECT_EQ(handle_get(p, fd_b_wr, &bogus_tmp), -1,
-        "closed fd returns -1 from handle_get");
-
-    // Cleanup. Procf_free closes the remaining handles (rd_a, wr_a,
-    // rd_b) via handle_table_free → KOBJ_SPOOR release → spoor_clunk.
+    if (!p) return r;
+    p->principal_id = 0x1234u;
+    p->primary_gid  = 0x5678u;
+    hidx_t c2s_rd = -1, c2s_wr = -1, s2c_rd = -1, s2c_wr = -1;
+    if (sys_pipe_for_proc(p, &c2s_rd, &c2s_wr) == 0 &&
+        sys_pipe_for_proc(p, &s2c_rd, &s2c_wr) == 0 &&
+        pa_stage(p, s2c_wr, P9_TVERSION, P9_NOTAG) == 0 &&
+        pa_stage(p, s2c_wr, P9_TATTACH, 0) == 0) {
+        u64 tx = (u64)c2s_wr, rx = (u64)s2c_rd;
+        if (ends == PA_BOGUS_TX) tx = 9999;
+        if (ends == PA_BOGUS_RX) rx = 9999;
+        if (ends == PA_DEVNONE_TX) {
+            struct Spoor *dn = spoor_alloc(&devnone);
+            hidx_t h = dn ? handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, dn) : -1;
+            if (h < 0) { if (dn) spoor_unref(dn); drop_test_proc(p); return r; }
+            tx = (u64)h;
+        }
+        r.ret = sys_attach_9p_for_proc(p, tx, rx, null_aname ? NULL : g_pa_aname,
+                                       aname_len, n_uname, flags);
+        struct Handle h;
+        if (r.ret >= 0 && handle_get(p, (hidx_t)r.ret, &h) == 0) {
+            struct dev9p_priv *rp = h.kind == KOBJ_SPOOR
+                                        ? dev9p_priv_of((struct Spoor *)h.obj) : NULL;
+            r.attached = rp != NULL && rp->client != NULL;
+            if (r.attached) {
+                r.cape   = rp->client->cape;
+                r.remote = rp->client->remote;
+            }
+            handle_put(&h);
+        }
+        r.sent = pa_drain(p, c2s_rd);
+        // The server's end goes first, so the root's Tclunk meets EOF rather
+        // than waiting on a reply nobody will send.
+        handle_close(p, s2c_wr);
+        if (r.ret >= 0) handle_close(p, (hidx_t)r.ret);
+    }
     drop_test_proc(p);
+    return r;
+}
+
+static struct pa_seen pipe_attach(u64 flags) {
+    return pipe_attach_ex(flags, 0, 1, false, PA_PIPES);
+}
+
+// SYS_ATTACH_9P's refusals, each before a byte reaches the wire. The admitted
+// control is the same call one variable away.
+void test_sys_attach_9p_rejection_paths(void) {
+    struct pa_seen r = pipe_attach(0);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "control: a pipe attach with good arguments attaches");
+    TEST_ASSERT(r.sent > 0, "control: the handshake reached the wire");
+
+    r = pipe_attach_ex(0, 0, 1, false, PA_BOGUS_TX);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "a bogus tx fd -> -1, nothing sent");
+    r = pipe_attach_ex(0, 0, 1, false, PA_BOGUS_RX);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "a bogus rx fd -> -1, nothing sent");
+    r = pipe_attach_ex(0, 0, 1, false, PA_DEVNONE_TX);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "a tx that is not a pipe -> -1, nothing sent");
+    r = pipe_attach_ex(0, 0, SYS_ATTACH_ANAME_MAX + 1, false, PA_PIPES);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "an aname over the cap -> -1, nothing sent");
+    r = pipe_attach_ex(0, 0, 1, true, PA_PIPES);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "a NULL aname with a length -> -1, nothing sent");
+    r = pipe_attach_ex(0, 0x100000000ull, 1, false, PA_PIPES);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "F239: an n_uname past u32 -> -1, nothing sent");
+}
+
+// The declarations are the mounter's on the pipe attach (IDENTITY-DESIGN 3.2,
+// HAUL-DESIGN 4.8): each flag word marks the session it names and nothing else,
+// and every other bit is refused before the wire.
+void test_sys_attach_9p_declarations(void) {
+    struct pa_seen r = pipe_attach(0);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "no flags: attached");
+    TEST_ASSERT(!r.cape && !r.remote, "no flags: neither caped nor remote");
+
+    r = pipe_attach(SYS_ATTACH_9P_REMOTE);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "REMOTE: attached");
+    TEST_ASSERT(r.remote, "REMOTE: the session is declared remote");
+    TEST_ASSERT(!r.cape, "REMOTE alone is not the cape");
+
+    r = pipe_attach(SYS_ATTACH_9P_CAPE);
+    TEST_ASSERT(r.ret >= 0 && r.attached && r.cape, "CAPE: attached, caped");
+    TEST_ASSERT(!r.remote, "CAPE alone does not declare the session remote");
+
+    r = pipe_attach(SYS_ATTACH_9P_CAPE | SYS_ATTACH_9P_REMOTE);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "CAPE|REMOTE: attached");
+    TEST_ASSERT(r.cape && r.remote, "CAPE|REMOTE: caped and remote (Haul's direct form)");
+
+    r = pipe_attach(SYS_ATTACH_9P_LOOSE);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "LOOSE is /srv-only: refused, nothing sent");
+    r = pipe_attach(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_REMOTE);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "REMOTE does not carry LOOSE in");
+    r = pipe_attach(0x8u);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "an unknown bit: refused, nothing sent");
+    r = pipe_attach(1ull << 32);
+    TEST_ASSERT(r.ret == -1 && r.sent == 0, "a high bit is not truncated away");
 }
 
 void test_sys_pipe_handle_close_releases_one_end(void) {

@@ -1,11 +1,14 @@
 // realm [--color[=WHEN]] PATH... -- print each path's namespace realm.
 //
 // The Thylacine answer to "what KIND of thing is this in the namespace?": a real
-// filesystem object (fs), a device (dev), or a live kernel-served graft. A graft
-// is a path `readdir` lists but `fstat` cannot cross (no stat_native) -- the
-// distinction Unix has no word for. Sharpens to the exact Dev class once a kernel
-// SYS_FD_DEVCLASS lands (COREUTILS-THYLACINE-DESIGN.md). A presentation tool ->
-// color on the console (auto).
+// filesystem object (fs), a device (dev), a live kernel-served graft, or a mount
+// point -- `remote` when a member mounted there comes from a 9P session declared
+// remote, else `mount` (read from the caller's own /proc/<pid>/ns, ahead of the
+// fstat inference). A graft is a path `readdir` lists but `fstat` cannot cross
+// (no stat_native) and the mount list does not name -- the distinction Unix has
+// no word for. Sharpens to the exact Dev class once a kernel SYS_FD_DEVCLASS
+// lands (COREUTILS-THYLACINE-DESIGN.md). A presentation tool -> color on the
+// console (auto).
 
 #![no_std]
 #![no_main]
@@ -20,6 +23,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use alloc::format;
 use core::fmt::Write as _;
 use coreutils::color::{self, ColorMode};
+use coreutils::nsmount::MountRealms;
 use coreutils::{meta, palette, usage};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs;
@@ -28,14 +32,14 @@ use libthyla_rs::{eprintln, io};
 const USAGE: &str = "\
 usage: realm [--color[=WHEN]] PATH...
   Print each PATH's namespace realm: fs (a filesystem object), dev (a
-  device), or graft (a live kernel-served namespace mount, which fstat
-  cannot cross).
+  device), graft (a live kernel-served namespace, which fstat cannot
+  cross), or for a mount point mount -- remote when it is a network mount.
   --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
   realm /               # fs
-  realm /srv            # graft (a live kernel namespace)
+  realm /srv            # mount (a mount point)
 ";
 
 #[no_mangle]
@@ -45,7 +49,12 @@ pub extern "C" fn rs_main() -> i64 {
 
 /// `(realm, color)` for `path`. Empty realm means "no such path" (the parent
 /// does not list it either).
-fn realm_of(path: &str) -> (&'static str, &'static str) {
+fn realm_of(realms: &MountRealms, path: &str) -> (&'static str, &'static str) {
+    match coreutils::path::abs(path).and_then(|a| realms.realm(&a)) {
+        Some("remote") => return ("remote", palette::EMBER),
+        Some(r) => return (r, palette::VIOLET),
+        None => {}
+    }
     match fs::metadata(path) {
         Ok(m) => {
             let k = meta::kind_of(&m);
@@ -124,8 +133,14 @@ fn run(args: Args) -> i64 {
     let on = mode.resolve(stdout_is_console);
     let mut out = io::OutSink::new();
     let mut status = 0;
-    for path in &paths {
-        let (realm, color) = realm_of(path);
+    let realms = meta::mount_realms();
+    if realms.truncated() {
+        meta::warn_mount_list_cut("realm");
+    }
+    let found: Vec<(&str, &'static str, &'static str)> =
+        paths.iter().map(|p| { let (r, c) = realm_of(&realms, p); (*p, r, c) }).collect();
+    let rw = found.iter().map(|(_, r, _)| r.len()).max().unwrap_or(0).max(5);
+    for (path, realm, color) in found {
         if realm.is_empty() {
             eprintln!("realm: {}: no such path", path);
             status = 1;
@@ -133,13 +148,14 @@ fn run(args: Args) -> i64 {
         }
         let _ = write!(
             out,
-            "{}{:<5}{}  {}{}{}\n",
+            "{}{:<rw$}{}  {}{}{}\n",
             color::col(color, on),
             realm,
             color::reset(on),
             color::col(color, on),
             path,
-            color::reset(on)
+            color::reset(on),
+            rw = rw
         );
     }
     out.finish("realm", status)

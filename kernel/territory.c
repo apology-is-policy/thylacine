@@ -42,6 +42,7 @@
 // automatically by call ordering, not by init ordering.
 
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/extinction.h>
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
@@ -571,6 +572,11 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         // reads "mount <pt> <pt> covered"): shown, so an operator can see that
         // the point's own names are searched and in what order.
         if (ok && (m->flags & MCOVERED)) ok = ns_put_str(buf, cap, &off, " covered");
+        // LR-1 (HAUL-DESIGN 4.8): a member whose source belongs to a 9P session
+        // declared remote at its attach or its /srv post. Never the covered
+        // entry: nobody mounted it, and its line already names the directory.
+        if (ok && !(m->flags & MCOVERED) && dev9p_spoor_remote(m->source))
+            ok = ns_put_str(buf, cap, &off, " remote");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Nonblocking endpoints
 
@@ -106,7 +106,17 @@ every file as the attacher). The perm word's rules live in the tested
 predicate `sys_srv_post_perm_ok` (only DMSRV* bits; CAPE only beside BYTE),
 and `devsrv_post_listener` refuses a caped 9P-mode post itself too (−1):
 the cape's no-escalation argument rests on the attacher holding the raw
-transport, which a 9P-mode opener never does. Returns the listener hidx (obj = the registry entry;
+transport, which a 9P-mode opener never does. `perm & DMSRVREMOTE` (bit 22,
+LR-1, HAUL-DESIGN 4.8) marks the service remote in EITHER mode: every attach
+over its connections declares its session remote, which `/proc/<pid>/ns`
+shows and nothing else reads. `SrvService.remote` is set in
+`srv_reserve_in` on all three arms (a fresh slot, a tombstone rebind, the
+recycle of a dead tombstone) and is part of the service IDENTITY on a
+rebind, like the mode, the ring class and the cape: a rebind that changes it
+answers −1, because a conn minted before the rebind must read the
+declaration its poster made. `devsrv_open_connect` captures it atomically
+with LIVE, beside the mode and the cape, and marks the minted conn with
+`srvconn_set_remote` ([[sub-kernel-srvconn]]). Returns the listener hidx (obj = the registry entry;
 `RIGHT_READ|WRITE`; `handle_dup` refuses it) or −1.
 
 **open=connect** — `devsrv_open_connect(p, c, omode)` (the `Dev.open`
@@ -512,6 +522,21 @@ identity both ways), `srv_client.cape_admission` (the syscall predicates,
 `sys_srv_post_perm_ok` and `sys_attach_9p_flags_ok`, bit by bit), and
 `srv_client.cape_post_syscall` (a post through SYS_WALK_CREATE's own
 inner on a /srv root fd: the cape bit marks the service, a caped 9P-mode
-post answers -EINVAL and registers nothing). The 9p-mode
+post answers -EINVAL and registers nothing), and 4 for the remote
+declaration: `srv_client.remote_admission` (both values pinned, both
+predicates bit by bit: either mode, REMOTE does not lift the cape's byte
+rule, REMOTE is refused on the /srv attach and cannot carry LOOSE into the
+pipe attach), `srv_client.remote_post` (9P-mode, byte and caped remote
+posts are marked, the plain control is not; the byte services mint marked
+conns; the rebind identity both ways across a tombstone),
+`srv_client.remote_recycle` (a user's post of a new name recycles a dead
+tombstone's slot, proven the same entry before the declaration is judged,
+and takes the NEW post's declaration both ways), and
+`srv_client.remote_post_syscall` (through SYS_WALK_CREATE's own inner). The
+LR-1 sabotage boots turned these red when the post stopped recording the
+declaration (the common tail of `srv_reserve_in`), when the recycle arm
+stopped rewriting it (red only with the rebind check in place: the common
+tail runs for every arm, so deleting the check masked it), when the rebind
+identity check was deleted, and when connect stopped capturing it. The 9p-mode
 connect has NO unit case ([[seam-srv-9p-connect-unit]]); the boot E2E
 (joey/login/legate → corvus + stratumd) is its regression.

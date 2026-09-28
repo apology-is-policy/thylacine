@@ -2424,15 +2424,20 @@ bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx
     return tx && rx && tx->dev == &devpipe && rx->dev == &devpipe;
 }
 
-// Each attach admits one bit. The per-attach LOOSE opt-in (B1) was voted for the
-// /srv attach alone. The identity cape is the pipe attach's: the mounter holds
-// both pipes, so the mounter decides. Over /srv the cape is the poster's
-// decision (DMSRVCAPE) and never the attacher's, so the bit is refused there
-// like any unknown one.
+// The per-attach LOOSE opt-in (B1) was voted for the /srv attach alone. The
+// identity cape and the remote declaration are the pipe attach's: the mounter
+// holds both pipes, so the mounter decides. Over /srv both are the poster's
+// decision (DMSRVCAPE, DMSRVREMOTE) and never the attacher's, so those bits
+// are refused there like any unknown one.
 bool sys_attach_9p_flags_ok(u64 flags, bool srv) {
-    u64 ok = srv ? (u64)SYS_ATTACH_9P_LOOSE : (u64)SYS_ATTACH_9P_CAPE;
+    u64 ok = srv ? (u64)SYS_ATTACH_9P_LOOSE
+                 : (u64)(SYS_ATTACH_9P_CAPE | SYS_ATTACH_9P_REMOTE);
     return (flags & ~ok) == 0;
 }
+
+s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
+                           const u8 *aname, u64 aname_len, u64 n_uname,
+                           u64 flags);
 
 static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
                                  u64 aname_va, u64 aname_len, u64 n_uname,
@@ -2444,20 +2449,41 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
 
     // Validate aname length cap.
     if (aname_len > SYS_ATTACH_ANAME_MAX)             return -1;
-    // F239: n_uname is 9P2000.L's u32 numeric uid field; reject values
-    // that would silently truncate to u32. Pre-fix the syscall did
-    // `(u32)n_uname` blindly, masking high bits.
-    if (n_uname > (u64)0xFFFFFFFFu)                   return -1;
-    // x5 flags (the #112 ABI discipline: every caller passes it). The only bit
-    // is SYS_ATTACH_9P_CAPE, the identity cape (IDENTITY-DESIGN 3.2); the
-    // per-attach LOOSE opt-in belongs to SYS_ATTACH_9P_SRV alone and is refused
-    // here like any unknown bit.
-    if (!sys_attach_9p_flags_ok(flags, /*srv=*/false)) return -1;
-    bool cape = (flags & SYS_ATTACH_9P_CAPE) != 0;
     // Validate user-VA range when aname_len > 0; zero-length aname
     // is permitted (a zero-length attach name is legal per 9P2000.L).
     if (aname_len > 0 && !sys_validate_user_buf(aname_va, aname_len))
                                                      return -1;
+    // Copy aname into kernel scratch. SYS_ATTACH_ANAME_MAX byte stack
+    // buffer; per-byte uaccess_load_u8 (same shape as SYS_WRITE).
+    u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
+    for (u64 i = 0; i < aname_len; i++) {
+        if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0)
+                                                     return -1;
+    }
+    return sys_attach_9p_for_proc(p, tx_fd_raw, rx_fd_raw, aname_scratch,
+                                  aname_len, n_uname, flags);
+}
+
+// Inner -- testable without a live EL0 thread (a kernel aname, no user buffer),
+// like SYS_ATTACH_9P_SRV's. Every refusal before the attach is the bare -1, so
+// moving the copy ahead of them changes no answer.
+s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
+                           const u8 *aname, u64 aname_len, u64 n_uname,
+                           u64 flags) {
+    if (!p)                                          return -1;
+    if (aname_len > SYS_ATTACH_ANAME_MAX)             return -1;
+    if (aname_len > 0 && !aname)                      return -1;
+    // F239: n_uname is 9P2000.L's u32 numeric uid field; reject values
+    // that would silently truncate to u32. Pre-fix the syscall did
+    // `(u32)n_uname` blindly, masking high bits.
+    if (n_uname > (u64)0xFFFFFFFFu)                   return -1;
+    // x5 flags (the #112 ABI discipline: every caller passes it): the identity
+    // cape (SYS_ATTACH_9P_CAPE, IDENTITY-DESIGN 3.2) and the remote declaration
+    // (SYS_ATTACH_9P_REMOTE, HAUL-DESIGN 4.8); the per-attach LOOSE opt-in
+    // belongs to SYS_ATTACH_9P_SRV alone and is refused here like any unknown bit.
+    if (!sys_attach_9p_flags_ok(flags, /*srv=*/false)) return -1;
+    bool cape   = (flags & SYS_ATTACH_9P_CAPE) != 0;
+    bool remote = (flags & SYS_ATTACH_9P_REMOTE) != 0;
 
     // Look up the transport handles. Take INDEPENDENT references so
     // userspace closing the original fds doesn't free Spoors out from
@@ -2493,17 +2519,6 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     spoor_clunk(tx);
     spoor_clunk(rx);
 
-    // Copy aname into kernel scratch. SYS_ATTACH_ANAME_MAX byte stack
-    // buffer; per-byte uaccess_load_u8 (same shape as SYS_WRITE).
-    u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
-    for (u64 i = 0; i < aname_len; i++) {
-        if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0) {
-            spoor_clunk(tx);
-            if (rx != tx) spoor_clunk(rx);
-            return -1;
-        }
-    }
-
     // Allocate the adapter on the heap. Transport ownership transfers
     // into the p9_attached via p9_attached_install_transport below, so
     // the LAST p9_attached_unref (after every walked Spoor closes — F2)
@@ -2532,7 +2547,7 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         SYS_ATTACH_DEFAULT_ROOT_FID,         // root_fid
         SYS_ATTACH_DEFAULT_MSIZE,            // msize (client proposal)
         NULL, 0,                             // uname (empty at v1.0; no-auth)
-        aname_len > 0 ? aname_scratch : NULL, aname_len,
+        aname_len > 0 ? aname : NULL, aname_len,
         // A-3 M4: assert the caller's kernel-stamped principal as n_uname.
         // The userspace-supplied n_uname is vestigial (validated above for
         // ABI hygiene, then superseded). Against Stratum this is a no-op
@@ -2569,10 +2584,13 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     // From here on, FAILURE paths just unref `att`. The attached's
     // last-ref destroy handles adapter + transport cleanup.
 
-    // The identity cape: stamped on the still-private client before the root
-    // Spoor exists (the handle publication below orders it, as for `loose`).
+    // The identity cape and the remote declaration: stamped on the still-private
+    // client before the root Spoor exists (the handle publication below orders
+    // them, as for `loose`).
     if (cape)
         p9_client_set_cape(att->client, p->principal_id, p->primary_gid);
+    if (remote)
+        p9_client_set_remote(att->client);
 
     struct Spoor *root = p9_attached_root_spoor(att);
     if (!root) {
@@ -2692,9 +2710,10 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
     // is the B1 per-attach I-38 opt-in (docs/chase/B1-VOTE.md + the ARCH
     // I-38 row): the mounter asserts the single-writer premise for this
     // attach; the minted client's cached-opens then serve full hint hits
-    // without the per-open wire revalidation. SYS_ATTACH_9P_CAPE is refused
-    // here like any unknown bit: over /srv the identity cape is the poster's
-    // (DMSRVCAPE, IDENTITY-DESIGN 3.2). The #112 ABI discipline:
+    // without the per-open wire revalidation. SYS_ATTACH_9P_CAPE and
+    // SYS_ATTACH_9P_REMOTE are refused here like any unknown bit: over /srv the
+    // identity cape and the remote declaration are the poster's (DMSRVCAPE,
+    // IDENTITY-DESIGN 3.2; DMSRVREMOTE, HAUL-DESIGN 4.8). The #112 ABI discipline:
     // this is arg x4 -- EVERY caller sets it (the lib wrappers take it
     // explicitly, so a stale caller cannot pass garbage silently).
     if (!sys_attach_9p_flags_ok(flags, /*srv=*/true)) return -1;
@@ -2736,8 +2755,9 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
     // p9_attached construction ref before returning, so the returned root owns
     // the session via its dev9p_priv->attached_owner. devsrv_open's 9p-mode
     // connect shares the SAME helper -- the 9P-unification.
-    // A conn from a DMSRVCAPE service is caped whatever `flags` says: the
-    // helper reads the mark off the conn itself.
+    // A conn from a DMSRVCAPE service is caped, and one from a DMSRVREMOTE
+    // service marked remote, whatever `flags` says: the helper reads both marks
+    // off the conn itself.
     int aerr = 0;
     struct Spoor *root = srvconn_attach_dev9p_root(
         cn, aname_len > 0 ? aname : NULL, aname_len, p, (u32)flags, &aerr);
@@ -4013,7 +4033,8 @@ s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
 
 // DMSRVCAPE only beside DMSRVBYTE: a byte-mode attacher holds the raw
 // transport, which is why the cape grants it nothing (IDENTITY-DESIGN 3.2); a
-// 9P-mode opener never does.
+// 9P-mode opener never does. DMSRVREMOTE is a label and grants nothing, so
+// either mode admits it (HAUL-DESIGN 4.8).
 bool sys_srv_post_perm_ok(u32 perm) {
     if (perm & ~(u32)SYS_WALK_CREATE_DMSRV_BITS) return false;
     return !(perm & SYS_WALK_CREATE_DMSRVCAPE) || (perm & SYS_WALK_CREATE_DMSRVBYTE);
@@ -4055,8 +4076,9 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // than the KOBJ_SPOOR the generic create path installs over the returned
     // Spoor -- so it cannot ride that path; branch here and return the listener
     // hidx directly. perm selects the transport: DMSRVBYTE -> byte-mode, else
-    // 9P-mode; DMSRVBULK selects the ring class and DMSRVCAPE the identity cape.
-    // No other perm bit is meaningful for a service post.
+    // 9P-mode; DMSRVBULK selects the ring class, DMSRVCAPE the identity cape and
+    // DMSRVREMOTE the remote declaration. No other perm bit is meaningful for a
+    // service post.
     if (src->dc == 's' && src->aux &&
         *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
         // #50: only the fd-based SYS_WALK_CREATE may post a service. A
@@ -4069,16 +4091,18 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
                                  ? SRV_MODE_BYTE : SRV_MODE_9P;
         bool bulk = (perm & SYS_WALK_CREATE_DMSRVBULK) != 0;   // CF-3 B ring class
         bool cape = (perm & SYS_WALK_CREATE_DMSRVCAPE) != 0;
+        bool remote = (perm & SYS_WALK_CREATE_DMSRVREMOTE) != 0;
         // #844: devsrv_post_listener mints a registry-lifetime KObj_Srv (not
         // tied to src); release the src borrow after it returns.
         s64 lh = (s64)devsrv_post_listener(p, src, name_scratch,
-                                           (size_t)name_len_raw, mode, bulk, cape);
+                                           (size_t)name_len_raw, mode, bulk, cape,
+                                           remote);
         spoor_clunk(src);
         return lh;
     }
 
-    // DMSRVBYTE / DMSRVBULK / DMSRVCAPE are meaningful ONLY for the /srv
-    // service post above. On a regular create they must not reach a Dev's
+    // DMSRVBYTE / DMSRVBULK / DMSRVCAPE / DMSRVREMOTE are meaningful ONLY for
+    // the /srv service post above. On a regular create they must not reach a Dev's
     // create perm (e.g. a dev9p Tlcreate), where the high bits would corrupt
     // the wire perm -- reject them.
     if (perm & SYS_WALK_CREATE_DMSRV_BITS)              { spoor_clunk(src); return -T_E_INVAL; }

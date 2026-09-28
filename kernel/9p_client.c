@@ -1373,6 +1373,7 @@ int p9_client_init(struct p9_client *c,
     c->cape            = false;
     c->cape_uid        = 0;
     c->cape_gid        = 0;
+    c->remote          = false;
     c->cacheable       = false;
     c->wga_unsupported = false;
     c->out_buf     = c->out_buf_inline;

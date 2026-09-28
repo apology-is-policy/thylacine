@@ -266,6 +266,13 @@ int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got);
 // `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.
 struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
 
+// LR-1 (HAUL-DESIGN 4.8): does `c` belong to a 9P session whose attacher or
+// /srv poster declared it remote? A lock-free read of a flag stamped before the
+// session's root published; the caller's reference on `c` keeps its priv and
+// client alive. False for anything that is not a dev9p Spoor with a valid priv.
+// Its one caller is territory_format_ns: the declaration is display only.
+bool dev9p_spoor_remote(struct Spoor *c);
+
 // #99: the create errno accessor for sys_walk_create_handler. Returns the errno
 // dev9p_create recorded for the last create failure on this Spoor -- clamped to
 // the syscall passthrough range [-4095, -2] so it reaches EL0 as the true POSIX

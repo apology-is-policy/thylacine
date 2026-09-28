@@ -128,8 +128,13 @@ User-chosen: **boxed header**, **both** the realm and qid columns.
   `fstat` cannot cross is `mount`, and `graft` stays the inference for what the
   table does not name. The union's covered entry is not a member for this purpose
   (nobody mounted it). The names are introspection-only (I-33): a mount point
-  reached under another name shows its ordinary realm. The kernel side, and why
-  the label rides the 9P session rather than the mount call: HAUL-DESIGN.md 4.8.
+  reached under another name shows its ordinary realm. The kernel renders the
+  list into a bounded buffer and writes its `binds:` line only after a whole
+  list, so a list without one was cut and its newest mounts are missing: the
+  box's bottom rule then reads `mount list incomplete`, and the plain form,
+  `stat` and `realm` say it once on stderr, rather than let a missing mount
+  point read `fs` in silence. The kernel side, and why the label rides the 9P
+  session rather than the mount call: HAUL-DESIGN.md 4.8.
 - **QID** (the exotic identity): the 9P qid the kernel knows the object by --
   `{t}:0x{path}` where `t` is `d`/`f`/`c`. Grafts show `-` (fstat doesn't cross
   the mount, so there is no qid to report). This is Plan-9 made visible: unix
@@ -172,9 +177,11 @@ zero-ESC legs.
   (Plan 9's default: "the process with the named pid, or by default itself");
   `ns 0` is the system root, the pre-LR-1 default, which never held the shell's
   own mounts. The boxed view's REALM reads `remote` for a line the kernel marks
-  ` remote`, and `9p` for a `#9` source (it used to read `disk`, which is wrong
-  for `/net`, the container diorama and a Haul mount -- 9P sessions that are not
-  the disk). A FLAGS column carries the other suffixes the kernel renders
+  ` remote`. A 9P session root carries a name (it is born `/`), so it reads
+  `fs` like any subtree; `#9`, which the kernel writes only for a session root with no name
+  (the allocation-failure fallback), reads `9p` rather than the old `disk`. A
+  cut list (no `binds:` line) puts `mount list incomplete` in the count cell
+  where a zero used to stand. A FLAGS column carries the other suffixes the kernel renders
   (`noexec`, `pheno-linux`, `covered`) instead of dropping them; an unknown
   suffix is shown as written. `--color=never` still passes the kernel text
   through untouched.

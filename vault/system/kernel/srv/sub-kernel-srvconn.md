@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Event-loop I/O
 
@@ -83,7 +83,12 @@ IDENTITY-DESIGN 3.2: set at mint before publication with
 corrupted conn; marking a NULL, corrupted or kernel-attached conn
 extincts. The conn only CARRIES the mark: the attach helper decides what
 it means, and honours it only on a byte conn —
-[[sub-kernel-ninep-attach]]).
+[[sub-kernel-ninep-attach]]) ·
+`srvconn_set_remote` / `srvconn_remote` (the service's DMSRVREMOTE mark,
+LR-1, HAUL-DESIGN 4.8: the cape's contract exactly -- set at mint before
+publication, RELEASE; read with ACQUIRE, false on a NULL or corrupted conn;
+marking a NULL, corrupted or kernel-attached conn extincts. The helper
+stamps it on the session in either mode, because it is a label).
 
 **Deadline** — `srvconn_set_client_deadline(cn, abs_ns)` (0 = none;
 clears `client_timed_out`) · `srvconn_client_timed_out` (distinguishes
@@ -497,6 +502,9 @@ returned 0, no park) · `recv_deadline_timeout` · `teardown_eofs` ·
 the >cap send is in flight) · `role_park_second_writer` (A-then-B frame
 atomicity) · `role_park_second_reader` · plus the srv_client byte-mode
 suite exercising these rings end-to-end (listed under
-[[sub-kernel-devsrv]] Tests). Threaded cases use the cooperative harness
+[[sub-kernel-devsrv]] Tests). The remote mark's carry is covered there
+(`srv_client.remote_post`: a remote service mints marked conns, a plain one
+plain conns) and at the attach (`9p_srvconn_transport.remote_attach`,
+[[sub-kernel-ninep-attach]]). Threaded cases use the cooperative harness
 + the #109 terminal-park reap handshake + `SC_YIELD_UNTIL` observable
 waits.

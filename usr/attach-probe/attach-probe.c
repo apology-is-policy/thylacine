@@ -27,7 +27,9 @@
 //   0. the flags word (x5): t_attach_9p with LOOSE (a /srv-only bit)
 //      and with an unknown bit must both fail -- before anything
 //      reaches the wire (the kernel test counts one Tattach).
-//   1. t_attach_9p(0, 1, "/", 1, 0, T_ATTACH_9P_CAPE) → drives Tversion +
+//   1. t_attach_9p(0, 1, "/", 1, 0, T_ATTACH_9P_CAPE | T_ATTACH_9P_REMOTE),
+//      Haul's direct form (the remote declaration is a label the kernel
+//      test sys_attach_9p.declarations reads back) → drives Tversion +
 //      Tattach handshake against the kernel responder; returns
 //      attach_fd (KOBJ_SPOOR pointing at the 9P tree's root,
 //      backed by dev9p with attached_owner set). The session is
@@ -69,12 +71,13 @@ int main(void) {
         t_putstr("attach-probe: a pipe attach admitted LOOSE\n");
         return 2;
     }
-    if (t_attach_9p(tx_fd, rx_fd, aname, 1, 0, 0x4ul) >= 0) {
+    if (t_attach_9p(tx_fd, rx_fd, aname, 1, 0, 0x8ul) >= 0) {
         t_putstr("attach-probe: an unknown flags bit was admitted\n");
         return 3;
     }
 
-    long attach_fd = t_attach_9p(tx_fd, rx_fd, aname, 1, 0, T_ATTACH_9P_CAPE);
+    long attach_fd = t_attach_9p(tx_fd, rx_fd, aname, 1, 0,
+                                 T_ATTACH_9P_CAPE | T_ATTACH_9P_REMOTE);
     if (attach_fd < 0) {
         t_putstr("attach-probe: t_attach_9p FAIL\n");
         return 1;

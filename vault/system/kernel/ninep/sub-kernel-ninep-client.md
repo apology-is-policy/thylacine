@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -215,7 +215,13 @@ test clients carry the counters unlisted.
   resets all three (a reused client struct must not inherit a cape -- the
   kernel tests reuse one). The client only HOLDS them: the attach layer
   decides ([[sub-kernel-ninep-attach]]) and dev9p and Loom consult them
-  ([[sub-kernel-ninep-dev9p]], [[sub-kernel-loom]]).
+  ([[sub-kernel-ninep-dev9p]], [[sub-kernel-loom]]). The remote declaration
+  `remote` (LR-1, HAUL-DESIGN 4.8) is a fourth, under the same rule:
+  `p9_client_set_remote(c)` is its one stamp, made by either attach path
+  before the root publishes, and `p9_client_init` resets it. It is DISPLAY
+  ONLY: its one reader is `territory_format_ns`, through
+  `dev9p_spoor_remote`, and nothing that resolves, checks permission,
+  caches or vouches for exec consults it.
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
   flags, its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
   async seam), `owner` (the submitting Proc — the handoff skip's key; NULL

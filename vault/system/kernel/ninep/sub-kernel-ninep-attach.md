@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-24
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -109,11 +109,18 @@ each step's ordering is load-bearing):
 6. `loose` from `SYS_ATTACH_9P_LOOSE` — the **B1 per-attach loose mode**
    (the I-38 opt-in consumed by the Larder write-behind/cached-open legs in
    [[sub-kernel-ninep-dev9p]]) — and, when caped,
-   `p9_client_set_cape(client, who->principal_id, who->primary_gid)`. Both
-   are stamped on the still-private client BEFORE the root Spoor exists:
-   the caller's handle publication orders them against every subsequent
-   dev9p op, so the plain fields need no atomics and never flip afterward.
-   No stat runs in this layer, so no conversion can precede the cape.
+   `p9_client_set_cape(client, who->principal_id, who->primary_gid)`, and,
+   when the conn carries the service's DMSRVREMOTE mark,
+   `p9_client_set_remote(client)` (LR-1, HAUL-DESIGN 4.8). All three are
+   stamped on the still-private client BEFORE the root Spoor exists: the
+   caller's handle publication orders them against every subsequent dev9p
+   op, so the plain fields need no atomics and never flip afterward. No stat
+   runs in this layer, so no conversion can precede the cape. The remote
+   mark is read off the conn like the cape's, but in EITHER mode: it is a
+   label and grants nothing, so the cape's byte-mode argument has nothing to
+   protect. No bit of `flags` can ask for it: step 0's
+   `sys_attach_9p_flags_ok(flags, true)` refuses REMOTE with -EINVAL, as it
+   does the cape, because over /srv the poster declares.
 7. `p9_attached_install_transport(att, adapter-as-spoor-cast, NULL, NULL)`
    — tx/rx NULL because the SrvConn's lifetime is the adapter's own
    srvconn_ref, not a Spoor pair.
@@ -324,3 +331,15 @@ cape flag is refused and sends nothing, LOOSE reaches the helper uncaped, an
 unknown bit sends nothing) -- two tests, so neither half's early return can
 hide the other's -- both reading the Tattach's n_uname off the ring; the live path is exercised by every boot
 (all mounts route through `srvconn_attach_dev9p_root`).
+`9p_srvconn_transport.remote_attach` covers the remote mark through the helper
+(a DMSRVREMOTE byte service marks without a flag and is not the cape, the
+plain control stays unmarked, a caped remote service carries both, LOOSE
+over a remote service is loose and remote, the REMOTE flag is refused as
+-EINVAL and the call did run, and a remote mark on a 9P-mode conn marks the
+session while a cape mark there still capes nothing), and
+`9p_srvconn_transport.remote_attach_srv` covers it through
+SYS_ATTACH_9P_SRV's inner (the poster's declaration marks with flags 0, the
+REMOTE flag is refused and sends nothing, even over a service already
+declared remote). The LR-1 sabotage boots turned both red when the helper's
+stamp was deleted, when the post stopped recording the declaration, and when
+connect stopped carrying it onto the conn.

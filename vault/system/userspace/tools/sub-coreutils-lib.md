@@ -9,6 +9,7 @@ code:
   - usr/coreutils/src/size.rs
   - usr/coreutils/src/stream.rs
   - usr/coreutils/src/find.rs
+  - usr/coreutils/src/nsmount.rs
   - usr/coreutils/src/select.rs
   - usr/coreutils/src/counting.rs
   - usr/coreutils/src/beacon_gate.rs
@@ -25,7 +26,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-24
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -50,9 +51,10 @@ here at one chokepoint, `beacon_gate`.
 
 ## Contract
 
-Five modules are pure and ungated -- `path`, `size`, `stream`, `find` and
-`select` -- with no syscall and no runtime dependency, so they compile and test
-on the host; a sixth, `counting`, exists only in the host tests. Five are
+Six modules are pure and ungated -- `path`, `size`, `stream`, `find`,
+`select` and `nsmount` -- with no syscall and no runtime dependency, so they
+compile and test on the host; a seventh, `counting`, exists only in the host
+tests. Five are
 backend-gated behind a Cargo feature because they touch the runtime:
 `beacon_gate`, `meta`, `ui`, `usage`, `netpump`.
 
@@ -133,6 +135,32 @@ or of delimiters is searched and cut with no allocation at all.
 reports but `fstat` cannot cross is a *graft* -- a live kernel namespace
 mount. The failure is the signal, which turns what would be an unexplained
 error row into a first-class kind with its own colour and realm column.
+
+**Since LR-1 (2026-09-28) the mount list outranks that inference** (the
+operator's `la` vote, HAUL-DESIGN 4.8). `nsmount` parses the kernel's
+`/proc/<pid>/ns` text: `parse_line` gives each line's point, source and
+suffixes (` noexec`, ` pheno-linux`, ` covered`, ` remote`, and any unknown
+one as written), and `MountRealms::from_text` keeps each mount point's name
+and whether ANY of its member lines is remote, skipping covered entries,
+which nobody mounted. `meta::mount_realms` reads the caller's own list once
+per run, and `meta::realm_of` asks it first, by the entry's cleaned absolute
+path: `remote` or `mount`. Only for a name the table does not hold does the
+kind's own realm (`fs`, `dev`, `graft`) apply. Two degradations are
+deliberate:
+- a list with no `binds:` line was cut by the kernel's buffer, so
+  `truncated()` is true, and `meta::MOUNT_LIST_CUT` ("mount list
+  incomplete") is what the tools say instead of letting a cut mount read as
+  plain (`warn_mount_list_cut` prints it once per run on stderr);
+- an unreadable list (no `/proc` in the namespace, or no pid) yields an empty
+  table, which is not reported as cut, and every entry falls back to the
+  inference, as before LR-1.
+
+Names are not quoted in the kernel's text, so a name with whitespace splits
+into the wrong fields; such a line lends no realm and nothing panics (queued
+in OPEN-BUGS as a format limit). The host tests cover every suffix, the
+covered skip, the cleaned-name compare, a broken list, the cut list and the
+space-split name; sabotaging the covered skip and the cut detection each
+turned them red.
 
 **`netpump` encodes one non-obvious fact about the network daemon**: its data
 write is non-blocking, so a full send window returns a zero-count write rather

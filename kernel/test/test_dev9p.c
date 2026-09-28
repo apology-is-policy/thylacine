@@ -25,8 +25,11 @@
 #include <thylacine/proc.h>
 #include <thylacine/caps.h>
 #include <thylacine/handle.h>
+#include <thylacine/path.h>
+#include <thylacine/territory.h>
 
 #include "../../mm/slub.h"             // kmalloc (the wb heap scratch)
+#include "../../arch/arm64/uart.h"
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -67,6 +70,9 @@ void test_dev9p_wb_writethrough_range_invalidate(void);
 void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
+void test_dev9p_remote_format_ns(void);
+
+extern struct Dev devnone;
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -3421,19 +3427,28 @@ void test_dev9p_cape(void) {
                    (u64)P9_NOGID, "caped Tmkdir: gid (u32)-1");
 }
 
-// DMSRVCAPE is a service-post bit: a path create refuses it before resolving
-// anything, like its DMSRV siblings.
+// The DMSRV bits are service-post bits: a path create refuses each before
+// resolving anything. The bits come from SYS_WALK_CREATE_DMSRV_BITS, so a bit
+// added there is covered here without an edit.
 void test_dev9p_path_create_refuses_dmsrvcape(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "client+root");
     hidx_t base = -1;
     struct Proc *p = oc9_proc(root, &base);
     TEST_ASSERT(p != NULL, "proc + start fd");
-    g_tlcreate_seen = 0;
-    TEST_EXPECT_EQ((u64)sys_open_create_kpath_for_proc(p, (u64)base, "newfile", 7, 1,
-                                                       SYS_WALK_CREATE_DMSRVCAPE | 0644u),
-                   (u64)(s64)-T_E_INVAL, "DMSRVCAPE on a path create -> -EINVAL");
-    TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)0, "nothing reached the wire");
+    u32 tried = 0;
+    for (u32 bit = 1; bit != 0; bit <<= 1) {
+        if (!(SYS_WALK_CREATE_DMSRV_BITS & bit)) continue;
+        tried |= bit;
+        g_tlcreate_seen = 0;
+        TEST_EXPECT_EQ((u64)sys_open_create_kpath_for_proc(p, (u64)base, "newfile", 7, 1,
+                                                           bit | 0644u),
+                       (u64)(s64)-T_E_INVAL, "a DMSRV bit on a path create -> -EINVAL");
+        TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)0, "nothing reached the wire");
+    }
+    TEST_EXPECT_EQ((u64)tried, (u64)SYS_WALK_CREATE_DMSRV_BITS, "every DMSRV bit was tried");
+    TEST_ASSERT((tried & SYS_WALK_CREATE_DMSRVCAPE) && (tried & SYS_WALK_CREATE_DMSRVREMOTE),
+                "the cape and the remote declaration among them");
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     teardown(root);
@@ -3467,11 +3482,144 @@ void test_dev9p_walk_create_refuses_dmsrv_bits(void) {
     u32 seen = 0;
     TEST_ASSERT(wc_dmsrv_create(0644u, &seen) >= 0, "plain fd create (control)");
     TEST_EXPECT_EQ((u64)seen, (u64)1, "control: the create reached the wire");
-    const u32 bits[3] = { SYS_WALK_CREATE_DMSRVBYTE, SYS_WALK_CREATE_DMSRVBULK,
-                          SYS_WALK_CREATE_DMSRVCAPE };
-    for (int i = 0; i < 3; i++) {
-        TEST_EXPECT_EQ((u64)wc_dmsrv_create(bits[i] | 0644u, &seen), (u64)(s64)-T_E_INVAL,
+    // Derived from the mask (a new bit is covered without an edit here).
+    u32 tried = 0;
+    for (u32 bit = 1; bit != 0; bit <<= 1) {
+        if (!(SYS_WALK_CREATE_DMSRV_BITS & bit)) continue;
+        tried |= bit;
+        TEST_EXPECT_EQ((u64)wc_dmsrv_create(bit | 0644u, &seen), (u64)(s64)-T_E_INVAL,
                        "a DMSRV bit on a regular fd create -> -EINVAL");
         TEST_EXPECT_EQ((u64)seen, (u64)0, "a refused fd create sent no Tlcreate");
     }
+    TEST_EXPECT_EQ((u64)tried, (u64)SYS_WALK_CREATE_DMSRV_BITS, "every DMSRV bit was tried");
+    TEST_ASSERT(tried & SYS_WALK_CREATE_DMSRVREMOTE, "the remote declaration among them");
+}
+
+// LR-1 (HAUL-DESIGN 4.8): the remote declaration on the mount list. A member
+// entry whose source belongs to a session declared remote ends in " remote",
+// and the same mount from an unmarked session does not; the covered entry of a
+// union never carries it, even when the directory under the union lives in a
+// remote session; an MREPL of a local tree drops it with the entry it replaced;
+// and the suffix joins the whole-line rewind.
+static struct Path *d9_name(const char *name) {
+    struct Path *root = path_make_root();
+    if (!root) return NULL;
+    u64 n = 0;
+    while (name[n]) n++;
+    struct Path *p = path_addelem(root, name, n);
+    path_unref(root);
+    return p;
+}
+
+static bool d9_streq(const char *a, const char *b) {
+    u64 i = 0;
+    while (a[i] && b[i] && a[i] == b[i]) i++;
+    return a[i] == '\0' && b[i] == '\0';
+}
+
+static struct dev9p_priv g_d9_forged;
+
+// A mismatch prints what was rendered, so the failure names its cause.
+static bool d9_ns_is(const char *got, const char *want) {
+    if (d9_streq(got, want)) return true;
+    uart_puts("    rendered: [");
+    uart_puts(got);
+    uart_puts("]\n");
+    return false;
+}
+
+// Render `t`'s mount list into buf (cap bytes) and NUL-terminate it; buf must
+// hold cap + 1.
+static u64 d9_ns(struct Territory *t, char *buf, u64 cap) {
+    u64 n = territory_format_ns(t, buf, cap);
+    buf[n <= cap ? n : cap] = '\0';
+    return n;
+}
+
+void test_dev9p_remote_format_ns(void) {
+    char buf[160];
+    struct Spoor *dn = spoor_alloc(&devnone);
+    struct Spoor *mp = spoor_alloc(&devnone);
+    struct Spoor *a  = spoor_alloc(&devnone);
+    struct Spoor *b  = spoor_alloc(&devnone);
+    TEST_ASSERT(dn && mp && a && b, "devnone Spoors");
+    mp->qid.path = 0x71; mp->qid.type = QTDIR;
+    a->qid.path  = 0x72;
+    b->qid.path  = 0x73;
+    mp->path = d9_name("m");
+    TEST_ASSERT(mp->path != NULL, "name /m");
+    TEST_ASSERT(!dev9p_spoor_remote(NULL), "NULL is not remote");
+    TEST_ASSERT(!dev9p_spoor_remote(dn), "a Spoor of another Dev is not remote");
+    struct Spoor *bare = spoor_alloc(&dev9p);
+    TEST_ASSERT(bare != NULL, "a dev9p Spoor with no priv");
+    TEST_ASSERT(!dev9p_spoor_remote(bare), "a dev9p Spoor with no priv is not remote");
+
+    // Control: the same mount from an unmarked session. A session root is
+    // born named "/" (dev9p_attach_client), and the source column renders
+    // that name.
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root");
+    TEST_ASSERT(!dev9p_spoor_remote(root), "a fresh session is not remote");
+    struct Territory *t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory");
+    TEST_EXPECT_EQ(mount(t, root, mp, 0), 0, "mount the unmarked root at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /\nbinds: 0\n"), "an unmarked session: no suffix");
+    territory_unref(t);
+    teardown(root);
+
+    root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root (marked)");
+    p9_client_set_remote(&g_client);
+    TEST_ASSERT(dev9p_spoor_remote(root), "the marked session's root is remote");
+    // A priv is read only under dev9p's magic, even one naming a remote
+    // session; the same priv with the magic is the control.
+    g_d9_forged.client = &g_client;
+    g_d9_forged.magic  = DEV9P_PRIV_MAGIC ^ 1u;
+    bare->aux = &g_d9_forged;
+    TEST_ASSERT(!dev9p_spoor_remote(bare), "a priv without dev9p's magic is not read");
+    g_d9_forged.magic  = DEV9P_PRIV_MAGIC;
+    TEST_ASSERT(dev9p_spoor_remote(bare), "control: the same priv with the magic reads remote");
+    bare->aux = NULL;
+    spoor_unref(bare);
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 2");
+    TEST_EXPECT_EQ(mount(t, root, mp, 0), 0, "mount the marked root at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m / remote\nbinds: 0\n"),
+                "a member from a remote session ends in \" remote\"");
+
+    // The suffix is inside the #66b rewind: a cap that ends in the middle of
+    // it, or just after it, leaves no partial line; the whole line fits in 18.
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 13), 0, "cap inside \" remote\": no partial line");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 17), 0, "cap before the newline: no partial line");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 18), 18, "the whole line, and no binds line after it");
+    TEST_ASSERT(d9_ns_is(buf, "mount /m / remote\n"), "the truncated list is the whole line");
+
+    TEST_EXPECT_EQ(mount(t, b, mp, MREPL), 0, "MREPL a local tree over the remote one");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m #-\nbinds: 0\n"), "nothing remote is left at /m");
+    territory_unref(t);
+
+    // A union at a directory of the remote session: its covered entry's source
+    // IS a remote Spoor (asserted, so the missing suffix is the rule's doing,
+    // not the fixture's), and the entry still says only " covered".
+    if (root->path) path_unref(root->path);
+    root->path = d9_name("h");
+    TEST_ASSERT(root->path != NULL, "name /h");
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 3");
+    TEST_EXPECT_EQ(mount(t, a, root, MBEFORE), 0, "a union at the remote directory -> [a, covered]");
+    u32 f = 0;
+    struct Spoor *cov = mount_member_at(t, root, 1, &f);
+    TEST_ASSERT(cov == root && f == MCOVERED, "the covered entry names the remote directory");
+    TEST_ASSERT(dev9p_spoor_remote(cov), "premise: the covered entry's source is remote");
+    if (cov) spoor_clunk(cov);
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /h #-\nmount /h /h covered\nbinds: 0\n"),
+                "the covered entry never carries \" remote\"");
+    territory_unref(t);
+    teardown(root);
+
+    spoor_unref(dn); spoor_unref(mp); spoor_unref(a); spoor_unref(b);
 }

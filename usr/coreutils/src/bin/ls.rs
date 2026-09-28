@@ -5,10 +5,12 @@
 // graft=violet, dev=gold) with a classify suffix (`/` `*`). `ls -l` (= ll / la):
 // a box framed by the directory path + an item count, columns
 // MODE OWNER SIZE REALM QID NAME -- where REALM is the namespace nature
-// (fs / dev / graft) and QID is the 9P identity. A GRAFT is an entry whose
-// `fstat` fails (a live kernel namespace with no `stat_native`): that failure is
-// the signal, so the old ugly `??????` row becomes a first-class `graft` (the
-// REALM column + the violet name say so).
+// (fs / dev / graft / mount / remote) and QID is the 9P identity. A GRAFT is an
+// entry whose `fstat` fails (a live kernel namespace with no `stat_native`):
+// that failure is the signal, so the old ugly `??????` row becomes a
+// first-class `graft` (the REALM column + the violet name say so). A MOUNT
+// POINT is read from the caller's own mount list instead: `remote` when a
+// member at the point comes from a 9P session declared remote, else `mount`.
 //
 // Color gate: default AUTO since H-1 -- SYS_FD_DEVCLASS answers the long-
 // parked TTY question (dc 'c' == the interactive console), so `ls | cat` is
@@ -47,7 +49,8 @@ const USAGE: &str = "\
 usage: ls [-laFh1] [--color[=WHEN]] [--beacon=WHEN] [PATH...]
   List directory contents the Thylacine way: names color-coded by kind
   (dir / exec / graft / dev); -l boxes the listing with a REALM + 9P QID
-  column. A graft is a live kernel namespace (fstat can't cross it).
+  column. A graft is a live kernel namespace (fstat can't cross it); a
+  mount point reads mount, or remote for a network mount.
   -a  include dotfiles          -l  long (boxed) format
   -h  human-readable sizes       -F  classify (/ dir, * exec)
   -1  one entry per line         --color[=WHEN]  always | never | auto
@@ -371,6 +374,7 @@ fn render_long(
     let mut name_s: Vec<String> = Vec::new();
     let mut suffix_s: Vec<&'static str> = Vec::new();
     let mut color_s: Vec<&'static str> = Vec::new();
+    let realms = meta::mount_realms();
 
     for e in entries {
         let md = fs::metadata(&e.path).ok();
@@ -390,7 +394,7 @@ fn render_long(
                 qid_s.push(String::from("-"));
             }
         }
-        realm_s.push(kind.realm());
+        realm_s.push(meta::realm_of(&realms, &e.path, kind));
         name_s.push(e.display.clone());
         suffix_s.push(kind.suffix());
         color_s.push(kind.color());
@@ -400,7 +404,7 @@ fn render_long(
     let mw = 10usize; // perms are 10
     let ow = owner_s.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(5);
     let sw = size_s.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(4);
-    let rw = 5usize; // "graft" / "REALM"
+    let rw = realm_s.iter().map(|s| s.len()).max().unwrap_or(0).max(5); // "REALM"
     let qw = qid_s.iter().map(|s| s.chars().count()).max().unwrap_or(0).max(3);
 
     // Build rows (header first). rows[0] is the header; rows[i + 1] is entry i.
@@ -428,7 +432,8 @@ fn render_long(
         .max()
         .unwrap_or(0);
     let count = format!("{} item{}", entries.len(), if entries.len() == 1 { "" } else { "s" });
-    let total = boxd::fit(content_w, title, &count, "");
+    let foot = if realms.truncated() { meta::MOUNT_LIST_CUT } else { "" };
+    let total = boxd::fit(content_w, title, &count, foot);
 
     if rich {
         // PL-5: box-drawing output rides a Beacon `pre` block (HALCYON.md 14.13
@@ -465,7 +470,7 @@ fn render_long(
             }
             s.text(" \u{2502}\n");
         }
-        s.text(&boxd::bottom(total, ""));
+        s.text(&boxd::bottom(total, foot));
         s.text("\n");
         s.pre_close();
         return;
@@ -474,6 +479,9 @@ fn render_long(
     if !on {
         // Plain parseable long format: the data rows only (no box / header /
         // color), suffixes only under -F. The pipe-clean discipline.
+        if realms.truncated() {
+            meta::warn_mount_list_cut("ls");
+        }
         for r in rows.iter().skip(1) {
             if classify_force {
                 let _ = write!(out, "{}{}{}\n", r.prefix, r.name, r.suffix);
@@ -490,7 +498,7 @@ fn render_long(
     for (i, r) in rows.iter().enumerate() {
         emit_row(out, total, r, on, i == 0);
     }
-    let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::bottom(total, ""), color::reset(on));
+    let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::bottom(total, foot), color::reset(on));
 }
 
 /// Emit one boxed content row: `│ {prefix}{name}{suffix}{pad} │`. The header

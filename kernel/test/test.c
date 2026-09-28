@@ -1228,6 +1228,10 @@ void test_srv_client_byte_mode_mode_change_rebind_refused(void);
 void test_srv_client_cape_post(void);
 void test_srv_client_cape_admission(void);
 void test_srv_client_cape_post_syscall(void);
+void test_srv_client_remote_admission(void);
+void test_srv_client_remote_post(void);
+void test_srv_client_remote_recycle(void);
+void test_srv_client_remote_post_syscall(void);
 void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
@@ -1535,6 +1539,7 @@ void test_dev9p_wstat_size(void);
 void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
+void test_dev9p_remote_format_ns(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -1582,6 +1587,8 @@ void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
 void test_9p_srvconn_transport_cape_attach_srv(void);
+void test_9p_srvconn_transport_remote_attach(void);
+void test_9p_srvconn_transport_remote_attach_srv(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
@@ -1679,6 +1686,7 @@ void test_sys_prw_rights_and_walkonly(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
+void test_sys_attach_9p_declarations(void);
 void test_sys_mount_happy_path_grafts_pipe_spoor(void);
 void test_sys_mount_idempotent_on_duplicate(void);
 void test_sys_mount_rejects_bad_fd(void);
@@ -3159,6 +3167,10 @@ struct test_case g_tests[] = {
     { "srv_client.cape_post",          test_srv_client_cape_post,          false, NULL },
     { "srv_client.cape_admission",     test_srv_client_cape_admission,     false, NULL },
     { "srv_client.cape_post_syscall",  test_srv_client_cape_post_syscall,  false, NULL },
+    { "srv_client.remote_admission",   test_srv_client_remote_admission,   false, NULL },
+    { "srv_client.remote_post",        test_srv_client_remote_post,        false, NULL },
+    { "srv_client.remote_recycle",     test_srv_client_remote_recycle,     false, NULL },
+    { "srv_client.remote_post_syscall", test_srv_client_remote_post_syscall, false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },
@@ -3645,6 +3657,7 @@ struct test_case g_tests[] = {
     { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
     { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
     { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
+    { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
@@ -3703,6 +3716,8 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.large_frame_roundtrip",         test_9p_srvconn_transport_large_frame_roundtrip,         false, NULL },
     { "9p_srvconn_transport.cape_attach",                   test_9p_srvconn_transport_cape_attach,                   false, NULL },
     { "9p_srvconn_transport.cape_attach_srv",               test_9p_srvconn_transport_cape_attach_srv,               false, NULL },
+    { "9p_srvconn_transport.remote_attach",                 test_9p_srvconn_transport_remote_attach,                 false, NULL },
+    { "9p_srvconn_transport.remote_attach_srv",             test_9p_srvconn_transport_remote_attach_srv,             false, NULL },
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },
@@ -3782,6 +3797,7 @@ struct test_case g_tests[] = {
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
+    { "sys_attach_9p.declarations",                    test_sys_attach_9p_declarations,                    false, NULL },
     { "sys_mount.happy_path_grafts_pipe_spoor",        test_sys_mount_happy_path_grafts_pipe_spoor,        false, NULL },
     { "sys_mount.idempotent_on_duplicate",             test_sys_mount_idempotent_on_duplicate,             false, NULL },
     { "sys_mount.rejects_bad_fd",                      test_sys_mount_rejects_bad_fd,                      false, NULL },

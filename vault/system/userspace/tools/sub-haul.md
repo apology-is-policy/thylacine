@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -88,6 +88,22 @@ reports and refuses is [[sub-kernel-ninep-dev9p]]'s; where the cape is decided
 is [[sub-kernel-ninep-attach]]'s. The mark grants nothing new. The token
 already gives the mounter everything the server serves, and the kernel admits
 the mark only on a byte-mode post, whose attacher holds the raw connection.
+
+**Both paths declare the session remote** (LR-1, HAUL-DESIGN 4.8, the
+operator's `la` vote). Haul holds the TCP connection, so Haul is the program
+that knows the session leaves the machine: `run` adds `T_ATTACH_9P_REMOTE`
+beside the cape, and `post_listener` adds `T_WALK_CREATE_DMSRVREMOTE` to the
+post. The declaration rides the session, not the mount call, so the shell's
+plain `mount /srv/NAME` over a posted service is marked too, though the
+shell never learns what is behind the service. `ls -l` and `stat` then show
+`remote` at the mount point, `realm` prints `remote`, and `ns` ends the line
+in `remote` (`mount /tmp/NAME / remote`). It is a label: it grants nothing,
+and the kernel reads it only to render `/proc/<pid>/ns`. `haul-npxf` (the
+child's `ls -l` and `ns`, with the shell's unmounted view of the same
+directory as the control) and `haul-post` (the shell's mount of the posted
+service beside an unmounted sibling) hold it on the device. With the
+declaration stripped from both paths, each gate passed every earlier leg and
+failed at its first LR-1 leg (2026-09-28).
 
 ## Data structures
 

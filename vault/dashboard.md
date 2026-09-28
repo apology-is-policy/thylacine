@@ -133,6 +133,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-28 [[chg-2026-09-28-lr1-la-realm]] — LR-1: a remote mount says so -- the declaration rides the 9P session, /proc/<pid>/ns ends its lines in remote, and ls/stat/realm/ns read it
 - 2026-09-25 [[chg-2026-09-25-b1d-dlopen]] — B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness
 - 2026-09-25 [[chg-2026-09-25-b1d-round2-close]] — B-1d holotype round 2 close: the bin/ move's four breakers, the escape leg walks its .., the initrd root guarded (4 P0-class closed in the round + 0 P0 / 0 P1 / 1 P2 / 5 P3)
 - 2026-09-25 [[chg-2026-09-25-b1d-round3-close]] — B-1d holotype round 3 close: the confined leg's second control, five EXTINCTION bodies restored, the stale-path sweep finished (0 P0 / 0 P1 / 1 P2 / 6 P3, the P2 self-found)
@@ -140,5 +141,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-25 [[chg-2026-09-25-b1d-v-emount]] — B-1d-v: SYS_MOUNT refuses Plan 9's Emount (only MREPL at a file), joey's extinction bodies name bin/joey, the musl loader is secure-always; a per-post /srv qid.path
 - 2026-09-24 [[chg-2026-09-24-b1c-filters-stream]] — B-1c WIP 3: a direct block counted for as long as it is held; the six filters that do not need their whole input stream it (HT09.R4-F2 reopened by the uncapped slurp, closed)
 - 2026-09-24 [[chg-2026-09-24-b1c-native-heap]] — B-1c (the native heap): thyla-heap -- dlmalloc 0.2.14 over reservations the platform owns, a block of 256 KiB or more its own mapping -- under libthyla-rs's ThylaAlloc; the fixed heaps, ThylaAllocN and slurp's cap gone; the manual's bound under dlmalloc; /heap-probe
-- 2026-09-24 [[chg-2026-09-24-b1c-round1-close]] — B-1c holotype round 1 close: a line bound, filters that stop quietly when their reader leaves, small over-aligned blocks in dlmalloc, witness legs that can fail (0 P0 / 1 P1 / 1 P2 / 10 P3, four self-found)
 <!-- generated:end -->

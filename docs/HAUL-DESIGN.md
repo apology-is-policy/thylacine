@@ -678,18 +678,20 @@ IDENTITY-DESIGN.md 3.2.
 
 **What failed.** The operator mounted a host tree with Haul and listed its
 parent with `la` (the shell's alias for `ls -la`). The mount point's REALM
-read `fs`, the same as every directory beside it, and `ns` called the mount's
-source `disk` (`ns.rs` maps every `#9` source to that word). Nothing on the
-screen said the tree lived on another machine.
+read `fs`, the same as every directory beside it. Nothing on the screen said
+the tree lived on another machine, and `ns` could not say it either: with no
+operand it showed the system root, which never holds a shell's mounts, and
+given the right pid it named the source `/` (the name every 9P session root is
+born with, `dev9p_attach_client`) with the REALM `fs`, like any subtree.
 
 **The votes.** The first (operator, 2026-09-24): a mount point gets a REALM of
 its own, `remote` for a network mount and `mount` for a local one. Haul
 declares its mount remote and the kernel carries the declaration; the vote
-signed off a change to the mount syscall to carry it, and asked for `ns` to
-stop calling a Haul mount the local disk. The second (operator, 2026-09-28)
-chose the carrier: a mount-syscall flag labels the first flow below and no
-other, so the declaration rides the 9P session instead, on the two bits listed
-under **The ABI**.
+signed off a change to the mount syscall to carry it. The second (operator,
+2026-09-28) chose the carrier: a mount-syscall flag labels the first flow below
+and no other, so the declaration rides the 9P session instead, on the two bits
+listed under **The ABI**. The `ns` changes under **Where it shows** are the
+implementer's, not part of either vote.
 
 **Where the declaration lives: the 9P session.** A mount entry records where a
 tree is grafted. The tree comes from a 9P session, and only the program that
@@ -766,14 +768,18 @@ holds the TCP connection.
   bind or a union, shows its entry's ordinary realm. `stat` and `realm` report
   the same realm for their operands, and `realm`'s own example (`/srv` is a
   graft) becomes true again as `mount`.
-- `ns`: a line with the suffix reads REALM `remote`; a `#9` source reads `9p`
-  rather than `disk`, because `/net` and the container diorama are 9P sessions
-  too and neither is the disk; a FLAGS column shows the
-  suffixes the boxed view used to drop (`noexec`, `pheno-linux`, `covered`),
-  which closes that queued defect. With no operand, `ns` shows its caller's
-  namespace, Plan 9's default (ns(1): "the process with the named pid, or by
-  default itself"); `ns 0` shows the system root, the old default, which never
-  held the shell's own mounts.
+- `ns`: a line with the suffix reads REALM `remote`. The source column names
+  the mounted Spoor, and a session root attached by `SYS_ATTACH_9P` or
+  `SYS_ATTACH_9P_SRV` keeps the name it is born with, `/`
+  (`dev9p_attach_client`). So a Haul mount's source reads `/` in both forms,
+  as does a local session attached the same way, and the suffix is what tells
+  them apart. The kernel writes `#9` only for a session root with no name at
+  all (the allocation-failure fallback), and `ns` now calls that `9p` rather
+  than `disk`. A FLAGS column shows the suffixes the boxed view used to drop
+  (`noexec`, `pheno-linux`, `covered`), which closes that queued defect. With
+  no operand, `ns` shows its caller's namespace, Plan 9's default (ns(1): "the
+  process with the named pid, or by default itself"); `ns 0` shows the system
+  root, the old default, which never held the shell's own mounts.
 
 **What `remote` does not claim.** It says where the session's bytes go, as the
 attacher or the poster declared. It says nothing about encryption: Haul's
@@ -784,6 +790,11 @@ nothing about reachability either; a mount whose connection has ended stays
 **Limits, recorded here rather than discovered later.** A mount-point name that
 contains whitespace breaks every parse of `/proc/<pid>/ns`, because the format
 has no quoting (Plan 9 quotes such names); this predates LR-1 and is queued.
+The list is rendered into a bounded buffer, whole lines only, and its `binds:`
+line is written only when the list fit (#66b); the newest mounts are the ones
+cut. The tools read a missing `binds:` line as a cut list and say
+`mount list incomplete`, but they cannot name what was cut, so a remote mount
+past the cut shows its ordinary realm.
 
 ## 5. Open
 

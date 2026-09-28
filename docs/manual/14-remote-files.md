@@ -79,12 +79,15 @@ ls -l /tmp
 The `REALM` column of the `remote` entry reads `remote`. A directory with nothing
 mounted on it reads `fs`, and a local mount point, such as `/srv` in a listing of
 `/`, reads `mount`. `la`, the shell's alias for `ls -la`, shows the same column,
-and `realm /tmp/remote` prints the realm of a single path.
+and `realm /tmp/remote` prints the realm of a single path. If the shell holds so
+many mounts that their list is too long to read whole, the listing says
+`mount list incomplete`, and a mount point missing from the list shows its
+ordinary realm.
 
 `ns` with no operand prints the mount table of the shell that runs it. The line
-for `/tmp/remote` names the source `#9`, the device name of a 9P session, and
-reads `remote` in the `REALM` column; its `FLAGS` column shows any restriction
-the mount carries, such as `noexec`. `ns 0` prints the system's root namespace
+for `/tmp/remote` names the source `/`, the top of the tree the server exports,
+and reads `remote` in the `REALM` column; its `FLAGS` column shows any
+restriction the mount carries, such as `noexec`. `ns 0` prints the system's root namespace
 instead, which does not contain mounts made in a shell.
 
 Both forms of Haul mark the mount: the private form marks the session it

@@ -46,7 +46,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -525,3 +525,18 @@ The fixture must use the explicit CI image (`HALCYON_SESSION=n`): automatic
 Halcyon login consumes the serial session and invalidates these serial-driving
 scenarios. The updated harness comment removes the obsolete Linux-only server
 restriction. Native Haul tests also pass 53/53 including live server interop.
+
+LR-1 (2026-09-28) added a remote-realm leg to each Haul gate and a local one to
+`ergo-1`, every typed line piped through `tr a-z A-Z` so its echo cannot
+satisfy a token. `haul-npxf`: the child's `ls -l /tmp` reads REMOTE at its
+mount point, while the shell's own listing of the same directory, where
+nothing is mounted, reads FS -- the control one variable away -- and the
+child's bare `ns` shows `MOUNT /TMP/HOST2 / REMOTE`. `haul-post`: the shell's
+mount of the posted service reads REMOTE beside an unmounted sibling reading
+FS, and `ns` shows the remote line. `ergo-1(f)`: `/srv` reads MOUNT and a file
+at `/` reads FS, in `la` and in `realm`. All three passed on the CI image
+against two local read-only npxf servers (ports 5640 and 15640). With Haul's
+declaration stripped from both paths, both Haul gates passed every earlier leg
+and failed at their first LR-1 leg; with `realm_of` ignoring the mount list,
+`ergo-1` passed (a) to (e) and failed at (f), `/srv` reading FS. Each red run
+cost three boots, because the harness retries a guest failure.

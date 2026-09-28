@@ -71,6 +71,11 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c) {
     return priv_of(c);
 }
 
+bool dev9p_spoor_remote(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    return p && p->client && p->client->remote;
+}
+
 // #99: propagate the real create errno (see the header contract). The clamp to
 // the [-4095, -2] passthrough range makes a hostile/garbage Rlerror ecode (I-14
 // bounds them, but be defensive) fail safe to -1 rather than smuggle an
@@ -588,7 +593,9 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
     // SOURCE (stalk_cross_mounts stamps the mount-point name onto the crossed
     // clone) and as a devsrv open=connect endpoint (the stalk / walk_open
     // adoption arms stamp the opened path -- audit F2). So the raw "/" surfaces
-    // only when the root IS the namespace root (joey's pivot target).
+    // where the root itself is named: as the namespace root (joey's pivot
+    // target), and as a mount-table source, which /proc/<pid>/ns renders by
+    // this name.
     // path_make_root NULL (OOM) -> "unknown", never fatal.
     c->path = path_make_root();
     return c;

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -214,7 +214,28 @@ any overflow to discard a partial line, and emit `binds: N` only when
 the list rendered in full (a `binds:` line after a truncation would
 falsely imply completeness). The source label is its Spoor's `->path`,
 or `#<dc>` — the Plan 9 device spec — when the source is a device root
-with no namespace name.
+with no namespace name. A 9P session root is named "/" at birth, so a mount
+of one reads `mount <point> /` ([[sub-kernel-ninep-dev9p]]).
+
+A line ends in its suffixes, each a word after a space, in a fixed order:
+` noexec`, ` pheno-linux`, ` covered`, then ` remote` (LR-1, HAUL-DESIGN
+4.8). ` remote` marks a member whose source belongs to a 9P session
+declared remote at its attach or its /srv post, asked of the source through
+`dev9p_spoor_remote`. It is never written on the covered entry: nobody
+mounted that entry, and its line already names the directory, even when the
+directory itself lies in a remote session (main's rule, and the test
+asserts the premise so the missing suffix is the rule's doing). Each suffix
+is inside the line's rewind, so a cap that falls inside ` remote` or just
+before the newline leaves no partial line, and `binds:` stays the proof of a
+whole list. Readers therefore treat a list without `binds:` as cut: the
+coreutils listing tools say `mount list incomplete` rather than show a
+mount point by its plain realm. This is the kernel's only use of the
+declaration. `dev9p.remote_format_ns` renders real Territories: an unmarked
+session's `mount /m /`, a marked one's `mount /m / remote`, caps of 13, 17
+and 18 bytes, an MREPL of a local tree over the remote one, and a union at a
+remote directory whose covered line carries no suffix. The LR-1 sabotage
+boots turned it red when the covered guard was dropped and when the suffix
+write's result was ignored.
 
 ## Data structures
 

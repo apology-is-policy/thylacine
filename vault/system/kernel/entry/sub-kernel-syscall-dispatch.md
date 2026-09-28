@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -410,13 +410,13 @@ identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
 The cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7) enters this file on two ABI
 words. `SYS_ATTACH_9P` takes an x5 `flags` word and `SYS_ATTACH_9P_SRV` an x4
 one, and every caller passes it (the #112 discipline).
-`sys_attach_9p_flags_ok(flags, srv)` is the one rule: one bit per handler --
-`SYS_ATTACH_9P_CAPE` on the pipe attach, the per-attach `LOOSE` opt-in on the
-`/srv` attach -- and every other bit refused with the bare -1 before any handle
-lookup. Over `/srv` the cape is the poster's decision (DMSRVCAPE, read off the
+`sys_attach_9p_flags_ok(flags, srv)` is the one rule: the pipe attach takes
+`SYS_ATTACH_9P_CAPE` (and, since LR-1, `SYS_ATTACH_9P_REMOTE`, below), the
+`/srv` attach takes the per-attach `LOOSE` opt-in, and every other bit is
+refused with the bare -1 before any handle lookup. Over `/srv` the cape is the poster's decision (DMSRVCAPE, read off the
 conn by the shared helper); the attacher's flag was withdrawn from
-`SYS_ATTACH_9P_SRV` on 2026-09-24 (B), before it was ever pushed. On the create word the three service-post
-bits share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
+`SYS_ATTACH_9P_SRV` on 2026-09-24 (B), before it was ever pushed. On the create word the service-post
+bits (three at the cape, four since LR-1) share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
 - the `/srv` post branch admits a perm only through `sys_srv_post_perm_ok`:
   nothing outside the mask, and `DMSRVCAPE` only beside `DMSRVBYTE`, because a
   byte-mode attacher holds the raw transport and a 9P-mode opener never does;
@@ -449,6 +449,48 @@ the `sys_open_create_kpath_for_proc` pattern:
 Both keep their gates in the inner, as the first Prosecution rule requires.
 Tests: `dev9p.walk_create_refuses_dmsrv_bits`, `srv_client.cape_post_syscall`,
 and the `/srv` legs of `9p_srvconn_transport.cape_attach`.
+
+### The remote declaration rides the cape's two paths (LR-1, 2026-09-28)
+
+The operator's `la` vote puts a display label on the 9P session (HAUL-DESIGN
+4.8, [[dec-2026-09-28-remote-label-carrier-r2]]). It enters this file on the
+cape's two words:
+- the pipe attach admits `SYS_ATTACH_9P_REMOTE` (0x4) beside the cape. The
+  `/srv` attach refuses it like any unknown bit, because over `/srv` the
+  poster declares;
+- `SYS_WALK_CREATE_DMSRVREMOTE` (bit 22) joins `SYS_WALK_CREATE_DMSRV_BITS`,
+  so the fd create and the path create refuse it with no new code.
+  `sys_srv_post_perm_ok` admits it with either mode: the cape's byte-mode
+  rule protects an authority, and a label grants none.
+
+`spoor_create_install`'s devsrv branch hands the bit to
+`devsrv_post_listener` as `remote`. The pipe inner stamps
+`p9_client_set_remote` after the cape and before `p9_attached_root_spoor`
+publishes the root, under the cape's ordering argument. Nothing in this file
+reads the declaration after the stamp. Its one reader anywhere is
+`territory_format_ns` ([[sub-kernel-territory]]).
+
+The pipe handler thinned to a third inner, `sys_attach_9p_for_proc` (a kernel
+aname), so its own rules are testable without EL0. The handler now copies the
+aname before the `n_uname` and flags refusals and before the transport lookup.
+Every refusal there is the bare -1, so the reordering changes no answer, and a
+faulting copy no longer has two transport references to release.
+
+Tests:
+- `sys_attach_9p.declarations`: the inner over pre-staged pipes, reading each
+  flag word's cape and remote marks back off the client; the refusals send
+  nothing;
+- `sys_attach_9p.rejection_paths`: every refusal before the wire, beside an
+  admitted control;
+- `srv_client.remote_admission` (both predicates, bit by bit),
+  `srv_client.remote_post_syscall`, the REMOTE rows of
+  `dev9p.walk_create_refuses_dmsrv_bits`, and
+  `9p_srvconn_transport.remote_attach_srv`.
+
+The LR-1 sabotage boots turned each of these mutants red on its predicted
+test: the pipe mask dropping REMOTE, the `/srv` mask admitting it, the pipe
+stamp deleted, the `n_uname` check deleted, the mask without REMOTE, and the
+post branch ignoring the bit.
 
 ### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
 

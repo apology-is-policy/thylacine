@@ -412,14 +412,20 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // peer's pid (aname is often empty on the /srv path).
     p9_attached_set_ctl_ident(att, "srv", cn->peer_pid);
 
-    // B1 per-attach loose mode (I-38 opt-in) and the identity cape: stamped on
-    // the still-private client BEFORE the root Spoor exists -- the caller's
-    // handle publication orders them against every subsequent dev9p op, so the
-    // plain fields need no atomics and are never flipped after this point.
+    // B1 per-attach loose mode (I-38 opt-in), the identity cape and the remote
+    // declaration: stamped on the still-private client BEFORE the root Spoor
+    // exists -- the caller's handle publication orders them against every
+    // subsequent dev9p op, so the plain fields need no atomics and are never
+    // flipped after this point.
     if ((flags & SYS_ATTACH_9P_LOOSE) && att->client)
         att->client->loose = true;
     if (cape && att->client)
         p9_client_set_cape(att->client, who->principal_id, who->primary_gid);
+    // The remote declaration (HAUL-DESIGN 4.8) is read off the conn like the
+    // cape, but from either mode: it is a label and grants nothing, so the
+    // cape's byte-mode argument has nothing to protect here.
+    if (srvconn_remote(cn) && att->client)
+        p9_client_set_remote(att->client);
 
     // Transfer adapter ownership into the attached (tx == rx == NULL: the SrvConn
     // lifetime is the adapter's own srvconn_ref, not a transport-Spoor pair).

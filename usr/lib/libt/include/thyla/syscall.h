@@ -737,10 +737,13 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 // at v1.0). n_uname is vestigial: the kernel asserts the caller's own
 // principal (or, caped, no user at all).
 //
-// flags: 0, or T_ATTACH_9P_CAPE -- the identity cape (IDENTITY-DESIGN
-// 3.2): every file reports the caller as owner and its primary group as
-// group, the server's mode kept, and chown/chgrp are refused. For a
-// server whose ids are not Thylacine principals. Unknown bits reject.
+// flags: 0, or any of T_ATTACH_9P_CAPE -- the identity cape
+// (IDENTITY-DESIGN 3.2): every file reports the caller as owner and its
+// primary group as group, the server's mode kept, and chown/chgrp are
+// refused; for a server whose ids are not Thylacine principals -- and
+// T_ATTACH_9P_REMOTE -- the session's transport leaves the machine
+// (HAUL-DESIGN 4.8): /proc/<pid>/ns marks every mount from it ` remote`;
+// a label, it grants nothing. Unknown bits reject.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid tx_fd / rx_fd or missing R/W rights
@@ -749,6 +752,7 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 //   - server-side Rlerror on Tversion or Tattach
 //   - kmalloc OOM / handle table full
 #define T_ATTACH_9P_CAPE 0x2ul
+#define T_ATTACH_9P_REMOTE 0x4ul
 __attribute__((always_inline))
 static inline long t_attach_9p(long tx_fd, long rx_fd,
                                const char *aname, size_t aname_len,
@@ -2380,8 +2384,9 @@ static inline long t_lseek(long fd, long offset, long whence) {
 // (the B1 per-attach opt-in -- the caller asserts the single-writer
 // premise for this attach; cached-opens then serve full Larder-hint hits
 // without the per-open wire revalidation). Unknown bits reject,
-// T_ATTACH_9P_CAPE among them: over /srv the identity cape is the
-// poster's, and a service posted DMSRVCAPE capes every attach over it.
+// T_ATTACH_9P_CAPE and T_ATTACH_9P_REMOTE among them: over /srv the
+// identity cape and the remote declaration are the poster's, and a
+// service posted DMSRVCAPE / DMSRVREMOTE marks every attach over it.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid srv_fd / wrong kind / missing R+W rights / not byte-mode

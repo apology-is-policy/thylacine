@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -358,6 +358,35 @@ caller to clunk; overflow evicts round-robin via `hand`), `dirfid_drop`
 victims MUST be clunked — a fresh walk re-resolving a reused qid.path must
 never be served a fid for the dead object). All returns are clunked by the
 CALLER outside the leaf lock.
+
+### The remote declaration's one reader, and the name a session root carries (LR-1, 2026-09-28)
+
+`dev9p_spoor_remote(c)` answers whether `c` belongs to a session declared
+remote at its attach or its /srv post (HAUL-DESIGN 4.8). It reads the
+client's `remote` flag through `priv_of`, so it is false for NULL, for a
+Spoor of another Dev, for a dev9p Spoor with no priv, and for a priv that
+does not carry `DEV9P_PRIV_MAGIC`. The read is lock-free: the flag is
+stamped before the session's root publishes and never flips, and the
+caller's reference on `c` keeps the priv and the client alive. Its one
+caller is `territory_format_ns` ([[sub-kernel-territory]]); nothing in this
+Dev consults the flag.
+
+Every session root is born named "/" (`dev9p_attach_client`), and the mount
+table renders a source by its name, so a mount of a session root reads
+`mount <point> /` in `/proc/<pid>/ns`, with ` remote` when declared. `#9`
+appears only when `path_make_root` fails. The comment at the naming site
+now says where the raw "/" surfaces: as the namespace root (joey's pivot
+target) and as a mount-table source. That the "/" reads like a bind of the
+namespace root (login's home prints `mount /home/<user> /`) is a known
+legibility gap, queued for an operator vote.
+
+Tests: `dev9p.remote_format_ns` opens on this function (NULL, another Dev, a
+bare dev9p Spoor, a priv naming a marked session under the wrong magic and,
+as the control, under the right one) before its rendering legs; the REMOTE
+rows of `dev9p.walk_create_refuses_dmsrv_bits` and
+`dev9p.path_create_refuses_dmsrvcape` keep the bit out of a Tlcreate perm.
+The LR-1 sabotage boots turned `remote_format_ns` red both when the function
+answered for every dev9p Spoor and when it read a priv without its magic.
 
 ## Data structures
 

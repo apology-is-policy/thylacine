@@ -430,6 +430,20 @@ bool srvconn_cape(const struct SrvConn *cn) {
     return __atomic_load_n(&cn->cape, __ATOMIC_ACQUIRE);
 }
 
+void srvconn_set_remote(struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)
+        extinction("srvconn_set_remote: NULL or corrupted SrvConn");
+    if (srvconn_is_kernel_attached(cn))
+        extinction("srvconn_set_remote: kernel-attached "
+                   "(remote set on a published SrvConn)");
+    __atomic_store_n(&cn->remote, true, __ATOMIC_RELEASE);
+}
+
+bool srvconn_remote(const struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
+    return __atomic_load_n(&cn->remote, __ATOMIC_ACQUIRE);
+}
+
 void srvconn_set_kernel_attached(struct SrvConn *cn) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
         extinction("srvconn_set_kernel_attached: NULL or corrupted SrvConn");

@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -740,3 +740,27 @@ flag (no native C consumer; the subset rule), and gains `T_MNOEXEC` (0x10), the
 mount flag the deny paths use. The Rust mirror is unchanged.
 Consumers: musl's loader through 0047 (`libc.so`), and the device prover
 `/pouch-hello-dlopen` ([[sub-pouch-seam]]).
+
+## LR-1: the remote declaration, one attach bit and one perm bit (2026-09-28)
+
+No number changed and no record grew. The operator voted the carrier: the 9P
+session, in the cape's shape (HAUL-DESIGN 4.8,
+[[dec-2026-09-28-remote-label-carrier-r2]]). The native ceiling is unchanged.
+
+- `SYS_ATTACH_9P_REMOTE` (0x4) on `SYS_ATTACH_9P`'s x5: the attacher declares
+  that the session's transport leaves the machine, and `/proc/<pid>/ns` ends
+  the line of every mount sourced from the session in ` remote`. Mirrored as
+  `T_ATTACH_9P_REMOTE` in both libraries. `SYS_ATTACH_9P_SRV` (52) refuses it
+  in x4 like any unknown bit: over `/srv` the poster declares.
+- `SYS_WALK_CREATE_DMSRVREMOTE` (0x00400000, bit 22, the next free bit below
+  DMSRVCAPE; libthyla-rs `T_WALK_CREATE_DMSRVREMOTE`; libt carries no DMSRV
+  bit, by the subset rule) marks a `/srv` service post remote in EITHER mode.
+  It joins `SYS_WALK_CREATE_DMSRV_BITS`, so `SYS_WALK_CREATE_PERM_VALID` and
+  all three refusals follow without an edit, which is what the derived mask
+  was built for. A static assert pins that bit 22 collides with no other perm
+  bit, and `srv_client.remote_admission` pins both values.
+- A label, not an authority: nothing that resolves a path, checks permission,
+  caches or vouches for exec consults it, and the wrappers' comments say so.
+- Callers: Haul, on both paths ([[sub-haul]]), and `/attach-probe`, whose
+  real attach now passes CAPE|REMOTE. Its unknown-bit probe moved from 0x4,
+  now admitted, to 0x8. Every other in-tree `t_attach_9p` caller passes 0.

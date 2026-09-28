@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-24
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -78,15 +78,29 @@ That inference has a cost worth stating: any other cause of a stat failure
 on a directory — a permission denial, a transport error, a race with a
 removal — also renders as a graft. The classification is
 "directory that could not be stat'd", presented as "live namespace mount",
-and the two are not the same set. There is a positive source (the mount
-list, which `ns` reads from the process filesystem) and the listing tools
-do not consult it.
+and the two are not the same set. There is a positive source, the mount
+list, which `ns` reads from the process filesystem, and since LR-1
+(2026-09-28) the listing tools consult it first: `ls -l` (and `la`), `stat`
+and `realm` read their own `/proc/<pid>/ns` once per run and show a mount
+point as `remote` when its session was declared remote (HAUL-DESIGN 4.8) or
+`mount` otherwise, so the inference now covers only what the table does not
+name ([[sub-coreutils-lib]]). The REALM column grew to fit `remote`. A cut
+list says so rather than letting a mount read as plain: the `ls -l` box
+footer reads `mount list incomplete` in the rich and boxed forms, and the
+plain form, `stat` and `realm` print it once on stderr. `realm`'s usage
+example now shows what the guest prints for `/srv` (`mount`), not `graft`.
 
 **`ns` reads the kernel's own rendering** rather than deriving anything:
 one line per mount, mountpoint and source, where a source with no
-namespace name appears as a device specifier. The realm column is derived
-from that device character — precise, available now, and requiring no new
-kernel surface. With colour off it passes the kernel text through
+namespace name appears as a device specifier, and a 9P session root as `/`.
+With no operand it shows the caller's own namespace, Plan 9's default
+(`ns 0` is the system root's). The realm column is derived from the
+source's device character, except that a line ending in ` remote` reads
+`remote`; `#9` reads `9p`, where it once read `disk`. A FLAGS column shows
+the suffixes the boxed view used to drop (`noexec`, `pheno-linux`,
+`covered`, then any it does not know, as written), and the count cell says
+`mount list incomplete` instead of a bind count when the kernel cut the
+list. With colour off it passes the kernel text through
 untouched, which is the right escape hatch for a tool whose subject is
 already text, and through the same failing-write path as the box, so a text
 it could not write is reported.
@@ -243,8 +257,9 @@ There is no name service for user identities, so an owner column shows a
 number for anyone but the system principal.
 
 The graft classification cannot distinguish a mount from any other
-stat failure (above). Consulting the mount list would fix it and would
-cost a read per listing.
+stat failure (above), for a directory the mount list does not name. LR-1
+made the listing tools consult the list for every name it holds, at one
+read per run.
 
 ## Caveats
 

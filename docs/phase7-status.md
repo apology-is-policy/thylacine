@@ -542,6 +542,38 @@ and the tile recorded again). Host sabotage sweeps,
 every leg predicted before its run: r6 110/114, r7 121/125 then 125/125 after closing its test gap, r9 136/138 (one test
 gap: the frame test compared heights only) and r9b 138/138 after the fix.
 
+## LR-1: a remote mount says so — 2026-09-28
+
+The operator's `la` vote made code (observation 2 of the lantern-over-Haul review): a mount point gets a REALM of its
+own, `remote` for a network mount and `mount` for a local one. Scripture f8ba6124, the carrier vote bb501b57 (HAUL-DESIGN
+4.8; COREUTILS-THYLACINE-DESIGN; the ARCH `/proc/<pid>/ns` paragraph; manual 14; the LR-1 audit-trigger row).
+
+- **The carrier** (operator vote 2026-09-28). The declaration rides the 9P session in the identity cape's shape:
+  `SYS_ATTACH_9P_REMOTE` (0x4) on the pipe attach, `DMSRVREMOTE` (bit 22) on a /srv post in either mode, inherited
+  by every attach over the service and part of its identity on a tombstone rebind. Stamped once before the root
+  publishes; display only.
+- **The render.** `territory_format_ns` ends a member line in ` remote`, never the covered entry's, inside the #66b
+  rewind.
+- **The tools.** Haul declares on both paths. `ls -l` / `la`, `stat` and `realm` read the caller's own mount list ahead
+  of the fstat inference. `ns` defaults to the caller, reads `9p` for `#9` and `remote` for a suffixed line, and gains a
+  FLAGS column. A cut list says `mount list incomplete`.
+- **A correction.** The claim that `ns` called the Haul mount `disk`, read from code, was wrong: every 9P session root
+  is named `/`. The carrier note is restated as `dec-2026-09-28-remote-label-carrier-r2`.
+
+Audit (the LR-1 row), 1 round: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end. 0 P0 / 1 P1 (the `/`
+label, which the first boot had also found) / 0 P2 / 2 P3 (a cut list read silently; the priv-magic arm unwitnessed),
+all fixed; not dirty. Closed list: memory `audit_lr1_closed_list.md`.
+
+Verification: new kernel tests `sys_attach_9p.{declarations, rejection_paths}`, `srv_client.remote_{admission, post,
+recycle, post_syscall}`, `9p_srvconn_transport.remote_attach{,_srv}` and `dev9p.remote_format_ns`; coreutils host
+tests 52. Sabotage: 15 kernel mutants over six boots, each red on its predicted test (one masking pair explained: the
+recycle arm's write shows only with the rebind identity check in place); host sabotage of the covered skip and of the
+cut detection red. Device, CI image: `ergo-1`, `haul-npxf` and `haul-post` green, red with Haul's declaration stripped
+(both haul gates at their first LR-1 leg) and with the mount list ignored (`ergo-1` at leg f). Default image: `tools/test.sh`
+1740/1740 (zero `[skip]`, boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 28 crates, 2077 tests, 0 failing.
+`corvus.tla` (PostService maps to `srv_reserve`, which LR-1 changed; the spec does not model a service's attributes):
+its eight buggy cfgs re-run, each still violated.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

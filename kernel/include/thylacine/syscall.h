@@ -136,8 +136,9 @@ enum {
     //   x4 = n_uname (u32; vestigial -- the kernel asserts the caller's
     //        principal, or no user under the cape)
     //   x5 = flags (SYS_ATTACH_9P_CAPE, the identity cape -- IDENTITY-DESIGN
-    //        3.2; unknown bits reject, LOOSE included. The #112 ABI
-    //        discipline: EVERY caller sets x5 -- the libt/libthyla-rs
+    //        3.2; SYS_ATTACH_9P_REMOTE, the remote declaration -- LR-1,
+    //        HAUL-DESIGN 4.8; unknown bits reject, LOOSE included. The #112
+    //        ABI discipline: EVERY caller sets x5 -- the libt/libthyla-rs
     //        wrappers take it as an explicit parameter)
     // Returns: x0 = new fd (>=0) on success; -1 on:
     //   - invalid tx_fd or rx_fd (not KOBJ_SPOOR / out-of-range)
@@ -1081,10 +1082,13 @@ enum {
     //                    (docs/chase/B1-VOTE.md + the ARCH I-38 row); a
     //                    cached-open whose RPC-free hint fully hits then
     //                    skips the per-open wire revalidation.
-    //                    Unknown bits reject, SYS_ATTACH_9P_CAPE among
-    //                    them: over /srv the identity cape is the
-    //                    POSTER's, and a service posted DMSRVCAPE capes
-    //                    every attach over it (IDENTITY-DESIGN 3.2).
+    //                    Unknown bits reject, SYS_ATTACH_9P_CAPE and
+    //                    SYS_ATTACH_9P_REMOTE among them: over /srv the
+    //                    identity cape and the remote declaration are the
+    //                    POSTER's -- a service posted DMSRVCAPE capes every
+    //                    attach over it (IDENTITY-DESIGN 3.2), and one
+    //                    posted DMSRVREMOTE marks every attach over it
+    //                    remote (HAUL-DESIGN 4.8).
     //                    The #112 ABI discipline: EVERY
     //                    caller sets x4 -- the libt/libthyla-rs wrappers
     //                    take it as an explicit parameter)
@@ -3165,6 +3169,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // Thylacine principals. SYS_ATTACH_9P_SRV refuses the bit: over /srv the cape
 // is the poster's decision (DMSRVCAPE), never the attacher's.
 #define SYS_ATTACH_9P_CAPE    0x2u
+// SYS_ATTACH_9P (x5): the remote declaration (LR-1, HAUL-DESIGN 4.8; operator
+// vote 2026-09-24). The attacher states that the session's transport leaves
+// the machine, and /proc/<pid>/ns ends the line of every mount sourced from the
+// session in " remote". A label: it grants nothing and no lookup, check, cache
+// or exec decision consults it. SYS_ATTACH_9P_SRV refuses the bit: over /srv
+// the poster declares (DMSRVREMOTE), as with the cape.
+#define SYS_ATTACH_9P_REMOTE  0x4u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
 // SYS_PWRITE call. Userspace still loops for larger transfers (short
@@ -3336,7 +3347,8 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // sys_walk_create_handler; that branch is the ONLY place it is meaningful -- a
 // regular (non-/srv) create rejects it (it must not leak into a dev9p Tlcreate
 // perm). For a service post the valid perm bits are {0, DMSRVBYTE} |
-// {0, DMSRVBULK} | {0, DMSRVCAPE}, DMSRVCAPE only with DMSRVBYTE.
+// {0, DMSRVBULK} | {0, DMSRVCAPE} | {0, DMSRVREMOTE}, DMSRVCAPE only with
+// DMSRVBYTE.
 #define SYS_WALK_CREATE_DMSRVBYTE   0x02000000u
 // DMSRVBULK (Thylacine extension; CF-3 B, CONCURRENT-FS.md): on a /srv
 // service post, selects the BULK ring class -- every connection minted on
@@ -3362,11 +3374,23 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // DMSRVBULK. Like the other DMSRV bits it is meaningful ONLY on the
 // devsrv-post branch; a regular create rejects it.
 #define SYS_WALK_CREATE_DMSRVCAPE   0x00800000u
+// DMSRVREMOTE (Thylacine extension; LR-1, HAUL-DESIGN 4.8): on a /srv service
+// post, the poster declares that the service's transport leaves the machine,
+// and every attach over the service -- SYS_ATTACH_9P_SRV on a byte conn, or
+// devsrv's own attach for a 9P-mode opener -- marks its session remote, as
+// SYS_ATTACH_9P_REMOTE does a pipe attach. Either mode admits it: DMSRVCAPE's
+// byte-mode rule rests on what the attacher could already do, and a label
+// grants nothing to restrict. Part of the service IDENTITY on a tombstone
+// rebind, like the mode, the ring class and the cape. Bit 22 is the next free
+// bit below DMSRVCAPE. Meaningful ONLY on the devsrv-post branch; a regular
+// create rejects it.
+#define SYS_WALK_CREATE_DMSRVREMOTE 0x00400000u
 // Every service-post bit: the one set a regular create refuses, so a new
 // DMSRV bit joins every refusal by joining this.
 #define SYS_WALK_CREATE_DMSRV_BITS  (SYS_WALK_CREATE_DMSRVBYTE | \
                                      SYS_WALK_CREATE_DMSRVBULK | \
-                                     SYS_WALK_CREATE_DMSRVCAPE)
+                                     SYS_WALK_CREATE_DMSRVCAPE | \
+                                     SYS_WALK_CREATE_DMSRVREMOTE)
 #define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR | \
                                      SYS_WALK_CREATE_DMSRV_BITS)
 _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
@@ -3382,6 +3406,11 @@ _Static_assert((SYS_WALK_CREATE_DMSRVCAPE &
                  SYS_WALK_CREATE_DMSRVBYTE | SYS_WALK_CREATE_DMSRVBULK)) == 0,
                "DMSRVCAPE must not collide with the mode bits, DMDIR, "
                "DMSRVBYTE, or DMSRVBULK");
+_Static_assert((SYS_WALK_CREATE_DMSRVREMOTE &
+                (0x1FFu | SYS_WALK_CREATE_DMDIR | SYS_WALK_CREATE_DMSRVBYTE |
+                 SYS_WALK_CREATE_DMSRVBULK | SYS_WALK_CREATE_DMSRVCAPE)) == 0,
+               "DMSRVREMOTE must not collide with the mode bits, DMDIR, "
+               "DMSRVBYTE, DMSRVBULK, or DMSRVCAPE");
 
 // SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
 // (rmdir an empty directory vs unlink a non-directory). Mirrors the wire
@@ -3615,12 +3644,15 @@ void syscall_dispatch(struct exception_context *ctx);
 struct Spoor;
 bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
 
-// The identity cape's two admission predicates (defined in syscall.c;
-// non-static so the regressions exercise the handlers' own rules):
-//   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE only (`srv`
-//     false); SYS_ATTACH_9P_SRV takes SYS_ATTACH_9P_LOOSE only;
+// The identity cape's and the remote declaration's two admission predicates
+// (defined in syscall.c; non-static so the regressions exercise the handlers'
+// own rules):
+//   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE and
+//     SYS_ATTACH_9P_REMOTE (`srv` false); SYS_ATTACH_9P_SRV takes
+//     SYS_ATTACH_9P_LOOSE only;
 //   - a /srv service post's perm (SYS_WALK_CREATE's devsrv branch): DMSRV
-//     bits only, and DMSRVCAPE only beside DMSRVBYTE.
+//     bits only, and DMSRVCAPE only beside DMSRVBYTE (DMSRVREMOTE with
+//     either mode).
 bool sys_attach_9p_flags_ok(u64 flags, bool srv);
 bool sys_srv_post_perm_ok(u32 perm);
 

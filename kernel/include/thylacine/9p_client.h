@@ -303,6 +303,12 @@ struct p9_client {
     bool                 cape;
     u32                  cape_uid;
     u32                  cape_gid;
+    // LR-1 (HAUL-DESIGN 4.8): the attacher or the /srv poster declared that this
+    // session's transport leaves the machine. DISPLAY ONLY -- its one reader is
+    // territory_format_ns (via dev9p_spoor_remote); nothing that resolves,
+    // checks permission, caches or vouches for exec consults it. Stamped once by
+    // the attach path before the root Spoor publishes, like `cape`, never flipped.
+    bool                 remote;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
     // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
@@ -333,6 +339,11 @@ static inline void p9_client_set_cape(struct p9_client *c, u32 uid, u32 gid) {
     c->cape_uid = uid;
     c->cape_gid = gid;
     c->cape     = true;
+}
+
+// Stamp the remote declaration, under the same rule as the cape.
+static inline void p9_client_set_remote(struct p9_client *c) {
+    c->remote = true;
 }
 
 // =============================================================================

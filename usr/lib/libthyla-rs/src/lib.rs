@@ -425,6 +425,11 @@ pub const T_WALK_CREATE_DMSRVBULK: u32 = 0x0100_0000;
 // attach, and the only way a /srv attach is caped. Refused without DMSRVBYTE.
 // Mirrors SYS_WALK_CREATE_DMSRVCAPE in the kernel.
 pub const T_WALK_CREATE_DMSRVCAPE: u32 = 0x0080_0000;
+// DMSRVREMOTE (HAUL-DESIGN 4.8): on a /srv service post in either mode, every
+// attach over the service is declared remote -- what T_ATTACH_9P_REMOTE does
+// to a pipe attach -- and /proc/<pid>/ns marks each mount from it ` remote`.
+// A label: it grants nothing. Mirrors SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
+pub const T_WALK_CREATE_DMSRVREMOTE: u32 = 0x0040_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when
@@ -1741,7 +1746,8 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
 /// duplex Spoor passed as both. The kernel runs Tversion + Tattach (asserting
 /// the caller's kernel-stamped principal as `n_uname`; the value passed here
 /// is vestigial) and returns a KOBJ_SPOOR rooting the attached tree
-/// (R|W|TRANSFER). `flags` is 0 or [`T_ATTACH_9P_CAPE`]; unknown bits reject.
+/// (R|W|TRANSFER). `flags` is 0 or any of [`T_ATTACH_9P_CAPE`] and
+/// [`T_ATTACH_9P_REMOTE`]; unknown bits reject.
 /// The attach holds its own refs on both transport Spoors, so the pipe fds may
 /// be closed afterwards. Returns the new fd (>= 0) or -1.
 #[inline(always)]
@@ -1776,6 +1782,14 @@ pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
 /// refuses it: over /srv the cape is the poster's ([`T_WALK_CREATE_DMSRVCAPE`]).
 pub const T_ATTACH_9P_CAPE: u64 = 0x2;
 
+/// SYS_ATTACH_9P flags: the remote declaration (HAUL-DESIGN 4.8). The attacher
+/// declares that the session's transport leaves the machine; `/proc/<pid>/ns`
+/// marks every mount whose source comes from the session ` remote`, and `ls`,
+/// `stat`, `realm` and `ns` read it. A label: nothing else consults it.
+/// SYS_ATTACH_9P_SRV refuses it: over /srv the poster declares
+/// ([`T_WALK_CREATE_DMSRVREMOTE`]).
+pub const T_ATTACH_9P_REMOTE: u64 = 0x4;
+
 /// t_attach_9p_srv -- drive a 9P attach over a byte-mode `/srv` connection
 /// (16c; SYS_ATTACH_9P_SRV). `srv_fd` is a KOBJ_SPOOR CLIENT byte-conn from
 /// open=connect on a byte-mode service (must carry R+W; the kernel 9P client
@@ -1784,8 +1798,9 @@ pub const T_ATTACH_9P_CAPE: u64 = 0x2;
 /// the attached tree (R|W|TRANSFER). `aname` is the server-side path /
 /// capability string (<= SYS_ATTACH_ANAME_MAX; pass NULL+0 for the default
 /// root). `flags` is 0 (strict close-to-open) or T_ATTACH_9P_LOOSE; unknown
-/// bits reject, T_ATTACH_9P_CAPE among them (over /srv the cape is the
-/// poster's: a service posted DMSRVCAPE capes every attach over it). After a
+/// bits reject, T_ATTACH_9P_CAPE and T_ATTACH_9P_REMOTE among them (over /srv
+/// both are the poster's: a service posted DMSRVCAPE / DMSRVREMOTE marks every
+/// attach over it). After a
 /// successful attach the `srv_fd` handle may be closed -- the attach holds its
 /// own ref and the rings are kernel_attached.
 /// Returns the new fd (>= 0) or -1.
