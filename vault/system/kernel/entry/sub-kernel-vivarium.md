@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -686,3 +686,20 @@ no row's argument. The phenotype's file-backed `mmap` rows and the new native
 number now call the same three D-3 cores ([[sub-kernel-syscall-dispatch]]):
 each entry decides its own word and hands the cores the same prot encoding, so
 the phenotype's deciders did not change.
+
+## A zero-timeout ppoll is no longer widened (2026-09-28, #98 NP-4c)
+
+`VIV_PPOLL_PROBE_MS` (10 ms) is gone from `vivarium.h`. It was the budget
+`viv_poll_translated` gave a guest `ppoll` or `pselect6` whose timeout was 0
+when a `/net` socket was in the set: the poll core answered a socket from a
+cache that a freshly opened `ready` file did not have yet, so a strict
+zero-timeout scan reported a writable socket not ready, and a guest polling
+with timeout 0 in a loop made no progress. The core now asks netd for a
+snapshot, which netd answers at once ([[sub-kernel-poll]],
+[[sub-kernel-ninep-dev9p-poll]]), so the guest's 0 passes through unchanged and
+still gets netd's verdict. The cost moved rather than vanished: every pass over
+a socket is a netd round trip, timeout 0 included (VIVARIUM.md's DEGRADED row).
+The deciders did not change. Two costs stay until NP-5 keeps ready Spoors
+outside the guest's fd table: the Twalk+Tlopen+Tclunk each polled socket costs
+per call, and the guest fd number each one borrows (V-5d F6). The witness is
+viv-pheno-probe L113, a ready socket polled at timeout 0.

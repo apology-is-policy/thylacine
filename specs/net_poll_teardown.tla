@@ -50,20 +50,34 @@
 (*  - ClunkAtMostOnce (SAFETY): the `ready`-fd Tclunk is delivered at most  *)
 (*    once (the cancel + the close, or the two Spoor-ref drops, must not    *)
 (*    double-clunk -> a double slot_unref).                                 *)
+(*                                                                         *)
+(* THE COLLECTOR IS ONE STEP (BUGGY_SPLIT_GC, 2026-09-28). KthreadGc takes  *)
+(* a stranded op off the registry AND flushes its Tread in one step with    *)
+(* respect to the close: both happen under g_dev9p_poll_lock, which the     *)
+(* close's cancel takes too. Split them -- unlink under the lock, flush     *)
+(* after it, the code from #294 to NP-4c -- and a close between the two     *)
+(* finds no op to cancel, while the op's Tread still targets the fid, so    *)
+(* the Tclunk is refused (9p_session any_outstanding_on_fid) and nothing    *)
+(* clunks the fid afterwards: the slot leaks although the kthread flushes.  *)
 (***************************************************************************)
 EXTENDS Naturals
 
 CONSTANT Fix    \* BOOLEAN -- TRUE: cancel-at-close; FALSE: the current deferred-pin design.
+CONSTANT BUGGY_SPLIT_GC   \* BOOLEAN -- the collector unlinks and flushes in two steps.
 
 ASSUME Fix \in BOOLEAN
+ASSUME BUGGY_SPLIT_GC \in BOOLEAN
+ASSUME BUGGY_SPLIT_GC => Fix    \* a flaw of the cancel-at-close design's collector
 
 VARIABLES
     poll,     \* {"parked","ended"} -- the poller; "ended" = it timed out + returned.
     fdref,    \* BOOLEAN -- the user still holds the `ready`-fd handle ref.
     oppin,    \* BOOLEAN -- the op pins the `ready` Spoor (TRUE only in the ~Fix design).
-    op,       \* {"live","stranded","torndown"} -- the readiness op.
+    op,       \* {"live","stranded","unlinked","torndown"} -- the readiness op.
               \*   live      = outstanding, the poll is parked (a Tread is in flight).
               \*   stranded  = the poll ended; the op awaits teardown (GC or cancel-at-close).
+              \*   unlinked  = BUGGY_SPLIT_GC only: off the registry, ps->op cleared, its
+              \*               Tread still in flight (not yet flushed).
               \*   torndown  = the op was cancelled/unregistered + freed.
     privps,   \* BOOLEAN -- the priv (dev9p_priv) holds the poll-state ref.
     opps,     \* BOOLEAN -- the op holds a poll-state ref (TRUE only in the Fix design).
@@ -90,7 +104,7 @@ TypeOk ==
     /\ poll   \in {"parked","ended"}
     /\ fdref  \in BOOLEAN
     /\ oppin  \in BOOLEAN
-    /\ op     \in {"live","stranded","torndown"}
+    /\ op     \in {"live","stranded","unlinked","torndown"}
     /\ privps \in BOOLEAN
     /\ opps   \in BOOLEAN
     /\ clunks \in Nat
@@ -123,13 +137,13 @@ PollTimeout ==
     /\ UNCHANGED <<fdref, oppin, privps, opps, clunks, uaf>>
 
 (***************************************************************************)
-(* KthreadTouchPs -- the dev9p.poll kthread derefs op->ps (a pump cycle or  *)
-(* the completion path reads ps->cached_revents). Legal only while the op   *)
-(* is still live/stranded (not torn down). Records a UAF if ps is freed --  *)
-(* the safety probe for the fix's ps-decoupling.                            *)
+(* KthreadTouchPs -- the dev9p.poll kthread derefs op->ps (the reap's walk *)
+(* of ps->poll_list, or the collector's empty-check). Legal only while the *)
+(* op is still live/stranded (not torn down). Records a UAF if ps is freed *)
+(* -- the safety probe for the fix's ps-decoupling.                        *)
 (***************************************************************************)
 KthreadTouchPs ==
-    /\ op \in {"live","stranded"}
+    /\ op \in {"live","stranded","unlinked"}
     /\ uaf' = (uaf \/ PsFreed)
     /\ UNCHANGED <<poll, fdref, oppin, op, privps, opps, clunks>>
 
@@ -147,6 +161,7 @@ KthreadTouchPs ==
 (* frees the slot with NO kthread fairness at all.)                         *)
 (***************************************************************************)
 KthreadGc ==
+    /\ ~BUGGY_SPLIT_GC
     /\ op = "stranded"
     /\ op' = "torndown"
     /\ clunks' = clunks + (IF oppin /\ ~fdref THEN 1 ELSE 0)   \* last Spoor ref -> clunk
@@ -156,6 +171,23 @@ KthreadGc ==
     \* but op is already "torndown" here, so KthreadTouchPs can no longer fire ->
     \* modeling privps as held (never freed) in ~Fix is sound for NoUseAfterFreePs.
     /\ UNCHANGED <<poll, fdref, privps, uaf>>
+
+(***************************************************************************)
+(* BUGGY_SPLIT_GC -- the collector in two steps. KthreadGcUnlink takes the  *)
+(* stranded op off the registry and clears ps->op under the lock;           *)
+(* KthreadGcFlush Tflushes and frees it after the unlock.                   *)
+(***************************************************************************)
+KthreadGcUnlink ==
+    /\ BUGGY_SPLIT_GC
+    /\ op = "stranded"
+    /\ op' = "unlinked"
+    /\ UNCHANGED <<poll, fdref, oppin, privps, opps, clunks, uaf>>
+
+KthreadGcFlush ==
+    /\ op = "unlinked"
+    /\ op'   = "torndown"
+    /\ opps' = FALSE
+    /\ UNCHANGED <<poll, fdref, oppin, privps, clunks, uaf>>
 
 (***************************************************************************)
 (* UserClose -- the user closes the `ready` fd (the poll has ended). Drops  *)
@@ -172,12 +204,17 @@ KthreadGc ==
 (*    longer complete it), drops the priv's ps ref, and delivers the clunk  *)
 (*    DETERMINISTICALLY. ps frees iff the op already dropped its ref; else   *)
 (*    the op's ref keeps ps alive until KthreadGc/teardown drops it.        *)
+(*    An UNLINKED op (BUGGY_SPLIT_GC) is invisible to the cancel, and its   *)
+(*    live Tread makes the session refuse the Tclunk: no clunk, ever.       *)
 (***************************************************************************)
 UserClose ==
     /\ poll = "ended"
     /\ fdref
     /\ fdref' = FALSE
-    /\ IF Fix
+    /\ IF Fix /\ op = "unlinked"
+       THEN /\ privps' = FALSE                 \* ps->op is NULL: nothing to cancel,
+            /\ UNCHANGED <<oppin, op, opps, clunks>>   \* and the Tclunk is refused.
+       ELSE IF Fix
        THEN /\ op'     = "torndown"            \* cancel under c->lock: no late completion.
             /\ privps' = FALSE                 \* the priv drops its ps ref.
             /\ opps'   = FALSE                 \* the op is freed here -> its ps ref drops too.
@@ -191,14 +228,17 @@ Next ==
     \/ PollTimeout
     \/ KthreadTouchPs
     \/ KthreadGc
+    \/ KthreadGcUnlink
+    \/ KthreadGcFlush
     \/ UserClose
 
 (* The poll always eventually times out, and the user always eventually      *)
 (* closes the fd -- WF on PollTimeout + UserClose. The buggy cfg withholds   *)
 (* WF on KthreadGc: that IS the leak -- the slot-free hinges on a kthread     *)
 (* step that may never come. The clean (Fix) cfg ALSO withholds it, proving  *)
-(* the fix frees the slot without ANY kthread fairness.                      *)
-Fairness == WF_vars(PollTimeout) /\ WF_vars(UserClose)
+(* the fix frees the slot without ANY kthread fairness. KthreadGcFlush IS   *)
+(* fair, so the split collector's leak is not a starved kthread.             *)
+Fairness == WF_vars(PollTimeout) /\ WF_vars(UserClose) /\ WF_vars(KthreadGcFlush)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 

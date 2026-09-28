@@ -65,8 +65,8 @@ static struct dev9p_priv *priv_of(struct Spoor *c) {
     return p;
 }
 
-// Exposed for kernel/dev9p_poll.c (the `.poll` bridge needs p->poll + p->client +
-// p->fid). Same dc + magic gate as priv_of.
+// Exposed for kernel/dev9p_poll.c (the readiness bridge needs p->poll +
+// p->client + p->fid). Same dc + magic gate as priv_of.
 struct dev9p_priv *dev9p_priv_of(struct Spoor *c) {
     return priv_of(c);
 }
@@ -538,9 +538,10 @@ static u8 qid_type_p9_to_kernel(u8 p9) {
     // links are invisible, which is the pre-D-1 status quo (fail-safe).
     // P9_QTSYMLINK == QTSYMLINK == 0x02.
     if (p9 & P9_QTSYMLINK) out |= QTSYMLINK;
-    // net-6b-2b: carry the readiness marker through so dev9p_poll's QTPOLL gate
-    // (on the cached qid) sees it. A server that never sets it -> dev9p_poll is
-    // POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL == 0x01.
+    // net-6b-2b: carry the readiness marker through so the readiness bridge's
+    // QTPOLL gate (on the cached qid; dev9p_poll.c) sees it. A server that never
+    // sets it -> the file is POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL
+    // == 0x01.
     if (p9 & P9_QTPOLL)    out |= QTPOLL;
     return out;
 }
@@ -2355,7 +2356,11 @@ struct Dev dev9p = {
     .bread    = dev9p_bread,
     .write    = dev9p_write,
     .bwrite   = dev9p_bwrite,
-    .poll     = dev9p_poll,    // net-6b-2b: readiness bridge (QTPOLL files only)
+    // net-6b-2b + #98: remote readiness, sampled and armed separately (a QTPOLL
+    // file asks its server; any other file answers always-ready itself).
+    .poll_snapshot         = dev9p_poll_snapshot,
+    .poll_snapshot_release = dev9p_poll_snapshot_release,
+    .poll_arm              = dev9p_poll_arm,
     .fsync    = dev9p_fsync,
     .readdir  = dev9p_readdir,
     .rename   = dev9p_rename,

@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -309,6 +309,22 @@ prints, so a check keyed on serving would skip exactly the deterministic
 failure. [[seam-242-selftest-nonfatal]] (the other selftests proceed after a
 FAIL) is narrowed by this capture, not closed.
 
+**A readiness fail-safe fails the verdict (2026-09-28, #98).** The poll core
+asks a remote readiness file's server (netd, ptyfs) for a snapshot and waits a
+fixed 1 s for the answer; one left unanswered is reported not ready, counted,
+and printed as `poll: FAILSAFE ...` (ARCH 23.3, [[sub-kernel-poll]]). The count
+is zero on a healthy system, so after the banner `test.sh` fails on any such
+line: it means some poll was handed a guess instead of its server's answer.
+The in-kernel test that makes the fail-safe fire shortens the bound through a
+test knob that also keeps it quiet, so a passing suite prints nothing here;
+the red run that restored the real bound in that test failed this check with
+every kernel test passing. `ci-smp-gate.sh` judges each boot through
+`test.sh`, so the check covers every gate boot. The knob, and the collector
+mode the dev9p tests set, are released by the kernel test runner after every
+test, which prints `POLL-KNOB(...)` and fails a passing test that left one set
+(the POOL-PARKED pattern: a knob restored on a test's last line is restored
+only by a test that passes).
+
 ### The host tests (`test-rust.sh`)
 
 **No gate ran `cargo test` until 2026-09-22**, so the largest body of tests in
@@ -509,3 +525,4 @@ derivation, the name parse's two self-checks and the warning count; and the two
 gate changes of 2026-09-22 that landed without a dossier update recorded here:
 main's `default-smp1` row (`6e1cda16`, the loom join) and the `/webkit` floor
 path (`b70e1bfd`). 2026-09-24: the netd selftest verdict joins the exit status.
+2026-09-28: the `poll: FAILSAFE` check (#98 NP-4c).

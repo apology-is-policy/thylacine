@@ -121,12 +121,13 @@ struct dev9p_priv {
     // owner contributes one p9_attached_ref; dev9p_close drops it.
     struct p9_attached       *attached_owner;
     // net-6b-2b: lazily-allocated poll state for a QTPOLL (netd `ready`) Spoor;
-    // NULL for every regular dev9p file (the common path). Allocated by dev9p_poll
-    // on the first poll of a readiness file. #294: independently REFCOUNTED -- the
-    // priv holds one ref (dropped via dev9p_poll_priv_release at dev9p_close), each
-    // outstanding readiness op holds one; freed when both drop (so an op the kthread
-    // still owns keeps it alive after this priv frees). Owned by THIS priv (not
-    // shared across walks -- each walked Spoor gets its own priv).
+    // NULL for every regular dev9p file (the common path). Allocated by the first
+    // readiness ARM of a readiness file (dev9p_poll_arm; a snapshot needs none).
+    // #294: independently REFCOUNTED -- the priv holds one ref (dropped via
+    // dev9p_poll_priv_release at dev9p_close), each outstanding arm holds one;
+    // freed when both drop (so an arm the kthread still owns keeps it alive after
+    // this priv frees). Owned by THIS priv (not shared across walks -- each walked
+    // Spoor gets its own priv).
     struct dev9p_poll_state  *poll;
     // Weft-6a-2: lazily-bound per-flow ring share for a /net data fid; NULL for
     // every fd that has not gone zero-copy (the common path). Installed by
@@ -263,7 +264,7 @@ int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got);
 
 // Resolve a dev9p-backed Spoor to its `struct dev9p_priv *` (dc + magic gated;
 // NULL if `c` is not a live dev9p Spoor). Exposed for kernel/dev9p_poll.c (the
-// `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.
+// readiness bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.
 struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
 
 // LR-1 (HAUL-DESIGN 4.8): does `c` belong to a 9P session whose attacher or
@@ -283,17 +284,28 @@ s64 dev9p_create_errno(struct Spoor *c);
 s64 dev9p_open_errno(struct Spoor *c);
 
 // =============================================================================
-// dev9p.poll -- the readiness bridge (net-6b-2b; NET-DESIGN section 12.2,
-// specs/net_poll.tla). Defined in kernel/dev9p_poll.c.
+// dev9p's remote readiness -- the SAMPLE/ARM bridge (net-6b-2b, #98; NET-DESIGN
+// section 12.2, specs/net_poll.tla). Defined in kernel/dev9p_poll.c.
 // =============================================================================
 
-// The Dev `.poll` slot. For a netd `ready` file (cached qid.type carries QTPOLL)
-// it registers `pw` on the Spoor's poll-state hook list + ensures an outstanding
-// async readiness Tread (offset = the event mask) is in flight, then samples the
-// last-known revents; for any other (regular) dev9p file it is POSIX always-ready
-// (`events & POLL_REQUESTABLE`, the prior NULL-slot behavior). Returns the ready
-// `revents` subset (>= 0). `pw == NULL` is the sample-only re-scan (no register).
-short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw);
+struct poll_snap;
+
+// The Dev `.poll_snapshot` slot (<thylacine/dev.h> documents the contract). For a
+// QTPOLL file on a deadline-capable client it sends the snapshot read (offset =
+// the requested events | P9_POLL_SNAPSHOT), which the server answers at once;
+// any other dev9p file is answered here, POSIX always-ready
+// (`events & POLL_REQUESTABLE`).
+void dev9p_poll_snapshot(struct Spoor *c, short events, struct poll_snap *s);
+
+// The Dev `.poll_snapshot_release` slot: flush the snapshot if unanswered (the
+// c->lock barrier), unlink it, free it.
+void dev9p_poll_snapshot_release(struct Spoor *c, struct poll_snap *s);
+
+// The Dev `.poll_arm` slot: register `pw` on the Spoor's poll-state hook list,
+// then ensure an arm (offset = the events) covering them is on the wire. 1 =
+// armed; 0 = a shortage (no memory, no free tag, a full send ring) or a dead
+// session left the file uncovered.
+int dev9p_poll_arm(struct Spoor *c, short events, struct poll_waiter *pw);
 
 // Initialize the global poll-pump registry + lock + kthread rendez. Idempotent.
 // Call once at boot, before spawning the pump kthread.
@@ -301,9 +313,10 @@ void dev9p_poll_init(void);
 
 // The global poll-pump kthread entry (the cons_poll console_mgr + Loom-4 SQPOLL
 // analog). Spawned once at boot via thread_create(kproc(), dev9p_poll_pump_main).
-// Drives the 9P elected reader for outstanding readiness ops (borrowing the
-// client from a live op's pin), walks the poll-state hook lists on completion (in
-// process context), reaps terminal ops, and garbage-collects stranded ops.
+// Drives the 9P elected reader for every client with an arm or a snapshot out
+// (borrowing the client through a session ref), walks the poll-state hook lists
+// when an arm is answered (in process context), reaps answered arms, and
+// garbage-collects stranded ones. Snapshots are their pollers' to release.
 void dev9p_poll_pump_main(void);
 
 // Release a priv's poll state at dev9p_close (#294 cancel-at-close,
@@ -315,9 +328,25 @@ void dev9p_poll_pump_main(void);
 // readiness Tread -- and drops the priv's poll-state ref.
 void dev9p_poll_priv_release(struct dev9p_priv *p);
 
-// Test accessor (test_dev9p): the live readiness-op registry length. Lets a test
-// assert the cancel-at-close teardown (op count back to baseline) without exposing
-// the static registry. Reads the atomic count; no lock needed.
+// Test accessors (test_dev9p): the arm registry's length, and the snapshots still
+// linked. Let a test assert a teardown (a count back to its baseline) without
+// exposing the static registries.
 u32 dev9p_poll_op_count_for_test(void);
+u32 dev9p_poll_snap_count_for_test(void);
+
+// Test accessor: the poll-pump kthread is asleep on its park (so it is pumping no
+// client). A test waits for it before destroying a client the kthread served.
+bool dev9p_poll_parked_for_test(void);
+
+// Test hook: the poll collector's mode. dev9p_poll_test_gc_release is the
+// runner's release after every test (back to RUN; whether it was left set).
+enum dev9p_poll_test_gc_mode {
+    DEV9P_POLL_GC_RUN  = 0,   // collect stranded arms (production)
+    DEV9P_POLL_GC_SKIP = 1,   // leave them for a close to cancel
+    DEV9P_POLL_GC_HOLD = 2,   // stop between the collect and the frees
+};
+void dev9p_poll_test_gc(enum dev9p_poll_test_gc_mode mode);
+bool dev9p_poll_gc_held_for_test(void);
+bool dev9p_poll_test_gc_release(void);
 
 #endif  // THYLACINE_DEV9P_H

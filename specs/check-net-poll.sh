@@ -42,7 +42,8 @@ net_poll:net_poll_buggy_gc_snapshot:NoFalseNotReady
 net_poll:net_poll_buggy_lost_ready:NoMissedNetPoll
 net_poll:net_poll_buggy_edge_arm:PollerEventuallyServed
 net_poll:net_poll_buggy_no_retry:NoMissedNetPoll
-net_poll_teardown:net_poll_teardown_buggy_leak:Liveness"
+net_poll_teardown:net_poll_teardown_buggy_leak:Liveness
+net_poll_teardown:net_poll_teardown_buggy_split_gc:Liveness"
 
 run() {  # $1 = module, $2 = cfg basename -> sets RC and LOG
     LOG="$TMP/$2.log"

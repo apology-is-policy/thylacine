@@ -12034,7 +12034,6 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     s32  opened[POLL_MAX_NFDS];
     s32  orig[POLL_MAX_NFDS];
-    bool any_socket = false;
 
     for (u64 i = 0; i < nfds; i++) {
         opened[i] = -1;
@@ -12065,10 +12064,10 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                 // self-inflicted, since this design spends one guest-fd-space
                 // handle per polled socket, so a guest polling near its ceiling
                 // can drive itself into it. Left as-is deliberately: the fix is
-                // to stop consuming guest fd numbers at all, which is the same
-                // change #98 needs (a poll core that holds Spoors), and
+                // to stop consuming guest fd numbers at all -- a cache of ready
+                // Spoors held outside the guest's fd table (NP-5) -- and
                 // splitting the arm now would encode the fd-space design it
-                // should replace. POLLNVAL
+                // replaces. POLLNVAL
                 // is the POSIX answer for an fd that cannot be polled, and it is
                 // per-pollfd: one broken socket must not fail the whole call for
                 // the fds beside it. (pselect6 then turns that POLLNVAL into a
@@ -12079,30 +12078,13 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
             }
             opened[i]  = (s32)rfd;
             kfds[i].fd = (s32)rfd;
-            any_socket = true;
         }
     }
 
-    // A ZERO TIMEOUT STILL NEEDS A MOMENT, and the reason is a property of the
-    // object rather than a shortcut. Readiness for a /net socket lives in netd,
-    // one RPC away: dev9p's .poll SUBMITS an async probe and answers from a
-    // cache that the freshly-opened `ready` fd does not yet have. So a strict
-    // zero-timeout scan would report "nothing ready" for a socket that is
-    // plainly writable -- and a caller polling with timeout 0 in a loop would
-    // never make progress at all.
-    //
-    // Giving the probe a small budget changes the LATENCY, not the ANSWER: what
-    // comes back is netd's real verdict rather than an approximation of it. If
-    // the probe misses even this, the call reports not-ready and the caller
-    // retries, which is the safe direction. A caller-supplied timeout is never
-    // touched -- only the literal 0 is widened, and only when a socket is
-    // actually in the array.
-    //
-    // This is a mitigation, not a closure (task #98): a slow or loaded path can
-    // still miss the budget. Closing it needs either a poll core that holds
-    // Spoors rather than fd indices (so the ready fd can be cached OUTSIDE the
-    // guest's fd-number space) or a synchronous readiness query on dev9p_poll.
-    if (timeout_ms == 0 && any_socket) timeout_ms = VIV_PPOLL_PROBE_MS;
+    // A zero timeout is passed through as it is. Readiness for a /net socket
+    // lives in netd, one RPC away, and the poll core asks for it with a
+    // snapshot netd answers at once, so even a timeout-0 scan reports netd's
+    // real verdict (ARCH 23.3).
 
     // V-5d F1: COMPACT AWAY THE CALLER-DISABLED ENTRIES BEFORE POLLING.
     //
@@ -12120,9 +12102,6 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
     // poll takes its fast path, and a ppoll asked to block forever RETURNS AT
     // ONCE with POLLNVAL on exactly the slots the caller had switched off -- a
     // hard spin, plus a revents a robust event loop reads as "this fd died".
-    // (It would also defeat the #98 probe budget: the fast path fires before
-    // VIV_PPOLL_PROBE_MS can be spent, so a socket beside a disabled slot would
-    // report not-ready forever.)
     //
     // Subtracting them from the result afterwards would fix the count and the
     // revents and NOT the blocking, so they must not reach the native poll at

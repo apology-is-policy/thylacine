@@ -413,6 +413,17 @@ case "$result" in
                 exit 1
             fi
         fi
+        # A readiness snapshot that a server (netd, ptyfs) left unanswered for
+        # the fixed 1 s is reported not ready and printed as `poll: FAILSAFE`
+        # (ARCH 23.3). The count is zero on a healthy system, so one line means a
+        # poll somewhere was handed a guess instead of its server's answer. The
+        # in-kernel test that makes it fire runs it quietly. tools/ci-smp-gate.sh
+        # judges each of its boots through this script.
+        if grep -aq 'poll: FAILSAFE' "$LOG_FILE"; then
+            echo "==> FAIL: a readiness snapshot fail-safe fired (poll: FAILSAFE)." >&2
+            grep -a 'poll: FAILSAFE' "$LOG_FILE" >&2 || true
+            exit 1
+        fi
         # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
         # verdict. Both soft-skip when their external Alpine bundle is absent,
         # which is right, but nothing carried the skip into the exit status --

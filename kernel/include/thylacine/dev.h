@@ -40,6 +40,7 @@ struct Spoor;
 struct Walkqid;
 struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-using devs land
 struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
+struct poll_snap;   // <thylacine/poll.h>; a remote fd's snapshot slot (.poll_snapshot)
 struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
 
 // Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
@@ -333,13 +334,40 @@ struct Dev {
     //     is non-NULL, atomically registers it on the object's poll-
     //     hook list under the object's own lock — the load-bearing
     //     register-then-observe step. If `pw` is NULL the call is
-    //     sample-only (the post-wake re-scan).
+    //     sample-only (a pass past the poll's deadline hooks nothing).
     //
     // A NULL .poll slot means the fd is always ready for the requested
     // events — the POSIX-correct answer for a regular file. Only Devs
     // with genuine readiness state (devpipe at v1.0; devsrv at
     // P5-poll-b) implement a real .poll.
     short         (*poll)(struct Spoor *c, short events, struct poll_waiter *pw);
+
+    // Remote readiness (#98; <thylacine/poll.h> REMOTE READINESS;
+    // specs/net_poll.tla). A Dev whose readiness lives in a server fills
+    // all three of these INSTEAD of .poll; the poll core prefers them.
+    //   poll_snapshot(c, events, s)
+    //     Ask for c's readiness NOW. Either answers here (s->state
+    //     ANSWERED, s->revents set, s->remote false: nothing to ask), or
+    //     sets s->remote and sends a snapshot, leaving s->state SENT (or
+    //     ANSWERED, if the answer beat the return) -- or UNSENT when a
+    //     shortage kept it off the wire, never an error or a guess. The
+    //     core calls again on an UNSENT slot to resend. The answer is
+    //     written to s->revents, then s->state (RELEASE), then s->rendez
+    //     is woken.
+    //   poll_snapshot_release(c, s)
+    //     The core is done with s. After it returns no answer will touch
+    //     s, and a snapshot still unanswered has been flushed.
+    //   poll_arm(c, events, pw)
+    //     The call will park. Register pw on c's hook list, THEN ensure a
+    //     request is on the wire that the server answers once c is ready
+    //     for `events` (at once if it already is); its answer walks the
+    //     list. Returns 1 when one is, 0 when a shortage left c uncovered:
+    //     the core then bounds its park by the retry timer.
+    void          (*poll_snapshot)(struct Spoor *c, short events,
+                                   struct poll_snap *s);
+    void          (*poll_snapshot_release)(struct Spoor *c, struct poll_snap *s);
+    int           (*poll_arm)(struct Spoor *c, short events,
+                              struct poll_waiter *pw);
 
     // Admin.
     //   remove — delete the file represented by c.

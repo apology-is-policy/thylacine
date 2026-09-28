@@ -13,6 +13,11 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>
+#include <thylacine/9p_transport_mq.h>
+#include <thylacine/pipe.h>
+#include <thylacine/rendez.h>
+#include <thylacine/sched.h>
+#include <thylacine/thread.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
@@ -46,6 +51,16 @@ void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+bool test_dev9p_np_release(void);
+void test_dev9p_poll_snapshot_answers_at_zero_timeout(void);
+void test_dev9p_poll_local_and_remote_both_reported(void);
+void test_dev9p_poll_snapshot_shortage_is_resent(void);
+void test_dev9p_poll_unanswered_snapshot_fails_safe(void);
+void test_dev9p_poll_arm_wakes_the_parked_poller(void);
+void test_dev9p_poll_retry_timer_is_a_wake(void);
+void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
+void test_dev9p_poll_cancel_at_close(void);
+void test_dev9p_poll_gc_flushes_with_the_unlink(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
@@ -1578,59 +1593,68 @@ void test_dev9p_perm_enforced_deny_allow(void) {
     teardown(root);
 }
 
-// net-6b-2b: the dev9p.poll QTPOLL gate -- the soundness-critical distinguisher.
-// A regular dev9p file (no QTPOLL on its cached qid; the root is QTDIR) is POSIX
-// always-ready and must NEVER be probed: dev9p_poll returns events & requestable
-// WITHOUT allocating a poll-state or submitting a readiness Tread. (The QTPOLL
-// PROBE path -- submit -> poll-pump kthread -> netd reply -> wake -- is exercised
-// end-to-end by the joey net-6b in-guest probe against netd's real `ready` file;
-// a unit test would drive the live poll-pump kthread against this loopback client.)
-void test_dev9p_poll_regular_file_always_ready(void) {
-    struct Spoor *root = make_open_client_and_root();
-    TEST_ASSERT(root != NULL, "root");
-    // root->qid.type is QTDIR -- no QTPOLL. The gate -> POSIX always-ready.
-    short rv = dev9p_poll(root, (short)(POLLIN | POLLOUT), NULL);
-    TEST_EXPECT_EQ((u64)(rv & (POLLIN | POLLOUT)), (u64)(POLLIN | POLLOUT),
-                   "non-QTPOLL dev9p file is always-ready (POLLIN|POLLOUT)");
-    struct dev9p_priv *p = dev9p_priv_of(root);
-    TEST_ASSERT(p != NULL && p->poll == NULL,
-                "no poll-state allocated for a regular (non-QTPOLL) file");
-    // priv_release on a NULL-poll priv is a safe no-op (idempotent with the
-    // dev9p_close call teardown() triggers).
-    dev9p_poll_priv_release(p);
-    TEST_ASSERT(p->poll == NULL, "priv_release on NULL poll is a no-op");
-    teardown(root);
+// =============================================================================
+// Remote readiness (net-6b-2b; the #98 SAMPLE/ARM split): dev9p's QTPOLL files
+// against a scripted readiness server on the multi-queue loopback, with the live
+// poll-pump kthread as the reader -- the production path, end to end, short of
+// netd itself (the boot probes cover netd and ptyfs).
+// =============================================================================
+
+static struct p9_client      g_np_client;
+static struct p9_mq_loopback g_np_mq;
+static u8                    g_np_recv_buf[8192];
+
+// The scripted server. The file's readiness is `g_np_level`, or `g_np_rise_level`
+// once the clock passes `g_np_rise_ns` (0 = never). A snapshot is answered at
+// once unless the server is hung (`g_np_hung`); an arm is answered at once if the
+// level already covers it, else held. `g_np_eagain_after_snap` != 0 refuses that
+// many sends after every answered snapshot -- so the pass's arm meets a full ring.
+// Every frame it sees takes the next `g_np_seq`, so a test can order two.
+static volatile u16  g_np_level;
+static volatile u16  g_np_rise_level;
+static volatile u64  g_np_rise_ns;
+static volatile bool g_np_hung;
+static volatile u32  g_np_eagain_after_snap;
+static volatile u32  g_np_snaps, g_np_arms, g_np_flushes, g_np_clunks, g_np_bad_offsets;
+static volatile u32  g_np_seq, g_np_arm_seq, g_np_flush_seq;
+static volatile u16  g_np_snap_tag, g_np_arm_tag, g_np_flush_oldtag;
+static volatile u32  g_np_ready_fid;
+static volatile bool g_np_ready_clunked;
+
+static u16 np_level_now(void) {
+    u64 rise = g_np_rise_ns;
+    if (rise != 0 && timer_now_ns() >= rise) return g_np_rise_level;
+    return g_np_level;
 }
 
-// =============================================================================
-// #294 cancel-at-close: a readiness op outstanding at dev9p_close.
-// =============================================================================
+static int np_rread(u8 *resp, size_t cap, u16 tag, u16 revents) {
+    size_t total = P9_HDR_LEN + 4 + 4;
+    if (cap < total) return -1;
+    resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+    resp[4] = P9_RREAD;
+    resp[5] = (u8)(tag & 0xff); resp[6] = (u8)(tag >> 8);
+    resp[7] = 4; resp[8] = 0; resp[9] = 0; resp[10] = 0;
+    resp[11] = (u8)(revents & 0xff); resp[12] = (u8)(revents >> 8);
+    resp[13] = 0; resp[14] = 0;
+    return (int)total;
+}
 
-static u32  g_cancel_treads;        // readiness Treads the responder saw
-static u32  g_cancel_tflushes;      // cancel-at-close Tflushes the responder saw
-static u32  g_cancel_tclunks;       // Tclunks the responder saw
-static u32  g_cancel_ready_fid;     // the fid the readiness Tread + close Tclunk name
-static bool g_cancel_ready_clunked; // the readiness fid's Tclunk was delivered
+static int np_rhdr(u8 *resp, size_t cap, u8 type, u16 tag) {
+    if (cap < P9_HDR_LEN) return -1;
+    resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+    resp[4] = type;
+    resp[5] = (u8)(tag & 0xff); resp[6] = (u8)(tag >> 8);
+    return (int)P9_HDR_LEN;
+}
 
-// A responder for the cancel-at-close test: the walked file is QTPOLL (so
-// dev9p_poll probes it) and its readiness Tread DEFERS (stages no reply, so the op
-// stays outstanding). The Tflush (the cancel) stages NOTHING -- p9_client_abandon_
-// async does not await an Rflush, and a staged-undrained reply would block the
-// synchronous Tclunk that follows (loopback_send refuses a second send while a
-// reply is undrained). The Tclunk -- the leak fix's deliverable -- replies Rclunk
-// and is recorded.
-static int dev9p_cancel_responder(void *ctx, const u8 *req, size_t req_len,
-                                  u8 *resp, size_t resp_cap) {
-    (void)ctx;
-    if (req_len < P9_HDR_LEN) return -1;
-    u32 size; u8 type; u16 tag;
-    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
-
+// Tversion / Tattach / Twalk for the fixture: every walked name is the
+// readiness file (QTFILE | QTPOLL).
+static int np_handshake(const u8 *req, size_t req_len, u8 type, u16 tag,
+                        u8 *resp, size_t resp_cap) {
     if (type == P9_TVERSION) {
         size_t total = P9_HDR_LEN + 4 + 2 + 8;
         if (resp_cap < total) return -1;
-        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
-        resp[2] = 0; resp[3] = 0;
+        resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RVERSION;
         resp[5] = 0xff; resp[6] = 0xff;
         resp[7] = 0; resp[8] = 0x20; resp[9] = 0; resp[10] = 0;     // msize=8192
@@ -1642,131 +1666,538 @@ static int dev9p_cancel_responder(void *ctx, const u8 *req, size_t req_len,
     if (type == P9_TATTACH) {
         size_t total = P9_HDR_LEN + P9_QID_LEN;
         if (resp_cap < total) return -1;
-        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RATTACH;
-        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)(tag >> 8);
         resp[7] = P9_QTDIR;
         for (int i = 0; i < 4; i++) resp[8 + i] = 0;
         resp[12] = 1; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
         return (int)total;
     }
-    if (type == P9_TWALK) {
-        if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
-        u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
-        size_t body_len = 2 + (size_t)nwname * P9_QID_LEN;
-        size_t total = P9_HDR_LEN + body_len;
-        if (resp_cap < total) return -1;
-        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
-        resp[2] = 0; resp[3] = 0;
-        resp[4] = P9_RWALK;
-        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        resp[7] = (u8)(nwname & 0xff); resp[8] = (u8)((nwname >> 8) & 0xff);
-        for (u16 i = 0; i < nwname; i++) {
-            size_t off = P9_HDR_LEN + 2 + (size_t)i * P9_QID_LEN;
-            resp[off] = (u8)(P9_QTFILE | P9_QTPOLL);   // QTPOLL => the readiness file
-            for (int j = 0; j < 4; j++) resp[off + 1 + j] = 0;
-            resp[off + 5] = (u8)(0x10 + i);
-            for (int j = 1; j < 8; j++) resp[off + 5 + j] = 0;
-        }
-        return (int)total;
+    // P9_TWALK
+    if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
+    u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
+    size_t total = P9_HDR_LEN + 2 + (size_t)nwname * P9_QID_LEN;
+    if (resp_cap < total) return -1;
+    resp[0] = (u8)(total & 0xff); resp[1] = (u8)(total >> 8); resp[2] = 0; resp[3] = 0;
+    resp[4] = P9_RWALK;
+    resp[5] = (u8)(tag & 0xff); resp[6] = (u8)(tag >> 8);
+    resp[7] = (u8)(nwname & 0xff); resp[8] = (u8)(nwname >> 8);
+    for (u16 i = 0; i < nwname; i++) {
+        size_t off = P9_HDR_LEN + 2 + (size_t)i * P9_QID_LEN;
+        resp[off] = (u8)(P9_QTFILE | P9_QTPOLL);
+        for (int j = 0; j < 4; j++) resp[off + 1 + j] = 0;
+        resp[off + 5] = (u8)(0x10 + i);
+        for (int j = 1; j < 8; j++) resp[off + 5 + j] = 0;
     }
+    return (int)total;
+}
+
+// Runs inside mq_send under the mq lock, so it may set the ring's eagain budget.
+static int np_responder(void *ctx, const u8 *req, size_t req_len,
+                        u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    g_np_seq++;
+    if (type == P9_TVERSION || type == P9_TATTACH || type == P9_TWALK)
+        return np_handshake(req, req_len, type, tag, resp, resp_cap);
     if (type == P9_TREAD) {
-        // The readiness probe (Tread offset=mask). DEFER: stage NO reply so the op
-        // stays outstanding. Record the fid for the Tclunk assertion.
-        g_cancel_treads++;
-        if (req_len >= P9_HDR_LEN + 4) g_cancel_ready_fid = le32_at(req + 7);
-        return 0;
+        if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
+        g_np_ready_fid = le32_at(req + 7);
+        u64 off = le64_at(req + 11);
+        if (off & ~(P9_POLL_MASK | P9_POLL_SNAPSHOT)) g_np_bad_offsets++;
+        u16 rv = (u16)(np_level_now() & ((off & P9_POLL_MASK) | POLLERR | POLLHUP));
+        if (off & P9_POLL_SNAPSHOT) {
+            g_np_snaps++;
+            g_np_snap_tag = tag;
+            if (g_np_hung) return 0;
+            if (g_np_eagain_after_snap) g_np_mq.eagain_budget = g_np_eagain_after_snap;
+            return np_rread(resp, resp_cap, tag, rv);
+        }
+        g_np_arms++;
+        g_np_arm_tag = tag;
+        g_np_arm_seq = g_np_seq;
+        return rv ? np_rread(resp, resp_cap, tag, rv) : 0;
     }
     if (type == P9_TFLUSH) {
-        // The cancel-at-close Tflush. Stage NOTHING (see the responder comment).
-        g_cancel_tflushes++;
-        return 0;
+        g_np_flushes++;
+        g_np_flush_seq = g_np_seq;
+        if (req_len >= P9_HDR_LEN + 2)
+            g_np_flush_oldtag = (u16)(req[7] | ((u16)req[8] << 8));
+        return np_rhdr(resp, resp_cap, P9_RFLUSH, tag);
     }
     if (type == P9_TCLUNK) {
-        // The `ready`-fd Tclunk -- the leak fix's deliverable.
-        g_cancel_tclunks++;
-        if (req_len >= P9_HDR_LEN + 4 && le32_at(req + 7) == g_cancel_ready_fid)
-            g_cancel_ready_clunked = true;
-        if (resp_cap < P9_HDR_LEN) return -1;
-        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
-        resp[4] = P9_RCLUNK;
-        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        return (int)P9_HDR_LEN;
+        g_np_clunks++;
+        if (req_len >= P9_HDR_LEN + 4 && le32_at(req + 7) == g_np_ready_fid)
+            g_np_ready_clunked = true;
+        return np_rhdr(resp, resp_cap, P9_RCLUNK, tag);
     }
     return -1;
 }
 
-// #294 cancel-at-close regression. A readiness op outstanding at dev9p_close must
-// be CANCELLED (Tflush) and the `ready`-fd Tclunk delivered -- not extinct (the
-// pre-#294 dev9p_poll_priv_release extincted on a live op) and not leak (the bug:
-// the kthread-GC-deferred Tclunk could never reach netd, leaving the slot pinned).
-// Deterministic: in the in-kernel suite SMP + preemption are off and the test
-// thread does not yield between submit and close, so the close -- not the poll-pump
-// kthread -- grabs + cancels the op. attached_owner==NULL here (the test path); the
-// session-ref leg is exercised by the live netd boot probes.
-void test_dev9p_poll_cancel_at_close(void) {
-    g_cancel_treads = 0; g_cancel_tflushes = 0; g_cancel_tclunks = 0;
-    g_cancel_ready_fid = 0; g_cancel_ready_clunked = false;
+// Hand the kthread a reply the server "sends" later: the answer to a held arm.
+static void np_inject_rread(u16 tag, u16 revents) {
+    u8 frame[P9_HDR_LEN + 8];
+    int n = np_rread(frame, sizeof(frame), tag, revents);
+    spin_lock(&g_np_mq.lock);
+    for (int i = 0; i < n; i++) g_np_mq.ring[g_np_mq.tail + (u32)i] = frame[i];
+    g_np_mq.tail += (u32)n;
+    spin_unlock(&g_np_mq.lock);
+}
 
-    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
-                                 dev9p_cancel_responder, NULL) == 0, "loopback init");
-    TEST_ASSERT(p9_client_init(&g_client, /*root_fid=*/0, 8192,
-                               p9_loopback_ops_for(&g_loopback),
-                               g_recv_buf, sizeof(g_recv_buf)) == 0, "client init");
+// The one message-queue fixture, and everything a test hangs on it, live in
+// static storage rather than on the test's stack. A failing assert returns
+// early, and what it leaves linked -- a hook on the file's list, a poller thread
+// in the poll core, the client the kthread pumps -- has to stay whole until the
+// runner's release (test_dev9p_np_release) takes it down: a hook on a dead stack
+// frame would be written by the next arm's walk, and a client the next setup
+// re-initialised would be pumped mid-rewrite.
+#define NP_HOOKS 3
+struct np_fixture {
+    struct Spoor      *root;
+    struct Spoor      *ready;     // the walked QTPOLL file (owned by `proc`'s handle once installed)
+    bool               ready_loose;   // walked, not yet installed: the teardown's to clunk
+    struct Proc       *proc;
+    hidx_t             fd;
+    u32                ops0;      // the arm registry's length before the test
+    bool               mq_up;
+    bool               client_up;
+    struct Rendez      r[NP_HOOKS];
+    struct poll_waiter pw[NP_HOOKS];   // hooks a test registers through dev9p_poll_arm
+    struct Thread     *poller;    // a poller thread; the teardown joins it first
+};
+static struct np_fixture g_np;
+static bool              g_np_live;
+
+// The poller thread's side (test_dev9p_poll_arm_wakes_the_parked_poller).
+static struct Proc  *g_np_poll_proc;
+static hidx_t        g_np_poll_fd;
+static volatile s64  g_np_poll_result;
+static volatile s16  g_np_poll_revents;
+static volatile u64  g_np_poll_took;
+static volatile bool g_np_poll_exited;
+
+// NULL when a failed test's fixture is still up: re-initialising the client the
+// kthread may still pump would corrupt it, so the tests after one that could not
+// be taken down fail here instead.
+static struct np_fixture *np_setup(void) {
+    if (g_np_live) return NULL;
+    struct np_fixture *f = &g_np;
+    *f = (struct np_fixture){0};
+    g_np_live = true;               // from here the teardown owns what is set up
+    g_np_level = 0; g_np_rise_level = 0; g_np_rise_ns = 0; g_np_hung = false;
+    g_np_eagain_after_snap = 0;
+    g_np_snaps = 0; g_np_arms = 0; g_np_flushes = 0; g_np_clunks = 0; g_np_bad_offsets = 0;
+    g_np_seq = 0; g_np_arm_seq = 0; g_np_flush_seq = 0;
+    g_np_snap_tag = 0; g_np_arm_tag = 0; g_np_flush_oldtag = 0xffff;
+    g_np_ready_fid = 0; g_np_ready_clunked = false;
+    for (int i = 0; i < NP_HOOKS; i++) {
+        rendez_init(&f->r[i]);
+        poll_waiter_init(&f->pw[i], &f->r[i]);
+    }
+    f->ops0 = dev9p_poll_op_count_for_test();
+
+    if (p9_mq_loopback_init(&g_np_mq, np_responder, NULL) != 0) return NULL;
+    f->mq_up = true;
+    if (p9_client_init(&g_np_client, /*root_fid=*/0, 8192, p9_mq_loopback_ops_for(&g_np_mq),
+                       g_np_recv_buf, sizeof(g_np_recv_buf)) != 0) return NULL;
+    f->client_up = true;
     const u8 uname[] = {'r','o','o','t'};
     const u8 aname[] = {'/'};
-    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname),
-                                    aname, sizeof(aname), 0) == 0, "handshake");
-    struct Spoor *root = dev9p_attach_client(&g_client, /*root_fid=*/0);
-    TEST_ASSERT(root != NULL, "root");
-
-    // Walk to a QTPOLL file (a netd `ready` analog) -- a fid_owned walked Spoor,
-    // so its close issues a Tclunk (the leak fix's deliverable).
-    struct Spoor *nc = spoor_clone(root);
-    TEST_ASSERT(nc != NULL, "clone target");
+    if (p9_client_handshake(&g_np_client, uname, sizeof(uname), aname, sizeof(aname), 0) != 0)
+        return NULL;
+    f->root = dev9p_attach_client(&g_np_client, /*root_fid=*/0);
+    if (!f->root) return NULL;
+    f->ready = spoor_clone(f->root);
+    if (!f->ready) return NULL;
+    f->ready_loose = true;
     const char *name = "ready";
-    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
-    TEST_ASSERT(w != NULL && w->spoor == nc, "walk to the readiness file");
+    struct Walkqid *w = dev9p.walk(f->root, f->ready, &name, 1);
+    if (!w || w->spoor != f->ready) {
+        if (w) walkqid_free(w);
+        return NULL;
+    }
     walkqid_free(w);
-    TEST_ASSERT((nc->qid.type & QTPOLL) != 0, "the walked qid carries QTPOLL");
+    if (!(f->ready->qid.type & QTPOLL)) return NULL;
+    f->proc = proc_alloc();
+    if (!f->proc) return NULL;
+    f->fd = handle_alloc(f->proc, KOBJ_SPOOR, RIGHT_READ, f->ready);
+    if (f->fd < 0) return NULL;
+    f->ready_loose = false;         // the handle owns it now
+    return f;
+}
 
-    u32 base = dev9p_poll_op_count_for_test();
+// In dependency order: the hooks off, the poller out of the poll core, the file
+// closed (its arm cancelled), the kthread parked -- with nothing out it pumps no
+// client -- and only then the client. A poller that never exits, or a kthread
+// that never parks, leaves the fixture up: a leak the next setup refuses, never
+// a client freed under a thread still using it.
+static void np_teardown(struct np_fixture *f) {
+    g_np_eagain_after_snap = 0;
+    g_np_mq.eagain_budget = 0;
+    for (int i = 0; i < NP_HOOKS; i++) poll_waiter_list_unregister(&f->pw[i]);
+    if (f->poller) {
+        test_kthread_join_free(f->poller, &g_np_poll_exited);
+        if (!__atomic_load_n(&g_np_poll_exited, __ATOMIC_ACQUIRE)) return;
+        f->poller = NULL;
+    }
+    if (f->proc) {
+        f->proc->state = PROC_STATE_ZOMBIE;
+        proc_free(f->proc);
+        f->proc = NULL;
+    }
+    if (f->ready_loose) {
+        spoor_clunk(f->ready);
+        f->ready_loose = false;
+    }
+    if (f->root) {
+        spoor_clunk(f->root);
+        f->root = NULL;
+    }
+    TEST_YIELD_UNTIL(dev9p_poll_snap_count_for_test() == 0 &&
+                     dev9p_poll_op_count_for_test() == f->ops0 &&
+                     dev9p_poll_parked_for_test());
+    if (f->client_up) {
+        p9_client_destroy(&g_np_client);
+        f->client_up = false;
+    }
+    if (f->mq_up) {
+        p9_mq_loopback_destroy(&g_np_mq);
+        f->mq_up = false;
+    }
+    g_np_live = false;
+}
 
-    // Poll: the responder defers the readiness Tread, so dev9p_poll submits an op +
-    // returns not-ready, leaving it OUTSTANDING (the timed-out-poll state). NOTE: a
-    // live op-COUNT snapshot here would race the poll-pump kthread, which runs on a
-    // secondary CPU during the suite (SMP is up) and can stranded-GC a pw==NULL op
-    // before this thread reads the count -- so we assert the NON-racy submission
-    // witness (the Tread reached the responder, recorded synchronously during the
-    // submit) instead. The post-close assertions below hold whether the close OR the
-    // kthread tore the op down (both deliver the Tflush + leave the Tclunk to close).
-    short rv = dev9p_poll(nc, (short)POLLIN, NULL);
-    TEST_EXPECT_EQ((u64)(rv & POLLIN), (u64)0, "deferred readiness -> not ready");
-    TEST_EXPECT_EQ((u64)g_cancel_treads, (u64)1, "one readiness Tread submitted");
+// The runner's release, after every test (test.c): a fixture a failed test left
+// up is taken down before the next test sets up. Returns whether one was.
+bool test_dev9p_np_release(void) {
+    if (!g_np_live) return false;
+    np_teardown(&g_np);
+    return true;
+}
 
-    struct dev9p_priv *ncp = dev9p_priv_of(nc);
-    TEST_ASSERT(ncp != NULL && ncp->fid_owned, "the walked Spoor owns its fid");
-    u32 want_fid = ncp->fid;
-
-    // Close the readiness Spoor WITH the op still live. Pre-#294 this extincted in
-    // dev9p_poll_priv_release; now it cancels the op (Tflush) + delivers the Tclunk.
-    spoor_clunk(nc);
-
-    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)base,
-                   "the live op was torn down at close (registry back to baseline)");
-    TEST_ASSERT(g_cancel_tflushes >= 1, "the outstanding op was cancelled (Tflush)");
-    // The `ready`-fd Tclunk reached the server -> netd's slot_unref fires (the leak
-    // fix). Note the Tflush leaves the readiness tag awaiting_flush; the clunk
-    // succeeds because any_outstanding_on_fid no longer counts a flushed op (the
-    // 9p_session SendClunk-precondition fix this test surfaced).
-    TEST_ASSERT(g_cancel_ready_clunked,
-                "the `ready`-fd Tclunk was delivered at close (#294 leak fix)");
-    TEST_EXPECT_EQ((u64)p9_session_fid_bound(&g_client.session, want_fid), (u64)0,
-                   "the readiness fid is unbound after close (clunk completed)");
-
-    spoor_clunk(root);   // root_fid is not clunked by dev9p (fid_owned false); frees the Spoor
+// A file with no readiness server (no QTPOLL; the root is QTDIR) is POSIX
+// always-ready and answered in the kernel: no snapshot is sent, no poll-state is
+// allocated, and an arm registers nothing.
+void test_dev9p_poll_regular_file_always_ready(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    // Everything is read, and everything the file could have set going is taken
+    // back, before anything is judged: an assert returns, and a snapshot slot or
+    // a hook left linked on this stack would be written by its answer.
+    struct poll_snap s = {0};
+    dev9p_poll_snapshot(root, (short)(POLLIN | POLLOUT), &s);
+    u8   state   = __atomic_load_n(&s.state, __ATOMIC_ACQUIRE);
+    bool sent    = s.remote || s.op != NULL;
+    u16  revents = s.revents;
+    if (s.op) dev9p_poll_snapshot_release(root, &s);
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
+    int  armed  = dev9p_poll_arm(root, (short)POLLIN, &pw);
+    bool hooked = pw.list != NULL;
+    poll_waiter_list_unregister(&pw);
+    struct dev9p_priv *p = dev9p_priv_of(root);
+    bool stateless = p != NULL && p->poll == NULL;
+    // priv_release on a NULL-poll priv is a safe no-op (idempotent with the
+    // dev9p_close call teardown() triggers).
+    if (stateless) dev9p_poll_priv_release(p);
+    bool still_stateless = stateless && p->poll == NULL;
+    // An arm that did go out is cancelled by the close; the client goes only
+    // once the kthread, which may be pumping it, is parked.
+    spoor_clunk(root);
+    TEST_YIELD_UNTIL(dev9p_poll_snap_count_for_test() == 0 && dev9p_poll_parked_for_test());
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+
+    TEST_EXPECT_EQ((u64)state, (u64)POLL_SNAP_ANSWERED, "answered in the kernel");
+    TEST_ASSERT(!sent, "no snapshot sent for a regular file");
+    TEST_EXPECT_EQ((u64)revents, (u64)(POLLIN | POLLOUT), "always-ready (POLLIN|POLLOUT)");
+    TEST_EXPECT_EQ((s64)armed, 1L, "nothing to arm on a regular file");
+    TEST_ASSERT(!hooked, "and no hook registered");
+    TEST_ASSERT(stateless, "no poll-state allocated for a regular (non-QTPOLL) file");
+    TEST_ASSERT(still_stateless, "priv_release on NULL poll is a no-op");
+}
+
+// THE #98 CLOSURE. A socket plainly ready at entry is reported ready by a
+// timeout-0 poll: the snapshot is answered at once and the verdict waits for it.
+// Before the split the only sample was a cache the fresh file did not have, so
+// this returned 0 (and the vivarium widened a zero timeout to 10 ms to hide it).
+// No arm is sent -- a sample-only pass arms nothing -- and nothing sleeps.
+void test_dev9p_poll_snapshot_answers_at_zero_timeout(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    g_np_level = POLLOUT;
+    struct pollfd pfd = { .fd = f->fd, .events = POLLIN | POLLOUT, .revents = 0 };
+    u64 slept0 = poll_total_slept();
+    s64 r = sys_poll_for_proc(f->proc, &pfd, 1, 0);
+    TEST_EXPECT_EQ(r, 1L, "a ready socket is ready at timeout 0");
+    TEST_EXPECT_EQ((s64)pfd.revents, (s64)POLLOUT, "with the server's revents");
+    TEST_EXPECT_EQ(poll_total_slept(), slept0, "and the call never parked");
+    TEST_EXPECT_EQ((u64)g_np_snaps, (u64)1, "one snapshot read (offset | P9_POLL_SNAPSHOT)");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)0, "no arm on a sample-only pass");
+    TEST_EXPECT_EQ((u64)g_np_bad_offsets, (u64)0, "no stray offset bits");
+    TEST_EXPECT_EQ((u64)dev9p_poll_snap_count_for_test(), (u64)0,
+                   "the snapshot was released before the call returned");
+    np_teardown(f);
+}
+
+// A local fd ready at the scan does not end the pass before the remote fd's
+// answer is in (poll buggy_verdict_before_settle): both are reported.
+void test_dev9p_poll_local_and_remote_both_reported(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    g_np_level = POLLOUT;
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    hidx_t hrd = handle_alloc(f->proc, KOBJ_SPOOR, RIGHT_READ, rd);
+    hidx_t hwr = handle_alloc(f->proc, KOBJ_SPOOR, RIGHT_WRITE, wr);
+    TEST_ASSERT(hrd >= 0 && hwr >= 0, "pipe fds installed");
+    static const u8 payload = 0x5a;
+    TEST_EXPECT_EQ(wr->dev->write(wr, &payload, 1, 0), 1L, "a byte in the pipe");
+
+    struct pollfd pfds[2] = {
+        { .fd = hrd,  .events = POLLIN,  .revents = 0 },
+        { .fd = f->fd, .events = POLLOUT, .revents = 0 },
+    };
+    u64 slept0 = poll_total_slept();
+    s64 r = sys_poll_for_proc(f->proc, pfds, 2, 1000);
+    TEST_EXPECT_EQ(r, 2L, "the local fd AND the remote fd are reported");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLIN, "pipe POLLIN");
+    TEST_EXPECT_EQ((s64)pfds[1].revents, (s64)POLLOUT, "socket POLLOUT");
+    TEST_EXPECT_EQ(poll_total_slept(), slept0, "no park: both were ready at entry");
+    np_teardown(f);
+}
+
+// A snapshot a full send ring kept off the wire is a shortage, not an answer:
+// resent inside its bound, it reports the real readiness, and nothing fails safe.
+void test_dev9p_poll_snapshot_shortage_is_resent(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    g_np_level = POLLOUT;
+    u64 fs0 = poll_total_snap_failsafes();
+    g_np_mq.eagain_budget = 1;              // the snapshot's first send meets a full ring
+    struct pollfd pfd = { .fd = f->fd, .events = POLLOUT, .revents = 0 };
+    s64 r = sys_poll_for_proc(f->proc, &pfd, 1, 0);
+    TEST_EXPECT_EQ((u64)g_np_mq.eagain_budget, (u64)0, "the full ring was met");
+    TEST_EXPECT_EQ(r, 1L, "resent, and answered ready");
+    TEST_EXPECT_EQ((s64)pfd.revents, (s64)POLLOUT, "revents POLLOUT");
+    TEST_EXPECT_EQ((u64)g_np_snaps, (u64)1, "the server saw the resend, not the refused send");
+    TEST_EXPECT_EQ(poll_total_snap_failsafes(), fs0, "no fail-safe");
+    TEST_ASSERT(!g_np_client.dead, "the session survived the shortage");
+    np_teardown(f);
+}
+
+// A server that never answers a snapshot costs the poll a fixed bound, never
+// the call's deadline (a timeout-0 call here), and never a hang: the snapshot is
+// flushed, reported not ready, and counted. The bound is shortened by the test
+// hook, which also keeps the fail-safe's console line (which the gates fail on)
+// quiet.
+#define NP_TEST_BOUND_NS  (30ull * 1000ull * 1000ull)
+void test_dev9p_poll_unanswered_snapshot_fails_safe(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    g_np_level = POLLOUT;                   // ready -- but the server is hung
+    g_np_hung = true;
+    u64 fs0 = poll_total_snap_failsafes();
+    poll_test_set_snap_bound_ns(NP_TEST_BOUND_NS);
+    struct pollfd pfd = { .fd = f->fd, .events = POLLOUT, .revents = 0 };
+    u64 t0 = timer_now_ns();
+    s64 r = sys_poll_for_proc(f->proc, &pfd, 1, 0);
+    u64 took = timer_now_ns() - t0;
+    poll_test_set_snap_bound_ns(0);
+    TEST_EXPECT_EQ(r, 0L, "an unanswered snapshot reports not ready");
+    TEST_EXPECT_EQ((s64)pfd.revents, 0L, "revents 0");
+    TEST_ASSERT(took >= NP_TEST_BOUND_NS,
+                "the settle waited the fixed bound, not the call's timeout");
+    TEST_EXPECT_EQ(poll_total_snap_failsafes(), fs0 + 1u, "the fail-safe was counted");
+    TEST_ASSERT(g_np_flushes >= 1 && g_np_flush_oldtag == g_np_snap_tag,
+                "the snapshot was flushed at the server");
+    TEST_EXPECT_EQ((u64)dev9p_poll_snap_count_for_test(), (u64)0, "and released");
+    np_teardown(f);
+}
+
+// The blocking path. The snapshot says not ready, so the call arms and parks;
+// the socket readies and the server answers the held arm; the kthread demuxes
+// it, walks the hook, and the woken poller samples again and returns. The arm's
+// answer is only the wake: the verdict is the second snapshot's.
+static void np_poll_entry(void) {
+    struct pollfd pfd = { .fd = g_np_poll_fd, .events = POLLIN, .revents = 0 };
+    u64 t0 = timer_now_ns();
+    s64 r = sys_poll_for_proc(g_np_poll_proc, &pfd, 1, 2000);
+    g_np_poll_took    = timer_now_ns() - t0;
+    g_np_poll_revents = pfd.revents;
+    __atomic_store_n(&g_np_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_np_poll_exited);
+}
+
+void test_dev9p_poll_arm_wakes_the_parked_poller(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    g_np_poll_proc = f->proc; g_np_poll_fd = f->fd;
+    g_np_poll_result = -999; g_np_poll_revents = 0; g_np_poll_took = 0;
+    g_np_poll_exited = false;
+    f->poller = thread_create(kproc(), np_poll_entry);
+    TEST_ASSERT(f->poller != NULL, "thread_create");
+    ready(f->poller);
+
+    TEST_YIELD_UNTIL(g_np_arms == 1);       // parked behind a held arm
+    TEST_EXPECT_EQ((u64)g_np_snaps, (u64)1, "one pass so far: snapshot, then arm");
+    g_np_level = POLLIN;
+    np_inject_rread(g_np_arm_tag, POLLIN);  // the server answers the arm
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_np_poll_result, __ATOMIC_ACQUIRE) != -999);
+
+    TEST_EXPECT_EQ(g_np_poll_result, 1L, "the woken poller reports the socket ready");
+    TEST_EXPECT_EQ((s64)g_np_poll_revents, (s64)POLLIN, "revents POLLIN");
+    TEST_ASSERT(g_np_poll_took < 1000ull * 1000ull * 1000ull,
+                "woken by the arm, not by the deadline");
+    TEST_EXPECT_EQ((u64)g_np_snaps, (u64)2, "the verdict came from a fresh snapshot");
+    np_teardown(f);
+}
+
+// An arm a full ring kept off the wire leaves the fd uncovered, so the park is
+// bounded by the retry timer -- and that timer's expiry is a WAKE, not the call's
+// timeout (poll buggy_no_retry, buggy_retry_is_timeout). Every arm here meets a
+// full ring; the socket readies 60 ms in. Without the timer the call sleeps to
+// its 500 ms deadline; taking the timer for the timeout returns 0 at ~10 ms.
+void test_dev9p_poll_retry_timer_is_a_wake(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    g_np_eagain_after_snap = 1;
+    u64 t0 = timer_now_ns();
+    g_np_rise_level = POLLIN;
+    g_np_rise_ns    = t0 + 60ull * 1000ull * 1000ull;
+    u64 retries0 = poll_total_arm_retries();
+    u64 fs0      = poll_total_snap_failsafes();
+    struct pollfd pfd = { .fd = f->fd, .events = POLLIN, .revents = 0 };
+    s64 r = sys_poll_for_proc(f->proc, &pfd, 1, 500);
+    u64 took = timer_now_ns() - t0;
+    TEST_EXPECT_EQ(r, 1L, "the retry woke a pass that found the socket ready");
+    TEST_EXPECT_EQ((s64)pfd.revents, (s64)POLLIN, "revents POLLIN");
+    TEST_ASSERT(took < 250ull * 1000ull * 1000ull,
+                "served by the retry timer, not the 500 ms deadline");
+    TEST_ASSERT(poll_total_arm_retries() >= retries0 + 2u,
+                "non-vacuous: the park was bounded by the timer, repeatedly");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)0, "no arm ever reached the server");
+    TEST_EXPECT_EQ(poll_total_snap_failsafes(), fs0, "no fail-safe");
+    TEST_ASSERT(!g_np_client.dead, "the session survived every refused arm");
+    np_teardown(f);
+}
+
+// A wider poller replaces the arm with one covering both. A widen that cannot
+// be sent keeps the old arm, so the pollers it covers stay covered: its answer
+// still wakes them. One that is sent flushes the old arm only after its
+// replacement is on the wire: the flush reaches the server after the new arm.
+void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    struct poll_waiter *pw1 = &f->pw[0], *pw2 = &f->pw[1], *pw3 = &f->pw[2];
+
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLIN, pw1), 1L, "POLLIN armed");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)1, "one arm held");
+    u16 first = g_np_arm_tag;
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLIN, pw2), 1L,
+                   "a second POLLIN poller reuses it");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)1, "no new arm for covered events");
+
+    // The widen meets a full ring. Two refusals, so that a flush sent before
+    // the replacement would be refused too rather than take the only one.
+    g_np_mq.eagain_budget = 2;
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLOUT, pw3), 0L,
+                   "a widen that meets a full ring is uncovered");
+    g_np_mq.eagain_budget = 0;
+    np_inject_rread(first, POLLIN);         // the server answers the old arm
+    TEST_YIELD_UNTIL(pw1->ready && pw2->ready);   // its pollers were still covered
+    TEST_EXPECT_EQ((u64)g_np_flushes, (u64)0, "and the old arm was kept, not flushed");
+    poll_waiter_list_unregister(pw1);
+    poll_waiter_list_unregister(pw2);
+    poll_waiter_list_unregister(pw3);      // the core's Rearm, before its next pass
+    TEST_YIELD_UNTIL(dev9p_poll_op_count_for_test() == f->ops0);
+    poll_waiter_init(pw1, &f->r[0]); poll_waiter_init(pw3, &f->r[2]);
+
+    // The widen goes out; only then is the arm it replaces flushed.
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLIN, pw1), 1L, "POLLIN armed again");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)2, "a fresh arm");
+    u16 second = g_np_arm_tag;
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLOUT, pw3), 1L, "the widen is sent");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)3, "a union arm went out");
+    TEST_ASSERT(g_np_flushes == 1 && g_np_flush_oldtag == second, "the arm it replaced was flushed");
+    TEST_ASSERT(g_np_flush_seq > g_np_arm_seq, "after the union arm reached the server");
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)(f->ops0 + 1u),
+                   "one arm linked");
+
+    poll_waiter_list_unregister(pw1);
+    poll_waiter_list_unregister(pw3);
+    np_teardown(f);
+}
+
+// #294 cancel-at-close. An arm outstanding at dev9p_close is CANCELLED (Tflush)
+// and the `ready`-fd Tclunk delivered -- not extinct (the pre-#294
+// dev9p_poll_priv_release extincted on a live op) and not leak (the bug: the
+// kthread-GC-deferred Tclunk could never reach netd, leaving the slot pinned).
+// The hook comes off first, as the poll core's sweep does before it drops the
+// Spoor. The collector is told to leave stranded arms alone, so the close is
+// what cancels this one (the collector's own half is the next test).
+void test_dev9p_poll_cancel_at_close(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    struct poll_waiter *pw = &f->pw[0];
+    dev9p_poll_test_gc(DEV9P_POLL_GC_SKIP);
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLIN, pw), 1L, "armed");
+    TEST_EXPECT_EQ((u64)g_np_arms, (u64)1, "the arm is held at the server");
+    u16 arm_tag = g_np_arm_tag;
+    struct dev9p_priv *ncp = dev9p_priv_of(f->ready);
+    TEST_ASSERT(ncp != NULL && ncp->fid_owned, "the walked Spoor owns its fid");
+    u32 want_fid = ncp->fid;
+    poll_waiter_list_unregister(pw);
+
+    // Close the readiness Spoor (its only handle) with the arm still out.
+    TEST_EXPECT_EQ((s64)handle_close(f->proc, f->fd), 0L, "close the ready fd");
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)f->ops0,
+                   "the arm was torn down at close (registry back to baseline)");
+    TEST_ASSERT(g_np_flushes >= 1 && g_np_flush_oldtag == arm_tag,
+                "the outstanding arm was cancelled (Tflush)");
+    // The Tflush leaves the arm's tag awaiting_flush; the clunk still succeeds
+    // because any_outstanding_on_fid does not count a flushed op.
+    TEST_ASSERT(g_np_ready_clunked,
+                "the `ready`-fd Tclunk was delivered at close (#294 leak fix)");
+    TEST_EXPECT_EQ((u64)p9_session_fid_bound(&g_np_client.session, want_fid), (u64)0,
+                   "the readiness fid is unbound after close");
+    dev9p_poll_test_gc(DEV9P_POLL_GC_RUN);
+    np_teardown(f);
+}
+
+// The collector's half of cancel-at-close, made deterministic: the kthread is
+// stopped after it collects the stranded arm and before it frees it, and the
+// file is closed right there. The close finds no arm to cancel, so the arm's
+// read must already be flushed, or the session refuses the close's Tclunk (a
+// live read still targets the fid) and the server's slot stays bound
+// (net_poll_teardown BUGGY_SPLIT_GC).
+void test_dev9p_poll_gc_flushes_with_the_unlink(void) {
+    struct np_fixture *f = np_setup();
+    TEST_ASSERT(f != NULL, "fixture");
+    struct poll_waiter *pw = &f->pw[0];
+    dev9p_poll_test_gc(DEV9P_POLL_GC_HOLD);
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLIN, pw), 1L, "armed");
+    u16 arm_tag = g_np_arm_tag;
+    struct dev9p_priv *ncp = dev9p_priv_of(f->ready);
+    TEST_ASSERT(ncp != NULL && ncp->fid_owned, "the walked Spoor owns its fid");
+    u32 want_fid = ncp->fid;
+    poll_waiter_list_unregister(pw);           // the poll is over: the arm is stranded
+
+    TEST_YIELD_UNTIL(dev9p_poll_gc_held_for_test());
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)f->ops0,
+                   "the collector took the arm off the registry");
+    TEST_EXPECT_EQ((s64)handle_close(f->proc, f->fd), 0L, "close the ready fd, the kthread held");
+    TEST_ASSERT(g_np_ready_clunked, "the close's Tclunk went out, not refused");
+    TEST_EXPECT_EQ((u64)p9_session_fid_bound(&g_np_client.session, want_fid), (u64)0,
+                   "the readiness fid is unbound");
+    TEST_ASSERT(g_np_flushes >= 1 && g_np_flush_oldtag == arm_tag,
+                "the collector had flushed the arm in the step that unlinked it");
+    dev9p_poll_test_gc(DEV9P_POLL_GC_RUN);
+    np_teardown(f);
 }
 
 // =============================================================================

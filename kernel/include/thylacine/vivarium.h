@@ -1933,12 +1933,6 @@ bool vivarium_pollfds_to_fdset(const struct pollfd *pfds, u32 count,
                                u8 *rd, u8 *wr, u8 *ex, u32 *out_bits,
                                s32 *out_err);
 
-// The budget a caller-requested timeout of 0 gets when the array holds a /net
-// socket, so netd's async readiness probe has a chance to land (task #98; the
-// reasoning is at the use site in viv_ppoll). Small enough that a zero-timeout
-// poll is still "immediate", generous enough for a loopback round trip.
-#define VIV_PPOLL_PROBE_MS 10
-
 // The reverse step: which note kind is this note NAME? PURE.
 //
 // Takes the name rather than a bit because NOTE_BIT_TTY is one bit for five

@@ -60,6 +60,17 @@ int dev_register(struct Dev *d) {
         extinction("dev_register: .wstat_native without .perm_enforced "
                    "(#47: perm_wstat_check is the only wstat authority gate)");
 
+    // #98: readiness that lives in a server is all three remote slots or none,
+    // and never beside .poll. The poll core calls the release and the arm of any
+    // Dev whose snapshot slot it used, so a partial set is a NULL call at the
+    // first poll of such a file rather than a refusal here.
+    if (d->poll_snapshot || d->poll_snapshot_release || d->poll_arm) {
+        if (!d->poll_snapshot || !d->poll_snapshot_release || !d->poll_arm)
+            extinction("dev_register: a remote-readiness slot without the other two");
+        if (d->poll)
+            extinction("dev_register: .poll beside the remote-readiness slots");
+    }
+
     // Collision check — both dc and name must be unique. The bestiary's
     // primary lookup is by dc (the on-wire identity that walks/syscalls
     // dispatch through); name collisions are a separate confusion class.

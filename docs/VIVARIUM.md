@@ -782,17 +782,17 @@ that is a memory-safe guest-self-race, not a kernel hazard. (The socktab itself
 now takes a lock; §5.5.2. The stronger "wholly unobservable" guarantee held only
 while the Proc was single-threaded.)
 
-**Readiness is not knowable synchronously, and the fix for that is latency, not
-a guess.** netd's probe is asynchronous: `dev9p.poll` *submits* it and answers
-from a cache the freshly-opened fd does not yet have. A strict zero-timeout scan
-would therefore report "nothing ready" for a socket that is plainly writable —
-and a caller polling with timeout 0 in a loop would never make progress at all.
-So a caller-supplied timeout of **0** gets a small budget (10 ms) when a socket
-is actually in the array. That changes the *latency*, never the *answer*: what
-comes back is netd's real verdict. A probe that misses even that budget yields
-not-ready and the caller retries — the safe direction. It is a mitigation rather
-than a closure; task #98 holds the two real fixes, both of which sit on the
-audited net-6b surface.
+**Readiness is asked of netd, and a zero timeout gets netd's answer (#98,
+closed 2026-09-28 by the SAMPLE/ARM split, NET-DESIGN 12.2).** Every pass of
+the kernel's poll sends each socket's `ready` file a SNAPSHOT read, which netd
+answers at once, 0 included, and the verdict waits until every snapshot of the
+pass is answered. So a zero-timeout scan reports a plainly writable socket
+writable, and the translator passes a caller's timeout through untouched --
+the 10 ms budget it used to add to a zero timeout is gone. The cost is one
+netd round trip per pass; a netd that does not answer within 1 s is reported
+not ready and counted, a fail-safe the gates require to stay at zero. The
+`ready` file is still walked, opened and clunked on every call; NP-5 keeps it
+open outside the guest's fd table.
 
 **One netd change was owed and is paid here (#220).** POSIX defines `POLLIN` on
 a *listener* as "a connection is pending — `accept` will not block". netd
@@ -3442,7 +3442,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **`connect` after a *constrained* `bind` is refused** (§5.5.3, V-5b) | netd's dial verb carries the REMOTE endpoint only (its `!local` suffix is parsed and ignored), so a client that bound a specific source port cannot be honoured and gets `EOPNOTSUPP` rather than a silent ephemeral port. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not already doing and proceeds normally |
 | **`listen`'s backlog is netd's** (§5.5.3, V-5b) | The `backlog` argument is dropped: netd owns its accept queue (depth 1 today) and exposes no way to request another. Linux also treats the value as a hint and clamps it to a system maximum, so a caller cannot distinguish this from an ordinary clamp — but a second connection arriving before the first is accepted is refused rather than queued |
 | **`accept`'s peer address degrades to `0.0.0.0:0`** (§5.5.3, V-5b) | The address comes from a second read of the connection's `remote` file. If that read fails the accept still succeeds — the peer genuinely is connected, and failing would be worse — and the `sockaddr_in` is written all-zero rather than left holding the caller's stale bytes. Not reachable in normal operation; listed because a caller cannot tell it apart from a genuine `0.0.0.0` peer |
-| **A zero-timeout `ppoll` over a socket takes up to 10 ms** (§5.5.4, V-5c, task #98) | Readiness lives in netd, one RPC away, and the probe is asynchronous — so a literal zero-timeout scan would answer "nothing ready" for a plainly writable socket, and a caller looping on timeout 0 would never progress. A requested 0 therefore gets a 10 ms budget when a socket is in the array. The *answer* is netd's real verdict; only the latency differs, and a caller-supplied timeout is never touched. A probe that misses the budget yields not-ready and the caller retries |
+| **A `ppoll` over a socket costs a netd round trip, even at timeout 0** (§5.5.4; #98 closed at NP-4c) | Readiness lives in netd, so each pass asks it -- a snapshot netd answers at once -- and the verdict waits for the answer: a zero timeout returns netd's real verdict without sleeping, and a caller's timeout is never touched. A netd that does not answer within 1 s is reported not ready and counted (the gates require zero). Until NP-5 the call also walks, opens and clunks each socket's `ready` file |
 | **`ppoll` with a `sigmask` is refused** (§5.5.4, V-5c) | The atomic mask swap is ppoll's entire reason to exist over `poll()`, and doing it non-atomically would re-open the exact race the caller chose ppoll to close. `ENOSYS` rather than an approximation. musl's `poll()` passes NULL, so the common path is unaffected; only a program using ppoll *for its signal semantics* is |
 | **`pselect6` with a `sigmask` is refused** (§5.5.4, V-5c-2) | Same reason as `ppoll`'s, and note the sixth argument is a POINTER to `{ss, ss_len}` — aarch64 caps a syscall at six registers — so a non-NULL pair is declined without being dereferenced. A NULL sixth argument is unambiguously "no mask", which is the common path |
 | **A set `exceptfds` bit is refused** (§5.5.4, V-5c-2) | Native poll has no `POLLPRI`: the requestable set is `(POLLIN\|POLLOUT)`, full stop. Dropping the bit silently — what pouch's userspace `select` does (task #99 F-b) — turns a *pure* `exceptfds` wait into an infinite block rather than an error, and mapping it to `POLLIN` would report ordinary data as an exception. A NULL or all-zero `exceptfds` is not a request and passes through |
@@ -3573,7 +3573,7 @@ formality.
 | **#93** process creation (clone/execve/wait4) | **The named next chunk, and the arc gate's blocker** -- "an Alpine shell runs" needs `fork`. Not a renumber: Linux `clone(flags, stack, ptid, tls, ctid)` versus a `SYS_SPAWN_*` family that takes a *program* rather than a continuation, and `fork()` has no native counterpart at all. Wants its own scripture pass. It also **falsifies two premises the socket family rests on** -- both the socktab's lock-freedom and the transient-fd invisibility assume a `PHENO_LINUX` Proc cannot spawn a thread -- so `viv_sock_connect`'s re-read of `e->proto`/`e->n` after a blocking write is the first line to revisit when it lands |
 | **#91** exit status is boolean | Thylacine-wide, not vivarium-specific, and `docs/ERRORS.md` is ABI-bearing -- the exit-status **encoding** needs user signoff before any impl. Touches the death path (#809/#811), so it wants its own chunk with the usual death-lineage care |
 | **#95** SIGTERM needs its own note | An I-19 supported-set addition = an ABI change to the notes surface. Signoff |
-| **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly |
+| **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly. **CLOSED 2026-09-28** by the SAMPLE/ARM split (netd and ptyfs at NP-3b, the kernel at NP-4c): a snapshot read answered at once is the only sample, and the 10 ms budget is deleted (§5.5.4) |
 | **#90** container `/proc/self` names the mounter | The remedies section 6.13 names both need a per-op identity channel, which is a new kernel surface |
 | **#99** pouch `select(2)`'s four defects | Userspace pouch, and the kernel translator already avoids all four (V-5c-2). Tracked, not arc-blocking |
 | **#106** `T_E_SPIPE` (29) is unregistered | Raised BY the round, as F1's deliberate residual. Appending an errno is an `ERRORS.md` change and `ERRORS.md` is ABI-bearing, so it needs signoff -- and the alternative (`EINVAL`) is the "differently wrong" substitution #100 declined. Published in §9's DEGRADED table meanwhile |

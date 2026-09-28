@@ -273,11 +273,80 @@ is shared with poll arms that are held until readiness. That is enqueued in
 OPEN-BUGS as a design question. It needs one, because a sync op that waits on
 tags held by readiness waits could wait forever.
 
+**NP-4c, the kernel.** Three Dev slots replace dev9p's `.poll`:
+`poll_snapshot`, `poll_snapshot_release` and `poll_arm`. A pass of the poll core
+now scans (a local fd registers and samples; a remote fd is sent a snapshot and
+hooks nothing), settles (every snapshot of the pass answered, or failed safe
+after a fixed 1 s from the scan's end, an unsent one resent every 1 ms),
+decides (the clock decides TIMEDOUT), arms each remote fd it will wait on
+(an arm the ring refused bounds the park by a 10 ms retry timer) and parks. The
+per-Spoor cache, `DEV9P_POLL_VALID` and the vivarium's 10 ms widening are gone.
+A fail-safe prints `poll: FAILSAFE`, and `tools/test.sh` fails a boot that
+prints one.
+
+**Found while writing a test: the collector let go of an arm too early.** The
+kthread took a stranded arm off its registry under `g_dev9p_poll_lock` and
+flushed its read only after the unlock (#294's Phase 1 and Phase 2b). A close in
+between found no arm to cancel, and the session refused the close's Tclunk
+because a read on the fid was still live. `dev9p_close` has no fallback, so the
+server's slot stayed bound until the session ended. The flush now runs in the
+locked step that unlinks the arm (lock order `g_lock -> c->lock`, which the
+arm's submit already used). `net_poll_teardown.tla` gained `BUGGY_SPLIT_GC`,
+red on `Liveness`. The regression test stops the kthread in that window
+(collector mode HOLD) and closes the file there. With the old order the console
+printed `clunk of fid 1 refused rc 5` and the test failed.
+
+**A red for the wrong reason.** My first widen test went red under its
+sabotage (the old arm flushed before its replacement is on the wire), but only
+because the setup's full-ring budget ran out one refusal early. The assert that
+failed was about the ring, not about coverage. A sabotage that reddens a test
+through its fixture proves the fixture, not the rule. The test now gives the
+ring two refusals, answers the old arm, and asserts its pollers were woken.
+Both widen sabotages fail at exactly that line.
+
+**The red runs, and a test that could not fail cleanly.** Fifteen sabotages, one
+build and boot each, in three batches. Every one of the ten `dev9p.poll_*` tests went red on its
+named assert under at least one. The loud fail-safe passed every kernel test
+and failed `test.sh` on its console line. Under `no_qtpoll_gate` the
+regular-file test failed as intended, then left a live snapshot whose slot was
+on its dead stack frame. The answer landed there, and the next test hung the
+boot for 300 s. The other tests had the same exposure through hooks on their
+stacks, a poller thread and a global client the next setup re-initialised under
+the kthread. The fixture and its hooks now live in static storage. `np_setup`
+refuses while a fixture is up, and the runner releases one a failed test left
+behind (`NP-FIXTURE`). Rerun: each sabotage reddens its own test and no other,
+with no hang. `dev_register` now refuses a Dev with a partial triple; the
+sabotage without `poll_arm` extincts the boot there.
+
+**The on-device control.** The in-kernel tests cannot show that a guest sees
+the fix, so one sabotage answers a real session's readiness file from nothing
+on a pass that cannot wait (the old cache miss) and leaves the test path alone.
+Every kernel test passed (1742/1742), and the boot failed at exactly
+`joey: V-1b linux-phenotype leg FAILED marker=L113`: viv-pheno-probe's
+zero-timeout `ppoll` of a writable socket is a witness of the closure, not
+only of the old 10 ms budget.
+
+**The refusals, pre-existing.** Every boot prints
+`9p: close: clunk of fid N refused rc 5` about fourteen times, NP-4c or not.
+One instrumented boot named the path of each of its sixteen. Thirteen come
+after the server has gone (the corvus test that tears its connection down, and
+the vivarium's `/dio/sys` and `/dio/proc` as each container's diorama exits),
+so the fids went with the connection; the line only reads like a leak. Three
+are a leak: `/goroot/bin/go` on a live session, never sent.
+`client_send_flow` refuses any send from a thread whose Proc is dying, before
+it tries the ring, so a killed process's last-ref close of a 9P file drops its
+Tclunk, and the server holds the fid for the session's life -- for the root
+sessions, the uptime. The comment above the call calls this a narrow race; the
+check is unconditional. Plan 9 queues exit-time closes to a kernel process
+(`ccloseq`, `closeproc`); Linux v9fs retries once and then leaks the fid
+until unmount. The fix is a design choice, so it waits for the operator's vote
+(OPEN-BUGS).
+
 **Open.**
-- NP-4, the kernel: the dev9p_poll rewrite, poll.c's settle and arm, deleting
-  VIV_PPOLL_PROBE_MS, and fixing the tag-exhaustion POLLERR. Its tests include
-  a red control and a deferring server. Then a Fable audit, the suite and the
-  SMP gate.
+- NP-4's Fable audit (NP-1 through NP-4c), the suite on the squash, and the
+  SMP gate (ubsan-smp8 and default-smp1).
+- The kill-time Tclunk leak: a design vote, then the fix, its test and an
+  audit.
 - Then the aux-3 fast-forward, and after it NP-5 (the vivarium's per-call open
   of each socket's `ready` file).
 - ~/tla2tools.jar is still the stale 2.19 build. It is the operator's file, and

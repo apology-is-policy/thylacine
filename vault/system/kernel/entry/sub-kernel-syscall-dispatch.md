@@ -1351,3 +1351,17 @@ one named errno in a call whose other refusals stay the flat -1
 ([[sub-kernel-syscall-abi]]); the votes are
 [[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
 [[dec-2026-09-25-sys-mount-emount]].
+
+## viv_poll_translated passes a zero timeout through (2026-09-28, #98 NP-4c)
+
+The guest poll translation no longer widens a literal timeout of 0 to
+`VIV_PPOLL_PROBE_MS` when a socket is in the set; `any_socket` and the budget
+are deleted. The budget covered for a poll core that answered a remote
+readiness file from a cache. The core now sends each remote file a snapshot
+its server answers at once and decides only after every snapshot of the pass
+is answered ([[sub-kernel-poll]]), so `sys_poll_for_proc` with timeout 0
+returns netd's real verdict without the widening. Everything else in the
+translation is unchanged: each socket's fd is swapped for its QTPOLL `ready`
+sibling (opened per call, which is the guest-fd consumption V-5d F6 records
+and NP-5 retires), caller-disabled entries are compacted away first (V-5d F1),
+and the result is mapped back to the guest's fd numbers.

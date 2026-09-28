@@ -2333,9 +2333,9 @@ unsafe fn run_linux() -> ! {
     // readiness for anything would pass it. It is meaningful only PAIRED with
     // L110 below, which shows the same fd DOES report POLLIN once a call
     // arrives: together they say the signal fires when it should and not when
-    // it should not. (Nor is a real timeout optional here: with a zero timeout
-    // this leg would pass because netd's probe had not answered yet, which is
-    // the same nothing wearing a different disguise -- task #98.)
+    // it should not. (A real timeout, not zero: a zero-timeout call is answered
+    // by netd's snapshot alone, and only a call that waits also shows that no
+    // arm wakes it with a false "ready".)
     let ts_200ms: [i64; 2] = [0, 200_000_000];
     pfd[0] = PollFd { fd: srv3 as i32, events: POLLIN, revents: 0 };
     leg!(
@@ -2374,12 +2374,12 @@ unsafe fn run_linux() -> ! {
     // at once, so this establishes that readiness for THIS fd is being answered
     // truthfully before anything below asks it to stay silent.
     //
-    // It also pins the zero-timeout mitigation. netd's readiness probe is
-    // ASYNCHRONOUS -- the first poll of a freshly-opened `ready` fd submits it
-    // and cannot answer it -- so a literal zero-timeout scan would report
-    // not-ready for a plainly writable socket. viv_ppoll gives a caller-supplied
-    // 0 a small budget for the probe to land (task #98), and this leg is what
-    // says so: remove the budget and it fails.
+    // It also pins the zero-timeout answer (task #98). The kernel asks netd for
+    // a readiness snapshot, which netd answers at once, and decides only after
+    // the answer is in, so a zero-timeout scan of a plainly writable socket
+    // reports it writable although the call never waits. Answer that scan from
+    // anything but the snapshot -- as the kernel did before, from a cache the
+    // freshly opened `ready` fd did not have -- and this leg fails.
     pfd[0] = PollFd { fd: afd3 as i32, events: POLLOUT, revents: 0 };
     leg!(
         rep,
@@ -2577,9 +2577,8 @@ unsafe fn run_linux() -> ! {
         b"L136\n"
     );
 
-    // A real timeout, not zero: readiness for a /net socket is one RPC away, so
-    // a zero-timeout answer would be "not yet" rather than the truth (task #98,
-    // and the same reason L107 spends 200ms).
+    // A real timeout, though zero would now do: the leg is about the restored
+    // fd numbers, and L113 already owns the zero-timeout answer (task #98).
     let ts_200: [i64; 2] = [0, 200_000_000];
     rdset = [0; 16];
     wrset = [0; 16];

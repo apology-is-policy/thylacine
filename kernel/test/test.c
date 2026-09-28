@@ -19,10 +19,12 @@
 #include "../../arch/arm64/uart.h"
 
 #include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
+#include <thylacine/dev9p.h>        // the poll collector's test mode, released per test
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
+#include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
 #include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
 
@@ -1529,7 +1531,16 @@ void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_readdir_cookie_high_bit(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+void test_dev9p_poll_snapshot_answers_at_zero_timeout(void);
+void test_dev9p_poll_local_and_remote_both_reported(void);
+void test_dev9p_poll_snapshot_shortage_is_resent(void);
+void test_dev9p_poll_unanswered_snapshot_fails_safe(void);
+void test_dev9p_poll_arm_wakes_the_parked_poller(void);
+void test_dev9p_poll_retry_timer_is_a_wake(void);
+void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
 void test_dev9p_poll_cancel_at_close(void);
+bool test_dev9p_np_release(void);
+void test_dev9p_poll_gc_flushes_with_the_unlink(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_unlink_rename_errno_propagates(void);
@@ -3650,7 +3661,15 @@ struct test_case g_tests[] = {
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "dev9p.readdir_cookie_high_bit", test_dev9p_readdir_cookie_high_bit, false, NULL },
     { "dev9p.poll_regular_file_always_ready", test_dev9p_poll_regular_file_always_ready, false, NULL },
+    { "dev9p.poll_snapshot_answers_at_zero_timeout", test_dev9p_poll_snapshot_answers_at_zero_timeout, false, NULL },
+    { "dev9p.poll_local_and_remote_both_reported", test_dev9p_poll_local_and_remote_both_reported, false, NULL },
+    { "dev9p.poll_snapshot_shortage_is_resent", test_dev9p_poll_snapshot_shortage_is_resent, false, NULL },
+    { "dev9p.poll_unanswered_snapshot_fails_safe", test_dev9p_poll_unanswered_snapshot_fails_safe, false, NULL },
+    { "dev9p.poll_arm_wakes_the_parked_poller", test_dev9p_poll_arm_wakes_the_parked_poller, false, NULL },
+    { "dev9p.poll_retry_timer_is_a_wake", test_dev9p_poll_retry_timer_is_a_wake, false, NULL },
+    { "dev9p.poll_widen_keeps_the_old_arm_until_replaced", test_dev9p_poll_widen_keeps_the_old_arm_until_replaced, false, NULL },
     { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
+    { "dev9p.poll_gc_flushes_with_the_unlink", test_dev9p_poll_gc_flushes_with_the_unlink, false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.unlink_rename_errno",     test_dev9p_unlink_rename_errno_propagates, false, NULL },
@@ -4246,6 +4265,32 @@ void test_run_all(void) {
             uart_puts(" pages released) ");
             if (!current_test->failed)
                 test_fail("test left the pool parked (see POOL-PARKED)");
+        }
+
+        // The readiness knobs are two more. A shortened snapshot bound is also a
+        // QUIET one, so left set it would hide every later fail-safe from the
+        // gates that grep for them; a poll collector left skipping or held
+        // stops every later stranded arm's teardown.
+        bool knob_bound = poll_test_snap_bound_release();
+        bool knob_gc    = dev9p_poll_test_gc_release();
+        if (knob_bound || knob_gc) {
+            uart_puts("POLL-KNOB(");
+            if (knob_bound) uart_puts("snap-bound");
+            if (knob_bound && knob_gc) uart_puts(",");
+            if (knob_gc) uart_puts("gc-mode");
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left a poll test knob set (see POLL-KNOB)");
+        }
+
+        // And the dev9p readiness fixture: a test that fails before its
+        // teardown leaves the fixture's client, file, hooks and poller thread
+        // up, and the next setup must not re-initialise a client the poll
+        // kthread may still pump.
+        if (test_dev9p_np_release()) {
+            uart_puts("NP-FIXTURE ");
+            if (!current_test->failed)
+                test_fail("test left the dev9p readiness fixture up (see NP-FIXTURE)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the
