@@ -1611,9 +1611,18 @@ every gate; that a healthy server answers within 1 s is a timing assumption
 the model states and cannot check, and the runtime owns it (the counter, the
 gates, a test server that defers the snapshot).
 
-Spec action ↔ impl mapping: **filled at NP-4** (`kernel/dev9p_poll.c`,
-`kernel/poll.c`, `kernel/9p_client.c`; the `ready` file's snapshot branch in
-`usr/netd/src/server.rs` and `usr/ptyfs/src/server.rs` at NP-3). The poll
+Spec action ↔ impl mapping, the server half (NP-3b): `SnapshotReply` and
+the on-arrival half of `ArmReply` are `ninep::ready_answer`
+(`usr/lib/ninep/src/lib.rs`), which netd's `ready` (`usr/netd/src/server.rs`,
+the `FK_READY` arm of the Tread dispatch) and ptyfs's `<n>ready`
+(`usr/ptyfs/src/server.rs`, `is_ready_path`) call with their level function
+(`check_ready`, `ready_revents`). It asks the level once, on arrival, for a
+snapshot and an arm alike -- `edge_arm`'s obligation, held by the host tests
+`a_snapshot_is_answered_at_once_even_when_nothing_is_ready` and
+`an_arm_sent_after_the_rise_is_answered_at_once`, each seen red with the
+rule removed. A held arm's later answer is `poll_ready` (netd) and
+`poll_reads` (ptyfs). The kernel half is **filled at NP-4**
+(`kernel/dev9p_poll.c`, `kernel/poll.c`, `kernel/9p_client.c`). The poll
 core's side of the settle -- where it sits in the loop, the death unwind, the
 snapshot's lifetime -- is `poll.tla`'s.
 

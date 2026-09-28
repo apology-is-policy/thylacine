@@ -221,12 +221,13 @@ const FK_MASTER: u64 = 1;
 const FK_SLAVE: u64 = 2;
 const FK_CTL: u64 = 3;
 // The per-pts poll-readiness file /dev/pts/<n>ready (item 10; the netd
-// /net/<proto>/N/ready precedent, net-6b-2b). A QTPOLL node: dev9p.poll probes
-// it with a Tread(offset = the poll mask, count = 4) and it replies a 4-byte LE
-// revents bitmap (or defers until satisfiable). A native poller (ut) polls THIS
-// file for its SLAVE fd's readiness -- the slave DATA file stays non-QTPOLL
-// (its reads park server-side), so a data read is never misread as a probe. Not
-// an EOF-counted endpoint; a hidden companion (walkable, not in readdir).
+// /net/<proto>/N/ready precedent, net-6b-2b). A QTPOLL node: dev9p.poll reads it
+// with a Tread whose offset carries the poll mask, and it replies the LE revents
+// as p9::ready_answer decides (a snapshot at once, an arm when satisfiable). A
+// native poller (ut) polls THIS file for its SLAVE fd's readiness -- the slave
+// DATA file stays non-QTPOLL (its reads park server-side), so a data read is
+// never misread as a readiness read. Not an EOF-counted endpoint; a hidden
+// companion (walkable, not in readdir).
 const FK_READY: u64 = 4;
 
 // The poll event bits the `<n>ready` file speaks (item 10; the kernel poll.h
@@ -1075,11 +1076,11 @@ struct PendingRead {
     master: bool, // reading the master endpoint (drain s2m) vs the slave (m2s)
     tag: u16,
     cap: usize,
-    // A NON-consuming poll-readiness probe (item 10), not a data read. When true,
-    // poll_reads recomputes the revents bitmap (never drains) and delivers a
-    // 4-byte reply once (revents & effective_mask) != 0; `mask` is the requested
-    // poll events (POLLIN|POLLOUT) from the probe Tread's offset. Sharing the one
-    // Vec means the clunk/Tflush/teardown cancel sites cover a parked probe too.
+    // A held readiness ARM (item 10; NET-DESIGN 12.2), not a data read. When true,
+    // poll_reads recomputes the revents bitmap (never drains) and delivers the
+    // first `cap` bytes of it once (revents & effective_mask) != 0; `mask` is the
+    // requested poll events (POLLIN|POLLOUT) from the arm's offset. Sharing the one
+    // Vec means the clunk/Tflush/teardown cancel sites cover a held arm too.
     probe: bool,
     mask: u16,
 }
@@ -1342,7 +1343,7 @@ impl Conn {
             p9::P9_QTFILE
         };
         // The poll-readiness file carries P9_QTPOLL so dev9p caches QTPOLL on the
-        // Spoor -> dev9p.poll probes it (item 10). Single source for walk +
+        // Spoor -> dev9p.poll reads it (item 10). Single source for walk +
         // getattr qids, so both agree.
         if is_ready_path(path) {
             kind |= p9::P9_QTPOLL;
@@ -1586,32 +1587,37 @@ impl Conn {
             return p9::build_rread(&mut self.out_buf, tag, &lb[off..off + k]);
         }
         if is_ready_path(f.path) {
-            // The NON-consuming poll-readiness probe (item 10; the netd ready-file
-            // shape). dev9p.poll encodes the wanted poll mask in the Tread OFFSET
-            // (count = 4). Reply the 4-byte LE revents once satisfiable; else park
-            // (poll_reads re-evaluates -- level-triggered, so a native poller that
-            // requested POLLIN wakes exactly when the slave becomes readable, and
-            // a ^C -- which posts a NOTE, not data -- never spuriously wakes it).
+            // The NON-consuming readiness read (item 10; the netd ready-file shape),
+            // decided by p9::ready_answer: a SNAPSHOT is answered at once, 0
+            // included; an ARM is answered at once if the slave is already ready,
+            // else held until poll_reads sees it ready -- level-triggered, so a
+            // native poller that requested POLLIN wakes exactly when the slave
+            // becomes readable, and a ^C (a NOTE, not data) never wakes it.
             let n = pts_n(f.path);
-            let mask = a.offset as u16;
-            let revents = ptys.ready_revents(n, mask);
-            if revents != 0 {
-                return p9::build_rread(&mut self.out_buf, tag, &(revents as u32).to_le_bytes());
-            }
-            if self.pending_reads.len() >= MAX_FIDS {
-                return self.err(tag, p9::E_PROTO);
-            }
-            self.pending_reads.push(PendingRead {
-                fid: a.fid,
-                slot_n: n,
-                master: false, // a ready file reports SLAVE readiness (item 10)
-                tag,
-                cap: 4,
-                probe: true,
-                mask,
-            });
-            self.defer = true;
-            return Ok(0); // ignored: dispatch returns Disp::Deferred
+            let level = |mask| ptys.ready_revents(n, mask);
+            return match p9::ready_answer(a.offset, a.count, self.msize, level) {
+                p9::ReadyAnswer::Reply { revents, len } => {
+                    let bytes = (revents as u32).to_le_bytes();
+                    p9::build_rread(&mut self.out_buf, tag, &bytes[..len])
+                }
+                p9::ReadyAnswer::Refuse(ecode) => self.err(tag, ecode),
+                p9::ReadyAnswer::Defer { mask, len } => {
+                    if self.pending_reads.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_reads.push(PendingRead {
+                        fid: a.fid,
+                        slot_n: n,
+                        master: false, // a ready file reports SLAVE readiness (item 10)
+                        tag,
+                        cap: len,
+                        probe: true,
+                        mask,
+                    });
+                    self.defer = true;
+                    Ok(0) // ignored: dispatch returns Disp::Deferred
+                }
+            };
         }
         if !is_pts(f.path) {
             return self.err(tag, p9::E_INVAL); // no readable static file (ptmx is open-only)
@@ -1881,14 +1887,14 @@ impl Conn {
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
             if pr.probe {
-                // A poll-readiness probe (item 10): recompute revents (no drain,
-                // no consume) and deliver the 4-byte reply once satisfiable.
-                // ready_revents already masks to the request + always-report HUP,
-                // so a non-zero value is exactly "deliver now" (else keep parked).
+                // A held readiness arm (item 10): recompute revents (no drain, no
+                // consume) and deliver the reply once satisfiable. ready_revents
+                // already masks to the request + always-report HUP, so a non-zero
+                // value is exactly "deliver now" (else keep holding it).
                 let revents = ptys.ready_revents(pr.slot_n, pr.mask);
                 if revents != 0 {
                     self.pending_reads.remove(i);
-                    if !self.deliver_read(pr.tag, &(revents as u32).to_le_bytes()) {
+                    if !self.deliver_read(pr.tag, &(revents as u32).to_le_bytes()[..pr.cap]) {
                         return false;
                     }
                 } else {

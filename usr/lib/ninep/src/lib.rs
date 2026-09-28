@@ -81,9 +81,10 @@ pub const P9_RFLUSH: u8 = 109;
 pub const P9_QTDIR: u8 = 0x80;
 pub const P9_QTFILE: u8 = 0x00;
 /// Thylacine 9P extension (net-6b-2b; NET-DESIGN section 12.2): a "pollable" file
-/// -- one whose server (netd's per-connection `ready` file) serves a non-consuming
-/// readiness probe. The kernel dev9p.poll probes ONLY a file whose qid.type carries
-/// this bit; an unmarked file is POSIX always-ready. 0x01 is unused in 9P2000.L.
+/// -- one whose server (netd's per-connection `ready`, ptyfs's `<n>ready`) answers
+/// non-consuming readiness reads as [`ready_answer`] decides. The kernel dev9p.poll
+/// reads ONLY a file whose qid.type carries this bit; an unmarked file is POSIX
+/// always-ready. 0x01 is unused in 9P2000.L.
 pub const P9_QTPOLL: u8 = 0x01;
 
 // Linux dirent type byte (the `d_type` of a Treaddir entry). The kernel
@@ -822,6 +823,58 @@ pub fn build_rreaddir(out: &mut [u8], tag: u16, data: &[u8]) -> Result<usize, ()
     Ok(total)
 }
 
+// =============================================================================
+// Readiness files (NET-DESIGN section 12.2). A Tread of a P9_QTPOLL file carries
+// poll events in its offset; the reply is the satisfied revents as a u32 LE.
+// =============================================================================
+
+/// The poll events a readiness Tread asks about: the offset's low 16 bits.
+pub const P9_POLL_MASK: u64 = 0xFFFF;
+/// Set in a readiness Tread's offset: a SNAPSHOT, answered at once with the
+/// current revents, 0 included, and never held. Clear: the ARM, held until the
+/// file is ready for the mask.
+pub const P9_POLL_SNAPSHOT: u64 = 1 << 16;
+
+/// What a readiness file does with one Tread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyAnswer {
+    /// Reply now: the first `len` bytes of `revents` as a u32 LE.
+    Reply { revents: u16, len: usize },
+    /// Hold the Tread; once the file is ready for `mask`, reply `len` bytes.
+    Defer { mask: u16, len: usize },
+    /// Rlerror with this code: the offset carries a bit the protocol does not
+    /// define, and a future bit must never be read as part of a mask.
+    Refuse(u32),
+}
+
+/// Decide a readiness Tread. `level` returns the file's revents for a mask as
+/// they are now. It is asked once, on arrival, for a snapshot and an arm alike,
+/// so an arm sent after the file became ready is answered at once: the kernel's
+/// snapshot may predate the rise, and an arm that waited for a later one would
+/// park its poller on readiness that already happened. A refused offset is not
+/// evaluated at all.
+pub fn ready_answer(
+    offset: u64,
+    count: u32,
+    msize: u32,
+    level: impl FnOnce(u16) -> u16,
+) -> ReadyAnswer {
+    if offset & !(P9_POLL_MASK | P9_POLL_SNAPSHOT) != 0 {
+        return ReadyAnswer::Refuse(E_INVAL);
+    }
+    let mask = (offset & P9_POLL_MASK) as u16;
+    let len = (msize as usize)
+        .saturating_sub(P9_HDR_LEN + 4)
+        .min(count as usize)
+        .min(4);
+    let revents = level(mask);
+    if revents != 0 || offset & P9_POLL_SNAPSHOT != 0 {
+        ReadyAnswer::Reply { revents, len }
+    } else {
+        ReadyAnswer::Defer { mask, len }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,7 +944,11 @@ mod tests {
 
     #[test]
     fn a_qid_is_thirteen_bytes_kind_version_path() {
-        let q = Qid { kind: P9_QTDIR, version: 0x0102_0304, path: 0x0506_0708_090A_0B0C };
+        let q = Qid {
+            kind: P9_QTDIR,
+            version: 0x0102_0304,
+            path: 0x0506_0708_090A_0B0C,
+        };
         let mut o = [0u8; P9_QID_LEN];
         assert_eq!(pack_qid(&mut o, 0, &q), Ok(P9_QID_LEN));
         assert_eq!(o, [0x80, 4, 3, 2, 1, 0x0C, 0x0B, 0x0A, 9, 8, 7, 6, 5]);
@@ -910,7 +967,10 @@ mod tests {
 
         let n = build_rlerror(&mut o, 7, E_INVAL).unwrap();
         let h = peek_header(&o).unwrap();
-        assert_eq!((n, h.size as usize, h.mtype, h.tag), (P9_HDR_LEN + 4, n, P9_RLERROR, 7));
+        assert_eq!(
+            (n, h.size as usize, h.mtype, h.tag),
+            (P9_HDR_LEN + 4, n, P9_RLERROR, 7)
+        );
         assert_eq!(unpack_u32(&o, P9_HDR_LEN), Ok((E_INVAL, n)));
     }
 
@@ -952,5 +1012,166 @@ mod tests {
         assert!(parse_twalk(&f[..n]).is_ok());
         let n = twalk(1, &[b'x'; P9_NAME_MAX + 1], &mut f);
         assert!(parse_twalk(&f[..n]).is_err());
+    }
+
+    const POLLIN: u16 = 0x001;
+    const POLLOUT: u16 = 0x004;
+    const MSIZE: u32 = 8192;
+
+    #[test]
+    fn a_snapshot_is_answered_at_once_even_when_nothing_is_ready() {
+        let mut asked = None;
+        let a = ready_answer(P9_POLL_SNAPSHOT | POLLIN as u64, 4, MSIZE, |m| {
+            asked = Some(m);
+            0
+        });
+        assert_eq!(a, ReadyAnswer::Reply { revents: 0, len: 4 });
+        assert_eq!(asked, Some(POLLIN));
+    }
+
+    #[test]
+    fn a_snapshot_reports_what_is_ready() {
+        let a = ready_answer(
+            P9_POLL_SNAPSHOT | (POLLIN | POLLOUT) as u64,
+            4,
+            MSIZE,
+            |m| m & POLLOUT,
+        );
+        assert_eq!(
+            a,
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 4
+            }
+        );
+    }
+
+    #[test]
+    fn an_arm_is_held_while_nothing_is_ready() {
+        let a = ready_answer(POLLIN as u64, 4, MSIZE, |_| 0);
+        assert_eq!(
+            a,
+            ReadyAnswer::Defer {
+                mask: POLLIN,
+                len: 4
+            }
+        );
+    }
+
+    #[test]
+    fn an_arm_sent_after_the_rise_is_answered_at_once() {
+        let a = ready_answer(POLLIN as u64, 4, MSIZE, |m| m & POLLIN);
+        assert_eq!(
+            a,
+            ReadyAnswer::Reply {
+                revents: POLLIN,
+                len: 4
+            }
+        );
+    }
+
+    #[test]
+    fn any_other_bit_above_the_mask_is_refused_unevaluated() {
+        let offsets = [
+            1 << 17,
+            P9_POLL_SNAPSHOT | 1 << 17 | POLLOUT as u64,
+            1 << 32 | POLLIN as u64,
+            1 << 63,
+            u64::MAX,
+        ];
+        for off in offsets {
+            let mut evaluated = false;
+            let a = ready_answer(off, 4, MSIZE, |m| {
+                evaluated = true;
+                m
+            });
+            assert_eq!(a, ReadyAnswer::Refuse(E_INVAL), "offset {off:#x}");
+            assert!(!evaluated, "offset {off:#x}");
+        }
+        // One variable away: the snapshot bit alone is part of the protocol.
+        let a = ready_answer(P9_POLL_SNAPSHOT | POLLOUT as u64, 4, MSIZE, |m| m);
+        assert_eq!(
+            a,
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 4
+            }
+        );
+    }
+
+    #[test]
+    fn the_mask_is_exactly_the_low_sixteen_bits() {
+        let mut asked = None;
+        ready_answer(P9_POLL_SNAPSHOT | P9_POLL_MASK, 4, MSIZE, |m| {
+            asked = Some(m);
+            0
+        });
+        assert_eq!(asked, Some(0xFFFF));
+        let a = ready_answer(0, 4, MSIZE, |m| {
+            asked = Some(m);
+            0
+        });
+        assert_eq!(
+            (asked, a),
+            (Some(0), ReadyAnswer::Defer { mask: 0, len: 4 })
+        );
+    }
+
+    #[test]
+    fn the_reply_is_cut_to_the_tread_count_and_the_msize() {
+        let snap =
+            |count, msize| ready_answer(P9_POLL_SNAPSHOT | POLLOUT as u64, count, msize, |m| m);
+        assert_eq!(
+            snap(4, MSIZE),
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 4
+            }
+        );
+        assert_eq!(
+            snap(64, MSIZE),
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 4
+            }
+        );
+        assert_eq!(
+            snap(1, MSIZE),
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 1
+            }
+        );
+        assert_eq!(
+            snap(0, MSIZE),
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 0
+            }
+        );
+        let tight = (P9_HDR_LEN + 4 + 2) as u32;
+        assert_eq!(
+            snap(4, tight),
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 2
+            }
+        );
+        assert_eq!(
+            snap(4, 0),
+            ReadyAnswer::Reply {
+                revents: POLLOUT,
+                len: 0
+            }
+        );
+        // A held arm keeps the cut it arrived with.
+        let a = ready_answer(POLLIN as u64, 2, MSIZE, |_| 0);
+        assert_eq!(
+            a,
+            ReadyAnswer::Defer {
+                mask: POLLIN,
+                len: 2
+            }
+        );
     }
 }

@@ -61,7 +61,7 @@ registry work rather than merely exist:
 - **a history** of the one time this went wrong.
 
 And it is **backlinked from every allocation site in both projects**:
-`9p_wire.h` twice, `ninep.rs` once, and Stratum's own `9p.h` — which points
+`9p_wire.h` twice, the `ninep` crate once, and Stratum's own `9p.h` — which points
 across the project boundary at a Thylacine document, the link that makes the
 authority real rather than aspirational.
 

@@ -159,8 +159,56 @@ and the deleted `poll_buggy_no_point.cfg`. The quaestor MCP server reads a
 stale vault root (it returned spec-poll's 08-01 text); the CLI with `--root`
 reads this tree.
 
+**NP-3: first, where could the tests run?** The voted plan gives NP-3 host
+tests, so the first question was where any could run. netd and ptyfs link
+libthyla-rs unconditionally. libthyla-rs cannot be built for the host, because
+its `_start` is ELF assembly. So tools/test-rust.sh classes all three NO-HOST,
+and a test added to any of them would be counted and never run. The 9P codec
+inside libthyla-rs has 820 lines, no dependencies and no system calls, and for
+the same reason it had never had a test. NP-3a (a4efecd9) moved it unchanged
+into its own crate, `usr/lib/ninep`, re-exported under the old path so that no
+caller changed. It added eight tests of invariants its dossier already claimed,
+and I ran four sabotages, one per invariant family; each turned its test red.
+
+NP-3b put the protocol decision in that crate as `ninep::ready_answer`. A
+snapshot is answered at once, even when the answer is 0. An arm is answered on
+arrival if the file is already ready. Any other offset bit is refused with
+EINVAL. The reply is cut to the Tread's count and the msize. Both servers call
+it with their own level function, so they cannot drift apart. It has seven host
+tests, and five sabotages each turned exactly their own test red. Two of those
+sabotages were the old servers' behaviour and an edge-triggered arm, which is
+the spec's `edge_arm` red, now a unit test as well.
+
+**Found while reading, fixed by the shared cut.** ptyfs replied with 4 bytes to
+a readiness read whatever count the Tread asked for, and its held reply did the
+same. The kernel refuses an Rread longer than its Tread (9p_client.c,
+`r.read_count > count` -> -EIO), so a guest read of fewer than 4 bytes from
+`<n>ready` failed with EIO. netd cut its immediate reply to the count but not
+its held one. **Found while reading, enqueued, not fixed:** netd's fid table
+holds 32 fids per session, and the whole guest uses one session. It also has
+16 socket slots of two or three files each. That this can exhaust the table is
+suspected, not confirmed (OPEN-BUGS).
+
+**On the device.** joey's net-6b probe and pty-probe each read their `ready`
+file directly with pread. The undefined bit came back refused (-22). A POLLOUT
+snapshot came back POLLOUT. A POLLIN snapshot of an idle file came back 0 at
+once. A 1-byte read came back cut to 1 byte. The refusal check runs first on
+purpose. A server that ignores the high bits answers (1<<17)|POLLOUT at once,
+which is a clean failure, where it would hold the POLLIN snapshot and hang the
+boot. The red runs:
+With netd's pre-change file, joey stopped at "net-6b PROBE ready: an
+undefined offset bit was not refused with EINVAL FAILED", and the boot
+extincted (test.sh rc=1). With ptyfs's, pty-probe stopped at the same check,
+joey reported PTY-2e FAILED, and the boot extincted, while netd's witness
+passed in that same boot. Neither run hung.
+
+**A wrong turn.** NP-3a's path search looked for `libthyla-rs/src/ninep.rs`. It
+missed three live mentions written as a bare `ninep.rs`: two in 9P-EXTENSIONS
+and one in the abi-ninep-wire pin. They surfaced while I was checking whether
+9P-EXTENSIONS should record the readiness wire. It should not, since it
+registers message types only. They are repointed in NP-3b.
+
 **Open.**
-- NP-3: netd and ptyfs gain the snapshot branch and refuse unknown offset bits.
 - NP-4, the kernel: the dev9p_poll rewrite, poll.c's settle and arm, deleting
   VIV_PPOLL_PROBE_MS, and fixing the tag-exhaustion POLLERR. Its tests include
   a red control and a deferring server. Then a Fable audit, the suite and the

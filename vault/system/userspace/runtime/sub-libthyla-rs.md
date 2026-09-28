@@ -215,7 +215,10 @@ calls.
 It is a crate of its own, `usr/lib/ninep`, which libthyla-rs re-exports as
 `libthyla_rs::ninep`, so no caller names it differently. libthyla-rs cannot be
 built for the host (its `_start` is ELF assembly), so a test inside it would run
-nowhere; the codec's tests run on the host under `tools/test-rust.sh`.
+nowhere; the codec's tests run on the host under `tools/test-rust.sh`. It
+also holds the one decision both readiness-file servers make,
+`ready_answer` (snapshot, arm, refusal, the reply's cut; NET-DESIGN 12.2),
+so netd and ptyfs cannot drift apart and the decision is tested once.
 
 Its codec invariants are pure wire properties: `pack_X` then `unpack_X` is the
 identity; every unpack short-circuits to `Err(())` rather than over-reading a

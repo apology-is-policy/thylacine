@@ -534,23 +534,23 @@ struct PendingConnect {
 /// immediately via ConnectState::Failed; this bounds only the silent case.
 const CONNECT_TIMEOUT_MS: u64 = 15_000;
 
-/// A deferred readiness probe (net-6b): a `read(/net/<proto>/N/ready)` whose
-/// requested poll mask (the Tread OFFSET) is not yet satisfied. netd HOLDS the
-/// Rread until the socket becomes ready for the mask (or an always-reported
-/// POLLERR/POLLHUP fires), then poll_ready sends the 4-byte revents bitmap. The
-/// kernel dev9p.poll bridge (NET-DESIGN 12.2) is the sole client: it keeps one
-/// outstanding readiness read per polled fd, so a poller parks until the socket
-/// transitions -- the probe-then-observe of net_poll.tla, with no busy loop
-/// (the mask names the specific events to wait for). Non-consuming (it reports
-/// readiness, never dequeues). Cancelled by the fid's clunk / a Tflush on its
-/// tag / teardown / Tversion, exactly like PendingRead. Bounded by MAX_FIDS per
-/// connection (#65 floor).
+/// A held readiness ARM (NET-DESIGN 12.2): a `read(/net/<proto>/N/ready)` without
+/// the snapshot bit, whose poll mask (the Tread OFFSET) was not satisfied when it
+/// arrived. netd HOLDS the Rread until the socket becomes ready for the mask (or
+/// an always-reported POLLERR/POLLHUP fires), then poll_ready sends the revents.
+/// The kernel dev9p.poll bridge is the sole client: it arms a socket only when a
+/// poller is about to park, and the arm's answer is that poller's wake -- the
+/// ArmReply of net_poll.tla, with no busy loop (the mask names the specific
+/// events to wait for). Non-consuming (it reports readiness, never dequeues).
+/// Cancelled by the fid's clunk / a Tflush on its tag / teardown / Tversion,
+/// exactly like PendingRead. Bounded by MAX_FIDS per connection (#65 floor).
 #[derive(Copy, Clone)]
 struct PendingReady {
     fid: u32,    // the fid the read is on (cancelled on its clunk)
     slot_n: u32, // the connection slot whose readiness to report
     tag: u16,    // the held Tread tag (cancelled by a Tflush on it)
     mask: u16,   // the requested poll events (POLLIN | POLLOUT) from the offset
+    len: usize,  // the reply's bytes: the u32 revents cut to the Tread count + msize
 }
 
 /// A blocking weft `data` read holding its Rweftio (Weft-6b-3, RX). The kernel
@@ -1192,7 +1192,7 @@ impl Net {
     /// rate-limit then still starved DNS). Removing the socket leaves nothing to
     /// dispatch -> the ARP stops at once. The slot stays allocated while a fid
     /// still refs it (a stranded QTPOLL `ready` fid, #293 part B); `err` is set so
-    /// check_ready reports POLLERR (completing any stranded readiness probe), and a
+    /// check_ready reports POLLERR (completing any held readiness arm), and a
     /// later slot_unref finds socket=None and frees the slot with no double-remove.
     fn tcp_drop_stuck_connect(&mut self, n: u32) {
         let i = n as usize;
@@ -2628,9 +2628,9 @@ impl Net {
     /// The net-6b readiness computation: the satisfied poll `revents` for
     /// connection `n` against the requested `mask`. POLLIN/POLLOUT are gated by
     /// the request (so a poll(POLLIN) on a writable-but-empty socket reports
-    /// nothing -> DEFER, never a busy loop); POLLERR/POLLHUP are always reported
-    /// (the output-only bits). A non-zero result satisfies the read at once;
-    /// zero means DEFER (park a PendingReady).
+    /// nothing -> an arm waits, never a busy loop); POLLERR/POLLHUP are always reported
+    /// (the output-only bits). A non-zero result answers the read at once; zero
+    /// is a snapshot's answer and holds an arm (a PendingReady).
     fn check_ready(&self, n: u32, mask: u16) -> u16 {
         let mut revents: u16 = 0;
         if mask & POLLIN != 0 && self.slot_poll_readable(n) {
@@ -5221,8 +5221,8 @@ pub struct Conn {
     // Blocking `data` reads holding their Rread (net-6a): each parked on an empty
     // rx, completed by poll_data when bytes arrive (or 0 on EOF).
     pending_reads: Vec<PendingRead>,
-    // Deferred `ready` readiness probes holding their Rread (net-6b): each parked
-    // on a not-yet-satisfied poll mask, completed by poll_ready when the socket
+    // Held `ready` ARMS (net-6b; NET-DESIGN 12.2): each waiting on a poll mask
+    // not satisfied when it arrived, completed by poll_ready when the socket
     // becomes ready per the mask. The dev9p.poll bridge's netd half.
     pending_ready: Vec<PendingReady>,
     // Deferred TCP `data` opens holding their Rlopen (#257): each parked on a
@@ -5603,15 +5603,15 @@ impl Conn {
         !self.pending_connects.is_empty()
     }
 
-    /// Complete any deferred readiness probes whose socket now satisfies the mask
+    /// Complete any held readiness arms whose socket now satisfies the mask
     /// (the net-6b analog of poll_data): the serve-loop pass, called per-Conn
-    /// after net.poll() (so a transition this tick is visible). For each parked
-    /// probe, re-run check_ready(mask): a non-zero revents sends the held Rread
-    /// (the 4-byte bitmap) and removes the pending; a still-zero revents keeps
-    /// waiting. Returns false if a held-Rread write failed (the session is dead
-    /// -> the serve loop tears this connection down). I-9: the single-threaded
-    /// loop runs net.poll() BEFORE this, so a readiness edge cannot be lost
-    /// between h_read's check and the park (the poll_data/poll_dns reasoning).
+    /// after net.poll() (so a transition this tick is visible). For each held
+    /// arm, re-run check_ready(mask): a non-zero revents sends the held Rread
+    /// and removes the pending; a still-zero revents keeps waiting. Returns false
+    /// if a held-Rread write failed (the session is dead -> the serve loop tears
+    /// this connection down). I-9: the single-threaded loop runs net.poll()
+    /// BEFORE this, so a readiness edge cannot be lost between h_read's check
+    /// and the park (the poll_data/poll_dns reasoning).
     pub fn poll_ready(&mut self, net: &mut Net) -> bool {
         let mut i = 0;
         while i < self.pending_ready.len() {
@@ -5620,7 +5620,7 @@ impl Conn {
             if revents != 0 {
                 self.pending_ready.remove(i);
                 let bytes = (revents as u32).to_le_bytes();
-                if !self.deliver_read(pr.tag, &bytes) {
+                if !self.deliver_read(pr.tag, &bytes[..pr.len]) {
                     return false;
                 }
             } else {
@@ -5630,7 +5630,7 @@ impl Conn {
         true
     }
 
-    /// Any deferred readiness probe is parked (the serve loop clamps its poll
+    /// Any readiness arm is held (the serve loop clamps its poll
     /// delay to the floor so a socket transition driven by NIC RX -- not a
     /// pollable 9P fd -- completes the held readiness read promptly).
     pub fn has_pending_ready(&self) -> bool {
@@ -5707,7 +5707,7 @@ impl Conn {
         }
         self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
         self.pending_reads.clear(); // the held Rreads die with the connection (net-6a)
-        self.pending_ready.clear(); // ... and the held readiness Rreads (net-6b)
+        self.pending_ready.clear(); // ... and the held readiness arms (net-6b)
         self.pending_weftio.clear(); // ... and the held weft Rweftios (Weft-6b-3)
         self.pending_connects.clear(); // ... and the held connect Rlopens (#257)
     }
@@ -5752,7 +5752,7 @@ impl Conn {
             net.cancel_accept_fid(self.handle, fid);
             self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
             self.pending_reads.retain(|pr| pr.fid != fid); // drop blocked reads (net-6a)
-            self.pending_ready.retain(|pr| pr.fid != fid); // drop readiness probes (net-6b)
+            self.pending_ready.retain(|pr| pr.fid != fid); // drop readiness arms (net-6b)
             self.pending_weftio.retain(|pw| pw.fid != fid); // drop blocked weft reads (Weft-6b-3)
             self.pending_connects.retain(|pc| pc.fid != fid); // drop deferred connects (#257)
             if let Some(n) = path_conn_n(f.path) {
@@ -5957,7 +5957,7 @@ impl Conn {
         }
         self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
         self.pending_reads.clear(); // ... and drops any blocked data reads (net-6a)
-        self.pending_ready.clear(); // ... and any deferred readiness probes (net-6b)
+        self.pending_ready.clear(); // ... and any held readiness arms (net-6b)
         self.pending_weftio.clear(); // ... and any blocked weft reads (Weft-6b-3)
         self.pending_connects.clear(); // ... and any deferred connect opens (#257)
     }
@@ -6238,37 +6238,38 @@ impl Conn {
                 }
             }
         }
-        // The `ready` file is the net-6b dev9p.poll readiness probe: report the
-        // satisfied poll revents for the mask carried in the Tread OFFSET, WITHOUT
-        // consuming socket data. A non-zero revents replies at once (the socket is
-        // ready for the requested events); a zero revents DEFERS -- park a
-        // PendingReady, poll_ready sends the held Rread when the socket becomes
-        // ready per the mask (so a poll(POLLIN) on a writable-but-empty socket
-        // waits for data, never busy-loops). The reply is the revents as a u32 LE
-        // (the kernel reads 4 bytes). Bounded per connection (#65 floor).
+        // The `ready` file (NET-DESIGN 12.2): the satisfied poll revents for the
+        // events in the Tread OFFSET, read WITHOUT consuming socket data, decided
+        // by p9::ready_answer. A SNAPSHOT is answered at once, 0 included: it is
+        // the kernel's only sample of the socket, so holding one would leave a
+        // poll with a deadline nothing true to report. An ARM is answered at once
+        // if the socket is already ready, else held as a PendingReady until
+        // poll_ready sees it ready -- a parked poller's wake, so a poll(POLLIN)
+        // on a writable-but-empty socket waits for data, never busy-loops.
         if is_conn(f.path) && conn_filekind(f.path) == FK_READY {
             let n = conn_n(f.path);
-            let mask = a.offset as u16; // the requested poll events (POLLIN|POLLOUT)
-            let revents = net.check_ready(n, mask);
-            if revents != 0 {
-                let bytes = (revents as u32).to_le_bytes();
-                let want = (self.msize as usize)
-                    .saturating_sub(p9::P9_HDR_LEN + 4)
-                    .min(a.count as usize)
-                    .min(4);
-                return p9::build_rread(&mut self.out_buf, tag, &bytes[..want]);
-            }
-            if self.pending_ready.len() >= MAX_FIDS {
-                return self.err(tag, p9::E_PROTO);
-            }
-            self.pending_ready.push(PendingReady {
-                fid: a.fid,
-                slot_n: n,
-                tag,
-                mask,
-            });
-            self.defer = true;
-            return Ok(0); // ignored: dispatch returns Disp::Deferred
+            let level = |mask| net.check_ready(n, mask);
+            return match p9::ready_answer(a.offset, a.count, self.msize, level) {
+                p9::ReadyAnswer::Reply { revents, len } => {
+                    let bytes = (revents as u32).to_le_bytes();
+                    p9::build_rread(&mut self.out_buf, tag, &bytes[..len])
+                }
+                p9::ReadyAnswer::Refuse(ecode) => self.err(tag, ecode),
+                p9::ReadyAnswer::Defer { mask, len } => {
+                    if self.pending_ready.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_ready.push(PendingReady {
+                        fid: a.fid,
+                        slot_n: n,
+                        tag,
+                        mask,
+                        len,
+                    });
+                    self.defer = true;
+                    Ok(0) // ignored: dispatch returns Disp::Deferred
+                }
+            };
         }
         if f.path == P_CS || f.path == P_DNS {
             // cs/dns response (net-4a/4b): drain the per-fid answer via a per-fid
@@ -6436,7 +6437,7 @@ impl Conn {
         net.cancel_accept_tag(self.handle, a.oldtag);
         self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
         self.pending_reads.retain(|pr| pr.tag != a.oldtag); // net-6a: drop a blocked read
-        self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness probe
+        self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness arm
         self.pending_weftio.retain(|pw| pw.tag != a.oldtag); // Weft-6b-3: drop a blocked weft read
         self.pending_connects.retain(|pc| pc.tag != a.oldtag); // #257: drop a deferred connect
         p9::build_rflush(&mut self.out_buf, tag)

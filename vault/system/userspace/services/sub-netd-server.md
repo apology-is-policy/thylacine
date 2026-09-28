@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-24
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -97,10 +97,22 @@ bridge, chosen because the poll-before-read alternative churned the
 shared session's tag pool to exhaustion) · anything else `E_OPNOTSUPP`,
 honestly.
 
-**The `ready` file** (net-6b): a read carries the requested poll mask
-in the Tread OFFSET (POLLIN|POLLOUT requestable; POLLERR|POLLHUP always
-reported) and returns the satisfied revents as a u32 LE WITHOUT
-consuming socket data; zero revents DEFERS. `qid_of` marks it
+**The `ready` file** (net-6b; the SAMPLE/ARM split,
+[[dec-2026-09-28-poll-sample-arm-split]]): a read carries the requested
+poll mask in the low 16 bits of the Tread OFFSET (POLLIN|POLLOUT
+requestable; POLLERR|POLLHUP always reported) and returns the satisfied
+revents as a u32 LE, cut to the Tread's count and msize, WITHOUT consuming
+socket data. `ninep::ready_answer` decides, and ptyfs calls the same
+function, so the two servers cannot drift. Offset bit 16
+(`P9_POLL_SNAPSHOT`) asks for a SNAPSHOT: answered at once, zero included,
+because it is the kernel's only sample of the socket and a held one would
+leave a poll with a deadline nothing true to report. Without it the read
+is the ARM: answered at once if the socket is already ready, else held as
+a `PendingReady` until `poll_ready` sees it ready. The level is asked on
+ARRIVAL for both, since an arm sent after the rise must not wait for a
+later one (`specs/net_poll.tla`'s `edge_arm`). Any other bit above the mask
+is refused `EINVAL`, so a future bit is never read as part of a mask.
+`qid_of` marks it
 `P9_QTPOLL` — the central qid builder (walk/lopen/getattr all route
 through it) so the kernel's cached qid always carries the bit; only a
 QTPOLL file is ever probed by the kernel bridge.

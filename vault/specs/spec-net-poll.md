@@ -2,7 +2,7 @@
 id: spec-net-poll
 type: spec
 title: "net_poll.tla"
-models: [sub-kernel-ninep-dev9p-poll, sub-netd-server, sub-ptyfs]
+models: [sub-kernel-ninep-dev9p-poll, sub-netd-server, sub-ptyfs, sub-libthyla-rs]
 pins: [inv-i9]
 cfgs:
   - "net_poll.cfg -- clean, timed (timeout 0 included): Invariants + FailSafeSilent (118 states)"
@@ -66,7 +66,9 @@ only parks never decides from a cache. That design survives as the red
 
 ## Action-site map
 
-Filled at NP-4, when the split lands in `kernel/dev9p_poll.c` and
-`kernel/poll.c`; the `ready` file's snapshot branch lands at NP-3. Until then
-the code is `BUGGY_CACHE_ONLY_SAMPLE`. The table lives in
+The server half landed at NP-3b: `ninep::ready_answer` is `SnapshotReply`
+and the on-arrival half of `ArmReply`, for netd and ptyfs alike. The kernel
+half is filled at NP-4, when the split lands in `kernel/dev9p_poll.c` and
+`kernel/poll.c`; until then the kernel never sets the snapshot bit, so it is
+still `BUGGY_CACHE_ONLY_SAMPLE`. The table lives in
 `specs/SPEC-TO-CODE.md::net_poll.tla`.
