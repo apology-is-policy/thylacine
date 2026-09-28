@@ -674,7 +674,7 @@ the other way:
 The full semantics, the mechanism and the escalation argument are in
 IDENTITY-DESIGN.md 3.2.
 
-## 4.8 A remote mount says so — the `remote` label (VOTED 2026-09-24; design 2026-09-28, LR-1)
+## 4.8 A remote mount says so — the `remote` label (VOTED 2026-09-24; carrier VOTED 2026-09-28, LR-1)
 
 **What failed.** The operator mounted a host tree with Haul and listed its
 parent with `la` (the shell's alias for `ls -la`). The mount point's REALM
@@ -682,11 +682,14 @@ read `fs`, the same as every directory beside it, and `ns` called the mount's
 source `disk` (`ns.rs` maps every `#9` source to that word). Nothing on the
 screen said the tree lived on another machine.
 
-**The vote** (operator, 2026-09-24): a mount point gets a REALM of its own,
-`remote` for a network mount and `mount` for a local one. Haul declares its
-mount remote and the kernel carries the declaration; the ABI change that
-carries it is signed off. The same vote asked for `ns` to stop calling a Haul
-mount the local disk.
+**The votes.** The first (operator, 2026-09-24): a mount point gets a REALM of
+its own, `remote` for a network mount and `mount` for a local one. Haul
+declares its mount remote and the kernel carries the declaration; the vote
+signed off a change to the mount syscall to carry it, and asked for `ns` to
+stop calling a Haul mount the local disk. The second (operator, 2026-09-28)
+chose the carrier: a mount-syscall flag labels the first flow below and no
+other, so the declaration rides the 9P session instead, on the two bits listed
+under **The ABI**.
 
 **Where the declaration lives: the 9P session.** A mount entry records where a
 tree is grafted. The tree comes from a 9P session, and only the program that
