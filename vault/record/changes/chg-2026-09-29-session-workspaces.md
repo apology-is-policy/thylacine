@@ -4,7 +4,7 @@ type: chg
 title: "A session's workspaces are the session's: the owner stamp, fresh panes that wait to be asked, the kept last pane, the departure and the takeover"
 date: 2026-09-29
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["4fd4cb65"]
 touched:
   - sub-tapestryd
   - sub-halcyond

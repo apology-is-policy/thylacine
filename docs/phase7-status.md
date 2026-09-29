@@ -619,7 +619,7 @@ tests, 0 failing. No kernel change, so no sanitizer run or spec is owed.
 The Operator's Manual had no section for Halcyon, although the default image's login starts it, and none for lantern.
 Operator vote 4 of 2026-09-28: the Halcyon chapter and the lantern section now, as a chunk of their own, before the next
 feature; later Halcyon changes then keep them current (the binding manual rule). Six commits: five compositor fixes the
-device scenario found, each its own commit, then the manual itself.
+device scenario found, each its own commit, then the manual itself (`2ed27be0`).
 
 - **`docs/manual/10-halcyon.md`** (`halcyon`): logging in and out, tiles and panes, the focus, splits and their limits,
   stacks, zoom, dividers, RESET, closing a tile (the dialog, the protected final tile), workspaces (the empty pane and

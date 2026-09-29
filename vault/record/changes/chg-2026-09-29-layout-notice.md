@@ -4,7 +4,7 @@ type: chg
 title: "A session's layout notice is no longer lost with the surface that carried it"
 date: 2026-09-29
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["1d3b5f5c"]
 touched:
   - sub-libtapestry
   - sub-halcyond

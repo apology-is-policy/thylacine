@@ -4,7 +4,7 @@ type: chg
 title: "A backgrounded leaf is transparent to a newcomer's share and to a move: the mean over the divided siblings, the nearest visible neighbour"
 date: 2026-09-28
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["c7b5293f"]
 touched:
   - sub-tapestryd
   - sub-halcyond

@@ -4,7 +4,7 @@ type: chg
 title: "A session tile draws its whole selection, as the console renderer does"
 date: 2026-09-29
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["bc3a04b7"]
 touched:
   - sub-halcyond
 established: []
