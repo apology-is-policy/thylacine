@@ -2460,8 +2460,15 @@ terminates rather than running a handler.
 the caught-note-interruptible sleep) no phenotype syscall could return `EINTR` at
 all — a caught note never unwound a blocked wait, so the pouch boundary-line
 truthfully recorded "no EINTR retry surface to enable" (patch `0007`). Item 11
-*creates* that surface: a blocking syscall interrupted by a deliverable caught
-note unwinds and returns `-T_E_INTR` (4), and the tail delivers the handler.
+*creates* that surface, for exactly the calls Linux lets a signal interrupt
+(signal(7)). ARCH §8.8.3's 2026-09-29 amendment holds the list and the
+mechanism. Such a call, blocked when a deliverable caught note arrives, unwinds
+and returns `-T_E_INTR` (4), and the tail delivers the handler. Every other
+call, and every page fault, rides the note out: `socket`, `bind`, `openat`,
+`newfstatat`, a regular file's `read`. The handler runs when the call returns,
+as it would after one of Linux's `TASK_KILLABLE` sleeps. Before the amendment,
+every 9P-backed call was interruptible. A `SIGCHLD` handler made `socket()`
+fail with `EINTR`, and made a demand-paged file read raise `SIGBUS`.
 Where the restart-vs-`EINTR` decision is made is the pouch/unmodified split:
 - **Pouch guest** (our patched musl): the kernel returns `-EINTR` and delivers
   the frame; musl's cancellation/`__eintr_valid_flag` machinery honours

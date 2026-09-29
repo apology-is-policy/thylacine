@@ -1495,7 +1495,10 @@ wait **without** terminating the Thread, so it is serviced promptly at the tail.
   readable). It **must not** double-count the terminate latches — those are
   `thread_die_pending`'s sole province (death wins; a note that is *both* a
   terminate-latch arm and a caught handler cannot be, by the arm-refusal above).
-  Plan 9's `up->notepending` is the shape.
+  Plan 9's `up->notepending` is the shape. **Amended 2026-09-29:** it is also
+  false unless the thread's current syscall marked its wait interruptible (the
+  per-Thread `note_interruptible`); see *Which waits a caught note may
+  interrupt* below.
 - **A NON-death unwind code `SLEEP_NOTEINTR` / `TSLEEP_NOTEINTR`** (rendez.h),
   distinct from the death `SLEEP_INTR` / `TSLEEP_INTR`. `SLEEP_INTR`'s "the
   caller unwinds and the Thread **dies** at its tail" contract is preserved
@@ -1529,8 +1532,11 @@ queued note is delivered by the **existing** EL0-return-tail dispatch (the Linux
 sigframe is built, or the self-managing reader's notes fd is now readable).
 - **Native.** `-T_E_INTR` reaches the native self-managing reader, which
   re-issues the wait after servicing the note (the item-10 native-`ut` close).
-- **Phenotype.** The kernel returns `-EINTR` (4) and delivers the sigframe; it
-  does **not** rewind PC. `SA_RESTART`-vs-`EINTR` is decided in **userspace** by
+  As built, no native wait is caught-note-interruptible yet:
+  `proc_caught_note_eintr_ready` admits only the Linux phenotype, and no native
+  syscall sets `note_interruptible`. Item 11c owes the native opt-in.
+- **Phenotype.** For a call on signal(7)'s list (below), the kernel returns
+  `-EINTR` (4) and delivers the sigframe; it does **not** rewind PC. `SA_RESTART`-vs-`EINTR` is decided in **userspace** by
   musl's existing cancellation/`__eintr_valid_flag` machinery (the pouch signals
   boundary-line already sets the advisory): `SA_RESTART` re-issues the syscall,
   else the caller observes `EINTR` — a shell's interactive-read SIGINT handler
@@ -1549,6 +1555,56 @@ note → `-T_E_INTR` → re-poll → note serviced), the LS-CI phenotype-ash sce
 (blocked in `read` + Ctrl-C → prompt within 2 s, no line lost), and the SMP gate
 are the rigor. Retires the LS-5 "P3-deliver" deferral and the item-8 / item-10
 "late Ctrl-C eats the next line" family in one move.
+
+**Which waits a caught note may interrupt: signal(7)'s list (amendment,
+operator vote 2026-09-29, `dec-2026-09-29-caught-signal-slow-calls`).** As
+first built, the unwind applied to every wait that opted in. Both 9P waits opt
+in: the client's RPC wait and the elected reader's receive. So for a
+Linux-phenotype Thread every 9P-backed call was interruptible. A caught note,
+typically from a `SIGCHLD` handler, that landed mid-RPC made `socket()`,
+`bind()`, `openat()`, `newfstatat()` and a regular file's `read()` fail with
+`EINTR`, which no Linux program expects. It also failed a demand-paged file
+read, which raises `SIGBUS`. Linux lets a signal interrupt only its *slow*
+calls (signal(7)). Every other call sleeps `TASK_KILLABLE`, so only a fatal
+signal wakes it, and the handler runs when the call returns. Linux's own 9P
+client waits killable for this reason.
+
+The rule now matches Linux. The unwind also requires the positive per-Thread
+flag `note_interruptible`, which defaults to false and is written only by the
+owning thread. The vivarium dispatcher sets it for a call on the list, and the
+`syscall_dispatch` wrapper clears it on the way out:
+- **Always:** `accept`, `accept4`, `connect`, `recvfrom`, `recvmsg`, `sendto`,
+  `sendmsg`, `wait4`, `ppoll`, `pselect6`, `futex`, `rt_sigsuspend`,
+  `rt_sigtimedwait`, and `fcntl` with `F_SETLKW` or `F_OFD_SETLKW`.
+- **On a slow file only:** `read`, `readv`, `write`, `writev`, `pread64`,
+  `pwrite64` and `ioctl`. A slow file is a socket, a pipe or FIFO, or a
+  character device such as a pts. It is recognised by a socket-table row, or
+  else by the Dev's stat type (`S_IFIFO` or `S_IFCHR`). The answer is learned
+  once per open file and cached on the Spoor.
+- **Never:** everything else, including every page fault.
+  `userland_demand_page` clears the flag for the page-in and restores it
+  afterwards. A copy-out that faults inside an interruptible `read` therefore
+  waits the page-in out, as Linux's `filemap_fault` does.
+
+A call that is not on the list rides the note out. Death still unwinds it,
+because `thread_die_pending` is checked first and is unchanged. The note is
+delivered at the call's EL0-return tail. The flag is positive so that a new
+table row, or a new wait inside an old row, can only be killed until someone
+puts it on the list. The failure mode is then a handler that runs late, never
+a spurious `EINTR`. Natives are unchanged: no native syscall sets the flag. When
+11c admits natives, it sets the flag for the waits it opts in; Plan 9
+interrupts every wait.
+
+Two alternatives were rejected:
+- **Exempting only socket setup.** `open`, `stat` and regular-file I/O would
+  still fail.
+- **A kernel-side restart (`ERESTARTNOINTR`) of the abandoned call.** An
+  abandoned 9P operation may already have taken effect on the server, since a
+  `Tflush` does not undo a completed create or dial. Re-issuing it is not
+  idempotent.
+
+No new invariant. This narrows I-19's caught-note disposition and leaves the
+I-9 wake intact: a waiter that is refused the unwind re-sleeps.
 
 ### 8.9 Open design questions
 
