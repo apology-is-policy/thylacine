@@ -19,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -95,6 +95,12 @@ behaviour, and exec init.
 - **Buffered console output armed only once an interrupt can drain it.** Every
   print before that point takes the direct path; the ring is empty at the moment
   of transition, so the change cannot reorder output.
+- **The 9P closer's first thread before the suite and before any 9P session**
+  (2026-09-29, `p9_closer_start`, next to the dev9p poll pump). A dying
+  thread's Tclunk is handed to the closer pool, and the pool grows only from a
+  closer that takes work, so the first closer must exist before the first
+  hand-off. Failing to create it extincts the boot; the closer tests in the
+  suite need it idle and asleep ([[sub-kernel-ninep-attach]]).
 
 **Feature detection.** Identifier registers are read once and reduced to a
 struct: which hardening features the silicon implements, how many debug

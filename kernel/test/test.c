@@ -25,6 +25,8 @@
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
+#include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
+#include <thylacine/rendez.h>       // test_dying_kill: the cascade's wake
 #include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
 
@@ -69,6 +71,60 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
     // prevent. A leaked (leak-checked) Thread slot is the safe residue.
     TEST_YIELD_UNTIL(__atomic_load_n(exited, __ATOMIC_ACQUIRE));
     thread_free(t);
+}
+
+static void test_dying_entry(void *arg) {
+    struct test_dying *d = (struct test_dying *)arg;
+    d->fn(d->arg);
+    __atomic_store_n(&d->done, true, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&d->exited);
+}
+
+bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
+                      bool dead_now) {
+    d->fn     = fn;
+    d->arg    = arg;
+    d->done   = false;
+    d->exited = false;
+    d->t      = NULL;
+    d->proc   = proc_alloc();
+    if (!d->proc) return false;
+    if (dead_now)
+        __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    d->t = thread_create_with_arg(d->proc, test_dying_entry, d);
+    if (!d->t) {
+        d->proc->state = PROC_STATE_ZOMBIE;
+        proc_free(d->proc);
+        d->proc = NULL;
+        return false;
+    }
+    ready(d->t);
+    return true;
+}
+
+bool test_dying_parked(const struct test_dying *d) {
+    return __atomic_load_n(&d->t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+}
+
+bool test_dying_done(const struct test_dying *d) {
+    return __atomic_load_n(&d->done, __ATOMIC_ACQUIRE);
+}
+
+void test_dying_kill(struct test_dying *d) {
+    __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    irq_state_t ws = spin_lock_irqsave(&d->t->wait_lock);
+    struct Rendez *r = d->t->rendez_blocked_on;
+    if (r) (void)wakeup(r);
+    spin_unlock_irqrestore(&d->t->wait_lock, ws);
+}
+
+void test_dying_reap(struct test_dying *d) {
+    TEST_YIELD_UNTIL(__atomic_load_n(&d->exited, __ATOMIC_ACQUIRE));
+    thread_free(d->t);
+    d->t = NULL;
+    d->proc->state = PROC_STATE_ZOMBIE;         // proc_free precondition
+    proc_free(d->proc);
+    d->proc = NULL;
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,6 +1398,8 @@ void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
 void test_9p_session_walk_fid_full_no_latch(void);
+void test_9p_session_clunk_retract_after_peer_fill(void);
+void test_9p_session_flushed_walk_late_reply_binds(void);
 void test_9p_session_clunk_round_trip(void);
 void test_9p_session_clunk_send_time_unbinds(void);
 void test_9p_session_dispatch_rlerror(void);
@@ -1461,6 +1519,17 @@ void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
+void test_9p_client_clunk_dying_keeps_fid_bound(void);
+void test_9p_client_clunk_killed_while_parked(void);
+void test_9p_client_clunk_killed_in_tag_drain(void);
+void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
+void test_9p_client_flushed_walk_late_reply_to_sink(void);
+void test_9p_client_abandoned_walk_late_reply_kept(void);
+void test_9p_client_abandoned_async_clunk_not_flushed(void);
+void test_9p_client_clunk_rlerror_drains_as_clunk(void);
+void test_9p_client_clunk_malformed_reply_fails_closed(void);
+void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
+void test_9p_client_flush_malformed_reply_fails_closed(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -1584,6 +1653,14 @@ void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
 void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
+void test_p9_closer_dying_close_delivers_tclunk(void);
+void test_p9_closer_stalled_session_holds_one_closer(void);
+void test_p9_closer_flushed_walk_fid_clunked(void);
+void test_p9_closer_failed_spawn_retried_by_hand_off(void);
+void test_p9_closer_hand_off_inside_failed_spawn_retried(void);
+void test_p9_closer_hand_off_inside_spawn_no_duplicate(void);
+void test_p9_closer_clunk_killed_while_self_pumping(void);
+void test_p9_closer_orphan_oom_on_dead_session_quiet(void);
 void test_sys_walk_open_max_length_name_nul_terminated(void);
 void test_spoor_transport_init_destroy(void);
 void test_spoor_transport_init_null_rejected(void);
@@ -3331,6 +3408,10 @@ struct test_case g_tests[] = {
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
     { "9p_session.walk_round_trip",    test_9p_session_walk_round_trip,    false, NULL },
     { "9p_session.walk_fid_full_no_latch", test_9p_session_walk_fid_full_no_latch, false, NULL },
+    { "9p_session.clunk_retract_after_peer_fill",
+                                       test_9p_session_clunk_retract_after_peer_fill, false, NULL },
+    { "9p_session.flushed_walk_late_reply_binds",
+                                       test_9p_session_flushed_walk_late_reply_binds, false, NULL },
     { "9p_session.clunk_round_trip",   test_9p_session_clunk_round_trip,   false, NULL },
     { "9p_session.clunk_send_time_unbinds",
                                        test_9p_session_clunk_send_time_unbinds,
@@ -3580,6 +3661,29 @@ struct test_case g_tests[] = {
     { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
+    { "9p_client.clunk_dying_keeps_fid_bound",
+                                       test_9p_client_clunk_dying_keeps_fid_bound, false, NULL },
+    { "9p_client.clunk_killed_while_parked",
+                                       test_9p_client_clunk_killed_while_parked, false, NULL },
+    { "9p_client.clunk_killed_in_tag_drain",
+                                       test_9p_client_clunk_killed_in_tag_drain, false, NULL },
+    { "9p_client.clunk_dying_waiter_sends_no_flush",
+                                       test_9p_client_clunk_dying_waiter_sends_no_flush, false, NULL },
+    { "9p_client.flushed_walk_late_reply_to_sink",
+                                       test_9p_client_flushed_walk_late_reply_to_sink, false, NULL },
+    { "9p_client.abandoned_walk_late_reply_kept",
+                                       test_9p_client_abandoned_walk_late_reply_kept, false, NULL },
+    { "9p_client.abandoned_async_clunk_not_flushed",
+                                       test_9p_client_abandoned_async_clunk_not_flushed, false, NULL },
+    { "9p_client.clunk_rlerror_drains_as_clunk",
+                                       test_9p_client_clunk_rlerror_drains_as_clunk, false, NULL },
+    { "9p_client.clunk_malformed_reply_fails_closed",
+                                       test_9p_client_clunk_malformed_reply_fails_closed, false, NULL },
+    { "9p_client.abandoned_walk_malformed_late_reply_fails_closed",
+                                       test_9p_client_abandoned_walk_malformed_late_reply_fails_closed,
+                                                                           false, NULL },
+    { "9p_client.flush_malformed_reply_fails_closed",
+                                       test_9p_client_flush_malformed_reply_fails_closed, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
@@ -3728,6 +3832,22 @@ struct test_case g_tests[] = {
                                        test_p9_attached_walked_outlives_root_no_uaf,
                                                                            false, NULL },
     { "p9_attached.ctl_registry",      test_p9_attached_ctl_registry,      false, NULL },
+    { "p9_closer.dying_close_delivers_tclunk",
+                                       test_p9_closer_dying_close_delivers_tclunk, false, NULL },
+    { "p9_closer.stalled_session_holds_one_closer",
+                                       test_p9_closer_stalled_session_holds_one_closer, false, NULL },
+    { "p9_closer.flushed_walk_fid_clunked",
+                                       test_p9_closer_flushed_walk_fid_clunked, false, NULL },
+    { "p9_closer.failed_spawn_retried_by_hand_off",
+                                       test_p9_closer_failed_spawn_retried_by_hand_off, false, NULL },
+    { "p9_closer.hand_off_inside_failed_spawn_retried",
+                                       test_p9_closer_hand_off_inside_failed_spawn_retried, false, NULL },
+    { "p9_closer.hand_off_inside_spawn_no_duplicate",
+                                       test_p9_closer_hand_off_inside_spawn_no_duplicate, false, NULL },
+    { "p9_closer.clunk_killed_while_self_pumping",
+                                       test_p9_closer_clunk_killed_while_self_pumping, false, NULL },
+    { "p9_closer.orphan_oom_on_dead_session_quiet",
+                                       test_p9_closer_orphan_oom_on_dead_session_quiet, false, NULL },
     { "sys_walk_open.max_length_name_nul_terminated",
                                        test_sys_walk_open_max_length_name_nul_terminated,
                                                                            false, NULL },

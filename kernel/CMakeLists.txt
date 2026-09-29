@@ -221,6 +221,7 @@ set(KERNEL_TEST_SRCS
     test/test_path.c
     test/test_stalk.c
     test/test_9p_attach.c
+    test/test_9p_closer.c
     test/test_9p_spoor_transport.c
     test/test_9p_srvconn_transport.c
     test/test_territory_pivot_root.c

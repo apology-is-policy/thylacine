@@ -96,6 +96,38 @@ static int fid_unbind(struct p9_session *s, u32 fid) {
 }
 
 // =============================================================================
+// Reserved fid slots (docs/FID-LIFECYCLE-DESIGN.md section 9). An outstanding
+// op that may leave a fid bound when it ends holds a slot: a walk naming a new
+// fid the slot that fid will bind, a Tclunk the slot of the fid its build
+// unbound. Bound + reserved never exceeds P9_SESSION_MAX_FIDS, because only a
+// new reservation needs room and it checks slot_available; a take-back or a
+// walk's bind turns a reserved slot back into a bound one.
+// =============================================================================
+
+static bool slot_available(const struct p9_session *s) {
+    return s->n_bound_fids + s->n_reserved_slots < P9_SESSION_MAX_FIDS;
+}
+
+static void slot_reserve(struct p9_session *s, u16 t) {
+    s->outstanding[t].holds_slot = true;
+    s->n_reserved_slots++;
+}
+
+static void slot_release(struct p9_session *s, u16 t) {
+    if (!s->outstanding[t].holds_slot) return;
+    s->outstanding[t].holds_slot = false;
+    s->n_reserved_slots--;
+}
+
+// Bind `fid` into op `t`'s reserved slot. The release comes first, so the
+// capacity check inside fid_bind cannot refuse; its duplicate check is the
+// only refusal left.
+static int slot_bind(struct p9_session *s, u16 t, u32 fid) {
+    slot_release(s, t);
+    return fid_bind(s, fid);
+}
+
+// =============================================================================
 // Tag pool — bitmap-like; tag value == outstanding-table index.
 // =============================================================================
 
@@ -120,6 +152,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     s->outstanding[t].op_id         = s->next_op_id;
     s->outstanding[t].awaiting_flush = false;
     s->outstanding[t].abandoned     = false;
+    s->outstanding[t].holds_slot    = false;
     s->outstanding[t].flush_oldtag  = 0;
     s->outstanding[t].wga_nwname    = 0;
     s->total_sent++;
@@ -127,6 +160,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
 
 // Clear tag `t`. Caller validates `t` was active.
 static void clear_outstanding(struct p9_session *s, u16 t) {
+    slot_release(s, t);
     s->outstanding[t].active        = false;
     s->outstanding[t].kind          = 0;
     s->outstanding[t].fid           = 0;
@@ -180,6 +214,7 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
     s->negotiated_msize = 0;
     for (size_t i = 0; i < P9_SESSION_MAX_FIDS; i++) s->bound_fids[i] = 0;
     s->n_bound_fids     = 0;
+    s->n_reserved_slots = 0;
     for (size_t i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) {
         s->outstanding[i].active        = false;
         s->outstanding[i].kind          = 0;
@@ -188,6 +223,7 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
         s->outstanding[i].op_id         = 0;
         s->outstanding[i].awaiting_flush = false;
         s->outstanding[i].abandoned     = false;
+        s->outstanding[i].holds_slot    = false;
         s->outstanding[i].flush_oldtag  = 0;
     }
     s->next_op_id       = 0;
@@ -205,8 +241,10 @@ void p9_session_destroy(struct p9_session *s) {
     s->magic            = 0;
     s->state            = P9_SESS_CLOSED;
     s->n_bound_fids     = 0;
+    s->n_reserved_slots = 0;
     for (size_t i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) {
-        s->outstanding[i].active = false;
+        s->outstanding[i].active     = false;
+        s->outstanding[i].holds_slot = false;
     }
 }
 
@@ -304,12 +342,13 @@ int p9_session_send_walk(struct p9_session *s,
     // Per spec's SendWalk precondition: no other in-flight op targets
     // new_fid as either src or destination.
     if (any_outstanding_on_fid(s, new_fid)) return -1;
-    // RW-4 round-2 (R-B-F1): pre-check the fid-table capacity so a walk that
-    // could not bind new_fid at dispatch fails CLOSED here (clean -1 -> caller
-    // -EIO, no server round-trip, no shared-session death) instead of surfacing
-    // as a dispatch-time fid_bind failure. The dispatch path still handles the
-    // rare TOCTOU residual (a peer binds the last fid during this op's recv).
-    if (s->n_bound_fids >= P9_SESSION_MAX_FIDS) return -1;
+    // RW-4 round-2 (R-B-F1): a full fid table fails the walk CLOSED here
+    // (clean -1 -> caller -EIO, no server round-trip, no shared-session
+    // death). The walk then reserves the slot new_fid will bind, so no peer
+    // can take it while the walk waits for its Rwalk (FID-LIFECYCLE section
+    // 9; the old dispatch-time capacity race failed the walk with EIO after
+    // the server had bound new_fid).
+    if (!slot_available(s)) return -1;
     int t = alloc_tag(s);
     if (t < 0) return -1;
     int rc = p9_build_twalk(out, cap, (u16)t,
@@ -317,6 +356,7 @@ int p9_session_send_walk(struct p9_session *s,
                             nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALK, src_fid, new_fid);
+    slot_reserve(s, (u16)t);
     return rc;
 }
 
@@ -344,7 +384,7 @@ int p9_session_send_walkgetattr(struct p9_session *s,
         if (fid_bound(s, new_fid)) return -1;
         if (new_fid == s->root_fid) return -1;
         if (any_outstanding_on_fid(s, new_fid)) return -1;
-        if (s->n_bound_fids >= P9_SESSION_MAX_FIDS) return -1;
+        if (!slot_available(s)) return -1;
     }
     int t = alloc_tag(s);
     if (t < 0) return -1;
@@ -354,6 +394,7 @@ int p9_session_send_walkgetattr(struct p9_session *s,
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALKGETATTR, src_fid, new_fid);
     s->outstanding[t].wga_nwname = nwname;
+    if (new_fid != P9_NOFID) slot_reserve(s, (u16)t);
     return rc;
 }
 
@@ -377,9 +418,11 @@ int p9_session_send_clunk(struct p9_session *s,
     int rc = p9_build_tclunk(out, cap, (u16)t, fid);
     if (rc < 0) return -1;
     // Send-time unbind (spec's client discipline: no further ops on
-    // this fid even while Tclunk's Rmsg is in flight).
+    // this fid even while Tclunk's Rmsg is in flight). The fid's slot stays
+    // reserved until the Rclunk, so a take-back can always re-bind it.
     (void)fid_unbind(s, fid);
     mark_outstanding(s, (u16)t, P9_TCLUNK, fid, fid);
+    slot_reserve(s, (u16)t);
     return rc;
 }
 
@@ -444,23 +487,24 @@ void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
     clear_outstanding(s, tag);
 }
 
-// abort_unsent leaves a never-sent Tclunk's fid unbound: its callers are a
-// dying sender, a dead session and a spill-OOM, whose fid nobody clunks
-// again, and it then leaks only server-side (the monotonic fid allocator
-// never re-issues the number). An async submit that met a full ring is
-// different -- its owner is alive and told to resubmit, and a resubmitted
-// Tclunk needs its fid bound -- so a take-back restores the fid too, which
-// is also what 9p_client.tla says: it has no step for a send that never
-// happened. fid_bind cannot fail here: the build's unbind freed a slot and
-// the caller has held the lock since.
-void p9_session_retract_unsent(struct p9_session *s, u16 tag) {
-    if (!s) return;
-    if (s->magic != P9_SESSION_MAGIC) return;
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
+// abort_unsent leaves a never-sent Tclunk's fid unbound, which is right only
+// on a dead session: the fid died with it. On a live session the server still
+// holds the fid, so its Tclunk must be resubmitted or handed to the closer
+// (FID-LIFECYCLE section 9), and a take-back restores the fid too. That is
+// also what 9p_client.tla says: it has no step for a send that never
+// happened. The re-bind uses the slot the Tclunk kept reserved, so it cannot
+// fail on capacity even when the caller dropped the lock to park after the
+// build.
+int p9_session_retract_unsent(struct p9_session *s, u16 tag) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
     struct p9_outstanding *op = &s->outstanding[tag];
-    if (!op->active || op->awaiting_flush || op->abandoned) return;
-    if (op->kind == P9_TCLUNK) (void)fid_bind(s, op->fid);
+    if (!op->active || op->awaiting_flush || op->abandoned) return -1;
+    int rc = 0;
+    if (op->kind == P9_TCLUNK) rc = slot_bind(s, tag, op->fid);
     clear_outstanding(s, tag);
+    return rc;
 }
 
 // #53: roll back a Tflush whose frame could NOT be pushed because the c2s
@@ -922,6 +966,7 @@ static void zero_result(struct p9_dispatch_result *out) {
     out->kind          = 0;
     out->fid           = 0;
     out->new_fid       = 0;
+    out->bound_new_fid = P9_NOFID;
     out->op_id         = 0;
     out->is_error      = false;
     out->ecode         = 0;
@@ -1016,6 +1061,37 @@ static int dispatch_rversion(struct p9_session *s,
     return 0;
 }
 
+// flush(5): "If a response to the flushed request is received before the
+// Rflush, the client must honor the response as if it had not been flushed."
+// The only fid state a reply creates is a walk's new fid, so a late successful
+// walk binds it -- into the slot the walk reserved -- and reports it in
+// out->bound_new_fid for the closer, since its owner is gone
+// (FID-LIFECYCLE section 9). The bind rule is the ordinary arms' (a TWALK
+// binds on any Rwalk, a TWALKGETATTR only on a full walk). holds_slot doubles
+// as "not yet honoured": a duplicate late reply finds it clear and binds
+// nothing. The tag itself stays reserved until the Rflush, as before.
+static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
+                             u16 tag, u8 type, const u8 *rmsg, size_t len,
+                             struct p9_dispatch_result *out) {
+    if (!op->holds_slot) return;
+    if (type != (u8)(op->kind + 1)) return;          // an Rlerror binds nothing
+    u16 tag_check;
+    u16 nwqid;
+    if (op->kind == P9_TWALK) {
+        if (p9_parse_rwalk(rmsg, len, &tag_check, &nwqid,
+                           out->qids, P9_MAX_WALK) < 0) return;
+    } else if (op->kind == P9_TWALKGETATTR) {
+        const u8 *body = NULL;
+        if (p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
+                                  out->qids, P9_MAX_WALK, &body) < 0) return;
+        if (nwqid != op->wga_nwname) return;
+    } else {
+        return;
+    }
+    if (tag_check != tag) return;
+    if (slot_bind(s, tag, op->new_fid) == 0) out->bound_new_fid = op->new_fid;
+}
+
 int p9_session_dispatch_rmsg(struct p9_session *s,
                              const u8 *rmsg, size_t len,
                              struct p9_dispatch_result *out) {
@@ -1047,14 +1123,16 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
     // is still possible -> a future reply mis-attributed to the reused tag
     // (the I-10 violation the naive fix introduces). The flush's Rflush
     // (dispatched via its own tag, below) is the SOLE authority that frees an
-    // awaiting_flush tag. No fid mutation either: the abandoned caller is gone.
+    // awaiting_flush tag. The one fid mutation it makes is a walk's new fid,
+    // which flush(5) says the client must honour (honour_late_walk).
     if (op->awaiting_flush) {
         // Absorb (do not complete): the tag stays reserved. The ownerless
         // demux caller is the only one that can reach an awaiting_flush tag
         // (the owner unwound + NULLed inflight[tag] before the flush reserved
-        // it), and it discards *out -- so leave it zeroed (zero_result ran). A
-        // 0 return here means "ownerless late reply absorbed", NOT "op
-        // completed"; no fid mutation, no clear_outstanding.
+        // it). It reads only out->bound_new_fid, which honour_late_walk sets
+        // when it binds. A 0 return here means "ownerless late reply
+        // absorbed", NOT "op completed"; no clear_outstanding.
+        honour_late_walk(s, op, tag, type, rmsg, len, out);
         return 0;
     }
 
@@ -1098,19 +1176,20 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         // At this bring-up subset we bind unconditionally; nuanced
         // partial-walk semantics (when nwqid < requested nwname) land
         // in P5-session-walk-partial.
-        if (fid_bind(s, op->new_fid) < 0) {
-            // fid_bind fails ONLY on a LOCAL condition (the fid table is full, or
-            // a redundant already-bound fid) -- the server's Rwalk is conformant.
-            // Surface it as a per-op error (a synthetic Rlerror) so this op
-            // completes with -EIO + the common tail clears the tag, WITHOUT the
-            // -1 that R3-F1's mark_dead-on-drc<0 reads as a protocol violation:
-            // a local 256-fid exhaustion must NOT latch the shared root-FS session
-            // dead (round-2 R-B-F1). send_walk's capacity pre-check makes this the
-            // rare TOCTOU residual (a peer bound the last fid during this recv).
+        if (slot_bind(s, tag, op->new_fid) < 0) {
+            // The bind goes into the slot send_walk reserved, so capacity
+            // cannot refuse it; only a redundant already-bound fid can, a LOCAL
+            // condition -- the server's Rwalk is conformant. Surface it as a
+            // per-op error (a synthetic Rlerror) so this op completes with -EIO
+            // + the common tail clears the tag, WITHOUT the -1 that R3-F1's
+            // mark_dead-on-drc<0 reads as a protocol violation (round-2 R-B-F1:
+            // a local fid-table condition must NOT latch the shared root-FS
+            // session dead).
             out->is_error = true;
             out->ecode    = T_E_IO;   // EIO (POSIX-aligned 9P2000.L wire errno)
         } else {
-            out->nwqid    = nwqid;
+            out->nwqid         = nwqid;
+            out->bound_new_fid = op->new_fid;
         }
     } else if (op->kind == P9_TWALKGETATTR) {
         u16 tag_check;
@@ -1127,15 +1206,16 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         // names, where partial cannot exist); the multi-name pounce
         // requires it.
         if (op->new_fid != P9_NOFID && nwqid == op->wga_nwname) {
-            if (fid_bind(s, op->new_fid) < 0) {
-                // Same LOCAL-failure posture as the TWALK arm: a fid-table
-                // exhaustion completes THIS op with -EIO; it must not latch
-                // the shared session dead.
+            if (slot_bind(s, tag, op->new_fid) < 0) {
+                // Same LOCAL-failure posture as the TWALK arm: a redundant
+                // bind completes THIS op with -EIO; it must not latch the
+                // shared session dead.
                 out->is_error = true;
                 out->ecode    = T_E_IO;
             } else {
-                out->nwqid    = nwqid;
-                out->wga_data = body;
+                out->nwqid         = nwqid;
+                out->wga_data      = body;
+                out->bound_new_fid = op->new_fid;
             }
         } else {
             out->nwqid    = nwqid;
@@ -1146,7 +1226,8 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         rc = p9_parse_rclunk(rmsg, len, &tag_check);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
-        // Send-time already unbound; no further action.
+        // Send-time already unbound; the slot it kept is released with the
+        // tag below.
     } else if (op->kind == P9_TFLUSH) {
         // Rflush (#845): the server guarantees it will not answer the
         // abandoned oldtag, so this Rflush is the SOLE authority that frees it
@@ -1377,4 +1458,10 @@ size_t p9_session_n_bound_fids(const struct p9_session *s) {
     if (!s) return 0;
     if (s->magic != P9_SESSION_MAGIC) return 0;
     return s->n_bound_fids;
+}
+
+size_t p9_session_n_reserved_slots(const struct p9_session *s) {
+    if (!s) return 0;
+    if (s->magic != P9_SESSION_MAGIC) return 0;
+    return s->n_reserved_slots;
 }

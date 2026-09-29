@@ -1703,7 +1703,10 @@ state from tripping the deadlock check. See NET-DESIGN.md §12.2 + ARCH §23.3
 
 Status: **spec landed model-first @bb72098; the cancel-at-close impl landed at
 #294-B (`kernel/dev9p_poll.c`). `BUGGY_SPLIT_GC` added 2026-09-28 (NP-4c):
-the collector's unlink and flush are one step with respect to the close.** `net_poll.tla` proves the I-9 readiness
+the collector's unlink and flush are one step with respect to the close.
+`DyingClose` / `CloserSend` / `NO_CLOSER` added 2026-09-29 (the Tclunk closer,
+`docs/FID-LIFECYCLE-DESIGN.md` section 9): a dying thread's close hands its
+Tclunk to the closer threads, and `CloserSend` is weakly fair.** `net_poll.tla` proves the I-9 readiness
 invariants (no missed edge) for a LIVE poller; it ABSTRACTS AWAY the layer this
 module models: the readiness op's MEMORY/pin lifetime and the delivery of the
 `ready`-fd Tclunk to netd (which frees the connection slot). The #294 leak lived
@@ -1726,11 +1729,13 @@ assumption on the kthread).
 | Config | Flags | Checked | Result |
 |---|---|---|---|
 | `net_poll_teardown.cfg`            | `Fix=TRUE`  | `SafetyInvariants` (TypeOk + NoUseAfterFreePs + ClunkAtMostOnce) | clean |
-| `net_poll_teardown_liveness.cfg`   | `Fix=TRUE`  | `Liveness` (SlotEventuallyFreed) -- with NO kthread fairness | clean |
+| `net_poll_teardown_liveness.cfg`   | `Fix=TRUE`  | `Liveness` (SlotEventuallyFreed) -- no fairness on the poll kthread; WF on `CloserSend` | clean (without WF on `CloserSend` it fails: `PollTimeout DyingClose`, the Tclunk handed over and never sent -- checked 2026-09-29) |
 | `net_poll_teardown_buggy_leak.cfg` | `Fix=FALSE` | `Liveness` -- no WF on `KthreadGc` | violation (the #294 leak) |
 | `net_poll_teardown_buggy_split_gc.cfg` | `Fix=TRUE`, `BUGGY_SPLIT_GC` | `Liveness` -- WF on `KthreadGcFlush` | violation (`PollTimeout KthreadGcUnlink UserClose KthreadGcFlush`: the close between the collector's unlink and its flush cancels nothing, its Tclunk is refused, and the flush clunks nothing) |
+| `net_poll_teardown_buggy_no_closer.cfg` | `Fix=TRUE`, `NO_CLOSER` | `Liveness` | violation (`PollTimeout DyingClose`: a dying thread's close cannot send, its Tclunk is refused and never sent -- the design before the closer) |
 
-Every clean cfg sets `BUGGY_SPLIT_GC = FALSE`; `ASSUME BUGGY_SPLIT_GC => Fix`.
+Every clean cfg sets `BUGGY_SPLIT_GC = FALSE` and `NO_CLOSER = FALSE`;
+`ASSUME BUGGY_SPLIT_GC => Fix`.
 The collector from #294 to NP-4c WAS the split: Phase 1 unlinked under
 `g_dev9p_poll_lock`, Phase 2b flushed after the unlock, so a close in between
 leaked the slot through a window the atomic `KthreadGc` hid. Found reading
@@ -1760,7 +1765,26 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   under g_lock (whoever removes it owns the teardown), `p9_client_abandon_async`
   (clear inflight + Tflush) + `dev9p_poll_op_free`, drops the priv's ps ref; then
   `kernel/dev9p.c::dev9p_close` delivers the `ready`-fd Tclunk
-  (`p9_client_clunk_async`).
+  (`dev9p_clunk_fid` -> `p9_client_clunk_async`).
+- `DyingClose` = the same close on a thread whose Proc is dying:
+  `p9_client_clunk_async` refuses it before the build (or takes a built,
+  never-sent Tclunk back) with `-P9_E_AGAIN` and the fid still bound, and
+  `dev9p_clunk_fid` hands the fid to `p9_attached_defer_clunk`
+  (`kernel/9p_attach.c`), which queues it with a session reference.
+  `NO_CLOSER` is the path before 2026-09-28: the build unbound the fid and the
+  send was refused.
+- `CloserSend` = `closer_serve` -> `closer_send` -> `p9_client_clunk_async` on a
+  closer thread (kproc, never dying); the entry's session reference keeps the
+  client alive until it is dropped after the send. Its weak fairness is the
+  closer pool's liveness: a session with pending closes is served by one
+  closer, and a spare is spawned when none is idle, so a stalled server holds
+  only its own session's closer (kernel test
+  `p9_closer.stalled_session_holds_one_closer`). A spare whose spawn failed is
+  spawned again by the next hand-off that finds no closer idle
+  (`p9_closer.failed_spawn_retried_by_hand_off`), and a hand-off made while
+  that spawn was failing is covered by the spawn's own retry, up to three
+  attempts (`p9_closer.hand_off_inside_failed_spawn_retried`); a closer spawn
+  that keeps failing (memory exhausted) is outside the fairness assumption.
 
 NOT modeled (caught by the kernel test `dev9p.poll_cancel_at_close`, not the
 spec): the abandon's Tflush leaves the readiness oldtag `awaiting_flush`, which

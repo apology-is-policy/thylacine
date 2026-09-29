@@ -161,6 +161,10 @@ struct p9_rpc {
                                // first); may be NULL there.
 };
 
+// Receives a fid the server holds and nobody owns. Called under c->lock, so it
+// must not sleep. Returns 0 when it took the fid, -1 when the fid stays bound.
+typedef int (*p9_orphan_sink_fn)(void *arg, u32 fid);
+
 struct p9_client {
     u32                  magic;
     // Per-client lock. Protects session.outstanding[], session.bound_fids[],
@@ -217,8 +221,9 @@ struct p9_client {
     // design (constant FID-LIFECYCLE background). The #845 abandon path
     // sends its Tflush ownerless, so every abandon's Rflush lands here by
     // design (death-driven). An abandoned op's LATE ORIGINAL reply is the
-    // third: its tag is still active + awaiting_flush in the session
-    // table, which the demux checks to classify it. With all three split,
+    // third: its tag is still active + awaiting_flush (or, when no Tflush
+    // could go out, `abandoned`) in the session table, which the demux
+    // checks to classify it. With all three split,
     // demux_orphan == 0 holds on every healthy boot INCLUDING death
     // flows — a nonzero value is a frame NO living mechanism accounts
     // for (misroute / tag corruption / genuine loss surfacing).
@@ -229,6 +234,15 @@ struct p9_client {
     u64                  demux_orphan_flush;
     u64                  demux_orphan_late;
     u64                  demux_wakes;
+    // FID-LIFECYCLE section 9: where an ownerless dispatch sends a fid the
+    // server holds and nobody owns -- a flushed or abandoned walk's late
+    // reply binds one. Set once by the attach path before the root Spoor
+    // publishes, like `cape`; NULL on a test client, whose orphans stay bound
+    // and are counted in orphan_kept. Under c->lock.
+    p9_orphan_sink_fn    orphan_sink;
+    void                *orphan_sink_arg;
+    u64                  orphan_handed;
+    u64                  orphan_kept;
     // #349 send flow control. A send whose c2s ring is transiently FULL (under
     // #841 pipelining + concurrent large frames) is back-pressure, NOT a death:
     // the sender drains the reply path + retries (client_send_flow). A reader
@@ -444,15 +458,30 @@ int  p9_client_walkgetattr(struct p9_client *c,
                            u16 *out_nwqid, struct p9_qid *out_qids,
                            struct p9_attr *out_attrs);
 
-// Clunk (release) a fid.
+// Clunk (release) a fid, waiting for the Rclunk. Returns 0 once the Tclunk is
+// on the wire and answered -- or on the wire with its waiter dying or
+// interrupted, since a Tclunk is never flushed (FID-LIFECYCLE section 9): it
+// completes without an owner. A full tag pool is drained first, as by
+// p9_client_clunk_async. -P9_E_AGAIN: the Tclunk could not be sent (a dying
+// caller, or a spill or reply buffer that could not be allocated) on a live
+// session; nothing reached the wire, the tag is free and the fid is STILL
+// BOUND, so the caller hands it to the closer. -P9_E_IO: the session is dead
+// (its fids died with it) or the fid cannot be clunked here (unbound, the
+// root, a live op on it).
 int  p9_client_clunk(struct p9_client *c, u32 fid);
 
 // Fire-and-forget clunk (FID-LIFECYCLE async-clunk): send the Tclunk, do NOT
 // block on Rclunk. The fid unbinds at send (I-11; the number is never reused);
 // the ownerless Rclunk drains via a later op's elected reader (I-10, the #845
 // Tflush discipline). For the hot close path (dev9p_close) where the submitter
-// need not wait for the release. Returns 0 on send, -P9_E_* on a build/send error.
+// need not wait for the release. Returns 0 on send; -P9_E_AGAIN and -P9_E_IO as
+// p9_client_clunk.
 int  p9_client_clunk_async(struct p9_client *c, u32 fid);
+
+// Install the orphan-fid sink (the attach layer's closer hand-off). Call once,
+// before the client is published.
+void p9_client_set_orphan_sink(struct p9_client *c, p9_orphan_sink_fn fn,
+                               void *arg);
 
 // =============================================================================
 // IO operations.
@@ -573,6 +602,11 @@ u32 p9_client_alloc_fid(struct p9_client *c);
 // =============================================================================
 
 bool   p9_client_is_open(const struct p9_client *c);
+// The server still holds `fid` and the client knows it: the session is live
+// (not latched dead, OPEN) and the fid is bound. A clunk that failed on such a
+// fid is a real leak; on a dead session the fid died with it, and an unbound
+// fid has nothing to leak (or its Tclunk is already on the wire).
+bool   p9_client_fid_held(struct p9_client *c, u32 fid);
 size_t p9_client_inflight(const struct p9_client *c);
 
 // =============================================================================
@@ -663,7 +697,8 @@ void p9_client_handoff_reader(struct p9_client *c);
 // `rpc` is still registered (its reply has not been demuxed) drop the
 // registration -- so no future demux / mark_dead can fire rpc->on_complete --
 // and Tflush the op (reserving its tag awaiting_flush so a late original reply
-// is discarded ownerless, the I-10 reuse guard). If `rpc` already completed
+// is discarded ownerless, the I-10 reuse guard) -- except a Tclunk, which is
+// never flushed and completes without an owner. If `rpc` already completed
 // (inflight slot cleared / reused), this is a no-op. After it returns, `rpc` is
 // unreachable from inflight[] and the caller owns the container teardown with no
 // concurrent completer. Idempotent on a NULL/foreign rpc. Best-effort: a failed
@@ -717,7 +752,9 @@ void p9_client_mark_devgone(struct p9_client *c);
 #define P9_E_IO       5       // EIO
 #define P9_E_NODEV   19       // ENODEV (the device-gone terminal; T_E_NODEV)
 #define P9_E_AGAIN   11       // EAGAIN (== T_E_AGAIN): an async op could not be sent
-                              // now -- no free tag, or a full send ring. Nothing
+                              // now -- no free tag, or a full send ring -- or a
+                              // Tclunk could not be sent on a live session (its fid
+                              // is still bound; FID-LIFECYCLE section 9). Nothing
                               // reached the server; the session is intact.
 #define P9_E_INTR     4       // EINTR (== T_E_INTR); item 11 caught-note unwind of a
                               // blocked client read/wait -- the thread LIVES, the note

@@ -157,6 +157,12 @@ struct p9_outstanding {
     // op (the Rattach arm also binds, but an abandoned attach exists only on
     // a private pre-publish client with no survivor to dispatch it).
     bool abandoned;
+    // FID-LIFECYCLE section 9: this op holds a fid-table slot -- a Tclunk
+    // the slot of the fid its build unbound (until its reply or a take-back),
+    // a walk naming a new fid the slot that fid will bind. Counted in
+    // p9_session.n_reserved_slots; released by clear_outstanding, or turned
+    // into a binding by slot_bind.
+    bool holds_slot;
     u16  flush_oldtag;
     // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
     // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).
@@ -186,6 +192,10 @@ struct p9_session {
     // doesn't matter.
     u32                   bound_fids[P9_SESSION_MAX_FIDS];
     size_t                n_bound_fids;
+    // Slots held by outstanding ops (p9_outstanding.holds_slot). A new
+    // reservation needs n_bound_fids + n_reserved_slots below
+    // P9_SESSION_MAX_FIDS, so a take-back or a walk's bind always finds room.
+    size_t                n_reserved_slots;
 
     // Outstanding table — indexed by tag (0..MAX-1). Each entry is
     // active iff a Tmsg was sent under that tag and the corresponding
@@ -247,6 +257,8 @@ int p9_session_send_attach(struct p9_session *s,
 //   - new_fid is NOT the root fid.
 //   - No other in-flight op targets new_fid.
 //   - nwname <= P9_MAX_WALK.
+//   - bound + reserved fid slots are below P9_SESSION_MAX_FIDS; the walk
+//     reserves the slot new_fid will bind, so its Rwalk always finds room.
 // `names` is an array of pointers (nwname elements); `name_lens` is
 // the matching length array. nwname == 0 is a fid clone.
 int p9_session_send_walk(struct p9_session *s,
@@ -273,7 +285,9 @@ int p9_session_send_walkgetattr(struct p9_session *s,
 //   - fid is bound.
 //   - fid is NOT the root fid (root released only at session close).
 //   - No other in-flight op targets fid.
-// Send-time unbinds fid (the spec's canonical client-discipline shape).
+// Send-time unbinds fid (the spec's canonical client-discipline shape),
+// and keeps its slot reserved until the Rclunk, so a take-back of a
+// never-sent Tclunk can always re-bind it.
 int p9_session_send_clunk(struct p9_session *s,
                           u8 *out, size_t cap,
                           u32 fid);
@@ -296,13 +310,15 @@ int p9_session_send_flush(struct p9_session *s,
 // reuse). No-op on an inactive or awaiting_flush tag (fail-soft).
 void p9_session_abort_unsent(struct p9_session *s, u16 tag);
 
-// Take back an op whose frame never reached the wire and whose submitter
-// is alive and may resubmit it: free the tag as abort_unsent does, AND
-// re-bind the fid a Tclunk unbound at build, since the server still holds
-// it. The session is then exactly as it was before the build. Call it with
-// the session lock held continuously since the build, so the fid-table
-// slot the build freed is still free. Fail-soft like abort_unsent.
-void p9_session_retract_unsent(struct p9_session *s, u16 tag);
+// Take back an op whose frame never reached the wire, so that it can be
+// resubmitted or handed to the closer: free the tag as abort_unsent does,
+// AND re-bind the fid a Tclunk unbound at build, since the server still
+// holds it. The session is then exactly as it was before the build. The
+// Tclunk's reserved slot makes the re-bind total, even after the caller
+// dropped the lock to park (FID-LIFECYCLE section 9). Returns 0 when the
+// op was taken back, -1 on a guard (inactive, flushed or abandoned tag) or
+// a failed re-bind; the tag is freed on a failed re-bind, never left active.
+int p9_session_retract_unsent(struct p9_session *s, u16 tag);
 
 // #53: undo send_flush after its frame hit c2s back-pressure (EAGAIN): free
 // the never-sent flush tag + clear the victim's awaiting_flush, restoring
@@ -515,6 +531,10 @@ struct p9_dispatch_result {
     u32  op_id;      // monotonic op-id (for diagnostics)
     bool is_error;   // TRUE iff Rmsg was Rlerror
     u32  ecode;      // valid iff is_error; Linux errno
+    // The new fid this dispatch bound (a walk's), or P9_NOFID. An ownerless
+    // dispatch -- a flushed or abandoned walk's late reply -- hands it to the
+    // closer: the server holds it and nobody else will clunk it.
+    u32            bound_new_fid;
     // For walk, the parsed qids (capacity P9_MAX_WALK).
     u16            nwqid;
     struct p9_qid  qids[P9_MAX_WALK];
@@ -583,5 +603,6 @@ bool   p9_session_fid_bound(const struct p9_session *s, u32 fid);
 size_t p9_session_inflight(const struct p9_session *s);  // outstanding count
 bool   p9_session_has_free_tag(const struct p9_session *s);  // a tag slot is free
 size_t p9_session_n_bound_fids(const struct p9_session *s);
+size_t p9_session_n_reserved_slots(const struct p9_session *s);
 
 #endif  // THYLACINE_9P_SESSION_H

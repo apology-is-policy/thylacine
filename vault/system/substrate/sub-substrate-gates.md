@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -319,7 +319,16 @@ The in-kernel test that makes the fail-safe fire shortens the bound through a
 test knob that also keeps it quiet, so a passing suite prints nothing here;
 the red run that restored the real bound in that test failed this check with
 every kernel test passing. `ci-smp-gate.sh` judges each boot through
-`test.sh`, so the check covers every gate boot. The knob, and the collector
+`test.sh`, so the check covers every gate boot.
+
+**A clunk refused on a live session fails the verdict (2026-09-29).** A
+Tclunk that a dying thread cannot send goes to the 9P closer threads, and a
+dead session's fids die with it, so neither prints anything
+([[sub-kernel-ninep-attach]]). What still prints `9p: close: clunk of fid N
+refused rc R` is a fid the live session holds after the hand-off failed: a
+real leak until the session ends. After the banner `test.sh` fails on the
+line and prints it. Its red run injected one refusal at boot: all 1764 kernel
+tests passed and the verdict failed on the line; the clean boot prints none. The knob, and the collector
 mode the dev9p tests set, are released by the kernel test runner after every
 test, which prints `POLL-KNOB(...)` and fails a passing test that left one set
 (the POOL-PARKED pattern: a knob restored on a test's last line is restored
@@ -525,4 +534,5 @@ derivation, the name parse's two self-checks and the warning count; and the two
 gate changes of 2026-09-22 that landed without a dossier update recorded here:
 main's `default-smp1` row (`6e1cda16`, the loom join) and the `/webkit` floor
 path (`b70e1bfd`). 2026-09-24: the netd selftest verdict joins the exit status.
-2026-09-28: the `poll: FAILSAFE` check (#98 NP-4c).
+2026-09-28: the `poll: FAILSAFE` check (#98 NP-4c). 2026-09-29: the
+`clunk of fid` refusal check (the Tclunk closer).

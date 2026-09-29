@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -46,7 +46,12 @@ retirement rules are mechanically enforced.
   `p9_session_flush_rollback(oldtag)`,
   `p9_session_mark_abandoned(tag)`.
 - Queries: `is_open`, `fid_bound`, `inflight`, `has_free_tag` (the
-  async-clunk pool-full pre-check), `n_bound_fids`.
+  async-clunk pool-full pre-check), `n_bound_fids`, `n_reserved_slots`.
+- `retract_unsent` returns `0` when it took the op back and `-1` on a guard
+  (inactive, flushed or abandoned tag) or a failed re-bind; the tag is freed
+  either way once it passed the guards.
+- `p9_dispatch_result.bound_new_fid`: the new fid a walk's reply bound, or
+  `P9_NOFID`. An ownerless dispatch hands it to the client's orphan sink.
 
 ## Mechanism
 
@@ -68,12 +73,25 @@ swap-with-last unbind. `SendClunk` **unbinds at send time** — the canonical
 client discipline: no further op can target the fid even while the Rclunk is
 in flight, and an Rlerror on the clunk leaves it unbound (the client already
 treated it as gone). `send_walk` pre-checks fid-table capacity (RW-4 R-B-F1)
-so exhaustion fails closed *before* the round trip; the dispatch-side
-`fid_bind` failure that remains (the TOCTOU residual — a peer bound the
-last fid during this op's recv) completes the op as a **synthetic
-Rlerror EIO** rather than returning `-1`, because the client latches the
-whole shared session dead on a dispatch `-1` and a local fid exhaustion
-must never kill every other Proc's mount (the R3-F1 lesson).
+so exhaustion fails closed *before* the round trip.
+
+**Reserved slots (2026-09-29, FID-LIFECYCLE section 9).** Every outstanding
+op that may leave a fid bound when it ends holds a slot of the table
+(`p9_outstanding.holds_slot`, counted in `n_reserved_slots`): a walk naming a
+new fid reserves the slot that fid will bind, and a Tclunk keeps the slot of
+the fid its build unbound until its reply or a take-back. A new reservation
+needs `n_bound_fids + n_reserved_slots` below `P9_SESSION_MAX_FIDS`
+(`slot_available`); a walk's bind or a take-back only turns a reserved slot
+into a bound one (`slot_bind`: release, then `fid_bind`). So bound plus
+reserved never exceeds the table, and neither a walk's Rwalk nor a take-back
+can find it full, even when the caller dropped `c->lock` to park after the
+build. This retired the walk's old dispatch-time capacity race (a peer
+bound the last slot while the walk waited, and the walk failed with EIO
+although the server had bound its fid). `clear_outstanding` releases a slot
+still held. The dispatch-side bind failure that remains is only a duplicate
+bind, which completes the op as a **synthetic Rlerror EIO** rather than
+returning `-1`, because the client latches the whole shared session dead on
+a dispatch `-1` (the R3-F1 lesson).
 
 **Exhaustion here is silent at BOTH endpoints, which is what made it the
 invisible layer of the #198 hunt.** `fid_alloc` refuses before any
@@ -109,21 +127,29 @@ legal before the Rflush arrives.
 2. It was abandoned with a Tflush in flight (#845): `send_flush` sets
    `victim->awaiting_flush` and records `flush_oldtag` on the flush's own
    tag. A late original reply on an `awaiting_flush` tag is
-   **absorbed-without-completing** (dispatch returns 0, `*out` stays zeroed,
-   no fid mutation, no clear) — the **Rflush is the sole authority** that
-   frees the victim (the TFLUSH dispatch arm). Freeing on the late reply
-   would allow reuse while a stray twin reply is still possible — the exact
-   I-10 mis-attribution the naive fix introduces.
+   **absorbed-without-completing** (dispatch returns 0, no clear) — the
+   **Rflush is the sole authority** that frees the victim (the TFLUSH
+   dispatch arm). Freeing on the late reply would allow reuse while a stray
+   twin reply is still possible — the exact I-10 mis-attribution the naive
+   fix introduces. flush(5) says a reply that arrives before the Rflush is
+   honoured as though the request had not been flushed, and the only fid
+   state a reply creates is a walk's new fid: `honour_late_walk` binds it
+   into the slot the walk reserved (a TWALK on any Rwalk, a TWALKGETATTR on
+   a full walk only) and reports it in `bound_new_fid`. `holds_slot` doubles
+   as "not yet honoured", so a duplicate late reply binds nothing; an
+   Rlerror binds nothing, and the Rflush then releases the reservation.
 3. It was never sent (#52): `abort_unsent` clears it immediately — sound
    only because the transport send contract is all-or-nothing (zero bytes
    pushed ⇒ the server never saw the tag ⇒ no late reply can exist).
    Fail-soft guards: inactive / `awaiting_flush` / `abandoned` tags are left
    alone.
    `retract_unsent` (NP-4b, the async submit's full-ring path) also re-binds
-   the fid a never-sent Tclunk unbound at build: that owner is alive and
-   resubmits, and 9p_client.tla has no step for a send that never happened.
-   The sync never-sent paths keep `abort_unsent` -- their owner is gone, and
-   the unclunked fid leaks only server-side (fid numbers are never reused).
+   the fid a never-sent Tclunk unbound at build, into the slot the Tclunk
+   kept: the server still holds it, and 9p_client.tla has no step for a send
+   that never happened. Since 2026-09-29 every never-sent Tclunk on a live
+   session is taken back this way (the client then returns `-P9_E_AGAIN` and
+   the fid goes to the closer, [[sub-kernel-ninep-attach]]); `abort_unsent`
+   keeps a dead session's, whose fids died with it.
 4. Its owner is gone with NO flush in flight (#53): `flush_rollback` (the
    flush frame itself hit EAGAIN — undo: free the never-sent flush tag,
    clear `awaiting_flush`, set `abandoned`) or `mark_abandoned` (the flush
@@ -152,8 +178,9 @@ exist — the deferred refinement is noted in place).
 negotiated_msize, `bound_fids[1024]` + count, `outstanding[64]`, monotonic
 `next_op_id`, sent/completed counters. `struct p9_outstanding`: `active`,
 `kind` (the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`,
-`abandoned`, `flush_oldtag`, `wga_nwname` (the walkgetattr full-walk
-comparand). Compile-time: MAX_OUTSTANDING ∈ [1, 0xFFFE] (room for NOTAG),
+`abandoned`, `holds_slot` (a reserved fid-table slot), `flush_oldtag`,
+`wga_nwname` (the walkgetattr full-walk comparand). `n_reserved_slots` counts
+the held slots. Compile-time: MAX_OUTSTANDING ∈ [1, 0xFFFE] (room for NOTAG),
 MAX_FIDS ≥ 1.
 
 ## Concurrency
@@ -172,7 +199,9 @@ its own serialization.
 
 Enforcement sites: `alloc_tag`/`clear_outstanding` + the four retirement
 rules above (I-10); `fid_bind`/`fid_unbind` + send-time clunk-unbind + the
-per-family preconditions (I-11). The dispatcher's type check (`expected_r ==
+per-family preconditions (I-11). Bound plus reserved slots never exceed
+`P9_SESSION_MAX_FIDS`, so a take-back restores exactly the binding the build
+removed (I-11) and a walk's server-side bind is never lost to capacity. The dispatcher's type check (`expected_r ==
 kind + 1`, Rlerror always admissible) plus tag-echo verification per parse
 arm closes reply mis-pairing (the spec's `OutOfOrderCorrectness`).
 
@@ -182,8 +211,9 @@ Send: `-1` on state/magic/precondition/window-full/codec failure. Dispatch:
 `-1` on malformed header, inactive tag, tag out of range, type mismatch,
 parse failure — the CLIENT treats a dispatch `-1` as a protocol violation
 and latches the session dead ([[haz-shared-stream-desync]]), which is why
-the two LOCAL failure arms (fid-table exhaustion on walk/walkgetattr bind)
-deliberately complete with a synthetic `T_E_IO` error instead.
+the two LOCAL failure arms (a duplicate bind on walk/walkgetattr, the only
+refusal a reserved slot leaves) deliberately complete with a synthetic
+`T_E_IO` error instead.
 
 ## Performance
 
@@ -207,6 +237,11 @@ O(64) tag scan, O(n_bound) fid scan — both cache-tight linear arrays;
   walkgetattr full-walk-only bind.
 - The `t != oldtag` argument in `send_flush` (alloc_tag skips the active
   victim, so `mark_outstanding(t)` cannot clobber the victim pointer).
+- **Slot accounting**: every path that ends an op must release its
+  reservation (`clear_outstanding` does, first) or turn it into a binding
+  (`slot_bind`); only a NEW reservation may check `slot_available`. A path
+  that reserves without the check, or binds without releasing, lets bound
+  plus reserved exceed the table and a take-back fail.
 
 ## Seams
 
@@ -247,4 +282,8 @@ inactive), and the flush machinery regressions
 `9p_session.late_reply_does_not_free_awaiting_flush`,
 `9p_session.abort_unsent_reclaims_tag`,
 `9p_session.flush_rollback_restores_victim` — the last two revert-probed at
-their landing).
+their landing). The reservation and flush(5) (2026-09-29, each seen RED by a
+sabotage): `9p_session.walk_fid_full_no_latch` (leg (b): a peer's walk cannot
+take a walk's reserved slot, and the Rwalk binds into it),
+`9p_session.clunk_retract_after_peer_fill`,
+`9p_session.flushed_walk_late_reply_binds`.

@@ -7,14 +7,19 @@
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/cons.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
+#include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/rendez.h>
+#include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/timer.h"
@@ -196,10 +201,15 @@ struct p9_attached *p9_attached_create(
     return a;
 }
 
+static int attached_orphan_sink(void *arg, u32 fid);
+
 struct Spoor *p9_attached_root_spoor(struct p9_attached *a) {
     if (!a) return NULL;
     if (a->magic != P9_ATTACHED_MAGIC) return NULL;
     if (!a->handshake_ok) return NULL;
+    // Before the root publishes, so no walk runs on this client without a
+    // place for its orphan fids (FID-LIFECYCLE section 9). Idempotent.
+    p9_client_set_orphan_sink(a->client, attached_orphan_sink, a);
     return dev9p_attach_client(a->client, a->root_fid);
 }
 
@@ -238,19 +248,10 @@ static void attached_destroy_inner(struct p9_attached *a) {
     // walker can reach this attached (the walker holds the registry lock
     // across its whole walk), so everything below tears down unobserved.
     attached_ctl_unlink(a);
-    // Clunk the root fid before destroying the client. The client's
-    // session module would clunk every fid at close anyway (when its
-    // refcount hits 0), but explicit-clunk-then-destroy is the
-    // documented v1.0 contract per ARCH §9.6.6 (mount lifecycle
-    // invariants).
-    //
-    // At v1.0 each clunk is a transport round trip. If the transport
-    // has already failed (e.g., backend hung up before destroy), the
-    // clunk returns an error which we ignore — the close path below
-    // forcibly tears down anyway.
-    if (a->handshake_ok && a->root_fid != P9_NOFID) {
-        (void)p9_client_clunk(a->client, a->root_fid);
-    }
+    // No Tclunk for the root fid: p9_session_send_clunk refuses the root, and
+    // the transport close below releases it on the server with every other
+    // fid of the session (FID-LIFECYCLE section 9). Every Tclunk queued for a
+    // closer holds a reference, so none of this session's is still queued.
 
     // Graceful close (best-effort) then destroy. close() closes the
     // transport via ops->close; destroy() clobbers the magic. Free the
@@ -461,4 +462,411 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     p9_attached_ref(att);        // the root's attached_owner hold
     p9_attached_unref(att);      // drop the construction ref; root owns the session
     return root;
+}
+
+// =============================================================================
+// The closer (docs/FID-LIFECYCLE-DESIGN.md section 9; dec-2026-09-28-tclunk-
+// closer). Plan 9's closeproc pool, serialized per session. A session with
+// deferred Tclunks waits on the run-queue until a closer takes it; that closer
+// sends them all, oldest first, parking on back-pressure like any live thread.
+// The closer that takes a session spawns a spare when no other closer is idle,
+// and a closer that finds no work retires when another is idle, so one idle
+// closer is kept and a server that never answers holds only its own session's
+// closer. A hand-off that finds every closer busy and no spare starting --
+// the last spawn failed -- spawns one itself. A kernel thread cannot free
+// itself, so a retired closer parks terminally and the idle one reaps it
+// (loom_free's SQPOLL join, by a peer).
+//
+// g_closer_lock is a leaf below c->lock: the orphan sink takes it under
+// c->lock. Nothing is sent, slept on, freed or unreffed under it; the wakeups
+// under it take only rendez and scheduler locks. Every wakeup of a closer's
+// Rendez happens under it, because a retired closer's struct is freed by its
+// reaper once the closer has left the lists.
+// =============================================================================
+
+struct p9_closer_entry {
+    struct p9_closer_entry *next;
+    u32                     fid;
+};
+
+struct p9_closer {
+    struct Thread    *thread;
+    struct Rendez     r;        // only this closer sleeps on it
+    struct p9_closer *next;     // the retired list
+    bool              kicked;   // "look at the pool again"; read by the idle cond
+    bool              exited;   // RELEASE-stored in the terminal window
+    bool              started;  // its first loop top ran: its spawn is over
+};
+
+// Backoff for a closer's own -P9_E_AGAIN: a closer never dies, so that is a
+// spill buffer that could not be allocated under back-pressure. Bounded; then
+// the fid is reported as a live leak.
+#define CLOSER_RETRY_NS_MIN   1000000ull      // 1 ms, doubling
+#define CLOSER_RETRIES        10u             // ~1 s in all
+// How soon the idle closer looks again for a retired peer that had not yet
+// reached its terminal switch when it was kicked.
+#define CLOSER_REAP_NS        10000000ull     // 10 ms
+// Attempts one spawn makes while a session waits and no closer is idle.
+#define CLOSER_SPAWN_TRIES    3u
+
+static spin_lock_t            g_closer_lock;
+static struct p9_attached    *g_closer_runq_head;
+static struct p9_attached    *g_closer_runq_tail;
+static struct p9_closer      *g_closer_idle;       // at most one
+static struct p9_closer      *g_closer_retired;    // parked terminally, unreaped
+static bool                   g_closer_spawning;   // a spare created, not yet started
+static struct p9_closer_stats g_closer_st;
+// Tests: allocations to fail, and a spawn held at its end (0 off, 1 armed, 2 held).
+static u32                    g_closer_fail_spawns;
+static u32                    g_closer_fail_nodes;
+static u32                    g_closer_hold;
+
+static bool closer_spawn(void);
+
+static bool closer_knob_take(u32 *knob) {
+    u32 n = __atomic_load_n(knob, __ATOMIC_RELAXED);
+    while (n > 0) {
+        if (__atomic_compare_exchange_n(knob, &n, n - 1, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return true;
+    }
+    return false;
+}
+
+static struct p9_closer_entry *closer_entry_alloc(void) {
+    if (closer_knob_take(&g_closer_fail_nodes)) return NULL;
+    return kmalloc(sizeof(struct p9_closer_entry), 0);
+}
+
+// Under g_closer_lock. A kick sets the flag before the wakeup, so a closer
+// between its unlock and its tsleep sees it at the sleep's first cond check.
+static void closer_kick_locked(struct p9_closer *k) {
+    __atomic_store_n(&k->kicked, true, __ATOMIC_RELEASE);
+    (void)wakeup(&k->r);
+}
+
+static void closer_enqueue_locked(struct p9_attached *a,
+                                  struct p9_closer_entry *e) {
+    e->next = NULL;
+    if (a->closer_tail) a->closer_tail->next = e;
+    else                a->closer_head = e;
+    a->closer_tail = e;
+    g_closer_st.pending++;
+    // A busy session's closer takes the entry before it lets go of the
+    // session; a queued one is already waiting for a closer.
+    if (a->closer_busy || a->closer_queued) return;
+    a->closer_queued = true;
+    a->closer_next   = NULL;
+    if (g_closer_runq_tail) g_closer_runq_tail->closer_next = a;
+    else                    g_closer_runq_head = a;
+    g_closer_runq_tail = a;
+    if (g_closer_idle) closer_kick_locked(g_closer_idle);
+}
+
+int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
+    if (!a || a->magic != P9_ATTACHED_MAGIC) return -1;
+    struct p9_closer_entry *e = closer_entry_alloc();
+    if (!e) return -1;
+    e->fid = fid;
+    p9_attached_ref(a);          // the entry's; the caller's own keeps it above 0
+    spin_lock(&g_closer_lock);
+    closer_enqueue_locked(a, e);
+    // A session waits, no closer is idle and none is starting: the spare the
+    // last busy closer spawned failed, and that closer may be waiting on a
+    // server that never answers. Spawn the spare now, so no session waits on
+    // another session's server.
+    bool spawn = g_closer_runq_head && !g_closer_idle && !g_closer_spawning;
+    if (spawn) g_closer_spawning = true;
+    spin_unlock(&g_closer_lock);
+    if (spawn) (void)closer_spawn();
+    return 0;
+}
+
+// A reference for a caller that holds none: fails once the count reached 0,
+// when the session is being torn down and its fids die with it.
+static bool attached_tryref(struct p9_attached *a) {
+    int old = __atomic_load_n(&a->ref, __ATOMIC_RELAXED);
+    while (old > 0) {
+        if (__atomic_compare_exchange_n(&a->ref, &old, old + 1, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            return true;
+    }
+    return false;
+}
+
+// The client's orphan sink: a flushed or abandoned walk's late reply bound a
+// new fid nobody owns. Called under c->lock by whichever thread dispatched the
+// reply, holding no reference on `a`; c is alive, so `a` is. The allocation
+// comes first so a failed tryref never needs an unref, whose last drop would
+// tear the session down under c->lock. Under c->lock it only queues, never
+// spawns (a thread's stack allocation and the Proc table lock): with every
+// closer busy and the last spawn failed, the entry waits for the next
+// hand-off, or for a closer to finish its session.
+static int attached_orphan_sink(void *arg, u32 fid) {
+    struct p9_attached *a = (struct p9_attached *)arg;
+    if (!a || a->magic != P9_ATTACHED_MAGIC) return -1;
+    struct p9_closer_entry *e = closer_entry_alloc();
+    if (!e) {
+        // The fid stays bound. On a live session the server keeps it until
+        // the session ends: a leak, reported like the hand-off's. A session
+        // that died, or is being torn down, takes its fids with it.
+        struct p9_client *c = a->client;
+        if (!c->dead && p9_session_is_open(&c->session) &&
+            __atomic_load_n(&a->ref, __ATOMIC_ACQUIRE) > 0)
+            p9_clunk_refused(fid, -T_E_NOMEM);
+        return -1;
+    }
+    if (!attached_tryref(a)) { kfree(e); return -1; }
+    e->fid = fid;
+    spin_lock(&g_closer_lock);
+    closer_enqueue_locked(a, e);
+    spin_unlock(&g_closer_lock);
+    return 0;
+}
+
+void p9_clunk_refused(u32 fid, int rc) {
+    spin_lock(&g_closer_lock);
+    g_closer_st.live_refusals++;
+    spin_unlock(&g_closer_lock);
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
+    cons_diag_line_putdec(&dl, (u64)fid);
+    cons_diag_line_puts(&dl, " refused rc ");
+    cons_diag_line_putdec(&dl, (u64)(rc < 0 ? -rc : rc));
+    cons_diag_line_puts(&dl, "\n");
+    cons_diag_line_emit(&dl);
+}
+
+static int closer_never_cond(void *arg) {
+    (void)arg;
+    return 0;
+}
+
+// Send one deferred Tclunk. A closer is kproc's, which never dies and never
+// stops, so -P9_E_AGAIN here is a spill-OOM under back-pressure, and the fid
+// was taken back: wait for memory, a bounded number of times. Nobody wakes
+// a busy closer's Rendez (kicks go to the idle closer), so each wait runs to
+// its deadline.
+static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
+    u64 backoff = CLOSER_RETRY_NS_MIN;
+    for (u32 tries = 0;; tries++) {
+        int rc = p9_client_clunk_async(a->client, fid);
+        if (rc != -P9_E_AGAIN || tries >= CLOSER_RETRIES) return rc;
+        (void)tsleep(&self->r, closer_never_cond, NULL, timer_now_ns() + backoff);
+        backoff *= 2;
+    }
+}
+
+// Send every deferred Tclunk of `a`, which this closer took off the run-queue
+// (closer_busy). Each entry's reference is dropped outside the lock: the last
+// drop tears the session down, which may close Spoors and queue again. While
+// entries remain they hold references, so `a` outlives each unref but the
+// last; the closer lets go of `a` (closer_busy = false) before that one.
+static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
+    for (;;) {
+        spin_lock(&g_closer_lock);
+        struct p9_closer_entry *e = a->closer_head;
+        a->closer_head = e->next;
+        if (!a->closer_head) a->closer_tail = NULL;
+        spin_unlock(&g_closer_lock);
+
+        int  rc   = closer_send(self, a, e->fid);
+        bool live = rc != 0 && p9_client_fid_held(a->client, e->fid);
+        if (live) p9_clunk_refused(e->fid, rc);
+
+        spin_lock(&g_closer_lock);
+        if (rc == 0)   g_closer_st.sent++;
+        else if (live) g_closer_st.refused++;
+        else           g_closer_st.dropped++;     // the session died: its fids too
+        g_closer_st.pending--;
+        bool done = a->closer_head == NULL;
+        if (done) a->closer_busy = false;
+        spin_unlock(&g_closer_lock);
+
+        kfree(e);
+        p9_attached_unref(a);
+        if (done) return;
+    }
+}
+
+// Under g_closer_lock: unlink the retired closers that have reached their
+// terminal switch. The caller frees them after dropping the lock.
+static struct p9_closer *closer_take_reapable_locked(void) {
+    struct p9_closer *out = NULL;
+    struct p9_closer **pp = &g_closer_retired;
+    while (*pp) {
+        struct p9_closer *k = *pp;
+        if (__atomic_load_n(&k->exited, __ATOMIC_ACQUIRE)) {
+            *pp = k->next;
+            k->next = out;
+            out = k;
+            g_closer_st.retired--;
+            g_closer_st.reaped++;
+        } else {
+            pp = &k->next;
+        }
+    }
+    return out;
+}
+
+// exited (ACQUIRE, above) pairs with the terminal RELEASE store, so each
+// thread is EXITING and past every use of its struct; thread_free spins on
+// on_cpu for the switch-away still in flight.
+static void closer_free_reaped(struct p9_closer *list) {
+    while (list) {
+        struct p9_closer *k = list;
+        list = k->next;
+        thread_free(k->thread);
+        kfree(k);
+    }
+}
+
+__attribute__((noreturn))
+static void closer_retire(struct p9_closer *self) {
+    // The loom SQPOLL terminal: IRQs masked across the state write and the
+    // RELEASE so no preempt lands between them, then a switch that never
+    // returns (EXITING is never re-enqueued).
+    (void)spin_lock_irqsave(NULL);
+    current_thread()->state = THREAD_EXITING;
+    __atomic_store_n(&self->exited, true, __ATOMIC_RELEASE);
+    sched();
+    extinction("p9 closer: returned from its terminal sched");
+}
+
+static int closer_kicked_cond(void *arg) {
+    struct p9_closer *k = (struct p9_closer *)arg;
+    return __atomic_load_n(&k->kicked, __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
+static void closer_main(void *arg) {
+    struct p9_closer *self = (struct p9_closer *)arg;
+    for (;;) {
+        spin_lock(&g_closer_lock);
+        if (!self->started) {
+            // This closer's spawn ends here, where it can take work, not at
+            // its creation: a hand-off in between would spawn a second spare.
+            self->started     = true;
+            g_closer_spawning = false;
+        }
+        if (g_closer_idle == self) g_closer_idle = NULL;
+        struct p9_closer   *reap = closer_take_reapable_locked();
+        struct p9_attached *a    = g_closer_runq_head;
+        if (a) {
+            g_closer_runq_head = a->closer_next;
+            if (!g_closer_runq_head) g_closer_runq_tail = NULL;
+            a->closer_next   = NULL;
+            a->closer_queued = false;
+            a->closer_busy   = true;
+            // A spare, so a session that queues while this one is served --
+            // or while its server never answers -- finds a closer.
+            bool spawn = !g_closer_idle && !g_closer_spawning;
+            if (spawn) g_closer_spawning = true;
+            spin_unlock(&g_closer_lock);
+            closer_free_reaped(reap);
+            if (spawn) (void)closer_spawn();
+            closer_serve(self, a);
+            continue;
+        }
+        if (g_closer_idle) {
+            // Another closer is idle: retire, and kick it to reap this one.
+            self->next       = g_closer_retired;
+            g_closer_retired = self;
+            g_closer_st.threads--;
+            g_closer_st.retired++;
+            closer_kick_locked(g_closer_idle);
+            spin_unlock(&g_closer_lock);
+            closer_free_reaped(reap);
+            closer_retire(self);
+        }
+        g_closer_idle = self;
+        __atomic_store_n(&self->kicked, false, __ATOMIC_RELAXED);
+        u64 deadline = g_closer_retired ? timer_now_ns() + CLOSER_REAP_NS : 0;
+        spin_unlock(&g_closer_lock);
+        closer_free_reaped(reap);
+        (void)tsleep(&self->r, closer_kicked_cond, self, deadline);
+    }
+}
+
+u32 p9_closer_fail_spawns_for_test(u32 n) {
+    return __atomic_exchange_n(&g_closer_fail_spawns, n, __ATOMIC_RELAXED);
+}
+
+u32 p9_closer_fail_nodes_for_test(u32 n) {
+    return __atomic_exchange_n(&g_closer_fail_nodes, n, __ATOMIC_RELAXED);
+}
+
+void p9_closer_hold_spawn_for_test(bool hold) {
+    __atomic_store_n(&g_closer_hold, hold ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+bool p9_closer_spawn_held_for_test(void) {
+    return __atomic_load_n(&g_closer_hold, __ATOMIC_ACQUIRE) == 2u;
+}
+
+static void closer_spawn_hold_for_test(void) {
+    u32 armed = 1u;
+    if (!__atomic_compare_exchange_n(&g_closer_hold, &armed, 2u, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return;
+    while (__atomic_load_n(&g_closer_hold, __ATOMIC_ACQUIRE) == 2u) sched();
+}
+
+// A closer is created with g_closer_spawning set -- by the closer that took
+// work, by a hand-off that found every closer busy, or by the boot start --
+// and clears it at its first loop top. A hand-off made while the spawn runs
+// sees the flag and leaves the spare to it, so a failed attempt tries again
+// while a session waits and no closer is idle. After CLOSER_SPAWN_TRIES
+// failures (memory is short) it clears the flag, and a waiting session waits
+// for the next hand-off, or for a closer to finish its session.
+static bool closer_spawn(void) {
+    for (u32 tries = 1;; tries++) {
+        struct p9_closer *k = closer_knob_take(&g_closer_fail_spawns) ? NULL :
+                              kmalloc(sizeof(*k), KP_ZERO);
+        struct Thread    *t = NULL;
+        if (k) {
+            rendez_init(&k->r);
+            t = thread_create_with_arg(kproc(), closer_main, k);
+            if (t) k->thread = t;
+        }
+        if (t) {
+            spin_lock(&g_closer_lock);
+            g_closer_st.threads++;
+            g_closer_st.spawned++;
+            spin_unlock(&g_closer_lock);
+            closer_spawn_hold_for_test();
+            ready(t);
+            return true;
+        }
+        kfree(k);
+        closer_spawn_hold_for_test();
+        spin_lock(&g_closer_lock);
+        g_closer_st.spawn_failed++;
+        bool again = g_closer_runq_head && !g_closer_idle &&
+                     tries < CLOSER_SPAWN_TRIES;
+        if (!again) g_closer_spawning = false;
+        spin_unlock(&g_closer_lock);
+        if (!again) return false;
+    }
+}
+
+int p9_closer_start(void) {
+    spin_lock(&g_closer_lock);
+    g_closer_spawning = true;
+    spin_unlock(&g_closer_lock);
+    return closer_spawn() ? 0 : -1;
+}
+
+void p9_closer_stats(struct p9_closer_stats *out) {
+    if (!out) return;
+    spin_lock(&g_closer_lock);
+    *out             = g_closer_st;
+    out->idle        = g_closer_idle ? 1u : 0u;
+    out->idle_parked = g_closer_idle &&
+        __atomic_load_n(&g_closer_idle->thread->state, __ATOMIC_ACQUIRE) ==
+            THREAD_SLEEPING ? 1u : 0u;
+    out->runq = 0;
+    for (struct p9_attached *a = g_closer_runq_head; a; a = a->closer_next)
+        out->runq++;
+    spin_unlock(&g_closer_lock);
 }

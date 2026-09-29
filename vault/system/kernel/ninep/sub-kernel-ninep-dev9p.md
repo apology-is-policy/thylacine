@@ -83,10 +83,24 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    DIRECTORY fid on a cacheable client, not `fid_suspect`, and not staled
    (`larder_qid_staled_since` over the G4 ring since `fid_gen`) PARKS in
    the client's dir-fid cache instead of clunking; everything else takes
-   `p9_client_clunk_async` (fire-and-forget; the fid unbinds at send and
-   its number is never reused; the ownerless Rclunk drains via a later
-   op's reader). Dedup/evict victims from the park are async-clunked
+   `dev9p_clunk_fid` (fire-and-forget; the fid unbinds at send and its
+   number is never reused; the ownerless Rclunk drains via a later op's
+   reader). Dedup/evict victims from the park are clunked the same way,
    outside the table lock.
+
+   **`dev9p_clunk_fid` is every dev9p clunk (2026-09-29, FID-LIFECYCLE
+   section 9)**, all ten sites: the close's fid and G2 victims, the rename
+   and create G2 drops, and the rollback clunks in walk, walk_attrs and
+   create (asynchronous now too, so no dev9p Tclunk waits for its Rclunk). A
+   thread whose Proc is dying cannot send; the client then answers
+   `-P9_E_AGAIN` with the fid still bound, and the helper hands the fid to
+   the closer through the priv's session owner (`p9_attached_defer_clunk`,
+   [[sub-kernel-ninep-attach]]) -- before `p9_attached_unref` in step 6, so
+   the entry's reference is taken while the priv's still holds. gopls's kill
+   of a `go` child still in its spawn thunk was the measured case: three
+   leaked fids a boot. Only a fid the live session still holds after that
+   is reported (`p9_clunk_refused`); a dead session's fids died with it, and
+   a fid a failed walk never bound had nothing to leak.
 6. `p9_attached_unref` — possibly the last ref → the whole session tears
    down ([[sub-kernel-ninep-attach]]).
 7. Magic clobber + kfree.
@@ -631,5 +645,9 @@ Writes therefore pass through instead of installing own-pages at guessed offsets
 Readdir propagates the translated wire errno, preserving interrupted reads as
 EINTR rather than fabricating EPERM from a flat -1. Readdir failure does not
 mark the fid suspect: its cursor is supplied again from the unchanged offset.
-If asynchronous Tclunk submission is refused at close, a bounded console
-diagnostic reports the fid and error; close still releases local ownership.
+A clunk the closer cannot take (a test attach with no session owner, or a
+node that cannot be allocated) on a session that still holds the fid prints
+`9p: close: clunk of fid N refused rc R`; close still releases local
+ownership. Since 2026-09-29 the line means a real leak, and `tools/test.sh`
+fails on it. Before, it also printed for dead sessions, whose fids leak
+nothing, and for every dying close, so it could not tell the two apart.

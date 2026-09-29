@@ -57,7 +57,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h | inv-i32 | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
 | [[sub-kernel-mm-slub]] | mm/slub.c, mm/slub.h |  | - The destroy guard must stay `alloc_count - free_count` — reverting |
 | [[sub-kernel-mmu]] | arch/arm64/mmu.c, arch/arm64/mmu.h | inv-i12, inv-i13, inv-i16, inv-i31, inv-i32, inv-i39 | On any change here: that no PTE constructor can produce writable-and-executable |
-| [[sub-kernel-ninep-attach]] | kernel/9p_attach.c, kernel/include/thylacine/9p_attach.h |  | - **The failure-path ledger**: every exit must leave (adapter ref × |
+| [[sub-kernel-ninep-attach]] | kernel/9p_attach.c, kernel/include/thylacine/9p_attach.h, kernel/test/test_9p_closer.c |  | - **The failure-path ledger**: every exit must leave (adapter ref × |
 | [[sub-kernel-ninep-client]] | kernel/9p_client.c, kernel/9p_session.c, kernel/9p_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_mq.c, kernel/9p_attach.c, kernel/include/thylacine/9p_client.h | inv-i9, inv-i10, inv-i11 | What an auditor attacks here (the single home of the trigger-row content for |
 | [[sub-kernel-ninep-dev9p]] | kernel/dev9p.c, kernel/include/thylacine/dev9p.h, kernel/test/test_dev9p.c | inv-i38 | - **The coherence pairing**: every mutation path must carry its exact |
 | [[sub-kernel-ninep-dev9p-poll]] | kernel/dev9p_poll.c | inv-i9 | - **The completion contexts**: under `c->lock` from the demux or mark_dead, |

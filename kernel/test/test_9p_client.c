@@ -903,6 +903,13 @@ static int test_build_clunk(struct p9_session *s, u8 *out, size_t cap, void *ctx
     return p9_session_send_clunk(s, out, cap, fid);
 }
 
+// Build thunk for submit_async: a Tgetattr on the fid passed via ctx -- an op
+// an abandon flushes (a Tclunk is never flushed).
+static int test_build_getattr(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    u32 fid = *(u32 *)ctx;
+    return p9_session_send_getattr(s, out, cap, fid, P9_GETATTR_BASIC);
+}
+
 // A demuxed reply drives on_complete, which posts a CQE carrying the op's
 // user_data + the mapped (success = 0) result.
 void test_9p_client_async_op_posts_cqe(void) {
@@ -3865,7 +3872,7 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
 
-    // An async op in flight: the mq transport stages its Rclunk in the ring
+    // An async op in flight: the mq transport stages its Rgetattr in the ring
     // (undrained -- nothing pumps), so inflight[tag] is still ours at abandon.
     TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 31, (const u8 *)"f", 1, NULL),
                    0, "walk root -> fid 31");
@@ -3875,7 +3882,7 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     g_async_op.completed   = false;
     g_async_op.rpc.on_complete = test_async_on_complete;
     u32 fid = 31;
-    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_getattr, &fid);
     TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
     u16 vt = g_async_op.rpc.tag;
 
@@ -3897,7 +3904,7 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
                 "victim not awaiting_flush (rolled back)");
 
     // The ownerless reclaim + live-session proof: a fresh sync op on the SAME
-    // session pumps the orphan Rclunk (clearing the victim tag) and completes.
+    // session pumps the orphan Rgetattr (clearing the victim tag) and completes.
     TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 32, (const u8 *)"g", 1, NULL),
                    0, "a fresh op completes on the still-live session");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
@@ -4051,4 +4058,492 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
 
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);
+}
+
+// =============================================================================
+// FID-LIFECYCLE section 9: a Tclunk that could not be sent leaves its fid
+// bound, for the closer; a Tclunk is never flushed; a flushed or abandoned
+// walk's late reply binds its new fid and hands it to the orphan sink.
+//
+// A dying sender is a thread of a real Proc (kproc never dies), killed the way
+// the group-terminate cascade kills a peer: group_exit_msg, then a wake of the
+// Rendez it sleeps on, read under its wait_lock (proc_interrupt_terminate_wake's
+// per-peer body) -- without the cascade's broadcast IPI, which would wake the
+// idle secondaries (test_rendez_death_interrupts_sleep).
+//
+// The mq transport's recv never blocks, so no thread can sit in it as the
+// elected reader. A test that needs a sender parked behind a reader holds the
+// reader role itself (reader_active), as a peer blocked in recv would.
+// =============================================================================
+
+void test_9p_client_clunk_dying_keeps_fid_bound(void);
+void test_9p_client_clunk_killed_while_parked(void);
+void test_9p_client_clunk_killed_in_tag_drain(void);
+void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
+void test_9p_client_flushed_walk_late_reply_to_sink(void);
+void test_9p_client_abandoned_walk_late_reply_kept(void);
+void test_9p_client_abandoned_async_clunk_not_flushed(void);
+void test_9p_client_clunk_rlerror_drains_as_clunk(void);
+void test_9p_client_clunk_malformed_reply_fails_closed(void);
+void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
+void test_9p_client_flush_malformed_reply_fails_closed(void);
+
+#define DY_CLUNK_ASYNC  1
+#define DY_CLUNK_SYNC   2
+#define DY_WALK         3
+
+static struct test_dying g_dy;
+static struct {
+    int op;
+    u32 fid;
+    int rc;
+} g_dyop;
+
+static void dy_run(void *arg) {
+    (void)arg;
+    int rc = -1;
+    if (g_dyop.op == DY_CLUNK_ASYNC)
+        rc = p9_client_clunk_async(&g_client, g_dyop.fid);
+    else if (g_dyop.op == DY_CLUNK_SYNC)
+        rc = p9_client_clunk(&g_client, g_dyop.fid);
+    else if (g_dyop.op == DY_WALK)
+        rc = p9_client_walk_one(&g_client, 0, g_dyop.fid, (const u8 *)"w", 1, NULL);
+    g_dyop.rc = rc;
+}
+
+// Run `op` on a thread of a fresh Proc; `dying` publishes its death first.
+static bool dy_start(int op, u32 fid, bool dying) {
+    g_dyop.op  = op;
+    g_dyop.fid = fid;
+    g_dyop.rc  = 0x7fffffff;
+    return test_dying_start(&g_dy, dy_run, NULL, dying);
+}
+
+// The server's view: every request it received, in order. With g_rec_clunk_err
+// it answers a Tclunk with an Rlerror, as a server may while it clunks the fid.
+// It answers the T-type g_rec_bad_reply_to with a reply no parser accepts.
+#define DY_REC_MAX  256u
+static u32  g_rec_n;
+static u8   g_rec_type[DY_REC_MAX];
+static bool g_rec_clunk_err;
+static u8   g_rec_bad_reply_to;
+
+static int recording_responder(void *ctx, const u8 *req, size_t req_len,
+                               u8 *resp, size_t resp_cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) != 0)
+        return canonical_responder(ctx, req, req_len, resp, resp_cap);
+    if (g_rec_n < DY_REC_MAX) g_rec_type[g_rec_n++] = type;
+    if (g_rec_bad_reply_to != 0 && type == g_rec_bad_reply_to) {
+        // Two body bytes: an Rlerror carries four, an Rflush none, and an
+        // Rwalk's count reads 65535.
+        if (resp_cap < 9) return -1;
+        u8 r = type == P9_TCLUNK ? P9_RLERROR : (u8)(type + 1);
+        const u8 bad[9] = {9, 0, 0, 0, r, (u8)tag, (u8)(tag >> 8), 0xff, 0xff};
+        for (u32 i = 0; i < 9; i++) resp[i] = bad[i];
+        return 9;
+    }
+    if (type == P9_TCLUNK && g_rec_clunk_err)
+        return rlerror_responder(ctx, req, req_len, resp, resp_cap);
+    return canonical_responder(ctx, req, req_len, resp, resp_cap);
+}
+
+static u32 rec_count(u8 type) {
+    u32 n = 0;
+    for (u32 i = 0; i < g_rec_n; i++)
+        if (g_rec_type[i] == type) n++;
+    return n;
+}
+
+static int dy_client_open(void) {
+    g_rec_n            = 0;
+    g_rec_clunk_err    = false;
+    g_rec_bad_reply_to = 0;
+    if (p9_mq_loopback_init(&g_mq, recording_responder, NULL) != 0) return -1;
+    if (p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                       p9_mq_loopback_ops_for(&g_mq),
+                       g_recv_buf, sizeof(g_recv_buf)) != 0) return -1;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    return p9_client_handshake(&g_client, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+}
+
+static void dy_client_close(void) {
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+static void dy_hold_reader(bool held) {
+    spin_lock(&g_client.lock);
+    g_client.reader_active = held;
+    spin_unlock(&g_client.lock);
+}
+
+static u32 dy_bind(u32 fid) {
+    return p9_client_walk_one(&g_client, 0, fid, (const u8 *)"f", 1, NULL) == 0 ? 1u : 0u;
+}
+
+// A thread already dying when it asks to clunk is refused before the Tclunk
+// is built: -P9_E_AGAIN, nothing on the wire, the fid still bound for the
+// closer. Before the closer the build unbound the fid, the send was refused,
+// and the server kept the fid until the session ended.
+void test_9p_client_clunk_dying_keeps_fid_bound(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(30) + dy_bind(31), 2u, "walks bind 30 and 31");
+    u64 sends = g_mq.sends;
+
+    static const int ops[2]  = { DY_CLUNK_ASYNC, DY_CLUNK_SYNC };
+    static const u32 fids[2] = { 30, 31 };
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT(dy_start(ops[i], fids[i], /*dying=*/true), "dying sender");
+        TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+        test_dying_reap(&g_dy);
+        TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_AGAIN,
+                       "a dying clunk is refused with -P9_E_AGAIN");
+        TEST_ASSERT(p9_session_fid_bound(&g_client.session, fids[i]),
+                    "the fid is still bound");
+        TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
+                       "no tag held");
+        TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                       "no slot held");
+    }
+    TEST_EXPECT_EQ(g_mq.sends, sends, "no Tclunk reached the wire");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+
+    // What the closer does: a live thread sends both.
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 30), 0, "live async clunk");
+    TEST_EXPECT_EQ(p9_client_clunk(&g_client, 31), 0, "live sync clunk");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 30) &&
+                !p9_session_fid_bound(&g_client.session, 31), "both clunked");
+    TEST_EXPECT_EQ((u64)rec_count(P9_TCLUNK), (u64)2, "the server saw both Tclunks");
+    dy_client_close();
+}
+
+// A sender that dies while parked on back-pressure has built its Tclunk, and
+// the build unbound the fid. The frame never reached the wire, so it is taken
+// back whole: -P9_E_AGAIN, the tag free, the fid bound again. Sync and async.
+void test_9p_client_clunk_killed_while_parked(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(40) + dy_bind(41), 2u, "walks bind 40 and 41");
+
+    static const int ops[2]  = { DY_CLUNK_ASYNC, DY_CLUNK_SYNC };
+    static const u32 fids[2] = { 40, 41 };
+    for (int i = 0; i < 2; i++) {
+        u64 sends = g_mq.sends;
+        dy_hold_reader(true);
+        g_mq.eagain_budget = 1;                  // the Tclunk meets a full c2s ring
+        TEST_ASSERT(dy_start(ops[i], fids[i], /*dying=*/false), "sender");
+        TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && g_client.send_waiters == 1);
+        TEST_ASSERT(!p9_session_fid_bound(&g_client.session, fids[i]),
+                    "the build unbound the fid");
+        TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)1,
+                       "the parked Tclunk holds its fid's slot");
+        test_dying_kill(&g_dy);
+        TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+        test_dying_reap(&g_dy);
+        dy_hold_reader(false);
+        TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_AGAIN,
+                       "taken back: -P9_E_AGAIN");
+        TEST_ASSERT(p9_session_fid_bound(&g_client.session, fids[i]),
+                    "the fid is bound again");
+        TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
+                       "the tag is free");
+        TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                       "no slot held");
+        TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the send met the full ring");
+        TEST_EXPECT_EQ(g_mq.sends, sends, "nothing reached the wire");
+    }
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 40), 0, "live async clunk");
+    TEST_EXPECT_EQ(p9_client_clunk(&g_client, 41), 0, "live sync clunk");
+    TEST_EXPECT_EQ((u64)rec_count(P9_TCLUNK), (u64)2, "the server saw both Tclunks");
+    dy_client_close();
+}
+
+// A clunk that finds the tag pool full drains replies until a tag frees. One
+// that dies while parked there has built nothing, so its fid is still bound,
+// and it is told -P9_E_AGAIN -- not -P9_E_IO, which would strand the fid.
+void test_9p_client_clunk_killed_in_tag_drain(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    const u32 n = P9_SESSION_MAX_OUTSTANDING;
+    u32 bound = 0;
+    for (u32 i = 0; i <= n; i++) bound += dy_bind(100 + i);
+    TEST_EXPECT_EQ(bound, n + 1, "walks bind 100..100+n");
+    for (u32 i = 0; i < n; i++)
+        TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100 + i), 0, "fill the tag pool");
+    TEST_ASSERT(!p9_session_has_free_tag(&g_client.session), "the tag pool is full");
+    u64 sends = g_mq.sends;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_CLUNK_ASYNC, 100 + n, /*dying=*/false), "sender");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && g_client.send_waiters == 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_AGAIN,
+                   "a death in the tag drain is -P9_E_AGAIN");
+    TEST_ASSERT(p9_session_fid_bound(&g_client.session, 100 + n), "the fid is still bound");
+    TEST_EXPECT_EQ(g_mq.sends, sends, "nothing was sent");
+
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100 + n), 0,
+                   "a live clunk drains a reply, then sends");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 100 + n), "clunked");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    dy_client_close();
+}
+
+// A Tclunk is never flushed (flush(5)): a flush the server honours would
+// cancel the clunk, and the fid -- unbound at the build -- would stay live on
+// the server with nobody left to clunk it. A sync clunk whose waiter dies
+// leaves its Tclunk in flight without an owner, and the Rclunk drains
+// ownerless like an asynchronous clunk's.
+void test_9p_client_clunk_dying_waiter_sends_no_flush(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(50), 1u, "walk binds 50");
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_CLUNK_SYNC, 50, /*dying=*/false), "sender");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TCLUNK) == 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)0, "the Tclunk is on the wire: it will happen");
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "a Tclunk is never flushed");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 50), "unbound at the build");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)1,
+                   "the Tclunk is in flight without an owner");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)1,
+                   "it keeps its slot until the Rclunk");
+
+    dy_hold_reader(false);
+    u64 oc = g_client.demux_orphan_clunk;
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rclunk drains");
+    TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "as an ownerless Rclunk");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                   "slot released");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    dy_client_close();
+}
+
+static u32 g_sink_n;
+static u32 g_sink_fid;
+
+static int test_orphan_sink(void *arg, u32 fid) {
+    (void)arg;
+    g_sink_n++;
+    g_sink_fid = fid;
+    return 0;
+}
+
+// flush(5): a walk whose owner died is flushed, and a reply that arrives
+// before the Rflush is honoured. The late Rwalk binds the walk's new fid,
+// which nobody owns, so the client hands it to the orphan sink -- the closer,
+// in production (p9_attached_root_spoor installs it).
+void test_9p_client_flushed_walk_late_reply_to_sink(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_sink_n   = 0;
+    g_sink_fid = P9_NOFID;
+    p9_client_set_orphan_sink(&g_client, test_orphan_sink, NULL);
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WALK, 60, /*dying=*/false), "walker");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_IO, "the dead owner's walk failed");
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)1, "and was flushed");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 60), "its Rwalk is still queued");
+
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the late Rwalk");
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rflush");
+    TEST_ASSERT(p9_session_fid_bound(&g_client.session, 60),
+                "the late Rwalk is honoured: fid 60 bound");
+    TEST_EXPECT_EQ((u64)g_sink_n, (u64)1, "the fid went to the orphan sink");
+    TEST_EXPECT_EQ((u64)g_sink_fid, (u64)60, "fid 60");
+    TEST_EXPECT_EQ(g_client.orphan_handed, (u64)1, "counted as handed");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tags freed");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                   "no slot held");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 60), 0, "the closer's clunk");
+    dy_client_close();
+}
+
+// A walk whose owner died and whose Tflush met a full c2s ring is abandoned
+// without a flush (#53). Its late reply frees the tag and binds the fid all
+// the same. No sink is installed here, so the client keeps the fid: it dies
+// with the session.
+void test_9p_client_abandoned_walk_late_reply_kept(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WALK, 70, /*dying=*/false), "walker");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
+    g_mq.eagain_budget = 1;                      // the owner's Tflush meets a full ring
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the Tflush met the full ring");
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "no Tflush reached the server");
+    u32 abandoned = 0;
+    for (u32 t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++)
+        if (g_client.session.outstanding[t].active &&
+            g_client.session.outstanding[t].abandoned) abandoned++;
+    TEST_EXPECT_EQ((u64)abandoned, (u64)1, "the walk is abandoned");
+
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the late Rwalk");
+    TEST_ASSERT(p9_session_fid_bound(&g_client.session, 70), "the late Rwalk bound fid 70");
+    TEST_EXPECT_EQ(g_client.orphan_kept, (u64)1, "with no sink the fid is kept");
+    TEST_EXPECT_EQ(g_client.orphan_handed, (u64)0, "and not handed");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                   "no slot held");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 70), 0, "a live clunk");
+    dy_client_close();
+}
+
+// A Tclunk is never flushed, however its owner goes. An asynchronous one that
+// is abandoned stays in flight without an owner, like p9_client_clunk_async's,
+// and its Rclunk drains ownerless. A flush the server honoured would cancel
+// the clunk, and the fid -- unbound at the build -- would stay on the server.
+static bool          g_dy_fired;
+static struct p9_rpc g_dy_rpc;
+
+static void dy_on_complete(struct p9_rpc *rpc, int status,
+                           struct p9_dispatch_result *dr) {
+    (void)rpc; (void)status; (void)dr;
+    g_dy_fired = true;
+}
+
+void test_9p_client_abandoned_async_clunk_not_flushed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(80), 1u, "walk binds 80");
+    g_dy_fired = false;
+    for (size_t i = 0; i < sizeof(g_dy_rpc); i++) ((u8 *)&g_dy_rpc)[i] = 0;
+    g_dy_rpc.on_complete = dy_on_complete;
+    u32 fid = 80;
+    TEST_EXPECT_EQ(p9_client_submit_async(&g_client, &g_dy_rpc, test_build_clunk, &fid), 0,
+                   "an async Tclunk in flight");
+    p9_client_abandon_async(&g_client, &g_dy_rpc);
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "an abandoned Tclunk is not flushed");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)1,
+                   "the Tclunk alone is in flight");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 80), "unbound at the build");
+
+    u64 oc = g_client.demux_orphan_clunk;
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rclunk drains");
+    TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "as an ownerless Rclunk");
+    TEST_ASSERT(!g_dy_fired, "the abandoned op completes nothing");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                   "slot released");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    dy_client_close();
+}
+
+// A server may answer a Tclunk with an Rlerror; the fid is clunked all the
+// same. For a Tclunk without an owner that reply is the clunk's, not a stray:
+// it frees the tag and the slot, and it is not reported as an ownerless frame.
+void test_9p_client_clunk_rlerror_drains_as_clunk(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(90), 1u, "walk binds 90");
+    g_rec_clunk_err = true;
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 90), 0, "an async Tclunk");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)1,
+                   "it keeps its slot until the reply");
+
+    u64 oc = g_client.demux_orphan_clunk;
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rlerror drains");
+    TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "as the clunk's reply");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "not as an unexplained frame");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
+                   "slot released");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 90), "the fid is gone");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    g_rec_clunk_err = false;
+    dy_client_close();
+}
+
+// A reply that fails to parse, to a Tclunk nobody owns, leaves its tag and slot
+// held. The session fails closed, as it does for an owned op's; before, the
+// ownerless arm dropped the failure and the slot leaked without a word.
+void test_9p_client_clunk_malformed_reply_fails_closed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(100), 1u, "walk binds 100");
+    g_rec_bad_reply_to = P9_TCLUNK;
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100), 0, "an async Tclunk");
+
+    u64 oc = g_client.demux_orphan_clunk;
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the malformed Rlerror");
+    TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "reached the clunk's arm");
+    TEST_ASSERT(g_client.dead, "the session failed closed");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    g_rec_bad_reply_to = 0;
+    dy_client_close();
+}
+
+// So can the late reply of a walk abandoned without a flush: it is dispatched
+// against the walk's tag, and a failure leaves that tag held.
+void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_rec_bad_reply_to = P9_TWALK;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WALK, 110, /*dying=*/false), "walker");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
+    g_mq.eagain_budget = 1;                      // the owner's Tflush meets a full ring
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the Tflush met the full ring");
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "the walk is abandoned unflushed");
+
+    dy_hold_reader(false);
+    u64 ol = g_client.demux_orphan_late;
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the malformed late Rwalk");
+    TEST_EXPECT_EQ(g_client.demux_orphan_late, ol + 1, "reached the late arm");
+    TEST_ASSERT(g_client.dead, "the session failed closed");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 110), "it bound nothing");
+    TEST_EXPECT_EQ(g_client.orphan_kept + g_client.orphan_handed, (u64)0, "no orphan fid");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    g_rec_bad_reply_to = 0;
+    dy_client_close();
+}
+
+// And so can an Rflush: one that fails to parse frees neither the flush's tag
+// nor the flushed walk's. The late Rwalk before it is well formed and absorbed.
+void test_9p_client_flush_malformed_reply_fails_closed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_rec_bad_reply_to = P9_TFLUSH;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WALK, 120, /*dying=*/false), "walker");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)1, "the walk was flushed");
+
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the late Rwalk");
+    TEST_ASSERT(!g_client.dead, "a well-formed late reply is absorbed");
+    u64 of = g_client.demux_orphan_flush;
+    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the malformed Rflush");
+    TEST_EXPECT_EQ(g_client.demux_orphan_flush, of + 1, "reached the flush's arm");
+    TEST_ASSERT(g_client.dead, "the session failed closed");
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    g_rec_bad_reply_to = 0;
+    dy_client_close();
 }

@@ -424,6 +424,15 @@ case "$result" in
             grep -a 'poll: FAILSAFE' "$LOG_FILE" >&2 || true
             exit 1
         fi
+        # A clunk refused while the session still holds the fid leaves it on the
+        # server until the session ends (docs/FID-LIFECYCLE-DESIGN.md section 9).
+        # A dying thread's clunk goes to the closer threads and a dead session's
+        # fids die with it, so neither prints: the line means a hand-off failed.
+        if grep -aq '9p: close: clunk of fid' "$LOG_FILE"; then
+            echo "==> FAIL: a clunk was refused on a live session (9p: close: clunk of fid)." >&2
+            grep -a '9p: close: clunk of fid' "$LOG_FILE" >&2 || true
+            exit 1
+        fi
         # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
         # verdict. Both soft-skip when their external Alpine bundle is absent,
         # which is right, but nothing carried the skip into the exit status --

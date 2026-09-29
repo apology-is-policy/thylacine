@@ -118,6 +118,29 @@ struct Thread;
 void test_kthread_park_terminal(volatile bool *exited);
 void test_kthread_join_free(struct Thread *t, volatile bool *exited);
 
+// A thread of a fresh Proc -- not kproc, which never dies -- for tests of what
+// a dying thread does. test_dying_kill kills it the way the group-terminate
+// cascade kills each peer (group_exit_msg, then a wake of the Rendez it sleeps
+// on, read under its wait_lock), without the cascade's broadcast IPI, which
+// would wake the idle secondaries (test_rendez_death_interrupts_sleep). A
+// reap that times out frees nothing: the thread may still be running.
+// Bodies in kernel/test/test.c.
+struct Proc;
+struct test_dying {
+    struct Proc   *proc;
+    struct Thread *t;
+    void         (*fn)(void *arg);
+    void          *arg;
+    volatile bool  done;       // fn returned (RELEASE)
+    volatile bool  exited;     // parked terminally (RELEASE)
+};
+bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
+                      bool dead_now);
+bool test_dying_parked(const struct test_dying *d);
+bool test_dying_done(const struct test_dying *d);
+void test_dying_kill(struct test_dying *d);
+void test_dying_reap(struct test_dying *d);
+
 // TEST_YIELD_UNTIL(cond) — wait for a PEER-THREAD observable, bounded.
 //
 // The thread_create / ready / sched pattern assumes one sched() runs the peer
