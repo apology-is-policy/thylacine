@@ -554,6 +554,17 @@ matching every other structural rule in Daylight (§2.4, §5.3). No new colour
 value; a rule is a hairline like the ones that already exist, not a new kind
 of mark.
 
+### 8.4 `aside`
+
+Beacon's passage set apart from the flow (BEACON.md §3; the Markdown block
+quote, a boxed slide) is framed by a 1px `border` hairline on all four sides:
+the same structural hairline as a `rule` (§8.3), drawn as a border (§2.2). It
+has no ground of its own. An aside is document prose, not an island, so it
+keeps the surface and the body face, and its lines reflow to the frame's inner
+width like any paragraph; the empty line between two of its paragraphs is the
+paragraph break it is outside the frame. The frame takes a `pre`'s margins and
+its padding, the left padding on both sides. No new colour value.
+
 ---
 
 ## 9. Discipline summary

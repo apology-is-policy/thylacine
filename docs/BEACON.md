@@ -98,6 +98,7 @@ requires a version bump plus scripture amendment here.
 | `hdr` | `level=1..3`, optional `class=title` | A heading; `class=title` marks a title page's heading (the herald), a role the stylesheet sets apart (§12.2). |
 | `rule` | — | A separator (self-closing). |
 | `pre` | — | A **preformatted block**: internal whitespace + line breaks are significant (character-grid alignment). The renderer sets it apart — mono + code-block chrome (own ground + a leading gutter rule) — and neither re-wraps nor collapses spacing. The interim home for box-drawing / column-exact output (`la`) until Beacon gains box/table primitives; the block-level companion to `em class=code`. May contain inline `em`/`obj`. |
+| `aside` | — | A **passage set apart from the flow** (2026-09-29, operator vote): text the document around it does not depend on — the Markdown block quote, a boxed slide. It names a ROLE, never a box: the renderer frames it through its stylesheet (Halcyon a hairline frame around reflowed prose; a plain console that knows its width U+2500 furniture). Its payload is document text, paragraphs and list lines, and may contain inline `em`/`obj`. |
 
 **v1 — inline:**
 
@@ -306,6 +307,12 @@ already a Bonfire palette role.)
   §14.13). The block-level companion to `em class=code`; the interim carrier
   for box-drawing / column-exact output until Beacon gains box/table
   primitives. Additive; forward-compatible (rule 4).
+- **2026-09-29**: `aside` added — the passage set apart from the flow (§3,
+  §12.1, §12.2), by the operator's vote of 2026-09-28: the manual's Markdown
+  block quote becomes an aside, and a slide that is one block quote is a boxed
+  slide (`dec-2026-09-28-beacon-aside`). A role, not a layout op; additive,
+  forward-compatible (rule 4: an old renderer shows the text as ordinary
+  prose).
 
 ---
 
@@ -340,6 +347,7 @@ SEP        = ";"                    ; 0x3B
 ST         = ESC "\"                ; 0x1B 0x5C   (parsers also accept BEL 0x07)
 version    = "v1"
 op         = "zone" / "table" / "row" / "cell" / "hdr" / "em" / "obj" / "pre"  ; paired
+           / "aside"                                                    ; paired
            / "mark" / "rule"                                            ; point (no close)
 arg        = key "=" value
 key        = 1*( %x61-7A )          ; lowercase a-z
@@ -369,11 +377,14 @@ Normative rules, each load-bearing:
    the forward-compat contract; v2 may add ops/keys without breaking v1
    renderers.
 5. **Nesting legality** (renderer may flatten illegal nesting, never error):
-   `zone` ⊃ anything; `table` ⊃ `row` ⊃ `cell`; `cell`/`hdr`/`pre` ⊃ inline
-   (`em`/`obj`); inline ops nest nothing. `table` direct children other than
-   `row` are illegal. Inside a `pre` block, whitespace and line breaks are
+   `zone` ⊃ anything; `table` ⊃ `row` ⊃ `cell`; `cell`/`hdr`/`pre`/`aside` ⊃
+   inline (`em`/`obj`); inline ops nest nothing. `table` direct children other
+   than `row` are illegal. Inside a `pre` block, whitespace and line breaks are
    SIGNIFICANT — the renderer preserves them verbatim (no join, no re-wrap, no
-   collapse); `pre` nests no block op.
+   collapse); `pre` nests no block op. An `aside` nests no block op either,
+   but its payload FLOWS: the renderer lays it as it lays document text
+   outside one, each line reflowed to the frame and an empty line a paragraph
+   break.
 
 ### 12.2 The v1 op registry (normative arguments)
 
@@ -389,6 +400,7 @@ Normative rules, each load-bearing:
 | `em` | paired | `class=emph \| strong \| dim \| code` | Emphasis by class. `code` implies monospace in every rich stylesheet. |
 | `obj` | paired | `type=path \| pid \| url \| commit \| user \| layout; ref=<canonical>` | The presentation. `type=path` ⇒ `ref` is the cleaned ABSOLUTE 9P path (the emitter resolves relative names before emitting; a ref the emitter cannot canonicalize ⇒ emit no frame, plain text only). `pid` ⇒ `ref` is the decimal pid. `url`/`commit`/`user` ⇒ ref is the literal. `layout` ⇒ `ref` is a saved Halcyon layout's NAME (one path component, HALCYON.md §13.7 -- never a path: the session tool's verbs take the name, and a name never begins with `-`). |
 | `pre` | paired | — (v1; `obj`/`em` permitted as inline children) | A **preformatted block**: internal whitespace + line breaks are significant. The rich renderer sets it apart (mono + code-block chrome: own ground + a leading gutter rule) and neither re-wraps nor collapses spacing. Plain realization: the literal payload (stripping every frame yields the exact `none`-tier text, rule 1). The interim carrier for box-drawing / column-exact output (`la`) until Beacon gains box/table primitives; the block-level companion to `em class=code`. Names a content PROPERTY (whitespace-significant), never a face — the stylesheet picks mono + chrome. |
+| `aside` | paired | — (v1; `obj`/`em` permitted as inline children) | **v1 amendment (2026-09-29, the operator's vote of 2026-09-28; `dec-2026-09-28-beacon-aside`):** a **passage set apart from the flow** — text the surrounding document does not depend on (the manual's block quote, a boxed slide). Names a ROLE, never a layout: no width, border, colour or position rides it, and the stylesheet realizes the role (Halcyon: a hairline frame with the payload laid as prose inside it, HALCYON-VISUAL §8.4). Nests no block op; its payload flows (rule 5). Plain realization: the literal payload (rule 1). An emitter that wraps its plain output to a known console width (the manual, MANUAL-DESIGN §4.3) may draw the frame there as U+2500 furniture, the payload wrapped at the width less 4; like the wrapping, the furniture exists only where the width is known, so the unwrapped plain text is still exactly the stripped rich stream. |
 
 **Vocabulary growth policy**: any new op or key is an amendment to this table
 plus a version note; renderers already tolerate it (rule 4). **Version notes**:
@@ -403,7 +415,10 @@ realization (mono + chrome); v1 + `hdr class=title` (2026-09-08, the
 composition round -- a value of a new key on an existing op naming the
 heading's ROLE [a title page's herald vs a section heading], the same class
 as `em class=`: the stylesheet realizes the role, an old renderer reads a
-plain level-1 heading per rule 4). Growth toward
+plain level-1 heading per rule 4); v1 + `aside` (2026-09-29, the operator's
+vote of 2026-09-28 -- an additive paired op naming a passage's ROLE [set
+apart from the flow], never a box: the stylesheet draws the frame, and an old
+renderer shows the text as ordinary prose per rule 4). Growth toward
 layout/typography ops is REFUSED on sight — that was the TermKit failure.
 
 ### 12.3 The tier mechanism (consctl verb + environment)

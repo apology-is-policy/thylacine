@@ -41,6 +41,14 @@ the shared crate (lib + bin, `no_std`, `beacon` its only dependency), and the
 dialect already covers the use. Two Markdown dialects in one tree is how a
 format rots; there is one.
 
+**The boxed slide (operator vote, 2026-09-28).** The manual's block quote is a
+Beacon `aside`, a passage set apart from the flow, so a slide whose body is one
+block quote is a boxed slide: Halcyon frames it through its stylesheet, a
+console that reports its width draws U+2500 furniture around it with the text
+wrapped inside, and down a pipe it is its text alone. It reached slides through
+the manual, not beside it: `lantern` still adds no construct, and the frame is
+the renderer's, never the deck's (§9). `dec-2026-09-28-beacon-aside`.
+
 The one deviation: a slide is checked as an **anonymous** section
 (`format::check(None, …)`). The `TitleNumber` rule — a title must not begin with
 its section number — exists for the manual's `NN-name.md` book ordering, and a
@@ -163,7 +171,10 @@ mails you cannot reach for them.
 the running system's `/` (the pool is, after the pivot), so a deck baked into the
 ramfs would simply never be found. Its slides are checked with the manual's own
 checker before the pool opens and a failure is fatal, so a demo deck that stopped
-being a valid section set cannot ship.
+being a valid section set cannot ship. Its second slide holds a block quote, so
+the shipped deck shows a boxed slide in every posture: framed in a Halcyon tile,
+in a U+2500 box on a console that reports its width, and as its text down a
+pipe.
 
 The check runs against a temporary directory holding only the `.md` files,
 because `manual-check` reads a whole directory and requires every entry to be
