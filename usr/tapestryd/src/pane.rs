@@ -1657,12 +1657,16 @@ impl Layout {
         }
     }
 
-    /// The mean of `container`'s children's weights, round half up, at
-    /// least 1 -- the equal share a newcomer takes (5.2). `DEFAULT_WEIGHT`
-    /// for a container with no children or a non-container.
+    /// The mean of the weights of the children `container` divides, round
+    /// half up, at least 1 -- the equal share a newcomer takes (5.2). A
+    /// backgrounded child takes no share of the division (`divide_list`,
+    /// F2), so its weight has no say in the mean. `DEFAULT_WEIGHT` for a
+    /// container with no children or a non-container.
     fn sibling_mean(&self, container: usize) -> u16 {
         let kids: Vec<usize> = match self.get(container).map(|p| &p.kind) {
-            Some(Kind::Container { children, .. }) if !children.is_empty() => children.clone(),
+            Some(Kind::Container { children, .. }) if !children.is_empty() => {
+                Self::divide_list(children, |c| self.is_bg_subtree(c))
+            }
             _ => return DEFAULT_WEIGHT,
         };
         let sum: u64 = kids.iter().map(|&c| self.get(c).map_or(1, |p| p.weight) as u64).sum();
@@ -2374,13 +2378,15 @@ impl Layout {
             };
             if sub == slot {
                 // Direct child: swap with the neighbor, or escalate past
-                // the edge to the next matching level.
+                // the edge to the next matching level. The neighbour is the
+                // nearest sibling the user can see: a backgrounded one is
+                // transparent (F2), and a swap with it would change the tree
+                // and nothing on the screen.
+                let seen = |k: &usize| !self.is_bg_subtree(kids[*k]);
                 let j = if before {
-                    i.checked_sub(1)
-                } else if i + 1 < kids.len() {
-                    Some(i + 1)
+                    (0..i).rev().find(seen)
                 } else {
-                    None
+                    (i + 1..kids.len()).find(seen)
                 };
                 match j {
                     Some(j) => {
@@ -2776,7 +2782,7 @@ impl Layout {
             None => return,
         };
         match next {
-            Next::Leaf => self.place_frame(rect, &[slot], 0),
+            Next::Leaf => self.place_frame(rect, &[slot], 0, 1),
             Next::Split(mode, children) => {
                 self.show_container(slot, rect);
                 if children.is_empty() {
@@ -2867,7 +2873,7 @@ impl Layout {
                     .filter(|&a| !self.is_bg_subtree(a))
                     .or_else(|| eff.first().copied());
                 if let Some(a) = shown {
-                    self.place_frame(rect, &[a], 0);
+                    self.place_frame(rect, &[a], 0, eff.len());
                 }
             }
             Next::Stack(children, active) => {
@@ -2884,7 +2890,7 @@ impl Layout {
                     .get(active)
                     .and_then(|&a| eff.iter().position(|&c| c == a))
                     .unwrap_or(0);
-                self.place_frame(rect, &eff, open);
+                self.place_frame(rect, &eff, open, eff.len());
             }
         }
     }
@@ -2903,8 +2909,9 @@ impl Layout {
     /// the open one, the open one directly above its body), the open body.
     /// A collapsed leaf is hidden with a ZERO body and its header; a tile
     /// that is itself a container takes the header slot and, when open, has
-    /// its subtree carved into the body.
-    fn place_frame(&mut self, rect: Rect, tiles: &[usize], open: usize) {
+    /// its subtree carved into the body. `members` is how many tiles the
+    /// container shows as its own: the Tab arm renders one of several.
+    fn place_frame(&mut self, rect: Rect, tiles: &[usize], open: usize, members: usize) {
         let m = self.metrics;
         let f = m.frame.max(0) as u32;
         let inner = inset(rect, f);
@@ -2927,8 +2934,9 @@ impl Layout {
         // N = 0 exception -- no 32 px header (no tile exists); its `tagbar`
         // is the whole interior, where its chrome surface paints the
         // placard, and its body is ZERO. An empty leaf inside a stack of
-        // several keeps a header row like any tile.
-        if tiles.len() == 1 && self.is_empty_leaf(tiles[0]) {
+        // several keeps a header row like any tile -- a tab of several as
+        // well, though the Tab arm hands over the open one alone.
+        if members == 1 && tiles.len() == 1 && self.is_empty_leaf(tiles[0]) {
             let p = self.get_mut(tiles[0]).unwrap();
             // Dormant when the clip left it no interior (r1 A-F1; r2 C-F1:
             // judged on the carved placard, not the frame rect -- a rect of
@@ -4889,6 +4897,132 @@ mod tests {
         assert_eq!(weight(&l, c), 2);
     }
 
+    /// A session's row, as the device builds it: the console renderer's
+    /// leaf first (backgrounded beside a session, so out of the division),
+    /// then two tiles whose weights a drag and a double-click have made
+    /// their pixel extents. Returns (layout, area, console, row, s, t).
+    fn session_row() -> (Layout, Rect, usize, usize, usize, usize) {
+        let area = r(0, 34, 1280, 741);
+        let mut l = Layout::new();
+        let console = l.root();
+        let s = l.split(console, Mode::SplitH).unwrap();
+        let t = l.split(s, Mode::SplitH).unwrap();
+        let row = parent(&l, s);
+        assert_eq!(parent(&l, t), row, "premise: one row of three");
+        l.apply_backgrounded(&[console]);
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert_eq!(l.divide_of(row), vec![s, t], "premise: the console leaf is out of the division");
+        assert_eq!(l.drag_track(row, 0, (400, 300)), DragVerdict::Changed);
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert_eq!(l.equalise_track(row, 0), DragVerdict::Changed);
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert!(weight(&l, s) > 100 && weight(&l, t) > 100, "premise: the weights are extents");
+        assert_eq!(weight(&l, console), DEFAULT_WEIGHT, "premise: the console leaf keeps the default");
+        (l, area, console, row, s, t)
+    }
+
+    /// 5.2's equal share is a share of the DIVISION. On the device the
+    /// console leaf's weight of 1 entered the mean beside two extents of
+    /// ~634, and the new pane took 313 px against 471 and 470.
+    #[test]
+    fn a_newcomer_is_not_shortchanged_by_a_backgrounded_sibling() {
+        let (mut l, area, _, row, s, t) = session_row();
+        let want = ((weight(&l, s) as u32 + weight(&l, t) as u32 + 1) / 2) as u16;
+        let n = l.split(t, Mode::SplitH).unwrap();
+        assert_eq!(parent(&l, n), row, "the split flattens into the row");
+        assert_eq!(weight(&l, n), want, "the mean of the divided siblings");
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let w: Vec<u32> = [s, t, n].iter().map(|&c| l.get(c).unwrap().rect.w).collect();
+        assert!(w.iter().max().unwrap() - w.iter().min().unwrap() <= 1, "three equal panes: {:?}", w);
+    }
+
+    /// The other newcomer: a tile pulled out of a nested split joins the
+    /// row with the same equal share.
+    #[test]
+    fn a_tile_moved_into_a_row_is_not_shortchanged_by_a_backgrounded_sibling() {
+        let (mut l, area, _, row, s, t) = session_row();
+        let u = l.split(t, Mode::SplitV).unwrap();
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert!(l.move_dir(u, Dir::Right));
+        assert_eq!(parent(&l, u), row, "premise: the tile joined the row");
+        let want = ((weight(&l, s) as u32 + weight(&l, t) as u32 + 1) / 2) as u16;
+        assert_eq!(weight(&l, u), want, "the mean of the divided siblings");
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let w: Vec<u32> = [s, t, u].iter().map(|&c| l.get(c).unwrap().rect.w).collect();
+        assert!(w.iter().max().unwrap() - w.iter().min().unwrap() <= 1, "three equal panes: {:?}", w);
+    }
+
+    /// A move trades places with the nearest tile the user can see. On the
+    /// device a move left from the row's first tile traded places with the
+    /// hidden console leaf: the tree changed and the screen did not.
+    #[test]
+    fn a_move_never_trades_places_with_a_backgrounded_sibling() {
+        let kids = |l: &Layout, c: usize| match &l.get(c).unwrap().kind {
+            Kind::Container { children, .. } => children.clone(),
+            _ => Vec::new(),
+        };
+        let (mut l, _, console, row, s, t) = session_row();
+        assert_eq!(kids(&l, row), vec![console, s, t], "premise: the console leaf first");
+        let e = l.epoch;
+        assert!(!l.move_dir(s, Dir::Left), "the first visible tile is at the edge");
+        assert_eq!((kids(&l, row), l.epoch), (vec![console, s, t], e), "and nothing changed");
+        assert!(l.move_dir(t, Dir::Left));
+        assert_eq!(kids(&l, row), vec![console, t, s], "the visible neighbour");
+        // A backgrounded leaf between two tiles is stepped over.
+        let mut l = Layout::new();
+        let a = l.root();
+        let b = l.split(a, Mode::SplitH).unwrap();
+        let c = l.split(b, Mode::SplitH).unwrap();
+        let row = parent(&l, a);
+        l.apply_backgrounded(&[b]);
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        assert!(l.move_dir(a, Dir::Right));
+        assert_eq!(kids(&l, row), vec![c, b, a], "the tiles trade places across it");
+        assert!(l.move_dir(a, Dir::Left));
+        assert_eq!(kids(&l, row), vec![a, b, c], "and back");
+        assert!(!l.move_dir(a, Dir::Left), "the edge");
+    }
+
+    /// The positive control for the rule's other arm: a container whose every
+    /// child is backgrounded divides among all of them, so the mean is over
+    /// all of them. A dormant workspace is such a tree, and a `split` verb
+    /// reaches it.
+    #[test]
+    fn an_all_backgrounded_container_still_shares_by_the_mean() {
+        let mut l = Layout::new();
+        let a = l.root();
+        let b = l.split(a, Mode::SplitH).unwrap();
+        assert!(l.set_weight(a, 3) && l.set_weight(b, 5));
+        assert!(l.switch_workspace(2));
+        l.apply_backgrounded(&[]);
+        assert!(l.is_bg_subtree(a) && l.is_bg_subtree(b), "premise: the dormant panes are stamped");
+        let c = l.split(b, Mode::SplitH).unwrap();
+        assert_eq!(weight(&l, c), 4, "the mean of 3 and 5 over the all-backgrounded row");
+    }
+
+    /// A move steps over a backgrounded CONTAINER as over a leaf.
+    #[test]
+    fn a_move_steps_over_a_backgrounded_container_too() {
+        let kids = |l: &Layout, c: usize| match &l.get(c).unwrap().kind {
+            Kind::Container { children, .. } => children.clone(),
+            _ => Vec::new(),
+        };
+        let mut l = Layout::new();
+        let a = l.root();
+        let b = l.split(a, Mode::SplitH).unwrap();
+        let c = l.split(b, Mode::SplitH).unwrap();
+        let d = l.split(b, Mode::SplitV).unwrap();
+        let row = parent(&l, a);
+        let mid = parent(&l, b);
+        assert_eq!(parent(&l, d), mid);
+        assert_eq!(kids(&l, row), vec![a, mid, c], "premise: a container in the middle");
+        l.apply_backgrounded(&[b, d]);
+        l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
+        assert!(l.is_bg_subtree(mid) && !l.is_bg_leaf(mid), "premise: an all-backgrounded container");
+        assert!(l.move_dir(a, Dir::Right));
+        assert_eq!(kids(&l, row), vec![c, mid, a], "a trades places with c across the container");
+    }
+
     /// r1 A-F1: a split past the minima through the tree's OWN api (the
     /// chord path, before its fits-check) lays every child at its minimum
     /// from the origin and the clip takes the overflow to ZERO; such a tile
@@ -5270,6 +5404,35 @@ mod tests {
         for slot in [root, b, c] {
             assert_eq!(l.get(slot).unwrap().separator, Rect::ZERO);
         }
+    }
+
+    /// 14.6 under Tabbed: the Tab arm renders the open member alone, and an
+    /// EMPTY open tab of several is still an empty leaf among several -- a
+    /// header row and a body, never the placard. halcyond judges the placard
+    /// on the shown count, so the placard's geometry here had it paint a
+    /// header across the whole pane.
+    ///
+    /// SABOTAGE: drop `members == 1` and the tab's tagbar is the interior.
+    #[test]
+    fn an_empty_tab_among_several_keeps_a_header_row() {
+        let area = r(0, 34, 1280, 741);
+        let mut l = Layout::new();
+        let root = l.root();
+        assert_eq!(l.host(7), Some(root));
+        let b = l.split(root, Mode::Tabbed).unwrap();
+        assert!(l.focus(b), "the empty tab is the open one");
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let pb = l.get(b).unwrap();
+        assert!(l.is_empty_leaf(b) && pb.visible);
+        assert_eq!(pb.tagbar, r(4, 38, 1272, 32), "a header, not a placard");
+        assert_eq!(pb.content, r(4, 70, 1272, 701));
+        // One variable away: with the other tab backgrounded, the container
+        // shows one member, and its empty tab IS the placard.
+        l.apply_backgrounded(&[root]);
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let pb = l.get(b).unwrap();
+        assert_eq!(pb.tagbar, r(4, 38, 1272, 733), "the placard fills the interior");
+        assert_eq!(pb.content, Rect::ZERO);
     }
 
     /// HALCYON-INSTRUMENT 6.5, the successor rule, and the defect the rule

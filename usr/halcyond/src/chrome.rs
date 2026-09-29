@@ -358,6 +358,9 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
     }
     let mut stack: Vec<Cont> = Vec::new();
     let mut out = Vec::new();
+    // Each stacked leaf's (index into `out`, group, raw position, n, active),
+    // for the backgrounded-member pass below.
+    let mut members: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
     for raw in layout.lines() {
         let depth = raw.len().saturating_sub(raw.trim_start().len()) / 2;
         let line = raw.trim();
@@ -401,6 +404,9 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
                 Some((true, _, _, _, parent)) => parent,
                 _ => id,
             };
+            if let Some((true, i, n, active, parent)) = place {
+                members.push((out.len(), parent, i, n, active));
+            }
             out.push(TileInfo {
                 group,
                 leaf: Leaf {
@@ -437,6 +443,38 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
             active,
             seen: 0,
         });
+    }
+    // F2's structural transparency: the carve does not show a backgrounded
+    // member (the console renderer's leaf, first in a session's root row,
+    // which Super+S can stack), so it is no part of the stack's face -- the
+    // numbers, the count and the open and last tiles are taken over the
+    // members shown, as tapestryd's Stack arm lays them (`eff`; the first
+    // shown member is open when the active one is backgrounded).
+    let mut groups: Vec<u32> = Vec::new();
+    for m in &members {
+        if !groups.contains(&m.1) {
+            groups.push(m.1);
+        }
+    }
+    for g in groups {
+        let of_g: Vec<(usize, u32, u32, u32)> =
+            members.iter().filter(|m| m.1 == g).map(|m| (m.0, m.2, m.3, m.4)).collect();
+        let bg: Vec<u32> = of_g.iter().filter(|m| out[m.0].leaf.backgrounded).map(|m| m.1).collect();
+        if bg.is_empty() {
+            continue;
+        }
+        let (n, active) = (of_g[0].2, of_g[0].3);
+        let Some(first) = (0..n).find(|j| !bg.contains(j)) else {
+            continue;
+        };
+        let open = if bg.contains(&active) { first } else { active };
+        for &(o, i, _, _) in of_g.iter().filter(|m| !bg.contains(&m.1)) {
+            let t = &mut out[o];
+            t.index = i + 1 - bg.iter().filter(|&&b| b < i).count() as u32;
+            t.count = n.saturating_sub(bg.len() as u32).max(1);
+            t.open = i == open;
+            t.last = (i + 1..n).all(|j| bg.contains(&j));
+        }
     }
     out
 }
@@ -1314,6 +1352,44 @@ mod tests {
         let t = parse_tree("epoch 1 focused 2\n1 splitv n=2 active=0 [0,0,1,1]\n  2* leaf empty [0,0,1,1]\n  3 leaf surface=4 [0,0,1,1]\n");
         assert!(t.iter().all(|x| x.index == 1 && x.count == 1 && x.open && x.last));
         assert!(t[0].empty && !t[1].empty);
+    }
+
+    /// A session's root row stacked by Super+S keeps the console renderer's
+    /// backgrounded leaf as its first member. The carve shows the other two,
+    /// so they are 1 and 2 of a stack of 2 -- the count is the final-tile
+    /// rule's input, and a count of 3 let the last shown tile's x close the
+    /// session.
+    #[test]
+    fn a_backgrounded_member_is_no_part_of_the_stacks_face() {
+        let tree = "epoch 9 focused 4\n1 stacked n=3 active=2 [3,37,1274,735]\n  2 leaf surface=0 [0,0,0,0] backgrounded hidden\n  3 leaf surface=1 [4,38,1272,32] hidden\n  4* leaf surface=2 [4,70,1272,700]\n";
+        let t = parse_tree(tree);
+        let f = |id: u32| {
+            let x = t.iter().find(|x| x.leaf.id == id).unwrap();
+            (x.index, x.count, x.open, x.last)
+        };
+        assert_eq!(f(3), (1, 2, false, false));
+        assert_eq!(f(4), (2, 2, true, true));
+        // Open on the backgrounded member: the carve opens the first shown.
+        let t = parse_tree(&tree.replace("active=2", "active=0"));
+        let x = t.iter().find(|x| x.leaf.id == 3).unwrap();
+        assert_eq!((x.index, x.count, x.open, x.last), (1, 2, true, false));
+        // The console leaf in the middle: the numbers close over it.
+        let mid = "epoch 9 focused 4\n1 stacked n=3 active=2 [3,37,1274,735]\n  3 leaf surface=1 [4,38,1272,32] hidden\n  2 leaf surface=0 [0,0,0,0] backgrounded hidden\n  4* leaf surface=2 [4,70,1272,700]\n";
+        let t = parse_tree(mid);
+        let g = |id: u32| {
+            let x = t.iter().find(|x| x.leaf.id == id).unwrap();
+            (x.index, x.count, x.open, x.last)
+        };
+        assert_eq!((g(3), g(4)), ((1, 2, false, false), (2, 2, true, true)));
+        // Without a backgrounded member the raw facts stand (the control).
+        let t = parse_tree(&tree.replace(" backgrounded", ""));
+        let x = t.iter().find(|x| x.leaf.id == 4).unwrap();
+        assert_eq!((x.index, x.count, x.open, x.last), (3, 3, true, true));
+        // A dump listing more backgrounded members than its `n=` is
+        // malformed, never a panic: the count floors at one.
+        let bad = "epoch 9 focused 3\n1 stacked n=2 active=0 [3,37,1274,735]\n  3* leaf surface=1 [4,38,1272,700]\n  2 leaf surface=0 [0,0,0,0] backgrounded hidden\n  5 leaf surface=4 [0,0,0,0] backgrounded hidden\n  6 leaf surface=6 [0,0,0,0] backgrounded hidden\n";
+        let t = parse_tree(bad);
+        assert_eq!(t.iter().find(|x| x.leaf.id == 3).map(|x| x.count), Some(1));
     }
 
     /// 6.4 at 100 %, a 732 x 32 header: the index box 32, the name at 39

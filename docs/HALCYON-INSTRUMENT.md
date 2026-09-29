@@ -436,7 +436,14 @@ joins it), then refuses like a full table. The two minima ride `Metrics`
 (`min_pane_w` 260, `min_body_h` 54; §5.7) so they scale with the rest.
 Weights live on the pane (`Pane.weight`): a newcomer to a container takes
 the MEAN of its siblings (an equal share, the siblings' ratios untouched —
-i3's `con_fix_percent`); a nesting split's container takes the leaf's
+i3's `con_fix_percent`) — of the siblings the container DIVIDES: a
+backgrounded one takes no share of the division (KT-1.5d-3 F2's structural
+transparency), so its weight has no say in the mean, except in a container
+whose every child is backgrounded, which divides among all of them (the
+carve's own rule; a dormant workspace is such a tree) (2026-09-28: the
+console renderer's leaf, weight 1 beside tiles a drag had weighted by
+their extents, gave a newcomer two thirds of an equal share); a nesting
+split's container takes the leaf's
 weight and the two inside halve; a dissolved container's survivor takes
 the container's; a swap moves the weight with the pane. The verb is
 `weight <id> <1..65535>` on the pane ctl and in the `layout` file (the

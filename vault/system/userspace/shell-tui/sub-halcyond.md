@@ -45,7 +45,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -1417,6 +1417,39 @@ compiles them: the guest build and the interactive gates are the only
 witnesses, as they were for round 1's F5/F6 and round 2's F6.
 
 `MAX_WORKSPACES` is no longer hand-copied here -- see [[sub-libhalcyon]].
+
+## A backgrounded leaf is no stack member and no RESET target (2026-09-29)
+
+The compositor's `layout` dump marks the console renderer's leaf `backgrounded`
+(first in a session's root row, weight 1), and tapestryd's carve skips it: the
+Stack arm lays out only the shown members and the Tab arm opens the first shown
+one ([[sub-tapestryd]], KT-1.5d-3 F2). halcyond read the same rows without the
+token. On a root row stacked by Super+S ([console, tour, shell]) `parse_tree`
+numbered the two shown tiles 02 and 03 of a stack of 3, so the last shown tile's
+close box -- which refuses only a stack of one (HALCYON-INSTRUMENT 6.5, FINAL
+TILE IS PROTECTED) -- closed it, and the session with it; and `reset_plan`
+planned a focus on the console leaf, which the compositor refuses, so RESET
+reported RESET REFUSED.
+
+`parse_tree` now takes each stack's `index`, `count`, `open` and `last` over the
+members the carve shows: a post-pass per stack drops the backgrounded ones and,
+when the active member is backgrounded, opens the first shown member, as the
+Stack arm does. **Only the displayed number, the count and the two flags move;
+every action still names its leaf by ID**, so no header maps back to a raw
+position. The count is `n.saturating_sub(backgrounded).max(1)`: a malformed
+dump listing more backgrounded members than its `n=` gives a count of 1, never
+an overflow panic (release builds keep overflow checks).
+
+`reset_plan`'s rows carry the token: `children_of` skips backgrounded children
+and `reexpands` judges a stack against its FIRST SHOWN child, so RESET neither
+focuses the console leaf nor re-expands a stack already open on its first shown
+tile. A root row whose active child is backgrounded plans nothing for it.
+
+Tests: the Super+S row's numbering and count and the malformed dump
+(`chrome.rs`); three `reset_plan` cases, a control without the token, and the
+backgrounded-active root (`rail.rs`); each red under a sabotage of its hunk. On
+the device, `ls-halcyon-manual` leg 1b: a right press on the shell's header in
+the stacked login row says `count: 2`.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

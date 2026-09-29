@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -2974,3 +2974,64 @@ cannot spin on shared-line retries. Live verification passes on ITS/TCG (176 sec
 ITS disabled (174 seconds). The latter samples sound stable at 190 deliveries
 while GPU advances 309 -> 339 over eight seconds, with no retries/cooldowns.
 The full controller/mode/SMP matrix remains open. This work is not yet in main.
+
+## A backgrounded leaf is transparent to a newcomer's share and to a move (2026-09-28)
+
+F2 (above) took a backgrounded leaf out of the carve's division (i) and made
+it transparent to a session's structural ops (ii): ownership, `tab_cycle`,
+`visible_strips`, the Tab arm; the divider tracks (`divide_of`) and the
+minima later followed the same rule. Two structural ops never did, and a
+session's root row always holds the console renderer's leaf -- first,
+weight 1, `backgrounded hidden` in the dump -- beside its tiles.
+
+- **The newcomer's share.** `sibling_mean` averaged every child. A drag or a
+  double-click makes the divided children's weights their pixel extents
+  (`set_pair_extents` re-weights `divide_of` only), so after one the console
+  leaf's 1 sat in the mean beside two extents of ~634: Super+H's newcomer took
+  423 and 313 px against 471 and 470 (the manual chunk's device run, captured
+  with `cat /dev/tapestry/layout` in a tile). The mean is now taken over
+  `divide_list`'s children, the set the carve divides -- all of them when
+  every one is backgrounded, the F2 rule. It serves both newcomers: `split`'s
+  flatten and `move_dir`'s pull-out.
+- **The move's neighbour.** `move_dir` swapped with the raw adjacent child.
+  Super+Shift+Left on the row's first tile traded places with the console
+  leaf -- the epoch moved, the screen did not -- and afterwards a move
+  between the tiles on either side of it was a dead press. The neighbour is
+  now the nearest sibling that is not backgrounded; none in that direction
+  is the edge, which escalates exactly as before.
+
+Nothing changes where no row mixes backgrounded and shown children: a
+session-less display has an empty backgrounded set, and a dormant workspace
+is uniformly backgrounded (`stamp_bg_subtree`), so `divide_list` is the
+identity on it and the mean is unchanged, while `move_dir` refuses a dormant
+slot outright. Pinned by three host tests on the device's tree (a
+backgrounded first leaf, a drag and an equalise):
+`a_newcomer_is_not_shortchanged_by_a_backgrounded_sibling`,
+`a_tile_moved_into_a_row_is_not_shortchanged_by_a_backgrounded_sibling` and
+`a_move_never_trades_places_with_a_backgrounded_sibling`, each red on the old
+code (423 where the share is 634; the edge move returned true); and by two
+controls for the arms those three never reach, each red under a sabotage
+that breaks only that arm: `an_all_backgrounded_container_still_shares_by_the_mean`
+(the dormant workspace) and `a_move_steps_over_a_backgrounded_container_too`.
+
+The class reached halcyond as well ([[sub-halcyond]]): its stack facts and its
+RESET planner read the dump's rows without the `backgrounded` token, so a
+root row stacked by Super+S numbered its shown tiles 02 and 03, counted 3 for
+the final-tile rule (the last shown tile's close box closed it, and with it
+the session), and planned a RESET focus on the console leaf, which the
+compositor refuses. Scripture:
+HALCYON-INSTRUMENT 5.2 (the mean over the divided siblings) and TAPESTRY.md
+(d) Move (the nearest sibling that is not backgrounded).
+
+**An empty tab among several keeps its header row** (2026-09-29, the manual
+chunk's round 3, F3; pre-existing). HALCYON-INSTRUMENT 14.6 makes a lone
+EMPTY leaf the N = 0 pane: no header row, its `tagbar` the whole interior
+(the placard's surface). The Tab arm hands `place_frame` the open tab alone,
+so an EMPTY open tab of several took the placard's geometry, while halcyond,
+which judges the placard on the stack's shown count, minted a header and
+painted it across the whole pane. `place_frame` now takes `members`, how many
+tiles the container shows as its own (the Leaf arm 1, the Stack and Tab arms
+the shown members), and the exception applies only at one. Pinned by
+`an_empty_tab_among_several_keeps_a_header_row`, with its control one
+variable away (the other tab backgrounded, the container shows one member
+and its empty tab IS the placard); both arms red under sabotage.
