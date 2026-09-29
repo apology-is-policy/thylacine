@@ -27,7 +27,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -740,6 +740,16 @@ skipped and its tier's label returned (so `resolve_bundle` still writes the
 same REFUSED notes), and nothing at all is legacy from the built-in tier. A
 profile tier that exists but cannot be read fails the restore (`read_theme`
 says why) rather than guessing a profile and building the wrong tree.
+
+## The tool's help named a path ut does not expand (2026-09-29)
+
+`halcyon`'s usage text and the welcome tour named the user's files as
+`$HOME/lib/halcyon.rc`, `$HOME/lib/halcyon/layouts` and
+`$HOME/lib/halcyon/theme.toml`. ut imports no `$HOME` -- its home variable is
+`$home`, and a leading `~` or `~/` expands to it -- so the path typed as shown
+read `/lib/halcyon.rc`, a system path. The five usage lines and the tour's code
+span now say `~/lib/halcyon...`; code comments keep the notation. Found by the
+Operator's Manual chunk, which writes `~/` for the same reason.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

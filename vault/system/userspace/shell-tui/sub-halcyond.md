@@ -1451,6 +1451,21 @@ backgrounded-active root (`rail.rs`); each red under a sabotage of its hunk. On
 the device, `ls-halcyon-manual` leg 1b: a right press on the shell's header in
 the stacked login row says `count: 2`.
 
+## The chrome line says every change of a header's rect (2026-09-29)
+
+In test builds the chrome set says `halcyond: chrome <surface> for pane <id>
+at <x>,<y> <w>x<h>` when it mints a header or placard strip and whenever the
+strip's rect changes; gates find a header by the LAST such line (a close-box
+press at `x + w - 9`, a blank-corner click at `x + w - 30`). The change test
+compared the wanted rect with the strip SURFACE's size, but the strip's own
+CONFIGURE (handled by the pump) resizes the surface before the layout pass
+runs, so a header that changed width at the same position was never said:
+after Super+H in a row of two the tour's header went from 632 to 418 px at x 4
+and its last line still read 632. The test now compares against the geometry
+the line last SAID (`Tile::said`, test builds only), set at the mint and at
+each say. `ls-halcyon-manual` leg 4a reads the three headers' widths after the
+split and was red on the old rule.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
 

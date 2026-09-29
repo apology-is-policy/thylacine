@@ -196,6 +196,11 @@ struct Tile {
     /// The surface's display origin (the tagbar's x, y): a menu is summoned
     /// at display coordinates.
     origin: (u32, u32),
+    /// The geometry the last `chrome` line said (test builds). The strip's
+    /// own CONFIGURE resizes `surf` before the layout pass sees the change,
+    /// so `surf`'s size cannot tell a resize that was never said.
+    #[cfg(feature = "test-mode")]
+    said: ((u32, u32), u32, u32),
     dirty: bool,
     dead: bool,
 }
@@ -461,11 +466,12 @@ impl ChromeSet {
                     // panes. Keep test geometry current, not just its mint
                     // position; input/pixel probes must follow the live tree.
                     #[cfg(feature = "test-mode")]
-                    if inst && (t.origin != w.origin || t.surf.w != w.w || t.surf.h != w.h) {
+                    if inst && t.said != (w.origin, w.w, w.h) {
                         say(&format!(
                             "halcyond: chrome {} for pane {} at {},{} {}x{}",
                             t.surf.id, w.id, w.origin.0, w.origin.1, w.w, w.h
                         ));
+                        t.said = (w.origin, w.w, w.h);
                     }
                     t.origin = w.origin;
                     if t.kind != w.kind {
@@ -500,6 +506,8 @@ impl ChromeSet {
                             hover: None,
                             action: None,
                             origin: w.origin,
+                            #[cfg(feature = "test-mode")]
+                            said: (w.origin, w.w, w.h),
                             dirty: true,
                             dead: false,
                         };
