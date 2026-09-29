@@ -752,7 +752,7 @@ merged before its gates. No kernel change, so no sanitizer run or spec is owed.
 Operator vote 3 of 2026-09-28 pulled forward the owed Fable-diversity pass on inline media and the I-47 flip. The pass
 (FABLE-1: 0 P0 / 1 P1 / 1 P2 / 4 P3) is closed here, all but F5, which belongs to (d2), the image slide. Scripture 8698a926
 (ARCH 28 I-47 rewritten and ENFORCED; the HPL2 AUDIT-TRIGGERS row; HALCYON 14.7 and 14.7.2; BEACON 10; AUX-ROADMAP;
-`dec-2026-09-29-inline-media-one-principal`). Code *(pending)*.
+`dec-2026-09-29-inline-media-one-principal`). Code 040450a6.
 
 - **One raster per block (F1, P1).** A block keeps one resampled raster per (image id, display size) in
   `LaidBlock.blobs`; a `LaidImage` is a placement shown at its raster's size, and `render_block` adds each raster to
