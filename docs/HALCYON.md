@@ -1518,7 +1518,8 @@ converged on (the image/placement split, explicit-format-never-sniff,
 resize-as-re-place, a bounded table) natively, without the escape-sequence hacks.
 
 **AS-DESIGNED (operator-ratified 2026-09-09; the design-conversation → scripture
-pattern).** Reserved as **I-47** (ARCH §28). Two amendments to the original prose,
+pattern).** **I-47** (ARCH §28; reserved 2026-09-09, ENFORCED 2026-09-29). Two
+amendments to the original prose,
 both from the ratifying dialogue:
 - **Decode runs in the short-lived `view`/`gallery` Proc, not in the compositor** —
   native Rust either way (the format-fuzz intent holds), but a per-invocation
@@ -1579,20 +1580,26 @@ namespace descendant of the pane's shell. See the reciprocal note in `BEACON.md 
 **path component**: `view` opens `/srv/halcyon-<user>/<hex(token)>/place`, the
 fully-resolved address the compositor wrote into that pane's
 `/env/HALCYON_PLACE` right before its spawn (per-Proc `/env`, deep-copied at
-spawn — so the child snapshots ITS pane's address, isolated from every other
-pane; the compositor removes it after the spawn so its own `/env` and the next
-tile's snapshot stay clean). The **wire is unchanged** (`inlinewire` v0 — the
-token never enters the payload; it is validated ONCE at the 9P walk, fail-closed
-`E_NOENT` on an unknown/dead token). Two authority axes: (1) the secret token
-(unguessable, only in the pane's own `/env`), and (2) a **peer-principal gate at
-accept** (`t_srv_peer`) refusing any connection whose peer is not the session's
-own user — so even a leaked token cannot let a different user place into the
-session. The DoS floor: `MAX_CONNS = 2` bounds concurrent transfers; the
-per-image cap is the heap residual divided by `MAX_CONNS` (so the aggregate
-in-flight fits the residual); the per-pane **stored** quota (live placements +
-raster bytes) is the tile transcript's own content budget (`inject_image` →
-`enforce_budget` evicts frozen blocks by `max_cost` + `max_blocks`, failing
-clean). The alternatives — a distinct 9P service per pane, and a token in the
+spawn — so the child snapshots ITS pane's address; the compositor removes it
+after the spawn so its own `/env` and the next tile's snapshot stay clean). The
+**wire is unchanged** (`inlinewire` v0 — the token never enters the payload; it
+is validated ONCE at the 9P walk, fail-closed `E_NOENT` on an unknown/dead
+token). The authority is a **peer-principal gate at accept** (`t_srv_peer`),
+refusing any connection whose peer is not the session's own user, so no other
+user places into the session; the token **routes** (unguessable, so a request
+lands only in the live pane it names). It is not a secret among one user's
+panes: any Proc of that user can read a pane's `/env` through
+`/proc/<pid>/environ`, and that user's panes are one authority domain (corrected
+2026-09-29: this paragraph first called the token an authority axis, isolated
+from every other pane; `dec-2026-09-29-inline-media-one-principal`). The DoS
+floor: `MAX_CONNS = 2` bounds concurrent transfers; the per-image cap is the heap
+residual divided by `MAX_CONNS` (so the aggregate in-flight fits the residual);
+the per-pane **stored** quota (live placements + raster bytes) is the tile
+transcript's own content budget (`inject_image` → `enforce_budget` evicts frozen
+blocks by `max_cost` + `max_blocks`, failing clean). The wire and the stored
+quota were refined on 2026-09-17 (the 14.7 integration refinement below: the
+header is `HPL2` and carries an image id, and a session tile's stored quota is
+its raster cache). The alternatives — a distinct 9P service per pane, and a token in the
 wire payload — were rejected: the former posts N services (heavier teardown, and
 §14.7.2 specifies one service); the latter bumps the wire ABI (a format break)
 and re-validates per write. Impl: `usr/halcyond/src/{paneroute,paneplace}.rs` +
@@ -2536,12 +2543,23 @@ for the console/test injection path.
 Each tile owns a bounded raster cache, independent of other panes. Text and
 raster retention share the existing per-tile content allowance equally.
 There are at most 64 cached images; eviction leaves the readable caption in
-place. A repeated reference does not duplicate retained raster storage. The
+place. A repeated reference does not duplicate retained raster storage, nor laid
+storage: a layout resamples each cached image once per block and size, however
+many rows name it. The
 layout resolver substitutes only a complete standalone inline-image object;
 ordinary text around an object is never silently discarded. New or evicted
 raster data invalidates the tile's layout-height cache. Restart drops both
 routing tokens and raster references. An id names presentation data only and
 confers no authority: service peer checks and per-pane routes remain the gates.
+The routes keep a request from being misrouted and from crossing a principal; they
+do not keep one principal's panes from each other. A pane's token is in its
+`/env`, which any Proc of that principal can read through `/proc/<pid>/environ`,
+and that principal's panes are already open to each other (Plan 9's rio, where
+every window's files are open to every process of the session; ptyfs's v1.0 pts
+posture) -- `dec-2026-09-29-inline-media-one-principal`. A diagnostic that a
+client can repeat at will (a connect accepted or refused, a walk to an unrouted
+token, an upload placed, refused by the cache, or orphaned by its pane closing)
+is logged at its 1st, 2nd, 4th ... occurrence, with its count.
 
 Session upload admission is capped by both the transient heap residual and the
 smallest live raster cache. Completion rechecks the current cap before replying:

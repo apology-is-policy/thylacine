@@ -271,11 +271,12 @@ was written, with no cross-reference; this note closes the gap). Beacon rejects
 carrying *Beacon structure* out of band — text annotation rides the pts cleanly as
 OSC 1936, so a side channel for *it* would be gratuitously fragile — and rejects
 *Beacon* carrying pixels ("Tapestry owns pixels"). The inline-media path
-(`HALCYON.md §14.7`, reserved as **I-47**) is **consistent with both**: pixels
-travel a dedicated per-pane pixel channel (a Weft raster share + a place-request),
-**never Beacon**, and the "fragile association / dies at every hop" failure mode is
-closed *by construction* — the endpoint lives in the pane's own namespace, so
-association is structural (inherited with the namespace). In a session, the
+(`HALCYON.md §14.7`, **I-47**, enforced since 2026-09-29) is **consistent with
+both**: pixels travel a dedicated pixel channel as a bounded write of the raster
+(a place-request), **never Beacon**, and the "fragile association / dies at every
+hop" failure mode is closed *by construction* — a pane's programs inherit the
+channel's address with the pane's environment, so association is structural. In a
+session, the
 pixel request carries a per-placement u128 ID; a standalone
 `obj type=inline-image ref=<32 hexadecimal digits>` caption in the text stream
 selects that raster from the same pane's bounded cache. The caption owns its
