@@ -1775,6 +1775,10 @@ pub struct Comp {
     /// The DECLARED session conn (`session on`) with its principal: the seat.
     /// At most one entry; cleared when the conn retires.
     session_conns: Vec<(u64, u32)>,
+    /// The conn `retire_conn` is tearing down, while it retires the conn's
+    /// surfaces: a departing seat's tiles close outright, since no pane is
+    /// kept for a session that has ended (`keeps_place`).
+    teardown_conn: Option<u64>,
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
@@ -2552,6 +2556,7 @@ impl Comp {
             geom_sig: 0,
             rescale_fan_due: false,
             session_conns: Vec::new(),
+            teardown_conn: None,
             tick: 0,
             clock_hz: 60,
             motion: true,
@@ -7509,6 +7514,10 @@ impl Comp {
                     .map(|_| v.0)
             }) {
                 self.layout.focus(slot);
+            } else if let Some(slot) = self.layout.first_unbackgrounded_leaf(self.layout.root()) {
+                // No session tile shows here: the empty pane the session can
+                // fill takes the keys, never the renderer nobody can see.
+                self.layout.focus(slot);
             }
         }
         let active_vis: Vec<(usize, usize, Rect)> = vis
@@ -8383,7 +8392,7 @@ impl Comp {
                 // is what i3 actually does. Nothing moved, so the caller gets
                 // E_INVAL rather than a silent success that would leave it
                 // believing it had switched.
-                if !self.layout.switch_workspace(n as u8) {
+                if !self.layout.switch_workspace(n as u8, self.workspace_owner()) {
                     return Err(p9::E_INVAL);
                 }
                 self.reconcile();
@@ -8513,7 +8522,7 @@ impl Comp {
             // request, never a forced retire (the client may need to
             // save). The event is non-droppable; a wedge force-retires.
             self.layout.unzoom();
-            let unhosted = self.layout.close(slot);
+            let unhosted = self.close_or_keep(slot);
             for n in unhosted {
                 self.send_close(n);
             }
@@ -8617,10 +8626,12 @@ impl Comp {
             self.ptr_over = None;
         }
         // (0) The pane side (G-6): the hosting leaf closes (single-child
-        // containers collapse; the root collapses to an empty leaf). Done
-        // BEFORE reconcile so the layout no longer names n.
+        // containers collapse; the root collapses to an empty leaf), or stays
+        // as a fresh empty pane when it is its workspace's last usable one
+        // (`close_or_keep`). Done BEFORE reconcile so the layout no longer
+        // names n.
         if let Some(leaf) = self.layout.find_hosting(n) {
-            let _ = self.layout.close(leaf);
+            let _ = self.close_or_keep(leaf);
         }
         // (1) Quiesce: presents are handled synchronously (see header) --
         // the in-flight set is empty here by construction.
@@ -8725,11 +8736,14 @@ impl Comp {
     /// `Direct(console)`, not N-1 composed passes of dead tiles beside it);
     /// the last retire already sees a declared conn hosting nothing.
     fn retire_conn(&mut self, conn_id: u64) {
+        let seat = self.session_declared(conn_id);
+        self.teardown_conn = Some(conn_id);
         for n in 0..MAX_SURFACES {
             if self.surf(n).map_or(false, |s| s.owner_conn == conn_id) {
                 self.retire(n);
             }
         }
+        self.teardown_conn = None;
         self.session_conns.retain(|&(c, _)| c != conn_id);
         // H-4d: the empties this conn split are reserved no longer -- they
         // are the principal's to host now (a restore tool exits after
@@ -8748,6 +8762,78 @@ impl Comp {
             self.layout.epoch += 1;
             self.notify_session_layout();
         }
+        if seat {
+            self.session_departed();
+        }
+    }
+
+    /// HALCYON-WORKSPACES, "Under a session": when the seat goes, the display
+    /// returns to the console. The panes nobody filled go with the session,
+    /// and the workspace holding the console renderer's leaf becomes the
+    /// active one -- the reap drops the others, now empty -- so the login
+    /// prompt shows and takes the keys wherever the session last stood.
+    fn session_departed(&mut self) {
+        for id in self.layout.fresh_ids() {
+            if let Some(slot) = self.layout.slot_of_id(id) {
+                let _ = self.layout.close(slot);
+            }
+        }
+        let console = self.layout.hosted_leaves().into_iter().find(|&(_, n)| {
+            self.surf(n)
+                .is_some_and(|s| !principal_is_session(s.owner_principal))
+        });
+        // Silent: login prints its prompt as this runs, and a line said here
+        // could tear it at the UART (every logout gate reads that prompt).
+        if let Some(number) = console.and_then(|(slot, _)| self.layout.workspace_number_of(slot)) {
+            let _ = self.layout.switch_workspace(number, 0);
+        }
+        self.reconcile();
+    }
+
+    /// A live SYSTEM surface -- the console renderer's, or any non-session
+    /// client's -- which a session's pane never counts as usable.
+    fn system_surface(&self, n: usize) -> bool {
+        self.surf(n)
+            .is_some_and(|s| !principal_is_session(s.owner_principal))
+    }
+
+    /// `Layout::keeps_place` under the declared seat: never while the seat's
+    /// own conn is torn down (a departing seat's tiles close outright; any
+    /// other conn's teardown keeps a pane like any close), and never with no
+    /// seat at all.
+    fn keeps_place(&self, slot: usize) -> bool {
+        let seat = match self.session_conns.first() {
+            Some(&(c, _)) => c,
+            None => return false,
+        };
+        if self.teardown_conn == Some(seat) {
+            return false;
+        }
+        self.layout.keeps_place(
+            slot,
+            |n| self.surf(n).is_some_and(|s| s.owner_conn == seat),
+            |n| self.system_surface(n),
+        )
+    }
+
+    /// Close the pane at `slot`, or keep it as a fresh empty pane when
+    /// `keeps_place` says so. The surfaces it unhosted, either way.
+    fn close_or_keep(&mut self, slot: usize) -> Vec<usize> {
+        if self.keeps_place(slot) {
+            let old = self.layout.id_of(slot).unwrap_or(0);
+            if let Some(unhosted) = self.layout.keep_as_fresh(slot, self.workspace_owner()) {
+                #[cfg(feature = "test-mode")]
+                say!(
+                    "tapestryd: pane {} kept as the empty pane {} (its workspace's last)",
+                    old,
+                    self.layout.id_of(slot).unwrap_or(0)
+                );
+                #[cfg(not(feature = "test-mode"))]
+                let _ = old;
+                return unhosted;
+            }
+        }
+        self.layout.close(slot)
     }
 
     /// HALCYON-SCALE 5 (the scale round's F3): the Direct arm carves
@@ -8791,6 +8877,19 @@ impl Comp {
     /// Is `conn` the declared session conn (the seat)?
     fn session_declared(&self, conn: u64) -> bool {
         self.session_conns.iter().any(|&(c, _)| c == conn)
+    }
+
+    /// The owner a newly minted workspace root records: the declared
+    /// session's principal (HALCYON-WORKSPACES: under a session the
+    /// workspaces are the SESSION's), else the environment's 0. Derived at
+    /// each mint, never stored, so a root minted after the logout reap is
+    /// the environment's again.
+    fn workspace_owner(&self) -> u32 {
+        self.session_conns
+            .first()
+            .map(|&(_, p)| p)
+            .filter(|&p| principal_is_session(p))
+            .unwrap_or(0)
     }
 
     /// The lowest-slot surface of the declared session conn, if any -- the
@@ -9851,7 +9950,7 @@ impl Comp {
             // read it); only its source moved from a position to an identity,
             // so with a sparse set it can honestly read "3 of 2".
             ChordAction::Workspace(n) => {
-                if self.layout.switch_workspace(n) {
+                if self.layout.switch_workspace(n, self.workspace_owner()) {
                     #[cfg(feature = "test-mode")]
                     say!(
                         "tapestryd: workspace switch -> {} of {}",
@@ -9862,13 +9961,28 @@ impl Comp {
                 }
             }
             ChordAction::MoveToWorkspace(n) => {
-                if self.layout.move_focused_to_workspace(n) {
+                // The last usable pane of this workspace stays behind, fresh.
+                let keep = !self.session_conns.is_empty()
+                    && self
+                        .layout
+                        .rest_unusable(self.layout.focused, |m| self.system_surface(m));
+                if self
+                    .layout
+                    .move_focused_to_workspace(n, self.workspace_owner(), keep)
+                {
                     #[cfg(feature = "test-mode")]
                     say!(
                         "tapestryd: workspace move -> {} of {}",
                         n,
                         self.layout.workspace_count()
                     );
+                    #[cfg(feature = "test-mode")]
+                    if keep {
+                        say!(
+                            "tapestryd: workspace move keeps the empty pane {}",
+                            self.layout.id_of(self.layout.focused).unwrap_or(0)
+                        );
+                    }
                     self.reconcile();
                 }
             }
@@ -9916,6 +10030,19 @@ impl Comp {
                 // a shell exactly as it fills a split's.
                 let f = self.layout.focused;
                 if !self.layout.is_leaf(f) {
+                    return;
+                }
+                // A fresh empty pane under a session is where the new tile
+                // goes: the chord asks for it (the placard's Open shell,
+                // from the keyboard -- and the legacy profile's only way,
+                // having no placard) rather than splitting an empty pane.
+                if !self.session_conns.is_empty() && self.layout.ask_fresh(f) {
+                    say!(
+                        "tapestryd: chord new-tile asks for the empty pane {}",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    self.reconcile();
+                    self.notify_session_layout();
                     return;
                 }
                 let mode = self.layout.new_tile_mode(f);
@@ -18185,6 +18312,21 @@ impl Conn {
                             self.conn_id
                         );
                         comp.session_conns.clear();
+                        // So do the seat's empty panes: stamped with the idle
+                        // holder's principal, the newcomer could neither bind
+                        // its placard to one nor claim it for a shell, and the
+                        // idle holder could still claim it for a tile the new
+                        // session never sees.
+                        if other_p != self.peer_principal {
+                            let n = comp.layout.restamp_empties(other_p, self.peer_principal);
+                            if n > 0 {
+                                say!(
+                                    "tapestryd: session takeover re-stamps {} empty pane(s) to principal {}",
+                                    n,
+                                    self.peer_principal
+                                );
+                            }
+                        }
                         // What the seat minted goes with the seat: the idle
                         // holder's status bar (the ONE per-display carve,
                         // which would else refuse the successor's for as
@@ -18254,6 +18396,7 @@ impl Conn {
                     say!("tapestryd: session declared by conn {}", self.conn_id);
                 }
                 "off" => {
+                    let seat = comp.session_declared(self.conn_id);
                     comp.session_conns.retain(|&(c, _)| c != self.conn_id);
                     // The mirror of the declare above, and TY-6 F7: a seat
                     // that gives the display back must give the display's
@@ -18280,6 +18423,9 @@ impl Conn {
                             say!("tapestryd: session release retires its rail (surface {})", r.n);
                             comp.retire(r.n);
                         }
+                    }
+                    if seat {
+                        comp.session_departed();
                     }
                 }
                 _ => return Err(p9::E_INVAL),

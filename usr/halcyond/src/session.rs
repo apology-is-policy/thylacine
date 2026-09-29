@@ -1193,12 +1193,14 @@ fn pane_channel(places: &mut Option<PanePlaceServer>, leaf: u32) -> Option<Strin
 
 /// Bring the tile set in line with the layout: reap orphaned tiles (leaf
 /// gone), spawn tiles for new empty leaves we own (claim-gated). `closed` is
-/// the permanent respawn guard.
+/// the permanent respawn guard; `opened` holds the fresh panes the placard's
+/// Open shell asked to fill (`plan_tiles`).
 fn reconcile(
     ring: &EventRing,
     troot: i64,
     tiles: &mut BTreeMap<u32, SessionTile>,
     closed: &mut BTreeSet<u32>,
+    opened: &BTreeSet<u32>,
     geom: Geom,
     home: Option<&str>,
     places: &mut Option<PanePlaceServer>,
@@ -1213,7 +1215,8 @@ fn reconcile(
     let leaves = parse_leaves_all(&layout);
     let have: Vec<u32> = tiles.keys().copied().collect();
     let closed_v: Vec<u32> = closed.iter().copied().collect();
-    let plan = plan_tiles(&leaves, &have, &closed_v);
+    let opened_v: Vec<u32> = opened.iter().copied().collect();
+    let plan = plan_tiles(&leaves, &have, &closed_v, &opened_v);
 
     for leaf in plan.drop {
         // HALCYON-WORKSPACES W-3: `plan.drop` is a CANDIDATE list -- it means
@@ -1840,6 +1843,7 @@ pub fn run(home: Option<String>) -> i64 {
 
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
+    let mut opened: BTreeSet<u32> = BTreeSet::new();
     let shell = tile_command("", home.as_deref(), |p| fs::exists(p));
     let root_addr = pane_channel(&mut places, root_leaf);
     match SessionTile::spawn(
@@ -2340,6 +2344,7 @@ pub fn run(home: Option<String>) -> i64 {
                 troot,
                 &mut tiles,
                 &mut closed,
+                &opened,
                 geom,
                 home.as_deref(),
                 &mut places,
@@ -2499,6 +2504,7 @@ pub fn run(home: Option<String>) -> i64 {
                     }
                     ChromeAction::OpenShell(id) => {
                         closed.remove(&id);
+                        opened.insert(id);
                         relayout = true;
                     }
                 }

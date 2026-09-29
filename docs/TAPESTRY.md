@@ -866,7 +866,12 @@ notifies the session to repaint its header. The surface owner cannot use this
 verb to name another pane. An unhosted surface returns `EINVAL`. Layout text
 has an optional `backgrounded` token after geometry/weight, separate from
 `hidden`: a hidden foreground tab still belongs to its pane, while a background
-system renderer is excluded from the session's pane count.
+system renderer is excluded from the session's pane count. An optional `fresh`
+token follows it, before `hidden`, on an EMPTY leaf the tree made so a
+workspace has a pane (HALCYON-WORKSPACES 4, "Under a session"): the session
+compositor fills a fresh pane only when asked. Hosting a surface in the leaf,
+or a Super+N ask on it under a session, clears the mark; a saved layout never
+records it.
 
 ### 18.6 Determinism mode (the §16 wire, made concrete)
 

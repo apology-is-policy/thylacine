@@ -176,7 +176,63 @@ the H-4 file format at v1 (a save is the active workspace's tree).
   format with a `workspace` header) is named, not proposed.
 - **Under a session**: the workspaces are the SESSION's (the console leaf
   stays backgrounded in every one, as today). On logout the tree collapses
-  to the console as today, workspaces and all.
+  to the console as today, workspaces and all. **As built (2026-09-29)**: a
+  root the tree mints for a workspace -- a new workspace's empty pane, or
+  the empty root a Super+Shift+N move leaves behind -- records the declared
+  session's principal as its owner (H-4b-2's stamp; the environment's 0
+  when no session is declared), read fresh at each mint. An
+  environment-owned empty root was one the session could neither bind its
+  placard to (HALCYON-INSTRUMENT 14.6) nor mint a placement claim on, so a
+  new workspace showed neither the placard nor its Open shell. The logout
+  reap hands such a root back to the environment.
+  **As built, round 4 (2026-09-29)** -- the rule that follows replaces an
+  earlier one keyed on the tree's SHAPE (a lone empty root waited), which
+  swallowed a one-leaf `layout restore` onto a new workspace: the
+  placeholder is hosted INTO the fresh root, `split` nests it with the
+  anchor, it closes, the container dissolves, and the anchor became a lone
+  empty root that waited behind a placard. The rule now keys on how a pane
+  came to be:
+  - **A fresh pane** is an empty leaf the tree made so a workspace has a
+    pane -- a new workspace's root, the pane a Super+Shift+N move leaves,
+    the pane a close keeps (below). Nobody asked for a tile there. The
+    `layout` dump marks it ` fresh` (TAPESTRY 18.5) and halcyond's
+    `plan_tiles` fills it only when asked. The placard's Open shell asks
+    (halcyond's `opened`); so does Super+N on the pane under a session,
+    which clears the mark in the compositor -- no geometry changes, so the
+    compositor fans the TEV_LAYOUT itself -- and which is the ONLY ask under
+    the legacy profile (no placard there). Hosting a surface in the pane
+    clears the mark (the restore above). A split leaves the target as it
+    was: the new half is filled as before, and the placard stays. Left empty, a fresh pane's
+    workspace vanishes (the i3 rule above).
+  - **The last usable pane stays.** While the session goes on -- a surface
+    of the declared seat is hosted outside the closing pane -- a pane whose
+    tile closes stays, EMPTIED IN PLACE under a new id and fresh, when every
+    other leaf of its workspace hosts a system surface (a root, or the root
+    row's [console, tile]); a Super+Shift+N move of such a pane leaves a
+    fresh pane in its place. The new id matters: halcyond's `closed` set
+    would refuse a Super+N ask on the old one. Without it, closing
+    workspace 1's last tile while workspace 2 held tiles left [console] as
+    workspace 1's root, framed, with the focus on the console leaf, so the
+    keys went to the hidden console renderer. The seat's last tile of all
+    still closes outright, and the session ends (halcyond exits with no
+    tiles). The seat's own teardown never keeps a pane; another conn's
+    (a program's window, a restore tool's placeholder) keeps one like any
+    close, since a plain close would leave an unmarked empty pane the
+    session fills unasked.
+  - **The focus never rests on the console leaf** while the session holds
+    the display: with no session tile visible, the first leaf of the active
+    root that is not backgrounded takes it (an empty pane, whose keys are
+    dropped). **The console leaf never moves**: Super+Shift+N refuses a
+    backgrounded leaf.
+  - **The departure** (the declared seat's conn closes, or `session off`):
+    the fresh panes close and the workspace holding the console renderer's
+    leaf becomes the active one; the reap drops the others, now empty. So
+    the login prompt shows, and takes the keys, wherever the session last
+    stood. It says nothing, even in test builds: `login` prints its prompt
+    as it runs, and a line said there could tear the prompt at the UART.
+  - **A takeover** (a declaration from another principal) re-stamps the old
+    seat's empty panes to the newcomer, whose placard binds and mints on
+    them.
 
 ## 5. What it touches (the audit-bearing surfaces)
 

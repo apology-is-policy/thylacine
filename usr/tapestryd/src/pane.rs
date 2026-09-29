@@ -832,6 +832,15 @@ pub struct Pane {
     /// regardless of this flag, so a backgrounded-but-active leaf is never
     /// blanked.
     pub backgrounded: bool,
+    /// An EMPTY leaf the compositor made so that a workspace has a pane --
+    /// a new workspace's root, the pane a move leaves in its tile's place,
+    /// the last usable pane a close keeps (`keep_as_fresh`). Nobody asked
+    /// for a tile there, so a session compositor fills it only when asked
+    /// (the placard's Open shell; Super+N on it, `ask_fresh`) and the i3
+    /// vanish rule still takes the workspace when it is left. Cleared when
+    /// the leaf is hosted or asked for; a split leaves it as it was, since
+    /// the new half is the tile the split asked for. Dumped as ` fresh`.
+    pub fresh: bool,
 }
 
 /// One workspace (HALCYON-WORKSPACES 4, mechanism (A)): its LIVE root and
@@ -1016,7 +1025,12 @@ impl Layout {
     /// existed to keep a dense vector hole-free (a property of the
     /// representation) and mis-attributed i3, which creates workspace 5 on
     /// Super+5 whether or not 2, 3 and 4 exist.
-    fn ensure_workspace(&mut self, n: u8) -> Option<usize> {
+    ///
+    /// The root it mints records `owner` (H-4b-2's stamp; 0 = the
+    /// environment's): under a session the workspaces are the SESSION's
+    /// (HALCYON-WORKSPACES), and an environment-owned empty root is one the
+    /// session can neither bind its placard to nor claim for a shell.
+    fn ensure_workspace(&mut self, n: u8, owner: u32) -> Option<usize> {
         if n == 0 || n as usize > MAX_WORKSPACES {
             return None;
         }
@@ -1037,6 +1051,10 @@ impl Layout {
                 return None;
             }
         };
+        self.set_owner_principal(root, owner);
+        if let Some(p) = self.get_mut(root) {
+            p.fresh = true;
+        }
         let at = self
             .workspaces
             .iter()
@@ -1104,13 +1122,15 @@ impl Layout {
     /// one's restored. A remembered leaf that died while the workspace was
     /// away falls back to the arriving root's first leaf, so a switch can
     /// never land focus on a freed slot.
-    pub fn switch_workspace(&mut self, n: u8) -> bool {
+    ///
+    /// A workspace this creates records `owner` on its root (`ensure_workspace`).
+    pub fn switch_workspace(&mut self, n: u8, owner: u32) -> bool {
         if self.workspaces.get(self.active).map(|w| w.number) == Some(n) {
             return false; // already there
         }
         // `ensure_workspace` may INSERT below `active` and bump it, so the
         // outgoing index is read AFTER the call, never before.
-        let k = match self.ensure_workspace(n) {
+        let k = match self.ensure_workspace(n, owner) {
             Some(k) => k,
             None => return false,
         };
@@ -1181,17 +1201,30 @@ impl Layout {
     /// `detach_leaf` no-ops on a parentless pane, so moving it without
     /// re-seating would leave the SAME SLOT rooted in two workspaces at
     /// once. That branch mints a fresh empty root to leave behind.
-    pub fn move_focused_to_workspace(&mut self, n: u8) -> bool {
+    ///
+    /// Every root this mints -- the target's, the one left behind -- records
+    /// `owner` (`ensure_workspace`).
+    ///
+    /// `keep_place`: the caller has judged the leaf the last usable pane of
+    /// its workspace (every other leaf there hosts a backgrounded system
+    /// surface), so a FRESH empty leaf takes its index, weight and parent and
+    /// the workspace keeps a pane its session can use (HALCYON-WORKSPACES,
+    /// "Under a session"). Only the caller can judge it: usable is a question
+    /// about surface principals, which the tree does not hold.
+    pub fn move_focused_to_workspace(&mut self, n: u8, owner: u32, keep_place: bool) -> bool {
         if self.workspaces.get(self.active).map(|w| w.number) == Some(n) {
             return false; // already here
         }
         let leaf = self.focused;
         // An empty tile is not worth moving: it would trade one placeholder
-        // for another and could strand the workspace it left.
+        // for another and could strand the workspace it left. Nor is a
+        // BACKGROUNDED one: the console renderer's leaf is transparent to a
+        // session's structure (KT-1.5d-3 F2), and moving it would carry the
+        // login prompt off to a workspace the logout never shows.
         //
         // Judged BEFORE the target is ensured, or a refused move would leave
         // a freshly-minted empty workspace behind it.
-        if !self.is_leaf(leaf) || self.leaf_surface(leaf).is_none() {
+        if !self.is_leaf(leaf) || self.leaf_surface(leaf).is_none() || self.is_bg_leaf(leaf) {
             return false;
         }
         // r3 F5: judge the NUMBER before allocating for it. `ensure_workspace`
@@ -1209,18 +1242,26 @@ impl Layout {
         // later alloc failed" the one way a refused move could strand a
         // freshly-minted empty workspace. Allocating first closes that window
         // by construction instead of unwinding it, and whether the leaf needs
-        // replacing is knowable here: it does iff it is its workspace's root.
-        let pre_fresh = if self.get(leaf).and_then(|p| p.parent).is_some() {
+        // replacing is knowable here: it does iff it is its workspace's root,
+        // or the caller asked for its place to be kept.
+        let parent = self.get(leaf).and_then(|p| p.parent);
+        let pre_fresh = if parent.is_some() && !keep_place {
             None
         } else {
             match self.alloc(None, Kind::Leaf { surface: None }) {
-                Some(f) => Some(f),
+                Some(f) => {
+                    self.set_owner_principal(f, owner);
+                    if let Some(p) = self.get_mut(f) {
+                        p.fresh = true;
+                    }
+                    Some(f)
+                }
                 None => return false, // pane table full: untouched
             }
         };
         // May INSERT below `active` and bump it, so every index used below is
         // read AFTER this point.
-        let k = match self.ensure_workspace(n) {
+        let k = match self.ensure_workspace(n, owner) {
             Some(k) => k,
             None => {
                 if let Some(f) = pre_fresh {
@@ -1266,11 +1307,30 @@ impl Layout {
         };
         // Past this line nothing can fail, so the tree is mutated only once
         // every pane the move needs is in hand.
-        match pre_fresh {
-            None => self.detach_leaf(leaf), // may dissolve, and may re-seat the root
-            Some(fresh) => {
+        match (pre_fresh, parent) {
+            (None, _) => self.detach_leaf(leaf), // may dissolve, and may re-seat the root
+            (Some(fresh), None) => {
                 let a = self.active;
                 self.workspaces[a].root = fresh;
+            }
+            // In place: the fresh leaf takes the leaf's index, so nothing
+            // dissolves and no sibling moves.
+            (Some(fresh), Some(pi)) => {
+                let w = self.get(leaf).map_or(DEFAULT_WEIGHT, |p| p.weight);
+                if let Some(Kind::Container { children, .. }) =
+                    self.get_mut(pi).map(|p| &mut p.kind)
+                {
+                    if let Some(at) = children.iter().position(|&c| c == leaf) {
+                        children[at] = fresh;
+                    }
+                }
+                if let Some(p) = self.get_mut(fresh) {
+                    p.parent = Some(pi);
+                    p.weight = w;
+                }
+                if let Some(p) = self.get_mut(leaf) {
+                    p.parent = None;
+                }
             }
         }
         let tr = self.workspaces[k].root;
@@ -1298,12 +1358,194 @@ impl Layout {
         }
         self.workspaces[k].focused = self.id_of(leaf).unwrap_or(0);
         // Focus stays HERE, on what is left behind -- the tile went away,
-        // the eye did not follow it (i3's move, not its move-and-follow).
+        // the eye did not follow it (i3's move, not its move-and-follow):
+        // on the fresh pane that took its place, else on the first pane the
+        // session can use -- never the backgrounded console leaf.
         let r = self.root();
-        self.focused = self.first_leaf(r).unwrap_or(r);
+        self.focused = match pre_fresh {
+            Some(f) => f,
+            None => self
+                .first_unbackgrounded_leaf(r)
+                .or_else(|| self.first_leaf(r))
+                .unwrap_or(r),
+        };
         self.zoomed_id = None;
         self.epoch += 1;
         true
+    }
+
+    /// Empty the pane at `slot` IN PLACE as a FRESH leaf -- under a session
+    /// the last usable pane of a workspace stays when its tile goes
+    /// (HALCYON-WORKSPACES, "Under a session"). The slot keeps its parent,
+    /// index and weight and takes a NEW id: nobody has asked for a tile in
+    /// this pane yet, and a session compositor holds the old id in its
+    /// respawn guard, which would refuse the ask too. Its surfaces are
+    /// unhosted and returned (the caller retires or asks them), a container's
+    /// descendants are freed, and the pane records `owner`. None, with
+    /// nothing changed, only when the id space is spent: the caller closes.
+    pub fn keep_as_fresh(&mut self, slot: usize, owner: u32) -> Option<Vec<usize>> {
+        let old = self.id_of(slot)?;
+        let id = self.id_seq.checked_add(1)?;
+        self.id_seq = id;
+        let mut unhosted = Vec::new();
+        self.collect_surfaces(slot, &mut unhosted);
+        let kids: Vec<usize> = match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) => children.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(p) = self.get_mut(slot) {
+            p.id = id;
+            p.kind = Kind::Leaf { surface: None };
+            // What a hosting program set on its own pane (the `role` file)
+            // goes with it: the kept pane is the one `alloc` would make.
+            p.role = Role::Content;
+            p.focusable = true;
+            p.backgrounded = false;
+            p.tag.clear();
+            p.status = Status::Resting;
+            p.claim_token = None;
+            p.owner_principal = owner;
+            p.creator_conn = 0;
+            p.creator_peer = 0;
+            p.fresh = true;
+            p.dividers.clear();
+            p.separator = Rect::ZERO;
+        }
+        for c in kids {
+            self.free_subtree(c);
+        }
+        if self.zoomed_id == Some(old) {
+            self.zoomed_id = None;
+        }
+        let top = self.top_of(slot);
+        if let Some(wi) = self.workspace_of_root(top) {
+            if wi == self.active {
+                self.focused = slot;
+            } else {
+                self.workspaces[wi].focused = id;
+            }
+        }
+        self.epoch += 1;
+        Some(unhosted)
+    }
+
+    /// Ask for a tile in the FRESH empty leaf `slot` (Super+N on it under a
+    /// session): the flag clears, so the session compositor fills the pane
+    /// as it fills any other. False, with nothing changed, for anything but
+    /// a fresh empty leaf.
+    pub fn ask_fresh(&mut self, slot: usize) -> bool {
+        match self.get_mut(slot) {
+            Some(p) if p.fresh && matches!(p.kind, Kind::Leaf { surface: None }) => {
+                p.fresh = false;
+                self.epoch += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The ids of every fresh leaf, in every workspace (a departing session's
+    /// panes that nobody filled).
+    pub fn fresh_ids(&self) -> Vec<u32> {
+        self.panes
+            .iter()
+            .flatten()
+            .filter(|p| p.fresh)
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// The first leaf under `slot`, in child order, that is not backgrounded:
+    /// a pane the session can use, where `first_leaf` may answer the console
+    /// renderer's leaf.
+    pub fn first_unbackgrounded_leaf(&self, slot: usize) -> Option<usize> {
+        let p = self.get(slot)?;
+        match &p.kind {
+            Kind::Leaf { .. } => (!p.backgrounded).then_some(slot),
+            Kind::Container { children, .. } => children
+                .iter()
+                .find_map(|&c| self.first_unbackgrounded_leaf(c)),
+        }
+    }
+
+    /// The number of the workspace `slot` lives in, active or not.
+    pub fn workspace_number_of(&self, slot: usize) -> Option<u8> {
+        self.get(slot)?;
+        let top = self.top_of(slot);
+        self.workspaces
+            .iter()
+            .find(|w| w.root == top)
+            .map(|w| w.number)
+    }
+
+    /// Every leaf of `slot`'s workspace outside `slot`'s own subtree -- what
+    /// the workspace keeps if `slot` goes.
+    pub fn leaves_beside(&self, slot: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        if self.get(slot).is_some() {
+            self.leaves_outside(self.top_of(slot), slot, &mut out);
+        }
+        out
+    }
+
+    fn leaves_outside(&self, at: usize, skip: usize, out: &mut Vec<usize>) {
+        if at == skip {
+            return;
+        }
+        match self.get(at).map(|p| &p.kind) {
+            Some(Kind::Leaf { .. }) => out.push(at),
+            Some(Kind::Container { children, .. }) => {
+                for &c in children {
+                    self.leaves_outside(c, skip, out);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// HALCYON-WORKSPACES, "Under a session": does the pane at `slot` stay,
+    /// empty and fresh, when its tile goes? `seat(n)`: surface n is the
+    /// declared seat's (a session tile); `system(n)`: a live system surface
+    /// (the console renderer's). Only while the session goes on -- a seat
+    /// surface is hosted outside `slot`, so the session's last tile of all
+    /// still closes outright and ends it -- and only when `slot` is the last
+    /// usable pane of its workspace (`rest_unusable`). The principals are the
+    /// caller's to answer: the tree holds surfaces, not who owns them.
+    pub fn keeps_place(
+        &self,
+        slot: usize,
+        seat: impl Fn(usize) -> bool,
+        system: impl Fn(usize) -> bool,
+    ) -> bool {
+        let inside = self.subtree_surfaces(slot);
+        let goes_on = self
+            .hosted_leaves()
+            .iter()
+            .any(|&(_, n)| !inside.contains(&n) && seat(n));
+        goes_on && self.rest_unusable(slot, system)
+    }
+
+    /// Would `slot`'s going leave its workspace without a pane a session can
+    /// use -- every other leaf there hosting a system surface? An empty leaf
+    /// is usable (its placard offers a shell), and so is one hosting a dead
+    /// or a session surface. Vacuously true for a workspace's root.
+    pub fn rest_unusable(&self, slot: usize, system: impl Fn(usize) -> bool) -> bool {
+        self.leaves_beside(slot)
+            .iter()
+            .all(|&l| self.leaf_surface(l).is_some_and(&system))
+    }
+
+    /// Re-stamp every EMPTY leaf `from` owns to `to` (a session takeover: the
+    /// seat's empty panes are the new seat's). Returns how many.
+    pub fn restamp_empties(&mut self, from: u32, to: u32) -> usize {
+        let mut n = 0;
+        for p in self.panes.iter_mut().flatten() {
+            if p.owner_principal == from && matches!(p.kind, Kind::Leaf { surface: None }) {
+                p.owner_principal = to;
+                n += 1;
+            }
+        }
+        n
     }
 
     fn alloc(&mut self, parent: Option<usize>, kind: Kind) -> Option<usize> {
@@ -1333,6 +1575,7 @@ impl Layout {
             creator_conn: 0,
             creator_peer: 0,
             backgrounded: false,
+            fresh: false,
             weight: DEFAULT_WEIGHT,
             dividers: Vec::new(),
             separator: Rect::ZERO,
@@ -1722,6 +1965,7 @@ impl Layout {
                     // A new program takes the tile: its status starts fresh.
                     p.status = Status::Resting;
                     p.claim_token = None;
+                    p.fresh = false;
                     // r2 F2 (P0): the H-4d reservation has SERVED ITS PURPOSE
                     // the moment the leaf is FILLED. Holding it past that made
                     // `subtree_reserved` true for every leaf halcyond ever
@@ -1785,6 +2029,7 @@ impl Layout {
             *s = Some(n);
             p.status = Status::Resting;
             p.claim_token = None;
+            p.fresh = false;
             // r2 F2 (P0): filled means the reservation is spent. See `host_for`.
             p.creator_conn = 0;
             p.creator_peer = 0;
@@ -1877,6 +2122,11 @@ impl Layout {
                 // to focus placement rather than failing.
                 p.creator_conn = 0;
                 p.creator_peer = 0;
+                p.fresh = false;
+                // Nor does the last program's `role` or tag outlive it.
+                p.role = Role::Content;
+                p.focusable = true;
+                p.tag.clear();
                 p.weight = DEFAULT_WEIGHT;
                 p.dividers.clear();
                 p.separator = Rect::ZERO;
@@ -3685,8 +3935,16 @@ impl Layout {
         if p.weight != DEFAULT_WEIGHT {
             let _ = core::fmt::write(s, format_args!(" w={}", p.weight));
         }
-        if p.backgrounded { s.push_str(" backgrounded"); }
-        let _ = core::fmt::write(s, format_args!("{}\n", if p.visible { "" } else { " hidden" }));
+        if p.backgrounded {
+            s.push_str(" backgrounded");
+        }
+        if p.fresh {
+            s.push_str(" fresh");
+        }
+        let _ = core::fmt::write(
+            s,
+            format_args!("{}\n", if p.visible { "" } else { " hidden" }),
+        );
         if let Kind::Container { children, .. } = &p.kind {
             for &c in children {
                 self.render_pane(s, c, depth + 1);
@@ -4713,7 +4971,7 @@ mod tests {
         // THE CONTROL, while it is still active: 3 x 260 + 14 = 794 > 594.
         assert!(!l.split_fits(b, Mode::SplitH), "refused while active");
 
-        assert!(l.switch_workspace(2), "workspace 1 goes dormant");
+        assert!(l.switch_workspace(2, 0), "workspace 1 goes dormant");
         l.recompute(area, 1, inst100(), Profile::Instrument);
         assert!(!l.in_active_root(b), "the premise: b is in the dormant tree");
 
@@ -4741,7 +4999,7 @@ mod tests {
         // THE CONTROL, while active: turning it vertical needs 505 > 394.
         assert!(!l.fits_after(|t| t.set_mode(ws1_root, Mode::SplitV)), "505 > 394");
 
-        assert!(l.switch_workspace(2), "workspace 1 goes dormant");
+        assert!(l.switch_workspace(2, 0), "workspace 1 goes dormant");
         l.recompute(r(0, 34, 1440, 400), 1, inst100(), Profile::Instrument);
         assert!(!l.in_active_root(ws1_root), "the premise: it is dormant");
 
@@ -4772,7 +5030,7 @@ mod tests {
             "the premise: already past its minima, so still mutable"
         );
 
-        assert!(l.switch_workspace(2), "and now it is dormant AND overflowing");
+        assert!(l.switch_workspace(2, 0), "and now it is dormant AND overflowing");
         let b_root = l.root();
         let _ = l.split(b_root, Mode::SplitH).expect("a container to act on");
         l.recompute(r(0, 34, 1440, 300), 1, inst100(), Profile::Instrument);
@@ -4993,7 +5251,7 @@ mod tests {
         let a = l.root();
         let b = l.split(a, Mode::SplitH).unwrap();
         assert!(l.set_weight(a, 3) && l.set_weight(b, 5));
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         l.apply_backgrounded(&[]);
         assert!(l.is_bg_subtree(a) && l.is_bg_subtree(b), "premise: the dormant panes are stamped");
         let c = l.split(b, Mode::SplitH).unwrap();
@@ -5529,21 +5787,21 @@ mod tests {
         // kept a dense vector hole-free, a property of the representation,
         // and it was attributed to i3, which creates workspace 5 on Super+5
         // whether or not 2, 3 and 4 exist.
-        assert!(l.switch_workspace(3), "a skipped number is CREATED (i3)");
+        assert!(l.switch_workspace(3, 0), "a skipped number is CREATED (i3)");
         assert_eq!(l.workspace_count(), 2);
         assert_eq!(l.active_number(), 3);
         assert_eq!(l.workspace_numbers(), alloc::vec![1u8, 3], "the set is SPARSE");
         assert_ne!(l.root(), a_root, "the new workspace has its own root");
         assert!(!l.in_active_root(a_root), "the old root is not in this tree");
 
-        assert!(!l.switch_workspace(MAX_WORKSPACES as u8 + 1), "past the bound");
-        assert!(!l.switch_workspace(0), "zero is not a workspace");
-        assert!(!l.switch_workspace(3), "already active");
+        assert!(!l.switch_workspace(MAX_WORKSPACES as u8 + 1, 0), "past the bound");
+        assert!(!l.switch_workspace(0, 0), "zero is not a workspace");
+        assert!(!l.switch_workspace(3, 0), "already active");
 
         let b_focus = l.focused;
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(1, 0));
         assert_eq!(l.focused, a_root, "workspace 1's focus came back");
-        assert!(l.switch_workspace(3));
+        assert!(l.switch_workspace(3, 0));
         assert_eq!(l.focused, b_focus, "and workspace 3's did too");
     }
 
@@ -5561,14 +5819,17 @@ mod tests {
     #[test]
     fn creating_a_lower_number_keeps_the_seat_where_it_was() {
         let mut l = Layout::new();
-        assert!(l.switch_workspace(4), "to 4, skipping 2 and 3");
+        assert!(l.switch_workspace(4, 0), "to 4, skipping 2 and 3");
         let four_root = l.root();
         assert_eq!(l.active_number(), 4);
         let _ = l.host_for(7, 0, 0).expect("a tile to move");
 
         // Creating 2 sorts it BELOW the active workspace 4, shifting 4's
         // index from 1 to 2.
-        assert!(l.move_focused_to_workspace(2), "create 2 below the active 4");
+        assert!(
+            l.move_focused_to_workspace(2, 0, false),
+            "create 2 below the active 4"
+        );
         assert_eq!(
             l.workspace_numbers(),
             alloc::vec![1u8, 2, 4],
@@ -5588,7 +5849,7 @@ mod tests {
             l.leaf_surface(l.root()).is_none(),
             "and it is an empty placeholder"
         );
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         assert_eq!(
             l.leaf_surface(l.root()),
             Some(7),
@@ -5609,12 +5870,12 @@ mod tests {
     fn a_vanish_does_not_renumber_the_survivors() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "workspace 2, left empty");
-        assert!(l.switch_workspace(4), "workspace 4");
+        assert!(l.switch_workspace(2, 0), "workspace 2, left empty");
+        assert!(l.switch_workspace(4, 0), "workspace 4");
         let four = l.host_for(8, 0, 0).expect("workspace 4's tile");
         assert_eq!(l.workspace_numbers(), alloc::vec![1u8, 2, 4]);
 
-        assert!(l.switch_workspace(1), "back to 1, so 2 is inactive AND empty");
+        assert!(l.switch_workspace(1, 0), "back to 1, so 2 is inactive AND empty");
         assert_eq!(l.reap_empty_workspaces(), 1, "the empty middle one goes");
         assert_eq!(
             l.workspace_numbers(),
@@ -5622,7 +5883,7 @@ mod tests {
             "and 4 is STILL 4 -- a vanish never renumbers the survivors"
         );
         assert_eq!(l.active_number(), 1, "the seat did not move");
-        assert!(l.switch_workspace(4), "Super+4 still reaches the same work");
+        assert!(l.switch_workspace(4, 0), "Super+4 still reaches the same work");
         assert_eq!(l.leaf_surface(four), Some(8), "with its tile intact");
     }
 
@@ -5631,7 +5892,7 @@ mod tests {
         let mut l = Layout::new();
         let a_root = l.root();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         let _ = l.host_for(8, 0, 0);
         ws_lay(&mut l);
         let a = l.get(a_root).expect("the other root outlives the switch");
@@ -5650,15 +5911,15 @@ mod tests {
         // one root and annihilates every other workspace with nine.
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         let _ = l.host_for(8, 0, 0);
         let b_root = l.root();
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(1, 0));
         let a_root = l.root();
         l.close(a_root);
         assert!(l.get(b_root).is_some(), "the other root SURVIVES the close");
         assert_eq!(l.workspace_count(), 2);
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         assert_eq!(l.root(), b_root);
         assert_eq!(l.leaf_surface(b_root), Some(8), "and still hosts its tile");
     }
@@ -5667,10 +5928,10 @@ mod tests {
     fn an_empty_inactive_workspace_vanishes_and_the_active_one_never_does() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(2)); // empty AND active
+        assert!(l.switch_workspace(2, 0)); // empty AND active
         assert_eq!(l.reap_empty_workspaces(), 0, "the active one never goes");
         assert_eq!(l.workspace_count(), 2);
-        assert!(l.switch_workspace(1)); // now the empty one is inactive
+        assert!(l.switch_workspace(1, 0)); // now the empty one is inactive
         assert_eq!(l.reap_empty_workspaces(), 1, "i3: the empty one goes");
         assert_eq!(l.workspace_count(), 1);
         assert_eq!(l.active_number(), 1);
@@ -5692,7 +5953,7 @@ mod tests {
         let one = l.host_for(7, 0, 0).expect("workspace 1, first tile");
         let two = l.host_for(8, 0, 0).expect("workspace 1, second tile");
         assert_ne!(one, two, "the premise: workspace 1's root is a container");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let ws2_root = l.root();
         // Close a tile INSIDE the dormant workspace. Its root then has one
         // child left and dissolves -- the moment the old code re-seated the
@@ -5704,7 +5965,7 @@ mod tests {
             "the ACTIVE workspace's root must not move when another workspace dissolves"
         );
         assert!(l.in_active_root(ws2_root));
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
         assert!(
             l.get(l.root()).is_some(),
             "workspace 1's root is a live slot, not the freed container"
@@ -5740,7 +6001,7 @@ mod tests {
     fn a_zoom_targeting_another_workspace_is_refused_at_the_setter() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         assert!(
             !l.zoom_toggle(dormant),
             "a pane in another workspace is not zoomable"
@@ -5767,7 +6028,7 @@ mod tests {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
         let dormant_id = l.id_of(dormant).expect("its id");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         l.zoomed_id = Some(dormant_id); // unreachable via the verbs; see above
         ws_lay(&mut l); // Profile::Legacy -- the shipped one
         let z = l.get(dormant).expect("the dormant leaf outlives the switch");
@@ -5792,11 +6053,11 @@ mod tests {
     fn closing_an_inactive_workspace_root_really_collapses_it() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let ws2_root = l.root();
         let _ = l.host_for(8, 0, 0).expect("workspace 2's tile");
         assert_eq!(l.leaf_surface(ws2_root), Some(8));
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
 
         let unhosted = l.close(ws2_root);
         assert_eq!(unhosted, alloc::vec![8], "the surface is reported unhosted");
@@ -5825,7 +6086,7 @@ mod tests {
     fn focus_refuses_a_pane_in_another_workspace() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let here = l.focused;
         assert!(!l.focus(dormant), "a dormant pane is not focusable");
         assert_eq!(l.focused, here, "and focus did not move");
@@ -5843,7 +6104,7 @@ mod tests {
     fn a_split_in_a_dormant_workspace_does_not_capture_focus() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let here = l.focused;
         // The NEST branch: `dormant` is workspace 1's parentless root.
         let made = l.split(dormant, Mode::SplitH).expect("the tree still splits");
@@ -5883,11 +6144,11 @@ mod tests {
     fn a_move_refused_by_a_full_pane_table_leaves_the_leaf_attached() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let _ = l
             .host_for(8, 0, 0)
             .expect("workspace 2's tile -- so its root is NOT a placeholder");
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
 
         let mut last = l.focused;
         while let Some(made) = l.split(l.focused, Mode::SplitH) {
@@ -5917,7 +6178,7 @@ mod tests {
         );
 
         assert!(
-            !l.move_focused_to_workspace(2),
+            !l.move_focused_to_workspace(2, 0, false),
             "an exhausted pane table refuses the move"
         );
         assert_eq!(
@@ -5941,12 +6202,12 @@ mod tests {
     fn a_reused_slot_cannot_resurrect_a_remembered_focus() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let ws2_root = l.root();
         let t2 = l.split(ws2_root, Mode::SplitH).expect("a second tile here");
         assert!(l.focus(t2));
         let remembered = l.focused;
-        assert!(l.switch_workspace(1), "to workspace 1 -- t2's slot is saved");
+        assert!(l.switch_workspace(1, 0), "to workspace 1 -- t2's slot is saved");
 
         // t2 dies while we are away, and workspace 1 then allocates enough
         // panes to reuse its slot.
@@ -5962,7 +6223,7 @@ mod tests {
         }
         assert!(reused, "the premise: workspace 1 took the freed slot");
 
-        assert!(l.switch_workspace(2), "back to workspace 2");
+        assert!(l.switch_workspace(2, 0), "back to workspace 2");
         assert!(
             l.in_active_root(l.focused),
             "focus must not be resurrected onto another workspace's pane"
@@ -5983,10 +6244,10 @@ mod tests {
     fn a_workspace_holding_a_reserved_skeleton_does_not_vanish() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let skeleton = l.root();
         l.set_creator(skeleton, 42, 7); // a restore tool is building here
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
 
         assert_eq!(
             l.reap_empty_workspaces(),
@@ -6019,7 +6280,7 @@ mod tests {
         let head = first.lines().next().unwrap();
         assert!(head.contains("workspaces 1 active 1"), "{}", head);
 
-        assert!(l.switch_workspace(3), "skip 2 -- the set goes sparse");
+        assert!(l.switch_workspace(3, 0), "skip 2 -- the set goes sparse");
         let second = l.render_text();
         let head = second.lines().next().unwrap();
         assert!(head.contains("workspaces 1,3 active 3"), "{}", head);
@@ -6032,7 +6293,7 @@ mod tests {
         let _ = l.host_for(7, 0, 0);
         assert!(l.zoom_toggle(a_root));
         assert!(l.zoom_id().is_some());
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         assert!(l.zoom_id().is_none(), "the zoom belonged to the tree it was made in");
         ws_lay(&mut l);
         assert!(!l.get(a_root).unwrap().visible, "the other tree stays dark");
@@ -6044,15 +6305,15 @@ mod tests {
         let mut l = Layout::new();
         let a_root = l.root();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(2));
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(2, 0));
+        assert!(l.switch_workspace(1, 0));
         // The focused leaf IS this workspace's root: `detach_leaf` no-ops on
         // a parentless pane, so without the re-seat this slot would end up
         // rooted in BOTH workspaces.
         assert_eq!(l.focused, a_root);
-        assert!(l.move_focused_to_workspace(2));
+        assert!(l.move_focused_to_workspace(2, 0, false));
         assert_ne!(l.root(), a_root, "the workspace it left was re-seated");
-        assert!(l.switch_workspace(2));
+        assert!(l.switch_workspace(2, 0));
         assert_eq!(l.leaf_surface(a_root), Some(7), "the tile kept its surface");
         assert!(l.in_active_root(a_root), "and lives in the target tree now");
     }
@@ -6073,7 +6334,7 @@ mod tests {
     fn a_workspace_a_session_split_and_emptied_still_vanishes() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let a = l.host_for(8, 0, 0).expect("tile A");
 
         // The rail's SPLIT H as `pane_cmd` performs it: the new empty leaf is
@@ -6087,7 +6348,7 @@ mod tests {
         let _ = l.close(b);
         assert!(l.is_empty_leaf(b), "the root collapsed back to an empty leaf");
 
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
         assert_eq!(
             l.reap_empty_workspaces(),
             1,
@@ -6112,12 +6373,12 @@ mod tests {
     fn a_directional_move_refuses_a_pane_in_another_workspace() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let t1 = l.host_for(8, 0, 0).expect("workspace 2's first tile");
         let t2 = l.split(t1, Mode::SplitH).expect("a second tile beside it");
         let _ = l.host_into(9, t2).expect("fill it");
         assert!(l.get(t2).and_then(|p| p.parent).is_some(), "it has a parent");
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
         let a_root = l.root();
 
         assert!(
@@ -6139,12 +6400,12 @@ mod tests {
     fn a_move_does_not_destroy_a_reserved_skeleton_root() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("the tile that will move");
-        assert!(l.switch_workspace(3), "to workspace 3");
+        assert!(l.switch_workspace(3, 0), "to workspace 3");
         let skeleton = l.root();
         l.set_creator(skeleton, 42, 7); // a restore tool is building here
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
 
-        assert!(l.move_focused_to_workspace(3), "the move lands");
+        assert!(l.move_focused_to_workspace(3, 0, false), "the move lands");
         assert!(
             l.get(skeleton).is_some(),
             "the reserved skeleton survived the arriving tile"
@@ -6169,7 +6430,7 @@ mod tests {
     fn a_move_refused_by_a_full_pane_table_mints_no_workspace() {
         let mut l = Layout::new();
         let home = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "fill the pool from somewhere else");
+        assert!(l.switch_workspace(2, 0), "fill the pool from somewhere else");
         while l.split(l.focused, Mode::SplitH).is_some() {}
 
         // Free EXACTLY one slot: a leaf whose parent keeps >= 2 children
@@ -6186,16 +6447,416 @@ mod tests {
         assert!(l.is_leaf(kids[0]), "and the one closed is a leaf");
         let _ = l.close(kids[0]);
 
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
         assert_eq!(l.focused, home, "its focused leaf IS its root");
         assert!(l.get(home).and_then(|p| p.parent).is_none(), "parentless");
         let before = l.workspace_count();
 
-        assert!(!l.move_focused_to_workspace(5), "one free slot is not two");
+        assert!(
+            !l.move_focused_to_workspace(5, 0, false),
+            "one free slot is not two"
+        );
         assert_eq!(
             l.workspace_count(),
             before,
             "and the refusal minted no workspace"
+        );
+    }
+
+    /// Under a session the workspaces are the SESSION's (HALCYON-WORKSPACES):
+    /// the root a switch mints records the owner its caller names, so the
+    /// session may bind its placard to the empty pane and claim the pane for
+    /// a shell. The environment-owned root refused both -- on the device the
+    /// placard's chrome create was E_PERM and Open shell never appeared.
+    ///
+    /// SABOTAGE: drop the stamp in `ensure_workspace` and the owner reads 0.
+    #[test]
+    fn a_workspace_minted_under_a_session_is_the_sessions() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(2, 1001), "the session's Super+2");
+        let r = l.root();
+        assert!(l.is_empty_leaf(r), "the premise: its root is the empty pane");
+        assert_eq!(l.pane_owner_principal(r), 1001);
+        assert!(chrome_bind_admitted(1001, None, l.pane_owner_principal(r)), "its placard binds");
+        // One variable away: minted with no session, the root is the
+        // environment's, and the same session may not bind it.
+        assert!(l.switch_workspace(1, 1001));
+        assert!(l.switch_workspace(3, 0), "no session declared");
+        let r3 = l.root();
+        assert_eq!(l.pane_owner_principal(r3), 0);
+        assert!(!chrome_bind_admitted(1001, None, l.pane_owner_principal(r3)));
+        // A workspace that exists is found, never re-stamped.
+        assert!(l.switch_workspace(2, 2002));
+        assert_eq!(l.pane_owner_principal(l.root()), 1001);
+    }
+
+    /// The other root a workspace move mints: moving a workspace's only tile
+    /// (its root) away leaves a fresh empty root behind, on the workspace the
+    /// user still stands on -- the session's as well, so its placard offers
+    /// Open shell there.
+    ///
+    /// SABOTAGE: drop the stamp on the hoisted leaf and the owner reads 0.
+    #[test]
+    fn the_root_a_move_leaves_behind_is_the_sessions() {
+        let mut l = Layout::new();
+        let t = l.host_for(7, 0, 0).expect("the lone tile");
+        assert!(
+            l.focused == t && l.get(t).and_then(|p| p.parent).is_none(),
+            "the premise: the tile IS the root"
+        );
+        assert!(
+            l.move_focused_to_workspace(2, 1001, false),
+            "the session's Super+Shift+2"
+        );
+        let left = l.root();
+        assert!(
+            left != t && l.is_empty_leaf(left),
+            "a fresh empty root stays behind"
+        );
+        assert_eq!(l.pane_owner_principal(left), 1001);
+        // The control: the environment's move leaves the environment's root.
+        assert!(l.switch_workspace(2, 0));
+        assert_eq!(l.focused, t, "the moved tile is workspace 2's root");
+        assert!(l.move_focused_to_workspace(1, 0, false));
+        let left2 = l.root();
+        assert!(left2 != t && l.is_empty_leaf(left2));
+        assert_eq!(l.pane_owner_principal(left2), 0);
+    }
+
+    /// A fresh pane is one the COMPOSITOR made so that a workspace has a
+    /// pane; a tile in it clears the flag, and a split leaves it as it was --
+    /// the new half is the tile the split asked for. The dump says ` fresh`
+    /// before ` hidden`, so a reader keying on the row's end still finds it.
+    ///
+    /// SABOTAGE: drop the mark in `ensure_workspace`, the clear in
+    /// `host_into` or the one in `host_for`, and an assert below fails.
+    #[test]
+    fn a_fresh_pane_is_the_compositors_until_a_tile_takes_it() {
+        let mut l = Layout::new();
+        let t = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(
+            !l.get(t).unwrap().fresh,
+            "the boot root is no workspace mint"
+        );
+        assert!(l.switch_workspace(2, 1001), "Super+2");
+        let r = l.root();
+        assert!(l.get(r).unwrap().fresh, "a new workspace's root is fresh");
+        let text = l.render_text();
+        let row = text.lines().nth(1).unwrap();
+        assert!(
+            row.ends_with(" leaf empty [0,0,0,0] fresh hidden"),
+            "the dump: {}",
+            row
+        );
+        let b = l.split(r, Mode::SplitH).expect("a split of the fresh pane");
+        assert!(
+            !l.get(b).unwrap().fresh,
+            "the split's new half is asked for"
+        );
+        assert!(
+            l.get(r).unwrap().fresh,
+            "the pane it acted on stays as it was"
+        );
+        let _ = l.host_into(9, r).expect("a claimed program takes it");
+        assert!(!l.get(r).unwrap().fresh, "hosted by claim: no longer fresh");
+        assert!(l.switch_workspace(3, 1001));
+        let r3 = l.root();
+        assert_eq!(
+            l.host_for(11, 0, 0),
+            Some(r3),
+            "hosted INTO the focused empty root"
+        );
+        assert!(
+            !l.get(r3).unwrap().fresh,
+            "hosted by focus: no longer fresh"
+        );
+    }
+
+    /// A restore onto a new workspace hosts its placeholder INTO the fresh
+    /// root, splits beside it and drops it, so the anchor ends up the lone
+    /// empty root -- and must not be fresh: the restore asked for it, and a
+    /// session that waited on it would show a placard where the tile goes.
+    ///
+    /// SABOTAGE: have `dissolve_if_single` mark a survivor that becomes a
+    /// root fresh (a SHAPE rule) and the last assert fails.
+    #[test]
+    fn a_restore_onto_a_new_workspace_leaves_no_fresh_pane() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(4, 1001), "halcyon workspace 4");
+        let r = l.root();
+        assert_eq!(
+            l.host_for(20, 0, 0),
+            Some(r),
+            "the placeholder lands IN the fresh root"
+        );
+        let anchor = l.split(r, Mode::SplitH).expect("the anchor split");
+        let _ = l.close(r);
+        assert_eq!(
+            l.root(),
+            anchor,
+            "the container dissolved: the anchor is the root"
+        );
+        assert!(l.is_empty_leaf(anchor), "the premise: a lone empty root");
+        assert!(
+            !l.get(anchor).unwrap().fresh,
+            "the restore asked for this pane"
+        );
+    }
+
+    /// [console leaf (system, backgrounded), S (a session tile)]: the tree the
+    /// session's first workspace has once its tour is gone.
+    fn console_and_tile() -> (Layout, usize, usize) {
+        let mut l = Layout::new();
+        let console = l.host_for(0, 0, 0).expect("the console renderer's leaf");
+        let s = l
+            .split(console, Mode::SplitH)
+            .expect("the session tile's leaf");
+        let _ = l.host_into(5, s).expect("the session tile");
+        l.apply_backgrounded(&[console]);
+        (l, console, s)
+    }
+
+    /// The last usable pane stays when its tile moves away: every other leaf
+    /// of the workspace hosts a backgrounded system surface, so the move
+    /// leaves a FRESH empty pane at the tile's index with its share, focused
+    /// -- where it used to leave [console] alone, with the keys on a renderer
+    /// nobody could see.
+    ///
+    /// SABOTAGE: mint `pre_fresh` only for a root (ignore keep_place) and the
+    /// in-place asserts fail; the control shows that old dissolve.
+    #[test]
+    fn a_move_keeps_the_last_usable_pane_in_place() {
+        let (mut l, console, s) = console_and_tile();
+        l.get_mut(s).unwrap().weight = 700;
+        let parent = l
+            .get(s)
+            .unwrap()
+            .parent
+            .expect("the premise: a split child");
+        assert!(l.move_focused_to_workspace(2, 1001, true), "Super+Shift+2");
+        let kids = match &l.get(parent).unwrap().kind {
+            Kind::Container { children, .. } => children.clone(),
+            _ => panic!("the container dissolved"),
+        };
+        assert_eq!(kids[0], console);
+        let f = kids[1];
+        assert!(
+            f != s && l.is_empty_leaf(f) && l.get(f).unwrap().fresh,
+            "a fresh pane took the tile's index"
+        );
+        assert_eq!(l.get(f).unwrap().parent, Some(parent));
+        assert_eq!(l.get(f).unwrap().weight, 700, "and its share");
+        assert_eq!(l.pane_owner_principal(f), 1001);
+        assert_eq!(
+            l.focused, f,
+            "the keys go to the pane, not the console leaf"
+        );
+        assert!(l.switch_workspace(2, 1001));
+        assert_eq!(l.focused, s, "the tile is workspace 2's");
+        // The control, one variable away: no pane kept, the pair dissolves.
+        let (mut l, console, _) = console_and_tile();
+        assert!(l.move_focused_to_workspace(2, 1001, false));
+        assert_eq!(l.root(), console, "[console] alone: what the keep prevents");
+    }
+
+    /// A backgrounded leaf -- the console renderer's beside a session -- is
+    /// not moved: the logout would never show the login prompt it carried off.
+    ///
+    /// SABOTAGE: drop the `is_bg_leaf` term and the refused move lands.
+    #[test]
+    fn a_move_refuses_the_backgrounded_console_leaf() {
+        let (mut l, console, _) = console_and_tile();
+        assert!(
+            l.focus(console),
+            "the premise: the console leaf holds the focus"
+        );
+        let before = l.workspace_count();
+        assert!(!l.move_focused_to_workspace(2, 1001, false), "refused");
+        assert_eq!(
+            l.workspace_count(),
+            before,
+            "and no workspace was minted for it"
+        );
+        // The control: the same leaf, not backgrounded (no session), moves.
+        l.apply_backgrounded(&[]);
+        assert!(l.move_focused_to_workspace(2, 0, false));
+    }
+
+    /// The pane a close keeps: emptied IN PLACE under a NEW id -- the old one
+    /// is spent (a session holds it in its respawn guard, which would refuse
+    /// the ask too) -- fresh, the owner's, focused, in its place and share,
+    /// its surfaces handed back and its command gone; a kept container frees
+    /// its descendants; a spent id space changes nothing.
+    ///
+    /// SABOTAGE: keep the old id and the id asserts fail; drop the mark and
+    /// the fresh assert fails.
+    #[test]
+    fn a_kept_pane_is_emptied_in_place_under_a_new_id() {
+        let (mut l, console, s) = console_and_tile();
+        l.get_mut(s).unwrap().weight = 700;
+        l.get_mut(s).unwrap().tag = String::from("hx notes.txt");
+        let old = l.id_of(s).unwrap();
+        assert!(l.focus(console));
+        assert_eq!(
+            l.keep_as_fresh(s, 1001),
+            Some(vec![5]),
+            "its surface is handed back"
+        );
+        let new = l.id_of(s).unwrap();
+        assert!(new > old, "a new id: ids are never reused");
+        assert_eq!(l.slot_of_id(old), None, "the old id names nothing");
+        assert!(l.is_empty_leaf(s) && l.get(s).unwrap().fresh);
+        assert_eq!(l.pane_owner_principal(s), 1001);
+        assert_eq!(l.get(s).unwrap().weight, 700, "its place and share");
+        assert!(
+            l.get(s).unwrap().tag.is_empty(),
+            "no command rides into the new pane"
+        );
+        assert_eq!(l.focused, s, "the keys follow the kept pane");
+        // A container: one fresh leaf where it stood, its tiles unhosted.
+        let (mut l, _, s) = console_and_tile();
+        let b = l.split(s, Mode::SplitV).expect("a nest under the tile");
+        let _ = l.host_into(6, b).expect("a second tile");
+        let c = l.get(s).unwrap().parent.unwrap();
+        let mut got = l.keep_as_fresh(c, 1001).expect("kept");
+        got.sort_unstable();
+        assert_eq!(got, vec![5, 6]);
+        assert!(
+            l.is_empty_leaf(c) && l.get(s).is_none() && l.get(b).is_none(),
+            "descendants freed"
+        );
+        // In a dormant workspace: its remembered focus names the new id.
+        let (mut l, _, s) = console_and_tile();
+        assert!(l.switch_workspace(2, 1001));
+        let _ = l.keep_as_fresh(s, 1001).expect("kept");
+        assert_eq!(l.workspaces[0].focused, l.id_of(s).unwrap());
+        // A spent id space: None, and nothing moved.
+        let (mut l, _, s) = console_and_tile();
+        l.id_seq = u32::MAX;
+        assert_eq!(l.keep_as_fresh(s, 1001), None);
+        assert_eq!(l.leaf_surface(s), Some(5), "untouched");
+    }
+
+    /// What the departed program set on its own pane (the `role` file: a
+    /// role, `nofocus`) does not outlive it -- neither in a kept pane nor in
+    /// a collapsed root -- or a pane nobody has asked for yet could not be
+    /// reached by Super+arrow (`neighbor_dir` skips a non-focusable leaf).
+    ///
+    /// SABOTAGE: drop the role/focusable reset from `keep_as_fresh`, or from
+    /// `close_inner`'s root arm, and its half fails.
+    #[test]
+    fn a_kept_or_collapsed_pane_is_the_one_alloc_makes() {
+        let (mut l, _, s) = console_and_tile();
+        let p = l.get_mut(s).unwrap();
+        p.role = Role::PinTarget;
+        p.focusable = false;
+        p.backgrounded = true;
+        let _ = l.keep_as_fresh(s, 1001).expect("kept");
+        let p = l.get(s).unwrap();
+        assert!(
+            p.role == Role::Content && p.focusable && !p.backgrounded,
+            "the kept pane is an allocated one"
+        );
+        // A workspace's root collapsing under a plain close.
+        let mut l = Layout::new();
+        let r = l.host_for(7, 0, 0).expect("the root's tile");
+        assert_eq!(r, l.root());
+        let p = l.get_mut(r).unwrap();
+        p.role = Role::PinTarget;
+        p.focusable = false;
+        p.tag = String::from("hx notes.txt");
+        assert_eq!(l.close(r), vec![7]);
+        let p = l.get(l.root()).unwrap();
+        assert!(
+            p.role == Role::Content && p.focusable && p.tag.is_empty(),
+            "a collapsed root is a pristine root"
+        );
+    }
+
+    /// Super+N on a fresh pane asks for its tile: the flag clears once, and
+    /// nothing else is ever asked.
+    ///
+    /// SABOTAGE: return true without clearing and the second assert fails.
+    #[test]
+    fn asking_for_a_fresh_pane_clears_it_once() {
+        let mut l = Layout::new();
+        let t = l.host_for(7, 0, 0).unwrap();
+        assert!(l.switch_workspace(2, 1001));
+        let r = l.root();
+        let e = l.epoch;
+        assert!(l.ask_fresh(r));
+        assert!(!l.get(r).unwrap().fresh && l.epoch > e);
+        assert!(!l.ask_fresh(r), "asked already");
+        assert!(!l.ask_fresh(t), "a hosted pane is not asked");
+        assert!(l.fresh_ids().is_empty());
+    }
+
+    /// A takeover re-stamps the old seat's EMPTY panes to the new one; a
+    /// hosted pane's stamp (inert) and another principal's panes stay.
+    ///
+    /// SABOTAGE: drop the emptiness term and the hosted assert fails.
+    #[test]
+    fn a_takeover_restamps_only_the_old_seats_empty_panes() {
+        let mut l = Layout::new();
+        let t = l.host_for(7, 0, 0).unwrap();
+        l.set_owner_principal(t, 1001);
+        assert!(l.switch_workspace(2, 1001));
+        let r2 = l.root();
+        assert!(l.switch_workspace(3, 3003));
+        let r3 = l.root();
+        assert_eq!(l.restamp_empties(1001, 2002), 1);
+        assert_eq!(l.pane_owner_principal(r2), 2002);
+        assert_eq!(l.pane_owner_principal(r3), 3003);
+        assert_eq!(
+            l.pane_owner_principal(t),
+            1001,
+            "a hosted pane is untouched"
+        );
+    }
+
+    /// The keep rule, whole: a pane stays only while the session goes on
+    /// elsewhere AND the rest of its workspace is system surfaces only.
+    /// Surface 0 is the console (system), 5 and 6 the seat's tiles.
+    ///
+    /// SABOTAGE: drop `goes_on` and the last-tile assert fails; drop the
+    /// `rest_unusable` term and the shared-workspace assert fails.
+    #[test]
+    fn a_pane_is_kept_only_as_its_workspaces_last_while_the_session_goes_on() {
+        let seat = |n: usize| n == 5 || n == 6;
+        let system = |n: usize| n == 0;
+        let (mut l, console, s) = console_and_tile();
+        // The session's last tile of all: it closes, and the session ends.
+        assert!(
+            !l.keeps_place(s, seat, system),
+            "the last tile ends the session"
+        );
+        // A tile on workspace 2 keeps the session going: S is kept.
+        assert!(l.switch_workspace(2, 1001));
+        let _ = l.host_for(6, 0, 0).expect("workspace 2's tile");
+        assert!(l.switch_workspace(1, 1001));
+        assert!(
+            l.keeps_place(s, seat, system),
+            "ws 1's last usable pane stays"
+        );
+        assert!(l.rest_unusable(s, system));
+        // The console leaf itself is never "the last usable" beside a tile.
+        assert!(!l.keeps_place(console, seat, system));
+        // A second tile beside S: the workspace keeps a usable pane anyway.
+        let b = l.split(s, Mode::SplitH).expect("a sibling");
+        assert!(
+            !l.keeps_place(s, seat, system),
+            "an empty sibling is usable"
+        );
+        let _ = l.host_into(6, b);
+        assert!(!l.keeps_place(s, seat, system), "a tile sibling is usable");
+        assert_eq!(l.leaves_beside(s), vec![console, b]);
+        assert_eq!(l.workspace_number_of(b), Some(1));
+        assert_eq!(
+            l.first_unbackgrounded_leaf(l.root()),
+            Some(s),
+            "never the console leaf"
         );
     }
 
@@ -6232,7 +6893,7 @@ mod tests {
     fn a_collapsed_root_drops_its_reservation() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(2), "to workspace 2");
+        assert!(l.switch_workspace(2, 0), "to workspace 2");
         let a = l.host_for(8, 0, 0).expect("tile A");
         let b = l.split(a, Mode::SplitH).expect("tile B's leaf");
         let _ = l.host_into(9, b).expect("fill it");
@@ -6249,7 +6910,7 @@ mod tests {
              the tiles it was stamped beside"
         );
 
-        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert!(l.switch_workspace(1, 0), "back to workspace 1");
         assert_eq!(l.reap_empty_workspaces(), 1, "so the workspace vanishes");
     }
 
@@ -6307,9 +6968,12 @@ mod tests {
                  have to allocate a replacement for it"
             );
             if refuse {
-                assert!(!l.move_focused_to_workspace(0), "zero is not a workspace");
                 assert!(
-                    !l.move_focused_to_workspace(MAX_WORKSPACES as u8 + 1),
+                    !l.move_focused_to_workspace(0, 0, false),
+                    "zero is not a workspace"
+                );
+                assert!(
+                    !l.move_focused_to_workspace(MAX_WORKSPACES as u8 + 1, 0, false),
                     "past the bound"
                 );
             }
@@ -6341,7 +7005,7 @@ mod tests {
     fn the_ratified_bound_is_nine_workspaces() {
         assert_eq!(MAX_WORKSPACES, 9, "HALCYON-WORKSPACES 4: Super+1..9");
         let mut l = Layout::new();
-        assert!(l.switch_workspace(9), "workspace 9 is reachable");
+        assert!(l.switch_workspace(9, 0), "workspace 9 is reachable");
         assert_eq!(l.active_number(), 9);
         assert_eq!(
             l.workspace_numbers(),

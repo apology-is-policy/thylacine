@@ -111,6 +111,10 @@ pub struct Leaf {
     pub hidden: bool,
     /// Explicit system-background state, distinct from a hidden tab/zoom.
     pub backgrounded: bool,
+    /// A pane the compositor made so that a workspace has one (a new
+    /// workspace's root, the pane a move or a close left): filled only when
+    /// asked (HALCYON-WORKSPACES, "Under a session").
+    pub fresh: bool,
 }
 
 /// The `layout` header's workspace pair -- `workspaces N active K`, ONE-BASED
@@ -343,7 +347,7 @@ pub struct TileInfo {
 /// Parse the `layout` text into its leaves with their stack facts. The
 /// dump's grammar (tapestryd `render_pane`): two spaces per depth; a
 /// container row `<id>[*] <mode> n=<k> active=<a> [rect]`, a leaf row
-/// `<id>[*] leaf surface=<n>|empty [rect][ w=<n>][ backgrounded][ hidden]`. The depth
+/// `<id>[*] leaf surface=<n>|empty [rect][ w=<n>][ backgrounded][ fresh][ hidden]`. The depth
 /// names the parent: a leaf at depth d belongs to the nearest container at
 /// depth d-1 above it. A malformed id is skipped, never guessed; a row
 /// whose depth names no container is a stack of one.
@@ -415,6 +419,7 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
                     surface,
                     hidden,
                     backgrounded: it.clone().any(|t| t == "backgrounded"),
+                    fresh: it.clone().any(|t| t == "fresh"),
                 },
                 index,
                 count,
@@ -1109,6 +1114,7 @@ mod tests {
                 surface: Some(0),
                 hidden: false,
                 backgrounded: false,
+                fresh: false,
             }
         );
         assert_eq!(
@@ -1119,6 +1125,7 @@ mod tests {
                 surface: None,
                 hidden: false,
                 backgrounded: false,
+                fresh: false,
             }
         );
     }

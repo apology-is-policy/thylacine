@@ -1466,6 +1466,30 @@ the line last SAID (`Tile::said`, test builds only), set at the mint and at
 each say. `ls-halcyon-manual` leg 4a reads the three headers' widths after the
 split and was red on the old rule.
 
+## An empty workspace waits to be asked (2026-09-29)
+
+The session's spawn plan (`tiles::plan_tiles`) makes a tile for every empty,
+visible leaf it does not host and has not closed; the claim mint is the
+owner-and-emptiness gate. When tapestryd began stamping a session's new
+workspace roots with the session's principal ([[sub-tapestryd]]), that root
+became claimable and the plan filled it at once: a new workspace came up with
+a shell in it, so an empty one could no longer vanish when left (the i3 rule,
+HALCYON-WORKSPACES). A first fix keyed the wait on the tree's shape -- the
+active workspace's lone empty root waited -- and it swallowed a one-leaf
+`halcyon layout restore` onto a new workspace: the placeholder is hosted into
+the fresh root, `split` nests it with the anchor, the placeholder closes, the
+container dissolves, and the anchor became a lone empty root that waited
+behind a placard (Fable round 4, F2). The rule now keys on how a pane came to
+be. The compositor's dump marks ` fresh` an empty leaf it made on its own
+account ([[sub-tapestryd]]), `chrome::Leaf` carries the token, and
+`plan_tiles(leaves, have, closed, opened)` fills a fresh leaf only when the
+session's `opened` set holds it (the placard's Open shell); Super+N's ask
+clears the mark in the compositor. A leaf a split makes, or a restore builds,
+is not fresh and is filled as before. Pinned by
+`a_fresh_pane_waits_to_be_asked_and_a_restored_root_does_not`, which parses
+real dump rows (a fresh root, its asked control, a restored root, a split's
+leaf), red when the rule or the parser is broken.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
 
