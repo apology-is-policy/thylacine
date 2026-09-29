@@ -85,10 +85,12 @@ many mounts that their list is too long to read whole, the listing says
 ordinary realm.
 
 `ns` with no operand prints the mount table of the shell that runs it. The line
-for `/tmp/remote` names the source `/`, the top of the tree the server exports,
-and reads `remote` in the `REALM` column; its `FLAGS` column shows any
-restriction the mount carries, such as `noexec`. `ns 0` prints the system's root namespace
-instead, which does not contain mounts made in a shell.
+for `/tmp/remote` names the source `/srv/remote`, the service the mount came
+over, and reads `remote` in the `REALM` column; its `FLAGS` column shows any
+restriction the mount carries, such as `noexec`. A mount made by Haul's private
+form, described under Separate remote sessions, names the source `#|`. `ns 0`
+prints the system's root namespace instead, which does not contain mounts made
+in a shell.
 
 Both forms of Haul mark the mount: the private form marks the session it
 attaches, and `haul --post` marks the posted service, so a mount made through
@@ -211,7 +213,10 @@ root becomes usable and does not change it for the life of the session.
 
 The mark is displayed and has no other effect. The kernel's list of a process's
 mounts ends a mount's line with the word `remote` when the mount's source belongs
-to a marked session, and `ls`, `stat`, `realm` and `ns` read that list. Name
+to a marked session, and `ls`, `stat`, `realm` and `ns` read that list. The same
+list names a mount's source by the file its session came over: the service in
+`/srv` that the shell's `mount` opened, or `#|`, the name of the pipe device, for
+Haul's private form, whose session runs over pipes that have no names. Name
 resolution, permission checks and caching behave identically on marked and
 unmarked sessions. Any program that attaches a session can declare it remote, so
 the mark reports what the attaching program stated; Haul states it because Haul

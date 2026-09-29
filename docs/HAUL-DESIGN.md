@@ -769,13 +769,16 @@ holds the TCP connection.
   the same realm for their operands, and `realm`'s own example (`/srv` is a
   graft) becomes true again as `mount`.
 - `ns`: a line with the suffix reads REALM `remote`. The source column names
-  the mounted Spoor, and a session root attached by `SYS_ATTACH_9P` or
-  `SYS_ATTACH_9P_SRV` keeps the name it is born with, `/`
-  (`dev9p_attach_client`). So a Haul mount's source reads `/` in both forms,
-  as does a local session attached the same way, and the suffix is what tells
-  them apart. The kernel writes `#9` only for a session root with no name at
-  all (the allocation-failure fallback), and `ns` now calls that `9p` rather
-  than `disk`. A FLAGS column shows the suffixes the boxed view used to drop
+  a session root by the file its session came over (operator vote 2026-09-28,
+  Plan 9's form; ARCH 9.6.9): the shell's `mount /srv/NAME` reads `/srv/NAME`,
+  the service the shell opened, and Haul's private form reads `#|`, the pipe
+  Haul hands the kernel (a pipe has no name, so its device spec stands in).
+  Through LR-1 both read `/`, the name every session root is born with
+  (`dev9p_attach_client`), which the root itself keeps. The suffix, not the
+  source, says remote: a local session attached the same way reads the same
+  shape without it. `ns` gives `#|` the REALM `9p`. The kernel writes `#9`
+  only for a session root with no name at all (the allocation-failure
+  fallback), and `ns` now calls that `9p` rather than `disk`. A FLAGS column shows the suffixes the boxed view used to drop
   (`noexec`, `pheno-linux`, `covered`), which closes that queued defect. With
   no operand, `ns` shows its caller's namespace, Plan 9's default (ns(1): "the
   process with the named pid, or by default itself"); `ns 0` shows the system

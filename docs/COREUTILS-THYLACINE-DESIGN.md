@@ -177,9 +177,11 @@ zero-ESC legs.
   (Plan 9's default: "the process with the named pid, or by default itself");
   `ns 0` is the system root, the pre-LR-1 default, which never held the shell's
   own mounts. The boxed view's REALM reads `remote` for a line the kernel marks
-  ` remote`. A 9P session root carries a name (it is born `/`), so it reads
-  `fs` like any subtree; `#9`, which the kernel writes only for a session root with no name
-  (the allocation-failure fallback), reads `9p` rather than the old `disk`. A
+  ` remote`. A 9P session root is named by the file its session came over
+  (`/srv/NAME`; operator vote 2026-09-28), so it reads `fs` like any subtree; `#|`, a
+  session that came over a pipe (Haul's private form), and `#9`, which the kernel writes
+  only for a session root with no name (the allocation-failure fallback), read `9p` (`#9`
+  read `disk`). A
   cut list (no `binds:` line) puts `mount list incomplete` in the count cell
   where a zero used to stand. A FLAGS column carries the other suffixes the kernel renders
   (`noexec`, `pheno-linux`, `covered`) instead of dropping them; an unknown
