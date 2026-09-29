@@ -1505,6 +1505,26 @@ Pinned by `a_selection_bands_each_row_it_covers`, red under four sabotages (no
 frozen bands; no cursor dedupe; no grid arm; the anchor ignored); on the
 device, `ls-halcyon-manual` leg 10a (`v`, `k`, `y` each change the band).
 
+## The layout notice rides any surface (2026-09-29)
+
+The session loop re-planned its tiles on a TEV_LAYOUT only when it arrived on a
+TILE's stream; the chrome, bar, rail and menu pumps drop events they do not
+handle, and tapestryd sends the notice to the seat's lowest surface slot,
+whatever it hosts ([[sub-tapestryd]]). After churn that slot was a chrome
+surface, which the chrome reconcile drops whenever its pane leaves the active
+tree. On the Operator's Manual chunk's device run 13, `halcyon workspace 4;
+halcyon layout restore X` left the restored pane empty behind a placard: the
+notice for the restore's released reservation -- no geometry changed, so it
+was the only one -- went to chrome 1, and chrome 1 was dropped on the
+workspace switch.
+
+Step (3) now also takes the ring's `take_layout_hint()` as a relayout
+([[sub-libtapestry]]), and the loop does not block while `layout_hint()` is
+set: a notice reaped by the chrome, bar or rail pumps after the reconcile would
+otherwise wait for an unrelated wake. The tile loop's own TEV_LAYOUT arm stays.
+On the device, `ls-halcyon-manual` leg 16's restore onto workspace 4 is the
+witness (red 3/3 on the image before the fix).
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
 

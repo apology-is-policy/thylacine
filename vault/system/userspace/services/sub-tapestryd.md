@@ -3145,3 +3145,17 @@ Pinned by `a_fresh_pane_is_the_compositors_until_a_tile_takes_it`,
 `a_kept_or_collapsed_pane_is_the_one_alloc_makes`, each
 red under a sabotage of its hunk; on the device, `ls-halcyon-manual` legs 16
 and 17a-17c.
+
+## The session's layout notice outlives the surface that carried it (2026-09-29)
+
+A surface takes its undelivered events with it, and the session's TEV_LAYOUT
+rides one surface (`session_notify_surface`, the lowest slot the seat owns).
+`retire(n)` therefore re-sends a TEV_LAYOUT, through `notify_session_layout`,
+to the seat's next surface when n's queue still held one -- except while n's
+own conn is torn down, whose every surface is going while `login` prints its
+prompt (a line there could tear it). Test builds say `tapestryd: surface N
+retired holding the session's layout notice -- re-sent`. The client half, for
+a notice already delivered, is the ring's hint ([[sub-libtapestry]],
+[[sub-halcyond]]). The arm has not yet fired on the device -- on the manual
+chunk's run 14 the client hint carried every notice -- and `server.rs` has no
+host harness, so it is verified by reading (the chunk's round 5).

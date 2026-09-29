@@ -8727,6 +8727,21 @@ impl Comp {
         if let Some(m) = unplaced {
             self.menu_unplaced(m);
         }
+        // The session's TEV_LAYOUT rides ONE of its surfaces
+        // (`session_notify_surface`), and a surface's undelivered events go
+        // with it: a notice still queued here goes to the seat's next
+        // surface, or the session never hears of the change behind it. Not
+        // for a conn being torn down -- its every surface is going, and
+        // `login` prints its prompt meanwhile (a line here could tear it).
+        if self.teardown_conn != Some(s.owner_conn) && s.events.iter().any(|e| e.kind == TEV_LAYOUT)
+        {
+            #[cfg(feature = "test-mode")]
+            say!(
+                "tapestryd: surface {} retired holding the session's layout notice -- re-sent",
+                n
+            );
+            self.notify_session_layout();
+        }
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).

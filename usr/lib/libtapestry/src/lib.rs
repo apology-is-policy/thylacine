@@ -1068,6 +1068,8 @@ struct RingCore {
     /// it returns text nobody reads -- never another surface's event.
     placeholder: OwnedFd,
     root: OwnedFd,
+    /// A TEV_LAYOUT reached the ring since the last `take_layout_hint`.
+    layout_hint: bool,
 }
 
 /// ONE 9P session to the compositor + ONE Loom ring, shared by every
@@ -1173,6 +1175,7 @@ impl EventRing {
                 slots,
                 placeholder: OwnedFd(placeholder),
                 root: OwnedFd(root),
+                layout_hint: false,
             })),
         })
     }
@@ -1279,6 +1282,22 @@ impl EventRing {
     pub fn poll(&self) -> Result<(), TapError> {
         self.core.borrow_mut().pump(false)
     }
+
+    /// Whether a structural notice (TEV_LAYOUT) reached this session since
+    /// the last call, on ANY of its surfaces -- the compositor picks one,
+    /// and a surface it picked may be one its owner never polls for it, or
+    /// drops before it does -- clearing the mark. A session re-reads the
+    /// layout on it.
+    pub fn take_layout_hint(&self) -> bool {
+        core::mem::take(&mut self.core.borrow_mut().layout_hint)
+    }
+
+    /// `take_layout_hint` without the clear: a session asks it before it
+    /// blocks, so a notice reaped after its reconcile is not left waiting
+    /// for an unrelated wake.
+    pub fn layout_hint(&self) -> bool {
+        self.core.borrow().layout_hint
+    }
 }
 
 #[cfg(feature = "guest")]
@@ -1358,12 +1377,14 @@ impl RingCore {
         };
         rc.map_err(|_| TapError::Loom)?;
         while let Some(cqe) = self.ring.reap() {
-            ring::route(
+            if ring::route(
                 &mut self.slots,
                 self.staging.as_mut_slice(),
                 cqe.user_data,
                 cqe.result,
-            );
+            ) {
+                self.layout_hint = true;
+            }
         }
         Ok(())
     }

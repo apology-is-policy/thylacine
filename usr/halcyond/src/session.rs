@@ -2340,6 +2340,13 @@ pub fn run(home: Option<String>) -> i64 {
 
         // (3) Reconcile if a relayout happened (a split added a leaf; a close
         // removed one). New tiles come up dirty; the loop re-renders below.
+        // The compositor's TEV_LAYOUT rides whichever of our surfaces it
+        // picks -- a chrome, the bar, a menu as often as a tile, and one we
+        // may drop before polling it -- so the ring, which sees every
+        // surface's events as they arrive, says it.
+        if ring.take_layout_hint() {
+            relayout = true;
+        }
         if relayout {
             relayout = false;
             reconcile(
@@ -2787,6 +2794,12 @@ pub fn run(home: Option<String>) -> i64 {
             .values()
             .any(|t| t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
         {
+            continue;
+        }
+        // Likewise a TEV_LAYOUT reaped after the reconcile above (the pumps
+        // below it poll the chrome, the bar and the rail): reconcile before
+        // blocking, or the notice waits for an unrelated wake.
+        if ring.layout_hint() {
             continue;
         }
 
