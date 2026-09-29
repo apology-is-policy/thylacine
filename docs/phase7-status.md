@@ -707,7 +707,7 @@ Sabotage: nine kernel mutants over six boots, each red on exactly the assertion 
 Operator vote 2 of 2026-09-28 (option 1, "a block the renderer draws"): the Markdown block quote, which the manual's
 checker rejected, becomes a Beacon `aside`, a passage set apart from the flow. Scripture f8b2c361 (BEACON 3, 12.1 rule 5,
 12.2 and the version note; MANUAL-DESIGN 3.2, 4.2-4.4, 8.1 and the 256-column box cap; LANTERN-DESIGN 2 and 5.1;
-HALCYON-VISUAL 8.4, new; HALCYON-INSTRUMENT 7.5; `dec-2026-09-28-beacon-aside`). Code *(pending)*.
+HALCYON-VISUAL 8.4, new; HALCYON-INSTRUMENT 7.5; `dec-2026-09-28-beacon-aside`). Code 40781e17.
 
 - **Beacon.** `aside` is a paired block op with no arguments that names a role, never a layout. It nests no block op,
   and its payload flows: each line reflowed, an empty line a paragraph break.

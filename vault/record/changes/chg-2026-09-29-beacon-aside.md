@@ -4,7 +4,7 @@ type: chg
 title: "A Markdown block quote is a Beacon aside -- checked by the manual, boxed where the console wraps, framed by Halcyon"
 date: 2026-09-29
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["40781e17"]
 touched:
   - sub-beacon
   - sub-manual
