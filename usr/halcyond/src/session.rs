@@ -31,7 +31,7 @@ use halcyond::raster::GlyphSource;
 use halcyond::select::{FlatRow, Sel, Stamp, GRID_BLOCK};
 use halcyond::session_init;
 use halcyond::tile::Tile;
-use halcyond::tile::{Mark, GRID_KEY};
+use halcyond::tile::{block_key, selection_bands, Band, Mark, GRID_KEY};
 use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
@@ -487,19 +487,21 @@ impl SessionTile {
         }
         let s = self.sel.as_ref()?;
         let fr = self.flat.get(s.cursor)?;
-        let block = if fr.block == GRID_BLOCK {
-            GRID_KEY
-        } else if fr.block == usize::MAX {
-            u64::MAX
-        } else {
-            self.tile.scrollback.frozen_blocks().get(fr.block)?.id
-        };
         Some(Mark {
-            block,
+            block: block_key(&self.tile.scrollback, *fr)?,
             item: fr.item,
             row: fr.row,
             obj: s.obj,
         })
+    }
+
+    /// The rows of an anchored Normal-mode selection, banded like the
+    /// cursor's (HALCYON 4: the selection shows as it extends).
+    fn bands(&self) -> Vec<Band> {
+        match (self.mode, self.sel.as_ref()) {
+            (Mode::Normal, Some(s)) => selection_bands(&self.tile.scrollback, &self.flat, s),
+            _ => Vec::new(),
+        }
     }
 
     /// Keep the flat row list current: new output moves the rows, and the
@@ -896,8 +898,9 @@ impl SessionTile {
             self.refresh_flat();
         }
         let mark = self.mark();
+        let bands = self.bands();
         self.tile
-            .render(cart, sw, sh, gs, sheet, &mut self.scroll_up, mark);
+            .render_selected(cart, sw, sh, gs, sheet, &mut self.scroll_up, mark, &bands);
         {
             let px = self.surf.pixels();
             cartoon::execute(

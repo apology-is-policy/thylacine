@@ -1843,7 +1843,13 @@ is keyed by its start column + 1, the grid's analogue of a block's obj
 index), Enter and a click resolve a grid run through its cell span to the
 owning block's obj (`grid_run_obj`), and the render bands the marked grid row
 and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
-pts clipboard work).
+pts clipboard work). **Fixed (2026-09-29, the Operator's Manual chunk):** a
+session tile banded only the Normal-mode CURSOR row (one `Mark`), while the
+console renderer bands every row of the selection, so a `v` selection in a
+tile was never drawn. `Tile::render_selected` now takes the selection's rows
+(`tile::selection_bands`, each keyed by `tile::block_key` as a `Mark` keys the
+cursor) and bands each row once -- the frozen blocks, the open block and the
+live grid; `render` is the no-selection form, byte-identical.
 
 **Fixed at TC-1b (2026-09-25).** The cursor and the `v` anchor are positions in
 the flat list, and both hosts re-flattened on new output by clamping them into

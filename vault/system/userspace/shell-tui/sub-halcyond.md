@@ -1490,6 +1490,21 @@ is not fresh and is filled as before. Pinned by
 real dump rows (a fresh root, its asked control, a restored root, a split's
 leaf), red when the rule or the parser is broken.
 
+## A session tile draws its selection (2026-09-29)
+
+A session tile banded only the Normal-mode CURSOR row: `session.rs`'s `mark()`
+handed `Tile::render` one `Mark`, while the console renderer bands every row of
+`sel.range()`. The `v` anchor existed -- TC-1b rebases it in both hosts -- and
+was never drawn, so `v` then `kkk` then `y` changed nothing on screen (the
+Operator's Manual chunk's device run 11, leg 10). `Tile::render_selected` now
+takes the selection's rows (`tile::selection_bands`, each keyed by
+`tile::block_key` as a `Mark` keys the cursor) and bands each row once -- the
+frozen blocks, the open block and the live grid -- through the session's
+`bands()`; `render` is the no-selection form and paints byte-identically.
+Pinned by `a_selection_bands_each_row_it_covers`, red under four sabotages (no
+frozen bands; no cursor dedupe; no grid arm; the anchor ignored); on the
+device, `ls-halcyon-manual` leg 10a (`v`, `k`, `y` each change the band).
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
 

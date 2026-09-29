@@ -671,6 +671,24 @@ impl Tile {
         scroll_up: &mut i32,
         mark: Option<Mark>,
     ) -> i32 {
+        self.render_selected(cart, w, h, gs, sheet, scroll_up, mark, &[])
+    }
+
+    /// `render` with a Normal-mode selection: every row of `bands`
+    /// (`selection_bands`) is banded as the cursor's row is, each once --
+    /// the console renderer's `sel_rows`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_selected(
+        &mut self,
+        cart: &mut Cartoon,
+        w: usize,
+        h: usize,
+        gs: &mut GlyphSource,
+        sheet: &Sheet,
+        scroll_up: &mut i32,
+        mark: Option<Mark>,
+        bands: &[Band],
+    ) -> i32 {
         cart.reset();
         // HALCYON-INSTRUMENT 14.7 under the Instrument profile: the raw
         // application grid fills the content rect in `terminal_bg`, the
@@ -911,6 +929,7 @@ impl Tile {
                 let lb = layout_block_media(b, lay_w, sheet, gs, Some(&self.media));
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
+                paint_bands(cart, &lb, y, w, sheet, bands, b.id, mark);
                 render_block(cart, &lb, y, gs);
                 paint_run(cart, &lb, y, sheet, mark.filter(|m| m.block == b.id));
                 self.laid_last += 1;
@@ -922,6 +941,7 @@ impl Tile {
         if y + open_lb.height >= 0 && y <= view_end {
             let m = mark.filter(|m| m.block == u64::MAX);
             paint_mark(cart, &open_lb, y, w, sheet, m);
+            paint_bands(cart, &open_lb, y, w, sheet, bands, u64::MAX, mark);
             render_block(cart, &open_lb, y, gs);
             paint_run(cart, &open_lb, y, sheet, m);
         }
@@ -936,6 +956,20 @@ impl Tile {
         // several laid lines) -- painted UNDER the cells.
         if let Some(m) = gm {
             for (by, bh) in live_row_spans(&live_lb, &prov, m.item, live_cols) {
+                cart.ops.push(Op::Rect {
+                    x: 0,
+                    y: y + by,
+                    w: w as u32,
+                    h: bh as u32,
+                    color: sheet.sel_bg,
+                });
+            }
+        }
+        for bd in bands
+            .iter()
+            .filter(|bd| bd.block == GRID_KEY && gm.map_or(true, |m| m.item != bd.item))
+        {
+            for (by, bh) in live_row_spans(&live_lb, &prov, bd.item, live_cols) {
                 cart.ops.push(Op::Rect {
                     x: 0,
                     y: y + by,
@@ -1089,6 +1123,51 @@ pub struct Mark {
     pub obj: Option<u16>,
 }
 
+/// One row of a Normal-mode selection, keyed as a `Mark` keys the cursor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Band {
+    pub block: u64,
+    pub item: usize,
+    pub row: usize,
+}
+
+/// The block key `render` matches a flat row against: a frozen block's id,
+/// `u64::MAX` for the open block, `GRID_KEY` for a live-grid row; none for a
+/// frozen block that is gone.
+pub fn block_key(t: &Transcript, fr: crate::select::FlatRow) -> Option<u64> {
+    if fr.block == crate::select::GRID_BLOCK {
+        Some(GRID_KEY)
+    } else if fr.block == usize::MAX {
+        Some(u64::MAX)
+    } else {
+        t.frozen_blocks().get(fr.block).map(|b| b.id)
+    }
+}
+
+/// Every row of an anchored selection as `render_selected` bands it; none
+/// without an anchor, where the cursor's row is the `Mark`'s to band.
+pub fn selection_bands(
+    t: &Transcript,
+    flat: &[crate::select::FlatRow],
+    sel: &crate::select::Sel,
+) -> Vec<Band> {
+    if sel.anchor.is_none() {
+        return Vec::new();
+    }
+    let (lo, hi) = sel.range();
+    flat.iter()
+        .skip(lo)
+        .take(hi - lo + 1)
+        .filter_map(|&fr| {
+            Some(Band {
+                block: block_key(t, fr)?,
+                item: fr.item,
+                row: fr.row,
+            })
+        })
+        .collect()
+}
+
 /// The cursor row's band under the text (`sel_bg`, full width).
 fn paint_mark(
     cart: &mut Cartoon,
@@ -1100,6 +1179,35 @@ fn paint_mark(
 ) {
     if let Some(m) = m {
         if let Some((ly, lh)) = laid_line_for(lb, m.item, m.row) {
+            cart.ops.push(Op::Rect {
+                x: 0,
+                y: y + ly,
+                w: w as u32,
+                h: lh.max(0) as u32,
+                color: sheet.sel_bg,
+            });
+        }
+    }
+}
+
+/// The rows of `bands` in `block`, banded as `paint_mark` bands the cursor's
+/// row -- which is left to it, so no row is banded twice.
+#[allow(clippy::too_many_arguments)]
+fn paint_bands(
+    cart: &mut Cartoon,
+    lb: &LaidBlock,
+    y: i32,
+    w: usize,
+    sheet: &Sheet,
+    bands: &[Band],
+    block: u64,
+    mark: Option<Mark>,
+) {
+    for bd in bands.iter().filter(|bd| bd.block == block) {
+        if mark.is_some_and(|m| m.block == bd.block && m.item == bd.item && m.row == bd.row) {
+            continue;
+        }
+        if let Some((ly, lh)) = laid_line_for(lb, bd.item, bd.row) {
             cart.ops.push(Op::Rect {
                 x: 0,
                 y: y + ly,
@@ -2047,6 +2155,79 @@ mod tests {
             band.0 >= 0 && band.0 + band.1 <= h as i32,
             "the marked row is in view: {band:?} of {h}"
         );
+    }
+
+    /// A Normal-mode selection bands each row it covers -- the console
+    /// renderer's `sel_rows` -- through the history and into the live grid;
+    /// without an anchor only the cursor's row is banded.
+    #[test]
+    fn a_selection_bands_each_row_it_covers() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((20 * cw) as usize, (60 * ch) as usize);
+        let mut t = history_tile(20, 4, 1000);
+        push_history(&mut t, 4, 3, 'm');
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('s')), (1, 0, cell('t'))],
+            cursor: (1, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let flat = crate::select::flatten_with_grid(&t.scrollback, 4);
+        let grid0 = flat
+            .iter()
+            .position(|fr| fr.block == crate::select::GRID_BLOCK)
+            .expect("premise: the grid's rows trail the history's");
+        assert!(
+            grid0 >= 4,
+            "premise: four history rows precede the grid ({grid0})"
+        );
+        let banded = |cart: &Cartoon| {
+            cart.ops
+                .iter()
+                .filter(|o| matches!(o, Op::Rect { color, .. } if *color == sheet.sel_bg))
+                .count()
+        };
+        // In the history: rows 1..=3, the cursor on row 3.
+        let mut sel = crate::select::Sel::at(3, crate::select::Stamp::default());
+        sel.anchor = Some(1);
+        let bands = selection_bands(&t.scrollback, &flat, &sel);
+        assert_eq!(bands.len(), 3, "every selected row is a band");
+        let fr = flat[3];
+        let mark = Mark {
+            block: block_key(&t.scrollback, fr).unwrap(),
+            item: fr.item,
+            row: fr.row,
+            obj: None,
+        };
+        let mut cart = Cartoon::new();
+        t.render_selected(&mut cart, w, h, &mut gs, &sheet, &mut 0, Some(mark), &bands);
+        assert_eq!(
+            banded(&cart),
+            3,
+            "each selected row is banded once, the cursor's included"
+        );
+        // Across into the grid: the last history row and the grid's first two.
+        sel.cursor = grid0 + 1;
+        sel.anchor = Some(grid0 - 1);
+        let bands = selection_bands(&t.scrollback, &flat, &sel);
+        assert_eq!(bands.len(), 3);
+        let mark = Mark {
+            block: GRID_KEY,
+            item: 1,
+            row: usize::MAX,
+            obj: None,
+        };
+        let mut cart = Cartoon::new();
+        t.render_selected(&mut cart, w, h, &mut gs, &sheet, &mut 0, Some(mark), &bands);
+        assert_eq!(banded(&cart), 3, "a history row and two grid rows");
+        // The control, one variable away: no anchor, the cursor's row alone.
+        sel.anchor = None;
+        assert!(selection_bands(&t.scrollback, &flat, &sel).is_empty());
+        let mut cart = Cartoon::new();
+        t.render_selected(&mut cart, w, h, &mut gs, &sheet, &mut 0, Some(mark), &[]);
+        assert_eq!(banded(&cart), 1);
     }
 
     #[test]
