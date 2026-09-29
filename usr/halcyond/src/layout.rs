@@ -1527,7 +1527,45 @@ impl Role {
     }
 }
 
-fn roles_of(b: &Block, fractional: bool) -> Vec<Role> {
+/// The frame an item is laid in: a `pre` block's island or an `aside`'s
+/// frame (HALCYON-VISUAL 8.4), named by the episode its lines carry. A blank
+/// grid row carries no tag, so it splits a tile's rebuilt block; the empty
+/// lines between two parts of one episode are laid inside it as well.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Framed {
+    Pre(u32),
+    Aside(u32),
+}
+
+fn frames_of(b: &Block) -> Vec<Option<Framed>> {
+    let mut out: Vec<Option<Framed>> = b
+        .items
+        .iter()
+        .map(|it| match it {
+            Item::Pre(lines) => lines.first().map(|l| l.episode).filter(|&e| e != 0).map(Framed::Pre),
+            Item::Line(l) if l.episode != 0 => Some(Framed::Aside(l.episode)),
+            _ => None,
+        })
+        .collect();
+    let mut i = 0;
+    while i < b.items.len() {
+        let mut j = i + 1;
+        if let Some(f) = out[i] {
+            while matches!(b.items.get(j), Some(Item::Line(l)) if l.episode == 0 && l.cells.is_empty()) {
+                j += 1;
+            }
+            if j > i + 1 && out.get(j).copied().flatten() == Some(f) {
+                for o in out[i + 1..j].iter_mut() {
+                    *o = Some(f);
+                }
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+fn roles_of(b: &Block, frames: &[Option<Framed>], fractional: bool) -> Vec<Role> {
     let block_class = b.class();
     let mut roles: Vec<Role> = Vec::with_capacity(b.items.len());
     // The herald's deck: the dim, non-empty lines directly under a title.
@@ -1535,12 +1573,22 @@ fn roles_of(b: &Block, fractional: bool) -> Vec<Role> {
     let mut deck_first = true;
     // Whether the previous item was a raw line (an island is open).
     let mut raw_open = false;
-    for item in b.items.iter() {
+    for (i, item) in b.items.iter().enumerate() {
         let role = match item {
             Item::Table(_) => Role::Table,
             Item::Rule => Role::Rule,
             Item::Pre(_) => Role::Pre,
             Item::Image { .. } => Role::Image,
+            // A row of a `pre` island between two parts of its block.
+            Item::Line(_) if matches!(frames.get(i), Some(Some(Framed::Pre(_)))) => Role::Pre,
+            // An aside's line is prose, and its empty line the paragraph break.
+            Item::Line(line) if matches!(frames.get(i), Some(Some(Framed::Aside(_)))) => {
+                if line.cells.is_empty() {
+                    Role::Empty
+                } else {
+                    Role::Prose
+                }
+            }
             Item::Line(line) => {
                 let class = if line.class == LineClass::Inherit {
                     block_class
@@ -1631,12 +1679,13 @@ fn letterbox(nw: i32, nh: i32, aw: i32, ah: i32) -> (i32, i32) {
     (dw.max(1), dh.max(1))
 }
 
-fn lay_inline_image(lb: &mut LineBuilder<'_>, sheet: &Sheet, w: u32, h: u32, argb: &[u32]) {
-    let avail = (lb.width - 2 * sheet.pad_x).max(1);
+/// An image letterboxed into the columns [left, right) and centred there.
+fn lay_inline_image(lb: &mut LineBuilder<'_>, left: i32, right: i32, w: u32, h: u32, argb: &[u32]) {
+    let avail = (right - left).max(1);
     let (dw, dh) = letterbox(w as i32, h as i32, avail, i32::MAX);
     if dw > 0 && dh > 0 && !argb.is_empty() {
         let blob = Blob { w, h, argb: argb.to_vec() }.scaled(dw as u32, dh as u32);
-        let x = sheet.pad_x + (avail - dw) / 2;
+        let x = left + (avail - dw) / 2;
         lb.images.push(LaidImage { blob, x, y: lb.y() });
         lb.advance(dh);
     }
@@ -1655,7 +1704,8 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
     gs.set_kerning(sheet.kerning);
     let mut lb = LineBuilder::new(sheet, width.max(2 * sheet.pad_x + sheet.ipx(MIN_CONTENT_W)));
     let fractional = sheet.flow == Flow::Fractional;
-    let roles = roles_of(b, fractional);
+    let frames = frames_of(b);
+    let roles = roles_of(b, &frames, fractional);
     let raw_margin = sheet.ipx(sheet.rhythm.raw);
     // CSS margin collapsing: the gap before an element is the larger of the
     // previous element's bottom margin and its own top; the first element's
@@ -1703,16 +1753,94 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
             }
         }
     };
+    // An aside's frame (HALCYON-VISUAL 8.4): its bottom padding, then a
+    // hairline on each of its four sides in the `rule` ink, and no ground. It
+    // caps at the measure, as a `pre` does.
+    let close_aside = |lb: &mut LineBuilder<'_>, top_q: i32| {
+        lb.advance(sheet.pre_pad_y + sheet.hairline);
+        let top = ypx(top_q);
+        let h = (lb.y() - top).max(0);
+        let w = (lb.right_with(sheet.measure_cap) - sheet.pad_x).max(0);
+        let t = sheet.hairline.min(h).min(w);
+        for (x, y, rw, rh) in [
+            (sheet.pad_x, top, w, t),
+            (sheet.pad_x, top + h - t, w, t),
+            (sheet.pad_x, top, t, h),
+            (sheet.pad_x + w - t, top, t, h),
+        ] {
+            lb.rects.push(RectSpec {
+                x,
+                y,
+                w: rw as u32,
+                h: rh as u32,
+                color: sheet.rule,
+            });
+        }
+    };
+    let (pre_top_margin, pre_bottom_margin) = Role::Pre.margins(sheet);
+    // The open aside frame, and a `pre` island kept open for the next part of
+    // its block: the episode, and the top in the flow's 1/64 px.
+    let mut aside_open: Option<(u32, i32)> = None;
+    let mut pre_open: Option<(u32, i32)> = None;
     for (item_idx, item) in b.items.iter().enumerate() {
+        let framed = frames[item_idx];
+        if let Some((e, t)) = aside_open {
+            if framed != Some(Framed::Aside(e)) {
+                aside_open = None;
+                close_aside(&mut lb, t);
+                prev_bottom = Some(pre_bottom_margin);
+                prev_role = Some(Role::Pre);
+            }
+        }
+        if let Some((e, t)) = pre_open {
+            if framed != Some(Framed::Pre(e)) {
+                pre_open = None;
+                close_island(&mut lb, t, true);
+            }
+        }
+        // An empty line between two parts of a `pre`: an empty row of it.
+        if let (Some(Framed::Pre(_)), Item::Line(_), Some(_)) = (framed, item, pre_open) {
+            lb.start_item(sheet.measure_cap);
+            lb.line_class = LineClass::Raw;
+            lb.line_pre = true;
+            lb.x0 = sheet.pad_x + sheet.pre_rule_w + sheet.pre_pad_x;
+            lb.pen_x = lb.x0;
+            lb.pen_q = 0;
+            let first = lb.lines.len();
+            lb.break_line(gs);
+            for l in lb.lines[first..].iter_mut() {
+                l.src_item = item_idx;
+            }
+            lb.line_pre = false;
+            continue;
+        }
         let raster = media.and_then(|m| m.resolve(b, item));
         let role = if raster.is_some() { Role::Image } else { roles[item_idx] };
         let (top, bottom) = role.margins(sheet);
-        // Consecutive raw lines share one island: no margin between them.
-        let joins_island = role == Role::Raw && island_top.is_some();
+        // Consecutive raw lines share one island: no margin between them; nor
+        // is there one before the next part of a `pre` its island waits for.
+        let joins_island = (role == Role::Raw && island_top.is_some())
+            || matches!((framed, pre_open), (Some(Framed::Pre(e)), Some((o, _))) if e == o);
         if !joins_island {
             if let Some(t) = island_top.take() {
                 close_island(&mut lb, t, false);
                 prev_bottom = Some(raw_margin);
+            }
+            // Entering an aside opens its frame: the margins of a `pre`, then
+            // the hairline and the padding; its first line starts fresh.
+            if let (Some(Framed::Aside(e)), None) = (framed, aside_open) {
+                let gap = match prev_bottom {
+                    None => 0,
+                    Some(_) if fractional && prev_role == Some(Role::Prompt) => {
+                        sheet.ipx(sheet.rhythm.prompt_bottom)
+                    }
+                    Some(pb) => pb.max(pre_top_margin),
+                };
+                lb.advance(gap);
+                aside_open = Some((e, lb.y_q));
+                lb.advance(sheet.hairline + sheet.pre_pad_y);
+                prev_bottom = None;
+                prev_role = None;
             }
             if fractional && role == Role::Empty {
                 // 7.5: the empty document line is a zero-height paragraph
@@ -1726,6 +1854,10 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
                     Some(pb) => pb.max(top).max(bottom),
                 });
                 lb.start_item(role.cap(sheet));
+                if aside_open.is_some() {
+                    lb.x0 = sheet.pad_x + sheet.hairline + sheet.pre_pad_x;
+                    lb.pen_x = lb.x0;
+                }
                 lb.break_line(gs);
                 if let Some(l) = lb.lines.last_mut() {
                     l.src_item = item_idx;
@@ -1755,7 +1887,15 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
         match item {
             Item::Line(_) if raster.is_some() => {
                 let r = raster.unwrap();
-                lay_inline_image(&mut lb, sheet, r.w, r.h, &r.argb);
+                // Inside an aside, inside its frame: the hairline and the
+                // padding on each side of the measure it caps at.
+                let (left, right) = if aside_open.is_some() {
+                    let inset = sheet.hairline + sheet.pre_pad_x;
+                    (sheet.pad_x + inset, lb.right_with(sheet.measure_cap) - inset)
+                } else {
+                    (sheet.pad_x, lb.width - sheet.pad_x)
+                };
+                lay_inline_image(&mut lb, left, right, r.w, r.h, &r.argb);
             }
             Item::Line(line) => {
                 let (mode, class) = match role {
@@ -1773,6 +1913,12 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
                     lb.pen_x = lb.x0;
                     lb.pen_q = 0;
                     lb.right_inset = sheet.raw_pad_r;
+                }
+                if aside_open.is_some() {
+                    lb.x0 = sheet.pad_x + sheet.hairline + sheet.pre_pad_x;
+                    lb.pen_x = lb.x0;
+                    lb.pen_q = 0;
+                    lb.right_inset = sheet.hairline + sheet.pre_pad_x;
                 }
                 lb.center = matches!(role, Role::Hdr(_, true) | Role::Deck(..));
                 for (s, e, sid) in runs_of(&line.cells) {
@@ -1808,8 +1954,14 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
                 // the mono text. Under Instrument it is the code block (7.3:
                 // `code_bg`, the 2 px `amber_muted` rule, 15 / 17 inside,
                 // the 12 x 1.65 row, capped at the measure).
-                let top_q = lb.y_q;
-                lb.advance(sheet.pre_pad_y);
+                let top_q = match pre_open.take() {
+                    Some((_, t)) => t,
+                    None => {
+                        let t = lb.y_q;
+                        lb.advance(sheet.pre_pad_y);
+                        t
+                    }
+                };
                 lb.line_class = LineClass::Raw;
                 lb.line_pre = true;
                 lb.right_inset = sheet.pre_pad_r;
@@ -1842,10 +1994,18 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
                 }
                 lb.line_pre = false;
                 lb.right_inset = 0;
-                close_island(&mut lb, top_q, true);
+                // The next part of this block, past the blank rows a tile
+                // split it at, lays in the same island.
+                match framed {
+                    Some(Framed::Pre(e)) if frames.get(item_idx + 1).copied().flatten() == framed => {
+                        pre_open = Some((e, top_q));
+                    }
+                    _ => close_island(&mut lb, top_q, true),
+                }
             }
             Item::Image { w, h, argb } => {
-                lay_inline_image(&mut lb, sheet, *w, *h, argb);
+                let right = lb.width - sheet.pad_x;
+                lay_inline_image(&mut lb, sheet.pad_x, right, *w, *h, argb);
             }
         }
         // Stamp the item's visual lines with their source address (tables
@@ -1859,6 +2019,12 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
             prev_bottom = Some(bottom);
         }
         prev_role = Some(role);
+    }
+    if let Some((_, t)) = aside_open.take() {
+        close_aside(&mut lb, t);
+    }
+    if let Some((_, t)) = pre_open.take() {
+        close_island(&mut lb, t, true);
     }
     if let Some(t) = island_top.take() {
         close_island(&mut lb, t, false);
@@ -3951,6 +4117,184 @@ pub(crate) mod tests {
         let t = inst_transcript(daylight(), build);
         let legacy = layout_block(&t.frozen_blocks()[1], 1000, &l, &mut g);
         assert_eq!(legacy.lines[1].segs[0].refs.len(), 200);
+    }
+
+    /// A paragraph, an aside of a short paragraph and one word too long for
+    /// a line, and a paragraph after it. The word breaks at the glyph that
+    /// would cross the wrap edge, so each of its lines ends within one narrow
+    /// glyph of that edge.
+    fn aside_between_paragraphs(buf: &mut Vec<u8>) {
+        wire::open(buf, BOp::Zone, &[("k", "output")]);
+        buf.extend_from_slice(b"before\n");
+        wire::open(buf, BOp::Aside, &[]);
+        buf.extend_from_slice(b"one\n\n");
+        for _ in 0..2000 {
+            buf.extend_from_slice(b"i");
+        }
+        buf.extend_from_slice(b"\n");
+        wire::close(buf, BOp::Aside);
+        buf.extend_from_slice(b"after\n");
+        wire::close(buf, BOp::Zone);
+    }
+
+    /// A line of the long word ends at `edge` exactly: at or before it, and
+    /// less than one glyph (the widest step on the line, plus the pen's
+    /// rounding) short of it.
+    fn broken_at(line: &LaidLine, edge: i32) -> bool {
+        let sg = line.segs.last().expect("a seg");
+        let step = sg.xs.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0);
+        sg.x_end <= edge && sg.x_end + step + 1 > edge
+    }
+
+    /// 8.4 / 7.5: an aside under Instrument is four 1 px `border` hairlines
+    /// at a `pre`'s margin (18) and padding (15 / 17, the 17 on both sides),
+    /// capped at the measure (720), with no ground. Its lines are prose at
+    /// the body face, wrapped at the frame's inner width, and its empty line
+    /// is the paragraph break (15).
+    #[test]
+    fn an_aside_is_a_hairline_frame_at_a_pre_s_margin_and_padding() {
+        let s = inst_sheet(1440);
+        let t = inst_transcript(s.theme.terminal, aside_between_paragraphs);
+        let mut g = gs();
+        let laid = layout_block(&t.frozen_blocks()[0], 1000, &s, &mut g);
+        assert_eq!(laid.rects.len(), 4, "the four hairlines and nothing else: no ground");
+        assert!(laid.rects.iter().all(|r| r.color == s.rule), "in the `border` ink");
+        let (top, bottom, left, right) = (&laid.rects[0], &laid.rects[1], &laid.rects[2], &laid.rects[3]);
+        let x0 = 43;
+        assert_eq!((top.x, top.w, top.h), (x0, 720, 1), "capped at the measure");
+        assert_eq!((bottom.x, bottom.w, bottom.h), (x0, 720, 1));
+        assert_eq!((left.x, left.y, left.w), (x0, top.y, 1));
+        assert_eq!((right.x, right.y, right.w), (x0 + 720 - 1, top.y, 1));
+        assert_eq!(left.h as i32, bottom.y + 1 - top.y, "the sides close the frame");
+        assert_eq!(right.h, left.h);
+        let first = |item: usize| laid.lines.iter().find(|l| l.src_item == item).expect("the item lays");
+        let before = first(0);
+        assert_eq!(top.y, before.y + before.h + 18, "a pre's margin above (18, over the paragraph's 15)");
+        let one = first(1);
+        assert_eq!(one.y, top.y + 1 + 15, "the hairline, then 15 in");
+        assert_eq!(one.segs[0].x, x0 + 1 + 17, "the hairline, then 17 in");
+        assert!(one.segs.iter().all(|sg| sg.face == s.face_body), "prose at the body face");
+        let long: Vec<_> = laid.lines.iter().filter(|l| l.src_item == 3).collect();
+        assert!(long.len() > 2, "the long word breaks");
+        assert_eq!(long[0].y, one.y + one.h + 15, "the empty line is the paragraph break");
+        // It breaks 17 in from the right hairline, and not before.
+        let inner_right = x0 + 720 - 1 - 17;
+        for l in &long[..long.len() - 1] {
+            assert_eq!(l.segs[0].x, x0 + 1 + 17);
+            assert!(broken_at(l, inner_right), "broken at the inner edge: {}", l.segs.last().unwrap().x_end);
+        }
+        let last = long.last().unwrap();
+        assert_eq!(bottom.y, last.y + last.h + 15, "15 in, then the hairline");
+        assert_eq!(first(4).y, bottom.y + 1 + 18, "a pre's margin below");
+    }
+
+    /// 8.4 under the legacy sheet: the same frame at COMPOSITION's island
+    /// margin (2) and padding (2 / 8, the 8 on both sides), the width
+    /// uncapped; the empty line lays as the legacy empty line, a line box.
+    #[test]
+    fn an_aside_under_the_legacy_sheet_takes_the_island_margin_and_padding() {
+        let l = daylight_sheet(100);
+        let t = inst_transcript(daylight(), aside_between_paragraphs);
+        let mut g = gs();
+        let laid = layout_block(&t.frozen_blocks()[0], 1000, &l, &mut g);
+        assert_eq!(laid.rects.len(), 4, "no ground");
+        assert!(laid.rects.iter().all(|r| r.color == l.rule));
+        let (top, bottom, right) = (&laid.rects[0], &laid.rects[1], &laid.rects[3]);
+        let (x0, w) = (12, 1000 - 24);
+        assert_eq!((top.x, top.w, top.h), (x0, w as u32, 1), "the width uncapped");
+        assert_eq!((right.x, right.w), (x0 + w - 1, 1));
+        let first = |item: usize| laid.lines.iter().find(|ln| ln.src_item == item).expect("the item lays");
+        let before = first(0);
+        assert_eq!(top.y, before.y + before.h + 2);
+        let one = first(1);
+        assert_eq!(one.y, top.y + 1 + 2);
+        assert_eq!(one.segs[0].x, x0 + 1 + 8);
+        let empty = first(2);
+        assert!(empty.h > 0, "the legacy empty line is a line box");
+        assert_eq!(empty.y, one.y + one.h + 2);
+        let long: Vec<_> = laid.lines.iter().filter(|ln| ln.src_item == 3).collect();
+        assert_eq!(long[0].y, empty.y + empty.h + 2);
+        let inner_right = x0 + w - 1 - 8;
+        assert!(long.len() > 2, "the long word breaks");
+        for ln in &long[..long.len() - 1] {
+            assert_eq!(ln.segs[0].x, x0 + 1 + 8);
+            assert!(broken_at(ln, inner_right), "broken at the inner edge: {}", ln.segs.last().unwrap().x_end);
+        }
+        let last = long.last().unwrap();
+        assert_eq!(bottom.y, last.y + last.h + 2);
+        assert_eq!(first(4).y, bottom.y + 1 + 2);
+    }
+
+    /// Two asides back to back are two frames, a `pre`'s margin apart; an
+    /// aside's empty line never bridges into the next one.
+    #[test]
+    fn two_asides_back_to_back_are_two_frames() {
+        let s = inst_sheet(1440);
+        let build = |buf: &mut Vec<u8>| {
+            wire::open(buf, BOp::Zone, &[("k", "output")]);
+            wire::open(buf, BOp::Aside, &[]);
+            buf.extend_from_slice(b"one\n");
+            wire::close(buf, BOp::Aside);
+            buf.extend_from_slice(b"\n");
+            wire::open(buf, BOp::Aside, &[]);
+            buf.extend_from_slice(b"two\n");
+            wire::close(buf, BOp::Aside);
+            wire::close(buf, BOp::Zone);
+        };
+        let t = inst_transcript(s.theme.terminal, build);
+        let mut g = gs();
+        let laid = layout_block(&t.frozen_blocks()[0], 1000, &s, &mut g);
+        assert_eq!(laid.rects.len(), 8, "two frames");
+        let (first_bottom, second_top) = (&laid.rects[1], &laid.rects[4]);
+        assert_eq!(laid.rects[0].y, 0, "the first child's margin is dropped");
+        assert_eq!(second_top.y, first_bottom.y + 1 + 18, "a pre's margin between the frames");
+        let empty = laid.lines.iter().find(|l| l.src_item == 1).expect("the empty line lays");
+        assert!(empty.y > first_bottom.y && empty.y <= second_top.y, "the empty line is in neither frame");
+    }
+
+    fn inline_image_in(buf: &mut Vec<u8>, aside: bool) {
+        wire::open(buf, BOp::Zone, &[("k", "output")]);
+        if aside {
+            wire::open(buf, BOp::Aside, &[]);
+        }
+        buf.extend_from_slice(b"one\n");
+        let refv = "0000000000000000000000000000000e";
+        wire::open(buf, BOp::Obj, &[("type", "inline-image"), ("ref", refv)]);
+        buf.extend_from_slice(b"picture");
+        wire::close(buf, BOp::Obj);
+        buf.extend_from_slice(b"\n");
+        if aside {
+            wire::close(buf, BOp::Aside);
+        }
+        wire::close(buf, BOp::Zone);
+    }
+
+    /// An inline image in an aside is letterboxed into the frame's inner
+    /// width and centred there, never laid across its hairlines. The control,
+    /// one variable away: the same image outside an aside spans the page
+    /// between its pads.
+    #[test]
+    fn an_inline_image_in_an_aside_stays_inside_its_frame() {
+        let s = inst_sheet(1440);
+        let mut media = crate::inlinecache::InlineCache::new(1 << 26);
+        // Wider than any frame, so it takes the whole width it is given.
+        assert!(media.insert(0xe, 4000, 100, alloc::vec![0xFF00_00FF; 4000 * 100]));
+        let mut g = gs();
+        let t = inst_transcript(s.theme.terminal, |b| inline_image_in(b, true));
+        let laid = layout_block_media(&t.frozen_blocks()[0], 1000, &s, &mut g, Some(&media));
+        assert_eq!(laid.images.len(), 1, "the picture resolves");
+        assert_eq!(laid.rects.len(), 4, "one frame");
+        let (bottom, left, right) = (&laid.rects[1], &laid.rects[2], &laid.rects[3]);
+        let img = &laid.images[0];
+        assert_eq!(img.x, left.x + 1 + 17, "the hairline, then 17 in");
+        assert_eq!(img.x + img.blob.w as i32, right.x - 17, "17 in from the right hairline");
+        assert!(bottom.y >= img.y + img.blob.h as i32 + 15, "the frame closes below it");
+
+        let t = inst_transcript(s.theme.terminal, |b| inline_image_in(b, false));
+        let laid = layout_block_media(&t.frozen_blocks()[0], 1000, &s, &mut g, Some(&media));
+        assert!(laid.rects.is_empty(), "no frame");
+        let img = &laid.images[0];
+        assert_eq!((img.x, img.blob.w as i32), (43, 1000 - 2 * 43), "the page between its pads");
     }
 
     /// 7.3's default inks by role under Instrument; an explicit SGR colour

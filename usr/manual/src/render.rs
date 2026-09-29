@@ -1,12 +1,13 @@
 //! The realization (MANUAL-DESIGN.md section 4): a section as Beacon frames around
 //! its payload at the rich tier, and as the same payload alone at the plain
-//! tiers, where paragraphs and list items may be word-wrapped. The renderer is a
-//! consumer of the parser's events, and writes as they arrive.
+//! tiers, where paragraphs and list items may be word-wrapped and a block quote
+//! drawn in a box. The renderer is a consumer of the parser's events, and writes
+//! as they arrive.
 
 use alloc::vec::Vec;
 
 use beacon::wire::{self, Op};
-use beacon::Tier;
+use beacon::{boxd, Tier};
 
 use crate::format::{self, Align, Events, Open, Problem, Run, TABLE_CELL_MAX, TABLE_COLUMNS_MAX};
 use crate::is_replaced;
@@ -18,11 +19,21 @@ pub const BOOK_TITLE: &str = "Thylacine Operator's Manual";
 /// The largest piece of output passed on at once (4.4).
 pub const CHUNK: usize = 64 * 1024;
 
+/// The widest box a block quote is drawn in (4.3). The console's width can be
+/// far larger, and every line of the box is padded to the box's width (4.4).
+pub const BOX_COLUMNS_MAX: usize = 256;
+
+/// The sides of a block quote's box (4.3).
+const BOX_LEFT: &str = "\u{2502} ";
+const BOX_RIGHT: &str = " \u{2502}\n";
+
+const SPACES: &[u8] = &[b' '; 64];
+
 /// Render a section that has passed the check at `tier`, passing the output to
 /// `out` in chunks of at most `CHUNK` bytes. `width` wraps paragraphs and list
-/// items at a plain tier (4.3) and is ignored at the rich tier, where the
-/// renderer wraps. Text the check would reject is still rendered safely (4.4),
-/// but not necessarily as its author meant.
+/// items, and boxes a block quote, at a plain tier (4.3); it is ignored at the
+/// rich tier, where the renderer wraps. Text the check would reject is still
+/// rendered safely (4.4), but not necessarily as its author meant.
 pub fn render(src: &str, tier: Tier, width: Option<usize>, out: &mut dyn FnMut(&[u8])) {
     let mut r = Renderer::new(tier, width, out);
     format::read(None, src, &mut r);
@@ -81,14 +92,66 @@ pub fn render_contents(sections: &[Listed], tier: Tier, out: &mut dyn FnMut(&[u8
     r.finish();
 }
 
-/// Output gathered into chunks of at most `CHUNK` bytes.
+/// Output gathered into chunks of at most `CHUNK` bytes. While a block quote's
+/// box is open, every line put is written between the box's sides.
 struct Chunks<'o> {
     buf: Vec<u8>,
     out: &'o mut dyn FnMut(&[u8]),
+    boxed: Option<Boxed>,
+}
+
+/// A block quote's box being drawn.
+#[derive(Clone, Copy)]
+struct Boxed {
+    /// The box's width, its sides included.
+    total: usize,
+    /// The characters written on the open line, or `None` before its first.
+    line: Option<usize>,
 }
 
 impl Chunks<'_> {
-    fn put(&mut self, mut bytes: &[u8]) {
+    fn put(&mut self, bytes: &[u8]) {
+        let Some(mut b) = self.boxed else {
+            self.emit(bytes);
+            return;
+        };
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let before = match b.line {
+                Some(n) => n,
+                None => {
+                    self.emit(BOX_LEFT.as_bytes());
+                    0
+                }
+            };
+            let lf = rest.iter().position(|&c| c == b'\n');
+            let text = &rest[..lf.unwrap_or(rest.len())];
+            self.emit(text);
+            // Width is counted in scalar values (4.3): every byte but a
+            // UTF-8 continuation byte starts one.
+            let n = before + text.iter().filter(|&&c| c & 0xc0 != 0x80).count();
+            if lf.is_some() {
+                self.emit_spaces(boxd::pad(b.total, n));
+                self.emit(BOX_RIGHT.as_bytes());
+                b.line = None;
+                rest = &rest[text.len() + 1..];
+            } else {
+                b.line = Some(n);
+                rest = &[];
+            }
+        }
+        self.boxed = Some(b);
+    }
+
+    fn emit_spaces(&mut self, mut n: usize) {
+        while n > 0 {
+            let k = n.min(SPACES.len());
+            self.emit(&SPACES[..k]);
+            n -= k;
+        }
+    }
+
+    fn emit(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             if self.buf.capacity() == 0 {
                 self.buf.reserve_exact(CHUNK);
@@ -124,6 +187,7 @@ enum Frame {
     Cell,
     /// A cell beyond the table's columns, which a checked section never has.
     Skip,
+    Aside,
 }
 
 struct Renderer<'o> {
@@ -131,9 +195,11 @@ struct Renderer<'o> {
     rich: bool,
     width: Option<usize>,
     blocks: usize,
-    /// Open blocks, innermost last. A checked section nests at most three deep:
-    /// a table, a row, a cell.
-    stack: [Frame; 3],
+    /// Blocks written inside the open block quote.
+    quote_blocks: usize,
+    /// Open blocks, innermost last: at most four deep, a table's cell inside a
+    /// block quote, which only text the check would reject holds.
+    stack: [Frame; 4],
     depth: usize,
     numbered: bool,
     align: [Align; TABLE_COLUMNS_MAX],
@@ -153,11 +219,13 @@ impl<'o> Renderer<'o> {
             out: Chunks {
                 buf: Vec::new(),
                 out,
+                boxed: None,
             },
             rich,
             width: if rich { None } else { width },
             blocks: 0,
-            stack: [Frame::Heading; 3],
+            quote_blocks: 0,
+            stack: [Frame::Heading; 4],
             depth: 0,
             numbered: false,
             align: [Align::Left; TABLE_COLUMNS_MAX],
@@ -193,7 +261,6 @@ impl<'o> Renderer<'o> {
     }
 
     fn spaces(&mut self, n: usize) {
-        const SPACES: &[u8] = &[b' '; 64];
         let mut n = n;
         while n > 0 {
             let k = n.min(SPACES.len());
@@ -202,8 +269,15 @@ impl<'o> Renderer<'o> {
         }
     }
 
+    /// Whether `op`'s frame is written. An `aside` nests no block op (BEACON.md
+    /// 12.1 rule 5), so the blocks of a block quote that the check would reject
+    /// are written without their frames.
+    fn frames(&self, op: Op) -> bool {
+        self.rich && (op == Op::Em || !(self.depth > 0 && self.stack[0] == Frame::Aside))
+    }
+
     fn open_frame(&mut self, op: Op, args: &[(&str, &str)]) {
-        if self.rich {
+        if self.frames(op) {
             self.frame.clear();
             wire::open(&mut self.frame, op, args);
             self.out.put(&self.frame);
@@ -211,7 +285,7 @@ impl<'o> Renderer<'o> {
     }
 
     fn close_frame(&mut self, op: Op) {
-        if self.rich {
+        if self.frames(op) {
             self.frame.clear();
             wire::close(&mut self.frame, op);
             self.out.put(&self.frame);
@@ -244,10 +318,35 @@ impl<'o> Renderer<'o> {
     }
 
     fn flow_begin(&mut self, marker: &str) {
-        match self.width {
+        let cols = match self.out.boxed {
+            Some(b) => Some(b.total.saturating_sub(4)),
+            None => self.width,
+        };
+        match cols {
             Some(cols) => self.wrap.begin(marker, cols),
             None => self.put_text(marker, false),
         }
+    }
+
+    /// Open a block quote's box (4.3): its top border, then every line inside
+    /// it written between its sides until `box_end`.
+    fn box_begin(&mut self, width: usize) {
+        let total = width.min(BOX_COLUMNS_MAX);
+        self.put(boxd::top(total, "", "").as_bytes());
+        self.put(b"\n");
+        self.out.boxed = Some(Boxed { total, line: None });
+    }
+
+    fn box_end(&mut self) {
+        let Some(b) = self.out.boxed else {
+            return;
+        };
+        if b.line.is_some() {
+            self.put(b"\n");
+        }
+        self.out.boxed = None;
+        self.put(boxd::bottom(b.total, "").as_bytes());
+        self.put(b"\n");
     }
 
     fn cell_begin(&mut self, width: usize) -> Frame {
@@ -275,10 +374,15 @@ impl Events for Renderer<'_> {
 
     fn open(&mut self, block: Open<'_>) {
         if !matches!(block, Open::Item(_) | Open::Row | Open::Cell { .. }) {
-            if self.blocks > 0 {
+            let written = if self.top() == Some(Frame::Aside) {
+                &mut self.quote_blocks
+            } else {
+                &mut self.blocks
+            };
+            *written += 1;
+            if *written > 1 {
                 self.put(b"\n");
             }
-            self.blocks += 1;
         }
         let frame = match block {
             Open::Title => {
@@ -348,6 +452,14 @@ impl Events for Renderer<'_> {
                 Frame::Row
             }
             Open::Cell { width } => self.cell_begin(width),
+            Open::Aside => {
+                self.open_frame(Op::Aside, &[]);
+                self.quote_blocks = 0;
+                if let Some(width) = self.width {
+                    self.box_begin(width);
+                }
+                Frame::Aside
+            }
         };
         self.push(frame);
     }
@@ -384,6 +496,10 @@ impl Events for Renderer<'_> {
                 self.col += 1;
             }
             Some(Frame::Skip) => self.col += 1,
+            Some(Frame::Aside) => {
+                self.close_frame(Op::Aside);
+                self.box_end();
+            }
         }
     }
 
@@ -442,7 +558,11 @@ manual --check\n\
 | Option | Effect |\n\
 | --- | ---: |\n\
 | `-h` | 1 |\n\
-| `--beacon` | 22 |\n";
+| `--beacon` | 22 |\n\
+\n\
+> A *quoted* passage.\n\
+>\n\
+> - with a list\n";
 
     /// Render into one buffer, checking every chunk's size on the way.
     fn render_all(src: &str, tier: Tier, width: Option<usize>) -> Vec<u8> {
@@ -519,6 +639,13 @@ manual --check\n\
             f("/row")
         );
         e += &f("/table");
+        e += &format!(
+            "\n{}A {}quoted{} passage.\n\n- with a list\n{}",
+            f("aside"),
+            f("em;class=emph"),
+            f("/em"),
+            f("/aside")
+        );
         assert_eq!(s(&out), e);
     }
 
@@ -526,7 +653,7 @@ manual --check\n\
     fn plain_output_is_exact() {
         let out = render_all(FIXTURE, Tier::None, None);
         let expected = format!(
-            "The Reader\n\nThe manual command shows one section, if it passes.\n\nIn Practice\n\n- list\n- more\n\n1. first\n\nmanual --check\n\nOption{}Effect\n-h{}1\n--beacon{}22\n",
+            "The Reader\n\nThe manual command shows one section, if it passes.\n\nIn Practice\n\n- list\n- more\n\n1. first\n\nmanual --check\n\nOption{}Effect\n-h{}1\n--beacon{}22\n\nA quoted passage.\n\n- with a list\n",
             sp(4),
             sp(13),
             sp(6)
@@ -673,6 +800,13 @@ A paragraph that needs to wrap at twenty columns.\n\n\
             r.close();
             r.close();
             r.close();
+            r.open(Open::Aside);
+            r.open(Open::Paragraph);
+            r.run(Run::Emph, forged);
+            r.close();
+            // A run outside any paragraph leaves the box's line open at its close.
+            r.run(Run::Text, forged);
+            r.close();
             r.finish();
             drop(r);
             all
@@ -683,7 +817,7 @@ A paragraph that needs to wrap at twenty columns.\n\n\
                 Event::Open(op, _) | Event::Close(op) => assert!(
                     matches!(
                         op,
-                        Op::Hdr | Op::Em | Op::Pre | Op::Table | Op::Row | Op::Cell
+                        Op::Hdr | Op::Em | Op::Pre | Op::Table | Op::Row | Op::Cell | Op::Aside
                     ),
                     "a frame the renderer never emits: {:?}",
                     op
@@ -699,6 +833,154 @@ A paragraph that needs to wrap at twenty columns.\n\n\
             let plain = drive(Tier::None, width);
             assert!(!plain.contains(&0x1b) && !plain.contains(&0x07));
         }
+        let boxed = drive(Tier::None, Some(40));
+        let lines: Vec<&str> = s(&boxed).lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.starts_with('\u{250c}'))
+            .unwrap();
+        assert_eq!(lines.last().map(|l| l.chars().count()), Some(40));
+        assert!(lines.last().unwrap().starts_with('\u{2514}'));
+        for l in &lines[top + 1..lines.len() - 1] {
+            assert!(
+                l.starts_with("\u{2502} ") && l.ends_with(" \u{2502}"),
+                "{:?}",
+                l
+            );
+        }
+    }
+
+    /// One line of a block quote's box, `inner` columns between its sides.
+    fn boxed(text: &str, inner: usize) -> String {
+        format!(
+            "\u{2502} {}{} \u{2502}",
+            text,
+            sp(inner - text.chars().count())
+        )
+    }
+
+    fn border(left: char, total: usize, right: char) -> String {
+        format!("{}{}{}", left, "\u{2500}".repeat(total - 2), right)
+    }
+
+    /// A block quote is drawn in a box when the reader wraps (4.3): its text
+    /// wraps at the width less 4, a list item hangs inside it, and the empty
+    /// line between its blocks is an empty line of the box.
+    #[test]
+    fn a_block_quote_is_boxed_when_wrapping() {
+        let src = "# T\n\nBefore.\n\n\
+> A quoted paragraph that needs to wrap inside the box.\n\
+>\n\
+> - An item whose continuation hangs under its marker.\n\
+> - Two.\n\n\
+After.\n";
+        let out = render_all(src, Tier::None, Some(40));
+        let expected = [
+            String::from("T"),
+            String::new(),
+            String::from("Before."),
+            String::new(),
+            border('\u{250c}', 40, '\u{2510}'),
+            boxed("A quoted paragraph that needs to", 36),
+            boxed("wrap inside the box.", 36),
+            boxed("", 36),
+            boxed("- An item whose continuation hangs", 36),
+            boxed("  under its marker.", 36),
+            boxed("- Two.", 36),
+            border('\u{2514}', 40, '\u{2518}'),
+            String::new(),
+            String::from("After."),
+            String::new(),
+        ]
+        .join("\n");
+        assert_eq!(s(&out), expected);
+        // Without a width there is no box: the quote's blocks as outside one.
+        assert_eq!(
+            s(&render_all(src, Tier::None, None)),
+            "T\n\nBefore.\n\nA quoted paragraph that needs to wrap inside the box.\n\n- An item whose continuation hangs under its marker.\n- Two.\n\nAfter.\n"
+        );
+    }
+
+    /// The box is as wide as the console up to 256 columns (4.3, 4.4), and its
+    /// width is counted in scalar values, as wrapping counts it.
+    #[test]
+    fn a_block_quote_box_is_at_most_256_columns_wide() {
+        for (width, total) in [(1000, 256), (256, 256), (255, 255), (20, 20)] {
+            let out = render_all("# T\n\n> Quote.\n", Tier::None, Some(width));
+            let lines: Vec<&str> = s(&out).lines().skip(2).collect();
+            assert_eq!(
+                lines,
+                [
+                    border('\u{250c}', total, '\u{2510}'),
+                    boxed("Quote.", total - 4),
+                    border('\u{2514}', total, '\u{2518}'),
+                ],
+                "at {} columns",
+                width
+            );
+        }
+        let out = render_all(
+            "# T\n\n> \u{c7}a va \u{2014} tr\u{e8}s bien, merci, et vous-m\u{ea}me ?\n",
+            Tier::None,
+            Some(24),
+        );
+        let lines: Vec<&str> = s(&out).lines().skip(2).collect();
+        assert!(lines.len() > 3);
+        for l in &lines {
+            assert_eq!(l.chars().count(), 24, "{:?}", l);
+        }
+    }
+
+    /// A block quote holding blocks the check rejects (3.2) still renders: its
+    /// `aside` holds no block frame (BEACON.md 12.1 rule 5), the strip identity
+    /// holds, and the box stays whole around their short lines. Those blocks
+    /// are never wrapped, so a longer line would overflow the box: that is why
+    /// the check rejects them there, and neither binary renders what it rejects.
+    #[test]
+    fn a_block_quote_the_check_rejects_renders_without_block_frames() {
+        let src = "# T\n\n> ## H\n>\n> ```\n> code\n> ```\n>\n> | a | b |\n> | --- | --- |\n> | `c` | d |\n\nAfter.\n";
+        assert_eq!(format::check(None, src, &mut |_, _| {}), 3);
+        let go = |tier: Tier, width: Option<usize>| {
+            let mut out = Vec::new();
+            render(src, tier, width, &mut |chunk| out.extend_from_slice(chunk));
+            out
+        };
+        let rich = go(Tier::Rich, None);
+        let (mut inside, mut asides, mut ems) = (false, 0, 0);
+        for ev in wire::parse(&rich) {
+            match ev {
+                Event::Open(Op::Aside, _) => {
+                    assert!(!inside);
+                    inside = true;
+                    asides += 1;
+                }
+                Event::Close(Op::Aside) => inside = false,
+                Event::Open(op, _) | Event::Close(op) if inside => {
+                    assert_eq!(op, Op::Em, "a block frame inside the aside");
+                    ems += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!((asides, inside, ems), (1, false, 2));
+        assert_eq!(wire::strip(&rich), go(Tier::None, None));
+        let expected = [
+            String::from("T"),
+            String::new(),
+            border('\u{250c}', 40, '\u{2510}'),
+            boxed("H", 36),
+            boxed("", 36),
+            boxed("code", 36),
+            boxed("", 36),
+            boxed("a  b", 36),
+            boxed("c  d", 36),
+            border('\u{2514}', 40, '\u{2518}'),
+            String::new(),
+            String::from("After."),
+            String::new(),
+        ]
+        .join("\n");
+        assert_eq!(s(&go(Tier::None, Some(40))), expected);
     }
 
     /// Each bidirectional control is written as U+FFFD from every block, at
@@ -856,33 +1138,38 @@ A paragraph that needs to wrap at twenty columns.\n\n\
     #[test]
     fn rendering_matches_the_parsed_tree() {
         use crate::format::tree::{parse, plain_text, Block, Inline};
-        let src = "# T *x*\n\nA \\*b\\* `c` *d* e_f.\n\n- one\n  two\n\n| h | `i` |\n| :---: | ---: |\n| **j** | k |\n";
-        let doc = parse(src).unwrap();
-        let mut expected = String::new();
-        for (i, b) in doc.blocks.iter().enumerate() {
-            if i > 0 {
-                expected.push('\n');
-            }
-            match b {
-                Block::Title(r) | Block::Paragraph(r) => {
-                    expected += &plain_text(r);
-                    expected.push('\n');
+        fn blocks(bs: &[Block], out: &mut String) {
+            for (i, b) in bs.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
                 }
-                Block::Bullets(items) => {
-                    for it in items {
-                        expected += "- ";
-                        expected += &plain_text(it);
-                        expected.push('\n');
+                match b {
+                    Block::Title(r) | Block::Paragraph(r) => {
+                        *out += &plain_text(r);
+                        out.push('\n');
                     }
+                    Block::Bullets(items) => {
+                        for it in items {
+                            *out += "- ";
+                            *out += &plain_text(it);
+                            out.push('\n');
+                        }
+                    }
+                    Block::Table { header, rows, .. } => {
+                        assert_eq!(header[1], vec![Inline::Code(String::from("i"))]);
+                        assert_eq!(rows[0][0], vec![Inline::Strong(String::from("j"))]);
+                        *out += "h  i\nj  k\n";
+                    }
+                    Block::Aside(inner) => blocks(inner, out),
+                    other => panic!("{:?}", other),
                 }
-                Block::Table { header, rows, .. } => {
-                    assert_eq!(header[1], vec![Inline::Code(String::from("i"))]);
-                    assert_eq!(rows[0][0], vec![Inline::Strong(String::from("j"))]);
-                    expected += "h  i\nj  k\n";
-                }
-                other => panic!("{:?}", other),
             }
         }
+        let src = "# T *x*\n\nA \\*b\\* `c` *d* e_f.\n\n- one\n  two\n\n| h | `i` |\n| :---: | ---: |\n| **j** | k |\n\n> q *r*\n>\n> - s\n";
+        let doc = parse(src).unwrap();
+        assert!(matches!(doc.blocks.last(), Some(Block::Aside(inner)) if inner.len() == 2));
+        let mut expected = String::new();
+        blocks(&doc.blocks, &mut expected);
         assert_eq!(s(&render_all(src, Tier::None, None)), expected);
     }
 }

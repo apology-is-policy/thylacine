@@ -66,11 +66,26 @@ slides = ["01-title.md", "02-results.md", "03-plans.md"]
 ```
 
 A slide begins with a title line such as `# Results`. After the title it can
-contain headings, paragraphs, bulleted and numbered lists, tables and code
-blocks, with code spans and emphasis in the text. Links, images, block quotes,
-raw HTML and nested lists are rejected, exactly as they are in a manual
-section. The manual's rule that a section's title does not repeat the number in
-its file name does not apply to slides. See Manual.
+contain headings, paragraphs, bulleted and numbered lists, tables, code blocks
+and block quotes, with code spans and emphasis in the text. Links, images, raw
+HTML and nested lists are rejected, exactly as they are in a manual section.
+The manual's rule that a section's title does not repeat the number in its file
+name does not apply to slides. See Manual.
+
+A block quote sets a passage apart. Each of its lines begins with `>`, and it
+holds paragraphs and lists. In a Halcyon tile the passage is framed, on a
+console that reports its width it is drawn inside a box, and through a pipe it
+is plain text. A slide whose content after its title is one block quote is
+therefore shown as a boxed slide:
+
+```md
+# Results
+
+> Revenue rose in every region.
+>
+> - Orders shipped within a day: 98 percent
+> - Returns: down by a third
+```
 
 Check a deck before presenting it:
 

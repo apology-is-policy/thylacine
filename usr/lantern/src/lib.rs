@@ -254,6 +254,31 @@ mod tests {
                 token
             );
         }
+
+        // Slide two's block quote is drawn in a box where there is a width, the
+        // presentation's posture, and is its text alone down a pipe (MANUAL-
+        // DESIGN 4.3): leg (f) matches the box's borders, leg (b) its text.
+        let presented = rendered(SLIDES[1].0, Some(40));
+        let lines: Vec<&str> = presented.lines().collect();
+        let border = |l: char, r: char| alloc::format!("{}{}{}", l, "\u{2500}".repeat(38), r);
+        let top = lines
+            .iter()
+            .position(|&l| l == border('\u{250c}', '\u{2510}'))
+            .expect("slide two's box opens");
+        let bottom = lines
+            .iter()
+            .position(|&l| l == border('\u{2514}', '\u{2518}'))
+            .expect("and closes");
+        assert!(lines[top + 1].starts_with("\u{2502} What it does not do. "));
+        for l in &lines[top + 1..bottom] {
+            assert!(
+                l.starts_with("\u{2502} ") && l.ends_with(" \u{2502}"),
+                "{:?}",
+                l
+            );
+            assert_eq!(l.chars().count(), 40, "{:?}", l);
+        }
+        assert!(!rendered(SLIDES[1].0, None).contains('\u{2502}'));
     }
 
     /// The claim `cook` rests on: a Beacon frame never carries an LF, so a
@@ -283,6 +308,11 @@ A paragraph with *emphasis*, **strong**, and a `code span`.
 a code block line
 and another
 ```
+
+> A block quote, *boxed* at a plain tier
+> when the reader wraps.
+>
+> - with an item
 ";
         // The section must pass its own checker first, or this proves nothing
         // about a real slide.

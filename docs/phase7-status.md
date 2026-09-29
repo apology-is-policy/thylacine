@@ -702,6 +702,51 @@ Verification: new kernel tests `dev9p.origin_format_ns`, `sys_attach_9p.names_ro
 `9p_srvconn_transport.srv_attach_names_root`; coreutils host test `a_session_root_reads_by_the_file_it_came_over`.
 Sabotage: nine kernel mutants over six boots, each red on exactly the assertion written down before the first boot (thirteen FAIL lines, no other red); the coreutils mutant (`#|` dropped from the `9p` arm) red on its host test. Device, CI image: `haul-npxf` (40 s), `haul-post` (39 s) and `ergo-1` (38 s) green; with both stamps removed, both Haul gates failed at their `ns` leg, reading `/` -- once the two attach tests were unregistered in the red build, since with them the boot's kernel suite extincted before a login. Default image: `tools/test.sh` 1753/1753, zero `[skip]` (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 29 crates, 2142 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item); `ci-smp-gate` (default-smp4 and ubsan-smp4, N=10) 10 + 10 boots PASS, no corruption, external kill, timing or other. No spec models the touched code (`territory.tla` maps bind, mount, unmount and clone, not the ns render).
 
+## The Beacon aside: a block quote the renderer frames — 2026-09-29
+
+Operator vote 2 of 2026-09-28 (option 1, "a block the renderer draws"): the Markdown block quote, which the manual's
+checker rejected, becomes a Beacon `aside`, a passage set apart from the flow. Scripture f8b2c361 (BEACON 3, 12.1 rule 5,
+12.2 and the version note; MANUAL-DESIGN 3.2, 4.2-4.4, 8.1 and the 256-column box cap; LANTERN-DESIGN 2 and 5.1;
+HALCYON-VISUAL 8.4, new; HALCYON-INSTRUMENT 7.5; `dec-2026-09-28-beacon-aside`). Code *(pending)*.
+
+- **Beacon.** `aside` is a paired block op with no arguments that names a role, never a layout. It nests no block op,
+  and its payload flows: each line reflowed, an empty line a paragraph break.
+- **The manual.** A block quote is the run of lines that begin `>`; it holds paragraphs and flat lists, and the checker
+  rejects a nested quote, a heading, code block or table inside, and a quote with no content. At the rich tier it is
+  an `aside` with only `em` frames inside; at a plain tier it is boxed in U+2500 furniture, at most 256 columns wide,
+  only where the reader wraps (the console, at `/dev/winsize`'s width); elsewhere it is its text. `manual` and
+  `lantern` ask one function, `manual::wraps_at_console`, whether they wrap.
+- **The deck.** Slide 2 of the shipped deck ends with one block quote; `lantern.exp` leg (f) presents it on the serial
+  console and expects the box.
+- **halcyond.** A line carries the episode of the `pre` or aside it was written in (`Line.episode`); an aside is not an
+  item. A tile's cells carry `TAG_ASIDE`, and a registry of 32 block specs maps a rebuilt line to its block's episode,
+  or to one shared `UNKNOWN_EPISODE` once the spec has gone. `frames_of` frames an episode with four `sheet.rule`
+  hairlines and no ground, at a `pre`'s margins and padding (both sides), capped at the measure, and bridges the blank
+  rows a tile splits a block at. That bridge also closes an OPEN-BUGS item: a code block with a blank line in it showed
+  as two islands in a tile. Found while writing the tests: two code blocks on adjacent rows showed as one; a pre line
+  now joins only a pre of its own episode.
+
+Audit (the H-2 and KT-1 rows, ASIDE addenda), 1 round: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end.
+0 P0 / 0 P1 / 0 P2 / 4 P3, and 2 P3 found by the implementer while it ran; clean. Fixed: a forgotten block whose rows
+carry different serials fragmented into a frame per row (F1: the shared `UNKNOWN_EPISODE`); MANUAL-DESIGN 3.2 named
+only a bare `>` as a separator (F2); lantern wrapped and boxed at the console's width on a tile's pts (F3, pre-existing:
+`manual::wraps_at_console`); an inline image in an aside was laid across the hairlines (S1); a `pre` or an aside opened
+inside a heading swallowed the heading's close (S2). Recorded, not fixed: on the byte-fed console the line pending
+inside an open aside lays outside the frame until its LF (F4, cosmetic; OPEN-BUGS, sub-halcyond Caveats). Closed list:
+memory `audit_aside_closed_list.md`.
+
+Verification: host beacon 40, manual 82, lantern 25, halcyond 442. Sabotage, every red set predicted before its run:
+14 mutants over beacon, the manual and lantern (all red; 10 exactly as predicted, 4 on more or other tests), 25 over
+halcyond (each as predicted, after one test was sharpened) and 9 over the close's fixes (all red; 8 as predicted, C8
+on the cells-mode registry test rather than the byte-fed one, whose contiguity the intact close guards preserve). A
+differential fuzz, 160,000 sections over four seeds (about 39,600 accepted by the checker): no panic, strip(rich)
+equals the unwrapped plain output, the plain tiers agree, and every box is whole at every width a reader wraps at.
+Device, CI image: `lantern.exp` 46 s and `manual.exp` 46 s, both PASS; leg (f) matches the box by regex, because
+macOS's expect 5.45 faults (SIGBUS in `expMatchProcess`) on an `-ex` match of bytes above 0x7f, which a host-only
+script reproduces. Instrument session image: `ls-halcyon-lantern` 99 s PASS, leg (9) finding the one unfilled hairline
+frame slide two adds, (38,178) to (757,282), against slide one. The chunk sits on main 26e8d367 (the Tclunk closer),
+merged before its gates. No kernel change, so no sanitizer run or spec is owed.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

@@ -54,12 +54,17 @@ not leave a partially rendered document in the transcript.
 
 A section is a UTF-8 Markdown file of at most 1 MiB. The supported subset
 includes a title, headings, paragraphs, flat lists, fenced code, bounded
-tables, code spans, and emphasis. Links, images, raw HTML, nested lists,
-character references, and bidirectional controls are rejected. References to
-other sections are descriptive prose rather than clickable links.
+tables, block quotes, code spans, and emphasis. A block quote is written with
+`>` at the start of each of its lines and holds only paragraphs and flat
+lists. Links, images, raw HTML, nested lists, character references, and
+bidirectional controls are rejected. References to other sections are
+descriptive prose rather than clickable links.
 
 The reader writes bounded chunks as it renders. Rich and plain output carry
 the same text; Beacon frames supply semantic structure while Halcyon chooses
-its appearance. Control characters from document content cannot create new
-Beacon frames. Plain console output wraps when the console reports a usable
-width; piped output keeps each paragraph on one logical line.
+its appearance, which for a block quote is a thin frame around the passage.
+Control characters from document content cannot create new Beacon frames.
+Plain console output wraps when the console reports a usable width, and a
+block quote is then drawn inside a box of box-drawing characters as wide as
+the console, up to 256 columns. Piped output keeps each paragraph on one
+logical line and draws no box.

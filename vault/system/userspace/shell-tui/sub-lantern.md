@@ -13,6 +13,7 @@ code:
   - tools/interactive/lantern.exp
   - tools/interactive/ls-halcyon-lantern.exp
   - tools/interactive/ls-halcyon-lantern-haul.exp
+  - tools/interactive/gfx_frame.py
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -21,7 +22,7 @@ hazards: []
 abis: []
 design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3"]
 created: 2026-09-22
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -34,7 +35,8 @@ inside Thylacine with the system's own renderer doing the drawing.
 checker and its Beacon realization, used unchanged. The tree therefore carries
 ONE Markdown dialect, not a second one private to slides, and that was not a
 compromise: the manual subset already accepts everything a textual slide needs
-(a title, headings, lists, tables, code fences, emphasis). What lantern adds is
+(a title, headings, lists, tables, code fences, emphasis, and since 2026-09-29
+block quotes). What lantern adds is
 only what a deck needs beyond a document -- the ORDER, the key map, the clear
 between slides, and the output cooking that clear implies.
 
@@ -155,6 +157,30 @@ Safe across Beacon frames because a frame never carries an LF -- the checker
 rejects control characters in section text and the renderer sanitizes every
 value it did not produce -- and `lf_never_appears_inside_a_frame` pins that by
 walking the OSC state over every construct rather than trusting it.
+
+**A boxed slide is a block quote (2026-09-29; the operator's vote of 2026-09-28,
+`dec-2026-09-28-beacon-aside`).** lantern adds no construct for it. A slide is a
+manual section, so a box around a passage is the manual's block quote, which
+the reader renders as a Beacon `aside` ([[sub-manual]]). In a Halcyon tile the
+tier is rich, and the aside is the hairline frame around reflowed prose
+([[sub-halcyond]], HALCYON-VISUAL 8.4). Presented at a plain tier on the
+console, lantern hands the renderer the console's width (`plain_width`, from
+`/dev/winsize`, which Aurora sets), so the passage is drawn in U+2500 furniture
+at most 256 columns wide. On a tile's pts (`--beacon=never` in Halcyon), `cat`
+and a pipe get no width, by the manual's own rule (`manual::wraps_at_console`),
+and the passage is its plain text: the leaf is the console's width, not the
+tile's, and a box drawn to it tore on a narrower tile. The
+shipped deck's slide 2 ends with one block quote led by `**What it does not
+do.**`. It keeps the phrase "raw character grid", which `lantern.exp` leg (b)
+and `slide_tokens_render_contiguously` match. `lantern.exp` leg (f) presents the
+deck and expects the box's top and bottom borders between slide 2's heading and
+its footer. The patterns are built from UTF-8 bytes, because the scenario's
+expect channel reads each byte as one iso8859-1 character (lib.exp).
+`ls-halcyon-lantern` leg (9) finds the frame in the tile: `gfx_frame.py` reports
+every closed rectangle of one-pixel sides in one colour that is not the
+ground, and slide 2 must add exactly one over slide 1's (a frame both show is
+the tile's), with no fill, ink inside, and the text clear of all four sides.
+On the captures of the image before the aside it finds no frame on a slide.
 
 **The caret.** `HIDE_CARET` on entry, `SHOW_CARET` on every exit path; see
 `[[sub-halcyond]]`'s caret section for the seam the escape crosses and the test

@@ -68,8 +68,8 @@ pub fn hdr_is_title(hdr: u8) -> bool {
 // tile has to REBUILD them from the cells, so the tag carries the structure
 // each cell was written inside. The `em` byte: bits 0-2 the EM_* class, then
 // the structure bits; the `hdr` byte: the HDR_MASK bits, then the table
-// column (bits 3-6, 0-15). A `Style` keeps only the class / the HDR_MASK
-// bits (`tag_style_em` / `tag_style_hdr`).
+// column (bits 3-6, 0-15), then TAG_ASIDE (bit 7). A `Style` keeps only the
+// class / the HDR_MASK bits (`tag_style_em` / `tag_style_hdr`).
 pub const TAG_EM_MASK: u8 = 0x07;
 /// Written inside a `pre` block.
 pub const TAG_PRE: u8 = 0x08;
@@ -85,6 +85,9 @@ pub const TAG_ROW_HDR: u8 = 0x40;
 /// so a block lookup would class a zone-less document (the welcome) as the
 /// prompt that came after it.
 pub const TAG_PROMPT: u8 = 0x80;
+/// Written inside an `aside`: the `hdr` byte's bit 7, since the `em` byte has
+/// no bit left.
+pub const TAG_ASIDE: u8 = 0x80;
 
 #[inline]
 pub fn tag_style_em(em: u8) -> u8 {
@@ -163,13 +166,23 @@ pub struct TCell {
 pub struct Line {
     pub cells: Vec<TCell>,
     pub class: LineClass,
+    /// The `pre` or `aside` the line was written inside, 0 outside both: the
+    /// open frame's serial in a tile, a count in a byte-fed transcript. A
+    /// blank grid row carries no tag, so it splits a tile's rebuilt block;
+    /// the parts share this, and layout frames them as one.
+    pub episode: u32,
 }
 
 impl Line {
     pub fn plain(cells: Vec<TCell>) -> Line {
+        Line::framed(cells, 0)
+    }
+
+    pub fn framed(cells: Vec<TCell>, episode: u32) -> Line {
         Line {
             cells,
             class: LineClass::Inherit,
+            episode,
         }
     }
 }
@@ -591,10 +604,29 @@ struct TableSpec {
 /// once; a spec older than this has scrolled out of every rebuild).
 const MAX_TABLE_SPECS: usize = 32;
 
+/// KT-1 cells mode: a `pre` or an `aside` a tile's frames opened. A cell's
+/// serial lies in [open_serial, close_serial]; the open's serial is the
+/// episode every line rebuilt from the block's cells carries.
+struct BlockSpec {
+    open_serial: u32,
+    close_serial: u32,
+    aside: bool,
+}
+
+/// The bound on remembered block specs, as for tables.
+const MAX_BLOCK_SPECS: usize = 32;
+
+/// The episode of every rebuilt `pre` or `aside` line whose block the registry
+/// has let go. One value for all of them, so adjacent ones join as a pre's
+/// rows did before the registry; their own serials differ row by row (an obj
+/// or an em per row) and would split one block into a frame per row.
+const UNKNOWN_EPISODE: u32 = u32::MAX;
+
 /// What a rebuilt line's tags say about its structure (cells mode).
 #[derive(Clone, Copy, Default)]
 struct RowShape {
     pre: bool,
+    aside: bool,
     cell: bool,
     hdr_row: bool,
     /// Written inside a prompt zone (TAG_PROMPT on the first tagged cell).
@@ -629,6 +661,7 @@ fn row_shape(cells: &[vt::Cell], spans: &SpanMap) -> RowShape {
             first = false;
             shape.serial = c.span;
             shape.pre = tag.em & TAG_PRE != 0;
+            shape.aside = tag.hdr & TAG_ASIDE != 0;
             shape.prompt = tag.em & TAG_PROMPT != 0;
             if tag.em & TAG_RULE != 0 {
                 shape.rule = Some(c.span);
@@ -645,9 +678,10 @@ fn row_shape(cells: &[vt::Cell], spans: &SpanMap) -> RowShape {
 }
 
 /// Place one rebuilt logical line into `items` per its tags: a rule before
-/// it (once per rule frame), a pre line joining the open pre block, a table
-/// row joining the table of the same spec (the padding between cells --
-/// untagged-as-cell -- dropped; a cell's text is its TAG_CELL run per
+/// it (once per rule frame), a pre line joining the pre block of its episode
+/// when that block is the last item, an aside line as a line of its episode,
+/// a table row joining the table of the same spec (the padding between cells
+/// -- untagged-as-cell -- dropped; a cell's text is its TAG_CELL run per
 /// column, its start column kept in `starts`), else a plain line.
 /// `interned` holds the line's cells with their styles already interned;
 /// `raw` the same cells with their tags. Returns the item the line landed
@@ -661,6 +695,7 @@ fn place_tagged_line(
     raw: &[vt::Cell],
     shape: RowShape,
     spec: Option<(u32, &[u8], bool)>,
+    episode: u32,
     class: LineClass,
     spans: &SpanMap,
     last_rule: &mut u32,
@@ -673,12 +708,22 @@ fn place_tagged_line(
     }
     if shape.pre {
         if let Some(Item::Pre(lines)) = items.last_mut() {
-            lines.push(Line::plain(interned));
-            let row = lines.len() - 1;
-            return (items.len() - 1, row);
+            if lines.last().is_none_or(|l| l.episode == episode) {
+                lines.push(Line::framed(interned, episode));
+                let row = lines.len() - 1;
+                return (items.len() - 1, row);
+            }
         }
-        items.push(Item::Pre(alloc::vec![Line::plain(interned)]));
+        items.push(Item::Pre(alloc::vec![Line::framed(interned, episode)]));
         return (items.len() - 1, 0);
+    }
+    if shape.aside {
+        items.push(Item::Line(Line {
+            cells: interned,
+            class,
+            episode,
+        }));
+        return (items.len() - 1, usize::MAX);
     }
     if shape.cell {
         let (src, cols) = match spec {
@@ -745,6 +790,7 @@ fn place_tagged_line(
     items.push(Item::Line(Line {
         cells: interned,
         class,
+        episode: 0,
     }));
     (items.len() - 1, usize::MAX)
 }
@@ -788,6 +834,16 @@ pub struct Transcript {
     rule_serial: u32,
     last_rule_serial: u32,
     table_specs: VecDeque<TableSpec>,
+    /// Cells mode: the specs of the `pre` and `aside` blocks opened, keyed by
+    /// open serial, for the episodes of their rebuilt lines.
+    block_specs: VecDeque<BlockSpec>,
+    /// The open `aside`'s episode, 0 when none is open. An aside gathers
+    /// nothing: its lines are the block's own, each carrying the episode.
+    aside: u32,
+    /// The open `pre`'s episode (byte-fed: its lines carry it).
+    pre_episode: u32,
+    /// The byte-fed episode count (a tile's episodes are frame serials).
+    episodes: u32,
     /// PL-1b: the open `pre` block's lines, accumulated between open_op(Pre)
     /// and close_op(Pre). Built through the SAME line discipline (put_char /
     /// newline / flush_line) so tabs, spacing and `\r` behave verbatim; the
@@ -991,6 +1047,10 @@ impl Transcript {
             rule_serial: 0,
             last_rule_serial: 0,
             table_specs: VecDeque::new(),
+            block_specs: VecDeque::new(),
+            aside: 0,
+            pre_episode: 0,
+            episodes: 0,
             pre: None,
             pre_bytes: 0,
             state: ScanState::Ground,
@@ -1188,11 +1248,11 @@ impl Transcript {
     }
 
     fn open_op(&mut self, op: Op, args: &[wire::Arg]) {
-        // A `pre` block nests no block op -- only inline `em`/`obj` (BEACON.md
-        // 351-355). While one is open, ignore any other open (malformed
-        // nesting, incl. a nested `pre`); em/obj still color its cells via
-        // style_idx. The format-fuzz containment guard.
-        if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj) {
+        // A `pre` or an `aside` nests no block op -- only inline `em`/`obj`
+        // (BEACON.md 12.1 rule 5). While one is open, ignore any other open
+        // (malformed nesting, incl. a nested `pre` or `aside`); em/obj still
+        // color its cells via style_idx. The format-fuzz containment guard.
+        if self.held() && !matches!(op, Op::Em | Op::Obj) {
             return;
         }
         match op {
@@ -1278,7 +1338,7 @@ impl Transcript {
                 // Anywhere else the line, the table or the pre would be cut
                 // in two, so the obj waits for the next line to freeze it.
                 let free = self.cells_mode
-                    || (self.line.is_empty() && self.table.is_none() && self.pre.is_none());
+                    || (self.line.is_empty() && self.table.is_none() && !self.held());
                 if free {
                     self.enforce_block_cap();
                 }
@@ -1328,24 +1388,78 @@ impl Transcript {
             }
             // `pre` opens a preformatted block: flush the pending flow line,
             // then redirect subsequent flushed lines into the pre accumulator
-            // (close_op(Pre) finalizes it). Not inside a table (malformed); the
-            // top guard already blocks a nested pre.
+            // (close_op(Pre) finalizes it). Not inside a table or a heading,
+            // which holds inline text only (BEACON.md 12.1) and whose close
+            // the pre's guard would swallow; the top guard already blocks a
+            // nested pre.
             Op::Pre => {
-                if self.table.is_none() && self.pre.is_none() {
+                if self.table.is_none() && self.hdr == 0 {
                     self.flush_line();
                     self.pre = Some(Vec::new());
                     self.pre_bytes = 0;
                     self.col = 0;
+                    self.pre_episode = self.open_episode(false);
+                }
+            }
+            // `aside` opens a passage set apart (HALCYON-VISUAL 8.4): the
+            // pending line flushes, and every line until the close is the
+            // block's own, carrying the aside's episode, which layout frames.
+            // Not inside a table or a heading, as for `pre`.
+            Op::Aside => {
+                if self.table.is_none() && self.hdr == 0 {
+                    self.flush_line();
+                    self.col = 0;
+                    self.aside = self.open_episode(true);
+                    self.open.annotated_own = true;
                 }
             }
             Op::Mark | Op::Rule => {} // point ops; a paired open is malformed -- ignore
         }
     }
 
+    /// A `pre` or an `aside` is open: neither nests a block op.
+    fn held(&self) -> bool {
+        self.pre.is_some() || self.aside != 0
+    }
+
+    /// The episode of a `pre` or `aside` opening: in a tile the frame's
+    /// serial, kept with the block's spec for the lines rebuilt from its
+    /// cells; byte-fed, the next count. Never 0.
+    fn open_episode(&mut self, aside: bool) -> u32 {
+        if self.cells_mode {
+            if self.block_specs.len() >= MAX_BLOCK_SPECS {
+                self.block_specs.pop_front();
+            }
+            let open_serial = self.cur_serial.max(1);
+            self.block_specs.push_back(BlockSpec {
+                open_serial,
+                close_serial: u32::MAX,
+                aside,
+            });
+            open_serial
+        } else {
+            self.episodes = self.episodes.wrapping_add(1).max(1);
+            self.episodes
+        }
+    }
+
+    /// Cells mode: the open `pre` or `aside` ends at this frame.
+    fn close_spec(&mut self, aside: bool) {
+        if let Some(spec) = self.block_specs.back_mut() {
+            if spec.aside == aside && spec.close_serial == u32::MAX {
+                spec.close_serial = self.cur_serial;
+            }
+        }
+    }
+
     fn close_op(&mut self, op: Op) {
-        // Mirror of open_op's containment guard: while a `pre` is open, only an
-        // inline em/obj close -- or the pre's own close -- is meaningful.
+        // Mirror of open_op's containment guard: while a `pre` or an `aside`
+        // is open, only an inline em/obj close -- or the block's own close --
+        // is meaningful.
         if self.pre.is_some() && !matches!(op, Op::Em | Op::Obj | Op::Pre) {
+            return;
+        }
+        if self.aside != 0 && !matches!(op, Op::Em | Op::Obj | Op::Aside) {
             return;
         }
         // The table byte cap for this tile (half its scrollback share); read
@@ -1444,7 +1558,9 @@ impl Transcript {
                 if self.cells_mode {
                     // The tile's pre lines live on its grid (tagged TAG_PRE);
                     // the accumulator here only carried the tag state.
-                    self.pre = None;
+                    if self.pre.take().is_some() {
+                        self.close_spec(false);
+                    }
                     return;
                 }
                 if let Some(lines) = self.pre.take() {
@@ -1456,6 +1572,15 @@ impl Transcript {
                     self.stored_cost += cost;
                     self.open.items.push(Item::Pre(lines));
                     self.enforce_block_cap();
+                }
+            }
+            Op::Aside => {
+                if self.aside != 0 {
+                    self.flush_line();
+                    self.aside = 0;
+                    if self.cells_mode {
+                        self.close_spec(true);
+                    }
                 }
             }
             Op::Mark | Op::Rule => {}
@@ -1524,12 +1649,12 @@ impl Transcript {
         // the pre (finalized as-is, the abandoned-capture posture) and then
         // lands -- else a crashed command never keyed the tile or the bar,
         // which showed the PREVIOUS command's state.
-        if self.pre.is_some() {
+        if self.held() {
             let shells = op == Op::Mark && matches!(Self::arg(args, "k"), Some("exit") | Some("cmd"));
             if !shells {
                 return;
             }
-            self.close_op(Op::Pre);
+            self.close_op(if self.pre.is_some() { Op::Pre } else { Op::Aside });
         }
         match op {
             Op::Mark => {
@@ -1619,6 +1744,9 @@ impl Transcript {
         // content resuming as ordinary lines. An empty accumulator (a tile's
         // always is) finalizes to nothing: an empty fence would be a history
         // row that no line added.
+        // An open aside's lines are already the block's own, so it goes on
+        // across a continuation; no zone frame reaches here while a `pre` or
+        // an `aside` is open (open_op's guard).
         if !keep_structure {
             if let Some(lines) = self.pre.take() {
                 if !lines.is_empty() {
@@ -1923,14 +2051,14 @@ impl Transcript {
             // half-share -- bounds the transient). A line past either is dropped.
             if pre.len() < cap && self.pre_bytes < byte_cap {
                 self.pre_bytes += cells.len() * core::mem::size_of::<TCell>();
-                pre.push(Line::plain(cells));
+                pre.push(Line::framed(cells, self.pre_episode));
             }
             return;
         }
         let cost = cells.len() * core::mem::size_of::<TCell>() + ITEM_OVERHEAD;
         self.open.cost += cost;
         self.stored_cost += cost;
-        self.open.items.push(Item::Line(Line::plain(cells)));
+        self.open.items.push(Item::Line(Line::framed(cells, self.aside)));
         self.enforce_block_cap();
     }
 
@@ -2235,16 +2363,17 @@ impl Transcript {
             let cap = self.max_lines_per_block;
             if let Some(pre) = self.pre.as_mut() {
                 if pre.len() < cap {
-                    pre.push(Line::plain(Vec::new()));
+                    pre.push(Line::framed(Vec::new(), self.pre_episode));
                 }
                 return;
             }
             // A blank line is content: keep it as an empty Line item -- and
-            // charge it: a million empty lines is a million items.
+            // charge it: a million empty lines is a million items. Inside an
+            // aside it is the passage's paragraph break.
             let cost = ITEM_OVERHEAD;
             self.open.cost += cost;
             self.stored_cost += cost;
-            self.open.items.push(Item::Line(Line::plain(Vec::new())));
+            self.open.items.push(Item::Line(Line::framed(Vec::new(), self.aside)));
             self.enforce_block_cap();
             return;
         }
@@ -2443,6 +2572,7 @@ impl Transcript {
         // captured its structure from the stream and takes the plain line.
         let shape = row_shape(&raw, spans);
         let spec = self.table_spec_for(shape.serial);
+        let episode = self.block_episode(shape);
         let mut last_rule = self.last_rule_serial;
         // A prompt line keeps its class wherever it lands (a scrolled-off
         // prompt row lands in the block open at finalize, often its output);
@@ -2463,6 +2593,7 @@ impl Transcript {
             &raw,
             shape,
             spec.as_ref().map(|s| (s.0, s.1.as_slice(), s.2)),
+            episode,
             class,
             spans,
             &mut last_rule,
@@ -2485,6 +2616,21 @@ impl Transcript {
             .rev()
             .find(|s| s.open_serial <= serial && serial <= s.close_serial)
             .map(|s| (s.open_serial, s.cols.clone(), s.hdr))
+    }
+
+    /// The episode of a rebuilt line written inside a `pre` or an `aside`
+    /// (cells mode): the open serial of the most recent such block open at or
+    /// before the line's serial and not closed by it -- `UNKNOWN_EPISODE` once
+    /// the registry has let that block go. 0 outside both.
+    fn block_episode(&self, shape: RowShape) -> u32 {
+        if !(shape.pre || shape.aside) {
+            return 0;
+        }
+        self.block_specs
+            .iter()
+            .rev()
+            .find(|s| s.aside == shape.aside && s.open_serial <= shape.serial && shape.serial <= s.close_serial)
+            .map_or(UNKNOWN_EPISODE, |s| s.open_serial)
     }
 
     /// PL-3: force any in-flight soft-wrapped ScrollOff line to finalize --
@@ -2669,12 +2815,14 @@ impl Transcript {
                 }),
             };
             let spec = self.table_spec_for(shape.serial);
+            let episode = self.block_episode(shape);
             let idx = place_tagged_line(
                 &mut items,
                 l.cells,
                 &l.raw,
                 shape,
                 spec.as_ref().map(|s| (s.0, s.1.as_slice(), s.2)),
+                episode,
                 class,
                 spans,
                 &mut last_rule,
@@ -2744,6 +2892,9 @@ impl Transcript {
         // console never notes tags, so they cost it nothing).
         if self.pre.is_some() {
             em |= TAG_PRE;
+        }
+        if self.aside != 0 {
+            hdr |= TAG_ASIDE;
         }
         if let Some(t) = self.table.as_ref() {
             if t.in_cell {
@@ -3392,6 +3543,383 @@ mod tests {
         t.feed(&frames(&parts));
         let lines = pre_of(&t.open_block().items);
         assert!(lines.len() <= 8, "the pre line count is capped: {}", lines.len());
+    }
+
+    /// Each item as its text and the episode it carries (a structure item
+    /// names itself, with no episode).
+    fn episodes_of(items: &[Item]) -> Vec<(String, u32)> {
+        items
+            .iter()
+            .map(|i| match i {
+                Item::Line(l) => (line_str(l), l.episode),
+                Item::Pre(_) => (String::from("<pre>"), u32::MAX),
+                Item::Table(_) => (String::from("<table>"), u32::MAX),
+                Item::Rule => (String::from("<rule>"), u32::MAX),
+                Item::Image { .. } => (String::from("<image>"), u32::MAX),
+            })
+            .collect()
+    }
+
+    fn owned(v: &[(&str, u32)]) -> Vec<(String, u32)> {
+        v.iter().map(|&(s, e)| (String::from(s), e)).collect()
+    }
+
+    #[test]
+    fn an_aside_s_lines_carry_its_episode() {
+        // HALCYON-VISUAL 8.4, byte-fed: an aside gathers nothing -- each line
+        // is the block's own and carries the aside's episode, its empty line
+        // too (the passage's paragraph break). The line pending at the open
+        // is outside it, the one pending at the close inside; two asides are
+        // two episodes.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Text("lead"),
+            F::Open(Op::Aside, &[]),
+            F::Text("one\n\ntail"),
+            F::Close(Op::Aside),
+            F::Text("between\n"),
+            F::Open(Op::Aside, &[]),
+            F::Text("two\n"),
+            F::Close(Op::Aside),
+            F::Text("after\n"),
+        ]));
+        let got = episodes_of(&t.open_block().items);
+        let (e1, e2) = (got[1].1, got[5].1);
+        assert!(e1 != 0 && e2 != 0 && e1 != e2, "{:?}", got);
+        let want = [("lead", 0), ("one", e1), ("", e1), ("tail", e1), ("between", 0), ("two", e2), ("after", 0)];
+        assert_eq!(got, owned(&want));
+        assert!(t.open_block().annotated_own, "an aside annotates its zone");
+    }
+
+    #[test]
+    fn an_aside_nests_no_block_op() {
+        // BEACON 12.1 rule 5: inside an aside a heading, a `pre`, a table, a
+        // zone, a rule and a program's own mark are ignored -- no freeze, no
+        // structure, every line still the aside's -- while `em` still styles
+        // its cells. A nested aside's open is ignored too, so the close after
+        // it is the aside's own.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Aside, &[]),
+            F::Open(Op::Hdr, &[("level", "1")]),
+            F::Text("h"),
+            F::Close(Op::Hdr),
+            F::Text("\n"),
+            F::Open(Op::Pre, &[]),
+            F::Text("p\n"),
+            F::Close(Op::Pre),
+            F::Open(Op::Table, &[("cols", "l"), ("hdr", "0")]),
+            F::Open(Op::Row, &[]),
+            F::Open(Op::Cell, &[]),
+            F::Text("c"),
+            F::Close(Op::Cell),
+            F::Close(Op::Row),
+            F::Close(Op::Table),
+            F::Text("\n"),
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("z\n"),
+            F::Close(Op::Zone),
+            F::Point(Op::Rule, &[]),
+            F::Point(Op::Mark, &[("k", "prog"), ("text", "inner")]),
+            F::Open(Op::Em, &[("class", "strong")]),
+            F::Text("e"),
+            F::Close(Op::Em),
+            F::Text("\n"),
+            F::Open(Op::Aside, &[]),
+            F::Text("n\n"),
+            F::Close(Op::Aside),
+            F::Text("out\n"),
+        ]));
+        assert!(t.frozen_blocks().is_empty(), "a zone frame inside the aside froze nothing");
+        let b = t.open_block();
+        let got = episodes_of(&b.items);
+        let e = got[0].1;
+        assert_ne!(e, 0);
+        let want = [("h", e), ("p", e), ("c", e), ("z", e), ("e", e), ("n", e), ("out", 0)];
+        assert_eq!(got, owned(&want));
+        let cell = |item: usize| match &b.items[item] {
+            Item::Line(l) => b.styles[l.cells[0].style as usize],
+            _ => unreachable!(),
+        };
+        assert_eq!(cell(0).hdr, 0, "the heading inside was ignored");
+        assert_eq!(cell(4).em, EM_STRONG, "em styles a cell inside");
+        assert_eq!(t.prog, None, "a program's mark inside was ignored");
+    }
+
+    #[test]
+    fn a_shell_mark_ends_an_open_aside() {
+        // A command that dies inside its aside: the shell's `exit` mark ends
+        // it -- the pending line kept as the aside's, the mark landing on the
+        // block -- and the zone close after it is honoured again. A `cmd`
+        // mark ends one the same way.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "boxed")]),
+            F::Open(Op::Aside, &[]),
+            F::Text("cut"),
+            F::Point(Op::Mark, &[("k", "exit"), ("code", "1")]),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("p\n"),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Aside, &[]),
+            F::Text("again"),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "next")]),
+            F::Text("plain\n"),
+        ]));
+        let frozen = t.frozen_blocks();
+        assert_eq!(frozen.len(), 2, "both zone closes froze their blocks");
+        let got = episodes_of(&frozen[0].items);
+        assert_eq!(got.len(), 1, "{:?}", got);
+        assert_eq!(got[0].0, "cut");
+        assert_ne!(got[0].1, 0, "the pending line was the aside's");
+        assert_eq!(frozen[0].exit, Some(1), "the exit mark landed");
+        assert_eq!(episodes_of(&frozen[1].items), owned(&[("p", 0)]));
+        let got = episodes_of(&t.open_block().items);
+        assert_eq!(got.len(), 2, "{:?}", got);
+        assert_ne!(got[0].1, 0, "the pending line was the second aside's");
+        assert_eq!(got[1], (String::from("plain"), 0), "the cmd mark ended the aside");
+        assert_eq!(t.open_block().cmd.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn an_aside_goes_on_across_a_continuation_freeze() {
+        // An aside longer than the block's line cap: the continuation freeze
+        // cuts the block (no zone frame reaches freeze_open while an aside is
+        // open, so this is the one freeze it meets), and the aside goes on in
+        // the next block, its lines still carrying the episode, so each block
+        // frames its part.
+        let mut t = Transcript::with_caps(daylight(), DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, 4);
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Open(Op::Aside, &[]),
+            F::Text("a\nb\nc\nd\ne\n"),
+            F::Close(Op::Aside),
+            F::Text("out\n"),
+            F::Close(Op::Zone),
+        ]));
+        let frozen = t.frozen_blocks();
+        assert_eq!(frozen.len(), 2, "the cap cut the zone once");
+        let e = episodes_of(&frozen[0].items)[0].1;
+        assert_ne!(e, 0);
+        assert_eq!(episodes_of(&frozen[0].items), owned(&[("a", e), ("b", e), ("c", e), ("d", e)]));
+        assert!(frozen[1].continuation);
+        assert_eq!(episodes_of(&frozen[1].items), owned(&[("e", e), ("out", 0)]));
+    }
+
+    #[test]
+    fn the_block_spec_registry_is_bounded() {
+        // Cells mode: every `pre` and `aside` a tile's frames open is kept for
+        // the episodes of its rebuilt lines, in a registry bounded like the
+        // table specs (KT-1): a flood of opens holds MAX_BLOCK_SPECS, the
+        // newest. A block whose spec has gone gives its lines UNKNOWN_EPISODE,
+        // so its rows still join though an em inside puts a second serial on
+        // them, as an obj per row does in `la`'s pre.
+        let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+        t.set_cells_mode(true);
+        let mut spans = SpanMap::new();
+        let mut serial = 0u32;
+        let mut frame = |t: &mut Transcript, spans: &mut SpanMap, bytes: Vec<u8>| -> u32 {
+            serial += 1;
+            t.feed_frame(&bytes, serial);
+            spans.note(serial, t.span_tag());
+            serial
+        };
+        let enc = |open: bool, op: Op| {
+            let mut b = Vec::new();
+            if open {
+                wire::open(&mut b, op, &[]);
+            } else {
+                wire::close(&mut b, op);
+            }
+            b
+        };
+        frame(&mut t, &mut spans, {
+            let mut b = Vec::new();
+            wire::open(&mut b, Op::Zone, &[("k", "output")]);
+            b
+        });
+        let strong = || {
+            let mut b = Vec::new();
+            wire::open(&mut b, Op::Em, &[("class", "strong")]);
+            b
+        };
+        let aside_open = frame(&mut t, &mut spans, enc(true, Op::Aside));
+        let aside_em = frame(&mut t, &mut spans, strong());
+        frame(&mut t, &mut spans, enc(false, Op::Em));
+        frame(&mut t, &mut spans, enc(false, Op::Aside));
+        let pre_open = frame(&mut t, &mut spans, enc(true, Op::Pre));
+        let pre_em = frame(&mut t, &mut spans, strong());
+        frame(&mut t, &mut spans, enc(false, Op::Em));
+        frame(&mut t, &mut spans, enc(false, Op::Pre));
+        for i in 0..1000 {
+            let op = if i % 2 == 0 { Op::Pre } else { Op::Aside };
+            frame(&mut t, &mut spans, enc(true, op));
+            frame(&mut t, &mut spans, enc(false, op));
+        }
+        assert_eq!(t.block_specs.len(), MAX_BLOCK_SPECS, "the registry is bounded");
+        assert!(t.block_specs.iter().all(|s| s.open_serial > pre_em), "the oldest went first");
+        let cell = |ch: char, span: u32| vt::Cell {
+            ch,
+            fg: 0,
+            bg: 0,
+            attrs: 0,
+            span,
+        };
+        let rows = [
+            vec![cell('q', aside_open)],
+            vec![cell('r', aside_em)],
+            vec![cell('s', pre_open)],
+            vec![cell('t', pre_em)],
+        ];
+        t.push_scrolled_rows(&rows, &[false; 4], &spans);
+        let items = &t.open_block().items;
+        let unknown = UNKNOWN_EPISODE;
+        assert_eq!(
+            episodes_of(items),
+            owned(&[("q", unknown), ("r", unknown), ("<pre>", u32::MAX)]),
+            "gone specs: one episode, so each block's rows join"
+        );
+        let pre: Vec<String> = pre_of(items).iter().map(line_str).collect();
+        assert_eq!(pre, ["s", "t"], "the pre's two rows are one block");
+    }
+
+    /// One random block-op stream (a seeded xorshift): zones, asides, pres,
+    /// headings, tables with rows and cells, ems, objs, the shell's marks, a
+    /// program's mark, rules, text and newlines, in any order and nesting.
+    fn random_stream(seed: &mut u64, parts: usize) -> Vec<Vec<u8>> {
+        let mut next = || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        };
+        let mut frames = Vec::new();
+        for _ in 0..parts {
+            let mut b = Vec::new();
+            let pick = next() % 22;
+            match pick {
+                0 => wire::open(&mut b, Op::Zone, &[("k", "output")]),
+                1 => wire::close(&mut b, Op::Zone),
+                2 | 3 => wire::open(&mut b, Op::Aside, &[]),
+                4 | 5 => wire::close(&mut b, Op::Aside),
+                6 => wire::open(&mut b, Op::Pre, &[]),
+                7 => wire::close(&mut b, Op::Pre),
+                8 => wire::open(&mut b, Op::Hdr, &[("level", "2")]),
+                9 => wire::close(&mut b, Op::Hdr),
+                10 => wire::open(&mut b, Op::Table, &[("cols", "ll")]),
+                11 => wire::close(&mut b, Op::Table),
+                12 => wire::open(&mut b, if next() % 2 == 0 { Op::Row } else { Op::Cell }, &[]),
+                13 => wire::close(&mut b, if next() % 2 == 0 { Op::Row } else { Op::Cell }),
+                14 => wire::open(&mut b, Op::Em, &[("class", "strong")]),
+                15 => wire::close(&mut b, Op::Em),
+                16 => wire::open(&mut b, Op::Obj, &[("type", "path"), ("ref", "/x")]),
+                17 => wire::close(&mut b, Op::Obj),
+                18 => {
+                    let k = ["cmd", "exit", "prog"][(next() % 3) as usize];
+                    wire::point(&mut b, Op::Mark, &[("k", k)]);
+                }
+                19 => wire::point(&mut b, Op::Rule, &[]),
+                _ => b.extend_from_slice([&b"w"[..], b"w\n", b"\n"][(next() % 3) as usize]),
+            }
+            frames.push(b);
+        }
+        frames
+    }
+
+    #[test]
+    fn random_streams_keep_each_aside_s_lines_together() {
+        // The containment rule as a property, byte-fed: whatever the stream,
+        // the lines of one aside are one run -- nothing is gathered into it
+        // and nothing splits it, across blocks too (a small line cap forces
+        // continuations) -- and no episode is used twice.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for round in 0..400 {
+            let mut t = Transcript::with_caps(daylight(), DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, 6);
+            for f in random_stream(&mut seed, 120) {
+                t.feed(&f);
+            }
+            let seq: Vec<Option<u32>> = t
+                .frozen_blocks()
+                .iter()
+                .chain(core::iter::once(t.open_block()))
+                .flat_map(|b| b.items.iter())
+                .map(|i| match i {
+                    Item::Line(l) => Some(l.episode),
+                    _ => None,
+                })
+                .collect();
+            for (i, e) in seq.iter().enumerate() {
+                let Some(e) = *e else { continue };
+                if e == 0 {
+                    continue;
+                }
+                let last = seq.iter().rposition(|x| *x == Some(e)).unwrap();
+                assert!(
+                    seq[i..=last].iter().all(|x| *x == Some(e)),
+                    "round {}: aside {} is not one run: {:?}",
+                    round,
+                    e,
+                    &seq[i..=last]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn random_frames_keep_the_block_registry_in_step_with_the_held_block() {
+        // Cells mode, the same streams one frame each: the last block spec is
+        // open exactly while a `pre` or an aside is held, no other spec is
+        // ever open (so none can claim a later block's lines), and the
+        // registry stays bounded.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for round in 0..200 {
+            let mut t = Transcript::with_caps(daylight(), 1000, 1 << 20, 10_000);
+            t.set_cells_mode(true);
+            for (n, f) in random_stream(&mut seed, 200).iter().enumerate() {
+                t.feed_frame(f, n as u32 + 1);
+                let open = t.block_specs.iter().filter(|s| s.close_serial == u32::MAX).count();
+                let back_open = t.block_specs.back().is_some_and(|s| s.close_serial == u32::MAX);
+                assert!(open <= 1, "round {} frame {}: {} open specs", round, n, open);
+                assert_eq!(back_open, t.held(), "round {} frame {}", round, n);
+                assert!(t.block_specs.len() <= MAX_BLOCK_SPECS);
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_op_inside_a_heading_is_ignored() {
+        // BEACON 12.1: a heading holds inline text only. A `pre` or an `aside`
+        // opened inside one is ignored, so the heading's own close still ends
+        // it; honoured, the block's guard would swallow that close and the
+        // heading would style the rest of the zone.
+        for op in [Op::Pre, Op::Aside] {
+            let mut t = Transcript::new(daylight());
+            t.feed(&frames(&[
+                F::Open(Op::Zone, &[("k", "output")]),
+                F::Open(Op::Hdr, &[("level", "2")]),
+                F::Text("T"),
+                F::Open(op, &[]),
+                F::Text("x"),
+                F::Close(Op::Hdr),
+                F::Text("y\n"),
+                F::Close(op),
+                F::Text("after\n"),
+            ]));
+            let b = t.open_block();
+            assert_eq!(episodes_of(&b.items), owned(&[("Txy", 0), ("after", 0)]), "{:?}", op);
+            let hdr = |item: usize, col: usize| match &b.items[item] {
+                Item::Line(l) => b.styles[l.cells[col].style as usize].hdr,
+                _ => unreachable!(),
+            };
+            assert_ne!(hdr(0, 1), 0, "x is the heading's ({:?})", op);
+            assert_eq!(hdr(0, 2), 0, "the heading's close ended it ({:?})", op);
+            assert_eq!(hdr(1, 0), 0, "nothing after it is a heading ({:?})", op);
+        }
     }
 
     #[test]

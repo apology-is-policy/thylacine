@@ -140,11 +140,11 @@ fn show_mode() -> Show {
     }
 }
 
-/// The wrap width, as `manual` computes it: only at a plain tier, only on a
-/// terminal, only when `/dev/winsize` reports one. At the rich tier the
-/// renderer owns the width and lantern must not wrap for it.
+/// The wrap width, by `manual`'s own rule: only at a plain tier, only on the
+/// console, only when `/dev/winsize` reports one. A tile's pts is a terminal,
+/// but that leaf is the console's width, not the tile's.
 fn plain_width(tier: Tier) -> Option<usize> {
-    if tier == Tier::Rich || !is_terminal(1) {
+    if !manual::wraps_at_console(tier, libthyla_rs::fd_devclass(1)) {
         return None;
     }
     let mut f = File::open("/dev/winsize").ok()?;

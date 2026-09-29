@@ -360,6 +360,63 @@ its reference. `Transcript::{span_tag, block_by_id, obj_in_block}` and
 are the readers; `select::flatten_with_grid` folds the grid tail into selection as
 a `GRID_BLOCK`.
 
+**An aside is a frame the layout draws, not an item (2026-09-29; BEACON.md 12.2,
+HALCYON-VISUAL 8.4, `dec-2026-09-28-beacon-aside`).** Beacon's `aside` is a
+passage set apart from the flow, the manual's block quote. `Transcript::open_op`
+flushes the pending line and records the aside's EPISODE: byte-fed, the next
+value of a counter; in a tile, the serial of the frame that opened it. Every line
+until the close is an ordinary `Item::Line` of the block, and `Line.episode`
+carries the episode, as it carries a `pre`'s on the pre's lines (0 outside both).
+An aside nests no block op (12.1 rule 5). While an aside or a `pre` is open
+(`held()`), `open_op` ignores every open but `em`/`obj`, `close_op` ignores every
+close but those and the block's own, and `point_op` ignores every point op but
+the shell's `cmd`/`exit` mark. That mark ends the aside, since the command died
+inside it. Neither block opens inside a heading, which holds inline text only
+(12.1): the block's guard would swallow the heading's close, and the heading's
+style would run on to the end of the zone. Zone frames are ignored while held, so the one freeze an aside meets
+is the cap's continuation, and the aside goes on across it into the next block.
+`Transcript::forget` keeps it open, like the other in-flight structure. A tile's
+tag carries `TAG_ASIDE`, bit 7 of the `hdr` byte (the `em` byte's bits are all
+taken); `row_shape` reads it as `aside`. A registry of `BlockSpec { open_serial,
+close_serial, aside }` (`MAX_BLOCK_SPECS` = 32, the oldest dropped first, like
+`table_specs`) gives a rebuilt line its block's open serial (`block_episode`), or
+`UNKNOWN_EPISODE` (`u32::MAX`) once the spec has gone. That one value is shared
+by every such line, so a forgotten block's rows join as a pre's rows did before
+the registry; their own serials differ row by row (an `obj` or an `em` per row,
+as in `la`'s pre) and would split one block into a frame per row. Two forgotten
+blocks that meet are joined, as two `pre`s always were. `place_tagged_line` pushes an aside
+line as `Item::Line` with its episode. A pre line joins the last `Item::Pre` only
+when the episodes match, so two `pre`s that meet on the grid stay two.
+
+A blank row was never written, so its cells carry span 0 and no tag. A blank line
+inside a `pre` or an aside therefore reaches a tile's transcript and `live_block`
+as a plain empty line, with episode 0, and it splits the block. The transcript
+keeps what the grid carried, and the layout bridges the gap. `frames_of` gives
+each item its frame (`Framed::Pre(e)` or `Framed::Aside(e)`) and extends a frame
+over a run of empty episode-0 lines between two items of that same frame. A
+bridged `pre` stays ONE island, its empty rows laid as empty pre rows. That
+fixes the old split: a code block with a blank line in it showed as two islands
+in a tile. A bridged aside line is the passage's paragraph break. The rejected
+alternative absorbed the blank rows into the item. That removed history rows
+after the fact, and `Sel::rebase` maps a history anchor by the front drops, so
+an anchor on an absorbed row would have landed on the wrong row.
+
+`layout_block_media` opens an aside's frame with a `pre`'s top margin, collapsed
+with the pending bottom (after a prompt, the prompt's own gap), then the hairline
+and `pre_pad_y`. The first line inside gets the first-child reset. Its lines are
+prose (`Role::Prose`, and `Role::Empty` for an empty line), laid at `x0 = pad_x +
+hairline + pre_pad_x` with `right_inset = hairline + pre_pad_x`: the left padding
+on both sides, since the legacy `pre_pad_r` is 0. `close_aside` advances
+`pre_pad_y` and the hairline, then pushes four hairline rects in `sheet.rule`
+over `[pad_x, right_with(measure_cap)]`, with no ground, and the next item gets a
+`pre`'s bottom margin. Under Instrument that is margin 18, padding 15 / 17 and
+the 720 cap; under legacy margin 2, padding 2 / 8 and no cap. An inline image
+in an aside is letterboxed into the frame's inner width and centred there
+(`lay_inline_image` takes the columns it may use). A `pre` or an aside
+that straddles the scrollback edge is laid as two frames, because the history's
+block and the live block are laid apart; a `pre` always was. A byte-fed aside cut
+by the cap's continuation is likewise two frames, one per block.
+
 ### The session tile: Normal mode, selection, and the tile menu (H-4d)
 
 A session tile spawns its `kaua-term` with `--beacon rich`, so the shell it hosts
@@ -909,6 +966,12 @@ anchors are the H-2 / H-3b / H-3c / H-3d / KT-1 trigger rows +
   `layout_block` (`len is 0 but the index is 0`).
 - **The grid containment**: an untrusted tile's OOB cell write is dropped, the
   cursor clamped.
+- **Aside containment** (format-fuzz class, 2026-09-29): an aside nests no block
+  op, by the same `held()` guard as a `pre`, so no stream makes one gather a
+  heading, table, `pre` or zone, or freeze at a zone frame; and neither opens
+  inside a heading, whose close the guard would swallow. The block-spec
+  registry is bounded at `MAX_BLOCK_SPECS` = 32, however many asides and `pre`s
+  a stream opens.
 - **One caret predicate, two consumers** (I-8c-2): `Tile::paints_caret` is
   what the painter asks AND what the blink's dirty rule asks, so a step can
   never mark a tile that shows no caret (a retained tile repainting twice a
@@ -1043,14 +1106,50 @@ presents are a recorded optimization.
   is ADDRESSED by the SQPOLL ring (KT-1.5b-i): the kernel poll-thread demuxes
   the console's parked reply on a frame-boundary deadline independent of
   halcyond's loop branch. A targeted repro is owed.
-- **Currency (2026-09-28): this dossier was edited for TC-1, TC-1b and FL-1 only.** The halcyond
+- **Currency (2026-09-29): this dossier was edited for TC-1, TC-1b, FL-1 and the aside only.** The halcyond
   changes between 2026-09-17 and 2026-09-22 (about 940 lines of `tile.rs`
   alone) are not yet described here, beyond what earlier sections already say.
   Dating this edit stopped `quaestor stale` from flagging the dossier, so the
   debt is recorded here instead.
+- The byte-fed console lays its pending line (`layout_pending`) as a block of
+  its own. While an aside is open, the line not yet ended sits below the
+  frame, outside it, until its LF moves it in (aside audit r1 F4; cosmetic, the
+  console path only, since a tile's pending text is on its grid). A `pre`'s
+  lines there wait for its close. Tracked in OPEN-BUGS.
 
 ## Tests
 
+- **The aside (2026-09-29): 442 lib tests, all green** (host, `cargo test -p
+  halcyond --lib`). Byte-fed: `an_aside_s_lines_carry_its_episode` (the line
+  pending at the open is outside, the one pending at the close inside, two
+  asides are two episodes), `an_aside_nests_no_block_op` (a heading, `pre`,
+  table, zone, rule and program mark inside are ignored, `em` still styles),
+  `a_shell_mark_ends_an_open_aside` (`exit` and `cmd`),
+  `an_aside_goes_on_across_a_continuation_freeze`,
+  `a_block_op_inside_a_heading_is_ignored` (a `pre` and an aside; the
+  heading's close still ends it), and
+  `random_streams_keep_each_aside_s_lines_together` (400 seeded streams of
+  every block op in any nesting, a 6-line block cap: one aside's lines are one
+  run, across blocks too). Cells mode:
+  `random_frames_keep_the_block_registry_in_step_with_the_held_block` (the
+  last spec is open exactly while a block is held, no other ever is),
+  `the_block_spec_registry_is_bounded` (1000 opens hold 32; the rows of gone
+  specs share `UNKNOWN_EPISODE`, so an aside's two serials and a pre's two
+  still join), `an_aside_on_the_live_grid_is_one_frame`,
+  `an_aside_s_rows_keep_their_episode_when_they_scroll_off`, and the rewritten
+  `a_blank_line_inside_a_pre_stays_inside_it_on_the_live_grid` (one island
+  across the blank row; two `pre`s with a blank row between, and two on
+  adjacent rows, are two). Layout:
+  `an_aside_is_a_hairline_frame_at_a_pre_s_margin_and_padding` (Instrument: 18,
+  15 / 17, 720, a word too long for a line broken exactly at the inner edge),
+  `an_aside_under_the_legacy_sheet_takes_the_island_margin_and_padding`,
+  `two_asides_back_to_back_are_two_frames`,
+  `an_inline_image_in_an_aside_stays_inside_its_frame` (and, one variable away,
+  at the page width outside one). Sabotage: 25 mutants over the
+  guards, the episode counter, the registry, the scroll-off episode, the tag
+  bit, the bridge and the frame's geometry (among them the right padding taken
+  from the legacy `pre_pad_r`, which is 0), each red on exactly the tests
+  predicted for it.
 - **FL-1 (2026-09-28): 424 lib tests, all green** (`tools/test-rust.sh
   halcyond`). `the_frame_records_open_and_close_the_hold_and_an_exit_closes_it`
   pins the records' effect on `Tile.hold`;

@@ -21,7 +21,7 @@ hazards: []
 abis: []
 design: ["docs/BEACON.md"]
 created: 2026-09-05
-updated: 2026-09-17
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -103,6 +103,20 @@ opens in `draw_prompt` and closes in a different call, the accept arm); and
 bins' existing box+SGR language and object *identity* is a Rich-only concept
 -- SGR never appears inside Rich beacon-structured output, where the
 renderer's stylesheet owns typography.
+
+**`aside` names a role, not a box (2026-09-29, the operator's vote of
+2026-09-28, `dec-2026-09-28-beacon-aside`).** The newest paired op marks a
+passage set apart from the flow: the manual's block quote, or a boxed slide. It
+takes no arguments. No width, border, colour or position rides it, because
+BEACON.md 12.2 refuses layout ops, so each renderer's stylesheet decides the
+look. Like `pre` it nests no block op (12.1 rule 5). Unlike `pre` its payload
+flows, so a renderer reflows each line to its frame and reads an empty line as
+a paragraph break. The crate adds the opcode (`Op::Aside`, `aside` on the wire,
+paired, never a point op) and the plain frame an emitter draws where it wraps.
+`boxd::top` with no title and no right label is now a bare `┌─..─┐` rule, the
+width of `bottom` with an empty label. Before, it left the `┌─  ─` gap a title
+reserves. The Sink has no aside method: the one emitter, the manual, writes its
+own frames ([[sub-manual]]).
 
 **verbs is the one rules engine three surfaces share** (the transcript's
 context menu, the tag bar, acme-style selection execution): "text + type ->
