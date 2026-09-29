@@ -4,7 +4,7 @@ type: chg
 title: "/proc/<pid>/ns names a 9P session root by the file its session came over -- a display-only origin on the root's dev9p priv"
 date: 2026-09-29
 arc: arc-net
-commits: ["*(pending)*"]
+commits: ["3936063b"]
 touched:
   - sub-kernel-ninep-dev9p
   - sub-kernel-syscall-abi

@@ -679,7 +679,7 @@ spec is owed.
 Operator vote 1 of 2026-09-28 (option 1, "the file it came from", Plan 9's form): `/proc/<pid>/ns` names a 9P session
 root by the file its session came over, where every one read `/` (login's home was `mount /home/michael /`; the LR-1
 audit's F1). Scripture 33ee9e96 (ARCH 9.6.9 and the I-33 row; HAUL-DESIGN 4.8; COREUTILS-THYLACINE-DESIGN; manual 14;
-`dec-2026-09-28-ns-session-root-names`). Code *(pending)*.
+`dec-2026-09-28-ns-session-root-names`). Code 3936063b.
 
 - **The carrier.** The root keeps its own name `/`: joey pivots to a `t_attach_9p_srv` root, and a pivot never
   re-stamps a published Spoor (I-33). The file's name is a second, display-only one on the root's dev9p priv: `origin`
