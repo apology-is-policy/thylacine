@@ -1,0 +1,1191 @@
+#!/usr/bin/expect -f
+# The Operator's Manual's Halcyon section (docs/manual/10-halcyon.md), on the
+# device: the tasks it describes, in its order, on the image an operator runs --
+# the default configuration, whose login starts the session under the
+# Instrument profile.
+#
+# The section is only as true as the tree it describes, and a manual that drifts
+# from the system is worse than none, so each claim here is asserted from the
+# compositor's own test-mode lines rather than from a capture that "looked
+# right". The captures are kept at build/manual-halcyon-*.png whatever the
+# verdict: several tasks print their result into a tile, where only a look can
+# read it (a tile's shell is not console-attached, so it cannot write the serial
+# line -- I-27), and the source map in the commit that adds a claim says which
+# capture shows it.
+#
+# What it asserts, leg by leg (the manual's task in brackets):
+#   1. [Log in] the welcome is the tour beside the shell, and the shell has the
+#      focus. The focus probe is Escape: only the focused tile enters Normal
+#      mode, and it says its own leaf.
+#   2. [Move between tiles] Super+Left / Super+Right move the focus, and a click
+#      in a tile's blank content focuses it (the tile says the press found no
+#      object, so no menu opened).
+#   3. [Dividers] a drag makes the pair unequal; a double-click on the divider
+#      restores the even split.
+#   4. [Split] in the row of two, Super+H adds a third pane with an equal
+#      share (both others narrow; the rows hold), its shell starting in the
+#      home directory although the split tile had changed directory (its bar is
+#      the control); Super+V halves the shell's pane one above the other (the
+#      tour does not move); Super+Up / Super+Down move the focus between the
+#      two; Super+E turns that split; Super+Shift+Left moves the tile past its
+#      neighbour and the tile keeps the focus; at the display's edge a move
+#      changes nothing, so one move the other way then acts.
+#   5. [Stack] Super+N makes the tour's pane a stack of two; Super+Tab /
+#      Super+Shift+Tab walk it; Super+Shift+T shows only the open tile under
+#      a single header (Super+Tab still reaches the other) and Super+S the
+#      column again (in that order: Super+N's stack is already a column, so a
+#      Super+S first would change nothing); Super+E lays its tiles side by
+#      side.
+#   6. [Zoom] Super+F shows one tile; Super+F again shows them all.
+#   7. [RESET] the rail's RESET asks first (the dialog) and Enter resets.
+#   8. [Close] Super+Shift+Q over a running command (in the stack's second
+#      tile) asks; Close tile closes the
+#      tile, the compositor kills the terminal the command holds open after its
+#      2 s grace, and no live sleep remains (`ps | grep sleep | grep ALIVE`
+#      exits 1; the ended command stays a ZOMBIE row until joey reaps it after
+#      the session). The header's x refuses a pane's only tile. A job started
+#      in the background outlives its tile's close (the same check exits 0,
+#      before the close too: the control, and the positive twin of 8a's
+#      negative), and a shell with only a background job closes without asking.
+#   9. [Workspaces] Super+2 creates workspace 2 with an empty pane whose Open
+#      shell starts a shell; Super+Shift+1 moves that tile to workspace 1; Super+1
+#      returns and the empty workspace 2 vanishes; `halcyon workspace 3` switches
+#      from a shell; a command keeps running while its workspace is hidden.
+#  10. [Scroll back] Normal mode's keys move the view: compared on a band of the
+#      display that excludes the rails and the prompt row, whose caret blinks --
+#      three captures with no key between them must agree there first (the
+#      control), then each key must change it; `p` returns to typing; Escape in
+#      a full-screen program never opens Normal mode (its control: the same
+#      Escape on the ordinary screen did).
+#  11. [Objects] `w` / `b` step between objects, Enter opens the object's menu,
+#      Escape closes it without running anything, and a click on the object
+#      opens the same menu, whose first command runs on exactly that object.
+#      [History] Super+K reaches the rail's owner and leaves no history rows.
+#  12. [The sections themselves] `manual`, `manual halcyon` and `manual lantern`
+#      render in a tile (captures, paged with Normal mode).
+#  13. [Keys] the rail's ? and Super+/ open the reference; Enter and Space
+#      close it.
+#  14. [Theme] Escape closes the picker without applying a theme; its control,
+#      one key away, is Enter, which applies the theme and writes it.
+#  15. [Scale] the scale steps 25 percent away from the measured scale (read
+#      from tapestryd's boot line) and back; Super+0 restores it; at a limit,
+#      that limit's key changes nothing.
+#  16. [Layouts] on a fresh workspace: `halcyon layout save / restore / list /
+#      delete`.
+#  17. [Profiles, halcyon.rc, the theme, log out] closing every tile logs out;
+#      with an empty ~/lib/halcyon.rc and `legacy` in ~/lib/halcyon/profile the
+#      next session starts one tile under the legacy profile, with the theme
+#      the picker saved, where the reference, the picker and Super+K are dropped
+#      (no rail -- the same chords reached the rail's owner in the first
+#      session), and a shell that exits 0 closes its tile -- the last one,
+#      which logs the session out.
+#
+# Needs the default image (HALCYON_SESSION=y, HALCYON_PROFILE=instrument):
+#   tools/build.sh kernel
+# A gate image (--config ci) starts ut at login and SKIPs (exit 77), as does a
+# session image baked `legacy`: a lever the image lacks is not a defect.
+
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+if {$::env(THYLACINE_ACCEL) ni {hvf tcg kvm}} {
+    puts stderr "LS_CI_GFX_ACCEL must be hvf, tcg or kvm"
+    exit 1
+}
+
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+set transcript /tmp/ls-halcyon-manual-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+# qmp-sendtext types printable US-ASCII and '\n' and refuses anything else.
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+    after 400
+}
+# Type a command whose END the next status-bar wait must see. The bar is said
+# only when its key changes -- the condition, the running flag, the pane
+# count, the workspaces; neither the exit code nor the context -- so a quick
+# command that ends as the previous one did can repaint without a word. A
+# second of `sleep 1` first guarantees a paint while it runs, so its end is
+# said. (ut runs the line as one command: one start mark, one exit mark.)
+proc cmd {text} {
+    type "sleep 1; $text\n"
+}
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 900
+}
+proc capture {name} {
+    global repo qmp
+    after 1200
+    set out $repo/build/manual-halcyon-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+    return $out
+}
+# A raw PPM beside the PNG, for the pixel comparisons (the PNG is for reading).
+proc snap {name} {
+    global repo qmp
+    capture $name
+    set out $repo/build/manual-halcyon-$name.ppm
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $out} e]} { lc_fail $e }
+    return $out
+}
+set ::ppm_cmp_py {
+import sys
+def ppm(p):
+    d = open(p, 'rb').read()
+    t = []
+    i = 2
+    while len(t) < 3:
+        c = d[i:i+1]
+        if c in b' \t\r\n':
+            i += 1
+        elif c == b'#':
+            while d[i:i+1] != b'\n':
+                i += 1
+        else:
+            j = i
+            while d[j:j+1] not in b' \t\r\n':
+                j += 1
+            t.append(int(d[i:j]))
+            i = j
+    return t[0], t[1], d[i+1:]
+wa, ha, pa = ppm(sys.argv[1])
+wb, hb, pb = ppm(sys.argv[2])
+y0, y1 = int(sys.argv[3]), int(sys.argv[4])
+if (wa, ha) != (wb, hb):
+    print('size')
+else:
+    s, e = y0 * wa * 3, y1 * wa * 3
+    print('same' if pa[s:e] == pb[s:e] else 'differ')
+}
+# Do two snaps agree on the band between the rails, above the prompt row?
+# The top rail carries a clock, the bottom rail transient notices, and the
+# prompt row a blinking caret: none of them may decide a comparison. On the
+# default display the zoomed tile's input row starts at y 701 (run 8's
+# captures: the caret's 2 px blink at x 72, y 701-724), so the band ends 11 px
+# above it.
+proc band {a b} {
+    global repo H
+    set r [exec python3 -c $::ppm_cmp_py $repo/build/manual-halcyon-$a.ppm $repo/build/manual-halcyon-$b.ppm 40 [expr {$H - 110}]]
+    if {$r eq "size"} { lc_fail "the captures $a and $b differ in size" }
+    return $r
+}
+# The virtio tablet: the axis value for the CENTRE of display pixel x is
+# (2x + 1) * 32767 / (2 (W - 1)) (the ls-halcyon-instrument idiom).
+proc ptr_op {op} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p $op} e]} { lc_fail "qmp-sendtext -p $op: $e" }
+}
+proc ptr_to {x y} {
+    global W H
+    set ax [expr {((2 * $x + 1) * 32767) / (2 * ($W - 1))}]
+    set ay [expr {((2 * $y + 1) * 32767) / (2 * ($H - 1))}]
+    ptr_op "abs $ax $ay"
+    after 400
+}
+proc click {x y {btn left}} {
+    ptr_to $x $y
+    ptr_op "btn $btn down"
+    after 250
+    ptr_op "btn $btn up"
+    after 900
+}
+# Everything the guest has said so far is read and dropped, so the next wait
+# can only be satisfied by a line said after this point. Bounded: a steady
+# trickle of lines cannot hold it forever. The transcript (log_file) holds only
+# what an expect call has READ, so every transcript read below drains first.
+proc drain {} {
+    after 700
+    set n 0
+    expect {
+        -timeout 1
+        -re {[^\n]*\n} { incr n; if {$n < 400} { exp_continue } }
+        timeout {}
+        eof { lc_fail "EOF while draining" }
+    }
+}
+proc want {re what {secs 30}} {
+    global timeout
+    set old $timeout
+    set timeout $secs
+    expect {
+        -re $re {}
+        -re {EXTINCTION:} { lc_extinction_fail $what }
+        -re {halcyond: session tile leaf=[0-9]+ crashed} { lc_fail "$what: a tile crashed" }
+        timeout { lc_fail "$what: no `$re` within ${secs}s" }
+        eof { lc_fail "EOF: $what" }
+    }
+    set timeout $old
+    return $expect_out(0,string)
+}
+proc want_ex {s what {secs 30}} {
+    global timeout
+    set old $timeout
+    set timeout $secs
+    expect {
+        -ex $s {}
+        -re {EXTINCTION:} { lc_extinction_fail $what }
+        timeout { lc_fail "$what: no `$s` within ${secs}s" }
+        eof { lc_fail "EOF: $what" }
+    }
+    set timeout $old
+}
+# A negative: `re` must NOT be said within `secs`. Only ever used beside a
+# positive control one variable away, named at the call site.
+proc never {re what {secs 3}} {
+    global timeout
+    set old $timeout
+    set timeout $secs
+    expect {
+        -re $re { lc_fail "$what: `$expect_out(0,string)` was said" }
+        -re {EXTINCTION:} { lc_extinction_fail $what }
+        timeout {}
+        eof { lc_fail "EOF: $what" }
+    }
+    set timeout $old
+}
+proc rx_quote {s} { return [regsub -all {[][\\.*+?^${}()|]} $s {\\&}] }
+# The focused tile's bar, once the command typed in it has finished: exit 0.
+set bar_ok {halcyond: status bar \d+ painted [^\r\n]*exit 0 notice "[^"]*" running false}
+# Which tile has the keyboard: Escape enters Normal mode in the focused tile
+# only, and that tile says its leaf; `i` returns it to typing.
+proc focused {what} {
+    key "esc"
+    set m [want {halcyond: session tile leaf=([0-9]+) normal mode \(([0-9]+) rows\)} "the focus probe ($what)"]
+    regexp {leaf=([0-9]+) normal} $m -> leaf
+    type "i"
+    want "halcyond: session tile leaf=$leaf insert mode" "the focus probe returns to typing ($what)"
+    return $leaf
+}
+# A tile's spawn: its leaf, columns, rows and command line.
+proc spawned {what} {
+    set m [want {halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ ([0-9]+)x([0-9]+) ([^\r\n]*)\r} $what]
+    regexp {leaf=([0-9]+) spawned pid=[0-9]+ ([0-9]+)x([0-9]+) ([^\r\n]*)\r} $m -> leaf c r cmd
+    return [list $leaf $c $r $cmd]
+}
+# A tile's current grid size: the last fit line for it, else its spawn line.
+proc size_of {leaf} {
+    global transcript
+    drain
+    set c ""; set r ""
+    if {[catch {exec grep -a -E "halcyond: session tile leaf=$leaf (fit|spawned) " $transcript} found]} { lc_fail "no size said for leaf $leaf" }
+    foreach line [split $found "\n"] {
+        if {[regexp {fit [0-9]+x[0-9]+ px -> ([0-9]+) cols ([0-9]+) rows} $line -> c r]} { continue }
+        regexp {spawned pid=[0-9]+ ([0-9]+)x([0-9]+) } $line -> c r
+    }
+    if {$c eq ""} { lc_fail "no size said for leaf $leaf" }
+    return [list $c $r]
+}
+# A header strip, off halcyond's LAST `chrome N for pane <id>` line.
+proc header_of {id} {
+    global transcript
+    drain
+    if {[catch {exec grep -a -E "halcyond: chrome \[0-9\]+ for pane $id at" $transcript} found]} { lc_fail "no chrome line for pane $id" }
+    set lines [split $found "\n"]
+    set line [lindex $lines end]
+    if {![regexp "chrome (\\d+) for pane $id at (\\d+),(\\d+) (\\d+)x(\\d+)" $line -> sid x y w h]} {
+        lc_fail "no chrome line for pane $id (last: '$line')"
+    }
+    return [list $x $y $w $h]
+}
+# Focus a tile by a press on its content's blank bottom-right corner (every
+# tile in these legs spans the display's height, the rails excepted). The
+# tile says whether the press found an object; one that did would have
+# opened a menu, so the press must find none.
+proc blank_click {leaf what} {
+    global H
+    set h [header_of $leaf]
+    drain
+    click [expr {[lindex $h 0] + [lindex $h 2] - 30}] [expr {$H - 60}]
+    set m [want "halcyond: tile $leaf click -> (menu|no run)" "$what: the press on leaf $leaf"]
+    if {[string match "*-> menu" $m]} {
+        key "esc"
+        lc_fail "$what: the press on leaf $leaf's blank corner found an object"
+    }
+}
+# The rail's targets, off halcyond's LAST `rail N painted` line.
+proc rail_zones {} {
+    global transcript
+    drain
+    if {[catch {exec grep -a -E {halcyond: rail [0-9]+ painted} $transcript} found]} { lc_fail "no rail zones line" }
+    set lines [split $found "\n"]
+    set line [lindex $lines end]
+    if {![regexp {rail (\d+) painted brand \[(\d+) (\d+) (\d+) (\d+)\] ctx \[(\d+) (\d+)\] splith \[(\d+) (\d+) (\d+) (\d+)\] splitv \[(\d+) (\d+) (\d+) (\d+)\] theme \[(\d+) (\d+) (\d+) (\d+)\] reset \[(\d+) (\d+) (\d+) (\d+)\] help \[(\d+) (\d+) (\d+) (\d+)\] clock \[(\d+) (\d+)\]} $line -> id bx by bw bh cx cw shx shy shw shh svx svy svw svh tx ty tw th rx ry rw rh hx hy hw hh kx kw]} {
+        lc_fail "no rail zones line (last: '$line')"
+    }
+    return [dict create brand [list $bx $by $bw $bh] reset [list $rx $ry $rw $rh] help [list $hx $hy $hw $hh] theme [list $tx $ty $tw $th]]
+}
+proc centre {z} {
+    return [list [expr {[lindex $z 0] + [lindex $z 2] / 2}] [expr {[lindex $z 1] + [lindex $z 3] / 2}]]
+}
+proc near {a b tol} { return [expr {abs($a - $b) <= $tol}] }
+# The transcript's length in lines, after a drain: where a later search
+# starts, so a line said before a chord cannot stand for a pane it made.
+proc transcript_mark {} {
+    global transcript
+    drain
+    return [lindex [exec wc -l < $transcript] 0]
+}
+# An empty workspace's placard fills its pane's interior, so its chrome line is
+# the first one taller than a header said after `since` (a transcript_mark
+# taken before the chord that made the pane); a failed chrome create is the
+# verdict itself. Open shell sits under the title and the hint (chrome.rs
+# placard_list): press down a column at the action's x until the placard says
+# the press, and return the shell it starts.
+proc open_shell {what since} {
+    global transcript
+    set E ""
+    for {set tries 0} {$tries < 10 && $E eq ""} {incr tries} {
+        drain
+        if {[catch {exec tail -n +[expr {$since + 1}] $transcript | grep -a -E {halcyond: chrome }} found]} { set found "" }
+        foreach l [split $found "\n"] {
+            if {[regexp {halcyond: chrome for pane ([0-9]+) failed ([A-Za-z]+)} $l -> fp fe]} {
+                lc_fail "$what: halcyond could not create the placard of pane $fp ($fe)"
+            }
+            if {[regexp {for pane ([0-9]+) at ([0-9]+),([0-9]+) ([0-9]+)x([0-9]+)} $l -> id x y w h] && $h > 100} {
+                set E $id; set ex $x; set ey $y
+                break
+            }
+        }
+    }
+    if {$E eq ""} { lc_fail "$what: no placard chrome line after the chord" }
+    set pressed 0
+    foreach dy {66 74 82 90 98 106 114 122 130} {
+        click [expr {$ex + 40}] [expr {$ey + $dy}]
+        expect {
+            -timeout 2
+            -re {halcyond: placard ([0-9]+) press OpenShell} { set pressed $dy; set E $expect_out(1,string) }
+            timeout {}
+            eof { lc_fail "EOF pressing Open shell" }
+        }
+        if {$pressed} { break }
+    }
+    if {!$pressed} { lc_fail "$what: no press on pane $E's Open shell landed" }
+    lc_step "$what: Open shell on the placard of pane $E pressed at +40,+$pressed"
+    lassign [spawned "$what: Open shell"] leaf c r cmd
+    lc_step "$what: Open shell spawned leaf $leaf ${c}x$r ($cmd)"
+    return $leaf
+}
+
+# --- Boot and log in -------------------------------------------------------------
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: this image starts ut at login -- the manual's Halcyon section describes the\
+ default image. Bake with: tools/build.sh kernel"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: theme [^\r\n]*; profile instrument \(} {}
+    -re {halcyond: theme [^\r\n]*; profile legacy \(} {
+        puts "\nLS-CI SKIP: this session image is baked `legacy`; the section describes Instrument, the\
+ default. Bake with: tools/build.sh kernel"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "the session never resolved its profile" }
+    eof { lc_fail "EOF resolving the profile" }
+}
+# --- 1. The welcome: the tour beside the shell, the shell focused ----------------
+# The session's first tile (the shell) spawns BEFORE `session up`, and one
+# buffer can hold several of these lines at once: expect tries its patterns in
+# LIST order and discards everything before the match, so a list of patterns
+# can swallow an earlier line. Every line is therefore read in turn and
+# classified here.
+set S ""; set T ""; set init 0; set panes2 0; set W ""; set H ""
+set deadline [expr {[clock seconds] + 90}]
+while {$W eq "" || $S eq "" || $T eq "" || !$init || !$panes2} {
+    if {[clock seconds] > $deadline} {
+        lc_fail "the welcome never settled (up=${W}x$H shell=$S tour=$T init=$init panes2=$panes2)"
+    }
+    expect {
+        -timeout 10
+        -re {([^\r\n]*)\r?\n} {
+            set line $expect_out(1,string)
+            if {[regexp {halcyond: session up ([0-9]+)x([0-9]+) px} $line -> W H]} {
+            } elseif {[regexp {halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ [0-9]+x[0-9]+ (.*)$} $line -> leaf cmd]} {
+                if {[string match "*halcyon welcome*" $cmd]} {
+                    set T $leaf
+                } elseif {$S eq ""} {
+                    set S $leaf
+                }
+            } elseif {[regexp {halcyond: session init exited \(code ([0-9-]+)\)} $line -> code]} {
+                if {$code ne "0"} { lc_fail "the welcome's restore exited $code" }
+                set init 1
+            } elseif {[regexp {halcyond: status bar [0-9]+ painted .*panes 2 workspaces} $line]} {
+                set panes2 1
+            } elseif {[regexp {halcyond: session tile leaf=[0-9]+ crashed} $line]} {
+                lc_fail "a tile crashed during the welcome"
+            } elseif {[regexp {EXTINCTION:} $line]} {
+                lc_extinction_fail "the welcome"
+            }
+        }
+        timeout {}
+        eof { lc_fail "EOF during the welcome" }
+    }
+}
+lc_step "session up on ${W}x$H; the shell is leaf $S, the tour leaf $T"
+after 2500
+capture welcome
+set f [focused "after login"]
+if {$f ne $S} { lc_fail "after login the focus is on leaf $f, not the shell (leaf $S; the tour is $T)" }
+set tx [lindex [header_of $T] 0]; set sx [lindex [header_of $S] 0]
+if {!($tx < $sx)} { lc_fail "the tour (leaf $T, x $tx) is not left of the shell (leaf $S, x $sx)" }
+lc_pass "manual(1): login shows the tour (leaf $T) left of the shell (leaf $S), and the shell has the focus"
+
+# --- 1b. The login row stacked: two tiles, two headers ----------------------------------
+# The session's root row also holds the console renderer's leaf, backgrounded.
+# Super+S stacks the row, and the carve shows the two tiles alone, so their
+# headers count a stack of 2 -- the count the header's x reads for the
+# final-tile rule (counting the hidden leaf let the last shown tile's x close
+# it, and the session with it). A right press on a header says that count;
+# Escape dismisses the tile menu, and Super+E lays the row side by side again.
+key "meta_l+s"
+after 1500
+set a [header_of $T]; set b [header_of $S]
+if {!([lindex $a 0] == [lindex $b 0] && [lindex $a 1] != [lindex $b 1])} { lc_fail "Super+S did not stack the login row ($a / $b)" }
+capture stacked-login
+drain
+click [expr {[lindex $b 0] + 60}] [expr {[lindex $b 1] + 16}] right
+set m [want "halcyond: header $S press Menu \\{ id: $S, count: \[0-9\]+," "a right press on the shell's header"]
+regexp {count: ([0-9]+),} $m -> cnt
+if {$cnt != 2} { lc_fail "the stacked login row counts $cnt tiles in the shell's header, not the 2 it shows" }
+want {halcyond: menu [0-9]+ placed at } "the tile menu"
+key "esc"
+want {tapestryd: menu [0-9]+ dismissed \(esc\)} "Escape dismisses the tile menu"
+key "meta_l+e"
+after 1500
+set a [header_of $T]; set b [header_of $S]
+if {!([lindex $a 1] == [lindex $b 1] && [lindex $a 0] < [lindex $b 0])} { lc_fail "Super+E did not lay the login row side by side again ($a / $b)" }
+if {[set f [focused "after the row returned"]] ne $S} { lc_fail "the shell lost the focus to $f" }
+lc_pass "manual(1b): Super+S stacks the login row as a stack of 2 (the console renderer's leaf is no member), and Super+E lays it side by side again"
+
+# --- 2. Focus: the chords and the click ------------------------------------------
+key "meta_l+left"
+set f [focused "Super+Left"]
+if {$f ne $T} { lc_fail "Super+Left focused leaf $f, not the tour on the left (leaf $T)" }
+key "meta_l+right"
+set f [focused "Super+Right"]
+if {$f ne $S} { lc_fail "Super+Right focused leaf $f, not the shell on the right (leaf $S)" }
+blank_click $T "a click in the tour"
+set f [focused "a click in the tour"]
+if {$f ne $T} { lc_fail "a click in the tour's content focused leaf $f, not $T" }
+blank_click $S "a click in the shell"
+set f [focused "a click in the shell"]
+if {$f ne $S} { lc_fail "a click in the shell's content focused leaf $f, not $S" }
+lc_pass "manual(2): Super+Left and Super+Right move the focus between neighbours, and a click in a tile focuses it"
+
+# --- 3. The divider: a drag makes the pair unequal, a double-click evens it -------
+set th [header_of $T]; set sh [header_of $S]
+set dx [expr {([lindex $th 0] + [lindex $th 2] + [lindex $sh 0]) / 2}]
+set dy [expr {(34 + $H - 25) / 2}]
+set t0 [lindex [size_of $T] 0]; set s0 [lindex [size_of $S] 0]
+ptr_to $dx $dy
+ptr_op "btn left down"
+after 300
+ptr_to [expr {$dx - 160}] $dy
+after 300
+ptr_op "btn left up"
+after 1500
+set t1 [lindex [size_of $T] 0]; set s1 [lindex [size_of $S] 0]
+lc_step "columns before the drag: tour $t0, shell $s0; after: tour $t1, shell $s1"
+if {!($t1 < $t0 && $s1 > $s0)} { lc_fail "the drag did not move the divider (tour $t0 -> $t1, shell $s0 -> $s1)" }
+ptr_to [expr {$dx - 160}] $dy
+ptr_op "dblclick left"
+want {tapestryd: divider double-click pane [0-9]+ track 0 -> equal[\r\n]} "the double-click on the divider"
+after 1500
+set t2 [lindex [size_of $T] 0]; set s2 [lindex [size_of $S] 0]
+if {![near $t2 $t0 1] || ![near $s2 $s0 1]} { lc_fail "the double-click did not restore the even split (tour $t2 vs $t0, shell $s2 vs $s0)" }
+lc_pass "manual(3): a divider drag resizes the pair ($t0/$s0 -> $t1/$s1 columns) and a double-click restores the even split ($t2/$s2)"
+
+# --- 4. Splits: a row gains a pane, a pane halves, the working directory, E, the move --
+# The bar's context is `name · cwd · cmd`, and the cwd rides the NEXT prompt,
+# so it is read from a later command's finished paint: `true` names neither
+# directory, and its prompt has already brought the cd's cwd.
+drain
+cmd "cd /lib/halcyon"
+want $bar_ok "cd /lib/halcyon"
+drain
+cmd "true"
+set m [want {halcyond: status bar \d+ painted [^\r\n]*context "([^"]*)"[^\r\n]*exit 0 notice "[^"]*" running false} "the bar after the cd"]
+regexp {context "([^"]*)"} $m -> sctx
+if {![string match "*/lib/halcyon*" $sctx]} { lc_fail "control: after cd the split tile's bar reads \"$sctx\", not /lib/halcyon" }
+# The tour and the shell stand in a row of two, so Super+H adds a third pane
+# to the row: the new pane takes an equal share and BOTH others narrow (a
+# split that halved the shell's pane would leave the tour as it was). Widths
+# are the header strips' (exact pixels), rows the grids'. The divider drag and
+# double-click of leg 3 weighted the pair by their extents, the case where a
+# weight outside the division once shortchanged the newcomer.
+set tw0 [lindex [header_of $T] 2]; set sw0 [lindex [header_of $S] 2]
+set sr [lindex [size_of $S] 1]
+key "meta_l+h"
+lassign [spawned "Super+H"] H1 hc0 hr0 hcmd
+after 2500
+set tw1 [lindex [header_of $T] 2]; set sw1 [lindex [header_of $S] 2]; set hw [lindex [header_of $H1] 2]
+set hr [lindex [size_of $H1] 1]
+lc_step "Super+H: leaf $H1 ($hcmd) is $hw px wide with $hr rows; the tour $tw0 -> $tw1 px, the shell $sw0 -> $sw1 px ($sr rows)"
+if {!($tw1 < $tw0 && $sw1 < $sw0) || ![near $hr $sr 1]} { lc_fail "Super+H did not add a pane to the row (tour $tw0 -> $tw1 px, shell $sw0 -> $sw1 px, new $hw px with $hr rows against $sr)" }
+if {![near $hw $tw1 2] || ![near $hw $sw1 2]} { lc_fail "Super+H's new pane did not take an equal share of the row ($hw px beside $tw1 and $sw1)" }
+set f [focused "after Super+H"]
+lc_step "after Super+H the focus is on leaf $f"
+if {$f ne $H1} { key "meta_l+right"; set f [focused "the new tile"] }
+if {$f ne $H1} { lc_fail "could not focus the new tile $H1 (focus on $f)" }
+drain
+cmd "true"
+set m [want {halcyond: status bar \d+ painted [^\r\n]*context "([^"]*)"[^\r\n]*exit 0 notice "[^"]*" running false} "the bar after a command in the new tile"]
+regexp {context "([^"]*)"} $m -> ctx
+if {[string match "*/lib/halcyon*" $ctx] || ![string match "*~*" $ctx]} { lc_fail "the new tile's shell did not start in the home directory: its bar reads \"$ctx\" (the split tile's read \"$sctx\")" }
+# Three panes in a row leave no room at this width for a split side by side
+# inside one of them (two minimum widths), so the row goes back to two: a
+# shell with nothing running closes without asking.
+drain
+key "meta_l+shift+q"
+want "halcyond: tile $H1 (hung up|killed after the hangup grace)" "Super+Shift+Q closes the new tile" 15
+lc_pass "manual(4a): Super+H adds a pane to a row with an equal share ($hw px beside $tw1 and $sw1), its shell starting in the home directory (\"$ctx\"; the split tile was in \"$sctx\")"
+
+# The shell's pane stands in a row, not a column, so Super+V halves it, one
+# above the other, and the tour does not move.
+blank_click $S "focus the shell for Super+V"
+if {[set f [focused "the shell for Super+V"]] ne $S} { lc_fail "a click in leaf $S focused leaf $f" }
+set tw0 [lindex [header_of $T] 2]; set sh0 [header_of $S]
+set sr0 [lindex [size_of $S] 1]
+key "meta_l+v"
+lassign [spawned "Super+V"] V1 vc0 vr0 vcmd
+after 2500
+set tw1 [lindex [header_of $T] 2]; set vh [header_of $V1]; set sh1 [header_of $S]
+set vr [lindex [size_of $V1] 1]; set sr1 [lindex [size_of $S] 1]
+lc_step "Super+V: leaf $V1 at y [lindex $vh 1], [lindex $vh 2] px wide, $vr rows; the shell at y [lindex $sh1 1], [lindex $sh0 2] -> [lindex $sh1 2] px, $sr0 -> $sr1 rows; the tour $tw0 -> $tw1 px"
+if {!([lindex $vh 1] > [lindex $sh1 1]) || ![near [lindex $vh 2] [lindex $sh0 2] 2] || ![near [lindex $sh1 2] [lindex $sh0 2] 2] || $vr >= $sr0 || $sr1 >= $sr0 || $tw1 != $tw0} {
+    lc_fail "Super+V did not halve the shell's pane one above the other (new at y [lindex $vh 1], [lindex $vh 2] px, $vr rows; shell y [lindex $sh1 1], [lindex $sh1 2] px, $sr0 -> $sr1 rows; tour $tw0 -> $tw1 px)"
+}
+set f [focused "after Super+V"]
+if {$f eq $V1} {
+    key "meta_l+up"
+    if {[set f [focused "Super+Up"]] ne $S} { lc_fail "Super+Up focused $f, not the upper tile $S" }
+    key "meta_l+down"
+    if {[set f [focused "Super+Down"]] ne $V1} { lc_fail "Super+Down focused $f, not the lower tile $V1" }
+} else {
+    key "meta_l+down"
+    if {[set f [focused "Super+Down"]] ne $V1} { lc_fail "Super+Down focused $f, not the lower tile $V1" }
+    key "meta_l+up"
+    if {[set f [focused "Super+Up"]] ne $S} { lc_fail "Super+Up focused $f, not the upper tile $S" }
+    key "meta_l+down"
+    if {[set f [focused "back to the lower tile"]] ne $V1} { lc_fail "Super+Down focused $f, not the lower tile $V1" }
+}
+lc_pass "manual(4b): Super+V halves the shell's pane one above the other ($sr0 -> $sr1 and $vr rows; the tour stays $tw1 px), and Super+Up / Super+Down move the focus between the two"
+
+lassign [size_of $V1] vc0 vr0
+key "meta_l+e"
+after 1500
+lassign [size_of $V1] vc1 vr1
+lc_step "Super+E: leaf $V1 ${vc0}x$vr0 -> ${vc1}x$vr1"
+if {!($vr1 > $vr0 && $vc1 < $vc0)} { lc_fail "Super+E did not turn the split (leaf $V1 ${vc0}x$vr0 -> ${vc1}x$vr1)" }
+lc_pass "manual(4c): Super+E changes the split's orientation"
+
+set vx0 [lindex [header_of $V1] 0]; set sx0 [lindex [header_of $S] 0]
+if {$vx0 <= $sx0} { lc_fail "premise: after Super+E leaf $V1 (x $vx0) is not right of $S (x $sx0)" }
+key "meta_l+shift+left"
+after 1500
+set vx1 [lindex [header_of $V1] 0]; set sx1 [lindex [header_of $S] 0]
+if {!($vx1 < $sx1)} { lc_fail "Super+Shift+Left did not move leaf $V1 past $S (x $vx0 -> $vx1, $sx0 -> $sx1)" }
+set f [focused "after the move"]
+if {$f ne $V1} { lc_fail "the moved tile lost the focus to $f" }
+lc_pass "manual(4d): Super+Shift+Left moves the tile past its neighbour (x $vx0 -> $vx1), and it keeps the focus"
+
+# At the display's edge a move changes nothing -- in the tree as well as on
+# the screen: the hidden console leaf beside the tour is no neighbour, so the
+# next move the other way acts on its first press. A swap with that leaf would
+# change nothing on the screen and leave the first press right dead.
+key "meta_l+left"
+if {[set f [focused "the tour, left of the split"]] ne $T} { lc_fail "Super+Left from leaf $V1 focused $f, not the tour $T" }
+set tx0 [lindex [header_of $T] 0]
+key "meta_l+shift+left"
+after 1500
+set tx1 [lindex [header_of $T] 0]
+if {$tx1 != $tx0} { lc_fail "Super+Shift+Left at the display's edge moved the tour (x $tx0 -> $tx1)" }
+key "meta_l+shift+right"
+after 1500
+set tx2 [lindex [header_of $T] 0]; set vx2 [lindex [header_of $V1] 0]; set sx2 [lindex [header_of $S] 0]
+if {!($tx2 > $vx2 && $tx2 > $sx2)} { lc_fail "after a move at the edge, one Super+Shift+Right did not move the tour past the split (tour x $tx0 -> $tx2; $V1 at $vx2, $S at $sx2)" }
+key "meta_l+shift+left"
+after 1500
+set tx3 [lindex [header_of $T] 0]
+if {$tx3 != $tx0} { lc_fail "Super+Shift+Left did not bring the tour back (x $tx2 -> $tx3, first $tx0)" }
+if {[set f [focused "the tour after the moves"]] ne $T} { lc_fail "the moved tour lost the focus to $f" }
+lc_pass "manual(4e): at the display's edge Super+Shift+Left changes nothing, and one Super+Shift+Right then moves the tile (x $tx0 -> $tx2 -> $tx3)"
+
+# --- 5. The stack: Super+N, Tab, Shift+Tab, Shift+T, S, E ---------------------------
+# In the tour's pane, the row's widest: laid side by side, a stack of two
+# needs two minimum widths.
+lassign [size_of $T] pc pr
+drain
+key "meta_l+n"
+lassign [spawned "Super+N"] N1 nc nr ncmd
+lc_step "Super+N: leaf $N1 joins leaf $T's pane (${pc}x$pr)"
+set f [focused "after Super+N"]
+if {$f ne $N1} { lc_fail "the new stacked tile $N1 does not have the focus ($f)" }
+key "meta_l+tab"
+set f1 [focused "Super+Tab"]
+if {$f1 ne $T} { lc_fail "Super+Tab opened leaf $f1, not the stack's other tile $T" }
+key "meta_l+shift+tab"
+set f2 [focused "Super+Shift+Tab"]
+if {$f2 ne $N1} { lc_fail "Super+Shift+Tab opened leaf $f2, not $N1" }
+set a [header_of $T]; set b [header_of $N1]
+if {!([lindex $a 0] == [lindex $b 0] && [lindex $a 1] != [lindex $b 1])} { lc_fail "premise: Super+N's stack does not lay its headers in a column ($a / $b)" }
+# Super+Shift+T shows only the open tile, under a single header at the pane's
+# top row (HALCYON-INSTRUMENT 6.6: tabbed stays a legacy mode that renders its
+# active child alone -- the capture shows the one header); the other tile
+# stays in the stack, and Super+Tab still reaches it.
+set ty0 [lindex $a 1]
+# Thylacine's grep takes a LITERAL pattern (no regex engine); -w bounds it as
+# a whole word, so only an all-zero rect (`0 0 0 0`) matches -- a header's
+# width and height are never 0.
+drain
+cmd "grep -w '0 0 0 0' /dev/tapestry/pane/$T/tagbar"
+want {halcyond: status bar \d+ painted [^\r\n]*exit 1 notice "[^"]*" running false} "control: in the column of headers leaf $T has a header"
+drain
+key "meta_l+shift+t"
+want "halcyond: chrome \[0-9\]+ for pane $N1 at [lindex $a 0],$ty0 " "Super+Shift+T moves the open tile's header to the pane's top row" 10
+after 1000
+capture tabbed
+drain
+cmd "grep -w '0 0 0 0' /dev/tapestry/pane/$T/tagbar"
+want $bar_ok "while tabbed, leaf $T has no header (its tagbar is zero)"
+key "meta_l+tab"
+if {[set f [focused "Super+Tab in the single-header stack"]] ne $T} { lc_fail "Super+Tab opened leaf $f, not the stack's other tile $T" }
+key "meta_l+shift+tab"
+if {[set f [focused "Super+Shift+Tab in the single-header stack"]] ne $N1} { lc_fail "Super+Shift+Tab opened leaf $f, not $N1" }
+key "meta_l+s"
+after 1500
+set a [header_of $T]; set b [header_of $N1]
+capture stacked
+if {!([lindex $a 0] == [lindex $b 0] && [lindex $a 1] != [lindex $b 1])} { lc_fail "Super+S did not lay the headers in a column ($a / $b)" }
+# Super+E spreads the stack out: the headers stand in a row as tabs do, so the
+# open tile's width is what tells a split from tabs.
+lassign [size_of $N1] ncs nrs
+key "meta_l+e"
+after 1500
+lassign [size_of $N1] nce nre
+set a [header_of $T]; set b [header_of $N1]
+capture stack-spread
+if {!($nce < $ncs && [lindex $a 1] == [lindex $b 1] && [lindex $a 0] != [lindex $b 0])} { lc_fail "Super+E did not lay the stack out side by side (leaf $N1 $ncs -> $nce columns; headers $a / $b)" }
+lc_pass "manual(5): Super+N makes a stack of two; Super+Tab / Super+Shift+Tab walk it; Super+Shift+T shows only the open tile under one header (Super+Tab still reaches the other) and Super+S the column of headers again; Super+E lays it side by side ($ncs -> $nce columns)"
+
+# --- 6. Zoom -------------------------------------------------------------------------
+drain
+key "meta_l+f"
+want {tapestryd: session-tiling active=1 } "Super+F zooms one tile"
+drain
+key "meta_l+f"
+set m [want {tapestryd: session-tiling active=([2-9]|[1-9][0-9]+) } "Super+F again"]
+regexp {active=([0-9]+)} $m -> act
+if {$act < 3} { lc_fail "after Super+F again only $act tile(s) show" }
+lc_pass "manual(6): Super+F zooms the focused tile and Super+F again shows all $act"
+
+# --- 7. RESET asks first --------------------------------------------------------------
+set rz [rail_zones]
+lassign [centre [dict get $rz reset]] rx ry
+click $rx $ry
+want {halcyond: rail press Reset} "the press on RESET"
+want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for dialog reset} "the reset dialog"
+capture reset-dialog
+key "ret"
+want {halcyond: reset: [1-9][0-9]* verb\(s\)} "the reset after Enter plans its verbs"
+want {halcyond: status notice "LAYOUT RESET" \(action\)} "every verb of the reset landed"
+lc_pass "manual(7): RESET asks for confirmation, and Enter resets the layout"
+
+# --- 8. Close: the running-close dialog, Close tile; the protected final tile ----------
+blank_click $N1 "focus the tile to close"
+set f [focused "before the close"]
+if {$f ne $N1} { lc_fail "a click in leaf $N1 focused leaf $f" }
+drain
+type "sleep 60\n"
+want {halcyond: status bar \d+ painted [^\r\n]*running true} "sleep is RUNNING"
+key "meta_l+shift+q"
+want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for dialog close} "the running-close dialog"
+capture close-dialog
+key "right"
+key "ret"
+# The running command holds the terminal open after the shell is killed, so
+# the compositor kills the terminal after its 2 s grace (the manual's words).
+# A hang-up inside the grace would mean nothing held it: not the chain the
+# manual describes.
+expect {
+    -timeout 15
+    -re "halcyond: tile $N1 killed after the hangup grace" {}
+    -re "halcyond: tile $N1 hung up" { lc_fail "leaf $N1 hung up inside the grace: the running command did not hold its terminal" }
+    -re {EXTINCTION:} { lc_extinction_fail "closing leaf $N1" }
+    timeout { lc_fail "Close tile did not end leaf $N1 within 15 s" }
+    eof { lc_fail "EOF closing leaf $N1" }
+}
+after 1500
+focused "after the close"
+# The ended command stays a ZOMBIE row until joey reaps it after the session,
+# so only a LIVE sleep counts. The positive twin is 8c's control: the same
+# pipeline finds a live sleep.
+drain
+cmd "ps | grep sleep | grep ALIVE"
+want {halcyond: status bar \d+ painted [^\r\n]*exit 1 notice "[^"]*" running false} "no live sleep outlives its closed tile" 15
+lc_pass "manual(8a): Super+Shift+Q over a running command asks first; Close tile closes the tile, the compositor kills the terminal the command held after the grace, and the command has ended"
+
+# With the stacked tile closed the tour's pane holds one tile again: its x is refused.
+set th [header_of $T]
+click [expr {[lindex $th 0] + [lindex $th 2] - 9}] [expr {[lindex $th 1] + [lindex $th 3] / 2}]
+want "halcyond: final tile is protected \\(pane $T\\)" "the x on a stack's last tile"
+want {halcyond: status notice "FINAL TILE IS PROTECTED" \(refusal\)} "the refusal on the bottom rail" 10
+lc_pass "manual(8b): the header's x refuses a stack's last tile, reported as FINAL TILE IS PROTECTED"
+
+# A job started in the background is no part of the close: it outlives its
+# tile. The control is the same check finding the job before the close.
+blank_click $S "focus the shell for the background job"
+if {[set f [focused "the background job's tile"]] ne $S} { lc_fail "a click in leaf $S focused leaf $f" }
+drain
+cmd "sleep 45 &"
+want $bar_ok "a background sleep starts"
+drain
+cmd "ps | grep sleep | grep ALIVE"
+want {halcyond: status bar \d+ painted [^\r\n]*exit 0 notice "[^"]*" running false} "control: the check finds the live background sleep" 15
+key "meta_l+shift+q"
+# The background job holds the terminal on its output, so the grace kill is
+# the expected end; either end closes the tile, and which one is recorded.
+expect {
+    -timeout 15
+    -re {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for dialog close} { lc_fail "a background job alone made the close ask" }
+    -re "halcyond: tile $S (killed after the hangup grace|hung up)" { lc_step "leaf $S: $expect_out(1,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "closing leaf $S" }
+    timeout { lc_fail "Super+Shift+Q did not end leaf $S within 15 s" }
+    eof { lc_fail "EOF closing leaf $S" }
+}
+after 1500
+focused "after closing the background job's tile"
+drain
+cmd "ps | grep sleep | grep ALIVE"
+want {halcyond: status bar \d+ painted [^\r\n]*exit 0 notice "[^"]*" running false} "the background sleep outlives its closed tile" 15
+lc_pass "manual(8c): a background job keeps running after its tile closes (and a shell with only a background job closes without asking)"
+
+# --- 9. Workspaces ---------------------------------------------------------------------
+set since [transcript_mark]
+key "meta_l+2"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,2 active0 1} "Super+2 created workspace 2"
+after 1500
+capture workspace2-empty
+set W2 [open_shell "workspace 2" $since]
+drain
+key "meta_l+shift+1"
+never {halcyond: status bar \d+ painted [^\r\n]*workspaces 1 active0 0} "Super+Shift+1 must keep the display on workspace 2"
+key "meta_l+1"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1 active0 0} "Super+1 returned and the empty workspace 2 vanished"
+set f [focused "the moved tile on workspace 1"]
+lc_step "on workspace 1 the focus is on leaf $f (the moved tile is $W2)"
+drain
+type "halcyon workspace 3\n"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,3 active0 1} "halcyon workspace 3"
+key "meta_l+1"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1 active0 0} "workspace 3 vanished on leaving it"
+lc_pass "manual(9a): Super+2 creates a workspace with an empty pane whose Open shell starts a shell; Super+Shift+1 moves the tile; an empty workspace vanishes when left; halcyon workspace 3 switches from a shell"
+
+drain
+type "sleep 4\n"
+want {halcyond: status bar \d+ painted [^\r\n]*running true} "sleep 4 is RUNNING"
+key "meta_l+2"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,2 active0 1} "switched away while sleep runs"
+after 6000
+drain
+key "meta_l+1"
+# Bounded well under the command's own 4 s: a command paused while hidden
+# would still be running when its workspace came back.
+want $bar_ok "the command finished while hidden" 3
+lc_pass "manual(9b): a command keeps running while its workspace is hidden"
+
+# --- 10. Normal mode ---------------------------------------------------------------------
+key "meta_l+f"
+drain
+cmd "seq 1 300"
+want $bar_ok "seq 1 300"
+after 1000
+key "esc"
+want {halcyond: session tile leaf=[0-9]+ normal mode \([0-9]+ rows\)} "Normal mode"
+snap normal-entered
+after 600
+snap normal-entered2
+after 600
+snap normal-entered3
+if {[band normal-entered normal-entered2] ne "same" || [band normal-entered normal-entered3] ne "same"} {
+    lc_fail "control: with no key pressed the compared band changed between captures -- it does not exclude an animation"
+}
+# Capture names differ in more than case: this host's filesystem ignores case,
+# so `normal-G` would overwrite `normal-g` and compare a capture with itself.
+type "g"
+snap normal-top
+type "G"
+snap normal-bottom
+type "kkkkkkkkkk"
+snap normal-k10
+# The cursor now stands inside the band: a blinking one would satisfy the
+# comparisons below by itself.
+after 600
+snap normal-k10b
+if {[band normal-k10 normal-k10b] ne "same"} {
+    lc_fail "control: with no key pressed the band changed with the cursor inside it -- the cursor blinks"
+}
+type "v"
+type "kkk"
+snap normal-select
+type "y"
+snap normal-yanked
+type "p"
+want {halcyond: session tile leaf=[0-9]+ insert mode} "p returns to typing"
+foreach {a b} {normal-entered normal-top normal-top normal-bottom normal-bottom normal-k10 normal-k10 normal-select normal-select normal-yanked} {
+    if {[band $a $b] ne "differ"} { lc_fail "Normal mode: the view did not change between $a and $b" }
+}
+lc_pass "manual(10a): Normal mode's g, G, k, v and y each change the view (the band is steady with no key), and p returns to typing"
+
+# The control first: Escape on the ordinary screen opens Normal mode (above, and
+# the probes). Then a full-screen program, which owns Escape.
+drain
+type "prowl\n"
+want {halcyond: session tile leaf=[0-9]+ screenmode -> AltScreen} "prowl takes the alternate screen"
+after 1000
+key "esc"
+never {halcyond: session tile leaf=[0-9]+ normal mode} "Escape in a full-screen program"
+want {halcyond: session tile leaf=[0-9]+ screenmode -> Normal} "prowl left on Escape (its own quit key)" 10
+key "meta_l+f"
+lc_pass "manual(10b): a full-screen program receives Escape itself; Normal mode does not open"
+
+# --- 11. Objects: w / b / Enter, Escape, a click; Super+K ------------------------------------
+key "meta_l+f"
+drain
+type "ls /lib/halcyon\n"
+set m [want {halcyond: session tile leaf=([0-9]+) presents objs \([0-9]+\)} "ls presents objects"]
+regexp {leaf=([0-9]+) presents} $m -> L
+after 1000
+key "esc"
+want "halcyond: session tile leaf=$L normal mode" "Normal mode for the objects"
+type "b"
+want "halcyond: session tile leaf=$L run -> row \[0-9\]+ obj \[0-9\]+" "b selects an object"
+type "w"
+want "halcyond: session tile leaf=$L (run -> row \[0-9\]+ obj \[0-9\]+|no run forward)" "w steps"
+type "b"
+want "halcyond: session tile leaf=$L run -> row \[0-9\]+ obj \[0-9\]+" "b selects an object again"
+key "ret"
+set m [want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for path (/lib/halcyon[^ ]*) run at ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)} "Enter opens the object's menu"]
+regexp {for path (/lib/halcyon[^ ]*) run at ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)} $m -> P rx ry rw rh
+capture object-menu
+drain
+key "esc"
+never {halcyond: menu ran:} "Escape on the menu"
+# Still in Normal mode, with the view the menu was placed from.
+click [expr {$rx + $rw / 2}] [expr {$ry + $rh / 2}]
+want "halcyond: tile $L click -> menu" "a click on the object"
+want "halcyond: menu \[0-9\]+ placed at \[0-9\]+ \[0-9\]+ \\(\[0-9\]+x\[0-9\]+\\) for path [rx_quote $P] run at" "the click opens the same object's menu"
+key "ret"
+want_ex "halcyond: menu ran: ls -l -- '$P'" "the first command runs on exactly that object"
+want "halcyond: session tile leaf=$L insert mode" "a chosen command returns the tile to typing"
+lc_pass "manual(11a): w / b step between objects, Enter opens the object's menu, Escape runs nothing, and a click opens the same menu, whose ls runs on $P"
+
+drain
+key "meta_l+k"
+want {tapestryd: chord history -> rail owner} "Super+K reaches the rail's owner"
+want "halcyond: session tile leaf=$L history forgotten" "Super+K forgets the focused tile's history"
+key "esc"
+want "halcyond: session tile leaf=$L history 0 rows" "no history rows after Super+K"
+type "i"
+want "halcyond: session tile leaf=$L insert mode" "back to typing after Super+K"
+lc_pass "manual(11b): Super+K deletes the focused tile's history"
+
+# --- 12. The sections themselves -------------------------------------------------------------
+proc show_section {name pages} {
+    global bar_ok L
+    type "clear\n"
+    after 1000
+    drain
+    key "meta_l+k"
+    want "halcyond: session tile leaf=$L history forgotten" "Super+K before `manual $name`"
+    drain
+    cmd "manual $name"
+    want $bar_ok "manual $name exits 0" 20
+    after 1000
+    key "esc"
+    want "halcyond: session tile leaf=$L normal mode" "Normal mode over `manual $name`"
+    type "g"
+    capture "section-$name-01"
+    for {set p 2} {$p <= $pages} {incr p} {
+        type "dd"
+        capture [format "section-%s-%02d" $name $p]
+    }
+    type "i"
+    want "halcyond: session tile leaf=$L insert mode" "back to typing after `manual $name`"
+}
+drain
+cmd "manual"
+want $bar_ok "manual (the contents) exits 0" 20
+capture section-contents
+show_section halcyon 12
+show_section lantern 7
+key "meta_l+f"
+lc_pass "manual(12): `manual`, `manual halcyon` and `manual lantern` exit 0 in a tile (captures: section-*)"
+
+# --- 13. The key reference ---------------------------------------------------------------
+set rz [rail_zones]
+lassign [centre [dict get $rz help]] hx hy
+click $hx $hy
+want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for help [0-9]+ rows} "the rail's ? opens the reference"
+capture help
+key "ret"
+want {halcyond: help closed} "Enter closes the reference"
+drain
+key "meta_l+slash"
+want {tapestryd: chord help -> rail owner} "Super+/ reaches the rail's owner"
+want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for help [0-9]+ rows} "Super+/ opens the reference"
+key "spc"
+want {halcyond: help closed} "Space closes the reference"
+lc_pass "manual(13): the rail's ? and Super+/ open the key reference; Enter and Space close it"
+
+# --- 14. The picker: Escape changes nothing; Enter applies and saves ----------------------
+drain
+key "meta_l+t"
+want {tapestryd: chord picker -> rail owner} "Super+T reaches the rail's owner"
+want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for picker } "Super+T opens the picker"
+capture picker
+key "down"
+key "esc"
+never {halcyond: theme [^\r\n]* applied} "Escape in the picker" 4
+key "meta_l+t"
+want {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for picker } "Super+T opens the picker again"
+key "down"
+key "ret"
+set m [want {halcyond: theme (\S+) applied} "Enter in the picker (the control)"]
+regexp {theme (\S+) applied} $m -> theme
+want_ex "halcyond: theme $theme written" "the picked theme is saved"
+set m [want {halcyond: status notice "THEME [^ ]+ ([^"]*)" \(action\)} "the saved theme's notice"]
+regexp {notice "THEME [^ ]+ ([^"]*)"} $m -> tname
+lc_pass "manual(14): Escape closes the theme picker without applying a theme; Enter applies $theme and saves it"
+
+# --- 15. Scale --------------------------------------------------------------------------------
+# The measured scale is tapestryd's boot line; the leg steps away from
+# whichever limit it sits at, and tries that limit's key when it sits on one.
+drain
+if {[catch {exec grep -a -E {tapestryd: scale [0-9]+ \((declared|edid)\)} $transcript} found]} { lc_fail "no measured-scale line at boot" }
+regexp {scale ([0-9]+) \(} [lindex [split $found "\n"] end] -> s0
+if {$s0 < 200} {
+    set away equal; set back minus; set s1 [expr {$s0 + 25}]; set edge minus; set edgeat 100
+} else {
+    set away minus; set back equal; set s1 [expr {$s0 - 25}]; set edge equal; set edgeat 200
+}
+key "meta_l+$away"
+want "tapestryd: scale $s0 -> $s1 \\(chord\\)" "Super+$away from the measured $s0"
+key "meta_l+$back"
+want "tapestryd: scale $s1 -> $s0 \\(chord\\)" "Super+$back back to $s0"
+key "meta_l+$away"
+want "tapestryd: scale $s0 -> $s1 \\(chord\\)" "Super+$away again"
+key "meta_l+0"
+want "tapestryd: scale $s1 -> $s0 \\(chord-reset\\)" "Super+0 restores the measured $s0"
+if {$s0 == $edgeat} {
+    # The control: the same key stepped the scale from $s1 above.
+    key "meta_l+$edge"
+    never {tapestryd: scale [0-9]+ -> } "Super+$edge at $s0 percent"
+    lc_step "at $s0 percent Super+$edge changes nothing"
+} else {
+    lc_step "the measured scale is $s0: neither limit is exercised"
+}
+lc_pass "manual(15): the scale steps by 25 percent ($s0 <-> $s1); Super+0 restores the measured $s0"
+
+# --- 16. Layouts, on a workspace of their own ------------------------------------------------
+set since [transcript_mark]
+key "meta_l+3"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,3 active0 1} "Super+3 created workspace 3"
+set W3 [open_shell "workspace 3" $since]
+drain
+cmd "halcyon layout save manualtest"
+want $bar_ok "halcyon layout save manualtest" 15
+drain
+type "halcyon layout restore manualtest\n"
+lassign [spawned "halcyon layout restore manualtest"] R3 rc rr rcmd
+lc_step "the restore built leaf $R3 ${rc}x$rr ($rcmd) beside leaf $W3"
+# The same one-leaf layout restored onto a NEW workspace, in one typed line:
+# `halcyon workspace 4` makes workspace 4, whose root is a fresh pane, and the
+# restore builds there. Its tile must start with no Open shell pressed -- the
+# pane the restore leaves is one it asked for; the restore above, onto the
+# workspace the layout was saved from, is the control. The bar and the spawn
+# may be said in either order.
+drain
+type "halcyon workspace 4; halcyon layout restore manualtest\n"
+set r4_bar 0
+set R4 ""
+set timeout 40
+while {!$r4_bar || $R4 eq ""} {
+    expect {
+        -re {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,3,4 active0 2} { set r4_bar 1 }
+        -re {halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ } { set R4 $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "the restore onto workspace 4" }
+        timeout { lc_fail "the restore onto workspace 4: bar $r4_bar, tile '$R4' (the restored pane left waiting?)" }
+        eof { lc_fail "EOF during the restore onto workspace 4" }
+    }
+}
+lc_step "the restore onto the new workspace 4 started leaf $R4 unasked"
+drain
+key "meta_l+shift+q"
+want {tapestryd: pane [0-9]+ kept as the empty pane [0-9]+} "workspace 4's only tile closes and its pane stays"
+key "meta_l+3"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,3 active0 1} "workspace 4, its pane empty, vanished on leaving it"
+drain
+type "halcyon layout list\n"
+want {halcyond: session tile leaf=[0-9]+ presents objs \([0-9]+\)} "halcyon layout list presents layout objects"
+capture layout-list
+drain
+cmd "halcyon layout delete manualtest"
+want $bar_ok "halcyon layout delete manualtest" 15
+drain
+cmd "halcyon layout list"
+want $bar_ok "halcyon layout list after the delete" 15
+capture layout-deleted
+drain
+key "meta_l+shift+q"
+want {halcyond: tile [0-9]+ hung up} "the first of workspace 3's tiles closes"
+key "meta_l+shift+q"
+want {halcyond: tile [0-9]+ hung up} "the second of workspace 3's tiles closes"
+key "meta_l+1"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1 active0 0} "workspace 3, emptied, vanished on leaving it"
+lc_pass "manual(16): halcyon layout save, restore (leaf $R3; onto a new workspace in one line, leaf $R4), list and delete (captures: layout-list, layout-deleted)"
+
+# --- 17. Log out; halcyon.rc, the profile and the theme at the next login ---------------------
+drain
+cmd "mkdir -p ~/lib/halcyon"
+want $bar_ok "mkdir -p ~/lib/halcyon"
+drain
+cmd "echo legacy > ~/lib/halcyon/profile"
+want $bar_ok "echo legacy > ~/lib/halcyon/profile"
+drain
+cmd "touch ~/lib/halcyon.rc"
+want $bar_ok "touch ~/lib/halcyon.rc"
+# Super+N on an empty pane opens the shell IN it: one shell, no split.
+drain
+key "meta_l+2"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,2 active0 1} "Super+2 for the last legs"
+after 1500
+key "meta_l+n"
+want {tapestryd: chord new-tile asks for the empty pane [0-9]+} "Super+N on workspace 2's empty pane"
+lassign [spawned "Super+N on the empty pane"] X xc xr xcmd
+never {halcyond: session tile leaf=[0-9]+ spawned} "Super+N on an empty pane starts ONE shell (the spawn above is the control)" 4
+lc_pass "manual(17a): Super+N on an empty pane opens a shell in it (leaf $X ${xc}x$xr), one shell"
+
+# Closing workspace 1's tiles while workspace 2 holds one: the last close keeps
+# workspace 1's pane, empty, and the session goes on. The keys go to that
+# pane -- nowhere -- never to the console renderer hidden behind it, and its
+# Open shell starts a shell there.
+key "meta_l+1"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,2 active0 0} "back to workspace 1"
+set closes 0
+set kept ""
+while {$kept eq "" && $closes < 25} {
+    incr closes
+    set since [transcript_mark]
+    key "meta_l+shift+q"
+    expect {
+        -timeout 3
+        -re {tapestryd: pane [0-9]+ kept as the empty pane ([0-9]+)} { set kept $expect_out(1,string) }
+        -re {halcyond: session logout \(code [0-9]+\)} { lc_fail "closing workspace 1's tiles logged out while workspace 2 holds leaf $X" }
+        -re {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for dialog close} { key "right"; key "ret"; exp_continue }
+        -re {EXTINCTION:} { lc_extinction_fail "closing workspace 1's tiles" }
+        timeout {}
+        eof { lc_fail "EOF closing workspace 1's tiles" }
+    }
+}
+if {$kept eq ""} { lc_fail "workspace 1's last close kept no pane ($closes closes)" }
+after 1500
+capture workspace1-kept
+drain
+type "q"
+want {tapestryd: key [0-9]+ dropped \(no focused surface\)} "a key on workspace 1's kept pane goes to no surface"
+set Y [open_shell "workspace 1's kept pane" $since]
+lc_pass "manual(17b): workspace 1's last tile closes to an empty pane (pane $kept, $closes closes) while workspace 2 holds a tile; its keys reach no hidden renderer, and Open shell starts leaf $Y there"
+
+# The logout from ANOTHER workspace: Y moves to workspace 2 (workspace 1 keeps
+# its pane), and closing every tile there ends the session. The display must
+# return to the login prompt, and the prompt must take the keys: the user
+# name is typed through the display's keyboard, not the serial line.
+drain
+key "meta_l+shift+2"
+want {tapestryd: workspace move keeps the empty pane [0-9]+} "Super+Shift+2 moves workspace 1's only tile and keeps its pane"
+key "meta_l+2"
+want {halcyond: status bar \d+ painted [^\r\n]*workspaces 1,2 active0 1} "to workspace 2, holding both tiles"
+set closes 0
+set out 0
+while {!$out && $closes < 10} {
+    incr closes
+    key "meta_l+shift+q"
+    expect {
+        -timeout 3
+        -re {halcyond: session logout \(code ([0-9]+)\)} { set out 1 }
+        -re {halcyond: menu [0-9]+ placed at [0-9]+ [0-9]+ \([0-9]+x[0-9]+\) for dialog close} { key "right"; key "ret" }
+        -re {EXTINCTION:} { lc_extinction_fail "logging out" }
+        timeout {}
+        eof { lc_fail "EOF logging out" }
+    }
+}
+if {!$out} { lc_fail "closing workspace 2's tiles did not log out ($closes closes)" }
+set timeout 60
+expect {
+    -ex "Thylacine login: " {}
+    timeout { lc_fail "no login prompt after the logout" }
+    eof { lc_fail "EOF after the logout" }
+}
+after 2000
+type "michael\n"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "the login prompt did not take the name typed on the display's keyboard" }
+    eof { lc_fail "EOF at the second login" }
+}
+lc_pass "manual(17c): closing every tile of workspace 2 ($closes closes) logs out; the display returns to workspace 1 and its login prompt takes the keys"
+type "correct-horse-battery-staple-v1\n"
+set m [want {halcyond: theme ([^(\r\n]+) \([^\r\n]*; profile legacy \(} "the second session reads ~/lib/halcyon/profile" 60]
+regexp {theme ([^(\r\n]+) \(} $m -> theme2
+set theme2 [string trim $theme2]
+if {[string toupper $theme2] ne $tname} { lc_fail "the second session starts with theme \"$theme2\", not the picker's \"$tname\" ($theme)" }
+want {halcyond: session init: [^\r\n]*halcyon.rc} "the second session runs ~/lib/halcyon.rc" 60
+want {halcyond: session init exited \(code 0\)} "the empty halcyon.rc exits" 60
+never {halcyon welcome} "the tour, with an empty halcyon.rc" 5
+lc_pass "manual(17d): the next session reads ~/lib/halcyon/profile (legacy), starts with the saved theme ($theme), and runs the empty ~/lib/halcyon.rc instead of the tour"
+drain
+key "meta_l+slash"
+want {tapestryd: chord help: no rail} "Super+/ under legacy"
+key "meta_l+t"
+want {tapestryd: chord picker: no rail} "Super+T under legacy"
+key "meta_l+k"
+want {tapestryd: chord history: no rail} "Super+K under legacy"
+lc_pass "manual(17e): under the legacy profile the reference, the picker and Super+K are dropped (no rail)"
+type "exit\n"
+want {halcyond: session tile leaf=[0-9]+ exited \(code 0\) -- closing} "exit under legacy closes the tile"
+want {halcyond: session logout \(code 0\)} "the last tile's close logs out"
+lc_pass "manual(17f): under legacy a shell that exits 0 closes its tile, and the last tile's close logs out"
+
+lc_quit
+lc_pass "LS-CI ls-halcyon-manual: the Operator's Manual's Halcyon tasks hold on the default image; captures at build/manual-halcyon-*.png"
+exit 0

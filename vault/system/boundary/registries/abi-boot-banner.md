@@ -38,6 +38,7 @@ mirrors:
   - "tools/interactive/lantern.exp (EXTINCTION: only — the deck presenter's gate)"
   - "tools/interactive/ls-halcyon-lantern.exp (EXTINCTION: only — the deck presenter in a Halcyon tile)"
   - "tools/interactive/ls-halcyon-lantern-haul.exp (EXTINCTION: only — the deck presenter on a Haul mount in a Halcyon tile)"
+  - "tools/interactive/ls-halcyon-manual.exp (EXTINCTION: only — the Operator's Manual's Halcyon tasks on the default image)"
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"

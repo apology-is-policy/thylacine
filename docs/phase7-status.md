@@ -614,6 +614,66 @@ step's skip removed (leg 8 at `cut short (1 paint(s) held)`); green, all eight l
 Default image: `tools/test.sh` 1740/1740 (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 28 crates, 2105
 tests, 0 failing. No kernel change, so no sanitizer run or spec is owed.
 
+## The Operator's Manual: Halcyon and lantern — 2026-09-29
+
+The Operator's Manual had no section for Halcyon, although the default image's login starts it, and none for lantern.
+Operator vote 4 of 2026-09-28: the Halcyon chapter and the lantern section now, as a chunk of their own, before the next
+feature; later Halcyon changes then keep them current (the binding manual rule). Six commits: five compositor fixes the
+device scenario found, each its own commit, then the manual itself.
+
+- **`docs/manual/10-halcyon.md`** (`halcyon`): logging in and out, tiles and panes, the focus, splits and their limits,
+  stacks, zoom, dividers, RESET, closing a tile (the dialog, the protected final tile), workspaces (the empty pane and
+  its Open shell, the kept pane), Normal mode and the history, objects and their menus, `clear` and Super+K, the key
+  reference, the theme picker and the scale, layouts, the chord and Normal-mode tables, the files. Technical Details:
+  the processes, key routing and what the rail delivers, rich text beside the terminal view, the history and the view,
+  what closing a tile does to its program, workspaces, profiles.
+- **`docs/manual/11-lantern.md`** (`lantern`): presenting, presenting to a room, writing and checking a deck, a deck
+  from another machine over Haul (in a Halcyon tile), printing, the keys, the command reference, the manifest.
+  Technical Details: the output forms, clearing, one slide per frame, keyboard input, checking and memory.
+- `01-manual.md`: in a Halcyon tile the reader's output scrolls back through Normal mode (it named a wheel scroll that
+  session tiles do not have). `OPERATORS-MANUAL.md`: the two rows and a revision row.
+- **The device scenario** `tools/interactive/ls-halcyon-manual.exp` (default image; SKIP 77 on `--config ci` or a
+  `legacy` bake): 18 steps in the section's order (1, 1b, 2-17, with sub-legs), asserted from the compositor's
+  test-mode lines, the captures kept at `build/manual-halcyon-*.png` for the claims only a look can read. Declared in
+  the vault's `abi-boot-banner` mirrors.
+- **The compositor fixes it found** (halcyon-status row for the five hashes):
+  - `c7b5293f` a backgrounded leaf (the console renderer's, in a session's root row) is transparent to a newcomer's
+    share, a move, a stack's header numbers and RESET -- KT-1.5d-3 F2's rule reaching four ops it had missed; an empty
+    tab among several keeps its header row.
+  - `f0038768` halcyond's test-mode chrome line says a header's resize; `halcyon`'s help writes `~/`, which ut expands.
+  - `4fd4cb65` a session's workspaces are the session's: the owner stamp, fresh panes that wait to be asked, the kept
+    last pane, the departure (the login prompt shows wherever the session ended), the takeover re-stamp.
+  - `bc3a04b7` a session tile draws its whole `v` selection, as the console renderer does.
+  - `1d3b5f5c` a session's layout notice (TEV_LAYOUT) is no longer lost with the surface that carried it (the ring
+    reports it whichever surface carries it; tapestryd re-sends one a retired surface still held). Pre-existing, I-9's
+    class.
+- **What the code refuted in the first draft** (before any review): plain output is a fixed-width terminal view, not
+  proportional; click-to-focus exists; `$HOME` is not a ut variable, so the section writes `~/`; Super+S and
+  Super+Shift+T act on the focused tile's parent and refuse a nested container; Super+E also spreads out a stack; the
+  key reference omits the workspace chords; "no program can delete the history" holds for the delete path only.
+- **What the device refuted in the second draft**: Super+H in a row adds a pane to the row (the others narrow in
+  proportion) rather than halving the focused pane; at 1280 px a row of three leaves no room to split one of them side
+  by side; Instrument's tabbed mode shows the open tile alone under one header.
+- **Defects enqueued** (OPEN-BUGS, all owned): the key reference omits the workspace chords although help.rs calls it
+  the whole vocabulary; a split's new shell starts in the home directory although HALCYON-INSTRUMENT 9.5 promises the
+  source tile's; a background job outlives its tile's close; a refused arrangement chord gives no status message
+  although HALCYON-INSTRUMENT 5.2 promises one; tapestryd's `ptr_hit` comment still says there is no click-to-focus.
+
+Audit, Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end in every round. The text and the scenario
+(accuracy reviews, each claim prosecuted against the code): r1 4 P1 / 7 P2 / 11 P3; r2 1 P0 (a scenario leg waiting
+for a line the code never says there) / 1 P1 / 1 P2 / 3 P3, dirty, so r3. The code: the tapestryd fix's own round
+0 / 0 / 1 P2 / 2 P3 (the P2: the class in halcyond); r3 (WIP 4-10, text and code) 0 / 0 / 1 / 8; r4 (the workspace
+owner) 0 / 2 P1 / 1 P2 / 3 P3, structural fixes, so r5; r5 (the round-4 fixes, the selection bands, the layout
+notice) 0 / 0 / 0 / 2 P3 -> clean. Every finding addressed. Closed list: memory `audit_manual_chunk_closed_list.md`.
+
+Verification: `manual-check docs/manual` 10 sections pass. Host (`tools/test-rust.sh`): tapestryd 112, halcyond 427,
+libtapestry 11, halcyon 26 at the final commit, each intermediate commit checked (guest build + host tests); the full
+run 29 crates, 2141 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item). Device (default image): 15 runs of `ls-halcyon-manual`; the reds were scenario defects, one
+host-filesystem trap (two capture names differing only in case are one file on macOS), and the five defects above,
+each fixed at its cause; bake 13 (the final code) passed it whole in 632 s, with `ls-halcyon-session-instrument`,
+`ls-halcyon-lantern` and `ls-halcyon-lantern-haul`. `tools/test.sh` 1750/1750 (boot banner, L-6c and D-5 PASS). No kernel change, so no sanitizer run or
+spec is owed.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

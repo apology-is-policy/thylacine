@@ -35,6 +35,8 @@ The integration image installs these checked sections:
 | Name | Subject |
 |---|---|
 | `manual` | Reading the manual and choosing output format |
+| `halcyon` | The graphical session: tiles, chords, workspaces, Normal mode and history |
+| `lantern` | Presenting a deck of slides |
 | `processes` | Processes, memory figures and the prowl display |
 | `remote-files` | Haul, network mounts and service posting |
 | `view` | Inline images and textual fallback |
@@ -74,3 +76,4 @@ A section is added when the facility it describes has settled, so sections appea
 | 2026-09-16 | `docs/MANUAL-DESIGN.md` adopted (source format, the `manual` reader, installation); the three earlier pages moved to `docs/manual-drafts/`. | Operator sign-off: nothing is installed until it is written to the guide. |
 | 2026-09-16 | The first sections and their writing order set, starting with Utopia; Containers remains a section of its own. | Operator decision. |
 | 2026-09-23 | `13-processes.md` (Processes and memory) added: the process list, `ps`, `prowl` with its memory view, `/proc/<pid>/status` and `/ctl/memory`; the `imperium` row added to the sections table, which had lacked it since `18-imperium.md` landed. | The prowl-6 sub-chunk (the B-1a' capacity figures reach the manual); index currency. |
+| 2026-09-28 | `10-halcyon.md` (Halcyon) and `11-lantern.md` (Presentations with Lantern) added, with the device scenario `ls-halcyon-manual`, which performs the Halcyon section's tasks on the default image. | Operator vote (2026-09-28): the Halcyon chapter and the lantern section as a chunk of their own, before the next feature. |
