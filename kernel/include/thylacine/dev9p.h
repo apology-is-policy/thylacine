@@ -59,6 +59,7 @@ struct Dev;
 struct poll_waiter;
 struct dev9p_poll_state;   // net-6b-2b: lazily-allocated per-Spoor poll state (dev9p_poll.c)
 struct weft_binding;       // Weft-6a-2: lazily-bound per-flow ring share (weft.c)
+struct Path;               // the session root's origin name (path.h)
 
 // Device character for dev9p — '9'. Distinct from all kernel-Dev
 // characters (-, c, 0, z, r, p, C, m).
@@ -120,6 +121,14 @@ struct dev9p_priv {
     // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
     // owner contributes one p9_attached_ref; dev9p_close drops it.
     struct p9_attached       *attached_owner;
+    // The file this session came over (operator vote 2026-09-28; ARCH 9.6.9),
+    // on the session ROOT alone: stamped by dev9p_stamp_origin from the attach
+    // handler before the root is published, never changed after. origin holds a
+    // ref on that file's name; origin_dc is its device char when it has none (a
+    // pipe). Display only (I-33) -- territory_format_ns is the one reader. A
+    // walk gives its result a fresh priv, so no walked Spoor carries one.
+    struct Path              *origin;
+    char                      origin_dc;
     // net-6b-2b: lazily-allocated poll state for a QTPOLL (netd `ready`) Spoor;
     // NULL for every regular dev9p file (the common path). Allocated by the first
     // readiness ARM of a readiness file (dev9p_poll_arm; a snapshot needs none).
@@ -273,6 +282,19 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
 // client alive. False for anything that is not a dev9p Spoor with a valid priv.
 // Its one caller is territory_format_ns: the declaration is display only.
 bool dev9p_spoor_remote(struct Spoor *c);
+
+// Name a session ROOT by the file its session came over (operator vote
+// 2026-09-28): `transport`'s namespace name, else its device char. The attach
+// handlers call it between minting the root and publishing it (I-33's
+// set-before-publish). Only an unstamped root takes it -- a walked or
+// cached-open priv is left alone -- and it cannot fail: the name is shared by
+// reference, never copied.
+void dev9p_stamp_origin(struct Spoor *root, const struct Spoor *transport);
+
+// The name dev9p_stamp_origin gave a session root: true with *name (borrowed;
+// alive while the caller holds `c`), or with *name NULL and *dc the file's
+// device char. False for anything else. Its one caller is territory_format_ns.
+bool dev9p_spoor_origin(struct Spoor *c, const struct Path **name, char *dc);
 
 // #99: the create errno accessor for sys_walk_create_handler. Returns the errno
 // dev9p_create recorded for the last create failure on this Spoor -- clamped to

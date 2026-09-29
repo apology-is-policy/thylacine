@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -764,3 +764,12 @@ session, in the cape's shape (HAUL-DESIGN 4.8,
 - Callers: Haul, on both paths ([[sub-haul]]), and `/attach-probe`, whose
   real attach now passes CAPE|REMOTE. Its unknown-bit probe moved from 0x4,
   now admitted, to 0x8. Every other in-tree `t_attach_9p` caller passes 0.
+
+The origin (2026-09-29, operator vote 1 of 09-28,
+[[dec-2026-09-28-ns-session-root-names]]): both attach calls name the root
+they mint by the file its session came over, for `/proc/<pid>/ns` alone.
+`SYS_ATTACH_9P_SRV` stamps its connection's namespace name (`/srv/NAME`),
+`SYS_ATTACH_9P` its transmit pipe's device spec, `#|`, since a pipe has no
+name. No argument, flag or return changed; where each inner stamps is
+[[sub-kernel-syscall-dispatch]]'s, what the root carries
+[[sub-kernel-ninep-dev9p]]'s.

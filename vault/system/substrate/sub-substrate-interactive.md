@@ -46,7 +46,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -531,7 +531,8 @@ LR-1 (2026-09-28) added a remote-realm leg to each Haul gate and a local one to
 satisfy a token. `haul-npxf`: the child's `ls -l /tmp` reads REMOTE at its
 mount point, while the shell's own listing of the same directory, where
 nothing is mounted, reads FS -- the control one variable away -- and the
-child's bare `ns` shows `MOUNT /TMP/HOST2 / REMOTE`. `haul-post`: the shell's
+child's bare `ns` shows the remote line (then `MOUNT /TMP/HOST2 / REMOTE`;
+the origin, below, renamed its source). `haul-post`: the shell's
 mount of the posted service reads REMOTE beside an unmounted sibling reading
 FS, and `ns` shows the remote line. `ergo-1(f)`: `/srv` reads MOUNT and a file
 at `/` reads FS, in `la` and in `realm`. All three passed on the CI image
@@ -540,3 +541,11 @@ declaration stripped from both paths, both Haul gates passed every earlier leg
 and failed at their first LR-1 leg; with `realm_of` ignoring the mount list,
 `ergo-1` passed (a) to (e) and failed at (f), `/srv` reading FS. Each red run
 cost three boots, because the harness retries a guest failure.
+
+The origin (2026-09-29, operator vote 1 of 09-28): a 9P session root's mount
+line names the file its session came over. `haul-npxf`'s `ns` leg reads
+`MOUNT /TMP/HOST2 #| REMOTE`, because Haul's private form attaches over
+pipes, and `haul-post`'s `MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE`.
+With the kernel's two stamps removed (and the two kernel tests that catch that
+unregistered, so the boot reaches a login), each gate passed every earlier leg
+and failed there, its line reading `/` (2026-09-29).

@@ -2615,6 +2615,9 @@ s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
     root_priv->attached_owner = att;
     // The root holds its own ref now.
     p9_attached_ref(att);
+    // Named, on /proc/<pid>/ns, by the file its session came over: the transmit
+    // fd (a pipe reads `#|`). Still thread-local, so set-before-publish (I-33).
+    dev9p_stamp_origin(root, tx);
 
     // Install root Spoor as a KOBJ_SPOOR handle. handle_alloc takes
     // ownership of root's ref (the one from spoor_alloc inside
@@ -2767,6 +2770,11 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
         handle_put(&hh);
         return attach_err_to_ret(aerr);
     }
+
+    // Named, on /proc/<pid>/ns, by the connection it came over: its namespace
+    // name (/srv/<name>, given by the adoption arm at the open). Still
+    // thread-local, so set-before-publish (I-33); conn_spoor is held by hh.
+    dev9p_stamp_origin(root, conn_spoor);
 
     // Install the dev9p root as a KOBJ_SPOOR handle. On failure, spoor_clunk
     // (root) runs dev9p_close -> the last attached_owner unref -> session

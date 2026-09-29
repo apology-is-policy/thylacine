@@ -76,6 +76,28 @@ bool dev9p_spoor_remote(struct Spoor *c) {
     return p && p->client && p->client->remote;
 }
 
+void dev9p_stamp_origin(struct Spoor *root, const struct Spoor *transport) {
+    struct dev9p_priv *p = priv_of(root);
+    if (!p || !transport) return;
+    // The root's priv is the one fid-bearing priv dev9p does not own (a cached-open
+    // priv owns no fid either, and has none).
+    if (p->fid_owned || p->cached_open || p->origin || p->origin_dc) return;
+    if (transport->path && transport->path->len) {
+        path_ref(transport->path);
+        p->origin = transport->path;
+    } else {
+        p->origin_dc = (char)transport->dc;
+    }
+}
+
+bool dev9p_spoor_origin(struct Spoor *c, const struct Path **name, char *dc) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || (!p->origin && !p->origin_dc)) return false;
+    if (name) *name = p->origin;
+    if (dc)   *dc   = p->origin_dc;
+    return true;
+}
+
 // #99: propagate the real create errno (see the header contract). The clamp to
 // the [-4095, -2] passthrough range makes a hostile/garbage Rlerror ecode (I-14
 // bounds them, but be defensive) fail safe to -1 rather than smuggle an
@@ -1723,6 +1745,8 @@ static void dev9p_close(struct Spoor *c) {
         p9_attached_unref(p->attached_owner);
         p->attached_owner = NULL;
     }
+    path_unref(p->origin);   // NULL-safe
+    p->origin = NULL;
 
     // Release the priv allocation. SLUB's freelist write clobbers
     // offset 0 (magic) on free; subsequent priv_of will see the

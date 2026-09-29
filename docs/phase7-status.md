@@ -674,6 +674,34 @@ each fixed at its cause; bake 13 (the final code) passed it whole in 632 s, with
 `ls-halcyon-lantern` and `ls-halcyon-lantern-haul`. `tools/test.sh` 1750/1750 (boot banner, L-6c and D-5 PASS). No kernel change, so no sanitizer run or
 spec is owed.
 
+## ns names a 9P session root by its file — 2026-09-29
+
+Operator vote 1 of 2026-09-28 (option 1, "the file it came from", Plan 9's form): `/proc/<pid>/ns` names a 9P session
+root by the file its session came over, where every one read `/` (login's home was `mount /home/michael /`; the LR-1
+audit's F1). Scripture 33ee9e96 (ARCH 9.6.9 and the I-33 row; HAUL-DESIGN 4.8; COREUTILS-THYLACINE-DESIGN; manual 14;
+`dec-2026-09-28-ns-session-root-names`). Code *(pending)*.
+
+- **The carrier.** The root keeps its own name `/`: joey pivots to a `t_attach_9p_srv` root, and a pivot never
+  re-stamps a published Spoor (I-33). The file's name is a second, display-only one on the root's dev9p priv: `origin`
+  (a ref on the transport file's name) or `origin_dc` (that file's device char when it has none), stamped by
+  `dev9p_stamp_origin` from both attach handlers before `handle_alloc` publishes the root, released at the root's
+  close. The stamp refuses every priv but a root's (a walked one owns its fid; a cached-open one is marked), and a
+  second stamp.
+- **The render.** `territory_format_ns` reads the origin ahead of the Spoor's name, never on a covered entry: login's
+  home reads `mount /home/michael /srv/home-michael`, the shell's mount of a posted Haul service `/srv/NAME`, Haul's
+  private form (its session rides pipes) `#|`. A bind of the tree and a union's covered entry read as before.
+- **The tools.** `ns` gives `#|` the REALM `9p`; the realm rule moved into `nsmount` (`entry_realm`, `source_realm`) so
+  a host test can fail on it. `haul-npxf` and `haul-post` assert the new line.
+
+Audit (the #66 and LR-1 rows, ORIGIN addenda), 1 round: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start ==
+end. 0 P0 / 0 P1 / 0 P2 / 0 P3, clean; two withdrawn hygiene notes acted on (the srv test takes its fixture name back
+before any assertion can return; the header comment no longer claims a shared bare clone). Closed list: memory
+`audit_ns_names_closed_list.md`.
+
+Verification: new kernel tests `dev9p.origin_format_ns`, `sys_attach_9p.names_root_by_its_pipe` and
+`9p_srvconn_transport.srv_attach_names_root`; coreutils host test `a_session_root_reads_by_the_file_it_came_over`.
+Sabotage: nine kernel mutants over six boots, each red on exactly the assertion written down before the first boot (thirteen FAIL lines, no other red); the coreutils mutant (`#|` dropped from the `9p` arm) red on its host test. Device, CI image: `haul-npxf` (40 s), `haul-post` (39 s) and `ergo-1` (38 s) green; with both stamps removed, both Haul gates failed at their `ns` leg, reading `/` -- once the two attach tests were unregistered in the red build, since with them the boot's kernel suite extincted before a login. Default image: `tools/test.sh` 1753/1753, zero `[skip]` (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 29 crates, 2142 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item); `ci-smp-gate` (default-smp4 and ubsan-smp4, N=10) 10 + 10 boots PASS, no corruption, external kill, timing or other. No spec models the touched code (`territory.tla` maps bind, mount, unmount and clone, not the ns render).
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

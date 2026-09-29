@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -469,6 +469,17 @@ cape's two words:
 publishes the root, under the cape's ordering argument. Nothing in this file
 reads the declaration after the stamp. Its one reader anywhere is
 `territory_format_ns` ([[sub-kernel-territory]]).
+
+Both attach inners also name the root they mint, for `/proc/<pid>/ns`, by the
+file its session came over (operator vote 2026-09-28):
+`dev9p_stamp_origin(root, tx)` in the pipe inner (a pipe has no name, so its
+device spec, `#|`) and `dev9p_stamp_origin(root, conn_spoor)` in the /srv
+inner (the connection's `->path`, which stalk's adoption arm set to the opened
+`/srv/<name>`), each after the root is minted and before `handle_alloc`
+publishes it ([[sub-kernel-ninep-dev9p]]). `sys_attach_9p.names_root_by_its_pipe`
+and `9p_srvconn_transport.srv_attach_names_root` drive the real inners: a
+pipe's device spec; a named connection's own Path, shared, then a nameless
+one's `#s`; the Path's count back to one once both Spoors are gone.
 
 The pipe handler thinned to a third inner, `sys_attach_9p_for_proc` (a kernel
 aname), so its own rules are testable without EL0. The handler now copies the

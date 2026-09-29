@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -92,11 +92,13 @@ example now shows what the guest prints for `/srv` (`mount`), not `graft`.
 
 **`ns` reads the kernel's own rendering** rather than deriving anything:
 one line per mount, mountpoint and source, where a source with no
-namespace name appears as a device specifier, and a 9P session root as `/`.
+namespace name appears as a device specifier, and a 9P session root as the
+file its session came over (`/srv/<name>`, or `#|` for a pipe).
 With no operand it shows the caller's own namespace, Plan 9's default
-(`ns 0` is the system root's). The realm column is derived from the
-source's device character, except that a line ending in ` remote` reads
-`remote`; `#9` reads `9p`, where it once read `disk`. A FLAGS column shows
+(`ns 0` is the system root's). The realm column (`nsmount::entry_realm`,
+host-tested in the library) is derived from the source's device character,
+except that a line ending in ` remote` reads `remote`; `#9` and `#|` read
+`9p` (`#9` once read `disk`). A FLAGS column shows
 the suffixes the boxed view used to drop (`noexec`, `pheno-linux`,
 `covered`, then any it does not know, as written), and the count cell says
 `mount list incomplete` instead of a bind count when the kernel cut the

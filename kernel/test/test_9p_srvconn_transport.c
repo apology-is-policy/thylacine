@@ -41,6 +41,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/path.h>
 #include <thylacine/proc.h>
 #include <thylacine/pts.h>
 #include <thylacine/spoor.h>
@@ -75,6 +76,7 @@ void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
 void test_9p_srvconn_transport_cape_attach_srv(void);
+void test_9p_srvconn_transport_srv_attach_names_root(void);
 void test_9p_srvconn_transport_remote_attach(void);
 void test_9p_srvconn_transport_remote_attach_srv(void);
 
@@ -108,6 +110,11 @@ static void drop_test_proc(struct Proc *p) {
 // SYS_POST_SERVICE_BYTE / SYS_SRV_CONNECT; this drives devsrv_post_listener +
 // devsrv_open_connect, the same machinery stalk's SYS_WALK_CREATE / SYS_OPEN
 // reach.)
+// When set, the fixture names each connection it opens by this Path, as the
+// stalk adoption arm names one opened by path (/srv/<name>), before the handle
+// exists. NULL: the connection keeps the no-name it is born with.
+static struct Path *g_sc_conn_name;
+
 static struct SrvConn *open_byte_mode_pair_decl(struct Proc **out_server,
                                                  struct Proc **out_client,
                                                  int *out_svc_h, int *out_conn_h,
@@ -151,6 +158,12 @@ static struct SrvConn *open_byte_mode_pair_decl(struct Proc **out_server,
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
     if (!cs) { drop_test_proc(server); drop_test_proc(client); return NULL; }
+    if (g_sc_conn_name) {
+        struct Path *old = cs->path;
+        path_ref(g_sc_conn_name);
+        cs->path = g_sc_conn_name;
+        path_unref(old);
+    }
 
     int conn_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     if (conn_h < 0) {
@@ -976,10 +989,12 @@ struct sc_cape_seen {
     bool attached, cape, loose, remote;
     u32  uid, gid, n_uname;
     int  err;
+    bool origin, origin_is_conn_name;   // the root's /proc/<pid>/ns name
+    char origin_dc;
 };
 
 static struct sc_cape_seen sc_decl_attach(bool service_cape, bool service_remote, u32 flags) {
-    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET };
+    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET, false, false, 0 };
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
     int svc_h = -1, conn_h = -1;
@@ -1023,7 +1038,7 @@ static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
 // `attached` stays false unless every requested mark took, so no leg can pass
 // on an unmarked conn.
 static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_remote) {
-    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET };
+    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET, false, false, 0 };
     struct Proc *client = make_test_proc();
     if (!client) return r;
     client->principal_id = 0x1234u;
@@ -1064,7 +1079,7 @@ extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
 // sentinel). *ret is the syscall's answer.
 static struct sc_cape_seen sc_srv_syscall_decl_attach(bool service_cape, bool service_remote,
                                                       u64 flags, s64 *ret) {
-    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET };
+    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET, false, false, 0 };
     *ret = 0x7BAD;
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
@@ -1088,6 +1103,9 @@ static struct sc_cape_seen sc_srv_syscall_decl_attach(bool service_cape, bool se
                 r.remote = rp->client->remote;
                 r.uid    = rp->client->cape_uid;
                 r.gid    = rp->client->cape_gid;
+                const struct Path *on = NULL;
+                r.origin = dev9p_spoor_origin((struct Spoor *)h.obj, &on, &r.origin_dc);
+                r.origin_is_conn_name = on != NULL && on == g_sc_conn_name;
             }
             handle_put(&h);
         }
@@ -1101,6 +1119,34 @@ static struct sc_cape_seen sc_srv_syscall_decl_attach(bool service_cape, bool se
 
 static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s64 *ret) {
     return sc_srv_syscall_decl_attach(service_cape, false, flags, ret);
+}
+
+// Operator vote 2026-09-28 (ARCH 9.6.9): SYS_ATTACH_9P_SRV names the root it
+// mints, on /proc/<pid>/ns, by the connection its session came over -- the
+// connection's own name, shared -- and a connection with no name by its
+// device spec. Both references drop with their Spoors.
+void test_9p_srvconn_transport_srv_attach_names_root(void) {
+    struct Path *r0 = path_make_root();
+    struct Path *r1 = r0 ? path_addelem(r0, "srv", 3) : NULL;
+    g_sc_conn_name = r1 ? path_addelem(r1, "btest", 5) : NULL;
+    path_unref(r1);
+    path_unref(r0);
+    s64 ret = 0;
+    struct sc_cape_seen r = sc_srv_syscall_attach(false, 0, &ret);
+    // Taken back before any assertion can return, so no later fixture
+    // connection inherits the name.
+    struct Path *name = g_sc_conn_name;
+    g_sc_conn_name = NULL;
+    int left = name ? name->ref : -1;
+    path_unref(name);
+    TEST_ASSERT(name != NULL, "the name /srv/btest");
+    TEST_ASSERT(ret >= 0 && r.attached, "an attach over a named connection");
+    TEST_ASSERT(r.origin && r.origin_is_conn_name, "the root carries the connection's own name");
+    TEST_EXPECT_EQ((u64)left, (u64)1, "the connection and the root released it");
+    r = sc_srv_syscall_attach(false, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached, "an attach over a connection with no name");
+    TEST_ASSERT(r.origin && !r.origin_is_conn_name && r.origin_dc == 's',
+                "a connection with no name gives its device spec, #s");
 }
 
 void test_9p_srvconn_transport_cape_attach(void) {

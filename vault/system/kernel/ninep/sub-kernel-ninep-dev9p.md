@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -363,7 +363,7 @@ victims MUST be clunked — a fresh walk re-resolving a reused qid.path must
 never be served a fid for the dead object). All returns are clunked by the
 CALLER outside the leaf lock.
 
-### The remote declaration's one reader, and the name a session root carries (LR-1, 2026-09-28)
+### The remote declaration's one reader, and the name a session root's mount carries (LR-1 2026-09-28; the origin 2026-09-29)
 
 `dev9p_spoor_remote(c)` answers whether `c` belongs to a session declared
 remote at its attach or its /srv post (HAUL-DESIGN 4.8). It reads the
@@ -375,14 +375,24 @@ caller's reference on `c` keeps the priv and the client alive. Its one
 caller is `territory_format_ns` ([[sub-kernel-territory]]); nothing in this
 Dev consults the flag.
 
-Every session root is born named "/" (`dev9p_attach_client`), and the mount
-table renders a source by its name, so a mount of a session root reads
-`mount <point> /` in `/proc/<pid>/ns`, with ` remote` when declared. `#9`
-appears only when `path_make_root` fails. The comment at the naming site
-now says where the raw "/" surfaces: as the namespace root (joey's pivot
-target) and as a mount-table source. That the "/" reads like a bind of the
-namespace root (login's home prints `mount /home/<user> /`) is a known
-legibility gap, queued for an operator vote.
+Every session root is born named "/" (`dev9p_attach_client`) and keeps that
+name: it is the namespace root's name when joey pivots to one, and a pivot
+never re-stamps a published Spoor. A mount line names the root otherwise
+(operator vote 2026-09-28, [[dec-2026-09-28-ns-session-root-names]]): by the
+file its session came over. `dev9p_stamp_origin(root, transport)` records it
+on the root's priv -- `origin`, a reference on the transport's `->path`, or,
+when the transport has no name, `origin_dc`, its device character -- and
+`dev9p_spoor_origin` reads it back. Both attach handlers stamp between minting
+the root and `handle_alloc` ([[sub-kernel-syscall-dispatch]]), so the plain
+fields are set before publication and never change; `dev9p_close` drops the
+reference. Only an unstamped root takes the stamp: a walked priv (`fid_owned`)
+and a cached-open priv (fidless like the root, but not one) refuse it, and a
+walk -- the zero-name clone every mount crossing makes included -- always
+builds a fresh priv, so no copy of the root carries the name. A root reached
+by opening a 9P-mode /srv service is named through its `->path` instead
+(stalk's adoption arm transplants the opened path onto it). `#9` appears only
+when `path_make_root` fails on an unstamped root. The name is display only
+(I-33); its one reader is `territory_format_ns` ([[sub-kernel-territory]]).
 
 Tests: `dev9p.remote_format_ns` opens on this function (NULL, another Dev, a
 bare dev9p Spoor, a priv naming a marked session under the wrong magic and,
@@ -391,6 +401,14 @@ rows of `dev9p.walk_create_refuses_dmsrv_bits` and
 `dev9p.path_create_refuses_dmsrvcape` keep the bit out of a Tlcreate perm.
 The LR-1 sabotage boots turned `remote_format_ns` red both when the function
 answered for every dev9p Spoor and when it read a priv without its magic.
+`dev9p.origin_format_ns` pins the origin: the accessor's negatives (NULL,
+another Dev, a bare dev9p Spoor), an unstamped root's `/`, the stamp sharing
+the name (its count rises by one) and refusing a second stamp, the rendered
+name with and without ` remote`, caps inside the name and before the newline,
+a clone walk carrying no origin and refusing the stamp, a covered entry on a
+stamped root keeping its own name, the root's close releasing the reference,
+a nameless transport's device spec, and a cached-open priv refusing what the
+same priv shaped as a root takes.
 
 ## Data structures
 

@@ -86,6 +86,7 @@ void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
 void test_dev9p_remote_format_ns(void);
+void test_dev9p_origin_format_ns(void);
 
 extern struct Dev devnone;
 
@@ -4053,4 +4054,161 @@ void test_dev9p_remote_format_ns(void) {
     teardown(root);
 
     spoor_unref(dn); spoor_unref(mp); spoor_unref(a); spoor_unref(b);
+}
+
+// Operator vote 2026-09-28 (ARCH 9.6.9): on the mount list a session ROOT is
+// named by the file its session came over -- the name dev9p_stamp_origin took
+// from the attach's transport, else that file's device spec. An unstamped root
+// keeps its own "/"; a walk of a stamped root carries nothing; a stamp takes
+// one root, once, and nothing else; the covered entry keeps its own name; the
+// name joins the whole-line rewind; the root's close releases it.
+static struct Path *d9_name2(const char *a, const char *b) {
+    struct Path *first = d9_name(a);
+    if (!first) return NULL;
+    u64 n = 0;
+    while (b[n]) n++;
+    struct Path *p = path_addelem(first, b, n);
+    path_unref(first);
+    return p;
+}
+
+void test_dev9p_origin_format_ns(void) {
+    char buf[160];
+    const struct Path *on = NULL;
+    char od = 0;
+    struct Spoor *mp    = spoor_alloc(&devnone);
+    struct Spoor *conn  = spoor_alloc(&devnone);   // a transport with a name
+    struct Spoor *other = spoor_alloc(&devnone);
+    struct Spoor *anon  = spoor_alloc(&devnone);   // one without
+    struct Spoor *a     = spoor_alloc(&devnone);
+    TEST_ASSERT(mp && conn && other && anon && a, "devnone Spoors");
+    mp->qid.path = 0x81; mp->qid.type = QTDIR;
+    a->qid.path  = 0x82;
+    mp->path    = d9_name("m");
+    conn->path  = d9_name2("srv", "home-joey");
+    other->path = d9_name("elsewhere");
+    TEST_ASSERT(mp->path && conn->path && other->path, "names /m, /srv/home-joey, /elsewhere");
+
+    TEST_ASSERT(!dev9p_spoor_origin(NULL, &on, &od), "NULL has no origin");
+    TEST_ASSERT(!dev9p_spoor_origin(mp, &on, &od), "a Spoor of another Dev has no origin");
+    struct Spoor *bare = spoor_alloc(&dev9p);
+    TEST_ASSERT(bare != NULL, "a dev9p Spoor with no priv");
+    dev9p_stamp_origin(bare, conn);
+    TEST_ASSERT(!dev9p_spoor_origin(bare, &on, &od), "a dev9p Spoor with no priv takes no stamp");
+
+    // Control: an unstamped root reads the name it is born with.
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root");
+    TEST_ASSERT(!dev9p_spoor_origin(root, &on, &od), "a fresh root has no origin");
+    struct Territory *t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory");
+    TEST_EXPECT_EQ(mount(t, root, mp, 0), 0, "mount the unstamped root at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /\nbinds: 0\n"), "an unstamped root reads its own name");
+    territory_unref(t);
+
+    // The stamp shares the transport's name (no copy, so it cannot fail), once.
+    int conn_ref = conn->path->ref;
+    dev9p_stamp_origin(root, conn);
+    TEST_ASSERT(dev9p_spoor_origin(root, &on, &od) && on == conn->path && od == 0,
+                "the root takes the connection's own name");
+    TEST_EXPECT_EQ((u64)conn->path->ref, (u64)(conn_ref + 1), "the stamp holds one ref on it");
+    dev9p_stamp_origin(root, other);
+    TEST_ASSERT(dev9p_spoor_origin(root, &on, &od) && on == conn->path, "a second stamp changes nothing");
+    TEST_EXPECT_EQ((u64)other->path->ref, (u64)1, "the refused stamp took no ref");
+    TEST_ASSERT(root->path && root->path->len == 1 && root->path->s[0] == '/',
+                "the root keeps its own name /");
+
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 2");
+    TEST_EXPECT_EQ(mount(t, root, mp, 0), 0, "mount the stamped root at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /srv/home-joey\nbinds: 0\n"),
+                "a stamped root reads the file its session came over");
+    p9_client_set_remote(&g_client);
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /srv/home-joey remote\nbinds: 0\n"),
+                "the remote suffix follows the name");
+    // "mount /m /srv/home-joey remote\n" is 31 bytes: a cap inside the name or
+    // just short of the newline leaves no partial line.
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 16), 0, "cap inside the name: no partial line");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 30), 0, "cap before the newline: no partial line");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 31), 31, "the whole line");
+    territory_unref(t);
+
+    // A walk of the root -- the clone every resolution crosses with -- has its
+    // own priv and no origin, and refuses a stamp: a bind of the tree reads the
+    // name it was reached by (here the "/" the clone shares).
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = nc ? dev9p.walk(root, nc, NULL, 0) : NULL;
+    TEST_ASSERT(w != NULL && nc->aux != root->aux, "the clone walk made its own priv");
+    if (w) walkqid_free(w);
+    TEST_ASSERT(!dev9p_spoor_origin(nc, &on, &od), "a walk of a stamped root carries no origin");
+    dev9p_stamp_origin(nc, conn);
+    TEST_ASSERT(!dev9p_spoor_origin(nc, &on, &od), "a walked priv refuses the stamp");
+    TEST_EXPECT_EQ((u64)conn->path->ref, (u64)(conn_ref + 1), "and took no ref");
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 3");
+    TEST_EXPECT_EQ(mount(t, nc, mp, 0), 0, "mount the walked clone at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m / remote\nbinds: 0\n"), "the clone reads its own name");
+    territory_unref(t);
+    spoor_clunk(nc);
+
+    // A union at the stamped root: the covered entry's source IS the stamped
+    // root (asserted, so the name is the rule's doing), and its line still
+    // names its own directory.
+    if (root->path) path_unref(root->path);
+    root->path = d9_name("h");
+    TEST_ASSERT(root->path != NULL, "name /h");
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 4");
+    TEST_EXPECT_EQ(mount(t, a, root, MBEFORE), 0, "a union at the stamped root -> [a, covered]");
+    u32 f = 0;
+    struct Spoor *cov = mount_member_at(t, root, 1, &f);
+    TEST_ASSERT(cov == root && f == MCOVERED, "the covered entry names the stamped root");
+    TEST_ASSERT(dev9p_spoor_origin(cov, &on, &od), "premise: the covered entry's source is stamped");
+    if (cov) spoor_clunk(cov);
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /h #-\nmount /h /h covered\nbinds: 0\n"),
+                "the covered entry keeps its own name");
+    territory_unref(t);
+    teardown(root);
+    TEST_EXPECT_EQ((u64)conn->path->ref, (u64)conn_ref, "the root's close released the name");
+
+    // A transport with no name gives its device spec (a pipe reads #|).
+    root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root (nameless transport)");
+    dev9p_stamp_origin(root, anon);
+    TEST_ASSERT(dev9p_spoor_origin(root, &on, &od) && on == NULL && od == anon->dc,
+                "a nameless transport gives its device char");
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 5");
+    TEST_EXPECT_EQ(mount(t, root, mp, 0), 0, "mount it at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m #-\nbinds: 0\n"), "the root reads the transport's device spec");
+    territory_unref(t);
+    teardown(root);
+
+    // A cached-open priv owns no fid, like the root, but is not one: it refuses
+    // the stamp. The same priv shaped as a root takes it (the control).
+    g_d9_forged = (struct dev9p_priv){ 0 };
+    g_d9_forged.magic       = DEV9P_PRIV_MAGIC;
+    g_d9_forged.client      = &g_client;
+    g_d9_forged.fid         = P9_NOFID;
+    g_d9_forged.cached_open = true;
+    bare->aux = &g_d9_forged;
+    dev9p_stamp_origin(bare, anon);
+    TEST_ASSERT(!dev9p_spoor_origin(bare, &on, &od), "a cached-open priv refuses the stamp");
+    g_d9_forged.fid         = 0;
+    g_d9_forged.cached_open = false;
+    dev9p_stamp_origin(bare, anon);
+    TEST_ASSERT(dev9p_spoor_origin(bare, &on, &od) && od == anon->dc,
+                "control: the same priv shaped as a root takes it");
+    bare->aux = NULL;
+    g_d9_forged = (struct dev9p_priv){ 0 };
+    spoor_unref(bare);
+
+    spoor_unref(mp); spoor_unref(conn); spoor_unref(other); spoor_unref(anon); spoor_unref(a);
 }

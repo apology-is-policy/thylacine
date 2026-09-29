@@ -107,7 +107,7 @@ lc_send "ls -l /tmp | tr a-z A-Z"
 lc_expect_re {REMOTE +[^ ]+ +HAUL-POST} "the shell's mount of the posted service reads remote"
 lc_expect_re {FS +[^ ]+ +HAUL-SECOND} "the unmounted directory beside it reads fs"
 lc_send "ns | tr a-z A-Z"
-lc_expect_re {MOUNT /TMP/HAUL-POST / REMOTE} "ns, the shell's own namespace by default, shows the remote line"
+lc_expect_re {MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE} "ns, the shell's own namespace by default, shows the remote line, named by the service it came over"
 lc_pass "LR-1: a posted haul service mounted by the shell reads remote in ls -l and ns"
 lc_send {mount /srv/haul-e2e /tmp/haul-second /; echo SECOND-STATUS=$status; echo $errstr}
 lc_expect "SECOND-STATUS=1" "second attach fails"

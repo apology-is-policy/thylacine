@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -97,13 +97,19 @@ post. The declaration rides the session, not the mount call, so the shell's
 plain `mount /srv/NAME` over a posted service is marked too, though the
 shell never learns what is behind the service. `ls -l` and `stat` then show
 `remote` at the mount point, `realm` prints `remote`, and `ns` ends the line
-in `remote` (`mount /tmp/NAME / remote`). It is a label: it grants nothing,
-and the kernel reads it only to render `/proc/<pid>/ns`. `haul-npxf` (the
+in `remote`. The declaration is a label: it grants nothing, and the kernel
+reads it only to render `/proc/<pid>/ns`. That line names the session by the
+file it came over (operator vote 2026-09-28): the shell's mount of a posted
+service reads `mount /tmp/NAME /srv/NAME remote`, and `run`'s private form,
+whose session rides pipes, `mount PATH #| remote`. `haul-npxf` (the
 child's `ls -l` and `ns`, with the shell's unmounted view of the same
 directory as the control) and `haul-post` (the shell's mount of the posted
 service beside an unmounted sibling) hold it on the device. With the
 declaration stripped from both paths, each gate passed every earlier leg and
-failed at its first LR-1 leg (2026-09-28).
+failed at its first LR-1 leg (2026-09-28). Their `ns` legs assert the file's
+name too; with the kernel's two stamps removed (and the two kernel tests that
+catch that unregistered, so the boot reaches a login), each gate passed every
+earlier leg and failed there, its line reading `/` (2026-09-29).
 
 ## Data structures
 

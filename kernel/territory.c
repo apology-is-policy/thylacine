@@ -543,12 +543,25 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         }
         if (ok) ok = ns_put_str(buf, cap, &off, " ");
 
-        // Source label: the source Spoor's namespace name when it has one (a
-        // mounted sub-tree); else "#<dc>" -- the Plan 9 device spec (a device
+        // Source label. A 9P session's root: the file its session came over (the
+        // operator's vote of 2026-09-28, Plan 9's form -- a mount line names the
+        // channel, not the tree), by that file's name, else its device spec
+        // ("#|", a pipe). Never on the covered entry, whose line names its own
+        // directory. Otherwise the source Spoor's namespace name when it has one
+        // (a mounted sub-tree); else "#<dc>" -- the Plan 9 device spec (a device
         // root has no namespace path; '#9'=9P, '#s'=srv, '#p'=proc, ...).
         if (ok) {
             struct Spoor *src = m->source;
-            if (src && src->path && src->path->len) {
+            const struct Path *origin = NULL;
+            char odc = 0;
+            if (!(m->flags & MCOVERED) && dev9p_spoor_origin(src, &origin, &odc)) {
+                if (origin) {
+                    ok = ns_put_bytes(buf, cap, &off, origin->s, origin->len);
+                } else {
+                    char dev[3] = { '#', odc, '\0' };
+                    ok = ns_put_str(buf, cap, &off, dev);
+                }
+            } else if (src && src->path && src->path->len) {
                 ok = ns_put_bytes(buf, cap, &off, src->path->s, src->path->len);
             } else {
                 char dev[3];

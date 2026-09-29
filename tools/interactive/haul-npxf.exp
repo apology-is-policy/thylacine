@@ -199,7 +199,7 @@ lc_expect_re {REMOTE +[^ ]+ +HOST2} "the mount point reads remote in the child's
 lc_send "ls -l /tmp | tr a-z A-Z"
 lc_expect_re {FS +[^ ]+ +HOST2} "unmounted, the same directory reads fs"
 lc_send "haul -t npxf.token 10.0.2.2!$hostport /tmp/host2 /bin/ns | tr a-z A-Z"
-lc_expect_re {MOUNT /TMP/HOST2 / REMOTE} "ns shows the remote line in its caller's namespace"
+lc_expect_re {MOUNT /TMP/HOST2 #\| REMOTE} "ns shows the remote line in its caller's namespace, named by the pipe it came over"
 lc_pass "haul-npxf: LR-1 -- a haul mount reads remote in ls -l and ns, and the unmounted directory reads fs"
 
 # THE HANG-UP LEG: a server that hangs up AFTER an authenticated handshake.

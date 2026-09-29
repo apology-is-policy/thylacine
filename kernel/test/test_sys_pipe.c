@@ -64,6 +64,7 @@ void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
 void test_sys_attach_9p_rejection_paths(void);
+void test_sys_attach_9p_names_root_by_its_pipe(void);
 void test_sys_attach_9p_declarations(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
@@ -325,6 +326,8 @@ struct pa_seen {
     s64  ret;
     bool attached, cape, remote;
     s64  sent;       // bytes written to the client-to-server pipe; < 0: fixture failed
+    bool origin, origin_named;   // the root's /proc/<pid>/ns name (dev9p_spoor_origin)
+    char origin_dc;
 };
 
 static int pa_stage(struct Proc *p, hidx_t wr, u8 type, u16 tag) {
@@ -355,7 +358,7 @@ static const u8 g_pa_aname[SYS_ATTACH_ANAME_MAX + 8] = { '/' };
 
 static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
                                      bool null_aname, enum pa_ends ends) {
-    struct pa_seen r = { 0x7BAD, false, false, false, -1 };
+    struct pa_seen r = { 0x7BAD, false, false, false, -1, false, false, 0 };
     struct Proc *p = make_test_proc();
     if (!p) return r;
     p->principal_id = 0x1234u;
@@ -384,6 +387,9 @@ static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
             if (r.attached) {
                 r.cape   = rp->client->cape;
                 r.remote = rp->client->remote;
+                const struct Path *on = NULL;
+                r.origin = dev9p_spoor_origin((struct Spoor *)h.obj, &on, &r.origin_dc);
+                r.origin_named = on != NULL;
             }
             handle_put(&h);
         }
@@ -399,6 +405,17 @@ static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
 
 static struct pa_seen pipe_attach(u64 flags) {
     return pipe_attach_ex(flags, 0, 1, false, PA_PIPES);
+}
+
+// Operator vote 2026-09-28 (ARCH 9.6.9): the root a pipe attach mints is named,
+// on /proc/<pid>/ns, by the file its session came over -- a pipe, which has no
+// name, so the pipe device's spec. Stamped before the fd exists.
+void test_sys_attach_9p_names_root_by_its_pipe(void) {
+    struct pa_seen r = pipe_attach(0);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "a pipe attach attaches");
+    TEST_ASSERT(r.origin, "its root carries the name of the file it came over");
+    TEST_ASSERT(!r.origin_named, "a pipe has no name");
+    TEST_EXPECT_EQ((u64)(u8)r.origin_dc, (u64)(u8)DEVPIPE_DC, "so the root reads the pipe's device spec");
 }
 
 // SYS_ATTACH_9P's refusals, each before a byte reaches the wire. The admitted

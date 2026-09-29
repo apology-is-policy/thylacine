@@ -26,7 +26,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -142,8 +142,12 @@ operator's `la` vote, HAUL-DESIGN 4.8). `nsmount` parses the kernel's
 suffixes (` noexec`, ` pheno-linux`, ` covered`, ` remote`, and any unknown
 one as written), and `MountRealms::from_text` keeps each mount point's name
 and whether ANY of its member lines is remote, skipping covered entries,
-which nobody mounted. `meta::mount_realms` reads the caller's own list once
-per run, and `meta::realm_of` asks it first, by the entry's cleaned absolute
+which nobody mounted. `entry_realm` / `source_realm` give the REALM `ns`
+shows for a line (moved from `bin/ns.rs` so a test can fail on them): `remote`
+for a marked line, else by the source's device character, with `#|` -- the
+pipe a 9P session came over, now that the kernel names a session root by its
+transport file -- reading `9p` like `#9`, and a namespace name `fs`.
+`meta::mount_realms` reads the caller's own list once per run, and `meta::realm_of` asks it first, by the entry's cleaned absolute
 path: `remote` or `mount`. Only for a name the table does not hold does the
 kind's own realm (`fs`, `dev`, `graft`) apply. Two degradations are
 deliberate:

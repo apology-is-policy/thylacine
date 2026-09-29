@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -214,8 +214,17 @@ any overflow to discard a partial line, and emit `binds: N` only when
 the list rendered in full (a `binds:` line after a truncation would
 falsely imply completeness). The source label is its Spoor's `->path`,
 or `#<dc>` — the Plan 9 device spec — when the source is a device root
-with no namespace name. A 9P session root is named "/" at birth, so a mount
-of one reads `mount <point> /` ([[sub-kernel-ninep-dev9p]]).
+with no namespace name. A 9P session's root is the exception (operator vote
+2026-09-28, Plan 9's form): its label is the file its session came over, the
+origin its attach handler stamped on the root's priv, asked through
+`dev9p_spoor_origin` -- that file's name (`/srv/home-<user>`) or, for a file
+with none, its device spec (`#|`, a pipe) ([[sub-kernel-ninep-dev9p]]). Never
+on the covered entry, whose line names its own directory even when that
+source is a stamped root. The root itself stays named "/", so a bind of it,
+which crosses with a fresh walk, reads the name it was reached by. On the CI
+image a login shell's list reads `mount /home/michael /srv/home-michael`, and
+a Haul mount `mount /tmp/haul-post /srv/haul-e2e remote` (the shell's mount of
+the posted service) or `mount /tmp/host2 #| remote` (Haul's private form).
 
 A line ends in its suffixes, each a word after a space, in a fixed order:
 ` noexec`, ` pheno-linux`, ` covered`, then ` remote` (LR-1, HAUL-DESIGN
@@ -230,12 +239,17 @@ before the newline leaves no partial line, and `binds:` stays the proof of a
 whole list. Readers therefore treat a list without `binds:` as cut: the
 coreutils listing tools say `mount list incomplete` rather than show a
 mount point by its plain realm. This is the kernel's only use of the
-declaration. `dev9p.remote_format_ns` renders real Territories: an unmarked
+declaration. `dev9p.remote_format_ns` renders real Territories over
+unstamped roots: an unmarked
 session's `mount /m /`, a marked one's `mount /m / remote`, caps of 13, 17
 and 18 bytes, an MREPL of a local tree over the remote one, and a union at a
 remote directory whose covered line carries no suffix. The LR-1 sabotage
 boots turned it red when the covered guard was dropped and when the suffix
-write's result was ignored.
+write's result was ignored. `dev9p.origin_format_ns` renders the origin the
+same way: an unstamped root's `/`, a stamped root's `mount /m /srv/home-joey`
+(then with ` remote` after the name), caps inside the name and before the
+newline, a walked clone reading its own name, a covered entry on a stamped
+root keeping its own, and a nameless transport's device spec.
 
 ## Data structures
 

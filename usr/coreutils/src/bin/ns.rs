@@ -7,10 +7,12 @@
 // The mountpoint column is the namespace name the directory was mounted onto
 // (a Spoor.path, #66a); the source is the mounted tree's name, or a Plan 9
 // device spec "#<dc>" (e.g. "#9"=9P, "#s"=srv, "#p"=proc) when the source is a
-// device root with no namespace name. We colorize + box the listing and add a
-// REALM column derived from the device char -- or `remote` for an entry the
-// kernel marks ` remote` (a 9P session declared remote, HAUL-DESIGN 4.8) -- and
-// a FLAGS column for the other suffixes. A presentation tool -> color on the
+// device root with no namespace name. A 9P session's root is named by the file
+// its session came over instead (/srv/<name>, or "#|" for a pipe; ARCH 9.6.9).
+// We colorize + box the listing and add a REALM column (nsmount::entry_realm:
+// from the device char, or `remote` for an entry the kernel marks ` remote` --
+// a 9P session declared remote, HAUL-DESIGN 4.8) and a FLAGS column for the
+// other suffixes. A presentation tool -> color on the
 // console (auto); --color=never passes the raw kernel text through.
 //
 // `ns` with no operand shows the caller's own namespace (Plan 9's default);
@@ -55,29 +57,16 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
-/// `(realm, color)` for a mount entry: `remote` when the kernel marks it so;
-/// else a `#<dc>` device spec maps to its realm by the device char, and a
-/// namespace-name source is a plain fs subtree.
+/// `(realm, color)` for a mount entry (the realm: nsmount::entry_realm).
 fn entry_realm(m: &Mount) -> (&'static str, &'static str) {
-    if m.remote {
-        return ("remote", palette::EMBER);
-    }
-    source_realm(m.source)
-}
-
-fn source_realm(src: &str) -> (&'static str, &'static str) {
-    match src.strip_prefix('#').and_then(|s| s.chars().next()) {
-        Some('9') => ("9p", palette::SLATE),
-        Some('r') | Some('M') => ("boot", palette::SLATE),
-        Some('p') => ("proc", palette::VIOLET),
-        Some('s') => ("srv", palette::VIOLET),
-        Some('H') => ("hw", palette::VIOLET),
-        Some('n') => ("notes", palette::VIOLET),
-        Some('d') => ("dev", palette::GOLD),
-        Some('c') | Some('C') => ("cons", palette::GOLD),
-        Some(_) => ("dev", palette::GOLD),
-        None => ("fs", palette::SLATE), // a namespace-name source subtree
-    }
+    let realm = nsmount::entry_realm(m);
+    let color = match realm {
+        "remote" => palette::EMBER,
+        "proc" | "srv" | "hw" | "notes" => palette::VIOLET,
+        "dev" | "cons" => palette::GOLD,
+        _ => palette::SLATE, // 9p, boot, fs
+    };
+    (realm, color)
 }
 
 fn run(args: Args) -> i64 {

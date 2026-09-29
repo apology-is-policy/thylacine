@@ -39,6 +39,34 @@ pub enum Line<'a> {
     Other(&'a str),
 }
 
+/// The REALM `ns` shows for an entry: `remote` when the kernel marks it so;
+/// else what its source names. A `#<dc>` device spec names a device root, by
+/// its character -- except `#|`, the pipe a 9P session came over (the kernel
+/// names a session root by its transport file), which reads `9p` like `#9`,
+/// the session root with no name at all. A namespace name reads `fs`: a
+/// mounted subtree, or a session root named by its `/srv` connection.
+pub fn entry_realm(m: &Mount) -> &'static str {
+    if m.remote {
+        return "remote";
+    }
+    source_realm(m.source)
+}
+
+pub fn source_realm(src: &str) -> &'static str {
+    match src.strip_prefix('#').and_then(|s| s.chars().next()) {
+        Some('9') | Some('|') => "9p",
+        Some('r') | Some('M') => "boot",
+        Some('p') => "proc",
+        Some('s') => "srv",
+        Some('H') => "hw",
+        Some('n') => "notes",
+        Some('d') => "dev",
+        Some('c') | Some('C') => "cons",
+        Some(_) => "dev",
+        None => "fs",
+    }
+}
+
 pub fn parse_line(line: &str) -> Line<'_> {
     if let Some(rest) = line.strip_prefix("mount ") {
         let mut fields = rest.split(' ').filter(|f| !f.is_empty());
@@ -157,6 +185,23 @@ mod tests {
         assert_eq!((m.point, m.source), ("/u", "/u"));
         assert!(m.noexec && m.pheno_linux && m.covered && m.remote);
         assert_eq!(m.unknown, alloc::vec!["shiny"]);
+    }
+
+    #[test]
+    fn a_session_root_reads_by_the_file_it_came_over() {
+        assert_eq!(source_realm("#|"), "9p", "a pipe-borne session root");
+        assert_eq!(source_realm("#9"), "9p", "a session root with no name");
+        assert_eq!(source_realm("/srv/home-joey"), "fs", "named by its connection");
+        assert_eq!(source_realm("#s"), "srv");
+        assert_eq!(source_realm("#x"), "dev", "an unknown device");
+        let Line::Mount(m) = parse_line("mount /tmp/host2 #| remote") else {
+            panic!("not a mount line");
+        };
+        assert_eq!(entry_realm(&m), "remote", "the mark outranks the source");
+        let Line::Mount(m) = parse_line("mount /tmp/host2 #|") else {
+            panic!("not a mount line");
+        };
+        assert_eq!(entry_realm(&m), "9p");
     }
 
     #[test]
