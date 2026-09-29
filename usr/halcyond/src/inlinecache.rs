@@ -40,13 +40,15 @@ impl InlineCache {
     }
     /// Only replace an entire line belonging to ONE explicit image object.
     /// Mixed text, tables and arbitrary ref strings remain ordinary text.
-    pub fn resolve<'a>(&'a self, b: &Block, item: &Item) -> Option<&'a Raster> {
+    /// Returns the image's id with its raster.
+    pub fn resolve<'a>(&'a self, b: &Block, item: &Item) -> Option<(u128, &'a Raster)> {
         let Item::Line(line) = item else { return None; };
         let first = line.cells.first()?;
         let obj = b.styles.get(first.style as usize)?.obj;
         if obj == 0 || !line.cells.iter().all(|c| b.styles.get(c.style as usize).is_some_and(|s| s.obj == obj)) { return None; }
         let o = b.objs.get(obj as usize - 1)?;
-        self.images.get(&image_id(&o.ty, &o.refv)?)
+        let id = image_id(&o.ty, &o.refv)?;
+        self.images.get(&id).map(|r| (id, r))
     }
     /// Keep only the images `keep` names; true when any went.
     pub fn retain(&mut self, keep: impl Fn(u128) -> bool) -> bool {
@@ -108,7 +110,8 @@ mod tests {
             objs: alloc::vec![Obj { ty: "inline-image".into(), refv: "00000000000000000000000000000001".into() }],
         };
         let mut caption = Item::Line(Line::plain(alloc::vec![TCell { ch: 'x', style: 0 }]));
-        assert_eq!(cache.resolve(&b, &caption).unwrap().argb[0], 0xffff0000);
+        let (id, r) = cache.resolve(&b, &caption).unwrap();
+        assert_eq!((id, r.argb[0]), (1, 0xffff0000));
         b.objs[0].ty = "path".into();
         assert!(cache.resolve(&b, &caption).is_none());
         b.objs[0].ty = "inline-image".into();

@@ -26,16 +26,22 @@ use view::{decode_jpeg, decode_png, jpeg_dimensions, png_dimensions, sniff, with
 // (VIEW_MAX_PIXELS below).
 const READ_CAP: usize = 16 * 1024 * 1024;
 
-// view's own decode pixel budget, bounding the WORST-CASE decode peak + the held
-// compressed input, checked from the headers BEFORE decode so an image past it
-// is a clean report, never a death at a page fault when the system runs out of
-// memory mid-decode. The worst
-// case is a PROGRESSIVE JPEG: zune holds a full-image coefficient buffer per
-// input component (~2 B * components * npx, up to 4 for CMYK, zune mcu_prog.rs)
-// ALONGSIDE the output during decode -- peak ~= READ_CAP + 12*npx, vs a
-// baseline/PNG ~8*npx. So 12*3M + 16 MiB = 52 MiB, set when the heap was a
-// fixed 64 MiB; the former 6M (88 MiB) OOM-exited a progressive JPEG there
-// (holotype F1).
+// view's own decode pixel budget, bounding the decode peak + the held compressed
+// input, checked from the headers BEFORE decode so an image past it is a clean
+// report, never a death at a page fault when the system runs out of memory
+// mid-decode. The peak per pixel depends on the format. A PROGRESSIVE JPEG
+// holds a full-image coefficient buffer per input component (~2 B * components
+// * npx, up to 4 for CMYK, zune mcu_prog.rs) beside its output, ~12 B/px; a
+// baseline one ~8. A PNG (zune-png 0.4.10) holds its whole inflated stream
+// beside its output buffer, both at the sample width: ~8 B/px for 8-bit RGBA,
+// ~16 for 16-bit, and an interlaced image a third buffer (~12, ~24); a stream
+// longer than its dimensions doubles zune-inflate's buffer before it is refused
+// (~32 B/px for 16-bit, transiently), and a PNG counts its input twice, held
+// and its IDAT data copied. So at 3M pixels: 12*3M + 16 MiB = 52 MiB for a
+// JPEG, 80 MiB for a 16-bit PNG, 104 MiB interlaced, 128 MiB for a malformed
+// one. The heap grows from the user pool (B-1c), so these are what a decode may
+// draw from it, not a wall; the 3M was set when the heap was a fixed 64 MiB,
+// where the former 6M (88 MiB) OOM-exited a progressive JPEG (holotype F1).
 // halcyond re-caps the CHANNEL downstream to ~1 Mpx (display-adaptive), so this
 // rarely binds the inline path; it bounds view's local decode.
 const VIEW_MAX_PIXELS: u64 = 3 * 1024 * 1024;

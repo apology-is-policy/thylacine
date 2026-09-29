@@ -13,11 +13,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-// An image decoder's working set is large, and the worst case is a PROGRESSIVE
-// JPEG: zune holds a full-image coefficient buffer per input component (~2 B *
-// components * npx, up to 4 for CMYK, zune mcu_prog.rs) ALONGSIDE the output
-// during decode -- peak ~= READ_CAP + 12*npx, vs a baseline/PNG ~8*npx. The heap
-// grows to hold it; GALLERY_MAX_PIXELS below is what bounds it.
+// An image decoder's working set is large and depends on the format: ~12 B/px
+// for a PROGRESSIVE JPEG (a coefficient buffer per component beside the output,
+// zune mcu_prog.rs), ~8 for a baseline JPEG or an 8-bit PNG, ~16 for a 16-bit
+// PNG and ~24 interlaced, ~32 transiently for a malformed 16-bit one (view's
+// main.rs derives them). The heap grows to hold it; GALLERY_MAX_PIXELS below
+// is what bounds it.
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
@@ -43,11 +44,14 @@ macro_rules! say {
 // 16 MiB holds any real image's compressed bytes with room to spare.
 const READ_CAP: usize = 16 * 1024 * 1024;
 
-// The decode pixel budget: the worst-case progressive-JPEG peak (~= READ_CAP +
-// 12*npx; see the allocator note) at 12 Mpx is 12*12M + 16 MiB = 160 MiB. It is
-// checked from the headers BEFORE decode, so an image past it is a clean error,
-// never a death at a page fault when the system runs out of memory mid-decode.
-// The figure was set when the heap was a fixed 192 MiB.
+// The decode pixel budget. At 12 Mpx a progressive JPEG peaks at 12*12M +
+// 16 MiB = 160 MiB, a 16-bit PNG at 16*12M + 32 MiB = 224 MiB (a PNG counts its
+// input twice: held, and its IDAT data copied), 320 MiB interlaced, and a
+// malformed 16-bit one at 416 MiB. It is checked from the headers BEFORE decode,
+// so an image past it is a clean error, never a death at a page fault when the
+// system runs out of memory mid-decode. The heap grows from the user pool
+// (B-1c), so these are what a decode may draw from it; the figure was set for
+// the JPEG when the heap was a fixed 192 MiB.
 const GALLERY_MAX_PIXELS: u64 = 12 * 1024 * 1024;
 
 // tapestryd is warden-spawned well before this, but a slow bring-up must not

@@ -485,6 +485,11 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      the compositor is spawned before the pivot to the pool, so its startup
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
      every image, until a halcyond pushes the bundle.
+- `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
+  halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
+  showed as a 60 s timeout that blamed the routing. It matches the refusal line
+  now (2026-09-29, the I-47 close); a host check of the inline gates' patterns
+  against halcyond's line formats found the old one matched nothing.
 
 ## Provenance
 

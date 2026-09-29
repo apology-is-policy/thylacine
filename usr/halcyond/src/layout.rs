@@ -646,6 +646,7 @@ fn hdr_track_em(sheet: &Sheet, hdr: u8) -> f32 {
 }
 
 /// `hdr_track_em` in 1/256 px at `px`.
+#[cfg(test)]
 fn hdr_track_fx(sheet: &Sheet, hdr: u8, px: f32) -> i32 {
     track_fx(px, hdr_track_em(sheet, hdr))
 }
@@ -714,11 +715,12 @@ pub struct RectSpec {
     pub color: u32,
 }
 
-/// A laid inline image (I-47 inline media): the resampled blob + its
-/// block-relative top-left. Built in `layout_block` (letterbox + resample),
-/// blitted in `render_block` via `cartoon::Op::Image`.
+/// A laid inline image (I-47 inline media): one placement of a raster in
+/// `LaidBlock::blobs` at its block-relative top-left, shown at that raster's
+/// size. Built in `layout_block` (letterbox + resample), blitted in
+/// `render_block` via `cartoon::Op::Image`.
 pub struct LaidImage {
-    pub blob: Blob,
+    pub blob: usize,
     pub x: i32,
     pub y: i32,
 }
@@ -727,7 +729,19 @@ pub struct LaidBlock {
     pub height: i32,
     pub lines: Vec<LaidLine>,
     pub rects: Vec<RectSpec>,
+    /// The block's resampled rasters. A cached image that many rows name is
+    /// resampled once per size and shared by their placements, so what a
+    /// block lays is bounded by the tile's raster cache, not by its rows.
+    pub blobs: Vec<Blob>,
     pub images: Vec<LaidImage>,
+}
+
+impl LaidBlock {
+    /// The size a placement shows at: its raster's, resampled to it once.
+    pub fn image_size(&self, img: &LaidImage) -> (u32, u32) {
+        let b = &self.blobs[img.blob];
+        (b.w, b.h)
+    }
 }
 
 fn face_for(st: &Style, in_table: bool, sheet: &Sheet) -> u8 {
@@ -907,6 +921,10 @@ struct LineBuilder<'a> {
     center: bool,
     /// Laid inline images (I-47), block-relative; drained into `LaidBlock`.
     images: Vec<LaidImage>,
+    /// The rasters `images` place, and the cached image and size each was
+    /// resampled from (`None` for a transcript image, laid once anyway).
+    blobs: Vec<Blob>,
+    blob_keys: Vec<Option<(u128, u32, u32)>>,
 }
 
 impl<'a> LineBuilder<'a> {
@@ -930,6 +948,8 @@ impl<'a> LineBuilder<'a> {
             line_pre: false,
             center: false,
             images: Vec::new(),
+            blobs: Vec::new(),
+            blob_keys: Vec::new(),
         }
     }
 
@@ -1656,10 +1676,6 @@ fn roles_of(b: &Block, frames: &[Option<Framed>], fractional: bool) -> Vec<Role>
     roles
 }
 
-/// Lay a frozen (or the open) block at `width`. Pure in its inputs modulo
-/// the glyph cache (rasterize-on-miss mutates `gs`; the RESULT is width-
-/// and content-deterministic either way -- the property the reflow E2E
-/// pins).
 /// Contain-fit `(nw, nh)` into `(aw, ah)` preserving aspect, never upscaling
 /// past native (I-47 inline media). Returns the letterboxed `(w, h)`; a
 /// narrower result is centred by the caller (the side bars are the letterbox).
@@ -1680,11 +1696,22 @@ fn letterbox(nw: i32, nh: i32, aw: i32, ah: i32) -> (i32, i32) {
 }
 
 /// An image letterboxed into the columns [left, right) and centred there.
-fn lay_inline_image(lb: &mut LineBuilder<'_>, left: i32, right: i32, w: u32, h: u32, argb: &[u32]) {
+/// `cached` names the tile's cached image it shows: a later placement of it
+/// at the same size in this block shares the first one's raster.
+fn lay_inline_image(lb: &mut LineBuilder<'_>, left: i32, right: i32, cached: Option<u128>,
+    w: u32, h: u32, argb: &[u32]) {
     let avail = (right - left).max(1);
     let (dw, dh) = letterbox(w as i32, h as i32, avail, i32::MAX);
     if dw > 0 && dh > 0 && !argb.is_empty() {
-        let blob = Blob { w, h, argb: argb.to_vec() }.scaled(dw as u32, dh as u32);
+        let key = cached.map(|id| (id, dw as u32, dh as u32));
+        let blob = match lb.blob_keys.iter().position(|k| key.is_some() && *k == key) {
+            Some(i) => i,
+            None => {
+                lb.blobs.push(Blob { w, h, argb: argb.to_vec() }.scaled(dw as u32, dh as u32));
+                lb.blob_keys.push(key);
+                lb.blobs.len() - 1
+            }
+        };
         let x = left + (avail - dw) / 2;
         lb.images.push(LaidImage { blob, x, y: lb.y() });
         lb.advance(dh);
@@ -1695,6 +1722,10 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
     layout_block_media(b, width, sheet, gs, None)
 }
 
+/// Lay a frozen (or the open) block at `width`. Pure in its inputs modulo
+/// the glyph cache (rasterize-on-miss mutates `gs`; the RESULT is width-
+/// and content-deterministic either way -- the property the reflow E2E
+/// pins).
 pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource,
     media: Option<&crate::inlinecache::InlineCache>) -> LaidBlock {
     // The glyph source follows the sheet in force here, at the entry the
@@ -1886,7 +1917,7 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
         lb.start_item(role.cap(sheet));
         match item {
             Item::Line(_) if raster.is_some() => {
-                let r = raster.unwrap();
+                let (id, r) = raster.unwrap();
                 // Inside an aside, inside its frame: the hairline and the
                 // padding on each side of the measure it caps at.
                 let (left, right) = if aside_open.is_some() {
@@ -1895,7 +1926,7 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
                 } else {
                     (sheet.pad_x, lb.width - sheet.pad_x)
                 };
-                lay_inline_image(&mut lb, left, right, r.w, r.h, &r.argb);
+                lay_inline_image(&mut lb, left, right, Some(id), r.w, r.h, &r.argb);
             }
             Item::Line(line) => {
                 let (mode, class) = match role {
@@ -2005,7 +2036,7 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
             }
             Item::Image { w, h, argb } => {
                 let right = lb.width - sheet.pad_x;
-                lay_inline_image(&mut lb, sheet.pad_x, right, *w, *h, argb);
+                lay_inline_image(&mut lb, sheet.pad_x, right, None, *w, *h, argb);
             }
         }
         // Stamp the item's visual lines with their source address (tables
@@ -2056,6 +2087,7 @@ pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSo
         height: lb.y(),
         lines: lb.lines,
         rects,
+        blobs: lb.blobs,
         images: lb.images,
     }
 }
@@ -2461,22 +2493,22 @@ pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &mut Glyp
             cart.push_glyphs(gen, seg.x, y0 + line.baseline, seg.color, &refs);
         }
     }
-    // I-47 inline media: blit each laid image via Op::Image. The resampled
-    // blob is pushed into the cartoon's per-frame blob table (execute reads
-    // cart.blobs). A per-frame clone off the cached LaidBlock -- fine for a
-    // handful of images; a move/borrow optimization is a later refinement.
+    // I-47 inline media: each of the block's rasters enters the cartoon's
+    // per-frame blob table once (execute reads cart.blobs), and every
+    // placement of it is an Op::Image naming it.
+    let ids: Vec<u32> = laid
+        .blobs
+        .iter()
+        .map(|b| cart.add_blob(Blob { w: b.w, h: b.h, argb: b.argb.clone() }))
+        .collect();
     for img in laid.images.iter() {
-        let id = cart.add_blob(Blob {
-            w: img.blob.w,
-            h: img.blob.h,
-            argb: img.blob.argb.clone(),
-        });
+        let (w, h) = laid.image_size(img);
         cart.ops.push(Op::Image {
-            blob_id: id,
+            blob_id: ids[img.blob],
             x: img.x,
             y: y0 + img.y,
-            w: img.blob.w,
-            h: img.blob.h,
+            w,
+            h,
         });
     }
 }
@@ -2700,7 +2732,7 @@ pub(crate) mod tests {
         let laid = layout_block(&wide, 600, &sheet, &mut g);
         assert_eq!(laid.images.len(), 1, "the image laid as one item");
         assert_eq!(
-            (laid.images[0].blob.w, laid.images[0].blob.h),
+            laid.image_size(&laid.images[0]),
             (nw, nh),
             "wide enough: native size, no upscale"
         );
@@ -2735,7 +2767,7 @@ pub(crate) mod tests {
         let laid_n = layout_block(&narrow, 80, &sheet, &mut g);
         assert_eq!(laid_n.images.len(), 1);
         assert!(
-            laid_n.images[0].blob.w < nw && laid_n.images[0].blob.w > 0,
+            (1..nw).contains(&laid_n.image_size(&laid_n.images[0]).0),
             "a narrower pane scaled the image down (reflow)"
         );
 
@@ -2757,7 +2789,7 @@ pub(crate) mod tests {
         };
         let laid_t = layout_block(&tall, 600, &sheet, &mut g);
         assert_eq!(
-            (laid_t.images[0].blob.w, laid_t.images[0].blob.h),
+            laid_t.image_size(&laid_t.images[0]),
             (100, 500),
             "a tall image that fits the width keeps native height (no height cap)"
         );
@@ -4286,15 +4318,88 @@ pub(crate) mod tests {
         assert_eq!(laid.rects.len(), 4, "one frame");
         let (bottom, left, right) = (&laid.rects[1], &laid.rects[2], &laid.rects[3]);
         let img = &laid.images[0];
+        let (iw, ih) = laid.image_size(img);
         assert_eq!(img.x, left.x + 1 + 17, "the hairline, then 17 in");
-        assert_eq!(img.x + img.blob.w as i32, right.x - 17, "17 in from the right hairline");
-        assert!(bottom.y >= img.y + img.blob.h as i32 + 15, "the frame closes below it");
+        assert_eq!(img.x + iw as i32, right.x - 17, "17 in from the right hairline");
+        assert!(bottom.y >= img.y + ih as i32 + 15, "the frame closes below it");
 
         let t = inst_transcript(s.theme.terminal, |b| inline_image_in(b, false));
         let laid = layout_block_media(&t.frozen_blocks()[0], 1000, &s, &mut g, Some(&media));
         assert!(laid.rects.is_empty(), "no frame");
         let img = &laid.images[0];
-        assert_eq!((img.x, img.blob.w as i32), (43, 1000 - 2 * 43), "the page between its pads");
+        assert_eq!((img.x, laid.image_size(img).0 as i32), (43, 1000 - 2 * 43), "the page between its pads");
+    }
+
+    /// A cached picture is resampled once however many rows name it: one obj
+    /// held open over 2,000 lines shows the picture on every line, lays one
+    /// raster, and puts one copy in the frame's blob table. A copy per row let
+    /// one pane's output multiply the compositor's memory by its row count.
+    #[test]
+    fn a_picture_named_by_many_rows_is_laid_once() {
+        let s = inst_sheet(1440);
+        let mut media = crate::inlinecache::InlineCache::new(1 << 26);
+        assert!(media.insert(0xe, 64, 64, alloc::vec![0xFF00_00FF; 64 * 64]));
+        let mut g = gs();
+        let t = inst_transcript(s.theme.terminal, |b| {
+            wire::open(b, BOp::Zone, &[("k", "output")]);
+            let refv = "0000000000000000000000000000000e";
+            wire::open(b, BOp::Obj, &[("type", "inline-image"), ("ref", refv)]);
+            for _ in 0..2000 {
+                b.extend_from_slice(b"x\n");
+            }
+            wire::close(b, BOp::Obj);
+            wire::close(b, BOp::Zone);
+        });
+        let laid = layout_block_media(&t.frozen_blocks()[0], 1000, &s, &mut g, Some(&media));
+        assert_eq!(laid.images.len(), 2000, "every row shows the picture");
+        assert_eq!(laid.blobs.len(), 1, "one raster laid");
+        assert_eq!(laid.blobs[0].argb.len(), 64 * 64, "at its native size");
+        assert!(laid.images.iter().all(|i| i.blob == 0));
+        assert_eq!(laid.image_size(&laid.images[0]), (64, 64));
+        let mut cart = Cartoon::new();
+        render_block(&mut cart, &laid, 0, &mut g);
+        assert_eq!(cart.blobs.blobs.len(), 1, "one copy in the frame");
+        let placed = cart.ops.iter().filter(|op| matches!(op, Op::Image { blob_id: 0, .. })).count();
+        assert_eq!(placed, 2000, "and one placement per row");
+    }
+
+    /// One picture named on the page and again inside an aside, in one block,
+    /// lays at the two widths it is given, and a second picture at the page's
+    /// width lays its own: three rasters, each placement naming its own. A key
+    /// without the size would show the page's raster inside the frame; one
+    /// without the id, the first picture in the second's place.
+    #[test]
+    fn a_block_lays_one_raster_per_picture_and_width() {
+        let s = inst_sheet(1440);
+        let mut media = crate::inlinecache::InlineCache::new(1 << 26);
+        assert!(media.insert(0xe, 4000, 100, alloc::vec![0xFF00_00FF; 4000 * 100]));
+        assert!(media.insert(0xf, 4000, 100, alloc::vec![0xFFFF_0000; 4000 * 100]));
+        let mut g = gs();
+        let pic = |b: &mut Vec<u8>, refv: &str| {
+            wire::open(b, BOp::Obj, &[("type", "inline-image"), ("ref", refv)]);
+            b.extend_from_slice(b"picture");
+            wire::close(b, BOp::Obj);
+            b.extend_from_slice(b"\n");
+        };
+        let (e, f) = ("0000000000000000000000000000000e", "0000000000000000000000000000000f");
+        let t = inst_transcript(s.theme.terminal, |b| {
+            wire::open(b, BOp::Zone, &[("k", "output")]);
+            pic(b, e);
+            wire::open(b, BOp::Aside, &[]);
+            pic(b, e);
+            wire::close(b, BOp::Aside);
+            pic(b, f);
+            wire::close(b, BOp::Zone);
+        });
+        let laid = layout_block_media(&t.frozen_blocks()[0], 1000, &s, &mut g, Some(&media));
+        assert_eq!(laid.images.len(), 3, "every placement resolves");
+        assert_eq!(laid.blobs.len(), 3, "one raster per picture and width");
+        let [page, framed, other] = [0, 1, 2].map(|i| &laid.images[i]);
+        assert_eq!(laid.image_size(page).0, 1000 - 2 * 43, "the page between its pads");
+        assert!(laid.image_size(framed).0 < laid.image_size(page).0, "the frame's is narrower");
+        assert_eq!(laid.image_size(other), laid.image_size(page), "the second picture, at the page's width");
+        assert_eq!(laid.blobs[page.blob].argb[0], 0xFF00_00FF);
+        assert_eq!(laid.blobs[other.blob].argb[0], 0xFFFF_0000, "shows its own pixels");
     }
 
     /// 7.3's default inks by role under Instrument; an explicit SGR colour

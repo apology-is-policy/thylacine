@@ -73,14 +73,19 @@ pub fn within_pixel_budget(w: u32, h: u32, max: u64) -> bool {
 /// Decode a PNG to opaque-or-alpha ARGB. zune expands sub-8-bit and palette
 /// images and reports the resulting colorspace; we normalize every case
 /// (Luma / LumaA / RGB / RGBA, 8- or 16-bit) to 0xAARRGGBB. 16-bit samples are
-/// taken high-byte (>> 8); a Luma channel replicates across R/G/B; a missing
+/// taken high-byte, by the decoder in its own buffer; a Luma channel replicates across R/G/B; a missing
 /// alpha is opaque. cartoon's Op::Image composites the alpha over the pane
 /// ground, so a transparent PNG shows the pane through -- correct for inline.
 pub fn decode_png(bytes: &[u8]) -> Result<Raster, &'static str> {
+    use zune_core::options::DecoderOptions;
     use zune_core::result::DecodingResult;
     use zune_png::PngDecoder;
 
-    let mut dec = PngDecoder::new(bytes);
+    // zune narrows a 16-bit image to its high bytes in its own output buffer, so
+    // no 16-bit copy reaches this function. The decode's peak is zune's; the
+    // callers' pixel budgets bound it (view's main.rs states it per format).
+    let opts = DecoderOptions::default().png_set_strip_to_8bit(true);
+    let mut dec = PngDecoder::new_with_options(bytes, opts);
     dec.decode_headers().map_err(|_| "png: malformed headers")?;
     let (w, h) = dec.get_dimensions().ok_or("png: no dimensions")?;
     let cs = dec.get_colorspace().ok_or("png: unknown colorspace")?;
@@ -93,10 +98,10 @@ pub fn decode_png(bytes: &[u8]) -> Result<Raster, &'static str> {
         return Err("png: image empty or over the pixel bound");
     }
 
-    // Decode to 8-bit samples in the native (post-expansion) colorspace.
+    // Decode to 8-bit samples in the native (post-expansion) colorspace; the
+    // strip above makes every depth arrive as 8-bit.
     let samples: Vec<u8> = match dec.decode().map_err(|_| "png: decode failed")? {
         DecodingResult::U8(v) => v,
-        DecodingResult::U16(v) => v.iter().map(|&s| (s >> 8) as u8).collect(),
         _ => return Err("png: unsupported sample type"),
     };
 
@@ -229,6 +234,16 @@ mod tests {
         assert_eq!(r.argb[10 * 640 + 600], 0xFFE0_20E0, "magenta bar");
         // (100,350): the bottom luminance ramp, v = 100*255/639 = 39 -> gray.
         assert_eq!(r.argb[350 * 640 + 100], 0xFF27_2727, "gradient gray");
+    }
+
+    #[test]
+    fn decode_png_takes_the_top_byte_of_a_16_bit_sample() {
+        // testdata/make-rgba16-png.py: a 2x2 RGBA PNG at 16 bits a sample, each
+        // sample's low byte unlike its high one, so a narrowing that kept the
+        // wrong byte reads as a different colour.
+        let r = decode_png(include_bytes!("testdata/rgba16.png")).expect("decode 16-bit");
+        assert_eq!((r.w, r.h), (2, 2));
+        assert_eq!(r.argb, [0xFFE0_2020, 0xFF20_E020, 0x8012_569A, 0x0000_0000]);
     }
 
     #[test]

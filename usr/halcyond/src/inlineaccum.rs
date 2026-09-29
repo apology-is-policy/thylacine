@@ -7,7 +7,8 @@
 // the syscall body.
 //
 // The wire contract itself is `inlinewire` (shared with `view`, the writer):
-// a 16-byte header (magic/format/w/h) then w*h ARGB u32s as LE bytes. That
+// a 32-byte header (magic/format/w/h, then the u128 image id) then w*h ARGB
+// u32s as LE bytes. That
 // crate's `PlaceHeader::parse` fully validates the header before this module
 // commits a byte of the payload.
 
@@ -84,7 +85,7 @@ impl PlaceAccum {
             }
             None => {
                 let have = self.buf.len();
-                // Not yet enough bytes to form a 16-byte header: buffer the few we
+                // Not yet enough bytes to form a header: buffer the few we
                 // have (< HEADER_LEN total -- bounded) and wait for more.
                 if have + data.len() < HEADER_LEN {
                     self.buf.extend_from_slice(data);
@@ -199,7 +200,7 @@ mod tests {
         let (msg, px) = wire(4, 4);
         let mut a = PlaceAccum::new(CAP);
         let mut off = 0u64;
-        // First a sub-header dribble (< 16 bytes), then the rest in 10-byte bites.
+        // First a sub-header dribble (< HEADER_LEN bytes), then the rest in 10-byte bites.
         assert!(matches!(a.write(off, &msg[..10]), AccumStep::More));
         off += 10;
         let mut done = None;
@@ -241,7 +242,7 @@ mod tests {
     #[test]
     fn header_claiming_giant_rejected_before_payload() {
         // The header alone, claiming a raster far over the cap: rejected on the
-        // 16-byte header, so no payload is ever buffered.
+        // header alone, so no payload is ever buffered.
         let hdr = PlaceHeader::argb(4000, 4000).pack(); // 16 Mpx > 2 Mpx cap
         let mut a = PlaceAccum::new(CAP);
         assert!(matches!(a.write(0, &hdr), AccumStep::Reject));

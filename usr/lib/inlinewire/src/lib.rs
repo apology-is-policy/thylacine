@@ -55,7 +55,7 @@ impl PlaceHeader {
         }
     }
 
-    /// The 16-byte wire header (magic, format, w, h; all LE).
+    /// The 32-byte wire header (magic, format, w, h, then the u128 id; all LE).
     pub fn pack(&self) -> [u8; HEADER_LEN] {
         let mut b = [0u8; HEADER_LEN];
         b[0..4].copy_from_slice(&MAGIC.to_le_bytes());

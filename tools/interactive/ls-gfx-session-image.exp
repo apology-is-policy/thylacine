@@ -17,7 +17,7 @@
 #   - halcyond validates the token at the walk, accepts the connection only from
 #     the session's own user, accumulates + validates the payload, and routes the
 #     completed raster to the tile the token names: the serial witness
-#     "halcyond: session inline leaf=N 640x400" (my new drain log).
+#     "halcyond: session inline leaf=N 640x400" (the session drain's log).
 #   - the pixel proof: a screendump delta shows the decoded image painted into
 #     the composited tile (the cartoon::Op::Image render, in a session tile).
 #
@@ -167,9 +167,9 @@ expect {
     -re {halcyond: session inline leaf=([0-9]+) 640x400} {
         set leaf $expect_out(1,string)
     }
-    -re {halcyond: session inline leaf=[0-9]+ REFUSED} {
-        lc_fail "the 640x400 raster was REFUSED by the per-pane budget (unexpected in a\
- lightly-loaded session -- the inject-time F1 check or the tile share is wrong)"
+    -re {halcyond: session inline leaf=[0-9]+ cache refused} {
+        lc_fail "the 640x400 raster routed but the tile's raster cache refused it (unexpected\
+ in a lightly-loaded session -- the admission cap or the tile's share is wrong)"
     }
     -re {EXTINCTION:} { lc_extinction_fail "extinction during the inline view" }
     timeout {

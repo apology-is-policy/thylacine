@@ -747,6 +747,43 @@ script reproduces. Instrument session image: `ls-halcyon-lantern` 99 s PASS, leg
 frame slide two adds, (38,178) to (757,282), against slide one. The chunk sits on main 26e8d367 (the Tclunk closer),
 merged before its gates. No kernel change, so no sanitizer run or spec is owed.
 
+## The I-47 close: one raster per block, a token that routes — 2026-09-29
+
+Operator vote 3 of 2026-09-28 pulled forward the owed Fable-diversity pass on inline media and the I-47 flip. The pass
+(FABLE-1: 0 P0 / 1 P1 / 1 P2 / 4 P3) is closed here, all but F5, which belongs to (d2), the image slide. Scripture 8698a926
+(ARCH 28 I-47 rewritten and ENFORCED; the HPL2 AUDIT-TRIGGERS row; HALCYON 14.7 and 14.7.2; BEACON 10; AUX-ROADMAP;
+`dec-2026-09-29-inline-media-one-principal`). Code *(pending)*.
+
+- **One raster per block (F1, P1).** A block keeps one resampled raster per (image id, display size) in
+  `LaidBlock.blobs`; a `LaidImage` is a placement shown at its raster's size, and `render_block` adds each raster to
+  the frame once. A block lays at most twice the tile's raster cache (the page's width and an aside's) plus its
+  transcript images, however many rows name a picture.
+- **The token routes (F2, P2, a decision).** Any Proc of the session's principal can read a pane's token from
+  `/proc/<pid>/environ`; ptyfs serves every pts 0666, and a covering debugger can drive a pane's shell. So one
+  principal's panes are one authority domain (Plan 9's rio): the peer-principal gate at accept is the authority and
+  the token routes. The ARCH row, HALCYON 14.7.2 and the code's headers say so. Option (ii), an inherited fd, would
+  protect nothing those leave open.
+- **Quiet diagnostics (F3).** Every place-path line a client can repeat (a connect accepted or refused, a walk to an
+  unrouted token, an upload placed, refused by the cache or orphaned) is written at its 1st, 2nd, 4th ... occurrence
+  with its count (`paneroute::Quiet`), on the session and the console channels.
+- **The rest.** The wire comments say 32 bytes, `HPL2` (F4). `view` narrows a 16-bit PNG in zune's buffer, and view's
+  and gallery's budget comments state each format's true peak (F6, corrected by the close's round).
+  `ls-gfx-session-image`'s fail-fast arm matches the refusal line halcyond writes. Three dead-code warnings removed.
+
+Audit: FABLE-1 (Fable 5.1, read-only on 84edfca5) opened the chunk. The close's own round, I47-CLOSE (Fable 5.1
+reviewing Opus 5.5, MODEL start == end): 0 P0 / 0 P1 / 1 P2 / 3 P3, all fixed, and it ruled for option (i). Fixed: the
+retracted token wording in the headers, 14.7.2 and the dossier (F1); the PNG peak figures (F2); four unthrottled
+lines (F3); the untested size half of the raster key, and a placement size its raster could contradict (F4). Found by
+the implementer in parallel: F1 and F3, `Quiet` inside `place_tail`'s doc comment, and the gate's dead fail-fast arm.
+Closed list: memory `audit_inline_media_closed_list.md`.
+
+Verification: host halcyond 445, view 12, gallery 11, inlinewire 2; guest build clean. Mutants, each red set predicted
+before its run: no raster reuse, a copy per placement, `Quiet` always open, no strip, a size-less key and an id-less
+key, all red as predicted. Device: on the console image, `ls-gfx-inline-view` 42 s, `ls-gfx-jpeg` 40 s and
+`ls-gfx-gallery` 39 s, all PASS; on the Instrument session image, `ls-gfx-session-image` 51 s (+194,115 px in the
+tile) and `ls-halcyon-session-media` 75 s, both PASS, each witness line in its new form (`leaf=3 640x400 (1 so far)`).
+No kernel change, so no sanitizer run or spec is owed.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it
