@@ -853,6 +853,64 @@ and 8, UBSan at -smp 4 and 8, ten boots each); `tools/test-fault.sh` 8/8; `tools
 or the debugger (`pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc`, `dap-nora`, `nora-demo`) PASS, one
 attempt each.
 
+## The held launch: ambush spawns held where the kernel has the hold — 2026-09-30
+
+The birth hold's userspace half. With the kernel half landed (the section above), ambush still spawned its target
+running, so the race stayed live: on 2026-09-30 the image-slide branch's CI `manual` gate died in `/ambush-probe`
+stage C, the race's third boot-fatal sighting. The operator said yes to changing and committing the Go fork and ambush
+on 2026-09-30. Scripture 9bfa3041 (DELVE-PORT-DESIGN section 7 (b) and section 12). Code *(pending)*.
+
+- **The forks.** Local commits in the forks the build reads, shared with main. go-thylacine: aaf21fb commits the
+  104-byte record its builds had compiled from an uncommitted working tree; e8b4bcf adds `SysProcAttr.DebugHeld`,
+  which sets `SPAWN_DEBUG_HELD` in `debug_flags`; 83b46ad makes the record's five user-address fields pointer-typed;
+  26b9b29 has a spawn without a `Dir` take `spawnDirMu`'s read side; 4aba404 names everything the `Dir` window
+  exposes. Ambush: 69e94cd spawns held when built with `-tags thylacine_held`, and writes `exitkill` before `stop`;
+  aba36e0 reaps an abandoned child only after its kill lands; 074dca0 adds dap-selftest's two reap legs; ce9154d reaps
+  a child that is already dead when the kernel refuses its kill, in `Launch`'s failure paths and in the debugger's own
+  kill.
+- **The tag.** Both ambush builds, the ramfs copy for `/ambush-probe` and the `/goroot/bin` copy nora's `:debug` runs,
+  take `-tags thylacine_held` from one variable, because this tree's kernel has the hold. A kernel without it refuses
+  the flag before any child exists, so a fork shared with main cannot spawn held unconditionally. `ambush_fork_check`
+  asks `go list` which of the held pair the tagged build compiles and refuses anything but the held file, and
+  `ambush_artifact_check` reads the tags back from each binary. The tag goes when every tree carries the hold.
+- **The order.** `Launch` writes `exitkill` before `stop`, on the tagged and the untagged path: the stop converts the
+  hold, and the orphan rule covers a held child only while the hold lasts.
+- **The witnesses.** `/ambush-probe` stage C prints `regs` at the launch stop, and the probe requires the PC to be
+  `/bin/ambush-child`'s ELF entry. A held child is parked there. A launch that raced has always left it, and a child
+  spawned running reads at the entry only when an interrupt is already pending at its first eret, so the marker fails
+  every raced launch, and a build that spawns running on all but a sliver of boots; the race itself bites about once
+  in 160. Stage D launches `/bin/ambush-notelf`, an executable that is not an ELF image, and requires the failed
+  launch to reap the child that died loading: a held spawn hands that child back already dead, and the kernel refuses
+  to kill it. Its second leg kills a stopped `/bin/ambush-child` from outside, waits for the zombie, and requires the
+  debugger's own kill to succeed and reap it, the same leak one function over, older than this chunk.
+- **The spawn record.** `startProcess` kept the record's name, argv and fd-list addresses as integers across the calls
+  that honour `ProcAttr.Dir`, and those calls can move the goroutine stack the buffers may live on, leaving the kernel
+  to read the freed old stack. The fields are pointers now, and `tools/check-spawn-args-mirrors.py` requires a pointer
+  type at every kernel `*_va` offset, and a classification for every 8-byte kernel field, address or not.
+- **Still open.** The Go fork honours `Dir` by moving the whole parent, so during a spawn the rest of the process sees
+  `Dir`, a `Chdir` it makes is undone, and a restore that fails leaves it in `Dir`. The fix, a spawn record that
+  carries the child's cwd, is an ABI change, queued in OPEN-BUGS for the operator's vote.
+- **The proof.** One 8-CPU boot per arm, the same 20-launch harness, and a 500 ms pause between the spawn and the
+  attach: held, the breakpoint on `main.parkLoop`'s entry fired 20/20, every launch stop landing before the child had
+  run anything; with `launchHeld` switched off in the same build, 0/20 fired, and all 20 stops found the child past
+  its entry, in `time.Sleep`.
+- **Audit.** Round 1, Fable 5.1: 0 P0 / 0 P1 / 2 P2 / 4 P3. The P2s: nora's `/goroot/bin` ambush was built untagged
+  (fixed: one `AMBUSH_TAGS`, and a check that reads the tags back from each binary), and the Go fork held the spawn
+  record's addresses as integers across calls that can move the stack (fixed: pointer-typed fields, required by the
+  mirror check). The P3s: a failed kill in `Launch` followed by a blocking reap, an old fork silently taking the tag,
+  a spawn without `Dir` catching a `Dir` spawn's cwd (all fixed), and an unreadable EPERM (closed: it waits on the
+  spawn returning a real errno, #102). Round 2, Fable 5.1, on the fixes: 0 / 0 / 0 / 5 P3. My kill-then-reap fix never
+  reaped a child that died loading (fixed with a non-blocking reap and a stage D leg), and checking that fix against
+  the kernel turned up the same leak in the debugger's own kill, older than this chunk (the same reap, and a second
+  leg; on the fork with the legs and no fix, one boot failed both, `reaped=0 killed=0`); the stage C comment claimed
+  more than the kernel gives (restated); the fork check trusted a declaration (it asks `go list` now); the checker's
+  address rule trusted the `_va` suffix (every 8-byte kernel field is classified now); and the fork's `Dir` window has
+  three residuals (documented; the fix is an ABI change, queued for a vote). My own review found three of round 2's
+  five before its report.
+- **Verification.** `tools/test.sh` 1782/1782 PASS; the debug probe's three held legs ok, and `/ambush-probe` stages A
+  to D green -- stage C's launch stop at the ELF entry (0x75440), stage D `reaped=1 killed=1` with every round-trip
+  marker; `dap-nora` and `nora-demo` PASS; `tools/ci-smp-gate.sh` 5 rows x 10/10, 0 corruption.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

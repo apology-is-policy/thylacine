@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -400,9 +400,22 @@ park.
   the wait, and there the parent runs on a stack its child still borrows.
   Tracked in OPEN-BUGS (2026-09-29); a park sleep that only group death
   interrupts, which the latch-versus-stop design call may bring, would close it.
-- **The launch path is not wired yet.** The Go fork's `SysProcAttr` and
-  ambush's `Launch` do not set the flag, so Delve's launch still races until
-  those two out-of-tree halves land. They wait on the operator's permission.
+- **The held launch rides a build tag.** The Go fork's
+  `SysProcAttr.DebugHeld` sets the flag, and ambush's `Launch` sets it only
+  when built with `-tags thylacine_held`, which this tree's `tools/build.sh`
+  passes ([[sub-substrate-build]]). A tree whose kernel lacks the hold builds
+  ambush untagged and keeps the old launch, race included, because that kernel
+  refuses the flag. `Launch` writes `exitkill` before `stop`: the stop ends the
+  orphan rule's cover, so the mark has to be in place first. `/ambush-probe`
+  stage C witnesses the held launch: its init script prints `regs` at the launch
+  stop, and the PC must be the program's ELF entry. A launch that raced has
+  always left the entry behind. A child spawned running is stopped at its first
+  trap, because `userland_enter` does not look for a stop, so it reads at the
+  entry only when an interrupt is already pending at its first eret. A held
+  child that dies loading comes back from the spawn already dead, and the kernel
+  refuses to kill a dead Proc, so a failed launch reaps it without waiting for a
+  kill; stage D launches such a program and requires the reap. The tag goes once
+  every tree carries the hold.
 
 ## Caveats
 

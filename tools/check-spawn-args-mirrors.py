@@ -8,8 +8,8 @@ each copy's own size assert cannot say whether it does -- an assert compares
 the copy with a NUMBER, not with the kernel. When the aux-2 merge grew the
 kernel struct 96 -> 104, a mirror left at 96 still passed its own assert and
 the kernel read 8 bytes past it (#100). The go fork's committed copy was left
-at 96 by the same growth, and its builds are right only because they compile
-an uncommitted working-tree fix.
+at 96 by the same growth, and for a while its builds were right only because
+they compiled an uncommitted working-tree fix.
 
 This check takes the layout from the kernel header -- the struct's field list,
 laid out with natural alignment, and cross-checked against the header's own
@@ -26,11 +26,21 @@ The in-tree mirrors must match names, offsets and sizes: two same-size fields
 swapped keep every offset and still hand the kernel the wrong value. The go
 fork lives outside the repo and names its fields in Go style, so it is held to
 offsets and sizes only, and is skipped (said so, never silently) when absent.
+It is held to one more rule: every field at an offset where the kernel's field
+is a user address (a name ending in _va) must be pointer-typed (*T or
+unsafe.Pointer). A Go buffer can live on the goroutine stack, and the stack
+copier adjusts pointer slots only, so an address kept as an integer across a
+call that moves the stack names the freed old stack when the kernel reads it.
+Which kernel fields are addresses is checked too: every 8-byte field of the
+kernel's struct must be named *_va or be listed in NON_ADDRESS_U64, so a new
+address field cannot slip past the rule by lacking the suffix.
 
 A green comparison is then proved able to fail: each source is mutated in
 memory -- a mirror missing its last field, a mirror with two fields swapped,
-the Rust mirror marked packed, a kernel field with no offset assert -- and any
-mutation that goes unreported fails the check. A checker that cannot verify itself stops the build.
+the Rust mirror marked packed, a kernel field with no offset assert, each go
+fork address field turned into an integer, a kernel address field without its
+_va suffix -- and any mutation that goes unreported, by the rule it targets,
+fails the check. A checker that cannot verify itself stops the build.
 """
 import os
 import pathlib
@@ -48,6 +58,9 @@ MIRRORS = [
 ]
 GO_REL = "src/syscall/exec_thylacine.go"
 GO_TYPE = "spawnArgs"
+# The kernel struct's 8-byte fields that are not user addresses; every other one
+# must be named *_va.
+NON_ADDRESS_U64 = {"cap_mask"}
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
 C_SIZES = {
@@ -67,7 +80,16 @@ C_FIELD = re.compile(
                                 for t in C_SIZES), key=len, reverse=True))
     + r")\s+(\w+)\s*(?:\[\s*(\d+)\s*\])?\s*;\s*$")
 RUST_FIELD = re.compile(r"^\s*pub\s+(\w+)\s*:\s*(\w+)\s*,?\s*$")
-GO_FIELD = re.compile(r"^\s*(\w+)\s+(\w+)\s*$")
+GO_FIELD = re.compile(r"^\s*(\w+)\s+(\*?\w+(?:\.\w+)?)\s*$")
+
+
+def go_pointer(t):
+    return t.startswith("*") or t == "unsafe.Pointer"
+
+
+def go_size(t):
+    """A Go field type's size; a pointer is 8 bytes on arm64."""
+    return 8 if go_pointer(t) else GO_SIZES.get(t)
 
 
 class CheckError(Exception):
@@ -178,7 +200,7 @@ def parse_fields(text, struct, lang, label):
             count = 1
         elif lang == "go":
             m = GO_FIELD.match(line)
-            size = GO_SIZES.get(m.group(2)) if m else None
+            size = go_size(m.group(2)) if m else None
             count = 1
         else:
             m = C_FIELD.match(line)
@@ -257,16 +279,57 @@ def compare(label, mirror, kernel, names):
     return errs
 
 
+def go_types(go_text):
+    """{offset: (field, type)} of the go fork's struct."""
+    lines = go_text.splitlines()
+    out = {}
+    for name, off, _, ln in layout(parse_fields(go_text, GO_TYPE, "go", "go fork"))[0]:
+        out[off] = (name, GO_FIELD.match(strip_comments([lines[ln]])[0]).group(2))
+    return out
+
+
+def go_va_errs(go_text, kernel):
+    """Each kernel user-address field (*_va) must be pointer-typed in Go."""
+    typed, errs = go_types(go_text), []
+    for kname, off, _, _ in kernel[0]:
+        if not kname.endswith("_va") or off not in typed:
+            continue
+        name, t = typed[off]
+        if not go_pointer(t):
+            errs.append(f"go fork: {name} @{off} carries the kernel's {kname}, a "
+                        f"user address, as {t} -- make it pointer-typed (*T or "
+                        f"unsafe.Pointer): the buffer can live on the goroutine "
+                        f"stack, and the stack copier adjusts pointer slots only")
+    return errs
+
+
+def u64_class_errs(text):
+    """Every 8-byte kernel field is a user address (*_va) or listed as not one."""
+    label, _, struct = KERNEL
+    wide = {name for name, size, count, _ in parse_fields(text, struct, "kernel", label)
+            if size == 8 and count == 1}
+    errs = [f"{label}: {name} is 8 bytes but neither named *_va (a user address) "
+            f"nor listed in NON_ADDRESS_U64 -- classify it, so that the go fork's "
+            f"pointer rule covers it if it is an address"
+            for name in sorted(wide)
+            if not name.endswith("_va") and name not in NON_ADDRESS_U64]
+    errs += [f"{label}: NON_ADDRESS_U64 lists {name}, which the struct does not "
+             f"declare as an 8-byte field -- the list has gone stale"
+             for name in sorted(NON_ADDRESS_U64 - wide)]
+    return errs
+
+
 def check(texts, go_text):
     """Every mismatch, as messages; raises CheckError on an unreadable source."""
     kernel = kernel_layout(texts["kernel"])
-    errs = []
+    errs = u64_class_errs(texts["kernel"])
     for label, _, struct, lang in MIRRORS:
         lay = layout(parse_fields(texts[label], struct, lang, label))
         errs += compare(label, lay, kernel, names=True)
     if go_text is not None:
         lay = layout(parse_fields(go_text, GO_TYPE, "go", "go fork"))
         errs += compare("go fork", lay, kernel, names=False)
+        errs += go_va_errs(go_text, kernel)
     return kernel, errs
 
 
@@ -275,6 +338,15 @@ def fails(texts, go_text):
         return bool(check(texts, go_text)[1])
     except CheckError:
         return True
+
+
+def reported(texts, go_text, needle):
+    """Whether the check reports a fault naming needle -- a mutation that another
+    rule happens to catch proves nothing about the rule it was aimed at."""
+    try:
+        return any(needle in e for e in check(texts, go_text)[1])
+    except CheckError as e:
+        return needle in str(e)
 
 
 def edit_line(text, lang, index, fn):
@@ -333,6 +405,19 @@ def self_test(texts, go_text):
                             lambda l: re.sub(r"\buint32\b", "uint64", l))
         if widened != go_text and not fails(texts, widened):
             missed.append("go fork with its last field widened")
+        typed = go_types(go_text)
+        vas = [(kname, off) for kname, off, _, _ in kernel_layout(texts["kernel"])[0]
+               if kname.endswith("_va") and off in typed and go_pointer(typed[off][1])]
+        ln = {off: f[3] for f, (_, off, _, _) in
+              zip(fields, layout(fields)[0])}
+        if not vas:
+            missed.append("go fork address fields (none is pointer-typed to mutate)")
+        for kname, off in vas:
+            integer = edit_line(go_text, "go", ln[off],
+                                lambda l: re.sub(r"\*\w+|unsafe\.Pointer", "uint64", l, count=1))
+            if integer == go_text or not reported(texts, integer, "a user address"):
+                missed.append(f"go fork with {typed[off][0]} (the kernel's {kname}) "
+                              f"as an integer")
     kfields = parse_fields(texts["kernel"], KERNEL[2], "kernel", "kernel")
     grown = edit_line(texts["kernel"], "kernel", kfields[-1][3],
                       lambda l: l + "\n    u32 unasserted_field;")
@@ -340,6 +425,12 @@ def self_test(texts, go_text):
     t["kernel"] = grown
     if not fails(t, go_text):
         missed.append("a kernel field with no offsetof assert")
+    first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
+                    if n.endswith("_va"))
+    t = dict(texts)
+    t["kernel"] = re.sub(r"\b%s\b" % first_va, first_va[:-3], texts["kernel"])
+    if t["kernel"] == texts["kernel"] or not reported(t, go_text, "neither named *_va"):
+        missed.append(f"a kernel address field ({first_va}) without its _va suffix")
     return missed
 
 
@@ -358,9 +449,8 @@ def main():
     try:
         kernel, errs = check(texts, go_text)
         if errs:
-            print("spawn-args mirror check: FAILED -- a mirror of struct "
-                  "sys_spawn_args does not match the kernel's layout:",
-                  file=sys.stderr)
+            print("spawn-args mirror check: FAILED -- struct sys_spawn_args or "
+                  "a mirror of it breaks a rule:", file=sys.stderr)
             for e in errs:
                 print(f"  {e}", file=sys.stderr)
             return 1
@@ -373,10 +463,12 @@ def main():
               + "; ".join(missed), file=sys.stderr)
         return 1
     checked = [m[0] for m in MIRRORS]
-    goline = (f"go fork ok (offsets and sizes, {go_path})" if go_text is not None
+    goline = (f"go fork ok (offsets, sizes, pointer-typed addresses; {go_path})"
+              if go_text is not None
               else f"go fork SKIPPED ({go_path} absent)")
     lay, size = kernel
-    print(f"spawn-args mirror check: kernel {size} B / {len(lay)} fields; "
+    print(f"spawn-args mirror check: kernel {size} B / {len(lay)} fields, every "
+          f"u64 classified; "
           f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}")
     return 0
 

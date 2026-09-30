@@ -21,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -204,6 +204,28 @@ fatal, with no skip switch. Like the hunk check it refuses rather than warns,
 because the failure it guards against is silent: a copy left behind when the
 kernel record grows passes its own size assertion while the kernel reads past
 it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
+
+**Both ambush builds pass `-tags thylacine_held` (2026-09-30).** The Go
+fork's `SysProcAttr.DebugHeld` sets the spawn record's `debug_flags`, and
+ambush's `Launch` sets it only in a build that carries the tag. This tree's
+kernel has the birth hold, so both ambush builds pass the tag from one
+variable, `AMBUSH_TAGS`: `build_ambush`'s ramfs copy for `/ambush-probe`, and
+the `/goroot/bin` copy that nora's `:debug` runs. A launched target stays
+parked until the debugger's stop ([[sub-kernel-birth-hold]]). Each build checks
+both ends of the tag. `ambush_fork_check` asks `go list` which of the pair
+`held_on_thylacine.go` / `held_off_thylacine.go` the tagged build compiles, and
+refuses unless it is the held one, declaring `launchHeld = true` (Go ignores a
+tag no file mentions, so an old fork, or one whose file no longer answers to
+the tag, would build the running-spawn `Launch` under a log line saying held).
+`ambush_artifact_check` reads the tags back from the binary with `go version
+-m`, whose build info survives the strip. Whether `Launch` still acts on the
+constant is behaviour, which `/ambush-probe` checks at the entry. The ramfs
+also carries `/bin/ambush-notelf`, an executable that is not an ELF image, for
+stage D's abandoned-launch leg. A
+kernel without the hold refuses the flag, and both forks are shared by trees
+whose kernels differ, so the choice lives here, in the file versioned with the
+kernel, rather than in the fork or at run time (DELVE-PORT-DESIGN section 7 (b)).
+The tag goes once every tree carries the hold.
 
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit
