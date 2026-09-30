@@ -9252,6 +9252,11 @@ struct spawn_full_argv_args {
     // invariant's own counterexample.
     u32            name_len;
     char           name[SYS_SPAWN_NAME_MAX + 1];
+    // The birth hold (DEBUG-FS-DESIGN 5f): the spawn asked for SPAWN_DEBUG_HELD,
+    // so the thunk enters EL0 through userland_enter_held. The REQUEST picks the
+    // path; the child's live mark (Proc.debug_birth_hold) decides at the birth
+    // park whether it still waits, so a hold released early simply falls through.
+    bool           debug_held;
 };
 
 __attribute__((noreturn))
@@ -9271,6 +9276,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     bool    pheno_manifest  = sa->pheno_manifest;    // V-1b/D: copy before kfree
     bool    exe_pheno_linux = sa->exe_pheno_linux;   // section 13: copy before kfree
     u32     name_len      = sa->name_len;            // D-4: copy before kfree
+    bool    debug_held    = sa->debug_held;          // 5f: copy before kfree
     if (name_len > SYS_SPAWN_NAME_MAX) name_len = SYS_SPAWN_NAME_MAX;
     char    name[SYS_SPAWN_NAME_MAX + 1];
     for (u32 i = 0; i < name_len; i++) name[i] = sa->name[i];
@@ -9418,6 +9424,10 @@ static void sys_spawn_full_argv_thunk(void *arg) {
         exits("fail-exec");
     }
 
+    // DEBUG-FS-DESIGN 5f: a held child builds its EL0 frame and parks at the
+    // birth tail before its first instruction; every other spawn is unchanged.
+    if (debug_held)
+        userland_enter_held(entry, sp);
     userland_enter(entry, sp);
 }
 
@@ -9433,7 +9443,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         u32 eff_budget,
         const struct spawn_identity *id,
         const struct spawn_allowance *want_allowance,
-        u32 pheno_flags) {
+        u32 pheno_flags, u32 debug_flags) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -9445,6 +9455,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (fd_count > 0 && !fds)                           return -1;
     if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
     if (pheno_flags & ~SPAWN_PHENO_FLAGS_ALL)           return -1;
+    if (debug_flags & ~SPAWN_DEBUG_FLAGS_ALL)           return -1;
 
     // argv validation. Both shapes accepted: (argc=0, argv_data_len=0,
     // argv_data=NULL) is the "no argv" case (equivalent to legacy
@@ -9534,12 +9545,17 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     sa->name_len = (u32)name_len;
     for (size_t i = 0; i < name_len; i++) sa->name[i] = name[i];
     sa->name[name_len] = '\0';
+    // 5f: read into a local -- `sa` belongs to the child once rfork returns.
+    const bool held = (debug_flags & SPAWN_DEBUG_HELD) != 0;
+    sa->debug_held = held;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
     }
 
-    int pid = rfork_with_caps(RFPROC, sys_spawn_full_argv_thunk, sa, cap_mask);
+    int pid = held
+        ? rfork_spawn_held(sys_spawn_full_argv_thunk, sa, cap_mask)
+        : rfork_with_caps(RFPROC, sys_spawn_full_argv_thunk, sa, cap_mask);
     if (pid < 0) {
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
@@ -9547,6 +9563,14 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
+    // 5f: the held spawn's synchronous return -- back only once the child has
+    // loaded its image and parked before its first instruction (or died, or
+    // been released), so the caller's attach + stop always finds a real EL0
+    // frame. The child's parent is the CALLING Proc (rfork forks the current
+    // one), which is not necessarily `p` for a kernel-test caller. A caller
+    // killed while waiting unwinds (#811); the orphan rule then kills the child.
+    if (held)
+        spawn_await_birth(current_thread()->proc, pid);
     return pid;
 }
 
@@ -9556,7 +9580,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 // kernel tests; the identity is passed as scalars (not the internal struct
 // spawn_identity) so the test file needs no kernel-internal type. set_identity ==
 // false (the back-compat path) means the child inherits the parent's identity.
-int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
@@ -9564,7 +9588,7 @@ int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
         bool set_identity, u32 principal_id, u32 primary_gid,
         const u32 *supp_gids, u32 supp_gid_count,
         const struct spawn_allowance *want_allowance,
-        u32 req_budget, u32 pheno_flags) {
+        u32 req_budget, u32 pheno_flags, u32 debug_flags) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
     // V-1b: unknown pheno bits reject (forward-compat); the known bit needs
@@ -9626,7 +9650,28 @@ int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
                                                    argc, cap_mask, perm_flags,
                                                    fds, fd_count, eff_budget,
                                                    eff_id, want_allowance,
-                                                   pheno_flags);
+                                                   pheno_flags, debug_flags);
+}
+
+// Back-compat entry: not held (debug_flags 0). Keeps the CL-5 / V-1b signature
+// for the kernel test suite.
+int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags) {
+    return sys_spawn_full_argv_debug_for_proc(p, name, name_len, argv_data,
+                                              argv_data_len, argc, fds,
+                                              fd_count, cap_mask, perm_flags,
+                                              set_identity, principal_id,
+                                              primary_gid, supp_gids,
+                                              supp_gid_count, want_allowance,
+                                              req_budget, pheno_flags,
+                                              /*debug_flags=*/0u);
 }
 
 // Back-compat entry: no budget request and no phenotype declaration (0 == 
@@ -9742,13 +9787,12 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     // pre-V-1b caller (zero-fill) is byte-identical, and a future flag still
     // cannot silently land on this kernel (the _pad_envp rationale).
     if (req->pheno_flags & ~(u32)SPAWN_PHENO_FLAGS_ALL) return -1;
-    // ...which leaves 100 as the reserved slot. It is poison-checked for the
-    // same reason _pad_envp is: the ONLY thing that keeps a future field from
-    // being handed a caller's stale stack garbage is a kernel that refuses
-    // nonzero today. Two independent branches have now each claimed a pad slot
-    // and each shipped a caller that filled it; a slot nobody rejects is a
-    // slot the next claimant inherits already-populated.
-    if (req->_pad_spawn2 != 0)                         return -1;
+    // ...which left 100 as the reserved slot, poison-checked so that the next
+    // claimant would not inherit callers' stale stack garbage. The birth hold
+    // (DEBUG-FS-DESIGN 5f) is that claimant: debug_flags narrows the reject from
+    // "any nonzero" to "any UNKNOWN bit", which every pre-5f caller (zero-fill)
+    // passes byte-identically, and a future flag still cannot land silently.
+    if (req->debug_flags & ~(u32)SPAWN_DEBUG_FLAGS_ALL) return -1;
     if ((req->allowance_flags & SPAWN_ALLOWANCE_SET) &&
         req->allowance_va == 0)                        return -1;
     return 0;
@@ -9894,7 +9938,7 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             argv_kbuf[i] = (char)b;
         }
     }
-    s64 rc = (s64)sys_spawn_full_argv_budget_for_proc(
+    s64 rc = (s64)sys_spawn_full_argv_debug_for_proc(
         p, name, (size_t)req.name_len,
         argv_kbuf, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
@@ -9903,7 +9947,8 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         supp_kbuf, supp_count,
         set_allowance ? &allow_kbuf : NULL,
         req.page_budget,                  // CL-5: 0 == inherit
-        req.pheno_flags);                 // V-1b: 0 == inherit
+        req.pheno_flags,                  // V-1b: 0 == inherit
+        req.debug_flags);                 // 5f: 0 == not held
     if (argv_kbuf) kfree(argv_kbuf);
     return rc;
 }

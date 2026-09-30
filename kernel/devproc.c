@@ -989,10 +989,12 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
         proc_group_terminate(p, "debugger exited");
         // StopImpliesOwned (debug_stop.tla; self-audit SA-1): clear the stop flag +
         // focus so they do not outlive the now-NULL owner (the spec's exitkill
-        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate so gflag is the
-        // wake the parked threads act on -- no resume-window; cosmetic cleanup of a
-        // dying target (matches proc_debug_resume's clears minus the wake, which the
-        // terminate's cascade already did).
+        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate, which is what
+        // keeps it from opening a resume window: a parked thread wakes on the
+        // terminate's cascade and dies at its loop top, and a thread mid-iteration
+        // that reads this clear sees the terminate at el0_stop_park's re-check after
+        // its wake condition (RELEASE here and in the CAS, ACQUIRE there). Matches
+        // proc_debug_resume's clears minus the wake, which the cascade already did.
         __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
     } else {
@@ -2243,6 +2245,11 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         // proc_free) so the ctx-switch reader never derefs freed memory.
         hwdebug_bp_clear_all(target->debug_hw);
         hwdebug_wp_clear_all(target->debug_hw);    // 8a-2b-3: likewise the watchpoints
+        // 5f: an explicit detach is the debugger's choice to run the target, so
+        // it releases a birth hold too (before the resume's wake). The IMPLICIT
+        // release -- the ctl fd closing without detach -- deliberately does not
+        // (devproc_debug_release_cb): the hold is the spawner's, not the slot's.
+        proc_birth_hold_release_locked(target);
         proc_debug_resume(target);                 // 8a-1b-beta: clear the stop + wake parked threads (ReleaseSlot -> NoStrand)
         d->result = 1;
     } else {
@@ -2281,8 +2288,20 @@ static int devproc_runctl_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != rc->target_pid) return 0;   // keep walking
     if (target->debug_owner != rc->ctl) { rc->result = -1; return 1; }  // not the slot owner
     switch (rc->op) {
-        case DBG_RC_STOP:     proc_debug_stop_deliver(target); break;
-        case DBG_RC_START:    proc_debug_resume(target);       break;
+        // DEBUG-FS-DESIGN 5f, the birth hold. STOP converts a held target:
+        // deliver first, then convert, so the birth park -- which reads the
+        // hold before the stop flags -- always sees one of them and the child
+        // never runs in between (the conversion refuses without a pending stop,
+        // so the reverse order leaves the child held). START releases: clear
+        // first, so the resume's wake finds the hold already gone.
+        case DBG_RC_STOP:
+            proc_debug_stop_deliver(target);
+            proc_birth_hold_convert_locked(target);
+            break;
+        case DBG_RC_START:
+            proc_birth_hold_release_locked(target);
+            proc_debug_resume(target);
+            break;
         case DBG_RC_WAITSTOP: break;   // no mutation; the block is outside the lock
         // 5d EXITKILL (I-39 die-with-launcher): mark the target killed-on-debugger-
         // death. Just records intent (a plain store under g_proc_table_lock,
@@ -2456,8 +2475,23 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
     struct devproc_stopscan_ctx *s = (struct devproc_stopscan_ctx *)arg;
     if (target->pid != s->target_pid) return 0;    // keep walking
     if (target->debug_owner != s->ctl) { s->state = 2; return 1; }  // slot released -- abort the wait
-    s->state = devproc_all_threads_parked(target) ? 1 : 0;   // gamma-shared "fully parked" predicate
+    // A DEBUG stop is what stop and waitstop wait for. Parked threads alone may
+    // be a job stop or a birth hold, and neither opens the stopped-only surface
+    // (devproc_target_fully_stopped reads debug_stop_req for the same reason),
+    // so reporting them as stopped hands the debugger a refusal on its next read.
+    s->state = (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+                devproc_all_threads_parked(target)) ? 1 : 0;   // + the gamma-shared "fully parked" predicate
     return 1;
+}
+
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): one pass of the scan stop and waitstop
+// poll, since waitstop itself would block on a target that never stops.
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl) {
+    struct devproc_stopscan_ctx s = { .target_pid = pid, .ctl = ctl, .state = -1 };
+    proc_for_each(devproc_stopscan_cb, &s);
+    return s.state;
 }
 
 // tsleep cond for the stop-wait poll: never wakes on the cond (only the deadline

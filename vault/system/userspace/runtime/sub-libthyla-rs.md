@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -312,6 +312,15 @@ None crossing a boundary; every ABI record belongs to
 - **`Stdio` / `PreparedStdio`** — the spawn plumbing. The prepared form splits
   what the parent must hold *through* the syscall from what it keeps *after*,
   which is the distinction that gets end-of-file semantics right.
+- **`Command::debug_held`** (2026-09-29) — spawns the child held
+  ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
+  image and parked before its first instruction, and the child runs only when a
+  debugger attached to it releases it, or stops and then starts it. If the
+  spawner exits first, the child is killed. The call blocks while the child
+  loads, so a thread that serves its own child's image must not spawn it held:
+  the two would wait on each other until the spawner is killed. The builder sets
+  `T_SPAWN_DEBUG_HELD` in `TSpawnArgs.debug_flags`, a record the build now checks
+  against the kernel's layout ([[sub-kernel-syscall-abi]]).
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.

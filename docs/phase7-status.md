@@ -784,6 +784,75 @@ key, all red as predicted. Device: on the console image, `ls-gfx-inline-view` 42
 tile) and `ls-halcyon-session-media` 75 s, both PASS, each witness line in its new form (`leaf=3 640x400 (1 so far)`).
 No kernel change, so no sanitizer run or spec is owed.
 
+## The birth hold: a spawned child parked before its first instruction — 2026-09-29
+
+Delve's launch raced its child: the probe's program reached its loop before the debugger's attach and stop landed, so
+an entry breakpoint never fired (DELVE-PORT-DESIGN 8c-4, closure (b), "it bit"). The operator voted the shape on
+2026-09-29: a spawn flag, and a held child whose spawner dies before taking it over is killed. Scripture 269207b5
+(DEBUG-FS-DESIGN 5f and section 6; DELVE-PORT-DESIGN 8c-4 (b); the ARCH I-39 row and spec-table row). Code
+*(pending)*.
+
+- **The flag.** `SPAWN_DEBUG_HELD` in `sys_spawn_args.debug_flags`, the record's last reserved slot (offset 100; the
+  record stays 104 bytes). A bit outside `SPAWN_DEBUG_FLAGS_ALL` refuses the spawn. Old callers pass zero.
+- **The hold.** `Proc.debug_birth_hold` (offset 404): none, unborn or parked. `rfork_internal` marks it unborn in the
+  publication lock hold, before the child can run. Only its setters write it, under `g_proc_table_lock`, and every
+  write wakes the parent's `child_waiters`.
+- **A synchronous spawn.** The held spawn returns the pid only once the child has loaded and parked, or was released
+  or died (`spawn_await_birth`, the vfork park's discipline).
+- **The birth park.** `userland_enter_held` builds the child's first frame (every GPR zero, the entry, the stack)
+  below the thunk's stack and runs a straight-line tail over it: preempt, die check, notes, `el0_birth_park`, the
+  ordinary exception return. The park shares `el0_stop_park` with the stop tail and waits on `birth_park_wake_cond`,
+  which reads the hold first. `regs`, `step` and `hwbreak` see the frame, so a debugger can set a breakpoint on the
+  entry.
+- **Conversion and release.** The owner's `stop` delivers the stop, then converts the hold; the conversion refuses
+  without a pending stop, so the order is tested (round 1, F4). `start` and an explicit `detach` release it. Closing
+  the ctl fd without `detach` leaves the hold for the orphan rule.
+- **The orphan rule.** When the spawner becomes a zombie, every live child still held is terminated, "launcher
+  exited", before the reparent.
+- **Death wins at every way out of the park.** `el0_stop_park` re-reads group death after its wake condition (the
+  model's first held run found the window: the EXITKILL release terminates and only then clears the stop), and its
+  latch exit re-reads it too (round 1, F8).
+- **A latched interrupt at the birth park ends the child** (`birth_park_terminate`, round 1, F1). The latch is armed
+  only for a note whose default applies, a held child's thread masks nothing, and the child exits with the note's
+  name, which the tests now check.
+- **`waitstop` waits for a debug stop.** A held, unconverted target no longer counts as stopped (round 1, F2).
+- **The mirror check.** `tools/check-spawn-args-mirrors.py`, run by `build.sh` before any target, derives the record
+  from the kernel's static asserts and checks libt, libthyla-rs and pouch, and the Go fork by offsets and sizes when
+  it can read it. It accepts only one plain `#[repr(C)]`, however another repr is spelled, `cfg_attr` included (round
+  1, F6; round 2, R2-F4), and it was proven red on a sabotaged mirror.
+- **Userspace.** `Command::debug_held` (libthyla-rs), `T_SPAWN_DEBUG_HELD` (libt), the pouch 0026 patch, the viv and
+  pty-probe records, and debug-probe's held phase, the device witness.
+- **Still open.** The Go fork's `SysProcAttr{DebugHeld}` and ambush's `Launch` wait on the operator, so Delve's launch
+  races until they land. A third party with debug authority can still stop a loading child mid-exec, with no frame to
+  read (a Seam in the dossier). A spawner that execs keeps its held children held until it exits. A latched interrupt
+  defeats a debug or job stop of a compute-bound thread: pre-existing, and an OPEN-BUGS design call. And the parent
+  suspend that vfork and the held spawn share can return early when a peer thread revokes the caller's own terminate
+  latch: pre-existing, in OPEN-BUGS beside that design call.
+
+Audit: round 1 (Fable 5.1 reviewing Opus 5.5, MODEL start == end, on 9e2e28a2..750724a4): 0 P0 / 1 P1 / 0 P2 / 7 P3,
+all fixed or closed. F1, the P1: the first draft answered an interrupt latched at the birth park by re-running the
+checkpoint in place, and note delivery declines a frame whose stack pointer it does not trust, which a debugger can
+write. The re-run then spun with interrupts masked and took its CPU. Round 2 (Fable 5.1 reviewing Opus 5.5, MODEL
+start == end, on the round-1 fixes): 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed, a clean close. It sharpened the claims (the
+park honours a thread's note mask, and a held child's thread masks nothing), pinned the exit message in the tests,
+stated a vacuous test premise, and closed a mirror-check gap (a repr inside `cfg_attr`). Found in parallel: the "no
+handler" argument re-argued from the latch's arming rule, and a parent suspend that returns early on a revoked latch
+(pre-existing, OPEN-BUGS). Closed list: memory `audit_birth_hold_closed_list.md`.
+
+Verification: kernel tests `birth_hold.*` (7) and `devproc.debug_birth_hold_ctl`; `tools/test.sh` 1782/1782 PASS;
+debug-probe `held ok` three times (a late attach whose entry breakpoint fires; attach, exitkill and stop at once; a
+close without detach that keeps the hold). Sabotage, each its own bake: no orphan rule, no conversion, no validation
+and a park that runs free, together five FAILs; a lost wake, one; a free-running park with the kernel legs removed,
+the device witness's "the stopped PC is not the ELF entry"; the stop's two steps swapped (F4) and the stop scan
+without the stop flag (F2), each its test's FAIL; the re-run restored (F1), a hung boot, 34,359,738,368 masked re-runs
+in 300 seconds; round 2's two name witnesses, an exit with no name (leg (b)'s FAIL) and the fallback name on a
+debugger-written frame (leg (b) passes, leg (c) FAILs). TLC, one worker, all 17 `debug_stop` cfgs as expected (the
+counts are in `specs/SPEC-TO-CODE.md`). `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4
+and 8, UBSan at -smp 4 and 8, ten boots each); `tools/test-fault.sh` 8/8; `tools/check-v80-floor.py` OK (220 ELFs,
+5,323 LSE instructions, all runtime-gated); and the interactive scenarios that share the stop park, the interrupt path
+or the debugger (`pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc`, `dap-nora`, `nora-demo`) PASS, one
+attempt each.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

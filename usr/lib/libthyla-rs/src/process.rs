@@ -52,6 +52,7 @@ use crate::handle::{Handle, Rights};
 use crate::io::Write;
 use crate::{
     t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, T_SPAWN_ALLOWANCE_SET,
+    T_SPAWN_DEBUG_HELD,
     T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
     T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
@@ -214,6 +215,9 @@ pub struct Command {
     // driver may create KObj_MMIO/IRQ/DMA handles ONLY within its device. The
     // kernel gates it as a narrowing of the caller's own allowance.
     allowance: Option<TAllowanceDesc>,
+    // The birth hold (DEBUG-FS-DESIGN 5f): spawn the child held before its first
+    // instruction (T_SPAWN_DEBUG_HELD). A debugger's launch path; default off.
+    debug_held: bool,
 }
 
 impl Command {
@@ -233,6 +237,7 @@ impl Command {
             perm_flags: 0,   // A-5b: grant no SPAWN_PERM_* bits by default
             inherit_fds: Vec::new(), // #94-B-b: no extra inherited fds by default
             allowance: None, // step 5: inherit the caller's allowance by default
+            debug_held: false, // 5f: run from the first instruction, as ever
         }
     }
 
@@ -354,6 +359,19 @@ impl Command {
         self
     }
 
+    /// Spawn the child held (DEBUG-FS-DESIGN 5f): `spawn` returns once the child
+    /// has loaded its image and parked before its first instruction. It runs
+    /// only when a debugger attached to it stops and then starts it, or starts
+    /// or detaches it; if this Proc exits first, the held child is killed.
+    /// `spawn` blocks while the child loads, so a thread must not spawn held a
+    /// child whose image comes from a server that same thread runs: neither
+    /// would move until the spawner is killed.
+    #[inline]
+    pub fn debug_held(&mut self, held: bool) -> &mut Command {
+        self.debug_held = held;
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -462,7 +480,7 @@ impl Command {
                               // decided from the namespace at every image
                               // load; this bit only declares a container's
                               // Territory Linux (viv sets it, after chroot)
-            _pad_spawn2: 0,
+            debug_flags: if self.debug_held { T_SPAWN_DEBUG_HELD } else { 0 },
         };
 
         // SAFETY: every pointer in args_record points into a buffer

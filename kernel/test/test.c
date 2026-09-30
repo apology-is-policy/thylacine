@@ -805,6 +805,14 @@ void test_proc_debug_taint_refuses_elevation(void);
 void test_proc_debug_taint_crosses_fork(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
+void test_devproc_debug_birth_hold_ctl(void);
+void test_birth_hold_validate_req(void);
+void test_birth_hold_publication_mark(void);
+void test_birth_hold_released_predicate(void);
+void test_birth_hold_parked_wakes_birth_wait(void);
+void test_birth_hold_orphan_rule(void);
+void test_birth_hold_held_spawn_parks(void);
+void test_birth_hold_held_spawn_death_wins(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -2816,6 +2824,7 @@ struct test_case g_tests[] = {
     { "devproc.dump_seal_scope",               test_devproc_dump_seal_scope,               false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
+    { "devproc.debug_birth_hold_ctl",          test_devproc_debug_birth_hold_ctl,          false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
@@ -4029,6 +4038,13 @@ struct test_case g_tests[] = {
     { "sys_spawn_full_argv.validate_req_rejects_unknown_perm_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits, false, NULL },
     { "sys_spawn_full_argv.validate_req_pheno_flags", test_sys_spawn_full_argv_validate_req_pheno_flags, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_oversize_fields", test_sys_spawn_full_argv_validate_req_rejects_oversize_fields, false, NULL },
+    { "birth_hold.validate_req",               test_birth_hold_validate_req,               false, NULL },
+    { "birth_hold.publication_mark",           test_birth_hold_publication_mark,           false, NULL },
+    { "birth_hold.released_predicate",         test_birth_hold_released_predicate,         false, NULL },
+    { "birth_hold.parked_wakes_birth_wait",    test_birth_hold_parked_wakes_birth_wait,    false, NULL },
+    { "birth_hold.orphan_rule",                test_birth_hold_orphan_rule,                false, NULL },
+    { "birth_hold.held_spawn_parks",           test_birth_hold_held_spawn_parks,           false, NULL },
+    { "birth_hold.held_spawn_death_wins",      test_birth_hold_held_spawn_death_wins,      false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },

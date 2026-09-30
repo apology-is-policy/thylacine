@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-09-29
 ---
 ## Graphical grant commit
 
@@ -101,7 +101,7 @@ so any tile program covered it exactly. It is sealed now.
 
 **And the sweeping form of this rule did not survive its own audit.** The draft said a
 `SPAWN_PERM_*` granted to a user-running Proc *must* carry `SEAL`, and claimed both of
-login's spawn sites obeyed. There are **three**: the session shell (`main.rs:1341`,
+login's spawn sites obeyed. There are **three**: the session shell (login's `rs_main`,
 `CONSOLE_OWNER | SESSION_HANGUP`) is deliberately unsealed, because neither bit is
 onward-conferrable by `ut` and a same-principal peer can already end the session by
 killing it, so sealing would make the user's own shell undebuggable and buy nothing.
@@ -169,6 +169,14 @@ CAP_ALL` — a clone carries no caps argument — so a Linux-phenotype child inh
 the parent's whole fork-grantable set, and the `& ~CAP_ELEVATION_ONLY` strip
 still applies, so I-2's monotonic reduction holds on the phenotype path exactly
 as on the native one.
+
+`rfork_spawn_held`, the fork behind a `SPAWN_DEBUG_HELD` spawn (2026-09-29,
+[[sub-kernel-birth-hold]]), is `RFPROC` through the same `rfork_internal` with
+the same carve. Only the birth-hold mark differs. The ask weighs no capability,
+deliberately: it restricts the spawner's own child and grants nothing over it.
+Reading or controlling the held child still takes an attach through the
+[[inv-i39]] gate, cover included, so the flag cannot be used to reach a Proc
+the caller could not already debug.
 
 ## Mechanism
 

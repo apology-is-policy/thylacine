@@ -124,7 +124,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +	unsigned int allowance_flags;      /* 88 */
 +	unsigned int page_budget;          /* 92 -- CL-5 anon budget; 0 == inherit */
 +	unsigned int pheno_flags;          /* 96 -- V-1b phenotype; 0 == inherit */
-+	unsigned int _pad_spawn2;          /* 100 -- must be 0 (forward-compat) */
++	unsigned int debug_flags;          /* 100 -- the birth hold; 0 == not held */
 +};
 +_Static_assert(sizeof(struct pouch_spawn_args) == 104,
 +	"struct pouch_spawn_args must match the kernel sys_spawn_args ABI. "
@@ -159,7 +159,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, allowance_flags)==  88, "allowance_flags@88");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, page_budget)    ==  92, "page_budget@92");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, pheno_flags)    ==  96, "pheno_flags@96");
-+_Static_assert(__builtin_offsetof(struct pouch_spawn_args, _pad_spawn2)    == 100, "_pad_spawn2@100");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, debug_flags)    == 100, "debug_flags@100");
 +
 +/* Shared helpers (_pouch_process.c). */
 +hidden int __pouch_pipe(int fd[2]);

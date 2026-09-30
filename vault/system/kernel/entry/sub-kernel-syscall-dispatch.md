@@ -1376,3 +1376,41 @@ translation is unchanged: each socket's fd is swapped for its QTPOLL `ready`
 sibling (opened per call, which is the guest-fd consumption V-5d F6 records
 and NP-5 retires), caller-disabled entries are compacted away first (V-5d F1),
 and the result is mapped back to the guest's fd numbers.
+
+## The held spawn: `SPAWN_DEBUG_HELD` through the spawn body (2026-09-29)
+
+`SYS_SPAWN_FULL_ARGV`'s record carries a `debug_flags` word at offset 100
+([[sub-kernel-syscall-abi]]), whose one bit, `SPAWN_DEBUG_HELD`, asks for the
+child to be parked before its first instruction ([[sub-kernel-birth-hold]]).
+The dispatch side is four decisions.
+
+**The bit is refused twice and gated nowhere.** A bit outside
+`SPAWN_DEBUG_FLAGS_ALL` is refused with -1 by `sys_spawn_full_argv_validate_req`
+at the syscall boundary, and again at the top of the spawn body, which kernel
+tests call directly. Both run before anything is allocated. The bit has no
+entry in the spawn-permission gate: it restricts only the spawner's own child
+and confers no access to it. Reading or controlling the child still takes an
+attach through the [[inv-i39]] gate.
+
+**The request picks the entry; the child's mark decides the wait.** The body
+reads the bit into a local before `rfork`, because the argument block belongs
+to the child once `rfork` returns, and hands it to the thunk as
+`sa->debug_held`. The thunk then enters EL0 through `userland_enter_held`
+instead of `userland_enter`, after `exec_setup` and after the spawn-permission
+stamp, so the stamp still lands before any user instruction. Whether the child
+waits at its birth park is read from its live mark, `Proc.debug_birth_hold`, so
+a hold released while the child was still loading simply falls through.
+
+**The fork marks the child before it is findable.** A held spawn forks with
+`rfork_spawn_held`, which stores the UNBORN mark in the same table-lock hold that
+links the child, so no reparent, sweep or `/proc` walk sees it linked but
+unmarked. An unheld spawn keeps `rfork_with_caps` and the path it always had.
+
+**The return waits for the park, on the calling Proc's children.**
+`spawn_await_birth` returns once the child has parked, had its hold released,
+stopped being ALIVE, or left the caller's children. The parent it waits on is
+`current_thread()->proc`, the Proc `rfork` forked, which a kernel test's `p` is
+not always. A caller killed while waiting unwinds (#811), and its own death then
+kills the child through the orphan rule. `sys_spawn_full_argv_debug_for_proc`
+and its budget wrapper are the kernel-test entries, declared where the tests
+call them.

@@ -21,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -192,6 +192,18 @@ GNU `patch` fuzzes up to two context lines by default and says so only on
 stdout; the control was measured — a perturbed context line applies under
 `-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
 fuzz-strict.
+
+**The spawn-args mirror check runs beside it (2026-09-29).**
+`tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the
+dispatcher, for the same one-chokepoint reason: each target builds a different
+copy of `struct sys_spawn_args` (libt, libthyla-rs, the pouch patch, and the Go
+fork when `$GOFORK` has one), so a check inside any one target would miss the
+others. It lays the record out from the kernel header, compares every copy
+field by field, and proves it can fail before it passes. It is sub-second and
+fatal, with no skip switch. Like the hunk check it refuses rather than warns,
+because the failure it guards against is silent: a copy left behind when the
+kernel record grows passes its own size assertion while the kernel reads past
+it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
 
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit

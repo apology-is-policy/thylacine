@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -216,6 +216,13 @@ park loop bails on the pending death and dies from inside the stop.
 satisfy, restated against the second owner. Without it, killing a Ctrl-Z'd job
 would hang forever.
 
+Since 2026-09-29 the shared park checks death a second time, after its wake
+condition passes ([[sub-kernel-death]]). A job resume that lands just after a
+group termination would otherwise let a stopped thread that had passed the
+first check read "no owner holds me" and `eret` into a dying group. The gap was
+found in the debugger's model, but the loop is shared, so this owner gets the
+same close.
+
 ## Data structures
 
 No structures of its own. Four fields on the Proc — the job stop flag, the
@@ -286,7 +293,8 @@ of the per-member loop.
 
 - The two stop flags must stay separate, and each resume must clear only its
   own. This is the invariant the sibling model exists to hold.
-- Death must keep winning from inside a stop, on every path.
+- Death must keep winning from inside a stop, on every path, including a
+  resume that lands after the terminate (the park's second death check).
 - The catchability gate's three outcomes must stay exhaustive and mutually
   exclusive — in particular, the uncaught-and-orphaned branch must keep
   discarding rather than falling through to a stop.

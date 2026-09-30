@@ -1340,7 +1340,8 @@ static void rfork_rollback_unpublished(struct Proc *child, struct Thread *ct) {
 }
 
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
-                          caps_t caps_mask, const struct fork_context *fc) {
+                          caps_t caps_mask, const struct fork_context *fc,
+                          bool birth_hold) {
     // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
     // -- RFNAMEG, RFFDG, RFCRED, RFNOTEG, RFNOWAIT, RFREND, RFENVG -- still
     // extinct: each shares a different per-Proc structure and each arrives with
@@ -1837,6 +1838,16 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
                           __ATOMIC_RELAXED);
 
+    // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication
+    // and for the taint's reason: the orphan rule runs under this lock at the
+    // parent's ZOMBIE transition, so a mark written after the unlock could
+    // miss a parent that died in between and strand the child held with no
+    // one left to release it. The child thread is not yet runnable (ready()
+    // is below), so the mark also precedes anything the child can do.
+    if (birth_hold)
+        __atomic_store_n(&child->debug_birth_hold, BIRTH_HOLD_UNBORN,
+                         __ATOMIC_RELEASE);
+
     proc_link_child(parent, child);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
@@ -1900,12 +1911,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
 }
 
 int rfork(unsigned flags, void (*entry)(void *), void *arg) {
-    return rfork_internal(flags, entry, arg, CAP_NONE, NULL);
+    return rfork_internal(flags, entry, arg, CAP_NONE, NULL, false);
 }
 
 int rfork_forked(unsigned flags, const struct fork_context *fc) {
     if (!fc) extinction("rfork_forked with NULL fork_context");
-    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc);
+    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc, false);
 }
 
 // The caps-bearing fork: identical to rfork_forked but with an explicit
@@ -1921,12 +1932,16 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
 int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
                            caps_t caps_mask) {
     if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
-    return rfork_internal(flags, NULL, NULL, caps_mask, fc);
+    return rfork_internal(flags, NULL, NULL, caps_mask, fc, false);
 }
 
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
-    return rfork_internal(flags, entry, arg, caps_mask, NULL);
+    return rfork_internal(flags, entry, arg, caps_mask, NULL, false);
+}
+
+int rfork_spawn_held(void (*entry)(void *), void *arg, caps_t caps_mask) {
+    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, true);
 }
 
 // =============================================================================
@@ -3680,6 +3695,13 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // exactly "the world once p is gone".
     proc_orphan_rule_locked(p);
 
+    // The birth hold's orphan rule (DEBUG-FS-DESIGN 5f): a child still held
+    // when its spawner dies has no one left who asked for the hold, so it dies
+    // with its launcher rather than parking under its adopter forever. Before
+    // the reparent, for the same reason as the rule above: the children list
+    // is consumed there.
+    proc_birth_hold_orphan_rule_locked(p);
+
     if (p->children) {
         proc_reparent_children(p);
     }
@@ -4805,34 +4827,15 @@ static int stop_park_wake_cond(void *arg) {
     return !proc_stop_requested(p);
 }
 
-void el0_return_stop_check(struct exception_context *ctx) {
-    // ARCH 8.12. THE #713 GUARD, and this is the right function for it: the
-    // only two callers are vectors.S's EL0-return tails (the 0x480 IRQ tail
-    // and .Lel0_sync_return), and in both this is the LAST C call before
-    // `b .Lexception_return` -> KERNEL_EXIT, which installs ELR/SPSR and erets
-    // under an INHERITED mask. That is the one surviving #713-class window
-    // that does not mask locally; #713 was the year-long AEGIS corruption,
-    // 3-13% of boots, never at -smp 1.
-    //
-    // Since syscall bodies run with interrupts ON, this is the assert that
-    // catches an unmask leaking past syscall_dispatch's re-mask -- the single
-    // way this chunk could resurrect it.
-    ASSERT_IRQS_MASKED("the EL0-return tail is about to reach KERNEL_EXIT, "
-                       "which inherits its mask (#713)");
-    struct Thread *t = current_thread();
-    if (!t || t->magic != THREAD_MAGIC) return;
-    struct Proc *p = t->proc;
-    if (!p || p->magic != PROC_MAGIC)   return;
-
-    // Fast path: no stop pending from EITHER owner -- the overwhelmingly common
-    // case. Two ACQUIRE loads off one already-hot cache line (job_stop_req
-    // occupies debug_stop_req's pad slot) + a predictable not-taken branch. The
-    // ACQUIRE pairs with proc_debug_stop_deliver's / proc_job_stop's RELEASE
-    // sets (specs/debug_stop.tla: the tail observes a set sflag; PTY-1f: the
-    // job owner rides the same tail).
-    if (!proc_stop_requested(p))
-        return;
-
+// The park both EL0-entry stop legs share: the EL0-return tail's stop-check
+// below, and the birth park of a held spawn (DEBUG-FS-DESIGN 5f). They differ
+// only in what may hold the thread, so `wake_cond` names it: true once nothing
+// does (stop_park_wake_cond -- both stop owners clear; birth_park_wake_cond --
+// the birth hold as well). Returns true to proceed to the eret, false when it
+// left the park for a latched interrupt (the caller decides what that means:
+// the tail erets to deliver it, the birth park ends the child).
+static bool el0_stop_park(struct exception_context *ctx, struct Thread *t,
+                          struct Proc *p, int (*wake_cond)(void *)) {
     // 8a-1c: publish the EL0-entry trapframe pointer (== the current SP at the
     // vector tail; see thread.h debug_trapframe) so /proc/<pid>/regs reads THIS
     // entry's saved GPR frame -- its kstack offset is not fixed. Set BEFORE the
@@ -4862,8 +4865,20 @@ void el0_return_stop_check(struct exception_context *ctx) {
         // (pty_stop.tla stopOwners = {}; a woken thread whose OTHER owner
         // still holds re-parks below -- the per-owner clear). Each clear is a
         // RELEASE ordered before its cascade's per-peer wake (the I-9 close).
+        // At the birth park the hold must be clear too (5f).
         // Proceed to the eret. (Also the fast-path re-observe under no death.)
-        if (!proc_stop_requested(p)) {
+        if (wake_cond(p)) {
+            // Death re-checked AFTER the wake condition (specs/debug_stop.tla
+            // BUGGY_NO_DEATH_RECHECK). The EXITKILL release terminates the
+            // group and only then clears the stop, and a start after a kill
+            // clears after the kill, so a thread that passed the check above
+            // just before the terminate reads the cleared flags here. The
+            // terminate is ordered before the clear wake_cond ACQUIRE-read
+            // (both RELEASE), so this load sees it: a dying thread never erets.
+            if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+                t->debug_trapframe = NULL;
+                thread_exit_self();          // noreturn
+            }
             // 8a-2b-2 (specs/debug_step.tla Tail->stepping): a step-resume arms the
             // arm64 SS machine in the frame the eret restores -- SPSR.SS (bit 21) =
             // active-not-pending, so exactly ONE EL0 instruction executes before
@@ -4875,31 +4890,153 @@ void el0_return_stop_check(struct exception_context *ctx) {
             if (t->debug_ss_armed && ctx)
                 ctx->spsr |= (1ull << 21);   // SPSR_EL1.SS
             t->debug_trapframe = NULL;   // 8a-1c: no longer parked -> stop pointing at the (about-to-be-live) frame
-            return;
+            return true;
         }
 
-        // A SOFT interrupt-terminate latched while parked (LS-5c; group death
-        // ruled out above, so thread_die_pending here is exactly the latch leg).
-        // Its terminate-vs-handler-vs-mask resolution is notes_deliver's, not
-        // ours; leave the park so the thread erets and delivers it at its next
-        // checkpoint (standard interrupt checkpoint-delivery -- an interrupt
-        // never preempts mid-EL0). Without this bail, sleep() would return
-        // SLEEP_INTR every iteration on the still-set latch -> a livelock.
+        // A SOFT interrupt-terminate latched while parked (LS-5c). Its
+        // terminate-vs-handler-vs-mask resolution is notes_deliver's, not
+        // ours; leave the park so the thread reaches its next checkpoint and
+        // delivers it there (standard interrupt checkpoint-delivery -- an
+        // interrupt never preempts mid-EL0). Without this bail, sleep() would
+        // return SLEEP_INTR every iteration on the still-set latch -> a livelock.
+        // thread_die_pending's first leg is group death, which the check at the
+        // top does not rule out here: a kill landing after it makes this read
+        // true, and the tail erets on a false return. So death is read once
+        // more, and only the latch leg leaves the park alive.
         if (thread_die_pending(t)) {
+            if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+                t->debug_trapframe = NULL;
+                thread_exit_self();          // noreturn
+            }
             t->debug_trapframe = NULL;   // 8a-1c: leaving the park to deliver the interrupt
-            return;
+            return false;
         }
 
         // Park (specs/debug_stop.tla Acquire+RegisterObserve). sleep() registers
         // rendez_blocked_on = &t->debug_rendez under t->wait_lock, re-checks
-        // stop_park_wake_cond under wait_lock+r->lock (serialized against
-        // BOTH resumes' clear-before-walk -- the register-then-observe I-9
-        // close), and returns SLEEP_INTR if this Proc is group-terminating (the
-        // loop's death check fires next iteration). The rendez is THIS thread's
-        // own (single-waiter -- a multi-thread target parks each thread on its
-        // own debug_rendez, never a shared one).
-        (void)sleep(&t->debug_rendez, stop_park_wake_cond, p);
+        // wake_cond under wait_lock+r->lock (serialized against BOTH resumes'
+        // clear-before-walk -- the register-then-observe I-9 close), and
+        // returns SLEEP_INTR if this Proc is group-terminating (the loop's death
+        // check fires next iteration). The rendez is THIS thread's own
+        // (single-waiter -- a multi-thread target parks each thread on its own
+        // debug_rendez, never a shared one).
+        (void)sleep(&t->debug_rendez, wake_cond, p);
     }
+}
+
+void el0_return_stop_check(struct exception_context *ctx) {
+    // ARCH 8.12. THE #713 GUARD, and this is the right function for it: the
+    // only two callers are vectors.S's EL0-return tails (the 0x480 IRQ tail
+    // and .Lel0_sync_return), and in both this is the LAST C call before
+    // `b .Lexception_return` -> KERNEL_EXIT, which installs ELR/SPSR and erets
+    // under an INHERITED mask. That is the one surviving #713-class window
+    // that does not mask locally; #713 was the year-long AEGIS corruption,
+    // 3-13% of boots, never at -smp 1.
+    //
+    // Since syscall bodies run with interrupts ON, this is the assert that
+    // catches an unmask leaking past syscall_dispatch's re-mask -- the single
+    // way this chunk could resurrect it.
+    ASSERT_IRQS_MASKED("the EL0-return tail is about to reach KERNEL_EXIT, "
+                       "which inherits its mask (#713)");
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return;
+    struct Proc *p = t->proc;
+    if (!p || p->magic != PROC_MAGIC)   return;
+
+    // Fast path: no stop pending from EITHER owner -- the overwhelmingly common
+    // case. Two ACQUIRE loads off one already-hot cache line (job_stop_req
+    // occupies debug_stop_req's pad slot) + a predictable not-taken branch. The
+    // ACQUIRE pairs with proc_debug_stop_deliver's / proc_job_stop's RELEASE
+    // sets (specs/debug_stop.tla: the tail observes a set sflag; PTY-1f: the
+    // job owner rides the same tail). The birth hold is deliberately not read
+    // here: it can only be set before a thread's first instruction, and the
+    // birth park is the one place that consults it (DEBUG-FS-DESIGN 5f).
+    if (!proc_stop_requested(p))
+        return;
+
+    // A false return (a latched interrupt) needs nothing here: the tail erets
+    // and the interrupt is delivered at the thread's next checkpoint.
+    (void)el0_stop_park(ctx, t, p, stop_park_wake_cond);
+}
+
+// The birth park's wake condition (DEBUG-FS-DESIGN 5f): the birth hold AND both
+// stop owners clear. The hold is read FIRST, with ACQUIRE. A conversion stores
+// debug_stop_req (proc_debug_stop_deliver) and only then clears the hold, both
+// RELEASE, so a read that sees the hold cleared also sees the stop -- the park
+// can never observe neither and let a held child run. Reading the stop flags
+// first would lose exactly that.
+static int birth_park_wake_cond(void *arg) {
+    const struct Proc *p = (const struct Proc *)arg;
+    if (__atomic_load_n(&p->debug_birth_hold, __ATOMIC_ACQUIRE) != BIRTH_HOLD_NONE)
+        return 0;
+    return !proc_stop_requested(p);
+}
+
+void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp) {
+    // Every field zero first, so every GPR the eret loads is zero -- the
+    // guarantee userland_enter's register sweep gives a fresh image: no kernel
+    // register state crosses into EL0.
+    u8 *b = (u8 *)ctx;
+    for (size_t i = 0; i < sizeof(*ctx); i++)
+        b[i] = 0;
+    ctx->elr  = entry;   // the image's first instruction
+    ctx->spsr = 0;       // EL0t, DAIF clear: userland_enter's SPSR exactly
+    ctx->sp   = sp;      // SP_EL0
+}
+
+// A latched terminate at the birth park (DEBUG-FS-DESIGN 5f). The ordinary
+// tail's answer -- eret, and let note delivery resolve the latch at the next
+// checkpoint -- would run a held child. Running the checkpoint again in place
+// would lean on note delivery consuming the latch, which it declines to do for
+// a frame whose SP it does not trust, and a debugger can write that SP: the
+// masked re-run would never end. So the park applies the latch itself. Its
+// disposition can only be the default, and the latch is what says so: it is
+// armed only for a note nothing catches or ignores, in a Proc that does not
+// read its own notes (notes_arm_intr_terminate_locked, below notes_post's
+// SIG_IGN drop), and only the child's own calls could install a handler or
+// open its notes after that. The child exits with the latched note's name, as
+// notes_deliver_at_el0_return's terminate arm would report it. The latch is
+// armed on the note's commit and nothing a parked child can do consumes the
+// note, so the name is always found; were it not, the child would still end,
+// because a held child must never run.
+__attribute__((noreturn))
+static void birth_park_terminate(struct Proc *p, struct Thread *t) {
+    const char *tname = NULL;
+    struct NoteQueue *q = p->notes;
+    if (q) {
+        spin_lock(&q->lock);
+        tname = notes_terminate_note_name_locked(p, t);
+        spin_unlock(&q->lock);
+    }
+    exits(tname ? tname : "terminated at the birth park");
+}
+
+void el0_birth_park(struct exception_context *ctx) {
+    // The #713 guard, for the tail's reason: userland_enter_held masked before
+    // entering the birth tail, and KERNEL_EXIT follows this call.
+    ASSERT_IRQS_MASKED("the birth tail is about to reach KERNEL_EXIT, "
+                       "which inherits its mask (#713)");
+    // Extinct rather than return: the tail can skip a stop for a corrupt
+    // thread, but here a return erets a held child.
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC)
+        extinction("el0_birth_park: corrupt thread");
+    struct Proc *p = t->proc;
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("el0_birth_park: corrupt proc");
+
+    // The arrival: UNBORN -> PARKED releases the spawner's birth wait. A no-op
+    // when the hold was released or converted before the child got here. The
+    // thread is not yet registered on its rendez, so a debugger's stop can land
+    // before it is; the stop's own wait covers that, because it waits for the
+    // park to settle (5e).
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_birth_hold_mark_parked_locked(p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+    // Group death never returns from the park; a false return is the latch.
+    if (!el0_stop_park(ctx, t, p, birth_park_wake_cond))
+        birth_park_terminate(p, t);
 }
 
 // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): the nested stop park a
@@ -5096,6 +5233,67 @@ void proc_debug_resume(struct Proc *p) {
         if (peer->rendez_blocked_on == &peer->debug_rendez)
             wakeup(&peer->debug_rendez);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
+}
+
+// The birth hold (DEBUG-FS-DESIGN 5f). Once published by rfork_internal, the
+// mark is written only here, under g_proc_table_lock, and every write wakes
+// the parent's child_waiters: a held spawn waits there until the child is no
+// longer UNBORN, and a write that did not wake it would strand that wait. The
+// parent is alive through the wake because the lock is held (the
+// proc_become_zombie_locked discipline). The wake is unconditional -- a
+// spurious one costs the waiter a re-scan, while a test would be a second
+// place that has to agree with the waiter about whether it is waiting.
+static void proc_birth_hold_set_locked(struct Proc *p, u32 v) {
+    __atomic_store_n(&p->debug_birth_hold, v, __ATOMIC_RELEASE);
+    if (p->parent)
+        poll_waiter_list_wake(&p->parent->child_waiters);
+}
+
+void proc_birth_hold_convert_locked(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (__atomic_load_n(&p->debug_birth_hold, __ATOMIC_RELAXED) == BIRTH_HOLD_NONE)
+        return;
+    // A conversion turns the hold into the stop just delivered. With no stop
+    // pending there is nothing to turn it into, and clearing the hold would let
+    // the child run, so it stands -- which also makes a conversion written
+    // before its delivery visible as a hold that outlives the stop verb,
+    // instead of an instant no test can catch. The clear is RELEASE, after
+    // proc_debug_stop_deliver's store of debug_stop_req, and the birth park
+    // reads the hold before the stop flags (birth_park_wake_cond), so a park
+    // that observes NONE also observes the stop: it never sees neither.
+    if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_RELAXED) == 0)
+        return;
+    proc_birth_hold_set_locked(p, BIRTH_HOLD_NONE);
+}
+
+void proc_birth_hold_release_locked(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (__atomic_load_n(&p->debug_birth_hold, __ATOMIC_RELAXED) == BIRTH_HOLD_NONE)
+        return;
+    // Before proc_debug_resume's wake walk, so the woken thread observes NONE.
+    proc_birth_hold_set_locked(p, BIRTH_HOLD_NONE);
+}
+
+void proc_birth_hold_mark_parked_locked(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (__atomic_load_n(&p->debug_birth_hold, __ATOMIC_RELAXED) != BIRTH_HOLD_UNBORN)
+        return;
+    proc_birth_hold_set_locked(p, BIRTH_HOLD_PARKED);
+}
+
+void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    for (struct Proc *c = p->children; c; c = c->sibling) {
+        if (c->state != PROC_STATE_ALIVE) continue;
+        if (__atomic_load_n(&c->debug_birth_hold, __ATOMIC_RELAXED) == BIRTH_HOLD_NONE)
+            continue;
+        // Idempotent over a child already dying (the set-once message), and
+        // safe under this lock (the devproc_kill_walk_cb idiom). Its #811
+        // cascade wakes the parked thread to die at the birth park's death
+        // check; a child still in exec_setup dies at its next sleep or at the
+        // birth tail's die-check.
+        proc_group_terminate(c, "launcher exited");
     }
 }
 
@@ -5563,10 +5761,13 @@ bool vfork_child_released(const struct Proc *parent, const struct Proc *child) {
     return (child->state != PROC_STATE_ALIVE) || (child->as != parent->as);
 }
 
-static void vfork_await_release(struct Proc *p, int child_pid) {
-    if (!p || p->magic != PROC_MAGIC)
-        extinction("vfork_await_release: bad Proc");
-
+// The park both parent suspends share -- the vfork suspend and the held spawn's
+// birth wait (DEBUG-FS-DESIGN 5f). They differ only in the release decision,
+// which each reads under g_proc_table_lock from the child it found in the scan;
+// the waiting discipline above is the same for both, so it lives once.
+static void await_child_release(struct Proc *p, int child_pid,
+                                bool (*released)(const struct Proc *parent,
+                                                 const struct Proc *child)) {
     struct Rendez self_rendez;
     rendez_init(&self_rendez);
     struct poll_waiter pw;
@@ -5579,7 +5780,7 @@ static void vfork_await_release(struct Proc *p, int child_pid) {
         for (struct Proc *c = p->children; c; c = c->sibling) {
             if (c->pid == child_pid) { child = c; break; }
         }
-        if (vfork_child_released(p, child)) {
+        if (released(p, child)) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);
             break;
         }
@@ -5601,6 +5802,38 @@ static void vfork_await_release(struct Proc *p, int child_pid) {
     // if a future edit adds an exit from inside the registered window
     // (poll.tla NoStaleHook).
     poll_waiter_list_unregister(&pw);
+}
+
+static void vfork_await_release(struct Proc *p, int child_pid) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("vfork_await_release: bad Proc");
+    await_child_release(p, child_pid, vfork_child_released);
+}
+
+// The held spawn's release decision (DEBUG-FS-DESIGN 5f): the child reached its
+// birth park or had its hold released (anything but UNBORN), died, or left the
+// list. Unlike the vfork release this IS a record -- nothing else already
+// written down says "the child has finished exec_setup" -- so every write of
+// the mark wakes child_waiters under the lock (proc_birth_hold_*_locked), and
+// death wakes it through proc_become_zombie_locked as it does for vfork.
+// Not-found counts as released for vfork_child_released's reason: hanging a
+// parent that cannot recover is the worse of the two dispositions.
+bool spawn_birth_released(const struct Proc *parent, const struct Proc *child) {
+    if (!parent || parent->magic != PROC_MAGIC)
+        extinction("spawn_birth_released: bad parent");
+    if (!child)
+        return true;
+    if (child->magic != PROC_MAGIC)
+        extinction("spawn_birth_released: bad child");
+    return (child->state != PROC_STATE_ALIVE) ||
+           (__atomic_load_n(&child->debug_birth_hold, __ATOMIC_ACQUIRE) !=
+            BIRTH_HOLD_UNBORN);
+}
+
+void spawn_await_birth(struct Proc *p, int child_pid) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("spawn_await_birth: bad Proc");
+    await_child_release(p, child_pid, spawn_birth_released);
 }
 
 int wait_pid_for(int want_pid, int flags, int *status_out) {

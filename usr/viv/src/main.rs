@@ -166,7 +166,7 @@ fn spawn_raw(name: &str, args: &[String], fds: &[u32], pheno_flags: u32,
         allowance_flags: 0,
         page_budget: 0,      // CL-5: inherit the spawner's budget
         pheno_flags,
-        _pad_spawn2: 0,
+        debug_flags: 0,
     };
     unsafe { t_spawn_full_argv(&req as *const _) }
 }

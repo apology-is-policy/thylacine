@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-29
 ---
 ## Graphical seat incarnations
 
@@ -83,6 +83,8 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 |---|---|
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
+| `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
+| `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
@@ -255,6 +257,15 @@ join already refuses an `RFMEM` child by reading the parent's bit at the access,
 so inheriting would add nothing and would leave a one-way bit outliving the
 sharing onto an image the seal was never about; and at a COW fork it would settle
 decision A by accident.
+
+The **birth hold** is stored in that same lock hold (2026-09-29,
+[[sub-kernel-birth-hold]]). `rfork_internal` takes a `birth_hold` argument,
+which only `rfork_spawn_held` sets, and stores UNBORN into the child's
+`debug_birth_hold` before the child is linked, for the taint's reason: a
+reparent, a `/proc` walk or the orphan rule must never find a held child linked
+but unmarked. In the `rfork` ledger the mark is fresh: it starts NONE, is set
+only when the spawn asks, and is never copied, so a later `rfork` of a released
+child starts NONE too.
 
 ### Image replacement: what must be reset, and why those things
 
@@ -501,7 +512,10 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   `proc_setsid` makes the child a session leader, never copied by `rfork`, and
   read on the death side by [[sub-kernel-death]]'s session hangup.
 - `wait_pid_for`'s register-then-observe: the waiter registration and the
-  no-zombie scan must stay in **one** critical section.
+  no-zombie scan must stay in **one** critical section. `await_child_release`
+  (the vfork suspend and the held spawn's birth wait) carries the same rule,
+  and every write of the birth-hold mark wakes `child_waiters` under the lock,
+  or a held spawn strands.
 - The I-32 charge helpers hold **no** counter state here; they route to the
   address space and decide only exemption. A caller that charges without
   [[lock-vma]] does not corrupt the count — the compare-and-swap prevents a lost

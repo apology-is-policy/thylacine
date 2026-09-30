@@ -7330,6 +7330,19 @@ python3 "$REPO_ROOT/tools/check-patch-hunks.py" \
     || { echo "==> patch-hunk check FAILED -- a hunk would apply INCOMPLETE" >&2
          exit 1; }
 
+# The SYS_SPAWN_FULL_ARGV argument block crosses the syscall boundary as raw
+# bytes, and every userspace copy of struct sys_spawn_args pins itself to a
+# literal size, not to the kernel: a copy left behind when the kernel grows
+# passes its own assert while the kernel reads past it (#100, and the go fork
+# again at the birth hold). Every copy -- libt, libthyla-rs, the pouch patch,
+# the go fork when present -- is compared with the kernel header field by
+# field, before any target, since each target builds a different copy. The
+# check proves it can fail before it passes. Sub-second, fatal, no skip switch.
+GOFORK="$GOFORK" python3 "$REPO_ROOT/tools/check-spawn-args-mirrors.py" \
+    || { echo "==> spawn-args mirror check FAILED -- a copy of struct" >&2
+         echo "    sys_spawn_args does not match kernel/include/thylacine/syscall.h" >&2
+         exit 1; }
+
 case "$target" in
     kernel)      build_kernel      ;;
     ramfs)       build_ramfs       ;;

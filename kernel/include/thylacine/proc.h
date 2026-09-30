@@ -947,7 +947,23 @@ struct Proc {
     //   that ACQUIRE-loads scope_id first (rfork does) sees them coherent.
     caps_t             legate_caps;
     u32                legate_flags;
+
+    // The birth hold (DEBUG-FS-DESIGN 5f; I-39): a SPAWN_DEBUG_HELD child parks
+    // before its first instruction. BIRTH_HOLD_UNBORN from rfork_spawn_held --
+    // set in the SAME g_proc_table_lock hold that publishes the child, so no
+    // reparent, sweep or walk ever sees it linked but unmarked -- to PARKED at
+    // the birth park, and back to NONE when a debugger's stop converts it or
+    // `start` / an explicit `detach` releases it. Never set again after that.
+    // Every write holds g_proc_table_lock and wakes the parent's child_waiters
+    // (a held spawn waits there until the child is no longer UNBORN); the birth
+    // park reads it lock-free. KP_ZERO-fresh NONE; never rfork-inherited. Fills
+    // the deliberate u32 tail pad, so sizeof is unchanged.
+    u32                debug_birth_hold;
 };
+
+#define BIRTH_HOLD_NONE    0u
+#define BIRTH_HOLD_UNBORN  1u   // held; the child is still inside exec_setup
+#define BIRTH_HOLD_PARKED  2u   // held; the child is at its birth park
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
 // NATIVE is 0 so a KP_ZERO-fresh Proc is native by construction -- the
@@ -1280,6 +1296,10 @@ _Static_assert(__builtin_offsetof(struct Proc, legate_caps) == 392,
 _Static_assert(__builtin_offsetof(struct Proc, legate_flags) == 400,
  "IM-2: legate_flags follows legate_caps; the 4-byte tail pad to the "
  "8-byte struct alignment is deliberate (the next u32 field lands there).");
+_Static_assert(__builtin_offsetof(struct Proc, debug_birth_hold) == 404,
+ "the birth hold (DEBUG-FS-DESIGN 5f) is that next u32: it fills the tail "
+ "pad after legate_flags, so sizeof stays 408 -- the sizeof assert above is "
+ "the control.");
 // CL-5 page_budget, placed by the aux-2 merge. On main it sat at 392 in a
 // 400-byte Proc; aux's L-1 had moved the whole address-space block OUT of Proc
 // (pgtable_root, vma_lock, vma_count, page_count, shared_map_pages,
@@ -1570,6 +1590,23 @@ int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask);
 
+// The birth hold (DEBUG-FS-DESIGN 5f): rfork_with_caps(RFPROC, ...) whose child
+// is published already marked BIRTH_HOLD_UNBORN. The SPAWN_DEBUG_HELD spawn's
+// fork. Same return contract as rfork_with_caps.
+int rfork_spawn_held(void (*entry)(void *), void *arg, caps_t caps_mask);
+
+// The held spawn's synchronous return: park the calling thread until its child
+// `child_pid` is no longer UNBORN (parked at birth, or released), is no longer
+// ALIVE, or has left `p`'s children list. vfork_await_release's discipline
+// (child_waiters, registered under g_proc_table_lock with the scan); #811
+// unwinds it. `p` is the child's parent -- the caller's own Proc.
+void spawn_await_birth(struct Proc *p, int child_pid);
+
+// spawn_await_birth's whole release decision, exposed for the kernel tests.
+// `child` NULL means "not in the parent's children list". Caller holds
+// g_proc_table_lock.
+bool spawn_birth_released(const struct Proc *parent, const struct Proc *child);
+
 // rfork flags. Per ARCH §7.4. RFPROC and RFMEM implemented; the rest extinct.
 //
 // Note the POLARITY, which diverges from Plan 9 deliberately: here set == SHARE,
@@ -1813,6 +1850,31 @@ bool proc_debug_fault_stop(struct Proc *p);
 // neither resume may clear the other's owner).
 void proc_debug_resume(struct Proc *p);
 
+// The birth hold (DEBUG-FS-DESIGN 5f). Each caller holds g_proc_table_lock.
+//
+// proc_birth_hold_convert_locked: the owner's stop takes the hold over. Called
+// AFTER proc_debug_stop_deliver, it clears the hold only while a debug stop is
+// pending, so a conversion issued before its delivery leaves the child held
+// instead of releasing it. NONE, then wake the parent's child_waiters in case
+// the spawner still waits for the birth.
+//
+// proc_birth_hold_release_locked: start, or an explicit detach, runs the child.
+// Called BEFORE proc_debug_resume's wake, so the woken park reads NONE. NONE,
+// then the same wake.
+//
+// Both are no-ops on an unheld Proc.
+//
+// proc_birth_hold_mark_parked_locked: the birth park's arrival -- UNBORN to
+// PARKED, then the same wake. A no-op unless UNBORN.
+//
+// proc_birth_hold_orphan_rule_locked: `p` is dying; terminate every ALIVE child
+// whose hold is still set ("launcher exited"). Run by proc_become_zombie_locked
+// before the reparent consumes the children list.
+void proc_birth_hold_convert_locked(struct Proc *p);
+void proc_birth_hold_release_locked(struct Proc *p);
+void proc_birth_hold_mark_parked_locked(struct Proc *p);
+void proc_birth_hold_orphan_rule_locked(struct Proc *p);
+
 // =============================================================================
 // PTY-1f: the job-control stop (I-20 stop leg; PTY-DESIGN.md section 4;
 // specs/pty_stop.tla). The SECOND stop owner beside the debugger's -- same
@@ -1925,6 +1987,17 @@ void proc_job_cont_proc(struct Proc *m);
 // kstack offset is not fixed -- see thread.h debug_trapframe).
 struct exception_context;
 void el0_return_stop_check(struct exception_context *ctx);
+
+// The birth hold's first entry (DEBUG-FS-DESIGN 5f), both called from
+// userland_enter_held (vectors.S). el0_birth_frame_init builds the initial EL0
+// frame: every field zero, then ELR = entry, SPSR = EL0t with DAIF clear, SP_EL0
+// = sp. el0_birth_park is the birth tail's stop leg: it announces the arrival,
+// then parks while the hold OR any stop owner holds, re-checking death on every
+// wake. It returns only to take the eret: group death ends the thread in the
+// park, and a latched terminate-interrupt ends it with the note's name, since a
+// held child can have no handler and must not eret to resolve it.
+void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp);
+void el0_birth_park(struct exception_context *ctx);
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
 // `g_proc_table_lock` (kept static in proc.c). thread.c's
