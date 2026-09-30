@@ -3591,10 +3591,36 @@ static void thread_clear_child_tid_handoff(struct Thread *t, struct Proc *p) {
 // it in the file).
 static void proc_orphan_rule_locked(struct Proc *dying);
 
+// The parent's side of p's exit (proc.h). Everything here runs UNDER
+// g_proc_table_lock, which keeps the parent alive through it.
+void proc_exit_notify_parent_locked(struct Proc *p) {
+    struct Proc *par = p->parent;
+    if (!par) return;
+    // #344 multi-waiter: every Thread of the parent waiting in wait_pid_for
+    // is woken to re-scan. Lock order: proc_table_lock -> list -> rendez.
+    poll_waiter_list_wake(&par->child_waiters);
+    // P6-pouch-signals-impl (sub-chunk 13a): the synthetic `child_exit` note.
+    // notes_post takes the queue lock + the poll_list.lock + (after dropping
+    // the queue lock) the queue's Rendez lock -- all compose with
+    // proc_table_lock (no path takes those then proc_table_lock).
+    // synthetic=true enables coalesce-on-full so the post is contractually
+    // infallible (a queue-full parent may lose precise (pid, status) tuples
+    // but will still observe "a child exited"; wait_pid re-discovers any
+    // losses by walking p->children).
+    notes_post_child_exit(par, p->pid, p->exit_status);
+    // ARCH 8.8.3: notes_post leaves the caught-note wake to its poster. A
+    // parent that catches child_exit (a SIGCHLD handler, a notes fd) and is
+    // already asleep in an interruptible wait -- a socket read -- must be woken
+    // to take it, or it sleeps on until something unrelated wakes it. No
+    // terminate wake: child_exit's default is ignore, which never arms it.
+    proc_caught_note_wake(par);
+}
+
 // Internal: common Proc-ZOMBIE transition body shared by exits() and
 // thread_exit_self(). MUST be called UNDER g_proc_table_lock. The Proc
 // must be ALIVE; transitions to ZOMBIE, captures exit_msg/exit_status,
-// re-parents orphan children, wakes parent's child_waiters (#344).
+// re-parents orphan children, notifies the parent
+// (proc_exit_notify_parent_locked).
 //
 // status: 0 = clean exit ("ok"); non-zero = error.
 // msg:    captured by reference; caller-owned (typically a string
@@ -3686,23 +3712,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     p->exit_msg    = msg ? msg : "ok";
     p->exit_status = status;
     p->state       = PROC_STATE_ZOMBIE;
-    // Wake parent's child_waiters UNDER the lock — parent stays alive
-    // through the wake (the original P3-A discipline; #344 multi-waiter:
-    // every Thread of the parent waiting in wait_pid_for is woken to
-    // re-scan). Lock order: proc_table_lock → list → rendez.
-    if (p->parent) {
-        poll_waiter_list_wake(&p->parent->child_waiters);
-        // P6-pouch-signals-impl (sub-chunk 13a): post the synthetic
-        // `child_exit` note to the parent's queue. notes_post takes the
-        // queue lock + the poll_list.lock + (after dropping queue lock)
-        // the queue's Rendez lock — all compose with proc_table_lock
-        // (no path takes those then proc_table_lock). synthetic=true
-        // enables coalesce-on-full so the post is contractually
-        // infallible (a queue-full parent may lose precise (pid, status)
-        // tuples but will still observe "a child exited"; wait_pid
-        // re-discovers any losses by walking p->children).
-        notes_post_child_exit(p->parent, p->pid, p->exit_status);
-    }
+    proc_exit_notify_parent_locked(p);
 }
 
 // #926 (U-6f command-substitution prerequisite): close + free a SINGLE-thread
@@ -4474,6 +4484,15 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // 4-byte zero stored at exit into whatever it mapped at that VA -- bounds-
     // checked, so contained, but a write the image never asked for.
     self->clear_child_tid = 0;
+
+    // ARCH 8.8.3: a caught-note unwind claim is cleared only by the thread that
+    // took it, at the tail of the call that took it. None should be held here:
+    // exec runs alone, its peers exited through a call that cannot claim, and
+    // execve is not a call a note interrupts. A claim left by a path that broke
+    // that argument would have no owner in the new image and would refuse its
+    // family's unwind in every wait, so the sub-field is cleared regardless.
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
+    self->note_claim = 0;
 }
 
 // Test hook (the *_for_test convention; deliberately absent from the header --
@@ -5273,8 +5292,10 @@ static int pgrp_hupcont_cb(struct Proc *q, void *arg) {
         return 0;
     (void)notes_post(q, NOTE_NAME_TTY_HUP, 0u, NULL, true);
     proc_interrupt_terminate_wake(q);
-    proc_caught_note_wake(q);   // item 11: caught SIGHUP handler wakes too
     (void)notes_post(q, NOTE_NAME_TTY_CONT, 0u, NULL, true);
+    // item 11: after BOTH posts -- a Proc that ignores SIGHUP may still catch
+    // SIGCONT, and a wake between the two would have missed it.
+    proc_caught_note_wake(q);
     proc_job_resume_one_locked(q);
     return 0;
 }
@@ -5344,6 +5365,7 @@ static int job_stop_cb(struct Proc *q, void *arg) {
         // fail PTY-4's own gate).
         if (notes_post(q, NOTE_NAME_TTY_SUSP, 0u, NULL, true) == 0)
             c->affected++;
+        proc_caught_note_wake(q);   // ARCH 8.8.3: the handler runs now, not a wait late
     } else if (!c->orphaned) {
         // UNCAUGHT + resumable: the default STOP consumes the signal.
         if (proc_job_stop_one_locked(q)) c->any_stopped = true;
@@ -5420,6 +5442,7 @@ static int job_cont_cb(struct Proc *q, void *arg) {
     struct job_cont_ctx *c = arg;
     if (q->state != PROC_STATE_ALIVE || q->pgid != c->pgid) return 0;
     (void)notes_post(q, NOTE_NAME_TTY_CONT, 0u, NULL, true);
+    proc_caught_note_wake(q);   // ARCH 8.8.3: a SIGCONT handler interrupts a blocked wait
     proc_job_resume_one_locked(q);
     c->visited++;
     return 0;
@@ -5862,6 +5885,15 @@ void proc_test_link_child(struct Proc *parent, struct Proc *p) {
         extinction("proc_test_link_child: NULL or corrupted Proc");
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     proc_link_child(parent, p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// proc_test_orphan_rule -- run the orphaned-pgrp rule for `dying` exactly as
+// its exit does (proc_become_zombie_locked), under g_proc_table_lock, without
+// the rest of the exit.
+void proc_test_orphan_rule(struct Proc *dying) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_orphan_rule_locked(dying);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 

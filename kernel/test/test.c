@@ -206,6 +206,13 @@ void test_rendez_intr_terminate_interrupts_tsleep(void);
 void test_rendez_reader_frame_predicate(void);
 void test_rendez_reader_frame_blocks_death(void);
 void test_rendez_reader_frame_blocks_death_sleep(void);
+void test_rendez_caught_wake_child_exit(void);
+void test_rendez_caught_wake_tty_susp(void);
+void test_rendez_caught_wake_tty_cont(void);
+void test_rendez_caught_wake_orphan_hup_cont(void);
+void test_rendez_caught_note_one_unwind(void);
+void test_rendez_caught_note_tail_discards_and_releases(void);
+void test_rendez_caught_note_release_wakes_peer(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_past_deadline_immediate(void);
@@ -450,6 +457,7 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_pagein_not_note_interruptible(void);
 void test_demand_page_file_pages_charge_the_holder(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
@@ -722,6 +730,7 @@ void test_notes_die_pending_predicate(void);
 void test_notes_pipe_die_pending(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_caught_note_claim_once(void);
 void test_notes_handler_escape_predicate(void);
 void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
@@ -944,6 +953,8 @@ void test_vivarium_renameat_domain(void);
 void test_vivarium_dirent64_encode(void);
 void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_readv_writev_guard_iovec_array(void);
+void test_vivarium_intr_class(void);
+void test_vivarium_fd_is_slow_cached(void);
 void test_vivarium_ioctl_termios_map(void);
 void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_dispatch_ebadf(void);
@@ -958,6 +969,18 @@ void test_vivarium_socktab(void);
 void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
 void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
 void test_vivarium_socktab_keyed_write_identity(void);              // N-3 socktab lock
+void test_vivarium_socktab_connecting(void);
+void test_vivsock_accept_wait_is_over(void);
+void test_vivsock_connect_tcp_holds_the_dial(void);
+void test_vivsock_connect_udp_never_waits(void);
+void test_vivsock_connect_eintr_then_retry(void);
+void test_vivsock_connect_connecting_resumes(void);
+void test_vivsock_connect_failure_verdicts(void);
+void test_vivsock_send_recv_finish_connect(void);
+void test_vivsock_read_write_finish_connect(void);
+void test_vivsock_so_error_reports_the_dial(void);
+void test_vivsock_positioned_io_finishes_connect(void);
+void test_vivsock_so_error_needs_no_descriptor(void);
 void test_vivarium_socktab_reset(void);                             // Design D audit F2
 void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
 void test_vivarium_socktab_alias(void);                             // socktab across images: alias
@@ -2026,6 +2049,14 @@ struct test_case g_tests[] = {
                                        test_rendez_reader_frame_blocks_death, false, NULL },
     { "rendez.reader_frame_blocks_death_sleep",
                                        test_rendez_reader_frame_blocks_death_sleep, false, NULL },
+    { "rendez.caught_wake_child_exit", test_rendez_caught_wake_child_exit, false, NULL },
+    { "rendez.caught_wake_tty_susp",   test_rendez_caught_wake_tty_susp,   false, NULL },
+    { "rendez.caught_wake_tty_cont",   test_rendez_caught_wake_tty_cont,   false, NULL },
+    { "rendez.caught_wake_orphan_hup_cont",
+                                       test_rendez_caught_wake_orphan_hup_cont, false, NULL },
+    { "rendez.caught_note_one_unwind", test_rendez_caught_note_one_unwind, false, NULL },
+    { "rendez.caught_note_tail_discards_and_releases", test_rendez_caught_note_tail_discards_and_releases, false, NULL },
+    { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
                                                                            false, NULL },
@@ -2361,6 +2392,7 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_pagein_not_note_interruptible", test_demand_page_file_pagein_not_note_interruptible, false, NULL },
     { "demand_page.file_pages_charge_the_holder",
                                        test_demand_page_file_pages_charge_the_holder,
                                                                            false, NULL },
@@ -2726,6 +2758,7 @@ struct test_case g_tests[] = {
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
+    { "notes.caught_note_claim_once",            test_notes_caught_note_claim_once,            false, NULL },
     { "notes.handler_escape_predicate", test_notes_handler_escape_predicate, false, NULL },
     { "notes.caught_note_stop_dequeue_drains", test_notes_caught_note_stop_dequeue_drains, false, NULL },
     { "notes.fstat_reports_chr",               test_notes_fstat_reports_chr,               false, NULL },
@@ -2978,6 +3011,8 @@ struct test_case g_tests[] = {
     { "vivarium.dirent64_encode",      test_vivarium_dirent64_encode,      false, NULL },
     { "vivarium.getdents64_guards_uaccess", test_vivarium_getdents64_guards_uaccess, false, NULL },
     { "vivarium.readv_writev_guard_iovec_array", test_vivarium_readv_writev_guard_iovec_array, false, NULL },
+    { "vivarium.intr_class",            test_vivarium_intr_class,            false, NULL },
+    { "vivarium.fd_is_slow_cached",     test_vivarium_fd_is_slow_cached,     false, NULL },
     { "vivarium.ioctl_termios_map", test_vivarium_ioctl_termios_map, false, NULL },
     { "vivarium.ioctl_grammar_roundtrip", test_vivarium_ioctl_grammar_roundtrip, false, NULL },
     { "vivarium.ioctl_dispatch_ebadf", test_vivarium_ioctl_dispatch_ebadf, false, NULL },
@@ -2991,6 +3026,18 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
     { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
     { "vivarium.socktab_keyed_write_identity", test_vivarium_socktab_keyed_write_identity, false, NULL },
+    { "vivarium.socktab_connecting",           test_vivarium_socktab_connecting,           false, NULL },
+    { "vivsock.accept_wait_is_over",         test_vivsock_accept_wait_is_over,         false, NULL },
+    { "vivsock.connect_tcp_holds_the_dial",  test_vivsock_connect_tcp_holds_the_dial,  false, NULL },
+    { "vivsock.connect_udp_never_waits",     test_vivsock_connect_udp_never_waits,     false, NULL },
+    { "vivsock.connect_eintr_then_retry",    test_vivsock_connect_eintr_then_retry,    false, NULL },
+    { "vivsock.connect_connecting_resumes",  test_vivsock_connect_connecting_resumes,  false, NULL },
+    { "vivsock.connect_failure_verdicts",    test_vivsock_connect_failure_verdicts,    false, NULL },
+    { "vivsock.send_recv_finish_connect",    test_vivsock_send_recv_finish_connect,    false, NULL },
+    { "vivsock.read_write_finish_connect",   test_vivsock_read_write_finish_connect,   false, NULL },
+    { "vivsock.so_error_reports_the_dial",   test_vivsock_so_error_reports_the_dial,   false, NULL },
+    { "vivsock.positioned_io_finishes_connect", test_vivsock_positioned_io_finishes_connect, false, NULL },
+    { "vivsock.so_error_needs_no_descriptor", test_vivsock_so_error_needs_no_descriptor, false, NULL },
     { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
     { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
     { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },

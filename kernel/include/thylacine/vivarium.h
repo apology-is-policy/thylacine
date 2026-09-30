@@ -103,6 +103,18 @@ struct viv_call {
 enum viv_verdict vivarium_translate(u64 linux_nr, const u64 *args_in,
                                     struct viv_call *out);
 
+// ARCH 8.8.3 (signal(7)'s list): may a caught signal interrupt this call?
+enum viv_intr {
+    VIV_INTR_NEVER   = 0,  // rides a caught note out; only death unwinds it
+    VIV_INTR_ALWAYS  = 1,  // a slow call whatever its fd (accept, wait4, ppoll...)
+    VIV_INTR_IF_SLOW = 2,  // the read/write family: only when args[0] is a slow file
+};
+
+// Classify a Linux aarch64 syscall by signal(7). PURE, like vivarium_translate:
+// deciding whether args[0] names a slow file is the dispatcher's half. A NULL
+// `args`, and any number not listed (a new row included), is VIV_INTR_NEVER.
+enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args);
+
 // The Linux aarch64 numbers this table knows. Named so the tests assert against
 // symbols rather than magic numbers, and so a future row addition is a one-line
 // diff next to its number. (Linux's aarch64 table is stable ABI — these values
@@ -1349,9 +1361,11 @@ enum viv_net_proto {
 //
 //   FRESH      -> the fd is the connection's `ctl`  (fresh, or bound, or both)
 //   LISTENING  -> the fd is STILL `ctl` (announce is a ctl write, not a swap)
+//   CONNECTING -> the fd is STILL `ctl`: the dial verb was accepted and the
+//                 `data` open (the handshake wait) has not returned
 //   CONNECTED  -> the fd has been swapped onto `data`
 //
-// So the ctl/data split is FRESH|LISTENING vs CONNECTED, not FRESH vs the rest:
+// So the ctl/data split is CONNECTED vs every other state, not FRESH vs the rest:
 // a listening socket keeps its ctl fd forever, because that is the fd `accept`
 // re-walks from and the fd whose reference keeps the listener alive. Anything
 // that writes a ctl verb (connect, announce) requires a non-CONNECTED fd, and
@@ -1361,6 +1375,12 @@ enum viv_sock_state {
     VIV_SOCK_FRESH     = 1,
     VIV_SOCK_CONNECTED = 2,
     VIV_SOCK_LISTENING = 3,
+    // ARCH 8.8.3: a caught signal can unwind connect() from its handshake wait,
+    // and the retry must resume that wait -- Linux's SS_CONNECTING, where a
+    // BLOCKING retry waits on and EALREADY is the nonblocking answer -- rather
+    // than write the dial verb again, which netd refuses once the slot has
+    // dialed. The row keeps the dialed peer in remote_addr/remote_port.
+    VIV_SOCK_CONNECTING = 4,
 };
 
 // Bounded: a guest must not be able to grow kernel memory without bound (the
@@ -1566,16 +1586,26 @@ bool viv_socktab_has_room(struct viv_socktab *tab);
 //   set_state    -- listen(): FRESH -> LISTENING.
 //   set_bound    -- bind(): record the requested local endpoint.
 //   record_remote-- connect()/sendto(): record the peer; also_connect
-//                   additionally transitions FRESH -> CONNECTED in the same
-//                   lock hold (so a peer recvmsg never sees CONNECTED with an
-//                   unset remote), which connect() passes true and the
-//                   connectionless datagram sendto passes false.
+//                   additionally transitions to CONNECTED in the same lock hold
+//                   (so a peer recvmsg never sees CONNECTED with an unset
+//                   remote), which connect() passes true and the connectionless
+//                   datagram sendto passes false.
+//   begin_connect-- connect()'s dial was accepted: FRESH -> CONNECTING with the
+//                   dialed peer recorded, in one hold (so no reader sees a stream
+//                   row that is FRESH with a remote). False unless the row is
+//                   FRESH.
+//   abort_connect-- the dial failed: CONNECTING -> FRESH with the peer
+//                   forgotten, so a retry dials again (Linux's SS_UNCONNECTED
+//                   after a failed connect). False unless the row is CONNECTING.
 bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            enum viv_sock_state st);
 bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port);
 bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port, bool also_connect);
+bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                               u32 addr, u16 port);
+bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch);
 
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable
 // domain, and if so which /net protocol directory it names. PURE.
@@ -1623,14 +1653,17 @@ enum {
 // honesty argument, not a default.
 //
 // WHAT the shell answers, and the EXACT boundary of its honesty (holotype F2):
-// SO_ERROR is a socket's pending error, cleared by the read. The shell answers
-// the constant 0, and that is TRUE for every SYNCHRONOUSLY-delivered error --
-// which is the entire class a blocking-only phenotype socket produces on the
-// GUEST's own syscalls (SOCK_NONBLOCK is refused at socket(), F_SETFL is not
-// served), so a failure is always that op's own return value, never pending.
-// This is exactly what the row exists for: connect verification (curl's
-// verifyconnect branches on err==0 -> connected), where a failed connect
-// already returned its error and a successful one has no pending error.
+// SO_ERROR is a socket's pending error, cleared by the read. A connect() that
+// runs to its end returns its own failure -- the vivarium's connect waits for
+// netd's verdict even on a SOCK_NONBLOCK socket (the EINPROGRESS path is not
+// built) -- so a socket in any state but CONNECTING has no pending connect
+// error, and the answer is 0. This is exactly what the row exists for: connect
+// verification (curl's verifyconnect branches on err==0 -> connected). A
+// CONNECTING socket is a connect() a caught signal interrupted (ARCH 8.8.3),
+// whose outcome arrives later: the shell asks netd whether the handshake has
+// resolved and, once it has, finishes the connect and reports a failed dial as
+// its errno -- what a caller that polled for the connection (POSIX's
+// asynchronous connect; CPython after EINTR) reads next.
 //
 // THE ONE GAP, deliberately shipped narrowed (operator-ratified 2026-08-25):
 // netd ALSO latches errors ASYNCHRONOUSLY -- a connected-UDP/ICMP send that
@@ -2687,6 +2720,8 @@ enum {
     VIV_F_SETFD         = 2,
     VIV_F_GETFL         = 3,
     VIV_F_SETFL         = 4,
+    VIV_F_SETLKW        = 7,     // not served; named for vivarium_intr_class
+    VIV_F_OFD_SETLKW    = 38,    // likewise
     VIV_F_DUPFD_CLOEXEC = 1030,
     VIV_FD_CLOEXEC      = 1,
 };

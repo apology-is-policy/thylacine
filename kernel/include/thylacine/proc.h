@@ -1134,6 +1134,25 @@ _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
                "relocate PROC_FLAG_SESSION_HANGUP above the field then");
 
+// ARCH 8.8.3: the CLAIM sub-field, one bit per note family aligned like the
+// caught sub-field above. One caught note unwinds ONE interruptible sleeper, as
+// Linux interrupts one thread for a process-directed signal: the sleeper that
+// unwinds sets its family's claim bit with a CAS on the whole word, so the claim
+// is taken only while that family's caught bit is still set, and records it in
+// its own Thread (note_claim). Only that thread clears the bit, at its next
+// EL0-return tail, whatever the tail delivered -- the tail can end short of the
+// claimed note, so a claim that waited for the note to drain could outlive the
+// claimant's unwind and refuse every wait in the Proc. Exec clears the field (a
+// Proc execs alone). NOT propagated by rfork; never set on kproc (the caught bit
+// never is).
+#define PROC_CAUGHT_CLAIM_SHIFT     22u
+#define PROC_FLAG_CAUGHT_CLAIM_MASK (0x7fu << PROC_CAUGHT_CLAIM_SHIFT)  // bits 22..28
+_Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
+    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
+    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED |
+    ((1u << 11) - 1u))) == 0,
+    "the caught-note claim sub-field must not overlap any other proc flag");
+
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -2580,14 +2599,23 @@ bool proc_caught_note_pending(const struct Proc *p);
 // of proc_interrupt_terminate_wake: identical body + lock contract (CALLER MUST
 // HOLD g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
 // internally gated on proc_caught_note_pending so a caller invokes it
-// unconditionally after posting. Interrupt-posting sites (which already hold
-// g_proc_table_lock for proc_interrupt_terminate_wake) call BOTH: the terminate
-// wake fires for an UNCAUGHT interrupt (latch armed), this one for a CAUGHT
-// interrupt (the latch was refused, this sub-field armed) -- exactly one is a
-// no-op per post. A caught note of a family posted from a site that does NOT
-// hold g_proc_table_lock (pipe / child_exit) is delivered at the blocked
-// thread's natural wake instead of promptly (today's behavior, no regression);
-// prompt delivery for those families is the item-11 completeness seam.
+// unconditionally after posting. EVERY site that posts a catchable note to a
+// Proc under g_proc_table_lock calls it (ARCH 8.8.3: the wake runs on every
+// caught commit) -- the interrupt/tty fans beside proc_interrupt_terminate_wake
+// (exactly one of the two is a no-op per post), and the posts that have no
+// terminate twin: child_exit (proc_exit_notify_parent_locked), a caught
+// tty:susp, tty:cont. Two posters run outside the lock: postnote_self (a Proc
+// noting itself), which takes the lock for its wakes after the post, and
+// notes_post_pipe, which needs no wake -- it posts to the writer's own Proc from
+// inside the write, which delivers at that thread's EL0-return tail, as Linux
+// sends SIGPIPE to the writing thread alone.
 void proc_caught_note_wake(struct Proc *p);
+
+// The parent's side of p's exit: wake the parent's wait_pid sleepers, post it
+// child_exit, and wake a parent blocked in a caught-note-interruptible wait
+// (ARCH 8.8.3). No-op when p has no parent. CALLER HOLDS g_proc_table_lock.
+// Called by the exit path's ZOMBIE transition; exposed so a kernel test drives
+// the same code.
+void proc_exit_notify_parent_locked(struct Proc *p);
 
 #endif // THYLACINE_PROC_H

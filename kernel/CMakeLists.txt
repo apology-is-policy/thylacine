@@ -156,6 +156,7 @@ set(KERNEL_TEST_SRCS
     test/test_image.c
     test/test_elf.c
     test/test_vivarium.c
+    test/test_viv_sock.c
     test/test_asid.c
     test/test_directmap.c
     test/test_proc_pgtable.c

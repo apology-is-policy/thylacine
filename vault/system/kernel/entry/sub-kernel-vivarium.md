@@ -3,14 +3,14 @@ id: sub-kernel-vivarium
 type: sub
 title: "The Linux phenotype: the syscall translation table"
 parent: moc-kernel-entry
-code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h"]
+code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c"]
 audit: hard
 guarded-by: [inv-i43]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-28
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -463,8 +463,9 @@ The disposition is itself a decision, and the file distinguishes three:
 - **ENOSYS** — the surface is absent. `brk` (no break pointer to move), a
   `munmap` or a fixed `mmap` below the burrow window (a mapping there is not
   the phenotype's to place or unmap; B-1a'), `sigaltstack`,
-  `setsockopt`/`getsockopt` (`/net` exposes no option surface; answering
-  "success" to a TCP_NODELAY the stack ignores is the silent lie).
+  `setsockopt`, and `getsockopt` beyond `(SOL_SOCKET, SO_ERROR)` (`/net`
+  exposes no option surface; answering "success" to a TCP_NODELAY the stack
+  ignores is the silent lie).
 - **A reproduced Linux errno** — where our domain *equals* Linux's, an
   out-of-domain value is refused exactly as Linux refuses it. `dup3`'s
   flags word is EINVAL, not ENOSYS, because `ksys_dup3` rejects the same
@@ -703,3 +704,91 @@ The deciders did not change. Two costs stay until NP-5 keeps ready Spoors
 outside the guest's fd table: the Twalk+Tlopen+Tclunk each polled socket costs
 per call, and the guest fd number each one borrows (V-5d F6). The witness is
 viv-pheno-probe L113, a ready socket polled at timeout 0.
+
+## Only signal(7)'s slow calls are note-interruptible (2026-09-29)
+
+`viv_linux_dispatch` now decides, once per call and from the Linux number
+before it is renumbered, whether a caught note may interrupt it, and stores the
+answer in the thread's `note_interruptible` ([[sub-kernel-notes]]).
+`vivarium_intr_class` is the pure half, a switch beside the tables: accept,
+accept4, connect, recvfrom, recvmsg, sendto, sendmsg, wait4, ppoll, pselect6,
+futex, rt_sigsuspend and rt_sigtimedwait always; fcntl only for F_SETLKW and
+F_OFD_SETLKW; read, readv, write, writev, pread64, pwrite64 and ioctl only on a
+slow file; everything else never. A row added later defaults to never, so the
+failure is a handler that runs late, never a spurious `EINTR`.
+`viv_fd_is_slow` is the dispatcher's half: a socktab row is slow; any other file
+is slow when its Dev's stat type is `S_IFIFO` or `S_IFCHR`. The answer is cached
+per open file in two Spoor flag bits (`CSLOWKNOWN`, `CSLOW`,
+[[sub-kernel-spoor]]), so a 9P file costs one Tgetattr per open file. A failed
+stat answers "not slow" and is not cached, so a stat that a group exit cut short
+cannot pin a fork-shared pts as uninterruptible. Before this every 9P-backed call
+was interruptible, and NP-5's SMP gate caught `socket()` failing with `EINTR`
+(3 boots in 50). Witnesses: the kernel tests `vivarium.intr_class` and
+`vivarium.fd_is_slow_cached`, and viv-pheno-probe L301-L310 -- a socket read
+that must return `EINTR` (the positive control, L305) and a loop of socket,
+openat, read and newfstatat calls that must not while children exit on a
+stagger (L309a-d). L305's interrupt is a child's exit, so it also rests on the
+caught-note wake at the `child_exit` post ([[sub-kernel-death]]); without that
+wake the read was interrupted only when unrelated traffic woke it, and L305
+failed about half its boots. Pre-existing and owned: an EINTR'd 9P op still
+discards a late original reply, where flush(5) says it must be honoured -- a
+fix for the 9P client's abandon path
+([[dec-2026-09-29-caught-signal-slow-calls]]).
+
+The socket calls keep Linux's shape at the boundary: a signal interrupts the
+call's wait and nothing else. `accept`'s wait is netd's held `listen` open. Once
+it returns, the connection is the guest's, and `viv_wait_is_over` clears the flag
+so the reads and the `data` open that follow cannot hang it up. `connect`'s wait
+is TCP's handshake, the held `data` open. `viv_sock_connect_dial` holds the note
+off across the dial verb (`viv_note_hold`), because a `Twrite` abandoned for a
+note may already have dialed, and gives it back for the `data` open only for TCP;
+a UDP connect never waits. An interrupted handshake returns `-T_E_INTR` and
+leaves the row `VIV_SOCK_CONNECTING`: `viv_socktab_begin_connect` recorded the
+dialed peer when netd accepted the verb, so a retry waits on the dial already
+made instead of writing the verb again, which netd refuses for a slot that has
+dialed. The retry's own address is ignored, as Linux ignores it in
+`SS_CONNECTING`. A failed `data` open resets the row to `FRESH`
+(`viv_socktab_abort_connect`) and reports netd's verdict -- `ETIMEDOUT` for a
+timed-out dial, `ECONNREFUSED` for the rest. A datagram `sendto` passes
+`-T_E_INTR` through from its destination write, whose re-point is idempotent on
+the retry, and a `CONNECTING` row refuses a `sendto` with an address (`EISCONN`).
+Witnesses: the `vivsock.*` kernel tests (`kernel/test/test_viv_sock.c`) drive the
+real shells through dev9p and stalk against a loopback `/net` whose responder
+records the caller's flag at each 9P op and fails a `data` open with a chosen
+errno; `vivarium.socktab_connecting` pins the two row writers.
+
+**An interrupted connect finishes on the socket's next use (2026-09-30).** POSIX
+has a connection a signal interrupted "established asynchronously", so a guest
+may poll for it and then use the socket without calling `connect()` again --
+CPython does exactly that after `EINTR` (PEP 475). Linux's send and recv wait for
+the handshake before they move data (`sk_stream_wait_connect`). So every call
+that uses a `CONNECTING` socket finishes the connect first:
+`viv_sock_finish_connect` runs the dial's wait half (the `data` open, the swap
+onto data, `CONNECTED`), interruptible exactly when the calling call is, and
+gives the call its flag back afterwards for the call's own wait. The send and
+recv shells (`sendto`, `recvfrom`, `recvmsg`) call it after their row check.
+`read`, `write`, their vector forms and the positioned pair reach whatever file
+the fd names, which for a `CONNECTING` socket is still `ctl`, so
+`viv_linux_dispatch` finishes the connect on their fd before it renumbers them
+(`viv_sock_finish_before_io`, [[sub-kernel-syscall-dispatch]]); Linux answers
+`ESPIPE` for positioned I/O on any socket, which waits on `T_E_SPIPE` being
+registered (ERRORS.md ER-3's residual). `getsockopt(SO_ERROR)` must never block,
+so on a `CONNECTING` row it reads netd's `status` file first -- through a private
+Spoor (`viv_kpath_read`), never a descriptor of the guest's, because a full table
+would otherwise read as a handshake in flight and a peer thread could see the
+transient fd: `Syn-Sent` or
+`Syn-Received`, or a file that cannot be read, is a handshake in flight and
+answers 0, as Linux does while a connect is in progress; any other state means
+the dial has resolved, the `data` open answers at once, and finishing the connect
+turns a failed dial into the `ECONNREFUSED` or `ETIMEDOUT` a poll-then-`SO_ERROR`
+caller must see. Before this arc a signal in the handshake laundered into
+`ECONNREFUSED`, so the `CONNECTING` state -- and every way of using it but a
+`connect()` retry or a poll -- is new with it. Witnesses:
+`vivsock.send_recv_finish_connect`, `vivsock.read_write_finish_connect` and
+`vivsock.positioned_io_finishes_connect` (through `viv_linux_dispatch` itself),
+`vivsock.so_error_reports_the_dial` and `vivsock.so_error_needs_no_descriptor`
+(the descriptor table filled to its ceiling). Owned and
+open: a second thread connecting the same socket reads `ECONNREFUSED` where Linux
+waits; `connect(AF_UNSPEC)` is unserved in every state; and `read` or `write` on a
+socket that never connected still reaches `ctl`, where Linux says `ENOTCONN` or
+`EPIPE`.

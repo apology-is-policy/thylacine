@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i44]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -155,7 +155,12 @@ the whole argument, which is why it reads as a changelog rather than a number.
 
 The tail is dense with single-purpose flags that each fit an existing
 padding hole: `cpu_pinned`, `exit_close_active`, `debug_ss_armed`,
-`stop_unwinds`, `stop_no_park`, `stop_unwound`. `cpu_pinned` is the single
+`stop_unwinds`, `stop_no_park`, `stop_unwound`, and since 2026-09-29
+`note_interruptible`: whether a caught note may unwind the thread's current
+wait, set only by the vivarium dispatcher for signal(7)'s list and cleared at
+the syscall exit and around a page-in ([[sub-kernel-notes]]); and since
+2026-09-30 `note_claim`, the caught-note families this thread has claimed, which
+only the thread itself writes and its EL0-return tail releases. `cpu_pinned` is the single
 clean unstealability predicate that replaced the old `kstack_base != NULL`
 gate — the #860 root cause was that `g_bootcpu_idle` owned a real kstack, so
 the old gate did not exclude it.

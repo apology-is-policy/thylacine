@@ -11204,6 +11204,24 @@ static u32 viv_net_path(char *buf, u32 buflen, enum viv_net_proto proto,
     return off;
 }
 
+// ARCH 8.8.3: the call's interruptible wait is over and its effect is taken
+// (accept has dequeued a connection), so the steps left must complete. From
+// here the call rides a caught note out, as Linux's does once past its wait.
+static void viv_wait_is_over(void) {
+    current_thread()->note_interruptible = false;
+}
+
+// A step outside the call's interruptible wait -- one whose effect can be taken
+// even when its reply is abandoned -- rides a caught note out. viv_note_hold
+// returns the flag the dispatcher set, for viv_note_resume at the wait.
+static bool viv_note_hold(void) {
+    struct Thread *t   = current_thread();
+    bool           was = t->note_interruptible;
+    t->note_interruptible = false;
+    return was;
+}
+static void viv_note_resume(bool was) { current_thread()->note_interruptible = was; }
+
 // socket(domain, type, protocol) -> fd.
 //
 // Opens /net/<proto>/clone ORDWR. netd's clone idiom rebinds that fid onto the
@@ -11297,12 +11315,13 @@ static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
     return -(s64)T_E_NOTSOCK;
 }
 
-static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
-    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock     e;   // snapshot: proto/n are immutable, the rest read-once
-    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
-    if (e.state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
-    if (e.state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
+// connect()'s row checks, made before it reads the address: a closed fd is
+// EBADF, a live non-socket ENOTSOCK, a connected or listening socket EISCONN.
+static s64 viv_sock_connect_row(struct Proc *p, struct viv_socktab *tab,
+                                u64 fd_raw, struct viv_sock *e) {
+    { s64 lr = viv_sock_row(p, tab, fd_raw, e); if (lr < 0) return lr; }
+    if (e->state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
+    if (e->state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
 
     // A CONSTRAINED bind cannot be honoured: netd's dial verb takes only the
     // REMOTE endpoint (its `!local` suffix is parsed and ignored), so a client
@@ -11312,52 +11331,64 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     // An UNCONSTRAINED bind (0.0.0.0:0) asks for nothing netd is not already
     // doing, so it proceeds -- which is also why the table needs no `bound`
     // flag: "bound to anything" and "not bound" are the same request here.
-    if (e.bound_port != 0 || e.bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
+    if (e->bound_port != 0 || e->bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
+    return 0;
+}
 
-    // Copy the sockaddr into kernel memory before looking at it -- the parse is
-    // pure and must never read user memory twice (a peer thread rewriting it
-    // between the family check and the address read is the classic TOCTOU).
-    if (addrlen == 0 || addrlen > 128)                  return -(s64)T_E_INVAL;
-    if (!sys_validate_user_buf(addr_va, addrlen))       return -(s64)T_E_FAULT;
-    u8 sa[128];
-    for (u64 i = 0; i < addrlen; i++) {
-        if (uaccess_load_u8(addr_va + i, &sa[i]) != 0)  return -(s64)T_E_FAULT;
-    }
-
-    u8  ip4[4];
-    u16 port = 0;
-    if (!vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
-        // Wrong family is EAFNOSUPPORT; a short/degenerate address is EINVAL.
-        // Telling them apart matters: a guest that gets EINVAL for an AF_INET6
-        // address retries it. F6a: read sa[1] only when it was copied -- a 1-byte
-        // addr has no family word (viv_copy_sockaddr fills only sa[0..addrlen)).
-        if (addrlen < 2) return -(s64)T_E_INVAL;
-        u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
-        return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
-    }
-
-    char cmd[48];
-    u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
-    if (clen == 0)                return -(s64)T_E_INVAL;
-
-    // A ctl verb is all-or-nothing: netd parses the whole buffer or rejects it,
-    // so a SHORT write means a truncated command was accepted, not a slow one.
-    // Unreachable today (clen <= 48, far under any negotiated msize) and checked
-    // anyway, because "wrote some of a command" must never read as success.
-    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
-    if (w != (s64)clen)           return -(s64)T_E_CONNREFUSED;
-
+// connect()'s dial and its wait, given the peer as a kernel address. A
+// CONNECTING row ignores `ip4`/`port` and resumes the wait on the peer it
+// dialed, as Linux ignores a retry's address in SS_CONNECTING.
+static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
+                                 u64 fd_raw, const struct viv_sock *e,
+                                 const u8 ip4[4], u16 port) {
     char path[64];
     u32  plen = viv_net_path(path, sizeof(path),
-                             (enum viv_net_proto)e.proto, true, e.n, "data");
+                             (enum viv_net_proto)e->proto, true, e->n, "data");
     if (plen == 0)                return -(s64)T_E_INVAL;
 
-    // BLOCKS for TCP until ESTABLISHED (netd's deferred Rlopen). That is the
-    // correct POSIX shape for a blocking connect(), and it is why SOCK_NONBLOCK
-    // is refused at socket() rather than silently ignored.
+    // signal(7)'s list names connect for its handshake wait alone: Linux sleeps
+    // in inet_wait_for_connect and nowhere else in the call. The dial verb is
+    // the SYN -- a Twrite abandoned for a note may already have dialed -- so it
+    // rides a caught note out, and so does all of a UDP connect, which never
+    // waits.
+    bool intr  = viv_note_hold();
+    u32  raddr = e->remote_addr;
+    u16  rport = e->remote_port;
+    if (e->state != VIV_SOCK_CONNECTING) {
+        char cmd[48];
+        u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
+        if (clen == 0)            return -(s64)T_E_INVAL;
+
+        // A ctl verb is all-or-nothing: netd parses the whole buffer or rejects
+        // it, so a SHORT write means a truncated command was accepted, not a
+        // slow one. Unreachable today (clen <= 48, far under any negotiated
+        // msize) and checked anyway, because "wrote some of a command" must
+        // never read as success.
+        s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+        if (w != (s64)clen)       return -(s64)T_E_CONNREFUSED;
+        raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+        rport = port;
+        // The dial is in flight. A retry after a signal must wait on it, not
+        // dial again -- netd refuses a second dial on a slot that has one.
+        (void)viv_socktab_begin_connect(tab, (s32)(s64)fd_raw, e->epoch, raddr, rport);
+    }
+
+    // BLOCKS for TCP until ESTABLISHED (netd's deferred Rlopen) -- the correct
+    // POSIX shape for a blocking connect(), and the wait a signal may
+    // interrupt. It blocks a SOCK_NONBLOCK socket too, where Linux answers
+    // EINPROGRESS.
+    if (e->proto == VIV_NET_TCP) viv_note_resume(intr);
     s64 dfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
                                       2u /* ORDWR */);
-    if (dfd < 0)                  return -(s64)T_E_CONNREFUSED;
+    viv_wait_is_over();
+    if (dfd == -(s64)T_E_INTR)    return dfd;   // a caught signal: still CONNECTING
+    if (dfd < 0) {
+        // The dial failed, so a retry dials again (Linux resets a failed connect
+        // to unconnected). netd tells a timed-out dial from a refused one.
+        (void)viv_socktab_abort_connect(tab, (s32)(s64)fd_raw, e->epoch);
+        return (dfd == -(s64)T_E_TIMEDOUT) ? dfd : -(s64)T_E_CONNREFUSED;
+    }
 
     // Take the data Spoor OUT of its temporary fd and put it in the socket's
     // fd. handle_get holds a ref across the move so the object cannot be freed
@@ -11410,16 +11441,116 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     // Record the peer so a recvmsg on this connected socket can synthesize
     // msg_name (the same field the datagram sendto path records), and transition
     // CONNECTED -- both under one lock hold, KEYED on the socket we snapshotted
-    // (e.n). If a peer thread closed and recycled this fd while we blocked in the
+    // (e->n). If a peer thread closed and recycled this fd while we blocked in the
     // data open, the write lands nowhere rather than marking a stranger's fresh
     // socket connected-to-our-peer. connect() still returns success: the
     // connection was made; a guest that closes an fd it is connecting on another
     // thread has raced its own descriptor.
-    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
-              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e.epoch, raddr, port,
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, rport,
                                     /*also_connect=*/true);
     return 0;
+}
+
+// A CONNECTING row is a connect() a caught signal interrupted, and POSIX has
+// that connection "established asynchronously": a guest may poll for it and
+// then use the socket without calling connect() again (CPython does). Linux's
+// send and recv wait for the handshake before they move data
+// (sk_stream_wait_connect), so every call that uses the socket finishes the
+// connect first -- the wait on the dial already made, then the swap onto data.
+// The wait is interruptible exactly when the calling call is, and the flag is
+// the call's again afterwards, for the call's own wait. On success `e` is
+// re-read; any row but CONNECTING is left alone.
+static s64 viv_sock_finish_connect(struct Proc *p, struct viv_socktab *tab,
+                                   u64 fd_raw, struct viv_sock *e) {
+    static const u8 unused_peer[4] = { 0, 0, 0, 0 };   // the row carries its own
+    if (e->state != VIV_SOCK_CONNECTING) return 0;
+    bool intr = current_thread()->note_interruptible;
+    s64  r    = viv_sock_connect_dial(p, tab, fd_raw, e, unused_peer, 0);
+    current_thread()->note_interruptible = intr;
+    if (r < 0) return r;
+    return viv_sock_row(p, tab, fd_raw, e);
+}
+
+// read(), write(), their vector and positioned forms on a socket fd reach the
+// file the fd names, and a CONNECTING socket's fd still names ctl -- so they
+// finish the connect first, as the send and recv shells do. Every other fd is
+// untouched.
+static s64 viv_sock_finish_before_io(struct Proc *p, u64 fd_raw) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;
+    if (!tab || !viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return 0;
+    return viv_sock_finish_connect(p, tab, fd_raw, &e);
+}
+
+// A small read of a file in the guest's namespace that installs no guest
+// descriptor: one borrowed for it could fail for want of a slot, and a peer
+// thread could see it. `path` is absolute; the walk carries the guest's own
+// identity, as an open would. Bytes read, or a negative errno.
+static s64 viv_kpath_read(struct Proc *p, const char *path, u32 plen, u8 *buf, long len) {
+    if (!p->territory) return -(s64)T_E_NOENT;
+    struct Spoor *root = territory_root_ref(p->territory);
+    if (!root) return -(s64)T_E_NOENT;
+    int serr = T_E_NOENT;
+    struct Spoor *s = stalk_err(p, root, path, plen, STALK_OPEN, 0u /* OREAD */, &serr);
+    spoor_clunk(root);                  // stalk borrowed it
+    if (!s) return -(s64)serr;
+    long n = (s->dev && s->dev->read) ? s->dev->read(s, buf, len, 0) : -(long)T_E_INVAL;
+    spoor_clunk(s);
+    return (n < -4095) ? -(s64)T_E_IO : (s64)n;
+}
+
+// SO_ERROR on a CONNECTING socket: whether the interrupted connect has failed
+// since. netd's status file says whether the handshake is still in flight; if
+// it is, the answer is 0, as Linux's is while a connect is in progress, and
+// nothing waits. Once it has resolved, the data open answers at once, and
+// finishing the connect turns a failed dial into the error this reports -- the
+// ECONNREFUSED or ETIMEDOUT a poll-then-SO_ERROR caller must see. A status file
+// that cannot be read counts as in flight, since getsockopt must never block.
+static s32 viv_sock_pending_error(struct Proc *p, struct viv_socktab *tab, u64 fd_raw) {
+    struct viv_sock e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e) || e.state != VIV_SOCK_CONNECTING)
+        return 0;
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path), (enum viv_net_proto)e.proto, true,
+                             e.n, "status");
+    if (plen == 0) return 0;
+    char st[16] = { 0 };
+    s64  got = viv_kpath_read(p, path, plen, (u8 *)st, (long)sizeof(st));
+    bool in_flight = got < 4 ||    // Syn-Sent, Syn-Received
+                     (st[0] == 'S' && st[1] == 'y' && st[2] == 'n' && st[3] == '-');
+    if (in_flight) return 0;
+    s64 r = viv_sock_finish_connect(p, tab, fd_raw, &e);
+    return (r < 0) ? (s32)(-r) : 0;
+}
+
+static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;   // snapshot: proto/n are immutable, the rest read-once
+    { s64 rr = viv_sock_connect_row(p, tab, fd_raw, &e); if (rr < 0) return rr; }
+
+    // Copy the sockaddr into kernel memory before looking at it -- the parse is
+    // pure and must never read user memory twice (a peer thread rewriting it
+    // between the family check and the address read is the classic TOCTOU).
+    if (addrlen == 0 || addrlen > 128)                  return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(addr_va, addrlen))       return -(s64)T_E_FAULT;
+    u8 sa[128];
+    for (u64 i = 0; i < addrlen; i++) {
+        if (uaccess_load_u8(addr_va + i, &sa[i]) != 0)  return -(s64)T_E_FAULT;
+    }
+
+    u8  ip4[4] = { 0, 0, 0, 0 };
+    u16 port   = 0;
+    if (e.state != VIV_SOCK_CONNECTING &&
+        !vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
+        // Wrong family is EAFNOSUPPORT; a short/degenerate address is EINVAL.
+        // Telling them apart matters: a guest that gets EINVAL for an AF_INET6
+        // address retries it. F6a: read sa[1] only when it was copied -- a 1-byte
+        // addr has no family word (viv_copy_sockaddr fills only sa[0..addrlen)).
+        if (addrlen < 2) return -(s64)T_E_INVAL;
+        u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
+        return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
+    }
+    return viv_sock_connect_dial(p, tab, fd_raw, &e, ip4, port);
 }
 
 // Copy a guest sockaddr into kernel memory. Shared by connect/bind, and for the
@@ -11487,10 +11618,11 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
 // point only; the decide declines everything else back to the T2-ENOSYS path
 // so those options behave exactly as they did under the blanket refusal.
 //
-// The answer is the constant 0, TRUE for every SYNCHRONOUSLY-delivered error
-// -- the whole class a blocking-only phenotype socket produces on the guest's
-// own syscalls -- which is exactly the connect-verification purpose the row
-// exists for. The ONE gap (holotype F2, shipped narrowed per the header): an
+// The answer is 0 for every socket but a CONNECTING one: a connect() that ran
+// to its end returned its own failure, which is exactly the connect-verification
+// purpose the row exists for. A CONNECTING socket's interrupted connect reports
+// its outcome here once netd has one (viv_sock_pending_error). The ONE gap
+// (holotype F2, shipped narrowed per the header): an
 // error netd latches ASYNCHRONOUSLY (a connected-UDP/ICMP local send failure)
 // is not consulted, so a guest that sees POLLERR on such a socket then reads
 // SO_ERROR gets 0 -- latent at v1.0, filed as the netd-errno arc. The full
@@ -11501,7 +11633,6 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
 // truncated write.
 static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
                                u64 optname, u64 optval_va, u64 optlen_va) {
-    // getsockopt reads no per-entry field: an existence test suffices.
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     { s64 lr = viv_sock_row(p, tab, fd_raw, NULL); if (lr < 0) return lr; }
 
@@ -11528,7 +11659,8 @@ static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
     // truncate-and-succeed there -- the deliberate delta named in the header).
     if ((s32)olen < 0)                       return -(s64)T_E_INVAL;
     if (olen < 4)                            return -(s64)T_E_INVAL;
-    if (viv_store_u32(optval_va, 0) != 0)    return -(s64)T_E_FAULT;
+    s32 soerr = viv_sock_pending_error(p, tab, fd_raw);
+    if (viv_store_u32(optval_va, (u32)soerr) != 0) return -(s64)T_E_FAULT;
     if (viv_store_u32(optlen_va, 4) != 0)    return -(s64)T_E_FAULT;
     return 0;
 }
@@ -11584,6 +11716,7 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_socktab *tab,
     u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
     if (clen == 0) return -(s64)T_E_INVAL;
     s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+    if (w == -(s64)T_E_INTR) return w;   // a caught signal, not a refusal
     if (w != (s64)clen) return -(s64)T_E_CONNREFUSED;
 
     // Move the payload on a data fid opened for exactly this datagram. The native
@@ -11620,6 +11753,7 @@ static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
     { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+    { s64 fr = viv_sock_finish_connect(p, tab, fd_raw, &e); if (fr < 0) return fr; }
 
     s32 err = 0;
     if (!vivarium_sendto_decide((enum viv_net_proto)e.proto, e.state, flags,
@@ -11637,6 +11771,7 @@ static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
     { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+    { s64 fr = viv_sock_finish_connect(p, tab, fd_raw, &e); if (fr < 0) return fr; }
 
     s32 err = 0;
     if (!vivarium_recvfrom_decide(e.state, flags, addr_va, &err))
@@ -11657,6 +11792,7 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
     { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
+    { s64 fr = viv_sock_finish_connect(p, tab, fd_raw, &e); if (fr < 0) return fr; }
 
     s32 derr = 0;
     if (!vivarium_recvmsg_decide(e.state, flags, e.remote_port != 0, &derr))
@@ -11882,6 +12018,9 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     s64 lfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
                                       2u /* ORDWR */);
     if (lfd < 0) return lfd;
+    // netd held that open until a call arrived: the connection is ours now, and
+    // an EINTR from the reads and the data open below would hang it up.
+    viv_wait_is_over();
 
     // The fid is now the ACCEPTED connection's ctl, so reading it yields M.
     u8  nbuf[16];
@@ -14561,6 +14700,50 @@ s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
     return viv_tier2(NULL, p, VIV_LINUX_FCNTL, args);
 }
 
+// Drives connect()'s dial and wait with a KERNEL address -- everything past the
+// sockaddr copy, which a test has no user pointer for.
+s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;
+    { s64 rr = viv_sock_connect_row(p, tab, fd, &e); if (rr < 0) return rr; }
+    return viv_sock_connect_dial(p, tab, fd, &e, ip4, port);
+}
+
+// Drives the REAL accept arm through the T2 dispatcher with no address out-
+// pointer (the ACCEPT case never reads the frame, and addr 0 skips uaccess).
+s64 viv_accept_for_test(struct Proc *p, u64 fd);
+s64 viv_accept_for_test(struct Proc *p, u64 fd) {
+    u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_ACCEPT, args);
+}
+
+// Drive the REAL send and recv arms through the T2 dispatcher with an empty
+// buffer, so what runs is the shell's own step before any transfer. The native
+// write or read it ends in resolves the fd on the CALLING thread's Proc, which
+// a kernel test does not share, so that half's result is not the test's.
+s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd);
+s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd) {
+    u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_SENDTO, args);
+}
+s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
+s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd) {
+    u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_RECVFROM, args);
+}
+s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
+s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va) {
+    u64 args[VIV_NARGS] = { fd, msg_va, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_RECVMSG, args);
+}
+
+// SO_ERROR's value, which getsockopt stores through a user pointer.
+s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
+s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd) {
+    return viv_sock_pending_error(p, __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE), fd);
+}
+
 // Drives the REAL dup arm through the T2 dispatcher (the DUP case never reads
 // the exception frame, so NULL ctx is safe), so a test proves the arm is wired
 // to handle_dup_posix -- not merely that the verdict is TIER2.
@@ -14634,6 +14817,50 @@ s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
     return viv_tier2(NULL, p, linux_num, args);
 }
 
+// ARCH 8.8.3: is `fd` a signal(7)-"slow" file -- a socket, a pipe or FIFO, a
+// character device? A socket is its socktab row (whatever Dev backs it); any
+// other file is its Dev's stat type, learned on the first call that asks and
+// cached on the Spoor, so a 9P file costs one Tgetattr per open file, not one
+// per read. A failed stat answers "not slow" UNCACHED: a stat that a group exit
+// cut short must not pin a pts that fork shares with a live Proc as
+// uninterruptible. A peer thread may close and reuse the fd between this and
+// the call. That misclassifies only that one call, for a guest racing its own
+// close: a handler that runs late, or an EINTR from the file it replaced.
+static bool viv_fd_is_slow(struct Proc *p, u64 fd) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock row;
+    if (tab && viv_socktab_get(tab, (s32)(s64)fd, &row)) return true;
+
+    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)fd, 0);
+    if (!c) return false;
+    u32 f = spoor_flag_get(c);
+    if (!(f & CSLOWKNOWN)) {
+        struct t_stat ks;
+        if (spoor_stat_native(c, &ks) != 0) { spoor_clunk(c); return false; }
+        u32 type = ks.mode & T_S_IFMT;
+        f = (type == T_S_IFIFO || type == T_S_IFCHR) ? (CSLOWKNOWN | CSLOW)
+                                                     : CSLOWKNOWN;
+        spoor_flag_set(c, f);
+    }
+    spoor_clunk(c);
+    return (f & CSLOW) != 0;
+}
+
+// ARCH 8.8.3 (signal(7)'s list): may a caught note interrupt this Linux call?
+static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args) {
+    switch (vivarium_intr_class(linux_nr, args)) {
+    case VIV_INTR_ALWAYS:  return true;
+    case VIV_INTR_IF_SLOW: return viv_fd_is_slow(p, args[0]);
+    case VIV_INTR_NEVER:   break;
+    }
+    return false;
+}
+
+// Drives viv_fd_is_slow so a test can prove the classification and its
+// per-Spoor cache (ARCH 8.8.3).
+bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
+bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd) { return viv_fd_is_slow(p, fd); }
+
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
 #if VIV_TRACE
     viv_trace_call(ctx->regs[8], p);
@@ -14699,6 +14926,28 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         if (st) viv_socktab_drop(st, (s32)(s64)ctx->regs[0]);
     }
 
+    // ARCH 8.8.3: whether a caught note may interrupt this call is Linux's
+    // answer, taken once from the Linux number before it is renumbered.
+    // syscall_dispatch clears it on the way out.
+    current_thread()->note_interruptible =
+        viv_call_interruptible(p, ctx->regs[8], args);
+
+    // A CONNECTING socket's fd still names ctl, so read and write finish its
+    // interrupted connect before they reach the file. A hook, as close's is,
+    // so read and write stay T1 renumbers onto the native handlers. The
+    // positioned pair is Linux's ESPIPE on any socket, which the errno registry
+    // cannot say yet (ERRORS.md ER-3's residual); until it can, they reach the
+    // file a connected socket's would.
+    if (ctx->regs[8] == VIV_LINUX_READ    || ctx->regs[8] == VIV_LINUX_WRITE   ||
+        ctx->regs[8] == VIV_LINUX_READV   || ctx->regs[8] == VIV_LINUX_WRITEV  ||
+        ctx->regs[8] == VIV_LINUX_PREAD64 || ctx->regs[8] == VIV_LINUX_PWRITE64) {
+        s64 fr = viv_sock_finish_before_io(p, args[0]);
+        if (fr < 0) {
+            ctx->regs[0] = (u64)fr;
+            return false;
+        }
+    }
+
     struct viv_call call;
     switch (vivarium_translate(ctx->regs[8], args, &call)) {
     case VIV_TRANSLATED:
@@ -14742,6 +14991,14 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
         return false;
     }
+}
+
+// The dispatcher itself, for its entry hooks. `p` is the phenotyped Proc and
+// `ctx` a frame holding a Linux number and its arguments; a true return means
+// the native handler would run on ctx's renumbered frame.
+bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
+bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p) {
+    return viv_linux_dispatch(ctx, p);
 }
 
 static void syscall_dispatch_body(struct exception_context *ctx);
@@ -14801,6 +15058,9 @@ void syscall_dispatch(struct exception_context *ctx) {
     irq_unmask_local();
 
     syscall_dispatch_body(ctx);
+    // The one exit: a wait outside this syscall (a page-in at EL0, the next
+    // syscall's) must not inherit its interruptibility (ARCH 8.8.3).
+    t->note_interruptible = false;
 
     irq_mask_local();
     t->in_syscall = 0u;

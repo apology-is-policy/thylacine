@@ -175,6 +175,16 @@ the same seven conditions now gate a userspace read-only/exec file map — and t
 arm's two conditions are unchanged by that generalization; the one fail-mode it
 added is the #194 past-EOF `FAULT_USER_BUS` (Error paths).
 
+The page-in is death-interruptible and, since 2026-09-29, never
+caught-note-interruptible. `userland_demand_page` is now a wrapper that clears
+the thread's `note_interruptible` around `demand_page_one` and restores it
+after, as Linux's `filemap_fault` waits killable. Without it a caught note
+landing mid page-in failed the file read, which is `FAULT_USER_BUS` at EL0 and
+an `EFAULT` from inside an interruptible read's copy-out. It restores rather
+than clears because the fault may sit inside a syscall that is itself
+interruptible. Witness: `demand_page.file_pagein_not_note_interruptible`
+([[dec-2026-09-29-caught-signal-slow-calls]]).
+
 The note did not exist when this dossier was written, deliberately: half its
 enforcement was unswept, and an invariant written from half its enforcement is
 the error this arc keeps finding. It was minted once exec and the image cache

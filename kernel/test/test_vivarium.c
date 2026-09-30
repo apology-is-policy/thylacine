@@ -2261,6 +2261,22 @@ void test_vivarium_sendrecv_domain(void) {
     TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 2, false, &err) && err == T_E_NOSYS,
                 "recvmsg MSG_PEEK declines -> ENOSYS");
 
+    // CONNECTING (a connect() a signal interrupted, or one still waiting on
+    // another thread): the fd is still ctl, but it is no longer free to re-point,
+    // and it moves no bytes until the handshake completes -- and although the row
+    // carries the dialed peer, it is not a datagram source.
+    const u8 CONNECTING = VIV_SOCK_CONNECTING;
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, CONNECTING, 0, 0x1000, 16, &err) &&
+                err == T_E_ISCONN,
+                "UDP sendto-with-address on a CONNECTING fd -> EISCONN, not a re-point");
+    TEST_ASSERT(!vivarium_sendto_decide(TCP, CONNECTING, 0, 0, 0, &err) && err == T_E_NOSYS,
+                "send on a CONNECTING socket -> ENOSYS (no data fd yet)");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONNECTING, 0, 0, &err) && err == T_E_NOSYS,
+                "recv on a CONNECTING socket -> ENOSYS");
+    TEST_ASSERT(!vivarium_recvmsg_decide(CONNECTING, 0, true, &err) && err == T_E_NOSYS,
+                "recvmsg on a CONNECTING socket with its dialed peer -> ENOSYS, "
+                "never the datagram path");
+
     // Fail closed on the NULL output.
     TEST_ASSERT(!vivarium_sendto_decide(TCP, CONN, 0, 0, 0, NULL), "NULL err -> false");
     TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0, NULL), "NULL err -> false");
@@ -2611,6 +2627,62 @@ void test_vivarium_socktab_keyed_write_identity(void) {
 
 // V-5b: the listen() decision table. Every arm is a REFUSAL a guest can
 // provoke, so each gets its own POSIX code rather than a shared EINVAL.
+// connect()'s CONNECTING row: begin_connect moves FRESH -> CONNECTING with the
+// dialed peer in one hold, abort_connect moves it back with the peer forgotten,
+// and connect()'s success records the peer and CONNECTED from either. Each
+// writer refuses a row in the wrong state and a stale epoch, one variable away
+// from the write it allows.
+void test_vivarium_socktab_connecting(void);
+void test_vivarium_socktab_connecting(void) {
+    static struct viv_socktab tab;
+    tab.lock = SPIN_LOCK_INIT;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
+        tab.s[i].bound_addr = 0; tab.s[i].bound_port = 0;
+        tab.s[i].remote_addr = 0; tab.s[i].remote_port = 0;
+    }
+    tab.next_epoch = 0;
+    struct viv_sock e;
+
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 7, VIV_SOCK_FRESH), "claim fd 4");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e), "snapshot fd 4");
+    u64 ep = e.epoch;
+
+    TEST_ASSERT(!viv_socktab_abort_connect(&tab, 4, ep),
+                "abort refuses a FRESH row -- there is no dial to abandon");
+    TEST_ASSERT(!viv_socktab_begin_connect(&tab, 4, ep + 1, 0x0A000002u, 80),
+                "begin refuses a stale epoch");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_FRESH &&
+                e.remote_port == 0, "the refusals changed nothing");
+
+    TEST_ASSERT(viv_socktab_begin_connect(&tab, 4, ep, 0x0A000002u, 80),
+                "begin moves a FRESH row");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTING &&
+                e.remote_addr == 0x0A000002u && e.remote_port == 80 && e.n == 7,
+                "CONNECTING, carrying the dialed peer");
+    TEST_ASSERT(!viv_socktab_begin_connect(&tab, 4, ep, 0x0A000003u, 81),
+                "a second begin refuses: the row is no longer FRESH");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.remote_port == 80,
+                "and keeps the FIRST dial's peer");
+
+    TEST_ASSERT(!viv_socktab_abort_connect(&tab, 4, ep + 1), "abort refuses a stale epoch");
+    TEST_ASSERT(viv_socktab_abort_connect(&tab, 4, ep), "abort moves a CONNECTING row");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_FRESH &&
+                e.remote_addr == 0 && e.remote_port == 0,
+                "FRESH again with the peer forgotten, so a retry dials anew");
+
+    TEST_ASSERT(viv_socktab_begin_connect(&tab, 4, ep, 0x0A000002u, 80), "dial again");
+    TEST_ASSERT(viv_socktab_record_remote(&tab, 4, ep, 0x0A000002u, 80, true),
+                "the handshake completed");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTED &&
+                e.remote_port == 80, "CONNECTED from CONNECTING");
+    TEST_ASSERT(!viv_socktab_abort_connect(&tab, 4, ep),
+                "abort refuses a CONNECTED row -- a late failure path cannot un-connect it");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTED,
+                "still CONNECTED");
+}
+
 void test_vivarium_listen_decide(void);
 void test_vivarium_listen_decide(void) {
     s32 err = -1;
@@ -2638,6 +2710,13 @@ void test_vivarium_listen_decide(void) {
     TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_CONNECTED, 80, &err),
                 "a connected socket may not listen");
     TEST_ASSERT(err == T_E_INVAL, "EINVAL, per POSIX");
+
+    // Linux's inet_listen refuses any socket not SS_UNCONNECTED, a connecting
+    // one included.
+    err = -1;
+    TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_CONNECTING, 80, &err),
+                "a connecting socket may not listen");
+    TEST_ASSERT(err == T_E_INVAL, "EINVAL, as for a connected one");
 
     // A repeat listen() is a POSIX success, not an error: it may only adjust a
     // backlog netd owns. false + err 0 is the "already done" signal.
@@ -5249,4 +5328,162 @@ void test_vivarium_phenotype_decide(void) {
                    "a declared Territory -> Linux (the container, no crossing)");
     TEST_EXPECT_EQ((u64)phenotype_decide(true,  true),  (u64)PHENO_LINUX,
                    "both -> Linux");
+}
+
+// ARCH 8.8.3 (signal(7)'s list): the pure half of the rule. Each class is
+// asserted by name, so a row moving between classes is a visible diff here.
+void test_vivarium_intr_class(void);
+void test_vivarium_intr_class(void) {
+    u64 a[VIV_NARGS] = { 0, 0, 0, 0, 0, 0 };
+
+    static const u64 always[] = {
+        VIV_LINUX_ACCEPT, VIV_LINUX_ACCEPT4, VIV_LINUX_CONNECT,
+        VIV_LINUX_RECVFROM, VIV_LINUX_RECVMSG, VIV_LINUX_SENDTO,
+        VIV_LINUX_SENDMSG, VIV_LINUX_WAIT4, VIV_LINUX_PPOLL,
+        VIV_LINUX_PSELECT6, VIV_LINUX_FUTEX, VIV_LINUX_RT_SIGSUSPEND,
+        VIV_LINUX_RT_SIGTIMEDWAIT,
+    };
+    for (u32 i = 0; i < sizeof(always) / sizeof(always[0]); i++)
+        TEST_EXPECT_EQ((u64)vivarium_intr_class(always[i], a), (u64)VIV_INTR_ALWAYS,
+                       "a slow call on any fd is interruptible");
+
+    static const u64 if_slow[] = {
+        VIV_LINUX_READ, VIV_LINUX_READV, VIV_LINUX_WRITE, VIV_LINUX_WRITEV,
+        VIV_LINUX_PREAD64, VIV_LINUX_PWRITE64, VIV_LINUX_IOCTL,
+    };
+    for (u32 i = 0; i < sizeof(if_slow) / sizeof(if_slow[0]); i++)
+        TEST_EXPECT_EQ((u64)vivarium_intr_class(if_slow[i], a), (u64)VIV_INTR_IF_SLOW,
+                       "the read/write family is interruptible only on a slow file");
+
+    // socket() is the call NP-5's SMP gate caught failing with EINTR; the rest
+    // are its neighbours on the same 9P waits.
+    static const u64 never[] = {
+        VIV_LINUX_SOCKET, VIV_LINUX_BIND, VIV_LINUX_LISTEN, VIV_LINUX_OPENAT,
+        VIV_LINUX_CLOSE, VIV_LINUX_NEWFSTATAT, VIV_LINUX_FSTAT,
+        VIV_LINUX_GETDENTS64, VIV_LINUX_MKDIRAT, VIV_LINUX_UNLINKAT,
+        VIV_LINUX_FACCESSAT, VIV_LINUX_CLONE, VIV_LINUX_EXECVE, VIV_LINUX_MMAP,
+        VIV_LINUX_LSEEK, VIV_LINUX_DUP, VIV_LINUX_DUP3,
+    };
+    for (u32 i = 0; i < sizeof(never) / sizeof(never[0]); i++)
+        TEST_EXPECT_EQ((u64)vivarium_intr_class(never[i], a), (u64)VIV_INTR_NEVER,
+                       "a call off the list rides a caught note out");
+
+    // fcntl depends on its command: only the blocking lock waits are slow.
+    a[1] = VIV_F_SETLKW;
+    TEST_EXPECT_EQ((u64)vivarium_intr_class(VIV_LINUX_FCNTL, a), (u64)VIV_INTR_ALWAYS,
+                   "fcntl F_SETLKW is interruptible");
+    a[1] = VIV_F_OFD_SETLKW;
+    TEST_EXPECT_EQ((u64)vivarium_intr_class(VIV_LINUX_FCNTL, a), (u64)VIV_INTR_ALWAYS,
+                   "fcntl F_OFD_SETLKW is interruptible");
+    a[1] = VIV_F_SETFL;
+    TEST_EXPECT_EQ((u64)vivarium_intr_class(VIV_LINUX_FCNTL, a), (u64)VIV_INTR_NEVER,
+                   "fcntl F_SETFL is not");
+    a[1] = VIV_F_SETLKW | (1ull << 32);
+    TEST_EXPECT_EQ((u64)vivarium_intr_class(VIV_LINUX_FCNTL, a), (u64)VIV_INTR_ALWAYS,
+                   "fcntl's cmd is an int: the high word is ignored, as Linux does");
+    a[1] = 0;
+
+    TEST_EXPECT_EQ((u64)vivarium_intr_class(VIV_LINUX_READ, NULL), (u64)VIV_INTR_NEVER,
+                   "NULL args fail safe to NEVER");
+    TEST_EXPECT_EQ((u64)vivarium_intr_class(0x10000u, a), (u64)VIV_INTR_NEVER,
+                   "an unknown number is NEVER");
+}
+
+// ARCH 8.8.3: the dispatcher's half of VIV_INTR_IF_SLOW. A pipe or character
+// device is slow and a regular file is not, learned ONCE per open file from
+// the Dev's stat and cached on the Spoor. A stat that fails answers "not slow"
+// and is NOT cached, so a stat cut short by a group exit cannot pin a
+// fork-shared pts as uninterruptible for the Proc that survives.
+extern bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
+extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+
+static int g_intr_stat_calls = 0;
+static int g_intr_stat_fail  = 0;
+static u32 g_intr_stat_mode  = 0;
+
+static int intr_test_stat(struct Spoor *c, struct t_stat *out) {
+    (void)c;
+    g_intr_stat_calls++;
+    if (g_intr_stat_fail) return -1;
+    out->mode = g_intr_stat_mode;
+    return 0;
+}
+
+static struct Dev g_intr_test_dev = {
+    .dc          = '?',
+    .name        = "intrtest",
+    .stat_native = intr_test_stat,
+};
+
+static hidx_t intr_install(struct Proc *p) {
+    struct Spoor *s = spoor_alloc(&g_intr_test_dev);
+    if (!s) return (hidx_t)-1;
+    return handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, s);
+}
+
+void test_vivarium_fd_is_slow_cached(void);
+void test_vivarium_fd_is_slow_cached(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // A real pipe: devpipe's stat says S_IFIFO.
+    hidx_t rd = -1, wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &rd, &wr), 0, "pipe");
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)rd), "a pipe's read end is slow");
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)wr), "a pipe's write end is slow");
+
+    // A regular file: stat once, cached, never again.
+    g_intr_stat_fail  = 0;
+    g_intr_stat_mode  = T_S_IFREG | 0644u;
+    g_intr_stat_calls = 0;
+    hidx_t reg = intr_install(p);
+    TEST_ASSERT(reg >= 0, "install a regular file");
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)reg), "a regular file is not slow");
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)reg), "still not slow");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 1, "the type was learned once and cached");
+
+    // A character device (a pts, the console): slow, and cached the same way.
+    g_intr_stat_mode  = T_S_IFCHR | 0620u;
+    g_intr_stat_calls = 0;
+    hidx_t chr = intr_install(p);
+    TEST_ASSERT(chr >= 0, "install a character device");
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)chr), "a character device is slow");
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)chr), "still slow");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 1, "learned once");
+
+    // A failing stat: not slow, NOT cached -- the next call asks again and
+    // learns the truth once the stat succeeds.
+    g_intr_stat_fail  = 1;
+    g_intr_stat_mode  = T_S_IFCHR | 0620u;
+    g_intr_stat_calls = 0;
+    hidx_t flaky = intr_install(p);
+    TEST_ASSERT(flaky >= 0, "install a file whose stat fails");
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)flaky), "a failed stat answers not slow");
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, (u64)flaky), "and again");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 2, "a failure is not cached");
+    g_intr_stat_fail = 0;
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)flaky),
+                "once the stat succeeds, the device is slow");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 3, "and the answer is now cached");
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, (u64)flaky), "cached slow");
+    TEST_EXPECT_EQ(g_intr_stat_calls, 3, "no further stat");
+
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, 60u), "a closed fd is not slow");
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, ~0ull), "a garbage fd is not slow");
+
+    // A socket is slow because it has a socktab row, whatever its Dev's stat
+    // says, and the row is asked before any handle lookup: fd 41 has a row
+    // and no handle at all.
+    struct viv_socktab *st = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(st != NULL, "kzalloc socktab");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) st->s[i].fd = -1;
+    TEST_ASSERT(viv_socktab_claim(st, 41, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED),
+                "claim a socket row for fd 41");
+    __atomic_store_n(&p->socktab, st, __ATOMIC_RELEASE);
+    TEST_ASSERT(viv_fd_is_slow_for_test(p, 41u), "a socket (a socktab row) is slow");
+    TEST_ASSERT(!viv_fd_is_slow_for_test(p, 42u), "a neighbour with no row and no handle is not");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
 }

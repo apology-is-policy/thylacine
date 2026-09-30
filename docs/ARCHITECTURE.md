@@ -1517,14 +1517,34 @@ wait **without** terminating the Thread, so it is serviced promptly at the tail.
   blocks through death — an immediate unwind would discard the partial frame and
   desync the shared stream. Death is still checked first (death wins).
 - **`proc_caught_note_wake(p)`** (proc.c, parallel to
-  `proc_interrupt_terminate_wake`): called from `notes_post`'s commit when a
-  deliverable caught note lands, it walks `p->threads` and `wakeup()`s each
+  `proc_interrupt_terminate_wake`): run on every commit of a deliverable caught
+  note, it walks `p->threads` and `wakeup()`s each
   blocked peer under its `wait_lock`, so an **already-sleeping** thread observes
   the predicate on resume. (A not-yet-sleeping thread is covered without the
   wake — its register-then-observe reads the predicate.) `notes_post`'s existing
   `poll_waiter_list_wake` already covers a peer blocked in `poll` on its *own*
   notes fd; the new wake covers a peer blocked in an *unrelated* wait — `read`,
-  9P RPC, `wait_pid`, `torpor`, `nanosleep`.
+  9P RPC, `wait_pid`, `torpor`, `nanosleep`. *As built:* the walk needs
+  `g_proc_table_lock`, which `notes_post` does not take, so the wake is the
+  **poster's**, and every poster holding that lock runs it after its post —
+  the interrupt and tty fans, a child's exit (`child_exit`), a caught
+  `tty:susp`, `tty:cont`. Two posts run outside the lock. A Proc noting itself
+  takes the lock for its wakes after the post. The `pipe` note needs no wake:
+  it goes to the writer's own Proc from inside the write and delivers at that
+  thread's return tail, as Linux sends SIGPIPE to the writing thread alone.
+  The wake reaches every blocked peer, but **one caught note unwinds one
+  sleeper**, as Linux interrupts one thread for a process-directed signal: the
+  sleeper that unwinds claims the note's family (a claim sub-field of
+  `proc_flags`, taken by a CAS that re-validates the caught bit), and its peers
+  find the family claimed and re-park. The claim is the claimant's, and it ends
+  at the claimant's EL0-return tail, whatever the tail delivered: that tail runs
+  at most one handler and can end short of the claimed note (a stop, a frame that
+  will not build), so a claim that waited for its note to drain could refuse
+  every wait in the Proc. Released with its note still queued, the family is
+  open again and the Proc's sleepers are woken to claim it. The tail itself
+  loops past notes it discards, as Linux's `get_signal` loops past ignored
+  signals, so a caught note queued behind an ignored one is delivered on the
+  same return.
 
 **Disposition — the native/phenotype split (VIVARIUM §6.22).** A blocking site,
 on `SLEEP_NOTEINTR`, does an EINTR-safe unwind and returns `-T_E_INTR`; the
@@ -1588,7 +1608,16 @@ owning thread. The vivarium dispatcher sets it for a call on the list, and the
 
 A call that is not on the list rides the note out. Death still unwinds it,
 because `thread_die_pending` is checked first and is unchanged. The note is
-delivered at the call's EL0-return tail. The flag is positive so that a new
+delivered at the call's EL0-return tail. The flag is necessary, not sufficient:
+the call's wait must also have opted in. As built only the two 9P waits have, so
+a listed call whose wait is in the kernel -- a kernel pipe's `read`, `ppoll`,
+`wait4`, `futex` -- still rides the note out until its wait opts in (owned
+work). Within a listed call the flag covers the wait alone, as Linux interrupts
+only the sleep: a step whose effect can land although its reply is abandoned
+clears it -- a socket's dial verb, and everything after `accept` has dequeued a
+connection -- and a `connect` whose handshake is interrupted leaves the socket
+`CONNECTING`, so the retry resumes that wait instead of dialing again (VIVARIUM
+6.22). The flag is positive so that a new
 table row, or a new wait inside an old row, can only be killed until someone
 puts it on the list. The failure mode is then a handler that runs late, never
 a spurious `EINTR`. Natives are unchanged: no native syscall sets the flag. When

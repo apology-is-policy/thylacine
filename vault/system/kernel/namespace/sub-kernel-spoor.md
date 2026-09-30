@@ -175,6 +175,14 @@ Three of the six are therefore not state but PROVENANCE — assertions
 about how the Spoor came to exist — which is what makes the clone rule
 load-bearing.
 
+`CSLOWKNOWN` and `CSLOW` (2026-09-29) are a learned fact about the OPEN file:
+whether its Dev's stat type is a pipe, FIFO or character device, which decides
+whether a Linux read or write on it is note-interruptible
+([[sub-kernel-vivarium]]). They are set at runtime with `spoor_flag_set`, since
+fork shares the Spoor, and `spoor_clone` strips them with `COPEN` and
+`CWALKONLY`: a clone may walk to a different file, and a directory's "known, not
+slow" inherited by a pts below it would make the pts read uninterruptible.
+
 ## Concurrency
 
 The refcount is the whole concurrency story. `spoor_ref` uses

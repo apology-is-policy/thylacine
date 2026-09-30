@@ -314,12 +314,13 @@ void test_spoor_clone_copies_state(void) {
     struct Spoor *c = spoor_alloc(&devnone);
     TEST_ASSERT(c != NULL, "alloc OK");
 
-    // Mutate every field spoor_clone is documented to copy, PLUS the two
-    // per-final-handle markers it must STRIP: COPEN (H9) and CWALKONLY (#81).
+    // Mutate every field spoor_clone is documented to copy, PLUS the
+    // per-final-handle markers it must STRIP: COPEN (H9), CWALKONLY (#81) and
+    // the learned slow-file type CSLOWKNOWN / CSLOW (ARCH 8.8.3).
     c->qid.path = 0xDEADBEEFCAFE0001ULL;
     c->qid.vers = 7;
     c->qid.type = QTDIR;
-    c->flag     = COPEN | CMSG | CWALKONLY;
+    c->flag     = COPEN | CMSG | CWALKONLY | CSLOWKNOWN | CSLOW;
     c->mode     = 3;
     c->offset   = (s64)0x1000;
 
@@ -334,7 +335,11 @@ void test_spoor_clone_copies_state(void) {
     // markers a clone must not inherit -- dev->open re-sets COPEN, and the two
     // T_OPATH sites re-set CWALKONLY. Inheriting COPEN was H9: an O_PATH clone
     // of the console-drain fd, closed, ran devdev_close's COPEN-gated disarm.
-    TEST_EXPECT_EQ(nc->flag,     (u32)CMSG,  "flag: CMSG kept, COPEN+CWALKONLY stripped");
+    // The slow-file bits describe THIS open file, and a clone may walk to
+    // another: a directory's "known, not slow" inherited by a pts under it
+    // would make the pts read one a caught signal can no longer interrupt.
+    TEST_EXPECT_EQ(nc->flag,     (u32)CMSG,
+                   "flag: CMSG kept, COPEN+CWALKONLY+CSLOWKNOWN+CSLOW stripped");
     TEST_EXPECT_EQ(nc->mode,     c->mode,     "mode copied");
     TEST_EXPECT_EQ(nc->offset,   c->offset,   "offset copied");
     TEST_EXPECT_EQ(nc->dev,      c->dev,      "dev back-pointer copied");

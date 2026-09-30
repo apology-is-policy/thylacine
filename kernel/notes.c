@@ -438,6 +438,12 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
 // NOTE_BIT_* family (widening NOTE_MASK_SUPPORTED) can never silently outgrow it.
 _Static_assert((NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT) == PROC_FLAG_CAUGHT_NOTE_MASK,
                "item 11: PROC_FLAG_CAUGHT_NOTE_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
+_Static_assert((NOTE_MASK_SUPPORTED << PROC_CAUGHT_CLAIM_SHIFT) == PROC_FLAG_CAUGHT_CLAIM_MASK,
+               "ARCH 8.8.3: PROC_FLAG_CAUGHT_CLAIM_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
+// A claim is released only through the claimant's own record of it, so a family
+// that did not fit Thread.note_claim would be claimed in proc_flags forever.
+_Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_claim))) == 0,
+               "ARCH 8.8.3: Thread.note_claim must hold every supported note family");
 
 // item 11 (ARCH 8.8.3): the CAUGHT-note twin of the terminate arm above -- its
 // EXACT COMPLEMENT. The terminate arm REFUSES when a live handler exists OR the
@@ -522,6 +528,10 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
             return;             // another same-family note remains queued
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
+    // The family's unwind claim is not cleared here: it belongs to the thread
+    // that took it and ends at that thread's EL0-return tail (notes_release_-
+    // claims). A sleeper's claim CAS that raced this drain fails on the changed
+    // word, so no claim is taken for a family with nothing queued.
     __atomic_and_fetch(&p->proc_flags, ~fambit, __ATOMIC_RELEASE);
 }
 
@@ -1297,6 +1307,13 @@ bool thread_die_pending(struct Thread *t) {
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
     if (t->exit_close_active) return false;
+    // ARCH 8.8.3 (signal(7)'s list): only a wait whose syscall is one a signal
+    // may interrupt unwinds for a caught note. Every other wait -- socket(),
+    // open(), a regular file's read(), any page-in -- rides the note out and
+    // can only be killed, as Linux's TASK_KILLABLE sleeps can; the note then
+    // delivers at the syscall's EL0-return tail. Owner-read: the sleep sites
+    // evaluate this on `t` itself.
+    if (!t->note_interruptible) return false;
     // A note that the N-3 re-entrancy guard will refuse to deliver is NOT
     // deliverable, and treating it as such is a read-interrupt LIVELOCK: the
     // sleep-interrupt predicate returns SLEEP_NOTEINTR, the op unwinds to EL0
@@ -1316,6 +1333,31 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
     u32 caught = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
+}
+
+bool thread_caught_note_claim(struct Thread *t) {
+    if (!thread_caught_note_deliverable(t)) return false;
+    struct Proc *p = t->proc;
+    u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    for (;;) {
+        u32 caught  = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+        u32 claimed = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+        u32 deliv   = caught & ~t->note_mask & NOTE_MASK_SUPPORTED;
+        // A claim this thread holds is its own to unwind on. A wait that claimed
+        // and then completed anyway leaves the claim until the call's tail, and
+        // the call's next wait must not refuse the note only it may unwind for.
+        if (deliv & t->note_claim) return true;
+        u32 open    = deliv & ~claimed;
+        if (open == 0) return false;   // every family deliverable here is taken
+        u32 fam = open & (~open + 1u); // the lowest: any one family unwinds us
+        if (__atomic_compare_exchange_n(&p->proc_flags, &flags,
+                                        flags | (fam << PROC_CAUGHT_CLAIM_SHIFT),
+                                        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            t->note_claim |= (u8)fam;
+            return true;
+        }
+        // `flags` now holds the fresh word: a post, a drain or a peer's claim.
+    }
 }
 
 // bug-2 (VIVARIUM.md §6.23): detect a PHENO_LINUX note handler that ESCAPED its
@@ -1521,8 +1563,7 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     // entered with, exactly as the Plan 9 note path leaves it.
 }
 
-void notes_deliver_at_el0_return(struct exception_context *ctx);
-void notes_deliver_at_el0_return(struct exception_context *ctx) {
+static void notes_deliver_tail(struct exception_context *ctx) {
     if (!ctx) return;
     struct Thread *t = current_thread();
     if (!t || !t->proc || !t->proc->notes) return;
@@ -1551,7 +1592,9 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     // F9 audit close: acquire-load handler_va so a multi-thread Proc
     // observes a coherent value vs a concurrent SYS_NOTIFY's store.
     u64 handler_va = __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE);
+    u32 discarded  = 0;
 
+again:
     // Peek under q->lock to identify the dispatcher candidate.
     spin_lock(&q->lock);
     struct Note candidate;
@@ -1692,6 +1735,11 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
             struct Note drop;
             (void)notes_dequeue_locked(p, t, &drop);
             spin_unlock(&q->lock);
+            // Linux's get_signal loops past an ignored signal to the next one
+            // pending, so a caught note queued behind this one is delivered on
+            // this return, not a later one. Bounded by the ring, so a flood of
+            // ignored notes cannot hold the thread here.
+            if (++discarded < NOTE_QUEUE_DEPTH) goto again;
             return;
         }
 
@@ -1868,6 +1916,40 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     // spsr unchanged — the handler runs at EL0 with the same PSTATE the
     // syscall entered with.
 }
+
+// ARCH 8.8.3: an unwind claim (thread_caught_note_claim) lasts until the
+// claimant's EL0-return tail, whatever the tail delivered. The tail runs at most
+// one handler and can end short of the claimed note -- at a stop, or at a frame
+// that would not build -- so the claim cannot wait for that note to drain: the
+// claimant may block again before it does, and every peer's wait refuses a
+// claimed family. Released, the family is open to this thread's next wait and
+// to a peer's; if its note is still queued, the peers' waits re-read their
+// conditions, so one of them can unwind for it now.
+static void notes_release_claims(struct Thread *t) {
+    u32 mine = t->note_claim;
+    if (mine == 0) return;
+    t->note_claim = 0;
+    struct Proc *p   = t->proc;
+    u32          was = __atomic_fetch_and(&p->proc_flags,
+                                          ~(mine << PROC_CAUGHT_CLAIM_SHIFT),
+                                          __ATOMIC_ACQ_REL);
+    u32 caught = (was & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    if ((caught & mine) == 0) return;
+    irq_state_t s = proc_table_lock_acquire();
+    proc_caught_note_wake(p);
+    proc_table_lock_release(s);
+}
+
+void notes_deliver_at_el0_return(struct exception_context *ctx);
+void notes_deliver_at_el0_return(struct exception_context *ctx) {
+    notes_deliver_tail(ctx);
+    struct Thread *t = current_thread();
+    if (t && t->proc) notes_release_claims(t);
+}
+
+// Test hook: the release a claimant's tail makes, for a Thread with no tail.
+void notes_release_claims_for_test(struct Thread *t);
+void notes_release_claims_for_test(struct Thread *t) { notes_release_claims(t); }
 
 // ---------------------------------------------------------------------------
 // SYS_NOTED restore + default-action helpers (called from kernel/syscall.c).

@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -134,8 +134,12 @@ exit and a kill alike:
   `uart_puts` path is deliberate: bounded FIFO, no TX ring, no sleep, no
   lock, therefore safe under the table lock;
 - capturing status/msg, flipping to ZOMBIE;
-- waking the parent's `child_waiters` **under the lock** and posting the
-  synthetic `child_exit` note.
+- the parent's side, `proc_exit_notify_parent_locked`, all **under the
+  lock**: wake the parent's `child_waiters`, post the synthetic `child_exit`
+  note, and run the caught-note wake (`proc_caught_note_wake`) so a parent
+  that catches `child_exit` -- a SIGCHLD handler, a notes fd -- and is already
+  asleep in an interruptible wait takes it now ([[sub-kernel-notes]]). There is
+  no terminate wake: `child_exit` defaults to ignore and never arms that latch.
 
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
 waking, the parent could be reaped and freed by the *grandparent*'s
@@ -427,7 +431,11 @@ What a change **must** re-establish:
   watchpoint slots under the same guarantee — and there the reasoning is sound,
   because a debugger can only have armed them while the target was fully stopped
   and this is the only live thread. Same gate, one valid use and one invalid one,
-  forty lines apart.
+  forty lines apart. A third use is valid for the same reason: exec clears the
+  caught-note claim sub-field of `proc_flags` (2026-09-30), and a claim is taken
+  only by a thread of this process for its own wait, so with exec alone the clear
+  is a guard, not a repair -- posters from other processes set caught bits, never
+  claims ([[sub-kernel-notes]]).
 
 ## Provenance
 

@@ -575,6 +575,46 @@ enum viv_verdict vivarium_translate(u64 linux_nr, const u64 *args_in,
     return VIV_FORWARD;
 }
 
+// ARCH 8.8.3: the calls signal(7) lets a handler interrupt. A switch rather than
+// a column in the tables above, because fcntl's answer depends on its command.
+// The default is NEVER on purpose: a row added later rides a caught note out
+// until someone puts it here, so the failure is a handler that runs late, never
+// a spurious EINTR.
+enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args) {
+    if (!args) return VIV_INTR_NEVER;
+    switch (linux_nr) {
+    case VIV_LINUX_ACCEPT:
+    case VIV_LINUX_ACCEPT4:
+    case VIV_LINUX_CONNECT:
+    case VIV_LINUX_RECVFROM:
+    case VIV_LINUX_RECVMSG:
+    case VIV_LINUX_SENDTO:
+    case VIV_LINUX_SENDMSG:
+    case VIV_LINUX_WAIT4:
+    case VIV_LINUX_PPOLL:
+    case VIV_LINUX_PSELECT6:
+    case VIV_LINUX_FUTEX:
+    case VIV_LINUX_RT_SIGSUSPEND:
+    case VIV_LINUX_RT_SIGTIMEDWAIT:
+        return VIV_INTR_ALWAYS;
+    case VIV_LINUX_FCNTL: {
+        u32 cmd = (u32)args[1];
+        return (cmd == VIV_F_SETLKW || cmd == VIV_F_OFD_SETLKW)
+                   ? VIV_INTR_ALWAYS : VIV_INTR_NEVER;
+    }
+    case VIV_LINUX_READ:
+    case VIV_LINUX_READV:
+    case VIV_LINUX_WRITE:
+    case VIV_LINUX_WRITEV:
+    case VIV_LINUX_PREAD64:
+    case VIV_LINUX_PWRITE64:
+    case VIV_LINUX_IOCTL:
+        return VIV_INTR_IF_SLOW;
+    default:
+        return VIV_INTR_NEVER;
+    }
+}
+
 // =============================================================================
 // TIER 2 — the translators (V-2b).
 // =============================================================================
@@ -2074,6 +2114,35 @@ bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch
     return ok;
 }
 
+bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                               u32 addr, u16 port) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->epoch == expect_epoch && e->state == (u8)VIV_SOCK_FRESH);
+    if (ok) {
+        e->remote_addr = addr;
+        e->remote_port = port;
+        e->state       = (u8)VIV_SOCK_CONNECTING;
+    }
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
+bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->epoch == expect_epoch && e->state == (u8)VIV_SOCK_CONNECTING);
+    if (ok) {
+        e->remote_addr = 0;
+        e->remote_port = 0;
+        e->state       = (u8)VIV_SOCK_FRESH;
+    }
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
 // execve's close-on-exec socktab sweep. A socket fd marked FD_CLOEXEC is about
 // to be closed by handle_close_on_exec, which knows nothing of this table; drop
 // its entry first, or the freed fd number would carry a stale (proto, n) row
@@ -2191,10 +2260,12 @@ bool vivarium_sendto_decide(enum viv_net_proto proto, u8 state, u64 flags,
     // fake state errno.
     if (addr_va != 0 || addrlen != 0) {
         if (proto != VIV_NET_UDP)             return false;   // ENOSYS
-        if (state == (u8)VIV_SOCK_CONNECTED) { *out_err = T_E_ISCONN; return false; }
-        if (state == (u8)VIV_SOCK_LISTENING) { *out_err = T_E_ISCONN; return false; }
+        // Only a FRESH socket's ctl is free to re-point: a CONNECTING one's is
+        // mid-connect() on another thread, and answers as the connected socket
+        // it is becoming.
+        if (state != (u8)VIV_SOCK_FRESH)     { *out_err = T_E_ISCONN; return false; }
         *out_err = 0;
-        return true;                                          // state FRESH
+        return true;
     }
 
     // sendto with NO destination -- the connected send()/write() shape. Only the

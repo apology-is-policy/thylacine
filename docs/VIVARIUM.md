@@ -713,8 +713,9 @@ already doing and proceeds — which is also why the table needs no `bound` flag
 
 **`listen` writes `announce`, and performs no swap.** The fd stays `ctl`. That is
 not an omission: `ctl` is the file `accept` re-walks from, and the reference that
-keeps the listener alive. So the ctl/data split is `FRESH|LISTENING` vs
-`CONNECTED`, not `FRESH` vs everything else.
+keeps the listener alive. So the ctl/data split is `CONNECTED` vs every other
+state — `FRESH`, `LISTENING`, and `CONNECTING` (a `connect` whose handshake a
+signal interrupted, §6.22) — not `FRESH` vs everything else.
 
 The wildcard is load-bearing. `0.0.0.0` renders as Plan 9's `announce *!port`, a
 concrete address as `announce a.b.c.d!port` — and netd treats them differently:
@@ -2469,6 +2470,16 @@ call, and every page fault, rides the note out: `socket`, `bind`, `openat`,
 as it would after one of Linux's `TASK_KILLABLE` sleeps. Before the amendment,
 every 9P-backed call was interruptible. A `SIGCHLD` handler made `socket()`
 fail with `EINTR`, and made a demand-paged file read raise `SIGBUS`.
+Inside an interruptible call, only its wait unwinds, as in Linux. `accept`'s wait
+is the held `listen` open; once that returns, netd has handed over the connection,
+and the steps that set it up ride the note out, since an `EINTR` there would hang
+up a connection the guest never saw. `connect`'s wait is TCP's handshake, the held
+`data` open. The dial verb before it rides the note out, because a `Twrite`
+abandoned for a note may already have dialed, and a UDP `connect` never waits at
+all. A `connect` that a signal interrupts leaves the socket `CONNECTING`, and a
+blocking retry waits on the dial already made rather than dialing again, as
+Linux's `SS_CONNECTING` does. A failed dial leaves it `FRESH`, and a timed-out one
+reports `ETIMEDOUT` as netd does, not `ECONNREFUSED`.
 Where the restart-vs-`EINTR` decision is made is the pouch/unmodified split:
 - **Pouch guest** (our patched musl): the kernel returns `-EINTR` and delivers
   the frame; musl's cancellation/`__eintr_valid_flag` machinery honours

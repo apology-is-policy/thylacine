@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-09-30
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -136,14 +136,21 @@ distinguishable things:
   zero is required; and a tier-2 shell returns a value the caller stores into
   `x0`, which would immediately overwrite the `x0` the note restore just put
   back. The interception *is* the implementation.
-- **Runs one entry hook with a side effect.** A phenotyped `close` drops the
+- **Runs two entry hooks with side effects.** A phenotyped `close` drops the
   process's socket-table entry for that descriptor *before* the native close
   runs, unconditionally, because the descriptor index is freed by the native
   path and reused — so a surviving `(proto, N)` entry would later be found by an
   unrelated file's operation and a dial verb written to a stranger's connection.
   The hook is deliberately not a translation row: `close` must stay a plain
   renumber that falls through, so descriptor teardown keeps exactly one
-  implementation.
+  implementation. And a phenotyped `read`, `write`, `readv`, `writev`,
+  `pread64` or `pwrite64` on a socket whose connect a signal interrupted
+  finishes that connect first
+  (`viv_sock_finish_before_io`, 2026-09-30): the fd still names `ctl` until the
+  connect swaps it onto `data`, so the renumbered call would otherwise read the
+  conversation number or feed netd's verb parser. A failure (an `EINTR` in the
+  handshake wait, a refused dial) is the call's result and the native handler
+  never runs ([[sub-kernel-vivarium]]).
 - **Translates in place and falls through.** The common case rewrites `x8` and
   the six argument registers from the translation result and returns *true*,
   meaning the native switch runs — on registers that are no longer the ones
@@ -658,6 +665,14 @@ mapped to `-T_E_ACCES`. So an out-of-scope attach now returns `-EACCES` (pouch
 presents `errno == EACCES`) where it once collapsed to a bare `-1` — the reason
 that identity refusal is observable from Thylacine at all
 ([[sub-kernel-ninep-attach]]).
+
+### The wrapper clears note_interruptible (ARCH 8.8.3)
+
+The single exit also clears the thread's `note_interruptible`, which the
+vivarium dispatcher sets for a Linux call on signal(7)'s list
+([[sub-kernel-vivarium]]). Clearing it at the one exit is what keeps a wait
+outside that syscall -- a page-in at EL0, the next syscall's own waits -- from
+inheriting its interruptibility ([[dec-2026-09-29-caught-signal-slow-calls]]).
 
 ### The body runs with interrupts ON (ARCH 8.12)
 

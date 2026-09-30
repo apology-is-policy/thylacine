@@ -3649,6 +3649,175 @@ unsafe fn run_linux() -> ! {
         );
     }
 
+    // --- L301-L310 (ARCH 8.8.3, VIVARIUM 6.22): a caught signal interrupts
+    // only the calls signal(7) lets it interrupt. Before the amendment every
+    // 9P-backed call was interruptible here: a SIGCHLD handler made socket(),
+    // openat(), newfstatat() and a regular file's read() fail with EINTR, and
+    // NP-5's SMP gate caught socket() doing it in 3 boots of 50.
+    //
+    // Two halves, one variable apart. The POSITIVE control comes first: a
+    // blocking read on a socket (a slow file) MUST return EINTR when a child's
+    // SIGCHLD lands mid-wait. It proves the handler is live and the note does
+    // interrupt, so the negative half cannot pass merely because no note came.
+    // Then the NEGATIVE half: children exit on a stagger while a loop issues
+    // only calls off the list, and none of those calls may fail.
+    const NEG_EINTR: i64 = -4;
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0]; // no SA_RESTART
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L301\n"
+    );
+    set = bit(SIGCHLD);
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8) == 0,
+        b"L302\n"
+    );
+
+    let isa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x73, // sin_port = 7795, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let ils = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(
+        rep,
+        ils >= 0
+            && svc3(NR_BIND, ils as u64, isa.as_ptr() as u64, isa.len() as u64) == 0
+            && svc3(NR_LISTEN, ils as u64, 1, 0) == 0,
+        b"L303\n"
+    );
+    let ics = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(
+        rep,
+        ics >= 0 && svc3(NR_CONNECT, ics as u64, isa.as_ptr() as u64, isa.len() as u64) == 0,
+        b"L303b\n"
+    );
+    let iss = svc3(NR_ACCEPT, ils as u64, 0, 0);
+    leg!(rep, iss >= 0, b"L303c\n");
+
+    // A read the note failed to interrupt would block forever, so a rescuer
+    // child writes one byte into the connection after 10 s: a broken kernel
+    // then FAILS L305 instead of hanging the probe. A passing run stands the
+    // rescuer down through a pipe the moment the read returns.
+    let mut irp: [i32; 2] = [-1, -1];
+    leg!(rep, svc3(NR_PIPE2, irp.as_mut_ptr() as u64, 0, 0) == 0, b"L304\n");
+    let fired_pre = sig_fired();
+    let rescuer = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if rescuer == 0 {
+        let _ = svc3(NR_CLOSE, irp[1] as u64, 0, 0);
+        let mut pfd = [PollFd { fd: irp[0], events: POLLIN, revents: 0 }];
+        let ts: [i64; 2] = [10, 0];
+        if svc4(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0) == 0 {
+            let x = b"x";
+            let _ = svc3(NR_WRITE, ics as u64, x.as_ptr() as u64, 1);
+        }
+        linux_exit(0)
+    }
+    // The interrupter: its exit is the SIGCHLD. One second is far longer than
+    // the few instructions between this fork and the read below.
+    let interrupter = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if interrupter == 0 {
+        let ts: [i64; 2] = [1, 0];
+        let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+        linux_exit(0)
+    }
+    let fired0 = sig_fired();
+    let mut one = [0u8; 4];
+    let n = svc3(NR_READ, iss as u64, one.as_mut_ptr() as u64, 1);
+    let k = b"k";
+    let _ = svc3(NR_WRITE, irp[1] as u64, k.as_ptr() as u64, 1);
+    leg!(rep, rescuer > 0 && interrupter > 0, b"L304b\n");
+    // The slow read WAS interrupted. On failure the marker names what the read
+    // returned (d data = the rescue, z EOF, a EAGAIN, b EBADF, n another error)
+    // and whether the handler ran before the read began (E) or not (L).
+    let nc = match n { 1 => b'd', 0 => b'z', -11 => b'a', -9 => b'b', _ if n < 0 => b'n', _ => b'p' };
+    let rc = if fired0 > fired_pre { b'E' } else { b'L' }; // the handler ran Early, before the read
+    let l305 = [b'L', b'3', b'0', b'5', nc, rc, b'\n'];
+    leg!(rep, n == NEG_EINTR, &l305);
+    leg!(rep, sig_fired() > fired0, b"L305b\n"); // and the handler ran
+    for kid in [rescuer, interrupter] {
+        let mut ws: i32 = -1;
+        let mut r = NEG_EINTR;
+        while r == NEG_EINTR {
+            r = svc4(NR_WAIT4, kid as u64, &mut ws as *mut i32 as u64, 0, 0);
+        }
+        leg!(rep, r == kid && (ws & 0x7f) == 0 && ((ws >> 8) & 0xff) == 0, b"L306\n");
+    }
+    for fd in [iss, ics, ils, irp[0] as i64, irp[1] as i64] {
+        let _ = svc3(NR_CLOSE, fd as u64, 0, 0);
+    }
+
+    // The negative half. Each call in the loop is a 9P round trip (netd, or
+    // the pool that holds this container's rootfs), so the children's exits
+    // land inside those waits. The loop runs until every child is reaped, so
+    // every exit happened while it ran.
+    const KIDS: usize = 6;
+    let mut kids = [0i64; KIDS];
+    for (i, slot) in kids.iter_mut().enumerate() {
+        let f = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if f == 0 {
+            let ts: [i64; 2] = [0, (i as i64 + 1) * 40_000_000];
+            let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+            linux_exit(0)
+        }
+        *slot = f;
+    }
+    leg!(rep, kids.iter().all(|&f| f > 0), b"L307\n");
+    let fired1 = sig_fired();
+    let mut reaped = [false; KIDS];
+    let mut left = KIDS;
+    let mut bad: u32 = 0; // the FIRST call that failed: 1 socket, 2 openat, 3 read, 4 newfstatat
+    let mut iters: u32 = 0;
+    let mut nst = core::mem::zeroed::<LinuxStat>();
+    let mut buf = [0u8; 64];
+    while left > 0 && iters < 100_000 {
+        let s = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+        if s < 0 {
+            if bad == 0 { bad = 1; }
+        } else {
+            let _ = svc3(NR_CLOSE, s as u64, 0, 0);
+        }
+        let fd = svc4(NR_OPENAT, AT_FDCWD, SELF_PATH.as_ptr() as u64, O_RDONLY, 0);
+        if fd < 0 {
+            if bad == 0 { bad = 2; }
+        } else {
+            if svc3(NR_READ, fd as u64, buf.as_mut_ptr() as u64, 64) != 64 && bad == 0 {
+                bad = 3;
+            }
+            let _ = svc3(NR_CLOSE, fd as u64, 0, 0);
+        }
+        if svc4(NR_NEWFSTATAT, AT_FDCWD, SELF_PATH.as_ptr() as u64,
+                &mut nst as *mut LinuxStat as u64, 0) != 0 && bad == 0 {
+            bad = 4;
+        }
+        for i in 0..KIDS {
+            if !reaped[i] {
+                let mut ws: i32 = -1;
+                if svc4(NR_WAIT4, kids[i] as u64, &mut ws as *mut i32 as u64, WNOHANG, 0)
+                    == kids[i]
+                {
+                    reaped[i] = true;
+                    left -= 1;
+                }
+            }
+        }
+        iters += 1;
+    }
+    leg!(rep, left == 0, b"L308\n"); // every child exited while the loop ran
+    let which: &[u8] = match bad {
+        1 => b"L309a\n", // socket()
+        2 => b"L309b\n", // openat()
+        3 => b"L309c\n", // a regular file's read()
+        _ => b"L309d\n", // newfstatat()
+    };
+    leg!(rep, bad == 0, which);
+    leg!(rep, sig_fired() > fired1, b"L310\n"); // the notes were delivered late, not lost
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
     // own territory. If the renumber were wrong the bytes would not be there,

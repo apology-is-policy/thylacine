@@ -39,7 +39,7 @@ from an interactive Ctrl-C.
 | Function | Contract |
 |---|---|
 | `proc_job_stop_pgrp(pgid)` | the suspend fan: per member, decide caught-vs-stop, return the affected count |
-| `proc_job_cont_pgrp(pgid)` | the continue fan: post the note and resume every alive member |
+| `proc_job_cont_pgrp(pgid)` | the continue fan: post the note, run the caught-note wake, and resume every alive member |
 | `proc_job_stop_proc(m)` / `proc_job_cont_proc(m)` | the single-target `/proc` verbs — **unconditional**, no note, no gate |
 | `proc_orphan_rule_locked(dying)` | at every death, hangup-then-continue any group this death newly orphans |
 | `proc_pgrp_in_session(pgid, sid)` | the membership gate the terminal calls run *before* locking |
@@ -76,7 +76,10 @@ A suspend character does not simply stop the group. Per member:
 
 - **Caught** — the member has an async handler, or manages its own notes via
   a notes fd, or every one of its threads masks the terminal note family. The
-  note is posted and delivered on the member's terms; **no stop**.
+  note is posted and delivered on the member's terms; **no stop**. The poster
+  runs the caught-note wake too, so a handler-bearing member already asleep in
+  an interruptible wait takes the note now rather than at its next wake
+  ([[sub-kernel-notes]]).
 - **Uncaught and resumable** — the default stop fires, and *consumes* the
   signal. No note is posted.
 - **Uncaught and orphaned** — discarded entirely. Nothing posted, nothing
@@ -207,10 +210,13 @@ which the child cap makes safe. The walks are linear in the process count per
 candidate; death is not a hot path and the fan is the rare case.
 
 The per-member order is hangup, then the terminate wake, then continue, then
-the job resume. The middle step is what makes an uncaught hangup's termination
-actually run: the hangup arms the terminate latch, the wake unwinds the
-member's blocked threads to die at their tails, and a stop-parked thread's
-park loop bails on the pending death and dies from inside the stop.
+the caught-note wake, then the job resume. The terminate wake is what makes an
+uncaught hangup's termination actually run: the hangup arms the terminate
+latch, the wake unwinds the member's blocked threads to die at their tails,
+and a stop-parked thread's park loop bails on the pending death and dies from
+inside the stop. The caught-note wake comes after **both** posts because a
+member may ignore the hangup and still catch the continue; a wake between them
+would find nothing armed.
 
 **Death wins from inside a stop** — the same clause the debugger's stop must
 satisfy, restated against the second owner. Without it, killing a Ctrl-Z'd job

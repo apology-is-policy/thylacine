@@ -178,8 +178,12 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //   - qid: the position the new Spoor inherits (walks update this
     //     in-place on the new Spoor afterwards).
     //   - flag / mode: pre-open flags carry over so a walk of a CMSG
-    //     parent inherits message-style semantics. EXCEPT two per-final-handle
+    //     parent inherits message-style semantics. EXCEPT the per-final-handle
     //     markers, which a fresh navigation clone must NOT inherit:
+    //       * CSLOWKNOWN / CSLOW (ARCH 8.8.3): the learned type of THIS open
+    //         file. A clone may walk to a different file, and inheriting "known,
+    //         not slow" from a directory would make a pts read under it one a
+    //         caught signal can no longer interrupt.
     //       * CWALKONLY (#81): a T_OPATH "navigation-only, no byte I/O" marker,
     //         set EXPLICITLY at the two handle-creation sites -- inheriting it
     //         would make a child CREATED or normally-opened from a T_OPATH parent
@@ -213,7 +217,7 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //     attaches it. Inheriting it would double-free the opened members and
     //     misroute readdir of a plain child through the parent's union.
     nc->qid    = c->qid;
-    nc->flag   = c->flag & ~(CWALKONLY | COPEN);   // never inherit the per-final-handle markers (see above)
+    nc->flag   = c->flag & ~(CWALKONLY | COPEN | CSLOWKNOWN | CSLOW);   // never inherit the per-final-handle markers (see above)
     nc->mode   = c->mode;
     nc->offset = c->offset;
     nc->aux    = c->aux;
