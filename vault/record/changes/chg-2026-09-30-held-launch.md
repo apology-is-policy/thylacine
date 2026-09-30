@@ -4,7 +4,7 @@ type: chg
 title: "The held launch: ambush spawns held where the kernel has the hold"
 date: 2026-09-30
 arc: arc-go-ide
-commits: ["*(pending)*"]
+commits: ["f4924564"]
 touched:
   - sub-substrate-build
   - sub-kernel-birth-hold

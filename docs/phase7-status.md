@@ -858,7 +858,7 @@ attempt each.
 The birth hold's userspace half. With the kernel half landed (the section above), ambush still spawned its target
 running, so the race stayed live: on 2026-09-30 the image-slide branch's CI `manual` gate died in `/ambush-probe`
 stage C, the race's third boot-fatal sighting. The operator said yes to changing and committing the Go fork and ambush
-on 2026-09-30. Scripture 9bfa3041 (DELVE-PORT-DESIGN section 7 (b) and section 12). Code *(pending)*.
+on 2026-09-30. Scripture 9bfa3041 (DELVE-PORT-DESIGN section 7 (b) and section 12). Code f4924564.
 
 - **The forks.** Local commits in the forks the build reads, shared with main. go-thylacine: aaf21fb commits the
   104-byte record its builds had compiled from an uncommitted working tree; e8b4bcf adds `SysProcAttr.DebugHeld`,
