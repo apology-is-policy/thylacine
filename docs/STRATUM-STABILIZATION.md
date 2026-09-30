@@ -2,7 +2,7 @@
 
 Binding charter for the proactive hardening of Stratum against the Thylacine
 workload. Stratum is in scope (`~/projects/stratum/v2`, branch
-`thylacine-pouch-arm`); Thylacine is its only client, so the bar is "whatever
+`main`); Thylacine is its only client, so the bar is "whatever
 serves Thylacine." This document is scripture for the arc: areas, method, exit
 criteria. Redesigns surface as their own scripture commits first (per
 `CLAUDE.md` "Design conversation -> scripture commit").

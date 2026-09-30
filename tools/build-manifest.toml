@@ -63,7 +63,7 @@ clone_dest = "~/projects/stratum"
 env        = "STRATUM_SRC"
 probe      = "CMakeLists.txt"
 repo       = "https://github.com/apology-is-policy/stratum.git"
-branch     = "thylacine-pouch-arm"
+branch     = "main"
 feeds      = "stratumd (the Stratum FS daemon; every image needs it)"
 forageable = "clone"
 
