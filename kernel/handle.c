@@ -601,6 +601,14 @@ void handle_put(struct Handle *h) {
     h->obj    = NULL;
 }
 
+void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp) {
+    handle_acquire_obj(KOBJ_SPOOR, sp);
+    out->magic  = HANDLE_MAGIC;
+    out->kind   = KOBJ_SPOOR;
+    out->rights = RIGHT_READ;
+    out->obj    = sp;
+}
+
 // May a SECOND handle be made to name this slot's object? Both callers create
 // exactly that -- `handle_dup` a second slot in the SAME table, the LINEAGE
 // L-3c fork copy a slot in ANOTHER Proc's table -- so both ask the identical

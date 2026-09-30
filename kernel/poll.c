@@ -269,7 +269,7 @@ static int poll_never(void *arg) {
 // semantics are "is this fd ready for the requested event", and a
 // reader without RIGHT_READ can still observe POLLHUP/POLLERR (POSIX
 // permits polling a write-only fd for POLLIN — revents=0).
-static void poll_scan_one(struct Proc *p, struct pollfd *pfd,
+static void poll_scan_one(struct Proc *p, struct pollfd *pfd, struct Spoor *pre,
                           struct poll_waiter *pw_or_null,
                           struct Handle *keep_out, struct poll_snap *snap) {
     // RW-2 2C-F1: `keep_out` receives the obj ref this scan must HOLD past the
@@ -294,8 +294,12 @@ static void poll_scan_one(struct Proc *p, struct pollfd *pfd,
     // sleep happens later in sys_poll_for_proc. handle_put before every return
     // EXCEPT when this scan registered a waiter on the object's poll_list or
     // sent a snapshot -- then the ref is RETAINED (transferred to keep_out).
+    // A pre-resolved entry is polled through the same snapshot a table lookup
+    // would give, so everything below -- retention included -- is unchanged.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)pfd->fd, &hh) < 0) {
+    if (pre) {
+        handle_snapshot_spoor(&hh, pre);
+    } else if (handle_get(p, (hidx_t)pfd->fd, &hh) < 0) {
         pfd->revents = POLLNVAL;
         return;
     }
@@ -503,6 +507,11 @@ static bool poll_expired(s32 timeout_ms, u64 deadline_ns) {
 
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms) {
+    return sys_poll_for_proc_spoors(p, kfds, nfds, timeout_ms, NULL);
+}
+
+s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
+                             s32 timeout_ms, struct Spoor *const *pre) {
     if (!p)                                   return -1;
     if (nfds == 0 || nfds > POLL_MAX_NFDS)    return -1;
     if (!kfds)                                return -1;
@@ -554,8 +563,8 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         bool expired    = poll_expired(timeout_ms, deadline_ns);
         bool any_remote = false;
         for (u64 i = 0; i < nfds; i++) {
-            poll_scan_one(p, &kfds[i], expired ? NULL : &waiters[i], &held[i],
-                          &snaps[i]);
+            poll_scan_one(p, &kfds[i], pre ? pre[i] : NULL,
+                          expired ? NULL : &waiters[i], &held[i], &snaps[i]);
             if (snaps[i].remote) any_remote = true;
         }
 

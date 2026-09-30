@@ -397,6 +397,17 @@ struct poll_snap {
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms);
 
+// The same poll, with entries the caller has already resolved: where pre[i] is
+// non-NULL the pass polls that Spoor and never looks kfds[i].fd up in `p`'s
+// handle table, so an object held outside the table (the vivarium's socket
+// readiness cache, NP-5) is polled without minting an fd for it; kfds[i].fd
+// still names the entry for the caller. The call takes its own reference per
+// pass, as a table lookup would; the caller keeps pre[i] alive across it.
+// pre == NULL is sys_poll_for_proc.
+struct Spoor;
+s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
+                             s32 timeout_ms, struct Spoor *const *pre);
+
 // Park the caller for `timeout_ms` (negative ⇒ indefinitely), then return 0.
 //
 // This is poll's slow path with the fd array removed: a private Rendez nothing

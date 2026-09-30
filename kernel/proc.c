@@ -774,10 +774,12 @@ void proc_free(struct Proc *p) {
     p->sigtab = NULL;
 
     // VIVARIUM V-5: release the per-Proc Linux socket table, same discipline.
-    // The entries hold no references -- a socket's ctl/data Spoors live in the
-    // handle table and were released by the handle-table teardown above, so
-    // this frees the (proto, N) bookkeeping only and can never orphan a fid.
-    kfree(p->socktab);
+    // A socket's ctl/data Spoors live in the handle table, and the table's own
+    // cached readiness Spoors (NP-5) were released with it at exit
+    // (proc_close_handles_at_exit). On the direct `state=ZOMBIE; proc_free()`
+    // paths that never ran that close, any still cached are clunked here, with
+    // the same Tclunk the handle_table_free above sends there.
+    viv_socktab_free(p->socktab);
     p->socktab = NULL;
 
     // (The address space was released above, before handle_table_free -- see
@@ -3787,8 +3789,23 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         proc_quiesce_owned_devices(p);
         handle_table_free(p->handles);
         p->handles = NULL;
+        // The Linux socket rows go with the fds they describe, and with them the
+        // readiness Spoors the rows cache (NP-5): each holds a netd fid, which a
+        // zombie must not pin until its parent reaps it -- the reason the handle
+        // table itself closes here. Inside exit_close_active for the same
+        // close-time Tclunk. NULL-safe (a native Proc has no table).
+        viv_socktab_reset(__atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE));
         closer->exit_close_active = false;
     }
+}
+
+// Test hook (the *_for_test convention; deliberately absent from the header):
+// the at-exit close, driven on a Proc a test built and never ran. The closer
+// flag lands on the calling test thread and is cleared before return, as at a
+// real exit.
+void proc_close_handles_at_exit_for_test(struct Proc *p);
+void proc_close_handles_at_exit_for_test(struct Proc *p) {
+    proc_close_handles_at_exit(p);
 }
 
 // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the Proc's Territory at EXIT,

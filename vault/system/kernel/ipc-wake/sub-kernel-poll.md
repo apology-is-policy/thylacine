@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -43,6 +43,18 @@ snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
   audit round 5 F5). A caller kept awake by noise crosses a preemption
   point each re-loop (step 5), where its CPU takes every pending
   interrupt; it adds no latency of its own.
+- `sys_poll_for_proc_spoors(p, kfds, nfds, timeout_ms, pre)` (NP-5,
+  2026-09-29) is the same poll over entries the caller has already resolved:
+  where `pre[i]` is non-NULL, `poll_scan_one` builds the Spoor Handle
+  snapshot from it (`handle_snapshot_spoor`, the snapshot `handle_get` would
+  have given, taking the reference each pass takes) and never looks
+  `kfds[i].fd` up in the handle table; `kfds[i].fd` still names the entry for
+  the caller. Everything after the snapshot, retention included, is the table
+  path's. The caller keeps each `pre[i]` alive across the call. `pre == NULL`
+  is `sys_poll_for_proc`, which is now a wrapper for exactly that. The
+  vivarium polls a socket's cached readiness Spoor this way, so an object held
+  outside the guest's fd table is polled without minting an fd for it
+  ([[sub-kernel-vivarium]]).
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
   `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
   256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
@@ -414,4 +426,9 @@ counter they already had; every poller test entry parks terminally and
 publishes its result with a release store) → #98 NP-4c (2026-09-28;
 spec first at NP-2 / NP-4a, voted `dec-2026-09-28-poll-sample-arm-split`):
 the remote pass — the settle, the fixed fail-safe, the arm, the retry
-timer.
+timer → NP-5 (2026-09-29): `sys_poll_for_proc_spoors`, pre-resolved entries
+for the vivarium's readiness cache (witness `poll.pre_resolved_spoor`: an
+fd number the table does not map, paired with a pipe's read Spoor, reports the
+pipe's readiness while its unpaired neighbour reports POLLNVAL; the reference
+count balances at every return, and a parked poll holds exactly one extra
+reference until it wakes).

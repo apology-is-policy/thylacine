@@ -489,3 +489,19 @@ The handle sweep also resolves a PCI endpoint's retained function. It therefore
 quiesces DMA and revokes delivery even if both parent handle and register mappings
 were closed while an IRQ endpoint survived. Owner quiescence's terminal flag
 prevents concurrent ARM/COMPLETE from restoring delivery during teardown.
+
+## The exit close releases the phenotype's socket cache (2026-09-29, NP-5)
+
+`proc_close_handles_at_exit` now also resets the Linux socket table
+(`viv_socktab_reset`), right after `handle_table_free` and inside the same
+`exit_close_active` window, for the same reason the handle table closes there
+rather than at reap. NP-5 made each socket row hold a cached readiness Spoor, an
+open fid at netd, and every fid under `/net/<proto>/N/` holds netd's slot N: a
+cache released only at reap kept a socket the exiting process had closed open to
+its peer (a forked worker's accepted connection, say) until the parent reaped the
+zombie. The reset's clunks are close-time Tclunks, legal here for the same
+reasons as the handle table's (the thread is still RUNNING, the Proc still
+ALIVE). The table itself is still freed at `proc_free`
+([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
+`proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
+(`vivarium.socktab_ready_release_paths`).

@@ -984,6 +984,8 @@ void test_vivsock_so_error_needs_no_descriptor(void);
 void test_vivarium_socktab_reset(void);                             // Design D audit F2
 void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
 void test_vivarium_socktab_alias(void);                             // socktab across images: alias
+void test_vivarium_socktab_ready_cache(void);                       // NP-5 readiness cache
+void test_vivarium_socktab_ready_release_paths(void);               // NP-5: fork/exec/exit release
 void test_vivarium_dup3_alias(void);                                // ...at the dup3 arm
 void test_vivarium_socktab_arm_refusals(void);                      // ...the arms' refusals (holotype F4)
 void test_vivarium_listen_decide(void);
@@ -1785,6 +1787,7 @@ void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
+void test_poll_pre_resolved_spoor(void);                            // NP-5
 void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -3041,6 +3044,8 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
     { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
     { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },
+    { "vivarium.socktab_ready_cache",  test_vivarium_socktab_ready_cache,  false, NULL },
+    { "vivarium.socktab_ready_release_paths", test_vivarium_socktab_ready_release_paths, false, NULL },
     { "vivarium.dup3_alias",           test_vivarium_dup3_alias,           false, NULL },
     { "vivarium.socktab_arm_refusals", test_vivarium_socktab_arm_refusals, false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
@@ -3980,6 +3985,7 @@ struct test_case g_tests[] = {
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
+    { "poll.pre_resolved_spoor",                test_poll_pre_resolved_spoor,                false, NULL },
     { "poll.sleep_for_waits",                   test_poll_sleep_for_waits,                   false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },

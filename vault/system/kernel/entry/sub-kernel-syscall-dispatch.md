@@ -1391,3 +1391,52 @@ translation is unchanged: each socket's fd is swapped for its QTPOLL `ready`
 sibling (opened per call, which is the guest-fd consumption V-5d F6 records
 and NP-5 retires), caller-disabled entries are compacted away first (V-5d F1),
 and the result is mapped back to the guest's fd numbers.
+
+## The vivarium's /net files leave the guest's fd table (2026-09-29, NP-5)
+
+The NP-4c section above names the readiness fd "opened per call ... NP-5
+retires": retired here, together with four more arms of the same shape and one
+older defect found on the way. The phenotype-side account is
+[[sub-kernel-vivarium]]; this is the dispatcher's.
+
+**The open core splits.** `sys_resolve_kpath_for_proc` is everything an open
+does short of installing an fd: the cwd join, stalk, the permission and rights
+policy, returning a referenced Spoor and the rights an fd for it would carry.
+`sys_open_kpath_for_proc` is that plus `handle_alloc`. The vivarium's socket
+arms call the resolve half only, so a file they hold privately passes the same
+walk and the same gates a guest open would.
+
+**I/O on a Spoor no fd names.** `spoor_read_on` / `spoor_write_on` are the
+Spoor halves of `spoor_read_common` / `spoor_write_common`: every gate after the
+handle lookup (CWALKONLY, the positioned seekability and overflow checks, the
+zero length, the missing method, the errno clamp, the cursor advance), in the
+same order. The `_common` forms are now the fd checks, `sys_lookup_rw_handle`,
+the `_on` body and the clunk. `sys_write_staged(p, h, via, buf_va, len)` is
+SYS_WRITE's staging tail (the two-tier bounce and the copy-in) with the target
+chosen by the caller: `via == NULL` writes fd `h`, as `sys_write_handler` does;
+a Spoor writes that Spoor.
+
+**The arms.** `viv_poll_translated` polls each socket through the readiness
+Spoor its socktab row caches (resolved on the socket's first poll; polled via
+`sys_poll_for_proc_spoors`, [[sub-kernel-poll]]); its borrowed `pre[]` follows
+the V-5d F1 compaction while the owning `ready[]` array stays in caller order
+and is released on every return. `connect` resolves `data` privately and hands
+that reference to `handle_replace`. `accept` resolves `listen`, `remote` and
+`data` privately and installs only `data`, with `handle_alloc` (a full table
+is EMFILE, as Linux answers it; it was ECONNABORTED). An unconnected UDP
+`sendto` and `recvmsg` resolve `data` per call (`viv_sock_resolve`) and move the
+datagram through `sys_write_staged` / `spoor_read_on`.
+
+**NP-5c, the nonblocking verb.** netd, not the Spoor, decides whether an empty
+`data` read parks or answers EAGAIN, by its per-connection `nonblock` ctl verb,
+and the dispatcher never wrote it: `socket(SOCK_NONBLOCK)` and `F_SETFL` set
+CNONBLOCK alone, which dev9p never reads, so a nonblocking read of an empty
+socket blocked, and recvmsg's 0 -> EAGAIN mapping (built on the premise that
+netd answered 0 on an empty socket) reported a closed peer as EAGAIN.
+`viv_sock_sync_nonblock` now writes the verb through a private `ctl` Spoor,
+carrying the flag as read back after each write lands and repeating while a
+peer thread moved it, so the two copies agree once the setters stop with no
+lock held across an RPC. `F_SETFL` on a socket row goes through
+`viv_sock_set_nonblock` (a failed verb restores the bit); `socket()` unwinds on
+a failed verb; both answer ENOMEM for a shortage and EIO otherwise. recvmsg's
+0 is 0 whatever the mode.

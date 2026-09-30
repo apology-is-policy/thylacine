@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -201,7 +201,7 @@ teardown/Tversion `cancel_accepts_for_conn`.
 | `Query.deferred` | cs/dns Tread while the DNS query is in flight | `poll_dns` | held Rread (the formatted answer) |
 
 Each engine is bounded (`MAX_PENDING_ACCEPTS=16`; the others by
-`MAX_FIDS=32` per Conn — the #65 floor) and carries the SAME
+`MAX_FIDS` per Conn — the #65 floor; 64 since NP-5, derived below) and carries the SAME
 four-site cancel matrix: `fid_clunk` (per-fid retain), `teardown` +
 `drop_all_fids`/Tversion (clear-all; accepts also
 `cancel_accepts_for_conn`), and `h_flush(oldtag)` (per-tag retain +
@@ -338,7 +338,7 @@ the 11-byte Rreaddir overhead — the net-2d F1 parity with `h_read`).
   active/opened counters, next_icmp_ident, icmp_seq, mint_seq,
   pending: Vec<PendingAccept>, dns: Option<SocketHandle>, dhcp:
   Option<SocketHandle>, ifc: IfConfig, lo: Option<LoStack> }`.
-- `Conn { handle, version_done, msize, fids: [Option<Fid>; MAX_FIDS=32],
+- `Conn { handle, version_done, msize, fids: [Option<Fid>; MAX_FIDS],
   in_buf, out_buf, defer, queries: Vec<Query>, pending_reads,
   pending_ready, pending_connects, pending_weftio }`; `Fid { fid, path,
   opened }`.
@@ -573,3 +573,22 @@ serves, or omits the dial-verdict PASS line. Before 2026-09-24 no gate read thes
 verdicts. Consumer-side: joey's per-chunk PROBE lines, the net-echo
 over-the-mount TCP/TLS/weft E2Es, the go-net Stage-3c listen/dial
 round-trip (the regression for the announce-`local` fix).
+
+## MAX_FIDS is derived from MAX_SLOTS (2026-09-29, NP-5)
+
+`MAX_FIDS` was 32 per Conn, and the whole box reaches `/net` over one kernel
+session, so that one table serves every Proc. It is now `MAX_SLOTS * 4` (64).
+A pouch socket holds three fids (its ctl, data and ready fds, shared by every
+Proc that inherits them); a vivarium socket holds one ctl-or-data fid, shared
+the same way, plus one `ready` fid per Proc that polls it (the kernel caches one
+per connection per Proc, shared by the socket's dups, [[sub-kernel-vivarium]]);
+and the fourth per slot covers the walks and short-lived opens in flight -- so
+the slot table binds first while at most two Procs poll each socket. The table
+is a pool, not a per-client quota: one Proc holding many `/net` files can still
+fill it, and nothing in netd bounds a client's share (queued in OPEN-BUGS). At
+32, sixteen polled vivarium sockets would have
+needed 33 fids with the attach root, and eleven polled pouch sockets already
+filled it, so the fid table ran out before the slot table it was meant to sit
+behind. A full table still answers a Twalk `E_NOMEM`. The bounds that hang off
+`MAX_FIDS` (the pending-read, pending-ready, pending-connect and pending-Weft
+queues, and the dns `queries` high-water) scale with it.

@@ -55,7 +55,20 @@ use smoltcp::wire::{
 pub const MAX_CONNS: usize = 8;
 
 /// Per-connection fid-table size: one fid per open file/dir the client holds.
-const MAX_FIDS: usize = 32;
+/// DERIVED from the slot bound, so that the slot table, not this one, is what a
+/// busy box runs out of. The whole box reaches /net over ONE kernel session, so
+/// this table is shared by every Proc. A pouch socket holds three fids (its
+/// ctl, data and ready fds, shared by every Proc that inherits them); a
+/// vivarium socket holds one ctl-or-data fid, shared the same way, plus one
+/// `ready` fid per Proc that polls it (the kernel caches one per connection per
+/// Proc, however many dup'd numbers name it). A fourth per slot covers the walks
+/// and short-lived opens in flight, so every socket fits while at most two Procs
+/// poll it. It is a pool, not a per-client quota: one Proc holding many /net
+/// files can still fill it. A full table answers a Twalk E_NOMEM.
+/// viv-pheno-probe's L300 turns red on a per-row readiness cache only while
+/// this is below 66 (the attach root, a listener's ctl, its client's data and
+/// 63 ready fids): raising MAX_SLOTS re-derives that leg.
+const MAX_FIDS: usize = MAX_SLOTS * 4;
 
 /// Max live `/net/tcp/N/` connection slots. A bound, not headroom: an unbounded
 /// connection table is a DoS vector (#65 resource floor), so clone-minting fails

@@ -237,8 +237,10 @@ may leave unused words as garbage exactly as a native one does); it
 records **which words the equivalence claim covers**, and the tests assert
 on it.
 
-`struct viv_sock` (16 B, pinned) — fd, `/net` connection number, the
-remembered bind, proto, state. `proto` is knowable only at `socket()` and
+`struct viv_sock` (32 B, pinned: 16 B until N-2a's recorded remote made it 24,
+and the u64 claim epoch, the keyed writers' identity key, made it 32) — fd,
+`/net` connection number, the remembered bind, the recorded remote, the epoch,
+proto, state. `proto` is knowable only at `socket()` and
 never mentioned again, and recovering it later would mean decoding netd's
 qid layout — refused, because `/net` is a mount point that need not be
 netd. **Remembering it is the whole reason the table exists.** There is
@@ -247,7 +249,12 @@ deliberately no `bound` flag: an unbound socket and one bound to
 
 `struct viv_socktab` / `struct viv_sigtab` — per-Proc, lazily allocated,
 CAS-installed, freed at `proc_free` **and nowhere else**, **not**
-rfork-inherited. That sentence was incomplete when written — the table was also
+rfork-inherited. Since NP-5 the socktab also holds `ready[VIV_SOCK_MAX]`, each
+row's cached readiness Spoor, beside the rows rather than inside `viv_sock` so
+that no snapshot or copy of a row can carry a borrowed pointer; each row owns
+one reference, a FREE row's is NULL, rows naming one connection (a socket and
+its dups) share one Spoor, and the cache (not the table) is released at exit
+(below). That sentence was incomplete when written — the table was also
 freed at exec, unmentioned — and it became true by the other free site being
 *deleted* rather than by the prose being edited (see Concurrency). `viv_sigtab`
 is indexed by *note kind*, not by signal number, which is legitimate only
@@ -702,8 +709,88 @@ still gets netd's verdict. The cost moved rather than vanished: every pass over
 a socket is a netd round trip, timeout 0 included (VIVARIUM.md's DEGRADED row).
 The deciders did not change. Two costs stay until NP-5 keeps ready Spoors
 outside the guest's fd table: the Twalk+Tlopen+Tclunk each polled socket costs
-per call, and the guest fd number each one borrows (V-5d F6). The witness is
+per call, and the guest fd number each one borrows (V-5d F6). (Both closed by
+NP-5, the next section.) The witness is
 viv-pheno-probe L113, a ready socket polled at timeout 0.
+
+## The readiness cache, private socket files, and netd's nonblocking mode (2026-09-29, NP-5)
+
+**NP-5, the readiness cache.** `viv_poll_translated` (kernel/syscall.c) no
+longer opens `/net/<proto>/N/ready` as a guest fd per socket per call. A
+socket's first poll resolves it as a private Spoor (`sys_resolve_kpath_for_proc`,
+the resolve half of `sys_open_kpath_for_proc`) and offers it to the row
+(`viv_socktab_ready_install`, keyed on fd + epoch like every keyed write; a row
+closed, recycled or filled meanwhile refuses, and the Spoor then serves that
+call only). Later polls take a new reference from the row
+(`viv_socktab_ready_get`). ONE Spoor per connection per table (NP-5 round-1
+F1): a row whose connection another row caches -- a `dup` of a polled socket --
+shares that Spoor with a reference of its own (`ready_get`'s sibling scan,
+`socktab_conn_ready_locked`), and an install for a connection a sibling cached
+first is refused and shares instead. Cached per ROW, as first written, one Proc
+could hold 64 netd fids by polling a socket's 63 dups, and netd's fid table is
+one pool for the whole box ([[sub-netd-server]]); the probe's L299/L300 are
+that case. The poll core receives the Spoors pre-resolved
+(`sys_poll_for_proc_spoors`, [[sub-kernel-poll]]); `kfds[i].fd` keeps the
+guest's own number throughout, and V-5d F1's compaction moves the borrowed
+`pre[]` with `kfds[]` while the owning `ready[]` stays in caller order. A
+resolve that fails `T_E_NOMEM` fails the call ENOMEM; any other failure marks
+that entry POLLNVAL. A full netd fid table lands in the second arm, because
+stalk reports a failed device walk as ENOENT (a queued P3).
+
+**Release.** Every path that clears a row detaches its Spoor under the leaf
+spinlock and clunks it after the unlock (a last clunk is a Tclunk): drop (the
+close hook), claim's replace-on-claim, an alias onto a cached number, reset
+(native exec, and now exit), drop_cloexec (exec-alone, no lock) and free
+(`proc_free`). A fork child's rows and a new alias row start uncached (the
+alias then shares its source's Spoor on its first poll; a fork child opens its
+own, so a socket polled by P Procs holds P readiness fids). The exit
+reset (`proc_close_handles_at_exit`, [[sub-kernel-death]]) is load-bearing: fds
+close at exit, and a cached ready fid holds netd's slot N (every fid under
+`/net/<p>/N/` refs it), so a cache released only at reap kept a forked worker's
+accepted connection open to its peer until the parent reaped.
+
+**NP-5b, the private socket files.** The same by-number class lived in four
+more arms: `connect` parked the data file on a temporary fd before
+`handle_replace`; `accept` opened `listen`, `remote` and `data` as guest fds;
+an unconnected UDP `sendto` and `recvmsg` each opened `data` as a transient fd.
+Each is now a private Spoor (`viv_sock_resolve`), and its I/O goes through
+`spoor_read_on` / `spoor_write_on` (the Spoor halves of `spoor_read_common` /
+`spoor_write_common`, so a Spoor no fd names meets the same gates in the same
+order) and `sys_write_staged` (SYS_WRITE's bounce and copy-in tail). accept's
+final install answers a full table EMFILE, as Linux does (it was ECONNABORTED).
+
+**NP-5c, the nonblocking mode reaches netd.** Found hunting the hang the NP-5b
+probe legs first caused, where a blocking UDP recvmsg with nothing in flight
+parked at netd (correct for a blocking socket). `O_NONBLOCK` on a socket set
+only the Spoor's CNONBLOCK, which dev9p never reads, and netd parks an empty
+`data` read unless its `nonblock` ctl verb has been written (#52). recvmsg's
+N-1b mapping, 0 bytes -> EAGAIN on a nonblocking socket, rested on the pre-#52
+premise that netd answered 0 on an empty socket; 0 is only end of stream, so a
+closed peer read as EAGAIN while an empty socket blocked. Now `socket()`'s
+SOCK_NONBLOCK and `F_SETFL` write the verb through a private ctl Spoor
+(`viv_sock_sync_nonblock`). The verb carries the flag as read back after each
+write lands and repeats while a peer thread moved it, so the Spoor's bit and
+netd's mode agree once the setters stop, with no lock held across the RPC. A
+failed verb puts the bit back (`F_SETFL`) or unwinds the socket (`socket()`),
+answering ENOMEM for a shortage and EIO otherwise. recvmsg returns 0 for 0 bytes
+whatever the mode. A nonblocking `connect` or `accept` still blocks (VIVARIUM.md
+ceilings; queued).
+
+**Witnesses.** Unit: `vivarium.socktab_ready_cache` (since round 1 also the
+per-connection sharing: a dup's row shares, a racing install is refused and
+shares, another n or the other protocol does not, a drop keeps the Spoor for the
+rows left), `vivarium.socktab_ready_release_paths` and
+`poll.pre_resolved_spoor`, each run red under its own sabotage. On device,
+viv-pheno-probe's Linux run: L297/L298 (a socket behind a caller-disabled entry
+waits, and answers at its own index), L299/L300 (a listener's 62 dups polled at
+once all report POLLIN -- one readiness fid, where one per row overflows netd's
+table and returns POLLNVAL); L278-L285
+(while a peer thread blocks in ppoll, the lowest free fd stays free and a dup3
+onto it survives the poll's end); L286-L290 (a nonblocking socket at end of
+stream reads 0, and an empty one answers EAGAIN, whether born nonblocking or
+made so by F_SETFL); L291-L296 (a peer thread takes the lowest free number over
+and over while this thread sends, receives, sets the mode and dials, and every
+copy lands on the same number).
 
 ## Only signal(7)'s slow calls are note-interruptible (2026-09-29)
 
@@ -774,7 +861,8 @@ the fd names, which for a `CONNECTING` socket is still `ctl`, so
 `ESPIPE` for positioned I/O on any socket, which waits on `T_E_SPIPE` being
 registered (ERRORS.md ER-3's residual). `getsockopt(SO_ERROR)` must never block,
 so on a `CONNECTING` row it reads netd's `status` file first -- through a private
-Spoor (`viv_kpath_read`), never a descriptor of the guest's, because a full table
+Spoor (`viv_kpath_read`: the resolve core and `spoor_read_on` above, as every
+/net file since NP-5b), never a descriptor of the guest's, because a full table
 would otherwise read as a handshake in flight and a peer thread could see the
 transient fd: `Syn-Sent` or
 `Syn-Received`, or a file that cannot be read, is a handshake in flight and

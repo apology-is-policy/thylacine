@@ -1569,6 +1569,39 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
     return true;
 }
 
+// The Spoor half of spoor_write_common: every gate a write passes once the
+// Spoor is in hand, on a Spoor the caller holds (borrowed; the caller releases
+// it). The vivarium's private /net Spoors (NP-5) write through it directly, so
+// a Spoor no guest fd names still meets the gates an fd write would.
+static s64 spoor_write_on(struct Spoor *c, const u8 *kbuf, u64 len,
+                          bool positioned, s64 off) {
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel (it is born R|W
+    // for create/walk-target use but perm_check-exempt at open). Reject every
+    // write, including len 0, so it cannot serve content (IDENTITY-DESIGN 9.4 #81).
+    // Linux answers EBADF for read/write on an O_PATH descriptor; so do we.
+    if (c->flag & CWALKONLY)                         return -T_E_BADF;
+    // ESPIPE is the POSIX answer here, but T_E_SPIPE (29) is not in the errno
+    // registry and appending one is signoff-bearing (CLAUDE.md: ERRORS.md is
+    // ABI-bearing). Left at the flat -1 rather than answering a plausible-but-
+    // wrong EINVAL -- status quo, not a new wrongness. See #100's residual note.
+    if (positioned && (!c->dev || !c->dev->seekable)) return -1;
+    if (len == 0)                                    return 0;
+    if (!c->dev || !c->dev->write)                   return -T_E_INVAL;
+    if (positioned && len > (u64)INT64_MAX - (u64)off) return -T_E_INVAL;
+    long n = c->dev->write(c, kbuf, (long)len, positioned ? off : c->offset);
+    // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
+    // returns -T_E_* for an ecode in 2..4095) instead of collapsing to -1.
+    // The legacy -1 sentinel is unchanged -- the pouch/native boundary decodes
+    // it to EIO, NOT EPERM (errno.h forbids a handler returning -T_E_PERM=1);
+    // an ecode==1/EPERM server error still collides with the -1 sentinel ->
+    // EIO (a wider channel is the ER-rollout's job). Clamp an out-of-window
+    // negative so a future Dev cannot punch a fake-huge "success" through
+    // pouch's [-4095,-1] error window (symmetric with the native saturation).
+    if (n < 0) return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
+    if (!positioned) c->offset += n;
+    return (s64)n;
+}
+
 // Shared body behind SYS_WRITE (cursor) and SYS_PWRITE (positioned) -- #37.
 // positioned=false reads the per-Spoor cursor and advances it by the accepted
 // count, byte-identical to the pre-#37 sys_write_for_proc. positioned=true
@@ -1599,41 +1632,14 @@ static s64 spoor_write_common(struct Proc *p, hidx_t h, const u8 *kbuf,
     if (positioned && off < 0)                       return -T_E_INVAL;
     // #844: c is a REF-HELD Spoor (the lookup transferred the ref); it keeps c
     // alive across the blocking dev->write even if a sibling closes the fd.
-    // spoor_clunk on EVERY exit after the lookup.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
     // The lookup folds three rejects into one NULL -- no such handle, wrong kobj
     // kind, missing RIGHT_WRITE. All three are EBADF in POSIX terms (a write to
     // a fd not open for writing is EBADF, not EACCES), so one code covers them.
     if (!c)                                          return -T_E_BADF;
-    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel (it is born R|W
-    // for create/walk-target use but perm_check-exempt at open). Reject every
-    // write, including len 0, so it cannot serve content (IDENTITY-DESIGN 9.4 #81).
-    // Linux answers EBADF for read/write on an O_PATH descriptor; so do we.
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -T_E_BADF; }
-    // ESPIPE is the POSIX answer here, but T_E_SPIPE (29) is not in the errno
-    // registry and appending one is signoff-bearing (CLAUDE.md: ERRORS.md is
-    // ABI-bearing). Left at the flat -1 rather than answering a plausible-but-
-    // wrong EINVAL -- status quo, not a new wrongness. See #100's residual note.
-    if (positioned && (!c->dev || !c->dev->seekable)) { spoor_clunk(c); return -1; }
-    if (len == 0)                                  { spoor_clunk(c); return 0; }
-    if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -T_E_INVAL; }
-    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -T_E_INVAL; }
-    long n = c->dev->write(c, kbuf, (long)len, positioned ? off : c->offset);
-    // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
-    // returns -T_E_* for an ecode in 2..4095) instead of collapsing to -1.
-    // The legacy -1 sentinel is unchanged -- the pouch/native boundary decodes
-    // it to EIO, NOT EPERM (errno.h forbids a handler returning -T_E_PERM=1);
-    // an ecode==1/EPERM server error still collides with the -1 sentinel ->
-    // EIO (a wider channel is the ER-rollout's job). Clamp an out-of-window
-    // negative so a future Dev cannot punch a fake-huge "success" through
-    // pouch's [-4095,-1] error window (symmetric with the native saturation).
-    if (n < 0) {
-        spoor_clunk(c);
-        return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
-    }
-    if (!positioned) c->offset += n;
+    s64 r = spoor_write_on(c, kbuf, len, positioned, off);
     spoor_clunk(c);
-    return (s64)n;
+    return r;
 }
 
 // Inner — testable with kernel-side buf. Returns bytes written (>=0)
@@ -1647,6 +1653,27 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
 s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
                         s64 off) {
     return spoor_write_common(p, h, kbuf, len, /*positioned=*/true, off);
+}
+
+// The Spoor half of spoor_read_common -- spoor_write_on's twin, same contract:
+// the gates a read passes once the Spoor is in hand, on a borrowed Spoor.
+static s64 spoor_read_on(struct Spoor *c, u8 *kbuf, u64 len, bool positioned,
+                         s64 off) {
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject every
+    // read (the perm_check-exempt O_PATH open would otherwise be a read-bypass,
+    // e.g. the 0400 /system.key via /bin/system.key). IDENTITY-DESIGN 9.4 #81.
+    if (c->flag & CWALKONLY)                         return -T_E_BADF;
+    if (positioned && (!c->dev || !c->dev->seekable)) return -1;
+    if (len == 0)                                    return 0;
+    if (!c->dev || !c->dev->read)                    return -T_E_INVAL;
+    if (positioned && len > (u64)INT64_MAX - (u64)off) return -T_E_INVAL;
+    long n = c->dev->read(c, kbuf, (long)len, positioned ? off : c->offset);
+    // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
+    // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
+    // negative to keep pouch's [-4095,-1] error window safe (see the write twin).
+    if (n < 0) return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
+    if (!positioned) c->offset += n;
+    return (s64)n;
 }
 
 // Shared body behind SYS_READ (cursor) and SYS_PREAD (positioned) -- #37.
@@ -1668,28 +1695,12 @@ static s64 spoor_read_common(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
     if (!p || (!kbuf && len > 0))                    return -1;
     if (positioned && off < 0)                       return -T_E_INVAL;
     // #844: c is a REF-HELD Spoor; it stays alive across the blocking
-    // dev->read even if a sibling closes the fd. spoor_clunk on EVERY exit.
+    // dev->read even if a sibling closes the fd.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_READ);
     if (!c)                                          return -T_E_BADF;
-    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject every
-    // read (the perm_check-exempt O_PATH open would otherwise be a read-bypass,
-    // e.g. the 0400 /system.key via /bin/system.key). IDENTITY-DESIGN 9.4 #81.
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -T_E_BADF; }
-    if (positioned && (!c->dev || !c->dev->seekable)) { spoor_clunk(c); return -1; }
-    if (len == 0)                                  { spoor_clunk(c); return 0; }
-    if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -T_E_INVAL; }
-    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -T_E_INVAL; }
-    long n = c->dev->read(c, kbuf, (long)len, positioned ? off : c->offset);
-    // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
-    // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
-    // negative to keep pouch's [-4095,-1] error window safe (see the write twin).
-    if (n < 0) {
-        spoor_clunk(c);
-        return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
-    }
-    if (!positioned) c->offset += n;
+    s64 r = spoor_read_on(c, kbuf, len, positioned, off);
     spoor_clunk(c);
-    return (s64)n;
+    return r;
 }
 
 // Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
@@ -1732,6 +1743,44 @@ static s64 sys_write_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
     return r;
 }
 
+// The byte-copy tail of a user write: stage the user bytes in kernel memory and
+// write them through handle `h` -- or through `via`, a Spoor the caller holds
+// (borrowed), when no guest fd names it (the vivarium's private /net Spoors,
+// NP-5). `len` is already capped at SYS_RW_MAX and non-zero, and the range was
+// validated by the caller.
+static s64 sys_write_staged(struct Proc *p, hidx_t h, struct Spoor *via,
+                            u64 buf_va, u64 len) {
+    // CF-3 A: two-tier bounce. Ops <= SYS_RW_STACK stay on the stack (the
+    // metadata-storm path -- zero new cost; 4 KiB frame vs the 16 KiB kernel
+    // stack); bulk ops take a transient kmalloc so ONE syscall stages up to
+    // SYS_RW_MAX. kmalloc failure degrades to the stack tier -- memory
+    // pressure shortens a write (POSIX short writes are normal), never
+    // fails it. uaccess_copy_in replaces the per-byte load loop.
+    u8 stack_scratch[SYS_RW_STACK];
+    u8 *scratch = stack_scratch;
+    void *heap_scratch = NULL;
+    if (len > SYS_RW_STACK) {
+        if (sys_bounce_charge(p, len)) {
+            heap_scratch = kmalloc(len, 0);
+            if (heap_scratch) scratch = heap_scratch;
+            else              sys_bounce_uncharge(p, len);
+        }
+        if (!heap_scratch) len = SYS_RW_STACK;
+    }
+    // #100 (ER-3): a copy-in fault is EFAULT. This is the arm that actually
+    // fires on a genuinely unmapped page -- sys_validate_user_buf above is only
+    // a range check, so fixing that one and leaving this is exactly the
+    // "the fix on site N stops you asking about site N+1" shape.
+    if (uaccess_copy_in(scratch, buf_va, len) != 0) {
+        if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
+        return -T_E_FAULT;
+    }
+    s64 wr = via ? spoor_write_on(via, scratch, len, /*positioned=*/false, 0)
+                 : sys_write_for_proc(p, h, scratch, len);
+    if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
+    return wr;
+}
+
 static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -1767,34 +1816,7 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
         return 0;
     }
 
-    // CF-3 A: two-tier bounce. Ops <= SYS_RW_STACK stay on the stack (the
-    // metadata-storm path -- zero new cost; 4 KiB frame vs the 16 KiB kernel
-    // stack); bulk ops take a transient kmalloc so ONE syscall stages up to
-    // SYS_RW_MAX. kmalloc failure degrades to the stack tier -- memory
-    // pressure shortens a write (POSIX short writes are normal), never
-    // fails it. uaccess_copy_in replaces the per-byte load loop.
-    u8 stack_scratch[SYS_RW_STACK];
-    u8 *scratch = stack_scratch;
-    void *heap_scratch = NULL;
-    if (len > SYS_RW_STACK) {
-        if (sys_bounce_charge(p, len)) {
-            heap_scratch = kmalloc(len, 0);
-            if (heap_scratch) scratch = heap_scratch;
-            else              sys_bounce_uncharge(p, len);
-        }
-        if (!heap_scratch) len = SYS_RW_STACK;
-    }
-    // #100 (ER-3): a copy-in fault is EFAULT. This is the arm that actually
-    // fires on a genuinely unmapped page -- sys_validate_user_buf above is only
-    // a range check, so fixing that one and leaving this is exactly the
-    // "the fix on site N stops you asking about site N+1" shape.
-    if (uaccess_copy_in(scratch, buf_va, len) != 0) {
-        if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
-        return -T_E_FAULT;
-    }
-    s64 wr = sys_write_for_proc(p, (hidx_t)hraw, scratch, len);
-    if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
-    return wr;
+    return sys_write_staged(p, (hidx_t)hraw, NULL, buf_va, len);
 }
 
 // Weft-6b-3 data drive (RX): the zero-copy read fast-path. A large read whose
@@ -3782,8 +3804,17 @@ static int sys_join_cwd_if_relative(struct Proc *p, u64 start_fd_raw,
     return 0;
 }
 
-static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
-                                   const char *kpath, u64 klen, u64 omode_raw) {
+// The resolution half of the open core: everything an open does short of
+// installing the result as an fd. Returns 0 with *out the opened Spoor (the
+// caller owns its reference) and *rights_out the rights an fd for it would
+// carry; else -1 for a malformed request or -T_E_* from the walk. The vivarium's
+// /net socket arms (NP-5) call it directly -- the readiness cache and every
+// private socket file -- so a Spoor held outside the guest's fd table still
+// passes the same stalk and the same gates.
+static s64 sys_resolve_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                      const char *kpath, u64 klen, u64 omode_raw,
+                                      struct Spoor **out, rights_t *rights_out) {
+    *out = NULL;
     if (!p || !kpath)                                return -1;
     if (klen == 0)                                   return -1;
     if (klen > SYS_OPEN_PATH_MAX)                    return -1;
@@ -3847,15 +3878,26 @@ static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     // (walk-only) handle is born R|W with NO RIGHT_TRANSFER (a navigation /
     // capability base, A-1.7/F5); a normally-opened handle derives its rights
     // from omode (A-3b) so the capability axis cannot exceed the access stalk's
-    // final perm_check validated, plus RIGHT_TRANSFER. The quarry owns its ref
-    // (from stalk); handle_alloc takes it; on a full table we clunk it.
-    rights_t r;
+    // final perm_check validated, plus RIGHT_TRANSFER.
     if (omode_raw & SYS_WALK_OPEN_OPATH) {
-        r = RIGHT_READ | RIGHT_WRITE;
+        *rights_out = RIGHT_READ | RIGHT_WRITE;
         quarry->flag |= CWALKONLY;   // #81: a navigation handle -- sys_read/write/readdir reject it
     } else {
-        r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
+        *rights_out = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
     }
+    *out = quarry;
+    return 0;
+}
+
+static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                   const char *kpath, u64 klen, u64 omode_raw) {
+    struct Spoor *quarry;
+    rights_t r;
+    s64 rc = sys_resolve_kpath_for_proc(p, start_fd_raw, kpath, klen, omode_raw,
+                                        &quarry, &r);
+    if (rc < 0) return rc;
+    // The quarry owns its ref (from stalk); handle_alloc takes it; on a full
+    // table we clunk it.
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, quarry);
     if (fd < 0) {
         spoor_clunk(quarry);
@@ -11129,12 +11171,13 @@ static struct viv_sigtab *viv_sigtab_of(struct Proc *p) {
 // =============================================================================
 // SOCKETS (V-5) -- the impure half. docs/VIVARIUM.md section 5.5.
 //
-// Every /net operation here goes through sys_open_kpath_for_proc, which is the
-// SAME resolution core SYS_OPEN uses: the caller's Territory, the caller's
-// per-component perm_check, the caller's omode-derived rights. That is what
-// makes I-43 structural for sockets -- a translated socket call reaches
-// exactly what the guest could reach by opening /net by hand, and a container
-// whose territory has no /net gets a walk failure rather than a bypass.
+// Every /net operation here resolves through sys_resolve_kpath_for_proc, the
+// SAME resolution core SYS_OPEN uses (sys_open_kpath_for_proc is it plus the
+// install): the caller's Territory, the caller's per-component perm_check, the
+// caller's omode-derived rights. That is what makes I-43 structural for
+// sockets -- a translated socket call reaches exactly what the guest could
+// reach by opening /net by hand, and a container whose territory has no /net
+// gets a walk failure rather than a bypass.
 // =============================================================================
 
 // The socket table's lazy allocator -- viv_sigtab_of's twin, same CAS shape.
@@ -11222,6 +11265,104 @@ static bool viv_note_hold(void) {
 }
 static void viv_note_resume(bool was) { current_thread()->note_interruptible = was; }
 
+// Resolve /net/<proto>/<n>/<file> as a PRIVATE Spoor the caller releases
+// (NP-5). It never takes a number in the guest's fd table, where a peer thread
+// (N-3) could be handed that number or swap a stranger into it while the RPCs
+// that follow sleep. PER-CALL, not cached: netd keeps a connection's state --
+// its rx/tx buffers, its read mode -- on the slot N (server.rs), not on the fid,
+// so a fresh fid reaches the same connection, and a held one would pin a netd
+// fid (a table the whole box shares) for the socket's life. A ctl open and a UDP
+// data open are immediate; netd defers only a TCP data open, until ESTABLISHED.
+static s64 viv_sock_resolve(struct Proc *p, enum viv_net_proto proto, u32 n,
+                            const char *file, struct Spoor **out) {
+    *out = NULL;
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path), proto, true, n, file);
+    if (plen == 0) return -(s64)T_E_INVAL;
+    rights_t r;
+    return sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                      2u /* ORDWR */, out, &r);
+}
+
+// Put connection N in the read mode the socket's O_NONBLOCK names (NP-5c).
+//
+// The mode has two homes. The socket's Spoor carries CNONBLOCK, which F_GETFL
+// reports -- but dev9p never reads CNONBLOCK. netd decides whether an empty
+// `data` read parks or answers EAGAIN, per connection, by its `nonblock` ctl
+// verb (#52, the verb pouch's FIONBIO writes). So the verb follows every change
+// to the Spoor's bit, carrying the bit as READ BACK from the Spoor rather than
+// the caller's argument, and the bit is read once more after the write lands:
+// if a peer thread moved it meanwhile, the verb goes again. Every pass re-reads
+// after its own write has landed, so the last setter's pass writes last and the
+// two homes agree once the setters stop, with no lock held across an RPC. (A
+// guest toggling the bit forever keeps this loop writing for as long; a death
+// fails the RPC and ends it.) A read never polls first: pouch's
+// poll-before-read cut abandoned a readiness tag per read and exhausted the
+// shared session's tag pool (patch 0028).
+static s64 viv_sock_sync_nonblock(struct Proc *p, struct Spoor *sock,
+                                  enum viv_net_proto proto, u32 n) {
+    static const char verb[2][11] = { "nonblock 0", "nonblock 1" };
+    const u64 vlen = sizeof(verb[0]) - 1;
+
+    struct Spoor *ctl;
+    s64 rc = viv_sock_resolve(p, proto, n, "ctl", &ctl);
+    if (rc < 0) return rc;
+    bool want = (spoor_flag_get(sock) & CNONBLOCK) != 0;
+    for (;;) {
+        s64 w = spoor_write_on(ctl, (const u8 *)verb[want ? 1 : 0], vlen, false, 0);
+        if (w != (s64)vlen) {
+            rc = (w < 0) ? w : -(s64)T_E_IO;
+            break;
+        }
+        bool now = (spoor_flag_get(sock) & CNONBLOCK) != 0;
+        if (now == want) {
+            rc = 0;
+            break;
+        }
+        want = now;
+    }
+    spoor_clunk(ctl);
+    return rc;
+}
+
+// The errno a socket call reports when its netd verb fails: a shortage is
+// ENOMEM, which socket(2) and fcntl(2) both document; anything else is the
+// device failing (EIO) -- never the ENOENT of a ctl walk the guest did not ask
+// for.
+static s64 viv_sock_verb_errno(s64 rc) {
+    return (rc == -(s64)T_E_NOMEM) ? rc : -(s64)T_E_IO;
+}
+
+// Sync the mode of the socket on guest fd `fd` (connection N): the Spoor is the
+// fd's, taken once, so the bit read back is that socket's own.
+static s64 viv_sock_sync_nonblock_fd(struct Proc *p, hidx_t fd,
+                                     enum viv_net_proto proto, u32 n) {
+    struct Spoor *s = sys_lookup_rw_handle(p, fd, 0);
+    if (!s) return -(s64)T_E_BADF;
+    s64 rc = viv_sock_sync_nonblock(p, s, proto, n);
+    spoor_clunk(s);
+    return rc;
+}
+
+// F_SETFL's O_NONBLOCK on a /net socket (NP-5c): the Spoor's bit, then netd's
+// copy. A verb that fails puts the bit back, so F_GETFL never reports a mode
+// the reads do not have.
+static s64 viv_sock_set_nonblock(struct Proc *p, hidx_t fd,
+                                 const struct viv_sock *e, bool on) {
+    struct Spoor *s = sys_lookup_rw_handle(p, fd, 0);
+    if (!s) return -(s64)T_E_BADF;
+    bool was = (spoor_flag_get(s) & CNONBLOCK) != 0;
+    if (on) spoor_flag_set(s, CNONBLOCK);
+    else    spoor_flag_clear(s, CNONBLOCK);
+    s64 rc = viv_sock_sync_nonblock(p, s, (enum viv_net_proto)e->proto, e->n);
+    if (rc < 0) {
+        if (was) spoor_flag_set(s, CNONBLOCK);
+        else     spoor_flag_clear(s, CNONBLOCK);
+    }
+    spoor_clunk(s);
+    return (rc < 0) ? viv_sock_verb_errno(rc) : 0;
+}
+
 // socket(domain, type, protocol) -> fd.
 //
 // Opens /net/<proto>/clone ORDWR. netd's clone idiom rebinds that fid onto the
@@ -11272,20 +11413,25 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 
     // N-1a: apply the SOCK_NONBLOCK/SOCK_CLOEXEC the decide admitted. NONBLOCK
     // becomes the ctl open-file's CNONBLOCK -- the guest-visible O_NONBLOCK state
-    // that fcntl(F_GETFL/F_SETFL) reads/writes AND that the recv shells consult to
-    // turn netd's empty-read (0 bytes, non-blocking at net-2c-2) into -EAGAIN.
-    // CLOEXEC becomes the fd's cloexec bit, honoured by handle_close_on_exec +
-    // the socktab's own execve sweep. A failure here is unreachable (the fd was
-    // just handed back by the open), but unwind rather than leak a half-configured
-    // socket: the guest would see a valid fd whose flags silently disagree with
-    // what it asked for.
+    // that fcntl(F_GETFL/F_SETFL) reads/writes -- and, since NP-5c, netd's
+    // nonblocking mode for connection N, which is what makes an empty read
+    // answer EAGAIN (viv_sock_sync_nonblock). CLOEXEC becomes the fd's cloexec
+    // bit, honoured by handle_close_on_exec + the socktab's own execve sweep. The
+    // flag sets cannot fail on the fd the open just returned; the verb can (a
+    // shortage at netd). Either way unwind rather than hand back a socket whose
+    // mode silently disagrees with what the guest asked for.
     bool nonblock = (type & (u64)VIV_SOCK_NONBLOCK) != 0;
     bool cloexec  = (type & (u64)VIV_SOCK_CLOEXEC)  != 0;
+    s64  frc      = 0;
     if ((nonblock && handle_set_nonblock(p, (hidx_t)fd, true) < 0) ||
-        (cloexec  && handle_set_cloexec(p, (hidx_t)fd, true) < 0)) {
+        (cloexec  && handle_set_cloexec(p, (hidx_t)fd, true) < 0))
+        frc = -(s64)T_E_IO;
+    else if (nonblock)
+        frc = viv_sock_sync_nonblock_fd(p, (hidx_t)fd, proto, n);
+    if (frc < 0) {
         viv_socktab_drop(tab, (s32)fd);
         handle_close(p, (hidx_t)fd);
-        return -(s64)T_E_IO;
+        return viv_sock_verb_errno(frc);
     }
     return fd;
 }
@@ -11376,52 +11522,34 @@ static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
 
     // BLOCKS for TCP until ESTABLISHED (netd's deferred Rlopen) -- the correct
     // POSIX shape for a blocking connect(), and the wait a signal may
-    // interrupt. It blocks a SOCK_NONBLOCK socket too, where Linux answers
-    // EINPROGRESS.
+    // interrupt. netd has no nonblocking dial, so it blocks a SOCK_NONBLOCK
+    // socket too, where Linux answers EINPROGRESS (VIVARIUM.md's ceilings
+    // table).
+    //
+    // Resolved as a PRIVATE Spoor, never a guest fd (NP-5): the data Spoor goes
+    // straight into the socket's own fd below, so no number of the guest's ever
+    // names it in between -- a peer thread (N-3) can neither be handed a
+    // temporary number nor swap a stranger into it. The resolve's reference is
+    // the one handle_replace installs.
     if (e->proto == VIV_NET_TCP) viv_note_resume(intr);
-    s64 dfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
-                                      2u /* ORDWR */);
+    struct Spoor *dsp;
+    rights_t      dr;
+    s64 rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                        2u /* ORDWR */, &dsp, &dr);
     viv_wait_is_over();
-    if (dfd == -(s64)T_E_INTR)    return dfd;   // a caught signal: still CONNECTING
-    if (dfd < 0) {
+    if (rc == -(s64)T_E_INTR)     return rc;    // a caught signal: still CONNECTING
+    if (rc < 0) {
         // The dial failed, so a retry dials again (Linux resets a failed connect
         // to unconnected). netd tells a timed-out dial from a refused one.
         (void)viv_socktab_abort_connect(tab, (s32)(s64)fd_raw, e->epoch);
-        return (dfd == -(s64)T_E_TIMEDOUT) ? dfd : -(s64)T_E_CONNREFUSED;
+        return (rc == -(s64)T_E_TIMEDOUT) ? rc : -(s64)T_E_CONNREFUSED;
     }
-
-    // Take the data Spoor OUT of its temporary fd and put it in the socket's
-    // fd. handle_get holds a ref across the move so the object cannot be freed
-    // between the two steps.
-    struct Handle dh;
-    if (handle_get(p, (hidx_t)dfd, &dh) < 0) {
-        handle_close(p, (hidx_t)dfd);
-        return -(s64)T_E_IO;
-    }
-    // V-5d F5: check the KIND before the cast. handle_replace has a Spoor-only
-    // gate, but it runs four lines below -- after spoor_ref would already have
-    // incremented a refcount at an offset that is only a Spoor's by assumption.
-    // Unreachable today (sys_open_kpath_for_proc allocates KOBJ_SPOOR
-    // unconditionally, and no peer thread can swap the slot), so this is the
-    // gate order made to match the header's claim rather than a live defect.
-    if (dh.kind != KOBJ_SPOOR) {
-        handle_put(&dh);
-        handle_close(p, (hidx_t)dfd);
-        return -(s64)T_E_IO;
-    }
-
-    // The ref handle_get took becomes the socket fd's ref; closing the
-    // temporary fd drops the temporary's own ref, leaving exactly one.
-    struct Spoor *dsp = (struct Spoor *)dh.obj;
-    rights_t      dr  = dh.rights;
-    spoor_ref(dsp);                       // the ref handle_replace will install
-    handle_put(&dh);                      // release the borrowed one
-    handle_close(p, (hidx_t)dfd);         // retire the temporary fd
 
     // Read the socket's nonblocking state off ctl BEFORE the swap. Since N-1a
     // admits SOCK_NONBLOCK, a socket(NONBLOCK)+connect() must stay nonblocking --
     // but CNONBLOCK is a per-Spoor flag, and handle_replace installs a fresh data
     // Spoor that does not carry it. Capture it here, re-apply after the swap.
+    // (netd's copy of the mode is per connection, so the swap keeps it.)
     int  ctl_omode = 0;
     bool ctl_nonblock = false;
     (void)handle_get_status_flags(p, (hidx_t)fd_raw, &ctl_omode, &ctl_nonblock);
@@ -11482,21 +11610,19 @@ static s64 viv_sock_finish_before_io(struct Proc *p, u64 fd_raw) {
     return viv_sock_finish_connect(p, tab, fd_raw, &e);
 }
 
-// A small read of a file in the guest's namespace that installs no guest
-// descriptor: one borrowed for it could fail for want of a slot, and a peer
-// thread could see it. `path` is absolute; the walk carries the guest's own
-// identity, as an open would. Bytes read, or a negative errno.
-static s64 viv_kpath_read(struct Proc *p, const char *path, u32 plen, u8 *buf, long len) {
-    if (!p->territory) return -(s64)T_E_NOENT;
-    struct Spoor *root = territory_root_ref(p->territory);
-    if (!root) return -(s64)T_E_NOENT;
-    int serr = T_E_NOENT;
-    struct Spoor *s = stalk_err(p, root, path, plen, STALK_OPEN, 0u /* OREAD */, &serr);
-    spoor_clunk(root);                  // stalk borrowed it
-    if (!s) return -(s64)serr;
-    long n = (s->dev && s->dev->read) ? s->dev->read(s, buf, len, 0) : -(long)T_E_INVAL;
+// A small read of a /net file that installs no guest descriptor: one borrowed
+// for it could fail for want of a slot, and a peer thread could see it. The file
+// is a private Spoor from the resolution core every open uses, read through the
+// gates a read of an fd passes. Bytes read, or a negative errno.
+static s64 viv_kpath_read(struct Proc *p, const char *path, u32 plen, u8 *buf, u64 len) {
+    struct Spoor *s;
+    rights_t      r;
+    s64 rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                        0u /* OREAD */, &s, &r);
+    if (rc < 0) return rc;
+    s64 n = spoor_read_on(s, buf, len, false, 0);
     spoor_clunk(s);
-    return (n < -4095) ? -(s64)T_E_IO : (s64)n;
+    return n;
 }
 
 // SO_ERROR on a CONNECTING socket: whether the interrupted connect has failed
@@ -11515,7 +11641,7 @@ static s32 viv_sock_pending_error(struct Proc *p, struct viv_socktab *tab, u64 f
                              e.n, "status");
     if (plen == 0) return 0;
     char st[16] = { 0 };
-    s64  got = viv_kpath_read(p, path, plen, (u8 *)st, (long)sizeof(st));
+    s64  got = viv_kpath_read(p, path, plen, (u8 *)st, sizeof(st));
     bool in_flight = got < 4 ||    // Syn-Sent, Syn-Received
                      (st[0] == 'S' && st[1] == 'y' && st[2] == 'n' && st[3] == '-');
     if (in_flight) return 0;
@@ -11665,22 +11791,6 @@ static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
     return 0;
 }
 
-// Open /net/<proto>/<n>/data for a socket, returning a fresh transient fd the
-// caller closes. PER-CALL, not cached: netd's rx/tx buffers live on the per-conn
-// slot N (server.rs), not the fid, so a transient data fid moves bytes to/from
-// the same connection AND never lands in the guest's fd-number space -- the
-// exact "opened per call, not cached" discipline the poll shell documents at
-// length, for the same reason (a cached derived fd the guest could close would
-// name a stranger's object after the close). UDP data open is immediate (netd's
-// deferred Rlopen is TCP-only), so this does not block for the datagram path.
-static s64 viv_sock_open_data(struct Proc *p, enum viv_net_proto proto, u32 n) {
-    char path[64];
-    u32  plen = viv_net_path(path, sizeof(path), proto, true, n, "data");
-    if (plen == 0) return -(s64)T_E_INVAL;
-    return sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
-                                   2u /* ORDWR */);
-}
-
 // The connectionless UDP datagram send (N-2a): dial `addr` on the ctl fd (netd
 // re-points conn N per call, server.rs), then move the payload on a transient
 // data fid. The guest fd stays `ctl`, so a subsequent sendto to a DIFFERENT peer
@@ -11719,12 +11829,20 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_socktab *tab,
     if (w == -(s64)T_E_INTR) return w;   // a caught signal, not a refusal
     if (w != (s64)clen) return -(s64)T_E_CONNREFUSED;
 
-    // Move the payload on a data fid opened for exactly this datagram. The native
-    // write handler does the copy-in + staging; a UDP write is one datagram.
-    s64 dfd = viv_sock_open_data(p, (enum viv_net_proto)e->proto, e->n);
-    if (dfd < 0) return dfd;
-    s64 sent = sys_write_handler((u64)dfd, buf_va, len);
-    handle_close(p, (hidx_t)dfd);
+    // Move the payload on a data Spoor opened for exactly this datagram; a UDP
+    // write is one datagram. The staging is the native write's own
+    // (sys_write_staged), with the gates SYS_WRITE applies ahead of it: the range
+    // check, a zero length writing nothing, and the SYS_RW_MAX cap. (No weft
+    // fast path: a freshly opened data fid is never weft-bound.)
+    struct Spoor *dsp;
+    s64 drc = viv_sock_resolve(p, (enum viv_net_proto)e->proto, e->n, "data", &dsp);
+    if (drc < 0) return drc;
+    s64 sent;
+    if (!sys_validate_user_buf(buf_va, len)) sent = -(s64)T_E_FAULT;
+    else if (len == 0)                       sent = 0;
+    else sent = sys_write_staged(p, (hidx_t)-1, dsp, buf_va,
+                                 (len > SYS_RW_MAX) ? (u64)SYS_RW_MAX : len);
+    spoor_clunk(dsp);
     if (sent < 0) return sent;
 
     // Record the destination AFTER the send succeeds -- a failed dial must not
@@ -11800,8 +11918,7 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
 
     // Copy the whole msghdr in (validated). No uaccess_load_u64 exists, and one
     // staged copy is easier to reason about than seven field loads; the fault
-    // fixup makes a peer-unmapped read a clean -EFAULT (there is no peer thread
-    // for a PHENO_LINUX Proc, so this is belt-and-braces).
+    // fixup makes a read of memory a peer thread unmapped a clean -EFAULT.
     if (!sys_validate_user_buf(msg_va, sizeof(struct viv_linux_msghdr)))
         return -(s64)T_E_FAULT;
     struct viv_linux_msghdr mh;
@@ -11813,10 +11930,9 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     // snapshot under the lock (viv_socktab_get above) -- N-3's socktab lock -- so
     // a peer thread's concurrent sendto/connect on this fd cannot tear them
     // between the decide here and the msg_name writeback below; both read the
-    // same coherent copy. The transient data fd opened below still sits briefly
-    // in the guest's OWN fd space where a peer could close it, but that is a
-    // guest racing its own descriptor (memory-safe -- each fd resolution is
-    // validated), not a kernel hazard the lock must close.
+    // same coherent copy. The data file an unconnected socket reads below is a
+    // private Spoor (NP-5b), outside the guest's fd space, so a peer thread can
+    // neither close it nor be handed its number.
     //
     // F3: validate msg_name UP FRONT, before a datagram is consumed. Linux checks
     // the address buffer before the receive, so a bad msg_name must fail EFAULT
@@ -11848,16 +11964,13 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
         }
     }
 
-    // The data fid: a CONNECTED socket's guest fd IS `data`; a FRESH datagram
-    // socket's guest fd is `ctl`, so open a transient data fid (closed below).
-    bool close_data = false;
-    s64  dfd;
-    if (e.state == (u8)VIV_SOCK_CONNECTED) {
-        dfd = (s64)fd_raw;
-    } else {
-        dfd = viv_sock_open_data(p, (enum viv_net_proto)e.proto, e.n);
-        if (dfd < 0) return dfd;
-        close_data = true;
+    // The data file: a CONNECTED socket's guest fd IS `data`; a FRESH datagram
+    // socket's guest fd is `ctl`, so a private data Spoor is opened for this one
+    // read (released below; NULL means read the guest's own fd).
+    struct Spoor *dsp = NULL;
+    if (e.state != (u8)VIV_SOCK_CONNECTED) {
+        s64 drc = viv_sock_resolve(p, (enum viv_net_proto)e.proto, e.n, "data", &dsp);
+        if (drc < 0) return drc;
     }
 
     // Read ONE datagram into a zeroed kernel bounce (cap up to 4 KiB is too big
@@ -11869,24 +11982,23 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     if (cap > 0) {
         bounce = (u8 *)kzalloc(cap, 0);
         if (!bounce) {
-            if (close_data) handle_close(p, (hidx_t)dfd);
+            spoor_clunk(dsp);
             return -(s64)T_E_NOMEM;
         }
-        got = spoor_read_common(p, (hidx_t)dfd, bounce, cap, false, 0);
+        got = dsp ? spoor_read_on(dsp, bounce, cap, false, 0)
+                  : spoor_read_common(p, (hidx_t)fd_raw, bounce, cap, false, 0);
     }
-    if (close_data) handle_close(p, (hidx_t)dfd);
+    spoor_clunk(dsp);
     if (got < 0) { if (bounce) kfree(bounce); return got; }
 
-    // NONBLOCK: netd's `data` read is non-blocking (0 bytes on an empty socket,
-    // net-2c-2), so a 0-byte read on a nonblocking socket is EAGAIN, not EOF --
-    // res_msend's recvmsg drain loop needs the negative return to break. A
-    // blocking socket keeps the 0.
+    // A nonblocking socket's empty read already came back as netd's own EAGAIN
+    // (got < 0, above): its connection is in netd's nonblocking mode (NP-5c), and
+    // a blocking one parked at netd until a datagram arrived. So 0 bytes is the
+    // end of the stream or an empty datagram, whatever the socket's mode -- never
+    // EAGAIN, which on a closed peer would read as "try again" forever.
     if (got == 0) {
-        int  omode = 0;
-        bool nb    = false;
-        (void)handle_get_status_flags(p, (hidx_t)fd_raw, &omode, &nb);
         if (bounce) kfree(bounce);
-        return nb ? -(s64)T_E_AGAIN : 0;
+        return 0;
     }
 
     // Pass 2: scatter the datagram across the iovecs (validated copy-out per
@@ -11976,25 +12088,26 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
 
 // accept(fd, addr, addrlen) / accept4(fd, addr, addrlen, flags).
 //
-// Unlike connect, this SWAPS NOTHING: it returns a NEW fd, and the fd it needs
-// is the one sys_open_kpath_for_proc already hands back for `data`. So the
-// sequence is a straight walk --
+// Unlike connect, this SWAPS NOTHING: it returns a NEW fd, and that fd is the
+// `data` Spoor itself, installed. So the sequence is a straight walk, every
+// file a private Spoor until the install --
 //
-//   open(/net/tcp/N/listen)   BLOCKS; netd holds the Rlopen until a call lands,
-//                             then REBINDS this fid onto the accepted
-//                             connection's ctl and replies (net-3a)
-//   read(that fd)          -> M, the accepted connection's number
-//   open(/net/tcp/M/data)  -> the fd accept() returns
-//   close(the listen fd)      M's ctl; data holds M's reference now
+//   resolve(/net/tcp/N/listen)  BLOCKS; netd holds the Rlopen until a call
+//                               lands, then REBINDS this fid onto the accepted
+//                               connection's ctl and replies (net-3a)
+//   read(that Spoor)         -> M, the accepted connection's number
+//   resolve(/net/tcp/M/data) -> installed as the fd accept() returns
+//   clunk(the listen Spoor)     M's ctl; data holds M's reference now
 //
 // The listener N is untouched throughout: netd re-arms it with a fresh socket
 // during the swap, so it stays ANNOUNCED and the next accept() blocks again.
 static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
                            u64 addrlen_va, u64 flags) {
-    // accept4's flags are SOCK_NONBLOCK/SOCK_CLOEXEC -- refused for exactly the
-    // reason socket() refuses them, and refused here rather than masked so a
-    // guest asking for a non-blocking accepted socket does not silently get a
-    // blocking one.
+    // accept4's flags (SOCK_NONBLOCK/SOCK_CLOEXEC) are refused, not masked, so
+    // a guest asking for a nonblocking accepted socket never silently gets a
+    // blocking one. socket() admits the same flags (N-1a), and musl answers
+    // this EINVAL with accept + fcntl, whose F_SETFL socket arm carries
+    // O_NONBLOCK to netd (NP-5c).
     if (flags != 0) return -(s64)T_E_INVAL;
 
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
@@ -12012,22 +12125,31 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     u32  plen = viv_net_path(path, sizeof(path), proto, true, e.n, "listen");
     if (plen == 0) return -(s64)T_E_INVAL;
 
+    // Every file below stays a PRIVATE Spoor until the last step (NP-5): the new
+    // connection's ctl, its remote file and its data file are resolved outside
+    // the guest's fd table, so while the RPCs below sleep no number of the
+    // guest's names any of them -- a peer thread (N-3) is neither handed a
+    // temporary number nor able to swap a stranger into one. Only the data
+    // Spoor is ever installed, as the fd accept() returns.
+    //
     // THE BLOCK. Propagate the open's own errno rather than flattening it:
     // netd answers ENOMEM when its deferred-accept table is full, and ENOMEM is
     // a documented accept(2) error that a server can act on.
-    s64 lfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
-                                      2u /* ORDWR */);
-    if (lfd < 0) return lfd;
+    struct Spoor *lsp;
+    rights_t      lr;
+    s64 lrc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                         2u /* ORDWR */, &lsp, &lr);
+    if (lrc < 0) return lrc;
     // netd held that open until a call arrived: the connection is ours now, and
     // an EINTR from the reads and the data open below would hang it up.
     viv_wait_is_over();
 
     // The fid is now the ACCEPTED connection's ctl, so reading it yields M.
     u8  nbuf[16];
-    s64 got = spoor_read_common(p, (hidx_t)lfd, nbuf, sizeof(nbuf), false, 0);
+    s64 got = spoor_read_on(lsp, nbuf, sizeof(nbuf), false, 0);
     u32 m   = 0;
     if (got <= 0 || !vivarium_parse_conn_n((const char *)nbuf, (u32)got, &m)) {
-        handle_close(p, (hidx_t)lfd);
+        spoor_clunk(lsp);
         return -(s64)T_E_IO;
     }
 
@@ -12041,16 +12163,16 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
         char rpath[64];
         u32  rlen = viv_net_path(rpath, sizeof(rpath), proto, true, m, "remote");
         if (rlen != 0) {
-            s64 rfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
-                                              rpath, rlen, 0u /* OREAD */);
-            if (rfd >= 0) {
+            struct Spoor *rsp;
+            rights_t      rr;
+            if (sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, rpath, rlen,
+                                           0u /* OREAD */, &rsp, &rr) == 0) {
                 u8  rbuf[32];
-                s64 rgot = spoor_read_common(p, (hidx_t)rfd, rbuf, sizeof(rbuf),
-                                             false, 0);
+                s64 rgot = spoor_read_on(rsp, rbuf, sizeof(rbuf), false, 0);
                 if (rgot > 0)
                     have_peer = vivarium_parse_ipport((const char *)rbuf,
                                                       (u32)rgot, rip, &rport);
-                handle_close(p, (hidx_t)rfd);
+                spoor_clunk(rsp);
             }
         }
     }
@@ -12058,20 +12180,30 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     char dpath[64];
     u32  dlen = viv_net_path(dpath, sizeof(dpath), proto, true, m, "data");
     if (dlen == 0) {
-        handle_close(p, (hidx_t)lfd);
+        spoor_clunk(lsp);
         return -(s64)T_E_INVAL;
     }
-    s64 dfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, dpath, dlen,
-                                      2u /* ORDWR */);
-    if (dfd < 0) {
-        handle_close(p, (hidx_t)lfd);
+    struct Spoor *dsp;
+    rights_t      dr;
+    if (sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, dpath, dlen,
+                                   2u /* ORDWR */, &dsp, &dr) < 0) {
+        spoor_clunk(lsp);
         return -(s64)T_E_CONNABORTED;
     }
 
     // data now holds M's reference, so ctl is disposable -- the same ledger
     // connect() relies on, and the reason a Linux socket can be ONE fd when the
     // Plan 9 connection is two files.
-    handle_close(p, (hidx_t)lfd);
+    spoor_clunk(lsp);
+
+    // The connection's first guest number: the fd accept() returns. A full table
+    // is EMFILE, as Linux's accept answers it; the data Spoor's release frees M.
+    hidx_t dh = handle_alloc(p, KOBJ_SPOOR, dr, dsp);
+    if (dh < 0) {
+        spoor_clunk(dsp);
+        return -(s64)T_E_MFILE;
+    }
+    s64 dfd = (s64)dh;
 
     // Born CONNECTED in one lock hold -- the accepted fd IS `data`. Doing it in
     // claim (rather than claim-then-set_state) closes the window in which a peer
@@ -12151,80 +12283,83 @@ fault_unwind:
 // defeat the wait -- the exact bug the pouch boundary-line hit at net-6b-3, and
 // it is the same bug here for the same reason.
 //
-// THE READY FD IS OPENED PER CALL, NOT CACHED, AND THAT IS DELIBERATE. Caching
-// it in the socktab (what pouch does) would put a handle the guest never asked
-// for into the guest's OWN fd-number space, where the guest could close it --
-// after which the cached number would name whatever object was allocated next,
-// and poll would report a stranger's readiness as this socket's. In pouch that
-// hazard does not exist, because there the ready fd IS a guest fd that the
-// guest's own libc opened and tracks. Here the guest cannot see it, so it must
-// not outlive the call.
+// THE READY FILE IS POLLED AS A SPOOR, NEVER AS A GUEST FD (NP-5). A socket's
+// readiness Spoor is opened on its first poll and cached in its socktab row --
+// held OUTSIDE the guest's fd table, where no thread of the guest can see it,
+// close it or be handed its number -- and the poll core takes it pre-resolved
+// (sys_poll_for_proc_spoors) while kfds[i].fd keeps naming the guest's own
+// socket. One per connection: the rows of a socket's dups share it. The cache
+// lives exactly as long as the rows: close, a dup onto the number, exec and
+// exit release each row's reference (vivarium.h, the readiness cache). It
+// replaced a readiness fd opened per socket per call, which cost a Twalk +
+// Tlopen + Tclunk each time and, once N-3 admitted peer threads, put a number
+// in the guest's fd space that a peer could take over mid-poll -- whereupon the
+// close-by-number afterwards closed the PEER's fd.
 //
-// The transient fd is unobservable for EXACTLY the reason the socktab needs no
-// lock -- a PHENO_LINUX Proc is single-threaded (clone is not a row), so nothing
-// can look at the handle table while this one blocks in poll. Both properties
-// evaporate together when process creation lands (VIVARIUM.md task #93); the
-// caching option becomes available then only if the fd-space problem above is
-// solved first.
-// Poll a pollfd array on the guest's behalf: translate each /net socket fd to a
-// freshly-opened readiness fd, run the native poll, then close every fd opened
-// and PUT THE CALLER'S OWN fd NUMBERS BACK.
-//
-// The restore is load-bearing for pselect6 and merely tidy for ppoll, which is
-// why it lives here rather than in either caller. ppoll writes back only the
-// `revents` field, so a readiness handle left in `kfds[i].fd` would never reach
-// the guest; pselect6 uses `kfds[i].fd` as the BIT INDEX to set in the caller's
-// fd_set, so a left-behind readiness handle would report the wrong fd as ready.
-// One shared helper, one invariant: on return, kfds[] holds the caller's fds.
+// Poll a pollfd array on the guest's behalf: pair each /net socket entry with
+// its readiness Spoor, run the native poll over the pairs, and return with
+// kfds[] holding the caller's own fds -- load-bearing for pselect6, which uses
+// kfds[i].fd as the BIT INDEX to set in the caller's fd_set.
 static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                                s32 timeout_ms) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    s32  opened[POLL_MAX_NFDS];
-    s32  orig[POLL_MAX_NFDS];
+    struct Spoor *ready[POLL_MAX_NFDS];   // per entry: a reference we own, or NULL
+    struct Spoor *pre[POLL_MAX_NFDS];     // ready[] in the compacted order (borrowed)
+    s32           orig[POLL_MAX_NFDS];
+    u32           src[POLL_MAX_NFDS];
+    u32           dense  = 0;
+    s64           result = 0;
 
     for (u64 i = 0; i < nfds; i++) {
-        opened[i] = -1;
-        orig[i]   = kfds[i].fd;
+        ready[i] = NULL;
+        orig[i]  = kfds[i].fd;
     }
 
     if (tab) {
         for (u64 i = 0; i < nfds; i++) {
             if (kfds[i].fd < 0) continue;          // caller-disabled entry
             struct viv_sock e;
-            if (!viv_socktab_get(tab, kfds[i].fd, &e)) continue;   // ordinary file: as-is
-
-            char path[64];
-            u32  plen = viv_net_path(path, sizeof(path),
-                                     (enum viv_net_proto)e.proto, true, e.n,
-                                     "ready");
-            s64 rfd = (plen == 0)
-                          ? -1
-                          : sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
-                                                    path, plen, 0u /* OREAD */);
-            if (rfd < 0) {
-                // The socket is in the table but its readiness file will not
-                // open -- a dead connection, a /net that went away, or (V-5d F6)
-                // a TRANSIENT shortage: the handle table full, or a kmalloc
-                // shortfall inside the open. The three answer alike, and for the
-                // third that is a real divergence -- Linux never turns a
-                // resource shortage into EBADF on select. It is also partly
-                // self-inflicted, since this design spends one guest-fd-space
-                // handle per polled socket, so a guest polling near its ceiling
-                // can drive itself into it. Left as-is deliberately: the fix is
-                // to stop consuming guest fd numbers at all -- a cache of ready
-                // Spoors held outside the guest's fd table (NP-5) -- and
-                // splitting the arm now would encode the fd-space design it
-                // replaces. POLLNVAL
-                // is the POSIX answer for an fd that cannot be polled, and it is
-                // per-pollfd: one broken socket must not fail the whole call for
-                // the fds beside it. (pselect6 then turns that POLLNVAL into a
-                // whole-call EBADF, which is select's own contract -- the split
-                // belongs to the caller, not here.)
-                kfds[i].fd = -1;
-                continue;
+            struct Spoor   *sp;
+            if (!viv_socktab_ready_get(tab, kfds[i].fd, &e, &sp)) continue;   // ordinary file: as-is
+            if (!sp) {
+                char path[64];
+                u32  plen = viv_net_path(path, sizeof(path),
+                                         (enum viv_net_proto)e.proto, true, e.n,
+                                         "ready");
+                rights_t r;
+                s64 rc = (plen == 0)
+                             ? -1
+                             : sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                          path, plen, 0u /* OREAD */,
+                                                          &sp, &r);
+                if (rc == -(s64)T_E_NOMEM) {
+                    // V-5d F6: a SHORTAGE fails the whole call, as Linux's poll
+                    // and select do (ENOMEM), rather than posing as a broken fd.
+                    result = rc;
+                    goto out;
+                }
+                if (rc < 0) {
+                    // The socket is in the table but its readiness file will not
+                    // open -- a dead connection, or a /net that went away. POLLNVAL
+                    // is the POSIX answer for an fd that cannot be polled, and it
+                    // is per-pollfd: one broken socket must not fail the call for
+                    // the fds beside it (pselect6 then turns it into a whole-call
+                    // EBADF, select's own contract). A dev walk that failed for want
+                    // of memory lands here too: stalk reports every dev walk miss
+                    // as T_E_NOENT.
+                    kfds[i].fd = -1;
+                    continue;
+                }
+                // Offer it to the cache; the second reference is the table's if
+                // the offer lands. A row a peer closed or recycled meanwhile, or
+                // filled first, or whose connection a dup's row cached first,
+                // refuses it -- then this Spoor serves this call only and is
+                // released with the rest.
+                spoor_ref(sp);
+                if (!viv_socktab_ready_install(tab, orig[i], e.epoch, sp))
+                    spoor_clunk(sp);
             }
-            opened[i]  = (s32)rfd;
-            kfds[i].fd = (s32)rfd;
+            ready[i] = sp;
         }
     }
 
@@ -12257,23 +12392,21 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
     // (a readiness file that would not open), and that one is still owed its
     // POLLNVAL. Compaction only ever moves an entry DOWN, so src[j] >= j and
     // the scatter can run high-to-low in place without clobbering.
-    u32 src[POLL_MAX_NFDS];
-    u32 dense = 0;
     for (u64 i = 0; i < nfds; i++) {
         if (orig[i] < 0) continue;              // inert, per POSIX
         if (dense != (u32)i) kfds[dense] = kfds[i];
         src[dense] = (u32)i;
+        pre[dense] = ready[i];
         dense++;
     }
 
-    s64 result;
     if (dense == 0) {
         // Every entry disabled: there is nothing to wait ON, but there is still
         // a timeout to wait FOR -- the same shape as nfds == 0, so it routes to
         // the same primitive rather than returning early.
         result = sys_poll_sleep_for(timeout_ms);
     } else {
-        result = sys_poll_for_proc(p, kfds, dense, timeout_ms);
+        result = sys_poll_for_proc_spoors(p, kfds, dense, timeout_ms, pre);
 
         // Scatter the answers back to the slots the caller used. High-to-low:
         // src[j] >= j, so every write lands at or above the read.
@@ -12286,17 +12419,13 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
         if (orig[i] < 0) kfds[i].revents = 0;
     }
 
-    // Close what we opened and restore what the caller wrote -- on EVERY path,
-    // including the error one, because the transient fds must not outlive the
-    // call and the caller's array must not carry our handles back out.
+out:
+    // Release our references and restore what the caller wrote -- on EVERY
+    // path, so the caller's array never carries anything of ours back out.
     for (u64 i = 0; i < nfds; i++) {
-        if (opened[i] >= 0) {
-            handle_close(p, (hidx_t)opened[i]);
-            opened[i] = -1;
-        }
+        spoor_clunk(ready[i]);
         kfds[i].fd = orig[i];
     }
-
     return result;
 }
 
@@ -13552,13 +13681,21 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                 return -(s64)T_E_BADF;
             return (s64)((u64)(omode & 3) | (nb ? (u64)VIV_O_NONBLOCK : 0));
         }
-        case VIV_FCNTL_SETFL:
+        case VIV_FCNTL_SETFL: {
             // Serve O_NONBLOCK; ignore O_APPEND/O_ASYNC/O_DIRECT and the access
             // mode, exactly as Linux's F_SETFL does (it silently drops every
-            // non-status bit rather than erroring). The arg is args[2].
-            if (handle_set_nonblock(p, fd, (args[2] & (u64)VIV_O_NONBLOCK) != 0) != 0)
-                return -(s64)T_E_BADF;
+            // non-status bit rather than erroring). The arg is args[2]. On a
+            // /net socket the mode lives at netd too (NP-5c), so the socket arm
+            // carries it there.
+            bool on = (args[2] & (u64)VIV_O_NONBLOCK) != 0;
+            struct viv_socktab *ntab =
+                __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+            struct viv_sock ne;
+            if (ntab && viv_socktab_get(ntab, (s32)fd, &ne))
+                return viv_sock_set_nonblock(p, fd, &ne, on);
+            if (handle_set_nonblock(p, fd, on) != 0) return -(s64)T_E_BADF;
             return 0;
+        }
         default:
             return -(s64)T_E_NOSYS;
         }

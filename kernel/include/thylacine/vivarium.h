@@ -124,7 +124,10 @@ enum {
     // here owes the socktab a drop of the entry keyed on the number it frees.
     // Leaving that out is the sharpest bug this family can have: a freed index
     // whose (proto, N) survives is handed to the next fd-creating call, and a
-    // later connect() then writes a dial verb to a STRANGER'S connection.
+    // later connect() then writes a dial verb to a STRANGER'S connection. And
+    // since NP-5 a surviving row is not bookkeeping alone: its cached readiness
+    // Spoor holds a netd fid, every fid under /net/<proto>/N/ holds slot N, so
+    // the socket the guest closed stays open to its peer.
     //
     // The obligation is discharged in TWO DIFFERENT PLACES, and the difference
     // is not stylistic (#157):
@@ -1472,10 +1475,28 @@ _Static_assert(sizeof(struct viv_sock) == 32, "viv_sock pinned at 32 bytes "
 // discipline that already tolerates concurrent delivery-read vs sigaction-write.
 // socktab cannot borrow that trick: its entries are scanned, allocated/freed,
 // and multi-field with an identity that must be seen together -- hence the lock.
+//
+// THE READINESS CACHE (NP-5). ready[i] is the opened `/net/<proto>/<n>/ready`
+// Spoor that ppoll/pselect6 poll for s[i]'s socket, held here -- OUTSIDE the
+// guest's fd table -- so a poll never mints a guest fd a peer thread could see,
+// close or be handed. A PARALLEL array, not a viv_sock field, so no row
+// snapshot, fork copy or alias copy can carry the pointer: each row owns ONE
+// ref to its cached Spoor, NULL means uncached, and a FREE slot is always NULL.
+// ONE Spoor PER CONNECTION: rows naming the same (proto, n) -- a socket and its
+// dup aliases -- share one Spoor, each holding its own ref, so polling k numbers
+// of one socket costs netd one fid, not k (its fid table is one pool for the
+// whole box). Every path that clears a slot detaches its Spoor under the lock
+// and clunks it after the unlock -- a last clunk is a Tclunk, and the lock is a
+// spinlock.
+// The cache never outlives the fds it serves: exit resets the table with the
+// handle table (a zombie pins no netd fid), and exec's sweeps clear the rows
+// whose fds the exec closes.
+struct Spoor;
 struct viv_socktab {
     spin_lock_t     lock;       // leaf; held only over array ops, never across I/O
     u64             next_epoch; // monotonic; stamps each claim's viv_sock.epoch
     struct viv_sock s[VIV_SOCK_MAX];
+    struct Spoor   *ready[VIV_SOCK_MAX];
 };
 
 // Snapshot the entry for `fd` into `*out` (which may be NULL for an existence
@@ -1498,16 +1519,43 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
 
 // Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
 // plain file, or a socket already dropped) is a no-op, which is what lets the
-// close hook run unconditionally for a phenotyped Proc. Takes the lock.
+// close hook run unconditionally for a phenotyped Proc. Takes the lock; the
+// row's cached readiness Spoor, if any, is clunked after the unlock, so this
+// may block on that Spoor's Tclunk.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
+
+// The readiness cache (NP-5). ready_get snapshots `fd`'s row into `*out` (may
+// be NULL) and returns true iff the row exists; `*ready_out` gets the cached
+// Spoor with a NEW reference the caller owns (release it with spoor_clunk), or
+// NULL when nothing is cached for the row's connection. An uncached row whose
+// connection another row caches takes that Spoor first (a ref of its own).
+// ready_install offers `sp` as the cache for the socket the caller
+// snapshotted: it installs only if `fd`'s row still names that socket (epoch ==
+// expect_epoch), caches nothing yet, and no other row caches the connection --
+// then the table has taken over one reference the caller passed in. Returns
+// true iff installed; on false the caller still owns that reference (and a row
+// whose connection a sibling cached now shares the sibling's).
+bool viv_socktab_ready_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out,
+                           struct Spoor **ready_out);
+bool viv_socktab_ready_install(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                               struct Spoor *sp);
+
+// proc_free's release: clunk every cached readiness Spoor, then free the table.
+// The at-exit reset has normally emptied the cache already; this covers the
+// Procs freed without it (rollback, orphan). The Proc is past its last thread,
+// so nothing can reach the table. NULL-safe.
+void viv_socktab_free(struct viv_socktab *tab);
 
 // Reset the WHOLE table in place under its lock -- every slot cleared, the
 // object kept (#254: cross-Proc-reachable; proc_free is the only free), the
-// epoch counter untouched (monotonic for the table's life). execve's NATIVE
-// arm calls it (proc_exec_drop_image_state, Design D audit F2): a native image
-// has no sockets, and native close() never drops a row, so a Linux image's
-// rows would otherwise outlive their fds and greet the next Linux image's
-// recycled fd numbers as live connections. NULL-safe. Mirrors viv_sigtab_reset.
+// epoch counter untouched (monotonic for the table's life), every cached
+// readiness Spoor clunked after the unlock. execve's NATIVE arm calls it
+// (proc_exec_drop_image_state, Design D audit F2): a native image has no
+// sockets, and native close() never drops a row, so a Linux image's rows would
+// otherwise outlive their fds and greet the next Linux image's recycled fd
+// numbers as live connections. Exit calls it too (proc_close_handles_at_exit),
+// so the cache's netd fids close with the fds rather than at reap. NULL-safe.
+// Mirrors viv_sigtab_reset.
 void viv_socktab_reset(struct viv_socktab *tab);
 
 // fork's copy (POSIX fork(2); operator-voted A, 2026-08-18 -- COPY at fork,
@@ -1618,8 +1666,9 @@ bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch
 //
 // SOCK_NONBLOCK/SOCK_CLOEXEC in the type word are ADMITTED (N-1a): the decide
 // masks them off before the base-type switch and the shell applies them --
-// NONBLOCK as the ctl open-file's CNONBLOCK (which the recv shells read to turn
-// netd's non-blocking empty-read into -EAGAIN), CLOEXEC as the fd's cloexec bit.
+// NONBLOCK as the ctl open-file's CNONBLOCK plus netd's `nonblock` verb on the
+// connection (NP-5c: netd, not the Spoor, decides that an empty read answers
+// EAGAIN), CLOEXEC as the fd's cloexec bit.
 // Any OTHER high bit in the type word is refused (T_E_INVAL): an unknown flag is
 // a request no honest translation exists for.
 //

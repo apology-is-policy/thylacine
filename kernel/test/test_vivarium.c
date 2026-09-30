@@ -4543,6 +4543,289 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
                 "so a sweep written `!= 0` instead of `== 1` would wrongly drop it");
 }
 
+// NP-5: the readiness cache. A stand-in for a /net ready Spoor: a Spoor on a
+// Dev (never registered) whose close counts into a counter of that Spoor's own
+// (aux) -- so "released exactly once" is asserted of EACH Spoor, where a total
+// would let a double release of one and a leak of another cancel out.
+static void viv_ready_stub_close(struct Spoor *c) { (*(u32 *)c->aux)++; }
+static struct Dev g_viv_ready_stub_dev = {
+    .dc    = (int)'+',
+    .name  = "vivreadystub",
+    .close = viv_ready_stub_close,
+};
+static struct Spoor *viv_ready_stub(u32 *closes) {
+    struct Spoor *sp = spoor_alloc(&g_viv_ready_stub_dev);
+    if (sp) sp->aux = closes;
+    return sp;
+}
+static int viv_ready_refs(struct Spoor *sp) {
+    return __atomic_load_n(&sp->ref, __ATOMIC_ACQUIRE);
+}
+
+// The cache API on a table of its own: get hands out a NEW reference, install is
+// keyed on the row's identity and refuses a filled row, a connection has one
+// Spoor however many rows (dups) name it, and every path that clears a slot --
+// drop, claim's replace, the alias's replace, the reset, the free -- releases
+// that row's reference exactly once. Results are taken first and asserted after
+// the teardown, so a failing leg still frees the table.
+void test_vivarium_socktab_ready_cache(void);
+void test_vivarium_socktab_ready_cache(void) {
+    struct viv_socktab *tab = (struct viv_socktab *)kzalloc(sizeof(*tab), 0);
+    TEST_ASSERT(tab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) tab->s[i].fd = -1;
+
+    static u32 closes[8];
+    struct Spoor *sp[8];
+    bool stubs = true;
+    for (u32 k = 0; k < 8; k++) {
+        closes[k] = 0;
+        sp[k] = viv_ready_stub(&closes[k]);
+        if (!sp[k]) stubs = false;
+    }
+    if (!stubs) {
+        for (u32 k = 0; k < 8; k++) spoor_clunk(sp[k]);
+        viv_socktab_free(tab);
+        TEST_ASSERT(false, "stub Spoors allocated");
+    }
+
+    struct viv_sock e;
+    struct Spoor   *got;
+
+    // An fd with no row: nothing snapshotted, nothing handed out.
+    bool none_row = viv_socktab_ready_get(tab, 5, &e, &got);
+    bool none_got = (got == NULL);
+
+    // A fresh row is uncached; an install hands the table the caller's reference.
+    bool claimed5 = viv_socktab_claim(tab, 5, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED);
+    bool row5     = viv_socktab_ready_get(tab, 5, &e, &got);
+    bool fresh5   = (got == NULL);
+    u64  ep5      = e.epoch;
+    bool inst5    = viv_socktab_ready_install(tab, 5, ep5, sp[0]);
+    int  ref_inst = viv_ready_refs(sp[0]);                 // 1: the table's
+
+    // get hands out a NEW reference, which the caller releases.
+    viv_socktab_ready_get(tab, 5, &e, &got);
+    bool got_sp0  = (got == sp[0]);
+    int  ref_got  = viv_ready_refs(sp[0]);                 // 2
+    spoor_clunk(got);
+    int  ref_back = viv_ready_refs(sp[0]);                 // 1
+
+    // A filled row refuses a second Spoor, which stays the caller's.
+    bool refill      = viv_socktab_ready_install(tab, 5, ep5, sp[1]);
+    int  ref_refused = viv_ready_refs(sp[1]);              // 1
+    viv_socktab_ready_get(tab, 5, NULL, &got);
+    bool kept_sp0    = (got == sp[0]);
+    spoor_clunk(got);
+
+    // Identity: another row's epoch, a later epoch, an fd with no row, NULLs.
+    bool claimed6  = viv_socktab_claim(tab, 6, VIV_NET_UDP, 4, VIV_SOCK_FRESH);
+    viv_socktab_ready_get(tab, 6, &e, NULL);
+    u64  ep6       = e.epoch;
+    bool other_ep  = viv_socktab_ready_install(tab, 6, ep5, sp[1]);
+    bool later_ep  = viv_socktab_ready_install(tab, 6, ep6 + 1, sp[1]);
+    bool no_row    = viv_socktab_ready_install(tab, 77, ep6, sp[1]);
+    bool null_sp   = viv_socktab_ready_install(tab, 6, ep6, NULL);
+    bool null_tab  = viv_socktab_ready_install(NULL, 6, ep6, sp[1]);
+    u32  sp1_idle  = closes[1];                            // 0: nothing took it
+
+    // drop releases the table's reference once; a second drop finds nothing.
+    viv_socktab_drop(tab, 5);
+    u32  drop_closes = closes[0];                          // 1
+    bool row5_gone   = !viv_socktab_ready_get(tab, 5, NULL, NULL);
+    viv_socktab_drop(tab, 5);
+    u32  drop_again  = closes[0];                          // still 1
+
+    // Replace-on-claim: a row still keyed on a reissued fd is released with it.
+    bool inst6        = viv_socktab_ready_install(tab, 6, ep6, sp[1]);
+    bool reclaim6     = viv_socktab_claim(tab, 6, VIV_NET_TCP, 9, VIV_SOCK_FRESH);
+    u32  reclaim_rel  = closes[1];                         // 1
+    viv_socktab_ready_get(tab, 6, &e, &got);
+    bool reclaim_cold = (got == NULL);
+    u64  ep6b         = e.epoch;
+
+    // One Spoor per CONNECTION. A dup's row shares the Spoor its source row
+    // caches, holding a reference of its own; an install racing that share is
+    // refused and the row shares instead; another connection -- another n, or
+    // the same n under the other protocol -- never shares; an alias onto a
+    // cached row of another connection releases that row's Spoor; and dropping
+    // sharers keeps the Spoor for the one left.
+    bool claimed7  = viv_socktab_claim(tab, 7, VIV_NET_TCP, 10, VIV_SOCK_CONNECTED);
+    viv_socktab_ready_get(tab, 7, &e, NULL);
+    bool inst7     = viv_socktab_ready_install(tab, 7, e.epoch, sp[2]);
+    int  alias1    = viv_socktab_alias(tab, 7, 8);
+    viv_socktab_ready_get(tab, 8, &e, &got);
+    bool alias_shares = (got == sp[2]);
+    int  ref_shared   = viv_ready_refs(sp[2]);             // 3: rows 7 and 8, ours
+    spoor_clunk(got);
+    int  alias2    = viv_socktab_alias(tab, 7, 12);        // uncached until asked
+    viv_socktab_get(tab, 12, &e);                          // the epoch, no share
+    bool inst12    = viv_socktab_ready_install(tab, 12, e.epoch, sp[3]);
+    int  ref_sp3   = viv_ready_refs(sp[3]);                // 1: still the caller's
+    viv_socktab_ready_get(tab, 12, NULL, &got);
+    bool twelve_shares = (got == sp[2]);
+    spoor_clunk(got);
+    if (!inst12) spoor_clunk(sp[3]);                       // a refused offer stays ours
+    bool claimed15 = viv_socktab_claim(tab, 15, VIV_NET_UDP, 10, VIV_SOCK_FRESH);
+    viv_socktab_ready_get(tab, 15, &e, &got);
+    bool udp_cold  = (got == NULL);
+    bool inst15    = viv_socktab_ready_install(tab, 15, e.epoch, sp[7]);
+    bool claimed16 = viv_socktab_claim(tab, 16, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED);
+    viv_socktab_ready_get(tab, 16, &e, &got);
+    bool n11_cold  = (got == NULL);
+    bool claimed14 = viv_socktab_claim(tab, 14, VIV_NET_TCP, 30, VIV_SOCK_CONNECTED);
+    viv_socktab_ready_get(tab, 14, &e, NULL);
+    bool inst14    = viv_socktab_ready_install(tab, 14, e.epoch, sp[6]);
+    int  alias3    = viv_socktab_alias(tab, 7, 14);        // over tcp/30's cached row
+    u32  alias_rel = closes[6];                            // 1: 14's old Spoor
+    viv_socktab_drop(tab, 8);
+    viv_socktab_drop(tab, 12);
+    u32  sharers_kept = closes[2];                         // 0: row 7 still holds it
+    int  ref_left     = viv_ready_refs(sp[2]);             // 1: row 7's alone
+
+    // reset releases every cached Spoor and clears every row.
+    bool inst6b     = viv_socktab_ready_install(tab, 6, ep6b, sp[4]);
+    viv_socktab_reset(tab);
+    u32  reset_rel2 = closes[2];                           // 1
+    u32  reset_rel4 = closes[4];                           // 1
+    u32  reset_rel7 = closes[7];                           // 1
+    bool reset_bare = !viv_socktab_ready_get(tab, 6, NULL, NULL) &&
+                      !viv_socktab_ready_get(tab, 7, NULL, NULL) &&
+                      !viv_socktab_ready_get(tab, 8, NULL, NULL);
+
+    // free releases what is still cached.
+    bool claimed9 = viv_socktab_claim(tab, 9, VIV_NET_TCP, 11, VIV_SOCK_FRESH);
+    viv_socktab_ready_get(tab, 9, &e, NULL);
+    bool inst9    = viv_socktab_ready_install(tab, 9, e.epoch, sp[5]);
+    viv_socktab_free(tab);
+
+    TEST_ASSERT(!none_row && none_got, "no row: ready_get is false and hands out nothing");
+    TEST_ASSERT(claimed5 && row5 && fresh5, "a fresh row exists and is uncached");
+    TEST_ASSERT(inst5, "install onto the row's own epoch lands");
+    TEST_EXPECT_EQ(ref_inst, 1, "the install TRANSFERRED the caller's reference (no bump)");
+    TEST_ASSERT(got_sp0, "ready_get hands back the cached Spoor");
+    TEST_EXPECT_EQ(ref_got, 2, "...with a NEW reference of the caller's own");
+    TEST_EXPECT_EQ(ref_back, 1, "...which the caller's clunk returns");
+    TEST_ASSERT(!refill, "a FILLED row refuses a second Spoor");
+    TEST_EXPECT_EQ(ref_refused, 1, "...which stays the caller's, untouched");
+    TEST_ASSERT(kept_sp0, "...and the row keeps its first Spoor");
+    TEST_ASSERT(claimed6, "claim fd 6");
+    TEST_ASSERT(!other_ep, "another row's epoch is refused");
+    TEST_ASSERT(!later_ep, "an epoch the row never had is refused");
+    TEST_ASSERT(!no_row, "an fd with no row is refused");
+    TEST_ASSERT(!null_sp && !null_tab, "NULL Spoor / NULL table are refused");
+    TEST_EXPECT_EQ(sp1_idle, 0u, "no refused install released the caller's Spoor");
+    TEST_EXPECT_EQ(drop_closes, 1u, "drop RELEASES the cached Spoor");
+    TEST_ASSERT(row5_gone, "...and the row");
+    TEST_EXPECT_EQ(drop_again, 1u, "a second drop releases nothing more");
+    TEST_ASSERT(inst6 && reclaim6, "cache fd 6, then re-claim the number");
+    TEST_EXPECT_EQ(reclaim_rel, 1u, "replace-on-claim RELEASES the stale row's Spoor");
+    TEST_ASSERT(reclaim_cold, "...and the new row starts uncached");
+    TEST_ASSERT(claimed7 && inst7, "cache fd 7 (tcp/10)");
+    TEST_EXPECT_EQ(alias1, 1, "alias 7 -> 8");
+    TEST_ASSERT(alias_shares,
+                "a dup's row SHARES its source's Spoor: one readiness fid per connection");
+    TEST_EXPECT_EQ(ref_shared, 3, "...each row holding a reference, plus the caller's");
+    TEST_EXPECT_EQ(alias2, 1, "alias 7 -> 12");
+    TEST_ASSERT(!inst12, "an install for a connection another row caches is REFUSED");
+    TEST_EXPECT_EQ(ref_sp3, 1, "...the offered Spoor stays the caller's");
+    TEST_ASSERT(twelve_shares, "...and the row shares the cached one instead");
+    TEST_ASSERT(claimed15 && udp_cold && inst15,
+                "the same n under the OTHER protocol is another connection: not shared");
+    TEST_ASSERT(claimed16 && n11_cold, "another n is another connection: not shared");
+    TEST_ASSERT(claimed14 && inst14, "cache fd 14 (tcp/30)");
+    TEST_EXPECT_EQ(alias3, 1, "alias 7 -> 14, over the cached row");
+    TEST_EXPECT_EQ(alias_rel, 1u, "the replaced row's Spoor is RELEASED");
+    TEST_EXPECT_EQ(sharers_kept, 0u, "dropping two sharers keeps the Spoor for the third");
+    TEST_EXPECT_EQ(ref_left, 1, "...which holds the one reference left");
+    TEST_ASSERT(inst6b, "cache fd 6 again");
+    TEST_EXPECT_EQ(reset_rel2, 1u, "reset RELEASES tcp/10's Spoor with its last row");
+    TEST_EXPECT_EQ(reset_rel4, 1u, "reset RELEASES fd 6's Spoor");
+    TEST_EXPECT_EQ(reset_rel7, 1u, "reset RELEASES the udp/10 row's Spoor");
+    TEST_ASSERT(reset_bare, "reset clears every row");
+    TEST_ASSERT(claimed9 && inst9, "cache fd 9");
+    for (u32 k = 0; k < 8; k++)
+        TEST_EXPECT_EQ(closes[k], 1u, "every stub released EXACTLY once (free took fd 9's)");
+}
+
+// The cache on the Proc-level paths: fork (the child's rows start uncached and
+// take no reference; the parent keeps its Spoor), exec's close-on-exec sweep (a
+// cloexec socket's Spoor is released, a kept socket's is not), and exit (the
+// rest goes with the fds, in the at-exit close -- not at reap, so a zombie pins
+// no netd fid).
+extern void proc_close_handles_at_exit_for_test(struct Proc *p);
+void test_vivarium_socktab_ready_release_paths(void);
+void test_vivarium_socktab_ready_release_paths(void) {
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(parent != NULL && child != NULL, "proc_alloc x2");
+    parent->phenotype = PHENO_LINUX;
+    child->phenotype  = PHENO_LINUX;
+    parent->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(parent->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) parent->socktab->s[i].fd = -1;
+
+    static u32 closes[2];
+    closes[0] = closes[1] = 0;
+    struct Spoor *kept = viv_ready_stub(&closes[0]);
+    struct Spoor *cx   = viv_ready_stub(&closes[1]);
+
+    hidx_t hk = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t hc = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);
+    handle_set_cloexec(parent, hc, true);
+    struct viv_sock e;
+    viv_socktab_claim(parent->socktab, (s32)hk, VIV_NET_TCP, 20, VIV_SOCK_CONNECTED);
+    viv_socktab_ready_get(parent->socktab, (s32)hk, &e, NULL);
+    bool inst_k = kept && viv_socktab_ready_install(parent->socktab, (s32)hk, e.epoch, kept);
+    viv_socktab_claim(parent->socktab, (s32)hc, VIV_NET_TCP, 21, VIV_SOCK_CONNECTED);
+    viv_socktab_ready_get(parent->socktab, (s32)hc, &e, NULL);
+    bool inst_c = cx && viv_socktab_ready_install(parent->socktab, (s32)hc, e.epoch, cx);
+
+    // FORK, the real three steps around the handle-table copy.
+    struct viv_socktab_fork f = { .parent = NULL, .dst = NULL };
+    int  prc = viv_socktab_fork_prepare(&f, parent);
+    handle_table_copy_into_hooked(child, parent, viv_socktab_fork_snapshot, &f);
+    viv_socktab_fork_finish(child, &f);
+    struct viv_socktab *ct = __atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE);
+    struct Spoor *got = NULL;
+    bool child_row  = ct && viv_socktab_ready_get(ct, (s32)hk, NULL, &got);
+    bool child_cold = (got == NULL);
+    spoor_clunk(got);
+    int  kept_refs  = inst_k ? viv_ready_refs(kept) : -1;   // 1: the parent table's only
+    viv_socktab_ready_get(parent->socktab, (s32)hk, NULL, &got);
+    bool parent_warm = (got == kept);
+    spoor_clunk(got);
+
+    // EXEC's close-on-exec sweep, on the parent.
+    viv_socktab_drop_cloexec(parent);
+    u32  cx_swept  = closes[1];                            // 1
+    u32  k_swept   = closes[0];                            // 0
+    viv_socktab_ready_get(parent->socktab, (s32)hk, NULL, &got);
+    bool k_warm    = (got == kept);
+    spoor_clunk(got);
+
+    // EXIT: the at-exit close releases the rest, before any reap.
+    proc_close_handles_at_exit_for_test(parent);
+    u32  k_exit    = closes[0];                            // 1
+    bool rows_gone = !viv_socktab_ready_get(parent->socktab, (s32)hk, NULL, NULL);
+
+    child->state  = PROC_STATE_ZOMBIE; proc_free(child);
+    parent->state = PROC_STATE_ZOMBIE; proc_free(parent);
+    u32  k_final   = closes[0];                            // still 1
+
+    TEST_ASSERT(inst_k && inst_c, "cache a kept and a cloexec socket's Spoor");
+    TEST_EXPECT_EQ(prc, 0, "fork prepare");
+    TEST_ASSERT(child_row, "the child carries the socket's row");
+    TEST_ASSERT(child_cold, "...UNCACHED: the parent's Spoor is never copied");
+    TEST_EXPECT_EQ(kept_refs, 1, "...and the fork took no reference on it");
+    TEST_ASSERT(parent_warm, "the parent's row keeps its Spoor");
+    TEST_EXPECT_EQ(cx_swept, 1u, "exec's sweep RELEASES the cloexec socket's Spoor");
+    TEST_EXPECT_EQ(k_swept, 0u, "...and not the kept socket's");
+    TEST_ASSERT(k_warm, "...which stays cached");
+    TEST_EXPECT_EQ(k_exit, 1u, "EXIT releases the cache with the fds, not at reap");
+    TEST_ASSERT(rows_gone, "...and clears the rows");
+    TEST_EXPECT_EQ(k_final, 1u, "the reap releases nothing twice");
+}
+
 // The getsockopt SHELL (not the pure decide): the F1 regression. The shell
 // marshals two EL0-controlled addresses through the byte-wise uaccess helpers,
 // which assume a validated user VA -- so it MUST reject a kernel-range address
