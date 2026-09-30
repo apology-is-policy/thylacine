@@ -808,12 +808,25 @@ halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
   console is up halcyond posts `/srv/halcyon` (a minimal 9P2000.L service; it
   holds the console renderer's `MAY_POST_SERVICE` grant, joey ORs it beside
   `CONSOLE_RENDERER`). The namespace is two nodes -- the root dir and a
-  write-only `place` file. The listener + live conns join the loop's unified
+  `place` file, written with a picture and read for the channel's current
+  per-image limit (2026-09-29). The listener + live conns join the loop's unified
   `poll(2)` (a write wakes the renderer at once), and one non-blocking
   `service()` pass per loop accepts + drains complete frames, exactly like the
   console drain (the same one-pass inject latency). The 9P codec is the shared
   `libthyla_rs::ninep` server codec; the dispatch/fid/frame-read shape is
   nocturned's (`usr/nocturned/src/server.rs`, not yet dossiered).
+- **The limit read** (2026-09-29, HALCYON 14.7's refinement of that date): a
+  `Tread` on `place` answers the per-image cap the channel's admission applies
+  to a new transfer -- `max_pixels` on the console (`set_max_pixels`),
+  `budget.max_pixels` in a session -- as `inlinewire::limit_read`'s window:
+  ASCII decimal and a LF at offset 0, end of file past the text. `h_read` checks
+  what it checked when a read answered end of file (a known, opened fid that is
+  not a directory) and allocates nothing. The figure tells a pane's programs the
+  display's size and the pane count, which they can already see; on the console
+  channel, which has no peer gate, it tells any principal that can open
+  `/srv/halcyon` the same. `view` reads it and reduces its raster before the
+  upload ([[sub-view]]); the fit legs of `ls-gfx-inline-view` and
+  `ls-gfx-session-image` exercise both servers.
 - **The accumulator** (`inlineaccum.rs`, the PURE, host-tested brain): a `place`
   write carries an `inlinewire` header (magic/format/w/h) then the ARGB payload.
   `PlaceAccum::write` validates the header -- magic, `FORMAT_ARGB8888`,
@@ -870,8 +883,8 @@ each raster to the tile it came from. `paneplace.rs` (the syscall shell) +
 - **The namespace is dynamic** (`paneroute::walk_child`): the root's children are
   the live token dirs `<hex>` (validated against the routes map, fail-closed
   `E_NOENT` on an unknown/dead token -- `parse_hex32` accepts ONLY the canonical
-  32 lowercase-hex spelling, so a token has no alias), each holding a write-only
-  `place`. HPL2 adds a placement ID to the raster header; the routing token stays
+  32 lowercase-hex spelling, so a token has no alias), each holding a `place`
+  written with a picture and read for the limit. HPL2 adds a placement ID to the raster header; the routing token stays
   outside the payload and is checked at the walk.
 - **One authority axis; the token routes.** The PEER-PRINCIPAL gate at accept
   (`t_srv_peer`, inline in `PanePlaceServer::service`) is the authority: a

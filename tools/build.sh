@@ -4128,6 +4128,25 @@ populate_stratum_pool() {
             echo "==> populate pool: no usr/view/testdata/test.png -- inline-media E2E fixture skipped"
         fi
 
+        # HALCYON.md 14.7, the 2026-09-29 refinement: the same card at 2048x1536
+        # (committed usr/view/testdata/test-large.png, `make-test-png.py large`),
+        # baked at /test-large.png. 3 Mi pixels is view's own decode budget and
+        # three times the largest per-image limit a pane admits, so the card
+        # shows only if view read the pane's limit and reduced the raster to it.
+        # Same halcyon gate + readback verify.
+        local testlarge="$REPO_ROOT/usr/view/testdata/test-large.png"
+        if [[ -f "$testlarge" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" write /test-large.png < "$testlarge" \
+                || { echo "==> populate pool: write /test-large.png FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync (test-large.png) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" read /test-large.png | cmp -s - "$testlarge" \
+                || { echo "==> populate pool: /test-large.png readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: /test-large.png baked + readback-verified (the fit-to-limit fixture, $(wc -c < "$testlarge" | tr -d ' ') B)"
+        else
+            echo "==> populate pool: no usr/view/testdata/test-large.png -- the fit-to-limit fixture skipped"
+        fi
+
         # I-47 JPEG slice: the same 640x400 witness card as a JPEG (committed
         # usr/view/testdata/test.jpg, made by make-test-jpg.sh), baked at
         # /test.jpg so `view /test.jpg` / `gallery /test.jpg` exercise the

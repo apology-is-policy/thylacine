@@ -456,6 +456,15 @@ instant, and falling back to the syscall when the page is absent.
   field and the builder hardcodes it to inherit. Nothing native can raise or
   lower a child's budget without hand-building the record, which is the one
   structure the typed layer exists to avoid.
+- **The spawn builder has no search path.** `Command::new` hands its name to
+  the kernel, which resolves it as an open does: an absolute path from the
+  Territory root, a relative one against the working directory. A bare name
+  therefore runs the file of that name in the caller's working directory,
+  where one can be executed. The shell searches its own path list before it
+  spawns, so this reaches a program that spawns another by name: it names a
+  system program absolutely, as lantern names `/bin/view` and view `/bin/cat`.
+  The `process.rs` header says the same, and that a child starts with a copy of
+  the caller's Territory (its working directory included) and environment.
 - **Small blocks freed below a live one keep their pages.** dlmalloc returns
   memory only from the top of its newest segment and from a segment it has
   wholly emptied, so a run of small blocks freed beneath one that stays live is

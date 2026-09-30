@@ -911,6 +911,67 @@ on 2026-09-30. Scripture 9bfa3041 (DELVE-PORT-DESIGN section 7 (b) and section 1
   to D green -- stage C's launch stop at the ELF entry (0x75440), stage D `reaped=1 killed=1` with every round-trip
   marker; `dap-nora` and `nora-demo` PASS; `tools/ci-smp-gate.sh` 5 rows x 10/10, 0 corruption.
 
+## The image slide: a deck names a picture, view shows it — 2026-09-30
+
+Operator vote 3 of 2026-09-28, "manifest names it, view shows it". Closes FABLE-1 F5, the finding the I-47 close left
+to this chunk. Scripture 5ea03715 (LANTERN-DESIGN 5, 8 and the new 14; HALCYON 14.7's 2026-09-29 refinement; ARCH 28's
+I-47 row; the HPL2 AUDIT-TRIGGERS row's addendum; the index line; `dec-2026-09-29-image-slide`). Code *(pending)*.
+
+- **view's program modes (F5).** `--check` decodes and shows nothing; `--embed` places the picture and prints only its
+  reference. Neither passes a file to `cat`; each exits 0 only on success and reports one bare reason line. The
+  interactive `view` exits 1 when the picture is not displayed.
+- **The pane's limit.** A read of `place` at offset 0 answers the live per-image cap as ASCII decimal and LF, on the
+  session and the console servers (`inlinewire::limit_text`, `limit_read`, `parse_limit`). `view` reads it on a handle
+  of its own and area-averages its raster to it, and to 8192 on a side, before the header; a failed read leaves only
+  the side bound.
+- **The picture slide.** A manifest entry ending `.png`, `.jpg` or `.jpeg` is a picture. `lantern --check` has
+  `view --check -` decode it; a presentation at the rich tier runs `view --embed -` before the frame (both pipes
+  drained, a 30 s stall bound) and writes the reference inside the slide's one-write frame. Elsewhere, or when `view`
+  fails, a Markdown stand-in names the picture and the reason, every punctuation character escaped. The demo deck gains
+  `04-lantern.png`, from a committed stdlib generator.
+- **No file of a deck through a link.** The manifest and both slide kinds are opened with `T_ONOFOLLOW` as regular
+  files, at startup and at every show. The text-slide path had followed links since it landed.
+- **Gates.** `lantern.exp` (four slides, the stand-in in both postures, a fake picture refused with view's reason);
+  `ls-halcyon-lantern` (10), the picture's upload witness and its amber against the text slide;
+  `ls-halcyon-lantern-haul` (5), a linked slide refused, the target's open count unchanged, the slide after it opened,
+  `cat` the control; the fit legs of `ls-gfx-inline-view` and `ls-gfx-session-image` on the new 2048x1536
+  `/test-large.png`.
+
+Audit: IMG-SLIDE (Fable 5.1 reviewing Opus 5.5, read-only on 4ae7f9e8, MODEL start == end, the transcript all Fable):
+0 P0 / 0 P1 / 0 P2 / 7 P3. Fixed: two HALCYON 14.7 sentences the side bound and the read's tests had overtaken (F1,
+F2); `usr/lantern/src/lib.rs` missing from the audit row and the index (F3); the Haul leg's positive (F4, also
+self-found); a silent exit 1 when the caption write fails (F5); the fit's grid test asserts the aspect, and
+LANTERN-DESIGN 14 lists the cap's fall between read and upload (F7). Tracked: F6, a link served by a Haul export
+redirecting the deck directory, a Haul design item in OPEN-BUGS. Self-found in parallel: F4, and `run_view` reporting
+a poll error as a stall. Closed list: memory `audit_inline_media_closed_list.md`. After the round, the device gates: a
+P0 it missed, lantern spawning `view` by a bare name that a spawn resolves against the working directory (the picture
+check failed outside /bin, and an executable `view` there ran in its place; fixed: /bin/view, leg (h), seen red both
+ways); the manual section check refusing a wrap (fixed); `1 slides` (fixed). Then IMG-SLIDE r2 (Fable 5.1, read-only
+on d8c0f52b, the transcript all Fable), on the class the first round missed: F1, `view`'s text fallback spawning a
+bare `cat` (rated P2, re-rated P0: `view notes.txt` failed outside a directory holding a `cat` and ran a planted one;
+fixed: /bin/cat and the ls-gfx-inline-view text-fallback leg, seen red on the old image); F2 [P3], the stale
+`process.rs` header (fixed); F3 [P3], `lantern ""` reading `/slides.toml` (fixed: a usage error, lantern.exp leg (i),
+seen red). Observations taken: `view` spawned with the CSPRNG capability alone; the 30 s bound stated as a silence
+bound. Self-found: a leading-dash file name reaching `cat` as an option (fixed: `--`). Then IMG-SLIDE r3 (Fable 5.1,
+read-only on 1cf587a3, the transcript all Fable): 0 P0 / 0 P1 / 0 P2 / 4 P3 -- F1 the leading-dash name (the
+self-found `--`); F2 the capability mask described as confining the presenter's authority (reworded: capabilities
+only); F3 an unbounded wait on a child that closed both pipes (fixed: the reap is bounded by the same 30 s); F4 the
+census blind to raw spawns (viv's manifest `args[0]`, tracked in OPEN-BUGS).
+
+Verification: the host suite (tools/test-rust.sh) at the final tree runs 2185 tests in 29 crates and fails none --
+view 16, lantern 30, inlinewire 5, halcyond 445 -- and the three bakes built every guest crate. Fourteen sabotages of
+the new code and data (S1-S14) each turned exactly its predicted tests red, and so did three of four on the side bound
+(SB1, SB3, SB4); SB2 also reddened fit_averages, whose 4x1 case at side 2 is width-bound, a wrong prediction rather
+than a gap; on the device, a spawn that tried the working directory first turned lantern.exp's leg (h) red both ways;
+and each leg added after the audit rounds was red on the image before its fix: the text fallback ran a planted `cat`
+from the working directory (the status arrived without the note), `lantern ''` opened `/slides.toml` at the root, and
+`view -- -zq.txt` refused the name as an invalid option. Device: three bakes at the final tree, eight gates green on
+one attempt each -- the CI image (`lantern` 41 s, `manual` 41 s), the session instrument image (`ls-halcyon-lantern`
+99 s, `ls-halcyon-lantern-haul` 74 s, `ls-gfx-session-image` 56 s, `ls-halcyon-session-media` 76 s) and the console
+Halcyon image (`ls-gfx-inline-view` 44 s, `ls-gfx-jpeg` 42 s) -- and the kernel suite on the CI image, 1782 of 1782,
+with debug-probe's three held legs and ambush-probe's stages C and D. No kernel change, so no sanitizer run or spec is
+owed.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

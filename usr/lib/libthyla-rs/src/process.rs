@@ -11,15 +11,16 @@
 //
 // V1.0 SCOPE:
 //   - SYS_SPAWN_FULL_ARGV: name + argv + cap_mask + perm_flags + a
-//     positional fd_list (0..MAX_FDS). At v1 we use the fd_list to
-//     express stdin/stdout/stderr (always exactly 3 entries -- the
-//     positional convention every POSIX-shaped tool expects).
-//   - Spawn looks up the binary in devramfs OR the pivoted root,
-//     same as the kernel's SYS_SPAWN_FULL_ARGV lookup -- callers pass
-//     a bare name (no slashes) per the SYS_SPAWN_NAME_MAX constraint.
+//     positional fd_list (0..MAX_FDS): the child's stdin, stdout and
+//     stderr at 0..2, then each `inherit_fd` in order.
+//   - The kernel resolves `name` as an open does: an absolute path from
+//     the Territory root, a relative one against the working directory.
+//     There is no search path, so a system program is named absolutely.
 //   - Inherited cap_mask defaults to the caller's full caps (`!0u64`);
 //     the kernel intersects with parent->caps so a child cannot gain
 //     capabilities the parent doesn't hold.
+//   - The child starts with a copy of the caller's Territory, working
+//     directory included, and of its environment.
 //
 // STDIO MODES:
 //   - `Stdio::Inherit` — child gets parent's same-position fd (0/1/2).
@@ -39,8 +40,9 @@
 //     field is reserved for envp pass-through but rejected non-zero at
 //     v1.0. Until the envp surface lands, environment is inherited
 //     wholesale (no per-Command override).
-//   - `current_dir`: SYS_CHROOT exists but is a Territory-wide
-//     operation; per-spawn cwd needs a different surface. v1.x.
+//   - `current_dir`: the child starts in the caller's working directory
+//     (`t_chdir` moves the caller's own); a per-spawn override needs a
+//     kernel surface that does not exist yet.
 //   - Status decoding beyond `success() == (status == 0)` and
 //     `code() == Some(status)`. Signal-terminated processes are
 //     surfaced via t::notes (U-2e); status decode that distinguishes
@@ -221,9 +223,11 @@ pub struct Command {
 }
 
 impl Command {
-    /// Construct a Command that will spawn the binary named `name`.
-    /// `name` is a single component (no `/`); the kernel looks it up
-    /// in devramfs OR the pivoted root.
+    /// Construct a Command that will spawn the binary at path `name`. The
+    /// kernel resolves it as it does an open: an absolute path from the
+    /// Territory root, a relative one against the working directory. There is
+    /// no search path, so a system program is named absolutely (`/bin/view`);
+    /// a bare `view` runs whatever file of that name the working directory holds.
     #[inline]
     pub fn new(name: impl Into<String>) -> Command {
         Command {

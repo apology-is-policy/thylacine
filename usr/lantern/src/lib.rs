@@ -13,6 +13,10 @@
 //! and the output cooking that clear implies. No I/O lives here; the binary
 //! supplies the files, the tier and the keystrokes.
 //!
+//! A picture slide (LANTERN-DESIGN 14) is shown by `view`, never decoded here:
+//! this half holds only the check on what `view --embed` answers and the
+//! stand-in a picture slide shows where the picture cannot be.
+//!
 //! A manifest carries CONTENT and ORDER, never display authority. It cannot
 //! set the scale, the theme or the font: those belong to the compositor and
 //! reach it through its own gated verbs, so a deck file someone mails you
@@ -83,6 +87,70 @@ pub fn slide_frame(paint: &mut dyn FnMut(&mut alloc::vec::Vec<u8>)) -> alloc::ve
     paint(&mut f);
     f.extend_from_slice(SYNC_END);
     f
+}
+
+/// The Markdown a picture slide shows where the picture cannot be: the file
+/// name set apart as an aside, and, when `view` was asked and failed, why.
+/// Rendered by `manual` like any slide, so it is framed in a tile, boxed on a
+/// console that reports its width, and plain text down a pipe. The name and the
+/// reason are sanitized, then every ASCII punctuation character in them is
+/// backslash-escaped, so each renders as the characters it holds and never as
+/// markup (`manual`'s subset honours a backslash before any ASCII punctuation).
+pub fn stand_in(name: &str, why: Option<&str>) -> alloc::string::String {
+    let mut s = alloc::string::String::from("> Picture: ");
+    escape_into(&mut s, name);
+    s.push('\n');
+    if let Some(why) = why {
+        s.push_str(">\n> Not shown: ");
+        escape_into(&mut s, why);
+        s.push('\n');
+    }
+    s
+}
+
+fn escape_into(out: &mut alloc::string::String, text: &str) {
+    for c in manual::sanitize(text, false).chars() {
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+}
+
+/// Whether `reply` is exactly what `view --embed` promises on success: one
+/// line holding one `inline-image` object, its reference 32 lowercase hex
+/// digits and its text printable, byte for byte as Beacon emits it. The reply
+/// is written inside the slide's frame and cooked with it, so anything else --
+/// a second line, a stray byte, a malformed frame -- is shown as a failure
+/// rather than written into a slide.
+pub fn is_reference(reply: &[u8]) -> bool {
+    use beacon::wire::{self, Event, Op};
+    let events = wire::parse(reply);
+    let [Event::Open(Op::Obj, args), Event::Text(shown), Event::Close(Op::Obj), Event::Text(end)] =
+        events.as_slice()
+    else {
+        return false;
+    };
+    let [ty, key] = args.as_slice() else {
+        return false;
+    };
+    let hex = |v: &str| v.len() == 32 && v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if end.as_slice() != b"\n"
+        || ty.key != "type"
+        || ty.value != "inline-image"
+        || key.key != "ref"
+        || !hex(&key.value)
+        || shown.is_empty()
+        || !shown.iter().all(|b| (0x20..=0x7e).contains(b))
+    {
+        return false;
+    }
+    let mut canon = alloc::vec::Vec::new();
+    wire::open(&mut canon, Op::Obj, &[("type", "inline-image"), ("ref", &key.value)]);
+    canon.extend_from_slice(shown);
+    wire::close(&mut canon, Op::Obj);
+    canon.push(b'\n');
+    canon == reply
 }
 
 /// Write `chunk` with every LF cooked to CR-LF.
@@ -189,11 +257,11 @@ mod tests {
             (include_str!("../deck/03-keys.md"), "Keys"),
         ];
 
-        // The shipped manifest names exactly these three, in this order -- which
-        // is what makes the gate's "3 / 3" footer token correct.
+        // The shipped manifest names these three and then the picture, in this
+        // order -- which is what makes the gate's "4 / 4" footer token correct.
         let d = crate::deck::parse(include_str!("../deck/slides.toml")).expect("the manifest");
-        assert_eq!(d.slides, ["01-title.md", "02-how.md", "03-keys.md"]);
-        assert_eq!(d.slides.len(), SLIDES.len());
+        assert_eq!(d.slides, ["01-title.md", "02-how.md", "03-keys.md", "04-lantern.png"]);
+        assert_eq!(d.slides.len(), SLIDES.len() + 1);
         assert_eq!(d.title.as_deref(), Some("Beacon slides"));
 
         let rendered = |src: &str, width: Option<usize>| -> alloc::string::String {
@@ -279,6 +347,146 @@ mod tests {
             assert_eq!(l.chars().count(), 40, "{:?}", l);
         }
         assert!(!rendered(SLIDES[1].0, None).contains('\u{2502}'));
+    }
+
+    /// A reference exactly as `view` writes one.
+    fn reference(key: &str, shown: &str) -> Vec<u8> {
+        let mut v = Vec::new();
+        beacon::wire::open(&mut v, beacon::wire::Op::Obj, &[("type", "inline-image"), ("ref", key)]);
+        v.extend_from_slice(shown.as_bytes());
+        beacon::wire::close(&mut v, beacon::wire::Op::Obj);
+        v.push(b'\n');
+        v
+    }
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn only_one_well_formed_reference_is_a_reference() {
+        let good = reference(KEY, "image 640x400");
+        assert!(is_reference(&good));
+        let mut two = good.clone();
+        two.extend_from_slice(&good);
+        let mut before = b"x".to_vec();
+        before.extend_from_slice(&good);
+        let mut after = good.clone();
+        after.extend_from_slice(b"x\n");
+        // Two replies the parser reads exactly as it reads the good one -- it
+        // accepts BEL as a terminator, and drops a frame it does not know whole
+        // -- so only the comparison with Beacon's own bytes refuses them.
+        let mut bel = Vec::new();
+        let mut i = 0;
+        while i < good.len() {
+            if good[i..].starts_with(b"\x1b\\") {
+                bel.push(0x07);
+                i += 2;
+            } else {
+                bel.push(good[i]);
+                i += 1;
+            }
+        }
+        let mut dropped = b"\x1b]1936;v1;blink\x1b\\".to_vec();
+        dropped.extend_from_slice(&good);
+        for same in [&bel, &dropped] {
+            assert_eq!(beacon::wire::parse(same), beacon::wire::parse(&good), "the premise");
+        }
+        for (bad, why) in [
+            (bel, "frames ended by BEL, not as Beacon writes them"),
+            (dropped, "a frame the parser drops"),
+            (Vec::new(), "empty"),
+            (good[..good.len() - 1].to_vec(), "no newline"),
+            (two, "two references"),
+            (before, "text before it"),
+            (after, "a second line"),
+            (reference(&KEY[1..], "image 640x400"), "a short key"),
+            (reference(&KEY.to_ascii_uppercase(), "image 640x400"), "an uppercase key"),
+            (reference(KEY, "image\n640x400"), "a line break in its text"),
+            (reference(KEY, "image \x1b[2J"), "an escape in its text"),
+            (reference(KEY, ""), "no text"),
+            (b"image 640x400\n".to_vec(), "no object at all"),
+        ] {
+            assert!(!is_reference(&bad), "{}", why);
+        }
+        let mut other = Vec::new();
+        beacon::wire::open(&mut other, beacon::wire::Op::Obj, &[("type", "path"), ("ref", KEY)]);
+        other.extend_from_slice(b"image 640x400");
+        beacon::wire::close(&mut other, beacon::wire::Op::Obj);
+        other.push(b'\n');
+        assert!(!is_reference(&other), "another object type");
+    }
+
+    fn plain(src: &str, width: Option<usize>) -> alloc::string::String {
+        let mut v: Vec<u8> = Vec::new();
+        manual::render::render(src, beacon::Tier::None, width, &mut |c| v.extend_from_slice(c));
+        alloc::string::String::from_utf8(v).expect("the plain tier is UTF-8")
+    }
+
+    #[test]
+    fn a_stand_in_is_the_name_set_apart_in_every_posture() {
+        let src = stand_in("04-lantern.png", None);
+        // Down a pipe: the text alone.
+        let piped = plain(&src, None);
+        assert!(piped.contains("Picture: 04-lantern.png"), "{:?}", piped);
+        assert!(!piped.contains('\u{2502}'), "no box without a width");
+        // On a console that reports a width: a box around it.
+        let boxed = plain(&src, Some(40));
+        let lines: Vec<&str> = boxed.lines().collect();
+        let top = lines.iter().position(|l| l.starts_with('\u{250c}')).expect("a box opens");
+        assert!(lines[top + 1].starts_with("\u{2502} Picture: 04-lantern.png"), "{:?}", lines);
+        assert!(lines.iter().any(|l| l.starts_with('\u{2514}')), "and closes");
+        // In a tile: one aside, holding the words.
+        let mut rich: Vec<u8> = Vec::new();
+        manual::render::render(&src, beacon::Tier::Rich, None, &mut |c| rich.extend_from_slice(c));
+        let events = beacon::wire::parse(&rich);
+        let asides = events
+            .iter()
+            .filter(|e| matches!(e, beacon::wire::Event::Open(beacon::wire::Op::Aside, _)))
+            .count();
+        assert_eq!(asides, 1);
+        assert!(beacon::wire::strip(&rich).windows(8).any(|w| w == b"04-lante"));
+    }
+
+    #[test]
+    fn a_stand_in_shows_its_text_as_written_never_as_markup() {
+        let src = stand_in("a*b*_c_`d`.png", Some("x [y](z) <w> #1 \x1b[2J done\\"));
+        let piped = plain(&src, None);
+        assert!(piped.contains("Picture: a*b*_c_`d`.png"), "{:?}", piped);
+        assert!(piped.contains("Not shown: x [y](z) <w> #1"), "{:?}", piped);
+        assert!(piped.contains("done\\"), "a trailing backslash is text, not a line break: {:?}", piped);
+        assert!(!piped.contains('\x1b'), "no control byte survives: {:?}", piped);
+        // The synthesized section is clean under the manual's own checker, apart
+        // from the title every real slide carries and this one has no use for.
+        let mut problems = Vec::new();
+        manual::format::check(None, &src, &mut |_, p| problems.push(p));
+        assert!(
+            problems.iter().all(|p| matches!(p, manual::format::Problem::NoTitle)),
+            "{:?}",
+            problems
+        );
+    }
+
+    /// The shipped deck's picture is one `view` shows: within the bytes it reads
+    /// and the pixels it decodes, and whole under its decoder. The amber the
+    /// session gate counts (tools/interactive/gfx_amber.py) is pinned here
+    /// against the picture itself; blue under 60 leaves out Halcyon's ember
+    /// accent, 0xE07840, and its blends with either theme's ground.
+    #[test]
+    fn the_shipped_picture_is_one_view_shows() {
+        let png: &[u8] = include_bytes!("../deck/04-lantern.png");
+        assert!(png.len() <= view::READ_CAP);
+        assert_eq!(view::sniff(png), view::Kind::Png);
+        let (w, h) = view::png_dimensions(png).expect("its headers");
+        assert!(view::within_pixel_budget(w, h, view::VIEW_MAX_PIXELS));
+        let r = view::decode_png(png).expect("it decodes");
+        assert_eq!((r.w, r.h), (640, 400));
+        let amber = |p: u32| {
+            let (red, green, blue) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+            red > 200 && (120..190).contains(&green) && blue < 60
+        };
+        assert!(amber(r.argb[200 * 640 + 346]), "the disc between two stripes");
+        assert!(!amber(r.argb[10 * 640 + 10]), "the ground is not amber");
+        let count = r.argb.iter().filter(|&&p| amber(p)).count();
+        assert!(count > 20_000, "a large amber area for a capture to find: {}", count);
     }
 
     /// The claim `cook` rests on: a Beacon frame never carries an LF, so a

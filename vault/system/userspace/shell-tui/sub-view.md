@@ -17,13 +17,16 @@ code:
   - usr/view/testdata/test.jpg
   - usr/view/testdata/test.png
   - usr/view/testdata/make-test-png.py
+  - usr/view/testdata/test-large.png
+  - usr/view/testdata/make-rgba16-png.py
+  - usr/view/src/testdata/rgba16.png
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
 abis: []
-design: ["docs/HALCYON.md"]
+design: ["docs/HALCYON.md", "docs/LANTERN-DESIGN.md section 14"]
 created: 2026-09-09
 updated: 2026-09-29
 ---
@@ -38,6 +41,10 @@ the transcript injection -- lives in [[sub-halcyond]]. The separate graphical si
 `gallery <path>` is [[sub-gallery]], which reuses this crate's decode and
 blits to its own tapestryd surface instead of the transcript.
 
+Two modes serve programs (2026-09-29, HALCYON 14.7's refinement of that date):
+`--check` decodes and shows nothing, and `--embed` places the picture and
+prints only its reference. [[sub-lantern]] is their first caller.
+
 The load-bearing design choice: **the image decode runs HERE, in the
 short-lived, unprivileged `view` process, never in halcyond** (the blast-radius
 amendment to 14.7's original "decode in halcyond"). A codec is a format-fuzz
@@ -47,14 +54,31 @@ pure-Rust fuzz-friendly posture is kept either way.
 
 ## Contract
 
-- `view <path>`: sniff the leading bytes. A recognized image (PNG or JPEG) ->
-  decode -> hand halcyond the raster over `/srv/halcyon` -> "view: <path> placed
-  inline (WxH)". A recognized image with no renderer channel (no `/srv/halcyon`,
-  or a short write) is NOT an error: view reports the decode ("... decoded WxH
-  ...; not displayed (why)") so it is useful standalone. Anything else ->
-  `cat <path>` (the operator's spec: "text would fallback to cat"). PNG and JPEG
-  share the same headers-only budget gate then decode-and-place path, factored
-  into `check_budget` + `place_decoded`.
+- `view [--check | --embed] <file | ->` (`parse_args`: exactly one operand,
+  `--` ends the options, the two modes exclude each other; otherwise exit 2).
+  `-` reads standard input (`read_input`), so a caller can hand `view` a file it
+  opened itself.
+- The interactive form (`Mode::Show`): sniff the leading bytes. A PNG or JPEG
+  decodes, is reduced to the pane's limit, and is placed -> "view: <path> placed
+  inline (WxH)", with ", reduced from W0xH0" when it was reduced, exit 0.
+  Decoded but not displayed -> "view: <path> decoded WxH (N argb px); not
+  displayed (why)", exit 1 (it was exit 0 until 2026-09-29, when `--check` took
+  over the standalone decode check). Anything else -> `cat <path>` (the
+  operator's spec: "text would fallback to cat"; standard input is written back
+  out), whose status is view's. `cat` is spawned as `CAT`, `/bin/cat`: a bare
+  name resolves against the working directory, so `view notes.txt` failed
+  wherever no `cat` sat beside the file and ran the one that did (audit
+  IMG-SLIDE r2 F1, 2026-09-29; `ls-gfx-inline-view`'s text-fallback leg). The
+  path follows `--`, so `view -- -n` shows the file `-n` rather than handing
+  cat an option (self-found beside r2; the leg's `-zq.txt` step).
+- `--check`: read, sniff, the headers-only budget, the full decode, nothing
+  shown. Exit 0 and silent, or one bare reason line on stderr (no `view:`
+  prefix, because the caller names the file) and exit 1. Never `cat`.
+- `--embed`: needs `/env/HALCYON_PLACE`, asked BEFORE the read and the decode
+  (`NO_CHANNEL`); decode, reduce, place, then write only the caption object and
+  a LF to stdout, exit 0. A failure is one bare reason on stderr with stdout
+  empty, exit 1. Its stdout's tier is not checked: the caller composes the
+  reference.
 - The wire it speaks is `inlinewire` (this dossier's other half), shared verbatim
   with halcyond's reader so writer and reader cannot drift: a 32-byte header
   (magic `HPL2`, format, w, h and u128 raster ID -- all integer fields LE) then w*h ARGB `u32`s as LE
@@ -96,10 +120,14 @@ not alpha). `jpeg_dimensions` reads the headers only (JPEG dims are 16-bit, so
 
 ### The channel writer (`view` bin)
 
-The bin flow: read (`slurp_capped`, 16 MiB cap) -> sniff -> **reject over-budget
-from the headers** (`check_budget` on `png_dimensions`/`jpeg_dimensions` +
-`within_pixel_budget` vs `VIEW_MAX_PIXELS` = 3 Mpx) -> `decode_png`/`decode_jpeg`
--> `drop(bytes)` -> `place_decoded` (`place_on_halcyon` + the standalone report).
+The bin flow: `parse_args` -> (`--embed` without a session channel fails here)
+-> `read_input` (`slurp_capped`, `READ_CAP` 16 MiB) -> `sniff` (`Kind::Other`
+in the interactive form -> `cat_fallback`) -> `decode`: **reject over-budget
+from the headers** (`within_budget` on `png_dimensions`/`jpeg_dimensions` +
+`within_pixel_budget` vs `VIEW_MAX_PIXELS` = 3 Mpx), then
+`decode_png`/`decode_jpeg` -> `drop(bytes)` -> `--check` exits 0, the
+interactive form runs `show` (`place_on_halcyon` + the report), `--embed` runs
+`place_on_halcyon` + `caption`.
 The decode runs on libthyla-rs's growable heap ([[sub-thyla-heap]], B-1c);
 `VIEW_MAX_PIXELS` = 3 Mpx is the real bound on the WORST decode mode's peak + the
 held input, checked before decode. The draw per pixel depends on the format. A
@@ -118,7 +146,7 @@ channel applies the current per-pane raster allowance downstream; a successful
 decode alone does not guarantee display admission. Both image
 arms produce a `Raster`; `Kind::Other` falls back to `cat`.
 
-`open_place_write` picks the channel (I-47, HALCYON.md 14.7.2). In a SESSION the
+`connect` picks the channel (I-47, HALCYON.md 14.7.2). In a SESSION the
 compositor put THIS pane's full address in `/env/HALCYON_PLACE`
 (`/srv/halcyon-<user>/<hex(token)>/place`); `view` opens it in a TWO-STEP
 (`split_service_addr` -> open the service root `/srv/halcyon-<user>` O_READ to
@@ -137,12 +165,32 @@ negotiated msize). The payload is the `&[u32]` reinterpreted as its LE bytes
 (aarch64 is little-endian, so the in-memory bytes ARE the wire bytes the reader
 reconstructs with `from_le_bytes`). The token never enters the payload -- it is
 the path, validated once by the server at the walk. On an absent service or a
-short write it returns `Err`, and the caller falls back to reporting the decode.
+short write it returns `Err`, and the caller reports the failure.
+
+**The fit (2026-09-29).** After connecting, `place_on_halcyon` has `read_limit`
+open `place` a second time `T_OREAD` (the upload's handle must start at offset
+0, which the channel requires) and read up to `LIMIT_TEXT_MAX + 1` bytes, which
+`inlinewire::parse_limit` accepts only in the canonical form. `fit(r, limit)`
+then reduces the raster: `fitted_size` takes the largest `w' x h'` with the
+source's aspect holding at most `limit` pixels and at most `MAX_SIDE` (8192,
+`inlinewire::MAX_W`/`MAX_H`, the header's own bound) on a side -- the width
+each bound allows, the narrowest winning, then `h' = w'h/w`, then both clamped
+so `w'h' <= limit`, never 0, never above the source -- and each new pixel is the AREA AVERAGE of the source pixels its span
+covers, colour weighted by alpha (straight alpha: a transparent pixel lends no
+colour), rounded to nearest. A read that fails or does not parse holds the
+raster to the side bound alone and lets the server judge its size; a limit that falls between the
+read and the upload is refused as before. The fit's peak is the source raster
+beside the reduced one (4 B/px each: at most 12 MiB + 4 MiB at the 3 Mpx budget
+and the 1 Mpx ceiling), below the decode's own peak, because the compressed
+input and the decoder's buffers are already freed.
 
 Session placement uses a fresh u128 raster ID, followed by a standalone Beacon
 `inline-image` caption with that ID. The text stream establishes output order;
-Halcyon's per-pane cache supplies the raster. Rich output is required when the
-per-pane endpoint is inherited, avoiding invisible placements through a pipe.
+Halcyon's per-pane cache supplies the raster. The interactive form requires
+rich output when the per-pane endpoint is inherited, avoiding invisible
+placements through a pipe; `--embed` hands the reference to its caller instead,
+and without a session channel it refuses, because the console path carries no
+reference.
 Console placement retains ID zero and direct transcript insertion.
 
 ### inlinewire (the shared wire, pure, zero deps)
@@ -156,9 +204,18 @@ so a `Some` result is safe to size an allocation from (`payload_len`/`total_len`
 cannot overflow). This is the first line of the format-fuzz defense; halcyond's
 `inlineaccum` adds the heap-safe per-image cap on top.
 
+The limit text is inlinewire's too (2026-09-29): `limit_text` formats the
+channel's current per-image cap as ASCII decimal and a LF (`LIMIT_TEXT_MAX` =
+21 bytes, the 20 digits of `u64::MAX` and the newline), `limit_read(px, offset,
+count, buf)` returns the window a 9P read at `offset` for `count` covers (end of
+file past the text; the arithmetic saturates), and `parse_limit` accepts exactly
+that text: digits with no leading zero, one LF, checked arithmetic, non-zero.
+Both of halcyond's servers answer a read of `place` with it ([[sub-halcyond]]).
+
 ## Data structures
 
 - `Kind` (`view`) -- Png / Jpeg / Other, from `sniff`.
+- `Mode` (`view` bin) -- Show / Check / Embed, from `parse_args`.
 - `Raster` (`view`) -- `{ w, h, argb: Vec<u32> }`, w-tight `0xAARRGGBB` rows.
 - `PlaceHeader` (`inlinewire`) -- `{ id, format, w, h }`; `MAGIC`/`FORMAT_ARGB8888`/
   `HEADER_LEN`=32/`MAX_W`=`MAX_H`=8192/`MAX_PIXELS`=16 Mpx.
@@ -177,20 +234,29 @@ halcyond); the handoff is a bounded WRITE, not shared memory (Weft needs
 format is validated at the header before either side allocates. The RESOURCE
 bound and the enforcement of the parse against hostile bytes are the reader's
 ([[sub-halcyond]] `inlineaccum` + [[haz-budget-stored-not-derived]] in spirit).
+The fit runs here too, so the reduced raster is computed in the sacrificial
+process; and the limit read is additive: the header wire is unchanged, an old
+client never reads, and an unparseable answer degrades to the old behaviour,
+where the server refuses an over-cap upload.
 
 ## Error paths
 
-- Non-UTF-8 / missing operand -> usage, exit 2.
-- Open / read failure -> "view: <path>: ..." to stderr, exit 1.
-- Decode failure (malformed PNG) -> "view: <path>: <reason>", exit 1.
-- Decode OK but no channel / short write -> the decode is REPORTED (not an error
-  exit): the decode succeeded, only the display did not.
-- Not an image -> `cat` (its exit status is view's).
+- A non-UTF-8 argument, no operand or two, an unknown option, both modes ->
+  a diagnostic and the usage, exit 2.
+- The interactive form: an open or read failure -> "view: <path>: cannot
+  open|read: ..." and a decode failure -> "view: <path>: <reason>", both exit
+  1; decoded but not displayed -> the report, exit 1; not an image -> `cat`
+  (its exit status is view's).
+- `--check` and `--embed`: every failure is ONE bare reason line on stderr and
+  exit 1 -- `cannot open: ...`, `larger than the 16 MiB view reads`, `not a PNG
+  or JPEG picture`, `image too large (WxH; over the 3 Mpx budget)`, a decoder's
+  reason, `NO_CHANNEL`, a channel failure, `cannot write the reference`.
 
 ## Performance
 
 A one-shot: one file read (`slurp_capped`, 16 MiB cap), a headers-only
-dimension read, one zune decode (`bytes` freed after), one channel
+dimension read, one zune decode (`bytes` freed after), one read of the pane's
+limit, one pass over the source pixels when it must be reduced, one channel
 write. No steady state.
 
 ## Prosecution
@@ -213,6 +279,22 @@ write. No steady state.
 - **The wire against drift.** `inlinewire::parse` validates before it returns;
   the pack/parse round-trip + the bounds rejections are host-tested; the magic
   reads as `HPL2` in a hexdump (a true-comment/wrong-value guard).
+- **The fit's arithmetic.** `fitted_size` works in u64 (`max_px * w`
+  saturates; the square root's Newton step from `n/2 + (n&1)` cannot overflow);
+  `fit` sums each block in u64 (a block is at most the whole 8192x8192 source:
+  255 * 2^26 * 255 < 2^64) and returns the raster unchanged when
+  `argb.len() != w*h` rather than index past it. Tests:
+  `isqrt_rounds_down_everywhere_it_is_asked`,
+  `a_fitted_size_keeps_the_aspect_under_the_limit` (exact figures, the side
+  bound, and a grid property), `fit_averages_what_each_new_pixel_covers`,
+  `fit_tiles_the_source_exactly`, each sabotaged red.
+- **The limit text.** `parse_limit` refuses everything `limit_text` does not
+  write (a leading zero, a sign, a space, a second LF, overflow, zero), and
+  `limit_read`'s window saturates for any offset and count; inlinewire's three
+  limit tests, each sabotaged red. halcyond's two `h_read`s live in bin-only
+  modules, so the device fit legs exercise them.
+- **The program modes' contract.** Every exit path's status; `--embed`'s stdout
+  carries nothing but the reference; its channel check precedes the read.
 - **The handoff trust direction.** A bounded WRITE to a per-endpoint service, not
   a shared mapping; `view` holds no elevated capability; an absent renderer is a
   clean fallback, never a hang.
@@ -230,8 +312,10 @@ write. No steady state.
   ([[sub-beacon]]).
 - The per-user SESSION-path channel LANDED (halcyond's `paneplace.rs`, see
   [[sub-halcyond]]): `view` now prefers the per-pane `/env/HALCYON_PLACE` address
-  (`/srv/halcyon-<user>/<hex(token)>/place`) via `open_place_write`, falling back
+  (`/srv/halcyon-<user>/<hex(token)>/place`) via `connect`, falling back
   to the console `/srv/halcyon` only when that env is absent.
+- [[sub-lantern]] is the first caller of `--check` and `--embed`; its
+  `is_reference` accepts only the exact bytes `caption` writes.
 
 ## Caveats
 
@@ -241,7 +325,11 @@ write. No steady state.
 - The witness card `usr/view/testdata/test.png` (+ `make-test-png.py`, stdlib
   zlib) is the PNG E2E fixture, baked to `/test.png` under `THYLACINE_HALCYON=1`;
   `testdata/test.jpg` (the same card re-encoded) is the JPEG one, baked to
-  `/test.jpg`. Three `src/testdata/*.jpg` lib fixtures: `quad.jpg` (32x32 colour,
+  `/test.jpg`. `testdata/test-large.png` (`make-test-png.py large`, the same card
+  at 2048x1536: 3 Mi pixels, the decode budget, three times the largest pane
+  limit) is baked to `/test-large.png`, and the fit legs of
+  `ls-gfx-inline-view` and `ls-gfx-session-image` show it only if `view` read
+  the limit and reduced the raster. Three `src/testdata/*.jpg` lib fixtures: `quad.jpg` (32x32 colour,
   baseline -- `decode_jpeg_quadrants_to_argb` asserts APPROXIMATE colours in a
   +-48 band, JPEG being lossy), `gray.jpg` (16x16 grayscale -- the Luma arm, every
   px r==g==b), and `prog.jpg` (32x32 SOF2 PROGRESSIVE -- the coefficient-buffer
@@ -250,7 +338,10 @@ write. No steady state.
   the pool bake and host tests need no encoder. `src/testdata/rgba16.png` (2x2
   RGBA at 16 bits a sample, from `testdata/make-rgba16-png.py`) feeds
   `decode_png_takes_the_top_byte_of_a_16_bit_sample`, red without the strip. `view`
-  lib tests: 12.
+  lib tests: 16.
+- The fit averages gamma-encoded (sRGB) values, not linear light, so a reduced
+  high-contrast pattern comes out a little darker than a linear-light average
+  would. `gallery` scales for display with its own code and does not use it.
 - The `decode_jpeg`/`gallery` `Jpeg` E2E is `tools/interactive/ls-gfx-jpeg.exp`
   (view inline + gallery fullscreen, HVF, SKIP-clean on aurora).
 

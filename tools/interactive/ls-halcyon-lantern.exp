@@ -47,6 +47,13 @@
 #      Slide one is the control one keystroke away: a frame both slides show is
 #      the tile's, not the deck's. On the image before the aside, slide two
 #      shows none.
+#  10. The picture slide SHOWS THE PICTURE (LANTERN-DESIGN 14). lantern has
+#      `view --embed` place it over the pane's own channel -- halcyond says on
+#      the serial line that a 640x400 raster reached a tile -- and writes the
+#      reference inside the slide's frame, so the capture holds the picture's
+#      amber. Slide three, a text slide, is the control one keystroke before
+#      it. Without the reference the raster sits in the tile's cache undrawn;
+#      without the upload the slide is the stand-in, which has no amber.
 #
 # The captures are kept at build/lantern-rich-*.png whatever the verdict: the
 # reason to run this is as much to LOOK at the result as to gate it, and a gate
@@ -103,6 +110,12 @@ proc band {png} {
 proc top {png} {
     global repo
     return [exec python3 $repo/tools/interactive/gfx_ink.py $png --rect 0 0.03 0.9 0.35]
+}
+# Pixels of the picture slide's amber (gfx_amber.py), the predicate lantern's
+# host test the_shipped_picture_is_one_view_shows pins against the file itself.
+proc amber {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_amber.py $png]
 }
 # The closed hairline frames in a capture, one list per frame:
 # {x0 y0 x1 y1 ink filled left top right bottom colour} (gfx_frame.py).
@@ -253,6 +266,39 @@ if {$held >= 1000} {
     lc_fail "the session loop spun while the frame held its paint ($held passes)"
 }
 lc_pass "ls-halcyon-lantern(8): a slide change is one synchronized frame -- the tile held $held paint(s) until it closed$late"
+
+# (10) The picture slide. SPACE shows slide three, the control; SPACE again shows
+# the picture. The witness line is the upload reaching the tile; the amber is the
+# reference resolving inside the slide. The chrome is the same in both captures,
+# so the difference is the slide's own, and the text slide is asked to hold
+# little amber of its own, or the difference could not tell the two apart.
+type " "
+set three [capture slide3]
+type " "
+set timeout 60
+expect {
+    -re {halcyond: session inline leaf=[0-9]+ 640x400} {}
+    -re {halcyond: session inline leaf=[0-9]+ cache refused} {
+        lc_fail "the picture reached the tile but its raster cache refused it"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "picture slide" }
+    timeout {
+        lc_fail "no 'session inline' line after the picture slide: lantern's view --embed placed nothing (the pane's channel, the limit read or the upload)"
+    }
+    eof { lc_fail "EOF waiting for the picture's placement" }
+}
+set timeout 120
+set four [capture slide4-picture]
+set amber_three [amber $three]
+set amber_four [amber $four]
+lc_step "amber pixels: slide three (text) $amber_three, slide four (the picture) $amber_four"
+if {$amber_three > 5000} {
+    lc_fail "premise: the text slide already holds $amber_three amber pixels, so amber cannot tell the picture apart"
+}
+if {$amber_four - $amber_three < 10000} {
+    lc_fail "the picture slide adds only [expr {$amber_four - $amber_three}] amber pixels: the raster was placed but the slide did not show it (the reference), or the stand-in was drawn"
+}
+lc_pass "ls-halcyon-lantern(10): the picture slide shows the picture in the tile ($amber_four amber pixels against the text slide's $amber_three)"
 
 # (5) TC-1, the operator's "lantern doesn't clear". Before the fix the view
 # bottom-anchored the live tail, so after a clear the slide sat at the BOTTOM of

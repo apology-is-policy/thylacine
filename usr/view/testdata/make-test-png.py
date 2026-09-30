@@ -10,9 +10,16 @@
 # transposed/mis-strided decode is obvious.
 
 import struct
+import sys
 import zlib
 
-W, H = 640, 400
+# `make-test-png.py large` writes the same card at 2048x1536 (test-large.png):
+# 3 Mi pixels, view's own decode budget and three times the largest per-image
+# limit a pane admits, so view must reduce it to show it (HALCYON.md 14.7, the
+# 2026-09-29 refinement).
+LARGE = sys.argv[1:] == ["large"]
+W, H = (2048, 1536) if LARGE else (640, 400)
+OUT = "test-large.png" if LARGE else "test.png"
 BARS = [
     (0xE0, 0x20, 0x20),  # red
     (0x20, 0xE0, 0x20),  # green
@@ -54,9 +61,9 @@ def main():
     idat = zlib.compress(bytes(raw), 9)
     png = sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
-    with open("test.png", "wb") as f:
+    with open(OUT, "wb") as f:
         f.write(png)
-    print("wrote test.png: {}x{} RGB, {} bytes".format(W, H, len(png)))
+    print("wrote {}: {}x{} RGB, {} bytes".format(OUT, W, H, len(png)))
 
 
 if __name__ == "__main__":

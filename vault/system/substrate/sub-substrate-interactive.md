@@ -554,3 +554,22 @@ pipes, and `haul-post`'s `MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE`.
 With the kernel's two stamps removed (and the two kernel tests that catch that
 unregistered, so the boot reaches a login), each gate passed every earlier leg
 and failed there, its line reading `/` (2026-09-29).
+
+The image slide (2026-09-29, aux (d2)): `ls-gfx-inline-view` and
+`ls-gfx-session-image` each end with a fit leg, `view /test-large.png`: the
+witness card at 2048x1536, three times the largest per-image limit a channel
+admits and exactly `view`'s decode budget. The console gate reads `view`'s
+`placed inline (WxH, reduced from 2048x1536)` and halcyond's injection line of
+the same size; the session gate reads halcyond's `session inline leaf=N WxH`,
+because `view`'s own line is tile pixels there. Neither pins the size, which
+follows the renderer's heap, the display and the pane count; both require it
+within 64 Ki to 1 Mi pixels with the card's 4:3 aspect (`|w*1536 - h*2048| <
+2048`, a pixel of rounding). Before the limit read an over-limit upload was
+refused `E_INVAL`: `view` said `not displayed` and the session gate saw no
+witness, so each leg fails without the read or the fit. `ls-gfx-inline-view`
+then runs `view note.txt` from a directory holding an executable copy of `echo`
+named `cat`: only `/bin/cat` prints the note's line (typed as two quoted words,
+so it never appears in the typed text), and the status line arriving without it
+is the red arm; `view -- -zq.txt` then shows a file whose name starts with `-`,
+which a cat handed no `--` refuses as an invalid option. `lantern.exp` leg (i)
+refuses `lantern ''` as a usage error.

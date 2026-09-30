@@ -101,8 +101,9 @@ fn qid_of(node: Node) -> p9::Qid {
 fn mode_of(node: Node) -> u32 {
     match node {
         // The dirs are r-x for all so the kernel dev9p per-component X-search
-        // passes; `place` is world-writable so the pane's `view` may open it
-        // O_WRONLY. The gate is the peer principal at accept; the token routes.
+        // passes; `place` is world-readable and -writable so the pane's `view`
+        // may read its limit and write a raster. The gate is the peer principal
+        // at accept; the token routes.
         Node::Root | Node::Dir(_) => S_IFDIR | 0o555,
         Node::Place(_) => S_IFREG | 0o666,
     }
@@ -280,7 +281,7 @@ impl Conn {
             p9::P9_TATTACH => self.h_attach(tmsg, tag),
             p9::P9_TWALK => self.h_walk(tmsg, tag, routes, diag),
             p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
-            p9::P9_TREAD => self.h_read(tmsg, tag),
+            p9::P9_TREAD => self.h_read(tmsg, tag, budget.max_pixels),
             p9::P9_TWRITE => self.h_write(tmsg, tag, out, routes, budget, diag),
             p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
@@ -429,7 +430,7 @@ impl Conn {
         p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.node), 0)
     }
 
-    fn h_read(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -445,8 +446,12 @@ impl Conn {
         if is_dir(f.node) {
             return self.err(tag, p9::E_ISDIR);
         }
-        // `place` is write-only: a read returns EOF (an empty Rread), never data.
-        p9::build_rread(&mut self.out_buf, tag, &[])
+        // A read of `place` answers the per-image limit a new transfer is held
+        // to now, so `view` fits its raster before the header rather than
+        // learning the cap from a refusal.
+        let mut text = [0u8; inlinewire::LIMIT_TEXT_MAX];
+        let data = inlinewire::limit_read(max_pixels, a.offset, a.count, &mut text);
+        p9::build_rread(&mut self.out_buf, tag, data)
     }
 
     fn h_write(

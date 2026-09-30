@@ -262,7 +262,12 @@ configuration at `/lib/dosbox-x/dosbox-x.conf`, plus optional Duke3D and Tomb
 Raider fixture stages. Emulator opt-out also skips its game data. Missing
 external C++ tooling is announced as a skipped build, not emulator coverage.
 View, Gallery, Manual, Nocturne and their probes are curated into the native
-ramfs binary list. `configs/ci.config` selects a serial shell for existing
+ramfs binary list. Under either Halcyon lever (`THYLACINE_HALCYON` or
+`THYLACINE_HALCYON_SESSION`) the pool also carries the inline-media fixtures
+from `usr/view/testdata`, each readback-verified: `/test.png` and `/test.jpg`
+(the 640x400 witness card) and, since 2026-09-29, `/test-large.png` (the same
+card at 2048x1536, which a pane shows only after `view` reduces it to the
+pane's limit). `configs/ci.config` selects a serial shell for existing
 interactive scenarios; the default profile starts the Halcyon session.
 Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
 

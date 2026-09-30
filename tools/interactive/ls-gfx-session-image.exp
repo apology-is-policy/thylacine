@@ -26,6 +26,14 @@
 # success-specific (it fires only when a completed raster injects), never the
 # harness. A silent channel failure prints no witness and the E2E fails.
 #
+# THE FIT (HALCYON.md 14.7, the 2026-09-29 refinement): /test-large.png is the
+# same card at 2048x1536, three times the largest per-image limit a pane admits.
+# view reads its pane's limit from `place` and reduces the raster before the
+# upload; an upload over the limit is refused and no witness line follows. The
+# reduced size is not pinned -- the limit follows the display and the number of
+# panes -- only that it lies within the channel's limits and keeps the card's
+# 4:3 aspect.
+#
 # GATED ON THE SESSION LEVER (the ls-gfx-session precedent): the pool carries
 # /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1, and the
 # widened bake (build.sh) puts /test.png in a session build too. On a default
@@ -197,5 +205,36 @@ lc_pass "session image: the decoded image is on the screen in a composited tile 
 # Preserve the witness image for review (the operator's screenshot).
 catch {file copy -force /tmp/ls-gfx-session-image-post.png $repo/build/ls-gfx-session-image.png}
 lc_step "session image: witness image saved to build/ls-gfx-session-image.png"
+
+# THE FIT. A picture three times the largest limit a pane admits routes reduced.
+after 800
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "view /test-large.png\n"} err]} {
+    lc_fail "qmp-sendtext view /test-large.png failed: $err"
+}
+set timeout 60
+expect {
+    -re {halcyond: session inline leaf=[0-9]+ ([0-9]+)x([0-9]+) } {
+        set fw $expect_out(1,string)
+        set fh $expect_out(2,string)
+    }
+    -re {halcyond: session inline leaf=[0-9]+ cache refused} {
+        lc_fail "the reduced raster routed but the tile's raster cache refused it"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the reduced view" }
+    timeout {
+        lc_fail "no 'halcyond: session inline' line after `view /test-large.png` -- no reduced raster reached a tile (the limit read, the fit, or an over-limit upload refused)"
+    }
+    eof { lc_fail "qemu exited during the reduced view" }
+}
+if {$fw == 640 && $fh == 400} {
+    lc_fail "the witness named the 640x400 card again, not the reduced large one"
+}
+if {$fw * $fh > 1048576 || $fw * $fh < 65536} {
+    lc_fail "the large card reached the tile at ${fw}x${fh}, outside the channel's limits of 64 Ki to 1 Mi pixels"
+}
+if {abs($fw * 1536 - $fh * 2048) >= 2048} {
+    lc_fail "the 4:3 card reached the tile at ${fw}x${fh}, its aspect lost"
+}
+lc_pass "session image: a 2048x1536 picture was reduced to the pane's limit (${fw}x${fh}) and routed to its tile"
 
 lc_quit
