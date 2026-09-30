@@ -4,7 +4,7 @@ type: chg
 title: "The image slide: a deck names a picture, and view shows it"
 date: 2026-09-30
 arc: arc-tapestry
-commits: ["*(pending)*"]
+commits: ["2f2cff77"]
 touched:
   - sub-view
   - sub-lantern

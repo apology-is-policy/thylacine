@@ -915,7 +915,7 @@ on 2026-09-30. Scripture 9bfa3041 (DELVE-PORT-DESIGN section 7 (b) and section 1
 
 Operator vote 3 of 2026-09-28, "manifest names it, view shows it". Closes FABLE-1 F5, the finding the I-47 close left
 to this chunk. Scripture 5ea03715 (LANTERN-DESIGN 5, 8 and the new 14; HALCYON 14.7's 2026-09-29 refinement; ARCH 28's
-I-47 row; the HPL2 AUDIT-TRIGGERS row's addendum; the index line; `dec-2026-09-29-image-slide`). Code *(pending)*.
+I-47 row; the HPL2 AUDIT-TRIGGERS row's addendum; the index line; `dec-2026-09-29-image-slide`). Code 2f2cff77.
 
 - **view's program modes (F5).** `--check` decodes and shows nothing; `--embed` places the picture and prints only its
   reference. Neither passes a file to `cat`; each exits 0 only on success and reports one bare reason line. The
