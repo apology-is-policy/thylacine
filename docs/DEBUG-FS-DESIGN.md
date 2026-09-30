@@ -339,7 +339,10 @@ must make the same call (its row in `dump_seal_disclosure` is what catches one t
 does not). `name`, the exe path's basename stamped at exec, is ledger: `status`,
 `sched` and `/ctl/procs` carry it, as Linux keeps a non-dumpable process's `comm`
 public.
-(`cmdline` carries no argv yet; it is in the set so that argv arrives sealed.)
+(`cmdline` carries no argv yet. Its place in the set seals argv only if argv is rendered
+from a per-Proc kernel copy, as `environ` is: argv read off the stack would read through a
+vfork child that shares the stack under its own, unsealed Proc, unless `cmdline` also
+joins `mem` and `maps` in the image join.)
 
 **Two properties of the enforcement, both deliberate.**
 
