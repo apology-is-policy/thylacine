@@ -362,13 +362,10 @@ handful of times per boot. Not a hot surface.
   only ever see a hostowner grant.
 - A failed gate must not consume the grant.
 - Any future cap mutation must be atomic on `p->caps`; it has a cross-thread
-  writer.
+  writer. Every gate reads it with an acquire load, the two `/grant` register
+  gates included since 2026-09-29 ([[seam-devcap-plain-caps-read]], closed).
 
 ## Seams
-
-[[seam-devcap-plain-caps-read]] — the two `/grant` register gates still read
-`writer->caps` with a plain load, the last two stragglers of a sweep that
-converted every other capability gate in the tree.
 
 `caps.h` records a forward-looking obligation for the day a cap-drop syscall
 lands: it must refuse with `-EBUSY` if dropping `CAP_HW_CREATE` would leave

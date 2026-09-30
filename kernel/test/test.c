@@ -236,6 +236,8 @@ void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_legate_teardown_from_zombie_chokepoint(void);
 void test_proc_rfork_refused_while_terminating(void);   // IM-2: the straggler close
+void test_proc_walk_deep_chain(void);
+void test_proc_walk_preorder_and_early_exit(void);
 void test_pgrp_defaults_and_inherit(void);
 void test_pgrp_setsid_semantics(void);
 void test_pgrp_setpgid_rule_matrix(void);
@@ -871,6 +873,10 @@ void test_cons_graphical_seat_service_death(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
+void test_cons_episode_mode_write_straddling_begin(void);
+void test_cons_episode_feed_straddling_begin(void);
+void test_cons_episode_repeat_sak_keeps_saved_owner(void);
+void test_cons_episode_fixture_fails_clean(void);
 void test_proc_console_relinquish(void);
 void test_proc_console_relinquish_other_owner(void);
 void test_cons_console_open(void);
@@ -2109,6 +2115,9 @@ struct test_case g_tests[] = {
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.rfork_refused_while_terminating",
                                        test_proc_rfork_refused_while_terminating, false, NULL },
+    { "proc.walk_deep_chain",          test_proc_walk_deep_chain,          false, NULL },
+    { "proc.walk_preorder_and_early_exit",
+                                       test_proc_walk_preorder_and_early_exit, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
     { "proc.wait_pid_for_wnohang_alive_then_reap",
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
@@ -2901,6 +2910,14 @@ struct test_case g_tests[] = {
                                        test_cons_episode_trusted_death_ends, false, NULL },
     { "cons.episode_saved_owner_death",
                                        test_cons_episode_saved_owner_death, false, NULL },
+    { "cons.episode_mode_write_straddling_begin",
+                                       test_cons_episode_mode_write_straddling_begin, false, NULL },
+    { "cons.episode_feed_straddling_begin",
+                                       test_cons_episode_feed_straddling_begin, false, NULL },
+    { "cons.episode_repeat_sak_keeps_saved_owner",
+                                       test_cons_episode_repeat_sak_keeps_saved_owner, false, NULL },
+    { "cons.episode_fixture_fails_clean",
+                                       test_cons_episode_fixture_fails_clean, false, NULL },
     { "proc.console_relinquish",       test_proc_console_relinquish,       false, NULL },
     { "proc.console_relinquish_other", test_proc_console_relinquish_other_owner, false, NULL },
     { "cons.console_open",             test_cons_console_open,             false, NULL },

@@ -801,14 +801,24 @@ u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATO
 // of kproc, and orphans re-parent on exit to init-else-kproc per
 // proc_reparent_children — both stay inside the kproc-rooted tree).
 
-// Recursive helper. PRECONDITION: caller holds g_proc_table_lock.
+// The Proc after `q` in a pre-order walk of `root`'s subtree; NULL once the walk
+// is done. Nothing bounds the tree's DEPTH -- PROC_CHILD_MAX caps a parent's
+// children, and an EL0 program can build P1 -> P2 -> ... -> PN with one child
+// each -- so no walk may spend a stack frame per level on a 16 KiB kernel stack;
+// the parent and sibling links already hold the return path. PRECONDITION: the
+// caller holds g_proc_table_lock, which keeps the links stable across the walk:
+// they are written only by fork, the reap, and a dying Proc's own exit, never
+// from inside a walk.
+static struct Proc *proc_walk_next(const struct Proc *root, struct Proc *q) {
+    if (q->children) return q->children;
+    while (q && q != root && !q->sibling) q = q->parent;
+    return (!q || q == root) ? NULL : q->sibling;
+}
+
+// PRECONDITION: caller holds g_proc_table_lock.
 static struct Proc *proc_find_by_pid_walk(struct Proc *root, int pid) {
-    if (!root) return NULL;
-    if (root->pid == pid) return root;
-    for (struct Proc *child = root->children; child; child = child->sibling) {
-        struct Proc *r = proc_find_by_pid_walk(child, pid);
-        if (r) return r;
-    }
+    for (struct Proc *q = root; q; q = proc_walk_next(root, q))
+        if (q->pid == pid) return q;
     return NULL;
 }
 
@@ -819,15 +829,12 @@ struct Proc *proc_find_by_pid(int pid) {
     return p;
 }
 
-// Recursive iterate. Returns first non-zero callback result; 0 if all
-// callbacks returned 0. PRECONDITION: caller holds g_proc_table_lock.
+// Pre-order. Returns the first non-zero callback result; 0 if all callbacks
+// returned 0. PRECONDITION: caller holds g_proc_table_lock.
 static int proc_for_each_walk(struct Proc *root,
                               int (*cb)(struct Proc *, void *), void *arg) {
-    if (!root) return 0;
-    int rv = cb(root, arg);
-    if (rv) return rv;
-    for (struct Proc *child = root->children; child; child = child->sibling) {
-        rv = proc_for_each_walk(child, cb, arg);
+    for (struct Proc *q = root; q; q = proc_walk_next(root, q)) {
+        int rv = cb(q, arg);
         if (rv) return rv;
     }
     return 0;
@@ -2422,8 +2429,12 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
             // hand the Ctrl-C target back. Only a LIVE owner is worth saving;
             // a NULL owner (a session between logins) keeps the previously
             // saved one -- the shell that lost its Ctrl-C at an earlier
-            // unarmed SAK gets it back at the next episode's END.
-            g_console_owner_pre_sak = owner;
+            // unarmed SAK gets it back at the next episode's END. A SAK
+            // repeated while an episode is open saves nothing: that episode's
+            // END restores the owner from before it began, not a claimant
+            // that took the empty slot since. Stable here: BEGIN, END and
+            // every abandon run under g_proc_table_lock, which this holds.
+            if (!cons_episode_active()) g_console_owner_pre_sak = owner;
         }
 
         // (2) Re-grant the console-ATTACH (elevation authority) to the trusted
@@ -2593,18 +2604,10 @@ void proc_mark_seat_manager(struct Proc *p) {
 // g_proc_table_lock, which every caller already holds (the /proc gates run
 // inside proc_for_each; the seal and the redeem take it themselves).
 //
-// WHY THIS TRAVERSAL IS ITERATIVE AND proc_for_each_walk IS NOT USED. That
-// helper descends one C frame per tree LEVEL, and these run INSIDE a walk that
-// is already doing exactly that -- so a recursive join would put two full-depth
-// recursions on one 16 KiB kernel stack. Nothing bounds the tree's DEPTH:
-// PROC_CHILD_MAX caps a parent's children (breadth), and no global Proc count or
-// ancestry limit exists, so an EL0 program can build P1 -> P2 -> ... -> PN with
-// one child each. The path is unprivileged-reachable -- /proc/<pid>/maps is mode
-// 0444 and its read asks the seal, which asks the join. The sibling and parent
-// links already encode the return path a stack frame would have held, so the
-// same traversal costs O(1) stack here. (The pre-existing recursion in
-// proc_for_each_walk is its own problem and is tracked separately; this chunk
-// declines to double it.)
+// These run INSIDE a walk -- /proc/<pid>/maps is mode 0444, and its read asks
+// the seal, which asks the join -- so they nest a second traversal in the first.
+// Both step with proc_walk_next, so the nesting costs no stack per tree level
+// however deep an EL0 program builds the tree.
 //
 // WHO COUNTS AS A MAPPER: every Proc in the table whose `as` is the target's,
 // whatever its state -- zombies INCLUDED for the caps and flags union. A zombie
@@ -2621,19 +2624,11 @@ struct proc_image_walk {
     u32                   bits;      // the stamp's payload
 };
 
-// Visit every Proc in the table, without recursion. Caller holds
-// g_proc_table_lock, which is what makes the links stable across the walk.
+// Visit every Proc in the table. Caller holds g_proc_table_lock.
 static void proc_image_visit(void (*fn)(struct Proc *, struct proc_image_walk *),
                              struct proc_image_walk *w) {
     struct Proc *root = kproc();
-    struct Proc *q = root;
-    while (q) {
-        fn(q, w);
-        if (q->children) { q = q->children; continue; }
-        while (q && q != root && !q->sibling) q = q->parent;
-        if (!q || q == root) break;
-        q = q->sibling;
-    }
+    for (struct Proc *q = root; q; q = proc_walk_next(root, q)) fn(q, w);
 }
 
 static void proc_image_join_one(struct Proc *q, struct proc_image_walk *w) {

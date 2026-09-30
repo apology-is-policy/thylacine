@@ -2158,14 +2158,11 @@ u64 proc_total_destroyed(void);
 struct Proc *proc_find_by_pid(int pid);
 
 // proc_for_each: invoke callback(p, arg) for every Proc in the tree
-// (DFS from kproc). The callback returns 0 to continue, non-zero to
-// stop early. Returns the last callback return value (0 if iteration
-// completed). g_proc_table_lock held throughout — callbacks must not
-// re-enter proc_find_by_pid / rfork / exits / wait_pid / proc_for_each.
-//
-// Used by future devproc readdir (when 9P readdir lands at Phase 4+).
-// Not called at v1.0 P4-C; declared here so the API is stable for
-// the future caller.
+// (pre-order DFS from kproc, without recursion: a walk costs the same stack
+// however deep EL0 builds the tree). The callback returns 0 to continue,
+// non-zero to stop early. Returns the last callback return value (0 if
+// iteration completed). g_proc_table_lock held throughout — callbacks must
+// not re-enter proc_find_by_pid / rfork / exits / wait_pid / proc_for_each.
 int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg);
 
 // The calling-convention-free parent read (#150, the VIVARIUM getppid row).

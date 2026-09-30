@@ -972,6 +972,32 @@ Halcyon image (`ls-gfx-inline-view` 44 s, `ls-gfx-jpeg` 42 s) -- and the kernel 
 with debug-probe's three held legs and ambush-probe's stages C and D. No kernel change, so no sanitizer run or spec is
 owed.
 
+## The kernel chunk: the trusted episode's lock re-checks, and walks without recursion — 2026-09-30
+
+Item (5) of the 2026-09-28 work order: the kernel findings of the owed Fable-diversity passes (IM-1..2 and H3+C,
+read-only on aux-3 9e2e28a2). Scripture 29f74063 (IMPERIUM 11.3 refinement 9, 11.4 refinement 2 and 11.5; DEBUG-FS-DESIGN's
+cmdline sentence; AUDIT-TRIGGERS row 158). Code *(pending)*.
+
+- **The episode's lock re-checks (IM F1 P1, F2 P2).** A consctl mode write and a renderer feed byte are refused where
+  they land, under `g_cons.lock`, the lock BEGIN takes; a `+echo` or a feed byte in flight at BEGIN no longer reaches
+  the episode.
+- **A repeated SAK keeps the saved owner (F5).** The pre-SAK owner is saved only when no episode is active.
+- **devcap's writer-caps loads (F6).** Acquire loads; `seam-devcap-plain-caps-read` is closed.
+- **Walks without recursion (H3+C F2, re-rated a P1 candidate).** `proc_walk_next` steps the table walk, the pid lookup
+  and the image visit, so an EL0 fork chain of any depth cannot carry a walk into the kernel stack's guard.
+- **Stale promises (H3+C F1, IM F4).** cmdline's seal comment; IMPERIUM's imperium set names `CAP_POST_SERVICE`.
+- **The episode fixture tears down.** `ep_setup`'s failure paths run `ep_teardown`.
+
+Audit: the kernel round (Fable 5.1 reviewing Opus 5.5, read-only on c62c7c4d, the transcript all Fable): 0 P0 / 0 P1
+/ 0 P2 / 3 P3, clean -- F2 the straddle hook under `KERNEL_TESTS`, F3 row 158's count, F1 the pre-BEGIN echo residue
+kept with row 155's (an operator vote on both narrowings). main reviewed the diff: no findings.
+
+Verification: six new kernel tests, each red first for its predicted reason (the three cons straddle/SAK assertions;
+the boot-stack guard in `proc.walk_deep_chain`, 2048 deep; "the walk visits each node once"; "a failed setup leaves no
+trusted authority"). `tools/test.sh` 1788/1788 after merging aux-3 9f0aec83. tools/ci-smp-gate.sh at the merged tip
+b0002334: 50 of 50 boots PASS across default-smp1, default-smp4, default-smp8, ubsan-smp4 and ubsan-smp8 (N=10 each),
+0 corruption.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

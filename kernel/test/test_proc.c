@@ -2307,3 +2307,124 @@ void test_proc_rfork_refused_while_terminating(void) {
     TEST_EXPECT_EQ((int)g_strag_kids_after, 0,
                    "terminating parent: no child was published");
 }
+
+// =============================================================================
+// The table walks spend no stack per tree level. Nothing bounds the tree's
+// depth -- PROC_CHILD_MAX caps a parent's children, not its descendants -- so an
+// EL0 chain a few hundred deep carried a recursive walk past the 16 KiB kernel
+// stack into its guard, from any /proc lookup. This chain is thousands deep: a
+// walker spending even 16 bytes a level faults on it.
+// =============================================================================
+
+#define WALK_CHAIN_DEPTH 2048
+
+// In .bss: WALK_CHAIN_DEPTH pointers are a whole kernel stack.
+static struct Proc *g_walk_chain[WALK_CHAIN_DEPTH];
+
+struct walk_chain_seen {
+    int first_pid, last_pid;   // the chain's two ends
+    int first_at, last_at;     // the visit index of each, -1 until seen
+    int visits;
+};
+
+static int walk_chain_cb(struct Proc *p, void *arg) {
+    struct walk_chain_seen *s = arg;
+    if (p->pid == s->first_pid) s->first_at = s->visits;
+    if (p->pid == s->last_pid)  s->last_at  = s->visits;
+    s->visits++;
+    return 0;
+}
+
+void test_proc_walk_deep_chain(void) {
+    int built = 0;
+    struct Proc *parent = kproc();
+    while (built < WALK_CHAIN_DEPTH) {
+        struct Proc *p = proc_alloc();
+        if (!p) break;
+        proc_test_link_child(parent, p);
+        g_walk_chain[built++] = p;
+        parent = p;
+    }
+
+    struct walk_chain_seen s = { -1, -1, -1, -1, 0 };
+    bool found_deepest = false;
+    if (built == WALK_CHAIN_DEPTH) {
+        s.first_pid = g_walk_chain[0]->pid;
+        s.last_pid  = g_walk_chain[built - 1]->pid;
+        (void)proc_for_each(walk_chain_cb, &s);
+        found_deepest = proc_find_by_pid(s.last_pid) == g_walk_chain[built - 1];
+    }
+
+    // Deepest first: proc_free refuses a Proc that still has children.
+    for (int i = built - 1; i >= 0; i--) {
+        proc_test_unlink(g_walk_chain[i]);
+        g_walk_chain[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(g_walk_chain[i]);
+        g_walk_chain[i] = NULL;
+    }
+
+    TEST_EXPECT_EQ(built, WALK_CHAIN_DEPTH, "the whole chain was allocated");
+    TEST_ASSERT(s.first_at >= 0 && s.last_at >= 0,
+                "proc_for_each reached both ends of the chain");
+    TEST_EXPECT_EQ(s.last_at - s.first_at, WALK_CHAIN_DEPTH - 1,
+                   "pre-order visits the chain's links one after another");
+    TEST_ASSERT(found_deepest, "proc_find_by_pid finds the deepest link");
+}
+
+// A small branched tree pins the order and the early exit. A parent's list
+// takes each new child at its FRONT, so linking B then C under A gives A's
+// children as C, B, and the pre-order is A C E B D.
+enum { WALK_A, WALK_B, WALK_C, WALK_D, WALK_E, WALK_NODES };
+
+struct walk_order {
+    int pids[WALK_NODES];
+    int seq[WALK_NODES + 1];   // node indices in visit order (one spare slot)
+    int n;
+    int stop_at;               // the node whose visit returns 7; -1 for none
+};
+
+static int walk_order_cb(struct Proc *p, void *arg) {
+    struct walk_order *w = arg;
+    for (int i = 0; i < WALK_NODES; i++) {
+        if (p->pid != w->pids[i]) continue;
+        if (w->n <= WALK_NODES) w->seq[w->n++] = i;
+        return i == w->stop_at ? 7 : 0;
+    }
+    return 0;
+}
+
+void test_proc_walk_preorder_and_early_exit(void) {
+    struct Proc *t[WALK_NODES] = { 0 };
+    int made = 0;
+    while (made < WALK_NODES && (t[made] = proc_alloc()) != NULL) made++;
+
+    struct walk_order full = { .stop_at = -1 };
+    struct walk_order cut  = { .stop_at = WALK_E };
+    int full_rv = -1, cut_rv = -1;
+    if (made == WALK_NODES) {
+        proc_test_link_child(kproc(), t[WALK_A]);
+        proc_test_link_child(t[WALK_A], t[WALK_B]);
+        proc_test_link_child(t[WALK_A], t[WALK_C]);
+        proc_test_link_child(t[WALK_B], t[WALK_D]);
+        proc_test_link_child(t[WALK_C], t[WALK_E]);
+        for (int i = 0; i < WALK_NODES; i++) full.pids[i] = cut.pids[i] = t[i]->pid;
+        full_rv = proc_for_each(walk_order_cb, &full);
+        cut_rv  = proc_for_each(walk_order_cb, &cut);
+        // Leaves first, so no Proc is unlinked while it still has children.
+        static const int unlink_order[WALK_NODES] = { WALK_D, WALK_E, WALK_B, WALK_C, WALK_A };
+        for (int k = 0; k < WALK_NODES; k++) proc_test_unlink(t[unlink_order[k]]);
+    }
+    for (int i = 0; i < made; i++) {
+        t[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(t[i]);
+    }
+
+    TEST_EXPECT_EQ(made, WALK_NODES, "the tree was allocated");
+    TEST_EXPECT_EQ(full_rv, 0, "a walk no callback stops returns 0");
+    TEST_EXPECT_EQ(full.n, WALK_NODES, "the walk visits each node once");
+    static const int want[WALK_NODES] = { WALK_A, WALK_C, WALK_E, WALK_B, WALK_D };
+    for (int k = 0; k < WALK_NODES; k++)
+        TEST_EXPECT_EQ(full.seq[k], want[k], "pre-order is A C E B D");
+    TEST_EXPECT_EQ(cut_rv, 7, "the stopping callback's value is what the walk returns");
+    TEST_EXPECT_EQ(cut.n, 3, "the walk stops at E: A, C, E, and neither B nor D");
+}

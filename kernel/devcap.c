@@ -187,7 +187,7 @@ long cap_register_grant_for_writer(struct Proc *writer,
     if ((cap_mask & ~(caps_t)CAP_GRANTABLE) != 0)    return -1;
     // Writer gate: must hold CAP_GRANT_HOSTOWNER. Single point — the
     // CAP_GRANT_HOSTOWNER bit is the only authority to register a grant.
-    if ((writer->caps & (caps_t)CAP_GRANT_HOSTOWNER) == 0) return -1;
+    if ((__atomic_load_n(&writer->caps, __ATOMIC_ACQUIRE) & (caps_t)CAP_GRANT_HOSTOWNER) == 0) return -1;
 
     u64 now = timer_now_ns();
     u64 expiry = now + CAP_GRANT_EXPIRY_NS;
@@ -234,7 +234,7 @@ static long register_imperium(struct Proc *writer,
         (cap_mask & ~(caps_t)CAP_GRANTABLE_IMPERIUM) != 0)   return -1;
     // Writer gate: must hold CAP_GRANT_CLEARANCE (corvus). The clearance
     // analog of the hostowner grant's CAP_GRANT_HOSTOWNER gate.
-    if ((writer->caps & (caps_t)CAP_GRANT_CLEARANCE) == 0)   return -1;
+    if ((__atomic_load_n(&writer->caps, __ATOMIC_ACQUIRE) & (caps_t)CAP_GRANT_CLEARANCE) == 0) return -1;
 
     u64 now = timer_now_ns();
     u64 expiry = now + CAP_GRANT_EXPIRY_NS;

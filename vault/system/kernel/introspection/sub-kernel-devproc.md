@@ -17,7 +17,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -102,7 +102,11 @@ mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `w
 too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
 `/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
 keeps its old meaning with NO seal and gates `sched` and `imperium`; `status` is
-ungated.
+ungated. `cmdline` renders no argv yet, and its place in the set seals argv only if
+argv comes from a per-Proc kernel copy, as `environ` does: argv read off the stack would
+read through a vfork child sharing that stack under its own, unsealed Proc, unless
+`cmdline` also joins `mem` and `maps` in the image join (H3+C Fable pass F1; the
+cmdline-argv work owes the choice).
 
 **The set took two corrections, and they are the part worth reading.** The first cut put
 the seal inside `devproc_owner_or_hostowner`, wrong in both directions: it MISSED `maps`

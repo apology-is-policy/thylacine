@@ -15,6 +15,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-80-pivot-orphan-mounts]] | closed | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
+| [[seam-devcap-plain-caps-read]] | closed | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
@@ -47,7 +48,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-console-chrome-on-handoff]] | open | sub-tapestryd | fnd-kt1-r1-c11 | the KT-1 audit round 1 (C-F11) |
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
-| [[seam-devcap-plain-caps-read]] | open | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
 | [[seam-dtb-blob-internally-trusted]] | open | sub-kernel-dtb | chg-2026-08-02-boot-sweep |  |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |

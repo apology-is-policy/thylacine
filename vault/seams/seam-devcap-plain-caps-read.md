@@ -2,12 +2,12 @@
 id: seam-devcap-plain-caps-read
 type: seam
 title: "The cap device's two grant-register gates read caps non-atomically"
-status: open
+status: closed
 surface: [sub-kernel-caps]
 opened-by: chg-2026-08-02-authority-sweep
 tracker: "task #15"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-29
 ---
 ## Owed
 
@@ -54,3 +54,11 @@ Low today; it rises the moment corvus becomes multi-threaded, or any second
 holder of `CAP_GRANT_*` appears. It should land as a matter of course rather
 than being weighed, because the fix is one line per site and the reasoning
 for it is already written down twice in the same file.
+
+## Closed (2026-09-29)
+
+Both gates now read `__atomic_load_n(&writer->caps, __ATOMIC_ACQUIRE)`, the
+form every other capability gate already used. The owed Fable pass over IM-1..2
+raised the two sites again (its F6), and the kernel chunk that closed that
+pass's episode races carried the change. No capability gate in the kernel
+reads `->caps` with a plain load now.

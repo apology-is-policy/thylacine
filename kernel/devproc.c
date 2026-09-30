@@ -1403,8 +1403,11 @@ static bool devproc_dump_sealed_against(const struct Proc *caller,
 // kernel's own execution state (kstack) belong to NOTRACE, through
 // devproc_debug_authorized. One predicate, asked through devproc_read_sealed at every
 // read site -- the dispatch and each walk with its own read path -- so a file is
-// classified here or not at all. cmdline carries no argv yet; it is in the set so
-// that argv arrives sealed. `name` -- the exe path's basename, stamped at exec -- is
+// classified here or not at all. cmdline carries no argv yet, and its place here
+// seals argv only if argv is rendered from a per-Proc kernel copy, as environ is:
+// argv read off the stack would read through a vfork child sharing that stack
+// under its own, unsealed Proc, unless cmdline also joins mem and maps in
+// devproc_read_sealed. `name` -- the exe path's basename, stamped at exec -- is
 // ledger: status, sched and /ctl/procs carry it, as Linux keeps a non-dumpable
 // process's comm public.
 static bool devproc_kind_is_image(u32 kind) {
@@ -1441,7 +1444,8 @@ static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *ta
     // never reached -- hands out the sealed image byte for byte. The rest
     // (cmdline, ns, exe, cwd, environ and the register files) are per-Proc or
     // per-Thread state that no sharer holds a copy of, so for those the target's
-    // own bit is the whole answer.
+    // own bit is the whole answer -- cmdline only while it renders no argv off the
+    // shared stack (devproc_kind_is_image).
     // PRECONDITION for the join below: g_proc_table_lock is held. Every caller
     // satisfies it today -- the read dispatch and each walk with its own read
     // path all run inside proc_for_each -- and devproc_extract_authorized, the

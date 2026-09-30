@@ -61,6 +61,17 @@ in a way an array would not be: reparenting an orphan is a splice, not a
 re-index, and the orphan-adopter fallback (`init`, else `kproc`) is what
 keeps the tree rooted and therefore keeps every Proc findable.
 
+Every walk is a pre-order DFS stepped by `proc_walk_next`, which follows the
+child, sibling and parent links instead of recursing, so a walk costs the
+same stack however deep the tree is -- and nothing bounds the depth:
+`PROC_CHILD_MAX` caps a parent's children, not its descendants, so an EL0
+chain of single children grows as far as memory allows, and a walk that
+spent a frame per level would carry any `/proc` lookup past the 16 KiB kernel
+stack. The links hold still across a walk because it runs under
+`g_proc_table_lock`, and they are written only by fork, the reap and a dying
+Proc's own exit, never from a walk callback (`proc_for_each`'s contract
+forbids a callback re-entering rfork, exits or wait_pid).
+
 ## Contract
 
 
@@ -241,12 +252,10 @@ true -- the direction that matters, since a missed sharer at the redeem is a
 privilege question. The caps and flags union still counts zombies: their bytes are
 still in the image.
 
-The traversal is **iterative**. The recursive `proc_for_each_walk` costs one C
-frame per tree level, and the join runs inside a walk already paying that, so
-recursing would put two full-depth descents on one 16 KiB kernel stack -- on a
-path any EL0 program can drive, since `maps` is mode 0444 and its read asks the
-seal, which asks the join. Nothing bounds tree *depth*. The sibling and parent
-links already encode the return path a frame would have held.
+The traversal is **nested**: the join runs inside a walk, on a path any EL0
+program can drive, since `maps` is mode 0444 and its read asks the seal, which
+asks the join. Both walks step with `proc_walk_next`, so the nesting costs no
+stack per tree level.
 
 Publication inherits the **debug taint**, in the same lock hold as the link, so no
 gate or sweep can observe a child that is visible but not yet restricted. It must

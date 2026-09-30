@@ -371,11 +371,17 @@ bool cons_episode_abandon(void);
 // EXACTLY (proc_console_sak -> cons_episode_begin). cons_test_reader_busy /
 // _episode_parked / _line_len are non-blocking observables: the reader slot,
 // the count of non-attached readers+writers parked on the episode list, the
-// cooked partial-line length.
+// cooked partial-line length. cons_test_set_window_hook runs `fn` between the
+// lockless episode check and the locked apply of a consctl mode write and of
+// each feed byte (NULL clears it), so a test can open an episode inside the
+// window.
 void cons_test_sak_dispatch(void);
 bool cons_test_reader_busy(void);
 u32  cons_test_episode_parked(void);
 u32  cons_test_line_len(void);
+#ifdef KERNEL_TESTS
+void cons_test_set_window_hook(void (*fn)(void));
+#endif
 
 // =============================================================================
 // #55: the console winsize (ARCH 23.5.3). One kernel-held size (cols, rows --
