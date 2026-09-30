@@ -4,7 +4,7 @@ type: chg
 title: "The birth hold: a spawned child parked before its first instruction"
 date: 2026-09-29
 arc: arc-go-ide
-commits: ["*(pending)*"]
+commits: ["a9596fb5"]
 touched:
   - sub-kernel-birth-hold
   - sub-kernel-exception

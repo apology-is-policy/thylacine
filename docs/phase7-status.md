@@ -790,7 +790,7 @@ Delve's launch raced its child: the probe's program reached its loop before the 
 an entry breakpoint never fired (DELVE-PORT-DESIGN 8c-4, closure (b), "it bit"). The operator voted the shape on
 2026-09-29: a spawn flag, and a held child whose spawner dies before taking it over is killed. Scripture 269207b5
 (DEBUG-FS-DESIGN 5f and section 6; DELVE-PORT-DESIGN 8c-4 (b); the ARCH I-39 row and spec-table row). Code
-*(pending)*.
+a9596fb5.
 
 - **The flag.** `SPAWN_DEBUG_HELD` in `sys_spawn_args.debug_flags`, the record's last reserved slot (offset 100; the
   record stays 104 bytes). A bit outside `SPAWN_DEBUG_FLAGS_ALL` refuses the spawn. Old callers pass zero.
