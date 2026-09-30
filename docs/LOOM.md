@@ -439,6 +439,17 @@ them. The two SQPOLL forks the design conversation resolved:
    (the kthread is the reader, the `ENTER` caller sleeps) and the non-SQPOLL
    multi-waiter case (one `ENTER` drives the reader, peers sleep on the list).
 
+   **As-built amendment (2026-09-30).** On a shared client the thread holding
+   the reader role may belong to another Proc: a sync op in `client_wait` reads
+   only until its own reply arrives, and its departing handoff designates only
+   sync ops, so an async reply that lands after it leaves had no reader while
+   the `ENTER` slept. An `ENTER` whose pump finds the role held therefore also
+   registers on the client's **role-waiter list** (register-then-observe under
+   `c->lock`), sharing its sleep's Rendez with the CQ hook. A handoff that leaves
+   the role free and undesignated wakes that list, as does session death, and
+   the woken `ENTER` pumps again. The SQPOLL kthread and the dev9p poll pump do
+   not sleep on a busy role: they yield and retry, so they cannot strand.
+
 **The new primitive.** A NULL-permitted transport-vtable op
 `set_recv_deadline(ctx, deadline_ns)` (srvconn → `client_deadline_ns`; the
 loopback test transport → no-op) + a deadline-aware reader pump

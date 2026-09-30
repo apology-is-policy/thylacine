@@ -1134,18 +1134,22 @@ mechanisms:
    `client_handoff_reader_locked`s the role, parks role-free
    (`proc_debug_stop_sleeper_park`, with `stop_unwinds` cleared so it parks), and
    re-elects on resume (the re-loop's `rpc->done` may already be true — a survivor
-   demuxed the reply while stopped). Every OTHER sleep (both flags clear —
-   Go's sysmon `nanosleep`, a futex wait) parks in place (the 8c-2 default,
-   preserving the syscall).
+   demuxed the reply while stopped). Every other sleep outside the 9P client
+   (both flags clear — Go's sysmon `nanosleep`, a futex wait) parks in place
+   (the 8c-2 default, preserving the syscall). Every other sleep INSIDE the
+   client unwinds the same way since the 2026-09-30 amendment below.
 2. **A top-of-loop stop guard** in `client_wait`: a debug-stopped thread reaching
    `client_wait` fresh (a mid-syscall stop) parks PROMPTLY (never elects); it
    re-hands-off first if it was handed `be_reader` (the handed-then-stopped race).
-3. **The handoff skips debug-stopped owners** (`p9_rpc.owner` = the submitting
-   Proc): the released role must land on a SURVIVOR, not bounce to another stopped
-   sibling — a stopped sibling's thread has parked, so its `rpc->rendez` has no
-   waiter and the `be_reader` wakeup would be a no-op (a lost role). If no survivor
-   op is pending, the handoff finds nothing → the role is dropped (`reader_active`
-   is already false) → a future survivor op self-elects.
+3. **The handoff skips an op whose thread is parked for a stop.** The released
+   role must land on a SURVIVOR, not bounce to a stopped sibling — a stopped
+   sibling's thread has parked, so its `rpc->rendez` has no waiter and the
+   `be_reader` wakeup would be a no-op (a lost role). As built at 8c-3 the handoff
+   read the owner's stop flags (`p9_rpc.owner`, the submitting Proc); since the
+   2026-09-30 amendment it reads `rpc->stop_parked`, which the parked thread sets
+   itself under `c->lock`. If no survivor op is pending, the handoff finds nothing
+   → the role is dropped (`reader_active` is already false) → a future op
+   self-elects, and so does the stopped op's own thread when it resumes.
 
 4. **F2 — the role-release covers ALL FOUR `reader_active` sites.** Centralizing
    the flags in `reader_recv_frame` gives the block-through to every caller, and
@@ -1188,6 +1192,37 @@ Fable holotype + the `9p_client.handoff_skips_debug_stopped_owner` regression +
 the SMP gate; the block-through decision lives in the sched detour, kproc-immune,
 so it has no deterministic kproc regression — the SMP gate + reasoning are its
 durable coverage).
+
+**The waiters-and-stops amendment (2026-09-30, as-built).** 8c-3 gave the
+unwind to the reader only. A thread waiting in the client for someone else's
+reading — the non-reader sleep in `client_wait`, a flush(5) wait, a #349
+send-list park — still parked IN PLACE inside that sleep, where the client
+cannot see it. Two defects followed:
+
+- **A stopped waiter resumed with no reader.** If the reader departed during the
+  stop, the handoff skipped the stopped op and, with nothing else pending,
+  dropped the role. On resume the thread re-checked only its own sleep condition
+  (`done`, `dead`, `be_reader`, `flushed`), all false, and slept on with its
+  reply unread: it never re-ran the election, though it was itself the survivor
+  mechanism 3 counted on.
+- **A stop snapshot went stale.** The handoff and the owed-tag check
+  (`client_tag_owed_locked`, flush(5)) read the owner's stop flags once. An owner
+  whose stop cleared and who was stopped again before it ran stayed inside the
+  nested park: the handoff designated it (a wake that landed on nothing), and a
+  tag drainer that counted on its dispatch waited out the new stop.
+
+Every client sleep now takes the reader's treatment. `stop_unwinds` is set
+around it, so a stop unwinds the sleep (`SLEEP_INTR`, with `stop_unwound`
+latched) instead of parking in place, and the client's own loop, which already
+checks `client_stop_pending`, releases any designation and parks the thread
+role-free through `client_debug_stop_park`. That park sets `rpc->stop_parked`
+under `c->lock` for its whole duration. The handoff and the owed-tag check read
+that flag, which is exact under the lock, and no longer read stop flags at all.
+On resume the loop re-runs, so a stopped waiter re-elects itself when nobody
+reads. The syscall is still preserved: the thread parks mid-call in the client
+and continues from there. Plan 9 has no counterpart because it stops a process
+only at `procctl` points, never inside a kernel sleep; the client's park is the
+nearest thing to one, a point where the client knows the thread is stopped.
 
 ### 5c.7 As-built — the #95 focus-thread (multi-M breakpoint inspect)
 
