@@ -265,6 +265,20 @@ has no "stop at exec/entry" primitive today. Two paths:
   audit-bearing). **Recorded, NOT in the 8c arc** — a small, well-scoped kernel
   follow-up if the entry race proves to bite in practice.
 
+  **It bit, and (b) is now designed as the birth hold (2026-09-29,
+  operator-voted; DEBUG-FS-DESIGN §5f).** `/ambush-probe` stage C's intermittent
+  hang was this race: a 640-launch loop caught the child idle in its loop at the
+  launch stop (1 in 160 at 8 CPUs, never at 1), and a control pair against an
+  idling child hung 20/20 on the loop's entry and fired 20/20 on its head. The
+  as-built shape differs from the sentence above in one respect: the slot is
+  **not** pre-claimed. The spawn (`debug_flags` = `SPAWN_DEBUG_HELD`) returns once
+  the child has loaded its image and parked before its first instruction; the
+  debugger then attaches and stops through the ordinary I-39 gate, and its stop
+  takes the hold over. The vote rejected a pre-claimed slot because it would mint
+  a `/proc` handle past the caller's namespace. A held child whose spawner exits
+  first is killed. Path (a) stays the shape for `ambush attach`; `native.Launch`
+  spawns held and orders `attach`, `exitkill`, `stop`.
+
 Path (a) keeps 8c a pure userspace port and delivers both `ambush attach` and
 `ambush exec`.
 

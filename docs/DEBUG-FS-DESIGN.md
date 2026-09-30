@@ -1,7 +1,8 @@
 # DEBUG-FS-DESIGN — the kernel debug surface (Go IDE Stage 8a-8b)
 
 **Status: 8a AS-BUILT (8a-1 + 8a-2 landed + audited, 2026-07-15). §5b (Stage 8b)
-DESIGN ratified 2026-07-16, user-voted — scripture, no code yet.** This is the
+DESIGN ratified 2026-07-16, user-voted — scripture, no code yet. §5f (the birth
+hold, the launch-race closure) designed 2026-09-29, operator-voted.** This is the
 Stage 8a-8b focused design pass mandated by `docs/GO-IDE-DESIGN.md §8` ("each
 kernel sub-stage opens with its own focused design pass + audit — it is a new
 privilege surface"). It designs the kernel half of the cross-boundary debugger:
@@ -1357,15 +1358,33 @@ machine and its composition with the death path. Target invariants:
   eventually settles (all parked/dead, or the stop cleared); the stop-of-a-sleeper
   guarantees the halt completes even when a thread is blocked in an indefinite
   sleep.
+- **NoEL0WhileHeld**, **EventuallyHoldResolved** and **BirthWaitReleases** (the
+  birth hold, §5f) — a held child runs no EL0 instruction before its hold is
+  converted-and-resumed or released; it is eventually converted, released or
+  dead (dead when its spawner dies holding it); and a held spawn eventually
+  returns.
+- **NoEretIntoDeath** (§5f) — neither park proceeds to EL0 once a group
+  termination is published: an action property on both parks' proceed step,
+  which re-reads death after its wake condition.
+- **LatchedHeldChildEnds** (§5f) — a held child with an interrupt latched
+  eventually ends, unless it is released first.
 
 Buggy cfgs (each a minimal counterexample on its named invariant): `park_before_die`
 (stop-check ordered before the die-check -> DeathWinsOverStop), `lost_stop`
 (observe-before-register at the tail -> NoLostStop), `double_wake` (resume without
 the single-waiter discipline -> ExactlyOnceResume), `strand_on_debugger_death`
 (the slot not released at ctl-fd close -> NoStrand), `fault_stop_ungated` (the EC
-fire sets the flag without the owner gate -> StopImpliesOwned), and `stop_skips_
+fire sets the flag without the owner gate -> StopImpliesOwned), `stop_skips_
 sleeper` (the v1.0 Plan 9 non-preemptive stop leaves a sleeper asleep ->
-EventuallyStopSettles, the 8c-2 multi-thread-stop seam).
+EventuallyStopSettles, the 8c-2 multi-thread-stop seam), and `exitkill_ignored`
+(a debugger's death resumes the target it launched -> EventuallyLaunchedDies,
+§5d). The birth hold (§5f)
+adds `held_runs_free`, `convert_clears_first`, `no_death_recheck` and
+`birth_latch_erets` (-> NoEL0WhileHeld), `orphan_hold_strands`
+(-> EventuallyHoldResolved), `birth_wait_unwoken` (-> BirthWaitReleases),
+`no_death_recheck_tail` (-> NoEretIntoDeath: the tail park's twin of the death
+re-check the held cfg found), and `birth_latch_rerun` (-> LatchedHeldChildEnds:
+the masked re-run audit round 1 found).
 
 The model pins the impl sites (the tail stop-leg, the delivery cascade, the
 ctl-fd-close resume); `specs/SPEC-TO-CODE.md` records the action<->site mapping.
@@ -1641,3 +1660,239 @@ is the one that serves both.
 was in the implementation's two-field *encoding* of that state, which admitted a
 configuration the model does not have -- so the fix moves the implementation
 toward the model rather than changing it, and the model stays the gate.
+
+---
+
+## 5f. The birth hold — a held spawn (the launch-race closure)
+
+Designed 2026-09-29 (operator-voted: the shape is **spawn held**, and a held child
+whose spawner exits first **is killed**). It lands the closure DELVE-PORT-DESIGN
+8c-4 recorded as path (b), "if the entry race proves to bite in practice". It has.
+
+**The gap, proven.** Launch path (a) spawns the program, attaches, and stops it,
+and the child runs from its first instruction the whole time. `ambush`'s launch
+opens seven `/proc/<pid>` files, attaches and stops; a small Go program can finish
+its runtime start-up and enter `main` first. A breakpoint on a function the
+program has already entered never fires when that function is a loop that never
+returns to its entry, and `continue` waits forever. That is `/ambush-probe` stage
+C's intermittent failure (seen 2026-09-22 and 2026-09-29):
+
+- A launch loop recorded where goroutine 1 was when the stop landed. Of 640
+  launches it fired 160/160 at 1 CPU, 160/160 at 4, and 159/160 at 8. The one
+  hang found the child already idle in the loop's sleep, and its output matched
+  the gate's failure byte for byte. None of the 639 stops that landed earlier
+  failed to fire.
+- A control pair then attached to a child idling in the loop: a breakpoint on
+  the loop's entry hung 20/20, and one on the loop's head fired 20/20. Same child
+  state, same kernel path; the only variable is whether the breakpoint address
+  is executed again.
+
+The kernel's breakpoint path is not at fault. The race narrows as CPUs are
+added, because the child gets a CPU of its own while the debugger is still
+opening files.
+
+**Heritage.** Plan 9's `proc(3)` `hang`: a process that execs with the bit set
+enters the Stopped state before returning to user mode, and `acid` starts
+programs that way. The same shape is `POSIX_SPAWN_START_SUSPENDED` on macOS (the
+image is loaded and the task suspended when `posix_spawn` returns),
+`CREATE_SUSPENDED` / `DEBUG_PROCESS` on Windows, `PTRACE_TRACEME` plus the exec
+stop on Linux, and the separate create and start of a Fuchsia process. Each one
+stops the child after its image is loaded and before its first instruction, and
+tells the parent it has.
+
+**The voted shape.** A spawn flag asks for the child to be held. The child loads
+its image and parks before its first instruction. A debugger attaches and stops
+it through today's gates, and its stop takes the hold over. Rejected at the
+vote: a spawn that returns an attached ctl handle (it mints a `/proc` handle past
+the caller's namespace), and a `hang` verb on the spawner (a per-Proc mode that
+any thread of a multi-threaded spawner can consume).
+
+**The mechanism.**
+
+1. **The ask.** `struct sys_spawn_args` claims its forward-compat slot at offset
+   100 as `debug_flags`, with `SPAWN_DEBUG_HELD = 1 << 0`. Unknown bits are
+   refused (-1), the `_pad_envp` rationale. The struct stays 104 bytes, and every
+   caller that zero-fills it is byte-identical. The slot was the last one, so the
+   next field grows the struct, with every mirror. The ask is ungated: a hold
+   restricts only the spawner's own child and confers no access to it. Reading
+   or controlling the child still takes an attach through the I-39 gate.
+
+2. **The mark.** `Proc.debug_birth_hold` (a `u32` in the deliberate tail pad at
+   @404) holds `BIRTH_HOLD_NONE`, `BIRTH_HOLD_UNBORN` or `BIRTH_HOLD_PARKED`.
+   `rfork_internal` sets UNBORN under `g_proc_table_lock` in the same hold that
+   publishes the child, as it does the debug taint, so no reparent, sweep or walk
+   can see the child linked but unmarked. Every write is under
+   `g_proc_table_lock`. It is never rfork-inherited, and a released hold is never
+   set again.
+
+3. **The synchronous return.** A held spawn returns only once the child has
+   reached its birth park, is no longer ALIVE, has left the spawner's children
+   list, or has had its hold released. The spawner parks on its own
+   `child_waiters` exactly as the vfork park does (`vfork_await_release`: the
+   waiter registered under `g_proc_table_lock` atomically with the scan that
+   found the child still unborn; #811 unwinds it). The child's death wakes it for
+   free (`proc_become_zombie_locked`), and every write to the mark wakes it too,
+   under the lock, so no path out of UNBORN can strand the spawner. When the pid
+   comes back, the child's image is loaded and the child has executed nothing,
+   which is the macOS contract. A late exec failure still reports as the child's
+   exit status, as it does for any spawn.
+
+   Why synchronous: an asynchronous return lets the debugger's stop land while
+   the child is still inside `exec_setup`, where the 8c-2 detour would park it in
+   a sleep with no EL0 frame. The stop would settle, and the debugger's first
+   register read would return nothing. Waiting for the birth park closes that
+   window for the launcher, at the cost of the spawner waiting while its child
+   loads. The vfork park has the same consequence: a thread must not spawn held
+   a child whose image is served by that same thread (a Proc that is the 9P or
+   `/srv` server for the mount holding the executable). The child's load would
+   wait on the server, and the server on the child, until the spawner is killed,
+   which unwinds its wait and kills the child by the orphan rule.
+
+4. **The birth park.** A held child does not take `userland_enter`'s shortcut.
+   After `exec_setup`, its head thread enters `userland_enter_held`, which lives
+   in `vectors.S` beside `thread_fork_trampoline` because it ends in the local
+   `.Lexception_return`. It builds the initial EL0 frame below its current stack
+   (ELR = the entry, SPSR = EL0t with DAIF clear, SP_EL0 = the user stack, every
+   GPR zero), masks, and runs a **birth tail**: the ordinary EL0-return sequence
+   (preempt check, die-check, note delivery) and then the park. The park
+   publishes `debug_trapframe` as that frame, so `regs`, `step` and `hwbreak`
+   address the first instruction. It marks the child PARKED and wakes the
+   spawner under the lock, then sleeps on its own `debug_rendez` while the hold
+   or any stop owner holds it. Released, the thread leaves through `KERNEL_EXIT`
+   from the frame, so a register written or a step armed while it was parked
+   takes effect. A non-held spawn is byte-identical: `userland_enter` does not
+   change.
+
+5. **The hold is not a stop owner.** `proc_stop_requested` stays the debug and
+   job flags only, deliberately. That disjunction drives the `sleep()` detour
+   and the 9P reader handoff. If the hold were in it, the unborn thread would park
+   inside `exec_setup` wherever it slept, with no EL0 frame, and the spawner's
+   birth wait would never be released. The hold is read in one place, the birth
+   park, where the thread holds no lock and no reader role. So R2-F2's hazard (a
+   flag the audited park machinery does not read) does not arise: the thread
+   makes no syscall while held, so no syscall-time park ever needs to see it.
+
+6. **Conversion.** The owner's `stop` on a held target delivers the stop as it
+   always does (`proc_debug_stop_deliver` sets `debug_stop_req` and wakes the
+   target's blocked threads) and only then clears the hold, all under
+   `g_proc_table_lock`. The park's wake condition reads the hold first (ACQUIRE)
+   and the stop flags after, pairing with that set-then-clear (RELEASE), so at
+   every instant it sees at least one of them. The delivery's wake may rouse the
+   parked thread, but it re-parks without leaving the birth tail, and the stop's
+   own wait sees it settle (§5e). From here it is an ordinary debug stop,
+   released by `start`, `detach`, the ctl-fd close or EXITKILL.
+
+7. **Release.** The owner's `start` and an explicit `detach` clear the hold and
+   wake the thread: each is the debugger's deliberate choice to run the child.
+   The implicit release, the ctl fd closing without `detach`, leaves the hold in
+   place: the hold belongs to the spawner, not to the attach slot.
+
+8. **Death wins.** The park checks for group death at the top of every pass and
+   again after its wake condition passes. `kill`, a group termination or the
+   orphan rule wakes the parked thread, which dies at the first check. The second
+   check catches a thread that is mid-pass when a release follows a terminate.
+   The EXITKILL release terminates the group and only then clears the stop, and
+   a `start` after a `kill` clears after the kill. A thread that passed the first
+   check just before the terminate then reads the cleared flags. Both clears are
+   RELEASE stores ordered after the terminate, so the ACQUIRE re-check sees it,
+   and the thread dies without reaching EL0. The first draft had only the first
+   check. The spec's clean held cfg found the gap. The tail's stop park runs the
+   same loop, so the re-check closes the same window for an ordinary stopped
+   thread. The park's other way out, for a latched interrupt, reads death once
+   more too: `thread_die_pending` also reports group death, so a kill landing
+   after the first check would otherwise send a stopped thread back to EL0 on
+   that exit (audit F8).
+
+9. **The orphan rule.** When the spawner becomes a ZOMBIE
+   (`proc_become_zombie_locked`, beside the PTY-1f orphan rule), every ALIVE child
+   whose hold is still set is `proc_group_terminate`d, with the message
+   "launcher exited". The trigger is a hold not yet converted or released. A
+   debugger that attached but did not stop has not taken the hold over, so that
+   child dies with its spawner too.
+
+10. **A latched interrupt at the birth park.** The ordinary stop park leaves the
+    park when a terminate-disposition `interrupt` is latched (LS-5c), so that the
+    thread erets and resolves it at its next checkpoint. A held child must not run
+    an instruction to do that, and it need not. The latch is armed only for a note
+    that nothing catches, in a Proc that does not read its own notes, and an
+    ignored note is dropped before it can arm it; only the child's own calls could
+    install a handler or open its notes afterwards, and a held child has made
+    none. So the note can only take its default disposition, and the birth park
+    applies it itself. (Both parks act on a latch only in a family the thread has
+    not masked, and a held child's thread has masked nothing: a native parent's
+    child starts with an empty mask, and no Linux call reaches the held spawn.) The child exits with the note's name, as note
+    delivery's terminate arm would report it, and the birth tail is
+    straight-line: the park returns only to proceed. The first draft re-ran the
+    checkpoint in place instead (die-check, note delivery, park). That relied on
+    note delivery consuming the latch, and delivery declines a frame whose SP it
+    does not trust, which a debugger's `regs` write can supply. The re-run then
+    spun with interrupts masked, taking its CPU for good, and with it every
+    thread queued on that CPU; at `-smp 1`, the machine (audit F1, 2026-09-29).
+    `birth_latch_rerun` keeps that design, and `birth_latch_erets` the tail's.
+
+**The ambush side.** go-thylacine grows `SysProcAttr{DebugHeld bool}`, which sets
+`debug_flags`. ambush's native `Launch` sets it and orders its verbs `attach`,
+`exitkill`, `stop`. A launcher that dies before its stop leaves its child to the
+orphan rule, and after `exitkill` EXITKILL covers it, so no window leaves a
+launched child running unowned. `ambush attach` to a running program is
+unchanged: a breakpoint behind the program counter does not fire, as in every
+debugger.
+
+**Invariants.** No new §28 row. This is an I-39 refinement, as EXITKILL is.
+
+- **NoEL0WhileHeld**: a held child executes no EL0 instruction until its hold is
+  converted and the stop resumed, or the hold is released.
+- **EventuallyHoldResolved**, the NoStrand analog for the hold: a held child is
+  eventually converted, released or dead. When its spawner dies with the hold
+  still set, the child dies.
+- **BirthWaitReleases**: a held spawn eventually returns, because the child
+  parks, dies or is released.
+- **NoEretIntoDeath**: neither park proceeds to EL0 once a group termination is
+  published. It is an action property on both parks' proceed step. The tail
+  park's other exit, for a latched interrupt, re-reads death in the code (audit
+  F8) and is outside the model, because what a stopped thread owes a latched
+  interrupt is still open (OPEN-BUGS, 2026-09-29).
+- **LatchedHeldChildEnds**: a held child with an interrupt latched eventually
+  ends, unless it is released first. The birth park's latch exit is in the
+  model, and it ends the child. The model's latch is one the park can see: a
+  latch in a masked family would wait, as it does at the tail, but a held
+  child's thread masks nothing (point 10).
+
+`StopImpliesOwned` is untouched. The hold is not a debug stop, and the
+fully-stopped predicate still requires `debug_stop_req`, so no stopped-only read
+or write reaches a held child before a debugger's stop.
+
+**The spec.** `debug_stop.tla` gains the hold, the birth park, conversion,
+release, the orphan rule, the spawner's birth wait and an interrupt latched on
+the held child, with eight buggy cfgs:
+
+- `held_runs_free`: the birth park ignores the hold (NoEL0WhileHeld).
+- `convert_clears_first`: conversion clears the hold before it sets the stop, so
+  the park observes neither and the child runs (NoEL0WhileHeld).
+- `orphan_hold_strands`: no orphan rule (EventuallyHoldResolved).
+- `birth_wait_unwoken`: a release before the park does not wake the spawner
+  (BirthWaitReleases).
+- `no_death_recheck`: the park proceeds on its wake condition without the
+  second death check, so a child dying with its launcher runs its first
+  instructions (NoEL0WhileHeld).
+- `no_death_recheck_tail`: the same omission at the tail's stop park, where a
+  stopped thread erets into a dying group (NoEretIntoDeath).
+- `birth_latch_erets`: the birth park's latch leg erets as the tail's does, so
+  an interrupt runs a held child (NoEL0WhileHeld).
+- `birth_latch_rerun`: the latch leg re-runs the checkpoint in place, and once
+  note delivery declines a debugger-written SP the re-run never ends
+  (LatchedHeldChildEnds; audit F1).
+
+**Tests.** Kernel tests cover the ask's validation, the mark and its lock-held
+writes, the birth wait's predicate and wake sites, conversion, release, the
+implicit-release carve-out and the orphan rule. A device witness spawns a program
+held, waits, attaches and stops it, and reads its PC, which must equal the ELF
+entry. It then sets a hardware breakpoint on the entry, starts the program, and
+requires the breakpoint to fire before any instruction has run. The witness is
+red on the old kernel (the flag is refused) and against each sabotage.
+`/ambush-probe` stages C and D and `/dap-probe` launch held once the ambush side
+lands.
+
+**Scope.** Only a held spawn changes: `userland_enter`, `thread_user_trampoline`
+and every other spawn are unchanged. No new ctl verb, no `/ctl/procs` change,
+and no syscall number.
