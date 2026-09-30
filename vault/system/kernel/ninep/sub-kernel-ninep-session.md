@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -41,9 +41,14 @@ retirement rules are mechanically enforced.
   pairing, per-kind parse + state mutation, results surfaced in
   `struct p9_dispatch_result` (zeroed on every call by the dispatcher; the
   caller must not read fields after a `-1`).
+  `p9_session_dispatch_flushed_rmsg` (2026-09-30) is its flush(5) twin for an
+  `awaiting_flush` tag whose owner still waits: the same parse, mutation and
+  result, but the tag is not freed (`-1` on a tag with no flush); it clears
+  `owner_waits`, because the op has now acted.
 - Repair surface (#845/#52/#53): `p9_session_send_flush(oldtag)`,
   `p9_session_abort_unsent(tag)`, `p9_session_retract_unsent(tag)`,
-  `p9_session_flush_rollback(oldtag)`,
+  `p9_session_flush_rollback(oldtag)`, `p9_session_flush_retract(oldtag)`,
+  `p9_session_flush_owner_waits(oldtag, waits)`,
   `p9_session_mark_abandoned(tag)`.
 - Queries: `is_open`, `fid_bound`, `inflight`, `has_free_tag` (the
   async-clunk pool-full pre-check), `n_bound_fids`, `n_reserved_slots`.
@@ -116,10 +121,19 @@ the same fid" discipline, enforced via `any_outstanding_on_fid`):
 `any_outstanding_on_fid` has **seven callers** (clunk, walk-new_fid, lopen,
 lcreate, walkgetattr, setattr, rename) — the in-code comment demands the
 list stay current because a stale list narrows future audit scoping
-(#52/#53 R2-F2). It EXCLUDES `awaiting_flush` and `abandoned` entries: a
-cancelled op will never act on its fid, so it must not block a fid op —
-this is what makes Tflush-then-immediately-Tclunk (the #294 cancel-at-close)
-legal before the Rflush arrives.
+(#52/#53 R2-F2). It EXCLUDES `abandoned` entries and `awaiting_flush` entries
+whose owner is gone: a cancelled op will never act on its fid, so it must not
+block a fid op — this is what makes Tflush-then-immediately-Tclunk (the #294
+cancel-at-close) legal before the Rflush arrives. A flushed op whose owner
+still waits (`owner_waits`, flush(5), 2026-09-30 round 3 F4) stays LIVE: a
+reply that beats its Rflush is applied in full, so it may yet act on its fid.
+The client sets the bit when it stages that Tflush and clears it when the
+owner dies in the flush wait; `dispatch_flushed_rmsg` clears it once the op
+has acted, and `flush_unstage` and `clear_outstanding` reset it. The Tflush
+entries themselves are skipped too: a flush acts on no fid, and its entry
+carries `root_fid` only as a placeholder, which refused a setattr of a
+raw attach root fd while any flush was in flight (flush(5) round 4 F4,
+pre-existing since #845; flush(5) made flushes routine).
 
 **The retirement rules (I-10 mechanized).** A tag frees by exactly one of:
 
@@ -138,6 +152,11 @@ legal before the Rflush arrives.
    a full walk only) and reports it in `bound_new_fid`. `holds_slot` doubles
    as "not yet honoured", so a duplicate late reply binds nothing; an
    Rlerror binds nothing, and the Rflush then releases the reservation.
+   When the owner still waits (a caught note, 2026-09-30), the client uses
+   `dispatch_flushed_rmsg` instead: `apply_rmsg` -- the shared body of the
+   type check, per-kind parse, mutation and result -- runs in full, and the
+   tag stays reserved all the same. The walk arms' `slot_bind` releases the
+   slot, so a duplicate still binds nothing.
 3. It was never sent (#52): `abort_unsent` clears it immediately — sound
    only because the transport send contract is all-or-nothing (zero bytes
    pushed ⇒ the server never saw the tag ⇒ no late reply can exist).
@@ -158,7 +177,11 @@ legal before the Rflush arrives.
    bit exists because a rolled-back victim without it counts LIVE in
    `any_outstanding_on_fid` and refuses the #294 cancel-then-close Tclunk —
    re-opening the netd slot leak on exactly the congestion path #53 targets
-   (the #53-audit F1).
+   (the #53-audit F1). Its owner STILL WAITS and the flush never left
+   (2026-09-30): `flush_retract` frees the flush's tag and clears
+   `awaiting_flush` WITHOUT setting `abandoned`, so the victim is an ordinary
+   live op again, guards its fid, and is freed by its reply (case 1). Both
+   undo through `flush_unstage`.
 
 **Rflush residual** (documented in the dispatch arm): a NON-conformant
 server's duplicate Rflush after the flush tag was freed+reused is
@@ -223,13 +246,16 @@ O(64) tag scan, O(n_bound) fid scan — both cache-tight linear arrays;
 ## Prosecution
 
 - **The retirement matrix**: any new path that clears an `awaiting_flush`
-  tag outside the Rflush arm is an I-10 break; any path that widens
+  tag outside the Rflush arm is an I-10 break (`dispatch_flushed_rmsg` applies
+  a reply and must never free its tag); any path that widens
   `abort_unsent` beyond the zero-bytes-pushed set mis-reclaims a live tag
   (a misclassified partial push breaks the stream AND I-10).
 - **`any_outstanding_on_fid` caller-list currency** (seven today) and its
-  two exclusions — removing either exclusion re-opens the #294 clunk-refusal
-  leak; adding an exclusion without the will-never-act-on-the-fid argument
-  breaks the live-op discipline.
+  exclusions (an `abandoned` op, a flushed op whose owner is gone, a Tflush
+  entry) — removing either of the first two re-opens the #294 clunk-refusal
+  leak, and removing the third refuses root-fid ops during any flush; adding
+  an exclusion without the will-never-act-on-the-fid argument breaks the
+  live-op discipline.
 - **Dispatch `-1` vs synthetic-error discipline**: a new dispatch arm that
   returns `-1` for a LOCAL condition kills the shared session for every
   mount that resolves through it (the R3-F1/R-B-F1 class).
@@ -286,4 +312,12 @@ their landing). The reservation and flush(5) (2026-09-29, each seen RED by a
 sabotage): `9p_session.walk_fid_full_no_latch` (leg (b): a peer's walk cannot
 take a walk's reserved slot, and the Rwalk binds into it),
 `9p_session.clunk_retract_after_peer_fill`,
-`9p_session.flushed_walk_late_reply_binds`.
+`9p_session.flushed_walk_late_reply_binds`. The living owner's flush(5)
+(2026-09-30): `9p_session.flushed_reply_honoured_for_waiting_owner` (the whole
+reply is applied, the tag stays reserved, a duplicate binds nothing, a
+wrong-type reply is refused, an Rlerror is honoured) and
+`9p_session.flush_retract_restores_live_op` (the retracted op still guards
+its fid, and its reply frees it), `9p_session.flush_owner_waits_keeps_fid_live`
+(a waiting owner's op guards its fid until it has acted; a dead owner's does
+not) and `9p_session.flush_names_no_fid` (a Tflush in flight does not hold the
+root fid; a live op on it does).

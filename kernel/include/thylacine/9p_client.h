@@ -148,6 +148,9 @@ struct p9_rpc {
     bool           done;       // reply copied into reply_buf (reply_len valid)
     bool           dead;       // session torn down under me -> -P9_E_IO
     bool           be_reader;  // a departing reader handed me the reader role
+    bool           sending;    // registered, but still getting a frame onto the
+                               // wire (the #349 send park, a flush's staging):
+                               // the reader-role handoff skips me
     int            reply_len;  // bytes in reply_buf (valid iff done)
     u8            *reply_buf;  // SYNC: kmalloc'd recv_cap bytes; ASYNC: NULL
     struct Rendez  rendez;     // SYNC: the submitter sleeps here; reader wakes it
@@ -159,6 +162,18 @@ struct p9_rpc {
                                // inflight (== as safe to deref as `done`). Unused
                                // for async ops (on_complete != NULL are skipped
                                // first); may be NULL there.
+    // flush(5), sync only; all under c->lock. `noted`: a caught note already
+    // interrupted this op and stays pending until the EL0-return tail, so any
+    // later wait for it is killable only. `flushing`: its Tflush is on the
+    // wire, so the demux applies a reply that beats the Rflush on arrival (into
+    // `flush_out`, recording `honoured` + `honour_rc`), and an Rflush that
+    // comes first sets `flushed`: the server cancelled the op.
+    bool           noted;
+    bool           flushing;
+    bool           honoured;
+    bool           flushed;
+    int            honour_rc;
+    struct p9_dispatch_result *flush_out;
 };
 
 // Receives a fid the server holds and nobody owns. Called under c->lock, so it
@@ -234,6 +249,10 @@ struct p9_client {
     u64                  demux_orphan_flush;
     u64                  demux_orphan_late;
     u64                  demux_wakes;
+    // flush(5), after a caught note interrupted a sync op: the flush waits that
+    // ended with the original reply honoured, and those the Rflush cancelled.
+    u64                  flush_honoured;
+    u64                  flush_cancelled;
     // FID-LIFECYCLE section 9: where an ownerless dispatch sends a fid the
     // server holds and nobody owns -- a flushed or abandoned walk's late
     // reply binds one. Set once by the attach path before the root Spoor

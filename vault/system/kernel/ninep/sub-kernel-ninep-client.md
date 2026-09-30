@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -78,7 +78,10 @@ Error convention: `-EINVAL` bad args/magic · `-EBUSY` not-OPEN · `-EIO`
 lower-layer failure · `-<ecode>` the server's Rlerror ecode, **bounded to
 `[1,4095]` (Linux `MAX_ERRNO`) before negation** and otherwise collapsed to
 `-EIO` (`map_error`); callers of Stratum-extension surfaces may still need
-to translate the in-range `STM_E*` codes.
+to translate the in-range `STM_E*` codes. `-P9_E_INTR` (EINTR) means a caught
+note interrupted the op AND the server's `Rflush` confirmed it cancelled, so
+the op had no effect (flush(5)); an op whose reply beat that `Rflush` returns
+its result instead.
 
 ## Mechanism
 
@@ -91,10 +94,23 @@ by tag to the owning rpc (frame copied to that rpc's `reply_buf`, waker
 wakes its own rendez), and repeats until its own reply lands; everyone else
 sleeps on their OWN rpc rendez. A departing reader hands the role off
 (`client_handoff_reader_locked`) to one still-pending rpc — skipping
-debug-stopped owners (`p9_rpc.owner->debug_stop_req`) so the role lands on a
-runnable survivor — with `be_reader` as a pure advisory wake-hint (election
+owners with a stop pending (`proc_stop_requested(p9_rpc.owner)`: a debugger
+stop or a job-control stop) so the role lands on a runnable survivor, and skipping an rpc still `sending` (registered, but its
+thread is still getting a frame onto the wire: the #349 send park, or a flush's
+staging) — with `be_reader` as a pure advisory wake-hint (election
 is gated solely by `reader_active` under the lock, so two readers are
-impossible regardless of how many carry the hint).
+impossible regardless of how many carry the hint). A sending thread sleeps on
+the send list, where neither the handoff's wake nor its `be_reader` check
+reaches it, so a designation there waited for an unrelated wake; and a death
+or a stop there (including the stop detour inside that sleep) took the role
+with it, leaving a survivor in `client_wait` with no reader (flush(5) round 2
+F2, 2026-09-30; the #349 park had it before the flush staging loop copied it).
+It needs no designation: every departure signals the send list first, and a
+woken sender self-elects -- except a tag drainer (the flush staging and
+`client_drain_until_free_tag`), which re-parks while a tag is owed and then
+rests on that owner's dispatch, which signals the send list when it frees the
+tag. `client_wait` clears `sending` on entry, so every
+rpc a designation can reach is one that can act on it.
 
 **Send-side flow control.** A transiently-full c2s ring is back-pressure,
 never death: `srvconn_transport_send` returns `P9_TRANSPORT_EAGAIN` at
@@ -111,7 +127,10 @@ its own stack rendez ([[haz-single-waiter-rendez]]) — until
 death; then retries from the spill. Never-sent exits (`CLIENT_SEND_NEVER`:
 self-dying, dead-observed, spill-OOM) reclaim their tag immediately via
 `p9_session_abort_unsent` — zero bytes reached the wire, so I-10-safe —
-except a Tclunk on a live session, which is taken back whole (below).
+except a Tclunk on a live session, which is taken back whole (below). A
+Tflush has one more never-sent exit, its op's own reply landing while it waits
+for ring space; `p9_session_flush_retract` reclaims that one (the flush(5)
+section).
 
 **A Tclunk the caller cannot send leaves its fid bound (2026-09-29,
 FID-LIFECYCLE section 9).** A dying thread cannot send (`client_send_flow`
@@ -174,6 +193,120 @@ park): on EAGAIN or a failed build, `p9_session_flush_rollback` /
 `abandoned` bit: the late original reply frees the tag; the victim is
 excluded from `any_outstanding_on_fid` so a cancel-then-close Tclunk still
 sends). Only a genuine transport break latches the session.
+
+**A caught note flushes and waits (flush(5), 2026-09-30; ARCH 8.8.3 and
+21.10).** A caught note that interrupts a Linux-phenotype op's wait
+(`CLIENT_WAIT_NOTEINTR`, 11b-9p) leaves the thread alive, so the death abandon
+above is wrong for it: flush(5) says a reply that arrives before the Rflush
+must be honoured. From 11b-9p until this fix, an interrupted socket or pts
+read lost the bytes the server had consumed, and a write that had completed
+reported EINTR. `client_flush_wait` now marks the rpc `noted`: the note stays
+pending until the EL0-return tail, so every later wait for the op is killable
+only (`sleep`, and `reader_recv_frame` with `caught_ok=false`), or it would
+only interrupt again (the claim is the thread's to re-take). The rpc KEEPS
+`inflight[tag]`. It stages the Tflush -- with a full pool it makes one unit of
+progress at a time and re-checks its own reply after each, because this op is
+on the wire and a pump can demux its answer, so `client_drain_until_free_tag`,
+which waits only for a free tag, would read on past it. A unit is a pump
+(`client_pump_or_park_locked`), except while a tag is owed
+(`client_tag_owed_locked`: a sync op's reply is stored and its owner, with no
+stop pending, has yet to run the dispatch that frees the tag): then it parks
+for that dispatch's signal, because no frame announces the freed tag and a
+second pump would wait for an unrelated reply (flush(5) round 3 F3; the async
+clunk's drain does the same). The staged Tflush marks the op `owner_waits` in
+the session and goes out through `client_send_flow`, parking on back-pressure
+like any send -- but that loop stops at the op's own reply (`rpc->noted &&
+rpc->done`, below). Then it sets `flushing` and waits in `client_wait` for the
+first answer:
+- **The original reply first.** The demux applies it at once, in wire order,
+  with `client_honour_locked` -> `p9_session_dispatch_flushed_rmsg`: the whole
+  reply, fid state included, into the caller's `out`, with the tag still
+  reserved until the Rflush (I-10 unchanged). It drops the registration and
+  sets `honoured`. The call returns its result, and the Rflush drains ownerless
+  later (`demux_orphan_flush`). A reply that lands before the Tflush is on the
+  wire is only stored (`flushing` is not yet set), and it answers the op
+  outright: the Tflush goes back unsent (the retract below) and the reply
+  completes the call as an ordinary one.
+- **The Rflush first.** The orphan-flush arm reads the flush's `flush_oldtag`
+  before dispatching; once the dispatch has freed both tags, it drops the
+  still-registered owner's `inflight[oldtag]` in the same critical section, so
+  the tag cannot be reused under it, and sets `flushed`. The call returns
+  `-P9_E_INTR` (`CLIENT_WAIT_FLUSHED`). A registered owner whose Tflush is not
+  yet on the wire means the server answered a flush it never got: fail closed.
+- **A death in the flush wait** drops the registration and returns `-P9_E_IO`
+  (`9p: op abandoned (tag N, death, in its flush wait)`); both frames drain
+  ownerless, as after the #845 abandon. The arm also clears `owner_waits`, so
+  the dead owner's fid goes to the closer before the Rflush lands. The #845 arm
+  cannot do that: its second `send_flush` is refused on an `awaiting_flush`
+  tag and `mark_abandoned` skips one, so falling through would leave the fid
+  held until the Rflush and refuse the closer's clunk (#294). The two arms
+  must stay separate.
+- **A Tflush that never reaches the wire** (`CLIENT_SEND_NEVER`: the op's own
+  reply came first, or the sender could not wait) is undone with
+  `p9_session_flush_retract` (not `flush_rollback`: the owner is still here, so
+  the op stays live), and the op waits for its reply, killable only -- or has
+  it already, and completes with it; either way the note delivers after the
+  call. A genuine send break latches the session dead; no reply of the op's can
+  be stored by then, because the send loop re-checks under the lock it sends
+  under.
+While the owner waits, the session counts its flushed op LIVE for the fid
+exclusion (`owner_waits`, set when the Tflush is staged): a reply that beats
+the Rflush is applied in full, so the op may yet act on its fid, and a clunk
+of that fid is refused. The honour clears the bit (the op has acted), and so
+does a death in the flush wait (the fid is the closer's, before the Rflush);
+the #845 abandon never sets it (flush(5) round 3 F4).
+`c->flush_honoured` / `c->flush_cancelled` count the two outcomes. A Tclunk is
+never flushed, here as on death. The orphan-flush arm fails the session closed
+on a registered victim that is async or not yet `flushing`: every other flusher
+drops its registration before its Tflush, so only a server answering a flush
+it never received can produce one. Tests, each seen RED on the pre-fix client:
+`9p_client.note_flush_honours_late_read`, `.note_flush_rflush_first_cancels`
+(the read's fid is not clunked while its owner waits, and clunks once the
+Rflush has cancelled the read),
+`.note_flush_death_abandons` (whose fid the closer can clunk before the
+Rflush) and `.note_flush_reader_honours_walk` (the flush
+wait holds the reader role and honours its own Rwalk: the caller gets the fid,
+not the closer), `.note_flush_full_pool_own_reply` (a full pool: the pump for a
+tag demuxes the op's own reply, and the op stops there) and
+`.note_flush_pump_wakes_parked_flush` (below), `.note_flush_reader_rflush_first`
+(the flush wait holds the reader role and reads its own Rflush: `-EINTR`, and
+it stops reading there) and `.note_flush_reply_beats_unsent_flush` (the
+Tflush meets a full send ring; the op's own reply, demuxed while it waits,
+completes the call and the Tflush goes back unsent),
+`.note_flush_handoff_skips_staging` and `.handoff_skips_send_parked` (a
+departing reader does not designate the op parked on the send list with the
+lower tag), `.note_flush_staging_waits_for_owed_tag` and
+`.async_clunk_drain_waits_for_owed_tag` (a drainer whose pump completed a sync
+op waits for that op's dispatch, not a second frame; on the mq loopback a
+second read is an EOF that kills the session), and
+`9p_session.flush_owner_waits_keeps_fid_live`. Each mechanism has a sabotage
+that turns its test RED. They run a Linux-phenotype
+`test_dying` thread whose SIGCHLD is caught and post a real child_exit through
+the exit path.
+
+**Every freed tag, and every pump's departure, signals send progress
+(2026-09-30, the flush(5) round-1 F1).** A sender parked in
+`client_pump_or_park_locked` -- on back-pressure, or draining a full tag pool --
+sleeps on the multi-waiter send list and wakes only on
+`client_send_progress_signal` or death. Before, only `client_wait`'s reader (per
+demux, and on departure) and the self-pump signalled. So a tag freed by an
+owner's DONE dispatch, a never-sent take-back, a Tflush roll-back (the death
+abandon's or `p9_client_abandon_async`'s) or retract, or an async retract woke
+no drainer, and a drainer parked on a full pool could
+sleep on with a free tag in the table. Worse, `p9_client_reader_pump_once` and
+`_deadline` (the SQPOLL and dev9p-poll kthreads) departed without signalling,
+so every sender that parked while a pump held the role slept until an
+unrelated op arrived. Each of those sites now signals:
+`client_take_back_unsent_locked` holds the never-sent reclaims (both
+`client_run` sites and `p9_client_clunk_async`'s). It must run under c->lock,
+and asserts it: `CLIENT_UNLOCK_RET` evaluates its value after the unlock, so a
+take-back written as its argument ran unlocked, racing peers over the tag and
+fid tables (flush(5) round 2 F1, a P1 in the round-1 fix; the async clunk now
+takes back before the unlock). The regressions are
+`.note_flush_pump_wakes_parked_flush`, a flush-stager parked on a full pool,
+and `.note_flush_reply_beats_unsent_flush`, a Tflush parked on a full send ring
+(the ordinary #349 park): each is woken only by the departure of the pump that
+demuxed its op's own reply.
 
 **Frame-atomic recv.** `reader_recv_frame` (thin wrapper over
 `do_reader_recv_frame`) holds `stop_no_park` for the whole recv tenure and
@@ -293,9 +426,14 @@ test clients carry the counters unlisted.
   `dev9p_spoor_remote`, and nothing that resolves, checks permission,
   caches or vouches for exec consults it.
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
-  flags, its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
+  flags, `sending` (registered, not yet waiting in `client_wait`: the
+  handoff skips it), its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
   async seam), `owner` (the submitting Proc — the handoff skip's key; NULL
-  for async).
+  for async), and the flush(5) state of a sync op a caught note interrupted:
+  `noted` (later waits killable only), `flushing` (its Tflush is on the
+  wire), `honoured` + `honour_rc` + `flush_out` (a reply applied by the
+  demux), `flushed` (the Rflush came first). Async containers are
+  zero-allocated, so all of these read false there.
 - `p9_session.outstanding[]` entry states: active · `awaiting_flush`
   (reserved until Rflush) · `abandoned` (owner gone, no flush in flight —
   freed by the late reply; excluded from `any_outstanding_on_fid`).
@@ -352,7 +490,8 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   sibling wire codec [[sub-kernel-ninep-wire]] asserts the same bound).
 - Congestion is NOT an error path: EAGAIN → spill/pump/park/retry; a
   stopped reader → role release, no latch; a dying owner → Tflush or the
-  abandoned-bit reclaim. Only a genuine break (or demux violation) latches
+  abandoned-bit reclaim; a caught note → Tflush and a killable wait for the
+  first answer (flush(5)). Only a genuine break (or demux violation) latches
   `c->dead`, which fails everything `-EIO` including parked senders.
 - Partial walks (`nwqid < nwname`) return `-EIO` at this layer (the
   resolver's pounce handles partial semantics above).
@@ -394,14 +533,34 @@ this surface):
   resume races it); DeathWinsOverStop at every branch.
 - **Role-release completeness**: all FOUR `reader_active` sites must handle
   stop/death without stranding the role or the session; the handoff must
-  skip debug-stopped owners AND re-hand-off on a DIED return gated on
-  `be_reader`.
+  skip owners with a stop pending (debugger or job control) AND rpcs still
+  `sending`, AND re-hand-off on a
+  DIED return gated on `be_reader`. A new place a registered rpc's thread can
+  sleep outside `client_wait` must set `sending`.
 - **Park machinery**: every park on shared-reachable state uses the
   multi-waiter list ([[haz-single-waiter-rendez]]); register-then-observe
   under the documented lock order; no stale hook survives a return.
 - **Reply-buffer lifetime**: any new zero-copy-aliasing op must keep the
   aliased buffer alive past the caller's copy-out (the `done_reply_buf`
   discipline).
+- **The progress signal** (2026-09-30): a new path that frees a tag, or a new
+  reader that departs, must call `client_send_progress_signal`, or a sender
+  parked for a tag or ring space sleeps on beside a free one. A tag drainer
+  must park, not pump, while a tag is owed (`client_tag_owed_locked`); a
+  self-pump blocked in the transport recv sees no client-side progress
+  (OPEN-BUGS 2026-09-30 11:01Z, the #349 root).
+- **The flush(5) arm** (2026-09-30): a reply on a flushing owner's tag must be
+  applied BEFORE any later frame (the Rflush frees the tag); the owner may
+  never touch `inflight[tag]` after `honoured` or `flushed` (the tag may
+  already belong to another op); every wait after `noted` must be killable
+  only (a pending caught note would spin a note-interruptible one); death
+  must still win in the flush wait; the Rflush-first hand-off must land in
+  the dispatch's own critical section; a Tflush's send must stop at its op's
+  own reply (sent after it, the Tflush would leave the stored reply to
+  `dispatch_rmsg`, which absorbs a reply on an `awaiting_flush` tag: the call
+  would succeed with an empty result, a read's false EOF); a living owner's
+  flushed op must count live for the fid exclusion until it has acted, and the
+  death-in-flush-wait arm must clear that before the Rflush.
 
 ## Seams
 

@@ -69,6 +69,10 @@ void test_9p_session_abort_unsent_reclaims_tag(void);
 void test_9p_session_flush_rollback_restores_victim(void);
 void test_9p_session_clunk_retract_after_peer_fill(void);
 void test_9p_session_flushed_walk_late_reply_binds(void);
+void test_9p_session_flushed_reply_honoured_for_waiting_owner(void);
+void test_9p_session_flush_retract_restores_live_op(void);
+void test_9p_session_flush_owner_waits_keeps_fid_live(void);
+void test_9p_session_flush_names_no_fid(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
@@ -438,6 +442,182 @@ void test_9p_session_flushed_walk_late_reply_binds(void) {
     TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&s), (u64)0,
                    "the Rflush released the reservation");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all tags free");
+    p9_session_destroy(&s);
+}
+
+// flush(5) for an owner that still waits: a reply that beats the Rflush is
+// applied in full -- *out filled, a walk's fid bound -- yet its tag stays
+// reserved until the Rflush. A duplicate then binds nothing, and a reply that
+// fits no op is refused with the tag still reserved.
+void test_9p_session_flushed_reply_honoured_for_waiting_owner(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+    u32 sz; u8 ty;
+    struct p9_dispatch_result r;
+
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 10, 0, NULL, NULL);
+    TEST_ASSERT(len > 0, "send_walk(0->10)");
+    u16 t;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    int rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 204);
+    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r), -1,
+                   "refused on a tag with no flush");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "the walk is untouched");
+
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush(walk)");
+    u16 ft;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ft);
+    rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 204);
+    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "the Rwalk that beat the Rflush is honoured");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TWALK, "as the walk it answers");
+    TEST_EXPECT_EQ((u64)r.nwqid, (u64)1, "its qids are reported");
+    TEST_EXPECT_EQ((u64)r.bound_new_fid, (u64)10, "and its bind");
+    TEST_ASSERT(p9_session_fid_bound(&s, 10), "fid 10 bound");
+    TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&s), (u64)0, "into its reserved slot");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2,
+                   "the walk's tag stays reserved until the Rflush");
+
+    size_t bound = p9_session_n_bound_fids(&s);
+    rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 204);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "a duplicate is absorbed ownerless");
+    TEST_EXPECT_EQ((u64)r.bound_new_fid, (u64)P9_NOFID, "and binds nothing");
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&s), (u64)bound, "bound set unchanged");
+
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rflush");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "the Rflush frees both tags");
+    TEST_ASSERT(p9_session_fid_bound(&s, 10), "fid 10 stays bound");
+
+    // An error reply is honoured too: the call fails with the server's errno.
+    len = p9_session_send_read(&s, g_buf, sizeof(g_buf), 10, 0, 16);
+    TEST_ASSERT(len > 0, "send_read(10)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush(read)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ft);
+    rlen = synth_rclunk(g_buf, sizeof(g_buf), t);
+    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r), -1,
+                   "a reply of the wrong type is refused");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "with the tag still reserved");
+    rlen = synth_rlerror(g_buf, sizeof(g_buf), t, 11);
+    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "an Rlerror that beat the Rflush is honoured");
+    TEST_ASSERT(r.is_error && r.ecode == 11, "with the server's errno");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "the tag stays reserved");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rflush");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all reclaimed");
+
+    p9_session_destroy(&s);
+}
+
+// A flush that never reached the wire, for an owner that still waits: the
+// retract frees the flush's tag and leaves the op LIVE -- unlike rollback's
+// abandon, it still guards its fid -- and its reply completes it.
+void test_9p_session_flush_retract_restores_live_op(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+    u32 sz; u8 ty;
+    u16 t;
+    struct p9_dispatch_result r;
+
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 12, 0, NULL, NULL);
+    TEST_ASSERT(len > 0, "send_walk(0->12)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    int rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 205);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "fid 12 bound");
+
+    len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 12, 0);
+    TEST_ASSERT(len > 0, "send_fsync(12)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    p9_session_flush_retract(&s, t);
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "no-op before any flush");
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush(fsync)");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "op + flush staged");
+
+    p9_session_flush_retract(&s, t);
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "the flush's tag is freed");
+    TEST_ASSERT(p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 12) < 0,
+                "the op is live again: a clunk of its fid is refused");
+
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFSYNC, t, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "its reply completes it");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TFSYNC, "as the fsync");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "and frees its tag");
+    TEST_ASSERT(p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 12) > 0,
+                "then the clunk builds");
+
+    p9_session_destroy(&s);
+}
+
+// A flushed op whose owner still waits may yet act on its fid, so it guards the
+// fid like a live op: a clunk of it is refused until the reply that beat the
+// Rflush has been applied, and then builds with the tag still reserved. An owner
+// that dies in the wait hands the fid over at once, as #294's cancel-then-close
+// needs.
+void test_9p_session_flush_owner_waits_keeps_fid_live(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+    u32 sz; u8 ty;
+    u16 t, ft, ct;
+    struct p9_dispatch_result r;
+
+    for (u32 fid = 14; fid <= 15; fid++) {
+        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, fid, 0, NULL, NULL);
+        TEST_ASSERT(len > 0, "send_walk");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        int rlen = synth_rwalk_single(g_buf, sizeof(g_buf), t, P9_QTFILE, 1, 206 + fid);
+        TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "fid bound");
+    }
+
+    // The owner waits, and its reply beats the Rflush.
+    int len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 14, 0);
+    TEST_ASSERT(len > 0, "send_fsync(14)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush(fsync 14)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ft);
+    p9_session_flush_owner_waits(&s, t, true);
+    TEST_ASSERT(p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 14) < 0,
+                "while its owner waits, a clunk of its fid is refused");
+    int rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFSYNC, t, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "the Rfsync that beat the Rflush is honoured");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "its tag stays reserved");
+    len = p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 14);
+    TEST_ASSERT(len > 0, "the op has acted: the clunk builds");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ct);
+    rlen = synth_rclunk(g_buf, sizeof(g_buf), ct);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rclunk 14");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rflush 14");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all tags free");
+
+    // The owner dies in the wait.
+    len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 15, 0);
+    TEST_ASSERT(len > 0, "send_fsync(15)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush(fsync 15)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ft);
+    p9_session_flush_owner_waits(&s, t, true);
+    TEST_ASSERT(p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 15) < 0,
+                "refused while its owner waits");
+    p9_session_flush_owner_waits(&s, t, false);
+    len = p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 15);
+    TEST_ASSERT(len > 0, "its owner gone, the clunk builds before the Rflush");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ct);
+    rlen = synth_rclunk(g_buf, sizeof(g_buf), ct);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rclunk 15");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rflush 15");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all reclaimed");
+
     p9_session_destroy(&s);
 }
 
@@ -1130,6 +1310,44 @@ void test_9p_session_setattr_with_inflight_on_fid_refused(void) {
     // Second setattr on same fid: refused.
     int rc = p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 35, &sa);
     TEST_EXPECT_EQ(rc, -1, "concurrent setattr on same fid refused");
+}
+
+// A Tflush acts on no fid, so while one is in flight an op on the root fid --
+// a setattr of a raw attach root fd -- still builds. A live op on the root fid
+// does hold it (the control).
+void test_9p_session_flush_names_no_fid(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+    u32 sz; u8 ty;
+    u16 t, ft, st;
+    struct p9_dispatch_result r;
+    struct p9_setattr sa = { .valid = P9_SETATTR_MODE, .mode = 0755u };
+
+    int len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 0, 0);
+    TEST_ASSERT(len > 0, "send_fsync(root)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    TEST_ASSERT(p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 0, &sa) < 0,
+                "a live op on the root fid refuses a setattr of it");
+    int rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFSYNC, t, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rfsync root");
+
+    TEST_EXPECT_EQ(walk_to(&s, 16), 0, "walk to fid 16");
+    len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 16, 0);
+    TEST_ASSERT(len > 0, "send_fsync(16)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush(fsync 16)");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &ft);
+    len = p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 0, &sa);
+    TEST_ASSERT(len > 0, "a Tflush in flight does not hold the root fid");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &st);
+    rlen = synth_rsetattr(g_buf, sizeof(g_buf), st);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rsetattr root");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "Rflush 16");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all tags free");
+
+    p9_session_destroy(&s);
 }
 
 void test_9p_session_getattr_permits_concurrent(void) {

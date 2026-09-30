@@ -151,6 +151,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     s->outstanding[t].new_fid       = new_fid;
     s->outstanding[t].op_id         = s->next_op_id;
     s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].owner_waits   = false;
     s->outstanding[t].abandoned     = false;
     s->outstanding[t].holds_slot    = false;
     s->outstanding[t].flush_oldtag  = 0;
@@ -167,6 +168,7 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
     s->outstanding[t].new_fid       = 0;
     s->outstanding[t].op_id         = 0;
     s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].owner_waits   = false;
     s->outstanding[t].abandoned     = false;
     s->outstanding[t].flush_oldtag  = 0;
     s->total_completed++;
@@ -178,9 +180,11 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
 // current: a stale list narrows future audit scoping, R2-F2) to
 // enforce the spec's "no other in-flight op on the same fid" discipline.
 //
-// A FLUSHED op (awaiting_flush, #845) is EXCLUDED: it has been cancelled, its
-// reply is discarded (the I-10 ownerless-demux path), and it will not act on the
-// fid, so it does not block a fid op. This makes Tflush-then-Tclunk -- the
+// A FLUSHED op whose owner is gone (awaiting_flush without owner_waits, #845)
+// is EXCLUDED: it has been cancelled, its reply is discarded (the I-10
+// ownerless-demux path), and it will not act on the fid, so it does not block a
+// fid op. A flushed op whose owner still waits (flush(5)) stays LIVE: a reply
+// that beats its Rflush is honoured in full. This makes Tflush-then-Tclunk -- the
 // standard cancel-then-close pattern -- legal: #294's cancel-at-close abandons
 // (Tflush) an outstanding readiness op then IMMEDIATELY clunks its fid, before any
 // Rflush has cleared the tag; counting the awaiting_flush entry here would refuse
@@ -191,7 +195,11 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
 static bool any_outstanding_on_fid(const struct p9_session *s, u32 fid) {
     for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
         if (!s->outstanding[t].active) continue;
-        if (s->outstanding[t].awaiting_flush) continue;   // cancelled -> not live
+        // A Tflush acts on no fid; its entry holds root_fid only as a
+        // placeholder, which would refuse a setattr of a raw attach root fd.
+        if (s->outstanding[t].kind == P9_TFLUSH) continue;
+        if (s->outstanding[t].awaiting_flush &&
+            !s->outstanding[t].owner_waits) continue;     // cancelled -> not live
         if (s->outstanding[t].abandoned) continue;        // rolled-back abandon (#53-F1)
         if (s->outstanding[t].fid == fid) return true;
         if (s->outstanding[t].new_fid == fid) return true;
@@ -222,6 +230,7 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
         s->outstanding[i].new_fid       = 0;
         s->outstanding[i].op_id         = 0;
         s->outstanding[i].awaiting_flush = false;
+        s->outstanding[i].owner_waits   = false;
         s->outstanding[i].abandoned     = false;
         s->outstanding[i].holds_slot    = false;
         s->outstanding[i].flush_oldtag  = 0;
@@ -427,7 +436,8 @@ int p9_session_send_clunk(struct p9_session *s,
 }
 
 // =============================================================================
-// Send: Tflush (#845) -- abandon an in-flight request whose owner is gone.
+// Send: Tflush -- cancel an in-flight request: its owner gone (#845), or still
+// waiting for whichever answer comes first (flush(5), owner_waits).
 // =============================================================================
 
 int p9_session_send_flush(struct p9_session *s,
@@ -449,8 +459,8 @@ int p9_session_send_flush(struct p9_session *s,
     if (t < 0) return -1;                        // pool full -> caller falls back
     int rc = p9_build_tflush(out, cap, (u16)t, oldtag);
     if (rc < 0) return -1;
-    // The flush op is fid-less; root_fid is a harmless placeholder (matches
-    // version/attach). alloc_tag skipped the active `oldtag`, so t != oldtag
+    // The flush op is fid-less; root_fid is a placeholder (matches
+    // version/attach), which any_outstanding_on_fid skips. alloc_tag skipped the active `oldtag`, so t != oldtag
     // and the victim pointer survives mark_outstanding's write to t. Record
     // oldtag so the Rflush can free it, and reserve oldtag against reuse until
     // that Rflush (9P: oldtag not reusable until Rflush -- the I-10 guard).
@@ -540,27 +550,49 @@ void p9_session_mark_abandoned(struct p9_session *s, u16 tag) {
     s->outstanding[tag].abandoned = true;
 }
 
-void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
-    if (!s) return;
-    if (s->magic != P9_SESSION_MAGIC) return;
-    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return;
-    if (!s->outstanding[oldtag].active) return;
-    if (!s->outstanding[oldtag].awaiting_flush) return;
+// Free the never-sent flush that send_flush staged for `oldtag` and clear
+// the victim's awaiting_flush. True when the (victim, flush-slot) pair matched.
+static bool flush_unstage(struct p9_session *s, u16 oldtag) {
+    if (!s) return false;
+    if (s->magic != P9_SESSION_MAGIC) return false;
+    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return false;
+    if (!s->outstanding[oldtag].active) return false;
+    if (!s->outstanding[oldtag].awaiting_flush) return false;
     for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
         if (!s->outstanding[t].active) continue;
         if (s->outstanding[t].kind != P9_TFLUSH) continue;
         if (s->outstanding[t].flush_oldtag != oldtag) continue;
         clear_outstanding(s, (u16)t);
         s->outstanding[oldtag].awaiting_flush = false;
-        // #53-audit F1: the victim's owner is gone and no flush is in flight.
-        // Without this bit the victim counts LIVE in any_outstanding_on_fid
-        // and the #294 cancel-then-close Tclunk that dev9p_close issues NEXT
-        // is refused with no retry -- re-opening the #294 netd slot leak (+
-        // tag accumulation on deferred-reply servers) on the exact congestion
-        // path #53 targets. The late original reply still frees the tag.
-        s->outstanding[oldtag].abandoned = true;
-        return;
+        s->outstanding[oldtag].owner_waits    = false;
+        return true;
     }
+    return false;
+}
+
+void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
+    // #53-audit F1: the victim's owner is gone and no flush is in flight.
+    // Without this bit the victim counts LIVE in any_outstanding_on_fid
+    // and the #294 cancel-then-close Tclunk that dev9p_close issues NEXT
+    // is refused with no retry -- re-opening the #294 netd slot leak (+
+    // tag accumulation on deferred-reply servers) on the exact congestion
+    // path #53 targets. The late original reply still frees the tag.
+    if (flush_unstage(s, oldtag)) s->outstanding[oldtag].abandoned = true;
+}
+
+// The owner still waits, so the victim goes back to being an ordinary
+// in-flight op: its reply completes it and frees its tag.
+void p9_session_flush_retract(struct p9_session *s, u16 oldtag) {
+    (void)flush_unstage(s, oldtag);
+}
+
+void p9_session_flush_owner_waits(struct p9_session *s, u16 oldtag, bool waits) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[oldtag].active) return;
+    if (!s->outstanding[oldtag].awaiting_flush) return;
+    s->outstanding[oldtag].owner_waits = waits;
 }
 
 // =============================================================================
@@ -1092,50 +1124,12 @@ static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
     if (slot_bind(s, tag, op->new_fid) == 0) out->bound_new_fid = op->new_fid;
 }
 
-int p9_session_dispatch_rmsg(struct p9_session *s,
-                             const u8 *rmsg, size_t len,
-                             struct p9_dispatch_result *out) {
-    if (!s) return -1;
-    if (s->magic != P9_SESSION_MAGIC) return -1;
-    if (!out) return -1;
-    if (!rmsg) return -1;
-    zero_result(out);
-
-    u32 size; u8 type; u16 tag;
-    int rc = p9_peek_header(rmsg, len, &size, &type, &tag);
-    if (rc < 0) return -1;
-
-    // Rversion is the only Rmsg that lives outside the outstanding[]
-    // bookkeeping (it uses NOTAG). Dispatch it specially.
-    if (type == P9_RVERSION) {
-        return dispatch_rversion(s, rmsg, len, out);
-    }
-
-    // For every other Rmsg, the tag must index a live outstanding entry.
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
-    struct p9_outstanding *op = &s->outstanding[tag];
-    if (!op->active) return -1;
-
-    // A reply for a tag reserved by a pending Tflush (#845) is a LATE reply
-    // for an abandoned op (its owner Proc died). Consume it WITHOUT freeing
-    // the tag: per 9P, oldtag is reusable only after the Rflush, so freeing
-    // here would let the tag be reused while a stray duplicate / twin reply
-    // is still possible -> a future reply mis-attributed to the reused tag
-    // (the I-10 violation the naive fix introduces). The flush's Rflush
-    // (dispatched via its own tag, below) is the SOLE authority that frees an
-    // awaiting_flush tag. The one fid mutation it makes is a walk's new fid,
-    // which flush(5) says the client must honour (honour_late_walk).
-    if (op->awaiting_flush) {
-        // Absorb (do not complete): the tag stays reserved. The ownerless
-        // demux caller is the only one that can reach an awaiting_flush tag
-        // (the owner unwound + NULLed inflight[tag] before the flush reserved
-        // it). It reads only out->bound_new_fid, which honour_late_walk sets
-        // when it binds. A 0 return here means "ownerless late reply
-        // absorbed", NOT "op completed"; no clear_outstanding.
-        honour_late_walk(s, op, tag, type, rmsg, len, out);
-        return 0;
-    }
-
+// Apply a reply to the op it answers: check its type, parse it, make its
+// state mutation and fill *out. Whether the tag is freed is the caller's.
+static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
+                      u16 tag, u8 type, const u8 *rmsg, size_t len,
+                      struct p9_dispatch_result *out) {
+    int rc;
     // Type must match (or be Rlerror). The R-msg of T-msg `kind` is
     // numerically kind + 1.
     u8 expected_r = (u8)(op->kind + 1);
@@ -1411,8 +1405,80 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
     out->fid     = op->fid;
     out->new_fid = op->new_fid;
     out->op_id   = op->op_id;
+    return 0;
+}
+
+int p9_session_dispatch_rmsg(struct p9_session *s,
+                             const u8 *rmsg, size_t len,
+                             struct p9_dispatch_result *out) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (!out) return -1;
+    if (!rmsg) return -1;
+    zero_result(out);
+
+    u32 size; u8 type; u16 tag;
+    int rc = p9_peek_header(rmsg, len, &size, &type, &tag);
+    if (rc < 0) return -1;
+
+    // Rversion is the only Rmsg that lives outside the outstanding[]
+    // bookkeeping (it uses NOTAG). Dispatch it specially.
+    if (type == P9_RVERSION) {
+        return dispatch_rversion(s, rmsg, len, out);
+    }
+
+    // For every other Rmsg, the tag must index a live outstanding entry.
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
+    struct p9_outstanding *op = &s->outstanding[tag];
+    if (!op->active) return -1;
+
+    // A reply for a tag reserved by a pending Tflush (#845) is a LATE reply
+    // for an abandoned op (its owner Proc died). Consume it WITHOUT freeing
+    // the tag: per 9P, oldtag is reusable only after the Rflush, so freeing
+    // here would let the tag be reused while a stray duplicate / twin reply
+    // is still possible -> a future reply mis-attributed to the reused tag
+    // (the I-10 violation the naive fix introduces). The flush's Rflush
+    // (dispatched via its own tag, below) is the SOLE authority that frees an
+    // awaiting_flush tag. The one fid mutation it makes is a walk's new fid,
+    // which flush(5) says the client must honour (honour_late_walk).
+    if (op->awaiting_flush) {
+        // Absorb (do not complete): the tag stays reserved. Only the ownerless
+        // demux path reaches an awaiting_flush tag here: an owner that still
+        // waits on its flush has its reply applied by
+        // p9_session_dispatch_flushed_rmsg instead. The ownerless caller reads
+        // only out->bound_new_fid, which honour_late_walk sets when it binds.
+        // A 0 return here means "ownerless late reply absorbed", NOT "op
+        // completed"; no clear_outstanding.
+        honour_late_walk(s, op, tag, type, rmsg, len, out);
+        return 0;
+    }
+
+    if (apply_rmsg(s, op, tag, type, rmsg, len, out) < 0) return -1;
     clear_outstanding(s, tag);
     return 0;
+}
+
+int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
+                                     const u8 *rmsg, size_t len,
+                                     struct p9_dispatch_result *out) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (!out) return -1;
+    if (!rmsg) return -1;
+    zero_result(out);
+
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(rmsg, len, &size, &type, &tag) < 0) return -1;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
+    struct p9_outstanding *op = &s->outstanding[tag];
+    if (!op->active || !op->awaiting_flush) return -1;
+    // No clear_outstanding: the tag stays reserved until the flush's Rflush
+    // (the I-10 guard). The walk arms' slot_bind releases the slot, so a
+    // duplicate reply reaching the ownerless arm above binds nothing. The op
+    // has acted, so its fid is free for the owner's next op.
+    int rc = apply_rmsg(s, op, tag, type, rmsg, len, out);
+    op->owner_waits = false;
+    return rc;
 }
 
 // =============================================================================

@@ -1425,6 +1425,10 @@ void test_9p_session_walk_round_trip(void);
 void test_9p_session_walk_fid_full_no_latch(void);
 void test_9p_session_clunk_retract_after_peer_fill(void);
 void test_9p_session_flushed_walk_late_reply_binds(void);
+void test_9p_session_flushed_reply_honoured_for_waiting_owner(void);
+void test_9p_session_flush_retract_restores_live_op(void);
+void test_9p_session_flush_owner_waits_keeps_fid_live(void);
+void test_9p_session_flush_names_no_fid(void);
 void test_9p_session_clunk_round_trip(void);
 void test_9p_session_clunk_send_time_unbinds(void);
 void test_9p_session_dispatch_rlerror(void);
@@ -1555,6 +1559,18 @@ void test_9p_client_clunk_rlerror_drains_as_clunk(void);
 void test_9p_client_clunk_malformed_reply_fails_closed(void);
 void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
 void test_9p_client_flush_malformed_reply_fails_closed(void);
+void test_9p_client_note_flush_honours_late_read(void);
+void test_9p_client_note_flush_rflush_first_cancels(void);
+void test_9p_client_note_flush_death_abandons(void);
+void test_9p_client_note_flush_reader_honours_walk(void);
+void test_9p_client_note_flush_full_pool_own_reply(void);
+void test_9p_client_note_flush_pump_wakes_parked_flush(void);
+void test_9p_client_note_flush_reader_rflush_first(void);
+void test_9p_client_note_flush_reply_beats_unsent_flush(void);
+void test_9p_client_note_flush_handoff_skips_staging(void);
+void test_9p_client_handoff_skips_send_parked(void);
+void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
+void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -3464,6 +3480,14 @@ struct test_case g_tests[] = {
                                        test_9p_session_clunk_retract_after_peer_fill, false, NULL },
     { "9p_session.flushed_walk_late_reply_binds",
                                        test_9p_session_flushed_walk_late_reply_binds, false, NULL },
+    { "9p_session.flushed_reply_honoured_for_waiting_owner",
+                                       test_9p_session_flushed_reply_honoured_for_waiting_owner, false, NULL },
+    { "9p_session.flush_retract_restores_live_op",
+                                       test_9p_session_flush_retract_restores_live_op, false, NULL },
+    { "9p_session.flush_owner_waits_keeps_fid_live",
+                                       test_9p_session_flush_owner_waits_keeps_fid_live, false, NULL },
+    { "9p_session.flush_names_no_fid",
+                                       test_9p_session_flush_names_no_fid, false, NULL },
     { "9p_session.clunk_round_trip",   test_9p_session_clunk_round_trip,   false, NULL },
     { "9p_session.clunk_send_time_unbinds",
                                        test_9p_session_clunk_send_time_unbinds,
@@ -3736,6 +3760,30 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.flush_malformed_reply_fails_closed",
                                        test_9p_client_flush_malformed_reply_fails_closed, false, NULL },
+    { "9p_client.note_flush_honours_late_read",
+                                       test_9p_client_note_flush_honours_late_read, false, NULL },
+    { "9p_client.note_flush_rflush_first_cancels",
+                                       test_9p_client_note_flush_rflush_first_cancels, false, NULL },
+    { "9p_client.note_flush_death_abandons",
+                                       test_9p_client_note_flush_death_abandons, false, NULL },
+    { "9p_client.note_flush_reader_honours_walk",
+                                       test_9p_client_note_flush_reader_honours_walk, false, NULL },
+    { "9p_client.note_flush_full_pool_own_reply",
+                                       test_9p_client_note_flush_full_pool_own_reply, false, NULL },
+    { "9p_client.note_flush_pump_wakes_parked_flush",
+                                       test_9p_client_note_flush_pump_wakes_parked_flush, false, NULL },
+    { "9p_client.note_flush_reader_rflush_first",
+                                       test_9p_client_note_flush_reader_rflush_first, false, NULL },
+    { "9p_client.note_flush_reply_beats_unsent_flush",
+                                       test_9p_client_note_flush_reply_beats_unsent_flush, false, NULL },
+    { "9p_client.note_flush_handoff_skips_staging",
+                                       test_9p_client_note_flush_handoff_skips_staging, false, NULL },
+    { "9p_client.handoff_skips_send_parked",
+                                       test_9p_client_handoff_skips_send_parked, false, NULL },
+    { "9p_client.note_flush_staging_waits_for_owed_tag",
+                                       test_9p_client_note_flush_staging_waits_for_owed_tag, false, NULL },
+    { "9p_client.async_clunk_drain_waits_for_owed_tag",
+                                       test_9p_client_async_clunk_drain_waits_for_owed_tag, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",

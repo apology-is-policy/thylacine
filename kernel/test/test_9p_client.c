@@ -31,7 +31,10 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // T_S_IFDIR (the 8.5.1 directory Rgetattr)
+#include <thylacine/thread.h>     // flush(5) legs: current_thread()->note_interruptible
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>  // flush(5) legs: a Linux sigtab row catches child_exit
+#include "../../mm/slub.h"       // flush(5) legs: kzalloc a sigtab proc_free frees
 
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
@@ -1078,14 +1081,17 @@ void test_9p_client_async_handoff_skips_async(void) {
     drive_client_open(&g_client, &g_loopback);
 
     g_handoff_async_fired = false;
-    struct p9_rpc async_rpc;
+    // Every hand-built rpc starts from zero: the handoff reads fields these
+    // assignments do not name (`sending`), and stack garbage there would skip
+    // the target.
+    struct p9_rpc async_rpc = { 0 };
     async_rpc.tag = 30; async_rpc.done = false; async_rpc.dead = false;
     async_rpc.be_reader = false; async_rpc.reply_len = 0; async_rpc.reply_buf = NULL;
     async_rpc.on_complete = test_handoff_async_recorder;   // async -> must be skipped
     async_rpc.owner = NULL;                           // 8c-3: not debug-stopped
     rendez_init(&async_rpc.rendez);
 
-    struct p9_rpc sync_rpc;
+    struct p9_rpc sync_rpc = { 0 };
     sync_rpc.tag = 31; sync_rpc.done = false; sync_rpc.dead = false;
     sync_rpc.be_reader = false; sync_rpc.reply_len = 0; sync_rpc.reply_buf = NULL;
     sync_rpc.on_complete = NULL;                      // sync -> the handoff target
@@ -1142,13 +1148,14 @@ void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     // The STOPPED op sits at the LOWER tag: the pre-fix handoff picks the first
     // eligible inflight, so without the skip it would choose owner_stopped and
     // set its be_reader -- the revert-probe (this test FAILS on pre-fix code).
-    struct p9_rpc rpc_stopped;
+    // From zero: the handoff reads fields the assignments below do not name.
+    struct p9_rpc rpc_stopped = { 0 };
     rpc_stopped.tag = 40; rpc_stopped.done = false; rpc_stopped.dead = false;
     rpc_stopped.be_reader = false; rpc_stopped.reply_len = 0; rpc_stopped.reply_buf = NULL;
     rpc_stopped.on_complete = NULL; rpc_stopped.owner = &owner_stopped;
     rendez_init(&rpc_stopped.rendez);
 
-    struct p9_rpc rpc_survivor;
+    struct p9_rpc rpc_survivor = { 0 };
     rpc_survivor.tag = 41; rpc_survivor.done = false; rpc_survivor.dead = false;
     rpc_survivor.be_reader = false; rpc_survivor.reply_len = 0; rpc_survivor.reply_buf = NULL;
     rpc_survivor.on_complete = NULL; rpc_survivor.owner = &owner_survivor;
@@ -4087,36 +4094,88 @@ void test_9p_client_clunk_rlerror_drains_as_clunk(void);
 void test_9p_client_clunk_malformed_reply_fails_closed(void);
 void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
 void test_9p_client_flush_malformed_reply_fails_closed(void);
+void test_9p_client_note_flush_honours_late_read(void);
+void test_9p_client_note_flush_rflush_first_cancels(void);
+void test_9p_client_note_flush_death_abandons(void);
+void test_9p_client_note_flush_reader_honours_walk(void);
+void test_9p_client_note_flush_full_pool_own_reply(void);
+void test_9p_client_note_flush_pump_wakes_parked_flush(void);
+void test_9p_client_note_flush_reader_rflush_first(void);
+void test_9p_client_note_flush_reply_beats_unsent_flush(void);
+void test_9p_client_note_flush_handoff_skips_staging(void);
+void test_9p_client_handoff_skips_send_parked(void);
+void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
+void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
 
 #define DY_CLUNK_ASYNC  1
 #define DY_CLUNK_SYNC   2
 #define DY_WALK         3
+#define DY_READ         4
 
 static struct test_dying g_dy;
 static struct {
-    int op;
-    u32 fid;
-    int rc;
+    int  op;
+    u32  fid;
+    int  rc;
+    bool noted;       // the op runs as a call on signal(7)'s list, SIGCHLD caught
+    bool setup_ok;
+    u8   data[16];
 } g_dyop;
+
+static const struct viv_ksigaction g_dy_hand = { .handler = 0x4000u, .flags = 0,
+                                                 .restorer = 0, .mask = 0 };
+
+// A Linux phenotype whose SIGCHLD has a handler (proc_free frees the sigtab).
+static bool dy_catch_child_exit(struct Proc *p) {
+    p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    if (!p->sigtab) return false;
+    p->phenotype = PHENO_LINUX;
+    return viv_sigtab_set(p->sigtab, VIV_SIGNOTE_CHILD_EXIT, &g_dy_hand);
+}
 
 static void dy_run(void *arg) {
     (void)arg;
     int rc = -1;
+    if (g_dyop.noted) {
+        // The thread sets up its own Proc before the op, so the post that
+        // follows the park sees it.
+        g_dyop.setup_ok = dy_catch_child_exit(current_thread()->proc);
+        current_thread()->note_interruptible = true;
+    }
     if (g_dyop.op == DY_CLUNK_ASYNC)
         rc = p9_client_clunk_async(&g_client, g_dyop.fid);
     else if (g_dyop.op == DY_CLUNK_SYNC)
         rc = p9_client_clunk(&g_client, g_dyop.fid);
     else if (g_dyop.op == DY_WALK)
         rc = p9_client_walk_one(&g_client, 0, g_dyop.fid, (const u8 *)"w", 1, NULL);
+    else if (g_dyop.op == DY_READ) {
+        u32 got = 0;
+        rc = p9_client_read(&g_client, g_dyop.fid, 0, (u32)sizeof(g_dyop.data),
+                            g_dyop.data, &got);
+        if (rc == 0) rc = (int)got;
+    }
     g_dyop.rc = rc;
+}
+
+static bool dy_launch(int op, u32 fid, bool dying, bool noted) {
+    g_dyop.op       = op;
+    g_dyop.fid      = fid;
+    g_dyop.rc       = 0x7fffffff;
+    g_dyop.noted    = noted;
+    g_dyop.setup_ok = false;
+    for (u32 i = 0; i < sizeof(g_dyop.data); i++) g_dyop.data[i] = 0;
+    return test_dying_start(&g_dy, dy_run, NULL, dying);
 }
 
 // Run `op` on a thread of a fresh Proc; `dying` publishes its death first.
 static bool dy_start(int op, u32 fid, bool dying) {
-    g_dyop.op  = op;
-    g_dyop.fid = fid;
-    g_dyop.rc  = 0x7fffffff;
-    return test_dying_start(&g_dy, dy_run, NULL, dying);
+    return dy_launch(op, fid, dying, /*noted=*/false);
+}
+
+// As dy_start, for a Linux-phenotype thread in a call a caught note may
+// interrupt (a SIGCHLD handler, note_interruptible).
+static bool dy_start_noted(int op, u32 fid) {
+    return dy_launch(op, fid, /*dying=*/false, /*noted=*/true);
 }
 
 // The server's view: every request it received, in order. With g_rec_clunk_err
@@ -4127,6 +4186,7 @@ static u32  g_rec_n;
 static u8   g_rec_type[DY_REC_MAX];
 static bool g_rec_clunk_err;
 static u8   g_rec_bad_reply_to;
+static u8   g_rec_hold;         // a T-type the server holds unanswered (until flushed)
 
 static int recording_responder(void *ctx, const u8 *req, size_t req_len,
                                u8 *resp, size_t resp_cap) {
@@ -4134,6 +4194,7 @@ static int recording_responder(void *ctx, const u8 *req, size_t req_len,
     if (p9_peek_header(req, req_len, &size, &type, &tag) != 0)
         return canonical_responder(ctx, req, req_len, resp, resp_cap);
     if (g_rec_n < DY_REC_MAX) g_rec_type[g_rec_n++] = type;
+    if (g_rec_hold != 0 && type == g_rec_hold) return 0;   // no reply queued
     if (g_rec_bad_reply_to != 0 && type == g_rec_bad_reply_to) {
         // Two body bytes: an Rlerror carries four, an Rflush none, and an
         // Rwalk's count reads 65535.
@@ -4159,6 +4220,7 @@ static int dy_client_open(void) {
     g_rec_n            = 0;
     g_rec_clunk_err    = false;
     g_rec_bad_reply_to = 0;
+    g_rec_hold         = 0;
     if (p9_mq_loopback_init(&g_mq, recording_responder, NULL) != 0) return -1;
     if (p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
                        p9_mq_loopback_ops_for(&g_mq),
@@ -4546,4 +4608,677 @@ void test_9p_client_flush_malformed_reply_fails_closed(void) {
     TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
     g_rec_bad_reply_to = 0;
     dy_client_close();
+}
+
+// =============================================================================
+// flush(5) on a caught-note unwind (ARCH 8.8.3, 21.10). A thread that LIVES
+// sends its Tflush and waits, killable only, for the first answer: a reply
+// that beats the Rflush is honoured and the call completes with it; an Rflush
+// that comes first cancels the op (-P9_E_INTR); a death in that wait drops the
+// registration and leaves both answers to drain ownerless, as #845 does.
+//
+// The op runs on a Linux-phenotype thread in a call on signal(7)'s list, and
+// the note is a child_exit its SIGCHLD handler catches, posted through the
+// exit path's own code (the rendez.caught_wake_* shape). The test holds the
+// reader role, so the op parks as a non-reader and only the note's wake ends
+// its first wait. Each leg finishes and reaps its thread before it asserts
+// anything, so a RED run leaks no parked thread.
+// =============================================================================
+
+// A child's exit posts child_exit to `par`, through the exit path's own code.
+static void dy_post_child_exit(struct Proc *par) {
+    struct Proc *kid = proc_alloc();
+    if (!kid) return;
+    kid->parent = par;   // the notify reads only parent, pid and exit_status
+    irq_state_t s = proc_table_lock_acquire();
+    proc_exit_notify_parent_locked(kid);
+    proc_table_lock_release(s);
+    kid->parent = NULL;
+    kid->state  = PROC_STATE_ZOMBIE;
+    proc_free(kid);
+}
+
+// Park the noted op behind the held reader, post the caught note, and report
+// whether the op then sent a Tflush and went on waiting (instead of returning).
+static bool dy_note_and_flush(u8 op_type, bool *parked) {
+    TEST_YIELD_UNTIL_SOFT(test_dying_parked(&g_dy) && rec_count(op_type) == 1);
+    *parked = test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    if (!*parked) return false;
+    dy_post_child_exit(g_dy.proc);
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy) ||
+                          (rec_count(P9_TFLUSH) == 1 && test_dying_parked(&g_dy)));
+    return rec_count(P9_TFLUSH) == 1 && !test_dying_done(&g_dy);
+}
+
+// End an op thread whatever state a leg left it in, then reap it. A thread
+// still waiting after the budget is killed, and *killed says so.
+static void dy_finish_of(struct test_dying *d, bool *killed) {
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(d));
+    *killed = !test_dying_done(d);
+    if (*killed) {
+        test_dying_kill(d);
+        TEST_YIELD_UNTIL_SOFT(test_dying_done(d));
+    }
+    test_dying_reap(d);
+}
+
+static void dy_finish(bool *killed) { dy_finish_of(&g_dy, killed); }
+
+// The server had already answered the read, so its Rread comes before the
+// Rflush: the read returns its bytes, not EINTR, and its tag stays reserved
+// until the Rflush frees it.
+void test_9p_client_note_flush_honours_late_read(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(130), 1u, "walk binds 130");
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 130), "reader");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TREAD, &parked);
+    dy_hold_reader(false);
+    int  pr = p9_client_reader_pump_once(&g_client);          // the Rread
+    bool killed;
+    dy_finish(&killed);
+    u64  mid      = p9_session_inflight(&g_client.session);
+    u64  late     = g_client.demux_orphan_late;
+    int  pf       = p9_client_reader_pump_once(&g_client);    // the Rflush
+    u64  end      = p9_session_inflight(&g_client.session);
+    u64  honoured = g_client.flush_honoured;
+    u64  cancel   = g_client.flush_cancelled;
+    u64  orphan   = g_client.demux_orphan;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_EXPECT_EQ(pr, 1, "the Rread, before the Rflush");
+    TEST_ASSERT(!killed, "the read returned on its own");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5,
+                   "flush(5): a reply that beats the Rflush is honoured -- the bytes, not EINTR");
+    TEST_ASSERT(g_dyop.data[0] == 'h' && g_dyop.data[4] == 'o', "the bytes the server sent");
+    TEST_EXPECT_EQ(honoured, (u64)1, "counted as honoured");
+    TEST_EXPECT_EQ(late, (u64)0, "not absorbed as an ownerless late reply");
+    TEST_EXPECT_EQ(mid, (u64)2, "its tag stays reserved until the Rflush (I-10)");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_EXPECT_EQ(end, (u64)0, "the Rflush frees both tags");
+    TEST_EXPECT_EQ(cancel, (u64)0, "nothing cancelled");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// The server holds the read and answers the flush: the Rflush comes first, the
+// op was cancelled, and only then does the read return -P9_E_INTR. Until then a
+// reply could still act on the read's fid, so the fid is not clunked under it.
+void test_9p_client_note_flush_rflush_first_cancels(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(131), 1u, "walk binds 131");
+    g_rec_hold = P9_TREAD;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 131), "reader");
+    bool parked;
+    bool waited  = dy_note_and_flush(P9_TREAD, &parked);
+    u64  waiting = p9_session_inflight(&g_client.session);
+    int  ck_wait = waited ? p9_client_clunk_async(&g_client, 131) : 0;
+    bool kept    = p9_session_fid_bound(&g_client.session, 131);
+    dy_hold_reader(false);
+    int  pf = p9_client_reader_pump_once(&g_client);          // the Rflush
+    bool killed;
+    dy_finish(&killed);
+    u64  end      = p9_session_inflight(&g_client.session);
+    int  ck_done  = p9_client_clunk_async(&g_client, 131);
+    int  pc       = ck_done == 0 ? p9_client_reader_pump_once(&g_client) : 0;  // the Rclunk
+    u64  after    = p9_session_inflight(&g_client.session);
+    u64  honoured = g_client.flush_honoured;
+    u64  cancel   = g_client.flush_cancelled;
+    u64  orphan   = g_client.demux_orphan;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_EXPECT_EQ(waiting, (u64)2, "the read's tag and the flush's are in flight");
+    TEST_EXPECT_EQ(ck_wait, -P9_E_IO, "while its owner waits, the read's fid is not clunked");
+    TEST_ASSERT(kept, "and stays bound");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_ASSERT(!killed, "the Rflush ended the wait");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR,
+                   "an Rflush that comes first cancels the read: -EINTR");
+    TEST_EXPECT_EQ(cancel, (u64)1, "counted as cancelled");
+    TEST_EXPECT_EQ(honoured, (u64)0, "nothing honoured");
+    TEST_EXPECT_EQ(end, (u64)0, "the Rflush freed both tags");
+    TEST_EXPECT_EQ(ck_done, 0, "cancelled, the read no longer holds its fid: the clunk goes out");
+    TEST_EXPECT_EQ(pc, 1, "the Rclunk");
+    TEST_EXPECT_EQ(after, (u64)0, "the Rclunk freed its tag");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A death in the flush wait abandons the op as #845 does: the Tflush is already
+// on the wire, so nothing more is sent, and its Rflush drains ownerless.
+void test_9p_client_note_flush_death_abandons(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(132), 1u, "walk binds 132");
+    g_rec_hold = P9_TREAD;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 132), "reader");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TREAD, &parked);
+    if (waited) test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy));
+    bool died   = test_dying_done(&g_dy);
+    u32  sends  = rec_count(P9_TFLUSH);
+    // With its owner gone the op's fid is the closer's, before the Rflush lands.
+    int  ck     = died ? p9_client_clunk_async(&g_client, 132) : -1;
+    dy_hold_reader(false);
+    u64  of     = g_client.demux_orphan_flush;
+    int  pf     = p9_client_reader_pump_once(&g_client);      // the Rflush
+    int  pc     = p9_client_reader_pump_once(&g_client);      // the Rclunk
+    bool killed;
+    dy_finish(&killed);
+    u64  flushed = g_client.demux_orphan_flush - of;
+    u64  end     = p9_session_inflight(&g_client.session);
+    u64  cancel  = g_client.flush_cancelled;
+    u64  orphan  = g_client.demux_orphan;
+    bool dead    = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_ASSERT(died, "the kill ends the flush wait");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_IO, "a death is -EIO, as #845");
+    TEST_EXPECT_EQ((u64)sends, (u64)1, "no second Tflush");
+    TEST_EXPECT_EQ(ck, 0, "its owner gone, the op's fid is clunked before the Rflush");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_EXPECT_EQ(pc, 1, "the Rclunk");
+    TEST_EXPECT_EQ(flushed, (u64)1, "drained ownerless");
+    TEST_EXPECT_EQ(cancel, (u64)0, "no waiter left to cancel");
+    TEST_EXPECT_EQ(end, (u64)0, "the Rflush freed both tags");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// The flush wait can hold the reader role: handed it, the interrupted walk
+// reads its own Rwalk, honours it -- the walk's caller gets its fid, not the
+// closer -- and leaves the Rflush to the next reader.
+void test_9p_client_note_flush_reader_honours_walk(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_sink_n   = 0;
+    g_sink_fid = P9_NOFID;
+    p9_client_set_orphan_sink(&g_client, test_orphan_sink, NULL);
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_WALK, 133), "walker");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TWALK, &parked);
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);                      // to the walk itself
+    bool killed;
+    dy_finish(&killed);
+    bool bound    = p9_session_fid_bound(&g_client.session, 133);
+    u64  mid      = p9_session_inflight(&g_client.session);
+    u64  honoured = g_client.flush_honoured;
+    int  pf       = p9_client_reader_pump_once(&g_client);    // the Rflush
+    u64  end      = p9_session_inflight(&g_client.session);
+    u32  sink_n   = g_sink_n;
+    u64  orphan   = g_client.demux_orphan;
+    bool dead     = g_client.dead;
+    int  clunk    = p9_client_clunk_async(&g_client, 133);
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the walk parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted walk waits for its Tflush's answer");
+    TEST_ASSERT(!killed, "the walk returned on its own");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)0, "flush(5): the walk completes");
+    TEST_ASSERT(bound, "its fid is bound");
+    TEST_EXPECT_EQ((u64)sink_n, (u64)0, "the walk's caller holds the fid, not the closer");
+    TEST_EXPECT_EQ(honoured, (u64)1, "counted as honoured");
+    TEST_EXPECT_EQ(mid, (u64)2, "its tag stays reserved until the Rflush");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush, left for the next reader");
+    TEST_EXPECT_EQ(end, (u64)0, "both tags freed");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(clunk, 0, "the walk's fid clunks");
+}
+
+// Fill the tag pool with `n` never-sent fsyncs on the root fid, the way a busy
+// shared session holds its tags; dy_unfill_pool takes them back.
+static u32 dy_fill_pool(u32 n, u16 *tags) {
+    static u8 frame[64];
+    u32 got = 0;
+    spin_lock(&g_client.lock);
+    for (u32 i = 0; i < n; i++) {
+        int len = p9_session_send_fsync(&g_client.session, frame, sizeof(frame), 0, 0);
+        if (len <= 0) break;
+        u32 sz; u8 ty; u16 t;
+        if (p9_peek_header(frame, (size_t)len, &sz, &ty, &t) < 0) break;
+        tags[got++] = t;
+    }
+    spin_unlock(&g_client.lock);
+    return got;
+}
+
+static void dy_unfill_pool(u32 n, const u16 *tags) {
+    spin_lock(&g_client.lock);
+    for (u32 i = 0; i < n; i++) p9_session_abort_unsent(&g_client.session, tags[i]);
+    spin_unlock(&g_client.lock);
+}
+
+// A full tag pool and no reader: the interrupted read cannot stage its Tflush,
+// so it pumps for a tag -- and the frame it pumps is its own Rread. The reply
+// beat the flush outright: the read returns its bytes, no Tflush goes out, and
+// the read stops pumping at its answer (on the mq loopback one more read finds
+// the queue empty, an EOF that kills the session).
+void test_9p_client_note_flush_full_pool_own_reply(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(134), 1u, "walk binds 134");
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+
+    dy_hold_reader(true);
+    bool started = dy_start_noted(DY_READ, 134);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1));
+    bool parked = started && test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    bool full   = !p9_session_has_free_tag(&g_client.session);
+    dy_hold_reader(false);                     // nobody reads: the read pumps itself
+    if (parked) dy_post_child_exit(g_dy.proc);
+    bool killed = false;
+    if (started) dy_finish(&killed);
+    u32  flushes = rec_count(P9_TFLUSH);
+    bool dead    = g_client.dead;
+    dy_unfill_pool(filled, tags);
+    u64  end     = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(full, "with the read's own tag the pool is full");
+    TEST_ASSERT(!killed, "the read returned on its own");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5,
+                   "its own reply, pumped while it waited for a tag, completes it");
+    TEST_EXPECT_EQ((u64)flushes, (u64)0, "no Tflush was owed: the reply came first");
+    TEST_ASSERT(!dead, "the read stopped pumping at its answer");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// The flush wait holds the reader role and the Rflush comes first: handed the
+// role, the interrupted read reads the Rflush for its own op, which cancels it.
+// The read stops reading there (on the mq loopback one more read finds the
+// queue empty, an EOF that kills the session) and returns -P9_E_INTR.
+void test_9p_client_note_flush_reader_rflush_first(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(136), 1u, "walk binds 136");
+    g_rec_hold = P9_TREAD;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_READ, 136), "reader");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TREAD, &parked);
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);                      // to the read itself
+    bool killed;
+    dy_finish(&killed);
+    u64  end      = p9_session_inflight(&g_client.session);
+    u64  honoured = g_client.flush_honoured;
+    u64  cancel   = g_client.flush_cancelled;
+    u64  orphan   = g_client.demux_orphan;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted read waits for its Tflush's answer");
+    TEST_ASSERT(!killed, "the Rflush it read ended the wait");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR,
+                   "the Rflush the read demuxed itself cancels it: -EINTR");
+    TEST_EXPECT_EQ(cancel, (u64)1, "counted as cancelled");
+    TEST_EXPECT_EQ(honoured, (u64)0, "nothing honoured");
+    TEST_EXPECT_EQ(end, (u64)0, "the Rflush freed both tags");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the read stopped reading at its Rflush");
+}
+
+// The Tflush meets a full send ring and parks for progress. The pump that wakes
+// it demuxes the read's own Rread, which lands before the Tflush is on the wire.
+// With the answer in hand no flush is owed: the Tflush goes back unsent, and the
+// read completes with its bytes as an ordinary reply, both tags freed at once.
+void test_9p_client_note_flush_reply_beats_unsent_flush(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(137), 1u, "walk binds 137");
+
+    dy_hold_reader(true);
+    bool started = dy_start_noted(DY_READ, 137);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1));
+    bool parked = started && test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    g_mq.eagain_budget = 1;                     // the Tflush's first send meets a full ring
+    if (parked) dy_post_child_exit(g_dy.proc);
+    TEST_YIELD_UNTIL_SOFT(!parked || test_dying_done(&g_dy) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
+    bool on_list = parked && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
+    u32  unfired = g_mq.eagain_budget;
+    dy_hold_reader(false);
+    int  pr = on_list ? p9_client_reader_pump_once(&g_client) : 0;   // the Rread
+    bool killed = false;
+    if (started) dy_finish(&killed);
+    g_mq.eagain_budget = 0;
+    u64  end      = p9_session_inflight(&g_client.session);
+    u32  flushes  = rec_count(P9_TFLUSH);
+    u64  honoured = g_client.flush_honoured;
+    u64  late     = g_client.demux_orphan_late;
+    u64  cancel   = g_client.flush_cancelled;
+    u64  orphan   = g_client.demux_orphan;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(on_list, "interrupted, its Tflush parks on the full ring");
+    TEST_EXPECT_EQ((u64)unfired, (u64)0, "the armed EAGAIN fired");
+    TEST_EXPECT_EQ(pr, 1, "the pump demuxes the read's own Rread");
+    TEST_ASSERT(!killed, "the pump's departure woke the flush");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5,
+                   "flush(5): the reply that came before the Tflush left completes the read");
+    TEST_ASSERT(g_dyop.data[0] == 'h' && g_dyop.data[4] == 'o', "the bytes the server sent");
+    TEST_EXPECT_EQ((u64)flushes, (u64)0, "the Tflush went back unsent");
+    TEST_EXPECT_EQ(honoured, (u64)0, "an ordinary reply: nothing awaited an Rflush");
+    TEST_EXPECT_EQ(end, (u64)0, "both tags freed at once");
+    TEST_EXPECT_EQ(late, (u64)0, "not absorbed as an ownerless late reply");
+    TEST_EXPECT_EQ(cancel, (u64)0, "nothing cancelled");
+    TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A full tag pool and a busy reader: the interrupted read parks for progress.
+// The reader is a pump (p9_client_reader_pump_once, as the SQPOLL and
+// dev9p-poll kthreads run it) and the frame it demuxes is the read's own Rread,
+// which wakes only the read's rendez -- not the send list the read sleeps on.
+// The pump must signal progress when it departs, or the read sleeps on with its
+// answer in hand.
+void test_9p_client_note_flush_pump_wakes_parked_flush(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(135), 1u, "walk binds 135");
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+
+    dy_hold_reader(true);
+    bool started = dy_start_noted(DY_READ, 135);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1));
+    bool parked = started && test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    if (parked) dy_post_child_exit(g_dy.proc);
+    TEST_YIELD_UNTIL_SOFT(!parked || test_dying_done(&g_dy) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
+    bool on_list = parked && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
+    dy_hold_reader(false);
+    int  pr = on_list ? p9_client_reader_pump_once(&g_client) : 0;   // the Rread
+    bool killed = false;
+    if (started) dy_finish(&killed);
+    u32  flushes = rec_count(P9_TFLUSH);
+    bool dead    = g_client.dead;
+    dy_unfill_pool(filled, tags);
+    u64  end     = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the read parked behind the held reader");
+    TEST_ASSERT(on_list, "interrupted, it parks for a tag on the send list");
+    TEST_EXPECT_EQ(pr, 1, "the pump demuxes the read's own Rread");
+    TEST_ASSERT(!killed, "the pump's departure woke the read");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5, "and its reply completes it");
+    TEST_EXPECT_EQ((u64)flushes, (u64)0, "no Tflush was owed");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// A second op beside the one under test: a plain read on its own thread.
+static struct test_dying g_dyx;
+static struct { u32 fid; int rc; } g_dyxop;
+
+static void dyx_run(void *arg) {
+    (void)arg;
+    u8  buf[16];
+    u32 got = 0;
+    int rc = p9_client_read(&g_client, g_dyxop.fid, 0, (u32)sizeof(buf), buf, &got);
+    g_dyxop.rc = rc == 0 ? (int)got : rc;
+}
+
+static bool dyx_start(u32 fid) {
+    g_dyxop.fid = fid;
+    g_dyxop.rc  = 0x7fffffff;
+    return test_dying_start(&g_dyx, dyx_run, NULL, /*dead_now=*/false);
+}
+
+// Under the client lock: the lowest tag above `after` with a registered op,
+// and the tag of the op designated to read next; -1 for none.
+static int dy_registered_tag_above(int after) {
+    int t = -1;
+    spin_lock(&g_client.lock);
+    for (int i = after + 1; i < (int)P9_SESSION_MAX_OUTSTANDING && t < 0; i++)
+        if (g_client.inflight[i]) t = i;
+    spin_unlock(&g_client.lock);
+    return t;
+}
+
+static int dy_designated_tag(void) {
+    int t = -1;
+    spin_lock(&g_client.lock);
+    for (int i = 0; i < (int)P9_SESSION_MAX_OUTSTANDING && t < 0; i++)
+        if (g_client.inflight[i] && g_client.inflight[i]->be_reader) t = i;
+    spin_unlock(&g_client.lock);
+    return t;
+}
+
+// The reader role never goes to an op still getting its frame onto the wire:
+// that thread sleeps on the send list, where a designation cannot reach it,
+// and a stop or a death there would take the role with it. The interrupted
+// walk S (held by the server) stages its Tflush on a full pool and parks on the
+// send list; beside it the read X waits in client_wait with its reply queued.
+// S holds the lower tag, so a handoff that ignored `sending` would pick it and
+// strand X. Designated, X reads its reply; the tag X frees lets S send its
+// Tflush, and S then reads its own Rflush.
+void test_9p_client_note_flush_handoff_skips_staging(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(139), 1u, "walk binds 139");
+    g_rec_hold = P9_TWALK;
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+
+    dy_hold_reader(true);
+    bool started = dy_start_noted(DY_WALK, 138);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 2));
+    int  s_tag     = dy_registered_tag_above(-1);
+    bool x_started = started && dyx_start(139);
+    TEST_YIELD_UNTIL_SOFT(!x_started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    int  x_tag = dy_registered_tag_above(s_tag);
+    bool full  = !p9_session_has_free_tag(&g_client.session);
+    bool both  = x_started && test_dying_parked(&g_dy) && test_dying_parked(&g_dyx) &&
+                 !test_dying_done(&g_dy) && !test_dying_done(&g_dyx);
+    if (both) dy_post_child_exit(g_dy.proc);
+    TEST_YIELD_UNTIL_SOFT(!both || test_dying_done(&g_dy) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
+    bool staging = both && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
+    dy_hold_reader(false);
+    int des = -1;
+    if (staging) {
+        p9_client_handoff_reader(&g_client);                  // as a departing reader does
+        des = dy_designated_tag();
+    }
+    bool x_killed = false, s_killed = false;
+    if (x_started) dy_finish_of(&g_dyx, &x_killed);
+    if (started) dy_finish(&s_killed);
+    bool bound = p9_session_fid_bound(&g_client.session, 138);
+    bool dead  = g_client.dead;
+    dy_unfill_pool(filled, tags);
+    u64  end   = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(both, "both ops parked behind the held reader");
+    TEST_ASSERT(s_tag >= 0 && x_tag > s_tag, "the interrupted walk holds the lower tag");
+    TEST_ASSERT(full, "the pool is full");
+    TEST_ASSERT(staging, "interrupted, the walk parks on the send list to stage its Tflush");
+    // X may take the role and consume its flag before it is read; the op still
+    // sending, never woken by a designation, would keep it.
+    TEST_ASSERT(des != s_tag, "the handoff does not designate the op still sending");
+    TEST_ASSERT(!x_killed, "the read took the role and read its own reply");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "the read completes with the server's bytes");
+    TEST_ASSERT(!s_killed, "the walk sent its Tflush once a tag freed");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR,
+                   "and read its own Rflush first: -EINTR");
+    TEST_ASSERT(!bound, "the cancelled walk bound nothing");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// The same for the #349 send park: the read S meets a full send ring and parks
+// on the send list with its frame unsent, while the read X waits in client_wait
+// with its reply queued. Designated, X reads its reply and leaves; S then sends
+// and reads its own.
+void test_9p_client_handoff_skips_send_parked(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(140) + dy_bind(141), 2u, "walks bind 140 and 141");
+
+    dy_hold_reader(true);
+    g_mq.eagain_budget = 1;                         // S's Tread meets a full ring
+    bool started = dy_start(DY_READ, 140, /*dying=*/false);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dy) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
+    bool s_parked  = started && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
+    u32  unfired   = g_mq.eagain_budget;
+    int  s_tag     = dy_registered_tag_above(-1);
+    bool x_started = s_parked && dyx_start(141);
+    TEST_YIELD_UNTIL_SOFT(!x_started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    bool x_parked = x_started && test_dying_parked(&g_dyx) && !test_dying_done(&g_dyx);
+    int  x_tag    = dy_registered_tag_above(s_tag);
+    dy_hold_reader(false);
+    int des = -1;
+    if (x_parked) {
+        p9_client_handoff_reader(&g_client);                  // as a departing reader does
+        des = dy_designated_tag();
+    }
+    bool x_killed = false, s_killed = false;
+    if (x_started) dy_finish_of(&g_dyx, &x_killed);
+    if (started) dy_finish(&s_killed);
+    g_mq.eagain_budget = 0;
+    bool dead = g_client.dead;
+    u64  end  = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_ASSERT(s_parked, "S parks on the full send ring");
+    TEST_EXPECT_EQ((u64)unfired, (u64)0, "the armed EAGAIN fired");
+    TEST_ASSERT(x_parked, "X parked behind the held reader");
+    TEST_ASSERT(s_tag >= 0 && x_tag > s_tag, "the unsent read holds the lower tag");
+    TEST_ASSERT(des != s_tag, "the handoff does not designate the sender");
+    TEST_ASSERT(!x_killed, "X took the role and read its own reply");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "X completes with the server's bytes");
+    TEST_ASSERT(!s_killed, "S sent once X left, and read its own reply");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5, "S completes with the server's bytes");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// A tag an owner is about to free needs no frame. The interrupted walk A finds
+// the pool full and no reader, so it pumps one frame -- the read Y's Rread --
+// and Y's tag is then owed: Y's dispatch frees it, and no frame announces that.
+// A waits for the dispatch instead of reading again (on the mq loopback one more
+// read finds the queue empty, an EOF that kills the session), sends its Tflush
+// on the tag Y freed, and reads its own Rflush first.
+void test_9p_client_note_flush_staging_waits_for_owed_tag(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(142), 1u, "walk binds 142");
+    g_rec_hold = P9_TWALK;
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+
+    dy_hold_reader(true);
+    bool y_started = dyx_start(142);
+    TEST_YIELD_UNTIL_SOFT(!y_started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    bool started = y_started && dy_start_noted(DY_WALK, 143);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 2));
+    bool full = !p9_session_has_free_tag(&g_client.session);
+    bool both = started && test_dying_parked(&g_dy) && test_dying_parked(&g_dyx) &&
+                !test_dying_done(&g_dy) && !test_dying_done(&g_dyx);
+    dy_hold_reader(false);                     // no reader, and nobody designated
+    if (both) dy_post_child_exit(g_dy.proc);
+    bool a_killed = false, y_killed = false;
+    if (started) dy_finish(&a_killed);
+    if (y_started) dy_finish_of(&g_dyx, &y_killed);
+    u32  flushes = rec_count(P9_TFLUSH);
+    bool bound   = p9_session_fid_bound(&g_client.session, 143);
+    bool dead    = g_client.dead;
+    dy_unfill_pool(filled, tags);
+    u64  end     = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(both, "both ops parked behind the held reader");
+    TEST_ASSERT(full, "the pool is full");
+    TEST_ASSERT(!a_killed, "Y's dispatch woke the walk");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR,
+                   "the walk sent its Tflush on the tag Y freed and read its Rflush first");
+    TEST_EXPECT_EQ((u64)flushes, (u64)1, "one Tflush went out");
+    TEST_ASSERT(!y_killed, "Y completed");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "Y completes with the server's bytes");
+    TEST_ASSERT(!bound, "the cancelled walk bound nothing");
+    TEST_ASSERT(!dead, "no read past Y's reply: the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// The same for the async clunk's tag drain (FID-LIFECYCLE section 9): it finds
+// the pool full and no reader, pumps the read Y's Rread, then waits for Y's
+// dispatch to free a tag instead of reading again.
+void test_9p_client_async_clunk_drain_waits_for_owed_tag(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(144) + dy_bind(145), 2u, "walks bind 144 and 145");
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+
+    dy_hold_reader(true);
+    bool y_started = dyx_start(144);
+    TEST_YIELD_UNTIL_SOFT(!y_started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    bool y_parked = y_started && test_dying_parked(&g_dyx) && !test_dying_done(&g_dyx);
+    bool full     = !p9_session_has_free_tag(&g_client.session);
+    dy_hold_reader(false);                     // no reader, and nobody designated
+    bool started = y_parked && dy_start(DY_CLUNK_ASYNC, 145, /*dying=*/false);
+    bool c_killed = false, y_killed = false;
+    if (started) dy_finish(&c_killed);
+    if (y_started) dy_finish_of(&g_dyx, &y_killed);
+    u32  clunks = rec_count(P9_TCLUNK);
+    bool bound  = p9_session_fid_bound(&g_client.session, 145);
+    bool dead   = g_client.dead;
+    int  pc     = dead ? 0 : p9_client_reader_pump_once(&g_client);   // the Rclunk
+    dy_unfill_pool(filled, tags);
+    u64  end    = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_ASSERT(y_parked, "Y parked behind the held reader");
+    TEST_ASSERT(full, "the pool is full");
+    TEST_ASSERT(started, "the clunk ran");
+    TEST_ASSERT(!c_killed, "Y's dispatch woke the clunk");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)0, "the Tclunk went out on the tag Y freed");
+    TEST_EXPECT_EQ((u64)clunks, (u64)1, "one Tclunk");
+    TEST_ASSERT(!bound, "its fid unbound");
+    TEST_ASSERT(!y_killed, "Y completed");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "Y completes with the server's bytes");
+    TEST_ASSERT(!dead, "no read past Y's reply: the session stays live");
+    TEST_EXPECT_EQ(pc, 1, "the Rclunk drains ownerless");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
 }

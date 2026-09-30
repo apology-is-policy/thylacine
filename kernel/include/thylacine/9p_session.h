@@ -136,13 +136,19 @@ struct p9_outstanding {
     u32  fid;        // primary target fid; equals root_fid for version/attach
     u32  new_fid;    // walk's destination; equals fid otherwise
     u32  op_id;      // monotonic spec-side identifier (for diagnostics)
-    // Tflush bookkeeping (#845). `awaiting_flush` marks an abandoned op
-    // whose owner is gone and for which a Tflush is in flight: the tag stays
-    // active (reserved) but is freed ONLY by the flush's Rflush, never by a
-    // late original reply -- 9P forbids reusing oldtag until Rflush, so this
-    // is the I-10 reuse-race guard. `flush_oldtag` is meaningful only on a
-    // TFLUSH entry: the original tag this flush abandons.
+    // Tflush bookkeeping (#845). `awaiting_flush` marks an op for which a
+    // Tflush is in flight -- its owner gone (#845) or, with owner_waits, still
+    // waiting for the first answer (flush(5)): the tag stays active (reserved)
+    // but is freed ONLY by the flush's Rflush, never by a late original reply
+    // -- 9P forbids reusing oldtag until Rflush, so this is the I-10
+    // reuse-race guard. `flush_oldtag` is meaningful only on a TFLUSH entry:
+    // the original tag this flush cancels.
     bool awaiting_flush;
+    // flush(5): the flushed op's owner still waits, so a reply that beats the
+    // Rflush is honoured in full and the op may yet act on its fid: it counts
+    // LIVE in any_outstanding_on_fid until that reply is applied, the Rflush
+    // lands, or the owner dies. Meaningful only with awaiting_flush.
+    bool owner_waits;
     // #53-audit F1: a rolled-back or flush-less abandon (the flush-EAGAIN
     // path via flush_rollback; the flush-BUILD-failure path via
     // mark_abandoned). The owner is gone but NO Tflush is in flight, so --
@@ -325,6 +331,20 @@ int p9_session_retract_unsent(struct p9_session *s, u16 tag);
 // the pre-#845 ownerless reclaim. No-op unless the (victim, flush-slot)
 // pair matches what send_flush staged (fail-soft).
 void p9_session_flush_rollback(struct p9_session *s, u16 oldtag);
+
+// flush(5), for an owner that still waits: undo send_flush when its frame
+// never reached the wire. Frees the flush tag and clears the victim's
+// awaiting_flush, leaving the victim an ordinary in-flight op whose reply
+// completes it. Unlike flush_rollback it does not mark the victim abandoned,
+// because its owner is still there. Fail-soft like flush_rollback.
+void p9_session_flush_retract(struct p9_session *s, u16 oldtag);
+
+// flush(5): record whether the owner of the flushed op under `oldtag` still
+// waits for its answer (see owner_waits). The client sets it when it stages a
+// living owner's Tflush and clears it when that owner dies in the flush wait,
+// handing the op's fid to the closer. Fail-soft: only an active op with a
+// flush in flight is marked.
+void p9_session_flush_owner_waits(struct p9_session *s, u16 oldtag, bool waits);
 
 // #52/#53 R2-F1: mark an owner-gone op abandoned when NO flush could even be
 // staged (pool-full / build failure) -- the flush-less sibling of
@@ -593,6 +613,18 @@ struct p9_dispatch_result {
 int p9_session_dispatch_rmsg(struct p9_session *s,
                              const u8 *rmsg, size_t len,
                              struct p9_dispatch_result *out);
+
+// flush(5): "If a response to the flushed request is received before the
+// Rflush, the client must honor the response as if it had not been flushed."
+// Dispatch a reply on an awaiting_flush tag whose owner still waits: the
+// state mutation is applied and *out filled exactly as dispatch_rmsg does,
+// but the tag stays reserved until the flush's Rflush frees it (the I-10
+// guard). A duplicate reply after this is absorbed as an ownerless late
+// reply and binds nothing. Returns 0, or -1 on malformed / unmatched /
+// wrong-type replies and when the tag is not awaiting a flush.
+int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
+                                     const u8 *rmsg, size_t len,
+                                     struct p9_dispatch_result *out);
 
 // =============================================================================
 // Query helpers (read-only; used by tests + audit + caller bookkeeping).
