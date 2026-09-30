@@ -4,7 +4,7 @@ type: chg
 title: "The kernel chunk: the trusted episode's lock re-checks, and walks without recursion"
 date: 2026-09-30
 arc: arc-holotype-rw
-commits: ["*(pending)*"]
+commits: ["6c0c4b36"]
 touched:
   - sub-kernel-cons
   - sub-kernel-proc

@@ -976,7 +976,7 @@ owed.
 
 Item (5) of the 2026-09-28 work order: the kernel findings of the owed Fable-diversity passes (IM-1..2 and H3+C,
 read-only on aux-3 9e2e28a2). Scripture 29f74063 (IMPERIUM 11.3 refinement 9, 11.4 refinement 2 and 11.5; DEBUG-FS-DESIGN's
-cmdline sentence; AUDIT-TRIGGERS row 158). Code *(pending)*.
+cmdline sentence; AUDIT-TRIGGERS row 158). Code 6c0c4b36.
 
 - **The episode's lock re-checks (IM F1 P1, F2 P2).** A consctl mode write and a renderer feed byte are refused where
   they land, under `g_cons.lock`, the lock BEGIN takes; a `+echo` or a feed byte in flight at BEGIN no longer reaches
