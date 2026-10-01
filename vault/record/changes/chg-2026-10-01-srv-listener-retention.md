@@ -4,7 +4,7 @@ type: chg
 title: "Listener handles and poll snapshots retain their service registry"
 date: 2026-10-01
 arc: arc-astra-halcyon-followup
-commits: ["*(pending)*"]
+commits: ["9bb44fc4661e0d102abe8aa7483361101bd9f9f6"]
 touched: [sub-kernel-devsrv, sub-kernel-handle, sub-kernel-poll]
 established: []
 closed: [seam-poll-srv-registry-retain]
