@@ -10295,8 +10295,11 @@ struct Fid {
     path: u64,
     gen: u32, // the surface generation captured at bind (0 for static qids)
     opened: bool,
-    interaction: Option<[u8; libhalcyon::interaction_control::REPLY_BYTES]>,
+    interaction: Option<interaction::Transaction>,
 }
+// Includes the exact request/decision cache; fixed across all eight connections.
+const _: () = assert!(core::mem::size_of::<Fid>() <= 160);
+const _: () = assert!(MAX_CONNS * MAX_FIDS * 160 == 640 * 1024);
 
 enum Disp {
     Reply(usize),
@@ -16313,7 +16316,8 @@ impl Conn {
         let cap = ((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4)).min(a.count as usize);
 
         if f.path == P_CTL {
-            if let Some(reply)=f.interaction {
+            if let Some(transaction)=f.interaction {
+                let reply = match transaction.result { Ok(b) => b, Err(e) => return self.err(tag,e) };
                 let off=(a.offset as usize).min(reply.len());
                 let end=off.saturating_add(cap).min(reply.len());
                 return p9::build_rread(&mut self.out_buf,tag,&reply[off..end]);
@@ -17510,7 +17514,6 @@ impl Conn {
         }
 
         if f.path == P_CTL {
-            if f.interaction.is_some() { return self.err(tag, p9::E_BUSY); }
             if a.data.starts_with(b"HIA1") {
                 if a.offset!=0 {return self.err(tag,p9::E_INVAL);}
                 return match self.interaction_control(comp,i,a.data) {
@@ -17518,6 +17521,7 @@ impl Conn {
                     Err(e)=>self.err(tag,e),
                 };
             }
+            if f.interaction.is_some() { return self.err(tag, p9::E_BUSY); }
             return match self.global_ctl(comp, a.data) {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),

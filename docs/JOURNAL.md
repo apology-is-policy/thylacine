@@ -22,6 +22,33 @@ needed the operator.
 
 
 ---
+## 2026-10-01 (Astra) -- asynchronous clipboard decisions
+
+The synchronous admission helper was suitable for setup, but using it for every
+copy would open a fid and block the UI on a 9P reply. Loom's walk/open opcodes
+are still unimplemented. The existing asynchronous READ/WRITE path suffices:
+open one ctl during setup, serialize requests, and cache its exact latest
+request/result. Strictly increasing IDs replace that cache; exact retries never
+repeat a decision, including one that originally failed. This avoids adding
+another protocol worker or a kernel fid-lifecycle mechanism to the clipboard.
+
+The broker now owns the pending operation and its payload ticket. Focus loss
+needed more care than cancelling everything: the approved linearization point
+allows a copy admitted before a later focus change to finish. Pending Get and
+Commit therefore retain the first loss epoch and accept only earlier receipts;
+a later return to focus cannot revive the request. Controller loss and SAK
+remain unconditional cancellation. Tests order those events explicitly, with
+source mutations proving the checks are consequential.
+
+A native probe drives these actual modules through real compositor CHECKs and
+verifies clipboard bytes, background denial, retained read snapshots and owner
+revocation. It is still a synthetic registered controller: app registration and
+the session's ordered invalidation delivery remain necessary before activating
+the endpoint. Measured gates, screenshots and limitations are recorded in
+HALCYON-INTERACTION-STATUS and work/oct1-hi-broker. No new visible modal UI is
+claimed by this substrate checkpoint.
+
+---
 ## 2026-10-01 (Astra) -- terminal admission meets the actual compositor
 
 With D7 delivered, the next useful boundary was ownership rather than exposing

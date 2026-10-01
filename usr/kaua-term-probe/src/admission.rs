@@ -56,6 +56,122 @@ fn focus(ring: &EventRing, leaf: u32) -> Result {
         "focus verb",
     )
 }
+// Only the test waits: Channel itself never waits for a compositor reply.
+fn exchange(
+    channel: &mut tapestry::admission::Channel,
+    q: Request,
+) -> core::result::Result<libhalcyon::interaction_control::Reply, tapestry::admission::Error> {
+    use tapestry::admission::Error;
+    channel.start(q)?;
+    require(channel.start(q).is_err(), "async duplicate start").map_err(|_| Error::Protocol)?;
+    let deadline = libthyla_rs::time::monotonic_ns() + 5_000_000_000;
+    loop {
+        channel.pump()?;
+        if let Some(c) = channel.take() {
+            if c.request != q {
+                return Err(Error::Protocol);
+            }
+            return c.result;
+        }
+        if libthyla_rs::time::monotonic_ns() >= deadline {
+            return Err(Error::Transport(-110));
+        }
+        let mut p = libthyla_rs::TPollFd {
+            fd: channel.poll_fd(),
+            events: libthyla_rs::T_POLLIN,
+            revents: 0,
+        };
+        if unsafe { libthyla_rs::t_poll(&mut p, 1, 100) } < 0 {
+            return Err(Error::Transport(-5));
+        }
+    }
+}
+fn broker_native(ring: &EventRing, q: Request, other_leaf: u32) -> Result {
+    use crate::{
+        clipboard::Owner,
+        clipbroker::{Authority, Broker, Outcome, Target},
+    };
+    use libhalcyon::{interaction_body::Scope, interaction_wire::Failure};
+    let mut channel = tapestry::admission::Channel::open(ring).map_err(|_| "async channel")?;
+    // Setup receipt supplies the real seat generation; no assumed QEMU constant.
+    let mut warm = tapestry::admission::Channel::open(ring).map_err(|_| "warm channel")?;
+    let receipt = exchange(&mut warm, q).map_err(|_| "async warm check")?;
+    drop(warm);
+    let mut b = Broker::new(7).map_err(|_| "broker init")?;
+    b.seat(Some(receipt.seat));
+    let a = Authority {
+        owner: Owner {
+            connection: 1,
+            scope: Scope {
+                session: 7,
+                controller: q.controller,
+                context: q.context,
+                epoch: q.epoch,
+            },
+        },
+        leaf: q.leaf,
+        binding: q.binding,
+        foreground: q.foreground,
+        subject: q.subject,
+    };
+    let t = Target {
+        connection: 1,
+        fid: 1,
+        request: 1,
+    };
+    let complete = |b: &mut Broker, ch: &mut tapestry::admission::Channel, q: Request| {
+        let reply = exchange(ch, q).map_err(|_| Failure::Denied);
+        b.complete(q.request, reply, 0)
+            .ok_or("broker lost request")?
+            .result
+            .map_err(|_| "broker refused")
+    };
+    let text = b"native asynchronous clipboard";
+    let begin = b.begin(a, t, text.len(), 0).map_err(|_| "broker begin")?;
+    let Outcome::Begun(id) = complete(&mut b, &mut channel, begin)? else {
+        return Err("begin kind");
+    };
+    b.write(a.owner, id, 0, text, 0)
+        .map_err(|_| "broker write")?;
+    let commit = b.commit(a, t, id, 0, 0).map_err(|_| "broker commit")?;
+    require(
+        complete(&mut b, &mut channel, commit)? == Outcome::Committed(1),
+        "commit generation",
+    )?;
+    focus(ring, other_leaf)?;
+    let get = b.get(a, t, 0).map_err(|_| "background get prepare")?;
+    require(
+        complete(&mut b, &mut channel, get).is_err(),
+        "async background was admitted",
+    )?;
+    focus(ring, q.leaf)?;
+    let get = b.get(a, t, 0).map_err(|_| "focused get prepare")?;
+    let Outcome::Clipboard(snapshot) = complete(&mut b, &mut channel, get)? else {
+        return Err("get kind");
+    };
+    focus(ring, other_leaf)?;
+    require(
+        b.read(a.owner, snapshot.transfer, 0, 64, 0)
+            .map_err(|_| "snapshot read")?
+            == text,
+        "snapshot bytes",
+    )?;
+    b.drop_connection(1);
+    require(
+        b.read(a.owner, snapshot.transfer, 0, 64, 0).is_err(),
+        "revoked read survived",
+    )?;
+    require(b.generation() == 1, "source exit lost copy")?;
+    focus(ring, q.leaf)?;
+    // Outstanding channel drop must retire its ring before freeing the buffer.
+    channel
+        .start(Request { request: 100, ..q })
+        .map_err(|_| "drop start")?;
+    channel.pump().map_err(|_| "drop submit")?;
+    drop(channel);
+    libthyla_rs::println!("ADMISSION async broker PASS");
+    Ok(())
+}
 fn native() -> Result {
     // This probe is also its synthetic terminal's foreground process. Queue
     // carrier loss so closing our own master cannot terminate the test before
@@ -185,6 +301,15 @@ fn native() -> Result {
         ..p2
     };
     surf.interaction_control(p3).map_err(|_| "renominate")?;
+    broker_native(
+        &ring,
+        Request {
+            op: Op::Check,
+            request: 20,
+            ..p3
+        },
+        other_leaf,
+    )?;
     surf.interaction_control(Request {
         op: Op::Unbind,
         request: 9,

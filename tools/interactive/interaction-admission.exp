@@ -6,6 +6,11 @@ lc_boot
 lc_login michael correct-horse-battery-staple-v1
 lc_send "kaua-term-probe --admission"
 expect {
+    -ex "ADMISSION async broker PASS" {lc_pass "async clipboard through real focus admission"}
+    -re {admission-probe: FAIL[^\r\n]*\r?\n} {lc_fail "async broker probe failed"}
+    timeout {lc_fail "async broker probe timed out"}
+}
+expect {
     -ex "admission-probe: PASS -- real binding, foreground, focus, context and retirement" {lc_pass "live Tapestry terminal admission"}
     -re {admission-probe: FAIL[^\r\n]*\r?\n} {lc_fail "live admission probe failed"}
     timeout {lc_fail "live admission probe timed out"}

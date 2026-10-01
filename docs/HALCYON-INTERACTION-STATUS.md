@@ -5,6 +5,52 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Asynchronous clipboard admission (October 1)
+
+The clipboard broker and asynchronous Tapestry channel now work together in the
+native admission probe. HIA1 uses one setup-opened ctl on the existing connection,
+with serialized increasing request IDs and exact cached success/error retries.
+Loom SQPOLL carries WRITE/positioned READ without a per-action open, thread or
+blocking UI wait. This closes the synchronous-per-admission mismatch: Loom's
+walk/open opcodes remain unimplemented and are not needed for the hot path.
+
+The broker owns one pending decision and its exact authenticated scope/target.
+Get pins before CHECK; Commit validates and reserves before CHECK. Wrong, stale,
+duplicate or retired receipts cannot authorize a new operation. Ordered focus
+loss retains the earliest epoch boundary for pending Get/Commit; an earlier
+admission may finish, but a later returned focus cannot revive an old request.
+Begin/unprepared writes cancel on focus loss. Controller death, disconnect and
+trusted-seat generation changes invalidate pending operations and transfers.
+
+Evidence: `work/oct1-hi-broker/`. The 476-test Halcyon host suite and 30 actual
+broker/store/codec/exchange controlled tests pass. Seven intended broker/channel
+mutants and six existing compositor mutants fail at their named assertions.
+The compositor fixture also verifies exact retry caching, failed-decision caching,
+changed-body/old-ID refusal and increasing-request reuse. Guest checks pass.
+Native image `native-1790869446286918000` passes ordinary CPU1 1830/1830 and the
+extended admission probe (40.16 seconds, exit zero): real asynchronous copy,
+background get denial, exact snapshot bytes after focus loss, broker disconnect cleanup/retention and in-flight channel drop. The final formatting and
+compile-time metadata bounds followed that native run; graphical verification
+uses those bounds. The native probe is a controlled registered subject, not an
+application peer-registration test. No clipboard endpoint is activated.
+
+Remaining HI-1: app/controller nomination and incarnation handling; ordered
+focus/terminal/seat invalidation delivered into the session's broker before
+completion; full resource ledger and persistent protocol adapter; direct native
+clients and two-client endpoint qualification. HI-2's mode widget and Nora/ut
+clipboard workflows follow. Four separate drafts remain protected, single-agent
+review applies, and October 1-2 50-boot/SMP/ASan/UBSan gates remain waived.
+
+Final graphical image `graphics-1790869744784923000` passes session media
+(75.74s) and physical F10 SAK (93.40s), both exit zero. Real sealed terminal
+registrations succeed; View, PNG/JPEG Gallery, manual history/theme, Gallery
+SAK restore, confer/real authority/abdicate/wrong-key/cancel remain working.
+The 1280x800 manual-history workspace and trusted-prompt screenshots were
+visually inspected; no new visible UI or fresh Pi/minimum-display qualification
+is claimed. Final source pins and four protected draft hashes match. Vault
+render/lint passes (1414 notes, zero failures, one pre-existing staleness warning).
+Single-agent review is recorded in `work/oct1-hi-broker/self-review.md`.
+
 ## Terminal admission checkpoint (October 1)
 
 The next HI-1 slice implements sealed Kaua binding announcements and Tapestry's

@@ -202,7 +202,7 @@ impl Comp {
     }
 }
 struct Fid {
-    interaction: Option<[u8; 40]>,
+    interaction: Option<interaction::Transaction>,
 }
 struct Conn {
     conn_id: u64,
@@ -446,7 +446,7 @@ fn sak_and_exhausted_focus_fail_closed() {
     assert!(!check(&mut c, Request { controller: 2, ..p }));
 }
 #[test]
-fn immutable_fid_reply_and_decode_gate() {
+fn reusable_fid_exact_replay_and_decode_gate() {
     let (mut c, r) = setup();
     let mut conn = Conn {
         conn_id: 3,
@@ -455,8 +455,18 @@ fn immutable_fid_reply_and_decode_gate() {
     assert!(conn.interaction_control(&mut c, 0, b"HIA1").is_err());
     conn.interaction_control(&mut c, 0, &r.encode()).unwrap();
     let saved = conn.fids[0].as_ref().unwrap().interaction;
-    assert!(conn.interaction_control(&mut c, 0, &r.encode()).is_err());
+    assert!(conn.interaction_control(&mut c, 0, &r.encode()).is_ok());
     assert_eq!(conn.fids[0].as_ref().unwrap().interaction, saved);
+    // Same ID with a changed body is neither a retry nor a new decision.
+    assert!(conn.interaction_control(&mut c, 0, &Request {leaf:99,..r}.encode()).is_err());
+    // A newer failed Bind is remembered, so removing the original binding
+    // cannot turn a retry of that failure into a successful new Bind.
+    let newer = Request {request:r.request+1,..r};
+    assert!(conn.interaction_control(&mut c, 0, &newer.encode()).is_err());
+    c.interactions = [None,None];
+    assert!(conn.interaction_control(&mut c, 0, &newer.encode()).is_err());
+    assert!(conn.interaction_control(&mut c, 0, &r.encode()).is_err());
+    conn.interaction_control(&mut c, 0, &Request {request:newer.request+1,..r}.encode()).unwrap();
 }
 
 #[test]

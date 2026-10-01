@@ -6,8 +6,9 @@ parent: moc-userspace-runtime
 code:
   - usr/lib/libtapestry/src/lib.rs
   - usr/lib/libtapestry/src/ring.rs
+  - usr/lib/libtapestry/src/admission.rs
   - usr/lib/libtapestry/Cargo.toml
-audit: light
+audit: hard
 guarded-by: []
 validated-by: [prose]
 locks: []
@@ -19,11 +20,25 @@ updated: 2026-10-01
 ---
 ## Internal admission client (October 1)
 
-`Surface::interaction_control` submits HIA1 on its owning connection's ctl,
-then uses positioned reads from zero for the immutable reply and matches its
-operation/request ID. Every call owns and closes its fid. This synchronous
-helper serves host setup and native qualification, not the future asynchronous
-clipboard hot path. It exposes no application clipboard authority by itself.
+`Surface::interaction_control` is the synchronous setup/test helper. The
+`admission::Channel` opens one ctl on the same authenticated EventRing session
+at setup, registers a fixed 120-byte buffer and fd with a four-entry SQPOLL
+Loom, and drives one request WRITE followed by positioned receipt READs.
+There is one exchange and one SQE in flight, with no per-action allocation,
+open or blocking wait. The renderer can include `poll_fd()` in its existing
+wait set. The channel retains its session and drops the ring before its buffer
+and fd. Cancellation invalidates the broker ticket; an in-flight channel is
+drained or dropped before reuse. New channel construction is setup, not an
+allowed per-action substitute for asynchronous operation.
+
+The pure Exchange matches monotonically unique CQE tags and request IDs,
+handles partial reads and backpressure, rejects duplicate/reordered CQEs,
+and refuses exhaustion. Exact denied decisions remain errors; malformed or
+truncated replies poison the channel. The reusable compositor ctl retains one
+exact request/decision, rejects old or altered IDs, and returns exact retries
+without re-running ACK/CHECK. Receipt correlation is not clipboard authority.
+The native admission probe exercises the channel with the actual clipboard
+broker; application endpoint/controller activation remains outstanding.
 
 
 ## Purpose

@@ -280,8 +280,13 @@ Bind uses leaf/host PID/binding; Unbind uses leaf/binding. Their remaining field
 are zero. Publish/Check use every identity/epoch field, all nonzero, with PID0.
 A fixed40-byte reply echoes the prefix/op/request, then u64 focus, seat and
 foreground epochs at16/24/32. Failures use existing Rlerror values. Reads on the
-same fid return that immutable reply; one operation per fid prevents replay
-from becoming a second admission. Close and reopen for another operation.
+same fid return the latest immutable reply. The October 1 asynchronous adapter
+serializes operations on one setup-opened ctl: a strictly increasing request ID
+replaces its cached decision. An exact retry returns that decision (including
+Rlerror) without repeating ACK/CHECK; changing a request under the same ID or
+replaying an older ID is refused. A fid that has processed HIA1 cannot become a
+text-command ctl. The client consumes a result before submitting the next
+request and never treats an echoed receipt as a second admission.
 
 Bind verifies the declared session, its exact live surface incarnation and
 kernel STATE's binder PID before retaining an observer watch. A locator cannot
@@ -294,8 +299,50 @@ access or replace the requirement for an asynchronous broker adapter.
 
 Replies use positioned reads from offset zero: writing advances a seekable
 9P fid by 80 bytes. The immutable reply is exactly 40 bytes. A successful
-operation seals the fid against further writes; rejected operations have no
-receipt. New context IDs require increasing context epochs within a controller
+operation retains its reply until the next higher request; rejected operations
+retain their errno with the same retry rule. New context IDs require increasing context epochs within a controller
 generation. Foreground retirement and SAK invalidate that generation. Both the
 loop and each request sample the seat. Connection and surface-incarnation IDs never wrap; layout epochs
 saturate and saturated admission is refused. No stale identity is reused.
+
+
+### Asynchronous broker completion (October 1)
+
+`libtapestry::admission::Channel` opens one ctl on the existing declared
+connection during setup, then drives one WRITE followed by positioned READs
+through an SQPOLL Loom. No action opens a fid or waits on the renderer thread.
+There is one exchange and at most one SQE in flight; its buffer remains pinned
+through CQE consumption or ring destruction. Partial replies advance offsets;
+short writes, EOF and malformed receipts fail the channel. A refused decision
+is an error, never an empty successful clipboard. Request and CQE identities
+never wrap. Cancellation invalidates broker authority but must drain the
+exchange before buffer/channel reuse. The ring's close precedes buffer/fid drop.
+This uses the existing asynchronous 9P mechanism; Loom walk/open remain
+unimplemented and are not added by the interaction feature.
+
+The pure clipboard broker retains one pending admission, keyed by authenticated
+connection, fid incarnation, caller request and complete controller scope. Get
+pins its candidate bytes; Commit validates bytes/generation and reserves its
+publication before CHECK. Busy does not create a second pending action. Wrong
+or duplicate receipts cannot consume another pending action. Controller/peer
+loss, exact pending cancellation and trusted-seat generation changes discard
+it. Deadlines join the event loop's next wakeup; no periodic scan is required.
+
+An ordered graphical focus-loss epoch cancels unprepared writes and pending
+Begin immediately. Pending Get/Commit retain that boundary: only a receipt
+from an earlier focus epoch may complete, even if focus later returns. This
+preserves the approved admission point while preventing a pending action from
+borrowing a later focus interval. Admitted read snapshots may finish after
+focus loss; controller loss and trusted-seat takeover still cancel them.
+
+The broker/channel are exercised together by the native admission probe. The
+application endpoint remains disabled until controller peer binding and ordered
+focus/terminal/seat notifications are connected to the session adapter. These
+modules alone are not a live clipboard service or a complete allocation ledger.
+
+Metadata bounds are compile-time checked: Broker <=1 KiB, Exchange <=512 bytes,
+and Tapestry Fid <=160 bytes (eight 512-entry tables <=640 KiB total). The
+channel adds one ctl, one four-entry Loom, and 120 registered bytes in one
+page-rounded buffer. The complete kernel/session allocation ledger remains an
+activation requirement; the 7.375 MiB payload/connection-buffer ceiling does
+not include these explicitly separate objects.

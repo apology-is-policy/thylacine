@@ -24,7 +24,13 @@ seat. Watches precede connection requests in the poll pass; newly accepted
 connections have no result in that pass. Surface reuse, watch retirement and
 SAK invalidate contexts. Each request resamples the seat to catch transitions
 since the loop's sample. Connection and surface-incarnation IDs stop at exhaustion; layout epochs
-saturate and saturated admission is refused. Replies are immutable per ctl fid.
+saturate and saturated admission is refused. Each ctl caches one exact HIA1 request/decision (including errno). Exact retries
+return that result without a second operation; only a higher request ID may
+replace it. Old or altered IDs are refused. The cached receipt remains immutable
+until replacement, and a HIA1 ctl refuses subsequent text verbs. This supports
+a setup-opened asynchronous channel without adding Loom fid-lifecycle ops.
+The compile-time 160-byte Fid ceiling bounds eight 512-entry fid tables to
+640 KiB, including that full request/decision cache.
 No application clipboard endpoint is activated by this layer.
 
 

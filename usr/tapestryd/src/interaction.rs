@@ -219,6 +219,14 @@ impl Comp {
     }
 }
 
+/// One reusable ctl transaction. Only a strictly newer request can replace it;
+/// exact retries return the stored decision, including failures, without ACKing
+/// or checking a second time. The broker must never reuse a consumed receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Transaction {
+    pub request: Request,
+    pub result: Result<[u8; libhalcyon::interaction_control::REPLY_BYTES], u32>,
+}
 impl Conn {
     pub(super) fn interaction_control(
         &mut self,
@@ -226,12 +234,17 @@ impl Conn {
         i: usize,
         data: &[u8],
     ) -> Result<(), u32> {
-        if self.fids[i].as_ref().unwrap().interaction.is_some() {
-            return Err(p9::E_BUSY);
-        }
         let r = Request::decode(data).ok_or(p9::E_INVAL)?;
-        let reply = comp.interaction_request(self.conn_id, r)?;
-        self.fids[i].as_mut().unwrap().interaction = Some(reply.encode());
-        Ok(())
+        if let Some(previous) = self.fids[i].as_ref().unwrap().interaction {
+            if r == previous.request {
+                return previous.result.map(|_| ());
+            }
+            if r.request <= previous.request.request {
+                return Err(p9::E_INVAL);
+            }
+        }
+        let result = comp.interaction_request(self.conn_id, r).map(Reply::encode);
+        self.fids[i].as_mut().unwrap().interaction = Some(Transaction { request: r, result });
+        result.map(|_| ())
     }
 }

@@ -6,6 +6,7 @@ parent: moc-userspace-shell-tui
 code:
   - usr/halcyond/src/lib.rs
   - usr/halcyond/src/clipboard.rs
+  - usr/halcyond/src/clipbroker.rs
   - usr/halcyond/src/main.rs
   - usr/halcyond/src/transcript.rs
   - usr/halcyond/src/layout.rs
@@ -48,14 +49,34 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-01
 ---
+## Pending clipboard admission (October 1)
+
+`clipbroker` owns the Clipboard and one pending compositor decision. Routing
+supplies authenticated Authority and an exact connection/fid-incarnation/request
+Target; these are not peer-decoded credentials. Get pins bytes and Commit
+validates the upload and generation before CHECK. A matching reply consumes
+that pending action once. Wrong/late/duplicate replies cannot authorize a new
+action. The 30-second deadline joins the payload store's next deadline.
+
+Ordered focus-loss epochs cancel Begin and unprepared writes. Get/Commit keep
+the earliest loss boundary and may finish only with a receipt that precedes it;
+later returned focus cannot revive them. A read already admitted can finish
+after focus changes. Controller loss, peer disconnect, exact cancellation and
+trusted-seat generation changes release pending tickets; SAK cancels all
+transfers, retaining only the committed clipboard value. Public service
+activation still requires peer/controller binding and delivery of ordered
+revocation/seat notifications to this owner. Native probe success does not
+mean an application clipboard endpoint is enabled.
+
 ## Terminal observer registration (October 1)
 
 The session accepts one binding announcement from its sealed Kaua child and
 registers it with the actual child PID, leaf and owning Tapestry connection.
 Duplicate announcements retire the terminal. Refusal leaves ordinary input
 alive without interaction authority. This one-time synchronous setup does not
-nominate an app. Asynchronous nomination, ordered pending-reply cancellation,
-clipboard activation and the mode widget remain unfinished.
+nominate an app. The pure asynchronous broker and native channel are implemented; application
+nomination, session notification wiring, clipboard activation and the mode
+widget remain unfinished.
 
 
 ## October 1 integration verification

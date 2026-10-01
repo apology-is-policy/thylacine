@@ -67,6 +67,7 @@ use libthyla_rs::{
     t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
+pub mod admission;
 mod ring;
 
 /// H-4b-3: the env var the layout-restore tool seeds into a spawned child's

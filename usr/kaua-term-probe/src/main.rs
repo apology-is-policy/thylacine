@@ -18,6 +18,10 @@ extern crate alloc;
 
 mod observer;
 mod admission;
+#[path = "../../halcyond/src/clipboard.rs"]
+mod clipboard;
+#[path = "../../halcyond/src/clipbroker.rs"]
+mod clipbroker;
 mod readiness;
 #[cfg(feature = "readiness-qualification")]
 mod readiness_qualification;

@@ -29,6 +29,16 @@ producer cannot synthesize this record from app output. Owner Drop revokes;
 kernel process death is the backstop. Standalone hosts without the switch
 retain existing behavior. A locator alone grants no application authority.
 
+The native `kaua-term-probe --admission` also witnesses this binding through
+asynchronous Tapestry CHECKs and the actual clipboard broker/store. It copies
+and reads exact bytes, refuses a background request, retains an admitted
+snapshot through focus loss, invokes broker disconnect cleanup, and drops a
+channel with an SQE outstanding. This is test coverage of the registered host
+boundary; Kaua's production service is unchanged by the asynchronous-broker
+checkpoint. Application nomination and live death-notification delivery still
+remain. Evidence: `work/oct1-hi-broker/`.
+
+
 
 ## Purpose
 
