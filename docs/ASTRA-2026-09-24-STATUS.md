@@ -1,5 +1,41 @@
 # Astra: September 24 follow-up
 
+## October 1 recheck of Main's original queue
+
+Checked on Astra's Main reconciliation `5886686cb` with qualified Aux
+`6df985512` staged. The September entries below are historical evidence.
+
+- **Registry exhaustion remains open and first in the repair queue.** The
+  registry still has 16 slots. Trusted-service tombstones retain their names;
+  capability-posted tombstones have restricted recycling, which does not free
+  boot/home service slots. The old 15/16 occupancy is a September measurement,
+  not a new count. Both drain/exit paths still use capacity-scaled stack arrays;
+  increasing the constant alone would leave the lifetime problem and grow the
+  stack cost. The repair must preserve stale-handle isolation and include a
+  three-user plus capability-posted-service regression and bind-error checks.
+- **Tapestry's startup system-tier miss is reproduced.** The fresh merged boot
+  reports missing `/lib/halcyon/profile` and `theme.toml`, then BuiltIn/Legacy.
+  Warden still starts before Joey's pool pivot. Halcyon's later bundle push
+  works, but does not repair this startup namespace contract.
+- **Lictor's remaining production debts persist:** default `test-mode`, refusal
+  below 800x720, unmeasured cost of its 10 ms poll loop, successful compositor
+  children left unsupervised, and no Pi 400/500 hardware qualification.
+  Tapestry's idle throttling does not measure Lictor's cost; GPU resource reaping
+  is distinct from compositor process reaping. The production-only compile
+  repair from September exists, but build defaults still enable test features.
+- **Blur is closed by operator choice:** the solid backdrop is the intended UI.
+- **Both ut findings remain source-confirmed.** Spawn errors set status 127
+  and errstr but return Normal, while the REPL prints only evaluator errors.
+  Foreground jobs still run before group/terminal assignment. Aux's new debugger
+  birth hold is not wired into these paths and is not assumed to be a drop-in
+  shell fix; release and abort ownership need review.
+
+This triage does not claim new three-user, idle-cost, or foreground-race runtime
+measurements. Evidence and source pointers are retained in
+`work/oct1-reconciliation/old-main-queue.md`; the startup witness is in
+`work/oct1-reconciliation/aux-boot-uart.log`. Complete the current qualified-branch
+reconciliation before changing these source paths.
+
 Permanent checkout: `/Users/northkillpd/projects/thylacine-astra`, branch
 `codex/astra`, initially main `5ed51ff5`. Yip identity `astra` on the shared
 Thylacine line. Calls 0107 (Main) and 0108 (Aux) establish ownership and bases.

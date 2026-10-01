@@ -65,6 +65,7 @@ void test_devproc_debug_cap_cover_predicate(void);
 void test_devproc_debug_cap_cover_attach(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
+void test_devproc_debug_birth_hold_ctl(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
 void test_devproc_debug_kregs_kstack_wait(void);
@@ -1598,6 +1599,193 @@ void test_devproc_debug_exitkill_terminates_on_close(void) {
     proc_test_unlink(attached);
     attached->state = PROC_STATE_ZOMBIE;
     proc_free(attached);
+}
+
+// DEBUG-FS-DESIGN 5f, the birth hold's ctl surface, on synthetic (thread-less)
+// targets carrying a hold: the owner's stop CONVERTS it (the stop set, the hold
+// cleared), start and an explicit detach RELEASE it, and the implicit release
+// -- the ctl fd closing without detach -- KEEPS it, because the hold belongs to
+// the spawner, not to the attach slot. A stop from a ctl that never attached is
+// refused and leaves the hold alone, and the scan stop and waitstop poll does
+// not count a held target as stopped until a stop converts it. The real park
+// under these verbs is birth_hold.held_spawn_parks and the debug-probe held
+// phase.
+static struct Proc *birth_hold_target(struct Proc *caller, u32 hold) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->principal_id = caller->principal_id;   // owner axis -> attach passes
+    p->state        = PROC_STATE_ALIVE;
+    __atomic_store_n(&p->debug_birth_hold, hold, __ATOMIC_RELEASE);
+    proc_test_link(p);
+    return p;
+}
+
+static void birth_hold_target_free(struct Proc *p) {
+    proc_test_unlink(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// Every leg records, releases its ctls and frees its target, and only then
+// asserts: a failing assert returns, and a target left attached and stopped in
+// the proc table stalls whichever later test walks it.
+#define BHC_UNSEEN 0xDEADu
+
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
+
+static u32 bhc_hold(struct Proc *p) {
+    return __atomic_load_n(&p->debug_birth_hold, __ATOMIC_ACQUIRE);
+}
+
+void test_devproc_debug_birth_hold_ctl(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "test thread has a proc (the debugger/caller)");
+    struct Proc *caller = t->proc;
+
+    const char attach_cmd[] = "attach";
+    const char stop_cmd[]   = "stop";
+    const char start_cmd[]  = "start";
+    const char detach_cmd[] = "detach";
+    const long an  = (long)sizeof(attach_cmd) - 1;
+    const long sn  = (long)sizeof(stop_cmd) - 1;
+    const long stn = (long)sizeof(start_cmd) - 1;
+    const long dn  = (long)sizeof(detach_cmd) - 1;
+
+    // (a) stop converts; a stranger's stop does not.
+    struct Proc *tgt = birth_hold_target(caller, BIRTH_HOLD_PARKED);
+    TEST_ASSERT(tgt != NULL, "alloc a held target");
+    struct Spoor *ctl = open_ctl_for_pid(tgt->pid);
+    struct Spoor *stranger = ctl ? open_ctl_for_pid(tgt->pid) : NULL;
+    long a_attach = 0, a_refused = 0, a_stop = 0, a_start = 0, a_detach = 0;
+    u32 a_hold_attached = BHC_UNSEEN, a_hold_refused = BHC_UNSEEN;
+    u32 a_hold_stopped = BHC_UNSEEN;
+    int a_stop_refused = -1, a_stop_set = -1, a_stop_started = -1;
+    if (ctl && stranger) {
+        a_attach        = devproc.write(ctl, attach_cmd, an, 0);
+        a_hold_attached = bhc_hold(tgt);
+        a_refused       = devproc.write(stranger, stop_cmd, sn, 0);
+        a_hold_refused  = bhc_hold(tgt);
+        a_stop_refused  = (int)tgt->debug_stop_req;
+        a_stop          = devproc.write(ctl, stop_cmd, sn, 0);
+        a_stop_set      = (int)tgt->debug_stop_req;
+        a_hold_stopped  = bhc_hold(tgt);
+        a_start         = devproc.write(ctl, start_cmd, stn, 0);
+        a_stop_started  = (int)tgt->debug_stop_req;
+        a_detach        = devproc.write(ctl, detach_cmd, dn, 0);
+    }
+    if (stranger) spoor_clunk(stranger);
+    if (ctl) spoor_clunk(ctl);
+    birth_hold_target_free(tgt);
+    TEST_ASSERT(ctl != NULL && stranger != NULL, "open the held target's ctl twice");
+    TEST_EXPECT_EQ(a_attach, an, "attach returns n");
+    TEST_EXPECT_EQ(a_hold_attached, BIRTH_HOLD_PARKED, "attaching alone leaves the hold");
+    TEST_EXPECT_EQ(a_refused, (long)-1,
+                   "a stop from a ctl that is not the slot owner is refused");
+    TEST_EXPECT_EQ(a_hold_refused, BIRTH_HOLD_PARKED, "the refused stop left the hold");
+    TEST_EXPECT_EQ(a_stop_refused, 0, "the refused stop set no stop");
+    TEST_EXPECT_EQ(a_stop, sn,
+                   "the owner's stop returns n (thread-less: vacuously stopped)");
+    TEST_EXPECT_EQ(a_stop_set, 1, "the conversion set the stop");
+    TEST_EXPECT_EQ(a_hold_stopped, BIRTH_HOLD_NONE, "the conversion cleared the hold");
+    TEST_EXPECT_EQ(a_start, stn, "start returns n");
+    TEST_EXPECT_EQ(a_stop_started, 0, "start resumed the converted target");
+    TEST_EXPECT_EQ(a_detach, dn, "detach returns n");
+
+    // (b) start releases a hold no stop converted.
+    tgt = birth_hold_target(caller, BIRTH_HOLD_UNBORN);
+    TEST_ASSERT(tgt != NULL, "alloc a held target (start)");
+    ctl = open_ctl_for_pid(tgt->pid);
+    long b_attach = 0, b_start = 0, b_detach = 0;
+    u32 b_hold = BHC_UNSEEN;
+    int b_stop = -1;
+    if (ctl) {
+        b_attach = devproc.write(ctl, attach_cmd, an, 0);
+        b_start  = devproc.write(ctl, start_cmd, stn, 0);
+        b_hold   = bhc_hold(tgt);
+        b_stop   = (int)tgt->debug_stop_req;
+        b_detach = devproc.write(ctl, detach_cmd, dn, 0);
+        spoor_clunk(ctl);
+    }
+    birth_hold_target_free(tgt);
+    TEST_ASSERT(ctl != NULL, "open the target's ctl (start)");
+    TEST_EXPECT_EQ(b_attach, an, "attach returns n");
+    TEST_EXPECT_EQ(b_start, stn, "start returns n");
+    TEST_EXPECT_EQ(b_hold, BIRTH_HOLD_NONE, "start released the hold");
+    TEST_EXPECT_EQ(b_stop, 0, "start left no stop behind");
+    TEST_EXPECT_EQ(b_detach, dn, "detach returns n");
+
+    // (c) an explicit detach releases.
+    tgt = birth_hold_target(caller, BIRTH_HOLD_PARKED);
+    TEST_ASSERT(tgt != NULL, "alloc a held target (detach)");
+    ctl = open_ctl_for_pid(tgt->pid);
+    long c_attach = 0, c_detach = 0;
+    bool c_slot_free = false;
+    u32 c_hold = BHC_UNSEEN;
+    if (ctl) {
+        c_attach    = devproc.write(ctl, attach_cmd, an, 0);
+        c_detach    = devproc.write(ctl, detach_cmd, dn, 0);
+        c_slot_free = tgt->debug_owner == NULL;
+        c_hold      = bhc_hold(tgt);
+        spoor_clunk(ctl);
+    }
+    birth_hold_target_free(tgt);
+    TEST_ASSERT(ctl != NULL, "open the target's ctl (detach)");
+    TEST_EXPECT_EQ(c_attach, an, "attach returns n");
+    TEST_EXPECT_EQ(c_detach, dn, "detach returns n");
+    TEST_ASSERT(c_slot_free, "detach freed the slot");
+    TEST_EXPECT_EQ(c_hold, BIRTH_HOLD_NONE, "an explicit detach released the hold");
+
+    // (d) the implicit release keeps the hold.
+    tgt = birth_hold_target(caller, BIRTH_HOLD_PARKED);
+    TEST_ASSERT(tgt != NULL, "alloc a held target (close)");
+    ctl = open_ctl_for_pid(tgt->pid);
+    long d_attach = 0;
+    bool d_slot_free = false, d_alive_msg = false;
+    u32 d_hold = BHC_UNSEEN;
+    if (ctl) {
+        d_attach = devproc.write(ctl, attach_cmd, an, 0);
+        spoor_clunk(ctl);   // no detach: devproc_debug_release_cb's resume path
+        d_slot_free = tgt->debug_owner == NULL;
+        d_hold      = bhc_hold(tgt);
+        d_alive_msg = tgt->group_exit_msg == NULL;
+    }
+    birth_hold_target_free(tgt);
+    TEST_ASSERT(ctl != NULL, "open the target's ctl (close)");
+    TEST_EXPECT_EQ(d_attach, an, "attach returns n");
+    TEST_ASSERT(d_slot_free, "the close freed the slot");
+    TEST_EXPECT_EQ(d_hold, BIRTH_HOLD_PARKED,
+                   "closing the ctl fd without detach keeps the hold (the spawner's)");
+    TEST_ASSERT(d_alive_msg, "an unmarked target is not terminated by the close");
+
+    // (e) waitstop waits for a DEBUG stop, not for parked threads: a held target
+    //     that no stop has converted is not stopped, and the owner's stop makes
+    //     it so. Read through one pass of the scan waitstop polls, since the verb
+    //     itself would wait here for a stop that never comes. The target has no
+    //     threads, so the scan's parked test passes vacuously and only the stop
+    //     flag can refuse it; held_spawn_parks (a) shows a real parked child with
+    //     no stop pending.
+    tgt = birth_hold_target(caller, BIRTH_HOLD_PARKED);
+    TEST_ASSERT(tgt != NULL, "alloc a held target (waitstop)");
+    ctl = open_ctl_for_pid(tgt->pid);
+    long e_attach = 0, e_stop = 0, e_detach = 0;
+    int e_held = -9, e_stopped = -9;
+    if (ctl) {
+        e_attach  = devproc.write(ctl, attach_cmd, an, 0);
+        e_held    = devproc_debug_stop_state_for_test(tgt->pid, ctl);
+        e_stop    = devproc.write(ctl, stop_cmd, sn, 0);
+        e_stopped = devproc_debug_stop_state_for_test(tgt->pid, ctl);
+        e_detach  = devproc.write(ctl, detach_cmd, dn, 0);
+        spoor_clunk(ctl);
+    }
+    birth_hold_target_free(tgt);
+    TEST_ASSERT(ctl != NULL, "open the target's ctl (waitstop)");
+    TEST_EXPECT_EQ(e_attach, an, "attach returns n");
+    TEST_EXPECT_EQ(e_held, 0,
+                   "a held target no stop has converted is not debug-stopped: "
+                   "its parked test passes, so only the stop flag refuses it");
+    TEST_EXPECT_EQ(e_stop, sn, "the owner's stop returns n");
+    TEST_EXPECT_EQ(e_stopped, 1, "the converted target is debug-stopped");
+    TEST_EXPECT_EQ(e_detach, dn, "detach returns n");
 }
 
 // 8a-1b-beta: the run-control state machine (specs/debug_stop.tla, the model's

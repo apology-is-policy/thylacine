@@ -1,10 +1,11 @@
 // placesrv -- the /srv/halcyon inline-media place server (I-47, HALCYON.md
 // 14.7). The console renderer posts it so a short-lived `view` can hand it a
 // decoded raster (the console spike; the per-pane session channel is a later
-// slice). A minimal 9P2000.L server: the root dir "/" and one write-only file
-// "place". A client walks to `place`, opens it O_WRONLY, and writes a
-// place-request -- an `inlinewire` header then the ARGB payload; on completion
-// the raster is queued for `Transcript::inject_image`.
+// slice). A minimal 9P2000.L server: the root dir "/" and one file "place". A
+// read of `place` answers the current per-image limit (`inlinewire::limit_read`)
+// so a client can fit its raster first; a write carries a place-request -- an
+// `inlinewire` header then the ARGB payload; on completion the raster is queued
+// for `Transcript::inject_image`.
 //
 // FORMAT-FUZZ SURFACE (audit:hard, I-47). This is the thin syscall shell: the
 // 9P codec is the shared `libthyla_rs::ninep` server codec, and every untrusted
@@ -59,8 +60,9 @@ const P_ROOT: u64 = 0;
 const P_PLACE: u64 = 1;
 
 // Mode bits (mirror nocturned's 9P-mode service): the dir is r-x for all so the
-// kernel dev9p per-component X-search passes; `place` is world-writable so a
-// non-root `view` may open it O_WRONLY. The security trio is filled in getattr
+// kernel dev9p per-component X-search passes; `place` is world-readable and
+// -writable so a non-root `view` may read the limit and write a raster. The
+// security trio is filled in getattr
 // (an unfilled trio fails the X-search closed -- the /dev/pts lesson).
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
@@ -116,7 +118,6 @@ fn mode_of(path: u64) -> u32 {
 /// A raster fully received on the place channel, awaiting injection into the
 /// transcript by the owner of the render loop.
 pub struct CompletedImage {
-    pub id: u128,
     pub w: u32,
     pub h: u32,
     pub argb: Vec<u32>,
@@ -236,7 +237,7 @@ impl Protocol {
             p9::P9_TATTACH => self.h_attach(tmsg, tag),
             p9::P9_TWALK => self.h_walk(tmsg, tag),
             p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
-            p9::P9_TREAD => self.h_read(tmsg, tag),
+            p9::P9_TREAD => self.h_read(tmsg, tag, max_pixels),
             p9::P9_TWRITE => self.h_write(tmsg, tag, out, max_pixels),
             p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
@@ -369,7 +370,7 @@ impl Protocol {
         p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.path), 0)
     }
 
-    fn h_read(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -385,8 +386,10 @@ impl Protocol {
         if f.path == P_ROOT {
             return self.err(tag, p9::E_ISDIR);
         }
-        // `place` is write-only: a read returns EOF (an empty Rread), never data.
-        p9::build_rread(&mut self.out_buf, tag, &[])
+        // A read of `place` answers the per-image limit a write is held to now.
+        let mut text = [0u8; inlinewire::LIMIT_TEXT_MAX];
+        let data = inlinewire::limit_read(max_pixels, a.offset, a.count, &mut text);
+        p9::build_rread(&mut self.out_buf, tag, data)
     }
 
     fn h_write(
@@ -421,13 +424,13 @@ impl Protocol {
             AccumStep::More => {
                 p9::build_rwrite(&mut self.out_buf, tag, a.count)
             }
-            AccumStep::Done { id, w, h, argb } => {
+            AccumStep::Done { w, h, argb, .. } => {
                 // Keep the accumulator bound to this fid: it has advanced its own
                 // base and reset its buffer, so a subsequent image on the same
                 // fid (whose first write arrives at the cumulative offset) is
                 // accepted -- the multi-image path `inlineaccum` is built + tested
                 // for. It is freed on clunk/teardown, or replaced on a Reject.
-                out.push(CompletedImage { id, w, h, argb });
+                out.push(CompletedImage { w, h, argb });
                 p9::build_rwrite(&mut self.out_buf, tag, a.count)
             }
             AccumStep::Reject => {

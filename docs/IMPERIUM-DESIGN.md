@@ -599,6 +599,23 @@ can veto any of them:**
    holder. Every other contender keeps the documented -1. Consequence: two
    non-attached readers frozen together both get the console after END, in
    turn, where pre-episode the second would have been refused.
+9. **A write is refused where it lands, not only where it enters**
+   (2026-09-29, the IM Fable pass F1/F2). A consctl mode write asks
+   `cons_caller_frozen()` again under `g_cons.lock`, in the critical section
+   that applies it, and a renderer feed byte asks whether an episode is open
+   there too (`cons_rx_accept`). The lockless check each kept before it is only
+   a fast refusal: alone, it let a write that had passed it before BEGIN land
+   inside the episode -- an in-flight `+echo` opened the trusted prompt with
+   ECHO on, the secret echoed to the UART and the renderer's drain, and an
+   in-flight feed byte entered the ring BEGIN had just emptied. BEGIN forces
+   RAW under the same lock, so a write either lands before BEGIN, which
+   overrides it, or is refused. And a SAK while an episode is open saves no
+   owner (F5): the owner saved by the SAK that opened it is the one every close
+   hands back, so a second SAK cannot replace it with a Proc that claimed the
+   empty owner slot in between. What still crosses BEGIN is output, bounded and
+   pre-SAK: the echo of a feed byte accepted before it (at most
+   `CONS_ECHO_MAX` bytes, emitted after the lock drops, while the byte itself
+   is discarded), the same class as the in-flight first chunk of a write.
 
 ### 11.4 The propagating legate scope -- kernel, I-25 STRENGTHENED, spec-first (IM-2)
 
@@ -659,7 +676,9 @@ so the operator can veto any of them:**
    lives with the tag it travels with. `PROC_FLAG_LEGATE_ROOT` is unchanged and
    still never inherits.
 2. **A PROPAGATING grant is bounded to `CAP_GRANTABLE_IMPERIUM` =
-   `DAC_OVERRIDE | CHOWN | KILL`** -- exactly the imperium level of §11.5.
+   `POST_SERVICE | DAC_OVERRIDE | CHOWN | KILL`** -- exactly the imperium
+   level of §11.5 (`POST_SERVICE` joined it in §6.5, so `haul`, a child of the
+   shell that redeemed the imperium, inherits it; `devcap.h`).
    `CAP_DEBUG` (a debugger's own debuggee would hold the debug authority; I-39
    is per-grant), `CAP_JIT` (I-42's "non-heritable" letter) and
    `CAP_AUDIO_GRAPH` (I-46's per-program whole-sink authority) stay plain
@@ -722,7 +741,7 @@ so the operator can veto any of them:**
 
 ### 11.5 The *lex curiata* -- corvus (IM-3)
 
-- **The `imperium` clearance level**: caps `DAC_OVERRIDE | CHOWN | KILL`,
+- **The `imperium` clearance level**: caps `DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE`,
   `auth_required = DISTINCT_SECRET`, `time_bound = 4h`, PROPAGATING. Eligibility
   is admin-granted (`CLEARANCE_GRANT`), like audio-graph. The request's cap-set is
   the self-restriction subset (the existing `self_restrict`, STS-style):

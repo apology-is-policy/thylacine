@@ -1257,13 +1257,21 @@ static void cons_deliver_partial_line_locked(bool *wake_data, bool *wake_mgr) {
     g_cons.line_len = 0u;
 }
 
-bool cons_rx_input(u8 byte, bool is_break) {
+// `feed`: the byte comes from the renderer's feed, which an open episode
+// refuses. Asked under the lock BEGIN discards the ring under, so a byte that
+// passed cons_feed_write's lockless check while BEGIN ran is not the first
+// byte the trusted reader sees.
+static bool cons_rx_accept(u8 byte, bool is_break, bool feed) {
     bool wake_data = false, wake_mgr = false;
     bool accepted = true;
     u8   echo[CONS_ECHO_MAX];
     int  necho = 0;
 
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (feed && cons_episode_active_load()) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return false;
+    }
     u32 tio = cons_termios_load();
 
     if (is_break) {
@@ -1379,6 +1387,10 @@ bool cons_rx_input(u8 byte, bool is_break) {
     if (wake_data) wakeup(&g_cons_data_rendez);
     if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
     return accepted;
+}
+
+bool cons_rx_input(u8 byte, bool is_break) {
+    return cons_rx_accept(byte, is_break, /*feed=*/false);
 }
 
 // (The reader's data cond is cons_data_or_vacate, with the episode block: it
@@ -1865,6 +1877,25 @@ static bool cons_caller_frozen(void) {
     if (!t || !t->proc) return false;
     return !proc_is_console_attached(t->proc);
 }
+
+// The window between a lockless episode check and the locked apply it
+// guards. A test runs a function there -- an episode opening inside the
+// window -- to prove the apply asks again under g_cons.lock. Compiled out of
+// production: no indirect-call slot on a path every renderer drives.
+#ifdef KERNEL_TESTS
+static void (*g_cons_test_window)(void);
+
+void cons_test_set_window_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_cons_test_window, fn, __ATOMIC_RELEASE);
+}
+
+static inline void cons_test_window(void) {
+    void (*fn)(void) = __atomic_load_n(&g_cons_test_window, __ATOMIC_ACQUIRE);
+    if (fn) fn();
+}
+#else
+static inline void cons_test_window(void) {}
+#endif
 
 static int cons_episode_over(void *arg) {
     (void)arg;
@@ -2457,7 +2488,8 @@ long cons_feed_write(const void *buf, long n) {
     long i = 0;
     for (; i < n; i++) {
         if (cons_episode_active_load()) break;
-        if (!cons_rx_input(bytes[i], /*is_break=*/false)) break;
+        cons_test_window();
+        if (!cons_rx_accept(bytes[i], /*is_break=*/false, /*feed=*/true)) break;
     }
     return i;
 }
@@ -2560,7 +2592,8 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     // renderer's verbs are refused too: `serialsilent 1` under the trusted
     // prompt would blank the provincia on the emergency medium the SAK just
     // restored. Refused BEFORE the parse so a frozen writer learns nothing
-    // about the grammar's acceptance of its tokens.
+    // about the grammar's acceptance of its tokens, and asked again under
+    // g_cons.lock before anything is stored (below).
     if (cons_caller_frozen()) return -1;
     const u8 *b = (const u8 *)buf;
 
@@ -2671,7 +2704,16 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
 
     bool winch = false;                                       // #55 changed?
     bool wake_data = false, wake_mgr = false;
+    cons_test_window();
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    // BEGIN forces RAW under this lock. A write that passed the check above
+    // while BEGIN ran would store its bits over the episode's word -- ECHO on
+    // under the trusted prompt, every key to the wire and the drain -- so the
+    // check is asked again here, where BEGIN cannot interleave.
+    if (cons_caller_frozen()) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return -1;
+    }
     u32 cur = cons_termios_load();
     u32 nxt = (cur | set_mask) & ~clear_mask;
     cons_termios_store(nxt);

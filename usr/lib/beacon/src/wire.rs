@@ -49,6 +49,7 @@ pub enum Op {
     Em,
     Obj,
     Pre,
+    Aside,
 }
 
 impl Op {
@@ -64,6 +65,7 @@ impl Op {
             Op::Em => "em",
             Op::Obj => "obj",
             Op::Pre => "pre",
+            Op::Aside => "aside",
         }
     }
 
@@ -79,7 +81,8 @@ impl Op {
             "em" => Some(Op::Em),
             "obj" => Some(Op::Obj),
             "pre" => Some(Op::Pre),
-        _ => None,
+            "aside" => Some(Op::Aside),
+            _ => None,
         }
     }
 
@@ -481,6 +484,32 @@ mod tests {
         assert!(!Op::Pre.is_point(), "pre pairs; it is never a point op");
         assert_eq!(Op::parse("pre"), Some(Op::Pre));
         assert_eq!(Op::Pre.as_str(), "pre");
+    }
+
+    #[test]
+    fn aside_roundtrips_and_strips_to_payload() {
+        // An `aside` pairs like `pre`, and its payload -- the passage's
+        // lines, an empty line between its paragraphs, an inline `em` -- is
+        // what strip leaves (12.1 rule 1): the plain text never names a frame.
+        let mut v = Vec::new();
+        open(&mut v, Op::Aside, &[]);
+        v.extend_from_slice(b"one ");
+        open(&mut v, Op::Em, &[("class", "emph")]);
+        v.extend_from_slice(b"set apart");
+        close(&mut v, Op::Em);
+        v.extend_from_slice(b" line\n\n- an item\n");
+        close(&mut v, Op::Aside);
+
+        let evs = parse(&v);
+        assert_eq!(evs[0], Event::Open(Op::Aside, vec![]));
+        assert!(matches!(evs.last(), Some(Event::Close(Op::Aside))));
+        assert_eq!(strip(&v), b"one set apart line\n\n- an item\n");
+        assert!(
+            !Op::Aside.is_point(),
+            "an aside pairs; it is never a point op"
+        );
+        assert_eq!(Op::parse("aside"), Some(Op::Aside));
+        assert_eq!(Op::Aside.as_str(), "aside");
     }
 
     #[test]

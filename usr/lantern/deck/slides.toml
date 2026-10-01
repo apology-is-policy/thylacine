@@ -6,4 +6,7 @@ slides = [
     "01-title.md",
     "02-how.md",
     "03-keys.md",
+    # A picture slide: `view` shows it in a Halcyon tile, and everywhere else
+    # the slide shows the file's name.
+    "04-lantern.png",
 ]

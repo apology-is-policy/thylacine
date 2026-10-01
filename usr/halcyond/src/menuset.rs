@@ -111,11 +111,6 @@ impl MenuSet {
         }
     }
 
-    /// Is a model up now?
-    pub fn is_open(&self) -> bool {
-        self.open.is_some()
-    }
-
     /// Summon the verb `model` at display point (x, y): mint, paint, place.
     /// `run` is the obj run's display rect, said with the placement. False
     /// (said once here) when the compositor refuses.

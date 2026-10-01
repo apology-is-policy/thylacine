@@ -2879,6 +2879,20 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_PHENO_LINUX            (1u << 0)
 #define SPAWN_PHENO_FLAGS_ALL        (SPAWN_PHENO_LINUX)
 
+// SYS_SPAWN_FULL_ARGV debug_flags (the birth hold; DEBUG-FS-DESIGN 5f; I-39).
+// SPAWN_DEBUG_HELD asks for the child to be held: the spawn returns once the
+// child has loaded its image and parked before its first instruction, and the
+// child runs nothing until a debugger's `stop` takes the hold over and resumes
+// it, or the owner's `start` / an explicit `detach` releases it. A held child
+// whose spawner exits first is killed.
+//
+// UNGATED, for the reason the phenotype is: the hold restricts only the
+// spawner's own child and hands it no access to that child -- reading or
+// controlling the held child still takes an attach through the I-39 gate.
+// Unknown bits are rejected (-1), the _pad_envp rationale.
+#define SPAWN_DEBUG_HELD             (1u << 0)
+#define SPAWN_DEBUG_FLAGS_ALL        (SPAWN_DEBUG_HELD)
+
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
 // allowance_va at it with SPAWN_ALLOWANCE_SET; the kernel uaccess-copies it,
@@ -3615,11 +3629,12 @@ struct sys_spawn_args {
     // size assert below for why a per-mirror size assert cannot catch a miss.
     u32 pheno_flags;     // SPAWN_PHENO_* bits; outside SPAWN_PHENO_FLAGS_ALL -> -1
 
-    // The next forward-compat slot, replacing the one the merge consumed. Same
-    // contract as _pad_envp and the former _pad_allow: MUST be 0 at v1.0, and
-    // the handler poison-checks it, so a future kernel can tell an old caller
-    // from a new one. Also restores 8-alignment of the struct.
-    u32 _pad_spawn2;     // must be 0 at v1.0 (forward-compat slot)
+    // The birth hold (DEBUG-FS-DESIGN 5f) claims the forward-compat slot the
+    // merge left at 100. 0 -- what every earlier caller zero-fills, and what the
+    // old poison check required -- means "not held", so those callers are
+    // byte-identical. It was the LAST pad slot: the next field grows the struct,
+    // and every mirror with it.
+    u32 debug_flags;     // SPAWN_DEBUG_* bits; outside SPAWN_DEBUG_FLAGS_ALL -> -1
 };
 
 _Static_assert(sizeof(struct sys_spawn_args) == 104,
@@ -3627,15 +3642,19 @@ _Static_assert(sizeof(struct sys_spawn_args) == 104,
                "— pinned at 104 bytes (A-1a appended the identity block at "
                "56..80; the Menagerie step-5 allowance block appended at "
                "80..96: allowance_va 8 + allowance_flags 4 + page_budget 4; "
-               "the aux-2 merge appended 96..104: pheno_flags 4 + _pad_spawn2 "
-               "4, because CL-5 and VIVARIUM V-1b had independently claimed "
-               "the SAME _pad_allow slot at 92); no implicit padding.\n"
+               "the aux-2 merge appended 96..104: pheno_flags 4 + the slot at "
+               "100 the birth hold now uses as debug_flags, because CL-5 and "
+               "VIVARIUM V-1b had independently claimed the SAME _pad_allow "
+               "slot at 92); no implicit padding.\n"
                "THIS ASSERT CANNOT CATCH A STALE MIRROR. It verifies the "
                "KERNEL's own layout only; libt / libthyla-rs / the pouch "
                "0026 patch / the go fork each carry their own copy and their "
                "own size assert, and a mirror left at 96 passes ITS assert "
                "while overflowing at runtime (the #100 lesson, paid for once "
-               "already). Growing this struct means grepping every mirror.");
+               "already). tools/check-spawn-args-mirrors.py, run by every "
+               "build, compares every mirror with this struct field by "
+               "field, reading the layout from the offsetof asserts below: "
+               "a new field needs its own assert or the build stops.");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
                "sys_spawn_args.name_va at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_va) == 8,
@@ -3680,9 +3699,10 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, pheno_flags) == 96,
                "the aux-2 merge moved it here, growing the struct to 104. 0 == "
                "inherit == the pre-V-1b must-be-0 behavior, so zero-filling "
                "callers are unaffected by the move.");
-_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_spawn2) == 100,
-               "sys_spawn_args._pad_spawn2 at ABI offset 100 -- the forward-"
-               "compat slot replacing the one the merge consumed; must be 0.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, debug_flags) == 100,
+               "sys_spawn_args.debug_flags at ABI offset 100 -- the forward-"
+               "compat slot the merge left, claimed by the birth hold; 0 == "
+               "not held.");
 
 struct exception_context;
 

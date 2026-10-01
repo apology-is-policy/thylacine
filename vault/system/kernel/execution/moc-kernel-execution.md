@@ -4,7 +4,7 @@ type: moc
 title: "Kernel execution: Procs, Threads, and the death path"
 parent: moc-kernel
 created: 2026-08-01
-updated: 2026-08-03
+updated: 2026-09-29
 ---
 The Plan 9 Proc/Thread pair and the lifecycle over them. A **Proc** owns an
 address space, a Territory, a handle table, an identity, and a list of
@@ -22,8 +22,9 @@ it carries the single most bug-prone lineage in the tree
 wake that did not arrive, a pointer freed while a peer still ran on it, or a
 state observed a moment too early.
 
-Eight surfaces, matching the code's own seams — three for the lifecycle, three
-for the loading, two for the terminal:
+Nine surfaces, matching the code's own seams — three for the lifecycle, three
+for the loading, two for the terminal, and one where a debugger takes a child
+at birth:
 
 ## Children
 
@@ -52,6 +53,10 @@ for the loading, two for the terminal:
 - [[sub-kernel-jobctl]] — Ctrl-Z: the second owner of the debugger's stop
   park, the gate deciding whether a suspend stops or merely notifies, and the
   POSIX orphan rule.
+- [[sub-kernel-birth-hold]] — the held spawn: a child parked in front of its
+  first instruction so the debugger that launched it can take it over, the EL0
+  frame built for it before it has one, and the rule that kills it with a
+  spawner that never took it over.
 
 Creation reads as one step and is two. `rfork` produces a Proc with an
 address space and nothing in it; exec is what puts a program there. The
@@ -82,7 +87,9 @@ filing convenience.
   shared path).
 - Specs: [[spec-death-wake]] (the cascade's register-then-observe, and the
   hang its buggy cfg reproduces) · [[spec-pty-stop]] (two owners of one park,
-  and that adding the second did not break the first).
+  and that adding the second did not break the first) · [[spec-debug-stop]]
+  (the debugger's stop, the birth hold beside it, and the park's second death
+  check that the held model found missing).
 - Locks: [[lock-proc-table]] — the one global lock the whole area turns on ·
   [[lock-pts]], a strict leaf that refuses to nest it.
 - Arcs: [[arc-phase2-lifecycle]] (where Proc/Thread came from) ·

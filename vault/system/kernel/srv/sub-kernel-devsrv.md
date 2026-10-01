@@ -12,8 +12,20 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-01
 ---
+## October 1 capacity recheck
+
+The stable Main/Aux reconciliation still defines `SRV_MAX_SERVICES` as 16.
+Trusted-service tombstones retain names and slots; the restricted recycling of
+capability-posted tombstones does not reclaim boot/home services. The September
+15/16 one-user observation remains historical, not a fresh occupancy measurement.
+Both registry drain and poster exit still have capacity-scaled stack arrays.
+The open repair must address headroom and stale-handle lifetime together, with
+three-user/service-post coverage; increasing the constant alone is insufficient.
+See `docs/ASTRA-2026-09-24-STATUS.md` for the reconciled operator queue.
+
+
 ## Nonblocking endpoints
 
 `CNONBLOCK` selects `srvconn_io_nonblock` on raw client/server transport

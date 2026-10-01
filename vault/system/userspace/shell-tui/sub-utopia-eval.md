@@ -26,8 +26,19 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-10-01
 ---
+## October 1 spawn and foreground recheck
+
+Both old operator findings remain in the stable Main/Aux source. The external
+spawn error arm records status 127 and errstr but returns Normal; the REPL's
+error printer runs only for evaluator Err, so it gives no spawn diagnostic.
+Foreground launch still makes the child runnable before `jc_place_in_group`
+and terminal handoff. The new debugger birth-hold facility is not used by
+these shell paths; its release/abort contract needs review before any reuse.
+These are source confirmations, not new runtime scheduling measurements.
+
+
 ## Purpose
 
 AST to effects. Where [[sub-utopia-parser]] touches nothing outside its own

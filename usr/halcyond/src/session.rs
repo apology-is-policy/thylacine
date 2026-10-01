@@ -27,6 +27,7 @@ use halcyond::layout::{sheet_for, Sheet};
 use halcyond::menu::{
     build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
 };
+use halcyond::paneroute::Quiet;
 use halcyond::raster::GlyphSource;
 use halcyond::select::{FlatRow, Sel, Stamp, GRID_BLOCK};
 use halcyond::session_init;
@@ -1839,7 +1840,7 @@ pub fn run(home: Option<String>) -> i64 {
     }
     // I-47 (HALCYON.md 14.7.2): the per-user inline-media place service. Posted
     // once (login granted MAY_POST_SERVICE, one hop, as it does for the home
-    // proxy); each tile gets a per-pane secret token routed through it. A failed
+    // proxy); each tile gets a per-pane routing token. A
     // failure before publication leaves inline media unavailable. Once published,
     // failure must end the poster so its registry name is retired.
     let user = session_user();
@@ -1851,6 +1852,7 @@ pub fn run(home: Option<String>) -> i64 {
         }
         _ => None,
     };
+    let (mut placed_quiet, mut refused_quiet) = (Quiet::default(), Quiet::default());
     match (&places, user.as_deref()) {
         (Some(_), Some(u)) => say!("halcyond: inline-media service /srv/halcyon-{}", u),
         _ => say!("halcyond: inline-media service unavailable (no user or post failed)"),
@@ -2935,15 +2937,14 @@ pub fn run(home: Option<String>) -> i64 {
             for img in p.take_completed() {
                 if let Some(t) = tiles.get_mut(&img.leaf) {
                     if !t.tile.place_image(img.id, img.w, img.h, img.argb) {
-                        say!("halcyond: session inline leaf={} cache refused", img.leaf);
+                        if let Some(n) = refused_quiet.next() {
+                            say!("halcyond: session inline leaf={} cache refused ({} so far)", img.leaf, n);
+                        }
                         continue;
                     }
-                    say!(
-                        "halcyond: session inline leaf={} {}x{}",
-                        img.leaf,
-                        img.w,
-                        img.h
-                    );
+                    if let Some(n) = placed_quiet.next() {
+                        say!("halcyond: session inline leaf={} {}x{} ({} so far)", img.leaf, img.w, img.h, n);
+                    }
                     t.dirty = true;
                 }
             }

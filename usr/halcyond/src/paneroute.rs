@@ -1,7 +1,7 @@
 // paneroute -- the PURE routing core for the per-pane inline-media channel
 // (I-47, HALCYON.md 14.7.2, the session-path slice). The session compositor
 // posts ONE per-user 9P service (`/srv/halcyon-<user>`) and distinguishes the
-// user's panes by a per-pane SECRET TOKEN carried as a PATH COMPONENT: a
+// user's panes by a per-pane ROUTING TOKEN carried as a PATH COMPONENT: a
 // place-request reaches tile T by walking `<hex(token_of_T)>/place`. This
 // module holds only the pure, host-testable parts of that scheme -- the 32-hex
 // token codec and the namespace walk -- so the untrusted-name decisions have a
@@ -98,6 +98,20 @@ pub fn walk_child(cur: Node, name: &[u8], live: impl Fn(u128) -> bool) -> Option
     }
 }
 
+/// A diagnostic a client can repeat at will -- a connect, a walk to an unrouted
+/// token, an upload placed, refused, or orphaned by its pane closing -- is
+/// written on its 1st, 2nd, 4th, 8th... occurrence with the count, so a flood
+/// costs the console a logarithm of itself rather than a line per attempt.
+#[derive(Default)]
+pub struct Quiet(u64);
+
+impl Quiet {
+    pub fn next(&mut self) -> Option<u64> {
+        self.0 = self.0.saturating_add(1);
+        self.0.is_power_of_two().then_some(self.0)
+    }
+}
+
 /// The per-user service's leaf name for a token: `<hex(token)>/place`, the tail
 /// a pane's program opens (prefixed by the service root in `/env/HALCYON_PLACE`).
 /// Pure, so the compositor's address construction is host-checkable against the
@@ -182,5 +196,14 @@ mod tests {
         // and the tail's first component parses back to the token.
         let comp = tail.split('/').next().unwrap();
         assert_eq!(parse_hex32(comp.as_bytes()), Some(t));
+    }
+
+    /// A thousand refusals write ten lines (the 1st, 2nd, 4th ... 512th), each
+    /// with its count; the first always writes, so a lone refusal is still seen.
+    #[test]
+    fn a_repeated_diagnostic_is_written_at_powers_of_two() {
+        let mut q = Quiet::default();
+        let said: alloc::vec::Vec<u64> = (0..1000).filter_map(|_| q.next()).collect();
+        assert_eq!(said, [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]);
     }
 }

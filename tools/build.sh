@@ -95,6 +95,43 @@ USR_RS_TARGET="aarch64-unknown-none"
 # so build_go_probes skips cleanly when it is missing (the Go boot probe just
 # does not get baked). Override with GOFORK=/path/to/go-thylacine.
 GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
+# Build tags for BOTH ambush builds: build_ambush's ramfs copy (/ambush-probe) and
+# the /goroot/bin copy nora's :debug runs. thylacine_held: this tree's kernel
+# carries the birth hold (SPAWN_DEBUG_HELD), so ambush's Launch spawns its target
+# held and no quick program can outrun the attach. A kernel without the hold
+# refuses the flag, which is why the shared fork makes it a tag and the tree
+# passes it (DELVE-PORT-DESIGN section 7 (b)); it goes when every tree carries
+# the hold.
+AMBUSH_TAGS="thylacine_held"
+# Both ambush builds check both ends of the tag. Go ignores a tag no file
+# mentions, so a fork that predates the held launch, or one whose held file no
+# longer answers to the tag, would build the running-spawn Launch under a log
+# line saying held. ambush_fork_check asks the toolchain which of the pair the
+# tagged build compiles (go list: the build's own file selection) and refuses
+# unless it is held_on_thylacine.go, declaring launchHeld = true.
+# ambush_artifact_check then reads the tags back from the binary itself (go
+# version -m; the build info survives -s -w), so a build that lost the flag stops
+# here instead of shipping the race. Whether Launch still acts on the constant is
+# behaviour, which /ambush-probe stage C checks at the entry. Both capture before
+# they match: under pipefail a `| grep -q` can SIGPIPE the producer and fail a
+# good build.
+ambush_fork_check() {
+    local files
+    files=$(cd "$1" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$GOFORK/bin/go" list -mod=vendor \
+        -tags "$AMBUSH_TAGS" -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
+        || { echo "==> Ambush: go list of $1/pkg/proc/native FAILED" >&2; return 1; }
+    [[ " $files " == *" held_on_thylacine.go "* && " $files " != *" held_off_thylacine.go "* ]] \
+        || { echo "==> Ambush: -tags $AMBUSH_TAGS does not compile held_on_thylacine.go in $1 (a fork from before the held launch has none) -- update the fork" >&2; return 1; }
+    grep -q '^const launchHeld = true$' "$1/pkg/proc/native/held_on_thylacine.go" \
+        || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
+}
+ambush_artifact_check() {
+    local info
+    info=$("$GOFORK/bin/go" version -m "$1") \
+        || { echo "==> Ambush: go version -m $1 FAILED" >&2; return 1; }
+    grep -q -- "-tags=$AMBUSH_TAGS\$" <<<"$info" \
+        || { echo "==> Ambush: $1 does not record -tags=$AMBUSH_TAGS" >&2; return 1; }
+}
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
 LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
@@ -430,7 +467,9 @@ print main.Sentinel
 EOF
     # Go Stage 8c-4 (launch E2E): the Ambush init script /bin/ambush-probe drives via
     # `ambush exec /bin/ambush-child --init /bin/ambush-init-exec`. Ambush spawns the child
-    # (attach-first Launch), stops it before main.main, sets a HARDWARE breakpoint
+    # held and stops it at its ELF entry (`regs` first: the probe checks the launch
+    # stop's PC against the entry, which tells a held launch from one that raced),
+    # sets a HARDWARE breakpoint
     # at main.parkLoop (I-12/I-36 route every bp to the kernel hwbreak path), then
     # `continue` runs the target INTO the breakpoint (the whole-Proc stop). The
     # inspect commands then run against the bp-stopped multi-M target; stdin EOF
@@ -438,12 +477,21 @@ EOF
     # HW-breakpoint-routing + the kernel #95 focus-thread proof: break + continue +
     # bt/print at a real HW bp on a multi-M Go target.
     cat > "$ramfs_bin/ambush-init-exec" <<'EOF'
+regs
 break main.parkLoop
 continue
 goroutines
 bt
 print main.Sentinel
 EOF
+    # Stage D's abandoned-launch leg: `ambush dap-selftest /bin/ambush-child
+    # /bin/ambush-notelf` launches this first. It is executable, so the spawn makes
+    # a child, and not an ELF image, so that child dies in its exec before it runs;
+    # the failed launch must reap it. The mode is set rather than left to the
+    # umask: without X the spawn is refused before any child exists, and the leg
+    # fails saying so.
+    printf 'not an ELF image\n' > "$ramfs_bin/ambush-notelf"
+    chmod 0755 "$ramfs_bin/ambush-notelf"
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).
@@ -869,11 +917,13 @@ build_ambush() {
         return 0
     fi
     mkdir -p "$go_out"
-    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$ambush_src)"
+    ambush_fork_check "$ambush_src" || return 1
+    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, -tags $AMBUSH_TAGS, fork=$ambush_src)"
     ( cd "$ambush_src" && \
       GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -mod=vendor \
-        -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
+        -tags "$AMBUSH_TAGS" -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
         || { echo "==> Ambush: go build FAILED" >&2; return 1; }
+    ambush_artifact_check "$go_out/ambush" || return 1
     echo "==> Ambush built: $go_out/ambush"
     ls -la "$go_out/ambush"
     ledger "ambush: Delve port cross-compile (GOOS=thylacine, stripped) -> ramfs (Stage 8c-1 debugger)"
@@ -999,10 +1049,12 @@ build_go_goroot() {
     # installed").
     local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
     if [[ -d "$ambush_src/cmd/dlv" ]]; then
-        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, fork=$ambush_src)"
+        ambush_fork_check "$ambush_src" || return 1
+        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, -tags $AMBUSH_TAGS, fork=$ambush_src)"
         ( cd "$ambush_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
-            "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
+            "$go_bin" build -mod=vendor -tags "$AMBUSH_TAGS" -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
             || { echo "==> Ambush /goroot bake FAILED" >&2; return 1; }
+        ambush_artifact_check "$stage/bin/ambush" || return 1
         echo "==> Ambush (/goroot) built: $stage/bin/ambush ($(du -h "$stage/bin/ambush" | cut -f1 | tr -d ' '))"
         ledger "ambush: Delve port -> /goroot/bin (Stage 8e-3e nora :debug)"
         if [[ -d "$REPO_ROOT/usr/ambush-child" ]]; then
@@ -1149,7 +1201,12 @@ build_userspace() {
     # aarch64-unknown-none target, skip with a notice rather than
     # erroring. Native Thylacine binaries still ship via the C path;
     # Rust binaries (hello-rs, future driver crates) need the target.
-    if rustup target list --installed 2>/dev/null | grep -q "^$USR_RS_TARGET$"; then
+    # Captured before it is matched: under pipefail a `| grep -q` that exits on
+    # its match can break rustup's next write (Rust panics on EPIPE), and the
+    # failed pipeline would read as "not installed" and skip the Rust build.
+    local rs_targets
+    rs_targets=$(rustup target list --installed 2>/dev/null || true)
+    if grep -q "^$USR_RS_TARGET$" <<<"$rs_targets"; then
         echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
         ( cd "$REPO_ROOT/usr" && cargo build --release $verbose )
         echo "==> Userspace Rust built under $USR_RS_BUILD"
@@ -4069,6 +4126,25 @@ populate_stratum_pool() {
             echo "==> populate pool: /test.png baked + readback-verified (I-47 inline-media fixture, $(wc -c < "$testpng" | tr -d ' ') B)"
         else
             echo "==> populate pool: no usr/view/testdata/test.png -- inline-media E2E fixture skipped"
+        fi
+
+        # HALCYON.md 14.7, the 2026-09-29 refinement: the same card at 2048x1536
+        # (committed usr/view/testdata/test-large.png, `make-test-png.py large`),
+        # baked at /test-large.png. 3 Mi pixels is view's own decode budget and
+        # three times the largest per-image limit a pane admits, so the card
+        # shows only if view read the pane's limit and reduced the raster to it.
+        # Same halcyon gate + readback verify.
+        local testlarge="$REPO_ROOT/usr/view/testdata/test-large.png"
+        if [[ -f "$testlarge" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" write /test-large.png < "$testlarge" \
+                || { echo "==> populate pool: write /test-large.png FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync (test-large.png) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" read /test-large.png | cmp -s - "$testlarge" \
+                || { echo "==> populate pool: /test-large.png readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: /test-large.png baked + readback-verified (the fit-to-limit fixture, $(wc -c < "$testlarge" | tr -d ' ') B)"
+        else
+            echo "==> populate pool: no usr/view/testdata/test-large.png -- the fit-to-limit fixture skipped"
         fi
 
         # I-47 JPEG slice: the same 640x400 witness card as a JPEG (committed
@@ -7328,6 +7404,19 @@ clean() {
 # eat a function definition out of the tyrquake port patch.
 python3 "$REPO_ROOT/tools/check-patch-hunks.py" \
     || { echo "==> patch-hunk check FAILED -- a hunk would apply INCOMPLETE" >&2
+         exit 1; }
+
+# The SYS_SPAWN_FULL_ARGV argument block crosses the syscall boundary as raw
+# bytes, and every userspace copy of struct sys_spawn_args pins itself to a
+# literal size, not to the kernel: a copy left behind when the kernel grows
+# passes its own assert while the kernel reads past it (#100, and the go fork
+# again at the birth hold). Every copy -- libt, libthyla-rs, the pouch patch,
+# the go fork when present -- is compared with the kernel header field by
+# field, before any target, since each target builds a different copy. The
+# check proves it can fail before it passes. Sub-second, fatal, no skip switch.
+GOFORK="$GOFORK" python3 "$REPO_ROOT/tools/check-spawn-args-mirrors.py" \
+    || { echo "==> spawn-args mirror check FAILED -- a copy of struct" >&2
+         echo "    sys_spawn_args does not match kernel/include/thylacine/syscall.h" >&2
          exit 1; }
 
 case "$target" in

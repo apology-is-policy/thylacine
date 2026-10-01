@@ -329,6 +329,29 @@ fn expensive(bytes: usize) -> Vec<(&'static str, String, bool)> {
         fill("# T\n\n- a\n", "  b\n", bytes),
         true,
     );
+    // Every line of a block quote's box is padded to its width, at most 256
+    // columns (4.3), so a quote of one short line is the most output per byte.
+    add(
+        "one-line block quotes",
+        fill("# T\n", "\n> a\n", bytes),
+        true,
+    );
+    add(
+        "one block quote of one-character lines",
+        fill("# T\n\n", "> a\n", bytes),
+        true,
+    );
+    add(
+        "bulleted items in one block quote",
+        fill("# T\n\n", "> - a\n", bytes),
+        true,
+    );
+    add("empty block quotes", fill("# T\n", "\n>\n", bytes), false);
+    add(
+        "nested block quotes",
+        fill("# T\n\n> a\n", "> > b\n", bytes),
+        false,
+    );
     add(
         "numbered items",
         {

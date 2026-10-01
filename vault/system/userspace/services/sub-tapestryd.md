@@ -12,8 +12,19 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-01
 ---
+## October 1 startup recheck
+
+The fresh merged boot still logs missing `/lib/halcyon/profile` and
+`/lib/halcyon/theme.toml`, selecting BuiltIn/Legacy in `system_theme()`.
+Warden starts Tapestry before Joey pivots to the pool, so the compositor's
+startup namespace does not supply those files. Halcyon's later bundle push
+works; it does not make the advertised startup read effective. This remains
+an open startup contract issue. Evidence: Astra's
+`work/oct1-reconciliation/aux-boot-uart.log`.
+
+
 ## Shared capacity
 
 The pane tree re-exports `libhalcyon::layout::MAX_PANES` (32), the same constant used for interaction controller capacity. No layout, tree capacity or wire value changes.

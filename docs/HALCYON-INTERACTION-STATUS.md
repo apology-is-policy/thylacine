@@ -13,19 +13,57 @@ work. Main and Aux are reported asleep; use Astra's checkout and Yip identity.
 The prior three checkpoint monitors remain paused. No peer checkout, branch,
 process or unexpired lease has been changed.
 
-Main 8746a8a24 is staged as a merge into Astra 37bfff3c. Source overlap review
-retains the PTY lifecycle invalidations, sealed terminal hosts, PollWorker media
-service and native pointer alongside Main's new socket/readiness cleanup. Both
-Cargo member sets and both dossier histories are retained. Qualified Aux
-6df985512 is next; its per-image cap protocol and media diagnostics must be
-composed with Astra's nonblocking transport. TC-1b is now cleared and in Main;
-the September 25 statements below describe the earlier state.
+Main `8746a8a24` is reconciled in Astra checkpoint `5886686cb`; qualified
+Aux `6df985512` is reconciled by this merge into that checkpoint. The composition keeps
+Astra's PollWorker/Stream transport and adds Aux's media diagnostics and image
+read cap. Both documentation histories and Cargo member sets are retained.
+TC-1b is cleared and included; the September statements below are historical.
+No unfinished stop/wakeup branch has been imported.
 
-The full default image build passed. Four protected authority/settings drafts
-match work/oct1-reconciliation/preserved.json; builds use the index versions of
-the two kernel test files and restore original bytes in finally. Never stage
-these four drafts from the working tree. Evidence and the current pickup are in
-work/oct1-reconciliation/. The merge is not a Main landing or clipboard activation.
+Fresh combined-tree evidence in `work/oct1-reconciliation/`:
+
+- Full default image build and boot **1830/1830 PASS**.
+- Full Mac host gate: **30 crates, 2275 tests PASS**, one Haul test ignored;
+  69 libutopia tests remain stranded by the host feature configuration.
+- Compiled PTY ABI fixtures: C/kernel, C/libt and Rust agree on 200 bytes;
+  HIN1 C fixtures pass all 20 frozen request/response vectors.
+- Graphical media, Lantern and full manual workflow: **3/3 PASS**. Lantern
+  includes picture/aside, synchronized output, 200% scaling and Super+K.
+- Physical F10 SAK: **3/3 PASS** (conferral 93 s, states at 1280x800 188 s,
+  recovery 69 s), with serial authorization disabled. Real authority,
+  abdication, denial, cancellation, expiry, lockout and recovery are witnessed.
+  Current screenshots are in `graphics/` and `graphics/sak/` below the evidence
+  directory. No new bare-metal or Linux runtime coverage is claimed.
+
+The CI console image also builds; native observer, readiness and service-wire
+all pass (40 s, 42 s, 39 s). The stable debug-stop and PTY-stop models verify
+four clean configurations and 17 intended named counterexamples. The first
+local checker attempts rejected valid TLC output (action-property wording and
+multi-property PTY cfg selection); those logs are retained. The final validator
+checks exact source/config bytes, actual exit receipts and named violations.
+This does not qualify the separate unfinished stop/wakeup branches.
+
+The full matrix completed on October 1 at 08:35 UTC: **50/50 PASS**, ten boots
+each for default SMP 1/4/8 and UBSan SMP 4/8. Every row reports zero corruption,
+external kills, missed injections, timing exceptions and other failures. The
+runner exited zero, restored all four draft bytes, and released Mac. The
+log validator matched all 50 individual PASS records and five row
+summaries to the pinned source/index; see `matrix-verified.json`. This is
+single-agent verification and self-review, not an independent adversarial audit.
+The full image excludes the optional Clade/GL/storm fixtures; their skips remain
+visible and do not count as coverage. The pristine default kernel/ramfs/pool/key
+pair is saved in `aux-default-pair/`; the native console pair is separate.
+Four protected authority/settings drafts match `preserved.json`; builds use
+index versions of the kernel test files and restore the draft bytes in finally.
+Never stage those four files from the working tree. The merge is not a Main
+landing or clipboard activation.
+
+The old Main queue was rechecked against this tree and fresh boot: registry
+headroom, Tapestry startup system-tier reads, the Lictor production debts and
+both ut spawn/foreground findings remain open. Blur is closed by the operator's
+solid-background choice. See `docs/ASTRA-2026-09-24-STATUS.md` and the owning
+Vault dossiers. Registry capacity/lifetime is first in that repair queue after
+this reconciliation; the historical 15/16 count is not presented as a new count.
 
 O1-R1: the first full Mac host run passed 29 crates/2159 tests but failed one of
 manual's 72 tests: the elapsed-time scaling assertion (11.845ms at64KiB,
@@ -38,8 +76,8 @@ diagnostics and the existing limit; the clock witness passes and rejects a wall-
 work mutant fails the scaling assertion. Three corrected contention runs pass;
 the full corrected manual suite passes 73/73. Together with the unchanged
 29 crates from the initial gate, this gives 2232 passing host tests. The default
-merged boot gate passes 1816/1816; full SMP and graphical qualification of the
-combined Main/Aux tree is still owed. The initial failed gate
+Main-only boot gate passed 1816/1816. The combined-tree evidence above
+supersedes that checkpoint's pending qualification. The initial failed gate
 remains evidence and is not relabelled as a pass.
 
 Open integration queue: O1-2 Main waiters-stops6459c24e2 still has its recorded

@@ -11,15 +11,16 @@
 //
 // V1.0 SCOPE:
 //   - SYS_SPAWN_FULL_ARGV: name + argv + cap_mask + perm_flags + a
-//     positional fd_list (0..MAX_FDS). At v1 we use the fd_list to
-//     express stdin/stdout/stderr (always exactly 3 entries -- the
-//     positional convention every POSIX-shaped tool expects).
-//   - Spawn looks up the binary in devramfs OR the pivoted root,
-//     same as the kernel's SYS_SPAWN_FULL_ARGV lookup -- callers pass
-//     a bare name (no slashes) per the SYS_SPAWN_NAME_MAX constraint.
+//     positional fd_list (0..MAX_FDS): the child's stdin, stdout and
+//     stderr at 0..2, then each `inherit_fd` in order.
+//   - The kernel resolves `name` as an open does: an absolute path from
+//     the Territory root, a relative one against the working directory.
+//     There is no search path, so a system program is named absolutely.
 //   - Inherited cap_mask defaults to the caller's full caps (`!0u64`);
 //     the kernel intersects with parent->caps so a child cannot gain
 //     capabilities the parent doesn't hold.
+//   - The child starts with a copy of the caller's Territory, working
+//     directory included, and of its environment.
 //
 // STDIO MODES:
 //   - `Stdio::Inherit` — child gets parent's same-position fd (0/1/2).
@@ -39,8 +40,9 @@
 //     field is reserved for envp pass-through but rejected non-zero at
 //     v1.0. Until the envp surface lands, environment is inherited
 //     wholesale (no per-Command override).
-//   - `current_dir`: SYS_CHROOT exists but is a Territory-wide
-//     operation; per-spawn cwd needs a different surface. v1.x.
+//   - `current_dir`: the child starts in the caller's working directory
+//     (`t_chdir` moves the caller's own); a per-spawn override needs a
+//     kernel surface that does not exist yet.
 //   - Status decoding beyond `success() == (status == 0)` and
 //     `code() == Some(status)`. Signal-terminated processes are
 //     surfaced via t::notes (U-2e); status decode that distinguishes
@@ -52,6 +54,7 @@ use crate::handle::{Handle, Rights};
 use crate::io::Write;
 use crate::{
     t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, T_SPAWN_ALLOWANCE_SET,
+    T_SPAWN_DEBUG_HELD,
     T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
     T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
@@ -214,12 +217,17 @@ pub struct Command {
     // driver may create KObj_MMIO/IRQ/DMA handles ONLY within its device. The
     // kernel gates it as a narrowing of the caller's own allowance.
     allowance: Option<TAllowanceDesc>,
+    // The birth hold (DEBUG-FS-DESIGN 5f): spawn the child held before its first
+    // instruction (T_SPAWN_DEBUG_HELD). A debugger's launch path; default off.
+    debug_held: bool,
 }
 
 impl Command {
-    /// Construct a Command that will spawn the binary named `name`.
-    /// `name` is a single component (no `/`); the kernel looks it up
-    /// in devramfs OR the pivoted root.
+    /// Construct a Command that will spawn the binary at path `name`. The
+    /// kernel resolves it as it does an open: an absolute path from the
+    /// Territory root, a relative one against the working directory. There is
+    /// no search path, so a system program is named absolutely (`/bin/view`);
+    /// a bare `view` runs whatever file of that name the working directory holds.
     #[inline]
     pub fn new(name: impl Into<String>) -> Command {
         Command {
@@ -233,6 +241,7 @@ impl Command {
             perm_flags: 0,   // A-5b: grant no SPAWN_PERM_* bits by default
             inherit_fds: Vec::new(), // #94-B-b: no extra inherited fds by default
             allowance: None, // step 5: inherit the caller's allowance by default
+            debug_held: false, // 5f: run from the first instruction, as ever
         }
     }
 
@@ -354,6 +363,19 @@ impl Command {
         self
     }
 
+    /// Spawn the child held (DEBUG-FS-DESIGN 5f): `spawn` returns once the child
+    /// has loaded its image and parked before its first instruction. It runs
+    /// only when a debugger attached to it stops and then starts it, or starts
+    /// or detaches it; if this Proc exits first, the held child is killed.
+    /// `spawn` blocks while the child loads, so a thread must not spawn held a
+    /// child whose image comes from a server that same thread runs: neither
+    /// would move until the spawner is killed.
+    #[inline]
+    pub fn debug_held(&mut self, held: bool) -> &mut Command {
+        self.debug_held = held;
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -462,7 +484,7 @@ impl Command {
                               // decided from the namespace at every image
                               // load; this bit only declares a container's
                               // Territory Linux (viv sets it, after chroot)
-            _pad_spawn2: 0,
+            debug_flags: if self.debug_held { T_SPAWN_DEBUG_HELD } else { 0 },
         };
 
         // SAFETY: every pointer in args_record points into a buffer

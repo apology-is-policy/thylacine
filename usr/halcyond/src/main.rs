@@ -563,6 +563,7 @@ pub extern "C" fn rs_main() -> i64 {
     // unavailable -- it falls back to reporting the decode. The place fds join
     // the unified wait below so a write wakes the loop promptly.
     let mut places = placesrv::PlaceServer::post();
+    let mut placed_quiet = halcyond::paneroute::Quiet::default();
     if places.is_some() {
         say!("halcyond: /srv/halcyon posted (inline media; I-47)");
     } else {
@@ -1881,7 +1882,9 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     dirty = true;
-                    say!("halcyond: inline image placed ({}x{}, {} px; I-47)", iw, ih, n);
+                    if let Some(k) = placed_quiet.next() {
+                        say!("halcyond: inline image placed ({}x{}, {} px; I-47; {} so far)", iw, ih, n, k);
+                    }
                 }
             }
         }

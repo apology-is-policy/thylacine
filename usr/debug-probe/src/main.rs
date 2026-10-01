@@ -24,6 +24,11 @@
 //      (cross-Proc WRITE), `start`, and reap the child == 0 -- proving the write
 //      landed in the target's address space AND the full stop/inspect/resume
 //      cycle.
+//   6. THE BIRTH HOLD (DEBUG-FS-DESIGN 5f): spawn debug-child HELD, attach late,
+//      and find it still before its first instruction -- PC == the ELF entry on
+//      a zeroed frame, and a breakpoint on the entry fires after `start`. Then
+//      the launcher's own order (attach, exitkill, stop at once), and a ctl fd
+//      closed without `detach`, which must leave the child held.
 //
 // joey spawns + reaps + asserts exit 0 + the "debug-probe: PASS" marker, so any
 // failure gates the boot. On any failure path the child is `killgrp`'d so it can
@@ -72,6 +77,13 @@ const USER_VA_LIMIT: u64 = 1u64 << 47;
 // non-delivering substrate's guest wedge from a boot-long hang into a report.
 const WP_POLL_TRIES: u32 = 800;
 const WP_POLL_MS: u64 = 25;
+
+// The birth hold. An unheld debug-child is deep in its loop long before this
+// (the Delve launch race lost 1 in 160 with far less time), so a child found at
+// its entry after it was held.
+const HELD_SETTLE_MS: u64 = 300;
+// kernel/include/thylacine/elf.h ELF_PIE_LOAD_BIAS: where an ET_DYN image lands.
+const ELF_PIE_LOAD_BIAS: u64 = 0x2000_0000;
 
 // Bound on the post-SKIP reap sweep (~2 s). A child that merely ran to completion
 // exits at once; one wedged inside the emulator never will, and waiting cannot
@@ -480,6 +492,162 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     // ctl / mem_f / regs_f / kregs_f / kstack_f drop here -> ctl close detaches.
 }
 
+// The runtime address of debug-child's first instruction, from its ELF header.
+fn debug_child_entry() -> Result<u64, &'static str> {
+    let f = File::open("/bin/debug-child").map_err(|_| "debug-probe: FAIL -- held: open /bin/debug-child\n")?;
+    let mut eh = [0u8; 64];
+    if read_exact_at(f.as_raw_fd() as i64, 0, &mut eh).is_err() {
+        return Err("debug-probe: FAIL -- held: read the ELF header\n");
+    }
+    if &eh[..4] != b"\x7fELF" || eh[4] != 2 {
+        return Err("debug-probe: FAIL -- held: /bin/debug-child is not ELF64\n");
+    }
+    let e_type = (eh[16] as u16) | ((eh[17] as u16) << 8);
+    let e_entry = u64_le(&eh, 24);
+    match e_type {
+        2 => Ok(e_entry),
+        3 => Ok(ELF_PIE_LOAD_BIAS + e_entry),
+        _ => Err("debug-probe: FAIL -- held: /bin/debug-child is neither ET_EXEC nor ET_DYN\n"),
+    }
+}
+
+fn spawn_held() -> Result<Child, &'static str> {
+    Command::new("/bin/debug-child")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .debug_held(true)
+        .spawn()
+        .map_err(|_| "debug-probe: FAIL -- held: the held spawn was refused (a kernel without the birth hold refuses debug_flags)\n")
+}
+
+// Every held leg ends here, whatever state it left the child in: a child whose
+// hold is never released stays parked for good.
+fn end_held(child: &Child) {
+    let _ = child.kill();
+    let mut st: i32 = 0;
+    unsafe {
+        t_wait_pid_for(child.pid(), 0, &mut st as *mut i32);
+    }
+}
+
+fn open_ctl_regs(pid: i32) -> Result<(File, File), &'static str> {
+    let ctl = OpenOptions::new()
+        .write(true)
+        .open(&format!("/proc/{}/ctl", pid))
+        .map_err(|_| "debug-probe: FAIL -- held: open ctl\n")?;
+    let regs_f = File::open(&format!("/proc/{}/regs", pid)).map_err(|_| "debug-probe: FAIL -- held: open regs\n")?;
+    Ok((ctl, regs_f))
+}
+
+// A child stopped before its first instruction: PC at the entry, every GPR
+// zero, SP a user VA, and PSTATE exactly the EL0t-with-DAIF-clear a fresh image
+// starts in.
+fn check_birth_frame(regs: &[u8; REGS_LEN], entry: u64) -> Result<(), &'static str> {
+    if u64_le(regs, R_PC) != entry {
+        return Err("debug-probe: FAIL -- held: the stopped PC is not the ELF entry (the child ran)\n");
+    }
+    let mut i = 0;
+    while i < 31 {
+        if u64_le(regs, i * 8) != 0 {
+            return Err("debug-probe: FAIL -- held: a GPR is nonzero before the first instruction\n");
+        }
+        i += 1;
+    }
+    let sp = u64_le(regs, R_SP);
+    if sp == 0 || sp >= USER_VA_LIMIT {
+        return Err("debug-probe: FAIL -- held: sp is not an EL0 VA\n");
+    }
+    if u64_le(regs, R_PSTATE) != 0 {
+        return Err("debug-probe: FAIL -- held: pstate is not the fresh EL0t state\n");
+    }
+    Ok(())
+}
+
+fn stop_expect_birth(ctl: &mut File, regs_f: &File, entry: u64) -> Result<(), &'static str> {
+    ctl.write_all(b"stop").map_err(|_| "debug-probe: FAIL -- held: stop\n")?;
+    let mut regs = [0u8; REGS_LEN];
+    if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() {
+        return Err("debug-probe: FAIL -- held: read regs after the stop\n");
+    }
+    check_birth_frame(&regs, entry)
+}
+
+// Leg 1: attach late. The hold alone is not a debug stop, so the stopped-only
+// surface stays shut until the debugger's stop converts it; the frame the stop
+// finds is the birth frame; and a breakpoint on the entry fires after `start`,
+// which it can only do if the first instruction had not run.
+fn held_late_attach(child: &Child, entry: u64) -> Result<(), &'static str> {
+    let _ = sleep(Duration::from_millis(HELD_SETTLE_MS));
+    let (mut ctl, regs_f) = open_ctl_regs(child.pid())?;
+    ctl.write_all(b"attach").map_err(|_| "debug-probe: FAIL -- held: attach\n")?;
+    let mut regs = [0u8; REGS_LEN];
+    if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_ok() {
+        return Err("debug-probe: FAIL -- held: regs readable before any stop (the hold opened the stopped-only surface)\n");
+    }
+    stop_expect_birth(&mut ctl, &regs_f, entry)?;
+    ctl.write_all(format!("hwbreak 0x{:x}", entry).as_bytes())
+        .map_err(|_| "debug-probe: FAIL -- held: hwbreak on the entry\n")?;
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- held: start\n")?;
+    // Bounded, as the watchpoint wait is: a regs read succeeds only once
+    // something re-stopped the child, and the entry breakpoint is the only
+    // thing armed.
+    let mut fired = false;
+    for _ in 0..WP_POLL_TRIES {
+        if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_ok() {
+            fired = true;
+            break;
+        }
+        let _ = sleep(Duration::from_millis(WP_POLL_MS));
+    }
+    if !fired {
+        return Err("debug-probe: FAIL -- held: the entry breakpoint never fired (the child was past its first instruction)\n");
+    }
+    if u64_le(&regs, R_PC) != entry {
+        return Err("debug-probe: FAIL -- held: the breakpoint stop's PC is not the entry\n");
+    }
+    Ok(())
+}
+
+// Leg 2: the launcher's order, attach, exitkill, stop, with no pause at all.
+fn held_immediate_attach(child: &Child, entry: u64) -> Result<(), &'static str> {
+    let (mut ctl, regs_f) = open_ctl_regs(child.pid())?;
+    ctl.write_all(b"attach").map_err(|_| "debug-probe: FAIL -- held: attach (immediate)\n")?;
+    ctl.write_all(b"exitkill").map_err(|_| "debug-probe: FAIL -- held: exitkill\n")?;
+    stop_expect_birth(&mut ctl, &regs_f, entry)
+}
+
+// Leg 3: a ctl fd closed without `detach` leaves the child held -- the hold is
+// the spawner's, not the attach slot's -- so a second debugger still finds it
+// at its entry.
+fn held_close_keeps(child: &Child, entry: u64) -> Result<(), &'static str> {
+    {
+        let (mut ctl, _regs_f) = open_ctl_regs(child.pid())?;
+        ctl.write_all(b"attach").map_err(|_| "debug-probe: FAIL -- held: attach (close)\n")?;
+    }
+    let _ = sleep(Duration::from_millis(HELD_SETTLE_MS));
+    let (mut ctl, regs_f) = open_ctl_regs(child.pid())?;
+    ctl.write_all(b"attach").map_err(|_| "debug-probe: FAIL -- held: re-attach after the close\n")?;
+    stop_expect_birth(&mut ctl, &regs_f, entry)
+}
+
+fn held_flow() -> Result<(), &'static str> {
+    let entry = debug_child_entry()?;
+    let legs: [(fn(&Child, u64) -> Result<(), &'static str>, &str); 3] = [
+        (held_late_attach, "late attach, entry breakpoint fired"),
+        (held_immediate_attach, "attach+exitkill+stop at once"),
+        (held_close_keeps, "a close without detach kept the hold"),
+    ];
+    for (leg, name) in legs.iter() {
+        let child = spawn_held()?;
+        let r = leg(&child, entry);
+        end_held(&child);
+        r?;
+        t_putstr(&format!("debug-probe: held ok ({})\n", name));
+    }
+    Ok(())
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     t_putstr("debug-probe: starting (8a-1c debug-fs E2E)\n");
@@ -502,11 +670,12 @@ pub extern "C" fn rs_main() -> i64 {
         }
     };
 
-    match debug_flow(&mut child) {
-        Ok(()) => {
-            t_putstr("debug-probe: PASS\n");
-            unsafe { t_exits(0) }
-        }
-        Err(msg) => die(&child, msg),
+    if let Err(msg) = debug_flow(&mut child) {
+        die(&child, msg);
     }
+    if let Err(msg) = held_flow() {
+        fail(msg);
+    }
+    t_putstr("debug-probe: PASS\n");
+    unsafe { t_exits(0) }
 }

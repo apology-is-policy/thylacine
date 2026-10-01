@@ -500,6 +500,11 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      the compositor is spawned before the pivot to the pool, so its startup
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
      every image, until a halcyond pushes the bundle.
+- `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
+  halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
+  showed as a 60 s timeout that blamed the routing. It matches the refusal line
+  now (2026-09-29, the I-47 close); a host check of the inline gates' patterns
+  against halcyond's line formats found the old one matched nothing.
 
 ## Provenance
 
@@ -597,3 +602,22 @@ pipes, and `haul-post`'s `MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE`.
 With the kernel's two stamps removed (and the two kernel tests that catch that
 unregistered, so the boot reaches a login), each gate passed every earlier leg
 and failed there, its line reading `/` (2026-09-29).
+
+The image slide (2026-09-29, aux (d2)): `ls-gfx-inline-view` and
+`ls-gfx-session-image` each end with a fit leg, `view /test-large.png`: the
+witness card at 2048x1536, three times the largest per-image limit a channel
+admits and exactly `view`'s decode budget. The console gate reads `view`'s
+`placed inline (WxH, reduced from 2048x1536)` and halcyond's injection line of
+the same size; the session gate reads halcyond's `session inline leaf=N WxH`,
+because `view`'s own line is tile pixels there. Neither pins the size, which
+follows the renderer's heap, the display and the pane count; both require it
+within 64 Ki to 1 Mi pixels with the card's 4:3 aspect (`|w*1536 - h*2048| <
+2048`, a pixel of rounding). Before the limit read an over-limit upload was
+refused `E_INVAL`: `view` said `not displayed` and the session gate saw no
+witness, so each leg fails without the read or the fit. `ls-gfx-inline-view`
+then runs `view note.txt` from a directory holding an executable copy of `echo`
+named `cat`: only `/bin/cat` prints the note's line (typed as two quoted words,
+so it never appears in the typed text), and the status line arriving without it
+is the red arm; `view -- -zq.txt` then shows a file whose name starts with `-`,
+which a cat handed no `--` refuses as an invalid option. `lantern.exp` leg (i)
+refuses `lantern ''` as a usage error.

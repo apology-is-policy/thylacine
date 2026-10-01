@@ -51,8 +51,19 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-09-24
+updated: 2026-10-01
 ---
+## October 1 production-debt recheck
+
+The stable Main/Aux tree retains the open defaults/geometry/lifecycle items
+listed below: test features enabled by default, 800x720 minimum, 10 ms broker
+poll interval with no measured idle cost, and no supervision/reap after
+successful compositor readiness. Tapestry's idle throttle and GPU resource
+reaping do not close the latter two findings. Pi 400/500 qualification remains
+open. The solid backdrop is the operator-selected presentation; blur is not an
+outstanding implementation requirement.
+
+
 ## Purpose
 
 Lictor owns the graphical seat's physical input and display transport. It is

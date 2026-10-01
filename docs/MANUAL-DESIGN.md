@@ -27,6 +27,7 @@ Decisions this document builds on:
 | 2026-09-16 | Containers is the first section written to the guide. Superseded the same day: Utopia is written first, and Containers remains a section of its own | `docs/OPERATORS-MANUAL.md` |
 | 2026-09-16 | Character references and bidirectional controls are rejected, and a table cell holds at most 256 characters | sections 3.1 to 3.3 and 4.4 |
 | 2026-09-16 | The reader is named `manual`; the three earlier pages move to `docs/manual-drafts/` and nothing is installed until a section is written to the guide | this document, section 10 |
+| 2026-09-28 | The block quote is accepted and realized as a Beacon `aside`, drawn as a box by the renderer (operator vote) | sections 3.2, 4.2 and 4.3; `dec-2026-09-28-beacon-aside` |
 
 This document fixes five things: the accepted Markdown subset (section 3), its
 realization at each Beacon tier (section 4), the command (section 5), the
@@ -57,8 +58,9 @@ typesetting language is involved, and no ANSI styling is chosen by the reader.
 
 **Why a strict subset rather than CommonMark.** Every accepted construct must have
 both a Beacon realization and a plain realization. Constructs that have neither
-(links, images, block quotes, raw HTML) are rejected when the section is checked,
-so they never reach a reader in an approximated form. This applies the writing
+(links, images, raw HTML) are rejected when the section is checked, so they never
+reach a reader in an approximated form. The block quote was rejected on the same
+grounds until Beacon gained `aside` (operator vote, 2026-09-28). This applies the writing
 guide's prohibition on invented markup mechanically. It also keeps the parser small
 enough to test exhaustively; the format checker is part of the reader.
 
@@ -99,12 +101,16 @@ or the end of the file.
 | Numbered list | Items begin `1. `, `2. `, … | Numbers run from 1 without gaps; continuation lines are indented to the item text; no nesting. |
 | Code block | A line of exactly three backticks, optionally followed by one word containing no backtick, then content, then a line of three backticks | Content is taken verbatim; the word after the opening fence is ignored. |
 | Table | A header row, a delimiter row, then body rows | Every row begins and ends with `\|` and has the same number of cells; at most 16 columns; a cell's text, as displayed, is at most 256 characters; the delimiter cells are `---`, `:---`, `---:`, or `:---:`. |
+| Block quote | Lines that each begin with `>` | Removing the `>`, and one space after it when there is one, from each line leaves the quote's content: paragraphs and lists, under the rules above, separated by lines that hold only `>`, or `>` and spaces. A quote holds at least one paragraph or list, and no heading, code block, table, or quote. |
 
-The checker rejects, with a diagnostic naming the line: block quotes, thematic
-breaks, setext headings (a line of `=` or `-` characters directly below a
-paragraph line), headings of level 4 or deeper, indented code blocks, bullets
-written with `*` or `+`, nested lists, raw HTML, link reference definitions,
-footnote definitions, and front matter. A line that does not begin with `|` is not
+The checker rejects, with a diagnostic naming the line: thematic breaks, setext
+headings (a line of `=` or `-` characters directly below a paragraph line),
+headings of level 4 or deeper, indented code blocks, bullets written with `*` or
+`+`, nested lists, raw HTML, link reference definitions, footnote definitions,
+front matter, a block quote inside another, a heading, code block, or table
+inside a block quote, and a block quote that holds no paragraph or list. A line
+directly below a block quote that does not begin with `>` is not part of it, so
+the blank-line rule above reports it. A line that does not begin with `|` is not
 a table row, so a table written without its outer pipes is a paragraph.
 
 ### 3.3 Inline forms
@@ -163,12 +169,14 @@ standard output is the console or a pts and the renderer has advertised `rich`.
 | List item | The marker (`- ` or `N. `) as text, the item's inline content, then LF | Identical, subject to wrapping (4.3) |
 | Code block | `pre` open, each content line followed by LF, `pre` close | Each content line followed by LF |
 | Table | `table cols=<spec>;hdr=1`, with `row` and `cell` frames; column padding outside the cell frames | Aligned columns, two spaces between columns, the last column unpadded, LF per row |
+| Block quote | `aside` open, the quote's blocks as each is realized outside a quote, `aside` close | The quote's blocks, as outside a quote; drawn inside a box when wrapping (4.3) |
 | Code span | `em class=code` around the literal text | The literal text |
 | Emphasis | `em class=emph` | The text |
 | Strong emphasis | `em class=strong` | The text |
 
 Exactly one empty line separates consecutive blocks; no empty line precedes the
-first block or follows the last. Table padding follows `beacon::sink::Table` so a
+first block or follows the last. The same holds for the blocks inside a block
+quote. Table padding follows `beacon::sink::Table` so a
 manual table aligns like every other tool's table. The reader emits no `rule`,
 `obj`, `zone`, or `mark` frames.
 
@@ -187,6 +195,17 @@ At a plain tier the reader wraps only when standard output is the console and
 Paragraphs and list items are then word-wrapped at that width; a list item's
 continuation lines are indented by the width of its marker, and a word longer than
 the width is split. Titles, headings, code blocks, and tables are never wrapped.
+
+A block quote is drawn as a box when the reader wraps. A line of U+2500
+box-drawing characters as wide as the console, up to 256 columns, opens and
+closes it (`┌─…─┐`, `└─…─┘`), and each line of its blocks is written between
+`│ ` and ` │`, padded so the right edges align. Its paragraphs and list items wrap at the width less
+4, and the empty line between two of its blocks is an empty line of the box.
+Titles, headings, code blocks, and tables are never wrapped, so a block quote
+cannot hold one: it could not be kept inside the box. When the reader does not
+wrap, a block quote has no box: its blocks are written as they are outside a
+quote, and the unwrapped plain output is still the rich output with its frames
+removed.
 
 In every other case (a pipe, a file, a pts, or a serial console reporting
 `winsize 0 0`) the reader does not wrap, so each paragraph is a single line and
@@ -207,9 +226,10 @@ output remains suitable for `grep`. Width is counted in Unicode scalar values.
   section a second time and writes the rendering as it goes, in chunks of at most
   64 KiB. At any moment it holds the section, the block being rendered, and one
   chunk of output, so no section within the size limit makes it fail for want of
-  memory. Table padding is bounded by the cell limit in section 3.2, so the size of
-  the output, and the time the reader takes, grow linearly with the section's size
-  (section 8.1).
+  memory. Table padding is bounded by the cell limit in section 3.2, and a block
+  quote's box, which pads each of its lines to its width, by its 256-column limit
+  (4.3), so the size of the output, and the time the reader takes, grow linearly
+  with the section's size (section 8.1).
 
 ---
 
@@ -303,7 +323,8 @@ Run with `cd usr && cargo test -p manual --lib --no-default-features --target aa
   every fixture and every file in `docs/manual/`, stripping frames from the rich
   output (`beacon::wire::strip`) equals the unwrapped plain output. Wrapping has
   goldens at width 40 covering a paragraph, a list item's hanging indent, an
-  over-long word, and an unwrapped table and code block.
+  over-long word, an unwrapped table and code block, and a block quote's box
+  holding a paragraph, a list, and the empty line between them.
 - **Hygiene.** A section containing a forged `ESC ] 1936 ; v1 ; obj …` sequence
   renders with no frames other than those the renderer emits, counted by parsing
   the output with beacon's parser. A section containing each bidirectional control
@@ -315,7 +336,8 @@ Run with `cd usr && cargo test -p manual --lib --no-default-features --target aa
   both tiers. The test reports how many sections it checked.
 - **Bounds.** Sections at the 1 MiB limit that are built to be expensive (blank
   lines, one-word paragraphs, long lists, tables and code blocks, tables whose
-  cells are as wide as section 3.2 allows, dense inline forms, a problem on every
+  cells are as wide as section 3.2 allows, one-line block quotes drawn in a box of
+  the widest width, dense inline forms, a problem on every
   line, one long line of problems) are read, checked, and rendered at both tiers as
   the binary does it, including a read whose length is not known in advance and a
   diagnostic formatted into a newly allocated string, under the allocator the
@@ -377,7 +399,7 @@ The three earlier pages moved to `docs/manual-drafts/`:
 | Draft | State |
 |---|---|
 | `00-overview.md` | A Phase-0 plan (2026-05-04) that describes intended phases rather than the current system. |
-| `40-dosbox.md` | Written 2026-09-05 to the earlier page template; uses thematic breaks, block quotes, and a numbered title, which section 3 rejects. |
+| `40-dosbox.md` | Written 2026-09-05 to the earlier page template; uses thematic breaks and a numbered title, which section 3 rejects. Its block quotes were rejected too until 2026-09-28, when they became asides. |
 | `41-audio.md` | Written 2026-09-05 to 2026-09-07 to the earlier page template. |
 
 A draft returns to `docs/manual/` when it has been rewritten to the guide and

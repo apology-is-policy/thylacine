@@ -123,6 +123,11 @@ exit and a kill alike:
   consumed there) — [[sub-kernel-jobctl]] owns it, and the ordering is the
   whole trick: it asks "orphaned once I am gone" while the answer is still
   computable;
+- the birth-hold orphan rule, also **before** the reparent and for the same
+  reason: every ALIVE child whose birth hold is still set, neither converted by
+  a debugger's `stop` nor released, is group-terminated with "launcher exited"
+  ([[sub-kernel-birth-hold]]; operator vote 2026-09-29). A held child whose
+  launcher died would otherwise sit parked, adopted by init, forever;
 - reparenting orphans to init, else `kproc` — and NAMING each one on the
   uart (#80): `proc: orphan pid=N name="X" (parent pid=M name="Y" exiting)
   -> adopted by pid=A`. This is the one point where the kernel still holds
@@ -262,6 +267,18 @@ suspended", and the reason is this dossier's recurring one: a test would be a
 second place that has to agree with the park about who is waiting. A spurious
 wake costs a re-scan.
 
+**The held spawn shares the park, and is the exception to its principle
+(2026-09-29).** A spawn asked with `SPAWN_DEBUG_HELD` suspends its caller until
+the child has parked in front of its first instruction
+([[sub-kernel-birth-hold]]). The waiting discipline now lives once, in
+`await_child_release`, and the vfork suspend and the birth wait differ only in
+the release predicate each passes. Death releases both for free, through the
+same chokepoint wake. Here the release condition *is* a record, because
+nothing already written down says "the child has finished loading": the
+child's birth-hold mark. The principle above is kept by the next best means.
+Every write of that mark goes through one setter pair that wakes
+`child_waiters` under the lock, so no path out of UNBORN can skip the wake.
+
 **The stop park.** Two independent owners can park a thread —
 `debug_stop_req` (I-39) and `job_stop_req` (I-20) — and they share one park
 (`el0_return_stop_check`, the `sleep`/`tsleep` detour, and each Thread's own
@@ -271,6 +288,20 @@ predicate is the disjunction. Death overrides both: the stop-check runs
 `group_exit_msg` on every wake, so a kill racing a stop terminates the
 thread inside the park rather than eret-ing to EL0. The second owner and its
 fans are [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
+
+The loop checks death twice per pass since 2026-09-29: at the top, and again
+after the wake condition passes. The second check is for a release that
+follows a terminate. The debugger's exitkill release terminates the group and
+only then clears the stop, and a `start` sent after a `kill` clears after the
+kill. A thread that passed the top check just before the terminate would read
+the cleared flags and `eret` into a group already dying. Both clears are
+RELEASE stores ordered after the terminate's, so the ACQUIRE re-check sees it.
+The held model of [[spec-debug-stop]] found the gap on its first run, and it
+was never specific to the birth hold. The birth park runs the same loop with
+its own wake condition. The model's action property `NoEretIntoDeath` states
+the rule for both parks, and two buggy cfgs remove the check, one at each
+park: `no_death_recheck` at the birth park and `no_death_recheck_tail` at the
+stop park.
 
 ## Data structures
 

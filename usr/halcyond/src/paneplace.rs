@@ -1,12 +1,13 @@
 // paneplace -- the per-pane SESSION inline-media place server (I-47, HALCYON.md
 // 14.7.2). The per-user session compositor (`session.rs`) posts ONE service,
 // `/srv/halcyon-<user>`, and routes each place-request to the tile named by a
-// per-pane SECRET TOKEN carried as a path component: a pane's programs reach
+// per-pane ROUTING TOKEN carried as a path component: a pane's programs reach
 // their tile by walking `<hex(token)>/place`, the address the compositor put in
-// that pane's `/env/HALCYON_PLACE` (per-Proc, deep-copied at spawn, so isolated
-// from every other pane). This is the session generalization of the console
-// spike's `placesrv` (single global `/srv/halcyon`, MAX_CONNS=1): here MANY
-// tiles share ONE service and completions are TAGGED with the target leaf.
+// that pane's `/env/HALCYON_PLACE` (per-Proc, deep-copied at spawn, so every
+// program in a pane inherits that pane's). This is the session generalization
+// of the console spike's `placesrv` (single global `/srv/halcyon`,
+// MAX_CONNS=1): here MANY tiles share ONE service and completions are TAGGED
+// with the target leaf.
 //
 // FORMAT-FUZZ SURFACE (audit:hard, I-47). The thin syscall shell only: the 9P
 // codec is `libthyla_rs::ninep`; the untrusted-NAME decisions (the 32-hex token
@@ -14,12 +15,17 @@
 // PURE, host-tested `paneroute`; the untrusted-PAYLOAD decisions
 // (validate-before-allocate, the heap-safe per-image cap) live in the PURE,
 // host-tested `inlineaccum::PlaceAccum`. What this file adds over `placesrv` is
-// the routing (token -> live leaf) and TWO authority axes:
-//   1. the SECRET token (a path component; unguessable u128, per-pane, only in
-//      the pane's own /env -- another pane cannot name it), and
-//   2. the PEER PRINCIPAL check at accept: a connection is refused unless its
-//      peer is the SESSION'S OWN USER (t_srv_peer). So even a leaked token
-//      cannot let a DIFFERENT user place into this session's panes.
+// the authority and the routing:
+//   1. the PEER PRINCIPAL check at accept, the authority: a connection is
+//      refused unless its peer is the SESSION'S OWN USER and alive
+//      (t_srv_peer), fail-closed, so no other principal places into this
+//      session's panes;
+//   2. the token, the routing (a path component; an unguessable u128 per pane):
+//      a request lands only in the live pane it names, never in a gone one. It
+//      is not a secret among one principal's panes -- any Proc of the principal
+//      reads a pane's /env through /proc/<pid>/environ, as it can write that
+//      pane's pts -- and those panes are one authority domain
+//      (dec-2026-09-29-inline-media-one-principal).
 // The DoS floor: MAX_CONNS bounds concurrent transfers; the per-image cap
 // (`max_pixels`, the heap residual DIVIDED by MAX_CONNS -- set each loop by the
 // compositor) bounds a single transfer AND, times MAX_CONNS, the aggregate
@@ -40,7 +46,7 @@ use libthyla_rs::poll::AsFd;
 use libthyla_rs::poll_worker::{PollWorker, WatchId};
 
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
-use halcyond::paneroute::{self, Node};
+use halcyond::paneroute::{self, Node, Quiet};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
     t_close, t_getuid, t_open, t_srv_accept, t_srv_peer, t_walk_create, TPollFd,
@@ -102,8 +108,9 @@ fn qid_of(node: Node) -> p9::Qid {
 fn mode_of(node: Node) -> u32 {
     match node {
         // The dirs are r-x for all so the kernel dev9p per-component X-search
-        // passes; `place` is world-writable so the pane's `view` may open it
-        // O_WRONLY. The real gate is the secret token + the peer principal.
+        // passes; `place` is world-readable and -writable so the pane's `view`
+        // may read its limit and write a raster. The gate is the peer principal
+        // at accept; the token routes.
         Node::Root | Node::Dir(_) => S_IFDIR | 0o555,
         Node::Place(_) => S_IFREG | 0o666,
     }
@@ -146,6 +153,14 @@ struct Budget {
     residual_bytes: u64,
 }
 
+#[derive(Default)]
+struct Diag {
+    accepted: Quiet,
+    refused: Quiet,
+    walk_noent: Quiet,
+    unrouted: Quiet,
+}
+
 // The accepted endpoint is explicitly nonblocking before Conn exists. The
 // common pump owns input/offsets; Protocol owns fids, accumulator and ONE reply.
 struct Conn {
@@ -161,8 +176,8 @@ impl Conn {
     fn events(&self) -> i16 {
         match self.stream.interest() { Interest::Read => T_POLLIN, Interest::Write => T_POLLOUT }
     }
-    fn service(&mut self, worker: &mut PollWorker, out: &mut Vec<PaneCompletedImage>, routes: &BTreeMap<u128, u32>, budget: Budget, deadline: u64) -> Result<bool, Error> {
-        let mut reply = Reply { protocol: &mut self.protocol, out, routes, budget };
+    fn service(&mut self, worker: &mut PollWorker, out: &mut Vec<PaneCompletedImage>, routes: &BTreeMap<u128, u32>, budget: Budget, diag: &mut Diag, deadline: u64) -> Result<bool, Error> {
+        let mut reply = Reply { protocol: &mut self.protocol, out, routes, budget, diag };
         worker.with_fd(self.watch, |fd| self.stream.service(&mut NativeEndpoint(fd as i64), &mut reply, deadline))
     }
 }
@@ -171,11 +186,12 @@ struct Reply<'a> {
     out: &'a mut Vec<PaneCompletedImage>,
     routes: &'a BTreeMap<u128, u32>,
     budget: Budget,
+    diag: &'a mut Diag,
 }
 impl Handler for Reply<'_> {
     fn dispatch(&mut self, frame: &[u8]) -> Result<(), ()> {
         let hdr = p9::peek_header(frame)?;
-        match self.protocol.dispatch(frame, hdr, self.out, self.routes, self.budget) {
+        match self.protocol.dispatch(frame, hdr, self.out, self.routes, self.budget, self.diag) {
             Disp::Fatal => Err(()),
             Disp::Reply(n) => { self.protocol.out_buf.truncate(n); Ok(()) }
         }
@@ -244,6 +260,7 @@ impl Protocol {
         out: &mut Vec<PaneCompletedImage>,
         routes: &BTreeMap<u128, u32>,
         budget: Budget,
+        diag: &mut Diag,
     ) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
@@ -252,10 +269,10 @@ impl Protocol {
         let r = match hdr.mtype {
             p9::P9_TVERSION => self.h_version(tmsg, tag),
             p9::P9_TATTACH => self.h_attach(tmsg, tag),
-            p9::P9_TWALK => self.h_walk(tmsg, tag, routes),
+            p9::P9_TWALK => self.h_walk(tmsg, tag, routes, diag),
             p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
-            p9::P9_TREAD => self.h_read(tmsg, tag),
-            p9::P9_TWRITE => self.h_write(tmsg, tag, out, routes, budget),
+            p9::P9_TREAD => self.h_read(tmsg, tag, budget.max_pixels),
+            p9::P9_TWRITE => self.h_write(tmsg, tag, out, routes, budget, diag),
             p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
@@ -318,7 +335,8 @@ impl Protocol {
         p9::build_rattach(&mut self.out_buf, tag, &qid_of(Node::Root))
     }
 
-    fn h_walk(&mut self, tmsg: &[u8], tag: u16, routes: &BTreeMap<u128, u32>) -> Result<usize, ()> {
+    fn h_walk(&mut self, tmsg: &[u8], tag: u16, routes: &BTreeMap<u128, u32>,
+        diag: &mut Diag) -> Result<usize, ()> {
         let a = match p9::parse_twalk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -352,11 +370,14 @@ impl Protocol {
                 // A root walk that resolved nothing: the first name is a token
                 // not (yet) routed, or malformed (a 32-byte name is a token
                 // attempt; anything else is not a place path).
-                say!(
-                    "halcyond: place walk NOENT at root (nwname={} first={} bytes)",
-                    a.nwname,
-                    a.names[0].len()
-                );
+                if let Some(n) = diag.walk_noent.next() {
+                    say!(
+                        "halcyond: place walk NOENT at root (nwname={} first={} bytes; {} so far)",
+                        a.nwname,
+                        a.names[0].len(),
+                        n
+                    );
+                }
             }
             return self.err(tag, p9::E_NOENT);
         }
@@ -387,7 +408,7 @@ impl Protocol {
         p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.node), 0)
     }
 
-    fn h_read(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -403,8 +424,12 @@ impl Protocol {
         if is_dir(f.node) {
             return self.err(tag, p9::E_ISDIR);
         }
-        // `place` is write-only: a read returns EOF (an empty Rread), never data.
-        p9::build_rread(&mut self.out_buf, tag, &[])
+        // A read of `place` answers the per-image limit a new transfer is held
+        // to now, so `view` fits its raster before the header rather than
+        // learning the cap from a refusal.
+        let mut text = [0u8; inlinewire::LIMIT_TEXT_MAX];
+        let data = inlinewire::limit_read(max_pixels, a.offset, a.count, &mut text);
+        p9::build_rread(&mut self.out_buf, tag, data)
     }
 
     fn h_write(
@@ -414,6 +439,7 @@ impl Protocol {
         out: &mut Vec<PaneCompletedImage>,
         routes: &BTreeMap<u128, u32>,
         budget: Budget,
+        diag: &mut Diag,
     ) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
@@ -474,11 +500,14 @@ impl Protocol {
                 if let Some(&leaf) = routes.get(&token) {
                     out.push(PaneCompletedImage { id, leaf, w, h, argb });
                 } else {
-                    say!(
-                        "halcyond: place completed {}x{} but its token is not routed (tile gone)",
-                        w,
-                        h
-                    );
+                    if let Some(n) = diag.unrouted.next() {
+                        say!(
+                            "halcyond: place completed {}x{} but its token is not routed (tile gone; {} so far)",
+                            w,
+                            h,
+                            n
+                        );
+                    }
                     return self.err(tag, p9::E_NOENT);
                 }
                 p9::build_rwrite(&mut self.out_buf, tag, a.count)
@@ -573,7 +602,7 @@ pub struct PanePlaceServer {
     /// present, so a closed tile's token fails closed (E_NOENT).
     routes: BTreeMap<u128, u32>,
     /// The session's own principal (from t_getuid at post). A connection whose
-    /// peer principal differs is refused at accept -- the second authority axis.
+    /// peer principal differs is refused at accept -- the authority gate; tokens route.
     principal: u32,
     /// The session user, for the `/srv/halcyon-<user>/...` addresses this
     /// server hands panes (`place_address`). Owned so the compositor need not
@@ -589,6 +618,7 @@ pub struct PanePlaceServer {
     /// peak fit here -- so two accums, one sized at a pre-resize (larger) cap,
     /// cannot combine to over-commit the heap.
     residual_bytes: u64,
+    diag: Diag,
 }
 
 impl PanePlaceServer {
@@ -633,6 +663,7 @@ impl PanePlaceServer {
             user: String::from(user),
             max_pixels: PLACE_MAX_PIXELS_HARD,
             residual_bytes: PLACE_MAX_PIXELS_HARD * 8 * MAX_CONNS as u64,
+            diag: Diag::default(),
         })
     }
 
@@ -711,7 +742,16 @@ impl PanePlaceServer {
                     && info.alive == 1 && info.principal_id == self.principal {
                     let watch = self.worker.register_owned(file, T_POLLIN)?;
                     self.conns.push(Conn::new(watch));
-                } // refused peers close via File, before any connection publication
+                    if let Some(n) = self.diag.accepted.next() {
+                        say!("halcyond: place conn from principal {} ({} so far)", info.principal_id, n);
+                    }
+                } else {
+                    if let Some(n) = self.diag.refused.next() {
+                        say!("halcyond: place conn REFUSED (peer {} alive {} != self {}; {} so far)",
+                            info.principal_id, info.alive, self.principal, n);
+                    }
+                    // Refused peers close via File before any publication.
+                }
             } else if h != -11 { return Err(Error::Io); }
         }
         if !self.conns.is_empty() { self.conns.rotate_left(1); }
@@ -725,7 +765,7 @@ impl PanePlaceServer {
                 let budget = Budget { max_pixels: self.max_pixels, others_reserved: others,
                     residual_bytes: self.residual_bytes };
                 let close = self.conns[i].ready & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
-                    || !self.conns[i].service(&mut self.worker, &mut self.completed, &self.routes, budget, deadline)?;
+                    || !self.conns[i].service(&mut self.worker, &mut self.completed, &self.routes, budget, &mut self.diag, deadline)?;
                 self.conns[i].ready = 0;
                 if close {
                     let c = self.conns.remove(i);

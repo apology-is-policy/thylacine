@@ -61,6 +61,12 @@ host-tested) and a thin libthyla-rs binary behind the `backend` feature.
   sanitize the names they repeat, so each stays one line.
 - `--beacon=auto|always|never` resolves the tier exactly as the coreutils do
   (`beacon::effective_tier` over `BEACON` + `fd_devclass(1)`).
+- The plain tiers wrap, and box a block quote, at `/dev/winsize`'s width only
+  when standard output is the console (`manual::wraps_at_console(tier,
+  fd_devclass(1))`, 4.3): a pts is a terminal of its own width, which that
+  leaf does not report. `lantern` asks the same function, so the rule has one
+  copy (aside audit r1 F3: lantern's own copy admitted a pts, and its box tore
+  on a tile narrower than the console).
 
 ### Installed catalogue and integration evidence
 
@@ -117,6 +123,19 @@ name, deliberately wider than the HTML5 table, so no decoded form escapes;
 both modes) and reports `CellTooWide` past `TABLE_CELL_MAX` = 256 displayed
 characters, the unit the padding is counted in.
 
+**Block quotes (2026-09-29; the operator's vote of 2026-09-28,
+`dec-2026-09-28-beacon-aside`).** A run of lines beginning `>` is one block
+quote, reported as `Open::Aside`. `quote` first finds the run's extent, then
+sets `quote_end`: the line reader strips each line's marker (`>` and at most one
+space, `quote_marker_len`) and stops at the run's end, so the block parsers read
+the quote's content as they read a section's. A quote holds paragraphs and flat
+lists only. A heading, fence or table inside is reported (`QuoteBlock`) and then
+parsed normally, so its own problems follow. A nested quote is `NestedQuote`, a
+run with no content is `EmptyQuote` on its first line, and a second space after
+the marker is indentation, rejected as it is at a section's left margin. The line after the
+run must be blank (`expect_blank(after, Above::Quote)`), so a lazy continuation
+line is the ordinary not-separated problem.
+
 **render.rs -- the rendering consumer.** `Renderer` implements `Events`, writing
 payload always and frames only at the rich tier through `Chunks` (64 KiB), so
 stripping frames yields the plain output (BEACON.md 12.1 rule 1). Tables mirror
@@ -126,6 +145,19 @@ for their widths before opening it (`Open::Table { widths }`, `Open::Cell {
 width }`). The renderer clamps each column width to `TABLE_CELL_MAX`, so padding
 stays linear for text that never passed the check (a checked section is already
 within it). `render_contents` drives the same renderer.
+
+A block quote at the rich tier is an `aside` frame around its blocks. Inside it
+only `em` frames are written (`frames`). A heading's, table's or code block's
+frames, which only text that failed the check can put there, are suppressed, so
+an aside never carries a block frame. Its inner blocks are separated by one
+empty line, counted apart from the section's (`quote_blocks`). At a plain tier
+with a console width the renderer boxes it. `box_begin` writes `boxd::top(total,
+"", "")`, where `total` is the width capped at `BOX_COLUMNS_MAX` = 256. `Chunks`
+then decorates every line written through it, the `Wrap` closures included, as
+`│ ` + text + padding + ` │`, counting the width in Unicode scalar values, and
+`flow_begin` wraps at `total - 4`. `box_end` writes `boxd::bottom`. Without a
+width there is no box, and the inner blocks are exactly as they would be outside
+a quote, which keeps the strip identity.
 
 **wrap.rs.** `Wrap` fills greedily as runs arrive (`begin` / `feed` / `end`):
 list items hang under their marker; a code span does not break at its own spaces;
@@ -147,12 +179,12 @@ frame can exceed the wire caps.
 ## Data structures
 
 `format::Open` {Title, Heading(2|3), Paragraph, Bullets, Numbered, Item(n), Code,
-Table{align, widths}, Row, Cell{width}}; `format::Run` {Text, Code, Emph, Strong}
+Table{align, widths}, Row, Cell{width}, Aside}; `format::Run` {Text, Code, Emph, Strong}
 (flat: emphasis never nests); `format::Problem` (one variant per rejection, the
 message in its `Display`); `catalog::Entry {number, name, file}`;
 `render::Listed {name, title}`. `SECTION_MAX` = 1 MiB; `HEAP_BYTES` = 16 MiB (the
 reader's memory budget; the binary runs on libthyla-rs's growable heap since
-B-1c); `TABLE_COLUMNS_MAX` = 16; `TABLE_CELL_MAX` = 256. The binary reads into a buffer sized from `fstat`
+B-1c); `TABLE_COLUMNS_MAX` = 16; `TABLE_CELL_MAX` = 256; `render::BOX_COLUMNS_MAX` = 256. The binary reads into a buffer sized from `fstat`
 (`read_capped`). The test-only `format::tree` rebuilds the old block tree from
 events and asserts they are well formed, in line order, and identical whether or
 not tables are measured.
@@ -207,7 +239,14 @@ marks (2026-09-16, round 2 F4): 1088, 2112, 3136 and 6208 KiB, and 6648 KiB wors
 unhinted, the grown buffer's holes counted. Table output at the cell limit: 255 KiB of empty
 rows under sixteen 256-character header cells writes 116,182 KiB across the rich
 and the 80-column plain rendering together (63 KiB writes 27,635 KiB; the ratio is
-the constant header's). Before the 2026-09-16 rewrite the
+the constant header's). Block quotes at the box's cap (host,
+2026-09-29): a section of one-line quotes (`> a` between blank lines) writes 360
+bytes of plain output per byte at a console of 256 columns or more (1023 KiB in,
+368,637 KiB out), because each 5-byte quote becomes three 256-column lines whose
+borders take 3 bytes a column. The rich tier writes 7.6 bytes per byte, and the
+time test's rich and 80-column plain renderings together write 121. The quote
+shapes' peak footprints at 1 MiB are 1216 KiB hinted, 1728 KiB unhinted, and
+2240 KiB for one quote of one-character lines. Before the 2026-09-16 rewrite the
 same shapes measured up to 158 MiB against the 16 MiB heap (an allocation
 failure, which exits 1 silently), and a paragraph of one-character lines took
 5.8 s at 256 KiB on the M2. The contents listing reads every installed section to
@@ -243,6 +282,9 @@ form a code host decodes that it misses, and a false positive on ordinary prose;
 
 - Plain tiers drop inline delimiters (a code span shows no backticks) -- forced
   by the strip identity.
+- A block quote's box counts one column per Unicode scalar value, as the wrap
+  does, so a character a console draws two columns wide pushes that line's
+  right edge out.
 - halcyond does not wrap table cells, so a wide table overflows a pane; keep cells
   short (MANUAL-DESIGN 8.3 review item).
 - A console renderer reads through the 8 KiB drop-oldest console drain; a large

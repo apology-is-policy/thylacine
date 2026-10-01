@@ -180,6 +180,9 @@ integrated as c252a7f3. Kernel ownership/lifecycle checkpoint 97bf1077 and expan
 regression checkpoint 5ad9ad27 are on Astra; consult the status for current runtime
 evidence and remaining integration. Kaua Control subtag 6 is Aux's ScreenErased,
 and 7 is Astra's binding announcement (Yip 0108 turn 22). Cleared TC-1a 1cc9a300 is integrated through Main 473cd0c0 in the September 25
-reconciliation. Aux's TC-1b remains uncleared; preserve its reserved surfaces
-listed in the Halcyon interaction status and Yip call 0108.
+reconciliation. As of October 1, Aux's TC-1b is cleared and included in Main
+8746a8a24. Its ScreenErased subtag remains 6 and Astra's binding subtag remains 7.
+The separate waiters-stops and stay-stopped work is still under review; do not
+infer its clearance from the TC-1b landing. Consult the current interaction
+status and Yip before further imports.
 No live clipboard is delivered by the kernel/protocol/storage checkpoints alone.
