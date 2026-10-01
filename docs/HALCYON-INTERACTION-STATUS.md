@@ -5,6 +5,24 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Trusted-seat cancellation integration review (October 1)
+
+Live clipboard activation exposes an unresolved ordering requirement: Lictor's
+hardware ACK does not wait for Halcyon to cancel an already queued admission
+receipt. Tapestry's local suspension cannot retract that receipt. The pure
+broker cancels correctly once notified; delivering that notification before
+trusted input is not currently guaranteed. The endpoint remains disabled.
+
+`docs/HALCYON-INTERACTION-SEAT-REVIEW.md` records the verified path, two
+controlled production-source schedules and alternatives. Proposed A preserves
+strict cancellation using a bounded userspace aggregate acknowledgement, with
+the explicit cost that a stalled normal renderer can cause SAK's existing
+five-second quiesce timeout. B keeps SAK independent but permits already-admitted
+clipboard work to complete during an episode. Neither change is ratified yet.
+Evidence is in `work/oct1-hi-seat-review/`; no new guest/graphical result is
+claimed. This is the remaining decision before wiring seat cancellation into
+application activation, not a failure of trusted key isolation.
+
 ## Asynchronous clipboard admission (October 1)
 
 The clipboard broker and asynchronous Tapestry channel now work together in the

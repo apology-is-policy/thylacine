@@ -49,6 +49,15 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-01
 ---
+## Clipboard seat-ordering seam
+
+`Broker::seat(None)` cancels locally when notified. Current Lictor/Tapestry
+exclusion does not order that call before trusted input: an earlier HIA1 receipt
+can already be queued to the broker. Application activation remains disabled
+pending the contract decision in
+[the seat review](../../../../docs/HALCYON-INTERACTION-SEAT-REVIEW.md).
+Display/key isolation does not itself establish clipboard cancellation.
+
 ## Pending clipboard admission (October 1)
 
 `clipbroker` owns the Clipboard and one pending compositor decision. Routing
