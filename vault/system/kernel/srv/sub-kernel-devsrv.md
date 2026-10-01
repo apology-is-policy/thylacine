@@ -14,6 +14,13 @@ design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
 updated: 2026-10-01
 ---
+## Ratified D7 completion
+
+[[dec-2026-10-01-session-registries]] approves the private registry factory,
+fixed resident routes, posting-membership lifecycle and charged resource domains.
+See `docs/SRV-SESSION-REGISTRY-DESIGN.md`; this is a contract, not an activation
+claim. [[seam-srv-registry-lifecycle]] remains open until runtime verification.
+
 ## October 1 capacity recheck
 
 The stable Main/Aux reconciliation still defines `SRV_MAX_SERVICES` as 16.

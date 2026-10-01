@@ -5,6 +5,17 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## D7 activation (approved October 1)
+
+The operator approved the concrete contract in
+`docs/SRV-SESSION-REGISTRY-DESIGN.md`, including the new factory role/ABI and
+resource partition. Scripture lands before consumers. O1-SRV-1 remains active
+until private roots, routes, poster death, quotas and real session regressions
+are implemented and verified. Work/evidence: `work/oct1-srv-sessions/`. Baseline
+CI console login returned 14 connection rows in one global diagnostic snapshot;
+it is neither a peak measurement nor a per-session charge measurement. All four
+protected drafts remain byte-exact; the baseline VM exited and Mac was released.
+
 ## Registry repair pickup (October 1, after reconciliation)
 
 O1-SRV-2 (fixed and verified, October 1): the documented 64-connection

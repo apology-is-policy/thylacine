@@ -320,6 +320,13 @@ tombstones its services + drains backlogs is reached through the listener handle
 (handle-release vs. an intrusive registry list) is a 3a impl decision; either way
 it is registry-scoped and audited in 3a.
 
+D7 completion was ratified on October 1, 2026 in
+`docs/SRV-SESSION-REGISTRY-DESIGN.md`: syscall 127, dedicated spawn role bit 10,
+fixed resident routes, a posting-membership lifetime ledger, and charged session
+resource domains. The factory replaces login's inherited `/srv` before auth;
+the selected-registry authority still lives in the namespace. Implementation
+status and measured limits belong in `HALCYON-INTERACTION-STATUS.md`.
+
 ### 5.2 `open(/srv/<name>)` = connect (Q1 = two-step explicit attach)
 
 `devsrv_open` (today a stub) performs the connect: resolve the service in the

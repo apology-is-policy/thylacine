@@ -197,3 +197,12 @@ applicable model counterexamples, self-review, documentation and normal hooks.
 The waiver expires at the start of October 3; it does not alter Main/Aux policy
 or waive investigation of an observed failure. Record the actual verification
 and the waived gates in each checkpoint.
+
+## Session registry completion (operator-approved, 2026-10-01)
+
+The operator approved `docs/SRV-SESSION-REGISTRY-DESIGN.md`: the login-only
+factory role/syscall, fixed resident routes, scoped posting lifecycle, and
+16-per-session / 48-session-combined / 64-global connection bounds, with at most
+16 retained session domains. Implement through focused tests and real login/
+Halcyon regressions. Keep the four protected drafts separate. This ratifies the
+new D7 contract; do not ask again for these authority/ABI/resource-policy terms.
