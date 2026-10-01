@@ -648,6 +648,11 @@ pub extern "C" fn rs_main() -> i64 {
         if t.seq != last_seq || dirty {
             last_seq = t.seq;
             dirty = false;
+            // The selection paints from the list the frame lays: bring it
+            // current first (between a key and the next, output moves rows).
+            if mode == Mode::Normal {
+                halcyond::select::refresh(&t, None, &mut flat, &mut flat_seq, sel.as_mut());
+            }
             // The atlas bound, between frames. The layout cache does NOT
             // key on the generation: a laid block holds codepoints, not
             // atlas ids, so an eviction re-resolves only what the frame
@@ -1146,6 +1151,24 @@ pub extern "C" fn rs_main() -> i64 {
                             relayout = true;
                         }
                     }
+                    railset::RailAction::ForgetHistory(id) => {
+                        // HALCYON 14.13 / HALCYON-INSTRUMENT 9.3 (TC-1b):
+                        // Super+K. The console seat hosts only its own pane;
+                        // any other id is said and dropped. A byte-fed
+                        // console has no span ring and no grid: everything
+                        // still live is the pending line, whose tables the
+                        // open block keeps, so no husk is owed.
+                        if Some(id) == chrome.own_pane() {
+                            t.forget(&alloc::collections::BTreeSet::new());
+                            // The last frame's geometry places what is gone.
+                            frame.clear();
+                            last_open_laid = None;
+                            dirty = true;
+                            say!("halcyond: history of pane {} forgotten", id);
+                        } else {
+                            say!("halcyond: history chord for pane {} -- not hosted here, dropped", id);
+                        }
+                    }
                     railset::RailAction::Workspaces { x, y } => {
                         // The console shows ONE workspace by design
                         // (HALCYON-WORKSPACES section 4), so the list is the
@@ -1433,13 +1456,7 @@ pub extern "C" fn rs_main() -> i64 {
                         if mode == Mode::Normal {
                             // Keep the flat list current before acting: new
                             // output during Normal mode moves the rows.
-                            if flat_seq != t.seq {
-                                flat_seq = t.seq;
-                                flat = halcyond::select::flatten(&t);
-                                if let Some(s) = sel.as_mut() {
-                                    s.clamp(flat.len());
-                                }
-                            }
+                            halcyond::select::refresh(&t, None, &mut flat, &mut flat_seq, sel.as_mut());
                             let page_rows = ((h as i32 / gs.mono_cell().1) / 2).max(1);
                             let act = normal_key(e.code, e.rune);
                             match act {
@@ -1686,7 +1703,10 @@ pub extern "C" fn rs_main() -> i64 {
                             mode = Mode::Normal;
                             flat_seq = t.seq;
                             flat = halcyond::select::flatten(&t);
-                            sel = Some(halcyond::select::Sel::at_end(flat.len()));
+                            sel = Some(halcyond::select::Sel::at_end(
+                                flat.len(),
+                                halcyond::select::Stamp::of(&t, &flat),
+                            ));
                             dirty = true;
                         } else {
                             keybuf.clear();
@@ -1844,7 +1864,22 @@ pub extern "C" fn rs_main() -> i64 {
                 p.service();
                 for img in p.take_completed() {
                     let (iw, ih, n) = (img.w, img.h, img.argb.len());
-                    t.inject_image(img.w, img.h, img.argb);
+                    // The image freezes IN FRONT of the open block's rows --
+                    // the one insert this transcript makes mid-list. Bring
+                    // the selection current, then move the rows at or past
+                    // the insertion point down with their content.
+                    let at = match (mode, sel.is_some()) {
+                        (Mode::Normal, true) => {
+                            halcyond::select::refresh(&t, None, &mut flat, &mut flat_seq, sel.as_mut());
+                            Some(t.frozen_blocks().iter().map(|b| b.flat_rows()).sum::<usize>())
+                        }
+                        _ => None,
+                    };
+                    if t.inject_image(img.w, img.h, img.argb) {
+                        if let (Some(at), Some(s)) = (at, sel.as_mut()) {
+                            s.shift_from(at, 1);
+                        }
+                    }
                     dirty = true;
                     say!("halcyond: inline image placed ({}x{}, {} px; I-47)", iw, ih, n);
                 }

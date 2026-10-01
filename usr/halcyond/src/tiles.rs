@@ -68,11 +68,25 @@ pub struct SessionPlan {
 /// TREE, never merely hidden (a zoom or a tab hides a hosted leaf; its shell
 /// keeps running, and it is filled again when shown). A hidden empty leaf is
 /// not created either: it gets no geometry until it shows.
-pub fn plan_tiles(leaves: &[Leaf], have: &[u32], closed: &[u32]) -> SessionPlan {
+///
+/// A FRESH leaf -- a pane the compositor made so that a workspace has one --
+/// is filled only once asked: `opened` holds the ones the placard's Open
+/// shell asked for (HALCYON-INSTRUMENT 14.6), and the compositor clears the
+/// flag itself when Super+N asks. So a new workspace starts empty and
+/// vanishes when left (HALCYON-WORKSPACES, the i3 rule), and a workspace
+/// whose last tile closed keeps its empty pane. The rule keys on how the
+/// pane came to be, never its shape: a restore onto a new workspace leaves a
+/// lone empty root that IS asked for, and a split's new leaf is filled as
+/// before.
+pub fn plan_tiles(leaves: &[Leaf], have: &[u32], closed: &[u32], opened: &[u32]) -> SessionPlan {
     let create = leaves
         .iter()
         .filter(|l| {
-            l.surface.is_none() && !l.hidden && !have.contains(&l.id) && !closed.contains(&l.id)
+            l.surface.is_none()
+                && !l.hidden
+                && !have.contains(&l.id)
+                && !closed.contains(&l.id)
+                && (!l.fresh || opened.contains(&l.id))
         })
         .map(|l| l.id)
         .collect();
@@ -101,6 +115,7 @@ mod tests {
             surface,
             hidden: false,
             backgrounded: false,
+            fresh: false,
         }
     }
 
@@ -142,7 +157,7 @@ mod tests {
         // Leaf 5 is empty and unowned by us -> claim it.
         let leaves = vec![leaf(1, false, Some(100)), leaf(5, true, None)];
         let have = [1u32];
-        let plan = plan_tiles(&leaves, &have, &[]);
+        let plan = plan_tiles(&leaves, &have, &[], &[]);
         assert_eq!(plan.create, vec![5]);
         assert!(plan.drop.is_empty());
     }
@@ -152,7 +167,7 @@ mod tests {
         // Leaf 1 hosts our surface 100 (surface=Some, in have): kept.
         let leaves = vec![leaf(1, true, Some(100))];
         let have = [1u32];
-        let plan = plan_tiles(&leaves, &have, &[]);
+        let plan = plan_tiles(&leaves, &have, &[], &[]);
         assert!(plan.create.is_empty());
         assert!(plan.drop.is_empty());
     }
@@ -162,7 +177,7 @@ mod tests {
         // We host 1 and 2; the layout now shows only 1 -> reap 2.
         let leaves = vec![leaf(1, true, Some(100))];
         let have = [1u32, 2u32];
-        let plan = plan_tiles(&leaves, &have, &[]);
+        let plan = plan_tiles(&leaves, &have, &[], &[]);
         assert!(plan.create.is_empty());
         assert_eq!(plan.drop, vec![2]);
     }
@@ -173,7 +188,7 @@ mod tests {
         // not empty, so not claimable -- skip it.
         let leaves = vec![leaf(1, true, Some(100)), leaf(9, false, Some(777))];
         let have = [1u32];
-        let plan = plan_tiles(&leaves, &have, &[]);
+        let plan = plan_tiles(&leaves, &have, &[], &[]);
         assert!(plan.create.is_empty());
         assert!(plan.drop.is_empty());
     }
@@ -185,7 +200,7 @@ mod tests {
         let leaves = vec![leaf(1, true, Some(100)), leaf(3, false, None)];
         let have = [1u32];
         let closed = [3u32];
-        let plan = plan_tiles(&leaves, &have, &closed);
+        let plan = plan_tiles(&leaves, &have, &closed, &[]);
         assert!(plan.create.is_empty(), "a closed leaf must not respawn");
         assert!(plan.drop.is_empty());
     }
@@ -195,7 +210,7 @@ mod tests {
         // The welcome / a burst of splits: two empty leaves at once, both
         // claimable (H-4d's two-pane precondition).
         let leaves = vec![leaf(1, false, None), leaf(2, true, None)];
-        let plan = plan_tiles(&leaves, &[], &[]);
+        let plan = plan_tiles(&leaves, &[], &[], &[]);
         assert_eq!(plan.create, vec![1, 2]);
     }
 
@@ -207,7 +222,7 @@ mod tests {
         hidden.hidden = true;
         let leaves = vec![leaf(1, true, Some(100)), hidden];
         let have = [1u32, 2u32];
-        let plan = plan_tiles(&leaves, &have, &[]);
+        let plan = plan_tiles(&leaves, &have, &[], &[]);
         assert!(plan.create.is_empty());
         assert!(
             plan.drop.is_empty(),
@@ -222,8 +237,53 @@ mod tests {
         let mut hidden = leaf(3, false, None);
         hidden.hidden = true;
         let leaves = vec![leaf(1, true, Some(100)), hidden];
-        let plan = plan_tiles(&leaves, &[1u32], &[]);
+        let plan = plan_tiles(&leaves, &[1u32], &[], &[]);
         assert!(plan.create.is_empty());
         assert!(plan.drop.is_empty());
+    }
+
+    /// A FRESH pane -- a new workspace's root, or the pane a close kept --
+    /// waits for Open shell (Super+N clears the flag in the compositor), so a
+    /// new workspace starts empty and vanishes when left. The rule keys on how
+    /// a pane came to be, never its shape: the lone empty root a restore
+    /// leaves on a new workspace was asked for, and is filled.
+    ///
+    /// SABOTAGE: drop the `fresh` term in `plan_tiles`, or parse no `fresh`
+    /// token, and the first plan fills the new workspace.
+    #[test]
+    fn a_fresh_pane_waits_to_be_asked_and_a_restored_root_does_not() {
+        use crate::chrome::parse_leaves_all;
+        // Super+2 under a session: the new workspace's root is fresh.
+        let dump =
+            "epoch 40 focused 12 workspaces 1,2 active 2\n12* leaf empty [4,38,1272,733] fresh\n";
+        let leaves = parse_leaves_all(dump);
+        assert!(leaves[0].fresh, "the premise: the dump's token is read");
+        let plan = plan_tiles(&leaves, &[], &[], &[]);
+        assert!(plan.create.is_empty(), "a fresh pane is not filled unasked");
+        // The control, one variable away: asked (Open shell), it is created.
+        let plan = plan_tiles(&leaves, &[], &[], &[12]);
+        assert_eq!(plan.create, vec![12]);
+        // A restore onto a new workspace: its anchor ends up the lone empty
+        // root, and nobody made it fresh -- filled with the tile it names.
+        let restored =
+            "epoch 44 focused 14 workspaces 1,4 active 4\n14* leaf empty [4,38,1272,733]\n";
+        let leaves = parse_leaves_all(restored);
+        assert!(!leaves[0].fresh);
+        let plan = plan_tiles(&leaves, &[], &[], &[]);
+        assert_eq!(
+            plan.create,
+            vec![14],
+            "a lone empty root that is not fresh is filled"
+        );
+        // The pane a close kept beside the console leaf waits too, and a
+        // split's new leaf beside a fresh pane is filled: the split asked.
+        let kept = "epoch 50 focused 21 workspaces 1,2 active 1\n3 splith n=3 active=2 [4,38,1272,733]\n  1 leaf surface=0 [0,0,0,0] backgrounded hidden\n  20 leaf empty [4,38,634,733] fresh\n  21* leaf empty [642,38,634,733]\n";
+        let leaves = parse_leaves_all(kept);
+        let plan = plan_tiles(&leaves, &[], &[], &[]);
+        assert_eq!(plan.create, vec![21]);
+        // ` fresh` rides before ` hidden`, which still ends the row.
+        let zoomed = "epoch 51 focused 21 workspaces 1 active 1 zoomed 21\n3 splith n=2 active=1 [4,38,1272,733]\n  20 leaf empty [0,0,0,0] fresh hidden\n  21* leaf surface=4 [4,38,1272,733]\n";
+        let leaves = parse_leaves_all(zoomed);
+        assert!(leaves[0].fresh && leaves[0].hidden, "both tokens read");
     }
 }

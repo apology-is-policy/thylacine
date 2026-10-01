@@ -94,7 +94,8 @@
 // delivered at the EL0-return tail without the Thread dying. The syscall then
 // returns -T_E_INTR: a native caller re-issues the wait after servicing the
 // note; a Linux-phenotype caller restarts the syscall iff the handler carried
-// SA_RESTART, else observes EINTR (ARCH 8.8.2, VIVARIUM 6.22). Slot 4 was the
+// SA_RESTART, else observes EINTR (ARCH 8.8.2, VIVARIUM 6.22). Only a Linux
+// call on signal(7)'s list is interrupted at all (ARCH 8.8.3). Slot 4 was the
 // last free low errno (3=ESRCH, 5=EIO); the operator ratified the ABI row.
 // POSIX: EINTR.
 #define T_E_INTR       4

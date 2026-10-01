@@ -22,6 +22,847 @@ needed the operator.
 
 
 ---
+## 2026-10-01 (Astra) -- reconcile Main before Aux and correct a misleading clock
+
+The operator returned after the peers' week of work and approved integrating
+qualified Main/Aux into Astra, reviewing their unfinished stop/wakeup branches,
+then continuing Halcyon interaction. Main8746a8a24 is the first checkpoint:
+PTY ownership invalidations, sealed hosts, session readiness and the native
+pointer are retained alongside Main's socket/9P changes and TC-1b. The separate
+four authority/settings drafts remain byte-identical and outside the merge.
+
+The full default build and 1816/1816 boot gate pass. The host gate exposed an
+elapsed-time scaling assertion in manual: one of72 tests failed while2159 tests
+in29 other crates passed. An isolated rerun passed72/72. Instead of labelling it
+a timing flake, paired wall/thread-CPU measurements reproduced the failure:
+controlled contention pushed the large sample's best wall time to103ms with
+CPU samples43--71ms, against a97ms threshold. The clock confounded computation
+and descheduling. The test now measures thread CPU on Unix and retains wall
+samples. A clock witness fails with the original wall clock; a quadratic-work
+mutant fails the scaling assertion; three corrected contention runs and the
+full73-test manual suite pass. The initial red log is retained.
+
+This is an Astra integration checkpoint, not a Main landing, independent audit,
+or full SMP/graphical qualification. Qualified Aux6df985512 follows; stop/WIP
+branches are not imported blindly. See HALCYON-INTERACTION-STATUS and evidence
+in work/oct1-reconciliation/ for exact limits and remaining implementation.
+
+## 2026-09-30 (main, Opus 5.5, effort max) -- flush(5): an interrupted 9P call waits for the server's answer, and a reply that beats the cancel is kept
+
+**The defect.** Found while self-reviewing VIV-EINTR (OPEN-BUGS, 2026-09-29 ~16:05Z, P1 latent). A caught note that interrupted a 9P wait took the #845 death abandon, which 11b-9p (`86b4b714`) had reused: drop `inflight[tag]`, send a `Tflush`, return `-EINTR` at once. A reply that landed before the `Rflush` was then absorbed ownerless and dropped (`demux_frame_locked`'s `awaiting_flush` arm). For a dying Proc that is right, because nobody reads the result. For a caught note the thread lives, and flush(5) says: "If a response to the flushed request is received before the Rflush, the client must honor the response as if it had not been flushed." The cost fell on exactly the calls VIV-EINTR leaves interruptible, the stream calls. An interrupted socket or pts read lost the bytes the server had consumed. A write or `sendto` that had completed reported `EINTR`, so a retry duplicated it. An `accept` could lose a connection. 11b-9p's commit had called this "inherent to interrupting an in-flight 9P RPC"; flush(5) is the protocol's answer to exactly that ambiguity.
+
+**The research, and why there was no vote.** Plan 9's `devmnt`: on `Eintr`, `mountio` allocates a flush (`mntflushalloc`) and keeps waiting until the flush completes. `mountrpc` then reads the ORIGINAL rpc's reply, so a reply that won is returned, and only an unanswered one becomes `Rflush` -> `error(Eintr)`. Linux v9fs (`net/9p/client.c`, `p9_client_rpc` + `p9_client_flush`): the wait is `wait_event_killable`, a signal flushes and waits for the `Rflush`, and "if we received the response anyway, don't signal error"; `recalc_sigpending` then lets the signal deliver. The protocol mandates the rule, and both heritages implement it the same way. So this was a correction, not a fork (docs/agent/DESIGN-FORKS.md: the research collapses the options, so make the call and report it). Scripture first, `6fcbdd86`: an ARCH 8.8.3 disposition bullet, an ARCH 21.10 paragraph after #845, and the I-10 row's "post-abandon" -> "once flushed". VIV-EINTR's own voted text is unchanged; its dial exemption still stands, because netd's `Tflush` drops a deferred connect's reply (`pending_connects.retain`) and nothing says the TCP connect stops.
+
+**The build.** `client_flush_wait` (kernel/9p_client.c) replaces the abandon for `CLIENT_WAIT_NOTEINTR`. It marks the rpc `noted`: the note stays pending until the EL0-return tail, and its claim is the thread's to re-take (`thread_caught_note_claim`), so a note-interruptible wait would return at once, every time. Every later wait is therefore killable only: plain `sleep`, and `reader_recv_frame(caught_ok=false)`. It keeps `inflight[tag]`, stages the `Tflush` (pumping for a free tag if the pool is full), sends it through `client_send_flow`, sets `flushing`, and waits in `client_wait`.
+- The original reply first: the demux applies it on arrival (`client_honour_locked` -> the new `p9_session_dispatch_flushed_rmsg`, i.e. the full parse and fid state, with the tag still reserved until the `Rflush`), drops the registration, and the call returns its result.
+- The `Rflush` first: the orphan-flush arm reads `flush_oldtag` before dispatching; once the dispatch has freed both tags, it drops the still-registered owner in the same critical section and sets `flushed` -> `-EINTR`.
+- Death in the flush wait: drop the registration, `-EIO`; both frames drain ownerless.
+- A `Tflush` that never reached the wire: `p9_session_flush_retract` (new; unlike `flush_rollback`, it does not mark the op `abandoned`, because its owner is still waiting), then a killable wait for the reply.
+The session's dispatch body became `apply_rmsg`, shared by `dispatch_rmsg` (which frees the tag) and `dispatch_flushed_rmsg` (which does not).
+
+**Wrong turn, caught by the self-audit (SF1, P2).** My first cut staged the flush through `client_drain_until_free_tag` when the tag pool was full. That loop waits only for a free tag. But a pump inside it can demux the op's OWN reply, because this op is on the wire, unlike every other caller's. The loop would then keep reading after the answer had arrived, and in a pool the server never frees, forever. Fixed by making the staging loop pump one unit at a time (`client_pump_or_park_locked`, with the stop park) and re-check `rpc->done` after each. The pump's "never its own reply" comment now names the exception.
+
+**Round 1 (Fable 5.1, start == end, on `79f8fdd4`): 0 P0 / 0 P1 / 1 P2 / 2 P3.** F1 [P2] had two legs. Leg A was my SF1, already fixed. Leg B: a tag freed by a DONE dispatch, a never-sent take-back, a flush roll-back or a retract woke no parked drainer, so a noted thread parked in the staging loop for a free tag could sleep until some unrelated frame arrived. Fixed in `7cf56731`: every client-side tag free signals send progress (`client_take_back_unsent_locked` folds the three never-sent reclaims into one helper). Found with it, pre-existing: neither `p9_client_reader_pump_once` departure signalled, so a sender that parked while Loom's SQPOLL kthread or dev9p's poll pump held the reader role slept on after the pump left -- and the pump's handoff could pick that sender's rpc, whose thread sleeps on the send list, not its rendez. Fixed in the same commit. F2 [P3]: `submit_async` left the six new rpc fields uninitialised, and the orphan-flush arm had no guard for an async victim: initialised, and the arm fails closed on an async or not-yet-flushing registered victim. F3 [P3]: ARCH 8.8.3 said a death in the flush wait "falls back to the abandon"; it drops the registration and leaves both answers to drain ownerless, reworded. Regressions: `note_flush_full_pool_own_reply` (leg A) and `note_flush_pump_wakes_parked_flush` (leg B). The round verified sound: wire order, no double honour, registration ownership, killable-only waits after the note, the reader role, `apply_rmsg`'s equivalence with the old body. The close was dirty (a wait/wake protocol changed), so round 2 was owed.
+
+**Round 2 (Opus 5.5 fallback, start == end, on `e8b6a19f`): 0 P0 / 1 P1 / 1 P2 / 2 P3.** The Fable run died on credit exhaustion before any report, so the round went to Opus with the same-family preamble. F1 [P1] was a regression in my round-1 fix: I folded the async clunk's reclaim into `CLIENT_UNLOCK_RET(c, client_take_back_unsent_locked(...))`, and that macro unlocks before it evaluates its value, so the take-back mutated the tag and fid tables without the lock. The existing test ran that path on every boot and stayed green, because nothing else touched the client at the time. The fix takes back first and unlocks after, and the helper now asserts the lock, which makes that test the witness. F2 [P2]: the reader-role handoff could designate an op whose thread sleeps on the send list (the #349 park, pre-existing; my flush staging loop copied it), where the designation never reaches it and a death or stop takes the role with it. The reviewer proposed releasing the role at each exit, but that misses a stop detour inside the send-list sleep itself. So the fix is at the root: an op is `sending` until `client_wait`, and the handoff skips it. F3 corrected a dossier line naming the wrong caller; F4 (no witness for most round-1 signal sites) is closed with reasons (a tag taken and freed under one lock hold cannot strand anyone; the rest need a blocking-transport harness the mq fixture cannot provide). The close was dirty again, so round 3 is owed.
+
+**Round 3 (Opus 5.5 fallback, start == end, on `e93b2c48`): 0 P0 / 0 P1 / 1 P2 / 5 P3 in the arc, plus a P2 outside it.** F1 [P2] I had found myself while it ran (SF3, a regression in my round-2 fix): two older tests built stack rpcs field by field and never set `sending`, so the handoff read stack garbage. Nonzero garbage skips the target, a false RED; a byte other than 0 or 1 is an invalid bool load, which traps under the UBSan gate rows. The suite had passed 1812/1812 because those bytes happened to be zero. Fixed in `b2aac856` (`= { 0 }`); sabotage O (a 0x01 poison) turns exactly those two tests RED. F2 [P3]: the two handoff witnesses read the designation after unlocking, racing the designee that consumes it; they now assert only that the op still sending is not designated, which sabotage N still turns RED. F3 [P3] was the substantive one, and it corrected round 2's confidence note, which I had accepted: a noted thread staging its Tflush on a full pool pumps one frame, and when that frame completes a sync owner, the tag it will free comes from that owner's dispatch, which no frame announces. The stager pumped again and blocked in the transport recv beside a tag about to be free. The Tflush's own send had the same blindness: parked for ring space, it kept pumping after its op's reply was already stored. Fixed in `5f28bcea`: a Tflush's send stops at its op's reply and goes back unsent (`flush_retract`), so the reply completes the call as an ordinary one -- which made the post-send honour (old sabotage L) unreachable, and it is gone; and a tag drainer parks for progress, instead of pumping, while a tag is owed (`client_tag_owed_locked`). The rest of that root, a self-pump in the recv blind to client-side progress, predates this arc (#349) and is owned in OPEN-BUGS. F4 [P3]: the session's fid exclusion skipped every flushed op as cancelled, but a living owner's op may still act on its fid; `owner_waits` keeps it live until it has acted, its Rflush lands, or its owner dies. F5 and F6 corrected comments and prose (ARCH 21.10 among them). F7 [P2, pre-existing since Loom-4b]: a Loom ENTER waiter can sleep behind another Proc's sync reader, which leaves at its own reply and never wakes it; owned in OPEN-BUGS, sequenced next. The close was dirty (a new park rule, a new send-loop exit, an I-11 change), so round 4 is owed.
+
+**Round 4 (Opus 5.5 fallback, start == end, on `5f28bcea`): 0 P0 / 0 P1 / 0 P2 / 4 P3, a clean close.** F1: the owed check reads the owner's stop state once. If the owner's stop clears and a new stop lands before it runs, it re-parks inside the nested stop sleep without re-checking its reply, and a drainer that counted on its dispatch waits out the new stop. The reader handoff has had the same race since 8c-3 (a designee re-stopped in the nested sleep holds the role). Not fixed here: it belongs with the strand my self-audit found (below), and both need a redesign of how a 9P waiter takes a stop, so they are one OPEN-BUGS family. F2: nothing witnessed the client setting `owner_waits`; deleting the line left every test green, because the session test sets the bit itself and the client tests clunk only after the wait. `rflush_first_cancels` now clunks the read's fid while its owner waits (refused, still bound) and again after the Rflush (sent). F3: dossier lines the code contradicts, one of which still called the death-in-flush-wait arm a diagnostic. Since round 3 only that arm clears `owner_waits`, so falling through to #845 would hold the fid until the Rflush and refuse the closer's clunk -- which also made my own matrix line about sabotage I stale (below). F4, pre-existing since #845: a Tflush's session entry carries the root fid as a placeholder, and the fid exclusion counted it, so a setattr of a raw attach root fd failed with EIO while any flush was in flight; since flush(5) every caught note flushes. A flush acts on no fid, so the exclusion now skips it; `9p_session.flush_names_no_fid` pairs it with a live op on the root fid that still refuses. Fixes in `e68fb165`.
+
+**My self-audit this round, against the reviewer's.** Beside round 4 I traced the owed park's liveness and called it sound: an owner whose reply is stored already has its sleep condition true, and `sleep_common` checks the condition before it detours for a stop. That holds for a stop that lands while the owner sleeps, and fails for F1's schedule, an owner still inside the nested stop sleep when its stop clears and another lands. I argued from states; the reviewer walked a schedule. The self-audit did find something the reviewer did not, a pre-existing strand: a waiter stopped in place while the reader departs is skipped by the handoff, and on resume it re-sleeps on its own condition and never elects itself, so its reply sits unread until other traffic reads it (OPEN-BUGS 11:28Z, now the family entry with F1).
+
+**A wrong turn in my own tooling.** The first GREEN run printed one PASS line and no test lines: my run script grepped `tools/test.sh`'s stdout, which carries only a tail of the console. The guest console is `build/test-boot.log`. The run was right (1808/1808); the check could not have seen a failure. Fixed before any RED ran.
+
+**The sabotage matrix, and what it found.** Each mechanism has a sabotage (A to N, one source edit each), run first as combined sets and then singly wherever two sabotages in one set could share a test. Writing the per-mechanism list on `7cf56731` is what exposed two arms no test could turn RED: K, the reader loop's stop at `flushed` (the flushing op reads its own Rflush), and L, `client_flush_wait`'s apply of a reply that landed while the Tflush waited for ring space. Two tests were added (`e8b6a19f`), and each is RED only under its own sabotage. What was run, and what went RED:
+- On `e68fb165` (1816 tests; round 4's fixes), each set alone. Clean 1816/1816 on a full build. T (the client never sets `owner_waits`) -> `rflush_first_cancels` alone, 1815/1816. U (the fid exclusion counts a Tflush entry) -> the session's `flush_names_no_fid` alone. I -> `death_abandons` alone (below). P -> the session's `flush_owner_waits_keeps_fid_live` and `rflush_first_cancels`, 1814/1816.
+- On `5f28bcea` (1815 tests; round 3's fixes). Clean 1815/1815. A: all 10 client flush tests, 1805/1815. L (repointed: the Tflush's send does not stop at its op's reply) with Q (no tag is ever owed): `reply_beats_unsent_flush`, `staging_waits_for_owed_tag`, `async_clunk_drain_waits_for_owed_tag`. P (the fid exclusion ignores `owner_waits`): the session's `flush_owner_waits_keeps_fid_live`. R (the honour keeps `owner_waits`) with S (so does a death): that session test and `death_abandons`. N: the two handoff tests. BEG, CFDH, H, J, K re-run: each RED only on tests its mechanisms own (CFDH: F adds `staging_waits_for_owed_tag`, D the session's owner-waits test; K adds `staging_waits_for_owed_tag`). M: the lock assert's EXTINCTION.
+- On `e93b2c48` (1812 tests). A (the pre-fix abandon): all 9 client flush tests, 1803/1812. The set BEG: 8 tests, `honours_late_read`, `rflush_first_cancels`, `death_abandons`, `reader_honours_walk`, `reader_rflush_first`, `pump_wakes_parked_flush`, `ring_full_honours_reply` and the session's `flush_retract_restores_live_op`. The set CFDH: 9 tests, `honours_late_read`, `reader_honours_walk`, `rflush_first_cancels`, `reader_rflush_first`, `handoff_skips_staging`, `full_pool_own_reply`, `pump_wakes_parked_flush`, `ring_full_honours_reply` and the session's `flushed_reply_honoured_for_waiting_owner`. J (the wait cond ignores `flushed`) -> `rflush_first_cancels`. K -> `reader_rflush_first`, `handoff_skips_staging`. L -> `ring_full_honours_reply`. M (round 2's F1 put back: the take-back inside `CLIENT_UNLOCK_RET`) -> EXTINCTION "9p: a tag take-back without the client lock" in `clunk_killed_while_parked`. N (the handoff ignores `sending`) -> exactly `handoff_skips_send_parked` and `note_flush_handoff_skips_staging`.
+- Singly on `e8b6a19f` (1810 tests, before the two handoff tests). C (no honour on arrival) -> `honours_late_read`, `reader_honours_walk`. G (no signal at a pump's departure) -> `pump_wakes_parked_flush`, `ring_full_honours_reply`. H (the pre-SF1 drain) -> `full_pool_own_reply`, `pump_wakes_parked_flush`. I -> GREEN (below).
+- B, D, E and F ran only inside the sets, so their tests are read off by elimination against the singles and the code, not measured alone: B (a note-interruptible flush wait) -> the five note tests left in BEG; E (the retract marks the op abandoned) -> the session's retract test; D (the flushed dispatch frees the tag) -> the session's honour test and `ring_full_honours_reply`; F (the Rflush-first arm skips the owner) -> the three Rflush-first tests.
+On `e93b2c48`, I (the death-in-flush-wait arm removed) stayed GREEN, and that was right then: falling through to the #845 arm behaved the same (its second `send_flush` is refused on an `awaiting_flush` tag, `mark_abandoned` skips one), and only the diagnostic changed. Round 3 made the arm load-bearing -- it alone clears `owner_waits` -- so the line went stale without my noticing, and round 4 F3 caught the dossier's copy of it. Re-measured on `e68fb165`: RED, `death_abandons` alone (1815/1816, "its owner gone, the op's fid is clunked before the Rflush"; the diagnostic now reads "no flush staged", the #845 arm's).
+
+**Evidence.** GREEN on `e68fb165`: 1816/1816 on a full build (earlier: 1815/1815 on `5f28bcea`, 1812/1812 on `e93b2c48`, 1810/1810 on `e8b6a19f`). `9p_client.tla`: the clean cfg passes (197 distinct states), and all five buggy cfgs violate `Invariants`; the spec does not model Tflush, so this re-confirms the tag and fid rules only. SMP gate: an early run on `e8b6a19f` was stopped at 40/40 PASS, 0 corruption (default-smp1/4/8 and ubsan-smp4 complete), when round 2's fixes superseded it; the full gate on `e68fb165` (the landed tree's `kernel/` is identical): all five rows 10/10, 0 corruption. One question the loopback cannot answer: the interrupted caller now waits for the server's `Rflush`, so a server that ignored a `Tflush` for a parked request would turn EINTR into a hang. Every 9P server in the tree has a `Tflush` handler (netd, ptyfs, nocturned, tapestryd, halcyond's two, diorama, corvus, lictor; Stratum's `server.c`) except three serial test stubs (`alloc-smoke`, `stratumd-stub`, `stub-fs-probe`) that nothing interrupts, and V-1b's L305 proves it for netd on every boot: a caught SIGCHLD interrupts a blocking socket read, and the leg fails if a rescuer's byte completes the read first. On a CI-image bake of `e68fb165`: 15 legs, one attempt each, all PASS: NP-4c's 14 PTY and network legs (haul-npxf and haul-post against a real npxf server on the host) and VIV-EINTR's r5f9-ash.
+
+**What "fixed" covers.** A caught note on any 9P call that is not a Tclunk now sends a `Tflush` and waits for the first answer. The reply is honoured if it comes first, and the call returns `EINTR` only if the `Rflush` does. Tests on the mq loopback transport cover every arm: the non-reader wait; the elected reader (the op reads its own reply, or its own `Rflush`); a full tag pool (the op's own reply pumped while it stages the flush); a full send ring (the reply lands while the `Tflush` waits); a `Tflush` that never reaches the wire (session level); and death in the flush wait. Unchanged: a Tclunk is never flushed; async (Loom) ops have no waiter a note can interrupt. Two pre-existing #349 defects are fixed with it: the pump departures' lost wake (both pump functions now signal; two witnesses), and the handoff that could designate an op sleeping on the send list (an op is `sending` until `client_wait`, and the handoff skips it; two witnesses). NOT covered by a test: the caught reader arm on the real srvconn transport (mq never sleeps in recv, the A-5b harness gap round 1 named); an end-to-end vivarium read that keeps its bytes across a SIGCHLD (the race is not deterministically constructible from userspace, so the unit tests are the witness); anything above `dev9p_read`, which round 1 read only that far. `9p_client.tla` does not model Tflush, so the honour rule rests on ARCH 21.10's prose, the tests and two audit rounds, not TLC.
+
+**Landing (2026-09-30).** Squashed to `2c44c3bd`, with the scripture `6fcbdd86` kept as it was. The gates ran on `e68fb165`, and the landed tree differs from it only in this entry and the status row (`git diff e68fb165 2c44c3bd -- kernel/` is empty): suite 1816/1816 with V-1b PASS; `ci-smp-gate` all five rows 10/10, 0 corruption; `9p_client.tla` clean and its five buggy cfgs red as claimed; on a CI-image bake, 15 legs, one attempt each, all PASS; the sabotage singles T, U, I and P red on exactly their own tests. Two slips at the landing, both caught before they became claims: the spec check's first run printed no verdict at all, because the default `java` is the macOS stub (SPEC-POLICY's OpenJDK printed them); and a `head -8` on a grep made V-1b look absent from the clean boot until a narrower grep found its PASS line.
+
+## 2026-09-29 to 09-30 (main, Opus 5.5, effort max) -- VIV-EINTR: a caught signal interrupts only signal(7)'s slow calls, and one note unwinds one thread
+
+**The defect.** NP-5's SMP gate failed 3 boots in 50 at the probe's `socket()` (marker L278), each after `9p: op abandoned (tag 0, note, flush sent)`. The probe leaves a counting `SIGCHLD` handler installed without `SA_RESTART` while two children are outstanding, and a caught note unwound ANY 9P wait: both 9P sleeps (the RPC wait and the elected reader's receive) took the caught-note arm, so `socket()`, `openat()`, a regular file's `read()` and every file page-in could fail with `EINTR` (a page-in with `SIGBUS`). Pre-existing since item 11. Linux lets a signal interrupt only the calls on signal(7)'s list; the rest sleep `TASK_KILLABLE`.
+
+**The vote.** 2026-09-29 ~15:10Z, `signal(7)`'s list, over interrupting only socket setup (leaves `open`/`stat`/`read` of regular files failing) and a kernel-side `ERESTARTNOINTR` (an abandoned 9P op may already have taken effect). `dec-2026-09-29-caught-signal-slow-calls`, scripture 54be3162 (ARCH 8.8.3, VIVARIUM 6.22).
+
+**The build.** A per-Thread `note_interruptible`, false by default: the vivarium dispatcher sets it per Linux call from `vivarium_intr_class` (always / only on a slow fd / never; a row added later defaults to never), `syscall_dispatch` clears it on the single exit, and `userland_demand_page` clears it around a page-in. `thread_caught_note_deliverable` refuses unless it is set. A slow fd is a socket row or a Dev whose stat type is a FIFO or a character device, cached per open file in two Spoor flag bits. Death never reads the flag.
+
+**The positive control failed about half its boots, and the cause was older than the arc.** L305 (a blocking read on an accepted socket that a child's exit must interrupt) passed and failed across boots. The first hypothesis -- the `SIGCHLD` landed during an EL0 page-in before the read -- was refuted by the probe's own marker (the handler had not run before the read). Instrumentation caught a failing boot at 17:41Z: at the child's `child_exit` post the parent's only thread was the elected 9P reader, asleep in `tsleep_noteintr` with the flag set and the caught bit armed, and nothing woke it until an unrelated byte arrived 10 s later. `child_exit`'s post, a caught `tty:susp` and `tty:cont` never ran the caught-note wake that ARCH 8.8.3 says runs on every caught commit, and `proc.h` called `child_exit`'s gap an "item-11 completeness seam" on the false premise that it is posted outside the table lock. Fixed in 6107ccab (`proc_exit_notify_parent_locked`; the hup/cont fan wakes after both posts), with four `rendez.caught_wake_*` tests seen red with their wake removed; then 8/8 boots passed L305.
+
+**Round 1 (Fable 5.1): 0 P0, 0 P1, 2 P2, 2 P3.** F1: `connect`, `accept` and a datagram `sendto` laundered the new `EINTR` into `ECONNREFUSED`, `EIO` or `ECONNABORTED`, and `accept`'s round trips after the dequeue were interruptible, so a signal could hang up a connection already accepted. The call's wait is now the only interruptible part (`viv_wait_is_over`, `viv_note_hold`/`viv_note_resume`), and an interrupted handshake leaves the row `VIV_SOCK_CONNECTING`, so a retried blocking connect waits on the dial already made, as Linux's does in `SS_CONNECTING`, instead of dialing again (netd refuses a second dial on a slot). `ETIMEDOUT` now passes through; it had been collapsed into `ECONNREFUSED`. F2: one caught note unwound EVERY interruptible sleeper of the Proc, where Linux interrupts one thread -- a claim sub-field in `proc_flags`, taken by CAS by the sleeper that unwinds.
+
+**Round 2 (Fable 5.1): 0 P0, 1 P1, 0 P2, 2 P3, plus my SF4 (P2).** F1 [P1] broke my round-1 argument. I had released a claim when the family's last note drained, reasoning that the claimant's tail delivers the note on its very next return. The tail handles ONE note per return, and it can end short of the claimed one: it discards a `SIG_DFL` default-ignore note queued in front (a `child_exit`, a `tty:winch`), stops, or cannot build the frame. The claim then outlived the unwind, and every later wait, the claimant's own retry included, refused the family: Ctrl-C dead in a blocked `recv`. My self-audit had given that exact argument to round 2 as a question rather than as settled, which is why it was examined. The fix (73bb39ca): the claim is the claimant's (`Thread.note_claim`) and ends at its EL0-return tail whatever the tail delivered, waking the parked peers again if the note is still queued; a thread's own claim stays open to it; the drain clears only the caught bit; exec clears the sub-field as a guard; and the tail loops past a discarded note to the next one, as Linux's `get_signal` does, bounded by the ring. SF4 [P2]: an interrupted connect left a `CONNECTING` row that only a `connect()` retry or a poll served -- `send`/`recv` answered `ENOSYS`, `read`/`write` reached netd's `ctl` file, and `SO_ERROR` answered a constant 0 whose header proof ("every error is synchronous") `CONNECTING` voided. POSIX has that connection "established asynchronously" and CPython takes exactly that path after `EINTR`. The reviewer called send/recv `ENOSYS` "the existing unbuilt posture" and withdrew it; I disagreed, because before this arc the interrupt laundered into `ECONNREFUSED`, so the state is new with it. Fixed by finish-on-use: every use of a `CONNECTING` socket finishes the connect first (Linux's `sk_stream_wait_connect`), and `SO_ERROR` reads netd's `status` file so it never waits -- netd holds a `data` open in exactly the two states (`Syn-Sent`, `Syn-Received`) the probe treats as in flight.
+
+**Round 3 (Fable 5.1): 0 P0, 0 P1, 0 P2, 4 P3 -- clean, so the audit closed.** It prosecuted the claim's new lifetime, the discard loop, the own-claim rule, finish-on-use and the `SO_ERROR` probe, and withdrew each challenge against the code (the release's wake keeps I-9: a peer re-checks the claim under its `wait_lock` after registering, and the release's `fetch_and` comes before the wake takes that lock). F1: `pread64`/`pwrite64` still reached a `CONNECTING` socket's `ctl` file, because the hook named four of the six slow-fd renumbers; it now covers the positioned pair too (Linux answers `ESPIPE` on any socket, which the errno registry cannot say yet: ERRORS.md ER-3's residual, task #106). F2: the `SO_ERROR` probe opened netd's `status` file into a guest descriptor, so a full table read as "in flight" (0 for a dial that had failed) and a peer thread could see the transient fd; `viv_kpath_read` reads a private Spoor instead. F4: `Thread.note_claim`'s width was pinned to nothing; a `_Static_assert` now derives it from the field. F3 predates the arc: a Linux frame that cannot be built (the stack within about 4.7 KB of its guard) leaves its note queued, so that thread's slow calls fail `EINTR` until the stack frees and the handler never runs. Linux `force_sigsegv()`s there; matching it changes the exit status a parent reads, so it is owned in OPEN-BUGS for its own design pass. The same round's process note: the Notes / signals and VIVARIUM rows of `docs/AUDIT-TRIGGERS.md` gained this arc's prosecution addenda.
+
+**Wrong turns, and what caught them.**
+- The round-1 claim's release rule, above: argued, not tested, and found by the next round.
+- My first exec-clear comment said a peer "that died in a group termination" could leave a claim. exec returns `EAGAIN` unless the caller is alone, so the clear is a guard; caught before the commit by re-reading `proc_exec_drop_image_state`'s caller.
+- A yip note said the Mac was free without re-checking and crossed aux's hold; apologised on the call.
+- A kernel test thread's Proc is kproc, so the native read/write handlers resolve fds on the wrong Proc: the finish-on-use tests drive the shells with zero-length buffers and assert the finish's effects instead.
+- Finish-on-use's hook listed the calls it covered by name, and the list stopped at four of the six slow-fd renumbers; round 3 found the positioned pair. A hook's call set should come from the class it serves.
+
+**Evidence.** Suite 1795/1795 at 73bb39ca (first boot of the round-2 fixes), V-1b PASS. Round-2 witnesses, each seen red at its own first assertion: ten sabotages in three boots at 73bb39ca, grouped so no test carried two -- 1789/1795 (the release call dropped, the discard loop bounded to one, the own-claim rule dropped, `sendto`'s finish dropped, the dispatcher hook never firing, `SO_ERROR` always in flight), 1792/1795 (the release's wake dropped, the flag restore dropped, `SO_ERROR` never in flight) and 1794/1795 (`SO_ERROR` dropping the error): exactly those tests, each at its predicted assertion. Round 1's variants, run at 1d89b986 and again at 73bb39ca: C (five kernel-unit sabotages) turns exactly its five tests red (1790/1795); A (every Linux call interruptible, the old kernel) passes the kernel suite and fails the probe at L309a, the NP-5 symptom, in one boot; B (nothing interruptible, run at 1d89b986) fails L305. Eight consecutive boots green on the caught-wake fix, and again at 73bb39ca (rc=0, V-1b PASS including L305). At b61e7748 (the round-3 fixes): suite 1797/1797, V-1b PASS; two sabotage boots, 1795/1797 (`pwrite64` left out of the hook; the status probe borrowing a guest descriptor again) and 1796/1797 (`pread64` left out), each test at its own assertion, nothing else red. On the CI image (f6b3ec62's code, `--config ci`) the interactive Ctrl-C scenarios `viv-run` and `r5f9-ash` pass.
+
+**What "fixed" covers, and what is open.** Every 9P-backed vivarium call off signal(7)'s list rides a caught note out; a listed call's wait is the only interruptible part; one caught note unwinds one thread and is never stranded behind a claim; an interrupted connect is finished by the socket's next use. Owned in OPEN-BUGS: signal(7)'s list is half-built (only the two 9P waits opt in, so a kernel pipe read, `ppoll`, `wait4` and `futex` ride a caught note out); the claimant may not be the thread that runs the handler (Linux restarts the call; kernel-side restart); an `EINTR`'d 9P op discards a late reply flush(5) says to honour, which for a socket loses or duplicates bytes; exec leaves armed caught bits; a second thread connecting one socket reads `ECONNREFUSED`; `connect(AF_UNSPEC)` is unserved; `read`/`write` on a never-connected socket still reach `ctl`; a nonblocking connect still blocks; a Linux frame that cannot be built leaves its note armed (round 3's F3). Positioned I/O on a socket reaches the file a connected socket's would, where Linux answers `ESPIPE` (task #106, which needs the operator's sign-off on the errno).
+
+**Landing (2026-09-30).** Squashed to `d73e68da` (the scripture `54be3162` kept as it was), with NP-5 squashed on top (`979250a7`; its entry, next, has the rebase). One gate run covered both, on the landed tree: suite 1800/1800, V-1b PASS; `ci-smp-gate` all five rows 10/10 (default-smp1, -smp4, -smp8; ubsan-smp4, -smp8), 0 corruption; every cfg of the specs whose modelled code this arc touched (scheduler, tsleep, death_wake, reader_frame, pty_stop) clean, or red on its named property; NP-5's `check-poll.sh` 19/19 and `check-net-poll.sh` 20/20; 15 CI-image legs PASS, `viv-run` and `r5f9-ash` among them; the ARMv8.0 floor OK. One wrong turn in the landing: the squash's first message named one dossier it did not update (`sub-kernel-syscall-abi`), but the gate's `No-dossier-change` trailer defers the whole commit, so that one line had also silenced four owners it never named (`-proc`, `-sched`, `-sched-smp`, `-caps`). NP-5's commit, blocked for want of a trailer, showed the gate's real list; the message was amended before anything was pushed, naming each owner with its reason (each shares a file or a header and describes nothing this arc changed).
+
+## 2026-09-29, landed 2026-09-30 (main, Opus 5.5, effort max) -- NP-5: the vivarium's socket files leave the guest's fd table, and a nonblocking socket finally tells netd
+
+**The defect.** `viv_poll_translated` opened each polled socket's `/net/<proto>/N/ready` file as a guest fd, per socket per call, and closed it by number when the poll ended (OPEN-BUGS 10:50Z, P2). Its safety comment rested on "a PHENO_LINUX Proc is single-threaded", a premise N-3 dissolved. A peer thread's `open()` during a poll was handed a number above the lowest free one, and a peer that put an fd at the transient's number lost it to the kernel's close. VIVARIUM 5.5.4 had called this "a memory-safe guest-self-race"; it was not one, because the guest was never told the number, so a correct program broke.
+
+**The vote.** #98's votes (2026-09-28) set NP-5's scope: "a cache of ready Spoors held outside the guest's fd table". Every call below derives from that; none needed a new fork.
+
+**The design.** A `ready[VIV_SOCK_MAX]` array beside the socktab rows (not inside `viv_sock`, so that no snapshot or copy of a row can carry a borrowed pointer); the table owns one reference per entry. The poll core takes pre-resolved Spoors (`sys_poll_for_proc_spoors`, `handle_snapshot_spoor`); the open core split into resolve and install (`sys_resolve_kpath_for_proc`).
+
+**Found in the self-audit, before any test ran.**
+- The cache was released at REAP (`proc_free`), but fds close at EXIT. A cached ready fid holds netd's slot N (every fid under `/net/<p>/N/` refs it), so a forked worker's accepted connection would have stayed open to its peer until the parent reaped. `proc_close_handles_at_exit` now resets the table inside `exit_close_active`.
+- NP-5b: the same by-number class in four more arms -- connect's temporary data fd, accept's listen/remote/data fds, and UDP sendto/recvmsg's per-datagram data fd. All private Spoors now, with `spoor_read_on`/`spoor_write_on`/`sys_write_staged` split out so a Spoor no fd names meets the same gates in the same order.
+
+**The wrong turn: a probe leg that asked a blocking socket to wait for nothing.** WIP 3 (`202b415e`) added viv-pheno-probe legs; the Linux run then never reported and `tools/test.sh` timed out at 300 s. I did not know whether the legs or the kernel were at fault. The kernel prints every syscall number the phenotype does not serve, so I put a deliberately unknown number (600+k) before each step as a console trace. One boot showed Part A complete and Part B stopped inside its first `recvmsg` (marker 611 printed, 612 never). netd parks an empty `data` read until bytes arrive (server.rs ~6219), and nothing answers port 9, so a blocking socket waiting there is correct. The legs had expected "0 or EAGAIN" because the kernel's own comment said "netd's data read is non-blocking (0 bytes on an empty socket, net-2c-2)".
+
+**What the wrong turn uncovered (NP-5c).** That comment had been false since #52 (`67b72e66`, 2026-07-22), when netd became blocking by default and grew a `nonblock` ctl verb for nonblocking consumers; pouch's FIONBIO writes it (patch 0028). The vivarium's recvmsg arrived later (`bcc7c8de`, 2026-08-31) and never wrote it: `socket(SOCK_NONBLOCK)` and `F_SETFL` set only the Spoor's CNONBLOCK, which dev9p never reads. So a nonblocking read of an empty socket BLOCKED, and recvmsg's "0 bytes on a nonblocking socket is EAGAIN" mapping reported a closed peer as "try again" forever. Aux had predicted the read half on 2026-08-17 (`bug-sock-nonblock-refusal-defeated-by-musl`, option (c)); N-1a admitted the flag at the Spoor level only. Masked because musl's resolver reads only after poll says readable and its answers arrive. NP-5c writes the verb through a private ctl Spoor on every mode change. There is no sleeping lock in the kernel, so the verb carries the flag as read back after each write lands and repeats while a peer moved it; the loop is deliberately unbounded, because a bounded pass can exit with its stale verb landed last.
+
+**netd's fid table.** `MAX_FIDS` was 32 for the one session the whole box shares; sixteen polled vivarium sockets would need 33 with the root. Now `MAX_SLOTS * 4`, derived, so the slot table binds first.
+
+**The audit, round 1 (Fable 5.1; 0 P0 / 0 P1 / 1 P2 / 4 P3).** The P2 was mine to have seen: I had cached the readiness Spoor per ROW, and a socket's dups are rows. One Proc could dup a socket 63 times and poll all 64 numbers, and hold 64 netd fids for as long as the rows lived. netd's fid table is one pool for the whole box (every Proc reaches /net over the one kernel session), so a full table fails every Proc's /net walks. My MAX_FIDS derivation ("a socket holds at most three fids") had counted sockets, not rows. The fix keeps one readiness Spoor per connection per table: an uncached row shares the Spoor a sibling row of the same (proto, n) caches, and an install for a connection a sibling cached first is refused and shares instead. Every row still owns one reference, so no release path changed. The identity premise -- same (proto, n) in one table is one connection -- holds because each live row's fd and each cached readiness fid hold netd's slot n, so n cannot be recycled under a cached Spoor. A fork child still opens its own, so P Procs polling one socket hold P fids, and the table stays a pool rather than a per-client quota; that part is pre-existing and queued. The four P3s: nothing witnessed that ppoll's compaction of a disabled entry moves the readiness Spoor with its socket (fixed: probe L297/L298); and three ways a guest racing its own descriptor can leave the Spoor's bit and netd's mode disagreeing, or send the verb to a stale connection -- each from a socket's identity and mode being split across per-fd rows and per-Spoor bits, so they wait for the socket object rather than a local patch that a peer holding the old ctl Spoor would still defeat. My own self-audit in parallel found two of those three, and four stale comments, one of which (connect's) hid that a nonblocking connect blocks.
+
+**Round 2** (Fable 5.1, over the fixes; 0 P0 / 0 P1 / 0 P2 / 1 P3). L300 turns red on a per-row cache only while netd's `MAX_FIDS` is below 66: the attach root, the listener's ctl, the client's data and 63 readiness fids, against a table of 64. That is a margin of two, and raising `MAX_SLOTS` would remove it without a sound. The coupling is now written at `MAX_FIDS`, at the leg and in AUDIT-TRIGGERS row 31. The witness that cannot go stale -- netd publishing its live fid count, and L300 asserting no growth -- is queued (OPEN-BUGS 13:55Z).
+
+**The sabotage that caught the test instead of the kernel.** R10 disabled the sibling scan and expected `vivarium.socktab_ready_cache` to fail its sharing assertion. The boot extincted instead, with a use-after-free inside the test: it released its offered Spoor unconditionally, and under the sabotage the install had kept that reference. The test now releases the offer only when the install refused it, and the same sabotage reads `FAIL: a dup's row SHARES its source's Spoor` (1776/1777). On a correct kernel the bad release never ran, so only the red run could show it.
+
+**The rebase onto VIV-EINTR (2026-09-30).** NP-5's SMP gate is what found VIV-EINTR (3 boots in 50 at L278, `socket()` failing with `EINTR`), so VIV-EINTR landed first and NP-5 was squashed onto it. Three hunks of `kernel/syscall.c` conflicted, and one was real: VIV-EINTR's connect dials, records the row `CONNECTING` and lets a note interrupt only TCP's `data` open, while NP-5 resolves that `data` file as a private Spoor. The merge keeps both: the private Spoor is resolved inside VIV-EINTR's wait, and the resolve core returns the walk's own errno, so `EINTR` still leaves the row `CONNECTING` and `ETIMEDOUT` still differs from a refusal. accept's `listen` resolve still ends the call's interruptible wait. `viv_kpath_read`, VIV-EINTR's `SO_ERROR` status probe, had walked its file with a bare `stalk_err`; it now resolves through `sys_resolve_kpath_for_proc` and reads through `spoor_read_on`, so the SOCKETS header's "every /net operation here resolves through" the one core stays true. `docs/AUDIT-TRIGGERS.md`'s VIVARIUM row carries both addenda, and VIV-EINTR's item (d) now names the core.
+
+**Evidence.** Kernel suite 1777/1777 on `099c0ffa`'s code, three tests new: `vivarium.socktab_ready_cache`, `vivarium.socktab_ready_release_paths` and `poll.pre_resolved_spoor`, each seen red under seven sabotages in three builds on `559d2a5d`. viv-pheno-probe L278-L296 pass on the default image ("V-1b phenotype (native + containered linux) PASS"). Every new leg was also run red, each red predicted before the boot:
+- main's kernel (`26e8d367`, 1774/1774): `marker=L282`, the fd the test placed at the poll's transient number closed under it; with L282 switched off, `marker=L283`, the poll's transient holding the lowest free number.
+- `099c0ffa`'s kernel (1777/1777 each) with recvmsg's old "0 bytes on a nonblocking socket is EAGAIN" put back: `marker=L288`. With sendto's transient guest data fd put back in main's exact shape: `marker=L296`, the storm thread's copy landing above the lowest free number.
+- With socket()'s verb skipped the probe hangs, and a console trace (unserved syscall numbers 628-632 around the four calls of L290) stops after 629, inside the first recvmsg; with F_SETFL's verb skipped it stops after 631, inside the second. `tools/test.sh` times out at 300 s both times.
+- `681e5487`'s fixes, each red as predicted (1777/1777 on each kernel): the readiness Spoors indexed by the compacted slot -> `marker=L297`; no scatter back -> `marker=L298`; `596cd50f`'s per-row kernel -> `marker=L300`.
+
+Before the rebase, on NP-5 alone (`9ecaf97f`): suite 1777/1777 and "V-1b phenotype (native + containered linux) PASS" (L278-L300), no `poll: FAILSAFE` line; NP-4c's 14 PTY and network legs on a CI-image bake of `681e5487` plus the test fix, one attempt each: 12 PASS; haul-npxf and haul-post SKIPPED, because no npxf server listened on the host, so they are not coverage. On the landed tree (NP-5 on VIV-EINTR's `d73e68da`): suite 1800/1800 and "V-1b phenotype (native + containered linux) PASS" (L278-L310), no `poll: FAILSAFE` line; `ci-smp-gate` all five rows 10/10 (default-smp1, -smp4, -smp8; ubsan-smp4, -smp8), 0 corruption; `specs/check-poll.sh` 19/19 and `specs/check-net-poll.sh` 20/20, the spec files unchanged; on a CI-image bake of it, 15 legs, one attempt each, all PASS: NP-4c's 14, with haul-npxf and haul-post now run against a real npxf server on the host (so for the first time they are coverage), and VIV-EINTR's `r5f9-ash`.
+
+**What "fixed" covers, and what stays open.** Fixed: no vivarium socket arm puts a transient fd in the guest's table any more -- ppoll, pselect6, connect, accept, sendto and recvmsg (the 10:50Z P2). A nonblocking socket's empty read answers EAGAIN and its EOF reads 0, whether it was born nonblocking or set by F_SETFL (the 12:40Z P1). A polled connection costs netd one readiness fid per Proc polling it, however many dups it has (r1 F1). Queued: a nonblocking connect or accept still blocks (12:55Z, P2); the three ways a guest racing its own descriptor splits the Spoor's bit from netd's mode (13:05Z, P3, the socket object); socket/accept/dup/F_DUPFD install first and may unwind by number (12:15Z, P3); stalk reports a failed device walk as ENOENT, so a netd fid shortage reads as POLLNVAL (11:30Z, P3); netd's fid table has no per-client bound (pre-existing, OPEN-BUGS M-PIN); L300's derived witness (13:55Z, P3).
+
+## 2026-09-29 (main, Opus 5.5, effort max) -- the Tclunk closer: a dying thread's clunk goes to a pool of closer threads, and flush(5) is kept on both sides
+
+**The defect.** A thread whose Proc is dying cannot send: `client_send_flow` refuses it at its loop top. For a Tclunk that was a leak. The build unbound the fid, the send was refused, and the server kept the fid until the session ended. `dev9p_close` printed `9p: close: clunk of fid N refused rc 5` and its comment called the cause "the narrow burst-during-a-kill race". Each instrumented boot of 2026-09-28 printed it three times from one site: gopls kills a `go` child still in its spawn thunk, and the thunk drops its exec Spoor. NP-4's audit (F1) had found the same exposure for a socket's `ready` fd.
+
+**The votes.** 2026-09-28: who sends the Tclunk -- a closer kthread (Plan 9's `closeproc`), over send-if-the-ring-has-room (Linux v9fs's shape, which still leaks under back-pressure), both, or widening #68's exit-close window (which lets a dying thread wait on a server). 2026-09-29: the closer's shape -- a pool with one closer per session (Plan 9's shape: a spare spawned by the closer that takes work, idle ones retired), over one thread that accepts a stuck server's stall, or one that never parks. `dec-2026-09-28-tclunk-closer`.
+
+**The take-back could fail, and the fix retired an older race.** `p9_session_retract_unsent` said its re-bind "cannot fail: the caller has held the lock since" the build. That was true for NP-4b's async submit and false for a clunk: a sender parked on back-pressure drops `c->lock`, and a peer may fill the fid table meanwhile. The shape question proposed 64 entries of headroom. The implementation reserves a slot instead, for every outstanding op that may leave a fid bound -- a Tclunk keeps its fid's slot, a walk reserves its new fid's -- and only a new reservation checks capacity. That also retired the walk's dispatch-time capacity race, where a walk failed with EIO after the server had bound its fid (RW-4 R-B-F1 had downgraded it from a session death to a per-op error, but the fid still leaked).
+
+**flush(5) was broken on both sides.** Reading the flush paths for the closer turned up three leaks of the same class, none in the plan:
+- the client flushed a sync Tclunk whose waiter died. A flush the server honours cancels the clunk, and the fid, unbound at the build, stayed on the server. A Tclunk is never flushed now; the dying waiter leaves it in flight without an owner.
+- a flushed walk's late Rwalk was absorbed "with no fid mutation", so a walk the server completed leaked its new fid. flush(5) says a reply that arrives before the Rflush is honoured; the late bind now goes through the session's orphan sink to the closer. The flush-less abandon (#53) took the same fid through its normal arm and dropped it.
+- Stratum's pool discarded the reply of an op flushed while it executed, so the client never learned of a walk that ran. Stratum now sends the reply first (`fs_pool.c`, CF2-I1/I2 reworded in `docs/cf-2-design.md`; committed locally, the operator pushes).
+
+**The dead root clunk.** `attached_destroy_inner` sent a Tclunk for the root fid "per the documented v1.0 contract". `p9_session_send_clunk` has always refused the root, so the call never sent anything; the transport close releases the root. Removed.
+
+**Wrong turns, and what caught them.**
+- The first leak test for a refused clunk was `p9_client_is_live`. A walk that fails leaves its new fid unbound, and the rollback clunk of that fid would then have reported a leak that is not one. `p9_client_fid_held` (live and bound) replaced it, in the WIP before any test ran.
+- `dev9p_clunk_fid` was inserted between `priv_alloc`'s comment and `priv_alloc`, so the comment read as the helper's. The pre-audit self-review caught it.
+- The client's `9p: op abandoned` line said "flush sent" for a Tflush that met back-pressure and was rolled back. The new abandoned-walk test's own output showed it; the line now names which of four outcomes happened.
+- The first run of the new Stratum test on the old pool hung for 19 minutes, and I recorded that the failing test had leaked its stall hook into a later test. A second run under a 60-second alarm showed otherwise: the harness's asserts are soft, so the test ran on past its failure into `recv_frame`, a read with no deadline, waiting for a reply the old pool never sends (SIGALRM, exit 142, the last line printed the test's own two FAILs). The fixture now bounds every wait on an expected event (10 s); the red run completes, 19 passed and 1 failed. The memory entry that carried the leaked-hook story was corrected, not deleted.
+- Fixing the audit's S1 (an abandoned asynchronous Tclunk would still be flushed) broke the #53 regression test, which had abandoned a Tclunk only because it was the one asynchronous builder at hand. It abandons a Tgetattr now, and still reaches the rolled-back Tflush it guards.
+- Writing S1's test showed a classifier gap: the demux recognised an ownerless clunk's reply by its type, so an Rlerror answering a clunk -- a server may report an error while it clunks the fid -- printed `9p: ownerless frame`, the line reserved for frames no mechanism explains. It is keyed on the tag's request now (`9p_client.clunk_rlerror_drains_as_clunk`, red with the old test).
+
+**The audit.** Round 1 (Fable 5.1) found no P0, P1 or P2 and six P3s: a failed spare spawn was never retried, so with the only closer waiting on a silent server every other session's Tclunks waited too (F1: the hand-off now spawns, and the spawning flag stays set until the new closer can take work, so no duplicate); two OOM paths in the sync clunk that lost a live fid (F2); no test of a dying sender that reads the replies itself (F3); a silent leak when the orphan sink cannot allocate (F4); a result field read after a dispatch that may not have filled it (F5); and the trigger row left uncommitted (F6). Plus my own S1 and S2 above. Round 2 (Fable 5.1, on the round-1 fixes) found three more P3s. A hand-off made while a spare's spawn was failing saw the spawning flag, spawned nothing, and waited behind the silent server all the same: round 1's fix had a hole of its own (R2-F1; the spawn now retries, up to three attempts, while a session waits and no closer is idle). F4's refusal guard could not tell a dead session from a live one (R2-F2). And S2's re-key swallowed a malformed reply to an ownerless Tclunk, leaking its tag without a word -- as the Rflush and late arms already did (R2-F3; all three now fail the session closed on a failed dispatch, as an owned reply does). The round's coverage note, that no test pinned the `started` flag, became a test that holds a successful spawn before it readies its closer. Round 2 also surfaced a pre-existing gap it did not ask me to fix: a wrong-type reply to an ownerless op lands in the residue and strands its tag (OPEN-BUGS, needs a design call). Round 3 (Fable 5.1, narrow, on the round-2 diff) enumerated every writer of the spawning flag instead of sampling schedules, found at most one spawner at any instant and no stranded state beyond the two documented residuals, and returned one P3: the client dossier said a malformed late reply fails the session, but a flushed op's tag absorbs any reply. Fixed in the dossier and the comment.
+
+**Evidence.** The WIP hashes below are on the local branch `closer-wip`; main carries the squash. Suite 1768/1768 at 88deb2f5, 1774/1774 at 8dfba5cd and again on the final tree (37cce045), no refusal line. Twenty-two new or rewritten kernel tests, each seen red at its intended assertion: twelve across four sabotage boots at 89fc61fd (A: 10 red, 2 unrelated green; B: 5 red; C: the pool never goes quiet; D: 1764/1764 kernel tests pass and `tools/test.sh` fails on one injected refusal line), round 1's four in one boot at 88deb2f5 (1764/1768: exactly those four, each at its named assertion), and round 2's six in one boot at 8dfba5cd (four sabotages -- no retry, the flag cleared at creation, the guard without its dead term, the dispatch helper ignoring its result: 1768/1774, exactly those six, each at its named assertion). `net_poll_teardown` TLC: two clean cfgs, three reds by their named property, and the liveness cfg fails without weak fairness on `CloserSend`; `9p_client.tla` (no spec change; the demux arms compose its tag machinery): the clean cfg passes (197 distinct states) and all five buggy cfgs are violated. The full SMP gate on 8dfba5cd (the final tree differs from it by one comment): all five rows -- the default kernel at 1, 4 and 8 CPUs, UBSan at 4 and 8 -- 10/10 each, zero corruption, boots of 55-77 s with no bimodal tail. Stratum 20a1a27: `test_9p_pool` red on the old pool at lines 534-536, 20/20 on the fix; ctest 73/73.
+
+**What "fixed" covers.** Every Tclunk a dying thread could not send on a live session whose Spoor holds a session reference; every flushed or abandoned walk's late fid on a session with an orphan sink (every production publisher installs one); a closer that meets a spill-OOM retries for about a second, then reports. The other in-tree 9P servers (netd, corvus and the rest) execute requests serially and only park, so the server-side half of flush(5) was Stratum's pool alone. Still open: an orphan-sink entry queued while every closer is busy and the last spawn failed waits for the next hand-off or for a closer to finish (the sink runs under `c->lock` and does not spawn); a closer spawn that fails three times running, with memory exhausted, leaves sessions waiting on busy closers; a wrong-type reply to an ownerless op strands its tag (printed; OPEN-BUGS); the sync 9P ops still answer a full tag pool with EIO (OPEN-BUGS, needs a design). Stratum 20a1a27 is local until the operator pushes it.
+
+## 2026-09-29 (aux, Opus 5.5 1M, effort max) -- ns names a 9P session root by the file it came over: a second name, because the root's own names everything under a pivot
+
+**The vote.** Operator vote 1 of 2026-09-28 chose option 1, "the file it came from" (Plan 9's form: a mount line names the channel, not the tree), over the file plus the aname, `#9`, and keeping `/`. Through LR-1 every session root's mount line read `/`, the name `dev9p_attach_client` gives a root at birth: login's home was `mount /home/michael /`. The vote is the signoff for the `/proc/<pid>/ns` text; nothing else in the interface moved. Recorded as `dec-2026-09-28-ns-session-root-names`.
+
+**Where the name could not live.** The obvious carrier was the root's own name: stamp `/srv/home-michael` onto `c->path`, as stalk's adoption arm already does for a root opened through a 9P-mode service (which is why `/net` read `mount /net /srv/net` all along). The I-33 row ruled it out before any code: joey pivots to a `t_attach_9p_srv` root, a pivot never re-stamps a published Spoor, and every name resolved under the namespace root derives from that Spoor's `/`. So the name is a second, display-only one on the root's dev9p priv (`origin`, or `origin_dc` for a nameless file), stamped by the two attach inners before `handle_alloc` publishes the root -- the `attached_owner` pattern -- and read by `territory_format_ns` alone. Two readings of the tree made the rule safe: `spoor_clone` copies `aux` shallowly, but every clone is either walked at once (dev9p's walk builds a fresh priv even for zero names) or has its `aux` cleared before release, so no copy of a root carries the name and a bind of `/` still reads `mount /n /`; and a cached-open priv owns no fid, like the root, so the stamp's guard names it.
+
+**What a pipe is called.** "A Haul mount names its dialed connection", the option said; the mechanism it named was "from the fd's own name". For Haul's post form the fd is the posted service, so the shell's mount reads `/srv/haul-e2e`; the private form attaches over pipes, which have no names, so it reads `#|`, the pipe device's spec, and the TCP connection stays Haul's. SYS_ATTACH_9P refuses a non-pipe transmit fd, so `#|` is the only thing that path can say. `ns` gives `#|` the REALM `9p`; that rule moved into `nsmount` so a host test can fail on it (the gates pipe `ns` through `tr`, which gets the raw kernel text, so no device leg ever sees the REALM column).
+
+**A record is append-only.** The dec note's first draft said "`bind / /n` still reads `mount /n /`", but no `bind` command exists. The rewording was refused at the WIP commit: the note was already committed, and the vault's R3 rule forbids changing a record's body. The scripture commit is local and is rebuilt at the squash, where the note is new, so the corrected text rides there.
+
+**The tests were planned around their own early return.** `TEST_ASSERT` returns at a test's first failure, so one boot shows one mutant per test. Nine mutants -- the two stamps, the render, the render's covered guard, the stamp's three refusals, the close's release, the nameless arm -- went into six boots arranged so that each test's first failing leg was the mutant under study, and every expected FAIL line was written down before the first boot. All six matched to the line: thirteen FAIL lines and no other red, including none from a test that returned before its cleanup, the knock-on named in advance. The host mutant, `#|` dropped from the `9p` arm, turned `a_session_root_reads_by_the_file_it_came_over` red, reading `dev`. The device run needed a second try to mean anything. With both stamps removed, both Haul gates went red for the wrong reason: the CI image runs the kernel suite at boot, the two attach tests caught the missing stamps, and the boot extincted before a login prompt, so neither gate reached its `ns` leg -- the HN-1 lesson, a kernel FAIL hiding a device leg, and an exit status of 1 would have hidden that in turn. With those two tests unregistered in the red build only (the boot's suite then read 1751/1751), each gate passed every earlier leg and timed out at its `ns` leg, the guest printing `MOUNT /TMP/HOST2 / REMOTE` and `MOUNT /TMP/HAUL-POST / REMOTE`.
+
+**Two dossiers quoted the old line without owning the code.** At the squash, `quaestor owner` over the changed paths named the five owners WIP 2 had updated and one more: `sub-substrate-interactive` owns `haul-npxf.exp` and still said the child's `ns` shows `MOUNT /TMP/HOST2 / REMOTE`. A search of the tree for the old output then found `sub-haul`, which owns no changed file, promising `mount /tmp/NAME / remote`. An owner census finds the dossiers of the code that changed; a dossier that quotes the code's output is found only by searching for the output. Both are corrected in the squash, and `sub-kernel-territory` now says LR-1's render test runs over unstamped roots. The LR-1 journal entry and change record keep the old line, as history.
+
+**What "fixed" covers.** The source a `/proc/<pid>/ns` line gives a 9P session root minted by either attach handler. A root minted any other way shows its own name, as before (the open=connect roots already read their `/srv` name through stalk's adoption arm). The list's names are still unquoted; that OPEN-BUGS item now notes that the origin carries `/srv` names too.
+
+**Evidence.** Guest, CI image: `mount /home/michael /srv/home-michael`, `mount /tmp/haul-post /srv/haul-e2e remote`, `mount /tmp/host2 #| remote`. At the final code (65d0a475's, which the squash carries unchanged): `tools/test.sh` 1753/1753, zero `[skip]`; `tools/test-rust.sh` 29 crates, 2142 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item); `haul-npxf`, `haul-post` and `ergo-1` green on the CI image (40, 39 and 38 s); `ci-smp-gate` default-smp4 and ubsan-smp4, N=10, 10 + 10 boots PASS, no corruption, external kill, timing or other. The gate's first try stopped before any boot: the worktree's `build/` was cloned from another tree, and the UBSan kernel's cloned CMake cache named that tree. Audit: one round, Fable 5.1 reviewing Opus 5.5, MODEL start == end, 0 P0 / 0 P1 / 0 P2 / 0 P3; its two withdrawn hygiene notes were acted on anyway, and its one confidence note -- that the composed behaviour was red-capable only in the two Haul gates -- is what the red device run answered.
+
+## 2026-09-28 to 09-29 (aux, Opus 5.5 1M, effort max) -- the Operator's Manual's Halcyon and lantern sections: a manual that performs its own tasks found five compositor defects
+
+**The vote.** Operator vote 4 of 2026-09-28: the Halcyon chapter and the lantern section now, as a chunk of their own. Numbered 10 and 11 (02-09 are left for Utopia, the utilities, Vivarium and containers). The chunk closed as six commits on aux-3: five compositor fixes (c7b5293f, f0038768, 4fd4cb65, bc3a04b7, 1d3b5f5c) and the manual with its scenario (2ed27be0), built as topic commits from fifteen WIP commits on the tc branch `aux-3-manual`.
+
+**The code corrected the text before anyone reviewed it.** Two first-draft claims fell to a capture and the code: plain output is a fixed-width terminal view (ut marks output zones, halcyond keeps them `LineClass::Raw`), not proportional; and click-to-focus exists (tapestryd `ptr_btn`), although `ptr_hit`'s doc says it does not (enqueued). ut imports no `$HOME` -- its variable is `$home`, and a leading `~` expands -- so every `$HOME/lib/...` the draft told a reader to type would have read `/lib/...`; the section writes `~/`. Reading the code for the scenario narrowed five more sentences: Super+S and Super+Shift+T act on the focused tile's PARENT and refuse a nested container; Super+E also spreads out a stack; the key reference omits the workspace chords although help.rs calls it the whole vocabulary (enqueued); "no program can delete a tile's history" holds for the delete path only (the budget evicts); lantern's "never shown" holds within the 150 ms hold.
+
+**The accuracy reviews ran while the Mac was main's.** Main held the Mac for NP-4's merge posture through the whole pre-device stretch, so Fable reviewed frozen snapshots. Round 1: 4 P1 / 7 P2 / 11 P3. The P1 worth keeping: the split paragraph copied HALCYON-INSTRUMENT 9.5 ("the new shell starts in the split tile's directory"), but tiles.rs `tile_command` passes only `--home` -- a manual sentence paraphrased from a design doc is a claim about the design, not the system. The text says home, leg 4a asserts it with the split tile's own `/lib/halcyon` as the control, and the divergence is enqueued. The Haul recipe could not work on the serial console (ut's console path drops stdin for a command outside its raw allowlist; haul is not on it), so it says "in a Halcyon tile". Round 2 found a P0 in my scenario: legs 8a/8c waited for `tile N hung up`, which halcyond says only when the terminal exits inside the 2 s grace -- a running command holds the slave, so the line is `killed after the hangup grace`, as the manual's own paragraph says. Its P1: an ended `sleep 60` stays a ZOMBIE row under joey for the session, so `ps | grep sleep` was red on a correct system and green on a broken one; the checks now grep ALIVE.
+
+**Device run 3: the numbers named the defect before the probe did.** Super+H's newcomer took 313 px beside 471 and 470. A mean of 634, 634 and 1 is 423, so I looked for a hidden child of weight 1 and found it in the code: a session's root row holds the console renderer's leaf, backgrounded, and `sibling_mean` averaged every child. My first guess (a restore placeholder left behind) was wrong and the code replaced it before any probe. The probe anyway -- `cat /dev/tapestry/layout` in a tile, captures read -- confirmed the row and showed a second missed op I had not predicted: Super+Shift+Left traded the row's first tile with the hidden leaf (epoch 26 -> 34, nothing moved). KT-1.5d-3 F2's operator-ratified rule already covered both by its own words; the fix's Fable round found the class in halcyond too (the stack numbering counted 3 on a Super+S root row, so the last shown tile's close box closed the session; RESET planned a focus on the console leaf). The probe's first launch "passed" in 7 bytes: a zsh glob with no match aborted the command line before the harness ran, caught because the result was implausibly fast.
+
+**Run 4: a test-mode line that lied by omission.** halcyond's chrome line compared the wanted rect with the strip SURFACE's size, which the strip's own CONFIGURE had already changed, so a header that narrowed in place (632 -> 418 px) was never said and the gate pressed a stale rect. The device also refuted the draft twice: Super+H in a row adds a pane to the row rather than halving the focused one, and at 1280 px a row of three leaves no room to split one side by side, so legs 4-5 as written could never have passed on either tapestryd.
+
+**Runs 6-8: scripture said the opposite of the code.** Leg 9a had never run -- runs 1-5 stopped earlier -- so the scenario was the first thing ever to press Open shell on a session's new workspace, and it found no placard: `halcyond: chrome for pane 12 failed Create`. The helper's own message blamed the press; it had clicked pane 9's placard from workspace 1, because it took the newest placard-sized chrome line anywhere in the transcript. The cause, by code: the new root's owner was 0, so the chrome bind was refused, while HALCYON-WORKSPACES makes a session's workspaces the SESSION's. The fix followed scripture (the principal stamped at each mint, derived, never stored), and the stamp alone made the next defect: the root became claimable and the session filled every new workspace at once (run 7), breaking the i3 vanish rule. My fix keyed the wait on the tree's shape -- the active workspace's lone empty root waited.
+
+**Round 4 found my shape rule wrong, and three pre-existing ways a session's workspaces ended wrong.** F2: a one-leaf `layout restore` onto a new workspace hosts its placeholder into the fresh root, `split` nests it with the anchor, the placeholder closes, the container dissolves, and the anchor became a lone empty root that waited behind a placard. A rule about a pane has to key on how the pane came to be, not on the tree's shape: tapestryd now marks ` fresh` the empty panes it makes on its own account, and halcyond fills one only when asked. F3: closing workspace 1's last tile while workspace 2 held tiles left the console leaf as workspace 1's root, framed, with the focus -- and the keys -- on the hidden console renderer. F1: a logout from workspace 2 left the login prompt on a dormant workspace. The fixes -- the kept last pane (emptied under a new id, since halcyond's respawn guard holds the old one), the departure (silent even in test builds, because login prints its prompt as it runs), the takeover re-stamp -- were structural, so round 5 was owed.
+
+**Run 13: a notice that died with its messenger.** Leg 16, the restore onto a new workspace, was red 3/3: the restored pane never filled, and no claim was even attempted. First theory, wrong: the anchor was fresh or hidden; the code marks it neither. A short probe ran the same restore and it spawned, so the rule was right and the difference was elsewhere. tapestryd sends a session's TEV_LAYOUT to the LOWEST surface slot the seat owns, queued per surface; after churn that is a chrome; halcyond handled TEV_LAYOUT only in its tile loop, and it drops a chrome at every workspace switch, taking a queued or reaped notice with it (`ring::leave` clears `pending`; the retiring arm discarded the last read). The restore's notice was the only one (no geometry changed) and it rode chrome 1 into the void. Pre-existing, I-9's class. The ring now reports a notice whichever surface carries it, halcyond reconciles on the report and does not block while one is pending, and tapestryd re-sends a notice still queued on a surface it retires. A hint on every ring `leave` was rejected: the status bar's mint retry would spin the loop. The rail's chords were suspected of the same loss and cleared by reading (`invalidate()` only clears `painted`). Run 14 replayed the same surface sequence and filled the pane.
+
+**Round 5 was clean**: 0 P0 / 0 P1 / 0 P2 / 2 P3, 18 targeted sabotages each red on exactly its test. F1: my text said any conn's teardown keeps no pane; the code refuses only the seat's own, the better behaviour, so the text changed. F2: a kept pane kept the departed program's `role` and `focusable` (a `nofocus` pane Super+arrow skips); it is now the pane `alloc` makes, and `close_inner`'s root arm, which a comment called pristine, had the same omission.
+
+**Also on the way.** A literal grep: Thylacine's grep has no regex engine, so round 3's `grep '^0 0 0 0'` never matched, and its no-match control passed on the broken check -- a negative control proves nothing about a pattern that cannot match; the positive half caught it. A case-insensitive host: `snap normal-G` overwrote `normal-g` on APFS, and the band compared a file with itself; a capture NAME is a host path. An invisible selection: a session tile banded only the cursor's row, so `v` then `kkk` then `y` changed nothing on screen; it now bands every row, as the console renderer does. At the close, building the topic commits turned up the round-3 test inserted inside another test's doc comment; the comment is back on its test.
+
+**What "fixed" covers.** Five compositor defects, each with host tests red under sabotage and a device leg. The tapestryd re-send arm has not fired on the device -- on run 14 the client hint carried every notice -- and `server.rs` has no host harness, so that arm is verified by reading only. Enqueued, not fixed: the key reference omits the workspace chords; a split's new shell starts in the home directory (HALCYON-INSTRUMENT 9.5 promises the source tile's); a background job outlives its tile's close; a refused arrangement chord gives no status message (5.2 promises one); the stale `ptr_hit` comment.
+
+**Evidence.** Bake 13 (= WIP 15, the final code): `ls-halcyon-manual` 632 s whole, `ls-halcyon-session-instrument` 142 s, `ls-halcyon-lantern` 93 s, `ls-halcyon-lantern-haul` 66 s. `tools/test.sh` on that image: 1750/1750, boot banner, L-6c and D-5 PASS. Host at 1d3b5f5c: tapestryd 112, halcyond 427, libtapestry 11, halcyon 26; every intermediate commit guest-built and host-tested. The squash branch's code equals WIP 15's except the moved test.
+
+## 2026-09-28 (aux, Opus 5.5 1M, effort max) -- FL-1, synchronized output: the program says where its frame ends
+
+**What the flicker was, read from the code.** The operator saw a Lantern slide change flicker over Haul (2026-09-24) and called it acceptable ("we're a console"), but put "flicker (DEC ?2026)" in their order. It has two causes, and the second was not in the 2026-09-24 triage. `lantern`'s `Out` wraps the unbuffered `io::OutSink`, and `lantern::cook` writes once per line segment and once per CRLF, so one slide is about forty writes. And `paint` reads the slide file INSIDE the paint, after the clear has been written (usr/lantern/src/main.rs:282-296), so over Haul the screen sits blank for a network round trip. halcyond renders every dirty tile at the top of each pass and ingests one read of at most 8 KiB per tile per pass (usr/halcyond/src/session.rs ~2106 and ~2841, `INGEST_BUF` = 8192), so each piece is a painted frame. Even one read of a whole slide carries the clear's own four records (ScrollOff, the blank CellDiff, ScreenErased, the slide's CellDiff), and a read boundary between the blank and the slide shows the blank.
+
+**Research before the fork.** A subagent read thirteen terminals in source, plus Plan 9's draw(3) and 9front's vt(1). Every implementation keeps parsing and holds only the render. The timeouts run from 100 ms to 2 s, and neovim, helix, notcurses and Textual use the mode only after DECRQM says yes. The render is halcyond's, so the frame boundary has to reach halcyond: a hold in the kaua-term cannot stop a paint between two reads of a burst larger than one read, and a full 80x24 CellDiff is 40,320 bytes (21 per cell).
+
+**The operator's vote (2026-09-28).** A seam record is a wire ABI change, so it went to the operator as three options: the seam record; a kaua-term hold with no wire change; lantern alone. They chose the seam record: `sync_begin` and `sync_end`, Control subtags 7 and 8, with halcyond holding only the tile's paint until the close, a resize, the program's exit, or 150 ms. The 150 ms is mine, not part of the vote. It comes from the short camp (Alacritty, contour, mintty) because the committed frame budget (VISION 4.5, p99.9 < 33 ms) treats a tail spike as a bug. Recorded as `dec-2026-09-28-sync-output-seam`.
+
+**Subtag 7 was said to be taken, and was not.** TC-1a's wire test comment and the sub-kaua-term dossier (both 1cc9a300, both mine) say "subtag 7 is allocated to another record". No scripture on aux-3 or on main (6a57d37a) allocates it, main's wire.rs ends at 6 like ours, and the one "tag 7" in AUDIT-TRIGGERS.md is the cartoon `Op` tag. The claim was wrong when it was written. FL-1 corrects both texts.
+
+**A parser defect found on the way.** Reading `csi()` for the DECRQM parse turned up three faults:
+- `<`, `=` and `>` hit `_ => State::Ground`, so `CSI > 4;1 m` (vim's modifyOtherKeys) left `4;1m` on the screen.
+- Intermediates were swallowed.
+- The `u`, `s` and `m` arms ignored the marker, so `CSI ? u`, the kitty keyboard query that neovim, helix and fish send at startup, restored the cursor.
+
+It was enqueued first (OPEN-BUGS) and fixed in WIP 1 (d4770ffd): markers are read on the first byte only, intermediates are tracked, an out-of-order byte spoils the sequence, a C0 control runs in place, ESC restarts, and dispatch routes by (marker, intermediate). There are nine new vt tests (84 in all). In the sabotage, with predictions written first, every test went red as predicted except one. On the ORIGINAL parser, the DECCARA test passed: its parameters formed an invalid region, so the aliased DECSTBM reset to full screen, which is exactly what the fix's ignore produces. That was a negative assertion satisfied by a broken fixture. With the fixture changed to a valid aliased region (rows 2-5), all six went red on the original parser.
+
+**A classifier outage** (~13:00-13:40Z) returned no verdict for Bash, Edit and quaestor ten times running and ended the turn. The vote and the state had already been written to the design memory.
+
+**The hold, end to end (WIP 2, ec87a756).** `FrameHold` went into the vt crate because halcyond and aurora both depend on vt and share nothing else. The bound runs from the first paint the hold defers, not from the open, and survives a close and a reopen: a stream of back-to-back frames still paints every 150 ms. A timeout abandons the frame, so a program that never closes one costs one stall. kaua-term maps `Boundary::Sync` like `Bell` (flush, then the record). halcyond skips a held tile's paint at the render step and folds the hold's deadline into the poll timeout. aurora reads the mode and the frame count once per pass through `follow_frame`, which is in its lib so it could be tested; the count exists because a frame abandoned by the bound must not be held again after every paint. lantern renders the slide into one buffer (`slide_frame`: open, clear, slide, close) and writes it once; `Out::put` now cooks into one buffer too, since the cook callback had made every line segment its own write. Host: `tools/test-rust.sh` 28 crates, 2101 tests, 0 failing. Sabotage S4-S16, predictions first, each red on exactly its predicted tests; S10 (7 and 8 renumbered on both sides) is caught only by the literal pin, which is that pin's job.
+
+**The device leg found what the host tests could not.** Leg 8 of `ls-halcyon-lantern` waits for halcyond's one-shot line that a frame held a paint. RED first (a bake with lantern's marks removed and the single write kept): legs 1-3 passed and leg 8 failed at its timeout, so the leg discriminates. Then the real image, and leg 8 failed too: `synchronized frame abandoned at its bound (91612 paint(s) held)`. That count is about 600,000 loop passes a second. halcyond's loop has a rule from before FL-1: before it blocks, `if tiles.values().any(|t| t.dirty) { continue; }` (session.rs ~2760), so a dirty tile renders at once. A held tile stays dirty, so the loop went top -> hold -> continue -> top without reaching the poll, never read the rest of the frame, and the bound abandoned every frame that spanned reads. The host seam test runs vt, producer, wire and tile, but not the session loop, and my self-audit had read the lines I changed, not the rule after them -- the memory's own lesson that a self-audit stopping at the changed function misses the recovery path. The fix: `FrameHold::waiting()` (a paint is deferred inside an open frame), and the pre-poll rule excepts a live tile whose paint is waiting; `due_ms` answers 0 whenever the next `holds` would paint (a dead clock included), so a waiting tile always has a wake. Leg 8 now also fails on 1000 or more held passes, so a spin that still completes its frame cannot pass. The failing run is this fix's RED.
+
+**A near miss of my own.** To save the peer's queue time I ran the vt sabotage harness in the foreground while the fixed image baked in the background, in the same worktree. The harness rewrites usr/lib/vt/src/lib.rs per leg, and the bake compiles vt: the image could have carried a sabotaged `waiting()`, the very predicate under test. I stopped the bake before reading any verdict, checked that no process was left, and rebaked with nothing writing the tree (timestamps: vt restored 18:38:52, halcyond built 18:40:04, the ramfs 18:40:29). Recorded beside the memory's "a clean tree is not a clean artifact".
+
+**Round 2 found what the device leg could not see.** Fable's second round (0 P0 / 0 P1 / 0 P2 / 4 P3) traced the spin fix through every path of the loop and found it sound, then turned to the witness. Leg 8 read halcyond's line that a frame held N paints and was shown at its close -- but N counts the times `holds()` said wait, not paints skipped, so a render step that counted the hold and painted anyway printed `shown (1)` and passed. Its suggested fix, a line at the skip, would not have caught that either: the sabotage that drops the `continue` keeps the line above it. What discriminates is the state at the paint: a frame still open when the paint lands was not shown whole. `painted()` now reports `Cut` for that, and for a frame a reconfigure or the program's exit cut, so only the program's own close reads `shown`; leg 8 fails on `cut short`. The RED bake with the render step's skip removed printed `synchronized frame cut short (1 paint(s) held)` and failed leg 8 at that arm, where the same sabotage had passed before; the GREEN bake passed all eight legs with `shown (3 paint(s) held)`. One thing stayed as it was, on purpose: when every frame hits the 150 ms bound the leg still fails, because a slide crosses the pipe in milliseconds and a slow host is not an explanation this project accepts for a red. The reviewer also noted, without filing, that a failing present re-loops without reading any pipe; read, it is not a defect -- each retry is a synchronous write to the compositor, a stale surface queues the event that heals it, and 240 consecutive failures end the session by design.
+
+## 2026-09-28 (aux, Opus 5.5 1M, effort max) -- LR-1, the `la` realm: the label goes where the truth is born
+
+**The dependency, pulled forward.** The realm's kernel half renders a label on the mount list, and the mount list now has main's B-1d unions (the covered entry). main (c5e057c6) had not merged TC-1b, so aux-3 merged main instead of waiting: 4662ddc1. Two conflicts, both keep-both: the journal (TC-1b's entry is newer, 09:45 against 08:55, so it stays first) and a generated vault view, re-rendered. main's side of the five auto-merged code files was B-1c's heap lines only; I read the diff before claiming it. On the merge, in my own worktree because the aux worktree's `build/` is the operator's image: kernel tests 1732/1732, zero `[skip]`, boot OK, L-6c and D-5; `tools/test-rust.sh` 28 crates, 2067 tests, none failing.
+
+**A duplicate row, in both parents.** Checking the merged `docs/AUDIT-TRIGGERS.md` for repeated headings found the HALCYON-THEME row twice: the TH-1 row one line above its own superset, which carries the TH-3..TH-4c addendum. Both parents had it, so the merge did not make it. Before deleting I proved the first row, less its closing ` |`, is an exact prefix of the second (the second adds 4993 characters): 06ebe868. Pushed to both mirrors; main told (call 0136) that its merge of aux-3 is now a fast-forward.
+
+**The carrier moved, and why.** The vote (2026-09-24) recorded the mechanism as a label passed with `SYS_MOUNT`. The manual's own primary example is `haul --post`, then the shell's `mount /srv/remote /tmp/remote /` (manual 14): there the program that mounts is the shell, and it never learns what is behind the service. A mount-call label is right only for Haul's private form, and a subtree of a remote mount mounted elsewhere would be wrong too. The truth is born where the session is created, and the identity cape already travels exactly that way: `SYS_ATTACH_9P_CAPE` on the private attach, `DMSRVCAPE` on the post, inherited by every attach over the service. So the label follows the cape: `SYS_ATTACH_9P_REMOTE` and `DMSRVREMOTE`, a flag on the session, and the mount list reads it from each entry's source when it renders. I first wrote that the ABI signoff stood and only its bits had moved. main answered (call 0136, turn 2) that the vote signed off a mount-syscall change, so two different bits on two other syscalls are a syscall interface change the operator had not approved. The vote record agrees ("the mount-syscall ABI change is SIGNED OFF"). I put it to the operator with the mount flag beside it, and the operator chose the session (2026-09-28). The WIP kernel commit stayed on its side branch until then; nothing of it had reached aux-3.
+
+**Two more decisions of mine, under the operator's "go with your guts".** `ns` with no operand showed pid 0, the system root, which never holds a shell's mounts, so `ns` could not show the Haul mount at all; Plan 9's `ns` defaults to the caller, and now so does this one (`ns 0` keeps the root). No gate runs `ns` bare (grep of `tools/interactive`; coreutil-smoke's leg is a write failure either way). And `#9` now reads `9p` rather than `disk`, though the first boot showed that label almost never appears (below). main's queued item (the boxed view drops the `noexec`/`pheno-linux`/`covered` suffixes) folds in as a FLAGS column.
+
+**Stale claims met on the way.** `realm`'s usage says `realm /srv` prints `graft`. devsrv has a `stat_native` (it is not among the six Devs without one: devcap, devnone, full, null, random, zero), so the stat crosses and the tool prints `fs`. Under LR-1 a mount point prints `mount`, so the example gets rewritten to what the guest leg shows.
+
+**A claim read from code, carried as an observation.** HAUL-DESIGN 4.8 said the operator's `ns` called the Haul mount's source `disk`, and I had put the same claim to the operator twice: in the 2026-09-24 question (in the option it did not choose) and in the third option of the 2026-09-28 one. The operator reported only `la` (observation 2). The `disk` claim was a reading of `ns.rs:55` (`#9` -> `disk`) and of the `#<dc>` branch in `territory_format_ns`, on the premise that a 9P session root has no name. The first boot of the new tests refuted it: 1739/1740, `dev9p.remote_format_ns` failing at "an unmarked session: no suffix", and the diagnostic I then added to the test printed `mount /m /`. `dev9p_attach_client` names every session root `/` at birth (`kernel/dev9p.c:598`), and `territory_format_ns` renders the source's name, so an unlabelled Haul mount read source `/` and REALM `fs`, and `ns` with no operand did not show it at all. `#9` is only the allocation-failure fallback. Corrected: the test and both guest `ns` legs expect `/`; HAUL-DESIGN 4.8, COREUTILS-THYLACINE-DESIGN and manual 14 no longer say `disk`, and the carrier decision is restated as `dec-2026-09-28-remote-label-carrier-r2` (a record note is append-only, and the vault lint refused my in-place edit); the 4.8 votes paragraph no longer credits the `ns` changes to the operator's vote (they are mine); and the `dev9p.c` comment that said the raw `/` surfaces only at a namespace root now names the mount-table source too. Neither vote's chosen option rests on the claim. The diagnostic stays, so the next red in that test prints what was rendered.
+
+**The audit, and a finding the boot had already made.** One round, Fable 5.1 reviewing Opus 5.5 (MODEL start == end): 0 P0 / 1 P1 / 0 P2 / 2 P3, not dirty. F1, the P1, was the `/` label above. The first boot had found it an hour before the report arrived, the reviewer by reading `dev9p_attach_client`, the boot by printing what was rendered, so the report confirmed it rather than discovered it. F2: the kernel renders `/proc/<pid>/ns` into a 2048-byte buffer and drops the newest whole lines when it fills, writing `binds:` only after a list that fit (#66b). A remote mount past the cut read `fs` in `ls -l`, and `ns` counted `0 binds`. The tools now read a list without its `binds:` line as cut and say `mount list incomplete` (the `ls -l` footer, stderr for plain `ls`, `stat` and `realm`, `ns`'s count cell). Measured on the device, a login shell with one Haul mount writes 495 bytes in 21 lines, so a cut needs about four times as many mounts; the fix turns a silent misreading into a sentence. F3: `dev9p_spoor_remote` refuses a priv without dev9p's magic, and nothing witnessed it; a forged priv naming a marked session now reads not remote under the wrong magic and remote under the right one. Closed list: memory `audit_lr1_closed_list.md`.
+
+**Fifteen mutants, six boots, and what the boots taught me about my own tool.** Every kernel site LR-1 added got a one-line mutant, with its failing test and message written down before the boot, and the boots were batched so no two mutants shared a detector: the suite runs on past a FAIL, but a test shows only its first failing assert. Four boots matched exactly. Boot 1 missed one prediction: deleting the recycle arm's write to the declaration passed, because the same boot also deleted the rebind identity check. `srv_reserve_in`'s common tail rewrites the declaration on every arm, so the recycle arm's own write matters only because the identity check reads it; alone (boot 2) the mutant refused the post, as it should. Boot 2 was contaminated: my restore used `shutil.copy2`, which keeps the backup's old mtime, so `make` kept boot 1's sabotaged `9p_attach.c` object, and two legs failed for the wrong reason. The tool now restores with a fresh mtime, and boot 5 re-ran the contaminated mutant alone and matched exactly. That is the third form of a known lesson: a clean tree is not a clean artifact. One candidate mutant, dropping `ok &&` before the suffix write, is equivalent (a write after a failed write cannot succeed), so the mutant that counts is "ignore the write's result", which the 13-byte cap leg kills.
+
+**On the device.** On the CI image `ergo-1`, `haul-npxf` and `haul-post` pass. The transcripts show the child's `ls -l` reading `REMOTE` at `host2` beside the shell's own listing reading `FS`, `haul-post`'s listing reading `REMOTE` for the shell's mount of the posted service beside `FS` for its unmounted sibling, and `ns` ending `mount /tmp/haul-post / remote`. With the declaration stripped from both of Haul's paths, both Haul gates passed every earlier leg and failed at their first LR-1 leg. With `realm_of` ignoring the mount list, `ergo-1` failed at its LR-1 leg, `/srv` reading `FS`. The same transcript confirmed joey's `/net` line (`mount /net /srv/net`) and showed a legibility gap LR-1 did not make but now sits beside: login's home reads `mount /home/michael /`, which is also what a bind of the namespace root would print. The source column is a format, so that went to OPEN-BUGS for an operator vote. The other gates that run `ls -l` or `stat` (`ls-3a`, `ls-halcyon`, the instrument gate's `ls -l /bin`) assert no realm and see an unchanged layout: the REALM column widens only when a `remote` row is present, and the footer appears only on a cut list.
+
+**The final gates, on the tree that was squashed.** Default image: `tools/test.sh` 1740/1740, zero `[skip]`, the boot banner, arc gates L-6c and D-5. `tools/test-rust.sh`: 28 crates, 2077 tests, 0 failing (libutopia's 69 stranded tests are pre-existing and queued). `corvus.tla` maps PostService to `srv_reserve`, which LR-1 changed, so its eight buggy cfgs were re-run; each still finds its counterexample, as it must, since the spec does not model a service's attributes. One wrong step: I started the clean `corvus.cfg` too, which the spec policy has suspended since 2026-05-21; it ran past ten minutes and I stopped it and removed its state directory.
+
+Scripture: HAUL-DESIGN 4.8, COREUTILS-THYLACINE-DESIGN (REALM, `realm`, `ns`), the ARCH `/proc/<pid>/ns` paragraph (its suffixes were never listed), manual 14 (a task and a technical section), the LR-1 audit row. Dossiers: sub-haul, sub-kernel-{syscall-abi, syscall-dispatch, devsrv, srvconn, ninep-attach, ninep-client, ninep-dev9p, territory}, sub-coreutils-{lib (now claims `nsmount.rs`), presenters}, sub-substrate-interactive; the change note `chg-2026-09-28-lr1-la-realm` flips the old carrier note to superseded.
+
+---
+## 2026-09-28 (main, Opus 5.5, effort max) -- #98: one read was doing two jobs, and a checker that could not pass on the jar I had given it
+
+**The red.** The SMP gate on aux-3 06ebe868 -- the tree the aux-3 fast-forward
+would put on main -- came back 49/50. ubsan-smp8 boot 10 failed viv-pheno-probe
+leg L113: a `ppoll(POLLOUT, 0)` on a freshly accepted socket returned 0 (the
+boot's log is in session scratch, not the tree). main stays at c5e057c6 until
+#98 is closed.
+
+**The mechanism, read, not guessed.** dev9p's readiness bridge had one
+primitive for two jobs: a readiness Tread on the socket's `ready` fid, offset =
+the event mask, which netd answers only once the socket is ready. It was the
+SAMPLE a verdict rests on and the ARM that wakes a parked poller, and a truthful
+"not ready" could not be said on the wire at all. A poll that had to return
+read a per-Spoor cache of whatever the relay had delivered (`cached_revents`,
+`DEV9P_POLL_VALID`). The vivarium widened a literal 0 to a 10 ms budget
+(`VIV_PPOLL_PROBE_MS`, vivarium.h:1940), and under UBSan at -smp 8 the reply
+lost that race. A budget only moves the deadline the relay races.
+
+**A second pair of eyes.** My first framing offered the snapshot bit as a
+cache-miss fallback. The operator asked for a Fable review -- "a more proper
+systemic solution, not something bolted on". It found the defect structural and
+wider:
+- The kthread's stranded-probe collector runs before its pump
+  (`dev9p_poll_service_once`, Phase 1 before Phase 3). A ready reply then lands
+  as `demux_orphan_late` and is discarded, which starves a socket beside an
+  always-ready local fd; this is deterministic at -smp 1.
+- A VALID cache survives across calls and can report a level that a competing
+  reader has already lowered.
+- A submit that fails under tag exhaustion reports POLLERR
+  (dev9p_poll.c:276-279).
+
+The research agreed. The Hurd hit this exact bug in 2012: Debian's first
+workaround was a 1 ms floor, and the fix, `io_select_timeout`, carries the
+deadline to the server. QNX's `_IO_NOTIFY` separates POLL from POLLARM.
+
+**Three votes** (dec-2026-09-28-poll-sample-arm-split):
+1. The SAMPLE/ARM split. A SNAPSHOT read, answered at once, is the only sample.
+   The deferred read is only the arm, sent before a park. Every pass settles
+   before it decides, and the cache goes.
+2. A server that never answers a snapshot is handled by a bounded, counted
+   fail-safe.
+3. The bound is a fixed 1 s from the send, never cut short by the call's
+   timeout.
+
+The third vote exists because my own option text was wrong. I had offered "the
+call's own deadline" as a bound. For timeout 0 that deadline has passed before
+the snapshot is sent, which is #98 again, one layer down. I surfaced it before
+the vote. NP-1 (7c1dc314) landed the scripture.
+
+**NP-2, the model first.** `net_poll.tla` was rewritten, not extended. The old
+module's `ready` was monotonic and its poller only parked, so it had no state in
+which #98 could happen. It now models the timed and zero-timeout poller, a
+level, the snapshot, the settle, a server that may hang, and the collector.
+Every red cfg is one flag from a clean one and fires by the mechanism it names:
+- The #98 path is `AdvanceTime SocketReady Scan Verdict`.
+- The rejected bound (`BUGGY_SETTLE_CUT_BY_DEADLINE`) fails the same invariant
+  against a healthy server.
+- `net_poll_failsafe_fires.cfg` is red by design. Against a hung server
+  `FailSafeSilent` must fail, or the counter could never move.
+
+`poll.tla` gained remote fds, the settle, the arm and sample-only passes.
+`BUGGY_VERDICT_BEFORE_SETTLE` reproduces the local-fd starvation Fable found
+(`MakeReady MakeReady Register EvaluateFirst`). Distinct states: net_poll 118
+(timed), 36 (poll(-1)), 308 (hung server); poll 3562 (timed), 1206 (poll(-1)),
+3242 (every fd local).
+
+**The wrong turn: a checker that could not pass on the jar I had given it.**
+Before touching `check-poll.sh`, I ran it on the unmodified tree. It FAILED its
+two temporal cfgs, a gate b7132455 had recorded green. The cause was mine.
+Earlier this session I had refilled a missing /tmp/tla2tools.jar from
+~/tla2tools.jar, a TLC2 2.19 build from Aug 2024. That build reports a liveness
+violation as "Temporal properties were violated." without naming the property.
+SPEC-POLICY's documented v1.8.0 download (TLC2 2026.09.25) names it.
+check-cow.sh and check-syscall-irqs.sh failed the same way on 2.19 and pass,
+unmodified, on the documented jar. The two scripts NP-2 touches now accept
+either wording, and accept the unnamed one only from a cfg that checks that one
+property. The lesson: run the baseline before the change. Had I run the new
+model first, I would have blamed the model.
+
+**Found in passing, fixed here.** Since b7132455 the SPEC-TO-CODE poll table
+had carried the counts from before ARCH 8.12 (2194/968), `IrqLatencyBounded`,
+and the deleted `poll_buggy_no_point.cfg`. The quaestor MCP server reads a
+stale vault root (it returned spec-poll's 08-01 text); the CLI with `--root`
+reads this tree.
+
+**NP-3: first, where could the tests run?** The voted plan gives NP-3 host
+tests, so the first question was where any could run. netd and ptyfs link
+libthyla-rs unconditionally. libthyla-rs cannot be built for the host, because
+its `_start` is ELF assembly. So tools/test-rust.sh classes all three NO-HOST,
+and a test added to any of them would be counted and never run. The 9P codec
+inside libthyla-rs has 820 lines, no dependencies and no system calls, and for
+the same reason it had never had a test. NP-3a (5caa79ae) moved it unchanged
+into its own crate, `usr/lib/ninep`, re-exported under the old path so that no
+caller changed. It added eight tests of invariants its dossier already claimed,
+and I ran four sabotages, one per invariant family; each turned its test red.
+
+NP-3b put the protocol decision in that crate as `ninep::ready_answer`. A
+snapshot is answered at once, even when the answer is 0. An arm is answered on
+arrival if the file is already ready. Any other offset bit is refused with
+EINVAL. The reply is cut to the Tread's count and the msize. Both servers call
+it with their own level function, so they cannot drift apart. It has seven host
+tests, and five sabotages each turned exactly their own test red. Two of those
+sabotages were the old servers' behaviour and an edge-triggered arm, which is
+the spec's `edge_arm` red, now a unit test as well.
+
+**Found while reading, fixed by the shared cut.** ptyfs replied with 4 bytes to
+a readiness read whatever count the Tread asked for, and its held reply did the
+same. The kernel refuses an Rread longer than its Tread (9p_client.c,
+`r.read_count > count` -> -EIO), so a guest read of fewer than 4 bytes from
+`<n>ready` failed with EIO. netd cut its immediate reply to the count but not
+its held one. **Found while reading, enqueued, not fixed:** netd's fid table
+holds 32 fids per session, and the whole guest uses one session. It also has
+16 socket slots of two or three files each. That this can exhaust the table is
+suspected, not confirmed (OPEN-BUGS).
+
+**On the device.** joey's net-6b probe and pty-probe each read their `ready`
+file directly with pread. The undefined bit came back refused (-22). A POLLOUT
+snapshot came back POLLOUT. A POLLIN snapshot of an idle file came back 0 at
+once. A 1-byte read came back cut to 1 byte. The refusal check runs first on
+purpose. A server that ignores the high bits answers (1<<17)|POLLOUT at once,
+which is a clean failure, where it would hold the POLLIN snapshot and hang the
+boot. The red runs:
+With netd's pre-change file, joey stopped at "net-6b PROBE ready: an
+undefined offset bit was not refused with EINVAL FAILED", and the boot
+extincted (test.sh rc=1). With ptyfs's, pty-probe stopped at the same check,
+joey reported PTY-2e FAILED, and the boot extincted, while netd's witness
+passed in that same boot. Neither run hung.
+
+**A wrong turn.** NP-3a's path search looked for `libthyla-rs/src/ninep.rs`. It
+missed three live mentions written as a bare `ninep.rs`: two in 9P-EXTENSIONS
+and one in the abi-ninep-wire pin. They surfaced while I was checking whether
+9P-EXTENSIONS should record the readiness wire. It should not, since it
+registers message types only. They are repointed in NP-3b.
+
+**NP-4, designed before a line of it was written.** The voted design says what
+the kernel does when a server answers or hangs. It does not say what it does
+when the kernel cannot ask: no free 9P tag, a full send ring, no memory. Reading
+`p9_client_submit_async` for that answer found a bug. A send that meets a full
+ring returns `P9_TRANSPORT_EAGAIN` (-11, `9p_transport.h:174`), and the async
+path treats every negative send as a broken stream (`9p_client.c:1150-1156`,
+`client_mark_dead_locked`), so one full ring kills the whole shared session. The
+synchronous path has handled that case as back-pressure since #349 (and its
+Tflush twin since #53); the async path, used by every dev9p arm and every Loom
+op, never did. NP-4 would multiply it, since every poll pass sends snapshots.
+It is enqueued, and fixed first as its own sub-chunk (NP-4b): a send that cannot
+go out now returns a retryable `-P9_E_AGAIN`, and the session stays alive.
+
+What poll does then follows from votes 2 and 3 rather than from a new question.
+A snapshot that cannot go out is sent again, within the same fixed 1 s that
+bounds its answer, and past it the fail-safe answers and is counted, as for a
+hung server. An arm that cannot go out leaves nothing that would ever wake the
+parked poller, so the park is bounded by a 10 ms retry timer and the next pass
+samples again. Neither case reports an error or a readiness that was not
+observed. The model owes this before the code: net_poll.tla gains an arm that
+may fail and the retry, with a sabotage that parks without it (NP-4a).
+
+**NP-4a, the model first.** net_poll.tla gains `ARM_MAY_FAIL`: the arm can fail
+to go out (`PollerArmFails`, which may leave no hook either, as a poll-state
+allocation failure would), and the park is then bounded by the retry timer
+(`RetryTick`). poll.tla lets any subset of the remote fds go unarmed and gains
+`RetryWake`. Each I-9 invariant gained one conjunct: a poller asleep on a ready
+fd must have a hook with a wake behind it, or the timer. Without `ARM_MAY_FAIL`
+a sleeping poller holds a hook on every fd, so the conjunct cannot change the
+older cfgs, and their state counts came back identical (118/36/36/118/308 and
+3562/1206/3562/1206/3242). That is the check that the extension left the old
+model alone. There are three new reds: a park with no timer, once in each module
+(NoMissedNetPoll, NoMissedPoll), and one the design memo had not listed,
+`poll_buggy_retry_is_timeout`. It came from reading the loop the code will
+change. Today's `sys_poll_for_proc` takes its final pass on any TIMEDOUT, and a
+retry timer is also a tsleep deadline, so the obvious implementation returns 0
+ten milliseconds into a ten-second poll (NoSpuriousZero). The clock has to
+decide, not tsleep's return code. Each new liveness cfg was shown able to fail
+with the retry removed. My first try at the poll one reported `Invariants`
+instead: the cfg checks both, and the invariant fires first, which proves the
+invariant and not the property. With the invariants taken out of the sabotage
+cfg, it fails `StableReadyReturns`. TLC's coverage shows the new actions taken
+in the clean runs (PollerArmFails 12 times, RetryTick 12, RetryWake 32).
+
+**NP-4b, and what the retry test found.** The fix is small. An async submit now
+checks for a free tag before it builds, and on a full ring it clears its
+in-flight slot and reclaims the tag; either way the op completes with
+`-P9_E_AGAIN` and the session stays up. Both regression tests failed first on
+the unfixed code, at their return-code check (-5 where -11 was owed, and the
+session dead). With the tag-only reclaim, the full-ring test still failed, one
+step later: the same Tclunk, resubmitted, would not build.
+`p9_session_send_clunk` unbinds its fid when it builds the frame, so a Tclunk
+that never left took the fid binding with it, while the server still held the
+fid. The sync never-sent paths have done this since #52 by choice: their owner
+is dying or failed, and a fid nobody clunks again leaks only server-side, since
+fid numbers are never reused. An async submitter that is told to resubmit is the
+case that choice did not cover. `p9_session_retract_unsent` takes the op back
+whole (the tag, and the fid) under the lock the build held, which is also what
+9p_client.tla says: it has no step for a send that never happened. The suite is
+1734/1734. Reading the sync path for the header's errno text turned up one more
+thing: a sync op that finds the pool full still fails with `-EIO`, and the pool
+is shared with poll arms that are held until readiness. That is enqueued in
+OPEN-BUGS as a design question. It needs one, because a sync op that waits on
+tags held by readiness waits could wait forever.
+
+**NP-4c, the kernel.** Three Dev slots replace dev9p's `.poll`:
+`poll_snapshot`, `poll_snapshot_release` and `poll_arm`. A pass of the poll core
+now scans (a local fd registers and samples; a remote fd is sent a snapshot and
+hooks nothing), settles (every snapshot of the pass answered, or failed safe
+after a fixed 1 s from the scan's end, an unsent one resent every 1 ms),
+decides (the clock decides TIMEDOUT), arms each remote fd it will wait on
+(an arm the ring refused bounds the park by a 10 ms retry timer) and parks. The
+per-Spoor cache, `DEV9P_POLL_VALID` and the vivarium's 10 ms widening are gone.
+A fail-safe prints `poll: FAILSAFE`, and `tools/test.sh` fails a boot that
+prints one.
+
+**Found while writing a test: the collector let go of an arm too early.** The
+kthread took a stranded arm off its registry under `g_dev9p_poll_lock` and
+flushed its read only after the unlock (#294's Phase 1 and Phase 2b). A close in
+between found no arm to cancel, and the session refused the close's Tclunk
+because a read on the fid was still live. `dev9p_close` has no fallback, so the
+server's slot stayed bound until the session ended. The flush now runs in the
+locked step that unlinks the arm (lock order `g_lock -> c->lock`, which the
+arm's submit already used). `net_poll_teardown.tla` gained `BUGGY_SPLIT_GC`,
+red on `Liveness`. The regression test stops the kthread in that window
+(collector mode HOLD) and closes the file there. With the old order the console
+printed `clunk of fid 1 refused rc 5` and the test failed.
+
+**A red for the wrong reason.** My first widen test went red under its
+sabotage (the old arm flushed before its replacement is on the wire), but only
+because the setup's full-ring budget ran out one refusal early. The assert that
+failed was about the ring, not about coverage. A sabotage that reddens a test
+through its fixture proves the fixture, not the rule. The test now gives the
+ring two refusals, answers the old arm, and asserts its pollers were woken.
+Both widen sabotages fail at exactly that line.
+
+**The red runs, and a test that could not fail cleanly.** Fifteen sabotages, one
+build and boot each, in three batches. Every one of the ten `dev9p.poll_*` tests went red on its
+named assert under at least one. The loud fail-safe passed every kernel test
+and failed `test.sh` on its console line. Under `no_qtpoll_gate` the
+regular-file test failed as intended, then left a live snapshot whose slot was
+on its dead stack frame. The answer landed there, and the next test hung the
+boot for 300 s. The other tests had the same exposure through hooks on their
+stacks, a poller thread and a global client the next setup re-initialised under
+the kthread. The fixture and its hooks now live in static storage. `np_setup`
+refuses while a fixture is up, and the runner releases one a failed test left
+behind (`NP-FIXTURE`). Rerun: each sabotage reddens its own test and no other,
+with no hang. `dev_register` now refuses a Dev with a partial triple; the
+sabotage without `poll_arm` extincts the boot there.
+
+**The on-device control.** The in-kernel tests cannot show that a guest sees
+the fix, so one sabotage answers a real session's readiness file from nothing
+on a pass that cannot wait (the old cache miss) and leaves the test path alone.
+Every kernel test passed (1742/1742), and the boot failed at exactly
+`joey: V-1b linux-phenotype leg FAILED marker=L113`: viv-pheno-probe's
+zero-timeout `ppoll` of a writable socket is a witness of the closure, not
+only of the old 10 ms budget.
+
+**The refusals, pre-existing.** Every boot prints
+`9p: close: clunk of fid N refused rc 5` about fourteen times, NP-4c or not.
+One instrumented boot named the path of each of its sixteen. Thirteen come
+after the server has gone (the corvus test that tears its connection down, and
+the vivarium's `/dio/sys` and `/dio/proc` as each container's diorama exits),
+so the fids went with the connection; the line only reads like a leak. Three
+are a leak: `/goroot/bin/go` on a live session, never sent.
+`client_send_flow` refuses any send from a thread whose Proc is dying, before
+it tries the ring, so a killed process's last-ref close of a 9P file drops its
+Tclunk, and the server holds the fid for the session's life -- for the root
+sessions, the uptime. The comment above the call calls this a narrow race; the
+check is unconditional. Plan 9 queues exit-time closes to a kernel process
+(`ccloseq`, `closeproc`); Linux v9fs retries once and then leaks the fid
+until unmount. The fix is a design choice, so it waits for the operator's vote
+(OPEN-BUGS).
+
+**The audit.** Fable 5.1 prosecuted NP-1 through NP-4c at `d785bd70`,
+now `24e0ac0d` (its first and last lines named the same model). It found 0 P0,
+0 P1, 0 P2 and 2 P3, and ran both spec scripts itself: every clean cfg reached
+its documented state count, and all 21 red cfgs broke their named property by
+the documented path. F1: a `ready` fd's Tclunk at close is refused for a dying
+sender, so a netd slot leaks. That is one more instance of the Tclunk leak
+below; the arm's own Tflush is not exposed. Its prosecution was wrong about
+where, though. The at-exit handle drain runs inside #68's exit-close window,
+where the Tclunk is sent; the exposure is a last reference dropped by a dying
+thread outside that window. F2: a widened arm wakes a co-poller for events it
+did not ask about. The co-poller samples again and parks again, so it costs
+CPU, not correctness. My own two findings were P3 as well, closed with reasons.
+A clean round, so no second one.
+
+**Where the killed thread closes it.** A second instrumented boot printed who
+made each never-sent close and walked the caller's frame records. The saved
+return addresses carry pointer-authentication bits; stripped and slid by the
+KASLR offset, they symbolize. All three are the same: a `go` process whose
+group-exit message is `killed`, still in its kernel spawn thunk.
+`sys_spawn_full_argv_thunk` clunks its exec Spoor after `exec_setup_from_spoor`
+(`kernel/syscall.c:9383`). gopls kills a `go` child it has just spawned, before
+the child reaches its first user instruction. My triage note had guessed the
+address-space teardown; the chain says otherwise. The readiness paths are not
+exposed to the same refusal: the async submit and the abandon's Tflush write
+the ring without the dying check.
+
+**The operator's vote: a closer thread.** Offered four ways to deliver the
+Tclunk of a dying thread: Plan 9's `ccloseq`/`closeproc`, the Linux v9fs shape
+(send if the ring has room, else leak), both, or a third setter of the #68
+exit-close window. The operator chose the closer (my recommendation): a
+Tclunk a dying thread cannot send is taken back whole
+(`p9_session_retract_unsent` re-binds the fid) and sent by a kernel thread
+that is not dying, holding a session ref. The refusal line will print only
+while the session is live, so it names a real leak and a gate can require
+zero. The capability microkernels agree on the principle: Zircon closes a
+dead process's handles, Mach sends no-senders, Genode's parent closes a dead
+child's sessions. The fix comes after the NP-4 merge, scripture first.
+
+**The rebase.** While the audit ran, aux-3 moved to `eb9a74ea`, carrying
+LR-1 and FL-1. LR-1's code (`728d627c`) touched seven of the kernel files
+NP-4 touches: `kernel/9p_client.c`, `kernel/dev9p.c`, their two headers,
+`kernel/syscall.c`, `kernel/test/test_dev9p.c` and `kernel/test/test.c`. Git
+merged all seven without a conflict. `git range-diff` shows no NP-4 code line
+changed. What differs is context, this journal (both sides kept), the
+rendered coverage view (rendered again), and three dossier `updated:` stamps
+that LR-1 had already moved to the same day. A clean text merge says nothing
+about how the two kernels behave together, so everything ran again on the
+combined tree (`a402cb70`):
+- the suite, 1750/1750, with no `poll: FAILSAFE`;
+- the SMP gate, all five rows: ubsan-smp8 and default-smp1 25/25 and
+  25/25, then default-smp4, default-smp8 and ubsan-smp4 10/10 each;
+- on the CI image, the PTY and network legs, 14/14: ls-ci, pty-4,
+  pty-susp-pouch, item10-ctrlc, viv-console-ctrlc, viv-run, the five haul
+  legs, git-shell, ergo-1 and prowl;
+- the Rust host tests, 2120 in 29 crates with none failing, and haul's live
+  npxf interop test, which is ignored unless a server is up.
+
+The spec files are byte-identical to the tree the two spec scripts ran on, so
+their counts stand.
+
+The early gate on `d785bd70`, 50 of 50, was evidence about NP-4 on its old
+base only.
+
+**pty-4 was red, and not because of NP-4.** Its type-ahead leg waited for the
+editor's redraw to end with cursor-forward 35, which is 4 columns of inner
+prompt plus the 31 typed characters. Since `1e5d2751` (09-23) the inner shell
+that ptyhost starts shows its inherited working directory, `/home/michael`, so
+the redraw ends at 47 and the anchor could never match. It failed three
+attempts of three, with the whole line visibly in the editor each time: 31
+redraws, one per delivered character. The leg has been red on main since that
+commit, because no merge since then ran the interactive legs, and NP-4 touches
+neither the shell nor ptyhost. The anchor is now the editor's redraw of the
+whole line (`8d747730`), and it passes on this tree. To see it fail, ptyfs was
+sabotaged to discard any pending line longer than 8 bytes. Its boot selftest
+types 2 bytes and still passed, and the leg failed at this step: after the
+cooked echo the editor stayed empty. Discarding every line instead stops the
+boot at that selftest (`modeflush-raw-delivered`) before the leg can run.
+haul-npxf and haul-post need an npxf server on the host, so the first run
+skipped them; both passed against a read-only fixture on ports 5640 and 15640.
+
+**Open.**
+- The kill-time Tclunk leak: the closer thread, scripture first, then the
+  fix, its tests and an audit. One question goes to the operator first. Plan
+  9's closeproc is a pool: `ccloseq` spawns another close proc whenever none
+  is idle, so a close stuck on one server never delays another. One thread
+  here could be wedged by a single stuck server, because a session attached
+  over a pipe has no receive deadline.
+- The flushed-request class, all found by reading, none seen on a boot yet:
+  - the kernel absorbs a late reply to a flushed request without its state
+    change, so a walk's new fid leaks (`kernel/9p_session.c` around 1043);
+  - a sync Tclunk answered by a bare Rflush was cancelled, so its fid is
+    still live on the server, but the client unbound it when it built the
+    Tclunk;
+  - stratumd runs a request flushed mid-execution and then discards its
+    reply (`src/cmd/stratumd/fs_pool.c`), where flush(5) says a completed
+    request's reply must reach the client.
+- ptyhost starts its inner shell without `--home`, so a nested shell has no
+  `$home`: `cd` alone does not go home, and the prompt shows the full path.
+  Whether ptyhost should forward the session's home is still to decide.
+- Then NP-5 (the vivarium's per-call open of each socket's `ready` file).
+- ~/tla2tools.jar is still the stale 2.19 build. It is the operator's file, and
+  I have not replaced it.
+- check-syscall-irqs.sh does not sweep its TTrace files; specs/ holds 152 old
+  ones.
+
+---
+## 2026-09-25 to 09-28 (aux, Opus 5.5 1M, effort max) -- the fix keyed on a counter that the tile never moved
+
+**What this was.** TC-1b, the operator's second vote made code: THE HISTORY IS THE USER'S, so no escape deletes it
+and a user chord does. Super+K (`history`, keycode 37) goes to the rail owner as TEV_CHORD code 4 carrying the
+focused pane's id, with no fallback and no verb; `Transcript::forget` drops the history and nothing else, keeping as
+HUSKS the blocks the live screen still names. Scripture 283f3a60; the implementation came as four unbuilt WIPs
+(944d8b8d, 4b22ef8b, 92c9d69b, 090bc81f) because the mac was main's for its B-1d landing gates all morning.
+
+**The consumer audit.** Before writing forget I listed every consumer of a block's position (the selection, the
+height cache, the layout cache, the pin, the inline cache, the click map). Two of them were already broken without
+any forget: the Normal-mode selection held flat POSITIONS and drifted a row per eviction (OPEN-BUGS, P2), and a tile
+never re-read its flat list across scroll-off (SA-2). The chord made both worse, so both were pulled forward.
+
+**The fix that could not run where it mattered.** WIP 2 rebased the selection by what the transcript dropped from
+its front, keyed on `Transcript::seq`: refresh re-reads the list only when seq moved. Round 1's P0 (Opus reviewing
+Opus; Fable out of credits): push_scrolled_rows, flush_scroll_pending and set_max_cost never bumped seq, so in a
+tile -- the only place the rebase mattered -- it never ran; my own G1 test would have failed, had anything compiled
+it. A mechanism keyed on a counter is only as live as the counter's writers: enumerate them before trusting the key.
+
+**Positions beat keys -- but not alone for grid rows.** F2 [P1]: a grid row that scrolled off as the first half of a
+wrapped line mapped to the line before, because the end-anchored formula assumed one history row per scrolled row.
+The transcript now records, per line a scroll-off finalizes, where its rows end and the flat rows it added (a ring
+of 1024); `scrolled_row` counts back from the end. That record is only exact if EVERY flat row in a tile's history
+arrives through a recorded line -- the invariant round 2's self-audit then tested by listing every item push site.
+
+**A claim of mine that was false.** WIP 2's message said the tile test's first zone "was dropped for want of a row".
+In cells mode freeze_open KEEPS a block with objects or an output zone; WIP 3's message corrects it. I had stated a
+rule from memory about the code I was changing.
+
+**Round 1's other findings.** A forget kept a byte-fed zone's open pre lines and finished table rows (F3); husk
+placeholder slots were uncharged, a bare obj's placeholder collided with a real one, and husk lookups were linear
+(F4/F8/F9: the husk is now sparse, sorted by id, binary-searched, charged per entry). Two were pre-existing and are
+fixed here with OPEN-BUGS entries: an obj was charged its text only and objects bypassed the open-block cap, so a bare
+obj was free (F5: about 196 MB reachable against a 64 MiB heap), and a block-cap continuation dropped the running
+command, so Super+Q closed a running job without asking (F6). The rest were P3s, each fixed or dispositioned in the
+closed list (F10-F16).
+
+**Round 2 and its self-audit.** Round 2 (Opus again) returned 0 P0 / 1 P1 / 5 P2 / 6 P3; four of them (F4-F7) the
+self-audit beside it had already found and fixed. The self-audit enumerated every `items.push` in
+transcript.rs against the ring's invariant and found a pre-existing phantom: a tile's block frozen mid-pre by the
+block cap gained an EMPTY Item::Pre (the cells-mode accumulator is always empty), an empty fence in the history and a
+flat row no line added, so every grid-row selection spanning it resolved one row off. It also found that round 1's
+own F3 fix applied a byte-mode fact (the accumulators hold text) to tiles, where they hold only tag state: a forget
+mid-row restarted the column count and made the next row a header. A fix proposal is a hypothesis about BOTH modes.
+
+**Build, sweep, device.** The first compile came at 10:30Z, in the host-only slot main handed over when its matrix
+ended: one error, in test code (T7 summed a Husk's `cost`; it is the husk block's), then halcyond 378 (340 + 38) and
+tapestryd 95 PASS, and both binaries build for aarch64-unknown-none with and without test-mode, every warning in lines
+TC-1b does not touch. A green first compile of four unbuilt WIPs proves nothing by itself, so the sweep came next:
+sabotage_tc1b_r2.py, 46 legs (round 1's 40, re-anchored where the code moved, and 6 for the round-2 fixes), each red
+set written by name before the run, and three round-1 predictions widened BEFORE it to include T20, whose ring
+assertions those legs also break: 46/46 EXACT, every file restored by sha256. Found while re-reading the device leg before its first run: leg 7's last check
+typed `true` after Super+K and required a history row, but the clear in leg 6 had left the grid mostly empty, so a
+correct system scrolls nothing off and reads 0 -- a red on the GREEN run. It now prints two screens and requires at
+least one screen of history. The premise of a check is the state the leg leaves behind, not the one it began in.
+
+The device chain then ran on 8ecce895 (10:50-10:58Z, `--config ci` + HALCYON_SESSION + instrument profile). RED (the
+session's `forget_history()` call removed, the chord still arriving and said): legs 1-6 PASS and leg 7 FAILS by name,
+"after Super+K the tile still holds 345 history rows (it held 345)". GREEN (HEAD): legs 1-7 PASS. The values, green:
+`seq 1 150` leaves 292 history rows on a 52-row grid; the control `true` adds 1; `clear` adds 52 (the whole screen
+moved); Super+K takes 345 to 0 with the grid still 52; three screens up the band's ink goes 16314 -> 0 while the live
+screen's top rows read 66122 before and after; two screens of output then make 56 history rows. The captures agree
+(history-before shows `seq 1 150` above the live screen; history-forgotten shows the live screen and nothing above
+it; the red run's history-forgotten is the history-before picture again). One thing the pictures show that no number
+did: after the chord the bar's `EXIT 0 . ECHO ...` becomes READY while that command is still on the screen. Its
+record (the block holding cmd and exit) is history and went; round 1's F11 had cleared the exit code so the label did
+not dangle. That is the fresh-tile reading 14.13 already implies; it is now stated there.
+
+**The round-2 fixes, and the tests the predictions found.** F1 [P1] was the resize: the mirror's reflow drops the
+rows a shrink pushes off the top, the producer's ScrollOff delivers them later, and push_scrolled_rows counted them
+again -- the selection re-anchored at the prompt then moved up by the rows shed. The tile now notes the shed
+(`note_grid_shed`), the public count is rows that have LEFT the grid, and arriving rows consume the shed. The resize
+path moved out of the binary into `Tile::resize_selected` so a host test can drive it: refresh, judge which ends are
+on the grid, resize, refresh, restart those ends at the prompt. F2 [P2] was round 1's own fix: freezing the block at
+an obj frame cut the console's pending line, table or pre in two; it now freezes only where nothing is split and
+otherwise degrades the obj to no link. F3 [P2], pre-existing: a block dropped at its freeze kept its charges and the
+budget drifted up. F11: the forget kept objects only forgotten rows used. Writing the sweep's predictions BEFORE the
+run found four holes no failing test had: a width-only shrink keeps the grid's height, so only the shed's seq bump
+makes the list re-read, and L6 (which changes height) cannot see it (L7); nothing covered the obj rule inside a pre
+(T28), its tile arm (T29), or the objects a pending line or a half-written table row still uses (T30). The run: 69
+of 71 exact. Z4 left T24 green because T24 never asserted that the cap was reached -- a negative assertion a broken
+fixture satisfies, which the prediction caught and the test did not; with the premise, exact. N19's extra red was my
+prediction's error: T30 also asserts the finished line's object is blanked.
+
+**Round 3: both prosecutors found the same P1.** Round 2's shed fix assumed the producer reflows the same resizes on the same state. It does not: kaua-term keeps ONE pending resize, the latest (the input thread stores over it, the output thread swaps it out), and a resize to the dims it already has is a no-op -- so a divider drag that narrows then widens leaves the mirror having shed rows the producer never sheds, and a mirror behind the producer (output in flight, the cursor moved up) over-predicts too. The leftover swallowed the next genuine scrolls. My self-audit found it reading apply_resize while the reviewer ran; the reviewer found it the same way. The reviewer proposed a sequence number on the dead WinsizeAck record; that is a wire change for what the stream already says: the producer answers every resize with a full repaint, so a CellDiff covering the whole grid now settles the guess, and the rebase follows a count that goes DOWN (rows the producer kept are back on the grid). A settle that fires early corrects itself when the rows arrive. The rest: the kept set is what the span ring names, a superset that must cover diffs in flight and a hidden main screen, so the prose saying 'a live cell' was wrong and T27, which built its set by hand, hid it; a height-only resize no longer moves a selection whose text stayed put. The sweep's one miss (N21) was a test that the ring made redundant in a tile and that nothing covered in the console.
+
+**Round 4: rows of mixed widths are no distance.** Round 4 (Opus-on-Opus) returned 1 P1 / 0 P2 / 3 P3. F1, verified by hand: across a width change the count adds rows cut at the mirror's intermediate widths to rows cut at the producer's single width, so a count delta is no displacement -- a coalesced narrowing drag put the cursor three rows above the prompt. Constant width stays exact (two independent traces agreed). The fix is a re-cut window: `Transcript::rewraps` is odd from a width change until the producer's repaint at the grid's dims; inside it grid ends keep their places, and across its edges the rebase REPORTS them and the tile restarts them at the prompt. Round 3's shape-test settle (any whole-grid diff) misfired on alt-screen switches and palette re-emits (r4 F2), so the settle is now keyed on the WinsizeAck record: it was defined, encoded, decoded and documented, and the producer never sent it. Sending it is not a format break; the round-3 variant that added a sequence number would have been. SA-r4-2: a repaint that moves an end down past the grid (the producer cut its row off) reports it. The width tests became SEAM tests (the real vt, the real producer, the wire both ways), so their premises are the producer's and not mine. Tracing them found a trap: the seam vt must be born in the tile's palette, because vt::reflow's padding test compares a blank's ink with the grid's own blank.
+
+**WIP 10: a fixture's blank was content, and the ack names no resize.** WIP 9 (17e386c4) was written while main held the mac. Its first build (5d4147c1) had one red, a fixture premise: `whole_grid` painted blanks in fg 0xFFFFFF, which the reflow reads as content, so one-character lines re-cut into two rows at four columns. My own pre-round find, SA-r5-1 [P2]: the ack names no resize, so after 8 -> 4 -> 8 -> 4 the reply to the FIRST narrow arrives at the grid's dims and settles early, and the producer's later reply at eight columns then moves ends by a mixed count (measured: grid row 0 instead of the prompt on row 3). An acked reply at another width now reopens the window. Sweep r5: 97 of 100 exact; the three misses were predicted reds that stayed green, each still caught elsewhere (D: the keep reads objs() now; N2: W1's settle zeroes the shed anyway; P7: W1's second narrow re-regrids).
+
+**Round 5: the selection moved before the grid did.** Round 5 (Opus-on-Opus; Fable out of credits all day) returned 0 P0 / 0 P1 / 3 P2 / 3 P3. F1: the window keyed on the mirror's screen, but `Vt::resize` re-cuts the producer's MAIN screen beneath the alt screen, so a relayout that races a TUI's exit left the cursor on the wrong row for good. F2, which my self-audit had found as SA-r5-2: a whole-grid reply spans many 4 KiB reads and the session paints between them, so after an early settle the rows of the next re-cut were counted before the reply that would have reopened the window, and an end was pushed into history on the wrong line, where no report reaches it. F3, present since WIP 1: in ordinary output the selection moved at the ScrollOff, one or more paints before the CellDiff moved the grid, and in between the band and Enter acted on another line. My first plan for F2 was a row-width rule (reopen on a ScrollOff row of another width). Tracing F3 showed one change fixes both: the selection counts the rows the grid has SHOWN leaving -- `rows_left`, moved by a resize's reflow at once and set at the end of every CellDiff -- so rows alone move nothing, and the reply that reopens the window comes before any count they carry. The row rule was dropped unapplied. Why `+= shed` at a resize and not the live count: rows that arrived but whose repaint has not landed are still on the mirror's grid, and publishing them there leaves every end off by their count after the settle. F4: a held end kept its run key while the grid moved under it. F5: no test split a record stream; L8's settle path could not tell "moved down" from "restarted at the prompt" (both land on d); the settle's rewraps seq bump carried nothing any test needed; W6 asserted F1's bug. F6: doc sentences that were not true of the code.
+
+**The fix's own premise failures.** Building option B turned two fixtures up, both mine and neither a code bug. L6's ScrollOff carried rows y and z that were not the grid's top rows, so under B the cursor was on b, not z, and the resize restarted it at the prompt; reworked to a producer's stream. The select tests pushed their first row without the repaint that shows it gone, so every stamp was one row stale; they now publish where a producer repaints. Under B every transcript-level fixture that pushes rows must also publish them.
+
+**Sweep r6.** 114 legs (round 5's 100 re-predicted under B, r5b's 3 re-anchored, 11 new on B, F1, F4 and the new tests): 110 exact on the first run, none uncaught. The four misses were my predictions. B3 and F5a also turn W10 red: a stale stamp catches up when the next rows arrive, and W10's last settle carries none. N9 and B5 left W5 green by coincidence: both wrong paths ended on W5's row-0 prompt, where the right path ends too. W5 gained an assertion before the repaint, and N9 and B5 then re-ran exact; B6 now turns W5 red as well, as re-derived. WIP 11 = 3cc92b1a.
+
+**Round 6 self-audit: the shed counted rows that had already arrived.** Round 6 ran on Opus again (Fable out of credits; the first spawn got a 429). Working alongside it, and not in the tree it reads, I re-derived focus 2 myself, and it failed. `note_grid_shed(n)` adds the whole shed to `rows_shed`, but the grid's top k rows (k = `rows_scrolled()` - `rows_left`) are rows that arrived before their repaint. They are here already, so only n - min(n, k) are still on their way. The double count rides into the next publish. Traced twice by hand: an 8x4 grid a b c d with the cursor on c, where a and b arrive and their repaint does not. The tile shrinks to three rows and the reflow drops a. The producer's old four-row repaint then lands in a read of its own. `rows_left` overshoots by one, the rebase finds c's number not yet arrived, and it snaps to the grid's first row. That lands on c, but only by luck: it breaks the invariant that an end's count plus its grid row is its text's ring number. The reply's ScrollOff[c] then fills the phantom slot, the settle publishes nothing, and the cursor sits on d for good. The fix counts only the rows still on their way, and the resize path measures its slide by `rows_left`, which grows by exactly n. Scripture 14.11.5 already said the ScrollOff "does not count them again"; the code now does what it says. No test resized while rows were ahead of their repaint, so sweep r6 could not catch it: an unconstructed arm. The repro waited on the mac (main's B-1d-v gates).
+
+**Round 6's report, and the repro.** The reviewer's F1 [P1] was SA-r6-1, found on its own, with a grow-back variant that is deterministic: 8x6 -> 8x4 -> 8x6 before the repaint puts both ends on e. Before fixing anything I ran my trace as a test on the unfixed tree (3cc92b1a, in a scratch copy). It failed exactly as traced: with the old repaint in a read of its own the cursor ended on d for good, and in the intermediate split it sat on d instead of e until the reply; the control, with the old repaint and the reply in one read, passed. The reviewer proposed clamping the publish in `note_grid_moved`. I did not take it: a clamp compensates for a phantom `rows_shed` where the fix is not to create one. Where a count passes a row that is not here yet, the rebase now reports the end (`ScrolledRow::Ahead`) instead of snapping it to the grid's first row, which is how the double count had landed on c by luck. The other four were P3s. F2: a held run survived the grid moving with no count change; a repaint counter now drops it. F3, older than TC-1b: Esc between an app's exit and the main screen's repaint entered Normal mode on the app's last frame; the session's gate now asks `normal_screen_shown`. F4: doc sentences. F5: tests; the alt-screen resize test now starts off the prompt, so a do-nothing system fails it. WIP 12 = e2a70da3: halcyond 414, kaua-term 49.
+
+**Sweep r7: one mechanism no test caught.** 125 legs, predicted before the run: 121 exact. Three misses were my predictions. Y and B1 expected the round-5 held-run test to turn red, but WIP 12 moved that drop onto the repaint counter, which neither leg reaches. N3's expected red was one I had flagged in advance as low confidence: the slide now follows `rows_left`, which N3 leaves alone. The fourth, P9, was caught by nothing: `grid_rows` skipping grid row 0 broke no test. WIP 12's Ahead report had made the old test's case equivalent: an end on a dropped row that has not arrived restarts at the prompt through the rebase alone. Only `resize_selected`'s regrid rule still tells P9 apart. That holds for a dropped row that had already arrived (outside the window the rebase finds its history row) and for any dropped row inside the window (the rebase holds grid rows in place). No test put an end on row 0 in either case. A new test covers the first, and W7 gains an anchor on the row the shorter window slides past. Every leg was re-predicted for both before the re-run: 125 exact of 125. WIP 13 = 6993f8b3.
+
+**Round 7: the frame the grid still held.** Fable was back (5.1), so round 7 was cross-family: 0 P0 / 0 P1 / 1 P2 / 2 P3. F1 was a case my self-audit had looked at and cleared, wrongly. While the main screen's repaint reads behind an app's exit, the grid holds the app's last frame, and a height shrink reflowed it, counting rows that never left the normal screen. I had judged that harmless on two grounds: the settle corrects the count, and Normal mode cannot be entered while the flag is set. Both were wrong. The producer's reply sheds its own rows, the same count when both cursors sit on the last row, so the settle finds nothing to correct; and the phantom outlives the pending window, so a selection made after the repaint and before the reply stays n rows off its text for good. The fix is the predicate round 6 had just introduced, asked at the reflow: until the repaint lands, the mirror crops the frame, as it does on the alt screen. The render now asks the same thing (the reviewer noted a one-frame flash outside its scope), and the Esc gate's conjunction moved into the lib, where tests reach it (F3). F2 asked for an arrived dropped row to follow its text into history rather than restart at the prompt. I closed it with a reason: it would swap one timing dependence for another, since an idle shrink cannot follow (its rows arrive only with the reply). WIP 14 = 8264de34 (committed untested at a context checkpoint while the mac was main's); sweep r8 was not run on it: round 8 came back first, so sweep r9 covers WIP 15 instead.
+
+**Round 8: clean, and the fix for its first finding was half a fix.** The mac was main's, so round 8 (Fable 5.1 again) ran on WIP 14 before its host tests, and the brief said so. It returned 0 P0 / 0 P1 / 0 P2 / 3 P3: a clean round. F1 was the mirror of round 7's flash: when a full-screen app STARTS, the mode flip is read ahead of the app's first paint, and the render's predicate (normal_screen_shown) is false there although the grid still holds the shell's screen, so every TUI launch with a grid above about 200 cells painted one frame of the shell as a raw cell grid. The reviewer's fix was a render predicate for what the grid holds. Applied alone, it would have traded the flash for a mis-joined line: kaua-term's last main-screen diff at alt-enter carried the blanked alt screen's wrap flags, and its comment said no render ever sees that frame -- which is exactly what the reviewer had just shown false. The producer now sends the main screen's flags (a new vt accessor), and the seam test types a command and enters the alt screen in one read, so that diff is actually emitted. F2: the gate admitted an Esc repeat in Insert that the handler then dropped; the entering Esc is now a press. F3: five doc comments. My self-audit beside it raised SA-r8-1 -- a stale taller reply leaving the cursor below the grid, and the next reflow anchoring on row 0 -- and it was wrong: `Grid::cursor()` clamps the row, and the reflow reads the accessor, not the field I had traced. The reviewer's own trace named the clamp. The repro stays as a test pinning it, since a clamp written for painting now carries the reflow. Three old render tests broke on F1's fix because they flipped to the alt screen with no paint after it, a stream the producer never sends; with the paint added, the legacy render fingerprint reproduced exactly. WIP 15 = 566d4682: halcyond 422, kaua-term 50, vt 75.
+
+**Sweep r9: a test that measured the wrong thing.** 138 legs (round 8's 131 re-predicted, seven new), predicted before the run: 136 exact, none uncaught. The two misses were one gap. Sabotaging the producer's alt-enter diff back to the blanked alt screen's wrap flags (X24), or the new vt accessor to the wrong buffer (X25), turned kaua-term's own test red, as predicted, and left halcyond's frame test green, where I had predicted red. That test compared what `render` returns, and `render` returns the content height. At 8 columns the joined line and its split rows painted alike. The test's comment said the soft-wrapped line stays joined, and nothing in it could see a split, so the halcyond half of the producer's flags was pinned by nothing. The fix went through two failures, each one the new premise doing its job: narrow letters at 8 columns still gave equal heights, and comparing the paint op by op at 8 columns still found it identical (why, I did not measure). At 16 columns the same frame repainted without its flags paints differently. The test now asserts that before relying on it, asserts the flags themselves, and compares the paint op by op, with the op hash factored out of the legacy render fingerprint; that fingerprint's fixed constant reproduces, so the hash is unchanged. render's doc still called the tail a fixed grid_rows * cell_h, stale since PL-4. WIP 16 = 7b5a97b4. Sweep r9b re-ran all 138 legs with the predictions unchanged: 138 exact of 138; X24 and X25 now turn the frame test red through its flag assertion, and kaua-term's test red as before.
+
+**The close.** The code the squash carries is WIP 17's tree (4cf814d8), and every gate ran on it: host tests halcyond 422, kaua-term 50, vt 75; `tools/test-rust.sh` 27 crates, 2018 tests, none failing; both halcyond release builds; the default image's `tools/test.sh`, kernel tests 1669/1669 and both arc gates. On the device, `ls-halcyon-lantern` went red with the session's forget call removed (legs 1-6 passed; leg 7 failed by name, the tile still holding 345 history rows) and green on the tree: Super+K took 345 history rows to 0, kept the grid, and the tile recorded again (56 rows). The capture after the forget shows the live screen's rows and no history. The squash replaced WIPs 1-17 on top of the scripture commit, with the dossier pass over sub-halcyond, sub-kaua-term, sub-lib-vt, sub-tapestryd, sub-libtapestry and sub-lantern.
+
+**Still open.** r7 F2 is closed with a reason, not fixed: an arrived dropped row restarts at the prompt rather than following its text into history. Queued in OPEN-BUGS, each pre-existing or tracked from a round: the device leg drives Super+K with the focused pane zoomed and never checks the other pane (r2 F12); kaua-term's output-only mode never applies a resize (r5); a tile's table past the byte cap stops counting columns; a block-cap continuation kills open spans; past the style cap a cell takes the last style's look; foreign structural rows re-class the open zone; five dead-code warnings in halcyond's release builds; libutopia's 69 stranded tests.
+
+## 2026-09-25 afternoon to 2026-09-28 (main, Opus, effort max) -- B-1d-v: only MREPL at a file, and the audit that found the guarantee rested on a key two calls could forge
+
+**The vote, and why cmount did not translate literally.** The B-1d-v scripture
+took Plan 9's second Emount case to be "an MBEFORE or MAFTER mount at a
+non-directory point". cmount actually tests `order != MREPL`, and Plan 9's flag
+0 *is* MREPL, so the two readings agree there -- but in Thylacine a mount with
+no placement flag APPENDS (territory.c mount()), where Plan 9 has no such mode.
+So a flagless mount of a second file at a file point that already holds one
+makes a two-member group, which stalk searches as a union directory whose
+listing skips the non-directory members: the mount returns 0 and never shows.
+The operator's 13:35Z vote (dec-2026-09-25-mrepl-only-at-a-file, superseding
+the emount dec) took cmount literally: at a point that is not a directory,
+refuse every mount but MREPL. The check is `source_dir != point_dir ||
+(!point_dir && !(flags & MREPL))` in sys_mount_for_proc -- flags and the two
+types only, no table read, no lock, no TOCTOU.
+
+**Round 1 (Opus on Opus at max; Fable out of credits, so the fallback tier --
+context-independent, same family).** 0 P0 / 0 P1 / 2 P2 / 5 P3. The P2s: an
+alloc-smoke success path that mounted `/lib`, which only an LLVM-fork image
+ships (fixed with `/bin`, on every image); and the flagless-at-a-file case,
+which went to the operator. The spec had pinned nothing -- territory_file_point
+checked nothing territory.cfg did not -- so the guard split into `EmountOK` for
+the syscall's refusal and `CovGuard` for the covered member, with the invariant
+`NoMemberAtFile` and a buggy cfg that fails it. My own call (not asked; DISTRO
+D-1 and the vote compose): a directory over a symlink point stays refused, and
+the trailing-slash spelling is documented.
+
+**Round 2's F1 [P2] was the run's real finding, and it was not in the changed
+code.** The new refusal rests on the mount key being an identity: mount_key_eq
+is `(dc, devno, qid.path)`. devsrv gave the /srv registry root qid.path 0 -- and
+`devsrv_walk` gave every /srv/<name> service node qid.path 0 as well, cloned
+from the root with the same dc and devno. So the key of every live service
+aliased the registry root's. Any unprivileged Proc could MREPL a readable file
+over /srv/<name> (file over file passes the new check) and the entry was keyed
+exactly where /srv itself is: the next resolution crossed /srv into the file,
+and every /srv/<x> answered ENOTDIR, after a SYS_MOUNT that returned 0. A
+chroot to /srv then an MBEFORE at "/" put a two-member union at the same key,
+i.e. at every service node. Two unprivileged calls defeated both halves of the
+guarantee the chunk had just documented. The alias predates the chunk (stalk-3a);
+the vote turned a latent identity bug into a defeated invariant. Fixed: a
+per-registry counter stamps each reservation's qid_path (never 0, as Plan 9's
+srvcreate), and devsrv_walk reads the name, the LIVE state and the path in one
+hold of the registry lock, since a tombstoned slot can be recycled under
+another name. Regression devsrv.service_keys_distinct. The lesson is the general
+one: **a refusal keyed on a tuple is only as sound as that tuple's uniqueness**
+-- audit the key, not just the check.
+
+**The lead the fix surfaced.** That same key rests on devno being unique among
+live instances, and `spoor_next_devno` is a monotonic u32 that wraps with no
+refusal (kernel/spoor.c). Three consumers assume uniqueness: the mount key,
+MNOEXEC coverage (a collision there only over-restricts) and the REVENANT image
+cache (a collision there could serve one instance's cached pages for another's
+file). spoor.c's own comment already named the image-cache alias as pre-existing
+but nobody had enqueued it. Now owned in OPEN-BUGS, orthogonal to B-1d-v (it
+needs 2^32 attaches in one boot to reach).
+
+**Round 2's five P3s** were prose that had called the install-time check an
+invariant (a 9P server the caller attached answers a later walk's type from its
+reply, so a directory point can read as a file afterwards -- the resolver's
+use-time QTDIR gates stay), the ENOTDIR producer count (five of eight), the
+superseded status row, a buggy cfg that had been given a SYMMETRY line against
+the convention that buggy cfgs read unreduced, and imprecise comments -- one of
+which ("a kernel test over every refused flag set") I made true by extending the
+test from 7 refused sets to all 24.
+
+**Rounds 1 and 2 ran Opus on Opus** because Fable was out of credits for the
+third day running. A same-family round keeps context independence and loses
+family diversity; it is a real review, and the rule is never to skip a round
+for want of Fable.
+
+**Round 3 found the witness, not the bug.** Fable came back for it -- the
+chunk's one cross-family round -- and read the regression test the devsrv fix
+shipped with. It was RED on the very kernel it was written to guard. Both of
+its resolution legs mounted a `devnone` source and then resolved through it,
+and `devnone_walk` returns NULL for every call, the zero-element clone that
+`clone_walk_zero` needs included: the cross failed, the walks came back NULL,
+and the `!= NULL` assertions fired before a single identity was compared. The
+commit said NOT BUILT, so it had never run. **A witness that has never turned
+red is not a witness** -- and this one would have gone to main as the evidence
+for the P2 it was guarding. It now asserts on the mount TABLE
+(`mount_is_point_id`), which is what crossing actually consults and needs no
+crossable source. Verified both ways this time: reverting the one-line fix
+turns exactly one test red, on the exact property (`a service node's path is
+not the registry root's`), and the fix turns it green. Round 3 also caught a
+placeholder I had committed into scripture unfilled, and a stranding the fix
+introduces: a mount placed at `/srv/<name>` is bound to that post, so a
+re-post leaves it unreachable and un-unmountable by name until the namespace
+ends (documented; the general fix is a generation in the mount key).
+
+**Cost and close.** The suite 1732/1732 with no extinction and alloc-smoke
+exiting 0; eight sabotage legs red, each failing exactly the tests it should;
+a clean rebuild after the sabotage reproducing the kernel hash the suite had
+passed on (`3e0f0436`), because a sabotage run leaves its own kernel in
+`build/` and the next boot would take it; the SMP gate 50 boots of 50 across five configurations (default at 1, 4 and 8
+CPUs, UBSan at 4 and 8) with no corruption, no timing failure and nothing else;
+`territory.tla`'s 22 cfgs each as claimed on a fresh 33-minute run, the four
+clean state counts unchanged. Squashed to 46d943c5 on 8c4cb7c8 and
+fast-forwarded onto main.
+
 ## 2026-09-25 (Astra) -- one wake descriptor, with real retirement
 
 Halcyon's two-connection media adapter now uses the native readiness worker;

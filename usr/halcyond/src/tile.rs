@@ -22,7 +22,7 @@ use crate::layout::layout_block;
 // `Transcript::feed` the console path uses (14.11.4), so the format-fuzz surface
 // (parsing an untrusted per-tile stream) is one parser, audited once.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -83,6 +83,12 @@ pub struct Tile {
     /// top edge and a full view below it. The normal screen's, so an
     /// alt-screen excursion leaves it as it was.
     pinned: bool,
+    /// The producer acknowledged a resize: the CellDiff after the ack is its
+    /// repaint of the whole grid at the dims it applied.
+    resize_acked: bool,
+    /// The screen mode flipped and the producer's repaint of the screen it
+    /// flipped to has not landed: the grid still shows the other one.
+    screen_pending: bool,
     /// The frozen blocks' laid heights at `heights_width`, aligned to the
     /// scrollback's frozen deque (front-evicted, back-appended; block ids are
     /// strictly increasing along it). A frozen block's layout is width- and
@@ -111,12 +117,14 @@ pub struct Tile {
     /// Visual lines laid out by the last `render` (the transient's witness:
     /// bounded by the view plus the two whole blocks, never the history).
     pub laid_lines_last: usize,
-    /// PL-4b-ii: the last NORMAL-mode render's proportional live tail --
-    /// (the laid live block, the per-grid-row provenance, the tail's screen-y)
-    /// -- so a click on the tail (`grid_hit` / `grid_run_rect`) inverts through
-    /// the SAME geometry the render painted, not the mono cell grid. None in
-    /// alt-screen (the tail is the mono `paint_grid`, hit by cell) and before
-    /// the first render. Rebuilt every render (O(grid), never the history), so
+    /// PL-4b-ii: the last proportional render's live tail -- (the laid live
+    /// block, the per-grid-row provenance, the tail's screen-y) -- so a click
+    /// on the tail (`grid_hit` / `grid_run_rect`) inverts through the SAME
+    /// geometry the render painted, not the mono cell grid. None while the
+    /// grid holds an app's frame (the tail is the mono `paint_grid`, hit by
+    /// cell: the alt screen, and its last frame until the normal screen's
+    /// repaint lands) and before the first render. Rebuilt every render
+    /// (O(grid), never the history), so
     /// a stale cache never outlives one frame; a click uses the last frame's
     /// layout exactly as the block `frame` does.
     live_laid: Option<LiveLaid>,
@@ -126,6 +134,10 @@ pub struct Tile {
     lane: bool,
     /// The lane passes the last render took (bounded at three; r2 B-F1).
     lane_passes: u8,
+    /// HALCYON 14.3: the program's synchronized frame (DEC mode 2026) and
+    /// the bound on how long it may hold this tile's paint. The records
+    /// open and close it; the session asks it before painting.
+    pub hold: vt::FrameHold,
 }
 
 impl Tile {
@@ -170,6 +182,8 @@ impl Tile {
             exit: None,
             bell: false,
             pinned: false,
+            resize_acked: false,
+            screen_pending: false,
             heights: VecDeque::new(),
             heights_width: 0,
             frame: Vec::new(),
@@ -179,6 +193,7 @@ impl Tile {
             live_laid: None,
             lane: false,
             lane_passes: 0,
+            hold: vt::FrameHold::default(),
         }
     }
 
@@ -258,13 +273,14 @@ impl Tile {
         Some((start as u16).saturating_add(1))
     }
 
-    /// The obj run under a tail-relative point: (grid row, run key). In NORMAL
-    /// mode the tail is proportional (PL-4b), so the click inverts through the
-    /// last render's cached layout -- `x`/`y` relative to the tail's top-left
-    /// (the caller subtracts the tail's screen-y): the laid line under `y`, its
-    /// logical column under `x`, then the `prov` inverse back to the grid
-    /// (row, col). In alt-screen there is no cache, so it falls back to the mono
-    /// cell grid (`cw` x `ch`), the geometry `paint_grid` uses.
+    /// The obj run under a tail-relative point: (grid row, run key). While the
+    /// grid holds a normal-screen frame the tail is proportional (PL-4b), so
+    /// the click inverts through the last render's cached layout -- `x`/`y`
+    /// relative to the tail's top-left (the caller subtracts the tail's
+    /// screen-y): the laid line under `y`, its logical column under `x`, then
+    /// the `prov` inverse back to the grid (row, col). While it holds an app's
+    /// frame there is no cache, so it falls back to the mono cell grid (`cw` x
+    /// `ch`), the geometry `paint_grid` uses.
     pub fn grid_hit(&self, x: i32, y: i32, cw: i32, ch: i32) -> Option<(usize, u16)> {
         if x < 0 || y < 0 {
             return None;
@@ -288,9 +304,9 @@ impl Tile {
     }
 
     /// The tail-relative display rect (x, y, w, h) of grid run (r, key): the
-    /// proportional x-extent + laid-line y/h from the cached layout in NORMAL
-    /// mode, or the mono cell rect (`cw` x `ch`) in alt-screen / before a
-    /// render. A soft-wrapped run reports its FIRST laid piece (this rect only
+    /// proportional x-extent + laid-line y/h from the cached layout, or the
+    /// mono cell rect (`cw` x `ch`) while the grid holds an app's frame /
+    /// before a render. A soft-wrapped run reports its FIRST laid piece (this rect only
     /// rides the menu-witness say line; the menu anchors at the pointer). None
     /// when the cell carries no run.
     pub fn grid_run_rect(&self, r: usize, key: u16, cw: i32, ch: i32) -> Option<(i32, i32, i32, i32)> {
@@ -330,6 +346,35 @@ impl Tile {
         if self.media.set_limit(bytes / 2) { self.heights.clear(); }
     }
 
+    /// TC-1b (HALCYON 14.13): the user's Super+K -- forget this tile's
+    /// history and nothing else. What the span ring names survives as husks
+    /// -- a superset of what the live cells resolve, as it must be: a diff in
+    /// flight and a hidden main screen carry older serials -- and an inline
+    /// image stays while an object that survived names it. The pin goes with
+    /// the history it pinned against, and the last frame's placements with
+    /// the blocks they placed.
+    pub fn forget_history(&mut self) {
+        let named = self.spans.named();
+        // An image no object names yet is still to be captioned (`view`
+        // uploads first): it is not history, so it stays.
+        let captioned: BTreeSet<u128> = self
+            .scrollback
+            .objs()
+            .filter_map(|(ty, refv)| crate::inlinecache::image_id(ty, refv))
+            .collect();
+        self.scrollback.forget(&named);
+        let keep: BTreeSet<u128> = self
+            .scrollback
+            .objs()
+            .filter_map(|(ty, refv)| crate::inlinecache::image_id(ty, refv))
+            .collect();
+        self.media
+            .retain(|id| keep.contains(&id) || !captioned.contains(&id));
+        self.pinned = false;
+        self.heights.clear();
+        self.frame.clear();
+    }
+
     pub fn place_image(&mut self, id: u128, w: u32, h: u32, argb: Vec<u32>) -> bool {
         if !self.media.insert(id, w, h, argb) { return false; }
         self.heights.clear();
@@ -357,6 +402,23 @@ impl Tile {
                     }
                 }
                 self.grid.apply_celldiff(&changed, cursor, &wrapped, top_continues);
+                self.screen_pending = false;
+                // The producer's reply to a resize -- the ack, then every
+                // cell of its grid -- at the dims the grid has now: the grid
+                // is the producer's cut again. A reply to an earlier resize
+                // (other dims) settles nothing, and one at another width
+                // re-cut the producer's lines where the grid does not show
+                // it: the ack names no resize, so a reply at these dims may
+                // have come before it, from a resize the grid went back to.
+                // Either screen: the producer re-cuts its main screen
+                // beneath the alt screen too.
+                let reply = core::mem::take(&mut self.resize_acked);
+                let (cols, rows) = self.grid.dims();
+                if reply && wrapped.len() == rows && changed.len() == cols * rows {
+                    self.scrollback.settle_grid_shed();
+                } else if reply && changed.len() != cols * wrapped.len() {
+                    self.scrollback.note_grid_recut();
+                }
                 // The scrolled-off fragment the transcript holds continues
                 // into row 0 only while the producer says so; the moment it
                 // does not (row 0 restarted as a line of its own), the
@@ -368,6 +430,9 @@ impl Tile {
                 if !top_continues && self.mode == ScreenMode::Normal {
                     self.scrollback.flush_scroll_pending(&self.spans);
                 }
+                // The rows that scrolled off before this repaint are gone
+                // from the grid only now: a selection on one stayed on it.
+                self.scrollback.note_grid_moved();
             }
             Record::ScrollOff { rows, wrapped } => {
                 // Output has filled the screen: the view flows again.
@@ -379,7 +444,10 @@ impl Tile {
             // The producer's top flag on the next normal-screen CellDiff says
             // whether a held soft-wrapped fragment still has its continuation
             // (PL-3); the mode flip itself decides nothing.
-            Record::Mode(m) => self.mode = m,
+            Record::Mode(m) => {
+                self.screen_pending |= m != self.mode;
+                self.mode = m;
+            }
         }
     }
 
@@ -406,9 +474,13 @@ impl Tile {
             // one decoder applies it, as on the console path.
             Control::Osc7Raw(body) => self.scrollback.apply_cwd_report(&body),
             Control::Bell => self.bell = true,
-            Control::Exit(code) => self.exit = Some(code),
-            // The down-channel resize was applied on the pts; no model state here.
-            Control::WinsizeAck => {}
+            Control::Exit(code) => {
+                self.exit = Some(code);
+                self.hold.cut();
+            }
+            // The down-channel resize was applied on the pts: the next
+            // CellDiff is the producer's repaint of the whole grid.
+            Control::WinsizeAck => self.resize_acked = true,
             // The erased rows arrived first, as history. An erase claimed on
             // the alt screen is not the normal screen's, whatever the
             // producer says.
@@ -417,6 +489,9 @@ impl Tile {
                     self.pinned = true;
                 }
             }
+            // The frame's records apply as they arrive; only the paint waits.
+            Control::SyncBegin => self.hold.open(),
+            Control::SyncEnd => self.hold.close(),
         }
     }
 
@@ -426,8 +501,94 @@ impl Tile {
     pub fn resize(&mut self, cols: usize, rows: usize) {
         // The normal screen reflows (the transcript's content model: a
         // soft-wrapped row is half of one logical line); the alt screen is
-        // the TUI's to repaint.
-        self.grid.resize(cols, rows, self.mode == ScreenMode::Normal);
+        // the TUI's to repaint, and so is its last frame while the normal
+        // screen's repaint is still on its way: no row of that frame left
+        // the normal screen's grid. The rows the reflow drops have left the
+        // grid now; the producer's ScrollOff delivers those not here already
+        // later, and must not count them as leaving twice. A new width
+        // re-cuts every line of the producer's main screen, beneath the alt
+        // screen too.
+        let reflow = self.normal_screen_shown();
+        let recut = cols != self.grid.dims().0;
+        let shed = self.grid.resize(cols, rows, reflow);
+        self.scrollback.note_grid_shed(shed);
+        if recut {
+            self.scrollback.note_grid_recut();
+        }
+    }
+
+    /// Bring a Normal-mode list and its selection current
+    /// (`select::refresh`, this grid's rows trailing), and start each end
+    /// the rebase could not follow again on the grid's cursor row, the
+    /// prompt.
+    pub fn refresh_selected(
+        &self,
+        flat: &mut Vec<crate::select::FlatRow>,
+        flat_seq: &mut u64,
+        mut sel: Option<&mut crate::select::Sel>,
+    ) {
+        let rows = self.grid.dims().1;
+        let lost = crate::select::refresh(&self.scrollback, Some(rows), flat, flat_seq, sel.as_deref_mut());
+        if let Some(s) = sel {
+            if lost.0 || lost.1 {
+                s.regrid(lost, self.grid.cursor().0, flat.len());
+            }
+        }
+    }
+
+    /// Resize under a Normal-mode selection over `flat` (current as of
+    /// `flat_seq`). A width change re-cuts every line, so no grid row keeps
+    /// its text; a height change keeps each row's text and slides the window
+    /// (`vt::reflow` keeps the cursor row) by the rows it drops off the top.
+    /// An end whose row lost its text -- any grid row at a width change, a
+    /// row slid past or cut off at a height change -- starts again on the
+    /// grid's cursor row, the prompt; any other grid end slides with its
+    /// row. The ends are judged on the list brought current first: a stale
+    /// one can hold a row that has since left.
+    pub fn resize_selected(
+        &mut self,
+        cols: usize,
+        rows: usize,
+        flat: &mut Vec<crate::select::FlatRow>,
+        flat_seq: &mut u64,
+        mut sel: Option<&mut crate::select::Sel>,
+    ) {
+        let old_cols = self.grid.dims().0;
+        self.refresh_selected(flat, flat_seq, sel.as_deref_mut());
+        let at = sel.as_ref().map(|s| s.grid_rows());
+        let left = self.scrollback.rows_left();
+        self.resize(cols, rows);
+        let shed = usize::try_from(self.scrollback.rows_left().saturating_sub(left))
+            .unwrap_or(usize::MAX);
+        self.refresh_selected(flat, flat_seq, sel.as_deref_mut());
+        if let (Some(s), Some((c, a))) = (sel, at) {
+            let lost = |g: usize| cols != old_cols || g < shed || g - shed >= rows;
+            let kept = |g: Option<usize>| g.filter(|&g| !lost(g)).map(|g| g - shed);
+            s.slide((kept(c), kept(a)), flat.len());
+            let (crow, _, _) = self.grid.cursor();
+            s.regrid((c.is_some_and(lost), a.is_some_and(lost)), crow, flat.len());
+        }
+    }
+
+    /// The grid shows the normal screen: the tile's mode, and the producer's
+    /// repaint of that screen has landed (until then the grid still shows
+    /// the full-screen app's last frame, and Esc is still the app's).
+    pub fn normal_screen_shown(&self) -> bool {
+        self.mode == ScreenMode::Normal && !self.screen_pending
+    }
+
+    /// The grid holds a frame of the normal screen: the live one, or its last
+    /// while a full-screen app's first paint is on its way. The render paints
+    /// by this; the keys and the reflow ask `normal_screen_shown`.
+    pub fn holds_normal_frame(&self) -> bool {
+        (self.mode == ScreenMode::Normal) != self.screen_pending
+    }
+
+    /// Whether a key goes to the transcript's Normal mode, not the program:
+    /// while the grid shows the normal screen, a press or a repeat in Normal
+    /// mode (`in_normal`), and in Insert only Esc's press, which enters it.
+    pub fn modal_key(&self, in_normal: bool, rune: u32, value: u32) -> bool {
+        self.normal_screen_shown() && value >= 1 && (in_normal || (rune == 0x1b && value == 1))
     }
 
     /// `Some(code)` once the hosted child has exited (the teardown trigger,
@@ -472,11 +633,13 @@ impl Tile {
     /// Paint the tile into `cart` (HALCYON.md 14.11.3). Returns the total
     /// content height in px (for scroll clamping by the caller).
     ///
-    /// Normal mode: the scrollback flow renders above, the live grid renders as
-    /// a fixed-height tail (`grid_rows * cell_h`) at the bottom; the content is
-    /// bottom-anchored, raised by `scroll_up` px (0 = the grid sits at the view
-    /// bottom, history off the top; scrolling up reveals history). Alt-screen
-    /// mode: the grid alone, full-tile from the top-left, scrollback frozen +
+    /// A normal-screen frame (`holds_normal_frame`): the scrollback flow
+    /// renders above, the live grid's content rows as the tail at the bottom,
+    /// proportional, soft-wrapped rows joined; the content is bottom-anchored,
+    /// raised by `scroll_up` px (0 = the grid sits at the view bottom, history
+    /// off the top; scrolling up reveals history). An app's frame (the alt
+    /// screen, and its last frame until the normal screen's repaint lands):
+    /// the grid alone, full-tile from the top-left, scrollback frozen +
     /// hidden. The `cart` is `reset()` first, so the caller passes one reusable
     /// display list. Grid glyphs come from FACE_MONO (the tile is a terminal);
     /// the scrollback flows through the proportional `layout_block`/`render_block`
@@ -508,6 +671,24 @@ impl Tile {
         scroll_up: &mut i32,
         mark: Option<Mark>,
     ) -> i32 {
+        self.render_selected(cart, w, h, gs, sheet, scroll_up, mark, &[])
+    }
+
+    /// `render` with a Normal-mode selection: every row of `bands`
+    /// (`selection_bands`) is banded as the cursor's row is, each once --
+    /// the console renderer's `sel_rows`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_selected(
+        &mut self,
+        cart: &mut Cartoon,
+        w: usize,
+        h: usize,
+        gs: &mut GlyphSource,
+        sheet: &Sheet,
+        scroll_up: &mut i32,
+        mark: Option<Mark>,
+        bands: &[Band],
+    ) -> i32 {
         cart.reset();
         // HALCYON-INSTRUMENT 14.7 under the Instrument profile: the raw
         // application grid fills the content rect in `terminal_bg`, the
@@ -515,7 +696,7 @@ impl Tile {
         // cells); the rich document sits on `open` (the sheet's ground),
         // and the legacy pane keeps its surface in both modes.
         let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
-        let ground = if inst && self.mode == ScreenMode::AltScreen {
+        let ground = if inst && !self.holds_normal_frame() {
             sheet.theme.terminal.bg
         } else {
             sheet.ground
@@ -544,10 +725,11 @@ impl Tile {
             None
         };
 
-        if self.mode == ScreenMode::AltScreen {
-            // The tail is the mono grid; a click hits it by cell, not through a
-            // proportional cache -- drop any stale normal-mode layout so
-            // `grid_hit` takes the mono path.
+        if !self.holds_normal_frame() {
+            // The tail is the mono grid -- the app's last frame too, until the
+            // normal screen's repaint lands; a click hits it by cell, not
+            // through a proportional cache -- drop any stale normal-mode
+            // layout so `grid_hit` takes the mono path.
             self.live_laid = None;
             paint_grid(cart, &self.grid, 0, top, gs, sheet, ground);
             if top > 0 {
@@ -747,6 +929,7 @@ impl Tile {
                 let lb = layout_block_media(b, lay_w, sheet, gs, Some(&self.media));
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
+                paint_bands(cart, &lb, y, w, sheet, bands, b.id, mark);
                 render_block(cart, &lb, y, gs);
                 paint_run(cart, &lb, y, sheet, mark.filter(|m| m.block == b.id));
                 self.laid_last += 1;
@@ -758,6 +941,7 @@ impl Tile {
         if y + open_lb.height >= 0 && y <= view_end {
             let m = mark.filter(|m| m.block == u64::MAX);
             paint_mark(cart, &open_lb, y, w, sheet, m);
+            paint_bands(cart, &open_lb, y, w, sheet, bands, u64::MAX, mark);
             render_block(cart, &open_lb, y, gs);
             paint_run(cart, &open_lb, y, sheet, m);
         }
@@ -772,6 +956,20 @@ impl Tile {
         // several laid lines) -- painted UNDER the cells.
         if let Some(m) = gm {
             for (by, bh) in live_row_spans(&live_lb, &prov, m.item, live_cols) {
+                cart.ops.push(Op::Rect {
+                    x: 0,
+                    y: y + by,
+                    w: w as u32,
+                    h: bh as u32,
+                    color: sheet.sel_bg,
+                });
+            }
+        }
+        for bd in bands
+            .iter()
+            .filter(|bd| bd.block == GRID_KEY && gm.map_or(true, |m| m.item != bd.item))
+        {
+            for (by, bh) in live_row_spans(&live_lb, &prov, bd.item, live_cols) {
                 cart.ops.push(Op::Rect {
                     x: 0,
                     y: y + by,
@@ -925,6 +1123,51 @@ pub struct Mark {
     pub obj: Option<u16>,
 }
 
+/// One row of a Normal-mode selection, keyed as a `Mark` keys the cursor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Band {
+    pub block: u64,
+    pub item: usize,
+    pub row: usize,
+}
+
+/// The block key `render` matches a flat row against: a frozen block's id,
+/// `u64::MAX` for the open block, `GRID_KEY` for a live-grid row; none for a
+/// frozen block that is gone.
+pub fn block_key(t: &Transcript, fr: crate::select::FlatRow) -> Option<u64> {
+    if fr.block == crate::select::GRID_BLOCK {
+        Some(GRID_KEY)
+    } else if fr.block == usize::MAX {
+        Some(u64::MAX)
+    } else {
+        t.frozen_blocks().get(fr.block).map(|b| b.id)
+    }
+}
+
+/// Every row of an anchored selection as `render_selected` bands it; none
+/// without an anchor, where the cursor's row is the `Mark`'s to band.
+pub fn selection_bands(
+    t: &Transcript,
+    flat: &[crate::select::FlatRow],
+    sel: &crate::select::Sel,
+) -> Vec<Band> {
+    if sel.anchor.is_none() {
+        return Vec::new();
+    }
+    let (lo, hi) = sel.range();
+    flat.iter()
+        .skip(lo)
+        .take(hi - lo + 1)
+        .filter_map(|&fr| {
+            Some(Band {
+                block: block_key(t, fr)?,
+                item: fr.item,
+                row: fr.row,
+            })
+        })
+        .collect()
+}
+
 /// The cursor row's band under the text (`sel_bg`, full width).
 fn paint_mark(
     cart: &mut Cartoon,
@@ -936,6 +1179,35 @@ fn paint_mark(
 ) {
     if let Some(m) = m {
         if let Some((ly, lh)) = laid_line_for(lb, m.item, m.row) {
+            cart.ops.push(Op::Rect {
+                x: 0,
+                y: y + ly,
+                w: w as u32,
+                h: lh.max(0) as u32,
+                color: sheet.sel_bg,
+            });
+        }
+    }
+}
+
+/// The rows of `bands` in `block`, banded as `paint_mark` bands the cursor's
+/// row -- which is left to it, so no row is banded twice.
+#[allow(clippy::too_many_arguments)]
+fn paint_bands(
+    cart: &mut Cartoon,
+    lb: &LaidBlock,
+    y: i32,
+    w: usize,
+    sheet: &Sheet,
+    bands: &[Band],
+    block: u64,
+    mark: Option<Mark>,
+) {
+    for bd in bands.iter().filter(|bd| bd.block == block) {
+        if mark.is_some_and(|m| m.block == bd.block && m.item == bd.item && m.row == bd.row) {
+            continue;
+        }
+        if let Some((ly, lh)) = laid_line_for(lb, bd.item, bd.row) {
             cart.ops.push(Op::Rect {
                 x: 0,
                 y: y + ly,
@@ -1413,7 +1685,7 @@ mod tests {
         assert!(t.take_bell(), "bell latched");
         assert!(!t.take_bell(), "bell cleared after one take");
 
-        t.apply(Record::Control(Control::WinsizeAck)); // no-op, must not disturb state
+        t.apply(Record::Control(Control::WinsizeAck)); // arms the resize's settle, nothing else
         assert_eq!(t.exited(), None);
 
         t.apply(Record::Control(Control::Exit(0)));
@@ -1885,6 +2157,79 @@ mod tests {
         );
     }
 
+    /// A Normal-mode selection bands each row it covers -- the console
+    /// renderer's `sel_rows` -- through the history and into the live grid;
+    /// without an anchor only the cursor's row is banded.
+    #[test]
+    fn a_selection_bands_each_row_it_covers() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((20 * cw) as usize, (60 * ch) as usize);
+        let mut t = history_tile(20, 4, 1000);
+        push_history(&mut t, 4, 3, 'm');
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('s')), (1, 0, cell('t'))],
+            cursor: (1, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let flat = crate::select::flatten_with_grid(&t.scrollback, 4);
+        let grid0 = flat
+            .iter()
+            .position(|fr| fr.block == crate::select::GRID_BLOCK)
+            .expect("premise: the grid's rows trail the history's");
+        assert!(
+            grid0 >= 4,
+            "premise: four history rows precede the grid ({grid0})"
+        );
+        let banded = |cart: &Cartoon| {
+            cart.ops
+                .iter()
+                .filter(|o| matches!(o, Op::Rect { color, .. } if *color == sheet.sel_bg))
+                .count()
+        };
+        // In the history: rows 1..=3, the cursor on row 3.
+        let mut sel = crate::select::Sel::at(3, crate::select::Stamp::default());
+        sel.anchor = Some(1);
+        let bands = selection_bands(&t.scrollback, &flat, &sel);
+        assert_eq!(bands.len(), 3, "every selected row is a band");
+        let fr = flat[3];
+        let mark = Mark {
+            block: block_key(&t.scrollback, fr).unwrap(),
+            item: fr.item,
+            row: fr.row,
+            obj: None,
+        };
+        let mut cart = Cartoon::new();
+        t.render_selected(&mut cart, w, h, &mut gs, &sheet, &mut 0, Some(mark), &bands);
+        assert_eq!(
+            banded(&cart),
+            3,
+            "each selected row is banded once, the cursor's included"
+        );
+        // Across into the grid: the last history row and the grid's first two.
+        sel.cursor = grid0 + 1;
+        sel.anchor = Some(grid0 - 1);
+        let bands = selection_bands(&t.scrollback, &flat, &sel);
+        assert_eq!(bands.len(), 3);
+        let mark = Mark {
+            block: GRID_KEY,
+            item: 1,
+            row: usize::MAX,
+            obj: None,
+        };
+        let mut cart = Cartoon::new();
+        t.render_selected(&mut cart, w, h, &mut gs, &sheet, &mut 0, Some(mark), &bands);
+        assert_eq!(banded(&cart), 3, "a history row and two grid rows");
+        // The control, one variable away: no anchor, the cursor's row alone.
+        sel.anchor = None;
+        assert!(selection_bands(&t.scrollback, &flat, &sel).is_empty());
+        let mut cart = Cartoon::new();
+        t.render_selected(&mut cart, w, h, &mut gs, &sheet, &mut 0, Some(mark), &[]);
+        assert_eq!(banded(&cart), 1);
+    }
+
     #[test]
     fn the_pin_is_the_normal_screens_and_only_a_scrolloff_releases_it() {
         let mut t = tile();
@@ -2159,6 +2504,8 @@ mod tests {
             exit: None,
             bell: false,
             pinned: false,
+            resize_acked: false,
+            screen_pending: false,
             heights: VecDeque::new(),
             heights_width: 0,
             frame: Vec::new(),
@@ -2168,6 +2515,7 @@ mod tests {
             live_laid: None,
             lane: false,
             lane_passes: 0,
+            hold: vt::FrameHold::default(),
         }
     }
 
@@ -2651,6 +2999,7 @@ mod tests {
         // Alt-screen drops the cache -> grid_hit falls back to the mono grid
         // (the same (row, key) by cell), and grid_run_rect to the mono cell.
         t.apply(Record::Mode(ScreenMode::AltScreen));
+        repaint_unchanged(&mut t);
         t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
         assert_eq!(
             t.grid_hit(5, 5, 8, 20),
@@ -2674,6 +3023,7 @@ mod tests {
         let (cw, ch, _) = gs.mono_cell();
         let mut t = daylight_tile(8, 2);
         t.apply(Record::Mode(ScreenMode::AltScreen)); // grid only, no scrollback flow
+        repaint_unchanged(&mut t);
         let mut cart = Cartoon::new();
         let (w, h) = ((8 * cw) as usize, (2 * ch) as usize);
         t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
@@ -3084,40 +3434,51 @@ mod tests {
     /// an atlas id, which packing order owns) for a history tile in normal
     /// mode with a mark, and in alt-screen. Read off 69f71541 with the
     /// constants at 0; the I-5b paddings, inks and grounds must leave it.
-    fn render_fingerprint(sheet: &Sheet) -> u64 {
+    fn fp_cart(h: &mut u64, c: &Cartoon) {
         use crate::layout::tests::{fnv, fp_i32, fp_u32};
+        fp_u32(h, c.ops.len() as u32);
+        for op in c.ops.iter() {
+            match *op {
+                Op::Clear { color } => {
+                    fnv(h, b"C");
+                    fp_u32(h, color);
+                }
+                Op::Rect { x, y, w, h: rh, color } => {
+                    fnv(h, b"R");
+                    fp_i32(h, x);
+                    fp_i32(h, y);
+                    fp_u32(h, w);
+                    fp_u32(h, rh);
+                    fp_u32(h, color);
+                }
+                Op::Glyphs { baseline_x, baseline_y, color, start, count, .. } => {
+                    fnv(h, b"G");
+                    fp_i32(h, baseline_x);
+                    fp_i32(h, baseline_y);
+                    fp_u32(h, color);
+                    for r in c.runs[start as usize..(start + count) as usize].iter() {
+                        fp_i32(h, r.advance);
+                    }
+                }
+                _ => fnv(h, b"?"),
+            }
+        }
+    }
+
+    fn cart_fingerprint(c: &Cartoon) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        fp_cart(&mut h, c);
+        h
+    }
+
+    fn render_fingerprint(sheet: &Sheet) -> u64 {
+        use crate::layout::tests::fp_i32;
         let mut gs = GlyphSource::new_vendored(512);
         let mut h: u64 = 0xcbf29ce484222325;
         let mut hash_cart = |c: &Cartoon, content: i32, su: i32| {
             fp_i32(&mut h, content);
             fp_i32(&mut h, su);
-            fp_u32(&mut h, c.ops.len() as u32);
-            for op in c.ops.iter() {
-                match *op {
-                    Op::Clear { color } => {
-                        fnv(&mut h, b"C");
-                        fp_u32(&mut h, color);
-                    }
-                    Op::Rect { x, y, w, h: rh, color } => {
-                        fnv(&mut h, b"R");
-                        fp_i32(&mut h, x);
-                        fp_i32(&mut h, y);
-                        fp_u32(&mut h, w);
-                        fp_u32(&mut h, rh);
-                        fp_u32(&mut h, color);
-                    }
-                    Op::Glyphs { baseline_x, baseline_y, color, start, count, .. } => {
-                        fnv(&mut h, b"G");
-                        fp_i32(&mut h, baseline_x);
-                        fp_i32(&mut h, baseline_y);
-                        fp_u32(&mut h, color);
-                        for r in c.runs[start as usize..(start + count) as usize].iter() {
-                            fp_i32(&mut h, r.advance);
-                        }
-                    }
-                    _ => fnv(&mut h, b"?"),
-                }
-            }
+            fp_cart(&mut h, c);
         };
         let (cw, ch, _) = gs.mono_cell();
         let mut t = history_tile(24, 8, 64);
@@ -3140,10 +3501,23 @@ mod tests {
             hash_cart(&cart, content, su);
         }
         t.apply(Record::Mode(ScreenMode::AltScreen));
+        repaint_unchanged(&mut t);
         let mut cart = Cartoon::new();
         let content = t.render(&mut cart, w, hh, &mut gs, sheet, &mut 0, None);
         hash_cart(&cart, content, 0);
         h
+    }
+
+    // The producer follows every mode flip with its repaint of the whole
+    // grid; this one repaints nothing, so a test keeps the cells it set up.
+    fn repaint_unchanged(t: &mut Tile) {
+        let (r, c, v) = t.grid.cursor();
+        t.apply(Record::CellDiff {
+            changed: vec![],
+            cursor: (r as u16, c as u16, v),
+            wrapped: vec![],
+            top_continues: false,
+        });
     }
 
     #[test]
@@ -3323,5 +3697,1598 @@ mod tests {
         assert!(matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == l.ground));
         let ids: Vec<u32> = cart.runs.iter().map(|r| r.glyph).collect();
         assert!(ids.contains(&id_x_roman) && !ids.contains(&id_i));
+    }
+
+    // --- TC-1b: the history chord (HALCYON 14.13) ---------------------------
+
+    fn osc(serial: u32, body: &str) -> Record {
+        Record::Control(Control::Osc1936Raw {
+            serial,
+            frame: alloc::format!("\x1b]1936;v1;{}\x1b\\", body).into_bytes(),
+        })
+    }
+
+    fn grid_text(t: &Tile, r: usize) -> alloc::string::String {
+        t.grid.row(r).iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn forget_history_keeps_the_live_screen_its_links_and_its_look() {
+        let cs = |ch: char, span: u32| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span,
+        };
+        let mut t = daylight_tile(8, 2);
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('p', 0), cs('q', 0)]],
+            wrapped: vec![false],
+        });
+        t.apply(osc(1, "obj;type=path;ref=/bin"));
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('b', 1)), (0, 1, cs('i', 1)), (0, 2, cs('n', 1))],
+            cursor: (0, 3, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        t.apply(osc(2, "/obj"));
+        // The zone cut freezes the path's block while the path is on screen.
+        t.apply(osc(3, "zone;k=prompt"));
+        assert_eq!(t.scrollback.frozen_blocks().len(), 1);
+        let screen = grid_text(&t, 0);
+        t.forget_history();
+        assert!(
+            t.scrollback.frozen_blocks().is_empty(),
+            "the history is gone"
+        );
+        assert!(t.scrollback.open_block().items.is_empty());
+        assert_eq!(grid_text(&t, 0), screen, "the live screen is untouched");
+        assert_eq!(
+            t.grid_run_obj(0, 1),
+            Some(("path", "/bin")),
+            "and its path still resolves"
+        );
+        // Leaving the grid later, the row brings its object along.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('b', 1), cs('i', 1), cs('n', 1)]],
+            wrapped: vec![false],
+        });
+        let fr = crate::select::FlatRow {
+            block: usize::MAX,
+            item: 0,
+            row: usize::MAX,
+        };
+        let runs = crate::menu::runs_on_row(&t.scrollback, fr);
+        assert_eq!(runs.len(), 1, "{:?}", runs);
+        assert_eq!(
+            crate::menu::obj_of(&t.scrollback, usize::MAX, runs[0].obj),
+            Some(("path", "/bin"))
+        );
+    }
+
+    #[test]
+    fn forget_history_releases_the_images_only_forgotten_lines_named() {
+        use crate::transcript::SPAN_MAP_ENTRIES;
+        let cs = |ch: char, span: u32| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span,
+        };
+        let caption = |n: u128| alloc::format!("obj;type=inline-image;ref={:032x}", n);
+        let mut t = daylight_tile(40, 2);
+        // Images A and C each captioned in a zone that holds a row, so each
+        // freezes at the next cut (an empty block is dropped, not frozen);
+        // image B's zone stays open.
+        let mut serial = 0u32;
+        for (n, ch) in [(0xa, 'a'), (0xc, 'c')] {
+            t.apply(osc(serial + 1, "zone;k=output"));
+            t.apply(osc(serial + 2, &caption(n)));
+            t.apply(osc(serial + 3, "/obj"));
+            t.apply(Record::ScrollOff {
+                rows: vec![vec![cs(ch, serial + 2)]],
+                wrapped: vec![false],
+            });
+            serial += 3;
+        }
+        t.apply(osc(7, "zone;k=output"));
+        t.apply(osc(8, &caption(0xb)));
+        t.apply(osc(9, "/obj"));
+        assert_eq!(
+            t.scrollback.frozen_blocks().len(),
+            2,
+            "premise: A's and C's zones are history"
+        );
+        // The ring turns over A's zone's slots: no live cell can name it now,
+        // while C's zone is still named.
+        for s in 1..=3u32 {
+            t.apply(osc(s + SPAN_MAP_ENTRIES as u32, "em;class=dim"));
+        }
+        for n in [0xa, 0xb, 0xc] {
+            assert!(t.place_image(n, 1, 1, vec![1]));
+        }
+        t.forget_history();
+        assert!(!t.media.contains(0xa), "A: only forgotten history named it");
+        assert!(
+            t.media.contains(0xc),
+            "C: the span ring still names its caption, so its husk keeps it"
+        );
+        assert!(
+            t.media.contains(0xb),
+            "B: the ring names its caption, in the open zone"
+        );
+    }
+
+    #[test]
+    fn a_clear_then_the_history_chord_leaves_an_empty_unpinned_tile() {
+        let cs = |ch: char| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span: 0,
+        };
+        let mut t = daylight_tile(8, 3);
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('h'), cs('i')]],
+            wrapped: vec![false],
+        });
+        t.apply(Record::Control(Control::ScreenErased));
+        assert!(t.pinned, "the clear pinned the view against its history");
+        t.forget_history();
+        assert!(!t.pinned, "the pin goes with the history it pinned against");
+        assert!(t.scrollback.frozen_blocks().is_empty());
+        assert!(t.scrollback.open_block().items.is_empty());
+    }
+
+    #[test]
+    fn a_normal_mode_selection_follows_a_scroll_off_through_the_tile() {
+        // The tile path end to end: the producer's ScrollOff, then the repaint
+        // that shows the rows gone, through Tile::apply, the flat list re-read
+        // the way the session reads it.
+        use crate::select::{refresh, FlatRow, Sel, Stamp, GRID_BLOCK};
+        let cs = |ch: char| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span: 0,
+        };
+        let row = |item: usize| FlatRow {
+            block: GRID_BLOCK,
+            item,
+            row: usize::MAX,
+        };
+        let mut t = daylight_tile(8, 4);
+        // a wraps into b; then c and d.
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('a')), (1, 0, cs('b')), (2, 0, cs('c')), (3, 0, cs('d'))],
+            cursor: (3, 1, true),
+            wrapped: vec![true, false, false, false],
+            top_continues: false,
+        });
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, None);
+        let mut sel = Sel::at(3, Stamp::of(&t.scrollback, &flat));
+        sel.anchor = Some(1);
+        // Three rows leave; the first two are one wrapped line, so they make
+        // two history rows -- a list only clamped, or shifted by what the
+        // history gained, lands on other rows.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('a')], vec![cs('b')], vec![cs('c')]],
+            wrapped: vec![true, false, false],
+        });
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat.len(), 2 + 4, "two history rows, then the grid");
+        assert_eq!(
+            flat[sel.cursor],
+            row(3),
+            "until the repaint the grid shows d on row 3, and the cursor stays on it"
+        );
+        assert_eq!(sel.anchor.map(|a| flat[a]), Some(row(1)), "and the anchor on b");
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('d')), (1, 0, cs(' ')), (2, 0, cs(' ')), (3, 0, cs(' '))],
+            cursor: (0, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat[sel.cursor], row(0), "the repaint moved grid row 3 up three");
+        assert_eq!(
+            sel.anchor,
+            Some(0),
+            "grid row 1, the wrapped line's second half, is in the history row its line joined"
+        );
+    }
+
+    #[test]
+    fn a_resize_restarts_grid_ends_at_the_prompt_and_its_shed_rows_arrive_once() {
+        // The session's resize path, Tile::resize_selected: the reflow drops
+        // rows off the top that the producer's ScrollOff delivers after it;
+        // they left the grid once.
+        use crate::select::{refresh, row_text, FlatRow, Sel, Stamp, GRID_BLOCK};
+        let cs = |ch: char| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span: 0,
+        };
+        let mut t = daylight_tile(8, 4);
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('y')), (1, 0, cs('z')), (2, 0, cs('a')), (3, 0, cs('b'))],
+            cursor: (3, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, None);
+        let mut sel = Sel::at(1, Stamp::of(&t.scrollback, &flat));
+        sel.anchor = Some(3);
+        // Two lines scroll y and z off, and the repaint shows it, before the
+        // list is re-read: the cursor's row is history row 1 now, no grid row.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('y')], vec![cs('z')]],
+            wrapped: vec![false, false],
+        });
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('a')), (1, 0, cs('b')), (2, 0, cs('c')), (3, 0, cs('d'))],
+            cursor: (3, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        t.resize_selected(8, 2, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.grid.cursor().0, 1, "premise: the prompt is grid row 1");
+        assert_eq!(
+            t.scrollback.rows_scrolled(),
+            4,
+            "premise: the reflow dropped two rows"
+        );
+        let prompt = FlatRow {
+            block: GRID_BLOCK,
+            item: 1,
+            row: usize::MAX,
+        };
+        // The producer's reply: the two rows the reflow dropped, the ack, the
+        // repaint.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('a')], vec![cs('b')]],
+            wrapped: vec![false, false],
+        });
+        refresh(&t.scrollback, Some(2), &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat.len(), 4 + 2, "four history rows, then the grid");
+        assert_eq!(sel.cursor, 1, "the cursor was on history row 1 at the resize and stays there");
+        assert_eq!(row_text(&t.scrollback, flat[sel.cursor]).trim_end(), "z");
+        assert_eq!(
+            sel.anchor.map(|a| flat[a]),
+            Some(prompt),
+            "the anchor was on the grid: it starts again at the prompt, and the rows arriving after leave it there"
+        );
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(8, &[("c", false), ("d", false)], (1, 1), false));
+        refresh(&t.scrollback, Some(2), &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 4, "premise: the repaint settled nothing");
+        assert_eq!(sel.cursor, 1, "and moved nothing");
+        assert_eq!(sel.anchor.map(|a| flat[a]), Some(prompt));
+    }
+
+    #[test]
+    fn a_narrowing_resize_restamps_the_selection_before_its_shed_rows_arrive() {
+        // A width change alone keeps the grid's height, so only the shed's
+        // seq bump makes the list re-read at the resize; the rows the reflow
+        // dropped then arrive without moving the selection off the prompt.
+        use crate::select::{refresh, FlatRow, Sel, Stamp, GRID_BLOCK};
+        let cs = |ch: char| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span: 0,
+        };
+        let mut t = daylight_tile(8, 4);
+        let mut changed = Vec::new();
+        for (r, ch, n) in [(0u16, 'a', 8u16), (1, 'b', 8), (2, 'c', 2), (3, 'd', 2)] {
+            changed.extend((0..n).map(|c| (r, c, cs(ch))));
+        }
+        t.apply(Record::CellDiff {
+            changed,
+            cursor: (3, 2, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, None);
+        let mut sel = Sel::at(2, Stamp::of(&t.scrollback, &flat));
+        sel.anchor = Some(0);
+        sel.obj = Some(1);
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.grid.dims(), (4, 4));
+        assert_eq!(sel.obj, None, "a restarted cursor carries no run of the row it left");
+        assert_eq!(t.grid.cursor().0, 3, "premise: the prompt is still the last row");
+        assert_eq!(
+            t.scrollback.rows_scrolled(),
+            2,
+            "premise: the reflow dropped the a line's two rows"
+        );
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('a'); 4], vec![cs('a'); 4]],
+            wrapped: vec![true, false],
+        });
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat.len(), 1 + 4, "the a line is one history row");
+        let prompt = FlatRow {
+            block: GRID_BLOCK,
+            item: 3,
+            row: usize::MAX,
+        };
+        assert_eq!(flat[sel.cursor], prompt, "the cursor stays on the prompt");
+        assert_eq!(
+            sel.anchor.map(|a| flat[a]),
+            Some(prompt),
+            "so does the anchor that was on grid row 0"
+        );
+    }
+
+    #[test]
+    fn a_height_only_resize_keeps_a_grid_selection_on_its_text() {
+        // Only a width change re-cuts the lines: a taller or shorter tile
+        // keeps each row's text, the window sliding to keep the cursor row,
+        // so an end on a row the window still shows stays on its text.
+        use crate::select::{refresh, FlatRow, Sel, Stamp, GRID_BLOCK};
+        let cs = |ch: char| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span: 0,
+        };
+        let row = |item: usize| FlatRow {
+            block: GRID_BLOCK,
+            item,
+            row: usize::MAX,
+        };
+        let mut t = daylight_tile(8, 4);
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('a')), (1, 0, cs('b')), (2, 0, cs('c')), (3, 0, cs('d'))],
+            cursor: (3, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, None);
+        let mut sel = Sel::at(1, Stamp::of(&t.scrollback, &flat));
+        t.resize_selected(8, 6, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.grid.cursor().0, 3, "premise: a taller grid keeps its rows where they were");
+        assert_eq!(flat[sel.cursor], row(1), "a taller tile keeps the cursor on b");
+        sel.anchor = Some(0);
+        assert_eq!(sel.anchor.map(|a| flat[a]), Some(row(0)), "premise: the anchor is on a");
+        t.resize_selected(8, 3, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.grid.cursor().0, 2, "premise: a shorter one slides a off the top");
+        assert_eq!(flat[sel.cursor], row(0), "and b, now its first row, keeps the cursor");
+        assert_eq!(
+            sel.anchor.map(|a| flat[a]),
+            Some(row(2)),
+            "the anchor on a, slid past, starts again at the prompt"
+        );
+        // With the cursor at the top, a shorter window cuts rows off below:
+        // an end on one of them has lost its text and starts at the prompt.
+        let mut t = daylight_tile(8, 4);
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cs('a')), (1, 0, cs('b')), (2, 0, cs('c')), (3, 0, cs('d'))],
+            cursor: (0, 1, true),
+            wrapped: vec![false; 4],
+            top_continues: false,
+        });
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        refresh(&t.scrollback, Some(4), &mut flat, &mut seq, None);
+        let mut sel = Sel::at(3, Stamp::of(&t.scrollback, &flat));
+        sel.anchor = Some(2);
+        t.resize_selected(8, 2, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 0, "premise: nothing slid off the top");
+        assert_eq!(flat[sel.cursor], row(0), "d was cut off below: the cursor is on the prompt");
+        assert_eq!(
+            sel.anchor.map(|a| flat[a]),
+            Some(row(0)),
+            "so was c, the first row past the window"
+        );
+    }
+
+    #[test]
+    fn a_resize_the_producer_coalesced_away_is_settled_by_its_repaint() {
+        // The mirror reflows every resize; the producer applies only the last
+        // one it finds pending. Shrunk and grown back before it looked, it
+        // sheds nothing, and its repaint of the whole grid -- announced by
+        // the ack -- settles the rows the mirror dropped: each end moves to
+        // where the repaint puts its row, and the next real scroll counts.
+        use crate::select::{FlatRow, Sel, Stamp, GRID_BLOCK};
+        let cs = |ch: char| Cell {
+            ch,
+            fg: 0xFFFFFF,
+            bg: 0,
+            attrs: 0,
+            span: 0,
+        };
+        // `lines` one character each down column 0 of an 8x6 grid, the rest
+        // blank, and the cursor on row `crow`.
+        let full = |lines: &str, crow: u16| -> Record {
+            let chars: Vec<char> = lines.chars().collect();
+            let changed = (0..6u16)
+                .flat_map(|r| (0..8u16).map(move |c| (r, c)))
+                .map(|(r, c)| {
+                    let ch = if c == 0 { chars.get(r as usize).copied().unwrap_or(' ') } else { ' ' };
+                    (r, c, cs(ch))
+                })
+                .collect();
+            Record::CellDiff {
+                changed,
+                cursor: (crow, 1, true),
+                wrapped: vec![false; 6],
+                top_continues: false,
+            }
+        };
+        let row = |item: usize| FlatRow {
+            block: GRID_BLOCK,
+            item,
+            row: usize::MAX,
+        };
+        // a, b, c, the prompt d on row 3, and two blank rows below it: the
+        // prompt is not the grid's last row, so no clamp can land on it.
+        let mut t = daylight_tile(8, 6);
+        t.apply(full("abcd", 3));
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let mut sel = Sel::at(3, Stamp::of(&t.scrollback, &flat));
+        sel.anchor = Some(2);
+        t.resize_selected(8, 2, &mut flat, &mut seq, Some(&mut sel));
+        t.resize_selected(8, 6, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "premise: the mirror dropped two rows");
+        assert_eq!(t.grid.cursor().0, 1, "premise: after the grow the mirror's prompt is row 1");
+        assert_eq!(flat[sel.cursor], row(1), "premise: the selection slid with d");
+        assert_eq!(sel.anchor.map(|a| flat[a]), Some(row(0)), "premise: and its anchor with c");
+        // An incremental diff in flight is no repaint: nothing settles.
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 7, cs('x'))],
+            cursor: (3, 1, true),
+            wrapped: vec![false; 6],
+            top_continues: false,
+        });
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "an incremental diff settles nothing");
+        assert_eq!(flat[sel.cursor], row(1), "and moves nothing");
+        // The producer applied only the last resize -- no change, no rows --
+        // acks it and repaints the whole grid.
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(full("abcd", 3));
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 0, "the repaint settled the two");
+        assert_eq!(flat[sel.cursor], row(3), "the selection is on d, where the repaint shows it");
+        assert_eq!(
+            sel.anchor.map(|a| flat[a]),
+            Some(row(2)),
+            "and its anchor on c: moved down with its row, not started again at the prompt"
+        );
+        // The next real scroll: the row, then the repaint that shows it gone.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![cs('a')]],
+            wrapped: vec![false],
+        });
+        t.apply(full("bcd", 2));
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat.len(), 1 + 6);
+        assert_eq!(flat[sel.cursor], row(2), "and the next real scroll moves it up one");
+        assert_eq!(sel.anchor.map(|a| flat[a]), Some(row(1)));
+    }
+
+    // A grid of `lines` (row-major, each padded to `cols`) as one CellDiff
+    // covering every cell -- the producer's repaint -- with its wrap flags
+    // and its top flag (`top`: the row above row 0 continues into it). In
+    // the daylight tile's default ink, as a producer's blanks are: a blank
+    // in any other ink is content to the reflow, and re-cuts as a character.
+    fn whole_grid(cols: usize, lines: &[(&str, bool)], cursor: (u16, u16), top: bool) -> Record {
+        let pal = libhalcyon::theme::daylight_palette();
+        let cell = |ch: char| Cell {
+            ch,
+            fg: pal.fg,
+            bg: pal.bg,
+            attrs: 0,
+            span: 0,
+        };
+        let mut changed = Vec::new();
+        for (r, (text, _)) in lines.iter().enumerate() {
+            let chars: Vec<char> = text.chars().collect();
+            for c in 0..cols {
+                changed.push((r as u16, c as u16, cell(chars.get(c).copied().unwrap_or(' '))));
+            }
+        }
+        Record::CellDiff {
+            changed,
+            cursor: (cursor.0, cursor.1, true),
+            wrapped: lines.iter().map(|&(_, w)| w).collect(),
+            top_continues: top,
+        }
+    }
+
+    // The records a producer emitted, through the wire both ways, into the
+    // tile (seam_step's second half).
+    fn seam_send(t: &mut Tile, out: Vec<Record>) {
+        for rec in out {
+            let mut buf = Vec::new();
+            kaua_term::wire::encode_record(&rec, &mut buf);
+            let back = kaua_term::wire::parse_record(buf[0], &buf[5..])
+                .expect("the producer's own record must parse");
+            assert_eq!(back, rec, "the wire round-trip is lossless");
+            t.apply(back);
+        }
+    }
+
+    // As seam_send, with the session's paint after every record: a record
+    // stream spans reads, and the selection is brought current between them.
+    fn seam_send_each(
+        t: &mut Tile,
+        out: Vec<Record>,
+        flat: &mut Vec<crate::select::FlatRow>,
+        seq: &mut u64,
+        sel: &mut crate::select::Sel,
+    ) {
+        for rec in out {
+            seam_send(t, vec![rec]);
+            t.refresh_selected(flat, seq, Some(&mut *sel));
+        }
+    }
+
+    // The producer's side of a resize, as kaua-term's apply_resize does it:
+    // the vt re-cut, the rows it pushed off the top, the ack, the repaint.
+    fn seam_resized(p: &mut kaua_term::Producer, v: &mut vt::Vt, cols: usize, rows: usize) -> Vec<Record> {
+        v.resize(cols, rows);
+        let mut out = Vec::new();
+        p.drain_pending(v, &mut out);
+        p.resized(v, &mut out);
+        out
+    }
+
+    // A seam tile of `cols` x `rows` showing `bytes`, and a Normal-mode
+    // selection on the grid's cursor row. The vt is born in the tile's
+    // palette, as a kaua-term is in its host's: the reflow's padding is the
+    // default ink, so both sides must mean the same ink by it.
+    fn seam_selected(
+        cols: usize,
+        rows: usize,
+        bytes: &[u8],
+    ) -> (Tile, kaua_term::Producer, vt::Vt, Vec<crate::select::FlatRow>, u64, crate::select::Sel) {
+        let mut v = vt::Vt::with_palette(cols, rows, libhalcyon::theme::daylight_palette());
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(cols, rows, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, bytes);
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let at = crate::select::Stamp::of(&t.scrollback, &flat);
+        let sel = crate::select::Sel::at(flat.len() - rows + t.grid.cursor().0, at);
+        (t, p, v, flat, seq, sel)
+    }
+
+    fn grid_row(item: usize) -> crate::select::FlatRow {
+        crate::select::FlatRow {
+            block: crate::select::GRID_BLOCK,
+            item,
+            row: usize::MAX,
+        }
+    }
+
+    #[test]
+    fn a_narrowing_drag_the_producer_coalesced_ends_on_the_prompt() {
+        // Rows cut at other widths are no distance: the mirror counts six rows
+        // at four and two columns, the producer's single re-cut from eight
+        // columns sheds nine at two, and the grids come out the same. A count
+        // delta of three would put the selection on output three rows above
+        // the prompt; the re-cut holds the grid rows until the producer's
+        // repaint, which starts them on its prompt.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) =
+            seam_selected(8, 4, b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\n$");
+        assert_eq!(flat[sel.cursor], grid_row(3), "premise: the selection is on the prompt");
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        t.resize_selected(2, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(
+            t.scrollback.rows_scrolled(),
+            6,
+            "premise: the mirror dropped three rows at four columns and three at two"
+        );
+        assert_eq!(flat[sel.cursor], grid_row(3), "premise: each re-cut started the cursor on the prompt");
+        // The producer finds only the last resize pending and re-cuts once.
+        seam_send(&mut t, seam_resized(&mut p, &mut v, 2, 4));
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 9, "premise: the producer's cut shed nine rows");
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: its repaint settled the re-cut");
+        assert_eq!(t.grid.cursor().0, 3, "premise: the repaint's prompt is row 3");
+        assert_eq!(flat[sel.cursor], grid_row(3), "the cursor is on the prompt the repaint shows");
+    }
+
+    #[test]
+    fn a_reply_to_a_resize_the_grid_moved_past_reopens_the_re_cut() {
+        // Narrowed, widened and narrowed again before any reply: the reply to
+        // the first narrow comes at the grid's dims and settles, but the
+        // producer still has two resizes to apply. Its reply at the wide
+        // width reopens the re-cut, so what it scrolls off at eight columns
+        // (the c line, two rows here, counts one) and what its last narrow
+        // sheds move no grid end; its last reply starts them on its prompt.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) =
+            seam_selected(8, 4, b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\n$");
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        t.resize_selected(8, 4, &mut flat, &mut seq, Some(&mut sel));
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        // The producer applies each resize as it comes, and prints two lines
+        // while it is at eight columns.
+        let narrow = seam_resized(&mut p, &mut v, 4, 4);
+        let wide = seam_resized(&mut p, &mut v, 8, 4);
+        let mut output = Vec::new();
+        p.feed(&mut v, b"\r\nyyyyyyyy\r\nzzzzzzzz\r\n$", &mut output);
+        let narrow_again = seam_resized(&mut p, &mut v, 4, 4);
+        seam_send(&mut t, narrow);
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: the first reply, at the grid's dims, settled");
+        assert_eq!(flat[sel.cursor], grid_row(3), "premise: the cursor is on the prompt that reply shows");
+        seam_send(&mut t, wide);
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "the reply at the wide width reopened the re-cut");
+        seam_send(&mut t, output);
+        seam_send(&mut t, narrow_again);
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(
+            t.scrollback.rows_scrolled(),
+            7,
+            "premise: three rows from the first narrow, two scrolled at eight columns, two shed by the last"
+        );
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: the last reply settled the re-cut");
+        assert_eq!(t.grid.cursor().0, 3, "premise: the last reply's prompt is row 3");
+        assert_eq!(flat[sel.cursor], grid_row(3), "the cursor is on the prompt, not on a row counted at eight columns");
+    }
+
+    #[test]
+    fn narrowed_and_widened_back_the_selection_ends_on_the_prompt() {
+        // Back at the width it started from, the producer applies nothing and
+        // repaints the line the mirror's two re-cuts shortened by a row: the
+        // row the mirror dropped is no row of the repaint's, and moving the
+        // selection down by it would leave it on a blank row below the prompt.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) = seam_selected(8, 4, b"aaaaaaaa\r\n$");
+        assert_eq!(flat[sel.cursor], grid_row(1), "premise: the selection is on the prompt");
+        t.resize_selected(2, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 1, "premise: the narrow re-cut dropped a row");
+        t.resize_selected(8, 4, &mut flat, &mut seq, Some(&mut sel));
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 8, 4), &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rows_scrolled(), 0, "premise: the repaint settled the row");
+        assert_eq!(t.grid.cursor().0, 1, "premise: the repaint's prompt is row 1");
+        assert_eq!(flat[sel.cursor], grid_row(1), "the cursor is on the prompt, not the blank row below it");
+    }
+
+    #[test]
+    fn output_in_flight_across_a_width_change_ends_on_the_new_prompt() {
+        // No coalescing: the producer printed four lines before the resize
+        // reached it. They left its grid at eight columns, the mirror's guess
+        // at four: inside the re-cut the grid rows keep their places whatever
+        // the count does, and the repaint starts them on its prompt.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) =
+            seam_selected(8, 4, b"xxxxxxxx\r\nyyyyyyyy\r\nzzzzzzzz\r\n$");
+        let mut in_flight = Vec::new();
+        p.feed(&mut v, b"\r\nwwwwwwww\r\nvvvvvvvv\r\nuuuuuuuu\r\n$", &mut in_flight);
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 3, "premise: the mirror's re-cut dropped three rows");
+        seam_send_each(&mut t, in_flight, &mut flat, &mut seq, &mut sel);
+        assert_eq!(
+            t.scrollback.rows_scrolled(),
+            4,
+            "premise: the four rows in flight count one past the mirror's three"
+        );
+        assert_eq!(flat[sel.cursor], grid_row(3), "inside the re-cut the cursor keeps its grid row");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 4, 4), &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.grid.cursor().0, 3, "premise: the repaint's prompt is row 3");
+        assert_eq!(flat[sel.cursor], grid_row(3), "the cursor is on the new prompt");
+    }
+
+    #[test]
+    fn a_width_change_while_the_mirror_is_behind_ends_on_the_repaints_cursor_row() {
+        // The producer had moved its cursor up (the diff still in flight) when
+        // the resize reached it: its window keeps the top rows and cuts the rest
+        // off below, where the mirror's, its cursor still on the prompt, slid
+        // three rows past. Held in place until the repaint, the cursor then
+        // starts on the repaint's cursor row -- not on the row it held, nor on
+        // that row moved down by the three rows the producer kept.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) =
+            seam_selected(8, 4, b"xxxxxxxx\r\nyyyyyyyy\r\nzzzzzzzz\r\n$");
+        let mut in_flight = Vec::new();
+        p.feed(&mut v, b"\x1b[2;1H", &mut in_flight);
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 3, "premise: the mirror's re-cut slid three rows past");
+        seam_send_each(&mut t, in_flight, &mut flat, &mut seq, &mut sel);
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 4, 4), &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rows_scrolled(), 0, "premise: the producer's window slid past nothing");
+        assert_eq!(t.grid.cursor().0, 2, "premise: the repaint's cursor is on y's first row");
+        assert_eq!(flat[sel.cursor], grid_row(2), "the cursor is on the repaint's cursor row");
+    }
+
+    #[test]
+    fn a_row_the_producer_cut_off_below_restarts_at_the_prompt() {
+        // The mirror was behind: the producer's cursor had moved to the top, so
+        // its shorter window kept a and b and cut c and d off below, where the
+        // mirror's (its cursor still on d) slid past a and b. The repaint moves
+        // the grid rows down two; d's row is past the grid's last row, so the
+        // end on it starts again at the prompt, not on b.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) = seam_selected(8, 4, b"a\r\nb\r\nc\r\nd");
+        let mut in_flight = Vec::new();
+        p.feed(&mut v, b"\x1b[H", &mut in_flight);
+        t.resize_selected(8, 2, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "premise: the mirror slid past a and b");
+        assert_eq!(flat[sel.cursor], grid_row(1), "premise: the cursor slid with d");
+        seam_send_each(&mut t, in_flight, &mut flat, &mut seq, &mut sel);
+        // The prompt the repaint restarts the cursor on is row 0, where wrong
+        // paths land too: the cursor must still be on d before the repaint.
+        assert_eq!(flat[sel.cursor], grid_row(1), "the diff in flight moved no row: the cursor is still on d");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 8, 2), &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rows_scrolled(), 0, "premise: the producer dropped nothing");
+        assert_eq!(t.grid.cursor().0, 0, "premise: the repaint's cursor is on a");
+        assert_eq!(flat[sel.cursor], grid_row(0), "d is gone: the cursor is on the prompt");
+    }
+
+    #[test]
+    fn a_height_change_inside_an_open_re_cut_slides_the_grid_ends_with_their_rows() {
+        // The re-cut holds the grid rows against the count, not against the
+        // mirror's own reflow: a shorter tile before the repaint still slides
+        // an end with its row, and starts one on a row it slid past again at
+        // the prompt.
+        let mut t = daylight_tile(8, 6);
+        t.apply(whole_grid(
+            8,
+            &[("a", false), ("b", false), ("c", false), ("d", false), ("e", false), ("$", false)],
+            (5, 1),
+            false,
+        ));
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let mut sel = crate::select::Sel::at(5, crate::select::Stamp::of(&t.scrollback, &flat));
+        t.resize_selected(4, 6, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "premise: the re-cut is unsettled");
+        sel.cursor = 4;
+        sel.anchor = Some(0);
+        assert_eq!(flat[sel.cursor], grid_row(4), "premise: the cursor is on e");
+        assert_eq!(flat[0], grid_row(0), "premise: the anchor is on a");
+        t.resize_selected(4, 3, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rows_scrolled(), 3, "premise: the shorter window slid past a, b and c");
+        assert_eq!(flat[sel.cursor], grid_row(1), "the cursor slid with e");
+        assert_eq!(t.grid.cursor().0, 2, "premise: the prompt is row 2");
+        assert_eq!(flat[sel.anchor.expect("the anchor stays")], grid_row(2), "the anchor on a starts again at the prompt");
+    }
+
+    // What a selection end is on: its grid row's text, or its history row's.
+    fn end_text(t: &Tile, flat: &[crate::select::FlatRow], i: usize) -> String {
+        let fr = flat[i];
+        if fr.block == crate::select::GRID_BLOCK {
+            String::from(grid_text(t, fr.item).trim_end())
+        } else {
+            String::from(crate::select::row_text(&t.scrollback, fr).trim_end())
+        }
+    }
+
+    // A seam tile of eight columns showing `bytes`, the cursor on grid row
+    // `on`; the producer prints `more`, and only the rows it scrolled off
+    // reach the tile (the repaint is in the next read, returned).
+    fn rows_ahead_of_their_repaint(
+        rows: usize,
+        bytes: &[u8],
+        more: &[u8],
+        on: usize,
+    ) -> (Tile, kaua_term::Producer, vt::Vt, Vec<crate::select::FlatRow>, u64, crate::select::Sel, Vec<Record>) {
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) = seam_selected(8, rows, bytes);
+        sel.cursor = flat.len() - rows + on;
+        let mut out = Vec::new();
+        p.feed(&mut v, more, &mut out);
+        let at = out
+            .iter()
+            .position(|r| matches!(r, Record::CellDiff { .. }))
+            .expect("premise: the producer repaints");
+        let repaint = out.split_off(at);
+        assert!(
+            out.iter().any(|r| matches!(r, Record::ScrollOff { .. })),
+            "premise: the rows come ahead of the repaint"
+        );
+        seam_send_each(&mut t, out, &mut flat, &mut seq, &mut sel);
+        (t, p, v, flat, seq, sel, repaint)
+    }
+
+    #[test]
+    fn a_shrink_before_the_repaint_counts_the_rows_that_arrived_once() {
+        // a and b arrived; their repaint had not when the tile shrank, so the
+        // reflow dropped a, which is here already. The producer's repaint at
+        // its old height lands and is painted, then its reply, which scrolls
+        // c off. Counted again, a would stand in for c: nothing would move at
+        // the reply and the cursor would sit on d.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel, repaint) =
+            rows_ahead_of_their_repaint(4, b"a\r\nb\r\nc\r\nd", b"\r\ne\r\nf", 2);
+        assert_eq!(end_text(&t, &flat, sel.cursor), "c", "premise: before the repaint the cursor is on c");
+        t.resize_selected(8, 3, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(grid_text(&t, 0).trim_end(), "b", "premise: the reflow dropped a");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "c", "the cursor slid with c");
+        seam_send_each(&mut t, repaint, &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 0).trim_end(), "c", "premise: the old repaint shows c on top");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "c", "the old repaint: the cursor is on c");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 8, 3), &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 0).trim_end(), "d", "premise: the producer's window slid past c");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "c", "the cursor followed c into history");
+    }
+
+    #[test]
+    fn a_shrink_starts_an_end_on_a_dropped_row_that_arrived_again_at_the_prompt() {
+        // a and b arrived; their repaint had not when the tile shrank, and the
+        // reflow dropped a. Its text is in history already, but an end on a
+        // row the reflow slid past starts again at the prompt, as any does.
+        let (mut t, _p, _v, mut flat, mut seq, mut sel, _repaint) =
+            rows_ahead_of_their_repaint(4, b"a\r\nb\r\nc\r\nd", b"\r\ne\r\nf", 0);
+        assert_eq!(end_text(&t, &flat, sel.cursor), "a", "premise: before the repaint the cursor is on a");
+        t.resize_selected(8, 3, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(grid_text(&t, 0).trim_end(), "b", "premise: the reflow dropped a");
+        assert_eq!(t.grid.cursor().0, 2, "premise: the prompt is row 2");
+        assert_eq!(flat[sel.cursor], grid_row(2), "the cursor starts again at the prompt");
+    }
+
+    // A drag shrinks a seam tile from six rows to three, the cursor on the
+    // prompt; the producer's reply to the first shrink (five rows) lands
+    // between the second and the third, or (`late`) after the third.
+    fn shrinks_around_an_older_taller_reply(late: bool) -> (String, u64) {
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) =
+            seam_selected(8, 6, b"m0\r\nm1\r\nm2\r\nm3\r\nm4\r\n$");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "$", "premise: the cursor is on the prompt");
+        t.resize_selected(8, 5, &mut flat, &mut seq, Some(&mut sel));
+        let taller = seam_resized(&mut p, &mut v, 8, 5);
+        t.resize_selected(8, 4, &mut flat, &mut seq, Some(&mut sel));
+        let reply = seam_resized(&mut p, &mut v, 8, 4);
+        let taller = if late {
+            Some(taller)
+        } else {
+            seam_send_each(&mut t, taller, &mut flat, &mut seq, &mut sel);
+            None
+        };
+        t.resize_selected(8, 3, &mut flat, &mut seq, Some(&mut sel));
+        let last = seam_resized(&mut p, &mut v, 8, 3);
+        if let Some(r) = taller {
+            seam_send_each(&mut t, r, &mut flat, &mut seq, &mut sel);
+        }
+        seam_send_each(&mut t, reply, &mut flat, &mut seq, &mut sel);
+        seam_send_each(&mut t, last, &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 2).trim_end(), "$", "premise: the producer keeps the prompt on the last row");
+        (end_text(&t, &flat, sel.cursor), t.scrollback.rows_left())
+    }
+
+    #[test]
+    fn a_shrink_after_an_older_taller_repaint_keeps_the_prompt_end() {
+        // That reply names a cursor row below the shorter grid, which reads it
+        // on its last row -- the prompt's, as the count places it while the
+        // rows the second shrink dropped are on their way -- so the third
+        // shrink slides the window from the prompt. Anchored on another row it
+        // would cut the prompt off below and restart the cursor above it.
+        assert_eq!(
+            shrinks_around_an_older_taller_reply(true),
+            (String::from("$"), 3),
+            "control: the replies trail the drag"
+        );
+        assert_eq!(
+            shrinks_around_an_older_taller_reply(false),
+            (String::from("$"), 3),
+            "the older reply lands mid-drag"
+        );
+    }
+
+    #[test]
+    fn a_shrink_before_the_repaint_settles_exactly_in_one_read() {
+        // The same, with the old repaint and the reply in one read: no paint
+        // between them, so a wrong count at the old repaint reaches nothing.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel, mut repaint) =
+            rows_ahead_of_their_repaint(4, b"a\r\nb\r\nc\r\nd", b"\r\ne\r\nf", 2);
+        t.resize_selected(8, 3, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(end_text(&t, &flat, sel.cursor), "c", "premise: the cursor slid with c");
+        repaint.extend(seam_resized(&mut p, &mut v, 8, 3));
+        seam_send(&mut t, repaint);
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(grid_text(&t, 0).trim_end(), "d", "premise: the producer's window slid past c");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "c", "the cursor followed c into history");
+    }
+
+    #[test]
+    fn an_old_repaint_after_a_shrink_moves_the_selection_by_the_rows_it_shows_gone() {
+        // The old repaint shows one row gone past what the reflow dropped
+        // (b), not two: a was both dropped and among the rows that arrived.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel, repaint) =
+            rows_ahead_of_their_repaint(6, b"a\r\nb\r\nc\r\nd\r\ne\r\nf", b"\r\ng\r\nh", 4);
+        assert_eq!(end_text(&t, &flat, sel.cursor), "e", "premise: the cursor is on e");
+        t.resize_selected(8, 5, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(grid_text(&t, 0).trim_end(), "b", "premise: the reflow dropped a");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "e", "the cursor slid with e");
+        seam_send_each(&mut t, repaint, &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 2).trim_end(), "e", "premise: the old repaint shows e on row 2");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "e", "the old repaint: the cursor is still on e");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 8, 5), &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 1).trim_end(), "e", "premise: the reply slid past c");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "e", "and after the reply");
+    }
+
+    #[test]
+    fn a_shrink_and_a_grow_back_before_the_repaint_keep_the_selection_on_its_rows() {
+        // The drag comes back before the producer sees it: it applies only
+        // the last size, its own, and settles nothing it never shed. Counted
+        // twice, a and b would push both ends to the first row at the old
+        // repaint and the settle would bring them down onto e.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel, repaint) =
+            rows_ahead_of_their_repaint(6, b"a\r\nb\r\nc\r\nd\r\ne\r\n$", b"\r\nf\r\n$", 3);
+        sel.anchor = Some(flat.len() - 6 + 2);
+        let ends = |t: &Tile, flat: &[crate::select::FlatRow], sel: &crate::select::Sel| {
+            (end_text(t, flat, sel.anchor.expect("the anchor stays")), end_text(t, flat, sel.cursor))
+        };
+        assert_eq!(ends(&t, &flat, &sel), (String::from("c"), String::from("d")), "premise: c to d");
+        t.resize_selected(8, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(grid_text(&t, 0).trim_end(), "c", "premise: the reflow dropped a and b");
+        t.resize_selected(8, 6, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(ends(&t, &flat, &sel), (String::from("c"), String::from("d")), "premise: the grow moved nothing");
+        seam_send_each(&mut t, repaint, &mut flat, &mut seq, &mut sel);
+        assert_eq!(ends(&t, &flat, &sel), (String::from("c"), String::from("d")), "the old repaint: still c to d");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 8, 6), &mut flat, &mut seq, &mut sel);
+        assert_eq!(ends(&t, &flat, &sel), (String::from("c"), String::from("d")), "and after the reply");
+    }
+
+    #[test]
+    fn a_selection_moves_with_the_grid_at_the_repaint_not_at_the_rows() {
+        // A scroll is two records -- the rows that left, then the repaint that
+        // shows them gone -- and the session paints between reads. Until the
+        // repaint the grid still shows every row where it was: an end moved at
+        // the rows would sit on another row's text, and the band and Enter
+        // would act on that row.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) = seam_selected(8, 4, b"a\r\nb\r\nc\r\n$");
+        assert_eq!(flat[sel.cursor], grid_row(3), "premise: the selection is on the prompt");
+        sel.anchor = Some(flat.len() - 4 + 1);
+        let mut out = Vec::new();
+        p.feed(&mut v, b"\r\nd\r\n$", &mut out);
+        let at = out
+            .iter()
+            .position(|r| matches!(r, Record::CellDiff { .. }))
+            .expect("premise: the producer repaints");
+        let repaint = out.split_off(at);
+        assert!(
+            out.iter().any(|r| matches!(r, Record::ScrollOff { .. })),
+            "premise: the rows come ahead of the repaint"
+        );
+        seam_send_each(&mut t, out, &mut flat, &mut seq, &mut sel);
+        assert_eq!(flat[sel.cursor], grid_row(3), "before the repaint the cursor stays on its row");
+        assert_eq!(grid_text(&t, 3).trim_end(), "$", "which still shows the prompt");
+        assert_eq!(sel.anchor.map(|a| flat[a]), Some(grid_row(1)), "and the anchor on b's row");
+        assert_eq!(grid_text(&t, 1).trim_end(), "b");
+        seam_send_each(&mut t, repaint, &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 1).trim_end(), "$", "premise: the repaint moved the prompt up two");
+        assert_eq!(flat[sel.cursor], grid_row(1), "and the cursor with it");
+        let anchor = sel.anchor.expect("the anchor stays");
+        assert_eq!(
+            crate::select::row_text(&t.scrollback, flat[anchor]).trim_end(),
+            "b",
+            "the anchor followed b into history"
+        );
+    }
+
+    #[test]
+    fn a_resize_on_the_alt_screen_holds_a_selection_made_before_its_reply() {
+        // The mirror resized while a TUI ran, and the TUI exited before the
+        // resize reached the producer: the main screen came back cut at the
+        // old width, and a selection was made on it. The producer then re-cut
+        // its main screen, and rows cut at the new width scroll off: counted
+        // as a distance they would put the cursor on output above the prompt.
+        // The width change opened the re-cut on the alt screen, so the grid
+        // ends hold until the reply, which starts them on its prompt.
+        let (mut t, mut p, mut v, _, _, _) = seam_selected(8, 4, b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\n$");
+        seam_step(&mut t, &mut p, &mut v, b"\x1b[?1049h");
+        assert_eq!(t.mode, ScreenMode::AltScreen, "premise: the TUI's screen is up");
+        t.resize(4, 4);
+        seam_step(&mut t, &mut p, &mut v, b"\x1b[?1049l");
+        assert_eq!(t.mode, ScreenMode::Normal, "premise: the main screen is back");
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "the width change on the alt screen opened the re-cut");
+        // Normal mode, the cursor moved up off the prompt: a selection that
+        // never moved would stay on this row.
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let at = crate::select::Stamp::of(&t.scrollback, &flat);
+        let mut sel = crate::select::Sel::at(flat.len() - 4 + 1, at);
+        assert_eq!(flat[sel.cursor], grid_row(1), "premise: the selection is on grid row 1");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 4, 4), &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rows_scrolled(), 3, "premise: the producer's re-cut shed three rows");
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: its repaint settled the re-cut");
+        assert_eq!(t.grid.cursor().0, 3, "premise: the repaint's prompt is row 3");
+        assert_eq!(
+            flat[sel.cursor],
+            grid_row(3),
+            "the cursor is on the prompt, not on a row counted at the new width"
+        );
+    }
+
+    #[test]
+    fn inside_an_open_re_cut_a_run_goes_when_the_grid_moves_under_it() {
+        // A held end keeps its grid row, but its run key names columns of the
+        // line the grid showed there: once the grid has moved, the row under
+        // the key is another line, cut at another width.
+        let mut t = daylight_tile(8, 6);
+        t.apply(whole_grid(
+            8,
+            &[("a", false), ("b", false), ("c", false), ("d", false), ("e", false), ("$", false)],
+            (5, 1),
+            false,
+        ));
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let mut sel = crate::select::Sel::at(5, crate::select::Stamp::of(&t.scrollback, &flat));
+        t.resize_selected(4, 6, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "premise: the re-cut is unsettled");
+        sel.cursor = 4;
+        sel.obj = Some(1);
+        // Output in flight at the old width: its row arrives, then its repaint.
+        t.apply(Record::ScrollOff {
+            rows: vec![vec![Cell {
+                ch: 'a',
+                fg: 0,
+                bg: 0,
+                attrs: 0,
+                span: 0,
+            }]],
+            wrapped: vec![false],
+        });
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat[sel.cursor], grid_row(4), "premise: the held cursor keeps its row");
+        assert_eq!(sel.obj, Some(1), "the grid has not moved: the run is still under the key");
+        t.apply(whole_grid(
+            8,
+            &[("b", false), ("c", false), ("d", false), ("e", false), ("$", false), ("", false)],
+            (4, 1),
+            false,
+        ));
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat[sel.cursor], grid_row(4), "the held cursor still keeps its row");
+        assert_eq!(sel.obj, None, "but the grid moved under it, and its run went");
+    }
+
+    #[test]
+    fn inside_an_open_re_cut_a_run_goes_at_a_repaint_that_moves_no_count() {
+        // The rows a narrowing dropped arrive cut at the old width and take
+        // back the shed, so no count moves; the repaint after them still
+        // writes the old width's cells over the rows the re-cut holds.
+        let mut t = daylight_tile(8, 4);
+        t.apply(whole_grid(
+            8,
+            &[("aaaaaaaa", false), ("bbbbbbbb", false), ("cccccccc", false), ("$", false)],
+            (3, 1),
+            false,
+        ));
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let mut sel = crate::select::Sel::at(3, crate::select::Stamp::of(&t.scrollback, &flat));
+        t.resize_selected(4, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "premise: the re-cut is unsettled");
+        let left = t.scrollback.rows_left();
+        assert_eq!(left, 3, "premise: the re-cut dropped three rows off the top");
+        sel.cursor = flat.len() - 4;
+        sel.obj = Some(1);
+        let row8 = |s: &str| {
+            s.chars()
+                .map(|ch| Cell {
+                    ch,
+                    fg: 0,
+                    bg: 0,
+                    attrs: 0,
+                    span: 0,
+                })
+                .collect::<Vec<_>>()
+        };
+        t.apply(Record::ScrollOff {
+            rows: vec![row8("aaaaaaaa"), row8("bbbbbbbb")],
+            wrapped: vec![false, false],
+        });
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(sel.obj, Some(1), "no repaint yet: the run is still under the key");
+        t.apply(whole_grid(
+            8,
+            &[("cccccccc", false), ("$", false), ("", false), ("", false)],
+            (1, 1),
+            false,
+        ));
+        assert_eq!(t.scrollback.rows_left(), left, "premise: the repaint moved no count");
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat[sel.cursor], grid_row(0), "the held cursor keeps its row");
+        assert_eq!(sel.obj, None, "but the repaint wrote other cells under it, and its run went");
+    }
+
+    #[test]
+    fn inside_an_open_re_cut_a_run_goes_at_a_repaint_with_no_rows() {
+        // A program rewrites a row in place at the old width: nothing
+        // arrives, and only the repaint says the grid moved under the key.
+        let mut t = daylight_tile(8, 6);
+        t.apply(whole_grid(
+            8,
+            &[("a", false), ("b", false), ("c", false), ("d", false), ("e", false), ("$", false)],
+            (5, 1),
+            false,
+        ));
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let mut sel = crate::select::Sel::at(5, crate::select::Stamp::of(&t.scrollback, &flat));
+        t.resize_selected(4, 6, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "premise: the re-cut is unsettled");
+        sel.cursor = 3;
+        sel.obj = Some(1);
+        t.apply(whole_grid(
+            8,
+            &[("a", false), ("b", false), ("c", false), ("x", false), ("e", false), ("$", false)],
+            (5, 1),
+            false,
+        ));
+        t.refresh_selected(&mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(flat[sel.cursor], grid_row(3), "the held cursor keeps its row");
+        assert_eq!(sel.obj, None, "the repaint moved no count, and the run went");
+    }
+
+    #[test]
+    fn esc_is_the_apps_until_the_normal_screen_is_repainted() {
+        // A full-screen app exits: the mode flip is a record of its own, and
+        // the main screen's repaint can be reads behind it. Until it lands
+        // the grid shows the app's last frame, and Esc is still the app's.
+        let (mut t, mut p, mut v, _, _, _) = seam_selected(8, 4, b"a\r\n$");
+        assert!(t.normal_screen_shown(), "premise: the normal screen shows");
+        assert!(t.modal_key(false, 0x1b, 1), "premise: Esc enters Normal mode");
+        seam_step(&mut t, &mut p, &mut v, b"\x1b[?1049h");
+        assert!(!t.normal_screen_shown(), "premise: the app's screen is up");
+        assert!(!t.modal_key(false, 0x1b, 1), "the app's screen: Esc is the app's");
+        let mut out = Vec::new();
+        p.feed(&mut v, b"\x1b[?1049l", &mut out);
+        let at = out
+            .iter()
+            .position(|r| matches!(r, Record::Mode(ScreenMode::Normal)))
+            .expect("premise: the producer flips the mode");
+        let repaint = out.split_off(at + 1);
+        seam_send(&mut t, out);
+        assert_eq!(t.mode, ScreenMode::Normal, "premise: the tile's mode is normal");
+        assert!(!t.normal_screen_shown(), "the grid still shows the app's frame");
+        assert!(!t.modal_key(false, 0x1b, 1), "Esc is still the app's");
+        seam_send(&mut t, repaint);
+        assert!(t.normal_screen_shown(), "the repaint landed: the normal screen shows");
+        assert!(t.modal_key(false, 0x1b, 1), "Esc enters Normal mode again");
+    }
+
+    #[test]
+    fn the_modal_gate_takes_a_press_in_normal_mode_and_the_esc_that_enters_it() {
+        // On the normal screen Normal mode keeps every key, pressed or
+        // repeated; in Insert only Esc's press goes to the transcript, and a
+        // release never does.
+        let t = daylight_tile(8, 4);
+        assert!(t.normal_screen_shown(), "premise: the normal screen shows");
+        let k = u32::from('k');
+        assert!(t.modal_key(true, k, 1), "Normal mode keeps a key");
+        assert!(t.modal_key(true, k, 2), "and its repeat");
+        assert!(t.modal_key(true, 0x1b, 1), "and Esc");
+        assert!(t.modal_key(false, 0x1b, 1), "Esc enters Normal mode");
+        assert!(!t.modal_key(false, 0x1b, 2), "Insert: an Esc repeat is the program's");
+        assert!(!t.modal_key(false, k, 1), "Insert: a key is the program's");
+        assert!(!t.modal_key(true, k, 0), "a release never reaches Normal mode");
+        assert!(!t.modal_key(false, 0x1b, 0), "nor does Esc's");
+    }
+
+    // A seam tile of eight columns and six rows showing the shell's `bytes`,
+    // its prompt on the last row; a full-screen app ran with its cursor on
+    // its own last row, then exited. The mode flip is applied; the main
+    // screen's repaint, the next read, is returned.
+    fn app_exit_before_its_repaint(bytes: &[u8]) -> (Tile, kaua_term::Producer, vt::Vt, Vec<Record>) {
+        let (mut t, mut p, mut v, _, _, _) = seam_selected(8, 6, bytes);
+        seam_step(&mut t, &mut p, &mut v, b"\x1b[?1049h\x1b[6;1Hstatus");
+        assert_eq!(t.grid.cursor().0, 5, "premise: the app's cursor is on its last row");
+        let mut out = Vec::new();
+        p.feed(&mut v, b"\x1b[?1049l", &mut out);
+        let at = out
+            .iter()
+            .position(|r| matches!(r, Record::Mode(ScreenMode::Normal)))
+            .expect("premise: the producer flips the mode");
+        let repaint = out.split_off(at + 1);
+        seam_send(&mut t, out);
+        (t, p, v, repaint)
+    }
+
+    #[test]
+    fn a_resize_before_the_normal_screens_repaint_counts_no_row_of_the_apps_frame() {
+        // The app's last frame is still on the grid when a drag shrinks the
+        // tile. Reflowed, it would count the three rows the app's cursor
+        // slides past as rows that left; the producer's reply carries three
+        // real ones, and a selection made between the repaint and the reply
+        // would stay three rows off its text. Cropped, as the alt screen is,
+        // nothing is counted until the reply's rows arrive.
+        let (mut shown, _, _, repaint) = app_exit_before_its_repaint(b"m0\r\nm1\r\nm2\r\nm3\r\nm4\r\n$");
+        seam_send(&mut shown, repaint);
+        let left = shown.scrollback.rows_left();
+        shown.resize(8, 3);
+        assert_eq!(shown.scrollback.rows_left(), left + 3, "control: the normal screen's reflow drops three rows");
+        let (mut t, mut p, mut v, repaint) = app_exit_before_its_repaint(b"m0\r\nm1\r\nm2\r\nm3\r\nm4\r\n$");
+        assert!(!t.normal_screen_shown(), "premise: the app's frame is on the grid");
+        let counts = (t.scrollback.rows_left(), t.scrollback.rows_scrolled());
+        t.resize(8, 3);
+        assert_eq!(
+            (t.scrollback.rows_left(), t.scrollback.rows_scrolled()),
+            counts,
+            "no row of the app's frame left the grid"
+        );
+        seam_send(&mut t, repaint);
+        assert_eq!(grid_text(&t, 0).trim_end(), "m0", "premise: the repaint's top rows show");
+        let (mut flat, mut seq) = (Vec::new(), u64::MAX);
+        t.refresh_selected(&mut flat, &mut seq, None);
+        let mut sel = crate::select::Sel::at(flat.len() - 3, crate::select::Stamp::of(&t.scrollback, &flat));
+        assert_eq!(end_text(&t, &flat, sel.cursor), "m0", "premise: the selection is on m0");
+        seam_send_each(&mut t, seam_resized(&mut p, &mut v, 8, 3), &mut flat, &mut seq, &mut sel);
+        assert_eq!(grid_text(&t, 0).trim_end(), "m3", "premise: the producer's window slid past m0, m1 and m2");
+        assert_eq!(end_text(&t, &flat, sel.cursor), "m0", "the cursor followed m0 into history");
+    }
+
+    #[test]
+    fn the_apps_last_frame_paints_as_its_grid_until_the_normal_screens_repaint() {
+        // Until the main screen's repaint lands the grid holds the app's last
+        // frame: it paints as the app painted it, the mono grid alone, not
+        // as normal-screen rows laid out beneath the history.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((8 * cw) as usize, (6 * ch) as usize);
+        let mut cart = Cartoon::new();
+        let (mut t, _, _, repaint) =
+            app_exit_before_its_repaint(b"h0\r\nh1\r\nm0\r\nm1\r\nm2\r\nm3\r\nm4\r\n$");
+        let pending = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert_eq!(pending, 6 * ch, "the app's frame paints as the mono grid alone");
+        seam_send(&mut t, repaint);
+        let shown = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+        assert!(shown > pending, "control: the normal screen lays its rows beneath the history ({shown} > {pending})");
+    }
+
+    #[test]
+    fn the_apps_last_frame_keeps_the_terminal_ground_until_the_repaint() {
+        // HALCYON-INSTRUMENT 14.7: the raw application grid sits on
+        // terminal_bg -- the app's last frame too, while the normal screen's
+        // repaint is on its way.
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        assert_ne!(s.ground, s.theme.terminal.bg, "premise: the two grounds differ");
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((8 * cw) as usize, (4 * ch) as usize);
+        let mut t = Tile::new(8, 4, s.theme.terminal);
+        let diff = |c: char| Record::CellDiff {
+            changed: vec![(3, 0, cell(c))],
+            cursor: (3, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        };
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.apply(diff('x'));
+        t.apply(Record::Mode(ScreenMode::Normal));
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(
+            matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == s.theme.terminal.bg),
+            "the app's frame keeps terminal_bg"
+        );
+        t.apply(diff('$'));
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(
+            matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == s.ground),
+            "control: the normal screen sits on the sheet's ground"
+        );
+    }
+
+    // A seam tile of eight columns and six rows showing the shell's `bytes`;
+    // the shell prints `typed` and a full-screen app starts in the same read.
+    // The mode flip is applied; the app's first paint, the next read, is
+    // returned.
+    fn app_start_before_its_paint(cols: usize, bytes: &[u8], typed: &[u8]) -> (Tile, Vec<Record>) {
+        let (mut t, mut p, mut v, _, _, _) = seam_selected(cols, 6, bytes);
+        let mut feed = Vec::from(typed);
+        feed.extend_from_slice(b"\x1b[?1049h");
+        let mut out = Vec::new();
+        p.feed(&mut v, &feed, &mut out);
+        let at = out
+            .iter()
+            .position(|r| matches!(r, Record::Mode(ScreenMode::AltScreen)))
+            .expect("premise: the producer flips the mode");
+        let paint = out.split_off(at + 1);
+        seam_send(&mut t, out);
+        (t, paint)
+    }
+
+    #[test]
+    fn the_shells_frame_paints_as_before_until_the_apps_first_paint() {
+        // A full-screen app starts: its first paint (the blank alt screen, a
+        // whole grid) can be reads behind the mode flip. Until it lands the
+        // grid holds the shell's screen, which paints as it did -- beneath the
+        // history, its soft-wrapped line joined -- not as a raw cell grid.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((16 * cw) as usize, (6 * ch) as usize);
+        let mut cart = Cartoon::new();
+        // What the tile paints, every op, not only its height.
+        let mut paint_of = |t: &mut Tile| {
+            let content = t.render(&mut cart, w, h, &mut gs, &sheet, &mut 0, None);
+            (content, cart_fingerprint(&cart))
+        };
+        // Narrow letters, and wide enough that joining the rows changes the paint (asserted below).
+        let bytes = b"h0\r\nh1\r\nh2\r\niiiiiiiiiiiiiiiiiiii\r\nm1\r\n$ ";
+        let typed = b"h0\r\nh1\r\nh2\r\niiiiiiiiiiiiiiiiiiii\r\nm1\r\n$ vi";
+        let (mut before, _, _, _, _, _) = seam_selected(16, 6, typed);
+        assert!(before.grid.wrapped().iter().any(|&w| w), "premise: the shell's screen holds a soft-wrapped row");
+        let shown = paint_of(&mut before);
+        // The same frame repainted without its wrap flags, as the alt screen's would say.
+        let (mut split, _, _, _, _, _) = seam_selected(16, 6, typed);
+        repaint_unchanged(&mut split);
+        assert_ne!(paint_of(&mut split), shown, "premise: the paint tells the joined line from its rows split");
+        let (mut t, paint) = app_start_before_its_paint(16, bytes, b"vi");
+        assert_eq!(t.grid.wrapped(), before.grid.wrapped(), "the shell's frame keeps its wrap flags");
+        assert_eq!(paint_of(&mut t), shown, "the shell's frame paints as it did before the flip");
+        seam_send(&mut t, paint);
+        assert_eq!(paint_of(&mut t).0, 6 * ch, "control: the app's paint is the mono grid alone");
+    }
+
+    #[test]
+    fn the_shells_frame_keeps_the_sheets_ground_until_the_apps_first_paint() {
+        // HALCYON-INSTRUMENT 14.7: the rich document sits on the sheet's
+        // ground -- the shell's last frame too, while the app's first paint
+        // (the raw grid, on terminal_bg) is on its way.
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        assert_ne!(s.ground, s.theme.terminal.bg, "premise: the two grounds differ");
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((8 * cw) as usize, (4 * ch) as usize);
+        let mut t = Tile::new(8, 4, s.theme.terminal);
+        let diff = |c: char| Record::CellDiff {
+            changed: vec![(3, 0, cell(c))],
+            cursor: (3, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        };
+        t.apply(diff('$'));
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(
+            matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == s.ground),
+            "the shell's frame keeps the sheet's ground"
+        );
+        t.apply(diff(' '));
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(
+            matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == s.theme.terminal.bg),
+            "control: the app's paint sits on terminal_bg"
+        );
+    }
+
+    #[test]
+    fn a_settle_that_moves_no_row_still_restarts_the_grid_ends() {
+        // A widening sheds nothing, so its reply carries no rows, and its
+        // settle moves no count: only the re-cut's own change makes the list
+        // re-read, and a cursor moved inside the open re-cut starts on the
+        // repaint's prompt.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) = seam_selected(4, 4, b"aaaaaaaa\r\n$");
+        assert_eq!(t.grid.cursor().0, 2, "premise: the a line takes two rows at four columns");
+        t.resize_selected(8, 4, &mut flat, &mut seq, Some(&mut sel));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "premise: the widening opened a re-cut");
+        sel.cursor = flat.len() - 4;
+        let reply = seam_resized(&mut p, &mut v, 8, 4);
+        assert!(
+            !reply.iter().any(|r| matches!(r, Record::ScrollOff { .. })),
+            "premise: the widening sheds nothing"
+        );
+        seam_send_each(&mut t, reply, &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rows_left(), 0, "premise: no row left the grid");
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: the repaint settled the re-cut");
+        assert_eq!(t.grid.cursor().0, 1, "premise: the repaint's prompt is row 1");
+        assert_eq!(
+            flat[sel.cursor],
+            grid_row(1),
+            "the cursor starts on the prompt, not on the row it was moved to"
+        );
+    }
+
+    #[test]
+    fn rows_of_a_reply_the_grid_moved_past_move_nothing_before_its_repaint() {
+        // Narrowed, widened, narrowed and widened again before any reply; the
+        // producer applies each. Its reply to the first widen settles at the
+        // grid's dims, early. Its next narrow sheds rows four columns wide,
+        // and a paint can fall between those rows and the repaint behind them
+        // (a whole-grid diff spans many reads). The rows alone move no end --
+        // the grid has not moved -- so none is counted into history, on the c
+        // line, where no report restarts it; the repaint at four columns
+        // reopens the re-cut, and the last reply starts the cursor on its
+        // prompt.
+        let (mut t, mut p, mut v, mut flat, mut seq, mut sel) =
+            seam_selected(8, 4, b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\n$");
+        for (cols, rows) in [(4, 4), (8, 4), (4, 4), (8, 4)] {
+            t.resize_selected(cols, rows, &mut flat, &mut seq, Some(&mut sel));
+        }
+        let first_narrow = seam_resized(&mut p, &mut v, 4, 4);
+        let first_widen = seam_resized(&mut p, &mut v, 8, 4);
+        let mut output = Vec::new();
+        p.feed(&mut v, b"\r\nyyyyyyyy\r\n$", &mut output);
+        let mut narrow = seam_resized(&mut p, &mut v, 4, 4);
+        let widen = seam_resized(&mut p, &mut v, 8, 4);
+        seam_send_each(&mut t, first_narrow, &mut flat, &mut seq, &mut sel);
+        seam_send_each(&mut t, first_widen, &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: the reply to the first widen settled, early");
+        seam_send_each(&mut t, output, &mut flat, &mut seq, &mut sel);
+        // The narrow's rows arrive; its ack and repaint are still unread.
+        let ack = narrow
+            .iter()
+            .position(|r| matches!(r, Record::Control(Control::WinsizeAck)))
+            .expect("premise: the producer acks the narrow");
+        let reply = narrow.split_off(ack);
+        assert!(!narrow.is_empty(), "premise: the narrow shed rows ahead of its ack");
+        let held = flat[sel.cursor];
+        assert_eq!(held.block, crate::select::GRID_BLOCK, "premise: the cursor is on the grid");
+        seam_send_each(&mut t, narrow, &mut flat, &mut seq, &mut sel);
+        assert_eq!(flat[sel.cursor], held, "the rows alone move no end: the grid has not moved");
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "nor do they open a re-cut");
+        seam_send_each(&mut t, reply, &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "the repaint at four columns reopened the re-cut");
+        seam_send_each(&mut t, widen, &mut flat, &mut seq, &mut sel);
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "premise: the last reply settled the re-cut");
+        assert_eq!(t.grid.cursor().0, 2, "premise: the last reply's prompt is row 2");
+        assert_eq!(
+            flat[sel.cursor],
+            grid_row(2),
+            "the cursor is on the prompt, not in history on the c line"
+        );
+    }
+
+    #[test]
+    fn only_the_acked_repaint_at_the_grids_dims_settles() {
+        // A whole-grid diff with no ack before it (an alt-screen switch, a
+        // palette re-emit) is no resize's reply, and an acked repaint at
+        // other dims answers an earlier resize: neither settles.
+        let mut t = daylight_tile(8, 4);
+        t.apply(whole_grid(8, &[("a", false), ("b", false), ("c", false), ("d", false)], (3, 1), false));
+        t.resize(8, 2);
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "premise: the mirror slid past a and b");
+        t.apply(whole_grid(8, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "no ack: no settle");
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(8, &[("a", false), ("b", false), ("c", false), ("d", false)], (3, 1), false));
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "an acked repaint at other dims settles nothing");
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "nor, at the grid's width, opens a re-cut");
+        t.apply(whole_grid(8, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rows_scrolled(), 2, "and its ack is spent");
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(8, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rows_scrolled(), 0, "the acked repaint at the grid's dims settles");
+        // A new width re-cuts the grid until its repaint.
+        t.resize(4, 2);
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "a new width opens a re-cut");
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(4, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "its repaint settles it");
+        // The ack names no resize: a reply at another width answers one the
+        // grid moved past, and the producer's lines are cut at that width.
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(8, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "a reply at another width reopens the re-cut");
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(4, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "and the reply at the grid's dims closes it");
+        // On the alt screen too: the producer re-cuts its main screen
+        // beneath it.
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        t.resize(6, 2);
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "a new width on the alt screen opens a re-cut");
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(6, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rewraps() % 2, 0, "its repaint settles it");
+        t.apply(Record::Control(Control::WinsizeAck));
+        t.apply(whole_grid(4, &[("c", false), ("d", false)], (1, 1), false));
+        assert_eq!(t.scrollback.rewraps() % 2, 1, "and a reply at another width reopens it");
+    }
+
+    #[test]
+    fn forget_history_keeps_an_image_not_yet_captioned() {
+        // `view` uploads first and captions after: an image no object names
+        // yet is not history.
+        let mut t = daylight_tile(40, 2);
+        t.apply(osc(1, "zone;k=output"));
+        assert!(t.place_image(0xd, 1, 1, vec![1]));
+        t.forget_history();
+        assert!(t.media.contains(0xd));
+    }
+
+    #[test]
+    fn forget_history_keeps_the_image_an_open_obj_names() {
+        // An obj span still open at the chord survives it (what is written
+        // next is the running command's), and so does the image it names --
+        // even when no ring slot names it any more: a nested obj's frames
+        // turned over the slot of the frame that opened it.
+        use crate::transcript::SPAN_MAP_ENTRIES;
+        let mut t = daylight_tile(40, 2);
+        t.apply(osc(1, "zone;k=output"));
+        t.apply(osc(2, &alloc::format!("obj;type=inline-image;ref={:032x}", 0xeu128)));
+        t.apply(osc(3, "obj;type=path;ref=/inner"));
+        t.apply(osc(2 + SPAN_MAP_ENTRIES as u32, "em;class=dim"));
+        let open = t.scrollback.open_block().id;
+        assert!(
+            !t.spans.named().contains(&(open, 1)),
+            "premise: no ring slot names the image's obj"
+        );
+        assert!(t.place_image(0xe, 1, 1, vec![1]));
+        t.forget_history();
+        assert!(t.media.contains(0xe), "the open obj keeps its image");
+    }
+
+    const T_NS: u64 = 5_000_000_000;
+
+    #[test]
+    fn the_frame_records_open_and_close_the_hold_and_an_exit_cuts_it() {
+        let mut t = tile();
+        assert!(!t.hold.holds(T_NS), "no frame, no hold");
+        t.apply(Record::Control(Control::SyncBegin));
+        assert!(t.hold.holds(T_NS));
+        t.apply(Record::Control(Control::SyncEnd));
+        assert!(!t.hold.holds(T_NS + 1));
+        assert_eq!(t.hold.painted(), vt::Held::UntilClose(1));
+        t.apply(Record::Control(Control::SyncBegin));
+        assert!(t.hold.holds(T_NS + 2));
+        t.apply(Record::Control(Control::Exit(0)));
+        assert!(!t.hold.holds(T_NS + 3), "the program's exit ends its frame");
+        assert_eq!(
+            t.hold.painted(),
+            vt::Held::Cut(1),
+            "cut short, never shown whole"
+        );
+    }
+
+    /// FL-1 across every link, in lantern's shape: the slide's frame reaches
+    /// the tile in two reads of the pipe, as the session reads it. The blank
+    /// the first read leaves is held, never painted; the close lets the
+    /// slide through.
+    #[test]
+    fn a_slide_split_across_two_reads_is_held_until_its_close() {
+        let mut v = vt::Vt::new(20, 4);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let mut t = Tile::new(20, 4, libhalcyon::theme::daylight_palette());
+        seam_step(&mut t, &mut p, &mut v, b"% lantern deck\r\n");
+        let mut recs = Vec::new();
+        p.feed(
+            &mut v,
+            b"\x1b[?2026h\x1b[0m\x1b[H\x1b[2Jslide one\x1b[?2026l",
+            &mut recs,
+        );
+        let mut wire = Vec::new();
+        let mut cut = 0;
+        for r in &recs {
+            kaua_term::wire::encode_record(r, &mut wire);
+            if *r == Record::Control(Control::ScreenErased) {
+                cut = wire.len();
+            }
+        }
+        assert!(
+            cut > 0 && cut < wire.len(),
+            "the read ends inside the frame"
+        );
+        let mut dec = kaua_term::wire::FrameDecoder::new();
+        let mut read = |t: &mut Tile, bytes: &[u8]| {
+            dec.push(bytes);
+            while let Some(f) = dec.next_frame() {
+                let (tag, payload) = f.expect("the producer's frames decode");
+                t.apply(kaua_term::wire::parse_record(tag, &payload).expect("and parse"));
+            }
+        };
+        read(&mut t, &wire[..cut]);
+        assert_eq!(
+            grid_text(&t, 0).trim_end(),
+            "",
+            "the first read leaves the blank"
+        );
+        assert!(t.hold.holds(T_NS), "and the paint waits");
+        read(&mut t, &wire[cut..]);
+        assert_eq!(grid_text(&t, 0).trim_end(), "slide one");
+        assert!(!t.hold.holds(T_NS + 1), "the close lets the slide through");
+        assert_eq!(t.hold.painted(), vt::Held::UntilClose(1));
     }
 }

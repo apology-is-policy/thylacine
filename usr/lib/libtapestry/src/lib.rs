@@ -147,17 +147,19 @@ pub const TEV_LAYOUT: u16 = 10;
 /// A header un-hovers on it; content surfaces never receive it.
 pub const TEV_PTR_LEAVE: u16 = 11;
 
-/// HALCYON-INSTRUMENT 9.3 (I-7, widened at I-7b): a Super chord the
-/// compositor does not act on itself -- the picker, the keyboard reference
-/// and the ask-before-closing-a-running-job live in the environment, not the
-/// compositor -- delivered to the REGISTERED RAIL's owner so it can act
-/// under its own authority. `code` names the request (1 = picker, 2 = help,
-/// 3 = close the focused pane); `value` is 1 for the first two and the
-/// FOCUSED PANE's id for the close, so the owner acts on the compositor's
-/// focus rather than re-deriving it from a layout file it may have read a
-/// wake ago. Sent only when a rail is registered: with none, the picker and
-/// the reference are said and dropped (the environment has neither there),
-/// while the CLOSE falls back to the compositor's own structural close.
+/// HALCYON-INSTRUMENT 9.3 (I-7, widened at I-7b and TC-1b): a Super chord
+/// the compositor does not act on itself -- the picker, the keyboard
+/// reference, the ask-before-closing-a-running-job and the tile's history
+/// live in the environment, not the compositor -- delivered to the
+/// REGISTERED RAIL's owner so it can act under its own authority. `code`
+/// names the request (1 = picker, 2 = help, 3 = close the focused pane, 4 =
+/// forget its history); `value` is 1 for the first two and the FOCUSED
+/// PANE's id for the last two, so the owner acts on the compositor's focus
+/// rather than re-deriving it from a layout file it may have read a wake
+/// ago. Sent only when a rail is registered: with none, the picker, the
+/// reference and the history chord are said and dropped (the environment
+/// has none of them there), while the CLOSE falls back to the compositor's
+/// own structural close.
 pub const TEV_CHORD: u16 = 12;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
@@ -1082,6 +1084,8 @@ struct RingCore {
     /// it returns text nobody reads -- never another surface's event.
     placeholder: OwnedFd,
     root: OwnedFd,
+    /// A TEV_LAYOUT reached the ring since the last `take_layout_hint`.
+    layout_hint: bool,
 }
 
 /// ONE 9P session to the compositor + ONE Loom ring, shared by every
@@ -1187,6 +1191,7 @@ impl EventRing {
                 slots,
                 placeholder: OwnedFd(placeholder),
                 root: OwnedFd(root),
+                layout_hint: false,
             })),
         })
     }
@@ -1293,6 +1298,22 @@ impl EventRing {
     pub fn poll(&self) -> Result<(), TapError> {
         self.core.borrow_mut().pump(false)
     }
+
+    /// Whether a structural notice (TEV_LAYOUT) reached this session since
+    /// the last call, on ANY of its surfaces -- the compositor picks one,
+    /// and a surface it picked may be one its owner never polls for it, or
+    /// drops before it does -- clearing the mark. A session re-reads the
+    /// layout on it.
+    pub fn take_layout_hint(&self) -> bool {
+        core::mem::take(&mut self.core.borrow_mut().layout_hint)
+    }
+
+    /// `take_layout_hint` without the clear: a session asks it before it
+    /// blocks, so a notice reaped after its reconcile is not left waiting
+    /// for an unrelated wake.
+    pub fn layout_hint(&self) -> bool {
+        self.core.borrow().layout_hint
+    }
 }
 
 #[cfg(feature = "guest")]
@@ -1372,12 +1393,14 @@ impl RingCore {
         };
         rc.map_err(|_| TapError::Loom)?;
         while let Some(cqe) = self.ring.reap() {
-            ring::route(
+            if ring::route(
                 &mut self.slots,
                 self.staging.as_mut_slice(),
                 cqe.user_data,
                 cqe.result,
-            );
+            ) {
+                self.layout_hint = true;
+            }
         }
         Ok(())
     }

@@ -23,7 +23,8 @@ STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
 CLEAN="territory_cov_alias:202800
-territory_file_point:4380876
+territory_file_point:1372428
+territory_file_point_kernel:4380876
 territory:8052876"
 
 # buggy: cfg, invariant that must be the one reported
@@ -43,7 +44,8 @@ territory_buggy_covered_takes_flags:CoveredIsItsPoint
 territory_buggy_covered_last:CoveredPlacement
 territory_buggy_unmount_orphans_covered:NoOrphanCovered
 territory_buggy_self_mount:NoSelfMount
-territory_buggy_cover_file:NoCoveredFile"
+territory_buggy_cover_file:NoCoveredFile
+territory_buggy_emount:NoMemberAtFile"
 
 run() {  # $1 = cfg basename, $2 = workers -> sets RC and LOG
     LOG="$TMP/$1.log"

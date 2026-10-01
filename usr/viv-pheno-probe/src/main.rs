@@ -853,6 +853,63 @@ unsafe fn futex_wait_until_ne(addr: *const AtomicU32, expected: u32, spins: u32)
     (*addr).load(Ordering::SeqCst) != expected
 }
 
+// ---------------------------------------------------------------------------
+// NP-5: the peer threads of the fd-table legs (L278-L291). Each runs on
+// THREAD_STACK and is joined through CTID_WORD before the next is spawned.
+//
+// The POLLER blocks in ppoll on the socket in NP5_POLL_FD, having published
+// NP5_ENTERED first; it records the return value and revents for the parent.
+static NP5_POLL_FD: AtomicU32 = AtomicU32::new(0);
+static NP5_ENTERED: AtomicU32 = AtomicU32::new(0);
+static NP5_RESULT: AtomicU64 = AtomicU64::new(0);
+static NP5_REVENTS: AtomicU32 = AtomicU32::new(0);
+const NP5_UNSET: u64 = 0xDEAD;
+
+extern "C" fn np5_poller_main(_arg: u64) -> ! {
+    #[repr(C)]
+    struct Pfd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    let mut pfd = [Pfd { fd: NP5_POLL_FD.load(Ordering::SeqCst) as i32, events: 0x001, revents: 0 }];
+    let ts_5s: [i64; 2] = [5, 0];
+    NP5_ENTERED.store(1, Ordering::SeqCst);
+    unsafe {
+        let _ = svc3(NR_FUTEX, core::ptr::addr_of!(NP5_ENTERED) as u64,
+                     FUTEX_WAKE | FUTEX_PRIVATE, 1);
+        let r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_5s.as_ptr() as u64, 0, 8, 0);
+        NP5_REVENTS.store(pfd[0].revents as u16 as u32, Ordering::SeqCst);
+        NP5_RESULT.store(r as u64, Ordering::SeqCst);
+        linux_thread_exit(0)
+    }
+}
+
+// The STORM thread takes the lowest free fd number over and over (F_DUPFD from
+// 0 of NP5_STORM_REP, then close) until NP5_STORM_STOP, counting every copy
+// that did NOT land on NP5_STORM_EXPECT.
+static NP5_STORM_REP: AtomicU32 = AtomicU32::new(0);
+static NP5_STORM_EXPECT: AtomicU64 = AtomicU64::new(0);
+static NP5_STORM_STOP: AtomicU32 = AtomicU32::new(0);
+static NP5_STORM_BAD: AtomicU32 = AtomicU32::new(0);
+static NP5_STORM_ITERS: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn np5_storm_main(_arg: u64) -> ! {
+    let rep = NP5_STORM_REP.load(Ordering::SeqCst) as u64;
+    let expect = NP5_STORM_EXPECT.load(Ordering::SeqCst) as i64;
+    while NP5_STORM_STOP.load(Ordering::SeqCst) == 0 {
+        let x = unsafe { svc3(NR_FCNTL, rep, F_DUPFD, 0) };
+        if x != expect {
+            NP5_STORM_BAD.fetch_add(1, Ordering::SeqCst);
+        }
+        if x >= 0 {
+            unsafe { let _ = svc3(NR_CLOSE, x as u64, 0, 0); }
+        }
+        NP5_STORM_ITERS.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe { linux_thread_exit(0) }
+}
+
 // Every leg is `cond or (report, exit)`. The marker goes into the report file
 // through Linux write(64) -- the exit status cannot carry it (task #91), so the
 // file is what tells joey WHICH property broke. A write failure here leaves the
@@ -2333,9 +2390,9 @@ unsafe fn run_linux() -> ! {
     // readiness for anything would pass it. It is meaningful only PAIRED with
     // L110 below, which shows the same fd DOES report POLLIN once a call
     // arrives: together they say the signal fires when it should and not when
-    // it should not. (Nor is a real timeout optional here: with a zero timeout
-    // this leg would pass because netd's probe had not answered yet, which is
-    // the same nothing wearing a different disguise -- task #98.)
+    // it should not. (A real timeout, not zero: a zero-timeout call is answered
+    // by netd's snapshot alone, and only a call that waits also shows that no
+    // arm wakes it with a false "ready".)
     let ts_200ms: [i64; 2] = [0, 200_000_000];
     pfd[0] = PollFd { fd: srv3 as i32, events: POLLIN, revents: 0 };
     leg!(
@@ -2374,12 +2431,12 @@ unsafe fn run_linux() -> ! {
     // at once, so this establishes that readiness for THIS fd is being answered
     // truthfully before anything below asks it to stay silent.
     //
-    // It also pins the zero-timeout mitigation. netd's readiness probe is
-    // ASYNCHRONOUS -- the first poll of a freshly-opened `ready` fd submits it
-    // and cannot answer it -- so a literal zero-timeout scan would report
-    // not-ready for a plainly writable socket. viv_ppoll gives a caller-supplied
-    // 0 a small budget for the probe to land (task #98), and this leg is what
-    // says so: remove the budget and it fails.
+    // It also pins the zero-timeout answer (task #98). The kernel asks netd for
+    // a readiness snapshot, which netd answers at once, and decides only after
+    // the answer is in, so a zero-timeout scan of a plainly writable socket
+    // reports it writable although the call never waits. Answer that scan from
+    // anything but the snapshot -- as the kernel did before, from a cache the
+    // freshly opened `ready` fd did not have -- and this leg fails.
     pfd[0] = PollFd { fd: afd3 as i32, events: POLLOUT, revents: 0 };
     leg!(
         rep,
@@ -2577,9 +2634,8 @@ unsafe fn run_linux() -> ! {
         b"L136\n"
     );
 
-    // A real timeout, not zero: readiness for a /net socket is one RPC away, so
-    // a zero-timeout answer would be "not yet" rather than the truth (task #98,
-    // and the same reason L107 spends 200ms).
+    // A real timeout, though zero would now do: the leg is about the restored
+    // fd numbers, and L113 already owns the zero-timeout answer (task #98).
     let ts_200: [i64; 2] = [0, 200_000_000];
     rdset = [0; 16];
     wrset = [0; 16];
@@ -3023,6 +3079,339 @@ unsafe fn run_linux() -> ! {
              FUTEX_WAIT | FUTEX_PRIVATE, 0xDEAD_BEEF, kernel_va, 0, 0) == NEG_EFAULT,
         b"L169d\n"
     );
+
+    // --- L278-L285 (NP-5): a peer thread's poll puts nothing in the fd table --
+    //
+    // ppoll polls a /net socket through its readiness file. Until NP-5 that file
+    // was a TRANSIENT fd in the guest's own table for the whole wait, closed BY
+    // NUMBER when the poll ended -- so while one thread polled, another thread's
+    // fresh fd was not the lowest free number, and an fd the other thread put at
+    // the transient's number was closed by the kernel under it. Now the poll
+    // takes a readiness Spoor held outside the table. A peer thread blocks in
+    // ppoll on a listener while this thread checks both properties; a
+    // connection then wakes the poll, proving it waited on the real readiness.
+    let lsn = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, lsn >= 0, b"L278\n");
+    let lsn_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x6F, // sin_port = 7791, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        svc3(NR_BIND, lsn as u64, lsn_sa.as_ptr() as u64, lsn_sa.len() as u64) == 0
+            && svc3(NR_LISTEN, lsn as u64, 1, 0) == 0,
+        b"L279\n"
+    );
+    // The lowest free number, measured rather than assumed: F_DUPFD from 0
+    // takes it, and the close gives it back.
+    let lowest = svc3(NR_FCNTL, rep as u64, F_DUPFD, 0);
+    leg!(rep, lowest >= 0 && svc3(NR_CLOSE, lowest as u64, 0, 0) == 0, b"L280\n");
+
+    NP5_POLL_FD.store(lsn as u32, Ordering::SeqCst);
+    NP5_ENTERED.store(0, Ordering::SeqCst);
+    NP5_RESULT.store(NP5_UNSET, Ordering::SeqCst);
+    NP5_REVENTS.store(0, Ordering::SeqCst);
+    CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);
+    let np5_stack = core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024);
+    let np5_tls = core::ptr::addr_of!(THREAD_TLS_AREA) as u64;
+    let poller = __viv_clone_thread(
+        np5_poller_main,
+        np5_stack,
+        CLONE_FLAGS_THREAD,
+        0,
+        core::ptr::addr_of!(PTID_WORD) as u64,
+        np5_tls,
+        core::ptr::addr_of!(CTID_WORD) as u64,
+    );
+    leg!(
+        rep,
+        poller > 0 && futex_wait_until_ne(core::ptr::addr_of!(NP5_ENTERED), 0, 8),
+        b"L281\n"
+    );
+    // Let the poller reach its wait. The zero-fd ppoll is a served sleep.
+    let ts_300ms: [i64; 2] = [0, 300_000_000];
+    let _ = svc6(NR_PPOLL, 0, 0, ts_300ms.as_ptr() as u64, 0, 8, 0);
+
+    // While it waits, this thread's next fd is the lowest free number...
+    let d = svc3(NR_FCNTL, rep as u64, F_DUPFD, 0);
+    let lowest_free = d == lowest;
+    // ...and a copy this thread puts AT that number stays this thread's.
+    let placed = svc3(NR_DUP3, rep as u64, lowest as u64, 0) == lowest;
+
+    // Wake the poll: a pending connection makes the listener readable.
+    let cli = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    let dialed = cli >= 0
+        && svc3(NR_CONNECT, cli as u64, lsn_sa.as_ptr() as u64, lsn_sa.len() as u64) == 0;
+    let joined = futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
+        && CTID_WORD.load(Ordering::SeqCst) == 0;
+
+    // The kernel did not close it when the poll ended (the by-number close).
+    leg!(rep, placed && svc3(NR_FCNTL, lowest as u64, F_GETFD, 0) >= 0, b"L282\n");
+    leg!(rep, lowest_free, b"L283\n");
+    leg!(rep, dialed && joined, b"L284\n");
+    // The poll saw the connection: 1 ready, POLLIN.
+    leg!(
+        rep,
+        NP5_RESULT.load(Ordering::SeqCst) == 1
+            && NP5_REVENTS.load(Ordering::SeqCst) & (POLLIN as u16 as u32) != 0,
+        b"L285\n"
+    );
+    if d >= 0 && d != lowest {
+        svc3(NR_CLOSE, d as u64, 0, 0);
+    }
+    svc3(NR_CLOSE, lowest as u64, 0, 0);
+    svc3(NR_CLOSE, cli as u64, 0, 0);
+    svc3(NR_CLOSE, lsn as u64, 0, 0);
+
+    // --- L286-L290 (NP-5c): a nonblocking socket's mode reaches netd --------
+    //
+    // O_NONBLOCK on a /net socket has two homes: the fd's own flag, which
+    // F_GETFL reports, and netd's mode for the connection, which decides
+    // whether an empty read parks or answers EAGAIN. Until NP-5c only the first
+    // was set, so a nonblocking read of an empty socket BLOCKED, and recvmsg
+    // turned the 0 of a genuine end of stream into EAGAIN -- a closed peer read
+    // as "try again" forever. The end-of-stream leg runs first: on a kernel
+    // without the fix it fails cleanly, where an empty read would hang.
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+    const EAGAIN: i64 = 11;
+    const NR_SENDTO: u64 = 206;
+    const NR_RECVMSG: u64 = 212;
+    let lsn3 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    let c3 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    let lsn3_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x71, // sin_port = 7793, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        lsn3 >= 0
+            && c3 >= 0
+            && svc3(NR_BIND, lsn3 as u64, lsn3_sa.as_ptr() as u64, lsn3_sa.len() as u64) == 0
+            && svc3(NR_LISTEN, lsn3 as u64, 1, 0) == 0
+            && svc3(NR_CONNECT, c3 as u64, lsn3_sa.as_ptr() as u64, lsn3_sa.len() as u64) == 0,
+        b"L286\n"
+    );
+    // The server end hangs up at once; the poll waits for its FIN to land.
+    let a3 = svc3(NR_ACCEPT, lsn3 as u64, 0, 0);
+    leg!(rep, a3 >= 0 && svc3(NR_CLOSE, a3 as u64, 0, 0) == 0, b"L287\n");
+    let mut p3 = [PollFd { fd: c3 as i32, events: POLLIN, revents: 0 }];
+    let ts_2s: [i64; 2] = [2, 0];
+    let polled = svc6(NR_PPOLL, p3.as_mut_ptr() as u64, 1, ts_2s.as_ptr() as u64, 0, 8, 0);
+    // One buffer + msghdr for every recvmsg below (aarch64 layout: name,
+    // namelen + pad, iov, iovlen, control, controllen, flags + pad).
+    let mut rbuf = [0u8; 16];
+    let iov: [u64; 2] = [rbuf.as_mut_ptr() as u64, rbuf.len() as u64];
+    let mut mh: [u64; 7] = [0, 0, iov.as_ptr() as u64, 1, 0, 0, 0];
+    // End of stream on a NONBLOCKING socket reads 0, exactly as on a blocking one.
+    leg!(
+        rep,
+        polled == 1 && svc3(NR_RECVMSG, c3 as u64, mh.as_mut_ptr() as u64, 0) == 0,
+        b"L288\n"
+    );
+    svc3(NR_CLOSE, c3 as u64, 0, 0);
+    svc3(NR_CLOSE, lsn3 as u64, 0, 0);
+
+    // An EMPTY nonblocking socket answers EAGAIN, whether it was born
+    // nonblocking (socket's SOCK_NONBLOCK) or made so later (F_SETFL). A fresh
+    // UDP socket has no connection to read until a sendto dials one; port 9
+    // (discard) never answers, so the socket stays empty.
+    let discard_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0, 9, // sin_port = 9 (discard), network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let u = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    let b = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    leg!(
+        rep,
+        u >= 0
+            && b >= 0
+            && svc3(NR_FCNTL, u as u64, F_GETFL, 0) & (O_NONBLOCK as i64) != 0
+            && svc3(NR_FCNTL, b as u64, F_GETFL, 0) & (O_NONBLOCK as i64) == 0
+            && svc3(NR_FCNTL, b as u64, F_SETFL, O_NONBLOCK) == 0
+            && svc3(NR_FCNTL, b as u64, F_GETFL, 0) & (O_NONBLOCK as i64) != 0,
+        b"L289\n"
+    );
+    leg!(
+        rep,
+        svc6(NR_SENDTO, u as u64, b"np5".as_ptr() as u64, 3, 0,
+             discard_sa.as_ptr() as u64, discard_sa.len() as u64) == 3
+            && svc3(NR_RECVMSG, u as u64, mh.as_mut_ptr() as u64, 0) == -EAGAIN
+            && svc6(NR_SENDTO, b as u64, b"np5".as_ptr() as u64, 3, 0,
+                    discard_sa.as_ptr() as u64, discard_sa.len() as u64) == 3
+            && svc3(NR_RECVMSG, b as u64, mh.as_mut_ptr() as u64, 0) == -EAGAIN,
+        b"L290\n"
+    );
+
+    // --- L291-L296 (NP-5b): datagrams, a dial and a mode change mint no fd ---
+    //
+    // The same class as L278-L285 in the other socket arms: UDP sendto and
+    // recvmsg on an unconnected socket each opened the connection's data file
+    // as a transient fd across their RPCs, and connect() parked the data file on
+    // a temporary fd before moving it into the socket. Now each is a Spoor
+    // outside the table, as is the ctl file F_SETFL writes netd's mode through
+    // (NP-5c). A peer thread takes the lowest free number over and over while
+    // this thread sends, receives, sets the mode and dials; none of those calls
+    // allocates a number, so every one of the peer's copies must land on the
+    // same number. (A leak of this class shows up as a copy that lands higher,
+    // whenever the peer runs inside one of those RPCs.)
+    let lsn2 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    let cli2 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, lsn2 >= 0 && cli2 >= 0, b"L291\n");
+    let lsn2_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x70, // sin_port = 7792, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        svc3(NR_BIND, lsn2 as u64, lsn2_sa.as_ptr() as u64, lsn2_sa.len() as u64) == 0
+            && svc3(NR_LISTEN, lsn2 as u64, 1, 0) == 0,
+        b"L292\n"
+    );
+    let lowest2 = svc3(NR_FCNTL, rep as u64, F_DUPFD, 0);
+    leg!(rep, lowest2 >= 0 && svc3(NR_CLOSE, lowest2 as u64, 0, 0) == 0, b"L293\n");
+
+    NP5_STORM_REP.store(rep as u32, Ordering::SeqCst);
+    NP5_STORM_EXPECT.store(lowest2 as u64, Ordering::SeqCst);
+    NP5_STORM_STOP.store(0, Ordering::SeqCst);
+    NP5_STORM_BAD.store(0, Ordering::SeqCst);
+    NP5_STORM_ITERS.store(0, Ordering::SeqCst);
+    CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);
+    let storm = __viv_clone_thread(
+        np5_storm_main,
+        np5_stack,
+        CLONE_FLAGS_THREAD,
+        0,
+        core::ptr::addr_of!(PTID_WORD) as u64,
+        np5_tls,
+        core::ptr::addr_of!(CTID_WORD) as u64,
+    );
+    // Wait (bounded) until the storm is running.
+    let ts_10ms: [i64; 2] = [0, 10_000_000];
+    let mut waits = 0u32;
+    while storm > 0 && NP5_STORM_ITERS.load(Ordering::SeqCst) == 0 && waits < 200 {
+        let _ = svc6(NR_PPOLL, 0, 0, ts_10ms.as_ptr() as u64, 0, 8, 0);
+        waits += 1;
+    }
+
+    let mut calls_ok = true;
+    let mut i = 0;
+    while i < 32 {
+        if svc6(NR_SENDTO, u as u64, b"np5".as_ptr() as u64, 3, 0,
+                discard_sa.as_ptr() as u64, discard_sa.len() as u64) != 3 {
+            calls_ok = false;
+        }
+        mh[0] = 0;
+        mh[1] = 0;
+        if svc3(NR_RECVMSG, u as u64, mh.as_mut_ptr() as u64, 0) != -EAGAIN {
+            calls_ok = false;
+        }
+        if svc3(NR_FCNTL, u as u64, F_SETFL, O_NONBLOCK) != 0 {
+            calls_ok = false;
+        }
+        i += 1;
+    }
+    let dialed2 = svc3(NR_CONNECT, cli2 as u64, lsn2_sa.as_ptr() as u64, lsn2_sa.len() as u64) == 0;
+    NP5_STORM_STOP.store(1, Ordering::SeqCst);
+    let joined2 = futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
+        && CTID_WORD.load(Ordering::SeqCst) == 0;
+
+    leg!(rep, storm > 0 && joined2 && NP5_STORM_ITERS.load(Ordering::SeqCst) > 0, b"L294\n");
+    leg!(rep, calls_ok && dialed2, b"L295\n");
+    leg!(rep, NP5_STORM_BAD.load(Ordering::SeqCst) == 0, b"L296\n");
+    svc3(NR_CLOSE, cli2 as u64, 0, 0);
+    svc3(NR_CLOSE, lsn2 as u64, 0, 0);
+    svc3(NR_CLOSE, b as u64, 0, 0);
+    svc3(NR_CLOSE, u as u64, 0, 0);
+
+    // --- L297-L300 (NP-5): a disabled slot, and one readiness fid per socket --
+    //
+    // ppoll drops a caller-disabled entry (fd -1) before polling, so a socket
+    // behind one moves down a slot, and its readiness file must move with it: a
+    // socket polled by its own fd reads as always ready (it names an ordinary
+    // /net file). An idle listener behind a -1 must wait out the timeout (L297),
+    // and once a call is pending it must answer at ITS index (L298). Then the
+    // listener's dups: a socket has one readiness file at netd however many
+    // numbers name it, so 62 dups polled at once hold one netd fid -- one each
+    // would overflow netd's fid table, which the whole box shares, and the
+    // entries past it would come back POLLNVAL (L300). L299 checks the premise
+    // that makes L300 bite: the table held only the listener and its client.
+    // The other premise is netd's: L300 overflows its fid table only while
+    // MAX_FIDS (usr/netd/src/server.rs) is below 66.
+    const EMFILE: i64 = 24;
+    let lsn4 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    let lsn4_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x72, // sin_port = 7794, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let up4 = lsn4 >= 0
+        && svc3(NR_BIND, lsn4 as u64, lsn4_sa.as_ptr() as u64, lsn4_sa.len() as u64) == 0
+        && svc3(NR_LISTEN, lsn4 as u64, 1, 0) == 0;
+    let mut p4 = [
+        PollFd { fd: -1, events: POLLIN, revents: 0 },
+        PollFd { fd: lsn4 as i32, events: POLLIN, revents: 0 },
+    ];
+    let ts_200ms: [i64; 2] = [0, 200_000_000];
+    let idle4 = svc6(NR_PPOLL, p4.as_mut_ptr() as u64, 2, ts_200ms.as_ptr() as u64, 0, 8, 0);
+    leg!(rep, up4 && idle4 == 0 && p4[0].revents == 0 && p4[1].revents == 0, b"L297\n");
+    let cli4 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    let dialed4 = cli4 >= 0
+        && svc3(NR_CONNECT, cli4 as u64, lsn4_sa.as_ptr() as u64, lsn4_sa.len() as u64) == 0;
+    p4[1].revents = 0;
+    let woke4 = svc6(NR_PPOLL, p4.as_mut_ptr() as u64, 2, ts_2s.as_ptr() as u64, 0, 8, 0);
+    leg!(
+        rep,
+        dialed4 && woke4 == 1 && p4[0].revents == 0 && p4[1].revents == POLLIN,
+        b"L298\n"
+    );
+    let mut dups4 = [-1i64; 62];
+    let mut ndup4 = 0usize;
+    while ndup4 < 62 {
+        let d = svc3(NR_DUP, lsn4 as u64, 0, 0);
+        if d < 0 {
+            break;
+        }
+        dups4[ndup4] = d;
+        ndup4 += 1;
+    }
+    leg!(rep, ndup4 == 62 && svc3(NR_DUP, lsn4 as u64, 0, 0) == -EMFILE, b"L299\n");
+    let mut p63 = [PollFd { fd: lsn4 as i32, events: POLLIN, revents: 0 }; 63];
+    let mut k = 0usize;
+    while k < 62 {
+        p63[k + 1].fd = dups4[k] as i32;
+        k += 1;
+    }
+    let all63 = svc6(NR_PPOLL, p63.as_mut_ptr() as u64, 63, ts_2s.as_ptr() as u64, 0, 8, 0);
+    let mut each_in = true;
+    k = 0;
+    while k < 63 {
+        if p63[k].revents != POLLIN {
+            each_in = false;
+        }
+        k += 1;
+    }
+    leg!(rep, all63 == 63 && each_in, b"L300\n");
+    k = 0;
+    while k < ndup4 {
+        svc3(NR_CLOSE, dups4[k] as u64, 0, 0);
+        k += 1;
+    }
+    let a4 = svc3(NR_ACCEPT, lsn4 as u64, 0, 0);
+    if a4 >= 0 {
+        svc3(NR_CLOSE, a4 as u64, 0, 0);
+    }
+    svc3(NR_CLOSE, cli4 as u64, 0, 0);
+    svc3(NR_CLOSE, lsn4 as u64, 0, 0);
 
     // --- L170-L176 (LINEAGE L-6b): wait4 -------------------------------------
     //
@@ -3649,6 +4038,175 @@ unsafe fn run_linux() -> ! {
             b"L253\n"
         );
     }
+
+    // --- L301-L310 (ARCH 8.8.3, VIVARIUM 6.22): a caught signal interrupts
+    // only the calls signal(7) lets it interrupt. Before the amendment every
+    // 9P-backed call was interruptible here: a SIGCHLD handler made socket(),
+    // openat(), newfstatat() and a regular file's read() fail with EINTR, and
+    // NP-5's SMP gate caught socket() doing it in 3 boots of 50.
+    //
+    // Two halves, one variable apart. The POSITIVE control comes first: a
+    // blocking read on a socket (a slow file) MUST return EINTR when a child's
+    // SIGCHLD lands mid-wait. It proves the handler is live and the note does
+    // interrupt, so the negative half cannot pass merely because no note came.
+    // Then the NEGATIVE half: children exit on a stagger while a loop issues
+    // only calls off the list, and none of those calls may fail.
+    const NEG_EINTR: i64 = -4;
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0]; // no SA_RESTART
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L301\n"
+    );
+    set = bit(SIGCHLD);
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8) == 0,
+        b"L302\n"
+    );
+
+    let isa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x73, // sin_port = 7795, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let ils = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(
+        rep,
+        ils >= 0
+            && svc3(NR_BIND, ils as u64, isa.as_ptr() as u64, isa.len() as u64) == 0
+            && svc3(NR_LISTEN, ils as u64, 1, 0) == 0,
+        b"L303\n"
+    );
+    let ics = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(
+        rep,
+        ics >= 0 && svc3(NR_CONNECT, ics as u64, isa.as_ptr() as u64, isa.len() as u64) == 0,
+        b"L303b\n"
+    );
+    let iss = svc3(NR_ACCEPT, ils as u64, 0, 0);
+    leg!(rep, iss >= 0, b"L303c\n");
+
+    // A read the note failed to interrupt would block forever, so a rescuer
+    // child writes one byte into the connection after 10 s: a broken kernel
+    // then FAILS L305 instead of hanging the probe. A passing run stands the
+    // rescuer down through a pipe the moment the read returns.
+    let mut irp: [i32; 2] = [-1, -1];
+    leg!(rep, svc3(NR_PIPE2, irp.as_mut_ptr() as u64, 0, 0) == 0, b"L304\n");
+    let fired_pre = sig_fired();
+    let rescuer = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if rescuer == 0 {
+        let _ = svc3(NR_CLOSE, irp[1] as u64, 0, 0);
+        let mut pfd = [PollFd { fd: irp[0], events: POLLIN, revents: 0 }];
+        let ts: [i64; 2] = [10, 0];
+        if svc4(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0) == 0 {
+            let x = b"x";
+            let _ = svc3(NR_WRITE, ics as u64, x.as_ptr() as u64, 1);
+        }
+        linux_exit(0)
+    }
+    // The interrupter: its exit is the SIGCHLD. One second is far longer than
+    // the few instructions between this fork and the read below.
+    let interrupter = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if interrupter == 0 {
+        let ts: [i64; 2] = [1, 0];
+        let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+        linux_exit(0)
+    }
+    let fired0 = sig_fired();
+    let mut one = [0u8; 4];
+    let n = svc3(NR_READ, iss as u64, one.as_mut_ptr() as u64, 1);
+    let k = b"k";
+    let _ = svc3(NR_WRITE, irp[1] as u64, k.as_ptr() as u64, 1);
+    leg!(rep, rescuer > 0 && interrupter > 0, b"L304b\n");
+    // The slow read WAS interrupted. On failure the marker names what the read
+    // returned (d data = the rescue, z EOF, a EAGAIN, b EBADF, n another error)
+    // and whether the handler ran before the read began (E) or not (L).
+    let nc = match n { 1 => b'd', 0 => b'z', -11 => b'a', -9 => b'b', _ if n < 0 => b'n', _ => b'p' };
+    let rc = if fired0 > fired_pre { b'E' } else { b'L' }; // the handler ran Early, before the read
+    let l305 = [b'L', b'3', b'0', b'5', nc, rc, b'\n'];
+    leg!(rep, n == NEG_EINTR, &l305);
+    leg!(rep, sig_fired() > fired0, b"L305b\n"); // and the handler ran
+    for kid in [rescuer, interrupter] {
+        let mut ws: i32 = -1;
+        let mut r = NEG_EINTR;
+        while r == NEG_EINTR {
+            r = svc4(NR_WAIT4, kid as u64, &mut ws as *mut i32 as u64, 0, 0);
+        }
+        leg!(rep, r == kid && (ws & 0x7f) == 0 && ((ws >> 8) & 0xff) == 0, b"L306\n");
+    }
+    for fd in [iss, ics, ils, irp[0] as i64, irp[1] as i64] {
+        let _ = svc3(NR_CLOSE, fd as u64, 0, 0);
+    }
+
+    // The negative half. Each call in the loop is a 9P round trip (netd, or
+    // the pool that holds this container's rootfs), so the children's exits
+    // land inside those waits. The loop runs until every child is reaped, so
+    // every exit happened while it ran.
+    const KIDS: usize = 6;
+    let mut kids = [0i64; KIDS];
+    for (i, slot) in kids.iter_mut().enumerate() {
+        let f = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if f == 0 {
+            let ts: [i64; 2] = [0, (i as i64 + 1) * 40_000_000];
+            let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+            linux_exit(0)
+        }
+        *slot = f;
+    }
+    leg!(rep, kids.iter().all(|&f| f > 0), b"L307\n");
+    let fired1 = sig_fired();
+    let mut reaped = [false; KIDS];
+    let mut left = KIDS;
+    let mut bad: u32 = 0; // the FIRST call that failed: 1 socket, 2 openat, 3 read, 4 newfstatat
+    let mut iters: u32 = 0;
+    let mut nst = core::mem::zeroed::<LinuxStat>();
+    let mut buf = [0u8; 64];
+    while left > 0 && iters < 100_000 {
+        let s = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+        if s < 0 {
+            if bad == 0 { bad = 1; }
+        } else {
+            let _ = svc3(NR_CLOSE, s as u64, 0, 0);
+        }
+        let fd = svc4(NR_OPENAT, AT_FDCWD, SELF_PATH.as_ptr() as u64, O_RDONLY, 0);
+        if fd < 0 {
+            if bad == 0 { bad = 2; }
+        } else {
+            if svc3(NR_READ, fd as u64, buf.as_mut_ptr() as u64, 64) != 64 && bad == 0 {
+                bad = 3;
+            }
+            let _ = svc3(NR_CLOSE, fd as u64, 0, 0);
+        }
+        if svc4(NR_NEWFSTATAT, AT_FDCWD, SELF_PATH.as_ptr() as u64,
+                &mut nst as *mut LinuxStat as u64, 0) != 0 && bad == 0 {
+            bad = 4;
+        }
+        for i in 0..KIDS {
+            if !reaped[i] {
+                let mut ws: i32 = -1;
+                if svc4(NR_WAIT4, kids[i] as u64, &mut ws as *mut i32 as u64, WNOHANG, 0)
+                    == kids[i]
+                {
+                    reaped[i] = true;
+                    left -= 1;
+                }
+            }
+        }
+        iters += 1;
+    }
+    leg!(rep, left == 0, b"L308\n"); // every child exited while the loop ran
+    let which: &[u8] = match bad {
+        1 => b"L309a\n", // socket()
+        2 => b"L309b\n", // openat()
+        3 => b"L309c\n", // a regular file's read()
+        _ => b"L309d\n", // newfstatat()
+    };
+    leg!(rep, bad == 0, which);
+    leg!(rep, sig_fired() > fired1, b"L310\n"); // the notes were delivered late, not lost
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

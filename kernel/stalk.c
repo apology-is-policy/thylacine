@@ -72,8 +72,9 @@ static int err_code(int ret) {
 //     `/mnt/.` return the mounted root while `/mnt` returns the mount point --
 //     a divergence this gate would be INTRODUCING, not fixing.
 // The two types can disagree only for a mount whose point and root differ in
-// kind (a directory grafted onto a file -- mount() does not gate on type).
-// Nothing in-tree builds one; if one existed, `/f/..` would answer ENOTDIR
+// kind (a directory grafted onto a file). SYS_MOUNT refuses to install one
+// (Plan 9's Emount, ARCH 9.6.1), but that is an install-time check and mount()
+// itself does not gate on type; if one existed, `/f/..` would answer ENOTDIR
 // while `/f/x` crossed and resolved.
 //
 // qid.type is the same TOTAL, fetch-free signal #79 established: every Spoor
@@ -1918,9 +1919,10 @@ per_component:
     //     crossing there would INTRODUCE a divergence.
     //   - a trailing slash is about WHAT THE PATH NAMES, which is the crossed
     //     result: `/mnt/` names the MOUNTED ROOT, not the shadowed point.
-    // The distinction is observable, not academic: nothing requires a mount
-    // point and its mounted root to agree on type (territory.c's mount() has no
-    // QTDIR check), so a directory mounted over a file makes `/mnt/` legal and
+    // The distinction is observable, not academic: below SYS_MOUNT nothing
+    // requires a mount point and its mounted root to agree on type (Emount is
+    // SYS_MOUNT's install-time refusal; territory.c's mount() has no QTDIR
+    // check), so a directory mounted over a file makes `/mnt/` legal and
     // a file mounted over a directory makes it ENOTDIR -- gating the uncrossed
     // point would be wrong in BOTH directions. Placing it on the quarry gets
     // every amode right for free, because the quarry is by construction the

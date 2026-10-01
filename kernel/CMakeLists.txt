@@ -156,6 +156,7 @@ set(KERNEL_TEST_SRCS
     test/test_image.c
     test/test_elf.c
     test/test_vivarium.c
+    test/test_viv_sock.c
     test/test_asid.c
     test/test_directmap.c
     test/test_proc_pgtable.c
@@ -221,6 +222,7 @@ set(KERNEL_TEST_SRCS
     test/test_path.c
     test/test_stalk.c
     test/test_9p_attach.c
+    test/test_9p_closer.c
     test/test_9p_spoor_transport.c
     test/test_9p_srvconn_transport.c
     test/test_territory_pivot_root.c

@@ -42,6 +42,7 @@
 // automatically by call ordering, not by init ordering.
 
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/extinction.h>
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
@@ -542,12 +543,25 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         }
         if (ok) ok = ns_put_str(buf, cap, &off, " ");
 
-        // Source label: the source Spoor's namespace name when it has one (a
-        // mounted sub-tree); else "#<dc>" -- the Plan 9 device spec (a device
+        // Source label. A 9P session's root: the file its session came over (the
+        // operator's vote of 2026-09-28, Plan 9's form -- a mount line names the
+        // channel, not the tree), by that file's name, else its device spec
+        // ("#|", a pipe). Never on the covered entry, whose line names its own
+        // directory. Otherwise the source Spoor's namespace name when it has one
+        // (a mounted sub-tree); else "#<dc>" -- the Plan 9 device spec (a device
         // root has no namespace path; '#9'=9P, '#s'=srv, '#p'=proc, ...).
         if (ok) {
             struct Spoor *src = m->source;
-            if (src && src->path && src->path->len) {
+            const struct Path *origin = NULL;
+            char odc = 0;
+            if (!(m->flags & MCOVERED) && dev9p_spoor_origin(src, &origin, &odc)) {
+                if (origin) {
+                    ok = ns_put_bytes(buf, cap, &off, origin->s, origin->len);
+                } else {
+                    char dev[3] = { '#', odc, '\0' };
+                    ok = ns_put_str(buf, cap, &off, dev);
+                }
+            } else if (src && src->path && src->path->len) {
                 ok = ns_put_bytes(buf, cap, &off, src->path->s, src->path->len);
             } else {
                 char dev[3];
@@ -571,6 +585,11 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         // reads "mount <pt> <pt> covered"): shown, so an operator can see that
         // the point's own names are searched and in what order.
         if (ok && (m->flags & MCOVERED)) ok = ns_put_str(buf, cap, &off, " covered");
+        // LR-1 (HAUL-DESIGN 4.8): a member whose source belongs to a 9P session
+        // declared remote at its attach or its /srv post. Never the covered
+        // entry: nobody mounted it, and its line already names the directory.
+        if (ok && !(m->flags & MCOVERED) && dev9p_spoor_remote(m->source))
+            ok = ns_put_str(buf, cap, &off, " remote");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial
@@ -863,17 +882,19 @@ int mount(struct Territory *territory, struct Spoor *source,
     // grow a covered member (territory.tla BUGGY_FRESH_AFTER_REMOVE).
     // MREPL wins over the ordering flags (Plan 9 encodes the three as one
     // field), so it never starts a union; SYS_MOUNT refuses the combinations.
-    // Only a directory can be searched as a member: at a file point the mount
-    // stays plain (territory.tla FilePaths; Plan 9 refuses it, Emount).
+    // Only a directory can be searched as a member, so no union starts at a
+    // file point. SYS_MOUNT refuses an ordered mount there (Plan 9's Emount,
+    // ARCH 9.6.1); this conjunct holds the line for mount()'s kernel callers
+    // (territory.tla BUGGY_COVER_FILE; territory_mount.covered_file_point_stays_plain).
     bool starts_union = !(flags & MREPL) && (flags & (MBEFORE | MAFTER)) &&
                         (mountpoint->qid.type & QTDIR) &&
                         !mount_point_hosts_member(territory, mountpoint);
 
     // Idempotency: (key(mountpoint), source) pair already in the table → no new
-    // entry, no refcount bump. Spec: <<path, s>> \notin mounts[p] precondition
-    // under the re-keyed identity (territory.tla models mounts as a set of
-    // <<point, source>> pairs and does not model `flags` at all, so the
-    // convergence below sits beneath the model).
+    // entry, no refcount bump. territory.tla keeps each point's members in
+    // order, with their MBEFORE and MCREATE bits, but has no flagless mount,
+    // so the convergence below sits beneath the model (its Reposition is the
+    // MBEFORE / MAFTER arm).
     //
     // #219: the arm used to `goto out` with rc = 0 WITHOUT consulting flags, so
     // mount(..., MNOEXEC) over an already-mounted pair reported success and

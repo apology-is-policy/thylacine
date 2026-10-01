@@ -26,6 +26,22 @@
 
 _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
 
+// Clunk a fid nobody uses any more (docs/FID-LIFECYCLE-DESIGN.md section 9).
+// The Tclunk goes out without waiting for its Rclunk. One the caller cannot
+// send on a live session -- the caller is dying, or a spill buffer could not
+// be allocated -- comes back -P9_E_AGAIN with the fid still bound, and goes to
+// the closer through the session's owner. A fid still held by a live session
+// after that is a leak, reported; on a dead session it died with the session,
+// and a fid that was never bound (a failed walk's) had nothing to leak.
+static void dev9p_clunk_fid(struct p9_client *cl, struct p9_attached *owner,
+                            u32 fid) {
+    int rc = p9_client_clunk_async(cl, fid);
+    if (rc == 0) return;
+    if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
+        return;
+    if (p9_client_fid_held(cl, fid)) p9_clunk_refused(fid, rc);
+}
+
 // =============================================================================
 // Internal: priv allocation + lookup.
 // =============================================================================
@@ -65,10 +81,37 @@ static struct dev9p_priv *priv_of(struct Spoor *c) {
     return p;
 }
 
-// Exposed for kernel/dev9p_poll.c (the `.poll` bridge needs p->poll + p->client +
-// p->fid). Same dc + magic gate as priv_of.
+// Exposed for kernel/dev9p_poll.c (the readiness bridge needs p->poll +
+// p->client + p->fid). Same dc + magic gate as priv_of.
 struct dev9p_priv *dev9p_priv_of(struct Spoor *c) {
     return priv_of(c);
+}
+
+bool dev9p_spoor_remote(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    return p && p->client && p->client->remote;
+}
+
+void dev9p_stamp_origin(struct Spoor *root, const struct Spoor *transport) {
+    struct dev9p_priv *p = priv_of(root);
+    if (!p || !transport) return;
+    // The root's priv is the one fid-bearing priv dev9p does not own (a cached-open
+    // priv owns no fid either, and has none).
+    if (p->fid_owned || p->cached_open || p->origin || p->origin_dc) return;
+    if (transport->path && transport->path->len) {
+        path_ref(transport->path);
+        p->origin = transport->path;
+    } else {
+        p->origin_dc = (char)transport->dc;
+    }
+}
+
+bool dev9p_spoor_origin(struct Spoor *c, const struct Path **name, char *dc) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || (!p->origin && !p->origin_dc)) return false;
+    if (name) *name = p->origin;
+    if (dc)   *dc   = p->origin_dc;
+    return true;
 }
 
 // #99: propagate the real create errno (see the header contract). The clamp to
@@ -533,9 +576,10 @@ static u8 qid_type_p9_to_kernel(u8 p9) {
     // links are invisible, which is the pre-D-1 status quo (fail-safe).
     // P9_QTSYMLINK == QTSYMLINK == 0x02.
     if (p9 & P9_QTSYMLINK) out |= QTSYMLINK;
-    // net-6b-2b: carry the readiness marker through so dev9p_poll's QTPOLL gate
-    // (on the cached qid) sees it. A server that never sets it -> dev9p_poll is
-    // POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL == 0x01.
+    // net-6b-2b: carry the readiness marker through so the readiness bridge's
+    // QTPOLL gate (on the cached qid; dev9p_poll.c) sees it. A server that never
+    // sets it -> the file is POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL
+    // == 0x01.
     if (p9 & P9_QTPOLL)    out |= QTPOLL;
     return out;
 }
@@ -588,7 +632,9 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
     // SOURCE (stalk_cross_mounts stamps the mount-point name onto the crossed
     // clone) and as a devsrv open=connect endpoint (the stalk / walk_open
     // adoption arms stamp the opened path -- audit F2). So the raw "/" surfaces
-    // only when the root IS the namespace root (joey's pivot target).
+    // where the root itself is named: as the namespace root (joey's pivot
+    // target), and as a mount-table source, which /proc/<pid>/ns renders by
+    // this name.
     // path_make_root NULL (OOM) -> "unknown", never fatal.
     c->path = path_make_root();
     return c;
@@ -631,7 +677,7 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv) return NULL;
     if (src_priv->fid == P9_NOFID) return NULL;   // fidless (cached-open) Spoor
-    if (nname < 0 || nname > P9_MAX_WALK) return NULL;
+    if (nname < 0 || nname > (int)P9_MAX_WALK) return NULL;
 
     // F3 close (P5-stratumd-stub-bringup audit): allocate the Walkqid
     // carrier FIRST so a SLUB OOM here doesn't consume a fid number
@@ -715,9 +761,8 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
                                                 /*fid_owned=*/true,
                                                 src_priv->attached_owner);
     if (!new_priv) {
-        // Best-effort: clunk the fid we just allocated. Ignore the
-        // result — if the clunk fails, we still need to fail the walk.
-        (void)p9_client_clunk(src_priv->client, new_fid);
+        // Clunk the fid the walk just bound; the walk fails either way.
+        dev9p_clunk_fid(src_priv->client, src_priv->attached_owner, new_fid);
         walkqid_free(w);
         return NULL;
     }
@@ -964,9 +1009,8 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                         }
                         walkqid_free(sw);
                     }
-                    // Alloc failure: nothing consumed the fid -- sync-clunk it
-                    // (rare OOM path; correctness over latency).
-                    (void)p9_client_clunk(cl, (u32)cfid);
+                    // Alloc failure: nothing consumed the fid -- clunk it.
+                    dev9p_clunk_fid(cl, src_priv->attached_owner, (u32)cfid);
                 }
             }
             // full positive in BIND form (no parked fid) -> must RPC to bind.
@@ -1113,7 +1157,8 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                                  /*fid_owned=*/true,
                                                  src_priv->attached_owner);
         if (!new_priv) {
-            (void)p9_client_clunk(src_priv->client, new_fid);
+            dev9p_clunk_fid(src_priv->client, src_priv->attached_owner,
+                            new_fid);
             walkqid_free(w);
             return NULL;
         }
@@ -1445,12 +1490,12 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         if (rc != 0 || nwqid != 1) {
             p->create_errno = (rc != 0) ? rc : -T_E_IO;  // #99 F3: dir created; walk-to-child failed
             p->fid_suspect = true;
-            (void)p9_client_clunk(p->client, dir_fid);
+            dev9p_clunk_fid(p->client, p->attached_owner, dir_fid);
             return NULL;                          // p->fid still parent; caller clunks
         }
         // Swap: clunk the parent clone, adopt the new-dir fid. From here a
         // failure leaves p->fid == dir_fid so dev9p_close clunks the right one.
-        (void)p9_client_clunk(p->client, p->fid);
+        dev9p_clunk_fid(p->client, p->attached_owner, p->fid);
         p->fid = dir_fid;
 
         rc = p9_client_lopen(p->client, dir_fid, 0u /* OREAD */, &qid, &iounit);
@@ -1507,7 +1552,7 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // of the child attr/page drops around it).
     {
         s64 g2df = dirfid_drop(p->client, c->qid.path);
-        if (g2df >= 0) (void)p9_client_clunk_async(p->client, (u32)g2df);
+        if (g2df >= 0) dev9p_clunk_fid(p->client, p->attached_owner, (u32)g2df);
     }
     // L1e invalidate (L1f audit F1): the reused-ino hazard applies to the
     // child's PAGES exactly as to its attr. A create at a freed+reused qid.path
@@ -1659,19 +1704,17 @@ static void dev9p_close(struct Spoor *c) {
         // normal close path fires the Tclunk fire-and-forget (the submitter is
         // not parked for the clunk RTT; the fid unbinds at send + its number is
         // never reused, and the ownerless Rclunk drains via a later op's reader,
-        // the #845 discipline). Ignore the result -- close-then-error has no good
-        // recovery; the fid is gone from the client's table either way per the
-        // wire spec. (Error/rollback clunks in walk/walk_attrs/create stay
-        // synchronous -- off the hot path, correctness over latency.)
-        // p9_client_clunk_async now composes internally with the #841 tag pool
-        // (it drains ownerless Rclunks on a full pool -- the #926 proc-exit
-        // close-burst -- before send, so the fid never leaks bound) and the #349
-        // c2s back-pressure (EAGAIN is retried, never a session death). A
-        // non-zero return is a can't/shouldn't-clunk (session dead / fid unbound
-        // / root / a live op targets it) OR the narrow burst-during-a-kill race
-        // (pool full AND the Proc dying -- the fid then leaks bound exactly as
-        // the old sync clunk did on the same race, session-teardown-bounded;
-        // round-2 F1). Ignored exactly as a sync-clunk error was, no fallback.
+        // the #845 discipline). Every dev9p clunk goes through dev9p_clunk_fid:
+        // the rollback clunks in walk/walk_attrs/create are asynchronous too, so
+        // no dev9p Tclunk waits for its Rclunk. p9_client_clunk_async composes
+        // internally with the #841 tag pool (it drains ownerless Rclunks on a
+        // full pool -- the #926 proc-exit close-burst -- before send) and the
+        // #349 c2s back-pressure (EAGAIN is retried, never a session death). A
+        // dying thread cannot send at all -- client_send_flow refuses every
+        // dying sender at its loop top, pool full or not -- so its Tclunk goes
+        // to the closer threads (FID-LIFECYCLE section 9), which is what
+        // gopls's kill of a child still in its spawn thunk reaches. The refusal
+        // line prints only for a fid the live session still holds.
         // G2 donate (docs/FID-LIFECYCLE-DESIGN.md section 4): an UNOPENED
         // DIRECTORY fid on a cacheable client parks in the dir-fid cache
         // instead of clunking -- the next bind-form resolve of this dir
@@ -1694,27 +1737,18 @@ static void dev9p_close(struct Spoor *c) {
             s64 vic = dirfid_put(p->client, c->qid.path, p->fid);
             parked = true;
             if (vic >= 0)
-                (void)p9_client_clunk_async(p->client, (u32)vic);
+                dev9p_clunk_fid(p->client, p->attached_owner, (u32)vic);
         }
-        if (!parked) {
-            int crc = p9_client_clunk_async(p->client, p->fid);
-            if (crc < 0) {
-                struct cons_diag_line dl;
-                cons_diag_line_init(&dl);
-                cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
-                cons_diag_line_putdec(&dl, (u64)p->fid);
-                cons_diag_line_puts(&dl, " refused rc ");
-                cons_diag_line_putdec(&dl, (u64)(-crc));
-                cons_diag_line_puts(&dl, "\n");
-                cons_diag_line_emit(&dl);
-            }
-        }
+        if (!parked)
+            dev9p_clunk_fid(p->client, p->attached_owner, p->fid);
     }
 
     if (p->attached_owner) {
         p9_attached_unref(p->attached_owner);
         p->attached_owner = NULL;
     }
+    path_unref(p->origin);   // NULL-safe
+    p->origin = NULL;
 
     // Release the priv allocation. SLUB's freelist write clobbers
     // offset 0 (magic) on free; subsequent priv_of will see the
@@ -2122,7 +2156,7 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     }
     if (g2have) {
         s64 g2df = dirfid_drop(od->client, g2victim);
-        if (g2df >= 0) (void)p9_client_clunk_async(od->client, (u32)g2df);
+        if (g2df >= 0) dev9p_clunk_fid(od->client, od->attached_owner, (u32)g2df);
         larder_attr_invalidate(&od->client->larder, g2victim);
     }
     // L1c OwnWrite: both dirs' attrs (nlink/mtime/cvers) changed -- G3
@@ -2175,7 +2209,7 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
         // and the invalidation EVENT is what makes a checked-out fid for this
         // qid unparkable at its close (the donate gate's ring scan).
         s64 g2df = dirfid_drop(p->client, g2victim);
-        if (g2df >= 0) (void)p9_client_clunk_async(p->client, (u32)g2df);
+        if (g2df >= 0) dev9p_clunk_fid(p->client, p->attached_owner, (u32)g2df);
         larder_attr_invalidate(&p->client->larder, g2victim);
     }
     // L1c OwnWrite: unlink changed the parent dir's attrs (nlink/mtime/cvers)
@@ -2348,7 +2382,11 @@ struct Dev dev9p = {
     .bread    = dev9p_bread,
     .write    = dev9p_write,
     .bwrite   = dev9p_bwrite,
-    .poll     = dev9p_poll,    // net-6b-2b: readiness bridge (QTPOLL files only)
+    // net-6b-2b + #98: remote readiness, sampled and armed separately (a QTPOLL
+    // file asks its server; any other file answers always-ready itself).
+    .poll_snapshot         = dev9p_poll_snapshot,
+    .poll_snapshot_release = dev9p_poll_snapshot_release,
+    .poll_arm              = dev9p_poll_arm,
     .fsync    = dev9p_fsync,
     .readdir  = dev9p_readdir,
     .rename   = dev9p_rename,

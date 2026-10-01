@@ -11,11 +11,13 @@ on-demand by `quaestor closed sub-kernel-devsrv`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-17 closed findings on [[sub-kernel-devsrv]] — do NOT re-report
+19 closed findings on [[sub-kernel-devsrv]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
 - [[fnd-957-r1-f1]] [P1] Single-hop open of a /srv leaf leaked the connection endpoint (fixed) — Fixed in-commit by adopting open()'s return exactly like stalk's
+- [[fnd-b1d-v-r2-f1]] [P2] Every /srv/<name> node carried the registry root's qid.path, so a mount at one was keyed at the root and at every other service (fixed) — Fixed: a per-registry counter stamps each reservation's `qid_path`, never 0,
+- [[fnd-b1d-v-r3-f1]] [P2] The round-2 regression witness crossed a devnone source, so it was red on the fixed kernel and had never run (fixed) — Fixed test-only: the two crossing legs become `mount_is_point_id` assertions on
 - [[fnd-p5srv-r1-f1]] [P1] Production /srv ops never armed client_deadline_ns — a hung server wedged its caller indefinitely (fixed) — Fixed in the audit-close commit: `srvconn_set_client_deadline` armed
 - [[fnd-p5srv-r1-f14]] [P3] Claimed missing poller wake on the connect failure paths (withdrawn) — WITHDRAWN: both failure paths are correct — the early-bail path frees
 - [[fnd-p5srv-r1-f2]] [P2] SrvService.magic + devsrv_svc_ref.magic offsets unpinned — the first-u64 discriminator rested on field order (fixed) — Fixed: both `_Static_assert`s added to `devsrv.h`, mirroring srvconn's.

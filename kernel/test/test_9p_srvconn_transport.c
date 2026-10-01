@@ -41,6 +41,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/path.h>
 #include <thylacine/proc.h>
 #include <thylacine/pts.h>
 #include <thylacine/spoor.h>
@@ -75,6 +76,9 @@ void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
 void test_9p_srvconn_transport_cape_attach_srv(void);
+void test_9p_srvconn_transport_srv_attach_names_root(void);
+void test_9p_srvconn_transport_remote_attach(void);
+void test_9p_srvconn_transport_remote_attach_srv(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -106,17 +110,22 @@ static void drop_test_proc(struct Proc *p) {
 // SYS_POST_SERVICE_BYTE / SYS_SRV_CONNECT; this drives devsrv_post_listener +
 // devsrv_open_connect, the same machinery stalk's SYS_WALK_CREATE / SYS_OPEN
 // reach.)
-static struct SrvConn *open_byte_mode_pair_cape(struct Proc **out_server,
+// When set, the fixture names each connection it opens by this Path, as the
+// stalk adoption arm names one opened by path (/srv/<name>), before the handle
+// exists. NULL: the connection keeps the no-name it is born with.
+static struct Path *g_sc_conn_name;
+
+static struct SrvConn *open_byte_mode_pair_decl(struct Proc **out_server,
                                                  struct Proc **out_client,
                                                  int *out_svc_h, int *out_conn_h,
-                                                 bool cape) {
+                                                 bool cape, bool remote) {
     struct Proc *server = make_marked_test_proc();
     if (!server) return NULL;
 
     // create=post (byte mode) on a transient boot /srv root.
     struct Spoor *proot = devsrv_attach_registry(srv_boot_registry());
     if (!proot) { drop_test_proc(server); return NULL; }
-    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE, false, cape);
+    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE, false, cape, remote);
     spoor_clunk(proot);
     if (svc_h < 0) { drop_test_proc(server); return NULL; }
 
@@ -149,6 +158,12 @@ static struct SrvConn *open_byte_mode_pair_cape(struct Proc **out_server,
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
     if (!cs) { drop_test_proc(server); drop_test_proc(client); return NULL; }
+    if (g_sc_conn_name) {
+        struct Path *old = cs->path;
+        path_ref(g_sc_conn_name);
+        cs->path = g_sc_conn_name;
+        path_unref(old);
+    }
 
     int conn_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     if (conn_h < 0) {
@@ -170,7 +185,7 @@ static struct SrvConn *open_byte_mode_pair_cape(struct Proc **out_server,
 static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
                                             struct Proc **out_client,
                                             int *out_svc_h, int *out_conn_h) {
-    return open_byte_mode_pair_cape(out_server, out_client, out_svc_h, out_conn_h, false);
+    return open_byte_mode_pair_decl(out_server, out_client, out_svc_h, out_conn_h, false, false);
 }
 
 static void cleanup_byte_mode_pair(struct Proc *server, struct Proc *client,
@@ -971,18 +986,20 @@ static u32 sc_sent_n_uname(struct SrvConn *cn) {
 enum { SC_ERR_UNSET = 0x7F };
 
 struct sc_cape_seen {
-    bool attached, cape, loose;
+    bool attached, cape, loose, remote;
     u32  uid, gid, n_uname;
     int  err;
+    bool origin, origin_is_conn_name;   // the root's /proc/<pid>/ns name
+    char origin_dc;
 };
 
-static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
-    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
+static struct sc_cape_seen sc_decl_attach(bool service_cape, bool service_remote, u32 flags) {
+    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET, false, false, 0 };
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
     int svc_h = -1, conn_h = -1;
-    struct SrvConn *cn = open_byte_mode_pair_cape(&server, &client, &svc_h, &conn_h,
-                                                  service_cape);
+    struct SrvConn *cn = open_byte_mode_pair_decl(&server, &client, &svc_h, &conn_h,
+                                                  service_cape, service_remote);
     if (!cn) return r;
     client->principal_id = 0x1234u;
     client->primary_gid  = 0x5678u;
@@ -995,10 +1012,11 @@ static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
             struct dev9p_priv *rp = dev9p_priv_of(root);
             r.attached = rp != NULL;
             if (rp) {
-                r.cape  = rp->client->cape;
-                r.loose = rp->client->loose;
-                r.uid   = rp->client->cape_uid;
-                r.gid   = rp->client->cape_gid;
+                r.cape   = rp->client->cape;
+                r.loose  = rp->client->loose;
+                r.remote = rp->client->remote;
+                r.uid    = rp->client->cape_uid;
+                r.gid    = rp->client->cape_gid;
             }
             r.n_uname = sc_sent_n_uname(cn);
             srvconn_teardown(cn);      // the root's Tclunk then fails fast
@@ -1009,20 +1027,27 @@ static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
     return r;
 }
 
-// A cape mark on a 9P-mode conn capes nothing. The /srv post refuses DMSRVCAPE
-// without DMSRVBYTE, so no service mints such a conn; this pins the helper's own
-// byte-mode gate on a raw conn marked by hand. `attached` stays false unless the
-// mark took, so the leg cannot pass on an unmarked conn.
-static struct sc_cape_seen sc_cape_attach_marked_9p_conn(void) {
-    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
+static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
+    return sc_decl_attach(service_cape, false, flags);
+}
+
+// An attach over a raw 9P-mode conn marked by hand. A cape mark capes nothing:
+// the /srv post refuses DMSRVCAPE without DMSRVBYTE, so no service mints such a
+// conn, and this pins the helper's own byte-mode gate. A remote mark does take:
+// a 9P-mode service may be declared remote, and the label grants nothing.
+// `attached` stays false unless every requested mark took, so no leg can pass
+// on an unmarked conn.
+static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_remote) {
+    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET, false, false, 0 };
     struct Proc *client = make_test_proc();
     if (!client) return r;
     client->principal_id = 0x1234u;
     client->primary_gid  = 0x5678u;
     struct SrvConn *cn = srvconn_create(0, client->pid, false, 0, SRVCONN_MSIZE);
     if (cn) {
-        srvconn_set_cape(cn);
-        if (srvconn_cape(cn) &&
+        if (mark_cape)   srvconn_set_cape(cn);
+        if (mark_remote) srvconn_set_remote(cn);
+        if (srvconn_cape(cn) == mark_cape && srvconn_remote(cn) == mark_remote &&
             sc_stage_reply(cn, P9_TVERSION, P9_NOTAG) == 0 &&
             sc_stage_reply(cn, P9_TATTACH, 0) == 0) {
             int err = 0;
@@ -1030,7 +1055,10 @@ static struct sc_cape_seen sc_cape_attach_marked_9p_conn(void) {
             if (root) {
                 struct dev9p_priv *rp = dev9p_priv_of(root);
                 r.attached = rp != NULL;
-                if (rp) r.cape = rp->client->cape;
+                if (rp) {
+                    r.cape   = rp->client->cape;
+                    r.remote = rp->client->remote;
+                }
                 r.n_uname = sc_sent_n_uname(cn);
                 srvconn_teardown(cn);
                 spoor_clunk(root);
@@ -1049,14 +1077,15 @@ extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
 // SYS_ATTACH_9P_SRV's own half, through its inner: the flags word reaches the
 // helper, and a refused word sends nothing (n_uname stays the 0xBAD0 no-frame
 // sentinel). *ret is the syscall's answer.
-static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s64 *ret) {
-    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
+static struct sc_cape_seen sc_srv_syscall_decl_attach(bool service_cape, bool service_remote,
+                                                      u64 flags, s64 *ret) {
+    struct sc_cape_seen r = { false, false, false, false, 0, 0, 0, SC_ERR_UNSET, false, false, 0 };
     *ret = 0x7BAD;
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
     int svc_h = -1, conn_h = -1;
-    struct SrvConn *cn = open_byte_mode_pair_cape(&server, &client, &svc_h, &conn_h,
-                                                  service_cape);
+    struct SrvConn *cn = open_byte_mode_pair_decl(&server, &client, &svc_h, &conn_h,
+                                                  service_cape, service_remote);
     if (!cn) return r;
     client->principal_id = 0x1234u;
     client->primary_gid  = 0x5678u;
@@ -1069,10 +1098,14 @@ static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s
                                         ? dev9p_priv_of((struct Spoor *)h.obj) : NULL;
             r.attached = rp != NULL;
             if (rp) {
-                r.cape  = rp->client->cape;
-                r.loose = rp->client->loose;
-                r.uid   = rp->client->cape_uid;
-                r.gid   = rp->client->cape_gid;
+                r.cape   = rp->client->cape;
+                r.loose  = rp->client->loose;
+                r.remote = rp->client->remote;
+                r.uid    = rp->client->cape_uid;
+                r.gid    = rp->client->cape_gid;
+                const struct Path *on = NULL;
+                r.origin = dev9p_spoor_origin((struct Spoor *)h.obj, &on, &r.origin_dc);
+                r.origin_is_conn_name = on != NULL && on == g_sc_conn_name;
             }
             handle_put(&h);
         }
@@ -1082,6 +1115,38 @@ static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s
     }
     cleanup_byte_mode_pair(server, client, conn_h);
     return r;
+}
+
+static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s64 *ret) {
+    return sc_srv_syscall_decl_attach(service_cape, false, flags, ret);
+}
+
+// Operator vote 2026-09-28 (ARCH 9.6.9): SYS_ATTACH_9P_SRV names the root it
+// mints, on /proc/<pid>/ns, by the connection its session came over -- the
+// connection's own name, shared -- and a connection with no name by its
+// device spec. Both references drop with their Spoors.
+void test_9p_srvconn_transport_srv_attach_names_root(void) {
+    struct Path *r0 = path_make_root();
+    struct Path *r1 = r0 ? path_addelem(r0, "srv", 3) : NULL;
+    g_sc_conn_name = r1 ? path_addelem(r1, "btest", 5) : NULL;
+    path_unref(r1);
+    path_unref(r0);
+    s64 ret = 0;
+    struct sc_cape_seen r = sc_srv_syscall_attach(false, 0, &ret);
+    // Taken back before any assertion can return, so no later fixture
+    // connection inherits the name.
+    struct Path *name = g_sc_conn_name;
+    g_sc_conn_name = NULL;
+    int left = name ? name->ref : -1;
+    path_unref(name);
+    TEST_ASSERT(name != NULL, "the name /srv/btest");
+    TEST_ASSERT(ret >= 0 && r.attached, "an attach over a named connection");
+    TEST_ASSERT(r.origin && r.origin_is_conn_name, "the root carries the connection's own name");
+    TEST_EXPECT_EQ((u64)left, (u64)1, "the connection and the root released it");
+    r = sc_srv_syscall_attach(false, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached, "an attach over a connection with no name");
+    TEST_ASSERT(r.origin && !r.origin_is_conn_name && r.origin_dc == 's',
+                "a connection with no name gives its device spec, #s");
 }
 
 void test_9p_srvconn_transport_cape_attach(void) {
@@ -1102,7 +1167,7 @@ void test_9p_srvconn_transport_cape_attach(void) {
 
     // An unknown bit is refused by the same gate -- the case F5 exists for, a
     // future caller handing the helper a word it never validated.
-    r = sc_cape_attach(false, 0x4u);
+    r = sc_cape_attach(false, 0x8u);
     TEST_ASSERT(!r.attached, "the helper refuses an unknown flag bit");
     TEST_EXPECT_EQ((u64)(s64)r.err, (u64)(s64)-T_E_INVAL, "unknown bit: refused as invalid");
 
@@ -1115,7 +1180,7 @@ void test_9p_srvconn_transport_cape_attach(void) {
     r = sc_cape_attach(false, SYS_ATTACH_9P_LOOSE);
     TEST_ASSERT(r.attached && r.loose && !r.cape, "LOOSE alone is not the cape");
 
-    r = sc_cape_attach_marked_9p_conn();
+    r = sc_attach_marked_9p_conn(/*mark_cape=*/true, /*mark_remote=*/false);
     TEST_ASSERT(r.attached, "attach over a cape-marked 9P-mode conn");
     TEST_ASSERT(!r.cape, "a cape mark on a 9P-mode conn capes nothing");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "9P-mode conn: the attacher's principal");
@@ -1137,7 +1202,64 @@ void test_9p_srvconn_transport_cape_attach_srv(void) {
     r = sc_srv_syscall_attach(false, 0, &ret);
     TEST_ASSERT(ret >= 0 && r.attached && !r.cape, "SYS_ATTACH_9P_SRV, no flag: uncaped (control)");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "SYS_ATTACH_9P_SRV, uncaped: the attacher's principal");
-    r = sc_srv_syscall_attach(false, 0x4u, &ret);
+    r = sc_srv_syscall_attach(false, 0x8u, &ret);
     TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1, "SYS_ATTACH_9P_SRV refuses an unknown flag bit");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)0xBAD0u, "the refused attach sent nothing");
+}
+
+// =============================================================================
+// 9p_srvconn_transport.remote_attach -- the remote declaration (HAUL-DESIGN 4.8)
+// through srvconn_attach_dev9p_root, the helper both /srv attach paths share. A
+// conn from a DMSRVREMOTE service marks the session, in either service mode,
+// and nothing else does; the flag word cannot ask for it over /srv, because
+// there the poster declares. Each marked leg sits beside a plain control.
+// =============================================================================
+
+void test_9p_srvconn_transport_remote_attach(void) {
+    struct sc_cape_seen r = sc_decl_attach(/*cape=*/false, /*remote=*/true, 0);
+    TEST_ASSERT(r.attached, "attach over a DMSRVREMOTE byte service");
+    TEST_ASSERT(r.remote, "a DMSRVREMOTE service marks the attach without a flag");
+    TEST_ASSERT(!r.cape, "the remote mark is not the cape");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "remote, uncaped: the attacher's principal");
+
+    r = sc_decl_attach(false, false, 0);
+    TEST_ASSERT(r.attached, "plain service (control)");
+    TEST_ASSERT(!r.remote, "a plain service leaves the session unmarked");
+
+    r = sc_decl_attach(true, true, 0);
+    TEST_ASSERT(r.attached && r.remote && r.cape, "a caped remote service: both marks (Haul's post)");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "caped and remote: no user named");
+
+    r = sc_decl_attach(false, true, SYS_ATTACH_9P_LOOSE);
+    TEST_ASSERT(r.attached && r.remote && r.loose, "LOOSE over a remote service: loose and remote");
+
+    // The flag word cannot ask for the mark over /srv: refused by errno, and the
+    // call did run (SC_ERR_UNSET would say it never did).
+    r = sc_decl_attach(false, false, SYS_ATTACH_9P_REMOTE);
+    TEST_ASSERT(!r.attached, "the helper refuses the REMOTE flag: /srv marks by the poster alone");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)(s64)-T_E_INVAL, "refused as invalid, and the call did run");
+
+    r = sc_attach_marked_9p_conn(/*mark_cape=*/false, /*mark_remote=*/true);
+    TEST_ASSERT(r.attached, "attach over a remote-marked 9P-mode conn");
+    TEST_ASSERT(r.remote, "a remote mark on a 9P-mode conn marks the session");
+    r = sc_attach_marked_9p_conn(false, false);
+    TEST_ASSERT(r.attached && !r.remote, "an unmarked 9P-mode conn: unmarked (control)");
+    r = sc_attach_marked_9p_conn(true, true);
+    TEST_ASSERT(r.attached && r.remote && !r.cape,
+                "a 9P-mode conn marked both ways: remote, and still uncaped");
+}
+
+void test_9p_srvconn_transport_remote_attach_srv(void) {
+    s64 ret = 0;
+    struct sc_cape_seen r = sc_srv_syscall_decl_attach(false, /*remote=*/true, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached, "SYS_ATTACH_9P_SRV over a DMSRVREMOTE service attaches");
+    TEST_ASSERT(r.remote, "SYS_ATTACH_9P_SRV: the poster's declaration marks with no flag");
+    r = sc_srv_syscall_decl_attach(false, false, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached && !r.remote, "SYS_ATTACH_9P_SRV over a plain service: unmarked");
+    r = sc_srv_syscall_decl_attach(false, false, SYS_ATTACH_9P_REMOTE, &ret);
+    TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1, "SYS_ATTACH_9P_SRV refuses the REMOTE flag");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0xBAD0u, "the refused remote attach sent nothing");
+    r = sc_srv_syscall_decl_attach(false, true, SYS_ATTACH_9P_REMOTE, &ret);
+    TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1,
+                   "the flag is refused even over a service already declared remote");
 }

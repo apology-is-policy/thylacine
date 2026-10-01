@@ -33,22 +33,26 @@
 (*   THE COVERED DIRECTORY (Plan 9 cmount's `old`; operator vote           *)
 (*   2026-09-24). An MBEFORE / MAFTER mount at a point that hosts NO       *)
 (*   member makes a union of the new tree AND the directory it covers:     *)
-(*   `cv` members. MBEFORE gives <<new, covered>>, MAFTER <<covered, new>>;*)
-(*   later MBEFOREs go in front, later MAFTERs behind. MREPL replaces the  *)
-(*   covered member with the rest; a flagless mount never adds one (Plan 9 *)
+(*   `cv` members. MBEFORE gives <<new, covered>>, MAFTER <<covered,       *)
+(*   new>>; later MBEFOREs go in front, later MAFTERs behind. MREPL        *)
+(*   replaces the covered member with the rest; a flagless mount, which    *)
+(*   appends like MAFTER, never adds one (Plan 9 has no such mount: its    *)
 (*   flag 0 is MREPL). The covered member is never unmounted by name, and  *)
 (*   leaves with the last member mounted there. `Covered[pt]` is pt's own  *)
-(*   directory, drawn from CovDirs (disjoint from Spoors, so every Spoor    *)
+(*   directory, drawn from CovDirs (disjoint from Spoors, so every Spoor   *)
 (*   pairing of the pre-vote model is still explored); COV_MOUNTABLE lets  *)
 (*   a covered directory ALSO be mounted elsewhere (aliasing), while       *)
 (*   mounting it at its OWN point stays refused -- the self-mount I-3      *)
 (*   forbids (kernel/territory.c would_create_mount_cycle).                *)
 (*                                                                         *)
-(*   FilePaths: the points that are NOT directories. The covered member    *)
-(*   is a DIRECTORY the union searches, so at a file point an MBEFORE /    *)
-(*   MAFTER mount adds none and starts no union -- a plain mount, as       *)
-(*   before the vote (kernel/territory.c: starts_union requires QTDIR on   *)
-(*   the point).                                                           *)
+(*   FilePaths: the points that are NOT directories. Every source here is  *)
+(*   a directory, so SYS_MOUNT's type check (Plan 9's Emount, the          *)
+(*   2026-09-25 vote) refuses every mount at a file point (EmountOK;       *)
+(*   NoMemberAtFile). A file mounted over a file (MREPL only) sits beneath *)
+(*   the model. KERNEL_MOUNTS models mount()'s kernel callers instead,     *)
+(*   which that check does not cover: their ordered mounts reach a file    *)
+(*   point and stay plain, because territory.c's starts_union requires     *)
+(*   QTDIR on the point (CovGuard; NoCoveredFile).                         *)
 (*                                                                         *)
 (*   unioned: a HISTORY variable. unioned[p][pt] is TRUE iff pt's group    *)
 (*   was started by an MBEFORE / MAFTER mount at a fresh point and has not *)
@@ -146,11 +150,18 @@
 (*   territory_cov_alias.cfg             clean, COV_MOUNTABLE: a covered    *)
 (*                                       directory mounted at another point,*)
 (*                                       and <<MBEFORE, covered, MAFTER>>.  *)
-(*   territory_buggy_cover_file.cfg      BUGGY_COVER_FILE -- a file point  *)
-(*                                       grows a covered member;           *)
+(*   territory_buggy_cover_file.cfg      BUGGY_COVER_FILE, KERNEL_MOUNTS --*)
+(*                                       an ordered kernel mount at a file *)
+(*                                       point grows a covered member;     *)
 (*                                       NoCoveredFile fails.              *)
-(*   territory_file_point.cfg            clean, FilePaths = {b}: ordered   *)
-(*                                       file-point mounts stay plain.     *)
+(*   territory_buggy_emount.cfg          BUGGY_EMOUNT -- SYS_MOUNT lets a  *)
+(*                                       mount reach a file point;         *)
+(*                                       NoMemberAtFile fails.             *)
+(*   territory_file_point.cfg            clean, FilePaths = {b}: every     *)
+(*                                       mount at b is refused.            *)
+(*   territory_file_point_kernel.cfg     clean, FilePaths = {b},           *)
+(*                                       KERNEL_MOUNTS: ordered mounts at b*)
+(*                                       stay plain.                       *)
 (*   territory_buggy_covered_takes_flags.cfg BUGGY_COVERED_TAKES_FLAGS --  *)
 (*                                       the covered member carries the    *)
 (*                                       mount's MBEFORE / MCREATE;        *)
@@ -168,6 +179,7 @@ CONSTANTS
     FilePaths,                 \* the points that are not directories
     Names,                     \* set of component names (for union walk / readdir)
     COV_MOUNTABLE,             \* a covered directory may be mounted elsewhere
+    KERNEL_MOUNTS,             \* the mounts are mount()'s kernel callers
     BUGGY_CYCLE,               \* BuggyBind skips cycle check
     BUGGY_MOUNT_NO_REFBUMP,    \* BuggyMount skips refcount bump
     BUGGY_UNMOUNT_NO_REFDROP,  \* BuggyUnmount skips refcount drop
@@ -184,6 +196,7 @@ CONSTANTS
     BUGGY_SELF_MOUNT,          \* a point's own directory mounted at it
     BUGGY_FRESH_AFTER_REMOVE,  \* reposition judges freshness after removing s
     BUGGY_COVER_FILE,          \* a file point grows a covered member
+    BUGGY_EMOUNT,              \* SYS_MOUNT's type check is missing
     BUGGY_COVERED_TAKES_FLAGS  \* the covered member takes the mount's flags
 
 ASSUME Cardinality(Procs) >= 1
@@ -206,8 +219,12 @@ ASSUME BUGGY_UNMOUNT_ORPHANS_COVERED \in BOOLEAN
 ASSUME BUGGY_SELF_MOUNT \in BOOLEAN
 ASSUME BUGGY_FRESH_AFTER_REMOVE \in BOOLEAN
 ASSUME BUGGY_COVER_FILE \in BOOLEAN
+ASSUME BUGGY_EMOUNT \in BOOLEAN
 ASSUME BUGGY_COVERED_TAKES_FLAGS \in BOOLEAN
 ASSUME COV_MOUNTABLE \in BOOLEAN
+ASSUME KERNEL_MOUNTS \in BOOLEAN
+\* Every source is a directory, so a file point's own object may not be one.
+ASSUME ~COV_MOUNTABLE \/ FilePaths = {}
 ASSUME Cardinality(CovDirs) >= Cardinality(Paths)
 ASSUME CovDirs \cap Spoors = {}
 ASSUME FilePaths \subseteq Paths
@@ -289,7 +306,11 @@ MountEntriesForSpoor(s) ==
 
 (***************************************************************************)
 (* Fresh(p, pt): nothing is mounted at pt (Plan 9 cmount's `m == nil`).    *)
-(* DirPoint(pt): pt is a directory, so a union can start there.           *)
+(* DirPoint(pt): pt is a directory. EmountOK(pt): a mount at pt passes     *)
+(* SYS_MOUNT's type check -- only at a directory, since every source is    *)
+(* one, unless the mounts are the kernel's own (KERNEL_MOUNTS) or the      *)
+(* check is missing (BUGGY_EMOUNT). CovGuard(pt): a union can start at     *)
+(* pt (starts_union's QTDIR conjunct; BUGGY_COVER_FILE drops it).          *)
 (* CovMember(pt, before, mc): pt's covered member, added by an MBEFORE     *)
 (* (before) or MAFTER mount with MCREATE mc. It carries neither flag:      *)
 (* the kernel installs it MCOVERED alone (BUGGY_COVERED_TAKES_FLAGS        *)
@@ -297,12 +318,14 @@ MountEntriesForSpoor(s) ==
 (* it now.                                                                 *)
 (***************************************************************************)
 Fresh(p, pt) == morder[p][pt] = << >>
-DirPoint(pt) == pt \notin FilePaths \/ BUGGY_COVER_FILE
+DirPoint(pt) == pt \notin FilePaths
+EmountOK(pt) == DirPoint(pt) \/ KERNEL_MOUNTS \/ BUGGY_EMOUNT
+CovGuard(pt) == DirPoint(pt) \/ BUGGY_COVER_FILE
 CovMember(pt, before, mc) ==
     [s |-> Covered[pt], mb |-> before /\ BUGGY_COVERED_TAKES_FLAGS,
      mc |-> mc /\ BUGGY_COVERED_TAKES_FLAGS, cv |-> TRUE]
 NewMember(s, before, mc) == [s |-> s, mb |-> before, mc |-> mc, cv |-> FALSE]
-CovAdded(p, pt) == Fresh(p, pt) /\ DirPoint(pt) /\ ~BUGGY_UNION_NO_COVERED
+CovAdded(p, pt) == Fresh(p, pt) /\ CovGuard(pt) /\ ~BUGGY_UNION_NO_COVERED
 
 (***************************************************************************)
 (* Placed(p, s, pt, before, mc): the sequence an MBEFORE (before) or MAFTER*)
@@ -325,7 +348,7 @@ Grafted(p, s, pt, bump_s) ==
                    + (IF d = Covered[pt] /\ CovAdded(p, pt) THEN 1 ELSE 0)]
 
 StartsUnion(p, pt) ==
-    IF Fresh(p, pt) /\ DirPoint(pt) THEN [unioned EXCEPT ![p][pt] = TRUE]
+    IF Fresh(p, pt) /\ CovGuard(pt) THEN [unioned EXCEPT ![p][pt] = TRUE]
     ELSE unioned
 
 (***************************************************************************)
@@ -371,10 +394,12 @@ Unbind(p, src, dst) ==
 (* directory at pt is refused (I-3's self-mount). Re-mounting an existing  *)
 (* member is Reposition, below. Bumps refcount[s] (and the covered         *)
 (* member's when this mount adds it). Maps to `kernel/territory.c::mount`  *)
-(* with MBEFORE.                                                            *)
+(* with MBEFORE, behind SYS_MOUNT's type check: EmountOK refuses a file    *)
+(* point (sys_mount_for_proc's Emount), here and in MountAfter/MountRepl.  *)
 (***************************************************************************)
 MountBefore(p, s, pt, mc) ==
     /\ s \in Srcs
+    /\ EmountOK(pt)
     /\ s # Covered[pt]
     /\ ~HasMember(p, pt, s)
     /\ morder' = [morder EXCEPT ![p][pt] = Placed(p, s, pt, TRUE, mc)]
@@ -388,6 +413,7 @@ MountBefore(p, s, pt, mc) ==
 (***************************************************************************)
 MountAfter(p, s, pt, mc) ==
     /\ s \in Srcs
+    /\ EmountOK(pt)
     /\ s # Covered[pt]
     /\ ~HasMember(p, pt, s)
     /\ morder' = [morder EXCEPT ![p][pt] = Placed(p, s, pt, FALSE, mc)]
@@ -429,6 +455,7 @@ Reposition(p, s, pt, before, mc) ==
 (***************************************************************************)
 MountRepl(p, s, pt) ==
     /\ s \in Srcs
+    /\ EmountOK(pt)
     /\ s # Covered[pt]
     /\ morder[p][pt] # <<NewMember(s, FALSE, FALSE)>>
     /\ morder' = [morder EXCEPT ![p][pt] = <<NewMember(s, FALSE, FALSE)>>]
@@ -793,6 +820,12 @@ NoSelfMount ==
 NoCoveredFile ==
     \A p \in Procs, pt \in FilePaths : CvIdxs(p, pt) = {}
 
+(* SYS_MOUNT refuses every mount at a file point (every source here is a   *)
+(* directory), so none holds a member. mount()'s kernel callers are not    *)
+(* held to it (KERNEL_MOUNTS).                                             *)
+NoMemberAtFile ==
+    KERNEL_MOUNTS \/ \A p \in Procs, pt \in FilePaths : morder[p][pt] = << >>
+
 Invariants ==
     /\ TypeOk
     /\ NoCycle
@@ -810,6 +843,7 @@ Invariants ==
     /\ NoOrphanCovered
     /\ NoSelfMount
     /\ NoCoveredFile
+    /\ NoMemberAtFile
 
 (***************************************************************************)
 (* StateConstraint — a TLC exploration bound (NOT part of the spec's      *)

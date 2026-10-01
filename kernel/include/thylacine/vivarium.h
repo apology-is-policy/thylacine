@@ -103,6 +103,18 @@ struct viv_call {
 enum viv_verdict vivarium_translate(u64 linux_nr, const u64 *args_in,
                                     struct viv_call *out);
 
+// ARCH 8.8.3 (signal(7)'s list): may a caught signal interrupt this call?
+enum viv_intr {
+    VIV_INTR_NEVER   = 0,  // rides a caught note out; only death unwinds it
+    VIV_INTR_ALWAYS  = 1,  // a slow call whatever its fd (accept, wait4, ppoll...)
+    VIV_INTR_IF_SLOW = 2,  // the read/write family: only when args[0] is a slow file
+};
+
+// Classify a Linux aarch64 syscall by signal(7). PURE, like vivarium_translate:
+// deciding whether args[0] names a slow file is the dispatcher's half. A NULL
+// `args`, and any number not listed (a new row included), is VIV_INTR_NEVER.
+enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args);
+
 // The Linux aarch64 numbers this table knows. Named so the tests assert against
 // symbols rather than magic numbers, and so a future row addition is a one-line
 // diff next to its number. (Linux's aarch64 table is stable ABI — these values
@@ -112,7 +124,10 @@ enum {
     // here owes the socktab a drop of the entry keyed on the number it frees.
     // Leaving that out is the sharpest bug this family can have: a freed index
     // whose (proto, N) survives is handed to the next fd-creating call, and a
-    // later connect() then writes a dial verb to a STRANGER'S connection.
+    // later connect() then writes a dial verb to a STRANGER'S connection. And
+    // since NP-5 a surviving row is not bookkeeping alone: its cached readiness
+    // Spoor holds a netd fid, every fid under /net/<proto>/N/ holds slot N, so
+    // the socket the guest closed stays open to its peer.
     //
     // The obligation is discharged in TWO DIFFERENT PLACES, and the difference
     // is not stylistic (#157):
@@ -1349,9 +1364,11 @@ enum viv_net_proto {
 //
 //   FRESH      -> the fd is the connection's `ctl`  (fresh, or bound, or both)
 //   LISTENING  -> the fd is STILL `ctl` (announce is a ctl write, not a swap)
+//   CONNECTING -> the fd is STILL `ctl`: the dial verb was accepted and the
+//                 `data` open (the handshake wait) has not returned
 //   CONNECTED  -> the fd has been swapped onto `data`
 //
-// So the ctl/data split is FRESH|LISTENING vs CONNECTED, not FRESH vs the rest:
+// So the ctl/data split is CONNECTED vs every other state, not FRESH vs the rest:
 // a listening socket keeps its ctl fd forever, because that is the fd `accept`
 // re-walks from and the fd whose reference keeps the listener alive. Anything
 // that writes a ctl verb (connect, announce) requires a non-CONNECTED fd, and
@@ -1361,6 +1378,12 @@ enum viv_sock_state {
     VIV_SOCK_FRESH     = 1,
     VIV_SOCK_CONNECTED = 2,
     VIV_SOCK_LISTENING = 3,
+    // ARCH 8.8.3: a caught signal can unwind connect() from its handshake wait,
+    // and the retry must resume that wait -- Linux's SS_CONNECTING, where a
+    // BLOCKING retry waits on and EALREADY is the nonblocking answer -- rather
+    // than write the dial verb again, which netd refuses once the slot has
+    // dialed. The row keeps the dialed peer in remote_addr/remote_port.
+    VIV_SOCK_CONNECTING = 4,
 };
 
 // Bounded: a guest must not be able to grow kernel memory without bound (the
@@ -1452,10 +1475,28 @@ _Static_assert(sizeof(struct viv_sock) == 32, "viv_sock pinned at 32 bytes "
 // discipline that already tolerates concurrent delivery-read vs sigaction-write.
 // socktab cannot borrow that trick: its entries are scanned, allocated/freed,
 // and multi-field with an identity that must be seen together -- hence the lock.
+//
+// THE READINESS CACHE (NP-5). ready[i] is the opened `/net/<proto>/<n>/ready`
+// Spoor that ppoll/pselect6 poll for s[i]'s socket, held here -- OUTSIDE the
+// guest's fd table -- so a poll never mints a guest fd a peer thread could see,
+// close or be handed. A PARALLEL array, not a viv_sock field, so no row
+// snapshot, fork copy or alias copy can carry the pointer: each row owns ONE
+// ref to its cached Spoor, NULL means uncached, and a FREE slot is always NULL.
+// ONE Spoor PER CONNECTION: rows naming the same (proto, n) -- a socket and its
+// dup aliases -- share one Spoor, each holding its own ref, so polling k numbers
+// of one socket costs netd one fid, not k (its fid table is one pool for the
+// whole box). Every path that clears a slot detaches its Spoor under the lock
+// and clunks it after the unlock -- a last clunk is a Tclunk, and the lock is a
+// spinlock.
+// The cache never outlives the fds it serves: exit resets the table with the
+// handle table (a zombie pins no netd fid), and exec's sweeps clear the rows
+// whose fds the exec closes.
+struct Spoor;
 struct viv_socktab {
     spin_lock_t     lock;       // leaf; held only over array ops, never across I/O
     u64             next_epoch; // monotonic; stamps each claim's viv_sock.epoch
     struct viv_sock s[VIV_SOCK_MAX];
+    struct Spoor   *ready[VIV_SOCK_MAX];
 };
 
 // Snapshot the entry for `fd` into `*out` (which may be NULL for an existence
@@ -1478,16 +1519,43 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
 
 // Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
 // plain file, or a socket already dropped) is a no-op, which is what lets the
-// close hook run unconditionally for a phenotyped Proc. Takes the lock.
+// close hook run unconditionally for a phenotyped Proc. Takes the lock; the
+// row's cached readiness Spoor, if any, is clunked after the unlock, so this
+// may block on that Spoor's Tclunk.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
+
+// The readiness cache (NP-5). ready_get snapshots `fd`'s row into `*out` (may
+// be NULL) and returns true iff the row exists; `*ready_out` gets the cached
+// Spoor with a NEW reference the caller owns (release it with spoor_clunk), or
+// NULL when nothing is cached for the row's connection. An uncached row whose
+// connection another row caches takes that Spoor first (a ref of its own).
+// ready_install offers `sp` as the cache for the socket the caller
+// snapshotted: it installs only if `fd`'s row still names that socket (epoch ==
+// expect_epoch), caches nothing yet, and no other row caches the connection --
+// then the table has taken over one reference the caller passed in. Returns
+// true iff installed; on false the caller still owns that reference (and a row
+// whose connection a sibling cached now shares the sibling's).
+bool viv_socktab_ready_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out,
+                           struct Spoor **ready_out);
+bool viv_socktab_ready_install(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                               struct Spoor *sp);
+
+// proc_free's release: clunk every cached readiness Spoor, then free the table.
+// The at-exit reset has normally emptied the cache already; this covers the
+// Procs freed without it (rollback, orphan). The Proc is past its last thread,
+// so nothing can reach the table. NULL-safe.
+void viv_socktab_free(struct viv_socktab *tab);
 
 // Reset the WHOLE table in place under its lock -- every slot cleared, the
 // object kept (#254: cross-Proc-reachable; proc_free is the only free), the
-// epoch counter untouched (monotonic for the table's life). execve's NATIVE
-// arm calls it (proc_exec_drop_image_state, Design D audit F2): a native image
-// has no sockets, and native close() never drops a row, so a Linux image's
-// rows would otherwise outlive their fds and greet the next Linux image's
-// recycled fd numbers as live connections. NULL-safe. Mirrors viv_sigtab_reset.
+// epoch counter untouched (monotonic for the table's life), every cached
+// readiness Spoor clunked after the unlock. execve's NATIVE arm calls it
+// (proc_exec_drop_image_state, Design D audit F2): a native image has no
+// sockets, and native close() never drops a row, so a Linux image's rows would
+// otherwise outlive their fds and greet the next Linux image's recycled fd
+// numbers as live connections. Exit calls it too (proc_close_handles_at_exit),
+// so the cache's netd fids close with the fds rather than at reap. NULL-safe.
+// Mirrors viv_sigtab_reset.
 void viv_socktab_reset(struct viv_socktab *tab);
 
 // fork's copy (POSIX fork(2); operator-voted A, 2026-08-18 -- COPY at fork,
@@ -1566,16 +1634,26 @@ bool viv_socktab_has_room(struct viv_socktab *tab);
 //   set_state    -- listen(): FRESH -> LISTENING.
 //   set_bound    -- bind(): record the requested local endpoint.
 //   record_remote-- connect()/sendto(): record the peer; also_connect
-//                   additionally transitions FRESH -> CONNECTED in the same
-//                   lock hold (so a peer recvmsg never sees CONNECTED with an
-//                   unset remote), which connect() passes true and the
-//                   connectionless datagram sendto passes false.
+//                   additionally transitions to CONNECTED in the same lock hold
+//                   (so a peer recvmsg never sees CONNECTED with an unset
+//                   remote), which connect() passes true and the connectionless
+//                   datagram sendto passes false.
+//   begin_connect-- connect()'s dial was accepted: FRESH -> CONNECTING with the
+//                   dialed peer recorded, in one hold (so no reader sees a stream
+//                   row that is FRESH with a remote). False unless the row is
+//                   FRESH.
+//   abort_connect-- the dial failed: CONNECTING -> FRESH with the peer
+//                   forgotten, so a retry dials again (Linux's SS_UNCONNECTED
+//                   after a failed connect). False unless the row is CONNECTING.
 bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            enum viv_sock_state st);
 bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port);
 bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port, bool also_connect);
+bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                               u32 addr, u16 port);
+bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch);
 
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable
 // domain, and if so which /net protocol directory it names. PURE.
@@ -1588,8 +1666,9 @@ bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch
 //
 // SOCK_NONBLOCK/SOCK_CLOEXEC in the type word are ADMITTED (N-1a): the decide
 // masks them off before the base-type switch and the shell applies them --
-// NONBLOCK as the ctl open-file's CNONBLOCK (which the recv shells read to turn
-// netd's non-blocking empty-read into -EAGAIN), CLOEXEC as the fd's cloexec bit.
+// NONBLOCK as the ctl open-file's CNONBLOCK plus netd's `nonblock` verb on the
+// connection (NP-5c: netd, not the Spoor, decides that an empty read answers
+// EAGAIN), CLOEXEC as the fd's cloexec bit.
 // Any OTHER high bit in the type word is refused (T_E_INVAL): an unknown flag is
 // a request no honest translation exists for.
 //
@@ -1623,14 +1702,17 @@ enum {
 // honesty argument, not a default.
 //
 // WHAT the shell answers, and the EXACT boundary of its honesty (holotype F2):
-// SO_ERROR is a socket's pending error, cleared by the read. The shell answers
-// the constant 0, and that is TRUE for every SYNCHRONOUSLY-delivered error --
-// which is the entire class a blocking-only phenotype socket produces on the
-// GUEST's own syscalls (SOCK_NONBLOCK is refused at socket(), F_SETFL is not
-// served), so a failure is always that op's own return value, never pending.
-// This is exactly what the row exists for: connect verification (curl's
-// verifyconnect branches on err==0 -> connected), where a failed connect
-// already returned its error and a successful one has no pending error.
+// SO_ERROR is a socket's pending error, cleared by the read. A connect() that
+// runs to its end returns its own failure -- the vivarium's connect waits for
+// netd's verdict even on a SOCK_NONBLOCK socket (the EINPROGRESS path is not
+// built) -- so a socket in any state but CONNECTING has no pending connect
+// error, and the answer is 0. This is exactly what the row exists for: connect
+// verification (curl's verifyconnect branches on err==0 -> connected). A
+// CONNECTING socket is a connect() a caught signal interrupted (ARCH 8.8.3),
+// whose outcome arrives later: the shell asks netd whether the handshake has
+// resolved and, once it has, finishes the connect and reports a failed dial as
+// its errno -- what a caller that polled for the connection (POSIX's
+// asynchronous connect; CPython after EINTR) reads next.
 //
 // THE ONE GAP, deliberately shipped narrowed (operator-ratified 2026-08-25):
 // netd ALSO latches errors ASYNCHRONOUSLY -- a connected-UDP/ICMP send that
@@ -1932,12 +2014,6 @@ bool vivarium_fdset_to_pollfds(const u8 *rd, const u8 *wr, const u8 *ex,
 bool vivarium_pollfds_to_fdset(const struct pollfd *pfds, u32 count,
                                u8 *rd, u8 *wr, u8 *ex, u32 *out_bits,
                                s32 *out_err);
-
-// The budget a caller-requested timeout of 0 gets when the array holds a /net
-// socket, so netd's async readiness probe has a chance to land (task #98; the
-// reasoning is at the use site in viv_ppoll). Small enough that a zero-timeout
-// poll is still "immediate", generous enough for a loopback round trip.
-#define VIV_PPOLL_PROBE_MS 10
 
 // The reverse step: which note kind is this note NAME? PURE.
 //
@@ -2693,6 +2769,8 @@ enum {
     VIV_F_SETFD         = 2,
     VIV_F_GETFL         = 3,
     VIV_F_SETFL         = 4,
+    VIV_F_SETLKW        = 7,     // not served; named for vivarium_intr_class
+    VIV_F_OFD_SETLKW    = 38,    // likewise
     VIV_F_DUPFD_CLOEXEC = 1030,
     VIV_FD_CLOEXEC      = 1,
 };

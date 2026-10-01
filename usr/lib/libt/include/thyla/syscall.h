@@ -798,10 +798,13 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 // at v1.0). n_uname is vestigial: the kernel asserts the caller's own
 // principal (or, caped, no user at all).
 //
-// flags: 0, or T_ATTACH_9P_CAPE -- the identity cape (IDENTITY-DESIGN
-// 3.2): every file reports the caller as owner and its primary group as
-// group, the server's mode kept, and chown/chgrp are refused. For a
-// server whose ids are not Thylacine principals. Unknown bits reject.
+// flags: 0, or any of T_ATTACH_9P_CAPE -- the identity cape
+// (IDENTITY-DESIGN 3.2): every file reports the caller as owner and its
+// primary group as group, the server's mode kept, and chown/chgrp are
+// refused; for a server whose ids are not Thylacine principals -- and
+// T_ATTACH_9P_REMOTE -- the session's transport leaves the machine
+// (HAUL-DESIGN 4.8): /proc/<pid>/ns marks every mount from it ` remote`;
+// a label, it grants nothing. Unknown bits reject.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid tx_fd / rx_fd or missing R/W rights
@@ -810,6 +813,7 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 //   - server-side Rlerror on Tversion or Tattach
 //   - kmalloc OOM / handle table full
 #define T_ATTACH_9P_CAPE 0x2ul
+#define T_ATTACH_9P_REMOTE 0x4ul
 __attribute__((always_inline))
 static inline long t_attach_9p(long tx_fd, long rx_fd,
                                const char *aname, size_t aname_len,
@@ -840,17 +844,24 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
 // successful mount; the mount table keeps the Spoor alive until `t_unmount`
 // or Territory destruction.
 //
-// The MOUNT POINT MUST EXIST as a walkable directory (Plan 9 M1; devramfs
-// ships /srv + /proc, the disk FS provides its own).
+// The MOUNT POINT MUST EXIST and be of the source's type: a directory over a
+// directory (Plan 9 M1; devramfs ships /srv + /proc, the disk FS provides its
+// own), a file over a file, and at a file only with T_MREPL
+// (kernel/include/thylacine/syscall.h, SYS_MOUNT).
 //
-// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE (bit-or'd).
+// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
+// T_MPHENO_LINUX (bit-or'd; at most one of the first three).
 //
-// Returns 0 on success, -1 on:
-//   - path absent / empty / too long / not resolvable
+// Returns 0 on success, -T_E_NOTDIR (-20) on Plan 9's Emount (ARCH 9.6.1),
+// and -1 on every other refusal:
+//   - path absent / empty / too long / not resolvable (a trailing '/' on a
+//     point that is not a directory is unresolvable)
 //   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
 //   - source handle missing T_RIGHT_READ
-//   - flags has bits outside the valid set
-//   - Territory mount table full (8 entries at v1.0)
+//   - flags has bits outside the valid set, or more than one of
+//     T_MREPL / T_MBEFORE / T_MAFTER
+//   - Territory mount table full (PGRP_MAX_MOUNTS, 32)
+//   - the mount would close a cycle in the mount graph (I-3)
 __attribute__((always_inline))
 static inline long t_mount(const char *path, unsigned long path_len,
                            long source_spoor_fd, unsigned long flags) {
@@ -2434,8 +2445,9 @@ static inline long t_lseek(long fd, long offset, long whence) {
 // (the B1 per-attach opt-in -- the caller asserts the single-writer
 // premise for this attach; cached-opens then serve full Larder-hint hits
 // without the per-open wire revalidation). Unknown bits reject,
-// T_ATTACH_9P_CAPE among them: over /srv the identity cape is the
-// poster's, and a service posted DMSRVCAPE capes every attach over it.
+// T_ATTACH_9P_CAPE and T_ATTACH_9P_REMOTE among them: over /srv the
+// identity cape and the remote declaration are the poster's, and a
+// service posted DMSRVCAPE / DMSRVREMOTE marks every attach over it.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid srv_fd / wrong kind / missing R+W rights / not byte-mode

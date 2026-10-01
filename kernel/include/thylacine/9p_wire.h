@@ -231,14 +231,25 @@ struct p9_qid {
 #define P9_QTAUTH       0x08u
 #define P9_QTTMP        0x04u         // O_TMPFILE-shape
 // Thylacine extension (net-6b-2b; NET-DESIGN section 12.2): a "pollable" file --
-// one whose server (netd's per-connection `ready` file) serves a non-consuming
-// readiness probe (a Tread whose offset is the poll event-mask, deferred until
-// satisfiable). 0x01 is unused in 9P2000.L. dev9p.poll probes ONLY a file whose
-// cached qid.type carries this bit; an unmarked file is POSIX always-ready (a
-// regular file is never read by poll()). Additive; no server that omits it is
-// affected. dev9p_poll fails SAFE (unmarked -> always-ready, never an unsound
-// probe).
+// one whose server (netd's per-connection `ready`, ptyfs's `<n>ready`) answers
+// non-consuming readiness reads (P9_POLL_* below). 0x01 is unused in 9P2000.L.
+// dev9p.poll reads ONLY a file whose cached qid.type carries this bit; an
+// unmarked file is POSIX always-ready (a regular file is never read by poll()).
+// Additive; no server that omits it is affected. dev9p_poll fails SAFE
+// (unmarked -> always-ready, never an unsound read).
 #define P9_QTPOLL       0x01u
+
+// A readiness Tread's offset: the poll events in the low 16 bits, and above
+// them P9_POLL_SNAPSHOT. With it, the server answers at once with the current
+// revents (0 included) and never holds the read: the sample. Without it, the
+// read is the arm, held until the file is ready for the mask and answered at
+// once if it already is. A server refuses any other bit with Rlerror, so a
+// future bit is never read as part of a mask. The reply is the revents as a
+// u32 LE.
+#define P9_POLL_MASK        0xFFFFull
+#define P9_POLL_SNAPSHOT    (1ull << 16)
+_Static_assert((P9_POLL_SNAPSHOT & P9_POLL_MASK) == 0,
+               "the snapshot bit lies above the event mask");
 
 // =============================================================================
 // Primitive packers — write a value at `out`, return bytes written, or

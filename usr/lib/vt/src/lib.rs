@@ -606,6 +606,11 @@ pub enum Boundary {
     /// only, so the consumer ends the fragment it holds before the next row
     /// leaves -- two rows coalesced into one scroll would otherwise glue.
     TopRestart,
+    /// DEC private mode 2026, synchronized output, changed: true when the
+    /// program opened a frame (`CSI ? 2026 h`), false when it closed one
+    /// (`CSI ? 2026 l`, or a RIS). Pushed on a CHANGE only, so a repeated set
+    /// opens nothing new; the consumer shows the frame once it closes.
+    Sync(bool),
     /// A non-7770 OSC terminated: the raw payload bytes between the OSC
     /// introducer and the terminator (e.g. `b"0;title"` or `b"1936;v1;..."`).
     /// The consumer routes by the leading numeric code; vt stays agnostic of
@@ -970,6 +975,130 @@ fn push_dec(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&buf[i..]);
 }
 
+// Append `n` in decimal, zero included (DECRQM's mode number).
+fn push_u32(out: &mut Vec<u8>, n: u32) {
+    let mut buf = [0u8; 10];
+    let mut i = buf.len();
+    let mut v = n;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+/// How long a renderer may hold a synchronized frame's paint (HALCYON 14.3).
+pub const SYNC_HOLD_NS: u64 = 150_000_000;
+
+/// A renderer's hold on one surface's paint while a program's synchronized
+/// frame (DEC mode 2026) is open. The bound runs from the first paint it
+/// defers and survives a close and a reopen, so no due paint waits longer
+/// than `SYNC_HOLD_NS`. A timeout abandons the frame, and a clock that reads
+/// 0 (`monotonic_ns` failing soft) or runs backwards never holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameHold {
+    open: bool,
+    // When the oldest paint not yet shown was first deferred; 0 = none.
+    since: u64,
+    held: u32,
+    expired: bool,
+    // The hold ended while the frame was open, before its program closed it.
+    cut: bool,
+}
+
+/// What `FrameHold::painted` reports about the paint just made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    /// It had not been held.
+    No,
+    /// It had been held this many times, until the program closed its frame:
+    /// the paint shows the frame whole.
+    UntilClose(u32),
+    /// It had been held this many times, and the frame was still open when
+    /// the paint was made: the surface was reconfigured, the program ended,
+    /// or the paint did not wait for the close.
+    Cut(u32),
+    /// It had been held this many times, until the bound ran out and the
+    /// frame was abandoned.
+    UntilTimeout(u32),
+}
+
+impl FrameHold {
+    /// The program opened a frame. Reopening moves no deadline.
+    pub fn open(&mut self) {
+        self.open = true;
+    }
+
+    /// The program closed its frame.
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    /// The hold ends without the frame's close: the surface was reconfigured
+    /// or the program ended.
+    pub fn cut(&mut self) {
+        self.cut |= self.open;
+        self.open = false;
+    }
+
+    /// Whether the paint due at `now` waits for the frame to close.
+    pub fn holds(&mut self, now: u64) -> bool {
+        if !self.open || now == 0 {
+            return false;
+        }
+        if self.since == 0 {
+            self.since = now;
+        }
+        if now < self.since || now - self.since >= SYNC_HOLD_NS {
+            self.open = false;
+            self.expired = true;
+            return false;
+        }
+        self.held = self.held.saturating_add(1);
+        true
+    }
+
+    /// A paint is being held: `holds` deferred one and the frame is open.
+    /// The renderer waits for input or `due_ms` then, never spins.
+    pub fn waiting(&self) -> bool {
+        self.open && self.since != 0
+    }
+
+    /// The surface was painted; the next paint deferred starts a new bound.
+    /// Only a frame its program closed is reported shown whole.
+    pub fn painted(&mut self) -> Held {
+        let held = match self.held {
+            0 => Held::No,
+            n if self.expired => Held::UntilTimeout(n),
+            n if self.cut || self.open => Held::Cut(n),
+            n => Held::UntilClose(n),
+        };
+        self.since = 0;
+        self.held = 0;
+        self.expired = false;
+        self.cut = false;
+        held
+    }
+
+    /// Milliseconds until a held paint is due whatever the frame does,
+    /// rounded up so a wakeup never lands before the deadline; None while
+    /// nothing is held.
+    pub fn due_ms(&self, now: u64) -> Option<i32> {
+        if !self.waiting() {
+            return None;
+        }
+        if now == 0 || now < self.since {
+            return Some(0);
+        }
+        let left = self.since.saturating_add(SYNC_HOLD_NS).saturating_sub(now);
+        Some(left.div_ceil(1_000_000) as i32)
+    }
+}
+
 pub struct Vt {
     pub cols: usize,
     pub rows: usize,
@@ -991,7 +1120,15 @@ pub struct Vt {
     nparams: usize,
     cur_param: u32,
     param_seen: bool,
-    csi_priv: bool,
+    // The CSI's private marker (`?` `<` `=` `>`; 0 = none) and its one
+    // intermediate byte (0 = none, 0xFF = more than one). A marked or
+    // intermediate sequence reaches only a handler that expects its marks:
+    // `CSI ? u` is not `CSI u`, and `CSI > c` never prints its `c`.
+    csi_marker: u8,
+    csi_inter: u8,
+    // A malformed sequence (a marker after a parameter, a parameter after an
+    // intermediate): consumed through its final byte, then ignored whole.
+    csi_bad: bool,
     saved: (usize, usize),
     // DECSTBM scroll region [scroll_top, scroll_bot], 0-based inclusive; default
     // full screen. LF at the bottom margin, RI at the top, and SU/SD scroll only
@@ -1079,6 +1216,13 @@ pub struct Vt {
     // keypad (DECKPAM/DECKPNM) is deferred with its keycodes -- the shared
     // KeyEvent model has no keypad keys yet, so there is nothing to re-encode.
     app_cursor: bool,
+    // DEC private mode 2026, synchronized output: a program has opened a
+    // frame and not yet closed it. The parser keeps applying everything as
+    // usual; only the renderer waits (a consumer reads `sync_output`, or the
+    // `Boundary::Sync` events under capture).
+    sync: bool,
+    // Frames opened so far, wrapping (see `sync_frames`).
+    sync_frames: u32,
 }
 
 impl Vt {
@@ -1118,7 +1262,9 @@ impl Vt {
             nparams: 0,
             cur_param: 0,
             param_seen: false,
-            csi_priv: false,
+            csi_marker: 0,
+            csi_inter: 0,
+            csi_bad: false,
             saved: (0, 0),
             scroll_top: 0,
             scroll_bot: rows - 1,
@@ -1138,6 +1284,8 @@ impl Vt {
             capture_events: false,
             pending: Vec::new(),
             app_cursor: false,
+            sync: false,
+            sync_frames: 0,
         }
     }
 
@@ -1146,6 +1294,20 @@ impl Vt {
     /// (`ESC [ A`) -- what full-screen apps (vim, less) expect.
     pub fn app_cursor(&self) -> bool {
         self.app_cursor
+    }
+
+    /// DEC private mode 2026: a program has opened a synchronized frame and
+    /// not closed it yet, so the grid may be half drawn. A renderer defers
+    /// its paint while this holds, and bounds the wait itself.
+    pub fn sync_output(&self) -> bool {
+        self.sync
+    }
+
+    /// How many synchronized frames have opened, wrapping. A renderer that
+    /// reads `sync_output` once per pass compares it to tell a new frame
+    /// from one still open that it has already given up on.
+    pub fn sync_frames(&self) -> u32 {
+        self.sync_frames
     }
 
     /// Enable/disable boundary-event capture (KT-1). The console renderer
@@ -1177,6 +1339,16 @@ impl Vt {
     /// last main-screen diff at alt-enter (the swap has already happened).
     pub fn main_top_continues(&self) -> bool {
         self.top_continues
+    }
+
+    /// The MAIN screen's wrap flags whichever screen shows -- for the same
+    /// diff: on the alt screen the main's sit in the swapped-away buffer.
+    pub fn main_wrapped(&self) -> &[bool] {
+        if self.on_alt {
+            &self.alt_wrapped
+        } else {
+            &self.wrapped
+        }
     }
 
     /// Row 0 restarted as a line of its own (main screen only): the row
@@ -1374,6 +1546,29 @@ impl Vt {
         }
         match b {
             0x1B => self.state = State::Esc,
+            0x00..=0x1F | 0x7F => self.execute(b),
+            0x20..=0x7E => self.put_char(b as char),
+            0xC0..=0xDF => {
+                self.utf_acc = (b & 0x1F) as u32;
+                self.utf_rem = 1;
+            }
+            0xE0..=0xEF => {
+                self.utf_acc = (b & 0x0F) as u32;
+                self.utf_rem = 2;
+            }
+            0xF0..=0xF7 => {
+                self.utf_acc = (b & 0x07) as u32;
+                self.utf_rem = 3;
+            }
+            _ => {} // stray continuation byte
+        }
+    }
+
+    /// A C0 control or DEL, executed in place -- in ground state and inside a
+    /// CSI alike (DEC STD-070), so a control never cuts a sequence short and
+    /// spills its tail as text. ESC is the caller's.
+    fn execute(&mut self, b: u8) {
+        match b {
             b'\n' => self.line_feed(),
             b'\r' => {
                 self.cx = 0;
@@ -1392,21 +1587,7 @@ impl Vt {
                     self.pending.push(Boundary::Bell);
                 }
             } // BEL
-            0x00..=0x06 | 0x0B..=0x0C | 0x0E..=0x1F | 0x7F => {} // other C0 + DEL: drop
-            0x20..=0x7E => self.put_char(b as char),
-            0xC0..=0xDF => {
-                self.utf_acc = (b & 0x1F) as u32;
-                self.utf_rem = 1;
-            }
-            0xE0..=0xEF => {
-                self.utf_acc = (b & 0x0F) as u32;
-                self.utf_rem = 2;
-            }
-            0xF0..=0xF7 => {
-                self.utf_acc = (b & 0x07) as u32;
-                self.utf_rem = 3;
-            }
-            _ => {} // stray continuation byte
+            _ => {} // other C0 + DEL: drop
         }
     }
 
@@ -1417,7 +1598,9 @@ impl Vt {
                 self.nparams = 0;
                 self.cur_param = 0;
                 self.param_seen = false;
-                self.csi_priv = false;
+                self.csi_marker = 0;
+                self.csi_inter = 0;
+                self.csi_bad = false;
                 self.state = State::Csi;
             }
             b']' => {
@@ -1478,6 +1661,8 @@ impl Vt {
                 self.restart_top();
                 self.mark_all();
                 self.note_screen_erased();
+                // Last, so the reset's own erase is inside the frame it closes.
+                self.set_sync(false);
             }
             _ => {}
         }
@@ -1485,6 +1670,9 @@ impl Vt {
 
     fn csi(&mut self, b: u8) {
         match b {
+            // A parameter after an intermediate is out of order (ECMA-48
+            // 5.4): the sequence is spoiled, not cut short.
+            b'0'..=b'9' | b';' | b':' if self.csi_inter != 0 => self.csi_bad = true,
             b'0'..=b'9' => {
                 self.cur_param = self
                     .cur_param
@@ -1495,19 +1683,38 @@ impl Vt {
             b';' => {
                 self.push_param();
             }
-            b'?' => self.csi_priv = true,
-            b' '..=b'/' => {} // intermediates: swallow
             b':' => {
                 // Sub-parameter separator (SGR 38:2:: form) -- treat like ';'
                 // (adequate for the tree's emitters, which use ';').
                 self.push_param();
+            }
+            // A private marker leads the parameter string (ECMA-48 5.4.1);
+            // one anywhere else spoils the sequence.
+            b'<'..=b'?' => {
+                if self.csi_marker == 0
+                    && self.nparams == 0
+                    && !self.param_seen
+                    && self.csi_inter == 0
+                {
+                    self.csi_marker = b;
+                } else {
+                    self.csi_bad = true;
+                }
+            }
+            b' '..=b'/' => {
+                self.csi_inter = if self.csi_inter == 0 { b } else { 0xFF };
             }
             0x40..=0x7E => {
                 self.push_param();
                 self.dispatch_csi(b);
                 self.state = State::Ground;
             }
-            _ => self.state = State::Ground, // malformed: abort the sequence
+            // ESC abandons the sequence and begins the next; CAN and SUB
+            // cancel it. Any other control runs in place.
+            0x1B => self.state = State::Esc,
+            0x18 | 0x1A => self.state = State::Ground,
+            0x00..=0x1F | 0x7F => self.execute(b),
+            _ => self.state = State::Ground, // a byte past 0x7F: malformed, abort
         }
     }
 
@@ -1529,6 +1736,37 @@ impl Vt {
     }
 
     fn dispatch_csi(&mut self, fin: u8) {
+        if self.csi_bad {
+            return;
+        }
+        match (self.csi_marker, self.csi_inter) {
+            (0, 0) => self.dispatch_plain(fin),
+            (b'?', 0) => self.dispatch_dec(fin),
+            // DECRQM: CSI Ps $ p asks after an ANSI mode, CSI ? Ps $ p a DEC one.
+            (0 | b'?', b'$') if fin == b'p' => self.report_mode(self.csi_marker == b'?'),
+            // Every other marked or intermediate sequence -- CSI > c (DA2),
+            // CSI > 4 ; 1 m (modifyOtherKeys), CSI ? u (the kitty keyboard
+            // query), CSI Ps SP q (DECSCUSR), CSI ? Ps S (the sixel queries)
+            // -- is not implemented: it is ignored whole, and never runs the
+            // handler of the plain sequence with the same final byte.
+            _ => {}
+        }
+    }
+
+    /// The DEC private (`CSI ?`) sequences this parser implements.
+    fn dispatch_dec(&mut self, fin: u8) {
+        match fin {
+            b'h' | b'l' => self.mode_set(fin == b'h'),
+            // DECSED / DECSEL: no cell is ever protected, so they are ED / EL.
+            b'J' => self.erase_display(self.p(0, 0)),
+            b'K' => self.erase_line(self.p(0, 0)),
+            // DECXCPR, answered as the plain CPR it has always been.
+            b'n' => self.device_status(),
+            _ => {}
+        }
+    }
+
+    fn dispatch_plain(&mut self, fin: u8) {
         match fin {
             b'A' => self.cy = self.cy.saturating_sub(self.p(0, 1) as usize),
             b'B' => self.cy = (self.cy + self.p(0, 1) as usize).min(self.rows - 1),
@@ -1547,21 +1785,18 @@ impl Vt {
             b'@' => self.insert_chars(self.p(0, 1) as usize),
             b'P' => self.delete_chars(self.p(0, 1) as usize),
             b'X' => self.erase_chars(self.p(0, 1) as usize),
-            b'S' if !self.csi_priv => self.scroll_region_up(self.p(0, 1) as usize),
+            b'S' => self.scroll_region_up(self.p(0, 1) as usize),
             // CSI T with 0/1 params is SD; the 5-param form is xterm highlight
             // mouse tracking (unimplemented) -- don't read it as a giant scroll.
-            // Both gate on !csi_priv: CSI ? ... S/T are private (sixel) queries.
-            b'T' if !self.csi_priv && self.nparams <= 1 => {
-                self.scroll_region_down(self.p(0, 1) as usize)
-            }
+            b'T' if self.nparams <= 1 => self.scroll_region_down(self.p(0, 1) as usize),
             b'm' => self.sgr(),
-            b'h' | b'l' => self.mode_set(fin == b'h'),
+            // SM / RM set ANSI modes (IRM, LNM): none is implemented.
             b's' => self.saved = (self.cx, self.cy),
             b'u' => {
                 self.cx = self.saved.0.min(self.cols - 1);
                 self.cy = self.saved.1.min(self.rows - 1);
             }
-            b'r' if !self.csi_priv => {
+            b'r' => {
                 // DECSTBM: set the scroll region [top, bot] (1-based params;
                 // empty -> full screen). A malformed region (top >= bot, or out
                 // of range) resets to full (xterm). Homes the cursor (origin-aware).
@@ -1577,29 +1812,32 @@ impl Vt {
                 self.cx = 0;
                 self.cy = if self.origin { self.scroll_top } else { 0 };
             }
-            // DSR. 6 = CPR: answer with the cursor position -- kaua's size
-            // handshake (SAVE + park-far + [6n + RESTORE) reads the parked
-            // report to learn the real grid; an unanswered request strands
-            // every Kaua app at its 80x24 fallback. The reply goes out via
-            // `reply` (the main loop writes it into the consfeed fd -- the
-            // keyboard wire, like any terminal).
-            b'n' if self.p(0, 0) == 6 => {
-                let row = self.cy + 1;
-                let col = self.cx.min(self.cols - 1) + 1;
-                self.reply.extend_from_slice(b"\x1b[");
-                push_dec(&mut self.reply, row);
-                self.reply.push(b';');
-                push_dec(&mut self.reply, col);
-                self.reply.push(b'R');
-            }
+            b'n' => self.device_status(),
             _ => {}
         }
     }
 
-    fn mode_set(&mut self, set: bool) {
-        if !self.csi_priv {
-            return; // ANSI modes (4 IRM etc.): not implemented
+    // DSR. 6 = CPR: answer with the cursor position -- kaua's size
+    // handshake (SAVE + park-far + [6n + RESTORE) reads the parked
+    // report to learn the real grid; an unanswered request strands
+    // every Kaua app at its 80x24 fallback. The reply goes out via
+    // `reply` (the main loop writes it into the consfeed fd -- the
+    // keyboard wire, like any terminal).
+    fn device_status(&mut self) {
+        if self.p(0, 0) != 6 {
+            return;
         }
+        let row = self.cy + 1;
+        let col = self.cx.min(self.cols - 1) + 1;
+        self.reply.extend_from_slice(b"\x1b[");
+        push_dec(&mut self.reply, row);
+        self.reply.push(b';');
+        push_dec(&mut self.reply, col);
+        self.reply.push(b'R');
+    }
+
+    /// DECSET / DECRST: `CSI ? Pm h` / `CSI ? Pm l`.
+    fn mode_set(&mut self, set: bool) {
         for i in 0..self.nparams {
             match self.params[i] {
                 1 => self.app_cursor = set, // DECCKM (application cursor keys)
@@ -1613,9 +1851,59 @@ impl Vt {
                 7 => self.wrap = set, // DECAWM (kaua paints the last cell under ?7l)
                 25 => self.cursor_visible = set,
                 47 | 1047 | 1049 => self.alt_screen(set),
+                2026 => self.set_sync(set),
                 _ => {}
             }
         }
+    }
+
+    // Only a change is an event: a second `h` inside an open frame opens
+    // nothing, and an `l` with none open closes nothing.
+    fn set_sync(&mut self, on: bool) {
+        if self.sync == on {
+            return;
+        }
+        self.sync = on;
+        if on {
+            self.sync_frames = self.sync_frames.wrapping_add(1);
+        }
+        if self.capture_events {
+            self.pending.push(Boundary::Sync(on));
+        }
+    }
+
+    /// DECRQM's answer, `CSI [?] Ps ; Pm $ y`: Pm 1 = set, 2 = reset, 0 = a
+    /// mode this parser does not implement (every ANSI mode).
+    fn report_mode(&mut self, dec: bool) {
+        let mode = self.p(0, 0);
+        let flag = |on: bool| -> u8 {
+            if on {
+                1
+            } else {
+                2
+            }
+        };
+        let pm: u8 = if !dec {
+            0
+        } else {
+            match mode {
+                1 => flag(self.app_cursor),
+                6 => flag(self.origin),
+                7 => flag(self.wrap),
+                25 => flag(self.cursor_visible),
+                47 | 1047 | 1049 => flag(self.on_alt),
+                2026 => flag(self.sync),
+                _ => 0,
+            }
+        };
+        self.reply.extend_from_slice(b"\x1b[");
+        if dec {
+            self.reply.push(b'?');
+        }
+        push_u32(&mut self.reply, mode);
+        self.reply.push(b';');
+        self.reply.push(b'0' + pm);
+        self.reply.extend_from_slice(b"$y");
     }
 
     fn alt_screen(&mut self, enter: bool) {
@@ -3729,5 +4017,326 @@ keeps an arrangement, and $HOME/lib/halcyon.rc runs at every login (an empty one
             assert_eq!(vt.wrapped(), &origin_wrapped[..], "width {w}");
             assert_eq!((vt.cx, vt.cy), origin_cursor, "width {w}");
         }
+    }
+
+    // --- FL-1: marked CSI sequences, DECRQM, synchronized output (?2026) ---
+
+    fn row_text(vt: &Vt, r: usize) -> String {
+        vt.cells[r * vt.cols..(r + 1) * vt.cols]
+            .iter()
+            .map(|c| c.ch)
+            .collect()
+    }
+
+    // `<` `=` `>` lead a private parameter string exactly as `?` does. The
+    // parser once accepted only `?`, so any other marker cut the sequence
+    // short and its tail printed: vim's modifyOtherKeys left `4;1m` on the
+    // screen, a DA2 query a `c`, the kitty keyboard protocol a `1u`.
+    #[test]
+    fn a_private_marker_never_spills_its_tail_as_text() {
+        let mut vt = Vt::new(12, 2);
+        feed(
+            &mut vt,
+            b"\x1b[>4;1m\x1b[>c\x1b[>0c\x1b[=1;1u\x1b[>1u\x1b[<uX",
+        );
+        assert_eq!(row_text(&vt, 0), "X           ");
+        assert_eq!(vt.cells[0].attrs, 0, "no SGR ran for CSI > 4 ; 1 m");
+    }
+
+    // A marked sequence reaches only a handler that expects its mark. The
+    // `u` / `s` / `m` arms once ignored it: `CSI ? u`, the kitty keyboard
+    // query neovim, helix and fish send at startup, RESTORED THE CURSOR.
+    #[test]
+    fn a_marked_sequence_never_runs_the_plain_handler() {
+        let mut vt = Vt::new(10, 3);
+        feed(&mut vt, b"\x1b[2;4H\x1b[?u");
+        assert_eq!((vt.cy, vt.cx), (1, 3), "CSI ? u is not SCORC");
+        feed(&mut vt, b"\x1b[2;4H\x1b[?s\x1b[3;1H\x1b[u");
+        assert_eq!((vt.cy, vt.cx), (0, 0), "CSI ? s saved nothing");
+        feed(&mut vt, b"\x1b[?4mZ");
+        assert_eq!(
+            vt.cells[0].attrs & ATTR_UNDERLINE,
+            0,
+            "CSI ? 4 m is not SGR 4"
+        );
+    }
+
+    // An intermediate names a different sequence: DECCARA (`CSI Pt;Pl;Pb;Pr;Ps
+    // $ r`) is not DECSTBM, though both end in `r`. Its first two parameters
+    // read as a VALID region (rows 2-5), so a DECSTBM that ran would show:
+    // an invalid one would reset to full and match either way.
+    #[test]
+    fn an_intermediate_names_a_different_sequence() {
+        let mut vt = Vt::new(8, 6);
+        feed(&mut vt, b"\x1b[3;3H\x1b[2;5;1;8;7$r");
+        assert_eq!(
+            (vt.scroll_top, vt.scroll_bot),
+            (0, 5),
+            "DECCARA set no region"
+        );
+        assert_eq!((vt.cy, vt.cx), (2, 2), "and homed nothing");
+        feed(&mut vt, b"\x1b[3;5r");
+        assert_eq!(
+            (vt.scroll_top, vt.scroll_bot),
+            (2, 4),
+            "the plain DECSTBM still does"
+        );
+        // DECSCUSR (a cursor shape) is ignored, and prints nothing.
+        feed(&mut vt, b"\x1b[1;1H\x1b[6 qY");
+        assert_eq!(vt.cells[0].ch, 'Y');
+    }
+
+    // A marker after a parameter, or a parameter after an intermediate, is
+    // out of order: the sequence is consumed and ignored, not run as another.
+    #[test]
+    fn an_out_of_order_sequence_is_ignored_whole() {
+        let mut vt = Vt::new(6, 2);
+        feed(&mut vt, b"\x1b[25?l");
+        assert!(vt.cursor_visible, "CSI 25 ? l is not DECTCEM reset");
+        feed(&mut vt, b"\x1b[?25$2l");
+        assert!(vt.cursor_visible, "a parameter after `$` spoils it");
+        feed(&mut vt, b"Q");
+        assert_eq!(vt.cells[0].ch, 'Q', "and neither printed a byte");
+    }
+
+    // A control inside a CSI runs in place and the sequence goes on (DEC
+    // STD-070); ESC abandons it and begins the next. Both once cut the
+    // sequence short and printed its tail.
+    #[test]
+    fn a_control_inside_a_csi_runs_and_an_esc_begins_the_next() {
+        let mut vt = Vt::new(8, 2);
+        feed(&mut vt, b"abc\x1b[2\rC");
+        assert_eq!(row_text(&vt, 0), "abc     ", "CR ran; C was the final byte");
+        assert_eq!(vt.cx, 2, "CUF 2 from column 0");
+        feed(&mut vt, b"\x1b[3\x1b[2J");
+        assert!(
+            vt.cells.iter().all(|c| c.ch == ' '),
+            "the second CSI erased; no `[2J` printed"
+        );
+    }
+
+    // DECRQM answers for every DEC mode the parser tracks, 0 for any other,
+    // and 0 for every ANSI mode (none is implemented).
+    #[test]
+    fn decrqm_reports_the_modes_the_parser_tracks() {
+        let mut vt = Vt::new(8, 2);
+        let ask = |vt: &mut Vt, q: &[u8]| -> Vec<u8> {
+            vt.reply.clear();
+            feed(vt, q);
+            core::mem::take(&mut vt.reply)
+        };
+        assert_eq!(ask(&mut vt, b"\x1b[?2026$p"), b"\x1b[?2026;2$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?2026h\x1b[?2026$p"), b"\x1b[?2026;1$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?25$p"), b"\x1b[?25;1$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?25l\x1b[?25$p"), b"\x1b[?25;2$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?1$p"), b"\x1b[?1;2$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?7$p"), b"\x1b[?7;1$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?6h\x1b[?6$p"), b"\x1b[?6;1$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?1049h\x1b[?1049$p"), b"\x1b[?1049;1$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?9999$p"), b"\x1b[?9999;0$y");
+        assert_eq!(ask(&mut vt, b"\x1b[4$p"), b"\x1b[4;0$y");
+        assert_eq!(ask(&mut vt, b"\x1b[?$p"), b"\x1b[?0;0$y");
+    }
+
+    // ?2026 is an event on a CHANGE only, in stream order with the cells.
+    #[test]
+    fn a_synchronized_frame_opens_and_closes_once_in_stream_order() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        let seq = b"\x1b[?2026hA\x1b[?2026hB\x1b[?2026l\x1b[?2026lC";
+        let mut pos = 0;
+        assert_eq!(vt.feed_until(seq, &mut pos), Some(Boundary::Sync(true)));
+        assert_eq!(vt.cells[0].ch, ' ', "the frame opened before A");
+        assert!(vt.sync_output());
+        assert_eq!(vt.feed_until(seq, &mut pos), Some(Boundary::Sync(false)));
+        assert_eq!(row_text(&vt, 0), "AB    ", "the second h opened nothing");
+        assert!(!vt.sync_output());
+        assert_eq!(
+            vt.feed_until(seq, &mut pos),
+            None,
+            "the second l closed nothing"
+        );
+        assert_eq!(row_text(&vt, 0), "ABC   ");
+    }
+
+    // A reset closes an open frame, and closes it last: the erase it does
+    // is inside the frame.
+    #[test]
+    fn a_reset_closes_an_open_frame_after_its_erase() {
+        let mut vt = Vt::new(4, 2);
+        vt.set_capture_events(true);
+        let got = drive(&mut vt, b"hi\x1b[?2026h\x1bc");
+        assert_eq!(
+            erase_trace(&got),
+            ["Sync(true)", "hi", "ERASED", "Sync(false)"]
+        );
+        assert!(!vt.sync_output());
+        // And with no frame open a reset reports no close.
+        let got = drive(&mut vt, b"ok\x1bc");
+        assert_eq!(erase_trace(&got), ["ok", "ERASED"]);
+    }
+
+    // The console renderer never captures events: it reads the state.
+    #[test]
+    fn without_capture_the_frame_is_state_only() {
+        let mut vt = Vt::new(4, 1);
+        feed(&mut vt, b"\x1b[?2026h");
+        assert!(vt.sync_output());
+        assert!(drive(&mut vt, b"x").is_empty());
+        feed(&mut vt, b"\x1b[?2026l");
+        assert!(!vt.sync_output());
+    }
+
+    const T: u64 = 5_000_000_000;
+
+    // The paint waits while the frame is open; the paint after the close
+    // reports how many it held.
+    #[test]
+    fn a_frame_holds_the_paint_until_it_closes() {
+        let mut h = FrameHold::default();
+        assert!(!h.holds(T), "no frame, no hold");
+        assert_eq!(h.painted(), Held::No);
+        h.open();
+        assert!(h.holds(T));
+        assert!(h.holds(T + SYNC_HOLD_NS - 1));
+        h.close();
+        assert!(!h.holds(T + SYNC_HOLD_NS - 1));
+        assert_eq!(h.painted(), Held::UntilClose(2));
+        assert_eq!(h.painted(), Held::No, "a paint starts the count afresh");
+    }
+
+    // Only the program's own close shows a frame whole. A reconfigure or the
+    // program's end cuts it short, and so does a paint made while the frame
+    // is still open; a cut after the close or the bound changes nothing.
+    #[test]
+    fn only_the_programs_close_shows_a_frame_whole() {
+        let mut h = FrameHold::default();
+        h.open();
+        assert!(h.holds(T));
+        h.cut();
+        assert!(!h.holds(T + 1), "a cut ends the hold");
+        assert_eq!(h.painted(), Held::Cut(1));
+        h.open();
+        assert!(h.holds(T + 2));
+        assert_eq!(h.painted(), Held::Cut(1), "painted while still open");
+        assert!(h.holds(T + 3), "the frame is still open");
+        h.close();
+        h.cut();
+        assert_eq!(h.painted(), Held::UntilClose(1), "closed before the cut");
+        h.open();
+        assert!(h.holds(T + 4));
+        assert!(!h.holds(T + 4 + SYNC_HOLD_NS));
+        h.cut();
+        assert_eq!(
+            h.painted(),
+            Held::UntilTimeout(1),
+            "abandoned before the cut"
+        );
+        h.cut();
+        assert_eq!(h.painted(), Held::No, "nothing held, nothing cut");
+    }
+
+    // A frame that never closes costs one stall: the bound abandons it and
+    // the same frame is not held again.
+    #[test]
+    fn a_frame_that_never_closes_is_abandoned_once() {
+        let mut h = FrameHold::default();
+        h.open();
+        assert!(h.holds(T));
+        assert!(!h.holds(T + SYNC_HOLD_NS), "the bound is inclusive");
+        assert_eq!(h.painted(), Held::UntilTimeout(1));
+        assert!(!h.holds(T + SYNC_HOLD_NS + 1), "abandoned, not held again");
+        h.open();
+        assert!(h.holds(T + 2 * SYNC_HOLD_NS), "a new frame is held afresh");
+    }
+
+    // A close and a reopen before any paint move no deadline, so a stream of
+    // back-to-back frames still paints every SYNC_HOLD_NS.
+    #[test]
+    fn back_to_back_frames_do_not_extend_the_hold() {
+        let mut h = FrameHold::default();
+        h.open();
+        assert!(h.holds(T));
+        h.close();
+        h.open();
+        assert!(h.holds(T + SYNC_HOLD_NS / 2));
+        h.open();
+        assert!(
+            !h.holds(T + SYNC_HOLD_NS),
+            "the bound runs from the first deferral"
+        );
+        assert_eq!(h.painted(), Held::UntilTimeout(2));
+    }
+
+    // A dead clock (0) never holds, and neither does one that runs backwards.
+    #[test]
+    fn a_clock_that_cannot_bound_the_hold_never_holds() {
+        let mut h = FrameHold::default();
+        h.open();
+        assert!(!h.holds(0));
+        assert_eq!(h.due_ms(0), None);
+        assert!(h.holds(T));
+        assert!(!h.holds(T - 1), "backwards abandons the frame");
+        assert_eq!(h.painted(), Held::UntilTimeout(1));
+    }
+
+    // The wakeup for a held paint rounds up to the deadline, never before it.
+    #[test]
+    fn the_deadline_rounds_up() {
+        let mut h = FrameHold::default();
+        h.open();
+        assert_eq!(h.due_ms(T), None, "nothing deferred yet");
+        assert!(h.holds(T));
+        assert_eq!(h.due_ms(T), Some(150));
+        assert_eq!(h.due_ms(T + 1), Some(150));
+        assert_eq!(h.due_ms(T + SYNC_HOLD_NS - 1), Some(1));
+        assert_eq!(h.due_ms(T + SYNC_HOLD_NS), Some(0));
+        assert_eq!(h.due_ms(T - 1), Some(0));
+        h.close();
+        assert_eq!(h.due_ms(T + 1), None, "closed, so the paint is not waiting");
+    }
+
+    // Waiting means a paint is deferred inside an open frame; whenever the
+    // next `holds` would paint instead, the deadline is now.
+    #[test]
+    fn a_hold_waits_only_while_a_paint_is_deferred() {
+        let mut h = FrameHold::default();
+        h.open();
+        assert!(!h.waiting(), "nothing deferred yet");
+        assert!(h.holds(T));
+        assert!(h.waiting());
+        assert_eq!(
+            h.due_ms(0),
+            Some(0),
+            "a clock gone dead lets it through now"
+        );
+        h.close();
+        assert!(!h.waiting(), "closed");
+        h.painted();
+        h.open();
+        assert!(h.holds(T + 1));
+        assert!(!h.holds(T + 1 + SYNC_HOLD_NS));
+        assert!(!h.waiting(), "abandoned");
+        h.open();
+        assert!(
+            !h.holds(T + 2 + SYNC_HOLD_NS),
+            "no paint since: the old bound runs on"
+        );
+        h.painted();
+        assert!(!h.waiting(), "painted");
+    }
+
+    // The count tells a new frame from an old one still open.
+    #[test]
+    fn each_frame_opened_is_counted_once() {
+        let mut vt = Vt::new(4, 1);
+        assert_eq!(vt.sync_frames(), 0);
+        feed(&mut vt, b"\x1b[?2026h\x1b[?2026h");
+        assert_eq!(vt.sync_frames(), 1, "a repeated open is the same frame");
+        feed(&mut vt, b"\x1b[?2026l\x1b[?2026h");
+        assert_eq!(vt.sync_frames(), 2);
+        feed(&mut vt, b"\x1bc");
+        assert!(!vt.sync_output());
+        assert_eq!(vt.sync_frames(), 2, "a reset closes and opens nothing");
     }
 }

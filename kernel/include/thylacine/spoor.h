@@ -129,6 +129,14 @@ _Static_assert(sizeof(struct Qid) == 16,
                                // when FULLY would-block) -- distinct from CNBFRAME's
                                // frame-atomic 9P-tx mode above. Per-fd (per-Spoor =
                                // per-open-file-description), copied on the Spoor clone.
+#define CSLOWKNOWN (1u << 8)   // ARCH 8.8.3: CSLOW below has been learned for this open
+                               // file, from its Dev's stat type on its first Linux read
+                               // or write. Set with spoor_flag_set (runtime, and fork
+                               // shares the Spoor). A walk clone never inherits either
+                               // bit: the clone may walk to a different file.
+#define CSLOW      (1u << 9)   // ...and the file is signal(7)-"slow" (a pipe, FIFO or
+                               // character device), so a caught note may interrupt a
+                               // Linux read or write on it.
 
 // SPOOR_MAGIC — sentinel set at spoor_alloc; checked at spoor_ref /
 // spoor_unref / spoor_clunk. SLUB's freelist write at free clobbers

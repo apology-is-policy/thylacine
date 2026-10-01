@@ -20,6 +20,26 @@
 #   5. In a tile WITH history the clear still starts the slide at the top of a
 #      clean view (TC-1, HALCYON 14.13). (1)-(3) run on a fresh tile, which has
 #      no history, and that is exactly why none of them could see the defect.
+#   6. A clear MOVES the screen into the history rather than losing it (TC-1a).
+#      (5) cannot see this: the moved text sits above the view's top edge. The
+#      tile counts its history rows when Normal mode opens, and a `clear` over
+#      a full screen must add more than half a screen of them, where `true`
+#      (the control, one variable away) adds a line or two.
+#   7. Super+K DELETES the history and nothing else (TC-1b): afterwards the
+#      tile holds no history row at all, the view three screens up is ground
+#      where it showed history, the live screen looks as it did, its grid is
+#      the size it was, and new output starts a history again.
+#   8. A slide change is ONE synchronized frame (FL-1, LANTERN-DESIGN 13): the
+#      tile says, once, that a frame held its paint until its program closed
+#      it. That line is the premise measured, not assumed -- the slide's
+#      records spanned reads of the pipe, so without the hold the blank and a
+#      partial slide showed. The same deck without the marks never prints it,
+#      and neither does a render step that counts the hold but paints anyway:
+#      its paint lands while the frame is open, which the tile reports as cut
+#      short (a RED bake of each, FL-1). A frame the 150 ms bound let through
+#      before one was shown whole is reported in the pass line. If every frame
+#      hit the bound the leg fails: a slide crosses the pipe in milliseconds,
+#      so a frame that needs 150 ms is a finding to hunt, not a slow host.
 #
 # The captures are kept at build/lantern-rich-*.png whatever the verdict: the
 # reason to run this is as much to LOOK at the result as to gate it, and a gate
@@ -71,6 +91,11 @@ proc ink {png} {
 proc band {png} {
     global repo
     return [exec python3 $repo/tools/interactive/gfx_ink.py $png --rect 0 0.45 0.9 0.94]
+}
+# The same count across a tile's top rows: the live screen's first lines.
+proc top {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_ink.py $png --rect 0 0.03 0.9 0.35]
 }
 
 lc_boot
@@ -143,6 +168,48 @@ if {$ink_two < 2000} {
 }
 lc_pass "ls-halcyon-lantern(3): slide two is DRAWN, not merely different -- the clear repainted"
 
+# (8) FL-1. Slides one and two have changed by now, and the tile has said once
+# how its first held frame of each kind ended. Nothing read the console since
+# the status bar (the captures go over QMP), so every line is still buffered,
+# and expect tries its patterns in list order against all of it: `shown` wins
+# whenever it is there, and an `abandoned` line before it is reported. With no
+# `shown`, an `abandoned` or a `cut` line fails, each with its own reason.
+set timeout 20
+set late ""
+expect {
+    -re {halcyond: session tile leaf=[0-9]+ synchronized frame shown \(([0-9]+) paint\(s\) held\)} {
+        set held $expect_out(1,string)
+        if {[regexp {synchronized frame abandoned at its bound \(([0-9]+) paint} $expect_out(buffer) -> n]} {
+            set late "; a frame before it hit the 150 ms bound ($n paint(s) held)"
+            lc_step "a frame hit the 150 ms bound before one was shown whole ($n paint(s) held)"
+        }
+    }
+    -re {halcyond: session tile leaf=[0-9]+ synchronized frame abandoned at its bound \(([0-9]+) paint\(s\) held\)} {
+        set n $expect_out(1,string)
+        if {$n >= 1000} {
+            lc_fail "the session loop spun while a frame held its paint ($n passes), so the frame's close was never read"
+        }
+        lc_fail "every frame hit the 150 ms bound ($n paint(s) held): the marks reached the tile and a paint waited, but no frame closed in time"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ synchronized frame cut short \(([0-9]+) paint\(s\) held\)} {
+        lc_fail "a frame was painted before its program closed it, and none was shown whole: the render step counted the hold and painted anyway, or a reconfigure or an exit cut the frame"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "synchronized frame" }
+    timeout {
+        lc_fail "no frame held a paint: lantern's marks did not reach the tile, or every slide fit one read of the pipe (the premise)"
+    }
+    eof { lc_fail "EOF waiting for the synchronized-frame line" }
+}
+set timeout 120
+# Each held pass is one wake of the session loop: an ingest, an event, the
+# hold's deadline. A loop that comes back for a held tile without waiting
+# spins, and piles up tens of thousands in the 150 ms (the first GREEN run:
+# 91612, and the spin kept the frame's close unread until the bound).
+if {$held >= 1000} {
+    lc_fail "the session loop spun while the frame held its paint ($held passes)"
+}
+lc_pass "ls-halcyon-lantern(8): a slide change is one synchronized frame -- the tile held $held paint(s) until it closed$late"
+
 # (5) TC-1, the operator's "lantern doesn't clear". Before the fix the view
 # bottom-anchored the live tail, so after a clear the slide sat at the BOTTOM of
 # a tile with history, the earlier output filling the space above it. Quit, fill
@@ -189,6 +256,126 @@ lc_pass "ls-halcyon-lantern(4): the deck survives the display scale ceiling"
 
 type "q"
 after 800
+# Back to the measured scale: more grid rows make (6)'s threshold wider. The
+# tile re-lays at the new size before (6) reads its first count.
+key "meta_l+0"
+after 1500
+
+# Esc opens Normal mode, which says the flat list's size and the history's
+# share of it; `i` returns. With a SHOT name it also pages three screens up
+# (`u` is half a page) and captures the view there: a tile's history is
+# reachable only through Normal mode (the view follows the cursor; a tile
+# takes no wheel). It consumes every line it waits for, so no later call can
+# read an earlier call's count.
+proc normal_rows {what {shot ""}} {
+    key "esc"
+    expect {
+        -re {halcyond: session tile leaf=[0-9]+ normal mode \(([0-9]+) rows\)} { set all $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "normal mode ($what)" }
+        timeout { lc_fail "no Normal mode after Esc ($what)" }
+        eof { lc_fail "EOF waiting for Normal mode ($what)" }
+    }
+    expect {
+        -re {halcyond: session tile leaf=[0-9]+ history ([0-9]+) rows} { set hist $expect_out(1,string) }
+        timeout { lc_fail "Normal mode said no history count ($what)" }
+        eof { lc_fail "EOF waiting for the history count ($what)" }
+    }
+    set png ""
+    if {$shot ne ""} {
+        type "uuuuuu"
+        set png [capture $shot]
+    }
+    type "i"
+    expect {
+        -re {halcyond: session tile leaf=[0-9]+ insert mode} {}
+        timeout { lc_fail "no Insert mode after i ($what)" }
+        eof { lc_fail "EOF waiting for Insert mode ($what)" }
+    }
+    lc_step "$what: $hist history rows of $all"
+    return [list $hist [expr {$all - $hist}] $png]
+}
+
+# (6) TC-1a's move, which (5) cannot see.
+type "seq 1 150\n"
+after 1500
+lassign [normal_rows "after seq 1 150"] h_full grid
+type "true\n"
+after 1000
+lassign [normal_rows "after true"] h_true grid_true
+type "clear\n"
+after 1500
+lassign [normal_rows "after clear"] h_clear grid_clear
+if {$grid < 8 || $grid_true != $grid || $grid_clear != $grid} {
+    lc_fail "premise: the grid must stay one size of at least 8 rows (it read $grid, $grid_true, $grid_clear)"
+}
+set grew_true [expr {$h_true - $h_full}]
+set grew_clear [expr {$h_clear - $h_true}]
+if {$grew_true > 3} {
+    lc_fail "control: true grew the history by $grew_true rows, so a clear's growth cannot be told apart"
+}
+if {$grew_clear <= $grid / 2} {
+    lc_fail "the clear added $grew_clear history rows on a $grid-row screen full of text: the screen was not moved into the history"
+}
+lc_pass "ls-halcyon-lantern(6): a clear moves the screen into the history ($grew_clear rows on a $grid-row grid; true added $grew_true)"
+
+# (7) TC-1b's delete. Beside the count, a second axis: the view three screens
+# up. Below the cursor row it shows history before Super+K and ground after.
+# And its positive control, one variable away: the live screen, inked by a
+# marker line, must look the same after the chord as before it.
+type "echo live-screen-marker-that-inks-a-whole-row-of-the-grid\n"
+after 1000
+lassign [normal_rows "before Super+K" history-before] h_pre grid_pre png_before
+if {$grid_pre != $grid || $h_pre < 3 * $grid} {
+    lc_fail "premise: three screens up must stay inside the history ($h_pre history rows on a $grid_pre-row grid)"
+}
+set live_before [capture live-before]
+key "meta_l+k"
+expect {
+    -re {halcyond: session tile leaf=[0-9]+ history forgotten} {}
+    -re {halcyond: history chord for pane [0-9]+ -- no tile here} { lc_fail "Super+K named a pane the session does not host" }
+    -re {tapestryd: chord history: no rail} { lc_fail "Super+K found no rail to deliver to" }
+    -re {tapestryd: chord history: the rail's queue was full} { lc_fail "Super+K overflowed the rail's queue" }
+    -re {EXTINCTION:} { lc_extinction_fail "history chord" }
+    timeout { lc_fail "Super+K forgot nothing (no witness)" }
+    eof { lc_fail "EOF waiting for the history chord" }
+}
+set live_after [capture live-after]
+lassign [normal_rows "after Super+K" history-forgotten] h_gone grid_gone png_after
+if {$h_gone != 0} {
+    lc_fail "after Super+K the tile still holds $h_gone history rows (it held $h_pre)"
+}
+if {$grid_gone != $grid} {
+    lc_fail "Super+K changed the live grid ($grid rows before, $grid_gone after)"
+}
+set band_before [band $png_before]
+set band_after [band $png_after]
+lc_step "ink three screens up, below the cursor row: before Super+K $band_before, after $band_after"
+if {$band_before < 800} {
+    lc_fail "premise: three screens up into the history the band painted almost nothing ($band_before)"
+}
+if {$band_after * 4 > $band_before} {
+    lc_fail "three screens up after Super+K the band is still inked ($band_after against $band_before): history is showing"
+}
+set top_before [top $live_before]
+set top_after [top $live_after]
+lc_step "ink on the live screen's top rows: before Super+K $top_before, after $top_after"
+if {$top_before < 1500} {
+    lc_fail "premise: the live screen's top rows painted almost nothing ($top_before)"
+}
+if {$top_after * 10 < $top_before * 8} {
+    lc_fail "Super+K took the live screen with the history (ink $top_after against $top_before)"
+}
+# New output starts a history again. The clear in (6) left the grid mostly
+# empty, so a line or two scrolls nothing off: two screens of output must
+# scroll at least one screen into the history.
+type "seq 1 [expr {2 * $grid}]\n"
+after 1500
+lassign [normal_rows "after Super+K and two screens of output"] h_again grid_again
+if {$h_again < $grid} {
+    lc_fail "two screens of output after Super+K made $h_again history rows on a $grid-row grid: the tile stopped recording"
+}
+lc_pass "ls-halcyon-lantern(7): Super+K deletes the history ($h_pre rows to 0) and keeps the grid; the tile records again ($h_again)"
+
 lc_quit
 lc_pass "LS-CI ls-halcyon-lantern: the deck renders in a Halcyon tile and pages on a keystroke; captures at build/lantern-rich-*.png"
 exit 0

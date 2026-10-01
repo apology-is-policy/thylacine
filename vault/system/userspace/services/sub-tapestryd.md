@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Shared capacity
 
@@ -1878,6 +1878,25 @@ owner`, then the confirmation dialog, then a Cancel that keeps both the tile
 and its job.
 
 
+## The delivered history chord -- Super+K forgets a tile's history (2026-09-25, TC-1b)
+
+`ChordAction::History` (the `history` action name; by default Super+K, keycode
+37, the Cmd+K of Terminal and iTerm2, and K was free) is DELIVERED like the
+picker and the reference: `exec_chord` sends `deliver_chord(4, id)` with the
+focused pane's id to the registered rail's owner, which forgets that tile's
+history ([[sub-halcyond]]). Unlike the close there is no fallback on a false:
+the compositor holds no transcript, and nothing but this chord may delete one.
+So with no rail (the legacy profile, or a seat whose rail is not up) the chord
+is said (`tapestryd: chord history: no rail`) and dropped. `deliver_chord`'s
+name match is now exact: 1 picker, 2 help, 3 close, 4 history, anything else
+`unknown`. There is deliberately no verb: a program able to write one could
+delete the record, which HALCYON 14.13 forbids.
+
+Ground truth: `usr/tapestryd/src/chords.rs` (the action, its name both ways,
+the default table) and `server.rs` (`exec_chord`'s `History` arm). Witnessed
+in-guest by `ls-halcyon-lantern` leg 7 ([[sub-lantern]]).
+
+
 ## The pointer path's witnesses -- a lost press could not be told from a swallowed one (2026-09-15, the I-6 hunt)
 
 `ptr_btn` had one say on its way in (`ptr btn ... -> chrome`, and only for a
@@ -2976,3 +2995,188 @@ planes show five shapes, edge clipping, divider selection and owner retirement;
 the SAK plane is fully transparent and the cursor returns after restoration.
 Raw fixture interiors remain byte-exact before and after pointer changes.
 This qualifies those composed paths, not bare-metal Pi or direct scanout.
+
+## A backgrounded leaf is transparent to a newcomer's share and to a move (2026-09-28)
+
+F2 (above) took a backgrounded leaf out of the carve's division (i) and made
+it transparent to a session's structural ops (ii): ownership, `tab_cycle`,
+`visible_strips`, the Tab arm; the divider tracks (`divide_of`) and the
+minima later followed the same rule. Two structural ops never did, and a
+session's root row always holds the console renderer's leaf -- first,
+weight 1, `backgrounded hidden` in the dump -- beside its tiles.
+
+- **The newcomer's share.** `sibling_mean` averaged every child. A drag or a
+  double-click makes the divided children's weights their pixel extents
+  (`set_pair_extents` re-weights `divide_of` only), so after one the console
+  leaf's 1 sat in the mean beside two extents of ~634: Super+H's newcomer took
+  423 and 313 px against 471 and 470 (the manual chunk's device run, captured
+  with `cat /dev/tapestry/layout` in a tile). The mean is now taken over
+  `divide_list`'s children, the set the carve divides -- all of them when
+  every one is backgrounded, the F2 rule. It serves both newcomers: `split`'s
+  flatten and `move_dir`'s pull-out.
+- **The move's neighbour.** `move_dir` swapped with the raw adjacent child.
+  Super+Shift+Left on the row's first tile traded places with the console
+  leaf -- the epoch moved, the screen did not -- and afterwards a move
+  between the tiles on either side of it was a dead press. The neighbour is
+  now the nearest sibling that is not backgrounded; none in that direction
+  is the edge, which escalates exactly as before.
+
+Nothing changes where no row mixes backgrounded and shown children: a
+session-less display has an empty backgrounded set, and a dormant workspace
+is uniformly backgrounded (`stamp_bg_subtree`), so `divide_list` is the
+identity on it and the mean is unchanged, while `move_dir` refuses a dormant
+slot outright. Pinned by three host tests on the device's tree (a
+backgrounded first leaf, a drag and an equalise):
+`a_newcomer_is_not_shortchanged_by_a_backgrounded_sibling`,
+`a_tile_moved_into_a_row_is_not_shortchanged_by_a_backgrounded_sibling` and
+`a_move_never_trades_places_with_a_backgrounded_sibling`, each red on the old
+code (423 where the share is 634; the edge move returned true); and by two
+controls for the arms those three never reach, each red under a sabotage
+that breaks only that arm: `an_all_backgrounded_container_still_shares_by_the_mean`
+(the dormant workspace) and `a_move_steps_over_a_backgrounded_container_too`.
+
+The class reached halcyond as well ([[sub-halcyond]]): its stack facts and its
+RESET planner read the dump's rows without the `backgrounded` token, so a
+root row stacked by Super+S numbered its shown tiles 02 and 03, counted 3 for
+the final-tile rule (the last shown tile's close box closed it, and with it
+the session), and planned a RESET focus on the console leaf, which the
+compositor refuses. Scripture:
+HALCYON-INSTRUMENT 5.2 (the mean over the divided siblings) and TAPESTRY.md
+(d) Move (the nearest sibling that is not backgrounded).
+
+**An empty tab among several keeps its header row** (2026-09-29, the manual
+chunk's round 3, F3; pre-existing). HALCYON-INSTRUMENT 14.6 makes a lone
+EMPTY leaf the N = 0 pane: no header row, its `tagbar` the whole interior
+(the placard's surface). The Tab arm hands `place_frame` the open tab alone,
+so an EMPTY open tab of several took the placard's geometry, while halcyond,
+which judges the placard on the stack's shown count, minted a header and
+painted it across the whole pane. `place_frame` now takes `members`, how many
+tiles the container shows as its own (the Leaf arm 1, the Stack and Tab arms
+the shown members), and the exception applies only at one. Pinned by
+`an_empty_tab_among_several_keeps_a_header_row`, with its control one
+variable away (the other tab backgrounded, the container shows one member
+and its empty tab IS the placard); both arms red under sabotage.
+
+## A workspace minted under a session is the session's (2026-09-29)
+
+HALCYON-WORKSPACES makes the workspaces under a session the SESSION's, but
+the tree minted every workspace root with owner 0, the environment's:
+`ensure_workspace` allocates a bare empty leaf, and neither the Super+N chord
+nor the `workspace` verb stamped it. An empty leaf's owner is its recorded
+one (H-4b-2), and both of a session's authorities over an empty leaf ask it:
+the chrome bind (`chrome_bind_admitted`, `pane_owner == chrome_owner`) and
+the placement claim (`Session(p)` mints only on a leaf whose owner is `p`).
+So on a session's new workspace halcyond's placard create was E_PERM --
+`halcyond: chrome for pane 12 failed Create` in the manual chunk's device
+run -- and the empty pane showed neither the placard nor its Open shell. The
+chord split had the same hole once (KT-1.5d-3, above).
+
+Every root the tree mints for a workspace now records an owner its caller
+names. `switch_workspace(n, owner)` and `move_focused_to_workspace(n, owner)`
+pass it to `ensure_workspace`, which stamps the new root; the move also
+stamps the fresh empty root it leaves behind when the tile it moves was its
+workspace's root. The compositor names `Comp::workspace_owner()`: the
+declared session's principal (`session_conns`), else 0, read at each mint and
+never stored, so a root minted after the logout reap -- which hands a
+session's empty workspace roots back to 0 -- is the environment's again. A
+workspace that already exists is found, never re-stamped.
+
+The stamp gives the declared session over a workspace root exactly what it
+holds over an empty leaf it split itself: the placard's bind and the claim.
+There is one declared session per display, and a root minted with none
+declared stays the environment's. Pinned by
+`a_workspace_minted_under_a_session_is_the_sessions` (with the no-session
+control and the found-not-re-stamped arm) and
+`the_root_a_move_leaves_behind_is_the_sessions` (with the environment's
+control), each red when its stamp is removed.
+
+The stamp alone made the next defect: halcyond fills every empty leaf the
+session owns and has not closed (its spawn plan, claim-gated), so a new
+workspace filled itself with a shell and never stayed empty to vanish -- the
+i3 rule `ls-halcyon-session-instrument` asserts. A new workspace's root is
+therefore a fresh pane, which halcyond fills only when the session asks for
+it (the next section; [[sub-halcyond]]).
+
+## A workspace keeps its last pane; fresh panes; the departure (2026-09-29)
+
+Fable round 4 on the Operator's Manual chunk found three defects in how a
+session's workspaces end. Closing workspace 1's last session tile while
+workspace 2 held tiles left `[console]` as workspace 1's root: a framed pane
+whose header bind halcyond was refused, with the focus left on the
+backgrounded console leaf (the reconcile's re-home looked only for a visible
+session leaf), so the keys went to the hidden console renderer and a chord
+split there minted owner-0 panes (F3). A logout from a workspace other than
+the console's left the login prompt on a dormant workspace: nothing switched
+at the departure, the active workspace's empty root was carved, and the keys
+were dropped for want of a focused surface; Super+Shift+N could also move the
+console leaf itself (F1). A takeover of an idle declaration kept the old
+principal's stamps on its empty panes (F5).
+
+`Pane.fresh` marks an EMPTY leaf the tree made so a workspace has a pane:
+`ensure_workspace`'s new root, the pane a move leaves (`pre_fresh`), the pane
+a close keeps. Only hosting (`host_for` into the focused leaf, `host_into`),
+`close_inner`'s root arm and `ask_fresh` clear it; a split leaves the target
+as it was. The dump prints ` fresh` after ` backgrounded` and before
+` hidden` (TAPESTRY 18.5), and halcyond fills a fresh pane only when asked
+([[sub-halcyond]]).
+
+`Layout::keeps_place(slot, seat, system)` is the keep rule: the pane at `slot`
+stays when a surface of the declared seat is hosted outside its subtree (the
+session goes on) and every other leaf of its workspace hosts a system surface
+(`rest_unusable`: a root, or `[console, tile]`). The compositor's
+`close_or_keep` asks it at both close sites (retire's pane side and the
+`close` verb), with the seat read from `session_conns`, and never while the
+seat's own conn is torn down: `teardown_conn` is set around `retire_conn`'s
+loop, because the declaration stays until after the retires, so a departing
+seat's tiles close outright; another conn's teardown keeps a pane like any
+close. `keep_as_fresh` empties the
+kept pane IN PLACE under a NEW id (from `id_seq`; None when the id space is
+spent, and the caller closes instead), keeping its parent, index and weight:
+halcyond's `closed` set would refuse a Super+N ask on the old id, and no id
+is ever reused. The kept pane is the pane `alloc` makes, less its id, place
+and share: `keep_as_fresh` resets `role`, `focusable` and `backgrounded`
+(the departed program's `role` file could leave `nofocus`, which
+`neighbor_dir` skips), and `close_inner`'s root arm resets `role`,
+`focusable` and the stale tag (round 5, F2). The seat's last tile of all still closes outright, and the
+session ends. The chord move passes `keep_place` from the same
+`rest_unusable`, and `move_focused_to_workspace` refuses a backgrounded leaf.
+The reconcile's re-home falls back to the first leaf of the active root that
+is not backgrounded (`first_unbackgrounded_leaf`).
+
+Super+N under a session on a fresh pane asks (`ask_fresh`): the mark clears
+and nothing splits. No geometry changed, so the compositor fans the
+TEV_LAYOUT itself. Under the legacy profile, which has no placard, it is the
+only ask.
+
+The departure, `session_departed` (the seat's conn closes, or `session off`),
+closes the fresh panes and makes the workspace holding the console renderer's
+leaf the active one; the reap drops the others. It says nothing, even in test
+builds: `login` prints its prompt as it runs, and UART lines from two writers
+can tear. The takeover re-stamps the old principal's empty leaves to the
+newcomer (`restamp_empties`).
+
+Pinned by `a_fresh_pane_is_the_compositors_until_a_tile_takes_it`,
+`a_restore_onto_a_new_workspace_leaves_no_fresh_pane`,
+`a_move_keeps_the_last_usable_pane_in_place`,
+`a_move_refuses_the_backgrounded_console_leaf`,
+`a_kept_pane_is_emptied_in_place_under_a_new_id`,
+`asking_for_a_fresh_pane_clears_it_once`,
+`a_takeover_restamps_only_the_old_seats_empty_panes`,
+`a_pane_is_kept_only_as_its_workspaces_last_while_the_session_goes_on` and
+`a_kept_or_collapsed_pane_is_the_one_alloc_makes`, each
+red under a sabotage of its hunk; on the device, `ls-halcyon-manual` legs 16
+and 17a-17c.
+
+## The session's layout notice outlives the surface that carried it (2026-09-29)
+
+A surface takes its undelivered events with it, and the session's TEV_LAYOUT
+rides one surface (`session_notify_surface`, the lowest slot the seat owns).
+`retire(n)` therefore re-sends a TEV_LAYOUT, through `notify_session_layout`,
+to the seat's next surface when n's queue still held one -- except while n's
+own conn is torn down, whose every surface is going while `login` prints its
+prompt (a line there could tear it). Test builds say `tapestryd: surface N
+retired holding the session's layout notice -- re-sent`. The client half, for
+a notice already delivered, is the ring's hint ([[sub-libtapestry]],
+[[sub-halcyond]]). The arm has not yet fired on the device -- on the manual
+chunk's run 14 the client hint carried every notice -- and `server.rs` has no
+host harness, so it is verified by reading (the chunk's round 5).

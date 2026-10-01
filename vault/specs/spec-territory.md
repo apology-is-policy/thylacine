@@ -6,7 +6,8 @@ models: [sub-kernel-territory]
 pins: [inv-i1, inv-i3]
 cfgs:
   - "territory.cfg -- clean, SYMMETRY Symm: every invariant below, at 2 Procs x 2 Paths x 2 Spoors x 2 covered dirs x 1 Name"
-  - "territory_file_point.cfg -- clean, FilePaths = {b}: ordered mounts at a file point stay plain"
+  - "territory_file_point.cfg -- clean, FilePaths = {b}: every mount at the file point b is refused (SYS_MOUNT's Emount)"
+  - "territory_file_point_kernel.cfg -- clean, FilePaths = {b}, KERNEL_MOUNTS: mount()'s kernel callers reach b, and an ordered mount there stays plain"
   - "territory_cov_alias.cfg -- clean, COV_MOUNTABLE: a covered directory also mounted at another point"
   - "territory_buggy.cfg -- BUGGY_CYCLE: bind without the cycle check; two binds compose into a loop (NoCycle)"
   - "territory_buggy_mount_no_refbump.cfg -- mount adds the entry, skips the ref bump (MountRefcountConsistency)"
@@ -24,8 +25,9 @@ cfgs:
   - "territory_buggy_covered_last.cfg -- a fresh MAFTER puts the new tree ahead of the covered one (CoveredPlacement)"
   - "territory_buggy_unmount_orphans_covered.cfg -- unmount leaves the covered member alone (NoOrphanCovered)"
   - "territory_buggy_self_mount.cfg -- a point's own directory mounted at it as an ordinary member (NoSelfMount)"
-  - "territory_buggy_cover_file.cfg -- a file point grows a covered member (NoCoveredFile)"
-gate: "specs/check-territory.sh -- runs all twenty, pins the three clean distinct-state counts, and asserts WHICH invariant each buggy cfg violates (one worker, so the attribution is deterministic). Re-run it for ANY change to a mount-table / root_spoor mutation site (mount, unmount, the reposition arm, chroot, pivot_root, clone, final release) or to the union walk, listing, create or remove selection."
+  - "territory_buggy_cover_file.cfg -- KERNEL_MOUNTS: an ordered kernel mount at a file point grows a covered member (NoCoveredFile)"
+  - "territory_buggy_emount.cfg -- SYS_MOUNT's type check is missing, so a mount reaches the file point (NoMemberAtFile)"
+gate: "specs/check-territory.sh -- runs all twenty-two, pins the four clean distinct-state counts, and asserts WHICH invariant each buggy cfg violates (one worker, so the attribution is deterministic). Re-run it for ANY change to a mount-table / root_spoor mutation site (mount, unmount, the reposition arm, chroot, pivot_root, clone, final release) or to the union walk, listing, create or remove selection."
 created: 2026-08-01
 updated: 2026-09-25
 ---
@@ -51,12 +53,20 @@ Three layers:
 - **The covered directory (B-1d-u, 2026-09-25).** An MBEFORE / MAFTER mount at
   a directory point hosting no member adds the point's own directory, a `cv`
   member drawn from `CovDirs` (disjoint from `Spoors`), in Plan 9's order.
-  `FilePaths` are points that are not directories, where no union starts.
+  `FilePaths` are points that are not directories. Every source in the model
+  is a directory, so since the 2026-09-25 Emount votes no EL0 mount reaches a
+  file point (`EmountOK` guards `MountBefore` / `MountAfter` / `MountRepl`;
+  `NoMemberAtFile`). A file mounted over a file, which `SYS_MOUNT` accepts
+  with `MREPL` alone, sits beneath the model. `KERNEL_MOUNTS` models
+  `mount()`'s kernel callers instead, which that check does not cover: their
+  ordered mounts reach a file point and stay plain, because `starts_union`
+  requires `QTDIR` on the point (`CovGuard`; `NoCoveredFile`).
   `unioned` is a history variable: it separates a union that lost its covered
   member from an MREPL group that never had one, which look alike in `morder`
   alone. `COV_MOUNTABLE` lets a covered directory also be mounted elsewhere.
 
-`SYMMETRY Symm` (Procs, Spoors) reduces the two large clean cfgs; the comment
+`SYMMETRY Symm` (Procs, Spoors) reduces the three large clean cfgs
+(`territory`, `territory_file_point`, `territory_file_point_kernel`); the comment
 at `Symm` argues its soundness (the one CHOOSE over model values ranges over
 `[Paths -> CovDirs]`, which neither permutation touches). The buggy cfgs stay
 unreduced, so their traces read directly.
@@ -67,7 +77,7 @@ unreduced, so their traces read directly.
 |---|---|
 | `Init` | `territory_init` / `territory_alloc` (via `territory_init_fields`) |
 | `Bind` / `Unbind` | `bind` / `unbind` — the DEAD table (see below) |
-| `MountBefore` / `MountAfter` | `mount`'s MBEFORE insert-at-group-front / append arms; `starts_union` plus the two `mount_install_at` calls place the covered entry, MCOVERED alone |
+| `MountBefore` / `MountAfter` | `mount`'s MBEFORE insert-at-group-front / append arms; `starts_union` plus the two `mount_install_at` calls place the covered entry, MCOVERED alone; their `EmountOK` guard (and `MountRepl`'s) is `sys_mount_for_proc`'s type check (`-T_E_NOTDIR`), and `CovGuard` is `starts_union`'s `QTDIR` conjunct |
 | `MountRepl` | `mount`'s MREPL arm (replace the whole group, covered entry included) |
 | `Reposition` | `mount`'s #219 / F6 reposition arm: an existing member moves, and no covered entry is added |
 | `Unmount` | `unmount`'s shift-down + the deferred `spoor_clunk`; the covered entry is never removed by name and leaves with the last mounted member |

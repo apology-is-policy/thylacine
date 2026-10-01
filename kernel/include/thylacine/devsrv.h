@@ -201,6 +201,9 @@ struct SrvService {
     bool           cap_posted; // retained on tombstone; never reclaim a TCB name
     u64            cap_scope;  // zero means a non-propagating/poster-local quota
     u64            generation; // increases at reservation, never wraps or clears
+    u64            qid_path;   // this post's node identity, unique in the registry
+                               // and never the root's 0 (Plan 9 devsrv's path):
+                               // a mount at /srv/<name> keys this post alone
     u8             name_len;         // 1..SRV_NAME_MAX; bytes valid in name[]
     char           name[SRV_NAME_MAX];
     u64            poster_stripes;   // poster Proc's stripes tag (by value)
@@ -225,6 +228,12 @@ struct SrvService {
                                      // only; set at srv_reserve and part of
                                      // the IDENTITY on a tombstone rebind,
                                      // like `mode` and `ring_msize`.
+    bool           remote;           // the remote declaration (a DMSRVREMOTE
+                                     // post; HAUL-DESIGN 4.8): every attach
+                                     // over this service marks its session
+                                     // remote. Either mode; set at srv_reserve
+                                     // and part of the IDENTITY on a
+                                     // tombstone rebind, like `cape`.
 
     // Accept backlog — a bounded FIFO ring of kernel-minted connections
     // awaiting SYS_SRV_ACCEPT. A client open enqueues one (holding a
@@ -374,7 +383,8 @@ int srv_registry_count(void);
 // already MAY_POST_SERVICE-gated, and the per-conn cost is capped by the
 // two-point ring-class policy x SRV_MAX_CONNS. `cape` (the DMSRVCAPE bit)
 // capes every attach over the service (IDENTITY-DESIGN 3.2) and is refused
-// unless `mode` is SRV_MODE_BYTE.
+// unless `mode` is SRV_MODE_BYTE. `remote` (the DMSRVREMOTE bit) marks every
+// attach over the service remote (HAUL-DESIGN 4.8), in either mode.
 //
 // Gated on PROC_FLAG_MAY_POST_SERVICE — the SAME one-way joey-stamped gate
 // SYS_POST_SERVICE checks (CORVUS-DESIGN.md §6.1); an unmarked Proc gets -1.
@@ -393,7 +403,7 @@ int srv_registry_count(void);
 // create path; the handler branches to here and returns the hidx directly.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
                          const char *name, size_t name_len, enum srv_mode mode,
-                         bool bulk, bool cape);
+                         bool bulk, bool cape, bool remote);
 
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).

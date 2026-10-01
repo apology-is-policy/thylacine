@@ -132,12 +132,19 @@ lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
 # (cooked-echoed, then DISCARDED by the mode write) + `ep 30` (delivered,
 # executed) -- made DETERMINISTIC: type the line WITHOUT Enter one second into
 # a `sleep 2` (CHILD_MODE is certainly on; the bytes certainly arrive before
-# the sleep exits), wait until the editor HOLDS all 31 chars (its redraw ends
-# with cursor-forward 4 + len = 35 -- unique in this scenario), then Enter.
-# Pre-fix the fragment was zeroed: the cursor never reached 35 and the command
-# never ran (a 30 s timeout here, not a flake). Regression: sabotage-verified.
+# the sleep exits), wait until the editor HOLDS all 31 chars, then Enter. The
+# anchor is the editor's own redraw of the whole line: the command word (in
+# whatever colour the highlighter gives it), the rest of the line, then `\r`
+# and the cursor move to the line's end. The pts's cooked echo is never
+# followed by that cursor move, so the anchor is unique. It names no column:
+# the anchor was once cursor-forward 4 + 31 = 35, the inner prompt being `/ `
+# plus its glyph, and it went stale on 1e5d2751, when a shell started
+# elsewhere began showing its inherited cwd (`/home/michael` here; ptyhost
+# passes no --home, so nothing abbreviates it to `~`). Pre-fix the fragment was
+# zeroed: the editor never held the line and the command never ran (a 30 s
+# timeout here, not a flake). Regression: sabotage-verified.
 #
-# THE ARMED WITNESS (the ccb597b8 round, F8): the cursor-35 anchor proves the
+# THE ARMED WITNESS (the ccb597b8 round, F8): the redraw anchor proves the
 # 31 chars REACHED the editor, not that the mode-write delivery carried them.
 # If they landed before ut wrote CHILD_MODE (raw, un-echoed, into m2s) or after
 # the PROMPT-mode re-arm, the editor shows them just the same and the leg is
@@ -151,7 +158,7 @@ lc_send "sleep 4"
 sleep 1
 send "echo type-ahead-ok | tr a-z A-Z"
 lc_expect_re {\r\necho type-ahead-ok \| tr a-z A-Z} "the pts COOKED-ECHOED the type-ahead right after the CRLF (CHILD_MODE was on: the delivery path is ARMED)"
-lc_expect "\x1b\[35C" "the editor holds the 31-char type-ahead delivered by the mode write"
+lc_expect_re {echo(\x1b\[[0-9;]*m)* type-ahead-ok \| tr a-z A-Z\r\x1b\[[0-9]+C} "the editor holds the 31-char type-ahead delivered by the mode write"
 send "\r"
 lc_expect "TYPE-AHEAD-OK" "the type-ahead line ran WHOLE (nothing dropped at the head)"
 

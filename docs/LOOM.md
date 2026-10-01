@@ -296,7 +296,9 @@ structured client API the design rests on):
 - `loom_cqe`: `{ u64 user_data; s32 result; u32 flags (LOOM_CQE_MORE for
   multishot) }`. `result >= 0` = byte count / packed qid / 0; `result < 0` =
   `-errno` (the `Rlerror` passthrough, mapped by the client's existing errno
-  convention).
+  convention). `-EAGAIN` raised by the kernel itself means the op never left
+  it: its session's tag pool or send ring was full. The session is intact and
+  the SQE may be resubmitted (NET-DESIGN 12.2, "a shortage is not an answer").
 - `opcode` set = the `p9_client_*` surface: `LOOM_OP_{WALK, LOPEN, LCREATE,
   READ, WRITE, GETATTR, SETATTR, READDIR, FSYNC, CLUNK, RENAMEAT, UNLINKAT,
   MKDIR, SYMLINK, LINK, MKNOD, READLINK, STATFS}` + `LOOM_OP_WIRE_PASSTHROUGH`

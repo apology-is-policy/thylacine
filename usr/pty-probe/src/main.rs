@@ -2,7 +2,8 @@
 //
 // Two roles in one binary (argv-dispatched):
 //   (no args)    the EMULATOR: open /dev/pts/ptmx (the clone mint), decode N
-//                via the fstat qid (the documented ptsname contract), spawn
+//                via the fstat qid (the documented ptsname contract), read
+//                the `<n>ready` file's wire directly (snapshot, refusal, cut), spawn
 //                itself as the session role, then drive the signal seam end to
 //                end: Ctrl-C -> interrupt, winsize -> tty:winch, master close
 //                -> tty:hup.
@@ -29,8 +30,8 @@ use alloc::format;
 use alloc::vec::Vec;
 use libthyla_rs::notes::Notes;
 use libthyla_rs::{
-    env, t_close, t_fstat, t_open, t_putstr, t_read, t_setsid, t_spawn_full_argv, t_tty_acquire,
-    t_wait_pid_for, t_write, TSpawnArgs, T_ORDWR, T_WALK_OPEN_FROM_ROOT,
+    env, t_close, t_fstat, t_open, t_pread, t_putstr, t_read, t_setsid, t_spawn_full_argv,
+    t_tty_acquire, t_wait_pid_for, t_write, TSpawnArgs, T_ORDWR, T_OREAD, T_WALK_OPEN_FROM_ROOT,
 };
 
 #[global_allocator]
@@ -45,6 +46,49 @@ fn open_rdwr(path: &str) -> i64 {
 
 fn wr(fd: i64, b: &[u8]) -> bool {
     unsafe { t_write(fd, b.as_ptr(), b.len()) == b.len() as i64 }
+}
+
+/// The readiness wire of `/dev/pts/<n>ready`, read directly (NET-DESIGN 12.2),
+/// before anyone opens the slave: s2m has room (POLLOUT) and no line is queued
+/// (no POLLIN). Offset bit 16 asks for a SNAPSHOT, answered at once and even when
+/// it is 0; any other bit above the 16-bit mask is refused (-22, EINVAL); the
+/// reply is cut to the read's count. The refusal goes first: a ptyfs that dropped
+/// the high bits would answer (1<<17)|POLLOUT at once -- a clean FAIL -- where it
+/// would HOLD the POLLIN snapshot and hang the boot.
+fn ready_wire(n: u64) -> bool {
+    const SNAP: i64 = 1 << 16;
+    const POLLIN: i64 = 0x001;
+    const POLLOUT: i64 = 0x004;
+    let path = format!("/dev/pts/{}ready", n);
+    let rfd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if rfd < 0 {
+        t_putstr("pty-probe: open(<n>ready) FAILED\n");
+        return false;
+    }
+    let rd = |b: &mut [u8], off: i64| unsafe { t_pread(rfd, b.as_mut_ptr(), b.len(), off) };
+    let mut ok = true;
+    let mut b = [0xAAu8; 4];
+    if rd(&mut b, (1 << 17) | SNAP | POLLOUT) != -22 || rd(&mut b, (1 << 32) | POLLOUT) != -22 {
+        t_putstr("pty-probe: ready: an undefined offset bit was not refused with EINVAL FAILED\n");
+        ok = false;
+    }
+    let mut b = [0xAAu8; 4];
+    if ok && (rd(&mut b, SNAP | POLLOUT) != 4 || u32::from_le_bytes(b) != POLLOUT as u32) {
+        t_putstr("pty-probe: ready: snapshot(POLLOUT) not answered POLLOUT FAILED\n");
+        ok = false;
+    }
+    let mut b = [0xAAu8; 4];
+    if ok && (rd(&mut b, SNAP | POLLIN) != 4 || u32::from_le_bytes(b) != 0) {
+        t_putstr("pty-probe: ready: snapshot(POLLIN) with no line queued not answered 0 FAILED\n");
+        ok = false;
+    }
+    let mut b = [0xAAu8; 2];
+    if ok && (rd(&mut b[..1], SNAP | POLLOUT) != 1 || b != [POLLOUT as u8, 0xAA]) {
+        t_putstr("pty-probe: ready: snapshot reply not cut to the read's count FAILED\n");
+        ok = false;
+    }
+    let _ = unsafe { t_close(rfd) };
+    ok
 }
 
 /// Read exactly one ack byte (blocks; the deferred-read path when empty).
@@ -78,6 +122,11 @@ fn emulator() -> i64 {
         return 4;
     }
     let n = (qp >> 8) & 0xff_ffff;
+
+    // (0) The ready file's wire, while the slave is still unopened.
+    if !ready_wire(n) {
+        return 10;
+    }
 
     // The raw fd-less spawn: the prover itself was spawned fd-less (joey's
     // plain t_spawn), so Command's Stdio::Inherit (pass the parent's fd 0/1/2)
@@ -148,7 +197,7 @@ fn emulator() -> i64 {
     let mut status: i32 = -1;
     let reaped = unsafe { t_wait_pid_for(child_pid as i32, 0, &mut status) };
     if reaped == child_pid && status == 0 {
-        t_putstr("pty-probe: openpty E2E PASS (park-read + INT + WINCH + HUP over a live controlling session)\n");
+        t_putstr("pty-probe: openpty E2E PASS (ready wire + park-read + INT + WINCH + HUP over a live controlling session)\n");
         0
     } else {
         t_putstr("pty-probe: session role FAILED (see its stage line above)\n");

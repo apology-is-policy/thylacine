@@ -52,6 +52,8 @@ const C_EXIT: u8 = 3;
 const C_WINSIZE_ACK: u8 = 4;
 const C_OSC7: u8 = 5;
 const C_SCREEN_ERASED: u8 = 6;
+const C_SYNC_BEGIN: u8 = 7;
+const C_SYNC_END: u8 = 8;
 
 /// A down-channel input record (halcyond -> kaua-term).
 #[derive(Clone, Debug, PartialEq)]
@@ -173,6 +175,8 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
                     p.extend_from_slice(body);
                 }
                 Control::ScreenErased => p.push(C_SCREEN_ERASED),
+                Control::SyncBegin => p.push(C_SYNC_BEGIN),
+                Control::SyncEnd => p.push(C_SYNC_END),
             }
             T_CONTROL
         }
@@ -378,6 +382,8 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                     Control::Osc7Raw(r.take(n)?.to_vec())
                 }
                 C_SCREEN_ERASED => Control::ScreenErased,
+                C_SYNC_BEGIN => Control::SyncBegin,
+                C_SYNC_END => Control::SyncEnd,
                 _ => return Err(WireError::Malformed),
             };
             Record::Control(c)
@@ -575,14 +581,16 @@ mod tests {
         )));
         rt_record(Record::Control(Control::Osc7Raw(Vec::new())));
         rt_record(Record::Control(Control::ScreenErased));
+        rt_record(Record::Control(Control::SyncBegin));
+        rt_record(Record::Control(Control::SyncEnd));
         rt_record(Record::Mode(ScreenMode::AltScreen));
         rt_record(Record::Mode(ScreenMode::Normal));
     }
 
     #[test]
     fn the_screen_erase_is_control_subtag_6_with_no_payload() {
-        // Pinned to the LITERAL: KAUA-TERM 1b allocates 6 (and 7 to another
-        // record), so a renumbering on both sides at once must still fail.
+        // Pinned to the LITERAL: KAUA-TERM 1b allocates 6, so a renumbering
+        // on both sides at once must still fail.
         let mut buf = Vec::new();
         encode_record(&Record::Control(Control::ScreenErased), &mut buf);
         assert_eq!(buf, [2, 1, 0, 0, 0, 6], "T_CONTROL, len 1, subtag 6");
@@ -594,6 +602,26 @@ mod tests {
         // unallocated subtag stays an error (the tile is torn down).
         assert_eq!(parse_record(T_CONTROL, &[6, 0]), Err(WireError::Malformed));
         assert_eq!(parse_record(T_CONTROL, &[0xFF]), Err(WireError::Malformed));
+    }
+
+    #[test]
+    fn a_synchronized_frame_is_control_subtags_7_and_8_with_no_payload() {
+        // Pinned to the LITERALS, as the erase is (KAUA-TERM 1b).
+        let mut buf = Vec::new();
+        encode_record(&Record::Control(Control::SyncBegin), &mut buf);
+        encode_record(&Record::Control(Control::SyncEnd), &mut buf);
+        assert_eq!(buf, [2, 1, 0, 0, 0, 7, 2, 1, 0, 0, 0, 8]);
+        assert_eq!(
+            parse_record(T_CONTROL, &[7]),
+            Ok(Record::Control(Control::SyncBegin))
+        );
+        assert_eq!(
+            parse_record(T_CONTROL, &[8]),
+            Ok(Record::Control(Control::SyncEnd))
+        );
+        assert_eq!(parse_record(T_CONTROL, &[7, 0]), Err(WireError::Malformed));
+        assert_eq!(parse_record(T_CONTROL, &[8, 0]), Err(WireError::Malformed));
+        assert_eq!(parse_record(T_CONTROL, &[9]), Err(WireError::Malformed));
     }
 
     #[test]

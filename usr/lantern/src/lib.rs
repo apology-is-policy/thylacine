@@ -28,13 +28,14 @@ pub mod nav;
 /// What lantern writes before each slide: reset the pen, home the cursor,
 /// erase the display.
 ///
-/// In a Halcyon tile this is a GRID operation and nothing more -- kaua-term's
-/// VT digests it, `vt::Screen::erase_display(2)` blanks every cell in place
-/// (no scroll-off, so the transcript does not accumulate the slides already
-/// shown) and every blanked cell carries `span: 0`, so the Beacon span tags of
-/// the previous slide go with its text. The tile stays in `ScreenMode::Normal`,
-/// which is the mode that lays the document out richly. On a serial console it
-/// is an ordinary clear. Down a pipe it is never written at all (`Show::Cat`).
+/// In a Halcyon tile the clear moves the slide on screen into the tile's
+/// history (operator vote 2026-09-25; HALCYON 14.13): kaua-term's VT sends the
+/// erased rows out as history, blanks every cell with `span: 0` (so the Beacon
+/// span tags of the previous slide go with its text) and reports the erase,
+/// and halcyond lays the history above the view's top edge, so the next slide
+/// starts at the top. The tile stays in `ScreenMode::Normal`, which is the mode
+/// that lays the document out richly. On a serial console it is an ordinary
+/// clear. Down a pipe it is never written at all (`Show::Cat`).
 ///
 /// It is deliberately NOT the alt-screen: entering that is what flips a tile
 /// to painting its raw mono grid, which would discard the rich rendering the
@@ -65,6 +66,24 @@ pub const CLEAR: &[u8] = b"\x1b[0m\x1b[H\x1b[2J";
 /// crash that skips lantern's own cleanup is covered by the backstop.
 pub const HIDE_CARET: &[u8] = b"\x1b[?25l";
 pub const SHOW_CARET: &[u8] = b"\x1b[?25h";
+
+/// Open and close a synchronized frame, DEC private mode 2026 (HALCYON 14.3):
+/// a renderer that knows the mode shows what lies between them whole. One
+/// that does not ignores both, as ECMA-48 requires of an unknown private mode.
+pub const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+pub const SYNC_END: &[u8] = b"\x1b[?2026l";
+
+/// One slide change as one buffer (LANTERN-DESIGN 13): the frame opens, the
+/// clear, whatever `paint` writes, the frame closes. The caller writes it
+/// once, so the slide is read and rendered before the screen changes.
+pub fn slide_frame(paint: &mut dyn FnMut(&mut alloc::vec::Vec<u8>)) -> alloc::vec::Vec<u8> {
+    let mut f = alloc::vec::Vec::new();
+    f.extend_from_slice(SYNC_BEGIN);
+    f.extend_from_slice(CLEAR);
+    paint(&mut f);
+    f.extend_from_slice(SYNC_END);
+    f
+}
 
 /// Write `chunk` with every LF cooked to CR-LF.
 ///
@@ -105,6 +124,24 @@ mod tests {
         let mut v = Vec::new();
         cook(s, &mut |c| v.extend_from_slice(c));
         v
+    }
+
+    // The marks are DEC private mode 2026 exactly: without the `?` the VT
+    // reads an ANSI mode it does not implement, and no frame opens.
+    #[test]
+    fn the_frame_marks_are_dec_private_mode_2026() {
+        assert_eq!(SYNC_BEGIN, b"\x1b[?2026h");
+        assert_eq!(SYNC_END, b"\x1b[?2026l");
+    }
+
+    #[test]
+    fn a_slide_change_is_one_frame_with_the_clear_inside() {
+        let f = slide_frame(&mut |f| f.extend_from_slice(b"# One\n"));
+        let mut want = Vec::new();
+        for part in [SYNC_BEGIN, CLEAR, b"# One\n", SYNC_END] {
+            want.extend_from_slice(part);
+        }
+        assert_eq!(f, want);
     }
 
     #[test]

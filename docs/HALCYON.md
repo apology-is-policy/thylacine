@@ -1369,9 +1369,11 @@ pollable (§14.11.7 / §14.11.7a). The record set:
 - **Up** (kaua-term → halcyond): `CellDiff{ changed (row,col,cell)[], cursor(row,col,vis) }`
   (the live screen) · `ScrollOff{ rows: cell[] }` (normal-mode lines off the top →
   the transcript) · `Control{ osc1936_raw | bell | title | exit(code) | winsize_ack
-  | osc7_raw | screen_erased }` (the last two AMENDED 2026-09-24: `osc7_raw`, the
-  cwd report, had been on the wire as tag 5 and missing from this list;
-  `screen_erased` is TC-1's, §14.13)
+  | osc7_raw | screen_erased | sync_begin | sync_end }` (`osc7_raw` and
+  `screen_erased` AMENDED 2026-09-24: `osc7_raw`, the cwd report, had been on the
+  wire as tag 5 and missing from this list; `screen_erased` is TC-1's, §14.13.
+  `sync_begin` and `sync_end` AMENDED 2026-09-28, operator vote: FL-1's
+  synchronized output, at the end of this section)
   (the kaua-term forwards OSC 1936 Beacon frames **raw** — halcyond keeps the Beacon
   parser, R5) · `Mode{ normal | alt_screen }`. **Ordering is load-bearing** (a Beacon
   zone-frame must land at the exact point between the cells it separates), so the
@@ -1398,6 +1400,48 @@ The native-`ut` VT-round-trip (a native Kaua app feeding cells more directly tha
 emitting VT to be re-parsed) stays a **v1.x optimization**; v1.0 native `ut` emits VT
 to its pts and the kaua-term parses it, as terminals do. The aux track's producer side
 of this contract is `docs/KAUA-TERM.md`.
+
+**AMENDED 2026-09-28 (operator vote; FL-1) — synchronized output: the program
+says where its frame ends.** A program opens a frame with DEC private mode 2026
+(`CSI ? 2026 h`) and closes it with `CSI ? 2026 l`; between the two the screen is
+half drawn and must not be shown. The producer's VT tracks the mode and answers
+DECRQM (`CSI ? 2026 $ p` → `CSI ? 2026 ; 1 $ y` while a frame is open and `; 2`
+otherwise; it answers the same way for every DEC mode it tracks, and 0 for the
+rest). It reports each CHANGE of the mode in stream order, and the kaua-term
+forwards it as `sync_begin` or `sync_end` (Control subtags 7 and 8, no payload).
+Like every control, each follows the pending `CellDiff`, so the cells written
+before a frame are never inside it and a frame's last cells always precede its
+close. A second open inside a frame, or a close with none open, is not reported.
+RIS closes an open frame, and does so last, so the reset's own erase is inside it.
+
+halcyond applies every record exactly as it arrives, so the ordering contracts
+above and in §14.13 are untouched, and holds only the tile's PAINT while a frame
+is open. Every other tile paints as usual. The hold ends at whichever comes first:
+the close; a reconfigure of the tile's surface (a resize, or the compositor's
+request to redraw -- a scale change that only reshapes the grid leaves the
+surface's pixels whole and keeps the hold); the program's exit or the tile's
+crash; or 150 ms after the first paint it deferred. A timeout abandons
+the frame, so a program that never closes one costs its tile a single 150 ms
+stall, never a standing slowdown. A repeated open does not extend the hold, so a
+stream of back-to-back frames that never leaves a paint point outside a frame
+still paints at least every 150 ms. While a paint is held the session WAITS for
+the rest of the frame: its loop blocks on the tile's pipe and the hold's
+deadline, and never comes back for the held tile without waiting. A loop that
+did would never read the frame's close (FL-1's first device run: 91612 passes in
+the 150 ms, and every frame that spanned reads abandoned).
+
+The research (13 terminals read in source; `dec-2026-09-28-sync-output-seam`):
+every implementation keeps parsing and holds only the render. Timeouts run from
+100 ms (Windows Terminal) and 150 ms (Alacritty, contour, mintty) through 1 s
+(foot, iTerm2, tmux, Ghostty, Konsole) to 2 s (kitty). Halcyon takes 150 ms, from
+the short camp, because the committed frame budget (VISION §4.5, p99.9 < 33 ms)
+treats a tail spike as a bug; contour chose the same value after measuring
+notcurses frames at about 35 ms. Holding the records in the kaua-term instead,
+with no wire change, was rejected. halcyond paints after every read of the pipe
+(at most 8 KiB) and one full-screen `CellDiff` is about 40 KB, so a hold upstream
+cannot stop a paint between two reads. Heritage: Plan 9's draw(3) buffers a
+client's drawing until `flushimage` makes it visible. There, too, the program
+says where a frame ends, not the screen.
 
 ### 14.4 The split
 
@@ -1726,7 +1770,7 @@ the transcript's blocks are finalized history.
 | `Control(Bell)` | the bell affordance (visual/log; no kernel bell) |
 | `Control(Title)` | the tile's OSC-0/2 title |
 | `Control(Exit(code))` | the tile's exit latch (the child is gone; teardown) |
-| `Control(WinsizeAck)` | resize handshake bookkeeping |
+| `Control(WinsizeAck)` | the producer applied a resize; the CellDiff that follows is its repaint of the whole grid, which settles the mirror's reflow at the grid's dims and, at another width, re-opens it (14.11.5) |
 | `Mode(Normal\|AltScreen)` | the render mode (14.11.3) |
 
 The ORDER is load-bearing and already guaranteed by the producer (a pending
@@ -1799,7 +1843,91 @@ is keyed by its start column + 1, the grid's analogue of a block's obj
 index), Enter and a click resolve a grid run through its cell span to the
 owning block's obj (`grid_run_obj`), and the render bands the marked grid row
 and underlines its run under `GRID_KEY`. Yank in a tile is still owed (the
-pts clipboard work).
+pts clipboard work). **Fixed (2026-09-29, the Operator's Manual chunk):** a
+session tile banded only the Normal-mode CURSOR row (one `Mark`), while the
+console renderer bands every row of the selection, so a `v` selection in a
+tile was never drawn. `Tile::render_selected` now takes the selection's rows
+(`tile::selection_bands`, each keyed by `tile::block_key` as a `Mark` keys the
+cursor) and bands each row once -- the frozen blocks, the open block and the
+live grid; `render` is the no-selection form, byte-identical.
+
+**Fixed at TC-1b (2026-09-25).** The cursor and the `v` anchor are positions in
+the flat list, and both hosts re-flattened on new output by clamping them into
+range, so when the budget evicted frozen blocks from the front every surviving
+row moved up and the selection landed on OTHER rows (a yank took different text;
+Enter opened the menu of another object) -- short of the `(block, item, col)`
+addressing 13.3 binds. The transcript now counts the flat rows it drops from the
+front (the budget and the TC-1b forget; one per-item row rule shared with
+`select::flatten`), and a re-flatten rebases the cursor and the anchor by that
+count: a row that survived is still selected, and a selection whose row was
+dropped moves to the oldest row that remains, its object cleared. A tile's
+live-grid rows follow their text too. The transcript counts the rows scrolled
+off the grid and remembers, for each line a scroll-off completed, how many
+rows it added. A grid row that stays moves up one per row scrolled, counted
+at the producer's repaint that shows the rows gone and not when they arrive:
+the two records can straddle reads, and a paint between them put the selection
+on another line's text, where the band and Enter acted. One that
+left is found in the history row its line joined (both halves of a
+soft-wrapped line land on that one row, and a clear that moves the screen into
+the history takes the selection with it), or on the grid's first row, where its
+line goes on, while the line is held there (a program that rewrites that row
+first leaves the half a row of its own, and the selection on the first row, as
+on any row rewritten in place). A count that passes a row not here yet places
+no end on it: that end starts again at the prompt. Counting back from the end
+is exact only because
+every history row a tile holds arrives through such a line; nothing else may
+add one (a block the cap freezes mid-pre once gained an empty fence). The
+record holds the last 1024 lines: a selection that last looked before more
+lines than that scrolled off (between two refreshes, and both hosts refresh
+before every key and every paint) counts one history row per row scrolled,
+wrong only for the lines among them that did not add one row per row scrolled
+(a wrapped line's halves, a pre line joining its fence, a table row of padding
+only, which adds none). A grid row is assumed to move up
+with every row scrolled; a row below a scroll region the program set does not,
+nor does a blank row a clear erases in place, and a selection on one lands the
+scrolled count above it. A selection whose grid row left the grid drops its
+run (a grid run's key names no block's object). A width change re-wraps the
+grid, so each end of the selection on a grid row starts again at the prompt; a
+height change keeps each row's text (the window slides to keep the cursor row),
+so an end slides with its row, and only one on a row it slid past or cut off
+starts again at the prompt. The mirror's reflow is its own guess at the
+producer's, which answers each resize it applies with a winsize ack and then a
+repaint of the whole grid (the rows its own reflow dropped go first). The rows a shrinking
+resize drops off the top leave the grid then. Those that arrived before the repaint
+that would have shown them gone are counted once; the ScrollOff that delivers the
+rest later does not count them again; and the acknowledged repaint at the grid's
+dims settles the count: a row the mirror dropped that the producer kept (it applies
+only the last of several resizes it finds pending, and it may be ahead of the
+mirror) is on the grid again, every grid row of the selection moves down by it,
+and an end that moves past the grid's last row (the producer cut that row off)
+starts again at the prompt. Rows cut at another width are no measure of how far
+a row moved: from a width change until its acknowledged repaint, the grid rows
+of the selection keep their places whatever arrives (the mirror's own reflow
+still moves them: a height change slides them with their rows, a width change
+starts them again at the prompt; and a run goes at the grid's first repaint),
+and the repaint starts each of them again at its prompt. That holds on either screen: the
+producer re-cuts its main screen beneath the alt screen too, so a TUI that exits
+before the resize reaches the producer brings back a main screen the reply then
+re-cuts. The ack names no resize, so a reply to one the grid
+has since gone back from can settle at the grid's dims while the producer still
+has resizes to apply; its next reply, at another width, opens the window again,
+and the reply at the grid's dims closes it. Every change to the
+flat list bumps the transcript's `seq`: a scroll-off, a held half's flush and a
+budget re-share did not, so a tile's list went stale until the next Beacon
+frame. The console renderer also re-flattens before it paints, not only before
+a key. Esc enters Normal mode on a press (a held Esc's repeats, like any key's
+in Insert, go to the program), and only once the grid shows the normal screen:
+when a full-screen app exits, the mode flip arrives ahead of the main screen's repaint,
+and until that repaint lands the grid still shows the app's last frame. Until
+then Esc is still the app's, the frame paints as the app painted it, and a
+resize crops it as it does the alt screen: reflowed, it would count the rows the
+app's cursor slides past as rows that left the normal screen, the producer's
+reply would carry its own, and a selection made before the reply would stay
+that many rows off its text. Starting an app is the mirror of it: the mode flip
+arrives ahead of the app's first paint, and until that lands the grid still
+holds the shell's screen, which paints as it did (the producer's last diff of it
+carries the main screen's wrap flags), while keys and a resize are already the
+app's.
 
 **14.11.6 Spawn.** halcyond spawns one `kaua-term` per **leaf tile**. The
 enumeration hook already exists: `ChromeSet::reconcile` (`chromeset.rs:129`)
@@ -2271,9 +2399,35 @@ clean.
   F3), that is the whole guarantee. The live screen stays the program's to
   rewrite: an overwrite, a partial erase, DL/IL or a scroll region can remove
   on-screen text without keeping it, as in any terminal. And the transcript is
-  bounded, so enough output evicts its oldest lines, as scrollback always has.
-  Deleting a tile's history is a USER action: a
-  chrome chord (TC-1b). This follows Plan 9, where a window's text belongs to the
+  bounded, so enough output evicts its oldest lines, as scrollback always has,
+  and the session shares one budget among its tiles, so opening more tiles
+  shrinks each one's share and can evict its oldest lines too.
+  Deleting a tile's history is a USER action: `Super+K` (TC-1b, 2026-09-25;
+  HALCYON-INSTRUMENT 9.3) forgets the focused tile's history -- every line above
+  the live screen, the scrolled-off lines of a command still running included --
+  and nothing else. The live screen stays the program's (the VT that holds it
+  runs in the producer, and halcyond blanking its own copy would desynchronise
+  the next CellDiff), and it keeps its links and its look: a cell resolves its
+  object and its zone's class through the block that was open when the cell was
+  written, so every block the tile's span map still names survives the forget as
+  a HUSK -- its kind, its class and the objects the map names (type and
+  reference, never a line of text), invisible to layout and selection, charged
+  to the budget and the first thing the budget evicts. An inline image stays
+  while an object that survives names it; one that only forgotten objects named
+  is released, and one no object names yet (an upload still to be captioned)
+  stays. The map remembers a little more than the screen shows -- cells in
+  flight and a hidden main screen resolve through it -- so an object whose lines
+  are gone stays until its frames age out of the map. Output still in flight at
+  the chord (rows the producer has scrolled that halcyond has not read, and rows
+  a resize just took off the grid) arrives after it and is history from then on;
+  a row the resize took off that the producer kept comes back as live screen
+  with its repaint. `clear` then `Super+K` leaves an empty
+  tile; `clear` alone already leaves a clean view; with no history the tile is
+  laid as a fresh one, and its bar reads as a fresh one's: the last command's
+  exit status goes with the command's record, even while its text is still on
+  the screen. A program cannot trigger it: the compositor reads the
+  chord from the keyboard, Super never reaches a tile, and there is no verb
+  that deletes history. This follows Plan 9, where a window's text belongs to the
   user, and the Genera listener, whose Clear Output History is a command the user
   gives rather than an escape a program sends. xterm, VTE and kitty let ESC[3J
   drop scrollback; Halcyon deliberately does not.

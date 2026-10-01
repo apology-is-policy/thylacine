@@ -23,7 +23,7 @@ hazards: []
 abis: []
 design: ["docs/MANUAL-DESIGN.md", "docs/thylacine-operators-manual-writing-guide.md", "docs/BEACON.md"]
 created: 2026-09-16
-updated: 2026-09-24
+updated: 2026-10-01
 ---
 ## Purpose
 
@@ -264,3 +264,22 @@ form a code host decodes that it misses, and a false positive on ordinary prose;
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+### October 1: complexity measurement excludes descheduling
+
+The host complexity assertion measures the calling thread's CPU time on Unix,
+using the vendored libc clock ABI. It keeps the matching wall-clock sample for
+diagnosis. It does not charge other tests' CPU usage or time this thread was not
+scheduled to the renderer. Clock errors fail explicitly; other host platforms
+retain the previous elapsed-time measurement. This is host test code only.
+The existing 8x-plus20ms rejection bound and all rendering/input/output paths
+are unchanged. A sleep witness checks that wall time is excluded and actual
+computation advances the clock. Temporary wall-clock and quadratic-work mutants
+verify discrimination; the latter repeats rendering in proportion to input size.
+
+Evidence is in work/oct1-reconciliation/: main-host.log retains the initial
+failure; main-manual-isolated.log is the unchanged72/72 pass; paired diagnostic
+logs show quiet4x scaling and reproduce an elapsed-time failure with measured
+CPU samples below the bound. The initial failure had no CPU sample, so its
+individual scheduler history cannot be reconstructed. The reproduced defect
+is in the test's clock choice, not evidence of a guest rendering race.

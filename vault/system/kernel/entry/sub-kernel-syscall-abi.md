@@ -19,7 +19,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -554,6 +554,25 @@ caller pivoted back; with the shed it would strip the table for good) -- and
 0040: ports pass the kernel's `OAPPEND` omode bit instead of emulating append
 with one seek at open.
 
+## B-1d-v: SYS_MOUNT names one errno (2026-09-25)
+
+No number or record changed. `SYS_MOUNT` (14), a flat -1 call, now also answers
+`-T_E_NOTDIR` for Plan 9's `Emount` cases
+([[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
+[[dec-2026-09-25-sys-mount-emount]]; ARCH 9.6.1): a source whose type differs
+from the mount point's, under any flag, and any mount without `MREPL` at a
+point that is not a directory. A flagless mount appends here, where Plan 9's
+flag 0 is `MREPL`, so at a file it is refused with `MBEFORE` and `MAFTER`. The
+final component is never followed, so a symbolic link is a point that is not a
+directory; a trailing `/` follows it to its target, unless a file is mounted
+on the link itself (the mount wins, and the path is refused). Every other
+refusal is still -1, so the call now mixes the two conventions, and its enum
+comment in
+`syscall.h` (mirrored in libt's `syscall.h` and in `libthyla_rs`) lists which
+cause gets which. A caller that tested `rc < 0` is unaffected;
+`libthyla_rs::territory::mount` passes the errno through as `NotADirectory` and
+keeps mapping -1 to `InvalidArgument`.
+
 ## B-1a: SYS_BURROW_RESERVE 124 and SYS_BURROW_PROTECT 125 (2026-09-23)
 
 Two new numbers rather than flags on `SYS_BURROW_ATTACH_LAZY`, per the
@@ -752,3 +771,36 @@ flag (no native C consumer; the subset rule), and gains `T_MNOEXEC` (0x10), the
 mount flag the deny paths use. The Rust mirror is unchanged.
 Consumers: musl's loader through 0047 (`libc.so`), and the device prover
 `/pouch-hello-dlopen` ([[sub-pouch-seam]]).
+
+## LR-1: the remote declaration, one attach bit and one perm bit (2026-09-28)
+
+No number changed and no record grew. The operator voted the carrier: the 9P
+session, in the cape's shape (HAUL-DESIGN 4.8,
+[[dec-2026-09-28-remote-label-carrier-r2]]). The native ceiling is unchanged.
+
+- `SYS_ATTACH_9P_REMOTE` (0x4) on `SYS_ATTACH_9P`'s x5: the attacher declares
+  that the session's transport leaves the machine, and `/proc/<pid>/ns` ends
+  the line of every mount sourced from the session in ` remote`. Mirrored as
+  `T_ATTACH_9P_REMOTE` in both libraries. `SYS_ATTACH_9P_SRV` (52) refuses it
+  in x4 like any unknown bit: over `/srv` the poster declares.
+- `SYS_WALK_CREATE_DMSRVREMOTE` (0x00400000, bit 22, the next free bit below
+  DMSRVCAPE; libthyla-rs `T_WALK_CREATE_DMSRVREMOTE`; libt carries no DMSRV
+  bit, by the subset rule) marks a `/srv` service post remote in EITHER mode.
+  It joins `SYS_WALK_CREATE_DMSRV_BITS`, so `SYS_WALK_CREATE_PERM_VALID` and
+  all three refusals follow without an edit, which is what the derived mask
+  was built for. A static assert pins that bit 22 collides with no other perm
+  bit, and `srv_client.remote_admission` pins both values.
+- A label, not an authority: nothing that resolves a path, checks permission,
+  caches or vouches for exec consults it, and the wrappers' comments say so.
+- Callers: Haul, on both paths ([[sub-haul]]), and `/attach-probe`, whose
+  real attach now passes CAPE|REMOTE. Its unknown-bit probe moved from 0x4,
+  now admitted, to 0x8. Every other in-tree `t_attach_9p` caller passes 0.
+
+The origin (2026-09-29, operator vote 1 of 09-28,
+[[dec-2026-09-28-ns-session-root-names]]): both attach calls name the root
+they mint by the file its session came over, for `/proc/<pid>/ns` alone.
+`SYS_ATTACH_9P_SRV` stamps its connection's namespace name (`/srv/NAME`),
+`SYS_ATTACH_9P` its transmit pipe's device spec, `#|`, since a pipe has no
+name. No argument, flag or return changed; where each inner stamps is
+[[sub-kernel-syscall-dispatch]]'s, what the root carries
+[[sub-kernel-ninep-dev9p]]'s.

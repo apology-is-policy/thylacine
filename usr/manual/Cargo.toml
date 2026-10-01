@@ -35,3 +35,7 @@ beacon = { path = "../lib/beacon" }
 # The bounds test runs the reader on the guest's heap.
 [dev-dependencies]
 thyla-heap = { path = "../lib/thyla-heap" }
+
+# Host complexity measurements exclude time when this thread is not scheduled.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { version = "0.2.186", default-features = false }

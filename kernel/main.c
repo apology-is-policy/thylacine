@@ -56,6 +56,7 @@
 #include <thylacine/weft.h>     // vdso_init (the clock vDSO page, #343)
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
+#include <thylacine/9p_attach.h>  // p9_closer_start (FID-LIFECYCLE section 9)
 #include <thylacine/dev9p.h>
 #include <thylacine/pipe.h>
 #include <thylacine/random.h>  // random_seed_from_virtio (Lazarus W3b)
@@ -817,6 +818,10 @@ void boot_main(void) {
         if (!poll_pump) extinction("boot_main: dev9p_poll_pump alloc failed");
         ready(poll_pump);
     }
+    // The 9P closer pool's first thread (docs/FID-LIFECYCLE-DESIGN.md section
+    // 9): it sends the Tclunks a dying thread could not, and spawns a spare
+    // when it takes work. Idle until the first hand-off; no cost otherwise.
+    if (p9_closer_start() != 0) extinction("boot_main: p9 closer alloc failed");
 
     // G-3 (R2-F3): the orphaned-weave reaper -- force-reclaims a dead
     // compositor's stale client weave mappings after a bounded grace

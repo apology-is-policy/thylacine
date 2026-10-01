@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -32,7 +32,10 @@ netd `/net`, corvus) is a tree of dev9p Spoors.
 
 The vtable (all slots non-stub today unless noted): `walk`, `walk_attrs`
 (POUNCE), `open_cached` (FID-LIFECYCLE), `open`, `create`, `close`, `read`,
-`write`, `poll` (→ [[sub-kernel-ninep-dev9p-poll]]), `fsync`, `readdir`,
+`write`, the three remote-readiness slots `poll_snapshot` /
+`poll_snapshot_release` / `poll_arm` (→ [[sub-kernel-ninep-dev9p-poll]]; there
+is no `.poll` since #98: a QTPOLL file asks its server, any other file answers
+always-ready without a wire op), `fsync`, `readdir`,
 `rename`, `unlink`, `stat_native`, `wstat_native`, plus `seekable = true`
 (positioned I/O honors the byte offset — the #37 pread/pwrite gate) and
 `perm_enforced = true` (A-3b: kernel rwx enforcement ACTIVE on dev9p; the
@@ -56,16 +59,17 @@ budget diagnostics + test bias.
 `struct dev9p_priv` (kmalloc KP_ZERO, magic "D9PP", clobbered on free):
 `client` + `fid` + `fid_owned`, `attached_owner` (one `p9_attached_ref` per
 priv — the F236 discipline; walks inherit the parent's), `create_errno`
-(#99 transient), `fid_gen`/`fid_suspect` (G2), `poll` (lazily-allocated
-readiness state, refcounted independently — #294), `weft` (the lazily-bound
+(#99 transient), `fid_gen`/`fid_suspect` (G2), `poll` (the lazily-allocated
+arm state: the hook list an arm's answer walks, refcounted independently — #294), `weft` (the lazily-bound
 flow ring; CAS-installed, ACQUIRE-read), the cached-open triple
 (`cached_open`/`co_buf`/`co_size`/`co_stat`), and the write-behind block
 under `wb_lock` ([[lock-dev9p-wb-priv]]).
 
 **`dev9p_close` teardown order** (each step's position is load-bearing):
-1. `dev9p_poll_priv_release` — cancel any outstanding readiness op BEFORE
-   the fid clunk, so the netd `ready`-fd Tclunk lands deterministically
-   (#294).
+1. `dev9p_poll_priv_release` — cancel the outstanding readiness ARM BEFORE
+   the fid clunk (a snapshot never outlives its poll call), so the netd
+   `ready`-fd Tclunk is not refused on a live read and lands
+   deterministically (#294).
 2. Weft release: ACQUIRE-load + NULL (RELEASE) → `weft_reap_unregister`
    (leave the G-3 reaper registry FIRST — after it returns no sweep holds
    the binding) → the G-2 weave clunk-unmap (pid-matched, VMA-identity
@@ -79,10 +83,24 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    DIRECTORY fid on a cacheable client, not `fid_suspect`, and not staled
    (`larder_qid_staled_since` over the G4 ring since `fid_gen`) PARKS in
    the client's dir-fid cache instead of clunking; everything else takes
-   `p9_client_clunk_async` (fire-and-forget; the fid unbinds at send and
-   its number is never reused; the ownerless Rclunk drains via a later
-   op's reader). Dedup/evict victims from the park are async-clunked
+   `dev9p_clunk_fid` (fire-and-forget; the fid unbinds at send and its
+   number is never reused; the ownerless Rclunk drains via a later op's
+   reader). Dedup/evict victims from the park are clunked the same way,
    outside the table lock.
+
+   **`dev9p_clunk_fid` is every dev9p clunk (2026-09-29, FID-LIFECYCLE
+   section 9)**, all ten sites: the close's fid and G2 victims, the rename
+   and create G2 drops, and the rollback clunks in walk, walk_attrs and
+   create (asynchronous now too, so no dev9p Tclunk waits for its Rclunk). A
+   thread whose Proc is dying cannot send; the client then answers
+   `-P9_E_AGAIN` with the fid still bound, and the helper hands the fid to
+   the closer through the priv's session owner (`p9_attached_defer_clunk`,
+   [[sub-kernel-ninep-attach]]) -- before `p9_attached_unref` in step 6, so
+   the entry's reference is taken while the priv's still holds. gopls's kill
+   of a `go` child still in its spawn thunk was the measured case: three
+   leaked fids a boot. Only a fid the live session still holds after that
+   is reported (`p9_clunk_refused`); a dead session's fids died with it, and
+   a fid a failed walk never bound had nothing to leak.
 6. `p9_attached_unref` — possibly the last ref → the whole session tears
    down ([[sub-kernel-ninep-attach]]).
 7. Magic clobber + kfree.
@@ -359,6 +377,53 @@ victims MUST be clunked — a fresh walk re-resolving a reused qid.path must
 never be served a fid for the dead object). All returns are clunked by the
 CALLER outside the leaf lock.
 
+### The remote declaration's one reader, and the name a session root's mount carries (LR-1 2026-09-28; the origin 2026-09-29)
+
+`dev9p_spoor_remote(c)` answers whether `c` belongs to a session declared
+remote at its attach or its /srv post (HAUL-DESIGN 4.8). It reads the
+client's `remote` flag through `priv_of`, so it is false for NULL, for a
+Spoor of another Dev, for a dev9p Spoor with no priv, and for a priv that
+does not carry `DEV9P_PRIV_MAGIC`. The read is lock-free: the flag is
+stamped before the session's root publishes and never flips, and the
+caller's reference on `c` keeps the priv and the client alive. Its one
+caller is `territory_format_ns` ([[sub-kernel-territory]]); nothing in this
+Dev consults the flag.
+
+Every session root is born named "/" (`dev9p_attach_client`) and keeps that
+name: it is the namespace root's name when joey pivots to one, and a pivot
+never re-stamps a published Spoor. A mount line names the root otherwise
+(operator vote 2026-09-28, [[dec-2026-09-28-ns-session-root-names]]): by the
+file its session came over. `dev9p_stamp_origin(root, transport)` records it
+on the root's priv -- `origin`, a reference on the transport's `->path`, or,
+when the transport has no name, `origin_dc`, its device character -- and
+`dev9p_spoor_origin` reads it back. Both attach handlers stamp between minting
+the root and `handle_alloc` ([[sub-kernel-syscall-dispatch]]), so the plain
+fields are set before publication and never change; `dev9p_close` drops the
+reference. Only an unstamped root takes the stamp: a walked priv (`fid_owned`)
+and a cached-open priv (fidless like the root, but not one) refuse it, and a
+walk -- the zero-name clone every mount crossing makes included -- always
+builds a fresh priv, so no copy of the root carries the name. A root reached
+by opening a 9P-mode /srv service is named through its `->path` instead
+(stalk's adoption arm transplants the opened path onto it). `#9` appears only
+when `path_make_root` fails on an unstamped root. The name is display only
+(I-33); its one reader is `territory_format_ns` ([[sub-kernel-territory]]).
+
+Tests: `dev9p.remote_format_ns` opens on this function (NULL, another Dev, a
+bare dev9p Spoor, a priv naming a marked session under the wrong magic and,
+as the control, under the right one) before its rendering legs; the REMOTE
+rows of `dev9p.walk_create_refuses_dmsrv_bits` and
+`dev9p.path_create_refuses_dmsrvcape` keep the bit out of a Tlcreate perm.
+The LR-1 sabotage boots turned `remote_format_ns` red both when the function
+answered for every dev9p Spoor and when it read a priv without its magic.
+`dev9p.origin_format_ns` pins the origin: the accessor's negatives (NULL,
+another Dev, a bare dev9p Spoor), an unstamped root's `/`, the stamp sharing
+the name (its count rises by one) and refusing a second stamp, the rendered
+name with and without ` remote`, caps inside the name and before the newline,
+a clone walk carrying no origin and refusing the stamp, a covered entry on a
+stamped root keeping its own name, the root's close releasing the reference,
+a nameless transport's device spec, and a cached-open priv refusing what the
+same priv shaped as a root takes.
+
 ## Data structures
 
 `dev9p_priv` as above. Budgets: `DEV9P_CO_MAX_SIZE` 128 KiB /
@@ -527,14 +592,15 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 (generated from incoming `touched` edges — the shaping chunks:
 P5-attach-dev, FS-alpha/beta/gamma, A-2a/A-3b, #37, #99, POUNCE P-3,
 Larder L1c/L1d/L1e, wb F1, G1/G2/G3/G4, FID-LIFECYCLE cached-open,
-Weft-6b-2/6b-3a, net-6b QTPOLL wiring, #955, D44, task-#44, #80 the
+Weft-6b-2/6b-3a, net-6b QTPOLL wiring, #98 NP-4c (the three readiness slots
+replace `.poll`), #955, D44, task-#44, #80 the
 name-op errno propagation, the V-4c-3 self-audit's class correction, and (L)
 the Haul identity cape.)
 [[chg-2026-08-16-dev9p-errno-class]] records the last two.
 
 ## Tests
 
-`kernel/test/test_dev9p.c` — ~56 registered `dev9p.*` cases over a
+`kernel/test/test_dev9p.c` — 74 registered `dev9p.*` cases over a
 canonical loopback responder: the vtable basics, errno propagation
 (`dev9p.create_errno_propagates_eexist` — non-vacuous, asserts the -17
 return AND the dentry drop), the Larder integration
@@ -547,8 +613,15 @@ budget_fallback,populate_readback,append_chain,failed_flush,
 writethrough_range}`), the G2 dirfid battery
 (`dev9p.dirfid_{consume_and_recycle,perm_only_leaf_consume,
 create_reuse_drop,rmdir_drop_and_no_stale_repark,suspect_not_reparked}`),
-cached-open (`dev9p.cached_open_*`), the poll teardown
-(`dev9p.poll_cancel_at_close`, `dev9p.poll_regular_file_always_ready`),
+cached-open (`dev9p.cached_open_*`), the remote-readiness battery (ten
+`dev9p.poll_*` cases on a message-queue loopback with a scripted server and
+the live poll kthread: `regular_file_always_ready`,
+`snapshot_answers_at_zero_timeout` (the #98 closure),
+`local_and_remote_both_reported`, `snapshot_shortage_is_resent`,
+`unanswered_snapshot_fails_safe`, `arm_wakes_the_parked_poller`,
+`retry_timer_is_a_wake`, `widen_keeps_the_old_arm_until_replaced`,
+`cancel_at_close`, `gc_flushes_with_the_unlink`; each seen red with its rule
+removed; the harness is detailed in [[sub-kernel-ninep-dev9p-poll]]),
 the prw wire-offset capture (`dev9p.prw_wire_offset_and_cursor`), and the
 identity cape: `dev9p.cape` (an uncaped control whose chown reaches the
 wire; the caped stat with the mode kept; a server that omits the trio;
@@ -572,5 +645,9 @@ Writes therefore pass through instead of installing own-pages at guessed offsets
 Readdir propagates the translated wire errno, preserving interrupted reads as
 EINTR rather than fabricating EPERM from a flat -1. Readdir failure does not
 mark the fid suspect: its cursor is supplied again from the unchanged offset.
-If asynchronous Tclunk submission is refused at close, a bounded console
-diagnostic reports the fid and error; close still releases local ownership.
+A clunk the closer cannot take (a test attach with no session owner, or a
+node that cannot be allocated) on a session that still holds the fid prints
+`9p: close: clunk of fid N refused rc R`; close still releases local
+ownership. Since 2026-09-29 the line means a real leak, and `tools/test.sh`
+fails on it. Before, it also printed for dead sessions, whose fids leak
+nothing, and for every dying close, so it could not tell the two apart.

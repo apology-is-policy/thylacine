@@ -1,17 +1,22 @@
 // ns [--color[=WHEN]] [pid] -- print a process's namespace (its territory mount
 // list), the Plan 9 `ns` tool, the Thylacine way. Reads /proc/<pid>/ns, which
-// the kernel renders as one "mount <mountpoint> <source>" line per mount entry
-// plus a trailing "binds: <N>" count (devproc -> territory_format_ns; #66, I-33).
+// the kernel renders as one "mount <mountpoint> <source>[ <suffix>]..." line per
+// mount entry plus a trailing "binds: <N>" count (devproc -> territory_format_ns;
+// #66, I-33), parsed by coreutils::nsmount.
 //
 // The mountpoint column is the namespace name the directory was mounted onto
 // (a Spoor.path, #66a); the source is the mounted tree's name, or a Plan 9
-// device spec "#<dc>" (e.g. "#9"=9P/disk, "#s"=srv, "#p"=proc) when the source
-// is a device root with no namespace name. We colorize + box the listing and add
-// a REALM column derived from the device char -- the precise realm, available NOW
-// from the kernel's "#<dc>" text (no SYS_FD_DEVCLASS needed). A presentation tool
-// -> color on the console (auto); --color=never passes the raw kernel text through.
+// device spec "#<dc>" (e.g. "#9"=9P, "#s"=srv, "#p"=proc) when the source is a
+// device root with no namespace name. A 9P session's root is named by the file
+// its session came over instead (/srv/<name>, or "#|" for a pipe; ARCH 9.6.9).
+// We colorize + box the listing and add a REALM column (nsmount::entry_realm:
+// from the device char, or `remote` for an entry the kernel marks ` remote` --
+// a 9P session declared remote, HAUL-DESIGN 4.8) and a FLAGS column for the
+// other suffixes. A presentation tool -> color on the
+// console (auto); --color=never passes the raw kernel text through.
 //
-// `ns` with no operand shows kproc's namespace (pid 0 -- the system root).
+// `ns` with no operand shows the caller's own namespace (Plan 9's default);
+// `ns 0` shows kproc's, the system root.
 
 #![no_std]
 #![no_main]
@@ -22,11 +27,13 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 extern crate alloc;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::fmt::Write as _;
 use coreutils::color::{self, ColorMode};
-use coreutils::{boxd, palette, usage};
+use coreutils::nsmount::{self, Line, Mount};
+use coreutils::{boxd, meta, palette, usage};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
 use libthyla_rs::{eprintln, io};
@@ -34,12 +41,14 @@ use libthyla_rs::{eprintln, io};
 const USAGE: &str = "\
 usage: ns [--color[=WHEN]] [pid]
   Print a process's namespace -- its territory mount list (mountpoint,
-  source, and the source's realm). No pid shows the system root (pid 0).
+  source, the source's realm, and the entry's flags). No pid shows the
+  caller's own namespace; pid 0 is the system root.
   --color[=WHEN]  colorize: always | never (raw kernel text) | auto (default)
   --help          show this help
 
 Examples:
-  ns                    # the system root namespace (pid 0)
+  ns                    # this shell's namespace
+  ns 0                  # the system root namespace
   ns 1                  # a process's mount list
 ";
 
@@ -48,21 +57,16 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
-/// `(realm, color)` for a mount source: a `#<dc>` device spec maps to its realm
-/// by the device char; a namespace-name source is a plain fs subtree.
-fn source_realm(src: &str) -> (&'static str, &'static str) {
-    match src.strip_prefix('#').and_then(|s| s.chars().next()) {
-        Some('9') => ("disk", palette::SLATE),
-        Some('r') | Some('M') => ("boot", palette::SLATE),
-        Some('p') => ("proc", palette::VIOLET),
-        Some('s') => ("srv", palette::VIOLET),
-        Some('H') => ("hw", palette::VIOLET),
-        Some('n') => ("notes", palette::VIOLET),
-        Some('d') => ("dev", palette::GOLD),
-        Some('c') | Some('C') => ("cons", palette::GOLD),
-        Some(_) => ("dev", palette::GOLD),
-        None => ("fs", palette::SLATE), // a namespace-name source subtree
-    }
+/// `(realm, color)` for a mount entry (the realm: nsmount::entry_realm).
+fn entry_realm(m: &Mount) -> (&'static str, &'static str) {
+    let realm = nsmount::entry_realm(m);
+    let color = match realm {
+        "remote" => palette::EMBER,
+        "proc" | "srv" | "hw" | "notes" => palette::VIOLET,
+        "dev" | "cons" => palette::GOLD,
+        _ => palette::SLATE, // 9p, boot, fs
+    };
+    (realm, color)
 }
 
 fn run(args: Args) -> i64 {
@@ -104,7 +108,7 @@ fn run(args: Args) -> i64 {
         }
     }
     if pid < 0 {
-        pid = 0; // default: the system root namespace
+        pid = unsafe { libthyla_rs::t_getpid() }; // default: the caller's namespace
     }
 
     let on = mode.resolve(stdout_is_console);
@@ -125,16 +129,15 @@ fn run(args: Args) -> i64 {
     }
 
     let text = core::str::from_utf8(&data).unwrap_or("");
-    let mut mounts: Vec<(&str, &str)> = Vec::new();
-    let mut binds = 0usize;
+    let mut mounts: Vec<Mount> = Vec::new();
+    let mut binds: Option<u64> = None;
+    let mut root_pheno = false;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("mount ") {
-            let mut it = rest.split_whitespace();
-            let mp = it.next().unwrap_or("");
-            let src = it.next().unwrap_or("");
-            mounts.push((mp, src));
-        } else if let Some(n) = line.strip_prefix("binds: ") {
-            binds = n.trim().parse().unwrap_or(mounts.len());
+        match nsmount::parse_line(line) {
+            Line::Mount(m) => mounts.push(m),
+            Line::Binds(n) => binds = Some(n),
+            Line::RootPheno => root_pheno = true,
+            Line::Other(_) => {}
         }
     }
 
@@ -146,41 +149,77 @@ fn run(args: Args) -> i64 {
         return out.finish("ns", 0);
     }
 
-    render(&mut out, pid, &mounts, binds, on);
+    render(&mut out, pid, &mounts, binds, root_pheno, on);
     out.finish("ns", 0)
 }
 
-/// Render the boxed namespace view: MOUNTPOINT / SOURCE / REALM, each cell
-/// colored by kind (mountpoint slate, source + realm by the device realm).
-fn render(out: &mut io::OutSink, pid: i64, mounts: &[(&str, &str)], binds: usize, on: bool) {
-    let realms: Vec<(&'static str, &'static str)> = mounts.iter().map(|(_, s)| source_realm(s)).collect();
-    let mpw = mounts.iter().map(|(m, _)| m.chars().count()).max().unwrap_or(0).max(10); // "MOUNTPOINT"
-    let srcw = mounts.iter().map(|(_, s)| s.chars().count()).max().unwrap_or(0).max(6); // "SOURCE"
+/// The FLAGS cell: the suffixes the kernel rendered other than ` remote` (which
+/// is the REALM), in the kernel's order (noexec, pheno-linux, covered), then any
+/// this tool does not know, as written.
+fn flags_cell(m: &Mount) -> String {
+    let mut f: Vec<&str> = Vec::new();
+    if m.noexec {
+        f.push("noexec");
+    }
+    if m.pheno_linux {
+        f.push("pheno-linux");
+    }
+    if m.covered {
+        f.push("covered");
+    }
+    f.extend(m.unknown.iter().copied());
+    if f.is_empty() {
+        String::from("-")
+    } else {
+        f.join(",")
+    }
+}
+
+/// Render the boxed namespace view: MOUNTPOINT / SOURCE / REALM / FLAGS, each
+/// cell colored by kind (mountpoint slate, source + realm by the realm, flags
+/// dim). A namespace-level `root: pheno-linux` rides the bottom rule.
+fn render(out: &mut io::OutSink, pid: i64, mounts: &[Mount], binds: Option<u64>, root_pheno: bool, on: bool) {
+    let realms: Vec<(&'static str, &'static str)> = mounts.iter().map(entry_realm).collect();
+    let flags: Vec<String> = mounts.iter().map(flags_cell).collect();
+    let mpw = mounts.iter().map(|m| m.point.chars().count()).max().unwrap_or(0).max(10); // "MOUNTPOINT"
+    let srcw = mounts.iter().map(|m| m.source.chars().count()).max().unwrap_or(0).max(6); // "SOURCE"
     let rw = realms.iter().map(|(r, _)| r.chars().count()).max().unwrap_or(0).max(5); // "REALM"
-    let content_w = mpw + 2 + srcw + 2 + rw;
+    let fw = flags.iter().map(|f| f.chars().count()).max().unwrap_or(0).max(5); // "FLAGS"
+    let content_w = mpw + 2 + srcw + 2 + rw + 2 + fw;
 
     let title = format!("namespace of pid {}", pid);
-    let count = format!("{} bind{}", binds, if binds == 1 { "" } else { "s" });
-    let total = boxd::fit(content_w, &title, &count, "");
+    // The kernel writes `binds:` only after a whole list (#66b); without it
+    // the list was cut, and the count cell says so instead of a zero.
+    let count = match binds {
+        Some(n) => format!("{} bind{}", n, if n == 1 { "" } else { "s" }),
+        None => String::from(meta::MOUNT_LIST_CUT),
+    };
+    let foot = if root_pheno { "root: pheno-linux" } else { "" };
+    let total = boxd::fit(content_w, &title, &count, foot);
 
     // top border (dim)
     let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::top(total, &title, &count), color::reset(on));
     // header row (dim)
-    let header = format!("{:<mpw$}  {:<srcw$}  {:<rw$}", "MOUNTPOINT", "SOURCE", "REALM", mpw = mpw, srcw = srcw, rw = rw);
+    let header = format!(
+        "{:<mpw$}  {:<srcw$}  {:<rw$}  {:<fw$}",
+        "MOUNTPOINT", "SOURCE", "REALM", "FLAGS",
+        mpw = mpw, srcw = srcw, rw = rw, fw = fw
+    );
     emit_row(out, total, &header, on);
     // entries
-    for ((mp, src), (realm, rcolor)) in mounts.iter().zip(&realms) {
+    for ((m, (realm, rcolor)), fl) in mounts.iter().zip(&realms).zip(&flags) {
         let body = format!(
-            "{}{:<mpw$}{}  {}{:<srcw$}{}  {}{:<rw$}{}",
-            color::col(palette::SLATE, on), mp, color::reset(on),
-            color::col(rcolor, on), src, color::reset(on),
+            "{}{:<mpw$}{}  {}{:<srcw$}{}  {}{:<rw$}{}  {}{:<fw$}{}",
+            color::col(palette::SLATE, on), m.point, color::reset(on),
+            color::col(rcolor, on), m.source, color::reset(on),
             color::col(rcolor, on), realm, color::reset(on),
-            mpw = mpw, srcw = srcw, rw = rw
+            color::col(palette::DIM, on), fl, color::reset(on),
+            mpw = mpw, srcw = srcw, rw = rw, fw = fw
         );
         emit_colored_row(out, total, content_w, &body, on);
     }
     // bottom rule (dim)
-    let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::bottom(total, ""), color::reset(on));
+    let _ = write!(out, "{}{}{}\n", color::col(palette::DIM, on), boxd::bottom(total, foot), color::reset(on));
 }
 
 /// A header (all-dim) content row whose PLAIN width is the field width.

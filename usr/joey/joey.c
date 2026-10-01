@@ -9719,6 +9719,52 @@ int main(void) {
                             t_putstr("joey: net-6b PROBE open ready FAILED\n");
                             return 1;
                         }
+                        // (0) The readiness wire, read directly (NET-DESIGN 12.2):
+                        //     offset bit 16 asks for a SNAPSHOT, answered at once
+                        //     and even when it is 0; any other bit above the
+                        //     16-bit mask is refused (-22, EINVAL); the reply is cut
+                        //     to the read's count. The refusal goes first: a netd
+                        //     that dropped the high bits would read (1<<17)|POLLOUT
+                        //     as POLLOUT and answer it at once -- a clean FAIL --
+                        //     where it would HOLD the POLLIN snapshot below and
+                        //     wedge the boot.
+                        {
+                            const long snap = 1L << 16;
+                            unsigned char rb[4];
+                            long x1 = t_pread(rf, rb, 4, (1L << 17) | snap | P_OUT);
+                            long x2 = t_pread(rf, rb, 4, (1L << 32) | P_OUT);
+                            if (x1 != -22 || x2 != -22) {
+                                t_putstr("joey: net-6b PROBE ready: an undefined offset "
+                                         "bit was not refused with EINVAL FAILED\n");
+                                return 1;
+                            }
+                            rb[0] = rb[1] = rb[2] = rb[3] = 0xAA;
+                            long so = t_pread(rf, rb, 4, snap | P_OUT);
+                            unsigned long vo = (unsigned long)rb[0] |
+                                               ((unsigned long)rb[1] << 8) |
+                                               ((unsigned long)rb[2] << 16) |
+                                               ((unsigned long)rb[3] << 24);
+                            if (so != 4 || vo != (unsigned long)P_OUT) {
+                                t_putstr("joey: net-6b PROBE ready: snapshot(POLLOUT) "
+                                         "not answered POLLOUT FAILED\n");
+                                return 1;
+                            }
+                            rb[0] = rb[1] = rb[2] = rb[3] = 0xAA;
+                            long si = t_pread(rf, rb, 4, snap | P_IN);
+                            if (si != 4 || rb[0] != 0 || rb[1] != 0 || rb[2] != 0 ||
+                                rb[3] != 0) {
+                                t_putstr("joey: net-6b PROBE ready: snapshot(POLLIN) on "
+                                         "an empty socket not answered 0 FAILED\n");
+                                return 1;
+                            }
+                            rb[0] = rb[1] = 0xAA;
+                            long sc = t_pread(rf, rb, 1, snap | P_OUT);
+                            if (sc != 1 || rb[0] != P_OUT || rb[1] != 0xAA) {
+                                t_putstr("joey: net-6b PROBE ready: snapshot reply not "
+                                         "cut to the read's count FAILED\n");
+                                return 1;
+                            }
+                        }
                         // (a) POLLOUT: a bound UDP socket is sendable -> the probe
                         //     completes POLLOUT (3s slack; it returns in ms).
                         struct jpollfd pf = { (int)rf, P_OUT, 0 };
@@ -9738,8 +9784,10 @@ int main(void) {
                         }
                         (void)t_close(rf);
                         (void)t_close(pa);
-                        t_putstr("joey: net-6b PROBE OK (dev9p.poll: udp ready "
-                                 "POLLOUT-ready + POLLIN-times-out, no hang)\n");
+                        t_putstr("joey: net-6b PROBE OK (ready: snapshot at once, "
+                                 "0 included, undefined bits refused, reply cut; "
+                                 "dev9p.poll: udp ready POLLOUT-ready + "
+                                 "POLLIN-times-out, no hang)\n");
                     }
 /* #228: the /net probe ladder ends HERE, not fourteen sections earlier. The
    gate's #endif used to sit right after net-5/6a-2, and every probe appended
@@ -11676,7 +11724,8 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-2e openpty E2E OK (live controlling session:"
-                     " INT+WINCH+HUP delivered; parked master read)\n");
+                     " INT+WINCH+HUP delivered; parked master read;"
+                     " ready wire)\n");
         }
 
         // PTY-3: the POUCH pty boundary-line (0021-pouch-pty). Spawn the

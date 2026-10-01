@@ -6,6 +6,7 @@
 
 #include <thylacine/9p_client.h>
 #include <thylacine/cons.h>
+#include <thylacine/extinction.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
@@ -146,7 +147,9 @@ static int map_error(int session_send_rc, int exchange_rc,
 #define CLIENT_WAIT_DEAD  1     // session torn down; -P9_E_IO
 #define CLIENT_WAIT_DIED  2     // caller's Proc group-terminating; unwind
 #define CLIENT_WAIT_NOTEINTR 3  // 11b-9p: a caught note interrupted the wait; the
-                                // thread LIVES -> abandon the op, return -P9_E_INTR
+                                // thread LIVES -> client_flush_wait (flush(5))
+#define CLIENT_WAIT_FLUSHED  4  // flush(5): my Rflush came first; the server
+                                // cancelled the op -> -P9_E_INTR
 
 // Is the calling Thread dying (#811, widened by LS-5c per ARCH 8.8.2)? A
 // group-terminating Proc OR a pending terminate-disposition `interrupt` (a
@@ -166,7 +169,7 @@ static bool client_self_dying(void) {
 // transition (I-9; scheduler.tla NoMissedWakeup).
 static int rpc_wait_cond(void *arg) {
     struct p9_rpc *rpc = (struct p9_rpc *)arg;
-    return rpc->done || rpc->dead || rpc->be_reader;
+    return rpc->done || rpc->dead || rpc->be_reader || rpc->flushed;
 }
 
 // Byte copy (the kernel links no libc; matches the file's field-by-field
@@ -213,15 +216,22 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
 
 // Hand the reader role to one still-pending op so a survivor keeps reading
 // after the current reader departs (LOAD-BEARING when the departing reader's
-// Proc dies). Picks the first inflight rpc that is not the departing one and
-// not yet done/dead/flagged, flags it be_reader + wakes it. If none, no reader
-// is needed (nothing left awaiting a reply). c->lock HELD.
+// Proc dies). Picks the first inflight rpc that is not the departing one, not
+// yet done/dead/flagged and not still sending, flags it be_reader + wakes it. If
+// none, no reader is needed (nothing left awaiting a reply), or the only ones
+// left are sending, and those self-elect. c->lock HELD.
 static void client_handoff_reader_locked(struct p9_client *c,
                                          struct p9_rpc *departing) {
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
         if (r && r != departing && !r->done && !r->dead && !r->be_reader &&
             !r->on_complete &&
+            // A thread still getting its frame onto the wire (the #349 send
+            // park, a flush's staging) sleeps on the send list, where neither
+            // this wake nor its be_reader check reaches it -- and a stop or a
+            // death there would take the role with it. It needs no designation:
+            // every departure signals the send list first, and it self-elects.
+            !r->sending &&
             // 8c-3 (#89): skip an op whose owner is being stopped -- by the
             // debugger OR (PTY-1f) a job-control stop; the gate is
             // proc_stop_requested's disjunction (round-2 R2-F2: a Ctrl-Z'd
@@ -373,6 +383,19 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle,
     return r;
 }
 
+// A fid the server holds and nobody owns -- bound by an ownerless dispatch of a
+// walk's late reply -- goes to the orphan sink (the attach layer's closer,
+// FID-LIFECYCLE section 9). With no sink, or a sink that cannot take it, the
+// fid stays bound: it dies with the session instead of being clunked. c->lock
+// HELD; the sink does not sleep.
+static void client_orphan_fid_locked(struct p9_client *c, u32 fid) {
+    if (fid == P9_NOFID) return;
+    if (c->orphan_sink && c->orphan_sink(c->orphan_sink_arg, fid) == 0)
+        c->orphan_handed++;
+    else
+        c->orphan_kept++;
+}
+
 // Demux one received frame (in c->transport.recv_buf, `len` bytes) to its owner.
 // c->lock HELD. An OWNED frame is copied into the owner's reply_buf + the owner
 // is woken (the owner dispatches it -- extraction stays in the submitter). An
@@ -381,8 +404,37 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle,
 // p9_session_dispatch_rmsg consumes it WITHOUT freeing the tag, which stays
 // reserved (awaiting_flush) until its Rflush -- or the Rflush itself, which
 // frees both the flush tag and the abandoned oldtag. dispatch_rmsg routes both
-// cases. A malformed header, out-of-range tag, or oversize frame is a protocol
-// violation -> mark dead.
+// cases. An op whose owner still waits on its flush (a caught note, flush(5))
+// keeps inflight[tag]: its original reply is applied on arrival, and an Rflush
+// that comes first is handed to it. A malformed header, out-of-range tag, or
+// oversize frame is a protocol violation -> mark dead.
+// The dispatch of a reply nobody owns, to a tag in flight. One that fails left
+// the tag and its slot held, so the session fails closed, as it does for an
+// owned reply.
+static int ownerless_dispatch_locked(struct p9_client *c, size_t len,
+                                     struct p9_dispatch_result *out) {
+    int rc = p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
+                                      len, out);
+    if (rc < 0) client_mark_dead_locked(c, false);
+    return rc;
+}
+
+// flush(5): "If a response to the flushed request is received before the
+// Rflush, the client must honor the response as if it had not been flushed."
+// Apply the reply in rpc->reply_buf into the owner's result, in wire order,
+// with its tag still reserved until that Rflush (the I-10 guard). The op is
+// complete, so the registration goes: a duplicate reply drains ownerless. A
+// reply that fits no op fails closed, as the sync DONE path does. c->lock HELD.
+static void client_honour_locked(struct p9_client *c, struct p9_rpc *rpc) {
+    c->inflight[rpc->tag] = NULL;
+    rpc->honour_rc = p9_session_dispatch_flushed_rmsg(&c->session, rpc->reply_buf,
+                                                     (size_t)rpc->reply_len,
+                                                     rpc->flush_out);
+    rpc->honoured = true;
+    c->flush_honoured++;
+    if (rpc->honour_rc < 0) client_mark_dead_locked(c, false);
+}
+
 static void demux_frame_locked(struct p9_client *c, size_t len) {
     u32 size; u8 type; u16 tag;
     c->frames_rx++;                // #210: every frame that reached the demux
@@ -427,37 +479,73 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         if (len > c->recv_cap) { client_mark_dead_locked(c, false); return; }  // defensive
         client_copy(owner->reply_buf, c->transport.recv_buf, len);
         owner->reply_len = (int)len;
+        // flush(5): a reply that beats the owner's Rflush is honoured. Apply it
+        // now, before a later frame can be the Rflush that frees its tag.
+        if (owner->flushing) client_honour_locked(c, owner);
         owner->done = true;
         c->demux_wakes++;          // #210: sync-owner wake actually issued
         wakeup(&owner->rendez);
-    } else if (type == P9_RCLUNK) {
+    } else if ((type == P9_RCLUNK || type == P9_RLERROR) &&
+               c->session.outstanding[tag].active &&
+               c->session.outstanding[tag].kind == P9_TCLUNK) {
         // #210: a LEGITIMATE ownerless flow — p9_client_clunk_async never
         // registers inflight[tag], so every async Rclunk lands here by
-        // design (FID-LIFECYCLE). Counted apart so the loss counter below
+        // design (FID-LIFECYCLE), as does a Tclunk whose owner died or
+        // abandoned it (a Tclunk is never flushed). Keyed on the tag's op, not
+        // the reply alone: an Rlerror answers a clunk too, and an Rclunk on any
+        // other tag is a stray. Counted apart so the loss counter below
         // stays cold on a healthy system (the #214-F1 conflation lesson).
         c->demux_orphan_clunk++;
         struct p9_dispatch_result discard;
-        (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
-                                       len, &discard);
-    } else if (type == P9_RFLUSH) {
+        (void)ownerless_dispatch_locked(c, len, &discard);
+    } else if (type == P9_RFLUSH &&
+               c->session.outstanding[tag].active &&
+               c->session.outstanding[tag].kind == P9_TFLUSH) {
         // #210: the other legitimate ownerless flow — the #845 abandon
         // path sends its Tflush with no inflight owner, so the Rflush
-        // arrives ownerless by design (death-driven).
+        // arrives ownerless by design (death-driven). Keyed on the tag's op:
+        // an Rflush on any other tag is a stray, for the residue below.
         c->demux_orphan_flush++;
+        u16 oldtag = c->session.outstanding[tag].flush_oldtag;
         struct p9_dispatch_result discard;
-        (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
-                                       len, &discard);
+        if (ownerless_dispatch_locked(c, len, &discard) == 0 &&
+            oldtag < P9_SESSION_MAX_OUTSTANDING && c->inflight[oldtag]) {
+            // flush(5): no reply beat this Rflush, so the op its owner still
+            // waits on was cancelled. The dispatch just freed oldtag; drop the
+            // registration in the same critical section, before the tag can be
+            // reused. Every other flusher drops its registration BEFORE its
+            // Tflush (the death abandon, p9_client_abandon_async), so a
+            // registered victim that is async, or whose Tflush is not yet on
+            // the wire, means the server answered a flush it never received:
+            // fail closed.
+            struct p9_rpc *victim = c->inflight[oldtag];
+            if (victim->on_complete || !victim->flushing) {
+                client_mark_dead_locked(c, false);
+            } else {
+                c->inflight[oldtag] = NULL;
+                victim->flushed = true;
+                c->flush_cancelled++;
+                wakeup(&victim->rendez);
+            }
+        }
     } else if (c->session.outstanding[tag].active &&
-               c->session.outstanding[tag].awaiting_flush) {
+               (c->session.outstanding[tag].awaiting_flush ||
+                c->session.outstanding[tag].abandoned)) {
         // #210: the third legitimate ownerless flow — an abandoned op's
         // LATE ORIGINAL reply (#845): the owner died and unwound, the tag
         // sits awaiting_flush until its Rflush, and the original reply
-        // arrives first. Session state read under c->lock (every session
-        // mutation on this client runs lock-held).
+        // arrives first. A duplicate of a reply that a living owner already
+        // honoured under flush(5) lands here too. The #53 flush-less abandon
+        // (`abandoned`: no Tflush could be staged or sent) is the same flow,
+        // and its late reply is what frees the tag. Session state read under c->lock (every session
+        // mutation on this client runs lock-held). A late walk reply binds its
+        // new fid (flush(5)), which goes to the closer. An awaiting_flush tag
+        // absorbs any reply; only an abandoned op's can fail, and one that
+        // fails bound nothing and may not have filled in the result.
         c->demux_orphan_late++;
         struct p9_dispatch_result discard;
-        (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
-                                       len, &discard);
+        if (ownerless_dispatch_locked(c, len, &discard) == 0)
+            client_orphan_fid_locked(c, discard.bound_new_fid);
     } else {
         // #210: the ownerless discard is no longer silent. With all three
         // by-design flows split out above, a frame landing here is one NO
@@ -519,8 +607,10 @@ static int client_debug_stop_park(struct p9_client *c) {
 // loop). c->lock HELD on entry + exit.
 static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *t = current_thread();
+    rpc->sending = false;        // from here a designation reaches me
     for (;;) {
         if (rpc->done)            return CLIENT_WAIT_DONE;
+        if (rpc->flushed)         return CLIENT_WAIT_FLUSHED;
         if (rpc->dead)            return CLIENT_WAIT_DEAD;
         if (client_self_dying()) {
             // F6 (round-2): if I was the designated-next reader (a departing
@@ -576,10 +666,12 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             bool stopped     = false;
             bool noteintr    = false;
             for (;;) {
-                if (rpc->done || rpc->dead) break;
+                if (rpc->done || rpc->dead || rpc->flushed) break;
                 if (client_self_dying())    break;
                 spin_unlock(&c->lock);
-                int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/true);
+                // A caught note that already interrupted this op is still
+                // pending: a later wait for it (the flush wait) is killable only.
+                int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/!rpc->noted);
                 spin_lock(&c->lock);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
@@ -629,10 +721,10 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                                                         // parked sender may self-pump
             client_handoff_reader_locked(c, rpc);
             if (noteintr) {
-                // 11b-9p: the reader role is handed to a survivor; unwind to my
-                // EL0-return tail where the caught note delivers. client_run maps
-                // CLIENT_WAIT_NOTEINTR to -P9_E_INTR + the op abandon (Tflush +
-                // tag reclaim), exactly as the DIED path.
+                // 11b-9p: the reader role is handed to a survivor. client_run
+                // then flushes the op and waits for its answer (flush(5),
+                // client_flush_wait) before unwinding to my EL0-return tail,
+                // where the caught note delivers.
                 //
                 // F1: re-check rpc->dead FIRST (the else-branch's guard analog).
                 // A peer's client_mark_dead_locked in the recv window sets
@@ -682,8 +774,11 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // in the unwind->relock window: rpc->done/dead -> fall through so the
             // loop-top returns DONE/DEAD (the reply is preserved); be_reader ->
             // re-hand-off so the role is not lost (the F6 death case), then unwind
-            // CLIENT_WAIT_NOTEINTR (client_run abandons the op + returns -P9_E_INTR).
-            int sr = sleep_noteintr(&rpc->rendez, rpc_wait_cond, rpc);
+            // CLIENT_WAIT_NOTEINTR (client_run flushes the op, flush(5)). Once a
+            // note has interrupted this op it stays pending, so the flush wait
+            // sleeps killable only.
+            int sr = rpc->noted ? sleep(&rpc->rendez, rpc_wait_cond, rpc)
+                                : sleep_noteintr(&rpc->rendez, rpc_wait_cond, rpc);
             spin_lock(&c->lock);
             if (sr == SLEEP_NOTEINTR && !rpc->done && !rpc->dead) {
                 if (rpc->be_reader) {
@@ -704,6 +799,45 @@ static int send_wait_cond(void *arg) {
     return w->c->dead || w->c->send_progress != w->gen;
 }
 
+// Park until send_progress moves or the session dies. MULTI-WAITER (R2-F1): N
+// senders can be back-pressured on the shared client at once, so each parks on
+// its OWN stack Rendez via a poll_waiter on c->send_waiters_list -- a single
+// Rendez extincts on the 2nd sleeper (rendez.h). register-then-observe: register
+// the hook + snapshot send_progress under c->lock, so a concurrent bump-then-wake
+// is either captured by the snapshot (cond true at sleep's re-check) or delivered
+// to the now-registered hook -- no lost wake (I-9; the poll.tla
+// register-then-observe). The stack Rendez/hook outlive the sleep (unregistered
+// under c->lock before this frame pops). c->lock HELD on entry + exit.
+static void client_park_for_progress_locked(struct p9_client *c) {
+    struct Rendez      pr;
+    struct poll_waiter pw;
+    rendez_init(&pr);
+    poll_waiter_init(&pw, &pr);
+    struct send_wait_ctx w = { c, c->send_progress };
+    poll_waiter_list_register(&c->send_waiters_list, &pw);
+    c->send_waiters++;
+    spin_unlock(&c->lock);
+    (void)sleep(&pr, send_wait_cond, &w);
+    spin_lock(&c->lock);
+    c->send_waiters--;
+    poll_waiter_list_unregister(&pw);
+}
+
+// A tag is owed when a sync op's reply is stored and its owner has yet to run
+// the dispatch that frees the tag and signals send progress -- an event no s2c
+// frame announces, so a tag drainer waits for it parked, not in the transport
+// recv. An owner with a stop pending may park before it dispatches, so its tag
+// is not counted on. c->lock HELD.
+static bool client_tag_owed_locked(struct p9_client *c) {
+    for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
+        struct p9_rpc *r = c->inflight[tag];
+        if (r && r->done && !r->on_complete &&
+            !(r->owner && proc_stop_requested(r->owner)))
+            return true;
+    }
+    return false;
+}
+
 // Send the framed Tmsg in c->out_buf with #349 flow control. c->lock HELD on
 // entry + exit. A transiently-FULL c2s ring (P9_TRANSPORT_EAGAIN -- back-pressure
 // under #841 pipelining + concurrent large frames) is NOT a session death: the
@@ -719,7 +853,11 @@ static int send_wait_cond(void *arg) {
 // for the queued requests, so the reply path drains + c2s frees; a dead server
 // surfaces as a reader EOF/error -> c->dead -> the park/loop exits -EIO. The op's
 // own tag is NOT on the wire (this send is failing), so a self-pump only demuxes
-// OTHER ops' replies -- never its own (no reentrancy on rpc).
+// OTHER ops' replies -- never its own (no reentrancy on rpc). The exception is
+// client_flush_wait, whose op IS on the wire: a pump there may demux its own
+// reply, which the demux only stores (flushing is not yet set), and rpc->done is
+// re-checked after each unit -- by the staging loop, and by client_send_flow's
+// loop top while the Tflush waits for ring space.
 // Make ONE unit of s2c progress while back-pressured, then return so the caller
 // re-tests its retry condition. Either self-pump one s2c frame (draining a reply
 // -> the server frees a c2s slot AND its tag) when no reader is active, or park
@@ -767,39 +905,20 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
         client_send_progress_signal(c);          // a c2s slot / tag may have freed
         client_handoff_reader_locked(c, rpc);
     } else {
-        // Another thread is the reader (draining s2c). Park until it makes
-        // progress (bumps send_progress) or the session dies, then retry.
-        // MULTI-WAITER (R2-F1): N senders can be back-pressured on the shared
-        // client at once, so each parks on its OWN stack Rendez via a
-        // poll_waiter on c->send_waiters_list -- a single Rendez extincts on the
-        // 2nd sleeper (rendez.h). register-then-observe: register the hook +
-        // snapshot send_progress under c->lock, so a concurrent reader's
-        // bump-then-wake is either captured by the snapshot (cond true at
-        // sleep's re-check) or delivered to the now-registered hook -- no lost
-        // wake (I-9; the poll.tla register-then-observe). The stack Rendez/hook
-        // outlive the sleep (unregistered under c->lock before this frame pops).
-        struct Rendez      pr;
-        struct poll_waiter pw;
-        rendez_init(&pr);
-        poll_waiter_init(&pw, &pr);
-        struct send_wait_ctx w = { c, c->send_progress };
-        poll_waiter_list_register(&c->send_waiters_list, &pw);
-        c->send_waiters++;
-        spin_unlock(&c->lock);
-        (void)sleep(&pr, send_wait_cond, &w);
-        spin_lock(&c->lock);
-        c->send_waiters--;
-        poll_waiter_list_unregister(&pw);
+        // Another thread is the reader (draining s2c): park until it makes
+        // progress or the session dies, then retry.
+        client_park_for_progress_locked(c);
     }
 }
 
 // client_send_flow return contract (#52): 0 = the whole frame is on the wire;
 // CLIENT_SEND_NEVER = the frame NEVER reached the wire and the byte stream is
 // INTACT (a self-dying sender refusing to park, the session observed already
-// dead, or a spill-OOM under back-pressure -- in every case the transport's
-// all-or-nothing contract means zero bytes were pushed), so the caller must
-// reclaim the never-sent tag (p9_session_abort_unsent) and must NOT latch the
-// shared session dead; any other negative = a genuine transport break (the
+// dead, a spill-OOM under back-pressure, or a Tflush whose op's own reply landed
+// first -- in every case the transport's all-or-nothing contract means zero
+// bytes were pushed), so the caller must reclaim the never-sent tag
+// (p9_session_abort_unsent, or flush_retract for a Tflush) and must NOT latch
+// the shared session dead; any other negative = a genuine transport break (the
 // stream may hold a partial frame), the caller latches dead as before.
 #define CLIENT_SEND_NEVER  (-1000)
 
@@ -834,6 +953,10 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
     for (;;) {
         if (client_self_dying()) { rc = CLIENT_SEND_NEVER; break; }
         if (c->dead)             { rc = CLIENT_SEND_NEVER; break; }
+        // A noted op's Tflush is owed only while its reply is outstanding. A
+        // reply stored while the Tflush waited for ring space answers the op:
+        // the Tflush goes back unsent and the reply completes the call.
+        if (rpc->noted && rpc->done) { rc = CLIENT_SEND_NEVER; break; }
 
         // 8c-3 (#89, F2): a debugger stop is pending -- park role-free instead
         // of retrying/self-pumping. A stop-unwound self-pump drains nothing (it
@@ -878,26 +1001,103 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
 // DoS on the shared mount. Draining ANY reply frees its tag (in a full pool the
 // outstanding set is dominated by ownerless clunks, so a drain frees a clunk
 // tag; even a sync peer's reply drain frees a tag). Uses the SAME pump/park body
-// as the send flow. c->lock HELD; returns 0 (a tag is free) or -P9_E_IO (death).
+// as the send flow. c->lock HELD; returns 0 (a tag is free), -P9_E_IO (the
+// session died) or -P9_E_AGAIN (the caller is dying on a live session; nothing
+// was built, so the fid is still bound and goes to the closer).
 static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *self = current_thread();
     for (;;) {
-        // has_free_tag FIRST (round-2 F1): with a free tag, proceed to
-        // send_clunk even when the caller's Proc is dying, so the fid unbinds
-        // cleanly -- matching the old sync clunk (which unbound BEFORE it
-        // detected death). Only the rare burst-DURING-a-kill (pool full AND
-        // dying) bails, and a bail there leaks the fid bound exactly as the old
-        // sync path did on the same race. The common (not-in-a-burst) close is a
-        // free tag -> a clean immediate unbind.
-        if (p9_session_has_free_tag(&c->session)) return 0;
+        // Death before the free tag (FID-LIFECYCLE section 9). Round-2 F1 put
+        // the free tag first "so the fid unbinds cleanly", but an unbind that
+        // is never sent is the leak: a dying caller's build unbinds the fid and
+        // its send is then refused at client_send_flow's loop top. Refusing
+        // here, before any build, leaves the fid bound for the closer.
         if (c->dead)             return -P9_E_IO;
-        if (client_self_dying()) return -P9_E_IO;
+        if (client_self_dying()) return -P9_E_AGAIN;
+        if (p9_session_has_free_tag(&c->session)) return 0;
         // 8c-3 (#89, F2): a debugger stop -- park role-free (no frame built, so
         // no spill). Else a stop-unwound self-pump would spin (drains nothing).
         // Resume re-checks has_free_tag.
         if (client_stop_pending(self)) { (void)client_debug_stop_park(c); continue; }
-        client_pump_or_park_locked(c, rpc);
+        if (client_tag_owed_locked(c)) client_park_for_progress_locked(c);
+        else                           client_pump_or_park_locked(c, rpc);
     }
+}
+
+// flush(5) for a Thread that LIVES: a caught note interrupted my wait, but the
+// op is in flight on the server, so I may not walk away from its reply. Send a
+// Tflush and wait again for the first answer. An original reply is honoured and
+// the call completes with it; an Rflush means the server cancelled the op
+// (CLIENT_WAIT_FLUSHED -> -P9_E_INTR). Plan 9's mountio and Linux's
+// p9_client_rpc do the same. The wait is killable only: the note stays pending
+// until my EL0-return tail, and its claim is mine to re-take
+// (thread_caught_note_claim), so a note-interruptible wait would return at
+// once, every time. With `noted` set, client_wait cannot return NOTEINTR again.
+// Returns DONE, FLUSHED, DEAD or DIED; DONE with rpc->honoured set means the
+// demux already applied the reply into `out`. c->lock HELD on entry + exit.
+static int client_flush_wait(struct p9_client *c, struct p9_rpc *rpc,
+                             struct p9_dispatch_result *out) {
+    rpc->noted     = true;
+    rpc->flush_out = out;
+    rpc->sending   = true;       // until client_wait: see the handoff
+    int flen;
+    for (;;) {
+        // Each lock drop below lets my reply land first; then no flush is owed.
+        if (rpc->done)           return CLIENT_WAIT_DONE;
+        if (rpc->dead)           return CLIENT_WAIT_DEAD;
+        if (client_self_dying()) return CLIENT_WAIT_DIED;
+        flen = p9_session_send_flush(&c->session, c->out_buf, c->out_buf_cap,
+                                     rpc->tag);
+        if (flen > 0) break;
+        // With a tag free, no flush can be built for this op: wait for its
+        // reply instead, and the note rides the call out.
+        if (p9_session_has_free_tag(&c->session)) return client_wait(c, rpc);
+        // A full pool: make one unit of progress, as client_drain_until_free_tag
+        // does, but re-check my own reply after each -- a drain loop that waited
+        // only for a free tag would keep reading after my answer had come.
+        if (client_stop_pending(current_thread())) {
+            (void)client_debug_stop_park(c);
+            continue;
+        }
+        if (client_tag_owed_locked(c)) client_park_for_progress_locked(c);
+        else                           client_pump_or_park_locked(c, rpc);
+    }
+    // Staged: while my owner waits, the op may still act on its fid.
+    p9_session_flush_owner_waits(&c->session, rpc->tag, true);
+    int sfr = client_send_flow(c, (size_t)flen, rpc);
+    if (sfr == CLIENT_SEND_NEVER) {
+        // The Tflush never reached the wire -- my reply came first, or I could
+        // not wait -- so the op is an ordinary one again: its reply completes
+        // it, or death abandons it (#845).
+        p9_session_flush_retract(&c->session, rpc->tag);
+        client_send_progress_signal(c);   // the flush's tag is free again
+        return client_wait(c, rpc);
+    }
+    if (sfr < 0) client_mark_dead_locked(c, false);  // part of it may be on the wire
+    else         rpc->flushing = true;
+    // No reply of mine is stored: the send loop re-checked under this lock hold.
+    // From here the demux applies my reply on arrival.
+    return client_wait(c, rpc);
+}
+
+// #52: take back a tag whose frame never reached the wire -- a Tclunk whole,
+// with its fid re-bound for the closer, on a live session -- and wake every
+// sender parked for progress: a tag drain parks for exactly this, and a freed
+// tag signals nothing else (client_pump_or_park_locked). c->lock HELD.
+static int client_take_back_unsent_locked(struct p9_client *c, u16 tag, u8 type) {
+    // It mutates the session's tag and fid tables and signals the send list,
+    // all of which peers touch under c->lock. The lock word names no owner, so
+    // this catches a caller running with the lock free, not one racing a holder.
+    ASSERT_OR_DIE(__atomic_load_n(&c->lock.value, __ATOMIC_RELAXED) != 0u,
+                  "9p: a tag take-back without the client lock");
+    int rc = -P9_E_IO;
+    if (type == P9_TCLUNK && !c->dead &&
+        p9_session_retract_unsent(&c->session, tag) == 0)
+        rc = -P9_E_AGAIN;
+    else
+        p9_session_abort_unsent(&c->session, tag);
+    client_send_progress_signal(c);
+    return rc;
 }
 
 // Submit the Tmsg already built into c->out_buf (built_len bytes; the caller's
@@ -948,8 +1148,15 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.done        = false;
     rpc.dead        = false;
     rpc.be_reader   = false;
+    rpc.sending     = false;
     rpc.reply_len   = 0;
     rpc.on_complete = NULL;          // sync (WAKE_RENDEZ): the submitter waits
+    rpc.noted       = false;
+    rpc.flushing    = false;
+    rpc.honoured    = false;
+    rpc.flushed     = false;
+    rpc.honour_rc   = 0;
+    rpc.flush_out   = NULL;
     struct Thread *submitter = current_thread();
     rpc.owner       = submitter ? submitter->proc : NULL;   // 8c-3 (#89): the
                                      // handoff skips a stopped owner's op
@@ -960,12 +1167,13 @@ static int client_run(struct p9_client *c, size_t built_len,
     if (!rpc.reply_buf) {
         // #52: the caller's session_send_* already marked outstanding[tag],
         // but the frame will never be sent -- reclaim the slot (never-sent =>
-        // I-10-safe) or 64 such OOMs wedge the shared session's tag pool.
-        p9_session_abort_unsent(&c->session, tag);
-        return -P9_E_IO;
+        // I-10-safe) or 64 such OOMs wedge the shared session's tag pool. A
+        // Tclunk is taken back whole, as at CLIENT_SEND_NEVER below.
+        return client_take_back_unsent_locked(c, (u16)tag, type);
     }
 
     c->inflight[tag] = &rpc;
+    rpc.sending      = true;         // until client_wait: see the handoff
 
     // Send the framed Tmsg with #349 flow control. c->lock HELD: holding it
     // serializes senders so two frames never interleave; a transiently-full c2s
@@ -979,11 +1187,14 @@ static int client_run(struct p9_client *c, size_t built_len,
         // zero-bytes-pushed by the all-or-nothing contract). Reclaim the tag
         // (never-sent => I-10-safe) and leave the session LIVE for peers --
         // pre-#52 the self-dying path leaked the slot and the spill-OOM
-        // latched the whole shared session dead.
+        // latched the whole shared session dead. A Tclunk on a live session
+        // is taken back whole instead (FID-LIFECYCLE section 9): the server
+        // still holds its fid, so the fid is re-bound and the caller hands it
+        // to the closer. Every other op keeps -P9_E_IO: P9_E_AGAIN is EAGAIN,
+        // which a read must never surface for a spill-OOM.
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
-        p9_session_abort_unsent(&c->session, tag);
-        return -P9_E_IO;
+        return client_take_back_unsent_locked(c, (u16)tag, type);
     }
     if (sfr < 0) {
         c->inflight[tag] = NULL;
@@ -997,11 +1208,48 @@ static int client_run(struct p9_client *c, size_t built_len,
     }
 
     int wr = client_wait(c, &rpc);
-    if (wr == CLIENT_WAIT_DIED || wr == CLIENT_WAIT_NOTEINTR) {
-        // My Proc is dying (DIED), OR a caught note interrupted my wait and I
-        // unwind to deliver it while LIVING (NOTEINTR, 11b-9p) -- both ABANDON
-        // the op identically, returning -P9_E_IO / -P9_E_INTR at the tail.
-        // Abandon the op (#845): drop the inflight
+    if (wr == CLIENT_WAIT_NOTEINTR && type != P9_TCLUNK)
+        wr = client_flush_wait(c, &rpc, out);
+    if ((wr == CLIENT_WAIT_DIED || wr == CLIENT_WAIT_NOTEINTR) &&
+        type == P9_TCLUNK) {
+        // A Tclunk is never flushed (FID-LIFECYCLE section 9, flush(5)): a
+        // flush the server honours cancels the clunk, and the fid -- unbound
+        // at the build -- would then stay live on the server with nobody left
+        // to clunk it. The Tclunk is on the wire, so leave it in flight
+        // without an owner, exactly like p9_client_clunk_async's: its Rclunk
+        // drains ownerless and frees the tag and the slot. The clunk will
+        // happen, so the caller is told it did.
+        c->inflight[tag] = NULL;
+        kfree(rpc.reply_buf);
+        return 0;
+    }
+    if (wr == CLIENT_WAIT_FLUSHED) {
+        // flush(5): the Rflush came first, so the server cancelled the op and
+        // it counts as never sent. The demux freed both tags and dropped my
+        // registration; the note delivers at my EL0-return tail.
+        kfree(rpc.reply_buf);
+        return -P9_E_INTR;
+    }
+    if (wr == CLIENT_WAIT_DIED && rpc.flushing) {
+        // Death in the flush wait. My Tflush is on the wire, and neither answer
+        // has come (either would have ended the wait first), so I still hold
+        // the registration. Drop it; the Rflush and any late original reply
+        // drain ownerless, as the abandon below leaves them, and the op's fid
+        // is the closer's to clunk.
+        c->inflight[tag] = NULL;
+        kfree(rpc.reply_buf);
+        p9_session_flush_owner_waits(&c->session, (u16)tag, false);
+        struct cons_diag_line dl;
+        cons_diag_line_init(&dl);
+        cons_diag_line_puts(&dl, "9p: op abandoned (tag ");
+        cons_diag_line_putdec(&dl, (u64)tag);
+        cons_diag_line_puts(&dl, ", death, in its flush wait)\n");
+        cons_diag_line_emit(&dl);
+        return -P9_E_IO;
+    }
+    if (wr == CLIENT_WAIT_DIED) {
+        // My Proc is dying: nobody will read the result, so abandon the op
+        // (#845) rather than wait for its answer: drop the inflight
         // registration (the reader must not touch reply_buf once freed) + free
         // reply_buf, then send a Tflush(oldtag=tag) so the server promptly
         // releases the request and the tag is reclaimed when the Rflush arrives
@@ -1011,10 +1259,10 @@ static int client_run(struct p9_client *c, size_t built_len,
         // original reply can never be mis-attributed to a reused tag (I-10).
         // The Tflush send is a non-blocking ring write under c->lock (reusing
         // out_buf, whose prior frame was already pushed to the ring). Reaching
-        // DIED/NOTEINTR both mean rpc->dead was false (DEAD is checked first in
-        // client_wait; NOTEINTR is guarded on !rpc->dead in both wait arms),
-        // so c->dead is false and the session is OPEN here. If the flush cannot
-        // be built/sent (pool full / send fail), fall back to the pre-#845
+        // DIED means rpc->dead was false (DEAD is checked first in
+        // client_wait), so c->dead is false and the session is OPEN here. If
+        // the flush cannot be built/sent (pool full / send fail), fall back to
+        // the pre-#845
         // reclaim path -- outstanding[tag] stays active, reclaimed by the
         // eventual late reply or session teardown (no regression); a failed
         // transport write means the byte stream is broken, so latch dead.
@@ -1022,6 +1270,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         kfree(rpc.reply_buf);
         int flen = p9_session_send_flush(&c->session, c->out_buf,
                                          c->out_buf_cap, (u16)tag);
+        const char *flush_note = ", no flush staged)\n";
         if (flen <= 0) {
             // R2-F1: no flush could be staged (pool full at the abandon
             // instant) -- the owner is still gone; mark abandoned so the
@@ -1030,7 +1279,9 @@ static int client_run(struct p9_client *c, size_t built_len,
         }
         if (flen > 0) {
             int fsr = p9_transport_send(&c->transport, c->out_buf, (size_t)flen);
+            flush_note = ", flush sent)\n";
             if (fsr == P9_TRANSPORT_EAGAIN) {
+                flush_note = ", flush rolled back)\n";
                 // #53: a transiently-full c2s ring is BACK-PRESSURE, not a
                 // break. A dying thread must not park (it is unwinding), and
                 // latching the SHARED session dead here is the #349 collapse
@@ -1040,7 +1291,9 @@ static int client_run(struct p9_client *c, size_t built_len,
                 // ACTIVE until the late original reply is drained by a
                 // survivor's reader, or session teardown reclaims it.
                 p9_session_flush_rollback(&c->session, (u16)tag);
+                client_send_progress_signal(c);   // the flush's tag is free again
             } else if (fsr < 0) {
+                flush_note = ", flush send failed)\n";
                 client_mark_dead_locked(c, false);
             }
         }
@@ -1049,11 +1302,20 @@ static int client_run(struct p9_client *c, size_t built_len,
             cons_diag_line_init(&dl);
             cons_diag_line_puts(&dl, "9p: op abandoned (tag ");
             cons_diag_line_putdec(&dl, (u64)tag);
-            cons_diag_line_puts(&dl, (wr == CLIENT_WAIT_DIED) ? ", death" : ", note");
-            cons_diag_line_puts(&dl, (flen > 0) ? ", flush sent)\n" : ", no flush staged)\n");
+            cons_diag_line_puts(&dl, ", death");
+            cons_diag_line_puts(&dl, flush_note);
             cons_diag_line_emit(&dl);
         }
-        return (wr == CLIENT_WAIT_NOTEINTR) ? -P9_E_INTR : -P9_E_IO;
+        return -P9_E_IO;
+    }
+    if (rpc.honoured) {
+        // flush(5): a reply that beat my Rflush was applied into *out when it
+        // was demuxed, and the registration dropped then. Its tag stays
+        // reserved until that Rflush, which may already have freed it for
+        // another op, so inflight[tag] is no longer mine to touch.
+        if (c->done_reply_buf) kfree(c->done_reply_buf);
+        c->done_reply_buf = rpc.reply_buf;
+        return map_error(0, rpc.honour_rc, out);
     }
     c->inflight[tag] = NULL;
     if (wr == CLIENT_WAIT_DEAD) {
@@ -1078,6 +1340,10 @@ static int client_run(struct p9_client *c, size_t built_len,
     // and a later well-formed reply on the still-active tag dispatches
     // ownerlessly + can spuriously mutate fid state.
     if (drc < 0) client_mark_dead_locked(c, false);
+    // The dispatch freed my tag, and a tag drain parked on a full pool wakes
+    // only for progress: signal it (the demux that stored my reply signalled
+    // before the tag was free).
+    client_send_progress_signal(c);
     // Do NOT free rpc.reply_buf here: dispatch set the read/readdir/readlink
     // zero-copy aliases (out->read_data etc.) pointing INTO it, and the public
     // op copies those out AFTER this returns. Keep it as the client's
@@ -1113,6 +1379,15 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         rpc->on_complete(rpc, -P9_E_IO, NULL);   // own it: complete + bail
         return -P9_E_IO;
     }
+    // A full tag pool is a shortage, not a failure of this op: the sync path
+    // drains a tag (client_drain_until_free_tag), but an async submitter must
+    // not block, so the op completes with the retryable -P9_E_AGAIN before
+    // anything is built -- a build failure would read as -EIO.
+    if (!p9_session_has_free_tag(&c->session)) {
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
+        return -P9_E_AGAIN;
+    }
     // Build the Tmsg into the shared out_buf under the lock (allocating the tag
     // + marking session.outstanding[tag]); a >0 return is a well-formed frame.
     int built = build(&c->session, c->out_buf, c->out_buf_cap, build_ctx);
@@ -1144,10 +1419,31 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     rpc->owner     = NULL;          // 8c-3 (#89): async ops are skipped in the
                                     // handoff (on_complete != NULL first), so
                                     // owner is never read -- keep it non-garbage
+    rpc->noted     = false;         // flush(5) state is sync-only: kept inert
+    rpc->flushing  = false;
+    rpc->honoured  = false;
+    rpc->flushed   = false;
+    rpc->honour_rc = 0;
+    rpc->flush_out = NULL;
+    rpc->sending   = false;
     rendez_init(&rpc->rendez);      // unused for async, but kept inert
     c->inflight[tag] = rpc;
 
     int src = p9_transport_send(&c->transport, c->out_buf, (size_t)built);
+    if (src == P9_TRANSPORT_EAGAIN) {
+        // A full send ring is back-pressure, not a break, as on the sync path
+        // (client_send_flow) and the abandon Tflush. The transport pushed zero
+        // bytes, so the server never saw this op: take it back whole -- the
+        // tag (never-sent, so I-10-safe) and a Tclunk's fid -- and leave the
+        // SHARED session live. The submitter cannot wait the ring out, so the
+        // op completes with the retryable -P9_E_AGAIN.
+        c->inflight[tag] = NULL;
+        p9_session_retract_unsent(&c->session, tag);
+        client_send_progress_signal(c);   // a tag drain parks for a freed tag
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
+        return -P9_E_AGAIN;
+    }
     if (src < 0) {
         // The byte stream is broken: latch dead + complete every in-flight op.
         // `rpc` is registered, so mark_dead fires its on_complete (error CQE).
@@ -1197,6 +1493,11 @@ int p9_client_reader_pump_once(struct p9_client *c) {
         ret = -P9_E_IO;
     }
     c->reader_active = false;
+    // As client_wait's reader does on departure: a sender parked for progress
+    // (back-pressure, or a full tag pool) wakes, and may now self-pump. Without
+    // it, a sender that parked because a pump held the role slept on after the
+    // pump left: the handoff below never designates a sender.
+    client_send_progress_signal(c);
     client_handoff_reader_locked(c, NULL);
     spin_unlock(&c->lock);
     return ret;
@@ -1252,6 +1553,11 @@ int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
         ret = P9_PUMP_DEAD;
     }
     c->reader_active = false;
+    // As client_wait's reader does on departure: a sender parked for progress
+    // (back-pressure, or a full tag pool) wakes, and may now self-pump. Without
+    // it, a sender that parked because a pump held the role slept on after the
+    // pump left: the handoff below never designates a sender.
+    client_send_progress_signal(c);
     client_handoff_reader_locked(c, NULL);
     spin_unlock(&c->lock);
     return ret;
@@ -1297,8 +1603,12 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
         // session.outstanding[tag] reserved (awaiting_flush). A failed
         // build/send means the byte stream is broken -> latch dead (no
         // regression vs the pre-#845 reclaim; the tag is then moot). The send is
-        // a non-blocking ring write reusing out_buf under c->lock.
-        if (!c->dead && p9_session_is_open(&c->session)) {
+        // a non-blocking ring write reusing out_buf under c->lock. A Tclunk is
+        // never flushed (FID-LIFECYCLE section 9): it stays in flight without
+        // an owner, like p9_client_clunk_async's, and its Rclunk drains
+        // ownerless.
+        if (c->session.outstanding[tag].kind != P9_TCLUNK &&
+            !c->dead && p9_session_is_open(&c->session)) {
             int flen = p9_session_send_flush(&c->session, c->out_buf,
                                              c->out_buf_cap, tag);
             if (flen <= 0) {
@@ -1314,6 +1624,7 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
                     // stays reserved until its late reply drains ownerlessly
                     // or teardown reclaims -- never latch the shared session.
                     p9_session_flush_rollback(&c->session, tag);
+                    client_send_progress_signal(c);   // the flush's tag is free again
                 } else if (fsr < 0) {
                     client_mark_dead_locked(c, false);
                 }
@@ -1373,8 +1684,13 @@ int p9_client_init(struct p9_client *c,
     c->cape            = false;
     c->cape_uid        = 0;
     c->cape_gid        = 0;
+    c->remote          = false;
     c->cacheable       = false;
     c->wga_unsupported = false;
+    c->orphan_sink     = NULL;
+    c->orphan_sink_arg = NULL;
+    c->orphan_handed   = 0;
+    c->orphan_kept     = 0;
     c->out_buf     = c->out_buf_inline;
     c->out_buf_cap = P9_CLIENT_OUT_BUF_MAX;
     if (msize > P9_CLIENT_OUT_BUF_MAX) {
@@ -1400,6 +1716,8 @@ int p9_client_init(struct p9_client *c,
     c->demux_orphan_flush = 0;
     c->demux_orphan_late  = 0;
     c->demux_wakes        = 0;
+    c->flush_honoured     = 0;
+    c->flush_cancelled    = 0;
     poll_waiter_list_init(&c->send_waiters_list);   // #349 send-flow-control park (multi-waiter)
     c->send_progress  = 0;
     c->send_waiters   = 0;
@@ -1629,11 +1947,21 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    // A dying caller cannot send (client_send_flow refuses it), so refuse it
+    // before the build: the fid stays bound and goes to the closer.
+    if (client_self_dying()) CLIENT_UNLOCK_RET(c, -P9_E_AGAIN);
+    // A free tag before the build, as p9_client_clunk_async: on a full pool
+    // the build fails with the fid still bound, and -P9_E_IO would strand it.
+    struct p9_rpc token;
+    for (size_t i = 0; i < sizeof(token); i++) ((u8 *)&token)[i] = 0;
+    int de = client_drain_until_free_tag(c, &token);
+    if (de != 0) CLIENT_UNLOCK_RET(c, de);
     int len = p9_session_send_clunk(&c->session, c->out_buf,
                                      c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
+    if (e == -P9_E_AGAIN) CLIENT_UNLOCK_RET(c, e);   // taken back, never sent
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     spin_unlock(&c->lock);
@@ -1666,14 +1994,19 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
 //     death (the pre-fix raw send treated EAGAIN as fatal -- the #349 collapse).
 // A GENUINE transport break marks the session dead (mirror client_run). A
 // send_clunk failure now means only fid unbound / root / a live op on the fid --
-// all cases where the fid should not be clunked here; the sole caller
-// (dev9p_close) ignores it exactly as it ignored a sync-clunk error.
+// all cases where the fid should not be clunked here.
+//
+// A Tclunk that cannot be sent on a live session returns -P9_E_AGAIN with its
+// fid still bound (FID-LIFECYCLE section 9): a caller dying before the build is
+// refused there; one that dies, or meets a spill-OOM, after the build has its
+// Tclunk taken back whole. The caller hands the fid to the closer.
 int p9_client_clunk_async(struct p9_client *c, u32 fid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    if (client_self_dying()) CLIENT_UNLOCK_RET(c, -P9_E_AGAIN);
 
     // The async clunk composes with the #841 tag pool + the #349 c2s back-
     // pressure via a SYNTHETIC (never-inflight) rpc token: the pump/park body
@@ -1709,14 +2042,18 @@ int p9_client_clunk_async(struct p9_client *c, u32 fid) {
     // ring actually broke (a self-death leaves the session live for peers).
     int sfr = client_send_flow(c, (size_t)len, &rpc);
     if (sfr == CLIENT_SEND_NEVER) {
-        // #52: never-sent (see client_run). Reclaim the clunk's tag (captured
-        // BEFORE the send -- out_buf is not re-readable here) -- the frame
-        // never left, so I-10 holds on immediate reuse. The fid was already
-        // unbound at send (I-11, reply-independent); the server-side fid
-        // persists until session end -- the documented dying-path cost,
-        // bounded, vs the pre-#52 leak of a tag slot on a LIVE session.
-        if (ctag != P9_NOTAG)
-            p9_session_abort_unsent(&c->session, ctag);
+        // #52: never-sent (see client_run). The clunk's tag was captured
+        // BEFORE the send -- out_buf is not re-readable here -- and the frame
+        // never left, so I-10 holds on immediate reuse. On a live session the
+        // server still holds the fid: take the Tclunk back whole (the fid is
+        // re-bound into the slot it kept) for the closer. On a dead session
+        // the fid died with it, so only the tag is reclaimed.
+        if (ctag != P9_NOTAG) {
+            // Taken back before the unlock: CLIENT_UNLOCK_RET evaluates its
+            // value after dropping c->lock.
+            int trc = client_take_back_unsent_locked(c, ctag, P9_TCLUNK);
+            CLIENT_UNLOCK_RET(c, trc);
+        }
         CLIENT_UNLOCK_RET(c, -P9_E_IO);
     }
     if (sfr < 0) {
@@ -2216,6 +2553,26 @@ bool p9_client_is_open(const struct p9_client *c) {
     bool open = p9_session_is_open(&c->session);
     spin_unlock(&((struct p9_client *)c)->lock);
     return open;
+}
+
+bool p9_client_fid_held(struct p9_client *c, u32 fid) {
+    if (!c) return false;
+    if (c->magic != P9_CLIENT_MAGIC) return false;
+    spin_lock(&c->lock);
+    bool held = !c->dead && p9_session_is_open(&c->session) &&
+                p9_session_fid_bound(&c->session, fid);
+    spin_unlock(&c->lock);
+    return held;
+}
+
+void p9_client_set_orphan_sink(struct p9_client *c, p9_orphan_sink_fn fn,
+                               void *arg) {
+    if (!c) return;
+    if (c->magic != P9_CLIENT_MAGIC) return;
+    spin_lock(&c->lock);
+    c->orphan_sink     = fn;
+    c->orphan_sink_arg = arg;
+    spin_unlock(&c->lock);
 }
 
 size_t p9_client_inflight(const struct p9_client *c) {

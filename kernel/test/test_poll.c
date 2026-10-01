@@ -86,6 +86,7 @@ void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
+void test_poll_pre_resolved_spoor(void);
 
 // =============================================================================
 // Helpers: test Proc + per-test Spoor → fd installation.
@@ -602,7 +603,7 @@ static struct Proc *make_marked_test_proc(void) {
 static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false, false);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false, false, false);
     spoor_clunk(root);
     return h;
 }
@@ -1663,6 +1664,88 @@ void test_poll_max_nfds(void) {
     }
     TEST_ASSERT(all_pollnval, "every revents = POLLNVAL");
 
+    drop_test_proc(p);
+}
+
+// NP-5: entries the caller resolved itself (sys_poll_for_proc_spoors' pre[]).
+// The vivarium polls a socket's readiness Spoor, held OUTSIDE the guest's fd
+// table, while kfds[i].fd keeps naming the guest's own socket -- so a pre entry
+// is polled through its Spoor and never looked up by number. Here the numbers
+// name nothing in the table: a pre entry that fell back to the lookup would read
+// POLLNVAL, exactly as the unresolved entry beside it must.
+static struct Spoor *g_pre_spoor;
+
+static void consumer_poll_pre_forever_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = 40, .events = POLLIN, .revents = 0 },
+    };
+    struct Spoor *pre[1] = { g_pre_spoor };
+    s64 r = sys_poll_for_proc_spoors(g_pollee_proc, pfds, 1, -1, pre);
+    g_poll_revents = pfds[0].revents;
+    __atomic_store_n(&g_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_poll_exited);
+}
+
+void test_poll_pre_resolved_spoor(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, 40, &h) < 0 && handle_get(p, 41, &h) < 0,
+                "control: fds 40 and 41 name nothing in the table");
+
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    int ref0 = __atomic_load_n(&rd->ref, __ATOMIC_ACQUIRE);
+
+    struct pollfd pfds[2] = {
+        { .fd = 40, .events = POLLIN, .revents = 0 },
+        { .fd = 41, .events = POLLIN, .revents = 0 },
+    };
+    struct Spoor *pre[2] = { rd, NULL };
+    s64 r0 = sys_poll_for_proc_spoors(p, pfds, 2, 0, pre);
+    TEST_EXPECT_EQ(r0, 1L, "empty pipe: only the unresolved entry counts");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, 0L, "the pre entry is polled, not looked up");
+    TEST_EXPECT_EQ((s64)pfds[1].revents, (s64)POLLNVAL, "the unresolved entry is looked up");
+
+    static const u8 payload = 0x5A;
+    TEST_EXPECT_EQ(wr->dev->write(wr, &payload, 1, 0), 1L, "write a byte");
+    pfds[0].revents = pfds[1].revents = 0;
+    s64 r1 = sys_poll_for_proc_spoors(p, pfds, 2, 0, pre);
+    TEST_EXPECT_EQ(r1, 2L, "a byte in the pipe: both entries count");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLIN, "the pre entry reads its Spoor's POLLIN");
+    TEST_EXPECT_EQ((s64)pfds[1].revents, (s64)POLLNVAL, "...beside the lookup's POLLNVAL");
+    TEST_ASSERT(pfds[0].fd == 40 && pfds[1].fd == 41, "the caller's numbers are untouched");
+    TEST_EXPECT_EQ(__atomic_load_n(&rd->ref, __ATOMIC_ACQUIRE), ref0,
+                   "every snapshot of the pre Spoor was released");
+
+    // Blocking: the pre entry's snapshot is RETAINED across the sleep (its waiter
+    // hangs off the Spoor) and released after the wake.
+    struct Spoor *rd2 = NULL, *wr2 = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd2, &wr2), 0, "pipe_create (blocking leg)");
+    int ref2 = __atomic_load_n(&rd2->ref, __ATOMIC_ACQUIRE);
+    g_pollee_proc  = p;
+    g_pre_spoor    = rd2;
+    g_poll_result  = -999; g_poll_exited = false;
+    g_poll_revents = 0;
+    struct Thread *consumer = thread_create(kproc(), consumer_poll_pre_forever_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "consumer SLEEPING on the pre Spoor");
+    int ref_asleep = __atomic_load_n(&rd2->ref, __ATOMIC_ACQUIRE);
+
+    static const u8 payload2 = 0xA5;
+    TEST_EXPECT_EQ(wr2->dev->write(wr2, &payload2, 1, 0), 1L, "wake it with a byte");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    TEST_EXPECT_EQ(g_poll_result, 1L, "the woken poll returns 1");
+    TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "...with POLLIN");
+    test_kthread_join_free(consumer, &g_poll_exited);
+    TEST_EXPECT_EQ(ref_asleep, ref2 + 1, "the sleeping poll HELD one reference");
+    TEST_EXPECT_EQ(__atomic_load_n(&rd2->ref, __ATOMIC_ACQUIRE), ref2,
+                   "...and released it after the wake");
+
+    spoor_clunk(rd);  spoor_clunk(wr);
+    spoor_clunk(rd2); spoor_clunk(wr2);
     drop_test_proc(p);
 }
 

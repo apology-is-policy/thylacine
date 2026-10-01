@@ -11,12 +11,15 @@ on-demand by `quaestor closed sub-kernel-territory`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-10 closed findings on [[sub-kernel-territory]] — do NOT re-report
+13 closed findings on [[sub-kernel-territory]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
 - [[fnd-66b-r1-f2]] [P3] A truncated mount line concatenated into the binds: line (fixed) — Fixed: each mount line renders ATOMICALLY — snapshot the offset, rewind
 - [[fnd-66b-r1-f3]] [P3] The read-buffer headroom comment assumed short names (fixed) — Fixed as documentation: reworded to say 512 bytes holds the common
+- [[fnd-b1d-v-r1-f1]] [P2] alloc-smoke's directory success path mounted /lib, which only an LLVM-fork image ships (fixed) — Fixed: the directory source is `/bin`. The same leg now mounts it through the
+- [[fnd-b1d-v-r1-f2]] [P2] a flagless mount at a file point still stacked a second member, a union the resolver searches as a directory (fixed) — Escalated; the operator voted for option 1 of 4 on 2026-09-25
+- [[fnd-b1d-v-r2-f1]] [P2] Every /srv/<name> node carried the registry root's qid.path, so a mount at one was keyed at the root and at every other service (fixed) — Fixed: a per-registry counter stamps each reservation's `qid_path`, never 0,
 - [[fnd-ls4-r1-f1]] [P3] A deep cwd plus a long relative path is rejected though it would resolve (fixed) — Fixed as documentation — the combined-length bound recorded as a known
 - [[fnd-ls4-r1-f2]] [P3] chdir resolves the path lexically, then stalk re-clamps what is already clean (fixed) — Fixed as a comment at the call site, NOT by removing the redundancy.
 - [[fnd-ls4-r1-f3]] [P3] source_is_valid is a tautology (documented) — Documented, no action — pre-existing and out of the LS-4 scope that

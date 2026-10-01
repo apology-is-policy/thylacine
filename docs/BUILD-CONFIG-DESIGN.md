@@ -337,7 +337,7 @@ copies), incl. the isolation guard that the real `configs/` is never touched.
 - **Six sibling forks** (in no Thylacine checkout), by exact commit: `go-thylacine`
   4bb69d2, `llvm-thylacine` 251b5b5 (branch `thylacine`, 6-patch series over
   llvmorg-22.1.8), `ambush` 563bae9, `gopls` f65d347, `mesa-thylacine` b7f9ed2,
-  `stratum/v2` (`thylacine-pouch-arm`).
+  `stratum/v2` (`main`).
 - **Two manual-drop cache inputs**: Alpine minirootfs (3.21.0-aarch64) +
   busybox-static (1.37.0-r14.apk) — URL + sha256 each. Since Boosty B-0 also
   `icu4c-78.3-sources.tgz`.

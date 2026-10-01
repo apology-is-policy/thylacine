@@ -643,9 +643,16 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
         binds.push(("/dev/tty", t));
     }
     for (path, fd) in &binds {
-        if unsafe { t_mount(path.as_ptr(), path.len(), *fd, T_MREPL | T_MNOEXEC) } != 0 {
+        let rc = unsafe { t_mount(path.as_ptr(), path.len(), *fd, T_MREPL | T_MNOEXEC) };
+        if rc != 0 {
             reap_diorama(dio_pid, dio_ctl);
-            return Err(format!("recipe mount {} failed (missing rootfs anchor?)", path));
+            // -ENOTDIR is Plan 9's Emount: the anchor exists but is the other
+            // type (a directory where a device leaf needs a file, or the reverse).
+            return Err(match libthyla_rs::err::Error::from_syscall_return(rc) {
+                Err(e) if rc != -1 => format!(
+                    "recipe mount {} failed: {} (the rootfs anchor has the wrong type)", path, e),
+                _ => format!("recipe mount {} failed (missing rootfs anchor?)", path),
+            });
         }
     }
     for (_, fd) in &binds {

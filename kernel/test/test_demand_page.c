@@ -49,6 +49,7 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>         // REVENANT R-2: spoor_alloc for the FILE Burrow's backing Chan
+#include <thylacine/thread.h>        // ARCH 8.8.3: current_thread + note_interruptible
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -64,6 +65,7 @@ void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 // REVENANT R-2: BURROW_TYPE_FILE demand-page fault arm.
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_pagein_not_note_interruptible(void);
 void test_demand_page_file_pages_charge_the_holder(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
@@ -495,9 +497,18 @@ static u64          g_rev_protect_prot = 0;
 extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
                                        u64 prot_raw, u64 flags_raw);
 
+// ARCH 8.8.3: what note_interruptible read DURING the page-in -- the stub read
+// is the one place that runs inside it. -1 = not recorded.
+static bool g_rev_record_intr = false;
+static int  g_rev_saw_intr    = -1;
+
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
+    if (g_rev_record_intr) {
+        struct Thread *ct = current_thread();
+        g_rev_saw_intr = (ct && ct->note_interruptible) ? 1 : 0;
+    }
     if (g_rev_shift_vma) {
         g_rev_shift_vma->burrow_offset += PAGE_SIZE;
         g_rev_shift_vma = NULL;          // shift ONCE, so a re-fault can settle
@@ -577,6 +588,52 @@ void test_demand_page_file_smoke(void) {
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident page resolves");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "fast-hit must NOT re-read (still 1)");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// ARCH 8.8.3 (signal(7)'s list): a page-in waits killable, as Linux's
+// filemap_fault does. A caught note that cut it short would be a SIGBUS at EL0,
+// or an EFAULT from inside an interruptible read's copy-out -- so
+// userland_demand_page clears note_interruptible around the page-in and
+// RESTORES it after, since the fault may sit inside a syscall that is itself
+// interruptible. The thread starts interruptible, as it would inside a pipe
+// read whose buffer is a not-yet-resident file page.
+void test_demand_page_file_pagein_not_note_interruptible(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map RX");
+
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL, "a current thread");
+    bool saved = t->note_interruptible;
+    t->note_interruptible = true;
+    g_rev_saw_intr    = -1;
+    g_rev_record_intr = true;
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+    enum fault_result r = userland_demand_page(p, &fi);
+
+    g_rev_record_intr = false;
+    bool after = t->note_interruptible;
+    t->note_interruptible = saved;
+
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the page-in resolves");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the page-in read ran");
+    TEST_EXPECT_EQ(g_rev_saw_intr, 0,
+                   "the page-in ran with note_interruptible CLEAR (killable only)");
+    TEST_ASSERT(after, "the fault RESTORED the flag for the syscall it sits in");
 
     drop_proc(p);
     burrow_unref(v);

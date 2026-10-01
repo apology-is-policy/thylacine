@@ -353,7 +353,17 @@ fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     //    logout, and unmount here is by PATH, not by fd.
     let _ = unsafe { libthyla_rs::t_close(root) };
     if rc != 0 {
-        return fail(env, alloc::format!("mount: cannot mount at {}", plan.mountpoint), 1);
+        // The kernel's flat -1 names no cause; Plan 9's type check does
+        // (-ENOTDIR: an attach root is a directory, so the point is a file).
+        let why = match libthyla_rs::err::Error::from_syscall_return(rc) {
+            Err(e) if rc != -1 => alloc::format!(": {}", e),
+            _ => alloc::string::String::new(),
+        };
+        return fail(
+            env,
+            alloc::format!("mount: cannot mount at {}{}", plan.mountpoint, why),
+            1,
+        );
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)

@@ -477,6 +477,231 @@ below slide one, equal to its fresh-tile control. `tools/test.sh` on the default
 the move, and TC-1b's device leg (scroll up after the clear, then after the chord) is designed to prove it with the
 delete.
 
+## TC-1b: Super+K forgets a tile's history, and the selection stops drifting — 2026-09-28
+
+The operator's second TC-1 vote made code: THE HISTORY IS THE USER'S. No escape deletes it (TC-1a); a user chord
+does. Scripture 283f3a60 (HALCYON 14.13, 14.11.5; HALCYON-INSTRUMENT 9.3; the TC-1b audit-trigger row). Before the
+chord, a census of every consumer of a block's position found two defects the chord would have worsened, both
+pre-existing and both pulled forward: the Normal-mode selection held flat POSITIONS and landed on other rows when the
+budget evicted in front of them, and a tile never re-read its flat list across scroll-off.
+
+- **The chord.** `ChordAction::History` (`history`, default Super+K, keycode 37) is delivered to the rail owner as
+  TEV_CHORD code 4 with the focused pane's id: no verb, no escape, no fallback -- with no rail, a full rail queue or a
+  pane the owner does not host, it is said and dropped and nothing is deleted.
+- **The forget.** `Transcript::forget` drops every frozen block, the open block's items, the held scroll-off half,
+  a byte-fed zone's gathered pre lines and finished table rows (the header flag with them); it keeps the open block's
+  identity (id, kind, cmd, styles, objs, its class latched), the pending line, the row still being written, the live
+  grid and all in-flight structure. The blocks the tile's span ring still names survive as sparse HUSKS (kind, class,
+  the named objects at their indices; sorted by id, binary-searched), charged `size_of::<Block>()` plus each kept
+  object, and evicted before any frozen block. The bar's exit label goes with its command; an image not yet captioned
+  stays; images only forgotten lines named are released.
+- **The selection.** A `Stamp` (rows dropped from the front, rows scrolled off the grid, the history's share of the
+  list) travels with the selection. A history row moves up by what went from the front; a grid row that stays moves
+  up one per row scrolled; one that left is found through the transcript's record of the lines scroll-off completed
+  (a ring of 1024: where each line's rows end and the flat rows it added), counted back from the end -- exact because
+  every history row of a tile arrives through such a line. A held half rides the grid's first row. The count is the
+  rows the grid has SHOWN leaving (`rows_left`): a resize's reflow moves it at once, and the end of every CellDiff
+  publishes what has arrived -- a ScrollOff alone moves nothing, because the grid still shows its rows until the
+  repaint lands and the session paints between reads. Every change to the flat list bumps `seq`, and refresh also
+  re-reads on a grid height change. A width change restarts each grid end at the prompt and a height change slides
+  it with its row (`Tile::resize_selected`); the rows a shrinking resize drops leave the grid then, and the
+  ScrollOff that later delivers them does not count them again. The producer answers each resize it applies with a
+  winsize ack (on the wire and never sent before) and a full repaint: the acknowledged repaint at the grid's dims
+  settles the mirror's guess (the count can go down: rows the producer kept are back, and grid ends move down).
+  From a width change until that repaint, on either screen, rows of other widths are no distance: grid ends hold
+  their rows and the repaint restarts them at its prompt; a reply at another width (the ack names no resize)
+  reopens the window. The forget also blanks the
+  open block's objects that only forgotten rows used.
+- **Between a mode flip and the other screen's first paint** the grid still holds the old screen's last frame
+  (`Tile::screen_pending`, set at a flip, cleared by the next CellDiff). After an app exits, Esc is the app's, a resize
+  crops the frame rather than reflowing it (a reflow would count rows that never left the normal screen), and it paints
+  as the app's. At an app's start the shell's frame paints as it did (`Tile::holds_normal_frame`), soft-wrapped rows
+  joined: the producer's last diff before the swap now carries the main screen's wrap flags (`Vt::main_wrapped`), not
+  the blanked alt screen's.
+- **Pre-existing, fixed on the way.** An obj was charged its text only and objects bypassed the open-block cap (a bare
+  obj was free); a block-cap continuation dropped the running command (Super+Q then closed a running job unasked); a
+  tile's block frozen mid-pre by the cap gained an empty fence (a history row no line added), and the cap's
+  continuation ended a tile's open pre and table; a block dropped at its freeze kept its charges, drifting the budget
+  up until it evicted history it had room for.
+- **Gate.** `ls-halcyon-lantern` legs 6 (TC-1a's move: a clear over a full screen adds more than half a screen of
+  history, `true` the control) and 7 (Super+K: history 0, the grid unchanged, three screens up shows ground where it
+  showed history, the live screen's top rows inked as before; two screens of output then start a history again).
+
+Audit (the TC-1b row), 8 rounds: rounds 1-6 Opus 5.5 reviewing Opus 5.5 (Fable out of credits), rounds 7-8 Fable 5.1
+reviewing Opus 5.5 (cross-family); MODEL start == end in every round.
+Round 1: 1 P0 (the seq bumps: the rebase never ran in a tile) / 3 P1 (a wrapped line's first half mapped to the line
+before; the obj charge; the continuation's cmd) / 2 P2 / 10 P3. Round 2: 0 P0 / 1 P1 (a shrinking resize counted its rows twice) / 5 P2 (four already fixed by the self-audit beside
+it; round 1's obj freeze cutting the console's line/table/pre; the dropped block's charges) / 6 P3. Round 3: 0 P0 / 1 P1 (the shed guess never settled: kaua-term coalesces resizes and a mirror lags -- the producer's full repaint now settles it, found by the reviewer and the self-audit alike) / 1 P2 (the kept set is what the span ring names, not what a live cell shows: the prose and T27) / 6 P3. Round 4: 0 P0 / 1 P1 (across a width change the count mixed rows of different widths: the re-cut window + the ack-keyed settle) / 0 P2 / 3 P3; the self-audit then found SA-r5-1 [P2] (an early settle; a reply at another width reopens). Round 5: 0 P0 / 0 P1 / 3 P2 (the window missed the alt screen; rows counted before the reply that reopens; the selection moved before the grid -- the last two fixed by one change, the count at the repaint) / 3 P3. Round 6: 0 P0 / 1 P1 (a shrink before the repaint counted the rows that had already arrived a second time -- found by the reviewer and the self-audit alike, and repro'd on the unfixed tree; the shed now counts only the rows still on their way, and a count that passes a row not here yet reports the end) / 0 P2 / 4 P3 (a held run survived a repaint that moved no count; Esc before the main screen's repaint entered Normal mode on the app's last frame, pre-existing; docs; tests). Sweep r7: 121 of 125 first, then 125 of 125 after closing its one test gap (P9, an end on grid row 0 at a shrink). Round 7 (Fable 5.1, cross-family): 0 P0 / 0 P1 / 1 P2 (a resize while the main screen's repaint read behind an app's exit reflowed the app's last frame, counting rows that never left; the mirror now crops that frame until the repaint, and paints it as the app's) / 2 P3 (the Esc gate moved into the lib where tests reach it; an arrived dropped row restarting at the prompt, closed with a reason). Round 8 (Fable 5.1): 0 P0 / 0 P1 / 0 P2 / 3 P3 -- clean (the shell's frame now paints as it did until an app's first paint, with the main screen's wrap flags from the producer; the entering Esc is a press; five doc comments).
+Closed list: memory `audit_tc1b_closed_list.md`.
+
+Verification: host halcyond 422, kaua-term 50, vt 75; `tools/test-rust.sh` 27 crates, 2018 tests, 0 failing; both
+halcyond release builds (default, guest); the default image's `tools/test.sh` (kernel tests 1669/1669, arc gates L-6c and
+D-5 PASS; the clade gates not baked). Device, `ls-halcyon-lantern`: red with the session's forget call removed (legs 1-6
+PASS; leg 7 FAIL by name, the tile still held 345 history rows) and green on the tree (legs 1-7 PASS; Super+K took 345 history rows to 0, kept the grid,
+and the tile recorded again). Host sabotage sweeps,
+every leg predicted before its run: r6 110/114, r7 121/125 then 125/125 after closing its test gap, r9 136/138 (one test
+gap: the frame test compared heights only) and r9b 138/138 after the fix.
+
+## LR-1: a remote mount says so — 2026-09-28
+
+The operator's `la` vote made code (observation 2 of the lantern-over-Haul review): a mount point gets a REALM of its
+own, `remote` for a network mount and `mount` for a local one. Scripture f8ba6124, the carrier vote bb501b57 (HAUL-DESIGN
+4.8; COREUTILS-THYLACINE-DESIGN; the ARCH `/proc/<pid>/ns` paragraph; manual 14; the LR-1 audit-trigger row).
+
+- **The carrier** (operator vote 2026-09-28). The declaration rides the 9P session in the identity cape's shape:
+  `SYS_ATTACH_9P_REMOTE` (0x4) on the pipe attach, `DMSRVREMOTE` (bit 22) on a /srv post in either mode, inherited
+  by every attach over the service and part of its identity on a tombstone rebind. Stamped once before the root
+  publishes; display only.
+- **The render.** `territory_format_ns` ends a member line in ` remote`, never the covered entry's, inside the #66b
+  rewind.
+- **The tools.** Haul declares on both paths. `ls -l` / `la`, `stat` and `realm` read the caller's own mount list ahead
+  of the fstat inference. `ns` defaults to the caller, reads `9p` for `#9` and `remote` for a suffixed line, and gains a
+  FLAGS column. A cut list says `mount list incomplete`.
+- **A correction.** The claim that `ns` called the Haul mount `disk`, read from code, was wrong: every 9P session root
+  is named `/`. The carrier note is restated as `dec-2026-09-28-remote-label-carrier-r2`.
+
+Audit (the LR-1 row), 1 round: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end. 0 P0 / 1 P1 (the `/`
+label, which the first boot had also found) / 0 P2 / 2 P3 (a cut list read silently; the priv-magic arm unwitnessed),
+all fixed; not dirty. Closed list: memory `audit_lr1_closed_list.md`.
+
+Verification: new kernel tests `sys_attach_9p.{declarations, rejection_paths}`, `srv_client.remote_{admission, post,
+recycle, post_syscall}`, `9p_srvconn_transport.remote_attach{,_srv}` and `dev9p.remote_format_ns`; coreutils host
+tests 52. Sabotage: 15 kernel mutants over six boots, each red on its predicted test (one masking pair explained: the
+recycle arm's write shows only with the rebind identity check in place); host sabotage of the covered skip and of the
+cut detection red. Device, CI image: `ergo-1`, `haul-npxf` and `haul-post` green, red with Haul's declaration stripped
+(both haul gates at their first LR-1 leg) and with the mount list ignored (`ergo-1` at leg f). Default image: `tools/test.sh`
+1740/1740 (zero `[skip]`, boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 28 crates, 2077 tests, 0 failing.
+`corvus.tla` (PostService maps to `srv_reserve`, which LR-1 changed; the spec does not model a service's attributes):
+its eight buggy cfgs re-run, each still violated.
+
+## FL-1: a slide change is one synchronized frame — 2026-09-28
+
+The operator saw a lantern slide change flicker over Haul (2026-09-24) and put synchronized output in their order. Two
+causes, read from the code: lantern wrote the clear, then read the slide (a network round trip over Haul), then wrote it
+in some forty unbuffered writes; and halcyond paints a tile after every read of its record pipe (at most 8 KiB), so the
+blank and each partial slide were shown in turn. Scripture 574f4d05 (HALCYON 14.3 AMENDED, KAUA-TERM 1b, LANTERN-DESIGN
+13, AURORA 3; `dec-2026-09-28-sync-output-seam`; the FL-1 audit-trigger row).
+
+- **The seam record** (operator vote 2026-09-28). A program's DEC private mode 2026 frame crosses the kaua seam as
+  `Control::SyncBegin` / `SyncEnd` (subtags 7 and 8, no payload), each after the pending `CellDiff`. halcyond applies
+  every record as it arrives and holds only that tile's paint until the close, a reconfigure, the program's exit or
+  crash, or 150 ms after the first paint it deferred; a timeout abandons the frame.
+- **The vt.** It reads a CSI's marks (a private marker on the first byte only, intermediates, C0 in place, ESC
+  restarts, CAN/SUB cancel), so a marked sequence no longer runs a plain handler or prints its tail; it answers DECRQM
+  for the DEC modes it tracks; it reports each change of mode 2026 in stream order, RIS closing a frame last.
+  `FrameHold` (shared by halcyond and aurora) bounds the wait.
+- **halcyond** skips a held tile's paint at the render step and, while the paint is held, waits in the poll for the
+  rest of the frame or the deadline; a loop that came back for the tile instead would never read the close (the first
+  device run: 91612 held passes). A reconfigure or the program's exit cuts the hold.
+- **aurora** reads the mode and a count of frames opened once per pass (`follow_frame`), holds the paint, and the
+  compositor's FRAME tick re-runs the pass.
+- **lantern** reads and renders a slide into memory, then writes `?2026h`, the clear, the slide and `?2026l` in one
+  write.
+- **A correction.** TC-1a's claim that subtag 7 was "allocated to another record" (the wire test comment and
+  sub-kaua-term) was false; nothing allocated it.
+
+Audit (the FL-1 row), 2 rounds: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end. r1: 1 P0 (the
+session loop spun on a held tile, which the device leg had found first) / 0 P1 / 0 P2 / 3 P3; dirty, so r2 on the
+fixes: 0 / 0 / 0 / 4 P3 (leg 8 saw the hold's accounting, not its effect -- now only the program's own close reads as a
+frame shown whole, and a paint made while the frame is open reads `cut short`; the abandonment report's reach; a cut
+told apart from a close; 14.3's resize wording). All addressed; closed. Closed list: memory `audit_fl1_closed_list.md`.
+
+Verification: host vt 92, kaua-term 55, halcyond 424, aurora 11, lantern 25. Sabotage S4-S24, predictions written
+first, each red on exactly its predicted tests (S20-S24 at the predicted assertion). Device (the CI image with the
+session and the Instrument profile, `ls-halcyon-lantern`): red without lantern's marks (leg 8 at its timeout); the first
+real run red with `abandoned at its bound (91612 paint(s) held)`, the spin, so that fix's red; red with the render
+step's skip removed (leg 8 at `cut short (1 paint(s) held)`); green, all eight legs, leg 8 `shown (3 paint(s) held)`.
+Default image: `tools/test.sh` 1740/1740 (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 28 crates, 2105
+tests, 0 failing. No kernel change, so no sanitizer run or spec is owed.
+
+## The Operator's Manual: Halcyon and lantern — 2026-09-29
+
+The Operator's Manual had no section for Halcyon, although the default image's login starts it, and none for lantern.
+Operator vote 4 of 2026-09-28: the Halcyon chapter and the lantern section now, as a chunk of their own, before the next
+feature; later Halcyon changes then keep them current (the binding manual rule). Six commits: five compositor fixes the
+device scenario found, each its own commit, then the manual itself (`2ed27be0`).
+
+- **`docs/manual/10-halcyon.md`** (`halcyon`): logging in and out, tiles and panes, the focus, splits and their limits,
+  stacks, zoom, dividers, RESET, closing a tile (the dialog, the protected final tile), workspaces (the empty pane and
+  its Open shell, the kept pane), Normal mode and the history, objects and their menus, `clear` and Super+K, the key
+  reference, the theme picker and the scale, layouts, the chord and Normal-mode tables, the files. Technical Details:
+  the processes, key routing and what the rail delivers, rich text beside the terminal view, the history and the view,
+  what closing a tile does to its program, workspaces, profiles.
+- **`docs/manual/11-lantern.md`** (`lantern`): presenting, presenting to a room, writing and checking a deck, a deck
+  from another machine over Haul (in a Halcyon tile), printing, the keys, the command reference, the manifest.
+  Technical Details: the output forms, clearing, one slide per frame, keyboard input, checking and memory.
+- `01-manual.md`: in a Halcyon tile the reader's output scrolls back through Normal mode (it named a wheel scroll that
+  session tiles do not have). `OPERATORS-MANUAL.md`: the two rows and a revision row.
+- **The device scenario** `tools/interactive/ls-halcyon-manual.exp` (default image; SKIP 77 on `--config ci` or a
+  `legacy` bake): 18 steps in the section's order (1, 1b, 2-17, with sub-legs), asserted from the compositor's
+  test-mode lines, the captures kept at `build/manual-halcyon-*.png` for the claims only a look can read. Declared in
+  the vault's `abi-boot-banner` mirrors.
+- **The compositor fixes it found** (halcyon-status row for the five hashes):
+  - `c7b5293f` a backgrounded leaf (the console renderer's, in a session's root row) is transparent to a newcomer's
+    share, a move, a stack's header numbers and RESET -- KT-1.5d-3 F2's rule reaching four ops it had missed; an empty
+    tab among several keeps its header row.
+  - `f0038768` halcyond's test-mode chrome line says a header's resize; `halcyon`'s help writes `~/`, which ut expands.
+  - `4fd4cb65` a session's workspaces are the session's: the owner stamp, fresh panes that wait to be asked, the kept
+    last pane, the departure (the login prompt shows wherever the session ended), the takeover re-stamp.
+  - `bc3a04b7` a session tile draws its whole `v` selection, as the console renderer does.
+  - `1d3b5f5c` a session's layout notice (TEV_LAYOUT) is no longer lost with the surface that carried it (the ring
+    reports it whichever surface carries it; tapestryd re-sends one a retired surface still held). Pre-existing, I-9's
+    class.
+- **What the code refuted in the first draft** (before any review): plain output is a fixed-width terminal view, not
+  proportional; click-to-focus exists; `$HOME` is not a ut variable, so the section writes `~/`; Super+S and
+  Super+Shift+T act on the focused tile's parent and refuse a nested container; Super+E also spreads out a stack; the
+  key reference omits the workspace chords; "no program can delete the history" holds for the delete path only.
+- **What the device refuted in the second draft**: Super+H in a row adds a pane to the row (the others narrow in
+  proportion) rather than halving the focused pane; at 1280 px a row of three leaves no room to split one of them side
+  by side; Instrument's tabbed mode shows the open tile alone under one header.
+- **Defects enqueued** (OPEN-BUGS, all owned): the key reference omits the workspace chords although help.rs calls it
+  the whole vocabulary; a split's new shell starts in the home directory although HALCYON-INSTRUMENT 9.5 promises the
+  source tile's; a background job outlives its tile's close; a refused arrangement chord gives no status message
+  although HALCYON-INSTRUMENT 5.2 promises one; tapestryd's `ptr_hit` comment still says there is no click-to-focus.
+
+Audit, Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end in every round. The text and the scenario
+(accuracy reviews, each claim prosecuted against the code): r1 4 P1 / 7 P2 / 11 P3; r2 1 P0 (a scenario leg waiting
+for a line the code never says there) / 1 P1 / 1 P2 / 3 P3, dirty, so r3. The code: the tapestryd fix's own round
+0 / 0 / 1 P2 / 2 P3 (the P2: the class in halcyond); r3 (WIP 4-10, text and code) 0 / 0 / 1 / 8; r4 (the workspace
+owner) 0 / 2 P1 / 1 P2 / 3 P3, structural fixes, so r5; r5 (the round-4 fixes, the selection bands, the layout
+notice) 0 / 0 / 0 / 2 P3 -> clean. Every finding addressed. Closed list: memory `audit_manual_chunk_closed_list.md`.
+
+Verification: `manual-check docs/manual` 10 sections pass. Host (`tools/test-rust.sh`): tapestryd 112, halcyond 427,
+libtapestry 11, halcyon 26 at the final commit, each intermediate commit checked (guest build + host tests); the full
+run 29 crates, 2141 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item). Device (default image): 15 runs of `ls-halcyon-manual`; the reds were scenario defects, one
+host-filesystem trap (two capture names differing only in case are one file on macOS), and the five defects above,
+each fixed at its cause; bake 13 (the final code) passed it whole in 632 s, with `ls-halcyon-session-instrument`,
+`ls-halcyon-lantern` and `ls-halcyon-lantern-haul`. `tools/test.sh` 1750/1750 (boot banner, L-6c and D-5 PASS). No kernel change, so no sanitizer run or
+spec is owed.
+
+## ns names a 9P session root by its file — 2026-09-29
+
+Operator vote 1 of 2026-09-28 (option 1, "the file it came from", Plan 9's form): `/proc/<pid>/ns` names a 9P session
+root by the file its session came over, where every one read `/` (login's home was `mount /home/michael /`; the LR-1
+audit's F1). Scripture 33ee9e96 (ARCH 9.6.9 and the I-33 row; HAUL-DESIGN 4.8; COREUTILS-THYLACINE-DESIGN; manual 14;
+`dec-2026-09-28-ns-session-root-names`). Code 3936063b.
+
+- **The carrier.** The root keeps its own name `/`: joey pivots to a `t_attach_9p_srv` root, and a pivot never
+  re-stamps a published Spoor (I-33). The file's name is a second, display-only one on the root's dev9p priv: `origin`
+  (a ref on the transport file's name) or `origin_dc` (that file's device char when it has none), stamped by
+  `dev9p_stamp_origin` from both attach handlers before `handle_alloc` publishes the root, released at the root's
+  close. The stamp refuses every priv but a root's (a walked one owns its fid; a cached-open one is marked), and a
+  second stamp.
+- **The render.** `territory_format_ns` reads the origin ahead of the Spoor's name, never on a covered entry: login's
+  home reads `mount /home/michael /srv/home-michael`, the shell's mount of a posted Haul service `/srv/NAME`, Haul's
+  private form (its session rides pipes) `#|`. A bind of the tree and a union's covered entry read as before.
+- **The tools.** `ns` gives `#|` the REALM `9p`; the realm rule moved into `nsmount` (`entry_realm`, `source_realm`) so
+  a host test can fail on it. `haul-npxf` and `haul-post` assert the new line.
+
+Audit (the #66 and LR-1 rows, ORIGIN addenda), 1 round: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start ==
+end. 0 P0 / 0 P1 / 0 P2 / 0 P3, clean; two withdrawn hygiene notes acted on (the srv test takes its fixture name back
+before any assertion can return; the header comment no longer claims a shared bare clone). Closed list: memory
+`audit_ns_names_closed_list.md`.
+
+Verification: new kernel tests `dev9p.origin_format_ns`, `sys_attach_9p.names_root_by_its_pipe` and
+`9p_srvconn_transport.srv_attach_names_root`; coreutils host test `a_session_root_reads_by_the_file_it_came_over`.
+Sabotage: nine kernel mutants over six boots, each red on exactly the assertion written down before the first boot (thirteen FAIL lines, no other red); the coreutils mutant (`#|` dropped from the `9p` arm) red on its host test. Device, CI image: `haul-npxf` (40 s), `haul-post` (39 s) and `ergo-1` (38 s) green; with both stamps removed, both Haul gates failed at their `ns` leg, reading `/` -- once the two attach tests were unregistered in the red build, since with them the boot's kernel suite extincted before a login. Default image: `tools/test.sh` 1753/1753, zero `[skip]` (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 29 crates, 2142 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item); `ci-smp-gate` (default-smp4 and ubsan-smp4, N=10) 10 + 10 boots PASS, no corruption, external kill, timing or other. No spec models the touched code (`territory.tla` maps bind, mount, unmount and clone, not the ns render).
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

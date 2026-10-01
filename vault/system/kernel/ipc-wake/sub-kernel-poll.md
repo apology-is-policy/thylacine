@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -21,7 +21,10 @@ installs a lightweight `poll_waiter` hook on each polled object's
 embedded hook list. Producers walk the list at every readiness edge.
 This is the primitive under every select/poll-shaped consumer — the
 `/srv` servers, netd's event loop via the pouch 0018 translation, the
-dev9p.poll bridge's userside.
+dev9p.poll bridge's userside. Since #98 (NP-4c, 2026-09-28) an fd whose
+readiness lives in a server is SAMPLED by a snapshot its server answers at
+once and ARMED only when the call will park — the pass below settles every
+snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
 
 ## Contract
 
@@ -40,13 +43,26 @@ dev9p.poll bridge's userside.
   audit round 5 F5). A caller kept awake by noise crosses a preemption
   point each re-loop (step 5), where its CPU takes every pending
   interrupt; it adds no latency of its own.
+- `sys_poll_for_proc_spoors(p, kfds, nfds, timeout_ms, pre)` (NP-5,
+  2026-09-29) is the same poll over entries the caller has already resolved:
+  where `pre[i]` is non-NULL, `poll_scan_one` builds the Spoor Handle
+  snapshot from it (`handle_snapshot_spoor`, the snapshot `handle_get` would
+  have given, taking the reference each pass takes) and never looks
+  `kfds[i].fd` up in the handle table; `kfds[i].fd` still names the entry for
+  the caller. Everything after the snapshot, retention included, is the table
+  path's. The caller keeps each `pre[i]` alive across the call. `pre == NULL`
+  is `sys_poll_for_proc`, which is now a wrapper for exactly that. The
+  vivarium polls a socket's cached readiness Spoor this way, so an object held
+  outside the guest's fd table is polled without minting an fd for it
+  ([[sub-kernel-vivarium]]).
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
   `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
   256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
-  fid-ceiling chain. The frame stack-allocates `waiters[]` + `held[]` at
-  the bound, 32 B + 24 B per fd (`sizeof(struct Handle) == 24` is
-  `_Static_assert`-pinned), so restoring the identity now costs
-  **56 KiB on a 16 KiB kstack** (`THREAD_KSTACK_SIZE`; the other 16 KiB of
+  fid-ceiling chain. The frame stack-allocates `waiters[]` + `held[]` +
+  `snaps[]` at the bound, 32 B + 24 B + 24 B per fd (`sizeof(struct
+  Handle) == 24` is `_Static_assert`-pinned; `struct poll_snap` is 24 B
+  since NP-4c), so restoring the identity now costs **80 KiB on a 16 KiB
+  kstack** (56 KiB before `snaps[]`) (`THREAD_KSTACK_SIZE`; the other 16 KiB of
   `THREAD_KSTACK_TOTAL_SIZE` is the guard region that exists to catch this
   exact overrun, so it is not headroom — #198's own stale-constant sweep
   compared against the 32 KiB total and understated the margin twofold,
@@ -61,7 +77,9 @@ dev9p.poll bridge's userside.
   8 bytes, offset-pinned ABI.
 - Per-fd semantics: negative fd or dead handle ⇒ `POLLNVAL` (which
   COUNTS as ready — POSIX); a Dev with no `.poll` slot ⇒ always-ready
-  for the requested bits (the regular-file answer); a NULL-obj Spoor ⇒
+  for the requested bits (the regular-file answer); a Dev with
+  `.poll_snapshot` ⇒ REMOTE, answered by its server's snapshot after the
+  settle (below); a NULL-obj Spoor ⇒
   `POLLNVAL`, never always-ready (a buggy caller must not spin on fake
   readiness); `KOBJ_SRV` dispatches through `srv_handle_poll` (magic
   discriminates listener vs connection); every other kobj kind ⇒
@@ -70,18 +88,34 @@ dev9p.poll bridge's userside.
 - The `Dev.poll` vtable op: `dev->poll(spoor, events, pw)` returns
   current revents and, iff `pw != NULL`, registers it — **atomically
   with the sample, under the object's own lock**. `sys_poll_for_proc`
-  passes a hook on EVERY pass (since audit round 4); `pw == NULL` is a
-  pure sample for other in-kernel callers and tests. A `.poll` MAY choose
-  which of its lists to register on by the state it samples (the
-  console's episode list) — the choice holds for one pass.
+  passes a hook on every pass that begins before the deadline (since
+  audit round 4) and NULL on one past it — timeout 0, the pass after the
+  park timed out — which returns whatever it finds (`ScanHooks`, NP-4c);
+  NULL is also a pure sample for other in-kernel callers and tests. A
+  `.poll` MAY choose which of its lists to register on by the state it
+  samples (the console's episode list) — the choice holds for one pass.
+- The remote slots (NP-4c; `dev.h`), filled INSTEAD of `.poll` by a Dev
+  whose readiness lives in a server: `.poll_snapshot(c, events, s)` sends
+  (or answers in the kernel) a snapshot into the core's `struct poll_snap`
+  slot; `.poll_snapshot_release(c, s)` is the barrier after which no answer
+  touches the slot and an unanswered one has been flushed;
+  `.poll_arm(c, events, pw)` registers `pw`, then puts an arm on the wire,
+  and returns 0 when a shortage left the fd uncovered.
 
 ## Mechanism
 
 1. **Register scan**: `dev->poll(c, events, &waiters[i])` per fd —
    [[spec-poll]]'s `Register`. Install-then-sample under the object
    lock means no readiness edge between the sample and the park can
-   miss the hook.
-2. Fast path: any ready, or `timeout_ms == 0` ⇒ jump to the sweep.
+   miss the hook. A remote fd is sent its snapshot instead, and hooks
+   nothing yet.
+2. **Settle, collect, verdict** (NP-4c). With any remote fd,
+   `poll_settle` waits until every snapshot of the pass is answered, and
+   `poll_collect` releases them all and reads the answers (below). Then
+   any ready ⇒ the sweep; `poll_expired` — timeout 0 always, else the
+   clock past the deadline — ⇒ the sweep with 0. Otherwise each remote fd
+   is ARMED, hook first (`poll_arm_remote`), and if any arm could not be
+   sent the park's deadline becomes `min(deadline, now + 10 ms)`.
 3. `tsleep` on the private Rendez with cond `any waiter.ready` — the
    cond reads `pw->ready` without object locks; sound because the
    producer writes it under the list lock and then `wakeup` takes the
@@ -100,16 +134,17 @@ dev9p.poll bridge's userside.
    can reach it, so the clear needs no lock); then the loop's own death
    and stop checks (below); then each fd's `.poll` runs WITH its hook
    again — the first scan's install-and-sample. An event before an fd's
-   install is seen by its sample; one after reaches the fresh hook. BEFORE
-   the rescan, with hooks off and no lock held, the loop crosses the
-   preemption point (below). Ready, or a `TSLEEP_TIMEDOUT` (the sleep is
-   always to the poll's own deadline) ⇒ the sweep. Otherwise an explicit
-   `timer_now_ns() >= deadline_ns` test, then `sched_yield_hint` (a noise
-   pass bought nothing; queued work on this CPU runs first), then **loop
-   to step 3 against the same absolute deadline**. The explicit
-   test is load-bearing: `tsleep` prefers a set flag to a passed
-   deadline, so a producer that never stops walking a list would hold
-   the poller past its timeout for ever (`PollTerminates`).
+   install is seen by its sample; one after reaches the fresh hook. EVERY
+   `tsleep` return goes round, `TSLEEP_TIMEDOUT` included: since NP-4c the
+   sleep may be the retry timer's rather than the call's, and whether the
+   call has timed out is the clock's answer, never tsleep's (`poll`
+   `buggy_retry_is_timeout`). The pass's verdict (step 2) decides: ready
+   ⇒ the sweep; `poll_expired` ⇒ the sweep with 0; otherwise
+   `sched_yield_hint` (a noise pass bought nothing; queued work on this
+   CPU runs first), arm, and park again **against the same absolute
+   deadline**. The clock test is load-bearing: `tsleep` prefers a set flag
+   to a passed deadline, so a producer that never stops walking a list
+   would hold the poller past its timeout for ever (`PollTerminates`).
    *Why re-register, not re-sample* (audit round 4 F1): the first form of
    the re-arm kept every hook where the first scan put it and only
    re-sampled. That is sound for an object with one list and wrong for a
@@ -163,7 +198,36 @@ connection — each frees its embedded list only at the Spoor's last
 clunk). The **listener** retain is INERT ([[fnd-rw2-r2poll-f1]],
 [[seam-poll-srv-registry-retain]]): `handle_acquire_obj` is a no-op
 for `KObj_Srv`, so listener-poll lifetime rests solely on the boot
-registry being immortal.
+registry being immortal. A REMOTE fd's ref is retained too
+(`snap->remote`): its snapshot is resent and released through the Spoor,
+its arm hooks onto the Spoor's list later in the pass, and the release must
+come before the Spoor's close can clunk the fid.
+
+**Remote readiness: sample and arm are separate** (#98, NP-4c, 2026-09-28;
+[[spec-poll]] `Remote` / `MayDecide` / `Arm` / `ScanHooks` / `SettleDeath` /
+`RetryWake`, [[spec-net-poll]]). One deferred read used to be both the
+sample and the wake, read back through a cache a fresh file did not have, so
+a zero-timeout poll of a plainly writable socket returned 0. Now each pass
+sends every remote fd a SNAPSHOT, which its server answers at once, and
+`poll_settle` waits for all of them (`buggy_verdict_before_settle`: a local
+fd ready at the scan must not end the pass before the socket's answer is in).
+The settle's bound is FIXED — `POLL_SNAP_BOUND_NS`, 1 s from the scan's end,
+shared by the pass — and never the call's deadline
+(`buggy_settle_cut_by_deadline`): a poll may return late by one server round
+trip, never early on a guess. A snapshot a shortage kept off the wire
+(UNSENT) is resent every `POLL_SNAP_RESEND_NS` (1 ms) inside that bound. One
+still out at the bound is released (flushed at its server), reported not
+ready, counted in `poll_total_snap_failsafes`, and printed as a `poll:
+FAILSAFE` line (the first 16), which `tools/test.sh` — and so the SMP gate —
+fails on; the test knob that shortens the bound also quiets it, and the test
+runner restores it after every test (POLL-KNOB). `poll_collect` releases
+every snapshot BEFORE it reads one — the release is the barrier after which
+no answer can touch the slot — and before any of the pass's refs drops, so a
+close that follows never overtakes a read still out on the same fid. The
+answer IS the verdict; an arm is only a wake, and the woken pass samples
+again. Every exit's sweep releases the snapshots FIRST (a death mid-settle
+leaves some out), then unhooks, then drops the refs
+(`buggy_sweep_leaves_snapshot`).
 
 ## Data structures
 
@@ -177,7 +241,13 @@ counts "committed to the slow path", not "actually parked" (a
 producer racing register-to-tsleep still increments it) —
 and `poll_total_resleeps`: wakes whose re-sample found nothing asked
 about, so the poller slept again. It is the tests' witness that a walk
-for someone else's edge did not end a poll.
+for someone else's edge did not end a poll. `struct poll_snap` (NP-4c,
+one per fd on the frame): the poller's `rendez`, the Dev's request `op`,
+`revents`, an atomic `state` (NONE / UNSENT / SENT / ANSWERED / EXPIRED)
+and `remote`. `poll_total_snap_failsafes` (zero on a healthy system) and
+`poll_total_arm_retries` (parks the retry timer bounded);
+`poll_test_set_snap_bound_ns` / `poll_test_snap_bound_release` the test
+knob and the runner's release.
 
 ## Concurrency
 
@@ -229,11 +299,12 @@ by design now); `DeathTerminates` and `StopHonoured` the loop's own
 checks. `IrqLatencyBounded` is GONE with the point (ARCH 8.12): there is
 no masked span left for this module to bound, and the CPU-level
 obligation is [[spec-syscall-irqs]]'s `CpuGetsItsInterrupts`.
-`specs/check-poll.sh` runs the four clean + seven buggy cfgs (two of them
-liveness: `no_loop_die_check`, `no_loop_stop_check`) and asserts WHICH
-property each buggy one violates; the clean runs measure 2146 / 944
-states, down 48 from the point's era -- exactly the `atpoint` states
-removed. The list-choosing half of re-registration is
+`specs/check-poll.sh` runs the eight clean + eleven buggy `poll.tla` cfgs
+and asserts WHICH property each buggy one violates; since NP-2 every cfg but
+`poll_local.cfg` polls a local fd beside a remote one, and the clean runs
+measure 3562 / 1206 states. The remote half adds `NoFalseNotReady` (an fd
+reported not ready was not ready at some instant of the pass that decided)
+and `NoSnapshotOutlivesCall`. The list-choosing half of re-registration is
 [[spec-cons-poll]]'s (`BUGGY_NO_REREGISTER`, `_CADENCE`).
 
 ## Error paths
@@ -245,9 +316,11 @@ and scrubs partially-written revents on a writeback fault.
 
 ## Performance
 
-O(nfds) lock pairs per scan; no allocation anywhere — `waiters[]`
-(~2 KiB) + `held[]` (~1.5 KiB) are frame-resident, which is exactly
-why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
+O(nfds) lock pairs per scan; no allocation in the core — `waiters[]`
+(~2 KiB) + `held[]` (~1.5 KiB) + `snaps[]` (~1.5 KiB) are frame-resident,
+which is exactly why `POLL_MAX_NFDS` is a frame bound, not an fd-table
+bound. A pass with remote fds costs one server round trip whatever their
+number: every snapshot is sent before the settle waits.
 
 ## Prosecution
 
@@ -296,6 +369,12 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   producer went quiet) — measured from the FIRST sample since round 4
   F9, so a poller the scheduler starts late cannot read as one that
   returned late.
+- The remote pass (NP-4c): no verdict before every snapshot of the pass is
+  answered or expired; the bound is fixed and never the call's deadline;
+  collect releases before it reads; the sweep releases before it unhooks;
+  a pass past the deadline hooks and arms nothing; an uncovered park is
+  bounded by the retry timer, whose expiry is a wake. Each has its `poll.tla`
+  or `net_poll.tla` buggy cfg and a `dev9p.poll_*` test seen red.
 - **A wake site may walk its list for ANY state change; what it may
   never do is fail to walk it for one.** That licence is what lets one
   list serve two endpoints, and it exists only because of the re-arm.
@@ -344,4 +423,12 @@ ARCH 8.12 deleted the same day in favour of an interrupts-on syscall body
 (so `IrqLatencyBounded`, `BUGGY_NO_POINT` and `sched_preempt_point` are
 all gone, and the two point tests were retargeted onto the re-loop
 counter they already had; every poller test entry parks terminally and
-publishes its result with a release store).
+publishes its result with a release store) → #98 NP-4c (2026-09-28;
+spec first at NP-2 / NP-4a, voted `dec-2026-09-28-poll-sample-arm-split`):
+the remote pass — the settle, the fixed fail-safe, the arm, the retry
+timer → NP-5 (2026-09-29): `sys_poll_for_proc_spoors`, pre-resolved entries
+for the vivarium's readiness cache (witness `poll.pre_resolved_spoor`: an
+fd number the table does not map, paired with a pipe's read Spoor, reports the
+pipe's readiness while its unpaired neighbour reports POLLNVAL; the reference
+count balances at every return, and a parked poll holds exactly one extra
+reference until it wakes).

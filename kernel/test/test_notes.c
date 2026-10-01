@@ -79,6 +79,7 @@ void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_caught_note_claim_once(void);
 void test_notes_handler_escape_predicate(void);
 void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
@@ -1062,10 +1063,11 @@ void test_notes_caught_note_deliverable_predicate(void) {
     p->state = PROC_STATE_ALIVE;
 
     struct Thread fake_t;
-    fake_t.proc              = p;
-    fake_t.note_mask         = 0u;
-    fake_t.exit_close_active = false;
-    fake_t.in_handler        = false;
+    fake_t.proc               = p;
+    fake_t.note_mask          = 0u;
+    fake_t.exit_close_active  = false;
+    fake_t.in_handler         = false;
+    fake_t.note_interruptible = true;   // a wait on signal(7)'s list
 
     TEST_ASSERT(!thread_caught_note_deliverable(NULL), "NULL thread -> false");
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t), "fresh Proc -> false");
@@ -1076,6 +1078,17 @@ void test_notes_caught_note_deliverable_predicate(void) {
     TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post");
     TEST_ASSERT(thread_caught_note_deliverable(&fake_t),
                 "caught + unmasked -> true");
+
+    // ARCH 8.8.3 (signal(7)'s list): the same note does NOT interrupt a wait
+    // whose syscall is not on the list -- socket(), open(), a regular file's
+    // read(), a page-in. Those ride the note out; only death unwinds them, and
+    // death is thread_die_pending's, which this flag never touches.
+    fake_t.note_interruptible = false;
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
+                "caught + unmasked, but the wait is not interruptible -> false");
+    fake_t.note_interruptible = true;
+    TEST_ASSERT(thread_caught_note_deliverable(&fake_t),
+                "the flag alone decides: interruptible again -> true");
     fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
                 "caught + MASKED -> false (the thread defers)");
@@ -1126,6 +1139,106 @@ void test_notes_caught_note_deliverable_predicate(void) {
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// caught_note_claim_once (ARCH 8.8.3, VIV-EINTR audit F2)
+// ---------------------------------------------------------------------------
+//
+// One caught note unwinds ONE interruptible sleeper, as Linux interrupts one
+// thread for a process-directed signal. thread_caught_note_claim is the sleep
+// arms' decision: the first thread claims the family, a second is refused while
+// the claim is held, and the claimant's own claim stays open to it. The claim
+// ends at the claimant's EL0-return tail, not at the family's drain: released
+// while its note is still queued, the note is open to another thread (round-2
+// F1 -- a tail that ended short of the note stranded it). Families claim
+// independently.
+void notes_release_claims_for_test(struct Thread *t);
+
+void test_notes_caught_note_claim_once(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state     = PROC_STATE_ALIVE;
+    p->phenotype = PHENO_LINUX;
+    notes_set_handler(p, 0x1000u);
+
+    static struct Thread a, b, c;       // BSS-zeroed, reset each run
+    a.proc = b.proc = c.proc = p;
+    a.note_mask = b.note_mask = c.note_mask = 0u;
+    a.exit_close_active = b.exit_close_active = c.exit_close_active = false;
+    a.in_handler = b.in_handler = c.in_handler = false;
+    a.note_interruptible = b.note_interruptible = c.note_interruptible = true;
+    a.note_claim = b.note_claim = c.note_claim = 0u;
+
+    bool none0 = thread_caught_note_claim(&a);                  // nothing queued
+    int  post1 = notes_post(p, "interrupt", 0u, NULL, true);
+    bool a1    = thread_caught_note_claim(&a);
+    bool b1    = thread_caught_note_claim(&b);
+    bool b1dl  = thread_caught_note_deliverable(&b);            // still pending
+    bool a1own = thread_caught_note_claim(&a);                  // a's own claim
+    // A second interrupt is QUEUED, not coalesced: the ring coalesces only past
+    // NOTE_COALESCE_THRESHOLD.
+    int  post2 = notes_post(p, "interrupt", 0u, NULL, true);
+    bool b2    = thread_caught_note_claim(&b);
+    int  post3 = notes_post(p, "child_exit", 0u, NULL, true);   // another family
+    bool b3    = thread_caught_note_claim(&b);
+    bool c3    = thread_caught_note_claim(&c);
+
+    // Drain one interrupt: the other is still queued, and a's claim holds.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int d1 = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    bool c4    = thread_caught_note_claim(&c);
+    // a's tail releases its claim with an interrupt still queued.
+    notes_release_claims_for_test(&a);
+    u8   a_rec = a.note_claim;
+    bool c5    = thread_caught_note_claim(&c);
+    // Drain the rest: every caught bit clears, and the claims stay with their
+    // owners until their tails.
+    spin_lock(&p->notes->lock);
+    int d2 = notes_dequeue_for_fd_locked(p, NULL, &got);
+    int d3 = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    u32 caught = flags & PROC_FLAG_CAUGHT_NOTE_MASK;
+    u32 claims = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+    notes_release_claims_for_test(&b);
+    notes_release_claims_for_test(&c);
+    u32 claims_after = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                       PROC_FLAG_CAUGHT_CLAIM_MASK;
+    int  post4 = notes_post(p, "interrupt", 0u, NULL, true);
+    b.note_mask = 1u << NOTE_BIT_INTERRUPT;                     // b defers it
+    bool b5m   = thread_caught_note_claim(&b);
+    b.note_mask = 0u;
+    bool b5    = thread_caught_note_claim(&b);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(!none0, "no caught note queued -> no claim");
+    TEST_ASSERT(post1 == 0 && post2 == 0 && post3 == 0 && post4 == 0, "posts accepted");
+    TEST_ASSERT(a1, "the first sleeper claims the caught family");
+    TEST_ASSERT(!b1, "a second sleeper is REFUSED while that note is pending "
+                     "(one note, one unwind)");
+    TEST_ASSERT(b1dl, "control: the note is still deliverable to the second "
+                      "thread -- only the unwind is refused");
+    TEST_ASSERT(a1own, "the claimant's own claim stays open to it: a wait that "
+                       "claimed and completed must not refuse the call's next wait");
+    TEST_ASSERT(!b2, "a second queued note of a claimed family unwinds nobody else");
+    TEST_ASSERT(b3, "another family claims independently");
+    TEST_ASSERT(!c3, "and is then taken for every other thread");
+    TEST_ASSERT(d1 == 1 && d2 == 1 && d3 == 1, "three notes dequeued");
+    TEST_ASSERT(!c4, "an interrupt still queued, a's claim held -> refused");
+    TEST_EXPECT_EQ(a_rec, (u8)0u, "the release clears the claimant's record");
+    TEST_ASSERT(c5, "released, the still-queued interrupt is open to another "
+                    "thread: a claim never outlives its claimant's tail");
+    TEST_EXPECT_EQ(caught, 0u, "the last drain of each family clears its caught bit");
+    TEST_EXPECT_EQ(claims, (1u << NOTE_BIT_INTERRUPT) | (1u << NOTE_BIT_CHILD_EXIT),
+                   "but not the claims, which end with their owners' tails");
+    TEST_EXPECT_EQ(claims_after, 0u, "the owners' releases clear them");
+    TEST_ASSERT(!b5m, "a thread masking the family cannot claim it");
+    TEST_ASSERT(b5, "a fresh note can be claimed again");
 }
 
 // ---------------------------------------------------------------------------

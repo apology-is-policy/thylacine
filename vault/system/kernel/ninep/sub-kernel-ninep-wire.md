@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/9P-EXTENSIONS.md]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -98,7 +98,11 @@ side), the shared `P9_TWALKGETATTR` **140**/141, `P9_TWEFT` **142**/143,
 renumbered at #371 after latently colliding with Stratum's Tfadvise/Tpin —
 the standing rule is: allocate from the shared registry document, never from
 one project's enum alone. `P9_QTPOLL` (0x01) is the readiness-file qid bit
-[[sub-kernel-ninep-dev9p-poll]] keys on; `P9_NOFID` 0xFFFFFFFF and
+[[sub-kernel-ninep-dev9p-poll]] keys on, and `P9_POLL_MASK` /
+`P9_POLL_SNAPSHOT` encode a readiness Tread's offset: the poll events in the
+low 16 bits, bit 16 asking for a snapshot the server answers at once, any
+other bit refused (the servers' side is `ninep::ready_answer`,
+[[sub-netd-server]]). `P9_NOFID` 0xFFFFFFFF and
 `P9_NOTAG` 0xFFFF are the sentinels; `P9_MAX_WALK` 16 caps a walk.
 `P9_NOGID` ((u32)-1) is a VALUE, not a message: the gid a caped session's
 create sends (Tlcreate / Tmkdir / Loom's Tsymlink and Tmknod), chown(2)'s

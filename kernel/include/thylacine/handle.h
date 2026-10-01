@@ -320,6 +320,12 @@ int handle_get(struct Proc *p, hidx_t h, struct Handle *out);
 // (which drops the TABLE's ref); handle_put drops the CALLER's borrowed ref.
 void handle_put(struct Handle *h);
 
+// The snapshot handle_get would give for a READ Spoor held OUTSIDE any table
+// (the vivarium's socket readiness cache), with its own reference, so a
+// consumer of snapshots takes it unchanged and handle_put releases it.
+struct Spoor;
+void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp);
+
 // Duplicate a handle within p's table with possibly reduced rights.
 //
 // new_rights MUST be a subset of the parent's rights — elevation is

@@ -100,6 +100,9 @@ impl Grid {
     /// The cursor clamped to a paintable coordinate (row in 0..rows, col in
     /// 0..cols); `visible` passes through. The render uses this so an
     /// out-of-range cursor from a misbehaving tile never indexes the buffer.
+    /// The reflow anchors on it too: a repaint answering an earlier, taller
+    /// resize names a row below this grid, and the window slides from the
+    /// grid's last row, the nearest it holds to the prompt.
     pub fn cursor(&self) -> (usize, usize, bool) {
         let (r, c, v) = self.cursor;
         (
@@ -191,10 +194,13 @@ impl Grid {
     /// cursor anchor slides past are dropped here -- the producer's own
     /// ScrollOff delivers them -- and until it does the top flag is cleared,
     /// since the transcript's held fragment is not yet row 0's head.
-    /// Without it (the alt screen, which the TUI repaints) the overlapping
+    /// Without it (the alt screen, which the TUI repaints, and either screen's
+    /// last frame while the other's first paint is on its way) the overlapping
     /// top-left block is preserved, the grown region blanked, and the
-    /// cursor clamped into the new dims.
-    pub fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
+    /// cursor clamped into the new dims. Returns how many rows the reflow
+    /// dropped off the top (0 without it): they have left the grid, but no
+    /// ScrollOff has carried them yet.
+    pub fn resize(&mut self, cols: usize, rows: usize, reflow: bool) -> usize {
         if reflow && cols > 0 && rows > 0 {
             let (cr, cc, cv) = self.cursor();
             let rf = vt::reflow(
@@ -214,7 +220,7 @@ impl Grid {
             self.rows = rows;
             self.cursor = (rf.cursor.1 as u16, rf.cursor.0.min(cols - 1) as u16, cv);
             self.top_continues = rf.scrolled.is_empty() && rf.top_continues;
-            return;
+            return rf.scrolled.len();
         }
         let blank = self.blank();
         let mut next = vec![blank; cols * rows];
@@ -241,6 +247,7 @@ impl Grid {
             cc.min(cols.saturating_sub(1) as u16),
             cv,
         );
+        0
     }
 }
 

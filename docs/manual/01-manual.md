@@ -18,9 +18,9 @@ manual gallery
 manual remote-files
 ```
 
-The output belongs to the shell transcript. Use Halcyon's normal scrollback
-to revisit it. The reader does not take over the pane or open a separate
-pager. A file path can be supplied instead of a section name:
+The output belongs to the shell transcript; in a Halcyon tile, Normal mode
+scrolls back through it (see Halcyon). The reader does not take over the tile
+or open a separate pager. A file path can be supplied instead of a section name:
 
 ```sh
 manual /manual/15-view.md

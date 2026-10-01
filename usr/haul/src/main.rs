@@ -61,6 +61,12 @@
 // paths therefore cape the session: the direct mount passes T_ATTACH_9P_CAPE,
 // and --post posts its service DMSRVCAPE, so a plain `mount /srv/NAME` over it
 // is caped too. The server's per-file mode is kept.
+//
+// A HAUL MOUNT SAYS IT IS REMOTE (HAUL-DESIGN 4.8). Haul holds the TCP
+// connection, so Haul is the program that knows the session leaves the
+// machine: the direct mount adds T_ATTACH_9P_REMOTE and --post adds
+// DMSRVREMOTE, and `ls -l`, `stat`, `realm` and `ns` then show the mount as
+// `remote`, whichever program mounts it.
 
 #![no_std]
 #![no_main]
@@ -81,7 +87,7 @@ use libthyla_rs::time::Duration;
 use libthyla_rs::thread;
 use libthyla_rs::{
     t_attach_9p, t_burrow_attach, t_close, t_mount, t_pipe, t_putstr, T_ATTACH_9P_CAPE,
-    T_MREPL,
+    T_ATTACH_9P_REMOTE, T_MREPL,
 };
 
 #[global_allocator]
@@ -899,11 +905,13 @@ fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, 
 // Creation is the kernel capability gate. A failed post never dials the peer.
 fn post_listener(name: &str) -> Result<i64, &'static str> {
     use libthyla_rs::{t_open, t_walk_create, T_WALK_OPEN_FROM_ROOT, T_OPATH,
-                     T_OREAD, T_WALK_CREATE_DMSRVBYTE, T_WALK_CREATE_DMSRVCAPE};
+                     T_OREAD, T_WALK_CREATE_DMSRVBYTE, T_WALK_CREATE_DMSRVCAPE,
+                     T_WALK_CREATE_DMSRVREMOTE};
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 { return Err("cannot open /srv"); }
     let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD,
-                                          T_WALK_CREATE_DMSRVBYTE | T_WALK_CREATE_DMSRVCAPE) };
+                                          T_WALK_CREATE_DMSRVBYTE | T_WALK_CREATE_DMSRVCAPE
+                                              | T_WALK_CREATE_DMSRVREMOTE) };
     let _ = unsafe { t_close(srv) };
     if listener < 0 { return Err("cannot post service (requires imperium post, an unused name and a free service slot)"); }
     Ok(listener)
@@ -1074,7 +1082,7 @@ fn run(argv: Args) -> Result<(), String> {
             args.aname.as_ptr(),
             args.aname.len(),
             0,
-            T_ATTACH_9P_CAPE,
+            T_ATTACH_9P_CAPE | T_ATTACH_9P_REMOTE,
         )
     };
     let _ = unsafe { t_close(c2s_wr) };
@@ -1101,7 +1109,13 @@ fn run(argv: Args) -> Result<(), String> {
     };
     let _ = unsafe { t_close(root) };
     if rc < 0 {
-        return Err("mount".into());
+        // The kernel names one cause, Plan 9's Emount (-ENOTDIR: an attach root
+        // is a directory, so the mount point is not); every other refusal is
+        // its generic -1.
+        return Err(match Error::from_syscall_return(rc) {
+            Err(e) if rc != -1 => alloc::format!("mount {}: {}", args.mountpoint, e),
+            _ => "mount".into(),
+        });
     }
 
     // Under -v, prove the mount from INSIDE this Proc before anyone else tries

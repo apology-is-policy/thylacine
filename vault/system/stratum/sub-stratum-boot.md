@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -95,6 +95,17 @@ authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum
 on any machine short of 16 TiB); since the default IS the hard maximum, the
 authority refusal proper -- a narrowed parent asking above itself but below
 the maximum -- is the kernel suite's (`resource.spawn_budget_resolve`).
+
+**The readiness wire, read directly (#98 NP-3b, 2026-09-28).** Before its
+net-6b polls, joey reads the udp connection's `ready` file with `t_pread`, and
+pty-probe (the PTY-2e rung) does the same to `/dev/pts/<n>ready` before the
+slave opens. Each requires -22 for an offset bit above the mask other than the
+snapshot bit, POLLOUT from a POLLOUT snapshot, 0 at once from a POLLIN
+snapshot of an idle file, and a 1-byte read cut to 1 byte (NET-DESIGN 12.2,
+[[sub-netd-server]], [[sub-ptyfs]]). The refusal is checked first because a
+server that ignored the high bits would answer it at once, a clean failure,
+where it would hold the POLLIN snapshot and hang the boot. Boot-fatal; each was
+seen to extinct the boot with its server's pre-change file.
 
 
 Ordered, and every step is boot-fatal:

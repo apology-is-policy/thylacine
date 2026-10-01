@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -28,6 +28,25 @@ that are not obvious.
   transient state, and returns; the Thread then dies at its EL0-return
   die-check. The value returned to userspace is immaterial — a flagged
   Thread never re-enters EL0.
+- `sleep_noteintr` / `tsleep_noteintr` (item 11, ARCH 8.8.3) are the
+  caught-note-interruptible variants (`caught_ok`). After the die-check --
+  death always wins -- they may also return `SLEEP_NOTEINTR` /
+  `TSLEEP_NOTEINTR`: the caller unwinds with `-T_E_INTR` and LIVES, and the
+  caught note delivers at its EL0-return tail. The arm fires only when `cond`
+  is still false (data wins over the note), the Proc is a Linux phenotype, a
+  mid-frame 9P reader is at a frame boundary (the #90 guard), and -- tested
+  LAST -- `thread_caught_note_claim` claims the note's family, which it does
+  only for a thread whose call is on signal(7)'s list (`note_interruptible`)
+  and only once per note: the peers the same wake reached find the family
+  claimed and re-park ([[sub-kernel-notes]]). The claim is the claimant's until
+  its EL0-return tail, which releases it and, if the note is still queued there,
+  wakes the parked peers again. Only the 9P client's RPC wait
+  and its elected reader's receive opt in today. Witnesses:
+  `rendez.caught_note_one_unwind` -- two sleepers of one Linux Proc, one caught
+  `child_exit`: exactly one unwinds and the other re-reads its cond and re-parks,
+  and a caught note of another family then unwinds the re-parked one;
+  `rendez.caught_note_tail_discards_and_releases` and
+  `rendez.caught_note_release_wakes_peer`, which run the real tail.
 - `tsleep(r, cond, arg, deadline_ns)` adds a deadline on the
   `timer_now_ns` timebase. Returns `TSLEEP_AWOKEN` / `TSLEEP_TIMEDOUT` /
   `TSLEEP_INTR`. **`cond` has precedence**: a wait satisfied exactly as

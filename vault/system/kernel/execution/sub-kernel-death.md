@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -134,8 +134,12 @@ exit and a kill alike:
   `uart_puts` path is deliberate: bounded FIFO, no TX ring, no sleep, no
   lock, therefore safe under the table lock;
 - capturing status/msg, flipping to ZOMBIE;
-- waking the parent's `child_waiters` **under the lock** and posting the
-  synthetic `child_exit` note.
+- the parent's side, `proc_exit_notify_parent_locked`, all **under the
+  lock**: wake the parent's `child_waiters`, post the synthetic `child_exit`
+  note, and run the caught-note wake (`proc_caught_note_wake`) so a parent
+  that catches `child_exit` -- a SIGCHLD handler, a notes fd -- and is already
+  asleep in an interruptible wait takes it now ([[sub-kernel-notes]]). There is
+  no terminate wake: `child_exit` defaults to ignore and never arms that latch.
 
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
 waking, the parent could be reaped and freed by the *grandparent*'s
@@ -427,7 +431,11 @@ What a change **must** re-establish:
   watchpoint slots under the same guarantee — and there the reasoning is sound,
   because a debugger can only have armed them while the target was fully stopped
   and this is the only live thread. Same gate, one valid use and one invalid one,
-  forty lines apart.
+  forty lines apart. A third use is valid for the same reason: exec clears the
+  caught-note claim sub-field of `proc_flags` (2026-09-30), and a claim is taken
+  only by a thread of this process for its own wait, so with exec alone the clear
+  is a guard, not a repair -- posters from other processes set caught bits, never
+  claims ([[sub-kernel-notes]]).
 
 ## Provenance
 
@@ -489,3 +497,19 @@ process is binder or observer and invalidates its controller nomination before
 publishing death. Wake references protect retired poll lists through the later
 wake; no Proc pointer is retained. The existing death, reparenting and wait
 semantics remain unchanged. See [[sub-kernel-pts]].
+
+## The exit close releases the phenotype's socket cache (2026-09-29, NP-5)
+
+`proc_close_handles_at_exit` now also resets the Linux socket table
+(`viv_socktab_reset`), right after `handle_table_free` and inside the same
+`exit_close_active` window, for the same reason the handle table closes there
+rather than at reap. NP-5 made each socket row hold a cached readiness Spoor, an
+open fid at netd, and every fid under `/net/<proto>/N/` holds netd's slot N: a
+cache released only at reap kept a socket the exiting process had closed open to
+its peer (a forked worker's accepted connection, say) until the parent reaped the
+zombie. The reset's clunks are close-time Tclunks, legal here for the same
+reasons as the handle table's (the thread is still RUNNING, the Proc still
+ALIVE). The table itself is still freed at `proc_free`
+([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
+`proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
+(`vivarium.socktab_ready_release_paths`).

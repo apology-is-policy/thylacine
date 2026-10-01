@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-09-30
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -136,14 +136,21 @@ distinguishable things:
   zero is required; and a tier-2 shell returns a value the caller stores into
   `x0`, which would immediately overwrite the `x0` the note restore just put
   back. The interception *is* the implementation.
-- **Runs one entry hook with a side effect.** A phenotyped `close` drops the
+- **Runs two entry hooks with side effects.** A phenotyped `close` drops the
   process's socket-table entry for that descriptor *before* the native close
   runs, unconditionally, because the descriptor index is freed by the native
   path and reused — so a surviving `(proto, N)` entry would later be found by an
   unrelated file's operation and a dial verb written to a stranger's connection.
   The hook is deliberately not a translation row: `close` must stay a plain
   renumber that falls through, so descriptor teardown keeps exactly one
-  implementation.
+  implementation. And a phenotyped `read`, `write`, `readv`, `writev`,
+  `pread64` or `pwrite64` on a socket whose connect a signal interrupted
+  finishes that connect first
+  (`viv_sock_finish_before_io`, 2026-09-30): the fd still names `ctl` until the
+  connect swaps it onto `data`, so the renumbered call would otherwise read the
+  conversation number or feed netd's verb parser. A failure (an `EINTR` in the
+  handshake wait, a refused dial) is the call's result and the native handler
+  never runs ([[sub-kernel-vivarium]]).
 - **Translates in place and falls through.** The common case rewrites `x8` and
   the six argument registers from the translation result and returns *true*,
   meaning the native switch runs — on registers that are no longer the ones
@@ -410,13 +417,13 @@ identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
 The cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7) enters this file on two ABI
 words. `SYS_ATTACH_9P` takes an x5 `flags` word and `SYS_ATTACH_9P_SRV` an x4
 one, and every caller passes it (the #112 discipline).
-`sys_attach_9p_flags_ok(flags, srv)` is the one rule: one bit per handler --
-`SYS_ATTACH_9P_CAPE` on the pipe attach, the per-attach `LOOSE` opt-in on the
-`/srv` attach -- and every other bit refused with the bare -1 before any handle
-lookup. Over `/srv` the cape is the poster's decision (DMSRVCAPE, read off the
+`sys_attach_9p_flags_ok(flags, srv)` is the one rule: the pipe attach takes
+`SYS_ATTACH_9P_CAPE` (and, since LR-1, `SYS_ATTACH_9P_REMOTE`, below), the
+`/srv` attach takes the per-attach `LOOSE` opt-in, and every other bit is
+refused with the bare -1 before any handle lookup. Over `/srv` the cape is the poster's decision (DMSRVCAPE, read off the
 conn by the shared helper); the attacher's flag was withdrawn from
-`SYS_ATTACH_9P_SRV` on 2026-09-24 (B), before it was ever pushed. On the create word the three service-post
-bits share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
+`SYS_ATTACH_9P_SRV` on 2026-09-24 (B), before it was ever pushed. On the create word the service-post
+bits (three at the cape, four since LR-1) share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
 - the `/srv` post branch admits a perm only through `sys_srv_post_perm_ok`:
   nothing outside the mask, and `DMSRVCAPE` only beside `DMSRVBYTE`, because a
   byte-mode attacher holds the raw transport and a 9P-mode opener never does;
@@ -449,6 +456,59 @@ the `sys_open_create_kpath_for_proc` pattern:
 Both keep their gates in the inner, as the first Prosecution rule requires.
 Tests: `dev9p.walk_create_refuses_dmsrv_bits`, `srv_client.cape_post_syscall`,
 and the `/srv` legs of `9p_srvconn_transport.cape_attach`.
+
+### The remote declaration rides the cape's two paths (LR-1, 2026-09-28)
+
+The operator's `la` vote puts a display label on the 9P session (HAUL-DESIGN
+4.8, [[dec-2026-09-28-remote-label-carrier-r2]]). It enters this file on the
+cape's two words:
+- the pipe attach admits `SYS_ATTACH_9P_REMOTE` (0x4) beside the cape. The
+  `/srv` attach refuses it like any unknown bit, because over `/srv` the
+  poster declares;
+- `SYS_WALK_CREATE_DMSRVREMOTE` (bit 22) joins `SYS_WALK_CREATE_DMSRV_BITS`,
+  so the fd create and the path create refuse it with no new code.
+  `sys_srv_post_perm_ok` admits it with either mode: the cape's byte-mode
+  rule protects an authority, and a label grants none.
+
+`spoor_create_install`'s devsrv branch hands the bit to
+`devsrv_post_listener` as `remote`. The pipe inner stamps
+`p9_client_set_remote` after the cape and before `p9_attached_root_spoor`
+publishes the root, under the cape's ordering argument. Nothing in this file
+reads the declaration after the stamp. Its one reader anywhere is
+`territory_format_ns` ([[sub-kernel-territory]]).
+
+Both attach inners also name the root they mint, for `/proc/<pid>/ns`, by the
+file its session came over (operator vote 2026-09-28):
+`dev9p_stamp_origin(root, tx)` in the pipe inner (a pipe has no name, so its
+device spec, `#|`) and `dev9p_stamp_origin(root, conn_spoor)` in the /srv
+inner (the connection's `->path`, which stalk's adoption arm set to the opened
+`/srv/<name>`), each after the root is minted and before `handle_alloc`
+publishes it ([[sub-kernel-ninep-dev9p]]). `sys_attach_9p.names_root_by_its_pipe`
+and `9p_srvconn_transport.srv_attach_names_root` drive the real inners: a
+pipe's device spec; a named connection's own Path, shared, then a nameless
+one's `#s`; the Path's count back to one once both Spoors are gone.
+
+The pipe handler thinned to a third inner, `sys_attach_9p_for_proc` (a kernel
+aname), so its own rules are testable without EL0. The handler now copies the
+aname before the `n_uname` and flags refusals and before the transport lookup.
+Every refusal there is the bare -1, so the reordering changes no answer, and a
+faulting copy no longer has two transport references to release.
+
+Tests:
+- `sys_attach_9p.declarations`: the inner over pre-staged pipes, reading each
+  flag word's cape and remote marks back off the client; the refusals send
+  nothing;
+- `sys_attach_9p.rejection_paths`: every refusal before the wire, beside an
+  admitted control;
+- `srv_client.remote_admission` (both predicates, bit by bit),
+  `srv_client.remote_post_syscall`, the REMOTE rows of
+  `dev9p.walk_create_refuses_dmsrv_bits`, and
+  `9p_srvconn_transport.remote_attach_srv`.
+
+The LR-1 sabotage boots turned each of these mutants red on its predicted
+test: the pipe mask dropping REMOTE, the `/srv` mask admitting it, the pipe
+stamp deleted, the `n_uname` check deleted, the mask without REMOTE, and the
+post branch ignoring the bit.
 
 ### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
 
@@ -605,6 +665,14 @@ mapped to `-T_E_ACCES`. So an out-of-scope attach now returns `-EACCES` (pouch
 presents `errno == EACCES`) where it once collapsed to a bare `-1` — the reason
 that identity refusal is observable from Thylacine at all
 ([[sub-kernel-ninep-attach]]).
+
+### The wrapper clears note_interruptible (ARCH 8.8.3)
+
+The single exit also clears the thread's `note_interruptible`, which the
+vivarium dispatcher sets for a Linux call on signal(7)'s list
+([[sub-kernel-vivarium]]). Clearing it at the one exit is what keeps a wait
+outside that syscall -- a page-in at EL0, the next syscall's own waits -- from
+inheriting its interruptibility ([[dec-2026-09-29-caught-signal-slow-calls]]).
 
 ### The body runs with interrupts ON (ARCH 8.12)
 
@@ -1328,3 +1396,80 @@ the load ([[sub-kernel-exec]]). And `sys_mount_for_proc`'s comment now says
 what B-1d-u made true: `territory.c::mount` retains the mountpoint Spoor, with
 its own reference, only as the covered member of a union the mount starts
 ([[sub-kernel-territory]]); the handler still releases its own.
+
+**B-1d-v (2026-09-25): `SYS_MOUNT`'s type check.** `sys_mount_for_proc` looks
+the source up (RIGHT_READ), then refuses Plan 9's `Emount` cases before
+`mount()` runs: a source whose `QTDIR` bit differs from the point's, under any
+flag, and any mount without `MREPL` at a point without `QTDIR` (Plan 9's
+`order != MREPL`; a flagless mount appends here, where Plan 9's flag 0 is
+`MREPL`). The check reads the flags and the two types only, so it takes no
+lock, and it is made once, on the point's own Spoor at install: a 9P server
+can re-type the point afterwards, so the resolver keeps its own type gates
+([[sub-kernel-stalk]]). The refusal clunks the lookup's reference and returns `-T_E_NOTDIR`, the
+one named errno in a call whose other refusals stay the flat -1
+([[sub-kernel-syscall-abi]]); the votes are
+[[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
+[[dec-2026-09-25-sys-mount-emount]].
+
+## viv_poll_translated passes a zero timeout through (2026-09-28, #98 NP-4c)
+
+The guest poll translation no longer widens a literal timeout of 0 to
+`VIV_PPOLL_PROBE_MS` when a socket is in the set; `any_socket` and the budget
+are deleted. The budget covered for a poll core that answered a remote
+readiness file from a cache. The core now sends each remote file a snapshot
+its server answers at once and decides only after every snapshot of the pass
+is answered ([[sub-kernel-poll]]), so `sys_poll_for_proc` with timeout 0
+returns netd's real verdict without the widening. Everything else in the
+translation is unchanged: each socket's fd is swapped for its QTPOLL `ready`
+sibling (opened per call, which is the guest-fd consumption V-5d F6 records
+and NP-5 retires), caller-disabled entries are compacted away first (V-5d F1),
+and the result is mapped back to the guest's fd numbers.
+
+## The vivarium's /net files leave the guest's fd table (2026-09-29, NP-5)
+
+The NP-4c section above names the readiness fd "opened per call ... NP-5
+retires": retired here, together with four more arms of the same shape and one
+older defect found on the way. The phenotype-side account is
+[[sub-kernel-vivarium]]; this is the dispatcher's.
+
+**The open core splits.** `sys_resolve_kpath_for_proc` is everything an open
+does short of installing an fd: the cwd join, stalk, the permission and rights
+policy, returning a referenced Spoor and the rights an fd for it would carry.
+`sys_open_kpath_for_proc` is that plus `handle_alloc`. The vivarium's socket
+arms call the resolve half only, so a file they hold privately passes the same
+walk and the same gates a guest open would.
+
+**I/O on a Spoor no fd names.** `spoor_read_on` / `spoor_write_on` are the
+Spoor halves of `spoor_read_common` / `spoor_write_common`: every gate after the
+handle lookup (CWALKONLY, the positioned seekability and overflow checks, the
+zero length, the missing method, the errno clamp, the cursor advance), in the
+same order. The `_common` forms are now the fd checks, `sys_lookup_rw_handle`,
+the `_on` body and the clunk. `sys_write_staged(p, h, via, buf_va, len)` is
+SYS_WRITE's staging tail (the two-tier bounce and the copy-in) with the target
+chosen by the caller: `via == NULL` writes fd `h`, as `sys_write_handler` does;
+a Spoor writes that Spoor.
+
+**The arms.** `viv_poll_translated` polls each socket through the readiness
+Spoor its socktab row caches (resolved on the socket's first poll; polled via
+`sys_poll_for_proc_spoors`, [[sub-kernel-poll]]); its borrowed `pre[]` follows
+the V-5d F1 compaction while the owning `ready[]` array stays in caller order
+and is released on every return. `connect` resolves `data` privately and hands
+that reference to `handle_replace`. `accept` resolves `listen`, `remote` and
+`data` privately and installs only `data`, with `handle_alloc` (a full table
+is EMFILE, as Linux answers it; it was ECONNABORTED). An unconnected UDP
+`sendto` and `recvmsg` resolve `data` per call (`viv_sock_resolve`) and move the
+datagram through `sys_write_staged` / `spoor_read_on`.
+
+**NP-5c, the nonblocking verb.** netd, not the Spoor, decides whether an empty
+`data` read parks or answers EAGAIN, by its per-connection `nonblock` ctl verb,
+and the dispatcher never wrote it: `socket(SOCK_NONBLOCK)` and `F_SETFL` set
+CNONBLOCK alone, which dev9p never reads, so a nonblocking read of an empty
+socket blocked, and recvmsg's 0 -> EAGAIN mapping (built on the premise that
+netd answered 0 on an empty socket) reported a closed peer as EAGAIN.
+`viv_sock_sync_nonblock` now writes the verb through a private `ctl` Spoor,
+carrying the flag as read back after each write lands and repeating while a
+peer thread moved it, so the two copies agree once the setters stop with no
+lock held across an RPC. `F_SETFL` on a socket row goes through
+`viv_sock_set_nonblock` (a failed verb restores the bit); `socket()` unwinds on
+a failed verb; both answer ENOMEM for a shortage and EIO otherwise. recvmsg's
+0 is 0 whatever the mode.

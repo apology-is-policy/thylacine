@@ -69,6 +69,7 @@
 struct p9_client;
 struct Spoor;
 struct p9_spoor_transport;
+struct p9_closer_entry;
 
 #define P9_ATTACHED_MAGIC  0x50394154u  // "P9AT" little-endian
 
@@ -116,6 +117,16 @@ struct p9_attached {
     struct p9_attached          *ctl_next;
     char                         ctl_label[12];
     int                          ctl_id;       // peer pid for /srv conns; -1 else
+    // The closer (docs/FID-LIFECYCLE-DESIGN.md section 9): this session's
+    // deferred Tclunks, oldest first, each entry holding one ref on this
+    // struct. closer_queued = waiting on the closers' run-queue; closer_busy =
+    // a closer is serving it -- never both, so one closer serves a session at
+    // a time. All under the closer lock (9p_attach.c).
+    struct p9_closer_entry      *closer_head;
+    struct p9_closer_entry      *closer_tail;
+    struct p9_attached          *closer_next;
+    bool                         closer_queued;
+    bool                         closer_busy;
 };
 
 // Create + handshake + return ownership. `transport_ops` is the byte-
@@ -188,6 +199,59 @@ void p9_attached_destroy(struct p9_attached *a);
 
 // Query: is this attached's session OPEN?
 bool p9_attached_is_open(const struct p9_attached *a);
+
+// =============================================================================
+// The closer (docs/FID-LIFECYCLE-DESIGN.md section 9; dec-2026-09-28-tclunk-
+// closer). A Tclunk its caller could not send on a live session -- the caller
+// is dying, or a spill buffer could not be allocated -- is sent by a pool of
+// kernel threads that never die: Plan 9's closeproc, one closer per session.
+// =============================================================================
+
+// Hand `fid` -- still bound, its Tclunk never sent -- to the closer. Queues it
+// with a reference on `a` in a node from kmalloc (which never sleeps) and wakes
+// an idle closer, or spawns one when every closer is busy (thread_create never
+// sleeps either): it never blocks (I-24). The caller holds a reference on `a`.
+// Returns 0 when queued; -1 when the node could not be allocated, and the fid
+// then stays bound -- a leak on a live session, which the caller reports
+// (p9_clunk_refused).
+int p9_attached_defer_clunk(struct p9_attached *a, u32 fid);
+
+// Print `9p: close: clunk of fid N refused rc R` and count it. Only for a fid
+// that stays live on a live session: tools/test.sh fails on the line.
+void p9_clunk_refused(u32 fid, int rc);
+
+// Boot: start the pool with its first closer. -1 if it could not be created.
+int p9_closer_start(void);
+
+// Observability (tests; the counters are cumulative since boot).
+struct p9_closer_stats {
+    u32 threads;         // closers alive, idle or busy
+    u32 idle;            // 0 or 1
+    u32 idle_parked;     // 1 while the idle closer sleeps: nothing of the
+                         // pool is runnable
+    u32 retired;         // retired and not yet reaped
+    u32 runq;            // sessions waiting for a closer
+    u64 pending;         // entries queued and not yet finished
+    u64 sent;            // Tclunks the closers put on the wire
+    u64 dropped;         // entries that needed no Tclunk: the session died
+                         // (its fids with it) or the fid was not bound
+    u64 refused;         // entries left live on a live session (reported)
+    u64 spawned;
+    u64 spawn_failed;
+    u64 reaped;
+    u64 live_refusals;   // p9_clunk_refused lines, from every caller
+};
+void p9_closer_stats(struct p9_closer_stats *out);
+
+// Tests: the next `n` closer spawns, or closer queue nodes, fail as an
+// allocation failure would. Each returns how many were still to fail.
+u32 p9_closer_fail_spawns_for_test(u32 n);
+u32 p9_closer_fail_nodes_for_test(u32 n);
+
+// Tests: hold the next spawn at its end -- before it readies its new closer,
+// or before it takes its failure -- until released with false.
+void p9_closer_hold_spawn_for_test(bool hold);
+bool p9_closer_spawn_held_for_test(void);
 
 // #210: relabel a registered attached for /ctl/9p-sessions (label is
 // copied, truncated to the ctl_label field; id is free-form — the /srv

@@ -574,7 +574,8 @@ fn the_heap_bounds_hold() {
                 break;
             }
             let mut passed = false;
-            let peak = peak_footprint(|| passed = show(src.as_bytes(), read, tier, width).is_some());
+            let peak =
+                peak_footprint(|| passed = show(src.as_bytes(), read, tier, width).is_some());
             assert_eq!(passed, passes, "{}: whether it passes the check", name);
             std::eprintln!(
                 "bounds: {:<50} {:?}/{:?}/{:?}: peak footprint {:>6} KiB ({:.2} bytes per byte)",
@@ -615,19 +616,82 @@ fn the_heap_bounds_hold() {
     );
 }
 
+/// Time spent on this thread's work, with elapsed time retained for diagnosis.
+/// A wall clock alone can classify a linear renderer as quadratic when the
+/// large-input sample is descheduled. Other test threads must not count either,
+/// hence THREAD_CPUTIME rather than the process clock. Non-Unix hosts retain
+/// the elapsed-time measurement; the supported macOS/Linux gates use CPU time.
+struct WorkClock {
+    wall: Instant,
+    #[cfg(unix)]
+    cpu: Duration,
+}
+
+#[cfg(unix)]
+fn thread_cpu_time() -> Duration {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one initialized timespec; the clock is the
+    // calling thread's and needs no handle or shared mutable storage.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    assert_eq!(rc, 0, "thread CPU clock unavailable");
+    assert!(t.tv_sec >= 0 && (0..1_000_000_000).contains(&t.tv_nsec));
+    Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+}
+
+impl WorkClock {
+    fn start() -> Self {
+        Self {
+            wall: Instant::now(),
+            #[cfg(unix)]
+            cpu: thread_cpu_time(),
+        }
+    }
+
+    fn elapsed(&self) -> (Duration, Duration) {
+        let wall = self.wall.elapsed();
+        #[cfg(unix)]
+        let work = thread_cpu_time()
+            .checked_sub(self.cpu)
+            .expect("CPU clock reversed");
+        #[cfg(not(unix))]
+        let work = wall;
+        (work, wall)
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn work_clock_excludes_unscheduled_time() {
+    let t = WorkClock::start();
+    std::thread::sleep(Duration::from_millis(40));
+    let (work, wall) = t.elapsed();
+    assert!(work < wall / 2, "work={work:?}, wall={wall:?}");
+    let t = WorkClock::start();
+    for i in 0..100_000usize {
+        std::hint::black_box(i.wrapping_mul(17));
+    }
+    assert!(
+        t.elapsed().0 > Duration::ZERO,
+        "CPU clock must measure computation"
+    );
+}
+
 /// Every expensive shape takes time, and writes output, linear in its size: the
 /// same work on a section four times larger takes well under sixteen times as
-/// long and writes well under sixteen times as much. Each size is timed as the
-/// best of several runs, which discards interference rather than averaging it
-/// in.
+/// long and writes well under sixteen times as much. Each size uses the best
+/// of several CPU-time samples on Unix (elapsed-time samples elsewhere). The
+/// associated wall time is diagnostic; it is not proof of extra computation.
 #[test]
 fn the_time_bounds_hold() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    fn best(src: &str) -> (Duration, usize) {
+    fn best(src: &str) -> ((Duration, Duration), usize) {
         let mut written = 0;
         let t = (0..3)
             .map(|_| {
-                let t = Instant::now();
+                let t = WorkClock::start();
                 written = [(Tier::Rich, None), (Tier::None, Some(80))]
                     .into_iter()
                     .map(|(tier, width)| {
@@ -643,9 +707,9 @@ fn the_time_bounds_hold() {
     let small = expensive(SECTION_MAX / 16);
     let large = expensive(SECTION_MAX / 4);
     for ((name, s, _), (_, l, _)) in small.iter().zip(&large) {
-        let ((ts, os), (tl, ol)) = (best(s), best(l));
+        let (((ts, ws), os), ((tl, wl), ol)) = (best(s), best(l));
         std::eprintln!(
-            "time: {:<50} {:>9.3?} and {:>6} KiB out at {:>4} KiB, {:>9.3?} and {:>6} KiB out at {:>4} KiB",
+            "work: {:<50} {:>9.3?} and {:>6} KiB out at {:>4} KiB, {:>9.3?} and {:>6} KiB out at {:>4} KiB (wall {ws:?}, {wl:?})",
             name,
             ts,
             os / 1024,

@@ -674,6 +674,131 @@ the other way:
 The full semantics, the mechanism and the escalation argument are in
 IDENTITY-DESIGN.md 3.2.
 
+## 4.8 A remote mount says so — the `remote` label (VOTED 2026-09-24; carrier VOTED 2026-09-28, LR-1)
+
+**What failed.** The operator mounted a host tree with Haul and listed its
+parent with `la` (the shell's alias for `ls -la`). The mount point's REALM
+read `fs`, the same as every directory beside it. Nothing on the screen said
+the tree lived on another machine, and `ns` could not say it either: with no
+operand it showed the system root, which never holds a shell's mounts, and
+given the right pid it named the source `/` (the name every 9P session root is
+born with, `dev9p_attach_client`) with the REALM `fs`, like any subtree.
+
+**The votes.** The first (operator, 2026-09-24): a mount point gets a REALM of
+its own, `remote` for a network mount and `mount` for a local one. Haul
+declares its mount remote and the kernel carries the declaration; the vote
+signed off a change to the mount syscall to carry it. The second (operator,
+2026-09-28) chose the carrier: a mount-syscall flag labels the first flow below
+and no other, so the declaration rides the 9P session instead, on the two bits
+listed under **The ABI**. The `ns` changes under **Where it shows** are the
+implementer's, not part of either vote.
+
+**Where the declaration lives: the 9P session.** A mount entry records where a
+tree is grafted. The tree comes from a 9P session, and only the program that
+created the session knows where its bytes go: the kernel speaks 9P over the two
+pipes Haul hands it (section 2), and the TCP connection behind them belongs to
+Haul and netd. Three documented flows put a remote tree into a namespace:
+
+1. `haul HOST!PORT PATH`: Haul attaches the session (`SYS_ATTACH_9P`) and
+   mounts it.
+2. `haul --post NAME HOST!PORT`, then the shell's `mount /srv/NAME PATH`: Haul
+   posts the service, and the SHELL attaches (`SYS_ATTACH_9P_SRV`) and mounts.
+   The shell never learns what is behind the service. This is the primary
+   example of the operator's manual, section 14.
+3. A directory inside a remote mount, mounted somewhere else: the new entry's
+   source is a Spoor of the same session.
+
+A declaration passed with `SYS_MOUNT` would be right in the first flow alone.
+So the declaration rides the session, by the two paths the cape already takes
+(4.7): the private form declares it on its attach, the post declares it on the
+service so every attach over the service inherits it, and every mount entry
+whose source belongs to the session shows it. The entry stores nothing; the
+label is read from the source when the mount list is rendered, so it cannot
+disagree with the session it describes.
+
+Plan 9 needed no declaration. `import` and `srv` mount the network connection
+itself, and `ns` names each mount by the channel it came from, so a network
+mount reads as a `/net` connection file or as a `/srv` entry named after its
+dial string (`srv tcp!host` posts `/srv/tcp!host`). Thylacine's kernel has no
+TCP, and Haul's pipes hide the connection; the declaration restores what Plan
+9's channel name shows by construction.
+
+**The ABI.** Every bit below was refused as unknown before LR-1, so no existing
+caller changes behaviour.
+
+- `SYS_ATTACH_9P_REMOTE` (`0x4`) in `SYS_ATTACH_9P`'s flags word: the attacher
+  declares that the session's transport leaves the machine. `SYS_ATTACH_9P_SRV`
+  refuses it, because over a service the poster declares, as with the cape.
+- `SYS_WALK_CREATE_DMSRVREMOTE` (`0x00400000`, bit 22, the next free bit below
+  DMSRVCAPE) on a `/srv` post: every attach over the service is remote. Either
+  service mode admits it. DMSRVCAPE is byte-mode only because of what a
+  byte-mode attacher could already do (4.7); a label grants nothing, so there
+  is nothing to restrict. The declaration is part of the service's identity
+  on a tombstone rebind, like the mode, the ring class and the cape: a client
+  that captured it mid-connect lands with a poster that made the same one.
+- The session (`struct p9_client`) gains `remote`, stamped once by the attach
+  path before the root Spoor is published and never cleared, the discipline of
+  `loose` and `cape`.
+- `/proc/<pid>/ns`: a member entry whose source Spoor belongs to a remote
+  session ends in ` remote`, after the existing ` noexec` and ` pheno-linux`,
+  so every parse of the first two fields is unchanged. The covered entry of a
+  union (ARCH 9.5) never carries it: nobody mounted that entry, it is the
+  directory underneath, and its line already names the directory.
+
+**Display only.** `territory_format_ns` is the only kernel reader. The
+resolver, the permission checks, the Larder, exec vouching (`MNOEXEC`,
+`Dev.may_back_exec`) and the phenotype stamp never consult it; this is I-33's
+rule for namespace names applied to a declaration. Any program that attaches a
+session may declare it remote or not, and a false declaration misleads a
+listing without granting anything. Haul's declaration is truthful because Haul
+holds the TCP connection.
+
+**Where it shows.**
+
+- `ls -l`, and so `la`: REALM is `remote` for a mount point with at least one
+  remote member, `mount` for any other mount point, and unchanged for every
+  other entry (`graft`, `dev`, `fs`). A mount point takes `mount` even when
+  `fstat` cannot cross it: the mount table is the ground truth, and `graft`
+  stays the inference for a directory `fstat` cannot cross that the table does
+  not name. `ls` reads its own `/proc/<pid>/ns` once per long listing; a
+  program's namespace is a copy of the shell's that spawned it, so the list is
+  the shell's. Each listed entry's cleaned absolute path is compared with the
+  mount-point names. Those names are captured when the mount is made (I-33,
+  introspection only), so a mount point reached by a different name, through a
+  bind or a union, shows its entry's ordinary realm. `stat` and `realm` report
+  the same realm for their operands, and `realm`'s own example (`/srv` is a
+  graft) becomes true again as `mount`.
+- `ns`: a line with the suffix reads REALM `remote`. The source column names
+  a session root by the file its session came over (operator vote 2026-09-28,
+  Plan 9's form; ARCH 9.6.9): the shell's `mount /srv/NAME` reads `/srv/NAME`,
+  the service the shell opened, and Haul's private form reads `#|`, the pipe
+  Haul hands the kernel (a pipe has no name, so its device spec stands in).
+  Through LR-1 both read `/`, the name every session root is born with
+  (`dev9p_attach_client`), which the root itself keeps. The suffix, not the
+  source, says remote: a local session attached the same way reads the same
+  shape without it. `ns` gives `#|` the REALM `9p`. The kernel writes `#9`
+  only for a session root with no name at all (the allocation-failure
+  fallback), and `ns` now calls that `9p` rather than `disk`. A FLAGS column shows the suffixes the boxed view used to drop
+  (`noexec`, `pheno-linux`, `covered`), which closes that queued defect. With
+  no operand, `ns` shows its caller's namespace, Plan 9's default (ns(1): "the
+  process with the named pid, or by default itself"); `ns 0` shows the system
+  root, the old default, which never held the shell's own mounts.
+
+**What `remote` does not claim.** It says where the session's bytes go, as the
+attacher or the poster declared. It says nothing about encryption: Haul's
+announcement line names the channel (`npxf encrypted` or `PLAIN 9P`). It says
+nothing about reachability either; a mount whose connection has ended stays
+`remote` until it is unmounted.
+
+**Limits, recorded here rather than discovered later.** A mount-point name that
+contains whitespace breaks every parse of `/proc/<pid>/ns`, because the format
+has no quoting (Plan 9 quotes such names); this predates LR-1 and is queued.
+The list is rendered into a bounded buffer, whole lines only, and its `binds:`
+line is written only when the list fit (#66b); the newest mounts are the ones
+cut. The tools read a missing `binds:` line as a cut list and say
+`mount list incomplete`, but they cannot name what was cut, so a remote mount
+past the cut shows its ordinary realm.
+
 ## 5. Open
 
 - **Where the guest gets the token.** Today: `-t FILE` or `--token-env VAR`,

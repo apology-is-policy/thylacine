@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-07
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -124,12 +124,15 @@ reports as always-ready — so a native poller of its slave fd would
 `interrupt` note cannot wake it (the "^C eats the next line" shape). The
 fix is netd's `ready`-file precedent: a **separate** per-pts
 `/dev/pts/<n>ready` whose qid carries QTPOLL, walkable but hidden from
-readdir (the master precedent). A read on it encodes the wanted poll mask
-in the Tread *offset* (count 4) and gets back the 4-byte revents — POLLIN
-iff a line is queued or the master is gone (EOF-as-readable), POLLOUT iff
-`s2m` has room, POLLHUP iff the master is gone (always, the poll(2)
-contract); non-zero replies now, zero **parks as a `PendingRead{probe:
-true, mask}` in the same flat Vec** as data reads, so `poll_reads`
+readdir (the master precedent). A read on it carries the wanted poll mask
+in the Tread *offset* and gets back the revents as a u32 LE, cut to the
+read's count — POLLIN iff a line is queued or the master is gone
+(EOF-as-readable), POLLOUT iff `s2m` has room, POLLHUP iff the master is
+gone (always, the poll(2) contract). `ninep::ready_answer` decides, as for
+netd's `ready` ([[sub-netd-server]]): a SNAPSHOT (offset bit 16) replies at
+once even when zero; any other bit above the mask is refused `EINVAL`; an
+ARM replies now if satisfied, else **parks as a `PendingRead{probe: true,
+mask, cap}` in the same flat Vec** as data reads, so `poll_reads`
 re-evaluates it non-consumingly and the same Tflush/clunk/teardown cancel
 paths dispose it — no separate machinery to miss. It is a distinct fid,
 never the slave's, because the slave's read offset is real data and a

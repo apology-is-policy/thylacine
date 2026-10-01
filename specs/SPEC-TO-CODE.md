@@ -310,7 +310,7 @@ Run 2026-09-25 on thyla-keep (TLC 2026.09.17 rev 142d0ba, OpenJDK 21, 32 aarch64
 | Config | Constants | Verdict | Distinct |
 |---|---|---|---|
 | `territory.cfg` | all flags FALSE, `Symm` | clean, depth 11 | 8,052,876 |
-| `territory_file_point.cfg` | `FilePaths = {b}`, `Symm` | clean, depth 11 | 4,380,876 |
+| `territory_file_point.cfg` | `FilePaths = {b}`, `Symm` | clean, depth 11 | 1,372,428 (4,380,876 before the 2026-09-25 Emount refusal) |
 | `territory_cov_alias.cfg` | `COV_MOUNTABLE`, `Procs = {p1}`, `Spoors = {s1}` | clean, depth 9 | 202,800 |
 | `territory_buggy.cfg` | `BUGGY_CYCLE` | `NoCycle` violated | (fast) |
 | `territory_buggy_mount_no_refbump.cfg` | `BUGGY_MOUNT_NO_REFBUMP` | `MountRefcountConsistency` violated | (fast) |
@@ -342,9 +342,12 @@ large clean cfgs came out identical across two independent runs: first on
 
 Impl mapping: `CovAdded` / `Placed` -> `kernel/territory.c::mount`'s
 `starts_union` (judged before the UM-8 reposition scan: an MBEFORE / MAFTER,
-never MREPL or flagless, at a directory point hosting no member; `DirPoint` is
-its QTDIR check) and the two `mount_install_at` calls that place the covered
-entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
+never MREPL or flagless, at a directory point hosting no member; `CovGuard` is
+its QTDIR check, and `EmountOK`, which guards `MountBefore` / `MountAfter` /
+`MountRepl`, is `kernel/syscall.c::sys_mount_for_proc`'s type check, Plan 9's
+Emount, since the 2026-09-25 votes: every source in the model is a directory,
+so no EL0 mount reaches a file point, and the kernel answers `-T_E_NOTDIR`)
+and the two `mount_install_at` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
 MAFTER); `Reposition` -> the #219 / F6 reposition arm (the point is not fresh,
 so no covered entry); `Unmount` -> `::unmount` (the covered entry is never
 removed by name and leaves with the last mounted member); `NoSelfMount` ->
@@ -355,6 +358,62 @@ stops at a point whose member[0] is covered). Runtime: the 18 B-1d-u kernel
 tests (`territory_mount.covered_*`, `union_keeps_covered`,
 `no_covered_unless_fresh`, `territory.shed_covered_shares_fate`,
 `stalk.union_covered_*`).
+
+### B-1d-v: SYS_MOUNT's Emount (2026-09-25)
+
+The two 2026-09-25 votes (vault `dec-2026-09-25-sys-mount-emount`, replaced by
+`dec-2026-09-25-mrepl-only-at-a-file`) put Plan 9's `Emount` in
+`sys_mount_for_proc`: a source whose type differs from the point's is refused
+under any flag, and at a point that is not a directory only `MREPL` is
+accepted. Every source in the model is a directory, so the half the model can
+see is that no EL0 mount reaches a file point. A file mounted over a file with
+`MREPL` sits beneath the model, and so does the flagless append the second vote
+refuses, which needs two file members at one point; the kernel test
+`sys_mount.refuses_all_but_mrepl_at_a_file` carries both.
+
+Model changes. The file-point guard is split in two: `EmountOK(pt) ==
+DirPoint(pt) \/ KERNEL_MOUNTS \/ BUGGY_EMOUNT` guards `MountBefore`,
+`MountAfter` and `MountRepl` (the syscall's check), and `CovGuard(pt) ==
+DirPoint(pt) \/ BUGGY_COVER_FILE` guards the covered member in `CovAdded`
+(`starts_union`'s QTDIR conjunct). `KERNEL_MOUNTS` models `mount()`'s kernel
+callers, which the syscall check does not cover. One invariant,
+`NoMemberAtFile`: no file point holds a member (it does not bind the kernel's
+callers). `territory_buggy_cover_file.cfg` now sets `KERNEL_MOUNTS`, since
+without it no mount reaches a file point and `BUGGY_COVER_FILE` could not fail.
+
+| Config | Constants | Verdict | Distinct |
+|---|---|---|---|
+| `territory_file_point_kernel.cfg` | `FilePaths = {b}`, `KERNEL_MOUNTS`, `Symm` | clean, depth 11 | 4,380,876 (the pre-refusal `file_point` count: with `KERNEL_MOUNTS` the mount actions are unguarded) |
+| `territory_buggy_emount.cfg` | `FilePaths = {b}`, `BUGGY_EMOUNT` | `NoMemberAtFile` violated, depth 2 (one `MountBefore` at `b`) | (fast) |
+| `territory_buggy_cover_file.cfg` | `FilePaths = {b}`, `BUGGY_COVER_FILE`, `KERNEL_MOUNTS` | `NoCoveredFile` violated, depth 2 | (fast) |
+
+Run 2026-09-25 on thyla-keep (TLC 2026.09.17, OpenJDK 21, 32 aarch64 cores).
+`specs/check-territory.sh` now runs all twenty-two and pins four clean counts:
+`territory` 8,052,876, `territory_file_point` 1,372,428,
+`territory_file_point_kernel` 4,380,876 and `territory_cov_alias` 202,800. Every
+cfg came out as claimed, and each buggy cfg violated the invariant it names, on
+one worker.
+
+`SYMMETRY Symm` reduces three clean cfgs now: `territory`, `territory_file_point`
+and `territory_file_point_kernel`. The buggy cfgs stay unreduced, so their
+traces read directly; `territory_buggy_emount` lost the `SYMMETRY` line it had
+been given (audit round 2). The whole set was re-run on 2026-09-28 (thyla-keep,
+about 33 minutes): all twenty-two came out as claimed, the four clean counts
+unchanged, and `territory_buggy_emount` violated `NoMemberAtFile` as claimed
+with no reduction.
+
+Impl mapping: `EmountOK` -> `sys_mount_for_proc`'s check (`source_dir !=
+point_dir || (!point_dir && !(flags & MREPL))`, `-T_E_NOTDIR`, the lookup's
+reference released); `CovGuard` -> `starts_union`'s QTDIR conjunct in
+`kernel/territory.c::mount`. Runtime: `sys_mount.refuses_a_type_mismatch`,
+`refuses_all_but_mrepl_at_a_file`, `type_check_reads_only_qtdir` and
+`accepts_an_ordered_mount_at_a_directory` at the syscall; the `mount()` layer's
+`territory_mount.covered_file_point_stays_plain` for `KERNEL_MOUNTS`; on the
+device, alloc-smoke's U-2f leg (a file over the `/srv` directory under every
+placement, `/bin` over `/srv` through the three `bind_*` wrappers with the
+placement read back from `/proc/<pid>/ns`, and `/bin/joey` over the
+`/bin/system.key` file: refused without `MREPL`, and read back through the
+key's name under it).
 
 ### P2-Ea landed (this chunk)
 
@@ -919,20 +978,66 @@ One measured fact from the point's era is kept because it corrected a claim
 rather than a test: the `isb` in that window WIDENED it and did not
 guarantee delivery -- a `noisb` sabotage PASSED while `nodaifclr` FAILED.
 
-State universe: one poller, N fds (`Fds`), one timeout, at most one stop
-request. CONSTANTS: `HAS_TIMEOUT` (FALSE = poll(-1)),
-`BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`, `BUGGY_LAZY_UNREGISTER`,
-`BUGGY_CLEAR_AFTER_SAMPLE`, `BUGGY_RETURN_ON_WAKE`,
-`BUGGY_NO_LOOP_DIE_CHECK`, `BUGGY_NO_LOOP_STOP_CHECK`, `BUGGY_NO_POINT`.
-`specs/check-poll.sh` checks every cfg's verdict (clean counts pinned;
-buggy cfgs by the NAMED property); `TLC_WORKERS=1` on a shared host.
+**What the #98 extension adds (2026-09-28, model-first; the mechanism
+landed at NP-4c).** REMOTE fds (`Remote`, a subset of `Fds`): a socket or a pty whose
+readiness lives in the server that holds it. A remote fd is sampled by a
+SNAPSHOT the server answers at once (`SnapshotAnswer`), so every pass SETTLES
+before its verdict (`MayDecide`); it is hooked only by `Arm`, when the call is
+about to park, where the server's level-on-arrival evaluation is folded in as
+a register-then-observe (a remote fd already ready flags its fresh hook). A
+pass that returns whatever it finds -- timeout 0, the pass after TIMEDOUT, a
+wake past the deadline -- hooks nothing (`ScanHooks`), and a first verdict
+past the deadline returns 0 on the pass's own answers. Death during a settle
+unwinds it (`SettleDeath`) and the sweep abandons the snapshots. Two new
+properties: `NoFalseNotReady` (every fd a returned poll reports not ready was
+not ready at some instant of the pass that decided; a ghost `pass_notready`
+carries the instant) and `NoSnapshotOutlivesCall`. The server's side --
+the arm's relay, the 1 s fail-safe, a server that hangs -- is
+`net_poll.tla`'s. Every cfg but `poll_local.cfg` now polls one local fd
+beside one remote one, which is why the clean counts grew.
+
+**An arm that cannot be sent (NP-4a, 2026-09-28).** `ARM_MAY_FAIL` lets
+`Arm` leave any subset of the remote fds unarmed -- the session's tags all
+in use, its send ring full, no memory for the poll state -- and bounds the
+park by a retry timer (`retry`) when any arm failed. An unarmed fd is left
+unregistered in the model: in the code its hook may be on the list, but
+nothing walks it for that fd's own readiness. The timer's expiry is
+`RetryWake`, a wake with no flag and one of the poller's steps.
+`NoMissedPoll` now also forbids sleeping, with no timer, on a ready fd the
+park does not cover. Without `ARM_MAY_FAIL` a sleeping poller holds a hook
+on every fd, so the new conjunct changes nothing there, and the five older
+clean counts are unchanged. Two red cfgs pin the code's obligations: a park
+any arm failed to cover gets the timer (`no_retry`), and the timer's expiry
+is never the call's timeout -- tsleep returns TIMEDOUT for either, so the
+clock decides (`retry_is_timeout`). `poll_armfail.cfg` polls one local fd
+beside two remote ones, so one arm can fail while the other is sent;
+TLC's coverage shows `Arm` and `RetryWake` taken there. The liveness side
+was shown able to fail: `poll_armfail_liveness_notimeout.cfg` with
+`BUGGY_NO_RETRY` and its invariants removed violates `StableReadyReturns`
+(`StopRequest Register SnapshotAnswer EvaluateFirst Arm MakeReady
+TSleepCommit StopResume TSleepCommit`, then stuttering).
+
+State universe: one poller, N fds (`Fds`, of which `Remote` are remote), one
+timeout, at most one stop request. CONSTANTS: `HAS_TIMEOUT` (FALSE =
+poll(-1)), `Remote`, `BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`,
+`BUGGY_LAZY_UNREGISTER`, `BUGGY_CLEAR_AFTER_SAMPLE`, `BUGGY_RETURN_ON_WAKE`,
+`BUGGY_NO_LOOP_DIE_CHECK`, `BUGGY_NO_LOOP_STOP_CHECK`,
+`BUGGY_VERDICT_BEFORE_SETTLE`, `BUGGY_SWEEP_LEAVES_SNAPSHOT`,
+`ARM_MAY_FAIL` (not a bug: the kernel may be unable to send an arm),
+`BUGGY_NO_RETRY`, `BUGGY_RETRY_IS_TIMEOUT`.
+`specs/check-poll.sh` checks every cfg's verdict (buggy cfgs by the NAMED
+property, with the counterexample's actions printed); `TLC_WORKERS=1` on a
+shared host. Its temporal verdicts need SPEC-POLICY's documented TLC, which
+names the violated property; an older build (2.19, Aug 2024) does not, and the
+script accepts that wording only from a cfg that checks that one property.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 2194 |
-| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 968 |
-| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `IrqLatencyBounded` | clean | 2194 |
-| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `IrqLatencyBounded` | clean | 968 |
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 3562 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 1206 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 3562 |
+| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1206 |
+| `poll_local.cfg`                       | `Remote = {}` (every fd local) | `Invariants` | clean | 3242 |
 | `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation | — |
 | `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation | — |
 | `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation | — |
@@ -940,7 +1045,13 @@ buggy cfgs by the NAMED property); `TLC_WORKERS=1` on a shared host.
 | `poll_buggy_return_on_wake.cfg`        | `BUGGY_RETURN_ON_WAKE`        | `NoSpuriousZero` | violation | — |
 | `poll_buggy_no_loop_die_check.cfg`     | `BUGGY_NO_LOOP_DIE_CHECK`, poll(-1), `Spec_Live` | `DeathTerminates` | violation | — |
 | `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
-| `poll_buggy_no_point.cfg`              | `BUGGY_NO_POINT`, poll(-1), `Spec_Live` | `IrqLatencyBounded` | violation | — |
+| `poll_buggy_verdict_before_settle.cfg` | `BUGGY_VERDICT_BEFORE_SETTLE` | `NoFalseNotReady` | violation (`MakeReady MakeReady Register EvaluateFirst`: both fds ready, the local one decides, the socket goes unreported) | — |
+| `poll_buggy_sweep_leaves_snapshot.cfg` | `BUGGY_SWEEP_LEAVES_SNAPSHOT` | `NoSnapshotOutlivesCall` | violation (`Register Die SettleDeath`) | — |
+| `poll_armfail.cfg`                     | `ARM_MAY_FAIL`, `Fds = {f1, f2, f3}`, `Remote = {f2, f3}` | `Invariants` | clean | 38844 |
+| `poll_armfail_liveness.cfg`            | `ARM_MAY_FAIL`, `Spec_Live` | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 4306 |
+| `poll_armfail_liveness_notimeout.cfg`  | `ARM_MAY_FAIL`, `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1304 |
+| `poll_buggy_no_retry.cfg`              | `ARM_MAY_FAIL`, `BUGGY_NO_RETRY` | `NoMissedPoll` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit MakeReady`: the socket's arm is not sent, the park has no timer, and the socket readies) | — |
+| `poll_buggy_retry_is_timeout.cfg`      | `ARM_MAY_FAIL`, `BUGGY_RETRY_IS_TIMEOUT` | `NoSpuriousZero` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit RetryWake FinalSample SnapshotAnswer EvaluateFinal`: the timer's expiry takes the final pass, and the call returns 0 before its deadline) | — |
 
 Both liveness properties were shown able to FAIL before being trusted
 (2026-09-21): deleting `EvaluateWake`'s explicit `Expired` test violates
@@ -961,20 +1072,23 @@ Spec action ↔ impl mapping:
 | Spec action | Source location | Notes |
 |---|---|---|
 | `Register` | `kernel/poll.c::poll_scan_one` (first scan); `kernel/pipe.c::devpipe_poll`; `kernel/srvconn.c::srvconn_poll` (BOTH endpoints, selected by its `client` argument); `kernel/devsrv.c::svc_listener_poll` + `devsrv_poll` + `srv_handle_poll` | `dev->poll(spoor, events, pw)` for KObj_Spoor; `srv_handle_poll(obj, events, pw)` for KObj_Srv. Each installs the hook AND samples readiness in one locked step under the object's lock(s) (`r->lock` for pipe; `c2s.lock` + `s2c.lock` for SrvConn; `g_srv_registry.lock` for SrvService). |
-| `EvaluateFirst` | `kernel/poll.c::sys_poll_for_proc` (the post-scan fast path) | Return on `ready_count > 0` or `timeout_ms == 0`. |
+| `EvaluateFirst` | `kernel/poll.c::sys_poll_for_proc` (the verdict after `poll_collect`) | Return on `ready_count > 0`, or on `poll_expired` -- the clock: always at timeout 0, else `now >= deadline`. |
 | `TSleepCommit` | `kernel/poll.c::sys_poll_for_proc` (the `tsleep` on the poller's private rendez with `poll_cond_any_flagged`) | The flag scan + the sleep transition are atomic under the rendez lock; a set flag beats the deadline (tsleep.tla). |
 | `Rearm` | `kernel/poll.c::poll_unhook_all` | `poll_waiter_list_unregister` every hook, THEN `handle_put` every retained ref (the RW-2 2C-F1 order), then clear each `pw->ready` -- unlisted, so no producer can race the clear. |
 | `LoopCheck` / `ParkDeath` / `StopResume` | `kernel/poll.c::sys_poll_for_proc` (the loop's `thread_die_pending` + `proc_stop_requested` -> `proc_stop_sleeper_park`) | With every hook off. `SLEEP_INTR` from the park is `ParkDeath`. |
-| `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., &waiters[i], &held[i])` loop) | The first scan's install-and-sample again; a TIMEDOUT pass runs the same code (the model folds it into `FinalSample`). |
+| `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., expired ? NULL : &waiters[i], &held[i], &snaps[i])` loop) | The first scan's install-and-sample again, and a fresh snapshot per remote fd. A pass that begins past the deadline -- timeout 0, or the pass after the park timed out -- passes a NULL hook (`ScanHooks`: sample-only). |
 | `Die` / `StopRequest` waking a sleeper | `kernel/proc.c::proc_group_terminate`'s cascade; `proc_stop_wake_sleepers_locked` | Wake the private rendez; tsleep re-loops through `TSleepCommit`. |
-| `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the loop tail) | Ready -> return; else the explicit `timer_now_ns() >= deadline_ns` test -> return 0; else the backstop test (budget spent with `t->nsleeps` unmoved -> `poll_unhook_all` + `backoff`); else `sched_yield_hint` and `continue` to the tsleep. |
-| `Point` / `atpoint` | `kernel/sched.c::sched_preempt_point`, called from `kernel/poll.c::sys_poll_for_proc` (the loop, after the die/stop checks, before the rescan) | Unmasks IRQs briefly with `preempt_count` held (the switch is deferred, `#360`), across an `isb`; then honors a deferred `need_resched`. The `isb` widens the window rather than guaranteeing delivery -- a direct DAIF write needs no barrier, and the architecture bounds delivery only by "finite time" -- so the claim is that the point is reached EVERY re-loop, leaving the CPU repeatedly interruptible, and that this composes across pollers on one CPU (round-6 S1). |
+| `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the same verdict, on every pass after a park) | Every tsleep return goes round (a flag is a hint; TIMEDOUT may be the retry timer's): unhook, die/stop checks, scan, settle, collect, then ready -> return, `poll_expired` -> return 0, else count a re-sleep (`g_poll_resleeps`), `sched_yield_hint`, arm and park again. (The noise backstop this row used to name is gone with the preemption point, ARCH 8.12.) |
+| `SnapshotAnswer(f)` | the send: `poll_scan_one` -> `Dev.poll_snapshot` (`kernel/dev9p_poll.c::dev9p_poll_snapshot`); the answer: `dev9p_poll_snap_complete` (under `c->lock`, from the kthread's demux) | The answer writes the poller's `struct poll_snap` slot, stores `POLL_SNAP_ANSWERED` (RELEASE), and wakes the poller's rendez. `MayDecide` is `kernel/poll.c::poll_settle` (+ `poll_cond_settled`): no SENT or UNSENT slot; `poll_collect` then releases every snapshot (the `c->lock` barrier) before it reads one. |
+| `Arm` | `kernel/poll.c::poll_arm_remote` -> `Dev.poll_arm` (`kernel/dev9p_poll.c::dev9p_poll_arm`) | Only when the call will park, after the verdict: the hook on the poll-state's list FIRST, then an arm on the wire (a covering one reused, else a union arm, linked only once its submit returned 0). Returns 0 when a shortage, a dead session or no memory left the fd uncovered. |
+| `SettleDeath` | `kernel/poll.c::poll_settle` returns -1 on `TSLEEP_INTR` | The caller goes to the sweep, which releases every snapshot still out (`poll_release_snaps`, the Tflush) before `poll_unhook_all` drops the refs. |
+| `RetryWake` | `kernel/poll.c::sys_poll_for_proc`: a park `poll_arm_remote` did not cover sleeps to `min(deadline, now + POLL_ARM_RETRY_NS)` (10 ms), counted in `g_poll_arm_retries` | On TIMEDOUT the clock decides: before the call's deadline the loop goes round like any wake (`retry_is_timeout`'s obligation). |
 | `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: EVERY ring mutation and the teardown — `srvconn_client_send` / `_send_frame` / `_send_blocking` (c2s fill), `srvconn_server_send` / `_send_blocking` (s2c fill), `srvconn_client_recv` (s2c drain), `srvconn_server_recv` / `_recv_blocking` (c2s drain), `srvconn_io_nonblock` (all four), `srvconn_teardown`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every readiness site calls `poll_waiter_list_wake` AFTER releasing the object lock it mutated under. For a SrvConn the one list carries four edges for two endpoints, so each walk is `MakeReady` for some pollers and `OtherEvent` for the rest. |
 | `OtherEvent(f)` | the same walks, seen from a poller that asked about something else | Until 2026-09-21 only the c2s-fill edge and the teardown walked the SrvConn list: a client poller was never woken by its reply, and a nonblocking server polling POLLOUT was never woken by a blocking client drain. |
 | `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
 | `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
-| `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label -> `poll_unhook_all`) | Every exit path goes through the sweep; it is idempotent over a pass that already unhooked. |
-| the eight `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; the noise backstop. |
+| `NoStaleHook` / `NoSnapshotOutlivesCall` (the sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label -> `poll_release_snaps`, then `poll_unhook_all`) | Every exit path goes through the sweep; it is idempotent over a pass that already released and unhooked. |
+| the eleven `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, abandon every unanswered one at the sweep, bound a park any arm failed to cover by the retry timer, and never take that timer's expiry for the call's timeout. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
@@ -1458,71 +1572,141 @@ the `reader_recv_frame` EOF-vs-error split, or the `loom_async_complete` termina
 
 ---
 
-## net_poll.tla — net-6b (the dev9p.poll readiness bridge; spec-first re-enabled, model-first)
+## net_poll.tla — net-6b (the dev9p.poll readiness bridge); rewritten for #98 (the SAMPLE/ARM split, 2026-09-28; spec-first re-enabled, model-first)
 
-Status: **spec landed model-first at net-6b-1; the mechanism lands at
-net-6b-2 (source map filled then).** Models the `dev9p.poll` PROBE-then-observe
-bridge (NET-DESIGN.md §12.2). Unlike the console (`cons_poll.tla`), whose
-readiness is a LOCAL edge an RX IRQ produces, a 9P socket's readiness lives in
-netd and must be ELICITED: the kernel issues a readiness READ (a deferred 9P
-Tread on a non-consuming netd `ready` file, the offset carrying the requested
-event mask) that netd answers only when the socket is ready per that mask. The
-reply is demuxed by the kernel 9P client's #841 elected reader — driven, because
-a `poll()` caller parks (it is precisely not doing a blocking read), by a
-per-client poll-pump kthread (the Loom-4 SQPOLL analog). The reader's demux
-fires the async op's `on_complete` UNDER `c->lock`, which RECORDS the readiness
-bitmap into the dev9p fid and sets a relay flag — it does NOT walk the hook list
-there (illegal under `c->lock`); the kthread walks it after the pump, `c->lock`
-released, in PROCESS context (the LS-8a `console_mgr` deferred-wake discipline).
+Status: **the split was modeled first (NP-2, 2026-09-28) and landed in two
+halves: the servers at NP-3b, the kernel at NP-4c; the action map below
+covers both.** `BUGGY_CACHE_ONLY_SAMPLE` is the model of the design before
+#98: `net_poll_buggy_cache_only_sample.cfg` reaches the #98 failure in four
+steps (`AdvanceTime SocketReady Scan Verdict` -- a zero-timeout poll of a
+socket that was ready before the call returns 0 off an empty cache). The
+design is NET-DESIGN.md 12.2's #98 amendment and ARCH 23.3, voted in
+`dec-2026-09-28-poll-sample-arm-split`. NP-4a (2026-09-28) added the arm
+the kernel cannot send, and the retry timer that covers its park.
 
-`poll.tla` owns the poller-side register-then-observe + the N-fd fan;
-`cons_poll.tla` owns the kthread-relayed deferred wake (the relay's own
-register-then-observe sleep, reused verbatim for the poll-pump kthread's sleep).
-`net_poll.tla` adds the one thing neither covers: readiness here is not produced
-spontaneously — it must be PROBED. The load-bearing discipline is
-PROBE-then-observe: `dev9p.poll` must ensure a readiness read is OUTSTANDING
-(atomically with installing the hook and sampling the cached bitmap) BEFORE the
-poller observes not-ready and parks; else the readiness edge fires in netd with
-no request to answer, the reader demuxes nothing, the relay never runs, and the
-poller sleeps forever on a ready socket. I-9 generalized to the elicited-
-readiness relay.
+A 9P socket's or pty's readiness lives in the server that holds it (netd,
+ptyfs). The kernel asks with a readiness READ on the file's `ready` fid, the
+offset carrying the event mask, and since #98 there are two of them, one per
+job. The SNAPSHOT (`mask | P9_POLL_SNAPSHOT`) is answered at once with the
+current readiness, 0 included, and is the only SAMPLE a verdict rests on. The
+ARM (plain `mask`) is held until the file is ready -- the level evaluated on
+arrival -- and is sent only by a poller about to park, after its hook is on
+the list; its answer is a WAKE, demuxed by the per-client poll-pump kthread
+(`on_complete` under `c->lock` sets a relay flag; the kthread walks the hook
+list afterwards in process context, the LS-8a discipline of `cons_poll.tla`).
+Every pass scans, SETTLES (waits for its snapshots), then decides. A snapshot
+unanswered a fixed 1 s after it was sent is flushed, reported not ready and
+counted; the call's timeout never cuts that interval short.
 
-State universe: one poller, one fd, the poll-pump relay (NetdReplyDemux =
-the reader's demux + `on_complete` record under `c->lock`; KthreadWalk = the
-post-pump process-context walk). CONSTANT: `BUGGY_LOST_READY` (the register step
-installs the hook + samples but never ensures a probe).
+Before #98 the module modeled the old bridge: one deferred readiness read that
+was both the sample and the wake, read back through a cache, with a monotonic
+`ready`. It proved the PROBE-then-observe order (`BUGGY_LOST_READY`) and could
+not see #98 at all: a monotonic level has no stale cache, and a poller that
+only ever parks never has to decide from a cache. The rewrite makes `ready` a
+level, adds the timed and zero-timeout poller, the snapshot, the settle, the
+hung server and the collector, and keeps `BUGGY_LOST_READY` as the ARM's
+obligation (hook, then ensure an arm, then park).
+
+State universe: one poller, one socket, its server, the relay. CONSTANTS:
+`HAS_TIMEOUT` (FALSE = poll(-1)), `HUNG_SERVER` (the server may stop
+answering, so the fail-safe is reachable), `ARM_MAY_FAIL` (the kernel may
+be unable to send the arm: no free tag, a full send ring, no memory for the
+poll state), and six `BUGGY_*`. An unsendable SNAPSHOT is not modeled
+separately: the kernel resends it inside its fixed 1 s, so for the settle it
+is one more reason an answer is late, and `HUNG_SERVER` stands for all of
+them.
+`specs/check-net-poll.sh` runs every cfg of this module and of
+`net_poll_teardown.tla`, judging each red cfg by the NAME of the property it
+violates and printing its counterexample's actions, so a red cfg that fires by
+an unintended path shows.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `net_poll.cfg`                  | `BUGGY_LOST_READY=FALSE` | `Invariants` | clean | 10 |
-| `net_poll_liveness.cfg`         | `Spec_Live`, all FALSE   | `PollerEventuallyServed` | clean | 10 |
-| `net_poll_buggy_lost_ready.cfg` | `BUGGY_LOST_READY=TRUE`  | `NoMissedNetPoll` | violation (depth 4) | 6 |
+| `net_poll.cfg`                              | timed | `Invariants` + `FailSafeSilent` | clean | 118 |
+| `net_poll_notimeout.cfg`                    | poll(-1) | `Invariants` + `FailSafeSilent` | clean | 36 |
+| `net_poll_liveness.cfg`                     | poll(-1), `Spec_Live` | `PollerEventuallyServed` | clean | 36 |
+| `net_poll_liveness_timeout.cfg`             | timed, `Spec_Live` | `PollTerminates` + `PollerEventuallyServed` | clean | 118 |
+| `net_poll_hung.cfg`                         | `HUNG_SERVER`, timed, `Spec_Live` | `Invariants` + `PollTerminates` | clean | 308 |
+| `net_poll_failsafe_fires.cfg`               | `HUNG_SERVER`, timed | `FailSafeSilent` | violation, BY DESIGN (`Scan Hang SnapshotFailSafe`): the fail-safe is reachable | — |
+| `net_poll_buggy_cache_only_sample.cfg`      | `BUGGY_CACHE_ONLY_SAMPLE`, timed | `NoFalseNotReady` | violation (the #98 path above) | — |
+| `net_poll_buggy_stale_cache.cfg`            | `BUGGY_CACHE_ONLY_SAMPLE`, timed | `NoFalseReady` | violation (an answered arm's cache outlives a retract) | — |
+| `net_poll_buggy_settle_cut_by_deadline.cfg` | `BUGGY_SETTLE_CUT_BY_DEADLINE`, timed | `NoFalseNotReady` | violation (`AdvanceTime SocketReady Scan SnapshotCut Verdict`) | — |
+| `net_poll_buggy_gc_snapshot.cfg`            | `BUGGY_GC_SNAPSHOT`, timed | `NoFalseNotReady` | violation (`AdvanceTime SocketReady Scan GcSnapshot Verdict`) | — |
+| `net_poll_buggy_lost_ready.cfg`             | `BUGGY_LOST_READY`, poll(-1) | `NoMissedNetPoll` | violation (a park with no arm) | — |
+| `net_poll_buggy_edge_arm.cfg`               | `BUGGY_EDGE_ARM`, poll(-1), `Spec_Live` | `PollerEventuallyServed` | violation (the socket readies between the verdict and the arm, and the arm waits for a rise that never comes) | — |
+| `net_poll_armfail.cfg`                      | `ARM_MAY_FAIL`, timed | `Invariants` + `FailSafeSilent` | clean | 155 |
+| `net_poll_armfail_liveness.cfg`             | `ARM_MAY_FAIL`, poll(-1), `Spec_Live` | `PollerEventuallyServed` | clean | 55 |
+| `net_poll_armfail_liveness_timeout.cfg`     | `ARM_MAY_FAIL`, timed, `Spec_Live` | `PollTerminates` + `PollerEventuallyServed` | clean | 155 |
+| `net_poll_buggy_no_retry.cfg`               | `ARM_MAY_FAIL`, `BUGGY_NO_RETRY`, poll(-1) | `NoMissedNetPoll` | violation (`Scan SnapshotReply SocketReady Verdict PollerArmFails TSleepCommit`: the arm is not sent and the park has no timer) | — |
 
-Spec action ↔ impl mapping (filled at net-6b-2b, `kernel/dev9p_poll.c`):
-`kernel/dev9p_poll.c::dev9p_poll` (register the hook on the Spoor's poll-state +
-`dev9p_poll_submit_locked` ensures a non-terminal readiness probe is outstanding +
-sample `ps->cached_revents`, one `g_dev9p_poll_lock` step) = `PollerRegister`;
-`kernel/dev9p_poll.c::dev9p_poll_complete` (fired by `kernel/9p_client.c::demux_frame_locked`
-under `c->lock`; record the bitmap into `ps->cached_revents` + set the op terminal,
-atomics only) = `NetdReplyDemux`; the poll-pump kthread's
-(`dev9p_poll_service_once`) post-pump `poll_waiter_list_wake` (process context,
-`c->lock` released) = `KthreadWalk`; netd serving the `ready` file's deferred
-reply = the `SocketReady`→reply edge; `kernel/poll.c::sys_poll_for_proc`'s
-evaluate/sleep = `PollerCommit`. The kthread's own go-to-sleep register-then-observe is
-`cons_poll.tla::MgrSleep` (the same `sleep(&rendez, cond)` contract). The
-`BUGGY_LOST_READY` counterexample is the durable regression for the
-probe-then-observe order.
+What each red cfg pins, as an obligation on the code: the verdict comes from
+the snapshot, never a cache (`cache_only_sample`, `stale_cache`); the settle
+is bounded by the server, never by the call (`settle_cut_by_deadline` -- the
+operator's third vote); the stranded-op collector takes arms only
+(`gc_snapshot`); a poller parks hooked with an arm ensured (`lost_ready`); the
+server evaluates an arm's level when it ARRIVES (`edge_arm` -- NP-3's
+obligation on netd and ptyfs, and one no safety invariant sees, since an arm
+IS outstanding); a park no arm covers is bounded by the retry timer
+(`no_retry`; `net_poll_armfail_liveness.cfg` with it violates
+`PollerEventuallyServed` too, shown 2026-09-28, and TLC's coverage shows
+`PollerArmFails` and `RetryTick` taken in `net_poll_armfail.cfg`).
+`FailSafeSilent` holding against a server that answers is
+the model's half of the runtime rule that the fail-safe counter stays zero on
+every gate; that a healthy server answers within 1 s is a timing assumption
+the model states and cannot check, and the runtime owns it (the counter, the
+gates, a test server that defers the snapshot).
 
-cfgs run with `-deadlock`; the `Done` self-loop keeps the legitimate terminal
-state from tripping the deadlock check (the lost-ready stuck state is
-PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
+Spec action ↔ impl mapping, the server half (NP-3b): `SnapshotReply` and
+the on-arrival half of `ArmReply` are `ninep::ready_answer`
+(`usr/lib/ninep/src/lib.rs`), which netd's `ready` (`usr/netd/src/server.rs`,
+the `FK_READY` arm of the Tread dispatch) and ptyfs's `<n>ready`
+(`usr/ptyfs/src/server.rs`, `is_ready_path`) call with their level function
+(`check_ready`, `ready_revents`). It asks the level once, on arrival, for a
+snapshot and an arm alike -- `edge_arm`'s obligation, held by the host tests
+`a_snapshot_is_answered_at_once_even_when_nothing_is_ready` and
+`an_arm_sent_after_the_rise_is_answered_at_once`, each seen red with the
+rule removed. A held arm's later answer is `poll_ready` (netd) and
+`poll_reads` (ptyfs).
+
+The kernel half (NP-4c; `kernel/dev9p_poll.c` unless noted):
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Scan` | `dev9p_poll_snapshot`, from `kernel/poll.c::poll_scan_one` | A Tread at offset `mask \| P9_POLL_SNAPSHOT`, count 4, through `p9_client_submit_async`; no hook. A shortage (`-P9_E_AGAIN`: no free tag, a full send ring; or no memory) leaves the slot UNSENT, and `poll_settle` resends it every `POLL_SNAP_RESEND_NS` (1 ms) -- the model's `HUNG_SERVER` stands for that lateness. |
+| `SnapshotReply` (the kernel's side) | `dev9p_poll_snap_complete` | Under `c->lock` from the kthread's demux: the revents into the poller's slot, `POLL_SNAP_ANSWERED`, a wake of the poller. A 9P error is POLLERR; `-P9_E_AGAIN` means not sent and touches nothing. |
+| `SnapshotFailSafe` | `kernel/poll.c::poll_settle`, the bound branch | `POLL_SNAP_BOUND_NS` (1 s) from the scan's end, never the call's deadline (`settle_cut_by_deadline`): `poll_snapshot_release` (the Tflush), `POLL_SNAP_EXPIRED`, and `poll_note_failsafe` -- `g_poll_snap_failsafes` plus a `poll: FAILSAFE` console line (the first 16), which `tools/test.sh` (and so `ci-smp-gate`) fails on. |
+| `Verdict` | `kernel/poll.c::sys_poll_for_proc`, after `poll_collect` | Answers only: an EXPIRED snapshot reports 0. |
+| `PollerArm` / `PollerArmFails` | `dev9p_poll_arm`, from `kernel/poll.c::poll_arm_remote` | Hook on `ps->poll_list` first, then reuse a non-terminal arm that covers the events or submit one for the union; a new arm is linked only once its submit returned 0, and a widen flushes the arm it replaces only after that. 0 = uncovered. |
+| `RetryTick` | `kernel/poll.c::sys_poll_for_proc` | The park's deadline becomes `min(deadline, now + POLL_ARM_RETRY_NS)`; its expiry is a wake. |
+| `ArmReply` (the kernel's side) | `dev9p_poll_arm_complete` | Under `c->lock`: `terminal` and a wake of the kthread. The bitmap is not read -- an arm is a WAKE. |
+| `KthreadWalk` | `dev9p_poll_service_once` Phase 2 | `poll_waiter_list_wake` on a terminal arm's list, in process context, then the free. |
+| `GcArm` | `dev9p_poll_service_once` Phase 1 | A non-terminal arm with an empty hook list is unlinked AND flushed under `g_dev9p_poll_lock` (`net_poll_teardown`'s `BUGGY_SPLIT_GC`), freed in Phase 2b. |
+| `GcSnapshot` | none | Snapshots live on their own list (`g_dev9p_poll_snaps`), which the collector never walks for teardown (`gc_snapshot`); the kthread only pumps their clients. The poller releases each. |
+| `Rearm` | `kernel/poll.c::poll_unhook_all` | As in `poll.tla`. |
+
+The poll core's side of the settle -- where it sits in the loop, the death
+unwind, the snapshot's lifetime -- is `poll.tla`'s. Tests: `dev9p.poll_*` in
+`kernel/test/test_dev9p.c` run the whole path against a scripted server on the
+multi-queue loopback with the live kthread -- the #98 case itself
+(`snapshot_answers_at_zero_timeout`), a local fd beside a remote one, a
+resent shortage, the fail-safe against a hung server, an arm's wake, the
+retry timer, the widen, and cancel-at-close -- each seen red with its rule
+removed.
+
+cfgs run with `-deadlock`; the `Done` self-loop keeps a legitimate terminal
+state from tripping the deadlock check. See NET-DESIGN.md §12.2 + ARCH §23.3
++ ARCH §28 I-9.
 
 ---
 
 ## net_poll_teardown.tla — #294 (the dev9p.poll readiness-op cancel-at-close; spec-first re-enabled, model-first)
 
 Status: **spec landed model-first @bb72098; the cancel-at-close impl landed at
-#294-B (`kernel/dev9p_poll.c`).** `net_poll.tla` proves the I-9 readiness
+#294-B (`kernel/dev9p_poll.c`). `BUGGY_SPLIT_GC` added 2026-09-28 (NP-4c):
+the collector's unlink and flush are one step with respect to the close.
+`DyingClose` / `CloserSend` / `NO_CLOSER` added 2026-09-29 (the Tclunk closer,
+`docs/FID-LIFECYCLE-DESIGN.md` section 9): a dying thread's close hands its
+Tclunk to the closer threads, and `CloserSend` is weakly fair.** `net_poll.tla` proves the I-9 readiness
 invariants (no missed edge) for a LIVE poller; it ABSTRACTS AWAY the layer this
 module models: the readiness op's MEMORY/pin lifetime and the delivery of the
 `ready`-fd Tclunk to netd (which frees the connection slot). The #294 leak lived
@@ -1545,23 +1729,62 @@ assumption on the kthread).
 | Config | Flags | Checked | Result |
 |---|---|---|---|
 | `net_poll_teardown.cfg`            | `Fix=TRUE`  | `SafetyInvariants` (TypeOk + NoUseAfterFreePs + ClunkAtMostOnce) | clean |
-| `net_poll_teardown_liveness.cfg`   | `Fix=TRUE`  | `Liveness` (SlotEventuallyFreed) -- with NO kthread fairness | clean |
+| `net_poll_teardown_liveness.cfg`   | `Fix=TRUE`  | `Liveness` (SlotEventuallyFreed) -- no fairness on the poll kthread; WF on `CloserSend` | clean (without WF on `CloserSend` it fails: `PollTimeout DyingClose`, the Tclunk handed over and never sent -- checked 2026-09-29) |
 | `net_poll_teardown_buggy_leak.cfg` | `Fix=FALSE` | `Liveness` -- no WF on `KthreadGc` | violation (the #294 leak) |
+| `net_poll_teardown_buggy_split_gc.cfg` | `Fix=TRUE`, `BUGGY_SPLIT_GC` | `Liveness` -- WF on `KthreadGcFlush` | violation (`PollTimeout KthreadGcUnlink UserClose KthreadGcFlush`: the close between the collector's unlink and its flush cancels nothing, its Tclunk is refused, and the flush clunks nothing) |
+| `net_poll_teardown_buggy_no_closer.cfg` | `Fix=TRUE`, `NO_CLOSER` | `Liveness` | violation (`PollTimeout DyingClose`: a dying thread's close cannot send, its Tclunk is refused and never sent -- the design before the closer) |
+
+Every clean cfg sets `BUGGY_SPLIT_GC = FALSE` and `NO_CLOSER = FALSE`;
+`ASSUME BUGGY_SPLIT_GC => Fix`.
+The collector from #294 to NP-4c WAS the split: Phase 1 unlinked under
+`g_dev9p_poll_lock`, Phase 2b flushed after the unlock, so a close in between
+leaked the slot through a window the atomic `KthreadGc` hid. Found reading
+NP-4c, not by a failure.
 
 Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
-- `Init` (op pins ps[refcount] + session, NOT the Spoor) = `dev9p_poll_submit_locked`
+- `Init` (op pins ps[refcount] + session, NOT the Spoor) = `dev9p_poll_arm`
   takes `dev9p_poll_state_ref(ps)` + `p9_attached_ref(attached_owner)` under
-  `g_dev9p_poll_lock`; the priv's ps ref is `cand->refs = 1` at lazy-alloc.
+  `g_dev9p_poll_lock`, before the submit; the priv's ps ref is `cand->refs = 1`
+  in `dev9p_poll_state_get`. (Since NP-4c the op is the ARM; a snapshot never
+  outlives its poller's pass, which holds the Spoor.)
 - `PollTimeout` (the poll ends, op stranded) = `kernel/poll.c::sys_poll_for_proc`
   unregisters the hook; the op stays live (no Spoor pin to defer close).
-- `KthreadTouchPs` (the UAF probe) = the kthread derefs `op->ps->poll_list` /
-  `cached_revents` via a LIVE op only (`dev9p_poll_service_once`, `dev9p_poll_complete`).
+- `KthreadTouchPs` (the UAF probe) = the kthread derefs `op->ps->poll_list` via
+  an op it holds only (`dev9p_poll_service_once`: the GC's empty-check, the
+  walk, the free).
 - `KthreadGc` (collect + tear down a stranded op) = `dev9p_poll_service_once`
-  Phase 1 unlink + Phase 2b `p9_client_abandon_async` + `dev9p_poll_op_free`.
+  Phase 1: unlink, clear `ps->op`, and `p9_client_abandon_async`, all under
+  `g_dev9p_poll_lock` (g_lock -> c->lock, the submit's edge); Phase 2b
+  `dev9p_poll_op_free` after the unlock. The free is not observable to the
+  close, so the model folds it in.
+- `KthreadGcUnlink` / `KthreadGcFlush` (BUGGY) = the pre-NP-4c split. The kernel
+  test `dev9p.poll_gc_flushes_with_the_unlink` stops the kthread between its
+  collect and its frees (`dev9p_poll_test_hold_gc`) and closes the file there:
+  the Tclunk must go out.
 - `UserClose` (Fix) = `dev9p_poll_priv_release` grabs `ps->op` from the registry
   under g_lock (whoever removes it owns the teardown), `p9_client_abandon_async`
   (clear inflight + Tflush) + `dev9p_poll_op_free`, drops the priv's ps ref; then
-  `kernel/dev9p.c::dev9p_close` delivers the `ready`-fd Tclunk (`p9_client_clunk`).
+  `kernel/dev9p.c::dev9p_close` delivers the `ready`-fd Tclunk
+  (`dev9p_clunk_fid` -> `p9_client_clunk_async`).
+- `DyingClose` = the same close on a thread whose Proc is dying:
+  `p9_client_clunk_async` refuses it before the build (or takes a built,
+  never-sent Tclunk back) with `-P9_E_AGAIN` and the fid still bound, and
+  `dev9p_clunk_fid` hands the fid to `p9_attached_defer_clunk`
+  (`kernel/9p_attach.c`), which queues it with a session reference.
+  `NO_CLOSER` is the path before 2026-09-28: the build unbound the fid and the
+  send was refused.
+- `CloserSend` = `closer_serve` -> `closer_send` -> `p9_client_clunk_async` on a
+  closer thread (kproc, never dying); the entry's session reference keeps the
+  client alive until it is dropped after the send. Its weak fairness is the
+  closer pool's liveness: a session with pending closes is served by one
+  closer, and a spare is spawned when none is idle, so a stalled server holds
+  only its own session's closer (kernel test
+  `p9_closer.stalled_session_holds_one_closer`). A spare whose spawn failed is
+  spawned again by the next hand-off that finds no closer idle
+  (`p9_closer.failed_spawn_retried_by_hand_off`), and a hand-off made while
+  that spawn was failing is covered by the spawn's own retry, up to three
+  attempts (`p9_closer.hand_off_inside_failed_spawn_retried`); a closer spawn
+  that keeps failing (memory exhausted) is outside the fairness assumption.
 
 NOT modeled (caught by the kernel test `dev9p.poll_cancel_at_close`, not the
 spec): the abandon's Tflush leaves the readiness oldtag `awaiting_flush`, which

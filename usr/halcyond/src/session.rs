@@ -28,10 +28,10 @@ use halcyond::menu::{
     build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
 };
 use halcyond::raster::GlyphSource;
-use halcyond::select::{flatten_with_grid, FlatRow, Sel, GRID_BLOCK};
+use halcyond::select::{FlatRow, Sel, Stamp, GRID_BLOCK};
 use halcyond::session_init;
 use halcyond::tile::Tile;
-use halcyond::tile::{Mark, GRID_KEY};
+use halcyond::tile::{block_key, selection_bands, Band, Mark, GRID_KEY};
 use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
@@ -268,7 +268,17 @@ struct SessionTile {
     rows: u16,
     dirty: bool,
     /// The one-shot "this tile presents objects" witness (test builds).
+    #[cfg(feature = "test-mode")]
     objs_said: bool,
+    /// The one-shot witnesses that a synchronized frame held this tile's
+    /// paint (test builds): shown when its program closed it, abandoned at
+    /// its bound, or cut short.
+    #[cfg(feature = "test-mode")]
+    sync_said: bool,
+    #[cfg(feature = "test-mode")]
+    sync_late_said: bool,
+    #[cfg(feature = "test-mode")]
+    sync_cut_said: bool,
     /// H-4d: the Helix-modal transcript mode (HALCYON.md 4): Esc leaves
     /// Insert for Normal, where the cursor walks the rows and `w`/`b` walk
     /// the obj runs; Enter opens the run's verb menu; `i` returns.
@@ -420,7 +430,14 @@ impl SessionTile {
             cols,
             rows,
             dirty: true,
+            #[cfg(feature = "test-mode")]
             objs_said: false,
+            #[cfg(feature = "test-mode")]
+            sync_said: false,
+            #[cfg(feature = "test-mode")]
+            sync_late_said: false,
+            #[cfg(feature = "test-mode")]
+            sync_cut_said: false,
             mode: Mode::Insert,
             flat: Vec::new(),
             flat_seq: u64::MAX,
@@ -473,32 +490,29 @@ impl SessionTile {
         }
         let s = self.sel.as_ref()?;
         let fr = self.flat.get(s.cursor)?;
-        let block = if fr.block == GRID_BLOCK {
-            GRID_KEY
-        } else if fr.block == usize::MAX {
-            u64::MAX
-        } else {
-            self.tile.scrollback.frozen_blocks().get(fr.block)?.id
-        };
         Some(Mark {
-            block,
+            block: block_key(&self.tile.scrollback, *fr)?,
             item: fr.item,
             row: fr.row,
             obj: s.obj,
         })
     }
 
-    /// Keep the flat row list current: new output moves the rows.
-    fn refresh_flat(&mut self) {
-        let sb = &self.tile.scrollback;
-        if self.flat_seq != sb.seq {
-            self.flat_seq = sb.seq;
-            // The live grid's rows trail the transcript's (14.11.5).
-            self.flat = flatten_with_grid(sb, self.tile.grid.dims().1);
-            if let Some(s) = self.sel.as_mut() {
-                s.clamp(self.flat.len());
-            }
+    /// The rows of an anchored Normal-mode selection, banded like the
+    /// cursor's (HALCYON 4: the selection shows as it extends).
+    fn bands(&self) -> Vec<Band> {
+        match (self.mode, self.sel.as_ref()) {
+            (Mode::Normal, Some(s)) => selection_bands(&self.tile.scrollback, &self.flat, s),
+            _ => Vec::new(),
         }
+    }
+
+    /// Keep the flat row list current: new output moves the rows, and the
+    /// budget or a forget drops some from the front. The live grid's rows
+    /// trail the transcript's (14.11.5).
+    fn refresh_flat(&mut self) {
+        self.tile
+            .refresh_selected(&mut self.flat, &mut self.flat_seq, self.sel.as_mut());
     }
 
     /// A row's obj runs: the transcript's for its rows, the cell spans' for
@@ -573,17 +587,24 @@ impl SessionTile {
                 let (crow, _, _) = self.tile.grid.cursor();
                 let grid_rows = self.tile.grid.dims().1;
                 let cursor = (n.saturating_sub(grid_rows) + crow).min(n.saturating_sub(1));
-                self.sel = Some(Sel {
+                self.sel = Some(Sel::at(
                     cursor,
-                    anchor: None,
-                    obj: None,
-                });
+                    Stamp::of(&self.tile.scrollback, &self.flat),
+                ));
                 self.dirty = true;
                 #[cfg(feature = "test-mode")]
                 say!(
                     "halcyond: session tile leaf={} normal mode ({} rows)",
                     self.leaf,
                     self.flat.len()
+                );
+                // The history's share of those rows: what Super+K deletes
+                // (the rest is the live grid, which it never touches).
+                #[cfg(feature = "test-mode")]
+                say!(
+                    "halcyond: session tile leaf={} history {} rows",
+                    self.leaf,
+                    n.saturating_sub(grid_rows)
                 );
             }
             return None;
@@ -834,7 +855,17 @@ impl SessionTile {
         if (nc != self.cols || nr != self.rows) && self.exit.is_none() {
             self.cols = nc;
             self.rows = nr;
-            self.tile.resize(nc as usize, nr as usize);
+            if self.mode == Mode::Normal {
+                self.tile.resize_selected(
+                    nc as usize,
+                    nr as usize,
+                    &mut self.flat,
+                    &mut self.flat_seq,
+                    self.sel.as_mut(),
+                );
+            } else {
+                self.tile.resize(nc as usize, nr as usize);
+            }
             wire_out.clear();
             encode_input(&Input::Resize { cols: nc, rows: nr }, wire_out);
             self.queue_resize(wire_out);
@@ -870,8 +901,9 @@ impl SessionTile {
             self.refresh_flat();
         }
         let mark = self.mark();
+        let bands = self.bands();
         self.tile
-            .render(cart, sw, sh, gs, sheet, &mut self.scroll_up, mark);
+            .render_selected(cart, sw, sh, gs, sheet, &mut self.scroll_up, mark, &bands);
         {
             let px = self.surf.pixels();
             cartoon::execute(
@@ -891,6 +923,44 @@ impl SessionTile {
                 false
             }
         }
+    }
+
+    /// The tile's paint reached the screen: whatever its synchronized frame
+    /// held is shown, and the next paint it defers starts a new bound.
+    fn painted(&mut self) {
+        let held = self.tile.hold.painted();
+        // Test builds: the premise the device leg measures -- a frame's
+        // records spanned reads, so without the hold a torn screen showed.
+        #[cfg(feature = "test-mode")]
+        match held {
+            vt::Held::UntilClose(n) if !self.sync_said => {
+                self.sync_said = true;
+                say!(
+                    "halcyond: session tile leaf={} synchronized frame shown ({} paint(s) held)",
+                    self.leaf,
+                    n
+                );
+            }
+            vt::Held::UntilTimeout(n) if !self.sync_late_said => {
+                self.sync_late_said = true;
+                say!(
+                    "halcyond: session tile leaf={} synchronized frame abandoned at its bound ({} paint(s) held)",
+                    self.leaf,
+                    n
+                );
+            }
+            vt::Held::Cut(n) if !self.sync_cut_said => {
+                self.sync_cut_said = true;
+                say!(
+                    "halcyond: session tile leaf={} synchronized frame cut short ({} paint(s) held)",
+                    self.leaf,
+                    n
+                );
+            }
+            _ => {}
+        }
+        #[cfg(not(feature = "test-mode"))]
+        let _ = held;
     }
 
     /// Drain one wake's worth of records from the up-pipe into the tile.
@@ -1130,12 +1200,14 @@ fn pane_channel(places: &mut Option<PanePlaceServer>, leaf: u32) -> Option<Strin
 
 /// Bring the tile set in line with the layout: reap orphaned tiles (leaf
 /// gone), spawn tiles for new empty leaves we own (claim-gated). `closed` is
-/// the permanent respawn guard.
+/// the permanent respawn guard; `opened` holds the fresh panes the placard's
+/// Open shell asked to fill (`plan_tiles`).
 fn reconcile(
     ring: &EventRing,
     troot: i64,
     tiles: &mut BTreeMap<u32, SessionTile>,
     closed: &mut BTreeSet<u32>,
+    opened: &BTreeSet<u32>,
     geom: Geom,
     home: Option<&str>,
     places: &mut Option<PanePlaceServer>,
@@ -1150,7 +1222,8 @@ fn reconcile(
     let leaves = parse_leaves_all(&layout);
     let have: Vec<u32> = tiles.keys().copied().collect();
     let closed_v: Vec<u32> = closed.iter().copied().collect();
-    let plan = plan_tiles(&leaves, &have, &closed_v);
+    let opened_v: Vec<u32> = opened.iter().copied().collect();
+    let plan = plan_tiles(&leaves, &have, &closed_v, &opened_v);
 
     for leaf in plan.drop {
         // HALCYON-WORKSPACES W-3: `plan.drop` is a CANDIDATE list -- it means
@@ -1785,6 +1858,7 @@ pub fn run(home: Option<String>) -> i64 {
 
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
+    let mut opened: BTreeSet<u32> = BTreeSet::new();
     let shell = tile_command("", home.as_deref(), |p| fs::exists(p));
     let root_addr = pane_channel(&mut places, root_leaf);
     match SessionTile::spawn(
@@ -2106,12 +2180,18 @@ pub fn run(home: Option<String>) -> i64 {
         // any wait (first-present-wins scanout; frame ticks reach only visible
         // surfaces).
         for t in tiles.values_mut() {
+            // HALCYON 14.3: an open synchronized frame holds this tile's
+            // paint, and only this tile's; a gone child's never waits.
+            if t.dirty && t.exit.is_none() && t.tile.hold.holds(now_ns) {
+                continue;
+            }
             let was_dirty = t.dirty;
             let ok = t.render_if_dirty(&mut cart, &mut gs, &sheet);
             if !was_dirty {
                 continue;
             }
             if ok {
+                t.painted();
                 present_fails = 0;
                 // "session up" witnesses a SUCCESSFUL present (the post-present
                 // marker rule), not merely the connect -- printed once, on the
@@ -2159,6 +2239,10 @@ pub fn run(home: Option<String>) -> i64 {
                             Ok(_) => {
                                 t.fit_to_surface(geom, &mut wire_out);
                                 t.dirty = true;
+                                // A reconfigure cuts a synchronized frame's
+                                // hold short (HALCYON 14.3): the slots are new
+                                // or suspect, and the program redraws anyway.
+                                t.tile.hold.cut();
                                 // A relayout may have added or removed leaves.
                                 relayout = true;
                             }
@@ -2172,10 +2256,9 @@ pub fn run(home: Option<String>) -> i64 {
                             // H-4d: on the VT's normal screen, Esc enters the
                             // transcript's Normal mode and Normal keeps every
                             // key (the Helix-modal boundary, HALCYON.md 4); a
-                            // full-screen app (the alt screen) owns Esc.
-                            let modal = t.tile.mode == ScreenMode::Normal
-                                && e.value >= 1
-                                && (t.mode == Mode::Normal || e.rune == 0x1b);
+                            // full-screen app (the alt screen) owns Esc, until
+                            // the normal screen's repaint is on the grid.
+                            let modal = t.tile.modal_key(t.mode == Mode::Normal, e.rune, e.value);
                             if modal {
                                 if let Some(req) = t.normal_input(&e, &rules, &sheet, &mut gs) {
                                     menu_req = Some((leaf, req));
@@ -2269,6 +2352,13 @@ pub fn run(home: Option<String>) -> i64 {
 
         // (3) Reconcile if a relayout happened (a split added a leaf; a close
         // removed one). New tiles come up dirty; the loop re-renders below.
+        // The compositor's TEV_LAYOUT rides whichever of our surfaces it
+        // picks -- a chrome, the bar, a menu as often as a tile, and one we
+        // may drop before polling it -- so the ring, which sees every
+        // surface's events as they arrive, says it.
+        if ring.take_layout_hint() {
+            relayout = true;
+        }
         if relayout {
             relayout = false;
             reconcile(
@@ -2276,6 +2366,7 @@ pub fn run(home: Option<String>) -> i64 {
                 troot,
                 &mut tiles,
                 &mut closed,
+                &opened,
                 geom,
                 home.as_deref(),
                 &mut places,
@@ -2435,6 +2526,7 @@ pub fn run(home: Option<String>) -> i64 {
                     }
                     ChromeAction::OpenShell(id) => {
                         closed.remove(&id);
+                        opened.insert(id);
                         relayout = true;
                     }
                 }
@@ -2663,6 +2755,24 @@ pub fn run(home: Option<String>) -> i64 {
                             status.notify("CLOSE REFUSED", true);
                         }
                     }
+                    railset::RailAction::ForgetHistory(id) => {
+                        // HALCYON 14.13 / HALCYON-INSTRUMENT 9.3 (TC-1b):
+                        // Super+K forgets the history of the tile this
+                        // session hosts under `id`. Any other pane's is said
+                        // and dropped: the record is never the compositor's,
+                        // so there is nobody else to hand it to.
+                        match tiles.get_mut(&id) {
+                            Some(t) => {
+                                t.tile.forget_history();
+                                t.dirty = true;
+                                say!("halcyond: session tile leaf={} history forgotten", id);
+                            }
+                            None => say!(
+                                "halcyond: history chord for pane {} -- no tile here, dropped",
+                                id
+                            ),
+                        }
+                    }
                     railset::RailAction::Workspaces { x, y } => {
                         let wm = workspace_menu(&ws_list, ws_pos);
                         if menus.open(wm, x, y, (x, y, 0, 0), &sheet, &mut gs) {
@@ -2688,8 +2798,20 @@ pub fn run(home: Option<String>) -> i64 {
         }
 
         // If any tile needs a paint (a new tile, a resize), render before we
-        // block, so no dirty tile waits on the next wake.
-        if tiles.values().any(|t| t.dirty) {
+        // block, so no dirty tile waits on the next wake. A live tile whose
+        // paint a synchronized frame holds waits in the poll instead, for the
+        // rest of its frame or the hold's deadline; looping back for it would
+        // spin without ever reading the frame's close (14.3).
+        if tiles
+            .values()
+            .any(|t| t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
+        {
+            continue;
+        }
+        // Likewise a TEV_LAYOUT reaped after the reconcile above (the pumps
+        // below it poll the chrome, the bar and the rail): reconcile before
+        // blocking, or the notice waits for an unrelated wake.
+        if ring.layout_hint() {
             continue;
         }
 
@@ -2775,6 +2897,15 @@ pub fn run(home: Option<String>) -> i64 {
             None
         };
         let timeout = libhalcyon::motion::fold_timeout(timeout, caret_tick);
+        // A held paint is due at its bound whatever the program does
+        // (HALCYON 14.3), so the wait ends there at the latest.
+        let hold_now = libthyla_rs::time::monotonic_ns();
+        let hold_due = tiles
+            .values()
+            .filter(|t| t.dirty && t.exit.is_none())
+            .filter_map(|t| t.tile.hold.due_ms(hold_now))
+            .min();
+        let timeout = libhalcyon::motion::fold_timeout(timeout, hold_due);
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);

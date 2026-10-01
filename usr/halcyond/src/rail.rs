@@ -984,6 +984,7 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
         focused: bool,
         container: Option<(bool, u32)>, // (stacked, active)
         weight: u32,
+        backgrounded: bool,
     }
     let mut rows: Vec<Row> = Vec::new();
     for line in layout.lines() {
@@ -1016,6 +1017,7 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
             focused,
             container,
             weight,
+            backgrounded: it.clone().any(|t| t == "backgrounded"),
         });
     }
     // The parent of row r: the nearest earlier row at depth - 1.
@@ -1026,8 +1028,8 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
         }
         (0..r).rev().find(|&p| rows[p].depth + 1 == d)
     };
-    // The direct children of row p, in order.
-    let children_of = |p: usize| -> Vec<usize> {
+    // The direct children of row p, in order, backgrounded ones included.
+    let all_children_of = |p: usize| -> Vec<usize> {
         let d = rows[p].depth;
         let mut out = Vec::new();
         for r in p + 1..rows.len() {
@@ -1039,6 +1041,29 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
             }
         }
         out
+    };
+    // The children the carve shows: a backgrounded one (the console
+    // renderer's leaf beside a session) is transparent (F2), so it is never
+    // a stack's first tile and never a focus target.
+    let children_of = |p: usize| -> Vec<usize> {
+        all_children_of(p).into_iter().filter(|&c| !rows[c].backgrounded).collect()
+    };
+    // Does stack p show a tile other than its first shown one? The open tile
+    // is the active child, or the first shown when the active one is
+    // backgrounded (tapestryd's Stack arm).
+    let reexpands = |p: usize| -> bool {
+        let Some((true, active)) = rows[p].container else {
+            return false;
+        };
+        let all = all_children_of(p);
+        let Some(first) = all.iter().position(|&c| !rows[c].backgrounded) else {
+            return false;
+        };
+        let open = match all.get(active as usize) {
+            Some(&c) if !rows[c].backgrounded => active as usize,
+            _ => first,
+        };
+        open != first
     };
     // The first leaf under row r (r itself when a leaf).
     let first_leaf = |mut r: usize| -> u32 {
@@ -1063,22 +1088,18 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
     let focused_row = rows.iter().position(|r| r.focused);
     let mut last_focus: Option<u32> = None;
     for r in 0..rows.len() {
-        if let Some((true, active)) = rows[r].container {
-            if active != 0 {
-                if let Some(&c) = children_of(r).first() {
-                    let id = first_leaf(c);
-                    plan.push((id, String::from("focus")));
-                    last_focus = Some(id);
-                }
+        if reexpands(r) {
+            if let Some(&c) = children_of(r).first() {
+                let id = first_leaf(c);
+                plan.push((id, String::from("focus")));
+                last_focus = Some(id);
             }
         }
     }
     if last_focus.is_some() {
         if let Some(f) = focused_row {
             let target = match parent_of(f) {
-                Some(p) if matches!(rows[p].container, Some((true, a)) if a != 0) => {
-                    children_of(p).first().map_or(rows[f].id, |&c| first_leaf(c))
-                }
+                Some(p) if reexpands(p) => children_of(p).first().map_or(rows[f].id, |&c| first_leaf(c)),
                 _ => rows[f].id,
             };
             if last_focus != Some(target) {
@@ -1692,6 +1713,23 @@ mod tests {
         let tree = "epoch 1 focused 2\n1 splith n=2 active=0 [0,0,1,1]\n  2* leaf surface=0 [0,0,1,1]\n  3 stacked n=2 active=0 [0,0,1,1]\n    4 leaf surface=1 [0,0,1,1]\n    5 leaf surface=2 [0,0,0,0] hidden\n";
         assert!(reset_plan(tree).is_empty());
         assert!(reset_plan("").is_empty());
+        // A session's root row stacked by Super+S: the console renderer's
+        // backgrounded leaf is its first member. Open on the first SHOWN
+        // tile, nothing is owed -- a plan to focus the console leaf is
+        // refused by the compositor and reads as RESET REFUSED.
+        let root = "epoch 9 focused 3\n1 stacked n=3 active=1 [3,37,1274,735]\n  2 leaf surface=0 [0,0,0,0] backgrounded hidden\n  3* leaf surface=1 [4,38,1272,700]\n  4 leaf surface=2 [4,739,1272,32] hidden\n";
+        assert!(reset_plan(root).is_empty(), "{:?}", reset_plan(root));
+        // Open on the backgrounded member itself: the carve opens the first
+        // shown tile, so nothing is owed either.
+        let root0 = root.replace("active=1", "active=0");
+        assert!(reset_plan(&root0).is_empty(), "{:?}", reset_plan(&root0));
+        // Open on the second shown tile: the first SHOWN one is focused.
+        let root2 = "epoch 9 focused 4\n1 stacked n=3 active=2 [3,37,1274,735]\n  2 leaf surface=0 [0,0,0,0] backgrounded hidden\n  3 leaf surface=1 [4,38,1272,32] hidden\n  4* leaf surface=2 [4,70,1272,700]\n";
+        assert_eq!(reset_plan(root2), alloc::vec![(3, String::from("focus"))]);
+        // The control: the same row with no backgrounded member re-expands
+        // on its raw first child.
+        let plain = root.replace(" backgrounded", "");
+        assert_eq!(reset_plan(&plain), alloc::vec![(2, String::from("focus"))]);
         // The pane count over the same trees: a stack counts once.
         let t = crate::chrome::parse_tree("epoch 1 focused 2\n1 splith n=2 active=0 [0,0,1,1]\n  2* leaf surface=0 [0,0,1,1]\n  3 stacked n=2 active=0 [0,0,1,1]\n    4 leaf surface=1 [0,0,1,1]\n    5 leaf surface=2 [0,0,0,0] hidden\n");
         assert_eq!(pane_count(&t), 2);

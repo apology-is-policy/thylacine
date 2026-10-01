@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Purpose
 
@@ -67,19 +67,39 @@ extern struct Walkqid dev_walk_attrs_unsupported;  // address-compared sentinel
 
 `dev_register` does not return errors — every rejection is an
 extinction: a NULL Dev, a `dc` collision, a `name` collision, a full
-bestiary, or a `.wstat_native` slot on a Dev that does not set
-`.perm_enforced`. That last one is a structural gate rather than a
-hygiene check, and it is the most interesting line in the file
-(Mechanism).
+bestiary, a `.wstat_native` slot on a Dev that does not set
+`.perm_enforced`, or a partial remote-readiness triple. The last two
+are structural gates rather than hygiene checks, and the first of them
+is the most interesting line in the file (Mechanism).
 
-**Sixteen of the 25 slots are mandatory; nine are NULL-permitted.** The
-optional set is `stat_native`, `wstat_native`, `walk_attrs`,
-`open_cached`, `fsync`, `readdir`, `rename`, `unlink`, `poll`. A NULL
-slot has a defined meaning per slot, and the meanings are not uniform:
-a NULL `poll` means ALWAYS READY (the POSIX-correct answer for a
-regular file), while a NULL `fsync`, `readdir` or `stat_native` means
-the corresponding syscall returns -1. So one absent slot is a graceful
-default and another is a hard refusal, and only the header says which.
+**Sixteen of the 29 slots are mandatory; thirteen are NULL-permitted.**
+The optional set is `stat_native`, `wstat_native`, `walk_attrs`,
+`open_cached`, `fsync`, `readdir`, `rename`, `unlink`, `readlink`, `poll`,
+and the remote-readiness triple `poll_snapshot` / `poll_snapshot_release`
+/ `poll_arm`. A NULL slot has a defined meaning per slot, and the
+meanings are not uniform: a NULL `poll` (with no triple) means ALWAYS
+READY (the POSIX-correct answer for a regular file), while a NULL
+`fsync`, `readdir` or `stat_native` means the corresponding syscall
+returns -1. So one absent slot is a graceful default and another is a
+hard refusal, and only the header says which.
+
+**Readiness has two shapes (2026-09-28, #98).** A Dev whose readiness it
+can see fills `.poll`, which registers the poller's hook and samples in
+one step under the object's lock. A Dev whose readiness lives in a server
+fills the triple instead: `poll_snapshot` asks for the readiness now (an
+answer the core waits for before it decides, or UNSENT on a shortage --
+never an error or a guess), `poll_snapshot_release` ends the core's
+interest (after it returns no answer touches the slot, and an unanswered
+snapshot has been flushed), and `poll_arm` registers the hook and then
+ensures a request the server answers once the file is ready (1, or 0
+when a shortage left it uncovered and the core must bound its park). The
+core prefers the triple over `.poll`; the contract is in `dev.h` and
+[[sub-kernel-poll]], and dev9p is the only Dev that fills it
+([[sub-kernel-ninep-dev9p-poll]]). `dev_register` refuses a Dev that
+fills some but not all of the three, or fills them beside `.poll`: the
+core calls the release and the arm of any Dev whose snapshot slot it
+used, so a partial triple would be a NULL call at the first poll of such
+a file. Same pattern as the `.wstat_native` gate below.
 
 **Two slots changed their failure contract, and the header now separates
 absence from refusal.** `rename` and `unlink` return 0 on success and a

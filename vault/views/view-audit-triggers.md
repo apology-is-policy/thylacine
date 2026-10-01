@@ -37,7 +37,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9, inv-i44 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
-| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h | inv-i1 | What an auditor attacks here: |
+| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, tools/test-pci-msi-dtb.py, kernel/include/thylacine/dtb.h, kernel/test/test_dtb.c | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
@@ -59,10 +59,10 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h | inv-i32 | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
 | [[sub-kernel-mm-slub]] | mm/slub.c, mm/slub.h |  | - The destroy guard must stay `alloc_count - free_count` — reverting |
 | [[sub-kernel-mmu]] | arch/arm64/mmu.c, arch/arm64/mmu.h | inv-i12, inv-i13, inv-i16, inv-i31, inv-i32, inv-i39 | On any change here: that no PTE constructor can produce writable-and-executable |
-| [[sub-kernel-ninep-attach]] | kernel/9p_attach.c, kernel/include/thylacine/9p_attach.h |  | - **The failure-path ledger**: every exit must leave (adapter ref × |
+| [[sub-kernel-ninep-attach]] | kernel/9p_attach.c, kernel/include/thylacine/9p_attach.h, kernel/test/test_9p_closer.c |  | - **The failure-path ledger**: every exit must leave (adapter ref × |
 | [[sub-kernel-ninep-client]] | kernel/9p_client.c, kernel/9p_session.c, kernel/9p_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_mq.c, kernel/9p_attach.c, kernel/include/thylacine/9p_client.h | inv-i9, inv-i10, inv-i11 | What an auditor attacks here (the single home of the trigger-row content for |
 | [[sub-kernel-ninep-dev9p]] | kernel/dev9p.c, kernel/include/thylacine/dev9p.h, kernel/test/test_dev9p.c | inv-i38 | - **The coherence pairing**: every mutation path must carry its exact |
-| [[sub-kernel-ninep-dev9p-poll]] | kernel/dev9p_poll.c | inv-i9 | - **The I-9 window**: any reordering of register-hook / ensure-probe / |
+| [[sub-kernel-ninep-dev9p-poll]] | kernel/dev9p_poll.c | inv-i9 | - **The completion contexts**: under `c->lock` from the demux or mark_dead, |
 | [[sub-kernel-ninep-session]] | kernel/9p_session.c, kernel/include/thylacine/9p_session.h | inv-i10, inv-i11 | - **The retirement matrix**: any new path that clears an `awaiting_flush` |
 | [[sub-kernel-ninep-transport]] | kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h |  | - **The EAGAIN classification boundary**: EAGAIN accepted anywhere past |
 | [[sub-kernel-ninep-wire]] | kernel/9p_wire.c, kernel/include/thylacine/9p_wire.h |  | What an auditor attacks here (changes to this surface ride the |
@@ -83,13 +83,13 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
 | [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, kernel/include/thylacine/errno.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs, usr/lib/libthyla-rs/src/pty_interaction.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
 | [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |
-| [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h, kernel/test/test_territory_pivot_root.c, usr/symlink-probe/src/main.rs | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
+| [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h, kernel/test/test_territory_pivot_root.c, kernel/test/test_sys_mount.c, usr/symlink-probe/src/main.rs | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
 | [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h | inv-i21, inv-i31, inv-i44 | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |
 | [[sub-kernel-uaccess]] | arch/arm64/uaccess.S, arch/arm64/uaccess.c, arch/arm64/uaccess.h | inv-i13 | - **A new fault point needs a table entry.** The entry is what separates |
 | [[sub-kernel-uart]] | arch/arm64/uart.c, arch/arm64/uart.h | inv-i9, inv-i15, inv-i27 | - **The TX spin must stay bounded.** An unbounded spin goes interrupt-dead; the |
-| [[sub-kernel-vivarium]] | kernel/vivarium.c, kernel/include/thylacine/vivarium.h | inv-i43 | What a change must re-establish: |
+| [[sub-kernel-vivarium]] | kernel/vivarium.c, kernel/include/thylacine/vivarium.h, kernel/test/test_viv_sock.c | inv-i43 | What a change must re-establish: |
 | [[sub-kernel-vma]] | kernel/vma.c, kernel/include/thylacine/vma.h | inv-i12, inv-i7, inv-i32, inv-i44 | The things to re-examine when this file changes: that `vma_alloc` remains the |
 | [[sub-kernel-weft]] | kernel/weft.c, kernel/include/thylacine/weft.h | inv-i37, inv-i30, inv-i9, inv-i32 | - **Admission stays kernel-minted.** Anonymous, or the allocation-time |
 | [[sub-libdriver-discovery]] | usr/lib/libdriver/src/source.rs, usr/lib/libdriver/src/dtb.rs, usr/lib/libdriver/src/supervise.rs, usr/lib/libdriver/src/readyline.rs | inv-i34 | - **The warden must never read a device register.** The moment it does, the |

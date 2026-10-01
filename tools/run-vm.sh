@@ -133,8 +133,7 @@ fi
 # pre-generates build/fixtures/pool.img (64 MiB, populated by host
 # stratum-mkfs with the bootstrap pool + a single root inode in dataset
 # id=1). stratumd is spawned by joey holding CAP_HW_CREATE, claims the
-# virtio-mmio bank via bdev_thylacine.c (Stratum's thylacine-pouch-arm
-# branch), finds this slot, mounts the pool, binds /srv/stratum-fs.
+# virtio-mmio bank via bdev_thylacine.c (on Stratum's main), finds this slot, mounts the pool, binds /srv/stratum-fs.
 #
 # Slot assignment: QEMU virt-machine assigns virtio-mmio slots in
 # REVERSE creation order. pool_flags is listed FIRST so pool.img gets

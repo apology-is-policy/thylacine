@@ -97,11 +97,11 @@ live TyrQuake connect (the ls-gfx-mp leg).
 + * bad/vacant fd or a failed ready open.
 + *
 + * This DOES touch the readiness bridge, so it is a COLD-path helper: a
-+ * 0-timeout poll submits a readiness probe the kernel kthread then
-+ * Tflush-abandons, and the abandoned tag sits `awaiting_flush` until
-+ * netd Rflushes it. One such tag per FIONREAD call is fine at frame
-+ * rate (netd Rflushes each before the next), but a TIGHT FIONREAD loop
-+ * can out-run the Rflush and exhaust the shared session tag pool. The
++ * 0-timeout poll sends netd a readiness snapshot and waits for the
++ * answer, which netd gives at once. That is one netd round trip per
++ * call, and the tag is back before the call returns, so a tight
++ * FIONREAD loop costs latency but never exhausts the session's tags;
++ * the answer is netd's own verdict, not a cached guess. The
 + * nonblocking READ path deliberately does NOT use this -- it relies on
 + * netd's `nonblock` E_AGAIN so it never touches the bridge. */
 +int pouch_sock_readable(int fd);
@@ -192,9 +192,9 @@ live TyrQuake connect (the ls-gfx-mp leg).
 +		 * contract, NOT a byte count -- the /net readiness surface
 +		 * (net-6b QTPOLL) reports ready/not-ready, never queue depth,
 +		 * and the BSD-socket consumers (TyrQuake net_udp.c:302) test
-+		 * nonzero only. A COLD path (pouch_sock_readable touches the
-+		 * readiness bridge -- fine per-call, but a tight FIONREAD loop
-+		 * can churn tags; documented in _pouch_socket.h). */
++		 * nonzero only. A COLD path (pouch_sock_readable costs one
++		 * netd round trip per call; documented in
++		 * _pouch_socket.h). */
 +		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
 +		if (!slot || slot->family != POUCH_SOCK_FAM_INET) {
 +			errno = ENOTTY; return -1;

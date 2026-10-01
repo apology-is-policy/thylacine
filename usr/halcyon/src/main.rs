@@ -90,7 +90,7 @@ const E_AGAIN: i64 = -11;
 
 const USAGE: &str = "\
 usage: halcyon layout save <name>
-  Save the current Halcyon pane layout to $HOME/lib/halcyon/layouts/<name>.
+  Save the current Halcyon pane layout to ~/lib/halcyon/layouts/<name>.
   <name> is one path component: letters/digits/._- , no leading dot.
 
   halcyon layout restore <name>
@@ -99,7 +99,7 @@ usage: halcyon layout save <name>
   tier first, then /lib/halcyon/layouts/<name>.
 
   halcyon layout list
-  Every saved layout: yours ($HOME/lib/halcyon/layouts, the session tier)
+  Every saved layout: yours (~/lib/halcyon/layouts, the session tier)
   and the image's (/lib/halcyon/layouts, the device tier). On a rich
   console each name is a layout object whose menu offers restore / save /
   delete.
@@ -107,7 +107,7 @@ usage: halcyon layout save <name>
   halcyon layout delete <name>
   Remove a layout from the session tier (the device tier is read-only).
 
-  At session start the per-user compositor runs $HOME/lib/halcyon.rc (a ut
+  At session start the per-user compositor runs ~/lib/halcyon.rc (a ut
   script) if it exists, else restores the device layout named `default`.
 
   halcyon welcome
@@ -118,13 +118,13 @@ usage: halcyon layout save <name>
   Check a theme file. A refusal names the line to fix; a file with
   `base = \"daylight\"` gets every key it INHERITED named, so the convenient
   mode stays auditable. With no <path>, checks the two tiers a session
-  resolves (/lib/halcyon/theme.toml, then $HOME/lib/halcyon/theme.toml) and
+  resolves (/lib/halcyon/theme.toml, then ~/lib/halcyon/theme.toml) and
   says which is active. Exits non-zero if a file is present and refused.
 
   halcyon workspace <n>
   Switch the display to workspace n, creating it if it does not exist.
   One-based, as the bar and the rail show them. Usable from
-  $HOME/lib/halcyon.rc to fill several workspaces at session start.
+  ~/lib/halcyon.rc to fill several workspaces at session start.
 
   halcyon --help
 ";
@@ -1613,7 +1613,7 @@ fn welcome() -> i64 {
         s.text(" zooms; ");
         s.em(Em::Code, "halcyon layout save <name>");
         s.text(" keeps an arrangement, and ");
-        s.em(Em::Code, "$HOME/lib/halcyon.rc");
+        s.em(Em::Code, "~/lib/halcyon.rc");
         s.text(" runs at every login (an empty one skips this welcome).\n");
         s.rule();
         s.em(

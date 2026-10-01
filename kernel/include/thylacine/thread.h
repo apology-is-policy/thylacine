@@ -455,6 +455,22 @@ struct Thread {
     // unwind there would livelock the send retry). Owner-only; cleared at recv exit.
     bool               recv_caught_ok;
 
+    // ARCH 8.8.3 (signal(7)'s list): may a CAUGHT note unwind this thread's
+    // current wait? False by default, so every wait can only be killed (death
+    // still unwinds it) unless its syscall said otherwise: the vivarium
+    // dispatcher sets it for a Linux call on the list, syscall_dispatch clears
+    // it on the way out, and userland_demand_page clears it around a page-in.
+    // Owner-only; KP_ZERO inits it false; not rfork-propagated. Fits the
+    // padding before debug_stepover_va -- no size change.
+    bool               note_interruptible;
+
+    // ARCH 8.8.3: the caught-note families whose unwind this thread claimed
+    // (thread_caught_note_claim), mirrored in proc_flags' claim sub-field. A
+    // claim ends at the thread's next EL0-return tail, delivered or not
+    // (notes_deliver_at_el0_return releases it). Owner-only; KP_ZERO inits it
+    // 0; not rfork-propagated; exec clears it. Also fits that padding.
+    u8                 note_claim;
+
     u64                debug_stepover_va;
 
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Graphical seat incarnations
 
@@ -569,3 +569,12 @@ Proc only for the current lock interval. No observer stores a Proc pointer.
 The setsid/setpgid, exec and ZOMBIE hooks invalidate nominations or retire roles
 before publishing the corresponding process change; [[sub-kernel-pts]] owns the
 contract. Allocation and user copies remain outside lifecycle.
+
+## proc_free and the phenotype's socket cache (2026-09-29, NP-5)
+
+`proc_free` releases the Linux socket table with `viv_socktab_free` instead of a
+bare `kfree`: since NP-5 a row may hold a cached readiness Spoor (a netd fid),
+so the table is no longer reference-free. The exit close already reset it
+([[sub-kernel-death]]); what `viv_socktab_free` catches is the direct
+`state = ZOMBIE; proc_free()` paths that never ran that close, whose cached
+Spoors it clunks with the same Tclunk the `handle_table_free` beside it sends.

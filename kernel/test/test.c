@@ -19,10 +19,14 @@
 #include "../../arch/arm64/uart.h"
 
 #include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
+#include <thylacine/dev9p.h>        // the poll collector's test mode, released per test
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
+#include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
+#include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
+#include <thylacine/rendez.h>       // test_dying_kill: the cascade's wake
 #include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
 
@@ -67,6 +71,60 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
     // prevent. A leaked (leak-checked) Thread slot is the safe residue.
     TEST_YIELD_UNTIL(__atomic_load_n(exited, __ATOMIC_ACQUIRE));
     thread_free(t);
+}
+
+static void test_dying_entry(void *arg) {
+    struct test_dying *d = (struct test_dying *)arg;
+    d->fn(d->arg);
+    __atomic_store_n(&d->done, true, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&d->exited);
+}
+
+bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
+                      bool dead_now) {
+    d->fn     = fn;
+    d->arg    = arg;
+    d->done   = false;
+    d->exited = false;
+    d->t      = NULL;
+    d->proc   = proc_alloc();
+    if (!d->proc) return false;
+    if (dead_now)
+        __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    d->t = thread_create_with_arg(d->proc, test_dying_entry, d);
+    if (!d->t) {
+        d->proc->state = PROC_STATE_ZOMBIE;
+        proc_free(d->proc);
+        d->proc = NULL;
+        return false;
+    }
+    ready(d->t);
+    return true;
+}
+
+bool test_dying_parked(const struct test_dying *d) {
+    return __atomic_load_n(&d->t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+}
+
+bool test_dying_done(const struct test_dying *d) {
+    return __atomic_load_n(&d->done, __ATOMIC_ACQUIRE);
+}
+
+void test_dying_kill(struct test_dying *d) {
+    __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    irq_state_t ws = spin_lock_irqsave(&d->t->wait_lock);
+    struct Rendez *r = d->t->rendez_blocked_on;
+    if (r) (void)wakeup(r);
+    spin_unlock_irqrestore(&d->t->wait_lock, ws);
+}
+
+void test_dying_reap(struct test_dying *d) {
+    TEST_YIELD_UNTIL(__atomic_load_n(&d->exited, __ATOMIC_ACQUIRE));
+    thread_free(d->t);
+    d->t = NULL;
+    d->proc->state = PROC_STATE_ZOMBIE;         // proc_free precondition
+    proc_free(d->proc);
+    d->proc = NULL;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +206,13 @@ void test_rendez_intr_terminate_interrupts_tsleep(void);
 void test_rendez_reader_frame_predicate(void);
 void test_rendez_reader_frame_blocks_death(void);
 void test_rendez_reader_frame_blocks_death_sleep(void);
+void test_rendez_caught_wake_child_exit(void);
+void test_rendez_caught_wake_tty_susp(void);
+void test_rendez_caught_wake_tty_cont(void);
+void test_rendez_caught_wake_orphan_hup_cont(void);
+void test_rendez_caught_note_one_unwind(void);
+void test_rendez_caught_note_tail_discards_and_releases(void);
+void test_rendez_caught_note_release_wakes_peer(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_past_deadline_immediate(void);
@@ -392,6 +457,7 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_pagein_not_note_interruptible(void);
 void test_demand_page_file_pages_charge_the_holder(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
@@ -664,6 +730,7 @@ void test_notes_die_pending_predicate(void);
 void test_notes_pipe_die_pending(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_caught_note_claim_once(void);
 void test_notes_handler_escape_predicate(void);
 void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
@@ -886,6 +953,8 @@ void test_vivarium_renameat_domain(void);
 void test_vivarium_dirent64_encode(void);
 void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_readv_writev_guard_iovec_array(void);
+void test_vivarium_intr_class(void);
+void test_vivarium_fd_is_slow_cached(void);
 void test_vivarium_ioctl_termios_map(void);
 void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_dispatch_ebadf(void);
@@ -900,9 +969,23 @@ void test_vivarium_socktab(void);
 void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
 void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
 void test_vivarium_socktab_keyed_write_identity(void);              // N-3 socktab lock
+void test_vivarium_socktab_connecting(void);
+void test_vivsock_accept_wait_is_over(void);
+void test_vivsock_connect_tcp_holds_the_dial(void);
+void test_vivsock_connect_udp_never_waits(void);
+void test_vivsock_connect_eintr_then_retry(void);
+void test_vivsock_connect_connecting_resumes(void);
+void test_vivsock_connect_failure_verdicts(void);
+void test_vivsock_send_recv_finish_connect(void);
+void test_vivsock_read_write_finish_connect(void);
+void test_vivsock_so_error_reports_the_dial(void);
+void test_vivsock_positioned_io_finishes_connect(void);
+void test_vivsock_so_error_needs_no_descriptor(void);
 void test_vivarium_socktab_reset(void);                             // Design D audit F2
 void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
 void test_vivarium_socktab_alias(void);                             // socktab across images: alias
+void test_vivarium_socktab_ready_cache(void);                       // NP-5 readiness cache
+void test_vivarium_socktab_ready_release_paths(void);               // NP-5: fork/exec/exit release
 void test_vivarium_dup3_alias(void);                                // ...at the dup3 arm
 void test_vivarium_socktab_arm_refusals(void);                      // ...the arms' refusals (holotype F4)
 void test_vivarium_listen_decide(void);
@@ -1159,6 +1242,7 @@ void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
 void test_devsrv_post_listener(void);
+void test_devsrv_service_keys_distinct(void);
 void test_devcap_registered(void);
 void test_devcap_walk_grant_use(void);
 void test_devcap_walk_unknown(void);
@@ -1227,6 +1311,10 @@ void test_srv_client_byte_mode_mode_change_rebind_refused(void);
 void test_srv_client_cape_post(void);
 void test_srv_client_cape_admission(void);
 void test_srv_client_cape_post_syscall(void);
+void test_srv_client_remote_admission(void);
+void test_srv_client_remote_post(void);
+void test_srv_client_remote_recycle(void);
+void test_srv_client_remote_post_syscall(void);
 void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
@@ -1335,6 +1423,12 @@ void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
 void test_9p_session_walk_fid_full_no_latch(void);
+void test_9p_session_clunk_retract_after_peer_fill(void);
+void test_9p_session_flushed_walk_late_reply_binds(void);
+void test_9p_session_flushed_reply_honoured_for_waiting_owner(void);
+void test_9p_session_flush_retract_restores_live_op(void);
+void test_9p_session_flush_owner_waits_keeps_fid_live(void);
+void test_9p_session_flush_names_no_fid(void);
 void test_9p_session_clunk_round_trip(void);
 void test_9p_session_clunk_send_time_unbinds(void);
 void test_9p_session_dispatch_rlerror(void);
@@ -1454,10 +1548,35 @@ void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
+void test_9p_client_clunk_dying_keeps_fid_bound(void);
+void test_9p_client_clunk_killed_while_parked(void);
+void test_9p_client_clunk_killed_in_tag_drain(void);
+void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
+void test_9p_client_flushed_walk_late_reply_to_sink(void);
+void test_9p_client_abandoned_walk_late_reply_kept(void);
+void test_9p_client_abandoned_async_clunk_not_flushed(void);
+void test_9p_client_clunk_rlerror_drains_as_clunk(void);
+void test_9p_client_clunk_malformed_reply_fails_closed(void);
+void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
+void test_9p_client_flush_malformed_reply_fails_closed(void);
+void test_9p_client_note_flush_honours_late_read(void);
+void test_9p_client_note_flush_rflush_first_cancels(void);
+void test_9p_client_note_flush_death_abandons(void);
+void test_9p_client_note_flush_reader_honours_walk(void);
+void test_9p_client_note_flush_full_pool_own_reply(void);
+void test_9p_client_note_flush_pump_wakes_parked_flush(void);
+void test_9p_client_note_flush_reader_rflush_first(void);
+void test_9p_client_note_flush_reply_beats_unsent_flush(void);
+void test_9p_client_note_flush_handoff_skips_staging(void);
+void test_9p_client_handoff_skips_send_parked(void);
+void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
+void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
 void test_9p_client_abandon_async_eagain_keeps_session_alive(void);
+void test_9p_client_async_send_eagain_keeps_session_alive(void);
+void test_9p_client_async_full_tag_pool_is_eagain(void);
 void test_larder_install_serve(void);
 void test_larder_serve_miss(void);
 void test_larder_invalidate(void);
@@ -1522,7 +1641,16 @@ void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_readdir_cookie_high_bit(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+void test_dev9p_poll_snapshot_answers_at_zero_timeout(void);
+void test_dev9p_poll_local_and_remote_both_reported(void);
+void test_dev9p_poll_snapshot_shortage_is_resent(void);
+void test_dev9p_poll_unanswered_snapshot_fails_safe(void);
+void test_dev9p_poll_arm_wakes_the_parked_poller(void);
+void test_dev9p_poll_retry_timer_is_a_wake(void);
+void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
 void test_dev9p_poll_cancel_at_close(void);
+bool test_dev9p_np_release(void);
+void test_dev9p_poll_gc_flushes_with_the_unlink(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_unlink_rename_errno_propagates(void);
@@ -1534,6 +1662,8 @@ void test_dev9p_wstat_size(void);
 void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
+void test_dev9p_remote_format_ns(void);
+void test_dev9p_origin_format_ns(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -1564,6 +1694,14 @@ void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
 void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
+void test_p9_closer_dying_close_delivers_tclunk(void);
+void test_p9_closer_stalled_session_holds_one_closer(void);
+void test_p9_closer_flushed_walk_fid_clunked(void);
+void test_p9_closer_failed_spawn_retried_by_hand_off(void);
+void test_p9_closer_hand_off_inside_failed_spawn_retried(void);
+void test_p9_closer_hand_off_inside_spawn_no_duplicate(void);
+void test_p9_closer_clunk_killed_while_self_pumping(void);
+void test_p9_closer_orphan_oom_on_dead_session_quiet(void);
 void test_sys_walk_open_max_length_name_nul_terminated(void);
 void test_spoor_transport_init_destroy(void);
 void test_spoor_transport_init_null_rejected(void);
@@ -1581,6 +1719,9 @@ void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
 void test_9p_srvconn_transport_cape_attach_srv(void);
+void test_9p_srvconn_transport_srv_attach_names_root(void);
+void test_9p_srvconn_transport_remote_attach(void);
+void test_9p_srvconn_transport_remote_attach_srv(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
@@ -1662,6 +1803,7 @@ void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
+void test_poll_pre_resolved_spoor(void);                            // NP-5
 void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -1678,6 +1820,8 @@ void test_sys_prw_rights_and_walkonly(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
+void test_sys_attach_9p_names_root_by_its_pipe(void);
+void test_sys_attach_9p_declarations(void);
 void test_sys_mount_happy_path_grafts_pipe_spoor(void);
 void test_sys_mount_idempotent_on_duplicate(void);
 void test_sys_mount_rejects_bad_fd(void);
@@ -1687,6 +1831,10 @@ void test_sys_mount_rejects_null_territory(void);
 void test_sys_unmount_removes_entry_and_drops_ref(void);
 void test_sys_unmount_rejects_nonexistent_target(void);
 void test_sys_mount_caller_close_keeps_mount_alive(void);
+void test_sys_mount_refuses_a_type_mismatch(void);
+void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
+void test_sys_mount_type_check_reads_only_qtdir(void);
+void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
 void test_attach_probe_round_trip(void);
 void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);
@@ -1920,6 +2068,14 @@ struct test_case g_tests[] = {
                                        test_rendez_reader_frame_blocks_death, false, NULL },
     { "rendez.reader_frame_blocks_death_sleep",
                                        test_rendez_reader_frame_blocks_death_sleep, false, NULL },
+    { "rendez.caught_wake_child_exit", test_rendez_caught_wake_child_exit, false, NULL },
+    { "rendez.caught_wake_tty_susp",   test_rendez_caught_wake_tty_susp,   false, NULL },
+    { "rendez.caught_wake_tty_cont",   test_rendez_caught_wake_tty_cont,   false, NULL },
+    { "rendez.caught_wake_orphan_hup_cont",
+                                       test_rendez_caught_wake_orphan_hup_cont, false, NULL },
+    { "rendez.caught_note_one_unwind", test_rendez_caught_note_one_unwind, false, NULL },
+    { "rendez.caught_note_tail_discards_and_releases", test_rendez_caught_note_tail_discards_and_releases, false, NULL },
+    { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
                                                                            false, NULL },
@@ -2255,6 +2411,7 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_pagein_not_note_interruptible", test_demand_page_file_pagein_not_note_interruptible, false, NULL },
     { "demand_page.file_pages_charge_the_holder",
                                        test_demand_page_file_pages_charge_the_holder,
                                                                            false, NULL },
@@ -2620,6 +2777,7 @@ struct test_case g_tests[] = {
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
+    { "notes.caught_note_claim_once",            test_notes_caught_note_claim_once,            false, NULL },
     { "notes.handler_escape_predicate", test_notes_handler_escape_predicate, false, NULL },
     { "notes.caught_note_stop_dequeue_drains", test_notes_caught_note_stop_dequeue_drains, false, NULL },
     { "notes.fstat_reports_chr",               test_notes_fstat_reports_chr,               false, NULL },
@@ -2872,6 +3030,8 @@ struct test_case g_tests[] = {
     { "vivarium.dirent64_encode",      test_vivarium_dirent64_encode,      false, NULL },
     { "vivarium.getdents64_guards_uaccess", test_vivarium_getdents64_guards_uaccess, false, NULL },
     { "vivarium.readv_writev_guard_iovec_array", test_vivarium_readv_writev_guard_iovec_array, false, NULL },
+    { "vivarium.intr_class",            test_vivarium_intr_class,            false, NULL },
+    { "vivarium.fd_is_slow_cached",     test_vivarium_fd_is_slow_cached,     false, NULL },
     { "vivarium.ioctl_termios_map", test_vivarium_ioctl_termios_map, false, NULL },
     { "vivarium.ioctl_grammar_roundtrip", test_vivarium_ioctl_grammar_roundtrip, false, NULL },
     { "vivarium.ioctl_dispatch_ebadf", test_vivarium_ioctl_dispatch_ebadf, false, NULL },
@@ -2885,9 +3045,23 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
     { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
     { "vivarium.socktab_keyed_write_identity", test_vivarium_socktab_keyed_write_identity, false, NULL },
+    { "vivarium.socktab_connecting",           test_vivarium_socktab_connecting,           false, NULL },
+    { "vivsock.accept_wait_is_over",         test_vivsock_accept_wait_is_over,         false, NULL },
+    { "vivsock.connect_tcp_holds_the_dial",  test_vivsock_connect_tcp_holds_the_dial,  false, NULL },
+    { "vivsock.connect_udp_never_waits",     test_vivsock_connect_udp_never_waits,     false, NULL },
+    { "vivsock.connect_eintr_then_retry",    test_vivsock_connect_eintr_then_retry,    false, NULL },
+    { "vivsock.connect_connecting_resumes",  test_vivsock_connect_connecting_resumes,  false, NULL },
+    { "vivsock.connect_failure_verdicts",    test_vivsock_connect_failure_verdicts,    false, NULL },
+    { "vivsock.send_recv_finish_connect",    test_vivsock_send_recv_finish_connect,    false, NULL },
+    { "vivsock.read_write_finish_connect",   test_vivsock_read_write_finish_connect,   false, NULL },
+    { "vivsock.so_error_reports_the_dial",   test_vivsock_so_error_reports_the_dial,   false, NULL },
+    { "vivsock.positioned_io_finishes_connect", test_vivsock_positioned_io_finishes_connect, false, NULL },
+    { "vivsock.so_error_needs_no_descriptor", test_vivsock_so_error_needs_no_descriptor, false, NULL },
     { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
     { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
     { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },
+    { "vivarium.socktab_ready_cache",  test_vivarium_socktab_ready_cache,  false, NULL },
+    { "vivarium.socktab_ready_release_paths", test_vivarium_socktab_ready_release_paths, false, NULL },
     { "vivarium.dup3_alias",           test_vivarium_dup3_alias,           false, NULL },
     { "vivarium.socktab_arm_refusals", test_vivarium_socktab_arm_refusals, false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
@@ -3054,6 +3228,7 @@ struct test_case g_tests[] = {
     { "devsrv.registry_lifecycle",     test_devsrv_registry_lifecycle,     false, NULL },
     { "devsrv.svc_ref_holds_registry", test_devsrv_svc_ref_holds_registry, false, NULL },
     { "devsrv.post_listener",          test_devsrv_post_listener,          false, NULL },
+    { "devsrv.service_keys_distinct",  test_devsrv_service_keys_distinct,  false, NULL },
     { "devcap.registered",             test_devcap_registered,             false, NULL },
     { "devcap.walk_grant_use",         test_devcap_walk_grant_use,         false, NULL },
     { "devcap.walk_unknown",           test_devcap_walk_unknown,           false, NULL },
@@ -3153,6 +3328,10 @@ struct test_case g_tests[] = {
     { "srv_client.cape_post",          test_srv_client_cape_post,          false, NULL },
     { "srv_client.cape_admission",     test_srv_client_cape_admission,     false, NULL },
     { "srv_client.cape_post_syscall",  test_srv_client_cape_post_syscall,  false, NULL },
+    { "srv_client.remote_admission",   test_srv_client_remote_admission,   false, NULL },
+    { "srv_client.remote_post",        test_srv_client_remote_post,        false, NULL },
+    { "srv_client.remote_recycle",     test_srv_client_remote_recycle,     false, NULL },
+    { "srv_client.remote_post_syscall", test_srv_client_remote_post_syscall, false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },
@@ -3297,6 +3476,18 @@ struct test_case g_tests[] = {
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
     { "9p_session.walk_round_trip",    test_9p_session_walk_round_trip,    false, NULL },
     { "9p_session.walk_fid_full_no_latch", test_9p_session_walk_fid_full_no_latch, false, NULL },
+    { "9p_session.clunk_retract_after_peer_fill",
+                                       test_9p_session_clunk_retract_after_peer_fill, false, NULL },
+    { "9p_session.flushed_walk_late_reply_binds",
+                                       test_9p_session_flushed_walk_late_reply_binds, false, NULL },
+    { "9p_session.flushed_reply_honoured_for_waiting_owner",
+                                       test_9p_session_flushed_reply_honoured_for_waiting_owner, false, NULL },
+    { "9p_session.flush_retract_restores_live_op",
+                                       test_9p_session_flush_retract_restores_live_op, false, NULL },
+    { "9p_session.flush_owner_waits_keeps_fid_live",
+                                       test_9p_session_flush_owner_waits_keeps_fid_live, false, NULL },
+    { "9p_session.flush_names_no_fid",
+                                       test_9p_session_flush_names_no_fid, false, NULL },
     { "9p_session.clunk_round_trip",   test_9p_session_clunk_round_trip,   false, NULL },
     { "9p_session.clunk_send_time_unbinds",
                                        test_9p_session_clunk_send_time_unbinds,
@@ -3546,6 +3737,53 @@ struct test_case g_tests[] = {
     { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
+    { "9p_client.clunk_dying_keeps_fid_bound",
+                                       test_9p_client_clunk_dying_keeps_fid_bound, false, NULL },
+    { "9p_client.clunk_killed_while_parked",
+                                       test_9p_client_clunk_killed_while_parked, false, NULL },
+    { "9p_client.clunk_killed_in_tag_drain",
+                                       test_9p_client_clunk_killed_in_tag_drain, false, NULL },
+    { "9p_client.clunk_dying_waiter_sends_no_flush",
+                                       test_9p_client_clunk_dying_waiter_sends_no_flush, false, NULL },
+    { "9p_client.flushed_walk_late_reply_to_sink",
+                                       test_9p_client_flushed_walk_late_reply_to_sink, false, NULL },
+    { "9p_client.abandoned_walk_late_reply_kept",
+                                       test_9p_client_abandoned_walk_late_reply_kept, false, NULL },
+    { "9p_client.abandoned_async_clunk_not_flushed",
+                                       test_9p_client_abandoned_async_clunk_not_flushed, false, NULL },
+    { "9p_client.clunk_rlerror_drains_as_clunk",
+                                       test_9p_client_clunk_rlerror_drains_as_clunk, false, NULL },
+    { "9p_client.clunk_malformed_reply_fails_closed",
+                                       test_9p_client_clunk_malformed_reply_fails_closed, false, NULL },
+    { "9p_client.abandoned_walk_malformed_late_reply_fails_closed",
+                                       test_9p_client_abandoned_walk_malformed_late_reply_fails_closed,
+                                                                           false, NULL },
+    { "9p_client.flush_malformed_reply_fails_closed",
+                                       test_9p_client_flush_malformed_reply_fails_closed, false, NULL },
+    { "9p_client.note_flush_honours_late_read",
+                                       test_9p_client_note_flush_honours_late_read, false, NULL },
+    { "9p_client.note_flush_rflush_first_cancels",
+                                       test_9p_client_note_flush_rflush_first_cancels, false, NULL },
+    { "9p_client.note_flush_death_abandons",
+                                       test_9p_client_note_flush_death_abandons, false, NULL },
+    { "9p_client.note_flush_reader_honours_walk",
+                                       test_9p_client_note_flush_reader_honours_walk, false, NULL },
+    { "9p_client.note_flush_full_pool_own_reply",
+                                       test_9p_client_note_flush_full_pool_own_reply, false, NULL },
+    { "9p_client.note_flush_pump_wakes_parked_flush",
+                                       test_9p_client_note_flush_pump_wakes_parked_flush, false, NULL },
+    { "9p_client.note_flush_reader_rflush_first",
+                                       test_9p_client_note_flush_reader_rflush_first, false, NULL },
+    { "9p_client.note_flush_reply_beats_unsent_flush",
+                                       test_9p_client_note_flush_reply_beats_unsent_flush, false, NULL },
+    { "9p_client.note_flush_handoff_skips_staging",
+                                       test_9p_client_note_flush_handoff_skips_staging, false, NULL },
+    { "9p_client.handoff_skips_send_parked",
+                                       test_9p_client_handoff_skips_send_parked, false, NULL },
+    { "9p_client.note_flush_staging_waits_for_owed_tag",
+                                       test_9p_client_note_flush_staging_waits_for_owed_tag, false, NULL },
+    { "9p_client.async_clunk_drain_waits_for_owed_tag",
+                                       test_9p_client_async_clunk_drain_waits_for_owed_tag, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
@@ -3558,6 +3796,12 @@ struct test_case g_tests[] = {
                                        test_9p_client_send_backpressure_spill_survives_outbuf_reuse, false, NULL },
     { "9p_client.abandon_async_eagain_keeps_session_alive",
                                        test_9p_client_abandon_async_eagain_keeps_session_alive,
+                                                                           false, NULL },
+    { "9p_client.async_send_eagain_keeps_session_alive",
+                                       test_9p_client_async_send_eagain_keeps_session_alive,
+                                                                           false, NULL },
+    { "9p_client.async_full_tag_pool_is_eagain",
+                                       test_9p_client_async_full_tag_pool_is_eagain,
                                                                            false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
@@ -3624,7 +3868,15 @@ struct test_case g_tests[] = {
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "dev9p.readdir_cookie_high_bit", test_dev9p_readdir_cookie_high_bit, false, NULL },
     { "dev9p.poll_regular_file_always_ready", test_dev9p_poll_regular_file_always_ready, false, NULL },
+    { "dev9p.poll_snapshot_answers_at_zero_timeout", test_dev9p_poll_snapshot_answers_at_zero_timeout, false, NULL },
+    { "dev9p.poll_local_and_remote_both_reported", test_dev9p_poll_local_and_remote_both_reported, false, NULL },
+    { "dev9p.poll_snapshot_shortage_is_resent", test_dev9p_poll_snapshot_shortage_is_resent, false, NULL },
+    { "dev9p.poll_unanswered_snapshot_fails_safe", test_dev9p_poll_unanswered_snapshot_fails_safe, false, NULL },
+    { "dev9p.poll_arm_wakes_the_parked_poller", test_dev9p_poll_arm_wakes_the_parked_poller, false, NULL },
+    { "dev9p.poll_retry_timer_is_a_wake", test_dev9p_poll_retry_timer_is_a_wake, false, NULL },
+    { "dev9p.poll_widen_keeps_the_old_arm_until_replaced", test_dev9p_poll_widen_keeps_the_old_arm_until_replaced, false, NULL },
     { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
+    { "dev9p.poll_gc_flushes_with_the_unlink", test_dev9p_poll_gc_flushes_with_the_unlink, false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.unlink_rename_errno",     test_dev9p_unlink_rename_errno_propagates, false, NULL },
@@ -3639,6 +3891,8 @@ struct test_case g_tests[] = {
     { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
     { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
     { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
+    { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
+    { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
@@ -3678,6 +3932,22 @@ struct test_case g_tests[] = {
                                        test_p9_attached_walked_outlives_root_no_uaf,
                                                                            false, NULL },
     { "p9_attached.ctl_registry",      test_p9_attached_ctl_registry,      false, NULL },
+    { "p9_closer.dying_close_delivers_tclunk",
+                                       test_p9_closer_dying_close_delivers_tclunk, false, NULL },
+    { "p9_closer.stalled_session_holds_one_closer",
+                                       test_p9_closer_stalled_session_holds_one_closer, false, NULL },
+    { "p9_closer.flushed_walk_fid_clunked",
+                                       test_p9_closer_flushed_walk_fid_clunked, false, NULL },
+    { "p9_closer.failed_spawn_retried_by_hand_off",
+                                       test_p9_closer_failed_spawn_retried_by_hand_off, false, NULL },
+    { "p9_closer.hand_off_inside_failed_spawn_retried",
+                                       test_p9_closer_hand_off_inside_failed_spawn_retried, false, NULL },
+    { "p9_closer.hand_off_inside_spawn_no_duplicate",
+                                       test_p9_closer_hand_off_inside_spawn_no_duplicate, false, NULL },
+    { "p9_closer.clunk_killed_while_self_pumping",
+                                       test_p9_closer_clunk_killed_while_self_pumping, false, NULL },
+    { "p9_closer.orphan_oom_on_dead_session_quiet",
+                                       test_p9_closer_orphan_oom_on_dead_session_quiet, false, NULL },
     { "sys_walk_open.max_length_name_nul_terminated",
                                        test_sys_walk_open_max_length_name_nul_terminated,
                                                                            false, NULL },
@@ -3697,6 +3967,9 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.large_frame_roundtrip",         test_9p_srvconn_transport_large_frame_roundtrip,         false, NULL },
     { "9p_srvconn_transport.cape_attach",                   test_9p_srvconn_transport_cape_attach,                   false, NULL },
     { "9p_srvconn_transport.cape_attach_srv",               test_9p_srvconn_transport_cape_attach_srv,               false, NULL },
+    { "9p_srvconn_transport.srv_attach_names_root",         test_9p_srvconn_transport_srv_attach_names_root,         false, NULL },
+    { "9p_srvconn_transport.remote_attach",                 test_9p_srvconn_transport_remote_attach,                 false, NULL },
+    { "9p_srvconn_transport.remote_attach_srv",             test_9p_srvconn_transport_remote_attach_srv,             false, NULL },
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },
@@ -3760,6 +4033,7 @@ struct test_case g_tests[] = {
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
+    { "poll.pre_resolved_spoor",                test_poll_pre_resolved_spoor,                false, NULL },
     { "poll.sleep_for_waits",                   test_poll_sleep_for_waits,                   false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
@@ -3776,6 +4050,8 @@ struct test_case g_tests[] = {
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
+    { "sys_attach_9p.names_root_by_its_pipe",          test_sys_attach_9p_names_root_by_its_pipe,          false, NULL },
+    { "sys_attach_9p.declarations",                    test_sys_attach_9p_declarations,                    false, NULL },
     { "sys_mount.happy_path_grafts_pipe_spoor",        test_sys_mount_happy_path_grafts_pipe_spoor,        false, NULL },
     { "sys_mount.idempotent_on_duplicate",             test_sys_mount_idempotent_on_duplicate,             false, NULL },
     { "sys_mount.rejects_bad_fd",                      test_sys_mount_rejects_bad_fd,                      false, NULL },
@@ -3785,6 +4061,10 @@ struct test_case g_tests[] = {
     { "sys_unmount.removes_entry_and_drops_ref",       test_sys_unmount_removes_entry_and_drops_ref,       false, NULL },
     { "sys_unmount.rejects_nonexistent_target",        test_sys_unmount_rejects_nonexistent_target,        false, NULL },
     { "sys_mount.caller_close_keeps_mount_alive",      test_sys_mount_caller_close_keeps_mount_alive,      false, NULL },
+    { "sys_mount.refuses_a_type_mismatch",             test_sys_mount_refuses_a_type_mismatch,             false, NULL },
+    { "sys_mount.refuses_all_but_mrepl_at_a_file",     test_sys_mount_refuses_all_but_mrepl_at_a_file,     false, NULL },
+    { "sys_mount.type_check_reads_only_qtdir",         test_sys_mount_type_check_reads_only_qtdir,         false, NULL },
+    { "sys_mount.accepts_an_ordered_mount_at_a_directory", test_sys_mount_accepts_an_ordered_mount_at_a_directory, false, NULL },
     { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
     { "sys_mlockall.cap_gate",                         test_sys_mlockall_cap_gate,                         false, NULL },
     { "sys_set_dumpable.one_way_to_zero",              test_sys_set_dumpable_one_way_to_zero,              false, NULL },
@@ -4212,6 +4492,32 @@ void test_run_all(void) {
             uart_puts(" pages released) ");
             if (!current_test->failed)
                 test_fail("test left the pool parked (see POOL-PARKED)");
+        }
+
+        // The readiness knobs are two more. A shortened snapshot bound is also a
+        // QUIET one, so left set it would hide every later fail-safe from the
+        // gates that grep for them; a poll collector left skipping or held
+        // stops every later stranded arm's teardown.
+        bool knob_bound = poll_test_snap_bound_release();
+        bool knob_gc    = dev9p_poll_test_gc_release();
+        if (knob_bound || knob_gc) {
+            uart_puts("POLL-KNOB(");
+            if (knob_bound) uart_puts("snap-bound");
+            if (knob_bound && knob_gc) uart_puts(",");
+            if (knob_gc) uart_puts("gc-mode");
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left a poll test knob set (see POLL-KNOB)");
+        }
+
+        // And the dev9p readiness fixture: a test that fails before its
+        // teardown leaves the fixture's client, file, hooks and poller thread
+        // up, and the next setup must not re-initialise a client the poll
+        // kthread may still pump.
+        if (test_dev9p_np_release()) {
+            uart_puts("NP-FIXTURE ");
+            if (!current_test->failed)
+                test_fail("test left the dev9p readiness fixture up (see NP-FIXTURE)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the

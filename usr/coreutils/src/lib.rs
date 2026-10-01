@@ -27,6 +27,7 @@ extern crate alloc;
 // unit tests with them).
 pub use beacon::{boxd, color, palette};
 pub mod find;
+pub mod nsmount;
 pub mod path;
 pub mod select;
 pub mod size;

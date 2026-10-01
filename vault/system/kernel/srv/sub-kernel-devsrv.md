@@ -3,7 +3,7 @@ id: sub-kernel-devsrv
 type: sub
 title: "devsrv — the /srv service registry, Dev, and accept/peer syscalls"
 parent: moc-kernel-srv
-code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h]
+code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c]
 audit: hard
 guarded-by: [inv-i1]
 validated-by: [spec-corvus, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-28
 ---
 ## Nonblocking endpoints
 
@@ -106,7 +106,17 @@ every file as the attacher). The perm word's rules live in the tested
 predicate `sys_srv_post_perm_ok` (only DMSRV* bits; CAPE only beside BYTE),
 and `devsrv_post_listener` refuses a caped 9P-mode post itself too (−1):
 the cape's no-escalation argument rests on the attacher holding the raw
-transport, which a 9P-mode opener never does. Returns the listener hidx (obj = the registry entry;
+transport, which a 9P-mode opener never does. `perm & DMSRVREMOTE` (bit 22,
+LR-1, HAUL-DESIGN 4.8) marks the service remote in EITHER mode: every attach
+over its connections declares its session remote, which `/proc/<pid>/ns`
+shows and nothing else reads. `SrvService.remote` is set in
+`srv_reserve_in` on all three arms (a fresh slot, a tombstone rebind, the
+recycle of a dead tombstone) and is part of the service IDENTITY on a
+rebind, like the mode, the ring class and the cape: a rebind that changes it
+answers −1, because a conn minted before the rebind must read the
+declaration its poster made. `devsrv_open_connect` captures it atomically
+with LIVE, beside the mode and the cape, and marks the minted conn with
+`srvconn_set_remote` ([[sub-kernel-srvconn]]). Returns the listener hidx (obj = the registry entry;
 `RIGHT_READ|WRITE`; `handle_dup` refuses it) or −1.
 
 **open=connect** — `devsrv_open_connect(p, c, omode)` (the `Dev.open`
@@ -211,7 +221,20 @@ LIVE service yields a QTFILE service Spoor whose aux is a kmalloc'd
 `SrvService *`: a tombstone-rebind reuses the slot, so the connect
 resolves the name fresh). Roots carry a per-instance `devno`
 (stalk-3a F1 — [[fnd-stalk3a-r1-f1]]) so two registry roots have
-distinct mount-key identity.
+distinct mount-key identity. A service node's `qid.path` is its post's own:
+`srv_reserve_in` stamps each reservation with the next value of a
+per-registry counter, never 0 (the root's), and the walk reads it in the same
+lock hold as the name and the LIVE check, since a tombstoned slot can be
+recycled under another name. Until B-1d-v every node carried the root's 0,
+and a service node shares the root's `dc` and `devno`, so a mount at
+`/srv/<name>` was keyed at the registry root and at every other service
+(B-1d-v audit round 2, F1). A new post of a name gets a new path, so a mount at
+the old post does not carry over, as with Plan 9's `srvcreate`. That also
+strands such a mount: a file a Proc mounts at `/srv/<name>` is keyed on that
+post's node, and after a re-post the name walks to the new node, so the old
+entry is unreachable and cannot be unmounted by name -- it holds its slot and
+its source ref until the namespace ends (B-1d-v audit round 3, F3; the general
+fix is a generation in the mount key, tracked in OPEN-BUGS).
 
 **open=connect** (`devsrv_open_connect`): global soft cap
 (`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
@@ -480,6 +503,8 @@ CONTROLS against a gate that refused unconditionally) ·
 `registered` · `post_gate` · `post_basic` · `tombstone` ·
 `registry_full` · `registry_full_tombstone_rebinds` (#30's at-capacity
 asymmetry) · `post_rollback` · `post_listener` · `walk_service` ·
+`service_keys_distinct` (B-1d-v r2 F1: an MREPL over `/srv/a` shows at `a`
+alone, a union at the registry root leaves `/srv/b` its service node) ·
 `registry_lifecycle` · `svc_ref_holds_registry` · `open_connect_byte` ·
 `open_root_dir` (#957) · `stat_native_root` · `accept_immediate` ·
 `accept_blocks_then_wakes` · `conn_io` · `conn_release` ·
@@ -497,6 +522,21 @@ identity both ways), `srv_client.cape_admission` (the syscall predicates,
 `sys_srv_post_perm_ok` and `sys_attach_9p_flags_ok`, bit by bit), and
 `srv_client.cape_post_syscall` (a post through SYS_WALK_CREATE's own
 inner on a /srv root fd: the cape bit marks the service, a caped 9P-mode
-post answers -EINVAL and registers nothing). The 9p-mode
+post answers -EINVAL and registers nothing), and 4 for the remote
+declaration: `srv_client.remote_admission` (both values pinned, both
+predicates bit by bit: either mode, REMOTE does not lift the cape's byte
+rule, REMOTE is refused on the /srv attach and cannot carry LOOSE into the
+pipe attach), `srv_client.remote_post` (9P-mode, byte and caped remote
+posts are marked, the plain control is not; the byte services mint marked
+conns; the rebind identity both ways across a tombstone),
+`srv_client.remote_recycle` (a user's post of a new name recycles a dead
+tombstone's slot, proven the same entry before the declaration is judged,
+and takes the NEW post's declaration both ways), and
+`srv_client.remote_post_syscall` (through SYS_WALK_CREATE's own inner). The
+LR-1 sabotage boots turned these red when the post stopped recording the
+declaration (the common tail of `srv_reserve_in`), when the recycle arm
+stopped rewriting it (red only with the rebind check in place: the common
+tail runs for every arm, so deleting the check masked it), when the rebind
+identity check was deleted, and when connect stopped capturing it. The 9p-mode
 connect has NO unit case ([[seam-srv-9p-connect-unit]]); the boot E2E
 (joey/login/legate → corvus + stratumd) is its regression.

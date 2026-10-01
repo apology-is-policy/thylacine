@@ -307,6 +307,11 @@ struct SrvConn {
     // SYS_ATTACH_9P_SRV capes every attach over a conn that carries it.
     bool                cape;
 
+    // LR-1: the remote declaration (HAUL-DESIGN 4.8), propagated from a
+    // DMSRVREMOTE service at mint exactly like `cape`; every attach over a conn
+    // that carries it, in either mode, marks its session remote.
+    bool                remote;
+
     // P6-pouch-stratumd-boot 16c: kernel-attached gate.
     //
     // SYS_ATTACH_9P_SRV wraps a byte-mode SrvConn in a kernel-owned 9P
@@ -394,6 +399,11 @@ void srvconn_set_byte_mode(struct SrvConn *cn);
 // srvconn_cape reads it (false on a NULL / corrupted conn).
 void srvconn_set_cape(struct SrvConn *cn);
 bool srvconn_cape(const struct SrvConn *cn);
+
+// srvconn_set_remote / srvconn_remote -- the remote declaration's one-way
+// setter and reader, under srvconn_set_cape's contract.
+void srvconn_set_remote(struct SrvConn *cn);
+bool srvconn_remote(const struct SrvConn *cn);
 
 // srvconn_set_kernel_attached — one-way setter for cn->kernel_attached.
 // P6-pouch-stratumd-boot 16c. Called from sys_attach_9p_srv_handler

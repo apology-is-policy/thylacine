@@ -303,7 +303,9 @@ session at 1280×800 and capturing, not by reading more code
    what a slide wants. Settled, no change.
 2. **The clear is exact.** Slide two carried no residue of slide one: no stale
    text, no inherited emphasis, no accumulated scrollback. The `span: 0` and
-   no-scroll-off properties of §3 hold in practice.
+   no-scroll-off properties of §3 hold in practice. (The no-scroll-off property
+   was withdrawn by the operator's vote of 2026-09-25: a clear now moves the slide
+   into the history. See §3.)
 3. **The title renders as a left-aligned H1**, not centred, because
    `manual::render` emits `Op::Hdr level=1` rather than `class=title`.
    **RATIFIED 2026-09-22: left-aligned stays.** `HdrClass::Title` would centre it
@@ -347,3 +349,27 @@ session at 1280×800 and capturing, not by reading more code
   owns.
 - It does not transition, animate, or lay out. Those are either the renderer's
   or nobody's.
+
+## 13. One frame per slide (FL-1, 2026-09-28)
+
+The operator saw a slide change flicker over Haul (2026-09-24). The code
+explained it. `present` wrote the clear, then read the slide -- over Haul, a
+network round trip -- then wrote it through an unbuffered sink, one write per line
+segment and one per line ending. halcyond paints a tile after every read of its
+record pipe, so the blank screen and each partial slide were shown in turn.
+
+A slide change is now ONE frame, and ONE write:
+
+1. The slide is read and rendered before anything is written, so a slow read
+   delays the change and never shows a blank screen.
+2. The frame is assembled in memory: `CSI ? 2026 h` (open a synchronized frame),
+   the clear, the slide, the footer, `CSI ? 2026 l` (close it). The whole buffer
+   is cooked once as it is written. `cook` is stateless per byte (§7), so the
+   bytes are exactly those the streamed writes produced.
+3. Under Halcyon the frame is shown whole: the tile's paint is held from the open
+   to the close (HALCYON 14.3, operator vote 2026-09-28). A console renderer that
+   does not know the mode ignores it, as ECMA-48 requires of an unknown private
+   mode, and still gains the single write. aurora holds its paint the same way
+   (AURORA.md §3).
+
+Down a pipe (`Show::Cat`) nothing changes: no clear, no frame marks.

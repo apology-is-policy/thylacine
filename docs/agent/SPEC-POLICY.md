@@ -83,6 +83,16 @@ curl -sL -o /tmp/tla2tools.jar \
   https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
 ```
 
+Use this download, not an older jar found elsewhere on the host. `/tmp` is
+cleared on reboot, so the jar goes missing and gets refilled from whatever is
+at hand. The `specs/check-*.sh` scripts judge a red cfg by the NAME of the
+property TLC reports violated. This release names a violated temporal
+property ("Temporal property X was violated."). TLC2 2.19 (Aug 2024) does not
+("Temporal properties were violated."), and on it every temporal red cfg of
+check-cow, check-syscall-irqs and the older check-poll failed, so those gates
+could not pass (2026-09-28). A run's log prints the version near the top
+(`TLC2 Version ...`).
+
 Run every spec in `specs/`:
 
 ```bash

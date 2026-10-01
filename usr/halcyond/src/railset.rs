@@ -56,6 +56,10 @@ pub enum RailAction {
     /// running, then closes by verb under its own authority -- without 6.5's
     /// final-tile protection, which Super+Q deliberately does not carry.
     CloseFocused(u32),
+    /// The history chord (Super+K) the compositor DELIVERED here (TC-1b,
+    /// HALCYON 14.13), carrying the pane it says is focused: the owner
+    /// forgets the history of the tile it hosts under that id.
+    ForgetHistory(u32),
     /// The mark: the workspace list, at display point (x, y).
     Workspaces { x: u32, y: u32 },
     /// A chip: switch to workspace NUMBER `n` (S4 -- an identity, not a
@@ -274,10 +278,11 @@ impl RailBar {
                             }
                             repaint = true;
                         }
-                        // HALCYON-INSTRUMENT 9.3 (I-7 / I-7b): a chord the
-                        // compositor delivered here (TEV_CHORD; code 1 =
-                        // picker, 2 = help, 3 = close the focused pane, whose
-                        // id rides in `value`) -- for 1 and 2 the same action
+                        // HALCYON-INSTRUMENT 9.3 (I-7 / I-7b / TC-1b): a chord
+                        // the compositor delivered here (TEV_CHORD; code 1 =
+                        // picker, 2 = help, 3 = close the focused pane, 4 =
+                        // forget its history -- the pane's id rides in
+                        // `value` for 3 and 4) -- for 1 and 2 the same action
                         // a press on the control produces, so the owner opens
                         // at the same anchor. An unknown code is ignored.
                         TEV_CHORD => {
@@ -285,6 +290,7 @@ impl RailBar {
                                 1 => Some(Self::theme_anchor(&self.zones, surf.w as i32, surf.h as i32, sheet)),
                                 2 => Some(RailAction::Help),
                                 3 => Some(RailAction::CloseFocused(e.value)),
+                                4 => Some(RailAction::ForgetHistory(e.value)),
                                 _ => None,
                             };
                             if let Some(a) = a {

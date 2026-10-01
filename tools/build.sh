@@ -3210,8 +3210,8 @@ build_stratumd() {
     # The Stratum source is consumed READ-ONLY from $STRATUM_SRC; no in-tree
     # changes are written. The Stratum-side `__thylacine__` arm in
     # peer_creds.c + the STM_PLATFORM_THYLACINE detection in CMakeLists.txt
-    # live on the `thylacine-pouch-arm` branch in the Stratum repo (a
-    # coordination artifact records the integration; see Stratum's
+    # live on the Stratum repo's `main` (a coordination artifact records the
+    # integration; see Stratum's
     # docs/session-handoff-2026-05-24-thylacine-pouch-arm.md).
     local sysroot="$BUILD_DIR/sysroot"
     local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"

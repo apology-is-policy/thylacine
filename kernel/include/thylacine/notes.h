@@ -602,8 +602,20 @@ bool thread_die_pending(struct Thread *t);
 // LIVING (the note delivers at the EL0-return tail). LOCK-FREE, same shape as
 // thread_die_pending; read only at the sleep sites' caught_ok arm, ALWAYS after
 // the die-check (death wins). Disjoint from thread_die_pending: the caught
-// latch and the terminate latch are never both set for one note.
+// latch and the terminate latch are never both set for one note. False unless
+// `t`'s current syscall marked its wait interruptible (t->note_interruptible,
+// ARCH 8.8.3's signal(7) amendment): every other wait rides the note out.
 bool thread_caught_note_deliverable(struct Thread *t);
+
+// ARCH 8.8.3: the sleep sites' unwind decision. True iff a family deliverable to
+// `t` is claimed by `t` already, or is not yet claimed AND `t` claims it (a CAS
+// on proc_flags' claim sub-field that also re-validates the caught bit, recorded
+// in t->note_claim), so one caught note unwinds ONE interruptible sleeper -- as
+// Linux interrupts one thread for a process-directed signal -- and every other
+// sleeper re-parks. The claim holds until `t`'s next EL0-return tail, which
+// releases it and wakes the Proc's sleepers if its note is still queued. The
+// sleep sites evaluate it LAST, only when every other unwind gate has passed.
+bool thread_caught_note_claim(struct Thread *t);
 
 // bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
 // its frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn,

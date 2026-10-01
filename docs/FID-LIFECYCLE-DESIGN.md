@@ -114,6 +114,8 @@ extend `specs/9p_client.tla` with the async-clunk model + a buggy cfg
 (`async_clunk_tag_leak`: a fire-and-forget that never drains → the `outstanding[]`
 slot is never freed → tag-pool exhaustion). Session-death: clunk-pending tags are
 abandoned with the session (client-side already unbound; no leak on our side).
+A Tclunk that a dying sender could not put on the wire goes to the closer
+(section 9).
 
 ### 3.2 page-cache sizing (−31%; the prerequisite — sub-chunk 2 = task #25)
 
@@ -447,3 +449,98 @@ rmdir_drop_and_no_stale_repark, suspect_not_reparked}. The co_prime test
 helper drains its async Rclunk only when the close actually clunked (a donate
 elides it, and a pump with nothing pending latches the single-slot loopback
 dead).
+
+## 9. A fid the server still holds is never forgotten (2026-09-28)
+
+The client accepted one leak as the price of a dying thread (#52;
+`p9_client_clunk_async` called it "the documented dying-path cost"): a Tclunk
+refused because its sender was dying left the fid on the server until the
+session ended. The cost is not bounded in practice. The root session ends at
+shutdown, and a netd fid is a connection slot. Each instrumented boot of
+2026-09-28 paid it three times from one site: gopls kills a `go` child still in
+its kernel spawn thunk, and the thunk's clunk of its exec Spoor is refused. The
+operator's votes (`dec-2026-09-28-tclunk-closer`) replace the price with closer
+threads, Plan 9's `closeproc`.
+
+The rule this section adds: while a session lives, every fid the server holds
+is known to the client, and the client clunks it once nobody uses it.
+
+**The hand-off contract.** `p9_client_clunk_async` and `p9_client_clunk`
+return `-P9_E_AGAIN` when a Tclunk could not be sent and the session is live.
+It means nothing reached the wire, the tag is free, and the fid is still
+bound. The caller hands the fid to the closer and returns without waiting
+(I-24).
+- A caller already dying when it asks is refused before the Tclunk is built,
+  so nothing changes.
+- A caller that dies while it is parked on back-pressure has built the
+  Tclunk, and the build unbound the fid. The frame never reached the wire, so
+  it is taken back whole (`p9_session_retract_unsent`): the tag is freed and
+  the fid bound again.
+- A live caller whose spill buffer cannot be allocated under back-pressure
+  gets the same answer.
+- A dead session keeps today's answer, `-P9_E_IO`. Its fids died with it.
+- The root fid is never clunked by the client: `p9_session_send_clunk` refuses
+  it, and the session's transport close releases it on the server.
+
+**The take-back cannot fail.** A caller parked on back-pressure dropped
+`c->lock`, so peers may have bound fids since its build unbound this one. The
+fid table therefore holds a slot for every outstanding request that may leave
+a fid bound when it ends. A Tclunk keeps the slot of the fid its build unbound
+until its reply arrives or it is taken back. A walk that names a new fid
+reserves the slot that fid will bind. A new reservation needs bound plus
+reserved slots below `P9_SESSION_MAX_FIDS`, while a take-back or a walk's bind
+only turns a reserved slot back into a bound one. Bound plus reserved never
+exceeds `P9_SESSION_MAX_FIDS`, so neither a take-back nor a walk's bind finds
+the table full. This also retires the walk's old capacity race: a peer could
+bind the last slot while a walk waited for its Rwalk, and the walk then failed
+with `EIO` although the server had bound its fid.
+
+**The closer** is a pool of kernel threads, Plan 9's shape, serialized per
+session (operator vote 2026-09-29).
+- The hand-off queues the fid with a session reference (`p9_attached_ref`),
+  in a node from `kmalloc`, which never sleeps, and wakes an idle closer.
+- A session with pending closes is served by one closer at a time. The closer
+  sends each Tclunk through `p9_client_clunk_async` like any live thread,
+  parking on back-pressure if it must, then drops the entry's reference
+  outside every lock. The last drop may tear the session down, and that
+  teardown may close Spoors and queue again.
+- A closer that takes a session's work spawns a spare when no other closer is
+  idle. A closer that finds no work retires when another is idle. One idle
+  closer is kept, and it reaps the retired ones, since a kernel thread cannot
+  free itself.
+- A server that never answers holds only its own session's closer. The pool
+  has at most one thread per session with pending closes, plus the idle one.
+- A session that died while its entry waited refuses the Tclunk with
+  `-P9_E_IO`. Its fids died with it, and the entry is dropped quietly.
+- If a spare cannot be spawned, the queued sessions wait for a closer to
+  finish. Nothing is lost.
+
+**A flushed request's reply is honoured** (flush(5)). The client flushes a
+request only when its owner has died or been interrupted by a note, so
+whatever the server did for it belongs to nobody.
+- A Tclunk is never flushed. A thread that dies or is interrupted while it
+  waits for its Rclunk leaves the Tclunk in flight without an owner, like an
+  asynchronous one, and the server clunks the fid.
+- A reply that arrives before the Rflush is honoured as though the request had
+  not been flushed. A walk's new fid is bound into the slot it reserved and
+  handed to the closer. The same holds for a walk whose Tflush could not be
+  sent, whose late reply is drained without an owner.
+- A Tlopen or a Tlcreate binds no new fid. The fid it opened is the one its
+  owner's unwind clunks.
+- Stratum's server keeps the other half of the contract: a request that ran
+  sends its reply before the Rflush, so the client can honour it.
+
+**What a refusal line means now.** `9p: close: clunk of fid N refused` prints
+only when the session is still live after the hand-off failed: the node could
+not be allocated, or the fid's Spoor holds no session reference to hand over
+(a test-only attach). That is a real leak. `tools/test.sh` fails on the line,
+as it fails on `poll: FAILSAFE`.
+
+**Invariants.** I-10: a take-back frees a tag the server never saw. I-11: a
+take-back restores exactly the binding the build removed, and `9p_client.tla`
+has no step for a send that never happened, so a take-back is a stutter. The
+slot reservation and flush are outside that model, which has no fid capacity
+and no Tflush; a late reply that binds is its ordinary Rwalk step. I-24: the
+dying thread's hand-off never blocks. The closer adds one liveness assumption,
+that a closer runs, which `net_poll_teardown.tla` states as a `CloserSend`
+step under weak fairness.

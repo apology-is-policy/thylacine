@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-08-15
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -36,6 +36,38 @@ on `obj` (the `burrow_create_anon`-consumed-reference convention);
 `handle_get(p, h, out)` returns a **by-value snapshot** with the object's
 refcount already bumped; `handle_put` drops that borrowed reference. The
 pairing is mandatory — see Concurrency.
+
+`handle_set_nonblock(p, h, on)` and `handle_get_status_flags(p, h, &omode,
+&nonblock)` (#91-follow, `34ff46df`, 2026-08-27): O_NONBLOCK is a per-OPEN-FILE
+status flag — CNONBLOCK on the Spoor, so a dup alias and a fork copy share it —
+where FD_CLOEXEC is per fd (the cloexec bitmap). The set is atomic
+(`spoor_flag_set`/`clear`), because the flag word is written from several lock
+domains (fork shares the Spoor across tables; CDEBUGOWNER is written under
+`g_proc_table_lock`); the table lock pins the slot's Spoor for the mutation's
+lifetime and serializes nothing. A non-Spoor handle is a no-op success, as
+Linux permits F_SETFL on any fd. `get_status_flags` reports the access mode
+(`s->mode & 3`) and the CNONBLOCK bit. Which reads honour the bit is each
+Dev's business: devpipe and devsrv do; dev9p does not, so a `/net` socket's
+mode lives at netd, which the vivarium sets with netd's `nonblock` verb
+([[sub-kernel-vivarium]], NP-5c).
+
+`handle_table_copy_into_hooked(dst, src, under_src_lock, arg)` (`4e694e5f`,
+2026-09-02): the fork copy with a hook run inside the SOURCE lock hold, after
+every slot is copied and before either lock drops. State that lives beside the
+table but is keyed by its indices (the vivarium's socket table) can only be
+snapshotted consistently with it there: the source lock is what stops a peer
+thread closing fd N and opening a different object at N between the two
+copies. The hook may take leaf locks (handle -> socktab nests) and must neither
+sleep nor allocate. `handle_table_copy_into` is the hooked copy with no hook.
+
+`handle_snapshot_spoor(out, sp)` (NP-5, 2026-09-29) builds the same snapshot
+for a Spoor held **outside** any table — KOBJ_SPOOR, RIGHT_READ, its own
+reference taken — so a consumer of snapshots takes it unchanged and
+`handle_put` releases it. The only caller is the poll core's pre-resolved path
+([[sub-kernel-poll]]), which polls the vivarium's cached socket readiness
+Spoors this way; it grants nothing a table lookup would not, because the
+caller already holds the Spoor and the snapshot carries only the read right a
+poll needs.
 
 `handle_dup(p, h, new_rights)` installs a second reference to the same
 object with `new_rights ⊆ parent->rights`.
@@ -362,4 +394,7 @@ sides), are stated Phase-5+ items.
 
 ## Provenance
 
-[[chg-2026-08-02-authority-sweep]].
+[[chg-2026-08-02-authority-sweep]] → #91-follow (`34ff46df`, 2026-08-27): the
+per-open-file nonblocking flag → the socktab-across-images audit close
+(`4e694e5f`, 2026-09-02): the hooked fork copy → NP-5 (2026-09-29):
+`handle_snapshot_spoor`, the snapshot for a Spoor held outside the table.

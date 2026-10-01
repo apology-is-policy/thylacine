@@ -132,14 +132,47 @@
 //   `events`, plus output-only POLLERR/POLLHUP if the device sees an
 //   error / hangup). If `pw` is non-NULL, atomically registers `pw` on
 //   the object's hook list under the object's lock. If `pw` is NULL,
-//   the call is sample-only. `sys_poll_for_proc` always passes a hook
-//   (every re-arm pass re-registers); the sample-only form serves
-//   other in-kernel callers and tests.
+//   the call is sample-only: a pass past the deadline (timeout 0 among
+//   them) hooks nothing, because it returns whatever it finds.
 //
 //   A NULL `Dev.poll` slot means the fd is always ready for the
 //   requested events — the POSIX-correct answer for a regular file, so
 //   only objects with genuine readiness state (devpipe at v1.0; devsrv
 //   at P5-poll-b) implement a real `.poll`.
+//
+// REMOTE READINESS: SAMPLE AND ARM ARE SEPARATE (#98; ARCH 23.3, NET-DESIGN
+// 12.2, specs/poll.tla + specs/net_poll.tla)
+//
+//   A file whose readiness lives in the server that serves it (dev9p's
+//   QTPOLL files) cannot be sampled under a lock: the kernel has to ask. Such
+//   a Dev fills `.poll_snapshot` / `.poll_snapshot_release` / `.poll_arm`
+//   instead of `.poll`, and every pass of `sys_poll_for_proc` runs
+//
+//     SCAN    each local fd registers + samples; each remote fd's server is
+//             sent a SNAPSHOT, which it answers at once, 0 included.
+//     SETTLE  wait until every snapshot of the pass is answered. A snapshot a
+//             shortage kept off the wire (no free tag, a full send ring, no
+//             memory) is resent every POLL_SNAP_RESEND_NS; one still
+//             unanswered POLL_SNAP_BOUND_NS after the scan is taken back and
+//             reported not ready -- the FAIL-SAFE, counted and printed. The
+//             call's own deadline never shortens that bound: a poll may return
+//             late by one server round trip, never early on a guess.
+//     VERDICT ready returns; nothing ready returns 0 once the deadline has
+//             passed -- the snapshots' answers ARE the answer -- and otherwise:
+//     ARM     each remote fd's hook goes on its list, THEN its arm (a read the
+//             server holds until the fd is ready, evaluated on arrival) goes on
+//             the wire. An arm is only ever a WAKE; the next pass samples
+//             again. An arm a shortage could not send bounds the park by
+//             POLL_ARM_RETRY_NS, and that timer's expiry is a wake too: whether
+//             the call has timed out is the CLOCK's answer, never tsleep's.
+//     PARK    tsleep on the flags, as for local fds.
+//
+//   The snapshot slot is the core's (`struct poll_snap`, on the poller's
+//   stack); the request in flight is the Dev's (`op`). The Dev's release is a
+//   barrier: after it returns no answer can touch the slot, and a snapshot
+//   still unanswered has been flushed at its server. The core releases every
+//   snapshot BEFORE it drops the object refs it holds for the pass, so a close
+//   that follows never overtakes a read still outstanding on the same fid.
 
 #ifndef THYLACINE_POLL_H
 #define THYLACINE_POLL_H
@@ -293,6 +326,39 @@ void poll_waiter_list_wake(struct poll_waiter_list *l);
 bool poll_waiter_list_empty(struct poll_waiter_list *l);
 
 // =============================================================================
+// Remote readiness: the per-fd snapshot slot (see REMOTE READINESS above).
+// =============================================================================
+
+// A remote snapshot is resent this often while a shortage keeps it off the
+// wire, and taken back as not ready this long after the scan that sent it
+// (the operator's fixed 1 s, never cut by the call's timeout). An arm a
+// shortage could not send bounds its park by the retry interval.
+#define POLL_SNAP_RESEND_NS   (1000ull * 1000ull)                 // 1 ms
+#define POLL_SNAP_BOUND_NS    (1000ull * 1000ull * 1000ull)       // 1 s
+#define POLL_ARM_RETRY_NS     (10ull * 1000ull * 1000ull)         // 10 ms
+
+// The slot's state. Written by the core (NONE, EXPIRED), by the Dev's
+// .poll_snapshot (SENT, UNSENT, or ANSWERED for a local answer) and by the
+// Dev's completion (ANSWERED, after `revents`, RELEASE). Read with ACQUIRE.
+enum poll_snap_state {
+    POLL_SNAP_NONE     = 0,   // no snapshot this pass
+    POLL_SNAP_UNSENT   = 1,   // a shortage kept it off the wire: the settle resends
+    POLL_SNAP_SENT     = 2,   // on the wire, unanswered
+    POLL_SNAP_ANSWERED = 3,   // `revents` holds the answer
+    POLL_SNAP_EXPIRED  = 4,   // the fail-safe took it back unanswered: not ready
+};
+
+// One fd's snapshot for one pass. The core owns the slot (stack, per call) and
+// hands it to the Dev; `op` is the Dev's request, NULL once released.
+struct poll_snap {
+    struct Rendez *rendez;    // the poller's private Rendez: an answer wakes it
+    void          *op;        // the Dev's in-flight request; NULL = none
+    u16            revents;   // the answer, valid once state is ANSWERED
+    u8             state;     // enum poll_snap_state (atomic)
+    bool           remote;    // the Dev sent a snapshot: release it, arm the fd
+};
+
+// =============================================================================
 // The SYS_POLL testable core. The user-VA wrapper sys_poll_handler
 // lives in kernel/syscall.c.
 // =============================================================================
@@ -331,6 +397,17 @@ bool poll_waiter_list_empty(struct poll_waiter_list *l);
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms);
 
+// The same poll, with entries the caller has already resolved: where pre[i] is
+// non-NULL the pass polls that Spoor and never looks kfds[i].fd up in `p`'s
+// handle table, so an object held outside the table (the vivarium's socket
+// readiness cache, NP-5) is polled without minting an fd for it; kfds[i].fd
+// still names the entry for the caller. The call takes its own reference per
+// pass, as a table lookup would; the caller keeps pre[i] alive across it.
+// pre == NULL is sys_poll_for_proc.
+struct Spoor;
+s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
+                             s32 timeout_ms, struct Spoor *const *pre);
+
 // Park the caller for `timeout_ms` (negative ⇒ indefinitely), then return 0.
 //
 // This is poll's slow path with the fd array removed: a private Rendez nothing
@@ -365,6 +442,23 @@ u64 poll_total_calls(void);
 // the fast path (any fd ready at first scan) from the slow path.
 u64 poll_total_slept(void);
 u64 poll_total_resleeps(void);
+
+// Remote readiness. FAIL-SAFES: snapshots a server left unanswered for the
+// whole bound -- zero on a healthy system; each one prints a `poll: FAILSAFE`
+// line the boot gates fail on. ARM RETRIES: parks an arm could not cover,
+// bounded by the retry timer instead.
+u64 poll_total_snap_failsafes(void);
+u64 poll_total_arm_retries(void);
+
+// Test hook: run the snapshot fail-safe after `bound_ns` instead of
+// POLL_SNAP_BOUND_NS, counted but NOT printed (a test that makes it fire must
+// not fail the gate that greps for it). 0 restores the real bound.
+void poll_test_set_snap_bound_ns(u64 bound_ns);
+
+// The test runner's release, after every test: restores the real bound and says
+// whether a test left its own set -- a quiet bound left behind would hide every
+// later fail-safe from the gates.
+bool poll_test_snap_bound_release(void);
 
 
 #endif // THYLACINE_POLL_H

@@ -39,38 +39,63 @@
 (*    clunk delivery becomes a SAFETY consequence of the user's own close,  *)
 (*    not a liveness assumption on the kthread.                             *)
 (*                                                                         *)
+(* A DYING CLOSER (2026-09-28, FID-LIFECYCLE section 9). A thread whose     *)
+(* Proc is dying cannot send, so its close hands the Tclunk to the closer   *)
+(* threads (DyingClose), which send it later (CloserSend). CloserSend is    *)
+(* weakly fair: a closer runs. That is the one liveness assumption the      *)
+(* closer adds; the poll kthread still needs none. NO_CLOSER is the design  *)
+(* before it: the dying close's Tclunk was refused and never sent.          *)
+(*                                                                         *)
 (* INVARIANTS:                                                             *)
 (*  - SlotEventuallyFreed (TEMPORAL, the leak): once the poll has ended the *)
 (*    `ready`-fd Tclunk is eventually delivered (the slot frees). Holds for *)
-(*    Fix=TRUE with NO kthread fairness (UserClose alone delivers it); the  *)
-(*    buggy cfg (Fix=FALSE, no WF on KthreadGc) is the LEAK counterexample. *)
+(*    Fix=TRUE with no fairness on the poll kthread (a live close delivers  *)
+(*    it; a dying close's closer does); the buggy cfgs (Fix=FALSE with no  *)
+(*    WF on KthreadGc; NO_CLOSER) are the LEAK counterexamples.             *)
 (*  - NoUseAfterFreePs (SAFETY): the kthread never touches the poll-state   *)
 (*    after it is freed -- the fix's ps-decoupling must not introduce a UAF.*)
 (*    The cancel/free coordination is what must prevent it.                 *)
 (*  - ClunkAtMostOnce (SAFETY): the `ready`-fd Tclunk is delivered at most  *)
 (*    once (the cancel + the close, or the two Spoor-ref drops, must not    *)
 (*    double-clunk -> a double slot_unref).                                 *)
+(*                                                                         *)
+(* THE COLLECTOR IS ONE STEP (BUGGY_SPLIT_GC, 2026-09-28). KthreadGc takes  *)
+(* a stranded op off the registry AND flushes its Tread in one step with    *)
+(* respect to the close: both happen under g_dev9p_poll_lock, which the     *)
+(* close's cancel takes too. Split them -- unlink under the lock, flush     *)
+(* after it, the code from #294 to NP-4c -- and a close between the two     *)
+(* finds no op to cancel, while the op's Tread still targets the fid, so    *)
+(* the Tclunk is refused (9p_session any_outstanding_on_fid) and nothing    *)
+(* clunks the fid afterwards: the slot leaks although the kthread flushes.  *)
 (***************************************************************************)
 EXTENDS Naturals
 
 CONSTANT Fix    \* BOOLEAN -- TRUE: cancel-at-close; FALSE: the current deferred-pin design.
+CONSTANT BUGGY_SPLIT_GC   \* BOOLEAN -- the collector unlinks and flushes in two steps.
+CONSTANT NO_CLOSER        \* BOOLEAN -- a dying close's Tclunk is refused, not handed on.
 
 ASSUME Fix \in BOOLEAN
+ASSUME BUGGY_SPLIT_GC \in BOOLEAN
+ASSUME NO_CLOSER \in BOOLEAN
+ASSUME BUGGY_SPLIT_GC => Fix    \* a flaw of the cancel-at-close design's collector
 
 VARIABLES
     poll,     \* {"parked","ended"} -- the poller; "ended" = it timed out + returned.
     fdref,    \* BOOLEAN -- the user still holds the `ready`-fd handle ref.
     oppin,    \* BOOLEAN -- the op pins the `ready` Spoor (TRUE only in the ~Fix design).
-    op,       \* {"live","stranded","torndown"} -- the readiness op.
+    op,       \* {"live","stranded","unlinked","torndown"} -- the readiness op.
               \*   live      = outstanding, the poll is parked (a Tread is in flight).
               \*   stranded  = the poll ended; the op awaits teardown (GC or cancel-at-close).
+              \*   unlinked  = BUGGY_SPLIT_GC only: off the registry, ps->op cleared, its
+              \*               Tread still in flight (not yet flushed).
               \*   torndown  = the op was cancelled/unregistered + freed.
     privps,   \* BOOLEAN -- the priv (dev9p_priv) holds the poll-state ref.
     opps,     \* BOOLEAN -- the op holds a poll-state ref (TRUE only in the Fix design).
     clunks,   \* Nat -- count of `ready`-fd Tclunks delivered to netd (the slot frees on the 1st).
-    uaf       \* BOOLEAN -- the kthread touched the poll-state after it was freed.
+    uaf,      \* BOOLEAN -- the kthread touched the poll-state after it was freed.
+    deferred  \* BOOLEAN -- a dying close handed the Tclunk to the closer threads; unsent.
 
-vars == <<poll, fdref, oppin, op, privps, opps, clunks, uaf>>
+vars == <<poll, fdref, oppin, op, privps, opps, clunks, uaf, deferred>>
 
 (* The `ready` Spoor's live refcount: the fd-handle, plus the op-pin in the  *)
 (* ~Fix design. The Spoor's close hook (-> the Tclunk) fires when a ref drop *)
@@ -90,11 +115,12 @@ TypeOk ==
     /\ poll   \in {"parked","ended"}
     /\ fdref  \in BOOLEAN
     /\ oppin  \in BOOLEAN
-    /\ op     \in {"live","stranded","torndown"}
+    /\ op     \in {"live","stranded","unlinked","torndown"}
     /\ privps \in BOOLEAN
     /\ opps   \in BOOLEAN
     /\ clunks \in Nat
     /\ uaf    \in BOOLEAN
+    /\ deferred \in BOOLEAN
 
 (***************************************************************************)
 (* Initial: the poll is parked on a live readiness op; the user holds the   *)
@@ -110,6 +136,7 @@ Init ==
     /\ opps   = Fix               \* Fix: the op holds its own ps ref; ~Fix: no.
     /\ clunks = 0
     /\ uaf    = FALSE
+    /\ deferred = FALSE
 
 (***************************************************************************)
 (* PollTimeout -- the poll times out + returns (sys_poll unregisters the    *)
@@ -120,18 +147,18 @@ PollTimeout ==
     /\ poll' = "ended"
     /\ op = "live"
     /\ op' = "stranded"
-    /\ UNCHANGED <<fdref, oppin, privps, opps, clunks, uaf>>
+    /\ UNCHANGED <<fdref, oppin, privps, opps, clunks, uaf, deferred>>
 
 (***************************************************************************)
-(* KthreadTouchPs -- the dev9p.poll kthread derefs op->ps (a pump cycle or  *)
-(* the completion path reads ps->cached_revents). Legal only while the op   *)
-(* is still live/stranded (not torn down). Records a UAF if ps is freed --  *)
-(* the safety probe for the fix's ps-decoupling.                            *)
+(* KthreadTouchPs -- the dev9p.poll kthread derefs op->ps (the reap's walk *)
+(* of ps->poll_list, or the collector's empty-check). Legal only while the *)
+(* op is still live/stranded (not torn down). Records a UAF if ps is freed *)
+(* -- the safety probe for the fix's ps-decoupling.                        *)
 (***************************************************************************)
 KthreadTouchPs ==
-    /\ op \in {"live","stranded"}
+    /\ op \in {"live","stranded","unlinked"}
     /\ uaf' = (uaf \/ PsFreed)
-    /\ UNCHANGED <<poll, fdref, oppin, op, privps, opps, clunks>>
+    /\ UNCHANGED <<poll, fdref, oppin, op, privps, opps, clunks, deferred>>
 
 (***************************************************************************)
 (* KthreadGc -- the kthread collects a STRANDED op and tears it down        *)
@@ -147,6 +174,7 @@ KthreadTouchPs ==
 (* frees the slot with NO kthread fairness at all.)                         *)
 (***************************************************************************)
 KthreadGc ==
+    /\ ~BUGGY_SPLIT_GC
     /\ op = "stranded"
     /\ op' = "torndown"
     /\ clunks' = clunks + (IF oppin /\ ~fdref THEN 1 ELSE 0)   \* last Spoor ref -> clunk
@@ -155,11 +183,29 @@ KthreadGc ==
     \* ~Fix: the priv's ps is freed by dev9p_close iff this drop frees the Spoor;
     \* but op is already "torndown" here, so KthreadTouchPs can no longer fire ->
     \* modeling privps as held (never freed) in ~Fix is sound for NoUseAfterFreePs.
-    /\ UNCHANGED <<poll, fdref, privps, uaf>>
+    /\ UNCHANGED <<poll, fdref, privps, uaf, deferred>>
 
 (***************************************************************************)
-(* UserClose -- the user closes the `ready` fd (the poll has ended). Drops  *)
-(* the fd-handle ref. The behaviour SPLITS on the design:                   *)
+(* BUGGY_SPLIT_GC -- the collector in two steps. KthreadGcUnlink takes the  *)
+(* stranded op off the registry and clears ps->op under the lock;           *)
+(* KthreadGcFlush Tflushes and frees it after the unlock.                   *)
+(***************************************************************************)
+KthreadGcUnlink ==
+    /\ BUGGY_SPLIT_GC
+    /\ op = "stranded"
+    /\ op' = "unlinked"
+    /\ UNCHANGED <<poll, fdref, oppin, privps, opps, clunks, uaf, deferred>>
+
+KthreadGcFlush ==
+    /\ op = "unlinked"
+    /\ op'   = "torndown"
+    /\ opps' = FALSE
+    /\ UNCHANGED <<poll, fdref, oppin, privps, clunks, uaf, deferred>>
+
+(***************************************************************************)
+(* UserClose / DyingClose -- the user closes the `ready` fd (the poll has  *)
+(* ended), from a live thread or from a dying one. Drops the fd-handle ref. *)
+(* The behaviour SPLITS on the design:                                      *)
 (*                                                                         *)
 (*  ~Fix: the op may still pin the Spoor, so dropping the fd ref may NOT    *)
 (*    take the Spoor to 0 -> no close hook -> no clunk yet (it waits for    *)
@@ -169,36 +215,77 @@ KthreadGc ==
 (*  Fix: the op does NOT pin the Spoor, so this is the LAST Spoor ref ->    *)
 (*    dev9p_close runs HERE. It cancels a still-outstanding op (Tflush +    *)
 (*    clear inflight -> op "torndown", under c->lock; the kthread can no    *)
-(*    longer complete it), drops the priv's ps ref, and delivers the clunk  *)
-(*    DETERMINISTICALLY. ps frees iff the op already dropped its ref; else   *)
-(*    the op's ref keeps ps alive until KthreadGc/teardown drops it.        *)
+(*    longer complete it), drops the priv's ps ref, and delivers the clunk. *)
+(*    ps frees iff the op already dropped its ref; else the op's ref keeps  *)
+(*    ps alive until KthreadGc/teardown drops it.                           *)
+(*    An UNLINKED op (BUGGY_SPLIT_GC) is invisible to the cancel, and its   *)
+(*    live Tread makes the session refuse the Tclunk: no clunk, ever.       *)
+(*                                                                         *)
+(* The clunk a close delivers (Deliver): a live thread sends it; a dying   *)
+(* one cannot (client_send_flow refuses it), so it hands the Tclunk to the  *)
+(* closer threads -- dev9p_clunk_fid on -P9_E_AGAIN, p9_attached_defer_clunk *)
+(* -- or, NO_CLOSER, the Tclunk is refused and lost.                        *)
 (***************************************************************************)
-UserClose ==
+Deliver(dying) ==
+    IF ~dying      THEN /\ clunks'   = clunks + 1
+                        /\ deferred' = deferred
+    ELSE IF NO_CLOSER THEN UNCHANGED <<clunks, deferred>>
+    ELSE                /\ deferred' = TRUE
+                        /\ clunks'   = clunks
+
+Close(dying) ==
     /\ poll = "ended"
     /\ fdref
     /\ fdref' = FALSE
-    /\ IF Fix
+    /\ IF Fix /\ op = "unlinked"
+       THEN /\ privps' = FALSE                 \* ps->op is NULL: nothing to cancel,
+            /\ UNCHANGED <<oppin, op, opps, clunks, deferred>>   \* and the Tclunk is refused.
+       ELSE IF Fix
        THEN /\ op'     = "torndown"            \* cancel under c->lock: no late completion.
             /\ privps' = FALSE                 \* the priv drops its ps ref.
             /\ opps'   = FALSE                 \* the op is freed here -> its ps ref drops too.
             /\ oppin'  = oppin                 \* (always FALSE in Fix)
-            /\ clunks' = clunks + 1            \* Spoor hits 0 refs (no op-pin) -> clunk.
-       ELSE /\ clunks' = clunks + (IF ~oppin THEN 1 ELSE 0)  \* clunk iff the op-pin is already gone.
+            /\ Deliver(dying)                  \* Spoor hits 0 refs (no op-pin) -> the clunk.
+       ELSE IF ~oppin                          \* ~Fix: the op-pin is already gone ->
+       THEN /\ Deliver(dying)                  \* this is the last drop -> the clunk.
             /\ UNCHANGED <<oppin, op, privps, opps>>
+       ELSE UNCHANGED <<oppin, op, privps, opps, clunks, deferred>>
     /\ UNCHANGED <<poll, uaf>>
+
+UserClose  == Close(FALSE)
+DyingClose == Close(TRUE)
+
+(***************************************************************************)
+(* CloserSend -- a closer thread sends the Tclunk a dying close handed it.  *)
+(* The hand-off took a session reference, so the session, and the fid on   *)
+(* it, live until the closer sends (closer_serve, kernel/9p_attach.c).     *)
+(***************************************************************************)
+CloserSend ==
+    /\ deferred
+    /\ deferred' = FALSE
+    /\ clunks'   = clunks + 1
+    /\ UNCHANGED <<poll, fdref, oppin, op, privps, opps, uaf>>
 
 Next ==
     \/ PollTimeout
     \/ KthreadTouchPs
     \/ KthreadGc
+    \/ KthreadGcUnlink
+    \/ KthreadGcFlush
     \/ UserClose
+    \/ DyingClose
+    \/ CloserSend
 
 (* The poll always eventually times out, and the user always eventually      *)
-(* closes the fd -- WF on PollTimeout + UserClose. The buggy cfg withholds   *)
-(* WF on KthreadGc: that IS the leak -- the slot-free hinges on a kthread     *)
-(* step that may never come. The clean (Fix) cfg ALSO withholds it, proving  *)
-(* the fix frees the slot without ANY kthread fairness.                      *)
-Fairness == WF_vars(PollTimeout) /\ WF_vars(UserClose)
+(* closes the fd, from a live thread or a dying one -- WF on PollTimeout and *)
+(* on the close. The buggy cfg withholds WF on KthreadGc: that IS the leak   *)
+(* -- the slot-free hinges on a kthread step that may never come. The clean  *)
+(* (Fix) cfg ALSO withholds it, proving the fix frees the slot without any   *)
+(* fairness on the poll kthread. KthreadGcFlush IS fair, so the split        *)
+(* collector's leak is not a starved kthread. CloserSend is fair: a closer   *)
+(* runs (FID-LIFECYCLE section 9), so NO_CLOSER's leak is not a starved one. *)
+Fairness == WF_vars(PollTimeout) /\ WF_vars(UserClose \/ DyingClose)
+            /\ WF_vars(KthreadGcFlush) /\ WF_vars(CloserSend)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -216,10 +303,11 @@ SafetyInvariants ==
 
 (* THE leak property: once the poll has ended (the op is stranded + the user *)
 (* will close the fd), the netd slot is eventually freed -- the `ready`-fd   *)
-(* Tclunk is delivered. Fix=TRUE: holds with NO kthread fairness (UserClose  *)
-(* delivers it). Fix=FALSE: the buggy cfg (no WF on KthreadGc) violates it   *)
-(* -- a stranded op whose GC never fires leaves clunks = 0 forever, the      *)
-(* permanent slot leak.                                                      *)
+(* Tclunk is delivered. Fix=TRUE: holds with no fairness on the poll kthread *)
+(* (a live close delivers it; a dying close's closer does). Fix=FALSE: the   *)
+(* buggy cfg (no WF on KthreadGc) violates it -- a stranded op whose GC      *)
+(* never fires leaves clunks = 0 forever, the permanent slot leak. NO_CLOSER *)
+(* violates it too: a dying close's refused Tclunk is never sent.            *)
 SlotEventuallyFreed == (poll = "ended") ~> (clunks = 1)
 
 Liveness == SlotEventuallyFreed

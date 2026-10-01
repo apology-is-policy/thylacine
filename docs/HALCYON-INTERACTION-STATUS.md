@@ -5,6 +5,50 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Current pickup (October 1)
+
+The operator approved resuming qualified Main/Aux reconciliation, reviewing the
+unfinished stop/wakeup branches, then controller/focus admission and clipboard
+work. Main and Aux are reported asleep; use Astra's checkout and Yip identity.
+The prior three checkpoint monitors remain paused. No peer checkout, branch,
+process or unexpired lease has been changed.
+
+Main 8746a8a24 is staged as a merge into Astra 37bfff3c. Source overlap review
+retains the PTY lifecycle invalidations, sealed terminal hosts, PollWorker media
+service and native pointer alongside Main's new socket/readiness cleanup. Both
+Cargo member sets and both dossier histories are retained. Qualified Aux
+6df985512 is next; its per-image cap protocol and media diagnostics must be
+composed with Astra's nonblocking transport. TC-1b is now cleared and in Main;
+the September 25 statements below describe the earlier state.
+
+The full default image build passed. Four protected authority/settings drafts
+match work/oct1-reconciliation/preserved.json; builds use the index versions of
+the two kernel test files and restore original bytes in finally. Never stage
+these four drafts from the working tree. Evidence and the current pickup are in
+work/oct1-reconciliation/. The merge is not a Main landing or clipboard activation.
+
+O1-R1: the first full Mac host run passed 29 crates/2159 tests but failed one of
+manual's 72 tests: the elapsed-time scaling assertion (11.845ms at64KiB,
+116.061ms at256KiB). The unchanged manual suite passed72/72 in isolation.
+Paired wall/thread-CPU diagnostics reproduced the failure under controlled
+contention: large-input best wall103.347ms versus CPU samples70.540/42.597/
+56.352ms. Quiet samples scale4x. The assertion was charging time off-CPU to the
+renderer. The correction measures per-thread CPU on Unix, retains wall-time
+diagnostics and the existing limit; the clock witness passes and rejects a wall-clock mutant, and a quadratic
+work mutant fails the scaling assertion. Three corrected contention runs pass;
+the full corrected manual suite passes 73/73. Together with the unchanged
+29 crates from the initial gate, this gives 2232 passing host tests. The default
+merged boot gate passes 1816/1816; full SMP and graphical qualification of the
+combined Main/Aux tree is still owed. The initial failed gate
+remains evidence and is not relabelled as a pass.
+
+Open integration queue: O1-2 Main waiters-stops6459c24e2 still has its recorded
+Loom-role model gap and resume-witness/comment audit corrections; O1-3 Aux
+aux-3-stay-stopped e7d1c0b46 includes fixes labelled UNBUILT. Review both against
+each other before importing. HI1-R14 Linux host classifier and HI1-R16 host
+allocator fixture cleanup remain separate debts. I-47's same-principal media
+policy does not replace foreground ownership for clipboard requests.
+
 ## Current pickup (September 25)
 
 Main 473cd0c0 is reconciled with Astra's 1f87fc69 connection-capacity checkpoint,

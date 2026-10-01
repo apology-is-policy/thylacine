@@ -100,6 +100,7 @@ const ACTION_ROWS: &[(&str, &str)] = &[
     ("cycle", "Open the next tile"),
     ("cycle-back", "Open the previous tile"),
     ("close", "Close the focused tile"),
+    ("history", "Forget the focused tile's history"),
     ("picker", "Choose a display theme"),
     ("help", "Show this reference"),
     ("scale-up", "Enlarge the display"),
@@ -618,6 +619,7 @@ super+e split-toggle
 super+tab cycle
 super+shift+tab cycle-back
 super+shift+q close
+super+k history
 super+equal scale-up
 super+minus scale-down
 super+0 scale-reset
@@ -648,8 +650,13 @@ super+0 scale-reset
         // Shift is its own cap, in order.
         assert_eq!(row(&h, "Close the focused tile").unwrap().caps, alloc::vec!["SUPER", "SHIFT", "Q"]);
         assert_eq!(row(&h, "Choose a display theme").unwrap().caps, alloc::vec!["SUPER", "T"]);
+        // TC-1b: the history chord reads like any other binding.
+        assert_eq!(
+            row(&h, "Forget the focused tile's history").unwrap().caps,
+            alloc::vec!["SUPER", "K"]
+        );
         // Two groups + every other default binding, one row each.
-        assert_eq!(h.rows.len(), 2 + 14);
+        assert_eq!(h.rows.len(), 2 + 15);
     }
 
     #[test]

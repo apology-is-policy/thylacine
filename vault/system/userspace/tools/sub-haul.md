@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-24
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -89,6 +89,28 @@ is [[sub-kernel-ninep-attach]]'s. The mark grants nothing new. The token
 already gives the mounter everything the server serves, and the kernel admits
 the mark only on a byte-mode post, whose attacher holds the raw connection.
 
+**Both paths declare the session remote** (LR-1, HAUL-DESIGN 4.8, the
+operator's `la` vote). Haul holds the TCP connection, so Haul is the program
+that knows the session leaves the machine: `run` adds `T_ATTACH_9P_REMOTE`
+beside the cape, and `post_listener` adds `T_WALK_CREATE_DMSRVREMOTE` to the
+post. The declaration rides the session, not the mount call, so the shell's
+plain `mount /srv/NAME` over a posted service is marked too, though the
+shell never learns what is behind the service. `ls -l` and `stat` then show
+`remote` at the mount point, `realm` prints `remote`, and `ns` ends the line
+in `remote`. The declaration is a label: it grants nothing, and the kernel
+reads it only to render `/proc/<pid>/ns`. That line names the session by the
+file it came over (operator vote 2026-09-28): the shell's mount of a posted
+service reads `mount /tmp/NAME /srv/NAME remote`, and `run`'s private form,
+whose session rides pipes, `mount PATH #| remote`. `haul-npxf` (the
+child's `ls -l` and `ns`, with the shell's unmounted view of the same
+directory as the control) and `haul-post` (the shell's mount of the posted
+service beside an unmounted sibling) hold it on the device. With the
+declaration stripped from both paths, each gate passed every earlier leg and
+failed at its first LR-1 leg (2026-09-28). Their `ns` legs assert the file's
+name too; with the kernel's two stamps removed (and the two kernel tests that
+catch that unregistered, so the boot reaches a login), each gate passed every
+earlier leg and failed there, its line reading `/` (2026-09-29).
+
 ## Data structures
 
 `UpCtx` owns the outgoing sealer, `DownCtx` the incoming opener. `Ready` marks
@@ -126,7 +148,10 @@ Bad arguments, inaccessible tokens, denied posts, handshake failures, thread
 creation failures, and relay completion all exit the process and release its
 service/connection resources. Post creation failure never dials. An unexpected
 remote close fails a blocked attach via transport teardown. Mount/unmount
-builtins expose failures through `$status` and `$errstr`. A failed dial exits 1
+builtins expose failures through `$status` and `$errstr`. A private mount at a
+point that is not a directory fails with `haul: mount PATH: not a directory`,
+the kernel's `ENOTDIR` for Plan 9's `Emount`; the kernel names no other cause,
+so any other refusal says only `haul: mount`. A failed dial exits 1
 before anything is mounted or pumped. It says `connection refused` for a RST,
 and `no answer (timed out)` at netd's deadline, preceded by the 2 s progress
 line. The texts are the operator's (manual 14).

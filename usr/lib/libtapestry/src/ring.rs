@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use crate::{
     Event, PopFirst, TapError, EV_CAP, EV_REGION, MAX_RING_SURFACES, SLOT_QUEUE_CAP, TEVENT_LEN,
-    UD_EVENT,
+    TEV_LAYOUT, UD_EVENT,
 };
 
 pub(crate) struct Slot {
@@ -115,42 +115,54 @@ pub(crate) fn any_armed(slots: &[Slot]) -> bool {
 
 /// Route one completion: `user_data` names the slot + generation it was
 /// armed for; `result` is the read's byte count, 0 at EOF, negative on an
-/// error; the bytes are in the slot's region of `staging`.
-pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: i32) {
+/// error; the bytes are in the slot's region of `staging`. True when the
+/// completion carried a TEV_LAYOUT -- also on a slot whose surface already
+/// left, whose events are dropped: the compositor fans a session's
+/// structural notice to ONE of its surfaces, whichever it picks, so the
+/// ring is where the session learns of it, not the surface.
+pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: i32) -> bool {
     if user_data & 0xff != UD_EVENT {
-        return;
+        return false;
     }
     let i = (user_data >> 40) as usize;
     let gen = ((user_data >> 8) & 0xffff_ffff) as u32;
     if i >= slots.len() {
-        return;
+        return false;
     }
     let s = &mut slots[i];
     if !s.used || s.gen != gen {
-        return; // a completion for a slot that has moved on
+        return false; // a completion for a slot that has moved on
     }
     s.armed = false;
+    let region = (i as u64 * EV_REGION) as usize;
+    let n = if result > 0 {
+        (result as usize).min(EV_CAP)
+    } else {
+        0
+    };
+    let end = region + n;
+    let d = staging;
+    let g16 = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
+    let layout = end <= d.len()
+        && (region..end)
+            .step_by(TEVENT_LEN)
+            .any(|o| o + TEVENT_LEN <= end && g16(o) == TEV_LAYOUT);
     if s.retiring {
         // The dropped surface's last read completed (the EOF after its
         // `destroy`, or an error): the slot may be re-minted now.
         s.used = false;
         s.retiring = false;
-        return;
+        return layout;
     }
     if result <= 0 {
         s.closed = true;
-        return;
+        return false;
     }
-    let region = (i as u64 * EV_REGION) as usize;
-    let n = (result as usize).min(EV_CAP);
-    let end = region + n;
-    if end > staging.len() {
-        return;
+    if end > d.len() {
+        return false;
     }
-    let d = staging;
     let mut off = region;
     while off + TEVENT_LEN <= end {
-        let g16 = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
         let g32 = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
         let g64 = |o: usize| {
             let mut b = [0u8; 8];
@@ -168,6 +180,7 @@ pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: 
         });
         off += TEVENT_LEN;
     }
+    layout
 }
 
 /// The next queued event for `slot`; `Err(Closed)` once its stream has
@@ -295,6 +308,57 @@ mod tests {
         assert!(!s[i].used && !s[i].retiring && !s[i].armed);
         assert!(s[i].pending.is_empty());
         assert!(matches!(join(&mut s, 13), Ok(0))); // now it is
+    }
+
+    /// Stage one record per kind at `slot`'s region; the byte count.
+    fn stage_kinds(staging: &mut [u8], slot: usize, kinds: &[u16]) -> i32 {
+        let base = slot * EV_REGION as usize;
+        for (k, &kind) in kinds.iter().enumerate() {
+            let o = base + k * TEVENT_LEN;
+            staging[o..o + TEVENT_LEN].fill(0);
+            staging[o..o + 2].copy_from_slice(&kind.to_le_bytes());
+        }
+        (kinds.len() * TEVENT_LEN) as i32
+    }
+
+    /// The compositor fans a session's TEV_LAYOUT to one of its surfaces --
+    /// its lowest slot, a chrome as often as a tile -- so `route` reports one
+    /// wherever it lands in a batch, and also in the last read of a surface
+    /// its owner already dropped (whose events go nowhere).
+    ///
+    /// SABOTAGE: return false from the retiring arm, or scan only a batch's
+    /// first record, and an assertion below fails.
+    #[test]
+    fn a_layout_notice_is_reported_wherever_it_rides() {
+        let mut s = new_slots();
+        let mut st = buf();
+        let i = join(&mut s, 10).unwrap() as usize;
+        arm(&mut s, i);
+        let n = stage_kinds(&mut st, i, &[1, TEV_LAYOUT, 3]);
+        let t = ud(i, s[i].gen);
+        assert!(route(&mut s, &st, t, n), "second of three");
+        assert_eq!(s[i].pending.len(), 3, "the batch is queued as before");
+        arm(&mut s, i);
+        let n = stage_kinds(&mut st, i, &[1, 3]);
+        let t = ud(i, s[i].gen);
+        assert!(!route(&mut s, &st, t, n), "no notice, no report");
+        // Dropped with a read in flight: the read's events go nowhere, but
+        // the notice among them is still the session's.
+        arm(&mut s, i);
+        assert!(leave(&mut s, i as u16));
+        let n = stage_kinds(&mut st, i, &[TEV_LAYOUT]);
+        let t = ud(i, s[i].gen);
+        assert!(route(&mut s, &st, t, n), "a dropped surface's last read");
+        assert!(!s[i].used && s[i].pending.is_empty());
+        // Neither an EOF nor a stale generation carries one.
+        let j = join(&mut s, 11).unwrap() as usize;
+        arm(&mut s, j);
+        let t = ud(j, s[j].gen);
+        assert!(!route(&mut s, &st, t, 0), "EOF");
+        let k = join(&mut s, 12).unwrap() as usize;
+        let n = stage_kinds(&mut st, k, &[TEV_LAYOUT]);
+        let stale = ud(k, s[k].gen.wrapping_sub(1));
+        assert!(!route(&mut s, &st, stale, n), "a stale generation");
     }
 
     #[test]

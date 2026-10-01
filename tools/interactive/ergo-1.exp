@@ -67,6 +67,18 @@ lc_send "cd ../.."
 lc_run_expect "la" "srv"
 lc_pass "ergo-1(e): `cd ../..` walks up as a real user (#84 X-search gate)"
 
+# LR-1 (COREUTILS-THYLACINE-DESIGN REALM): a mount point that is not remote
+# reads MOUNT -- /srv is joey's MREPL of the service registry -- and a file
+# beside it reads FS, in `la` and in `realm`. The haul gates hold the remote
+# half. Uppercased, so the typed line's echo cannot satisfy a token.
+lc_send "la / | tr a-z A-Z"
+lc_expect_re {MOUNT +[^ ]+ +SRV} "la: /srv reads mount"
+lc_expect_re {FS +[^ ]+ +THYLACINE-VERSION} "la: a file at / reads fs"
+lc_send "realm /srv /thylacine-version | tr a-z A-Z"
+lc_expect_re {MOUNT +/SRV} "realm: /srv is a mount point"
+lc_expect_re {FS +/THYLACINE-VERSION} "realm: the version file is fs"
+lc_pass "ergo-1(f): LR-1 -- la and realm read a local mount point as mount and a file as fs"
+
 lc_quit
 lc_pass "LS-CI ergo-1: ut Phase-1 ergonomics (home + aliases) verified"
 exit 0

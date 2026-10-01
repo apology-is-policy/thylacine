@@ -136,13 +136,19 @@ struct p9_outstanding {
     u32  fid;        // primary target fid; equals root_fid for version/attach
     u32  new_fid;    // walk's destination; equals fid otherwise
     u32  op_id;      // monotonic spec-side identifier (for diagnostics)
-    // Tflush bookkeeping (#845). `awaiting_flush` marks an abandoned op
-    // whose owner is gone and for which a Tflush is in flight: the tag stays
-    // active (reserved) but is freed ONLY by the flush's Rflush, never by a
-    // late original reply -- 9P forbids reusing oldtag until Rflush, so this
-    // is the I-10 reuse-race guard. `flush_oldtag` is meaningful only on a
-    // TFLUSH entry: the original tag this flush abandons.
+    // Tflush bookkeeping (#845). `awaiting_flush` marks an op for which a
+    // Tflush is in flight -- its owner gone (#845) or, with owner_waits, still
+    // waiting for the first answer (flush(5)): the tag stays active (reserved)
+    // but is freed ONLY by the flush's Rflush, never by a late original reply
+    // -- 9P forbids reusing oldtag until Rflush, so this is the I-10
+    // reuse-race guard. `flush_oldtag` is meaningful only on a TFLUSH entry:
+    // the original tag this flush cancels.
     bool awaiting_flush;
+    // flush(5): the flushed op's owner still waits, so a reply that beats the
+    // Rflush is honoured in full and the op may yet act on its fid: it counts
+    // LIVE in any_outstanding_on_fid until that reply is applied, the Rflush
+    // lands, or the owner dies. Meaningful only with awaiting_flush.
+    bool owner_waits;
     // #53-audit F1: a rolled-back or flush-less abandon (the flush-EAGAIN
     // path via flush_rollback; the flush-BUILD-failure path via
     // mark_abandoned). The owner is gone but NO Tflush is in flight, so --
@@ -157,6 +163,12 @@ struct p9_outstanding {
     // op (the Rattach arm also binds, but an abandoned attach exists only on
     // a private pre-publish client with no survivor to dispatch it).
     bool abandoned;
+    // FID-LIFECYCLE section 9: this op holds a fid-table slot -- a Tclunk
+    // the slot of the fid its build unbound (until its reply or a take-back),
+    // a walk naming a new fid the slot that fid will bind. Counted in
+    // p9_session.n_reserved_slots; released by clear_outstanding, or turned
+    // into a binding by slot_bind.
+    bool holds_slot;
     u16  flush_oldtag;
     // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
     // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).
@@ -186,6 +198,10 @@ struct p9_session {
     // doesn't matter.
     u32                   bound_fids[P9_SESSION_MAX_FIDS];
     size_t                n_bound_fids;
+    // Slots held by outstanding ops (p9_outstanding.holds_slot). A new
+    // reservation needs n_bound_fids + n_reserved_slots below
+    // P9_SESSION_MAX_FIDS, so a take-back or a walk's bind always finds room.
+    size_t                n_reserved_slots;
 
     // Outstanding table — indexed by tag (0..MAX-1). Each entry is
     // active iff a Tmsg was sent under that tag and the corresponding
@@ -247,6 +263,8 @@ int p9_session_send_attach(struct p9_session *s,
 //   - new_fid is NOT the root fid.
 //   - No other in-flight op targets new_fid.
 //   - nwname <= P9_MAX_WALK.
+//   - bound + reserved fid slots are below P9_SESSION_MAX_FIDS; the walk
+//     reserves the slot new_fid will bind, so its Rwalk always finds room.
 // `names` is an array of pointers (nwname elements); `name_lens` is
 // the matching length array. nwname == 0 is a fid clone.
 int p9_session_send_walk(struct p9_session *s,
@@ -273,7 +291,9 @@ int p9_session_send_walkgetattr(struct p9_session *s,
 //   - fid is bound.
 //   - fid is NOT the root fid (root released only at session close).
 //   - No other in-flight op targets fid.
-// Send-time unbinds fid (the spec's canonical client-discipline shape).
+// Send-time unbinds fid (the spec's canonical client-discipline shape),
+// and keeps its slot reserved until the Rclunk, so a take-back of a
+// never-sent Tclunk can always re-bind it.
 int p9_session_send_clunk(struct p9_session *s,
                           u8 *out, size_t cap,
                           u32 fid);
@@ -296,11 +316,35 @@ int p9_session_send_flush(struct p9_session *s,
 // reuse). No-op on an inactive or awaiting_flush tag (fail-soft).
 void p9_session_abort_unsent(struct p9_session *s, u16 tag);
 
+// Take back an op whose frame never reached the wire, so that it can be
+// resubmitted or handed to the closer: free the tag as abort_unsent does,
+// AND re-bind the fid a Tclunk unbound at build, since the server still
+// holds it. The session is then exactly as it was before the build. The
+// Tclunk's reserved slot makes the re-bind total, even after the caller
+// dropped the lock to park (FID-LIFECYCLE section 9). Returns 0 when the
+// op was taken back, -1 on a guard (inactive, flushed or abandoned tag) or
+// a failed re-bind; the tag is freed on a failed re-bind, never left active.
+int p9_session_retract_unsent(struct p9_session *s, u16 tag);
+
 // #53: undo send_flush after its frame hit c2s back-pressure (EAGAIN): free
 // the never-sent flush tag + clear the victim's awaiting_flush, restoring
 // the pre-#845 ownerless reclaim. No-op unless the (victim, flush-slot)
 // pair matches what send_flush staged (fail-soft).
 void p9_session_flush_rollback(struct p9_session *s, u16 oldtag);
+
+// flush(5), for an owner that still waits: undo send_flush when its frame
+// never reached the wire. Frees the flush tag and clears the victim's
+// awaiting_flush, leaving the victim an ordinary in-flight op whose reply
+// completes it. Unlike flush_rollback it does not mark the victim abandoned,
+// because its owner is still there. Fail-soft like flush_rollback.
+void p9_session_flush_retract(struct p9_session *s, u16 oldtag);
+
+// flush(5): record whether the owner of the flushed op under `oldtag` still
+// waits for its answer (see owner_waits). The client sets it when it stages a
+// living owner's Tflush and clears it when that owner dies in the flush wait,
+// handing the op's fid to the closer. Fail-soft: only an active op with a
+// flush in flight is marked.
+void p9_session_flush_owner_waits(struct p9_session *s, u16 oldtag, bool waits);
 
 // #52/#53 R2-F1: mark an owner-gone op abandoned when NO flush could even be
 // staged (pool-full / build failure) -- the flush-less sibling of
@@ -507,6 +551,10 @@ struct p9_dispatch_result {
     u32  op_id;      // monotonic op-id (for diagnostics)
     bool is_error;   // TRUE iff Rmsg was Rlerror
     u32  ecode;      // valid iff is_error; Linux errno
+    // The new fid this dispatch bound (a walk's), or P9_NOFID. An ownerless
+    // dispatch -- a flushed or abandoned walk's late reply -- hands it to the
+    // closer: the server holds it and nobody else will clunk it.
+    u32            bound_new_fid;
     // For walk, the parsed qids (capacity P9_MAX_WALK).
     u16            nwqid;
     struct p9_qid  qids[P9_MAX_WALK];
@@ -566,6 +614,18 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
                              const u8 *rmsg, size_t len,
                              struct p9_dispatch_result *out);
 
+// flush(5): "If a response to the flushed request is received before the
+// Rflush, the client must honor the response as if it had not been flushed."
+// Dispatch a reply on an awaiting_flush tag whose owner still waits: the
+// state mutation is applied and *out filled exactly as dispatch_rmsg does,
+// but the tag stays reserved until the flush's Rflush frees it (the I-10
+// guard). A duplicate reply after this is absorbed as an ownerless late
+// reply and binds nothing. Returns 0, or -1 on malformed / unmatched /
+// wrong-type replies and when the tag is not awaiting a flush.
+int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
+                                     const u8 *rmsg, size_t len,
+                                     struct p9_dispatch_result *out);
+
 // =============================================================================
 // Query helpers (read-only; used by tests + audit + caller bookkeeping).
 // =============================================================================
@@ -575,5 +635,6 @@ bool   p9_session_fid_bound(const struct p9_session *s, u32 fid);
 size_t p9_session_inflight(const struct p9_session *s);  // outstanding count
 bool   p9_session_has_free_tag(const struct p9_session *s);  // a tag slot is free
 size_t p9_session_n_bound_fids(const struct p9_session *s);
+size_t p9_session_n_reserved_slots(const struct p9_session *s);
 
 #endif  // THYLACINE_9P_SESSION_H

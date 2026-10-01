@@ -34,8 +34,9 @@ verb, and every hand-run remote gate, stands on -- and only lists the rest.
   warp `.exp` set). A scenario edited but not committed runs at HEAD's version.
 - The pool and the ramfs are a cryptographic PAIR: the ramfs bakes
   `bin/system.key`, the pool is sealed under it. A mismatch is `stratumd: run
-  failed (rc=-201)` (STM_EBADTAG) and then `EXTINCTION: joey: /joey exited
-  non-zero` -- the designed refusal, reading exactly like a guest defect.
+  failed (rc=-201)` (STM_EBADTAG) and then `EXTINCTION: joey: bin/joey exited
+  non-zero` (`/joey` before 2026-09-25) -- the designed refusal, reading exactly
+  like a guest defect.
 - Every verb is fail-closed: no positive evidence line, non-zero exit.
 
 ## Mechanism

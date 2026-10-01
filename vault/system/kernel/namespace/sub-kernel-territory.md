@@ -3,7 +3,7 @@ id: sub-kernel-territory
 type: sub
 title: "Territory — the per-Proc namespace (mount table, root, cwd)"
 parent: moc-kernel-namespace
-code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_pivot_root.c", "usr/symlink-probe/src/main.rs"]
+code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
 audit: hard
 guarded-by: [inv-i1, inv-i3, inv-i33]
 validated-by: [spec-territory, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -214,7 +214,42 @@ any overflow to discard a partial line, and emit `binds: N` only when
 the list rendered in full (a `binds:` line after a truncation would
 falsely imply completeness). The source label is its Spoor's `->path`,
 or `#<dc>` — the Plan 9 device spec — when the source is a device root
-with no namespace name.
+with no namespace name. A 9P session's root is the exception (operator vote
+2026-09-28, Plan 9's form): its label is the file its session came over, the
+origin its attach handler stamped on the root's priv, asked through
+`dev9p_spoor_origin` -- that file's name (`/srv/home-<user>`) or, for a file
+with none, its device spec (`#|`, a pipe) ([[sub-kernel-ninep-dev9p]]). Never
+on the covered entry, whose line names its own directory even when that
+source is a stamped root. The root itself stays named "/", so a bind of it,
+which crosses with a fresh walk, reads the name it was reached by. On the CI
+image a login shell's list reads `mount /home/michael /srv/home-michael`, and
+a Haul mount `mount /tmp/haul-post /srv/haul-e2e remote` (the shell's mount of
+the posted service) or `mount /tmp/host2 #| remote` (Haul's private form).
+
+A line ends in its suffixes, each a word after a space, in a fixed order:
+` noexec`, ` pheno-linux`, ` covered`, then ` remote` (LR-1, HAUL-DESIGN
+4.8). ` remote` marks a member whose source belongs to a 9P session
+declared remote at its attach or its /srv post, asked of the source through
+`dev9p_spoor_remote`. It is never written on the covered entry: nobody
+mounted that entry, and its line already names the directory, even when the
+directory itself lies in a remote session (main's rule, and the test
+asserts the premise so the missing suffix is the rule's doing). Each suffix
+is inside the line's rewind, so a cap that falls inside ` remote` or just
+before the newline leaves no partial line, and `binds:` stays the proof of a
+whole list. Readers therefore treat a list without `binds:` as cut: the
+coreutils listing tools say `mount list incomplete` rather than show a
+mount point by its plain realm. This is the kernel's only use of the
+declaration. `dev9p.remote_format_ns` renders real Territories over
+unstamped roots: an unmarked
+session's `mount /m /`, a marked one's `mount /m / remote`, caps of 13, 17
+and 18 bytes, an MREPL of a local tree over the remote one, and a union at a
+remote directory whose covered line carries no suffix. The LR-1 sabotage
+boots turned it red when the covered guard was dropped and when the suffix
+write's result was ignored. `dev9p.origin_format_ns` renders the origin the
+same way: an unstamped root's `/`, a stamped root's `mount /m /srv/home-joey`
+(then with ` remote` after the name), caps inside the name and before the
+newline, a walked clone reading its own name, a covered entry on a stamped
+root keeping its own, and a nameless transport's device spec.
 
 ## Data structures
 
@@ -697,9 +732,29 @@ directory as a member.
   `MREPL` group with `MBEFORE` finds the point hosting a member, so it grows
   no covered one (`territory.tla` `BUGGY_FRESH_AFTER_REMOVE`). `MREPL` wins
   over the ordering flags and replaces the whole group, covered entry
-  included; a flagless mount adds none. A file point stays a plain mount
-  (`NoCoveredFile`); Plan 9 refuses it (`Emount`), and whether `SYS_MOUNT`
-  should is owed to the operator.
+  included; a flagless mount adds none. No union starts at a file point
+  (`NoCoveredFile`), and since the 2026-09-25 votes
+  ([[dec-2026-09-25-mrepl-only-at-a-file]]) `SYS_MOUNT` installs only a
+  replacement at a point that is not a directory:
+  `sys_mount_for_proc` refuses Plan 9's `Emount` cases with `-T_E_NOTDIR`
+  before the table op -- a source whose type (directory or not) differs from
+  the point's, under any flag, and any mount but `MREPL` at a point that is
+  not a directory. A flagless mount appends, so a second one at a file would
+  make a two-member group there, which `stalk` treats as a union directory
+  whose listing skips the files. Only `MREPL` of a file over a file stays
+  legal, so `SYS_MOUNT` never gives a file point a second member
+  (`sys_mount.refuses_a_type_mismatch`,
+  `sys_mount.refuses_all_but_mrepl_at_a_file`). The check is made once, at
+  install, on the point's own Spoor: a 9P server the caller attached can
+  answer a later walk to the same point with the other type, so a directory
+  point with several members can read as a file afterwards, and `stalk`'s
+  use-time `QTDIR` gates stay. The key must also name the point alone:
+  devsrv gives each posted service a `qid.path` of its own, since a mount at
+  `/srv/<name>` was once keyed at the registry root and at every other
+  service (`devsrv.service_keys_distinct`). The QTDIR test in
+  `starts_union` stays for kernel-internal callers, whose boot mounts (joey's
+  `/dev` and `/srv`) are all directories over directories (`territory.tla`
+  `KERNEL_MOUNTS` and `CovGuard`; `territory_mount.covered_file_point_stays_plain`).
 - **Order and slots.** Both entries append in Plan 9's order (`mount_install_at`):
   `<new, covered>` for `MBEFORE`, `<covered, new>` for `MAFTER`. Later ordered
   mounts place around the covered entry like any member. The first mount

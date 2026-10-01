@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -226,7 +226,34 @@ A note with a live handler must run at the return tail — but a peer thread
 blocked in a syscall reaches no return tail until something wakes it. So a caught
 note ARMS a per-Proc mask (`notes_arm_caught_note_locked`, the caught-note
 sub-field of `proc_flags`) and wakes every blocked peer (`proc_caught_note_wake`,
-under the process-table lock). Each woken thread re-checks a lock-free predicate,
+under the process-table lock). `notes_post` cannot run that wake itself -- the
+thread walk needs the process-table lock, which it does not take -- so it is the
+POSTER's, and every poster that holds the lock runs it: the interrupt and tty
+fans beside the terminate wake, and the posts with no terminate twin -- a
+child's exit (`proc_exit_notify_parent_locked`), a caught `tty:susp`, `tty:cont`
+(the continue fan, and the orphan rule after both of its posts). Two posts run
+outside the lock: a Proc noting itself takes the lock for its wakes after the
+post, and `pipe` needs none -- it posts to the writer's own Proc from inside
+the write, which delivers at that thread's return tail, as Linux sends SIGPIPE
+to the writing thread alone. The wake reaches every blocked peer, but one caught
+note unwinds ONE of them (`thread_caught_note_claim`, the sleep arms' last test):
+the unwinding sleeper claims the note's family in a claim sub-field of
+`proc_flags` by a CAS that re-validates the caught bit and records the family as
+its own (`Thread.note_claim`), and its peers find the family claimed and re-park
+-- as Linux interrupts one thread for a process-directed signal. The claim is the
+claimant's, and it ends at the claimant's EL0-return tail whatever that tail
+delivered: `notes_deliver_at_el0_return` runs the delivery body
+(`notes_deliver_tail`) and then `notes_release_claims`, which ANDs the thread's
+bits out and, if the family is still caught -- the tail ended short of the note
+-- runs `proc_caught_note_wake` under the process-table lock so a parked peer
+re-reads its condition and unwinds for it. A thread's own claim stays open to
+it, so a wait that claimed and then completed anyway cannot make the call's next
+wait refuse the note only it may unwind for. The drain of a family's last queued
+note clears the caught bit alone; exec clears the claim sub-field as a guard
+(exec runs alone, so nothing should hold one). A claimant that dies before its
+tail leaves its claim set, and harmlessly: the tail's die-check kills a thread
+only in a group termination, after which no thread of the Proc waits again.
+Each woken thread re-checks a lock-free predicate,
 `thread_caught_note_deliverable`: a caught note is deliverable to *this* thread
 iff it is armed AND unmasked by the thread's own `note_mask` AND in the supported
 set (`caught & ~note_mask & NOTE_MASK_SUPPORTED`). Deliverable → the wait returns
@@ -240,6 +267,39 @@ nothing to deliver, re-sleep, and be re-woken forever. The register-then-observe
 discipline is [[inv-i9]]'s, shared with the death-wake and the report latches:
 the arm stores under the lock the predicate re-reads under, so no wake is lost
 between the check and the sleep.
+
+**Only a wait its syscall marked interruptible unwinds (signal(7)'s list,
+2026-09-29).** The predicate is also false unless the waiting thread's
+`note_interruptible` is set. That flag is positive and false by default. The
+vivarium dispatcher sets it for a Linux call that Linux lets a signal
+interrupt; `syscall_dispatch` clears it on the way out; `userland_demand_page`
+clears it around a page-in and restores it after. So `socket()`, `openat()`, a
+regular file's `read()` and every page-in ride a caught note out, and the
+handler runs at the call's return tail. Before this, both 9P waits (the RPC
+wait and the elected reader's receive) unwound for any caught note, so a
+`SIGCHLD` handler failed those calls with `EINTR` and a file page-in with
+`SIGBUS`. Death is untouched: `thread_die_pending` never reads the flag, and
+no native syscall sets it, so natives stay where `proc_caught_note_eintr_ready`
+already put them ([[dec-2026-09-29-caught-signal-slow-calls]]).
+
+**The claim ends at the tail, not at the drain (VIV-EINTR round-2 F1, P1).** The
+first version cleared a claim with its family's last drain, on the argument that
+the claimant's tail delivers the note on its very next EL0 return. That holds for
+the handler arm alone. The tail handles ONE note per return, and it can end short
+of the claimed one: it discards a `SIG_DFL` default-ignore note queued in front (a
+`child_exit` under a default `SIGCHLD`, a `tty:winch`), it stops, or the frame
+will not build. The claim then outlived the unwind with nothing left to drain the
+family, and every later wait -- the claimant's own retry included -- refused the
+claimed family and parked: Ctrl-C was dead in a blocked `recv`. Two changes close
+it. The claim is released by its owner's tail, as above. And the tail now loops
+past a discarded note to the next one, as Linux's `get_signal` does, bounded by
+`NOTE_QUEUE_DEPTH` so a flood of ignored notes cannot hold the thread there. *An
+argument from "every return delivers" must say what each return handles.*
+Witnesses: `rendez.caught_note_tail_discards_and_releases` (the reviewer's chain on
+the real tail: two ignored notes and a caught one, the tail loops to the caught
+one, and the retried wait unwinds again), `rendez.caught_note_release_wakes_peer`
+(the tail held until the peer has re-parked, so only the release's wake can
+unwind it), and `notes.caught_note_claim_once`.
 
 ### A handler that escapes its frame must not deafen the Proc (bug-2)
 
@@ -351,6 +411,11 @@ file-backed regions are read-only, so a *write* never reaches the arm that
 sleeps. The stated justification and the real one differ, and the real one
 depends on a property (no writable file-backed mapping) that
 [[sub-kernel-fault]] records as a v1.x seam. See Caveats.
+
+The caught-note claim takes no lock: a CAS on `proc_flags` takes it, an atomic
+AND releases it, and only the release's wake -- run from the EL0-return tail,
+which holds nothing, and only while the family is still caught -- takes the
+process-table lock.
 
 ## Invariants enforced
 

@@ -176,7 +176,8 @@ fn apply_resize(
         // boundaries: drain them through the producer FIRST (rows only -- a
         // diff here would run against the old-geometry shadow), so the
         // history precedes the resized screen on the wire in this same emit
-        // (a quiet app would otherwise never surface them).
+        // (a quiet app would otherwise never surface them). Then the ack and
+        // the full diff: halcyond settles its own reflow's guess on them.
         prod.drain_pending(vt, recs);
         prod.resized(vt, recs);
         emit(recs, out);

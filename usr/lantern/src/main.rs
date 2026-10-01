@@ -179,6 +179,7 @@ fn read_text(path: &str, cap: usize) -> Result<String, String> {
 }
 
 /// stdout, cooking LF to CR-LF when the line discipline has stopped doing it.
+/// Each `put` is one write.
 struct Out {
     sink: io::OutSink,
     cook: bool,
@@ -200,8 +201,9 @@ impl Out {
 
     fn put(&mut self, bytes: &[u8]) {
         if self.cook {
-            let sink = &mut self.sink;
-            lantern::cook(bytes, &mut |c| sink.put(c));
+            let mut cooked = Vec::with_capacity(bytes.len() + bytes.len() / 8);
+            lantern::cook(bytes, &mut |c| cooked.extend_from_slice(c));
+            self.sink.put(&cooked);
         } else {
             self.sink.put(bytes);
         }
@@ -209,12 +211,6 @@ impl Out {
 
     fn failed(&self) -> bool {
         self.sink.failed()
-    }
-}
-
-impl beacon::sink::Out for Out {
-    fn out(&mut self, bytes: &[u8]) {
-        self.put(bytes);
     }
 }
 
@@ -267,7 +263,7 @@ fn validate(dir: &str, d: &Deck) -> usize {
 /// -- position is the renderer's, and a program reaching for it is the failure
 /// the format exists to avoid. Dim is a MEANING (de-emphasised), which is why
 /// it is available.
-fn footer(out: &mut Out, tier: Tier, d: &Deck, at: usize) {
+fn footer(out: &mut Vec<u8>, tier: Tier, d: &Deck, at: usize) {
     let mut s = Sink::new(out, tier);
     s.text("\n");
     let counter = format!("{} / {}", at + 1, d.slides.len());
@@ -278,9 +274,9 @@ fn footer(out: &mut Out, tier: Tier, d: &Deck, at: usize) {
     s.text("\n");
 }
 
-/// Write one slide: its rendered body, then the footer.
+/// Render one slide into `out`: its body, then the footer.
 fn paint(
-    out: &mut Out,
+    out: &mut Vec<u8>,
     tier: Tier,
     width: Option<usize>,
     d: &Deck,
@@ -289,22 +285,38 @@ fn paint(
     foot: bool,
 ) {
     match slide_source(dir, &d.slides[at]) {
-        Ok(src) => manual::render::render(&src, tier, width, &mut |chunk| out.put(chunk)),
+        Ok(src) => {
+            manual::render::render(&src, tier, width, &mut |chunk| out.extend_from_slice(chunk))
+        }
         Err(lines) => {
             // A slide that has become invalid while the deck is open (an edit
             // mid-rehearsal) shows its diagnostics IN PLACE rather than ending
             // the presentation. Losing the deck is a far worse failure on a
             // stage than a slide that reports what is wrong with it.
-            out.put(b"This slide cannot be shown:\n\n");
+            out.extend_from_slice(b"This slide cannot be shown:\n\n");
             for l in &lines {
-                out.put(l.as_bytes());
-                out.put(b"\n");
+                out.extend_from_slice(l.as_bytes());
+                out.push(b'\n');
             }
         }
     }
     if foot {
         footer(out, tier, d, at);
     }
+}
+
+/// Show one slide as one synchronized frame in one write (LANTERN-DESIGN 13).
+fn show(
+    out: &mut Out,
+    tier: Tier,
+    width: Option<usize>,
+    d: &Deck,
+    dir: &str,
+    at: usize,
+    foot: bool,
+) {
+    let frame = lantern::slide_frame(&mut |f| paint(f, tier, width, d, dir, at, foot));
+    out.put(&frame);
 }
 
 fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
@@ -316,8 +328,7 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
     let mut buf = [0u8; 64];
 
     out.put(lantern::HIDE_CARET);
-    out.put(lantern::CLEAR);
-    paint(&mut out, tier, width, d, dir, at, foot);
+    show(&mut out, tier, width, d, dir, at, foot);
 
     loop {
         if out.failed() {
@@ -369,8 +380,7 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
                 None => action == Action::Redraw,
             };
             if repaint {
-                out.put(lantern::CLEAR);
-                paint(&mut out, tier, width, d, dir, at, foot);
+                show(&mut out, tier, width, d, dir, at, foot);
             }
         }
     }
@@ -380,10 +390,12 @@ fn cat(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
     let width = plain_width(tier);
     let mut out = Out::to_stdout();
     for at in 0..d.slides.len() {
+        let mut slide = Vec::new();
         if at > 0 {
-            out.put(b"\n");
+            slide.push(b'\n');
         }
-        paint(&mut out, tier, width, d, dir, at, foot);
+        paint(&mut slide, tier, width, d, dir, at, foot);
+        out.put(&slide);
     }
     if out.failed() {
         eprintln!("lantern: write error");

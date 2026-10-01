@@ -713,8 +713,9 @@ already doing and proceeds — which is also why the table needs no `bound` flag
 
 **`listen` writes `announce`, and performs no swap.** The fd stays `ctl`. That is
 not an omission: `ctl` is the file `accept` re-walks from, and the reference that
-keeps the listener alive. So the ctl/data split is `FRESH|LISTENING` vs
-`CONNECTED`, not `FRESH` vs everything else.
+keeps the listener alive. So the ctl/data split is `CONNECTED` vs every other
+state — `FRESH`, `LISTENING`, and `CONNECTING` (a `connect` whose handshake a
+signal interrupted, §6.22) — not `FRESH` vs everything else.
 
 The wildcard is load-bearing. `0.0.0.0` renders as Plan 9's `announce *!port`, a
 concrete address as `announce a.b.c.d!port` — and netd treats them differently:
@@ -727,14 +728,18 @@ as the other would silently move the server to a different interface.
 connection's `ctl` and replies. So:
 
 ```
-open(/net/tcp/N/listen)  -> BLOCKS; returns a fid that is now M's ctl
-read(it)                 -> M
-open(/net/tcp/M/data)    -> the fd accept() returns
-close(the listen fid)       data holds M's reference now
+resolve(/net/tcp/N/listen)  -> BLOCKS; returns a fid that is now M's ctl
+read(it)                    -> M
+resolve(/net/tcp/M/data)    -> installed as the fd accept() returns
+clunk(the listen fid)          data holds M's reference now
 ```
 
-The fd `accept` returns is the one `sys_open_kpath_for_proc` already produced for
-`data`, so unlike `connect` there is nothing to move. The listener N is untouched
+The fd `accept` returns is the `data` Spoor itself, installed: every file on the
+way is a private Spoor that no guest fd number names (NP-5b, §5.5.5), and `data`
+is the only one installed, so unlike `connect` there is nothing to move.
+`accept4`'s flags are refused (`EINVAL`) rather than masked; musl answers with
+`accept` + `fcntl`, and `F_SETFL` carries `O_NONBLOCK` to netd (§5.5.5, NP-5c).
+The listener N is untouched
 — netd re-arms it with a fresh socket during the swap — which is what lets a
 server accept more than one connection.
 
@@ -768,31 +773,49 @@ number back before returning. Polling the socket's own fd would return "ready"
 instantly and defeat every wait — the identical bug the pouch boundary-line hit
 at net-6b-3, for the identical reason.
 
-**The `ready` fd is opened per call, not cached, and that is a deliberate
-trade.** Caching it (what pouch does) would put a handle the guest never asked
-for into the guest's *own* fd-number space — where the guest can close it,
-leaving a cached number that names whatever was allocated next, and where it
-breaks POSIX's lowest-available-fd guarantee. In pouch that hazard does not
-exist, because there the ready fd *is* a guest fd its own libc opened and
-tracks. Here the guest cannot see it, so it must not outlive the call. Since N-3 a
-`PHENO_LINUX` Proc CAN be multi-threaded, so a peer thread could in principle
-name this transient fd's number and close it mid-call — but only by guessing a
-number the guest was never told, and the handle table is internally locked, so
-that is a memory-safe guest-self-race, not a kernel hazard. (The socktab itself
-now takes a lock; §5.5.2. The stronger "wholly unobservable" guarantee held only
-while the Proc was single-threaded.)
+**The `ready` file is held as a Spoor, never as a guest fd (NP-5).** A
+socket's readiness Spoor is opened on its first poll and cached with its
+socktab row, in an array beside the rows rather than in the guest's fd-number
+space: no thread of the guest can see it, close it or be handed its number, and
+POSIX's lowest-available-fd rule holds while a poll sleeps. The poll core takes
+it pre-resolved (`sys_poll_for_proc_spoors`) while `kfds[i].fd` keeps naming the
+guest's own socket, so `pselect6`'s bit indices are untouched.
 
-**Readiness is not knowable synchronously, and the fix for that is latency, not
-a guess.** netd's probe is asynchronous: `dev9p.poll` *submits* it and answers
-from a cache the freshly-opened fd does not yet have. A strict zero-timeout scan
-would therefore report "nothing ready" for a socket that is plainly writable —
-and a caller polling with timeout 0 in a loop would never make progress at all.
-So a caller-supplied timeout of **0** gets a small budget (10 ms) when a socket
-is actually in the array. That changes the *latency*, never the *answer*: what
-comes back is netd's real verdict. A probe that misses even that budget yields
-not-ready and the caller retries — the safe direction. It is a mitigation rather
-than a closure; task #98 holds the two real fixes, both of which sit on the
-audited net-6b surface.
+A connection has ONE readiness Spoor per table, however many rows name it: the
+first number of a socket to be polled opens it, and every other number of that
+socket (its `dup`s) shares it, each row holding a reference of its own. So
+polling k numbers of one socket costs netd one fid, not k -- netd's fid table
+is one pool for the whole box, and one Proc must not fill it by polling its own
+dups. Every path that clears a row detaches that row's reference under the
+socktab lock and releases it after the unlock (a last release is a Tclunk to
+netd, which must not run under a spinlock): `close`, a `dup2`/`dup3` onto the
+number, the `execve` sweeps (every row on a native exec, the cloexec rows on a
+Linux one), and **exit**. The exit release is not
+the reap's: fds close at exit, and every fid under `/net/<proto>/N/` holds
+netd's slot `N`, so a readiness fid held until the parent reaped would keep a
+socket the guest had closed open to its peer for as long as the zombie lasted.
+A fork child's rows start uncached: the child opens its own on its first poll,
+so a socket polled by P Procs holds P readiness fids.
+
+It replaced a readiness fd opened in the guest's own table per socket per call,
+which cost a Twalk + Tlopen + Tclunk each time. That was argued safe as a
+"guest-self-race" once N-3 admitted peer threads, and it was not one: the guest
+was never told the number, so a correct program broke. A peer thread's `open()`
+during the poll was handed a number above the lowest free one, and a peer that
+put an fd at the transient's number lost it to the kernel's close by number when
+the poll ended. The cost of the cache is one netd fid per polled socket per Proc
+polling it, for the socket's life (the ceilings table).
+
+**Readiness is asked of netd, and a zero timeout gets netd's answer (#98,
+closed 2026-09-28 by the SAMPLE/ARM split, NET-DESIGN 12.2).** Every pass of
+the kernel's poll sends each socket's `ready` file a SNAPSHOT read, which netd
+answers at once, 0 included, and the verdict waits until every snapshot of the
+pass is answered. So a zero-timeout scan reports a plainly writable socket
+writable, and the translator passes a caller's timeout through untouched --
+the 10 ms budget it used to add to a zero timeout is gone. The cost is one
+netd round trip per pass; a netd that does not answer within 1 s is reported
+not ready and counted, a fail-safe the gates require to stay at zero. Since
+NP-5 the `ready` file is walked and opened once per socket, not once per call.
 
 **One netd change was owed and is paid here (#220).** POSIX defines `POLLIN` on
 a *listener* as "a connection is pending — `accept` will not block". netd
@@ -862,8 +885,9 @@ nameserver it queried. Four kernel pieces close it:
 - **N-2a** — the **unconnected UDP `sendto(dest)`**. `vivarium_sendto_decide`
   gained the `proto` argument and admits the datagram shape for a `FRESH` udp
   socket; the shell dials `connect ip!port` on the `ctl` fd (netd re-points the
-  connection **per datagram**, `server.rs`) and moves the payload on a **transient
-  `data` fid opened for exactly that datagram**. The destination is recorded in
+  connection **per datagram**, `server.rs`) and moves the payload on a **`data`
+  Spoor opened for exactly that datagram** (a private Spoor since NP-5b, never a
+  guest fd). The destination is recorded in
   the socktab (`remote_addr`/`remote_port`, growing `viv_sock` 16→24).
 - **N-2b** — `recvmsg` (nr 212, previously blanket ENOSYS). Reads one datagram
   into a kernel bounce, scatters it across the guest iovecs, and synthesizes
@@ -872,22 +896,34 @@ nameserver it queried. Four kernel pieces close it:
   bounded by `sys_validate_user_buf` — the same guard the native `getdents64` arm
   carries, because this is the identical variable-length-copy-to-a-guest-pointer
   surface.
-- **N-1b** — nonblocking recv. netd's `data` read is **non-blocking at the server**
-  (0 bytes on an empty socket, net-2c-2), so the shell maps a 0-byte read on a
-  nonblocking socket to `-EAGAIN`; without it res_msend's drain loop, which reads
-  until the negative return, never terminates.
+- **N-1b / NP-5c** — nonblocking recv. netd **parks** an empty-but-open `data`
+  read until bytes arrive, unless the connection is in its nonblocking mode — set
+  by the `nonblock` ctl verb (#52, the verb pouch's `FIONBIO` writes) — when it
+  answers `EAGAIN` itself. N-1b set only the fd's `CNONBLOCK`, which dev9p never
+  reads, and turned a 0-byte read into `EAGAIN` on the premise that netd answered
+  0 on empty: in fact 0 is only end-of-stream, so an empty nonblocking read
+  **blocked** and a closed peer read as `EAGAIN` forever. Since NP-5c the kernel
+  writes the verb whenever a socket's `O_NONBLOCK` changes — `socket()`'s
+  `SOCK_NONBLOCK` and `fcntl(F_SETFL)` — through a private `ctl` Spoor, and a
+  0-byte read is 0 whatever the mode. The verb carries the flag as read back
+  after the write lands and repeats if a peer thread moved it meanwhile, so the
+  two copies (the fd's, which `F_GETFL` reports, and netd's, which the reads obey)
+  agree once the setters stop, without a lock held across the RPC. A read never
+  polls first: pouch's poll-before-read cut abandoned a readiness tag per read
+  and exhausted the shared session's tag pool (patch 0028).
 
-**Why per-call-open, not a held data fid.** The pouch boundary-line (userspace)
+**Why per-call, not a held data fid.** The pouch boundary-line (userspace)
 holds both a `ctl` and a `data` fd, because there the fds are the guest's own and
-its libc tracks them. In the kernel a cached `data` fd would sit in the guest's
-own fd-number space, where the guest could `close()` it — the documented footgun
-the `ppoll` readiness shell already refuses (§5.5.4). Re-opening `data` per call
-is safe precisely because netd's rx/tx buffers live on the per-connection **slot
-`N`** (not the fid) and the guest's `ctl` fd keeps the slot alive; it is the same
-"opened per call, not cached" discipline, and it keeps the socktab entry
-**reference-free** so `proc_free`'s `kfree` can never orphan a connection. The
-held-Spoor closure (a poll/data core that caches Spoors outside fd-number space)
-stays the future unification for *both* readiness and data, tracked as one item.
+its libc tracks them. The kernel opens `data` for each unconnected datagram
+instead, as a private Spoor that never takes a number in the guest's fd table
+(NP-5b; it was a transient guest fd before, with the same by-number hazard as
+§5.5.4's readiness fd). Re-opening per call is sound because netd keeps a
+connection's buffers and its read mode on the slot `N`, not the fid, and the
+guest's `ctl` fd keeps the slot alive; a held `data` fid would pin a netd fid for
+the socket's life. `connect()`, `accept()` and the nonblocking verb follow the
+same rule: every file they open on the way (`data` before the swap; the accepted
+connection's `ctl`, `remote` and `data`; the `ctl` a verb is written to) is a
+private Spoor until the one that becomes the guest's fd is installed.
 
 **Honest ceilings.** With one nameserver (the staged `/etc/resolv.conf` =
 `10.0.2.3`) this is exact. With **several**, netd's connected-UDP filters by peer
@@ -1001,10 +1037,10 @@ multithreaded phenotype program with concurrent socket ops from peer threads
 would have raced it. The focused socktab spinlock LANDED — snapshot reads +
 identity-guarded keyed writes, held only over pure array ops, never across I/O
 (§5.5.2). The DNS chunk's F2 note also asked for a "non-guest-fd data handle";
-that half proved unnecessary, because the data fid is opened PER CALL and is
-transient (never cached in the guest fd space), so a peer naming it is a
-memory-safe guest-self-race, not a kernel hazard — the lock alone closes the
-race the trap warned of ([[bug-n3-socktab-multithread-race]], RESOLVED).
+the lock closed the table race, and the transient data fid it left in the
+guest's fd space proved a real hazard after all (a peer could be handed its
+number, or lose an fd to its close by number), closed by NP-5b, which made it a
+private Spoor ([[bug-n3-socktab-multithread-race]], RESOLVED).
 
 ---
 
@@ -2460,8 +2496,25 @@ terminates rather than running a handler.
 the caught-note-interruptible sleep) no phenotype syscall could return `EINTR` at
 all — a caught note never unwound a blocked wait, so the pouch boundary-line
 truthfully recorded "no EINTR retry surface to enable" (patch `0007`). Item 11
-*creates* that surface: a blocking syscall interrupted by a deliverable caught
-note unwinds and returns `-T_E_INTR` (4), and the tail delivers the handler.
+*creates* that surface, for exactly the calls Linux lets a signal interrupt
+(signal(7)). ARCH §8.8.3's 2026-09-29 amendment holds the list and the
+mechanism. Such a call, blocked when a deliverable caught note arrives, unwinds
+and returns `-T_E_INTR` (4), and the tail delivers the handler. Every other
+call, and every page fault, rides the note out: `socket`, `bind`, `openat`,
+`newfstatat`, a regular file's `read`. The handler runs when the call returns,
+as it would after one of Linux's `TASK_KILLABLE` sleeps. Before the amendment,
+every 9P-backed call was interruptible. A `SIGCHLD` handler made `socket()`
+fail with `EINTR`, and made a demand-paged file read raise `SIGBUS`.
+Inside an interruptible call, only its wait unwinds, as in Linux. `accept`'s wait
+is the held `listen` open; once that returns, netd has handed over the connection,
+and the steps that set it up ride the note out, since an `EINTR` there would hang
+up a connection the guest never saw. `connect`'s wait is TCP's handshake, the held
+`data` open. The dial verb before it rides the note out, because a `Twrite`
+abandoned for a note may already have dialed, and a UDP `connect` never waits at
+all. A `connect` that a signal interrupts leaves the socket `CONNECTING`, and a
+blocking retry waits on the dial already made rather than dialing again, as
+Linux's `SS_CONNECTING` does. A failed dial leaves it `FRESH`, and a timed-out one
+reports `ETIMEDOUT` as netd does, not `ECONNREFUSED`.
 Where the restart-vs-`EINTR` decision is made is the pouch/unmodified split:
 - **Pouch guest** (our patched musl): the kernel returns `-EINTR` and delivers
   the frame; musl's cancellation/`__eintr_valid_flag` machinery honours
@@ -3442,7 +3495,9 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **`connect` after a *constrained* `bind` is refused** (§5.5.3, V-5b) | netd's dial verb carries the REMOTE endpoint only (its `!local` suffix is parsed and ignored), so a client that bound a specific source port cannot be honoured and gets `EOPNOTSUPP` rather than a silent ephemeral port. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not already doing and proceeds normally |
 | **`listen`'s backlog is netd's** (§5.5.3, V-5b) | The `backlog` argument is dropped: netd owns its accept queue (depth 1 today) and exposes no way to request another. Linux also treats the value as a hint and clamps it to a system maximum, so a caller cannot distinguish this from an ordinary clamp — but a second connection arriving before the first is accepted is refused rather than queued |
 | **`accept`'s peer address degrades to `0.0.0.0:0`** (§5.5.3, V-5b) | The address comes from a second read of the connection's `remote` file. If that read fails the accept still succeeds — the peer genuinely is connected, and failing would be worse — and the `sockaddr_in` is written all-zero rather than left holding the caller's stale bytes. Not reachable in normal operation; listed because a caller cannot tell it apart from a genuine `0.0.0.0` peer |
-| **A zero-timeout `ppoll` over a socket takes up to 10 ms** (§5.5.4, V-5c, task #98) | Readiness lives in netd, one RPC away, and the probe is asynchronous — so a literal zero-timeout scan would answer "nothing ready" for a plainly writable socket, and a caller looping on timeout 0 would never progress. A requested 0 therefore gets a 10 ms budget when a socket is in the array. The *answer* is netd's real verdict; only the latency differs, and a caller-supplied timeout is never touched. A probe that misses the budget yields not-ready and the caller retries |
+| **A `ppoll` over a socket costs a netd round trip, even at timeout 0** (§5.5.4; #98 closed at NP-4c) | Readiness lives in netd, so each pass asks it -- a snapshot netd answers at once -- and the verdict waits for the answer: a zero timeout returns netd's real verdict without sleeping, and a caller's timeout is never touched. A netd that does not answer within 1 s is reported not ready and counted (the gates require zero). Since NP-5 a socket's `ready` file is opened on its first poll and held until the socket closes, so later polls skip the walk, the open and the clunk |
+| **A polled socket holds a netd fid until it closes** (§5.5.4, NP-5) | The cached `ready` Spoor is an open fid at netd, and netd's fid table is per 9P connection (`MAX_FIDS`) while every Proc on the box reaches `/net` over the one kernel session joey mounts. A socket costs its `ctl` or `data` fid (one, however many fds and forked Procs share it) and, once polled, one `ready` fid per Proc polling it (its dups share one); netd sizes the table at four fids per connection slot (`MAX_FIDS = MAX_SLOTS * 4`, raised from 32 by NP-5), so the slot table runs out first while at most two Procs poll each socket. The table is a pool for the whole box, not a per-client quota: one Proc holding many `/net` files can still fill it (queued). If the fid table does fill, netd refuses the walk, and stalk reports every failed device walk as `ENOENT` (queued), so a poll marks that socket `POLLNVAL` rather than failing the call `ENOMEM` |
+| **A nonblocking `connect` or `accept` still blocks** (§5.5.5, NP-5c) | netd's `nonblock` verb governs the `data` read alone. A TCP `connect()` waits for ESTABLISHED, because netd defers the `data` open until then, where Linux answers `EINPROGRESS` and reports completion as `POLLOUT`; an `accept()` on a nonblocking listener waits for a call where Linux answers `EAGAIN`. An event loop therefore stalls its thread on each dial. Serving both needs a connecting state in the socket table and a deferred open the poll path completes (queued) |
 | **`ppoll` with a `sigmask` is refused** (§5.5.4, V-5c) | The atomic mask swap is ppoll's entire reason to exist over `poll()`, and doing it non-atomically would re-open the exact race the caller chose ppoll to close. `ENOSYS` rather than an approximation. musl's `poll()` passes NULL, so the common path is unaffected; only a program using ppoll *for its signal semantics* is |
 | **`pselect6` with a `sigmask` is refused** (§5.5.4, V-5c-2) | Same reason as `ppoll`'s, and note the sixth argument is a POINTER to `{ss, ss_len}` — aarch64 caps a syscall at six registers — so a non-NULL pair is declined without being dereferenced. A NULL sixth argument is unambiguously "no mask", which is the common path |
 | **A set `exceptfds` bit is refused** (§5.5.4, V-5c-2) | Native poll has no `POLLPRI`: the requestable set is `(POLLIN\|POLLOUT)`, full stop. Dropping the bit silently — what pouch's userspace `select` does (task #99 F-b) — turns a *pure* `exceptfds` wait into an infinite block rather than an error, and mapping it to `POLLIN` would report ordinary data as an exception. A NULL or all-zero `exceptfds` is not a request and passes through |
@@ -3573,7 +3628,7 @@ formality.
 | **#93** process creation (clone/execve/wait4) | **The named next chunk, and the arc gate's blocker** -- "an Alpine shell runs" needs `fork`. Not a renumber: Linux `clone(flags, stack, ptid, tls, ctid)` versus a `SYS_SPAWN_*` family that takes a *program* rather than a continuation, and `fork()` has no native counterpart at all. Wants its own scripture pass. It also **falsifies two premises the socket family rests on** -- both the socktab's lock-freedom and the transient-fd invisibility assume a `PHENO_LINUX` Proc cannot spawn a thread -- so `viv_sock_connect`'s re-read of `e->proto`/`e->n` after a blocking write is the first line to revisit when it lands |
 | **#91** exit status is boolean | Thylacine-wide, not vivarium-specific, and `docs/ERRORS.md` is ABI-bearing -- the exit-status **encoding** needs user signoff before any impl. Touches the death path (#809/#811), so it wants its own chunk with the usual death-lineage care |
 | **#95** SIGTERM needs its own note | An I-19 supported-set addition = an ABI change to the notes surface. Signoff |
-| **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly |
+| **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly. **CLOSED 2026-09-28** by the SAMPLE/ARM split (netd and ptyfs at NP-3b, the kernel at NP-4c): a snapshot read answered at once is the only sample, and the 10 ms budget is deleted (§5.5.4) |
 | **#90** container `/proc/self` names the mounter | The remedies section 6.13 names both need a per-op identity channel, which is a new kernel surface |
 | **#99** pouch `select(2)`'s four defects | Userspace pouch, and the kernel translator already avoids all four (V-5c-2). Tracked, not arc-blocking |
 | **#106** `T_E_SPIPE` (29) is unregistered | Raised BY the round, as F1's deliberate residual. Appending an errno is an `ERRORS.md` change and `ERRORS.md` is ABI-bearing, so it needs signoff -- and the alternative (`EINVAL`) is the "differently wrong" substitution #100 declined. Published in §9's DEGRADED table meanwhile |

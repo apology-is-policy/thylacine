@@ -67,6 +67,10 @@ void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_srv_client_cape_post(void);
 void test_srv_client_cape_admission(void);
 void test_srv_client_cape_post_syscall(void);
+void test_srv_client_remote_admission(void);
+void test_srv_client_remote_post(void);
+void test_srv_client_remote_recycle(void);
+void test_srv_client_remote_post_syscall(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -95,7 +99,7 @@ static void drop_test_proc(struct Proc *p) {
 static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false, false);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false, false, false);
     spoor_clunk(root);
     return h;
 }
@@ -104,7 +108,17 @@ static int post_svc_cape(struct Proc *p, const char *name, size_t name_len,
                          enum srv_mode mode) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, mode, false, true);
+    int h = devsrv_post_listener(p, root, name, name_len, mode, false, true, false);
+    spoor_clunk(root);
+    return h;
+}
+
+// A post with the remote declaration (HAUL-DESIGN 4.8) in either mode.
+static int post_svc_decl(struct Proc *p, const char *name, size_t name_len,
+                         enum srv_mode mode, bool cape, bool remote) {
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) return -1;
+    int h = devsrv_post_listener(p, root, name, name_len, mode, false, cape, remote);
     spoor_clunk(root);
     return h;
 }
@@ -112,7 +126,7 @@ static int post_svc_cape(struct Proc *p, const char *name, size_t name_len,
 static int post_svc_9p(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_9P, false, false);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_9P, false, false, false);
     spoor_clunk(root);
     return h;
 }
@@ -477,12 +491,181 @@ void test_srv_client_cape_admission(void) {
     TEST_ASSERT(sys_attach_9p_flags_ok(0, false),                    "pipe attach, no flags");
     TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE, false),   "caped pipe attach");
     TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, false), "LOOSE is /srv-only");
-    TEST_ASSERT(!sys_attach_9p_flags_ok(0x4u, false),                "unknown pipe-attach bit");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(0x8u, false),                "unknown pipe-attach bit");
     TEST_ASSERT(sys_attach_9p_flags_ok(0, true),                     "/srv attach, no flags");
     TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, true),   "loose /srv attach");
     TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE, true),   "the /srv cape is the poster's");
     TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_CAPE, true),
                 "LOOSE carries no cape in");
-    TEST_ASSERT(!sys_attach_9p_flags_ok(0x4u, true),                 "unknown /srv-attach bit");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(0x8u, true),                 "unknown /srv-attach bit");
     TEST_ASSERT(!sys_attach_9p_flags_ok(1ull << 32, true),           "a high bit is not truncated away");
+}
+
+// ---------------------------------------------------------------------------
+// The remote declaration on /srv (HAUL-DESIGN 4.8): a DMSRVREMOTE post marks
+// the service in either mode, open=connect carries the mark onto the conn
+// (captured with LIVE, like the mode and the cape), and it is part of the
+// service's identity on a tombstone rebind. The pipe attach's half is
+// test_sys_attach_9p_declarations; the attach over a marked conn is
+// 9p_srvconn_transport.remote_attach.
+// ---------------------------------------------------------------------------
+
+void test_srv_client_remote_admission(void) {
+    TEST_EXPECT_EQ((u64)SYS_ATTACH_9P_REMOTE, (u64)0x4u, "ABI: SYS_ATTACH_9P_REMOTE is bit 2");
+    TEST_EXPECT_EQ((u64)SYS_WALK_CREATE_DMSRVREMOTE, (u64)0x00400000u,
+                   "ABI: DMSRVREMOTE is bit 22");
+    const u32 BYTE = SYS_WALK_CREATE_DMSRVBYTE, BULK = SYS_WALK_CREATE_DMSRVBULK;
+    const u32 CAPE = SYS_WALK_CREATE_DMSRVCAPE, REMOTE = SYS_WALK_CREATE_DMSRVREMOTE;
+    TEST_ASSERT((SYS_WALK_CREATE_DMSRV_BITS & REMOTE) != 0, "DMSRVREMOTE is a service-post bit");
+    TEST_ASSERT((SYS_WALK_CREATE_PERM_VALID & REMOTE) != 0, "DMSRVREMOTE reaches the post branch");
+    TEST_ASSERT(sys_srv_post_perm_ok(REMOTE),                      "a remote 9P post: a label, either mode");
+    TEST_ASSERT(sys_srv_post_perm_ok(REMOTE | BULK),               "a remote bulk 9P post");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE | REMOTE),               "a remote byte post");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE | CAPE | REMOTE),        "a caped remote byte post (Haul's)");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE | BULK | CAPE | REMOTE), "every DMSRV bit at once");
+    TEST_ASSERT(!sys_srv_post_perm_ok(CAPE | REMOTE),              "REMOTE does not lift the cape's byte rule");
+    TEST_ASSERT(!sys_srv_post_perm_ok(REMOTE | 0644u),             "mode bits on a remote post refused");
+    TEST_ASSERT(!sys_srv_post_perm_ok(REMOTE | SYS_WALK_CREATE_DMDIR), "DMDIR on a remote post refused");
+
+    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_REMOTE, false), "a remote pipe attach");
+    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE | SYS_ATTACH_9P_REMOTE, false),
+                "a caped remote pipe attach (Haul's direct form)");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_REMOTE, false),
+                "REMOTE carries no LOOSE into the pipe attach");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_REMOTE, true),
+                "the /srv remote declaration is the poster's");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_REMOTE, true),
+                "LOOSE carries no remote declaration in");
+    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, true), "LOOSE alone still attaches (control)");
+}
+
+void test_srv_client_remote_post(void) {
+    srv_registry_reset();
+    struct Proc *server1 = make_marked_test_proc();
+    struct Proc *client  = make_test_proc();
+    TEST_ASSERT(server1 != NULL && client != NULL, "procs");
+
+    TEST_ASSERT(post_svc_decl(server1, "rnine", 5, SRV_MODE_9P, false, true) >= 0,
+                "a remote 9P-mode post (a label, unlike the cape)");
+    TEST_ASSERT(post_svc_decl(server1, "rbyte", 5, SRV_MODE_BYTE, false, true) >= 0,
+                "a remote byte post");
+    TEST_ASSERT(post_svc_decl(server1, "both", 4, SRV_MODE_BYTE, true, true) >= 0,
+                "a caped remote byte post");
+    TEST_ASSERT(post_svc_byte(server1, "plain", 5) >= 0, "a plain byte post (control)");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "rnine", 5);
+    TEST_ASSERT(svc != NULL && svc->remote && !svc->cape, "the 9P-mode service is remote, uncaped");
+    svc = srv_lookup_in(srv_boot_registry(), "rbyte", 5);
+    TEST_ASSERT(svc != NULL && svc->remote && !svc->cape, "the byte service is remote, uncaped");
+    svc = srv_lookup_in(srv_boot_registry(), "both", 4);
+    TEST_ASSERT(svc != NULL && svc->remote && svc->cape, "caped and remote");
+    svc = srv_lookup_in(srv_boot_registry(), "plain", 5);
+    TEST_ASSERT(svc != NULL && !svc->remote, "a plain post is not remote");
+
+    struct Spoor *rs = connect_byte(client, "rbyte");
+    struct Spoor *bs = connect_byte(client, "both");
+    struct Spoor *ps = connect_byte(client, "plain");
+    TEST_ASSERT(rs != NULL && bs != NULL && ps != NULL, "connect to all three byte services");
+    TEST_ASSERT(srvconn_remote(devsrv_conn_of(rs)), "a remote service mints remote conns");
+    TEST_ASSERT(!srvconn_cape(devsrv_conn_of(rs)), "the remote mark is not the cape");
+    TEST_ASSERT(srvconn_remote(devsrv_conn_of(bs)) && srvconn_cape(devsrv_conn_of(bs)),
+                "a caped remote service mints caped remote conns");
+    TEST_ASSERT(!srvconn_remote(devsrv_conn_of(ps)), "a plain service mints plain conns");
+    spoor_clunk(rs);
+    spoor_clunk(bs);
+    spoor_clunk(ps);
+
+    // Rebind: the declaration is identity, like the mode, the ring class and
+    // the cape. Each refusal is paired with the admitted rebind beside it.
+    srv_proc_exit_notify(server1);
+    svc = srv_lookup_in(srv_boot_registry(), "rbyte", 5);
+    TEST_ASSERT(svc != NULL, "tombstone persists");
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_TOMBSTONED, "poster exit tombstoned it");
+    struct Proc *server2 = make_marked_test_proc();
+    TEST_ASSERT(server2 != NULL, "server2");
+    TEST_EXPECT_EQ(post_svc_byte(server2, "rbyte", 5), -1,
+                   "rebinding a remote name plain -> -1");
+    TEST_EXPECT_EQ(post_svc_decl(server2, "plain", 5, SRV_MODE_BYTE, false, true), -1,
+                   "rebinding a plain name remote -> -1");
+    TEST_EXPECT_EQ(post_svc_decl(server2, "rnine", 5, SRV_MODE_9P, false, false), -1,
+                   "rebinding a remote 9P-mode name plain -> -1");
+    TEST_ASSERT(post_svc_decl(server2, "rbyte", 5, SRV_MODE_BYTE, false, true) >= 0,
+                "a remote rebind of the remote name");
+    TEST_ASSERT(post_svc_byte(server2, "plain", 5) >= 0, "a plain rebind of the plain name");
+    svc = srv_lookup_in(srv_boot_registry(), "rbyte", 5);
+    TEST_ASSERT(svc != NULL && svc->state == SRV_STATE_LIVE && svc->remote,
+                "the remote rebind is LIVE and remote");
+
+    drop_test_proc(server2);
+    drop_test_proc(server1);
+    drop_test_proc(client);
+    srv_registry_reset();
+}
+
+// A user's (CAP_POST_SERVICE) post of a new name recycles a dead tombstone's
+// slot; the recycled entry takes the NEW post's declaration. Each leg proves
+// the recycle arm ran (the same entry) before judging the declaration, so a
+// fresh slot cannot satisfy it.
+void test_srv_client_remote_recycle(void) {
+    srv_registry_reset();
+    struct Proc *a = make_test_proc(), *b = make_test_proc();
+    TEST_ASSERT(a != NULL && b != NULL, "procs");
+    a->caps |= CAP_POST_SERVICE;
+    b->caps |= CAP_POST_SERVICE;
+    a->legate_scope_id = 0x1234;
+    b->legate_scope_id = 0x5678;
+
+    TEST_ASSERT(post_svc_decl(a, "was-remote", 10, SRV_MODE_9P, false, true) >= 0,
+                "a user's remote post");
+    struct SrvService *old = srv_lookup_in(srv_boot_registry(), "was-remote", 10);
+    TEST_ASSERT(old != NULL && old->remote, "the user's service is remote");
+    srv_proc_exit_notify(a);
+    TEST_ASSERT(post_svc_decl(b, "now-plain", 9, SRV_MODE_9P, false, false) >= 0,
+                "a plain post of a new name recycles the remote tombstone");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "now-plain", 9);
+    TEST_ASSERT(svc == old, "the recycle arm took the tombstone's slot");
+    TEST_ASSERT(svc != NULL && !svc->remote, "the recycled entry is plain, as posted");
+
+    srv_proc_exit_notify(b);
+    TEST_ASSERT(post_svc_decl(a, "now-remote", 10, SRV_MODE_9P, false, true) >= 0,
+                "a remote post of a new name recycles the plain tombstone");
+    svc = srv_lookup_in(srv_boot_registry(), "now-remote", 10);
+    TEST_ASSERT(svc == old, "the recycle arm took the slot again");
+    TEST_ASSERT(svc != NULL && svc->remote, "the recycled entry is remote, as posted");
+
+    srv_proc_exit_notify(a);
+    a->legate_scope_id = b->legate_scope_id = 0;
+    drop_test_proc(a);
+    drop_test_proc(b);
+    srv_registry_reset();
+}
+
+// Through SYS_WALK_CREATE's own path: the remote bit reaches the post in either
+// mode and marks the service; without it, no mark.
+void test_srv_client_remote_post_syscall(void) {
+    srv_registry_reset();
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "proc");
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(root != NULL, "/srv root");
+    hidx_t fd = handle_alloc(server, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, root);
+    TEST_ASSERT(fd >= 0, "/srv root fd");
+    const u32 BYTE = SYS_WALK_CREATE_DMSRVBYTE, CAPE = SYS_WALK_CREATE_DMSRVCAPE;
+    const u32 REMOTE = SYS_WALK_CREATE_DMSRVREMOTE;
+    TEST_ASSERT(sys_walk_create_kname_for_proc(server, (u64)fd, "rnine", 5, 0, REMOTE) >= 0,
+                "a remote 9P-mode post");
+    TEST_ASSERT(sys_walk_create_kname_for_proc(server, (u64)fd, "haul", 4, 0,
+                                               BYTE | CAPE | REMOTE) >= 0,
+                "a caped remote byte post (Haul's --post)");
+    TEST_ASSERT(sys_walk_create_kname_for_proc(server, (u64)fd, "plain", 5, 0, BYTE) >= 0,
+                "a plain byte post (control)");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "rnine", 5);
+    TEST_ASSERT(svc != NULL && svc->remote && svc->mode == SRV_MODE_9P,
+                "the syscall's remote bit marks a 9P-mode service");
+    svc = srv_lookup_in(srv_boot_registry(), "haul", 4);
+    TEST_ASSERT(svc != NULL && svc->remote && svc->cape && svc->mode == SRV_MODE_BYTE,
+                "caped, remote, byte mode");
+    svc = srv_lookup_in(srv_boot_registry(), "plain", 5);
+    TEST_ASSERT(svc != NULL && !svc->remote, "no remote bit, no mark");
+    drop_test_proc(server);
+    srv_registry_reset();
 }

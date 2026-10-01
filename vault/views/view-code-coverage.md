@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**568 owned · 46 unowned · 614 files (92% owned) · ~12300 unswept lines.**
+**569 owned · 46 unowned · 615 files (92% owned) · ~12300 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **82 files, ~36933 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **82 files, ~37662 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -78,15 +78,15 @@ Excluded as harness and counted here rather than dropped: **82 files, ~36933 lin
 | usr/quarry | 0 | 1 | 1033 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/libthyla-rs | 33 | 1 | 196 |
+| usr/libthyla-rs | 32 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 76 | 1 | 72 |
+| usr/lib | 77 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
-| usr/coreutils | 64 | 0 | 0 |
+| usr/coreutils | 65 | 0 | 0 |
 | usr/corvus | 2 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |

@@ -46,9 +46,28 @@ impl InlineCache {
         let obj = b.styles.get(first.style as usize)?.obj;
         if obj == 0 || !line.cells.iter().all(|c| b.styles.get(c.style as usize).is_some_and(|s| s.obj == obj)) { return None; }
         let o = b.objs.get(obj as usize - 1)?;
-        if o.ty != "inline-image" || o.refv.len() != 32 || !o.refv.bytes().all(|c| c.is_ascii_hexdigit()) { return None; }
-        self.images.get(&u128::from_str_radix(&o.refv, 16).ok()?)
+        self.images.get(&image_id(&o.ty, &o.refv)?)
     }
+    /// Keep only the images `keep` names; true when any went.
+    pub fn retain(&mut self, keep: impl Fn(u128) -> bool) -> bool {
+        let before = self.images.len();
+        let bytes = &mut self.bytes;
+        self.images.retain(|id, r| {
+            let k = keep(*id);
+            if !k { *bytes -= r.argb.len() * 4; }
+            k
+        });
+        self.order.retain(|id| keep(*id));
+        before != self.images.len()
+    }
+    pub fn contains(&self, id: u128) -> bool { self.images.contains_key(&id) }
+}
+
+/// The cache key an obj names: an `inline-image` whose ref is its 32-digit
+/// hex id. The one rule `resolve` and a forget's keep set share.
+pub fn image_id(ty: &str, refv: &str) -> Option<u128> {
+    if ty != "inline-image" || refv.len() != 32 || !refv.bytes().all(|c| c.is_ascii_hexdigit()) { return None; }
+    u128::from_str_radix(refv, 16).ok()
 }
 #[cfg(test)]
 mod tests {
@@ -103,6 +122,20 @@ mod tests {
         if let Item::Line(ref mut line) = caption { line.cells.pop(); }
         cache.set_limit(0);
         assert!(cache.resolve(&b, &caption).is_none(), "eviction restores the textual caption");
+    }
+    #[test]
+    fn retain_releases_the_bytes_and_the_eviction_order() {
+        let mut c = InlineCache::new(16);
+        assert!(c.insert(1, 1, 1, alloc::vec![1]));
+        assert!(c.insert(2, 1, 1, alloc::vec![2]));
+        assert!(c.retain(|id| id == 2));
+        assert!(!c.contains(1) && c.contains(2));
+        assert_eq!(c.bytes, 4);
+        assert_eq!(c.order.iter().copied().collect::<alloc::vec::Vec<_>>(), alloc::vec![2]);
+        assert!(!c.retain(|_| true), "nothing went");
+        assert_eq!(image_id("inline-image", "0000000000000000000000000000000b"), Some(0xb));
+        assert_eq!(image_id("path", "0000000000000000000000000000000b"), None);
+        assert_eq!(image_id("inline-image", "b"), None);
     }
 
 }

@@ -866,7 +866,12 @@ notifies the session to repaint its header. The surface owner cannot use this
 verb to name another pane. An unhosted surface returns `EINVAL`. Layout text
 has an optional `backgrounded` token after geometry/weight, separate from
 `hidden`: a hidden foreground tab still belongs to its pane, while a background
-system renderer is excluded from the session's pane count.
+system renderer is excluded from the session's pane count. An optional `fresh`
+token follows it, before `hidden`, on an EMPTY leaf the tree made so a
+workspace has a pane (HALCYON-WORKSPACES 4, "Under a session"): the session
+compositor fills a fresh pane only when asked. Hosting a surface in the leaf,
+or a Super+N ask on it under a session, clears the mark; a saved layout never
+records it.
 
 ### 18.6 Determinism mode (the §16 wire, made concrete)
 
@@ -1179,7 +1184,10 @@ ACTIVE_COLOR off it, BORDER_COLOR inactive. Strips are chrome
 tearing-freedom intact). (d) **Move** (D6): directional re-parenting —
 swap with the matching-axis sibling, pull out of a nested subtree
 beside it (dissolution-safe index bookkeeping), wrap the root on a
-pure cross-axis move; at the screen edge it is a no-op. Tabbed matches
+pure cross-axis move; at the screen edge it is a no-op. The sibling is
+the nearest one that is not backgrounded: a backgrounded leaf is
+transparent to a session's structural ops (KT-1.5d-3 F2), and a swap
+with it would change the tree and nothing on the screen (2026-09-28). Tabbed matches
 the h axis, Stacked the v axis (moving walks tab order). (e) **Zoom**
 (§14 pane-zoom, tmux-shaped): a by-id toggle; the leaf alone fills the
 display (the tree untouched; a display-sized surface goes DIRECT

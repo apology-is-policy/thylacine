@@ -33,6 +33,11 @@ pub enum ChordAction {
     SplitToggle,
     TabCycle(bool), // true = forward
     Close,
+    /// HALCYON 14.13 (TC-1b): forget the focused tile's history -- the
+    /// transcript is the environment's, so like the picker and help this is
+    /// only DELIVERED to the rail's owner, and unlike the close there is no
+    /// fallback (the compositor has no record to forget).
+    History,
     /// HALCYON-SCALE 6: one 25% step of the display scale (+1 / -1).
     ScaleStep(i8),
     /// Back to the EDID-derived scale (`scale auto`).
@@ -93,6 +98,7 @@ const KEY_S: u16 = 31;
 const KEY_F: u16 = 33;
 const KEY_H: u16 = 35;
 const KEY_N: u16 = 49;
+const KEY_K: u16 = 37;
 const KEY_V: u16 = 47;
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -228,6 +234,7 @@ pub fn action_name(a: ChordAction) -> &'static str {
         ChordAction::TabCycle(true) => "cycle",
         ChordAction::TabCycle(false) => "cycle-back",
         ChordAction::Close => "close",
+        ChordAction::History => "history",
         ChordAction::ScaleStep(s) if s > 0 => "scale-up",
         ChordAction::ScaleStep(_) => "scale-down",
         ChordAction::ScaleReset => "scale-reset",
@@ -287,6 +294,7 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "cycle" => ChordAction::TabCycle(true),
         "cycle-back" => ChordAction::TabCycle(false),
         "close" => ChordAction::Close,
+        "history" => ChordAction::History,
         "scale-up" => ChordAction::ScaleStep(1),
         "scale-down" => ChordAction::ScaleStep(-1),
         "scale-reset" => ChordAction::ScaleReset,
@@ -341,6 +349,9 @@ impl Chords {
                 d(KEY_TAB, false, TabCycle(true)),
                 d(KEY_TAB, true, TabCycle(false)),
                 d(KEY_Q, true, Close),
+                // HALCYON 14.13 (TC-1b): Super+K forgets the focused tile's
+                // history -- Terminal's and iTerm2's Cmd+K; K was free.
+                d(KEY_K, false, History),
                 // HALCYON-SCALE 6: the universal zoom keys (browsers,
                 // terminals); free in this table; remappable like the rest.
                 d(KEY_EQUAL, false, ScaleStep(1)),
@@ -506,6 +517,14 @@ mod tests {
             Some(ChordAction::TabCycle(false))
         ));
         assert!(matches!(c.lookup(KEY_Q, true), Some(ChordAction::Close)));
+        // TC-1b: Super+K is the history chord, unshifted, by its config name.
+        assert!(matches!(c.lookup(KEY_K, false), Some(ChordAction::History)));
+        assert!(c.lookup(KEY_K, true).is_none(), "Super+Shift+K stays free");
+        assert!(matches!(
+            action_of("history"),
+            Some(Some(ChordAction::History))
+        ));
+        assert_eq!(key_code("k"), Some(KEY_K));
         // HALCYON-SCALE 6: the scale chords (Super+= / Super+- / Super+0),
         // shift-free, and their config names.
         assert!(matches!(c.lookup(KEY_EQUAL, false), Some(ChordAction::ScaleStep(1))));
@@ -637,7 +656,7 @@ mod tests {
         for name in [
             "focus-left", "focus-right", "focus-up", "focus-down", "move-left", "move-right",
             "move-up", "move-down", "split-h", "split-v", "split-toggle", "zoom", "tab", "stack",
-            "cycle", "cycle-back", "close", "scale-up", "scale-down", "scale-reset",
+            "cycle", "cycle-back", "close", "history", "scale-up", "scale-down", "scale-reset",
             // HALCYON-WORKSPACES 4: the parsed pair must invert too -- this
             // is the only check that the table direction and the parse
             // direction agree about all eighteen.

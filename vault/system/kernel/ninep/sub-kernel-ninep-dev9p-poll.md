@@ -12,240 +12,299 @@ hazards: [haz-death-path-wake]
 abis: []
 design: [docs/NET-DESIGN.md]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-09-28
 ---
 ## Purpose
 
-The one kernel surface of the net arc: makes `poll()` on a netd readiness
-file (`/net/<proto>/N/ready`, qid marked `QTPOLL`) block until the socket
-satisfies the requested events. The poller PARKS in `sys_poll_for_proc` —
-it does not block-read — so no synchronous reader drives the elected 9P
-reader for the outstanding readiness Tread; a boot-spawned GLOBAL poll-pump
-kthread does (the cons_poll `console_mgr` / Loom-4 SQPOLL analog). This is
-I-9 generalized to an elicited-readiness relay over the most-audited
-mechanism family in the tree (the #841 elected reader).
+The kernel side of remote readiness: makes `poll()` on a file whose readiness
+lives in the server that serves it — a netd `ready` file
+(`/net/<proto>/N/ready`) or a ptyfs `<n>ready` file, their qids marked
+`QTPOLL` — answer truthfully and block until the file is ready. Since #98
+(NP-4c, 2026-09-28) it does that with TWO reads, one per job: a SNAPSHOT the
+server answers at once, which is the only thing a verdict rests on, and an
+ARM the server holds until the file is ready, which is only ever a wake. The
+poll core ([[sub-kernel-poll]]) drives both through three Dev slots. Nothing
+synchronous waits on either reply, so a boot-spawned GLOBAL poll-pump
+kthread drives the 9P elected reader (#841) for them — the cons_poll
+`console_mgr` / Loom-4 SQPOLL analog.
+
+Before #98 one deferred read did both jobs, read back through a cache, and a
+truthful "not ready" was unrepresentable on the wire: a zero-timeout poll of a
+plainly writable socket returned 0 off a cache the fresh file did not have,
+and the vivarium widened a zero timeout to 10 ms to hide it.
 
 ## Contract
 
-- `dev9p_poll(c, events, pw)` — the Dev `.poll` slot. QTPOLL-marked Spoors
-  are probed; ANY other dev9p file is POSIX always-ready
-  (`events & POLL_REQUESTABLE`) — the fail-safe gate (an unmarked file or a
-  plumbing slip degrades to always-ready, never an unsound probe of a
-  regular file). `pw == NULL` is the sample-only re-scan.
+- `dev9p_poll_snapshot(c, events, s)` — `.poll_snapshot`. A file without
+  `QTPOLL`, or on a client whose transport has no recv deadline, is answered
+  here: POSIX always-ready (`events & POLL_REQUESTABLE`), `s->state`
+  ANSWERED, no request. Otherwise it sets `s->remote`, builds the request on
+  first use (reused on a resend), marks the slot SENT and submits a Tread at
+  offset `mask | P9_POLL_SNAPSHOT`, count 4. A shortage leaves the slot
+  UNSENT for the core to resend.
+- `dev9p_poll_snapshot_release(c, s)` — `.poll_snapshot_release`. The
+  barrier: after it returns no answer can write the slot, and a snapshot
+  still unanswered has been flushed at its server. No-op on a slot with no
+  request.
+- `dev9p_poll_arm(c, events, pw)` — `.poll_arm`. Registers `pw` on the
+  file's poll-state list, then ensures an arm covering `events` is on the
+  wire. Returns 1 covered, 0 not (a shortage, a dead session, no memory) —
+  the core then bounds its park by the retry timer. Returns 1 at once for a
+  file with nothing remote to wait for.
 - `dev9p_poll_init` (boot) + `dev9p_poll_pump_main` (the kproc kthread
-  entry, spawned once from `kernel/main.c`).
+  entry, spawned once from `kernel/main.c` before the kernel tests run).
 - `dev9p_poll_priv_release(p)` — the #294 cancel-at-close hook
   `dev9p_close` calls BEFORE the `ready`-fd Tclunk.
-- `dev9p_poll_op_count_for_test` — the registry-length witness the
-  teardown regression asserts against.
+- Test accessors: `dev9p_poll_op_count_for_test` (the arm registry's
+  length), `dev9p_poll_snap_count_for_test` (snapshots still linked),
+  `dev9p_poll_parked_for_test` (the kthread asleep on its park), and the
+  collector hold `dev9p_poll_test_hold_gc` / `dev9p_poll_gc_held_for_test` /
+  `dev9p_poll_test_hold_release` (the runner's release after every test).
 
 ## Mechanism
 
-The three spec actions of [[spec-net-poll]] map onto:
+The kernel half of [[spec-net-poll]]'s action map:
 
-**`dev9p_poll` (PollerRegister).** Gates: QTPOLL on the cached qid, then
-`p9_client_recv_is_deadline_capable` (the kthread's frame-boundary recv
-deadline REQUIRES a deadline-capable transport — srvconn is; a
-non-capable QTPOLL server would hang the kthread, so it degrades to
-always-ready). Then:
+**SNAPSHOT (`Scan`, `SnapshotReply`).** The request (`struct
+dev9p_poll_snap`) lives from the first send attempt to the core's release,
+always inside one pass of one poll call, whose held Spoor ref keeps the priv
+and so the session alive; the request's own session ref is for the kthread's
+borrow. It is linked on `g_dev9p_poll_snaps` and counted in the atomic
+`g_dev9p_poll_snap_live` from the moment it is built — even UNSENT, because
+the reply that frees a tag (an Rflush) has to be read by someone. Its
+completion `dev9p_poll_snap_complete` runs under `c->lock` (the kthread's
+demux, or `client_mark_dead_locked`) or, for a failure inside the submit, in
+the submitting poller: `-P9_E_AGAIN` means the read never left the kernel
+and touches nothing; anything else writes the revents (a 9P error is
+POLLERR, a short reply 0, masked to the asked events plus the output-only
+bits), RELEASE-stores ANSWERED, clears `live` exactly once
+(`dev9p_poll_snap_unlive`, an exchange: the answer and the release race for
+it), and wakes the poller's private rendez. The slot is on the poller's stack
+and stays there: the poller cannot return before its release, which takes
+`c->lock` after the completion ran.
 
-1. Lazily allocate the per-Spoor `dev9p_poll_state` — candidate kmalloc'd
-   OUTSIDE the registry lock, RELEASE-published under it (double-checked;
-   the loser frees; the lockless fast-path ACQUIRE-load pairs with the
-   publish — net-6b F5). `cand->refs = 1` is set BEFORE publish — the
-   priv's ref; without it the first op's teardown takes refs 1→0 and frees
-   the state out from under `p->poll` (the #294 self-audit F-self-1
-   would-be-P1).
-2. **Register the hook FIRST** (`poll_waiter_list_register`), then under
-   [[lock-dev9p-poll-glock]]: fold this poller's events into
-   `wanted_mask`, sample `cached_revents` (ACQUIRE).
-3. Not ready → **probe-then-observe** (the I-9 obligation): reuse a
-   covering live op; or WIDEN — unlink the narrower live op (making it
-   this caller's to abandon+free outside the lock, via Tflush #845) and
-   submit the union; or submit fresh. `dev9p_poll_submit_locked` links the
-   op into the registry + publishes `ps->op` + zeroes the stale cached
-   bitmap BEFORE `p9_client_submit_async` — a synchronous submit failure
-   fires the completion (POLLERR) on an already-linked op the kthread can
-   reap, and the post-submit re-sample surfaces it without a park.
-4. **F2/R2-F2 degrade**: if OOM left no fresh probe AND no covering live op
-   exists, return always-ready — a safe spurious wake the app re-checks;
-   the alternatives were an unwakeable infinite park (no live op) or a
-   no-progress spurious-wake loop (narrower live op under sustained OOM).
-5. Returning ready CONSUMES the cached bitmap (zeroed) — the cache is a
-   one-shot bridge between the async completion and the poller's
-   re-sample, NOT persistent readiness state; a stale "readable" after the
-   app drained the data would busy-loop it (level-triggered semantics).
+**The release (`dev9p_poll_snapshot_release`).** `p9_client_abandon_async`
+under `c->lock` first — an answer being delivered finishes before it returns,
+and one still due is flushed (Tflush; its late reply is discarded ownerless)
+and can no longer fire; for an UNSENT request it is a no-op — then the unlink
+and the unlive under the registry lock, the session unref, the free.
 
-**The probe itself**: a Tread on the `ready` fid whose OFFSET carries the
-event mask and whose count is 4 — netd defers the reply until satisfiable
-and answers a 4-byte LE revents bitmap. The op is a `p9_client`
-async submission whose completion (`dev9p_poll_complete`) runs UNDER the
-client's `c->lock` (from the demux or `client_mark_dead_locked`) and
-therefore does exactly three things: RELEASE-store
-`VALID | revents` into `cached_revents`, RELEASE-store `terminal`, wake
-the kthread rendez — no sleep, no poll-state lock, no `p9_client_*`
-re-entry (the on_complete seam contract of
-[[lock-9p-client-c-lock]]). A 9P error maps to POLLERR (a ready
-condition); a malformed/short reply to 0 (not ready).
+**ARM (`PollerArm` / `PollerArmFails`, `ArmReply`).** The hook FIRST
+(`poll_waiter_list_register` on `ps->poll_list`), so the arm's answer always
+has a hook to walk, including one that beats the call's return. Then under
+[[lock-dev9p-poll-glock]]: a non-terminal arm that already covers the events
+is reused; otherwise a fresh arm for the UNION of the live arm's mask and
+these events is submitted (refs taken first). It is linked, and published as
+`ps->op`, only when `p9_client_submit_async` returned 0 — so the registry
+holds only arms that are on the wire — and a widen unlinks the arm it
+replaces only then, to flush and free it after the unlock: its pollers are
+covered throughout, and a widen that cannot be sent keeps the old arm. The
+arm's completion `dev9p_poll_arm_complete` sets `terminal` and wakes the
+kthread; its bitmap is never read — the socket may be drained again before
+the poller looks, so the woken poller samples again.
 
-**The kthread (`dev9p_poll_service_once`, KthreadWalk).**
-- Phase 1 (under the registry lock): sweep the chain — terminal ops to the
-  reap list; non-terminal ops with an EMPTY `poll_list` to the abandon
-  list (the poll that needed them ended — the GC). The empty-check is
-  NESTED under the registry lock (g_lock → poll_list lock) so it is atomic
-  with the unlink + `ps->op` clear against a concurrent `dev9p_poll` reuse
-  (which registers its hook BEFORE taking g_lock: a poller already on the
-  list defeats the GC; one that registers after sees `ps->op` cleared and
-  submits fresh — no lost wake either way).
-- Phase 2 (outside): for each reaped op, `poll_waiter_list_wake` (process
-  context) then `dev9p_poll_op_free`. Phase 2b: abandon each stranded op at
-  the client (Tflush) then free.
-- Phase 3: `dev9p_poll_collect_clients` — the **F1 fairness fix**: collect
-  the DISTINCT clients of the remaining non-terminal ops (dedup by
-  pointer, bounded `DEV9P_POLL_MAX_PUMP` 16), taking an EXTRA session ref
-  per client (the borrow-guard: the client must survive the unlock + the
-  blocking pump even if a concurrent reaper frees the op it was borrowed
-  from). Pump EVERY collected client's elected reader once with a 20 ms
-  frame-boundary deadline (`DEV9P_POLL_IDLE_NS`), drop each borrow, yield
-  if any pump reported the reader role held by a sync reader. Pre-fix the
-  pump drove only the head op's client — a perpetually-parked op on client
-  A starved client B's pending reply (v1.0-safe with ONE QTPOLL client;
-  latent under per-user netd).
-- Empty registry → park on the rendez with a cond that re-checks the
-  atomic op count (register-then-observe under the rendez lock — the
-  cons_mgr discipline). kproc never group-terminates; a defensive
-  SLEEP_INTR just re-loops.
+**The kthread (`dev9p_poll_service_once`, `KthreadWalk` / `GcArm`).**
+- Phase 1 (under the registry lock): terminal arms to the reap list;
+  STRANDED arms — non-terminal, with an empty hook list, because every
+  poller that wanted them has moved on — are unlinked, `ps->op` cleared, AND
+  FLUSHED (`p9_client_abandon_async`, g_lock → c->lock) in the same locked
+  step. A close that takes the lock after this finds no arm to cancel, so the
+  arm's read must already be off the fid: while it is live the session
+  refuses the close's Tclunk (`any_outstanding_on_fid`), `dev9p_close` has no
+  fallback, and the server's slot would stay bound for the session's life
+  ([[spec-net-poll-teardown]] `BUGGY_SPLIT_GC` — the collector was split this
+  way from #294 until NP-4c). The empty-check is nested under the registry
+  lock (g_lock → poll_list lock), atomic with the unlink against a concurrent
+  `dev9p_poll_arm`, which registers its hook before it takes the lock: a
+  poller already on the list defeats the collector; one that registers after
+  finds `ps->op` cleared and submits fresh. Snapshots are never collected
+  (`buggy_gc_snapshot`): they have no hook by design, and their pollers
+  release them.
+- Phase 2 (outside the lock): each reaped arm's list is walked
+  (`poll_waiter_list_wake`, process context), then the arm is freed. Phase
+  2b frees the stranded arms, already flushed.
+- Phase 3: `dev9p_poll_collect_clients` gathers the DISTINCT clients with a
+  read out — a non-terminal arm or a live snapshot (dedup by pointer, bounded
+  `DEV9P_POLL_MAX_PUMP` 16) — each with an extra session ref as the
+  borrow-guard, and pumps each client's elected reader once with a 20 ms
+  frame-boundary deadline (`DEV9P_POLL_IDLE_NS`). BUSY (a sync reader holds
+  the role) or DEAD (only an UNSENT snapshot can still name a dead client,
+  until its poller resends into it) yields the CPU rather than spin.
+- Nothing out → park on the rendez; the cond re-reads both atomic counts
+  under the rendez lock (`op_count || snap_live`), each bumped before the
+  submitter's wake — register-then-observe, the cons_mgr discipline.
 
-**#294 cancel-at-close (`dev9p_poll_priv_release`).** The op deliberately
-pins the poll-state + the SESSION (`p9_attached_ref`) but NOT the Spoor —
-pinning the Spoor deferred `dev9p_close` past the user's fd-close, which
-was the permanent netd-slot-leak root (the pre-#294 design). So at close:
-grab the outstanding op from the registry if still present (whoever
-unlinks owns the teardown — the kthread may have collected it first;
-`ps->op` is registry-consistent under g_lock), abandon it at the client
-(clears `c->inflight[tag]` + Tflush — no late completion can fire on the
-freed op, and netd releases the held Tread), free it, drop the priv's
-poll-state ref, NULL `p->poll`. The caller then clunks the `ready` fid —
-delivered deterministically at fd-close, not hinged on the kthread GC.
-The session-core half of the fix (the `any_outstanding_on_fid`
-awaiting_flush exclusion that lets the Tclunk follow the Tflush
-immediately) lives in [[sub-kernel-ninep-session]].
+**A SHORTAGE IS NOT AN ANSWER.** `p9_client_submit_async` reports no free tag
+or a full send ring as `-P9_E_AGAIN` (NP-4b, [[sub-kernel-ninep-client]]) and
+fires the completion with it; both completions leave everything alone,
+because the read is its submitter's again. A snapshot waits UNSENT for the
+core's resend; a failed arm is freed and the core bounds its park.
+
+**#294 cancel-at-close (`dev9p_poll_priv_release`).** An arm pins the
+poll-state + the SESSION (`p9_attached_ref`), NOT the Spoor — pinning the
+Spoor deferred `dev9p_close` past the user's fd-close, the permanent
+netd-slot-leak root. At close: grab `ps->op` from the registry if still
+there (whoever unlinks owns the teardown; the collector may have taken it,
+and then it has already flushed it), abandon it at the client, free it, drop
+the priv's poll-state ref, NULL `p->poll`. The caller then clunks the
+`ready` fid — delivered deterministically at fd-close. No snapshot can be out
+here: the core releases each before it drops its Spoor ref. The session-core
+half (the `any_outstanding_on_fid` exclusion of a flushed entry, which lets
+the Tclunk follow the Tflush at once) lives in [[sub-kernel-ninep-session]].
 
 ## Data structures
 
-`struct dev9p_poll_op`: `p9_rpc` at **offset 0** (`_Static_assert`-pinned —
-the completion recovers the container by cast, the audited Loom idiom),
-`ps` (+1 ref), `attached_owner` (+1 session ref; NULL only on the
-externally-owned-client test path), borrowed `client`, `fid`, `mask`,
-atomic `terminal`, registry `next`. `struct dev9p_poll_state`:
-`poll_waiter_list` (own lock), atomic `cached_revents`
-(`DEV9P_POLL_VALID` bit 16 + 16 revents bits), `op` + `wanted_mask` (under
-g_lock), atomic `refs` (priv 1 + one per op; freed at 0 —
-`specs/net_poll_teardown.tla` NoUseAfterFreePs). Globals: the registry
-chain + atomic count + rendez + init flag.
+`struct dev9p_poll_op` (the arm): `p9_rpc` at **offset 0**
+(`_Static_assert`-pinned — the completion recovers the container by cast, the
+audited Loom idiom), `ps` (+1 ref), `attached_owner` (+1 session ref; NULL
+only on the externally-owned-client test path), borrowed `client`, `fid`,
+`mask`, atomic `terminal`, registry `next`. `struct dev9p_poll_snap` (the
+snapshot's request): `p9_rpc` at offset 0, the poller's slot `s`,
+`attached_owner`, `client`, `fid`, `mask`, atomic `live`, `next`. `struct
+dev9p_poll_state`: `poll_waiter_list` (own lock), `op` (the newest arm, under
+g_lock), atomic `refs` (priv 1 + one per arm; freed at 0 —
+[[spec-net-poll-teardown]] NoUseAfterFreePs). The poller's slot is the
+core's `struct poll_snap` (`poll.h`). Globals: the arm registry + its atomic
+count, the snapshot list + its atomic live count, the rendez, the init flag,
+the test hold.
 
 ## Concurrency
 
 Lock order (verified acyclic, documented at the file head):
-`g_dev9p_poll_lock → c->lock` (submit / abandon), `g_dev9p_poll_lock →
-poll_list lock` (the GC empty-check nesting), `poll_list lock → …` (the
-wake, OUTSIDE g_lock), `c->lock → rendez` (the completion's wake — leaf).
-The registry lock is NEVER held across a wakeup or the blocking pump.
-Memory ordering: state refs RELAXED-add (a holder exists) / ACQ_REL-sub;
-`cached_revents` + `terminal` RELEASE/ACQUIRE pairs; the op count
-RELEASE-mutated, ACQUIRE-read by the park cond. The poll-state's
-`poll_list is empty at close` premise rests on the poll-scan discipline:
-a registered poller's Spoor obj-ref is retained until after the unregister
-sweep (the 2C-F1 held[] rule), so the last-ref close cannot run with a
-live poller.
+`g_dev9p_poll_lock → c->lock` (the arm submit; the collector's flush),
+`g_dev9p_poll_lock → poll_list lock` (the collector's empty-check),
+`poll_list lock → g_timerwait → rendez → cpu_sched` (a walk's wakes, OUTSIDE
+g_lock), `c->lock → rendez` (a completion's wake — leaf). No completion takes
+g_lock, so the edge from g_lock to c->lock cannot close a cycle. The registry
+lock is never held across a wakeup, a pump, a snapshot submit or an unref.
+Memory ordering: a snapshot's ANSWERED is a RELEASE store the settle's cond
+ACQUIRE-loads under the rendez lock; `terminal` and `live` are RELEASE/ACQUIRE
+pairs; both counts are RELEASE-mutated and ACQUIRE-read by the park cond.
+The `poll_list is empty at close` premise rests on the poll core's discipline:
+a registered poller's Spoor obj-ref is retained until after its unregister
+sweep (the 2C-F1 held[] rule), so the last-ref close cannot run with a live
+poller.
 
 ## Invariants enforced
 
 ![[inv-i9#Statement]]
 
-Here as PROBE-then-observe: the hook is registered AND a covering
-non-terminal probe is outstanding BEFORE the not-ready sample returns, so
-no readiness edge between the sample and the park is lost
-([[spec-net-poll]] NoMissedNetPoll; the `BUGGY_LOST_READY` cfg is the
-counterexample). The teardown half — the slot-freeing clunk delivered
-deterministically at fd-close with no op UAF — is
-[[spec-net-poll-teardown]] (Fix=TRUE clean; Fix=FALSE reproduces the #294
-leak).
+Here as hook-THEN-arm: when a poller parks, its hook is on the list and an
+arm covering it is on the wire, or its park is bounded by the retry timer
+([[spec-net-poll]] NoMissedNetPoll; `buggy_lost_ready`, `buggy_no_retry`),
+and the server evaluates the arm's level on arrival, so readiness that rose
+after the snapshot is answered at once (`buggy_edge_arm` — netd's and
+ptyfs's obligation). A verdict rests only on a snapshot answered in its own
+pass (`NoFalseNotReady` / `NoFalseReady`; `buggy_cache_only_sample`,
+`buggy_stale_cache`). The teardown half — the slot-freeing clunk delivered
+deterministically at fd-close with no arm UAF — is [[spec-net-poll-teardown]].
 
 ## Error paths
 
-OOM on the poll-state → always-ready. OOM on the op candidate → the F2
-degrade matrix above. Synchronous submit failure → POLLERR via the normal
-completion path. Client death → `client_mark_dead_locked` error-completes
-every async op (POLLERR cached + terminal); the next cycle reaps them and
-wakes pollers; a dead client's ops drop out of the collect.
+No memory for a snapshot request → UNSENT (resent). No memory for the
+poll-state or an arm → `dev9p_poll_arm` returns 0 (the retry timer covers
+the park). A shortage → the same two outcomes. A synchronous submit failure
+on a dead session → the completion's POLLERR, which the verdict reports.
+Client death → `client_mark_dead_locked` completes every read in flight —
+snapshots answered POLLERR, arms terminal — and a dead client's reads drop
+out of the collect.
 
 ## Performance
 
-The 20 ms idle deadline means a parked-forever poll costs the kthread a
-50 Hz wake ([[seam-221-idle-pump-wake]]); the deadline is LOAD-BEARING
-(it is what lets the kthread GC stranded ops and notice widens — an
-unbounded recv would wedge it on a never-ready socket). netd-side,
-`c1e49fb1` (2026-06-21) taught the serve loop to honor `poll_delay` while
-a probe is pending (~6× loopback throughput) — the netd half of the same
-economics.
+One server round trip per poll pass, whatever the fd count: every snapshot of
+a pass is sent before the core waits. The 20 ms idle deadline makes a parked
+arm cost the kthread a 50 Hz wake ([[seam-221-idle-pump-wake]]); it is
+load-bearing — it lets the kthread collect stranded arms and notice new work
+instead of wedging in a never-ready server's recv. KNOWN (in OPEN-BUGS,
+needs design): the one pump serializes clients, and a new snapshot's wake
+does not interrupt a pump already blocked in another client's recv, so a
+snapshot's answer can wait up to one 20 ms idle pump — each pass, now that
+every sample is a snapshot. Correctness holds (the settle waits; the 1 s bound
+is far away).
 
 ## Prosecution
 
-- **The I-9 window**: any reordering of register-hook / ensure-probe /
-  sample, or a submit that returns before the op is registry-linked,
-  reopens the lost-readiness park.
-- **The borrow-guard**: the kthread must never deref an op after the
-  unlock without a pin it took under the lock; the collect's extra session
-  ref must balance exactly (pin per collected client, drop per pump).
-- **Teardown races**: close-grab vs kthread-collect (both unlink under
-  g_lock — whoever unlinks owns the free); abandon must precede the free
-  (a late completion on a freed op is the UAF the Tflush prevents);
-  the reap's wake must precede `op_free` (the wake touches `ps` the op's
-  ref keeps alive).
-- **The consume-on-ready rule** (level-triggered) and the widen's
-  abandon+union (a `poll(POLLOUT)` must never hang behind a live
-  `poll(POLLIN)` probe).
-- **The fairness cap's cliff**: >16 distinct QTPOLL clients STARVES the
-  tail outright (LIFO head-anchored collect, no rotation) —
-  [[seam-223-pump-tail-starvation]]; the v1.x per-client work-queue must
-  use a fair start.
+- **The completion contexts**: under `c->lock` from the demux or mark_dead,
+  or in the submitter for a synchronous failure; never sleep, never g_lock,
+  never re-enter `p9_client_*`; `-P9_E_AGAIN` touches nothing.
+- **The release barrier**: `abandon_async` before the unlink and the free —
+  the answer writes a slot on the poller's stack, so a release that let a
+  completion run after it would write a dead frame.
+- **Linked means on the wire**: an arm reaches the registry only after a
+  successful submit; a widen flushes the old arm only after the new one is
+  out; a failed widen keeps it.
+- **The collector is one step**: unlink, `ps->op` clear and flush under the
+  registry lock ([[spec-net-poll-teardown]] `BUGGY_SPLIT_GC`).
+- **The borrow-guard**: the kthread never derefs a request after the unlock
+  without a pin it took under the lock; one session ref per collected client,
+  dropped per pump.
+- **The fairness cap's cliff**: more than 16 distinct QTPOLL clients STARVES
+  the tail outright (LIFO head-anchored collect, no rotation) —
+  [[seam-223-pump-tail-starvation]]; a per-client work queue must use a fair
+  start.
 
 ## Seams
 
-- [[seam-221-idle-pump-wake]] — the 20 ms re-poll while a probe is parked
+- [[seam-221-idle-pump-wake]] — the 20 ms re-poll while an arm is parked
   (v1.x: transport wake-on-write).
 - [[seam-223-pump-tail-starvation]] — the >16-client LIFO cliff.
+- The pump's cross-client serialization (Performance) — the same per-client
+  pump would close both.
 - The pouch ready-fd slot-reuse ABA (net-6b F4, task #222) lives on the
-  pouch surface — records with its sweep.
+  pouch surface.
 - The deterministic two-QTPOLL-client fairness regression for F1 remains
-  owed (no in-tree config drives two clients);
-  [[seam-841-mi-harness]] is the same family's umbrella.
+  owed (no in-tree test drives two clients); [[seam-841-mi-harness]] is the
+  family's umbrella.
 
 ## Caveats
 
-- The op's session ref means a stranded op can hold the whole attach
-  session alive until GC'd — bounded by the 20 ms cycle.
-- `dev9p_poll_complete` may fire from `client_mark_dead_locked` with
-  status < 0 and `dr == NULL`; the revents mapper handles both.
-- A previous terminal op is left in the registry when a fresh one is
-  submitted over it (`ps->op` overwritten); the kthread reaps it from the
-  chain — the chain, not `ps->op`, is the ownership root.
+- An arm's session ref means a stranded arm holds the whole attach session
+  alive until collected — bounded by the kthread's 20 ms cycle.
+- A terminal arm superseded by a fresh one stays in the registry until the
+  kthread reaps it (`ps->op` now names the fresh one); its walk still wakes
+  the pollers it served, and each arms again for itself. The registry, not
+  `ps->op`, is the ownership root.
+- On the multi-queue loopback test transport an armed recv deadline returns
+  at once on an empty ring, so while a test holds an arm the kthread pumps
+  in a loop rather than every 20 ms; kthreads are preemptible, so it costs
+  CPU, not progress.
 
 ## Provenance
 
 (generated from incoming `touched` edges — net-6b-2b
 [[chg-2026-06-18-net6b-poll-bridge]], the net-6b-4 close
 [[chg-2026-06-18-net6b4-close]], #294
-[[chg-2026-06-21-294-cancel-at-close]].)
+[[chg-2026-06-21-294-cancel-at-close]].) #98's SAMPLE/ARM split:
+`dec-2026-09-28-poll-sample-arm-split`; NP-4c rewrote this file.
 
 ## Tests
 
-`dev9p.poll_regular_file_always_ready` (the QTPOLL gate),
-`dev9p.poll_cancel_at_close` (the #294 regression: a deferred readiness
-Tread outstanding at close → no extinction + op torn down + Tflush
-submitted + the `ready`-fd Tclunk delivered + fid unbound; the racy
-mid-test snapshot was removed at the #294 formal round's F1). The live
-path: the joey net-6b boot probe (POLLOUT-ready full loop + POLLIN
-park-then-timeout with kthread GC) + `netd: net-6b ready E2E PASS` +
-[[gate-smp]].
+The `dev9p.poll_*` set in `kernel/test/test_dev9p.c`, on the multi-queue
+loopback with a scripted readiness server and the live kthread (the teardown
+waits for the kthread to park before it destroys the client):
+`regular_file_always_ready` (the QTPOLL gate),
+`snapshot_answers_at_zero_timeout` (#98 itself),
+`local_and_remote_both_reported` (the settle), `snapshot_shortage_is_resent`,
+`unanswered_snapshot_fails_safe` (the fixed bound, the flush, the count),
+`arm_wakes_the_parked_poller` (the walk), `retry_timer_is_a_wake`,
+`widen_keeps_the_old_arm_until_replaced`, `cancel_at_close`, and
+`gc_flushes_with_the_unlink` (the kthread held between its collect and its
+frees while the file closes) — each shown RED on its sabotaged kernel, on
+the assert that names the rule. The live path: the joey net-6b boot probe,
+`netd: net-6b ready E2E PASS`, the pty-probe's ready wire, viv-pheno-probe
+L113 (a ready socket at timeout 0), and [[gate-smp]].
+
+**The tests are built to fail cleanly.** A failing assert returns early, and
+what the test had linked stays linked. So the fixture, the hooks a test
+registers through `dev9p_poll_arm`, and its poller thread live in static
+storage, never on the test's stack: a hook on a dead frame would be written
+by the next arm's walk. `np_setup` refuses while a failed test's fixture is
+still up, so it never re-initialises a client the kthread may be pumping.
+`np_teardown` takes the fixture down in dependency order (hooks, poller,
+file, kthread parked, client) and leaves it up (a leak, never a UAF) when a
+thread will not let go. The kernel test runner releases a fixture a failed
+test left up, printing `NP-FIXTURE`, alongside the two poll knobs
+(`POLL-KNOB`). The regular-file test reads and releases everything before
+it asserts anything. Before this, one failing test cascaded: under a broken
+QTPOLL gate the regular-file test left a live snapshot whose slot was on its
+dead stack, and the next test hung the boot.

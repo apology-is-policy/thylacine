@@ -98,6 +98,17 @@ lc_send "cat /tmp/haul-post/hello.txt | tr a-z A-Z; echo read-completed | tr a-z
 lc_expect "THE THYLACINE IS REAL" "same-shell remote file read"
 lc_expect "READ-COMPLETED" "read command and pipe have exited"
 lc_pass "posted encrypted tree is readable in the existing elevated shell"
+
+# LR-1 (HAUL-DESIGN 4.8): the manual's primary flow -- haul posts, the SHELL
+# mounts -- and the mount still says it is remote, because the declaration rode
+# the service (DMSRVREMOTE), not the mount call. haul-second, beside it and not
+# mounted, reads fs in the same listing: the control one variable away.
+lc_send "ls -l /tmp | tr a-z A-Z"
+lc_expect_re {REMOTE +[^ ]+ +HAUL-POST} "the shell's mount of the posted service reads remote"
+lc_expect_re {FS +[^ ]+ +HAUL-SECOND} "the unmounted directory beside it reads fs"
+lc_send "ns | tr a-z A-Z"
+lc_expect_re {MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE} "ns, the shell's own namespace by default, shows the remote line, named by the service it came over"
+lc_pass "LR-1: a posted haul service mounted by the shell reads remote in ls -l and ns"
 lc_send {mount /srv/haul-e2e /tmp/haul-second /; echo SECOND-STATUS=$status; echo $errstr}
 lc_expect "SECOND-STATUS=1" "second attach fails"
 lc_expect "mount: cannot attach" "stored attach error"

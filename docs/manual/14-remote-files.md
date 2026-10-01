@@ -67,6 +67,36 @@ abdicate
 Replace the example address, token path and filename with your server's values.
 `abdicate` ends the elevated scope and its background relays.
 
+### Confirm that a directory is remote
+
+A long listing of the directory that holds a mount point marks a Haul mount with
+the realm `remote`. With the mount above in place, run:
+
+```sh
+ls -l /tmp
+```
+
+The `REALM` column of the `remote` entry reads `remote`. A directory with nothing
+mounted on it reads `fs`, and a local mount point, such as `/srv` in a listing of
+`/`, reads `mount`. `la`, the shell's alias for `ls -la`, shows the same column,
+and `realm /tmp/remote` prints the realm of a single path. If the shell holds so
+many mounts that their list is too long to read whole, the listing says
+`mount list incomplete`, and a mount point missing from the list shows its
+ordinary realm.
+
+`ns` with no operand prints the mount table of the shell that runs it. The line
+for `/tmp/remote` names the source `/srv/remote`, the service the mount came
+over, and reads `remote` in the `REALM` column; its `FLAGS` column shows any
+restriction the mount carries, such as `noexec`. A mount made by Haul's private
+form, described under Separate remote sessions, names the source `#|`. `ns 0`
+prints the system's root namespace instead, which does not contain mounts made
+in a shell.
+
+Both forms of Haul mark the mount: the private form marks the session it
+attaches, and `haul --post` marks the posted service, so a mount made through
+the service with the shell's `mount` builtin is marked as well. After `unmount`,
+the directory reads `fs` again.
+
 ### Ownership and permissions
 
 Thylacine reports every file on a Haul mount as owned by the user who mounted
@@ -104,6 +134,9 @@ the ones that apply to the user who mounted it.
   mount privately, then run a child command or park. Use an absolute command
   path, such as `/bin/ut`.
 - `imperium --list`: inspect the current elevated scope. `abdicate`: leave it.
+- `ls -l DIR` or `la DIR`: the `REALM` column reads `remote` for a Haul mount
+  point in DIR and `mount` for a local one. `ns [PID]`: the mount table of the
+  calling shell, or of process PID, with each mount's realm and flags.
 
 Haul options must precede the two operands. Post mode does not accept `-a` or a
 child command. Names are single printable ASCII components, at most 32 bytes,
@@ -167,12 +200,49 @@ directly. Nothing identity-related is sent to the server. The attach names no
 user, a create asks the server to keep its default group, and a change of owner
 or group is refused before it reaches the server.
 
+### How a mount is marked remote
+
+The kernel cannot observe where a Haul session's data goes. Haul relays the 9P
+messages between the host connection and two local pipes, and the kernel uses
+those pipes as the session's transport; the TCP connection belongs to Haul and
+the network service. Haul therefore declares the session remote when the session
+is created. The private form sets a flag on its attach, and `haul --post` sets a
+flag on the posted service, which marks every session attached through that
+service. The kernel records the declaration with the session before the mount's
+root becomes usable and does not change it for the life of the session.
+
+The mark is displayed and has no other effect. The kernel's list of a process's
+mounts ends a mount's line with the word `remote` when the mount's source belongs
+to a marked session, and `ls`, `stat`, `realm` and `ns` read that list. The same
+list names a mount's source by the file its session came over: the service in
+`/srv` that the shell's `mount` opened, or `#|`, the name of the pipe device, for
+Haul's private form, whose session runs over pipes that have no names. Name
+resolution, permission checks and caching behave identically on marked and
+unmarked sessions. Any program that attaches a session can declare it remote, so
+the mark reports what the attaching program stated; Haul states it because Haul
+holds the network connection. A union's own directory, which the kernel keeps as
+a member of the union, is never marked, because no program mounted it.
+
+`ls` identifies a mount point by name. It reads its own mount list, which is a
+copy of its shell's, and compares the absolute path of each entry it lists with
+the mount-point names in that list. The name of a mount point is recorded when
+the mount is made, so a mount point that is listed under a different name, for
+example through a bind, shows the realm the directory has without the mount. The
+list does not quote names, and a mount point whose name contains whitespace is
+not recognized reliably.
+
 ### Failure and cleanup
 
 `mount` and `unmount` set `$status` and `$errstr`. Run `echo $errstr` to display
 a failure reason. A second mount of one post is refused; a missing post, busy
-name or exhausted quota also fails. Confirm the service announcement before
-mounting, and use `haul -v` for connection and handshake progress.
+name or exhausted quota also fails. PATH must be a directory: a mounted service
+is a directory tree, and mounting one over a file fails with
+`mount: cannot mount at PATH: not a directory`. A symbolic link counts as a file
+here, because the mount point is the link itself. End PATH with `/`, as in
+`/tmp/ln/`, to mount on the directory the link points to. That fails while a
+file is mounted on the link itself; unmount it first. Confirm the service
+announcement before mounting, and use `haul -v` for connection and handshake
+progress.
 
 Haul writes its messages to standard error, so they appear in the terminal or
 Halcyon tile that ran it. When the server cannot be reached, Haul names the

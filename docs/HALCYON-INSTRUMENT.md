@@ -436,7 +436,14 @@ joins it), then refuses like a full table. The two minima ride `Metrics`
 (`min_pane_w` 260, `min_body_h` 54; §5.7) so they scale with the rest.
 Weights live on the pane (`Pane.weight`): a newcomer to a container takes
 the MEAN of its siblings (an equal share, the siblings' ratios untouched —
-i3's `con_fix_percent`); a nesting split's container takes the leaf's
+i3's `con_fix_percent`) — of the siblings the container DIVIDES: a
+backgrounded one takes no share of the division (KT-1.5d-3 F2's structural
+transparency), so its weight has no say in the mean, except in a container
+whose every child is backgrounded, which divides among all of them (the
+carve's own rule; a dormant workspace is such a tree) (2026-09-28: the
+console renderer's leaf, weight 1 beside tiles a drag had weighted by
+their extents, gave a newcomer two thirds of an equal share); a nesting
+split's container takes the leaf's
 weight and the two inside halve; a dissolved container's survivor takes
 the container's; a swap moves the weight with the pane. The verb is
 `weight <id> <1..65535>` on the pane ctl and in the `layout` file (the
@@ -1511,6 +1518,20 @@ close with no rail (or onto a rail whose queue is too full, which retires
 it) is performed by the compositor itself, exactly as before I-7b. So
 `deliver_chord` returns whether the owner actually has the chord, and
 only the close arm reads that answer.
+
+**Widened at TC-1b (2026-09-25).** `code` 4 is the HISTORY chord
+(`Super+K`, the `history` action; HALCYON §14.13), the user's deletion of
+a tile's record. Like the close it carries the FOCUSED PANE's id, and the
+owner forgets the history of the tile it hosts under that id. Unlike the
+close it has no fallback: the transcript belongs to the environment and
+never to the compositor, so with no rail (the legacy profile, or a seat
+whose rail is not up), onto a rail too full to take it, or for a pane the
+owner does not host (the console seat's renderer hosts only its own), the
+chord is said and dropped and nothing is deleted. There is deliberately no
+verb for it: a program that could write one could delete the record, which
+§14.13 forbids. The key is the one Terminal and iTerm2 use for the same
+act (Cmd+K), and like theirs it does not ask first: unlike the close, it
+cannot end a running job or touch the live screen.
 
 ### 9.4 The theme picker and live switching
 

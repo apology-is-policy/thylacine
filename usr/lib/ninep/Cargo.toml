@@ -1,0 +1,17 @@
+[package]
+name = "ninep"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "ninep"
+path = "src/lib.rs"
+
+# The 9P2000.L wire codec a native server speaks (netd, ptyfs, corvus and the
+# rest reach it as `libthyla_rs::ninep`, which re-exports this crate). It has no
+# dependencies and makes no system calls, so `tools/test-rust.sh` runs its tests
+# on the host; inside libthyla-rs they could run nowhere, because libthyla-rs's
+# `_start` cannot assemble for a host target.
+[dependencies]

@@ -46,7 +46,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -244,6 +244,152 @@ the floor is exact whatever the metrics or the padding. The gap rides through
 first cut ended the history AT the tail, so its last `pad_top` pixels -- a whole
 line on Instrument -- showed above the slide). It is the
 only way the tile learns of a clear; blank cells are never read as one.
+
+**A synchronized frame holds the tile's paint, and nothing else (FL-1, HALCYON
+14.3).** `Tile.hold` (`vt::FrameHold`, [[sub-lib-vt]]) follows the program's
+frame: `apply_control` opens it on `SyncBegin`, closes it on `SyncEnd` and cuts
+it on `Exit`. Every record still applies as it arrives, so the seam's ordering
+contracts, the pin above among them, are untouched. The session's render step
+skips a tile whose paint is due while `hold.holds(now)` says wait, leaving it
+dirty; a skipped tile is not a present, so it counts neither toward the "session
+up" witness nor toward the present-failure limit. A gone child's tile (`exit`
+set, which also covers a crash that sent no `Exit`) never waits. Only that tile
+waits: every other tile paints as usual. A successful present calls `painted()`,
+which ends the hold, and test builds then say once per tile `synchronized frame
+shown (N paint(s) held)` when the program closed the frame, `... abandoned at its
+bound ...` if the 150 ms bound let it through, or `... cut short ...` if a
+reconfigure or the program's end cut it, or the paint landed while it was still
+open -- so a render step that counts the hold but paints anyway never reads as a
+whole frame. That line is the premise the device leg measures: the frame
+spanned reads, so without the hold a torn screen would have shown. The poll
+timeout folds the nearest `due_ms` over the held tiles, so a program that never
+closes its frame gets its tile painted at the bound, not at the next unrelated
+event. A surface CONFIGURE (a resize, or the compositor's redraw request) cuts
+the hold; a scale change that only reshapes the grid does not, since the
+surface still shows the last whole paint. The loop's pre-poll rule -- any dirty
+tile loops back to render before
+blocking -- excepts a live tile whose paint is `waiting()`: it waits in the poll
+for the rest of its frame or the deadline. The first device run had no such
+exception, and the held tile spun the loop (91612 held passes in 150 ms) without
+ever reading the frame's close, so the bound abandoned every frame; leg 8 now
+fails on a held count of 1000 or more. The hold lives here, not in the kaua-term, because halcyond paints
+after every read of a tile's pipe (at most `INGEST_BUF` = 8 KiB) and one
+full-screen `CellDiff` is about 40 KB.
+
+**Super+K forgets the history, and only the history (TC-1b, HALCYON 14.13).**
+The chord is the user's: the compositor delivers `TEV_CHORD` code 4 with the
+focused pane's id to the rail's owner ([[sub-tapestryd]]), and `railset` maps it
+to `RailAction::ForgetHistory`. The session resolves the id against the tiles it
+hosts, the console renderer only against its own pane; any other id is said and
+dropped. There is no verb and no fallback. `Transcript::forget` drops every
+frozen block, the open block's items, the half-rejoined `scroll_pending`, and
+what a byte-fed zone's open `pre` has gathered and its open table has finished
+(the header flag with those rows). It keeps the open block's identity, cmd mark,
+styles and objs, with its class latched first (a zone is a document once any of
+its content was structure), and every piece of in-flight structure (`pre`,
+`table`, the em/obj stacks, `table_specs`) with the row still being written, as
+it keeps the pending line; so a running command's later rows and its zone close
+land where they would have. The bar's `exit N` goes with the command it named.
+The live screen keeps its links and its look. A grid cell resolves its obj and
+its zone's class through the block that was open when it was written (the span
+ring), usually a frozen one, so every block `SpanMap::named` names survives as a
+HUSK in `Transcript.husks`: a `Block` with no items or styles, its kind and its
+latched class, plus only the named objs, kept sparse by index (`Husk.objs`,
+ascending) so an unnamed index resolves to nothing. The store is sorted by
+block id (an injected image freezes out of id order) and searched by binary
+search. Husks are never laid out or selected; `block_by_id`, `obj_in_block`,
+`local_obj` and `live_block` find them. Each costs `HUSK_OVERHEAD` (its
+`Block`) plus each kept obj's entry and text, and the budget evicts husks before
+any frozen block, including at the end of the forget itself.
+`Tile::forget_history` keeps the inline images a ring-named obj names and those
+no obj names yet (an upload still to be captioned), releases the rest, and
+clears the pin (the history it pinned against is gone) and the height and frame
+caches. `clear` then Super+K leaves an empty tile.
+
+**What the budget charges, and what the cap's freeze keeps (TC-1b rounds).** An
+obj costs its table slot (`OBJ_OVERHEAD`, one `Obj`) as well as its text at
+every site that stores one (`open_op`, `local_obj`, `retained_cost`), and an obj
+frame meets the open block's cap before it is pushed, so objects alone freeze a
+block where the budget can reach it (a bare obj used to be free). A block-cap
+continuation carries the running command's mark while it has no exit (else
+`running()` read false and Super+Q closed a running job unasked). In a tile the
+cap's continuation keeps an open `pre` and table open -- their text is on the
+grid, and the accumulators hold only the state cells are tagged under -- and an
+empty accumulator finalizes to nothing (an empty fence would be a history row
+that no line added).
+
+**The Normal-mode selection follows its rows (TC-1b, HALCYON 14.11.5).** `Sel`'s
+cursor and anchor are flat positions, and both hosts used to clamp them after a
+re-flatten, so a budget eviction moved the selection onto other rows, and yank
+and Enter acted on those. `Sel` now keeps a `select::Stamp` of the list it
+indexes: the transcript's `rows_dropped` (front drops, budget evictions and
+forgets alike, counted by `Item::flat_rows`, the one row rule `select::flatten`
+uses), `rows_left`, `rewraps` and `repaints` (below), and how many leading rows
+were the transcript's. `Sel::rebase` moves a transcript row up by the front
+drops. A live-grid row follows its text. It moves up one per row the grid has
+SHOWN leaving, and one that left is found through the transcript's record of
+the lines scroll-off completed (`ScrollLine { end, added }`, a ring of
+`SCROLL_LINES_MAX` = 1024). `Transcript::scrolled_row` counts back from the end
+to the history row its line joined (`ScrolledRow::History`: both halves of a
+wrapped line, a pre line joining its fence), the grid's first row while its
+line is still held (`Held`), nothing once forgotten or evicted (`Gone`), the old
+end-anchored estimate past the ring (`Unknown`), or, for a number no row has
+reached yet, `Ahead`, which the rebase reports and the tile restarts at the
+prompt. Counting back is exact only because every history row a tile holds
+arrives through such a line.
+
+The count is two counters. `rows_scrolled()` is the live count: the rows
+`push_scrolled_rows` took off the grid, plus `rows_shed`, the rows the mirror's
+own reflow dropped at a resize that have not arrived yet (a ScrollOff consumes
+`rows_shed` before it raises the count). `rows_left` is the published count the
+stamp reads: `note_grid_moved` sets it to `rows_scrolled()` at the end of every
+CellDiff, and `note_grid_shed` moves it at the mirror's reflow. A ScrollOff and
+its repaint can straddle reads, and the session paints between them, so rows
+alone move no end until the repaint shows them gone. A shed of n adds n to
+`rows_left` but only n - min(n, k) to `rows_shed`, where k = `rows_scrolled()` -
+`rows_left` counts the rows that arrived ahead of their repaint (the grid's top
+k rows, here already). So `rows_shed` > 0 implies k = 0, and every grid end's
+`rows_left` + g is its text's number in the ring. The producer answers each
+resize it applies with a `WinsizeAck` and then a full repaint
+([[sub-kaua-term]]). That acknowledged repaint at the grid's dims settles the
+mirror's guess (`settle_grid_shed`: kaua-term coalesces resizes and can be ahead
+of the mirror): the ends move DOWN by the rows the producer kept, and one moved
+past the grid's last row is reported. A width change, on either screen (the
+producer re-cuts its main screen beneath the alt screen), opens a re-cut window
+(`rewraps` odd) until that repaint. Rows cut at other widths are no distance, so
+the grid ends keep their places, a run goes at the grid's first repaint
+(`repaints`; every repaint in the window bumps `seq`), and the settle restarts
+the ends at the prompt. An acknowledged reply at another width opens the window
+again, because the ack names no resize. `Tile::resize_selected` slides the grid
+ends with their rows at a height change (by the `rows_left` delta), restarts at
+the prompt those on rows it slid past or cut off, and restarts all of them at a
+width change. A selection whose row went moves to the oldest row left; a grid
+end that left the grid drops its run.
+
+After a full-screen app exits, the mode flip arrives ahead of the main screen's
+repaint, and until that repaint lands (`Tile::screen_pending`, set at a flip and
+cleared by the next CellDiff) the grid holds the app's last frame.
+`Tile::normal_screen_shown` is false then, so the session's Esc gate
+(`Tile::modal_key`; an Esc press enters Normal mode, and a held Esc's repeats
+in Insert are the program's) leaves Esc to the app, and a resize crops the
+frame rather than reflowing it: a reflow would count rows that never left the
+normal screen. Starting an app is the mirror of it: the flip to the alt screen
+arrives ahead of the app's first paint, and until that lands the grid still
+holds the shell's screen, while keys and a resize are already the app's. The
+render paints what the grid holds (`Tile::holds_normal_frame`, true when the
+mode is Normal XOR `screen_pending`): the app's last frame as the mono grid,
+and the shell's last frame as it was, proportional on the sheet's ground. The
+producer's diff of that frame carries the main screen's wrap flags
+([[sub-kaua-term]]), so its soft-wrapped rows stay joined. The held-fragment
+flush and the ScreenErased pin still ask the mode, since they read the
+producer's state. The
+console's one mid-list insert (a placed inline image freezes in front of the
+open block's rows) is followed by `Sel::shift_from`. `select::refresh` is the
+one re-flatten and rebase: both hosts call it before a key and before a paint,
+and it re-reads on a `seq` change or a grid height change. Every transcript
+entry point that changes the flat list bumps `seq`; before TC-1b, scroll-off, a
+held half's flush and a budget re-share did not, so a tile's list could index
+blocks the budget had already dropped until the next Beacon frame arrived.
 
 **Beacon presentation rides the span serial, parser-free (H-4d).** A tile renders
 obj/em/hdr markup over its cell grid without a second Beacon parser: the producer
@@ -968,7 +1114,7 @@ presents are a recorded optimization.
   is ADDRESSED by the SQPOLL ring (KT-1.5b-i): the kernel poll-thread demuxes
   the console's parked reply on a frame-boundary deadline independent of
   halcyond's loop branch. A targeted repro is owed.
-- **Currency (2026-09-25): this dossier was edited for TC-1 only.** The halcyond
+- **Currency (2026-09-28): this dossier was edited for TC-1, TC-1b and FL-1 only.** The halcyond
   changes between 2026-09-17 and 2026-09-22 (about 940 lines of `tile.rs`
   alone) are not yet described here, beyond what earlier sections already say.
   Dating this edit stopped `quaestor stale` from flagging the dossier, so the
@@ -982,6 +1128,29 @@ presents are a recorded optimization.
   `work/hi1b-pi-deadline-fixed.log`. No live clipboard adapter is tested yet.
 
 
+
+- **FL-1 (2026-09-28): 424 lib tests, all green** (`tools/test-rust.sh
+  halcyond`). `the_frame_records_open_and_close_the_hold_and_an_exit_closes_it`
+  pins the records' effect on `Tile.hold`;
+  `a_slide_split_across_two_reads_is_held_until_its_close` runs lantern's slide
+  change through the real vt, producer and wire, cut in two reads right after
+  the erase: after the first read the tile holds the blank, after the second
+  the slide is through. Sabotage: SyncBegin opening nothing (S12) and SyncEnd
+  closing nothing (S14) red both; an Exit that leaves the hold open (S13) reds
+  the first. The render step's skip, the witness line, the poll deadline and the
+  CONFIGURE close live in the bin and are proven on the device
+  (`ls-halcyon-lantern`).
+- **TC-1b (2026-09-28): 422 lib tests, all green** (`tools/test-rust.sh
+  halcyond`). TC-1b's tests pin the forget (what goes, what stays, the husks,
+  the budget, the obj charge, the continuation, the cap's freeze in a tile), the
+  selection across front drops, a forget, a wrapped scroll-off, a held half and
+  the image insert, and, through the real producer and vt on the seam, every
+  resize case the audit rounds raised: rows split from their repaint, the shed
+  counted once, the settle, the re-cut window on either screen, a reply at
+  another width, a row cut off below, a run held in the window, a reply at an
+  earlier, taller size landing between two shrinks, the app's last frame (Esc,
+  paint, crop), the shell's frame until an app's first paint (paint, ground)
+  and the modal gate.
 - **TC-1 (2026-09-25): 340 lib tests, all green** (`tools/test-rust.sh
   halcyond`; the per-module figures below are older). TC-1 added ten in
   `tile.rs`: `a_screen_erase_pins_the_live_tail_to_the_top_of_the_view` (the
@@ -1326,6 +1495,113 @@ compiles them: the guest build and the interactive gates are the only
 witnesses, as they were for round 1's F5/F6 and round 2's F6.
 
 `MAX_WORKSPACES` is no longer hand-copied here -- see [[sub-libhalcyon]].
+
+## A backgrounded leaf is no stack member and no RESET target (2026-09-29)
+
+The compositor's `layout` dump marks the console renderer's leaf `backgrounded`
+(first in a session's root row, weight 1), and tapestryd's carve skips it: the
+Stack arm lays out only the shown members and the Tab arm opens the first shown
+one ([[sub-tapestryd]], KT-1.5d-3 F2). halcyond read the same rows without the
+token. On a root row stacked by Super+S ([console, tour, shell]) `parse_tree`
+numbered the two shown tiles 02 and 03 of a stack of 3, so the last shown tile's
+close box -- which refuses only a stack of one (HALCYON-INSTRUMENT 6.5, FINAL
+TILE IS PROTECTED) -- closed it, and the session with it; and `reset_plan`
+planned a focus on the console leaf, which the compositor refuses, so RESET
+reported RESET REFUSED.
+
+`parse_tree` now takes each stack's `index`, `count`, `open` and `last` over the
+members the carve shows: a post-pass per stack drops the backgrounded ones and,
+when the active member is backgrounded, opens the first shown member, as the
+Stack arm does. **Only the displayed number, the count and the two flags move;
+every action still names its leaf by ID**, so no header maps back to a raw
+position. The count is `n.saturating_sub(backgrounded).max(1)`: a malformed
+dump listing more backgrounded members than its `n=` gives a count of 1, never
+an overflow panic (release builds keep overflow checks).
+
+`reset_plan`'s rows carry the token: `children_of` skips backgrounded children
+and `reexpands` judges a stack against its FIRST SHOWN child, so RESET neither
+focuses the console leaf nor re-expands a stack already open on its first shown
+tile. A root row whose active child is backgrounded plans nothing for it.
+
+Tests: the Super+S row's numbering and count and the malformed dump
+(`chrome.rs`); three `reset_plan` cases, a control without the token, and the
+backgrounded-active root (`rail.rs`); each red under a sabotage of its hunk. On
+the device, `ls-halcyon-manual` leg 1b: a right press on the shell's header in
+the stacked login row says `count: 2`.
+
+## The chrome line says every change of a header's rect (2026-09-29)
+
+In test builds the chrome set says `halcyond: chrome <surface> for pane <id>
+at <x>,<y> <w>x<h>` when it mints a header or placard strip and whenever the
+strip's rect changes; gates find a header by the LAST such line (a close-box
+press at `x + w - 9`, a blank-corner click at `x + w - 30`). The change test
+compared the wanted rect with the strip SURFACE's size, but the strip's own
+CONFIGURE (handled by the pump) resizes the surface before the layout pass
+runs, so a header that changed width at the same position was never said:
+after Super+H in a row of two the tour's header went from 632 to 418 px at x 4
+and its last line still read 632. The test now compares against the geometry
+the line last SAID (`Tile::said`, test builds only), set at the mint and at
+each say. `ls-halcyon-manual` leg 4a reads the three headers' widths after the
+split and was red on the old rule.
+
+## An empty workspace waits to be asked (2026-09-29)
+
+The session's spawn plan (`tiles::plan_tiles`) makes a tile for every empty,
+visible leaf it does not host and has not closed; the claim mint is the
+owner-and-emptiness gate. When tapestryd began stamping a session's new
+workspace roots with the session's principal ([[sub-tapestryd]]), that root
+became claimable and the plan filled it at once: a new workspace came up with
+a shell in it, so an empty one could no longer vanish when left (the i3 rule,
+HALCYON-WORKSPACES). A first fix keyed the wait on the tree's shape -- the
+active workspace's lone empty root waited -- and it swallowed a one-leaf
+`halcyon layout restore` onto a new workspace: the placeholder is hosted into
+the fresh root, `split` nests it with the anchor, the placeholder closes, the
+container dissolves, and the anchor became a lone empty root that waited
+behind a placard (Fable round 4, F2). The rule now keys on how a pane came to
+be. The compositor's dump marks ` fresh` an empty leaf it made on its own
+account ([[sub-tapestryd]]), `chrome::Leaf` carries the token, and
+`plan_tiles(leaves, have, closed, opened)` fills a fresh leaf only when the
+session's `opened` set holds it (the placard's Open shell); Super+N's ask
+clears the mark in the compositor. A leaf a split makes, or a restore builds,
+is not fresh and is filled as before. Pinned by
+`a_fresh_pane_waits_to_be_asked_and_a_restored_root_does_not`, which parses
+real dump rows (a fresh root, its asked control, a restored root, a split's
+leaf), red when the rule or the parser is broken.
+
+## A session tile draws its selection (2026-09-29)
+
+A session tile banded only the Normal-mode CURSOR row: `session.rs`'s `mark()`
+handed `Tile::render` one `Mark`, while the console renderer bands every row of
+`sel.range()`. The `v` anchor existed -- TC-1b rebases it in both hosts -- and
+was never drawn, so `v` then `kkk` then `y` changed nothing on screen (the
+Operator's Manual chunk's device run 11, leg 10). `Tile::render_selected` now
+takes the selection's rows (`tile::selection_bands`, each keyed by
+`tile::block_key` as a `Mark` keys the cursor) and bands each row once -- the
+frozen blocks, the open block and the live grid -- through the session's
+`bands()`; `render` is the no-selection form and paints byte-identically.
+Pinned by `a_selection_bands_each_row_it_covers`, red under four sabotages (no
+frozen bands; no cursor dedupe; no grid arm; the anchor ignored); on the
+device, `ls-halcyon-manual` leg 10a (`v`, `k`, `y` each change the band).
+
+## The layout notice rides any surface (2026-09-29)
+
+The session loop re-planned its tiles on a TEV_LAYOUT only when it arrived on a
+TILE's stream; the chrome, bar, rail and menu pumps drop events they do not
+handle, and tapestryd sends the notice to the seat's lowest surface slot,
+whatever it hosts ([[sub-tapestryd]]). After churn that slot was a chrome
+surface, which the chrome reconcile drops whenever its pane leaves the active
+tree. On the Operator's Manual chunk's device run 13, `halcyon workspace 4;
+halcyon layout restore X` left the restored pane empty behind a placard: the
+notice for the restore's released reservation -- no geometry changed, so it
+was the only one -- went to chrome 1, and chrome 1 was dropped on the
+workspace switch.
+
+Step (3) now also takes the ring's `take_layout_hint()` as a relayout
+([[sub-libtapestry]]), and the loop does not block while `layout_hint()` is
+set: a notice reaped by the chrome, bar or rail pumps after the reconcile would
+otherwise wait for an unrelated wake. The tile loop's own TEV_LAYOUT arm stays.
+On the device, `ls-halcyon-manual` leg 16's restore onto workspace 4 is the
+witness (red 3/3 on the image before the fix).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

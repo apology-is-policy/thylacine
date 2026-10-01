@@ -1237,8 +1237,27 @@ static enum fault_result file_demand_page_slow(struct Proc *p,
     return r;
 }
 
+static enum fault_result demand_page_one(struct Proc *p,
+                                         const struct fault_info *fi);
+
+// ARCH 8.8.3 (signal(7)'s list): a page-in waits killable, as Linux's
+// filemap_fault does, so the ONE entry clears note_interruptible around it. A
+// caught note must not cut a file page-in short: at EL0 that is a SIGBUS, and
+// inside an interruptible read's copy-out it turns the read into an EFAULT.
+// Death still unwinds the page-in. Restored, not cleared, because the fault may
+// sit inside a syscall that is itself interruptible.
 enum fault_result userland_demand_page(struct Proc *p,
                                        const struct fault_info *fi) {
+    struct Thread *t = current_thread();
+    bool intr = t && t->note_interruptible;
+    if (t) t->note_interruptible = false;
+    enum fault_result r = demand_page_one(p, fi);
+    if (t) t->note_interruptible = intr;
+    return r;
+}
+
+static enum fault_result demand_page_one(struct Proc *p,
+                                         const struct fault_info *fi) {
     if (!p || !fi)                       return FAULT_UNHANDLED_USER;
     if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
     if (!p->as)                          return FAULT_UNHANDLED_USER;

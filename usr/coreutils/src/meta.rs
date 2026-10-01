@@ -2,10 +2,13 @@
 //! realm), the perms string, the owner, and the 9P qid -- the logic ls / stat /
 //! realm / qid all present. Backend-gated (uses libthyla-rs `Metadata`).
 
+use crate::nsmount::MountRealms;
 use crate::palette;
 use alloc::format;
 use alloc::string::String;
-use libthyla_rs::fs::Metadata;
+use core::sync::atomic::{AtomicBool, Ordering};
+use libthyla_rs::fs::{File, Metadata};
+use libthyla_rs::io;
 
 /// The kind of a namespace entry -- drives its color, classify suffix, and the
 /// REALM column. `Graft` is the Thylacine flavor: a live kernel namespace mount
@@ -45,6 +48,46 @@ impl Kind {
             _ => "fs",
         }
     }
+}
+
+/// The caller's own mount list (`/proc/<pid>/ns`), for the REALM of a mount
+/// point. A program's namespace is a copy of the shell's that spawned it, so
+/// this is the shell's list. An unreadable list is an empty one: every entry
+/// then shows the realm its `fstat` gives, as before LR-1.
+pub fn mount_realms() -> MountRealms {
+    let pid = unsafe { libthyla_rs::t_getpid() };
+    if pid < 0 {
+        return MountRealms::default();
+    }
+    let path = format!("/proc/{}/ns", pid);
+    match File::open(&path).and_then(|mut f| io::slurp(&mut f)) {
+        Ok(data) => MountRealms::from_text(core::str::from_utf8(&data).unwrap_or("")),
+        Err(_) => MountRealms::default(),
+    }
+}
+
+/// The footer `ls -l` draws when the mount list was cut
+/// (`MountRealms::truncated`).
+pub const MOUNT_LIST_CUT: &str = "mount list incomplete";
+
+/// The same news on stderr, where there is no box to carry it: once per run.
+pub fn warn_mount_list_cut(prog: &str) {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if !SAID.swap(true, Ordering::Relaxed) {
+        libthyla_rs::eprintln!(
+            "{}: mount list incomplete; a mount point may show its plain realm",
+            prog
+        );
+    }
+}
+
+/// An entry's REALM: the mount table's word when `path` names a mount point
+/// (COREUTILS-THYLACINE-DESIGN REALM; ahead of the fstat inference), else the
+/// kind's.
+pub fn realm_of(realms: &MountRealms, path: &str, kind: Kind) -> &'static str {
+    crate::path::abs(path)
+        .and_then(|a| realms.realm(&a))
+        .unwrap_or(kind.realm())
 }
 
 /// Classify from what `readdir` said (was it a directory?) and the `fstat`

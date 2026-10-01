@@ -3,7 +3,7 @@
 **This file is the single allocation authority for 9P message-type
 numbers above the standard 9P2000.L set, across BOTH projects.** Before
 assigning a new T/R pair anywhere (Thylacine `kernel/include/thylacine/
-9p_wire.h`, libthyla-rs `ninep.rs`, Stratum `include/stratum/9p.h`),
+9p_wire.h`, the `ninep` crate, Stratum `include/stratum/9p.h`),
 check this table and extend it in the same change. Allocating from one
 project's enum alone is how #371 happened (see History).
 
@@ -38,7 +38,7 @@ by the .L dialect, which is why Stratum repurposed 124-127 (below).
 | 136 | 137 | Tpin / Rpin | Stratum (reserved; ENOSYS at v2.0) | any client ↔ stratumd | same |
 | 138 | 139 | Tunpin / Runpin | Stratum (reserved; ENOSYS at v2.0) | any client ↔ stratumd | same |
 | 140 | 141 | Twalkgetattr / Rwalkgetattr | SHARED (POUNCE; Thylacine-designed, Stratum-implemented) | kernel client ↔ stratumd (netd answers ENOSYS → the dev9p per-session latch) | both: thyla `9p_wire.h` + `stratum include/stratum/9p.h` |
-| 142 | 143 | Tweft / Rweft | Thylacine | kernel client ↔ netd ONLY (never stratumd) | thyla `9p_wire.h` + `ninep.rs` |
+| 142 | 143 | Tweft / Rweft | Thylacine | kernel client ↔ netd ONLY (never stratumd) | thyla `9p_wire.h` + `ninep` |
 | 144 | 145 | Tweftio / Rweftio | Thylacine | kernel client ↔ netd ONLY | same |
 
 **Next free pair: 146/147.**
@@ -62,7 +62,7 @@ by the .L dialect, which is why Stratum repurposed 124-127 (below).
 ## Cross-references
 
 - Thylacine: `kernel/include/thylacine/9p_wire.h` (the kernel wire
-  enum), `usr/lib/libthyla-rs/src/ninep.rs` (the userspace codec netd
+  enum), `usr/lib/ninep/src/lib.rs` (the userspace codec netd
   serves with), `docs/POUNCE-DESIGN.md` §3, `docs/NET-THROUGHPUT.md` §6.
 - Stratum: `include/stratum/9p.h` (the `STM_9P_*` enum),
   `docs/reference/20-9p.md`.

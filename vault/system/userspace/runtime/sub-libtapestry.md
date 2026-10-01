@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-09-24
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -411,6 +411,41 @@ The owner's half belongs to [[sub-halcyond]]: it asks with the
 HALCYON-INSTRUMENT 14.5 running-close dialog when the named tile's last
 command is RUNNING, and closes by verb otherwise, carrying NO final-tile
 protection -- section 6.5 reads `Super+Q` as the structural act.
+
+## `TEV_CHORD` code 4: the history chord (2026-09-25, TC-1b)
+
+**`code` 4 = forget the focused pane's history**, its `value` the FOCUSED
+PANE's id, as the close's is. Unlike the close it has no fallback: the
+compositor holds no transcript, and nothing but this chord may delete one, so
+with no registered rail the chord is said and dropped, like the picker and the
+reference. The owner ([[sub-halcyond]]) resolves the id against the tiles it
+hosts and forgets that tile's history, and only its history. There is
+deliberately no verb that does the same.
+
+## The ring says a session's layout notice (2026-09-29)
+
+tapestryd fans a declared session's structural notice (TEV_LAYOUT) to ONE of
+its surfaces -- the lowest surface slot the seat owns ([[sub-tapestryd]]) --
+and after enough churn that is as often a chrome, the status bar or a menu as
+a tile. A notice is an event on that surface's stream, so it was only as good
+as its surface: a pump that never looked for it dropped it, and a surface its
+owner dropped took it along -- `ring::leave` clears the slot's `pending`, and
+`ring::route`'s retiring arm discards the dropped surface's last read. The
+Operator's Manual chunk's device run 13 lost one that way: a restore onto a new
+workspace never filled its pane ([[sub-halcyond]]).
+
+`ring::route` now returns whether a completion carried a TEV_LAYOUT, scanning
+every whole record of the batch -- also the retiring arm's, whose events still
+go nowhere -- and `RingCore` latches it as `layout_hint`. `EventRing` gains
+`take_layout_hint()` (read and clear) and `layout_hint()` (peek). The ring
+reaps every surface's completions as they arrive, so the mark is set whichever
+surface the compositor picked and whether or not its owner ever polls it for
+the notice. A hint on every `leave` was rejected: a surface that fails to mint
+and is retried on each relayout would keep the loop spinning. Pinned by
+`a_layout_notice_is_reported_wherever_it_rides` (a notice second of three; a
+batch without one; a dropped surface's last read; EOF and a stale generation
+report nothing), red when the retiring arm drops the notice and when only a
+batch's first record is scanned.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

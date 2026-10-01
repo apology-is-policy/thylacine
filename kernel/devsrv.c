@@ -70,6 +70,7 @@ struct SrvRegistry {
     u64               magic;          // SRV_REGISTRY_MAGIC; 0 once freed
     int               ref;            // instance refcount (atomic)
     spin_lock_t       lock;
+    u64               last_qid_path;  // the last service qid.path handed out
     struct SrvService entries[SRV_MAX_SERVICES];
 };
 
@@ -138,6 +139,7 @@ static void srv_clear_locked(struct SrvService *e) {
     e->poster_pid     = 0;
     e->ring_msize     = 0;
     e->cape           = false;
+    e->remote         = false;
     e->backlog_head   = 0;
     e->backlog_tail   = 0;
     e->backlog_count  = 0;
@@ -292,6 +294,7 @@ u64 srv_registry_total_destroyed(void) { return __atomic_load_n(&g_srv_registry_
 static int srv_reserve_in(struct SrvRegistry *reg,
                           const char *name, u8 name_len, struct Proc *poster,
                           enum srv_mode mode, u32 ring_msize, bool cape,
+                          bool remote,
                           struct SrvService **svc_out, enum srv_state *prior_out) {
     if (!reg)                                              return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
@@ -347,6 +350,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         e->mode = mode;
         e->ring_msize = ring_msize;
         e->cape = cape;
+        e->remote = remote;
     }
     if (cap_post && !e && cap_slots >= SRV_CAP_SLOTS) {
         spin_unlock_irqrestore(&reg->lock, s);
@@ -388,6 +392,12 @@ static int srv_reserve_in(struct SrvRegistry *reg,
             spin_unlock_irqrestore(&reg->lock, s);
             return -1;
         }
+        // The remote declaration is identity for the same reason: an attach over
+        // a conn minted before the rebind must read the declaration its poster made.
+        if (e->remote != remote) {
+            spin_unlock_irqrestore(&reg->lock, s);
+            return -1;
+        }
         *prior_out = SRV_STATE_TOMBSTONED;
     } else {
         // Fresh post — claim a FREE slot.
@@ -405,11 +415,12 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         *prior_out = SRV_STATE_FREE;
     }
 
-    if (e->generation == ~(u64)0) {
+    if (e->generation == ~(u64)0 || reg->last_qid_path == ~(u64)0) {
         spin_unlock_irqrestore(&reg->lock, s);
         return -1;
     }
     ++e->generation;
+    e->qid_path = ++reg->last_qid_path;
     e->cap_posted = cap_post;
     e->cap_scope = cap_post ? scope : 0;
     // e->magic is already SRV_SERVICE_MAGIC + e->reg is already set —
@@ -422,6 +433,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     e->mode           = mode;
     e->ring_msize     = ring_msize;
     e->cape           = cape;
+    e->remote         = remote;
     *svc_out = e;
 
     spin_unlock_irqrestore(&reg->lock, s);
@@ -477,7 +489,7 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
 // close), so handle_release_obj's KOBJ_SRV case is a no-op for it.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
                          const char *name, size_t name_len, enum srv_mode mode,
-                         bool bulk, bool cape) {
+                         bool bulk, bool cape, bool remote) {
     if (!p)                                              return -1;
     if (!name)                                           return -1;
     if (name_len == 0 || name_len > SRV_NAME_MAX)        return -1;
@@ -509,7 +521,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
     // LIVE until the handle below exists).
     struct SrvService *svc = NULL;
     enum srv_state     prior = SRV_STATE_FREE;
-    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, ring_msize, cape,
+    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, ring_msize, cape, remote,
                        &svc, &prior) != 0)
         return -1;
 
@@ -841,11 +853,15 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
     while (len < SRV_NAME_MAX && s[len] != '\0') len++;
     if (len == 0 || s[len] != '\0') return NULL;   // empty or over-long
 
-    struct SrvService *svc = srv_lookup_in(reg, s, (u8)len);
-    if (!svc) return NULL;
+    // One hold for the name, the state and the path: a tombstoned slot can be
+    // recycled under another name, and a path read in a later hold would key
+    // this node as that post.
+    u64 qpath = 0;
     {
         irq_state_t st = spin_lock_irqsave(&reg->lock);
-        bool live = (svc->state == SRV_STATE_LIVE);
+        struct SrvService *svc = srv_find_locked(reg, s, (u8)len);
+        bool live = svc && svc->state == SRV_STATE_LIVE;
+        if (live) qpath = svc->qid_path;
         spin_unlock_irqrestore(&reg->lock, st);
         if (!live) return NULL;        // only a LIVE service is walkable
     }
@@ -867,7 +883,7 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
 
     nc->aux      = ref;        // commit: nc is a service-ref Spoor
     nc->qid.type = QTFILE;
-    nc->qid.path = 0;
+    nc->qid.path = qpath;      // never the root's 0: the mount key is (dc, devno, qid.path)
     nc->qid.vers = 0;
     w->nqid    = 1;
     w->qid[0]  = nc->qid;
@@ -983,6 +999,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     enum srv_mode service_mode;
     u32           ring_msize;
     bool          service_cape;
+    bool          service_remote;
     bool          service_cap_posted;
     {
         irq_state_t ls = spin_lock_irqsave(&reg->lock);
@@ -994,6 +1011,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
         ring_msize     = svc->ring_msize;   // CF-3 B: the conn's ring class,
                                             // captured atomically with LIVE
         service_cape   = svc->cape;         // the identity cape, likewise
+        service_remote = svc->remote;       // the remote declaration, likewise
         // (U) which posting authority minted this service -- the TCB mark or a
         // user's CAP_POST_SERVICE. Captured HERE, atomically with LIVE and
         // beside mode/cape, because it is a term of the connect decision: read
@@ -1039,6 +1057,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     if (!cn) return NULL;
     if (service_mode == SRV_MODE_BYTE) srvconn_set_byte_mode(cn);
     if (service_cape)                  srvconn_set_cape(cn);
+    if (service_remote)                srvconn_set_remote(cn);
 
     // A 2nd ref for the accept-backlog slot; the push re-validates LIVE atomically.
     srvconn_ref(cn);
