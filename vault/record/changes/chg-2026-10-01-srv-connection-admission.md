@@ -4,7 +4,7 @@ type: chg
 title: "Reserve service-connection capacity before allocation"
 date: 2026-10-01
 arc: arc-astra-halcyon-followup
-commits: ["*(pending)*"]
+commits: ["a4fa3cbd378dccce25603a8c034536ddb62cd766"]
 touched: [sub-kernel-devsrv, sub-kernel-srvconn]
 established: []
 closed: []
