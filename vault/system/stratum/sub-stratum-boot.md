@@ -12,8 +12,18 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-28
+updated: 2026-10-01
 ---
+## Session factory handoff
+
+Kernel bootstrap stamps Joey with the explicit session-registry factory role.
+Userspace Joey delegates it only to login, whose first namespace operation
+creates the private resident-service view. CI boot probes exercise three
+users, same-principal overlap and twenty distinct login/logout cycles. The
+extra THYLA_D7_HOLD_LOGINS fixture is default-OFF and exists solely to hold
+two pipe-fed logins during a third interactive Haul session; normal production
+builds do not retain fixture users.
+
 ## Purpose
 
 Take the machine from a read-only initrd to a disk-backed root. joey spawns

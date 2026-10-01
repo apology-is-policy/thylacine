@@ -10,8 +10,18 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-30
+updated: 2026-10-01
 ---
+## Session registry retirement
+
+`srv_proc_exit_notify` marks the Proc posting latch closed and detaches its
+registry memberships under the posting lock. It then tombstones matching
+services and drops covering refs outside that lock. Concurrent posting must
+finish its reserve/install/commit before this detach, or observe the closed
+latch and fail. Repeated notification is empty; proc_free covers paths that
+skip ordinary exits. Neither the mutable namespace nor boot-only scanning
+decides which registries are drained.
+
 ## Purpose
 
 Terminating a Proc is a **cascade, not a call**. No Thread is ever torn down

@@ -13,7 +13,7 @@ Generated from note fields — do not edit between the markers
 | surface | code | invariants | prosecution |
 |---|---|---|---|
 | [[sub-aurora]] | usr/aurora/src/lib.rs, usr/aurora/src/main.rs, usr/aurora/src/render.rs, usr/aurora/src/osd.rs, usr/aurora/src/config.rs, usr/aurora/Cargo.toml | inv-i27 | - **The drain and feed opens must precede surface creation.** Without the |
-| [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/src/provincia.rs, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
+| [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/src/provincia.rs, usr/corvus/src/sessions.rs, tools/test-corvus-sessions.py, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
 | [[sub-corvus-authority]] | usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, usr/lib/corvus-authority/src/codec.rs, usr/lib/corvus-authority/src/transaction.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml | inv-i35 | 49 host tests pass, bare-target check passes, host Clippy -D warnings passes. |
 | [[sub-corvus-crypto]] | usr/lib/corvus-crypto/src/lib.rs, usr/lib/corvus-crypto/src/bip39_wordlist.rs, usr/lib/corvus-crypto/Cargo.toml |  | - **A new wrap kind needs a new associated-data prefix**, built through a |
 | [[sub-corvus-mint]] | tools/corvus-mint/src/main.rs, tools/corvus-mint/Cargo.toml | inv-i22 | - **The self-verify must survive any change to the wrap path.** It is the |
@@ -38,7 +38,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9, inv-i44 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c, kernel/test/test_devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
-| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c | inv-i1 | What an auditor attacks here: |
+| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, tools/test-pci-msi-dtb.py, kernel/include/thylacine/dtb.h, kernel/test/test_dtb.c | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
@@ -80,7 +80,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-sched]] | kernel/sched.c, kernel/include/thylacine/sched.h | inv-i8, inv-i17, inv-i21, inv-i44 | - **The mask-before-read rule holds at every per-CPU read.** Any new site |
 | [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S | inv-i21, inv-i18, inv-i8, inv-i9 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
 | [[sub-kernel-spoor]] | kernel/spoor.c, kernel/include/thylacine/spoor.h | inv-i33 | - **The refcount balances on every path.** `spoor_total_allocated` / |
-| [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
+| [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c, tools/test-srvconn-admission.py | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
 | [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, kernel/include/thylacine/errno.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs, usr/lib/libthyla-rs/src/pty_interaction.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
 | [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |

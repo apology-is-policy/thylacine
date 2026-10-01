@@ -3,17 +3,44 @@ id: sub-kernel-devsrv
 type: sub
 title: "devsrv — the /srv service registry, Dev, and accept/peer syscalls"
 parent: moc-kernel-srv
-code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c]
+code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py]
 audit: hard
 guarded-by: [inv-i1]
 validated-by: [spec-corvus, gate-smp]
-locks: [lock-srv-registry-lock]
+locks: [lock-srv-registry-lock, lock-srv-posting]
 hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
 updated: 2026-10-01
 ---
+## D7 implementation (October 1)
+
+Login now creates and MREPL-mounts a mortal private registry before AUTH.
+`SYS_SRV_REGISTRY_NEW` (127) requires the explicit one-hop factory role
+(public spawn bit 10, internal Proc bit 29), a boot O_PATH root, and a
+validated immutable manifest of at most 16 forty-byte routes. It returns
+an owned root descriptor; it does not mount on behalf of userspace.
+The source reference is private, with no boot fallback in the namespace.
+
+Eleven resident names are routed; local posts cannot shadow them, even while
+a resident is offline. Opens resolve current trusted boot postings, preserve
+D8, recheck posting generation on enqueue, and charge the requesting view's
+domain. Capability-posted boot names cannot satisfy a resident route.
+Route qids occupy the high half; local monotonically allocated qids the low.
+
+Each poster owns a deduplicated list of covering registry references.
+`Proc.srv_post_lock` serializes reserve/handle-install/commit with the death
+latch. Death marks posting closed, detaches the list, then drains matching
+posts and drops references outside that lock; `proc_free` covers rollback.
+The registry lock never surrounds allocation or teardown. Handle, poll,
+namespace and service-leaf references retain their earlier lifetime rules.
+See [[sub-kernel-srvconn]] for 16/48/64 admission and retained-domain lifetime.
+
+The older capacity diagnosis below is historical. The implementation and its
+multi-session dependencies are under final verification in
+`work/oct1-srv-sessions/`; no Main landing or sanitizer/SMP result is implied.
+
 ## Ratified D7 completion
 
 [[dec-2026-10-01-session-registries]] approves the private registry factory,

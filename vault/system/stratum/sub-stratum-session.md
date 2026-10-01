@@ -15,8 +15,37 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-10-01
 ---
+## D7 concurrent sessions (October 1)
+
+Before AUTH, login replaces `/srv` with a private factory-created view and
+closes the boot source descriptor. Its shell, proxy and Halcyon inherit the
+view but never the factory role. Each login has its own home service name,
+including two simultaneous logins for the same principal.
+
+The coordinator now holds one proven DEK lease per (ctl connection, dataset),
+bounded to 64 pairs. A second connection must successfully UNWRAP and match
+the existing key; an unlocked dataset is not evidence of its authority.
+Only the last lease release removes the key. Provisioning reserves lease
+capacity before creating a dataset; table exhaustion cannot publish an
+unleased key. These fixes are in Astra's isolated Stratum checkout/branch,
+`stratum-astra`, `codex/astra-session-dek`, not yet in shared Stratum main.
+
+A real logout regression exposed dirty data left behind after key eviction:
+the next whole-pool fsync failed ELOCKED, including unrelated Corvus writes.
+Eviction now drains buffered writes under the filesystem's exclusive lock
+before removing the key. Explicit failure preserves the key and lease for
+retry. Connection destruction retains the existing best-effort eviction
+policy: failed final eviction can leave a key resident; this is not claimed
+as qualified storage-failure recovery; see [[seam-stratum-final-eviction-failure]].
+Successful drain is not a commit barrier.
+
+Real CPU1 checks now cover three overlapping users, two simultaneous logins
+for one user, surviving-home access after one logout, and twenty distinct
+login/logout cycles. Haul posting and encrypted reading also pass with three
+users held live. Evidence: `work/oct1-srv-sessions/`.
+
 ## Purpose
 
 Give each logged-in user an encrypted home that only their session can

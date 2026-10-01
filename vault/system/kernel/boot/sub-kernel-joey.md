@@ -15,8 +15,15 @@ design:
   - "docs/ARCHITECTURE.md section 5.1"
   - "docs/CORVUS-DESIGN.md section 3"
 created: 2026-09-06
-updated: 2026-09-25
+updated: 2026-10-01
 ---
+## Session factory bootstrap
+
+The kernel explicitly grants Joey PROC_FLAG_SESSION_REGISTRY beside its
+existing bootstrap roles. Userspace delegates that one-hop role only to login.
+It confers no connection/posting capability itself and does not propagate
+through ordinary rfork. See [[sub-kernel-devsrv]] and [[sub-stratum-boot]].
+
 ## Purpose
 
 The kernel side of init. `boot_main`'s last real step is `joey_run`, which

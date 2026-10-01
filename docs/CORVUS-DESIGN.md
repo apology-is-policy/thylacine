@@ -712,6 +712,18 @@ corvus blocks until a client opens `/srv/corvus`, then receives the server end o
 
 **corvus is single-threaded.** corvus `poll`s its listener plus its N accepted connection fds and serves one 9P message at a time, each connection's protocol state held in a strictly isolated per-connection arena (a fid bug on one connection cannot reach another). (`poll` is the multi-fd wait syscall — the **P5-poll** chunk, ARCH §23.3; a prerequisite of P5-corvus-srv-impl-b, since Thylacine has no kernel "wait on N sources" primitive otherwise.) A slow operation (Argon2id) adds latency to other connections; this is accepted for the infrequent login path and documented — a v1.x corvus may multi-thread. Per-connection arena isolation is the load-bearing property; single-threadedness is an implementation simplification, not a security boundary.
 
+**D7 concurrent-login completion (October 1, 2026).** The approved D7
+acceptance requires concurrent distinct users and two sessions of one user.
+Lift the singleton implementation narrowing to the model's existing one-session-
+per-owner-Proc rule, within the unchanged eight-connection bound. Each record
+retains its immutable authenticated principal, user, keypair, token and creating
+connection. Token lookup selects exactly one record. Only that connection's
+teardown or matching owner-issued SESSION_CLOSE retires it; forwarded tokens do
+not confer retirement authority. CLEARANCE_ACTIVATE_SELF checks a live record
+of the requesting principal, not a global selected session. See
+`SRV-SESSION-REGISTRY-DESIGN.md` for the runtime witness and implementation scope.
+The historical single-slot statement below describes the narrowing being lifted.
+
 **AUTH-session ownership (A-5b lift, user-voted 2026-06-02).** The post-AUTH state — the authenticated user's unwrapped keypair + the bearer token (§4.2) — is the *AUTH session*, distinct from the per-connection 9P transport above. At v1.0 corvus holds a single global AUTH-session slot (one authenticated user at a time; single-console-serial). That slot is **owned by the connection that ran the successful AUTH**, and is cleared on exactly two events: that owning connection's teardown, or an explicit `SESSION_CLOSE` (verb 3) **issued over the owning connection** with the matching token. A *non-owning* connection — a second Proc that presents the bearer token for an UNWRAP (the §6.3 forward; e.g. the A-5b storage coordinator pulling a per-user home DEK) — may use the session, but **neither its close NOR a `SESSION_CLOSE` verb on it clears the session** (the verb is owner-gated, not merely token-gated: a valid bearer token is *necessary but not sufficient*, else the coordinator's token could wipe a live login session and break A-4 elevation). This realizes the §4.2 "token bound to the creating Proc; closing it auto-closes the session" intent precisely: the AUTH session lives as long as its creating connection, independent of how many other connections borrow the token over their own lifetimes. (The pre-A-5b impl cleared the session on *any* connection close — sound only while exactly one connection ever existed at a time; A-5b's coordinator is the first concurrent non-owning connection, which forces the owning-connection discipline. Without it, the coordinator's transient connect→unwrap→disconnect would wipe a live login session mid-session and break A-4 legate elevation, which re-presents the same token. Concurrent multi-AUTH-session corvus — multiple distinct owners at once — remains the v1.x lift; the owning-connection tag here is its first step.) Audit-bearing: the session-ownership tag + the `close_conn` clear-gate are prosecuted in the A-5b round.
 
 ### 6.3 Kernel-stamped peer identity

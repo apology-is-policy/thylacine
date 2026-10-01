@@ -23,7 +23,7 @@
 // the single static registry becomes a heap-allocated, refcounted
 // `SrvRegistry` reached THROUGH the mounted devsrv root Spoor (the root's
 // `aux`), not a global. Boot mounts one immortal registry on the kproc
-// `/srv` synthetic dir; a future login (A-5b-body) mounts a fresh
+// `/srv` synthetic dir; D7 login mounts a fresh
 // per-session registry so a second user's coordinator is structurally
 // unnameable (I-1). Posting is create=post (SYS_WALK_CREATE on a /srv dir
 // -> devsrv_post_listener; the DMSRVBYTE perm bit selects byte- vs 9P-mode)
@@ -72,7 +72,28 @@ struct SrvRegistry {
     spin_lock_t       lock;
     u64               last_qid_path;  // the last service qid.path handed out
     struct SrvService entries[SRV_MAX_SERVICES];
+    struct SrvDomain *domain; // NULL for boot/internal test registries
+    struct SrvRegistry *source; // owned boot reference; never exposed
+    u32 route_count;
+    struct srv_route routes[SRV_MAX_ROUTES];
 };
+
+// Deduplicated Proc-owned references, detached at death before teardown.
+struct SrvPostMembership {
+    struct SrvRegistry *reg;
+    struct SrvPostMembership *next;
+};
+
+static int srv_route_index(const struct SrvRegistry *reg, const char *name, u8 len) {
+    for (u32 i = 0; i < reg->route_count; i++) {
+        const struct srv_route *r = &reg->routes[i];
+        if (r->name_len != len) continue;
+        u32 j = 0;
+        while (j < len && r->name[j] == (u8)name[j]) j++;
+        if (j == len) return (int)i;
+    }
+    return -1;
+}
 
 _Static_assert(__builtin_offsetof(struct SrvRegistry, magic) == 0,
                "magic at offset 0 — a devsrv root Spoor's aux is its "
@@ -268,6 +289,8 @@ void srv_registry_unref(struct SrvRegistry *reg) {
         // retained registry or root Spoor; magic is a corruption check, not
         // a substitute for that lifetime guarantee.
         srv_registry_drain(reg);
+        srv_domain_unref(reg->domain);
+        srv_registry_unref(reg->source);
         reg->magic = 0;
         kfree(reg);
         __atomic_fetch_add(&g_srv_registry_destroyed, 1u, __ATOMIC_RELAXED);
@@ -294,6 +317,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
                           struct SrvService **svc_out, enum srv_state *prior_out) {
     if (!reg)                                              return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
+    if (srv_route_index(reg, name, name_len) >= 0) return -1;
     if (!svc_out || !prior_out)                            return -1;
     if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)      return -1;
     // CF-3 B: exactly two ring classes -- the two-point policy that keeps
@@ -311,7 +335,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
 
     bool cap_post = !proc_may_post_service(poster);
     u64 scope = __atomic_load_n(&poster->legate_scope_id, __ATOMIC_ACQUIRE);
-    if (cap_post && (poster->caps & CAP_POST_SERVICE) == 0) return -1;
+    if (cap_post && (__atomic_load_n(&poster->caps, __ATOMIC_ACQUIRE) & CAP_POST_SERVICE) == 0) return -1;
     irq_state_t s = spin_lock_irqsave(&reg->lock);
 
     // Count reservations as well as live posts under the reservation lock.
@@ -411,7 +435,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         *prior_out = SRV_STATE_FREE;
     }
 
-    if (e->generation == ~(u64)0 || reg->last_qid_path == ~(u64)0) {
+    if (e->generation == ~(u64)0 || reg->last_qid_path >= (1ULL << 63) - 1) {
         spin_unlock_irqrestore(&reg->lock, s);
         return -1;
     }
@@ -504,7 +528,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 
     // TCB posters retain the one-way role; scoped user services require the
     // elevation-only capability. srv_reserve_in applies their bounded quota.
-    if (!proc_may_post_service(p) && (p->caps & CAP_POST_SERVICE) == 0) return -1;
+    if (!proc_may_post_service(p) && (__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_POST_SERVICE) == 0) return -1;
 
     // Service-name hygiene, identical to sys_post_service_core: printable
     // ASCII, no '/' (a /srv path separator), no control bytes -- so the name
@@ -514,30 +538,45 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
         if (c < 0x21u || c > 0x7eu || c == '/')          return -1;
     }
 
-    // Phase 1: reserve a slot in THIS registry (RESERVING; never observably
-    // LIVE until the handle below exists).
+    struct SrvPostMembership *candidate = kmalloc(sizeof(*candidate), KP_ZERO);
+    if (!candidate) return -T_E_NOMEM;
+    // The caller's root pins reg; neither rollback nor commit can be its last
+    // reference. No heap allocation, teardown or final free under this lock.
+    irq_state_t ps = spin_lock_irqsave(&p->srv_post_lock);
+    if (p->srv_posts_closed) {
+        spin_unlock_irqrestore(&p->srv_post_lock, ps);
+        kfree(candidate);
+        return -T_E_ACCES;
+    }
     struct SrvService *svc = NULL;
-    enum srv_state     prior = SRV_STATE_FREE;
+    enum srv_state prior = SRV_STATE_FREE;
     if (srv_reserve_in(reg, name, (u8)name_len, p, mode, ring_msize, cape, remote,
-                       &svc, &prior) != 0)
-        return -1;
-
-    // Install the KObj_Srv listener handle. handle_alloc does not take a
-    // reference, so transfer one covering registry ref to the table slot.
-    // The root Spoor keeps reg alive through rollback/commit even if a peer
-    // closes the newly installed handle before this function returns.
-    srv_registry_ref(reg);
-    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, svc);
-    if (h < 0) {
-        // Phase 2 (failure): roll the reservation back to its prior state so a
-        // retry -- or another poster -- can still claim the name.
-        srv_abort(svc, prior);
-        srv_registry_unref(reg);
+                       &svc, &prior) != 0) {
+        spin_unlock_irqrestore(&p->srv_post_lock, ps);
+        kfree(candidate);
         return -1;
     }
-
-    // Phase 2 (success): RESERVING -> LIVE. Infallible.
+    srv_registry_ref(reg); // transferred to the listener if installed
+    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, svc);
+    if (h < 0) {
+        srv_abort(svc, prior);
+        spin_unlock_irqrestore(&p->srv_post_lock, ps);
+        srv_registry_unref(reg);
+        kfree(candidate);
+        return -T_E_MFILE;
+    }
     srv_commit(svc);
+    struct SrvPostMembership *m = p->srv_post_memberships;
+    while (m && m->reg != reg) m = m->next;
+    if (!m) {
+        srv_registry_ref(reg);
+        candidate->reg = reg;
+        candidate->next = p->srv_post_memberships;
+        p->srv_post_memberships = candidate;
+        candidate = NULL;
+    }
+    spin_unlock_irqrestore(&p->srv_post_lock, ps);
+    kfree(candidate);
     return (int)h;
 }
 
@@ -556,11 +595,8 @@ struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
 
 // srv_proc_exit_notify_in — tombstone every LIVE service in `reg` posted
 // by `p` (matched by stripes), draining each accept backlog. The public
-// srv_proc_exit_notify binds the boot registry: in stalk-3a all posters
-// post into the one boot registry (nothing migrates), so walking it is
-// correct + complete. stalk-3b moves the tombstone trigger to the listener
-// handle (which will carry its registry ref), making it per-registry for
-// session registries — see STALK-DESIGN.md §5.1.
+// exit entry point walks the Proc-owned registry ledger, never its mutable
+// namespace. Membership holds each registry through the complete drain.
 static void srv_proc_exit_notify_in(struct SrvRegistry *reg, struct Proc *p) {
     if (!reg) return;
     // proc_stripes fail-closes to 0; a LIVE poster always carries a
@@ -620,7 +656,19 @@ static void srv_proc_exit_notify_in(struct SrvRegistry *reg, struct Proc *p) {
 }
 
 void srv_proc_exit_notify(struct Proc *p) {
-    srv_proc_exit_notify_in(g_boot_srv_registry, p);
+    if (!p) return;
+    irq_state_t ps = spin_lock_irqsave(&p->srv_post_lock);
+    p->srv_posts_closed = true;
+    struct SrvPostMembership *m = p->srv_post_memberships;
+    p->srv_post_memberships = NULL;
+    spin_unlock_irqrestore(&p->srv_post_lock, ps);
+    while (m) {
+        struct SrvPostMembership *next = m->next;
+        srv_proc_exit_notify_in(m->reg, p);
+        srv_registry_unref(m->reg);
+        kfree(m);
+        m = next;
+    }
 }
 
 static int srv_registry_count_in(struct SrvRegistry *reg) {
@@ -792,6 +840,51 @@ struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg) {
     return c;
 }
 
+// Factory input is kernel-owned scratch, copied before any publication.
+// Each allocation has a single owner until the returned Spoor is installed.
+struct Spoor *devsrv_session_root(struct Proc *p, struct Spoor *source,
+    const struct srv_route *routes, u32 count, int *err) {
+    *err = -T_E_ACCES;
+    if (!proc_may_create_srv_registry(p)) return NULL;
+    *err = -T_E_INVAL;
+    if (!source || source->dc != 's' || !source->aux ||
+        *(const u64 *)source->aux != SRV_REGISTRY_MAGIC ||
+        !(source->flag & CWALKONLY) || !(source->qid.type & QTDIR)) return NULL;
+    *err = -T_E_ACCES;
+    if (source->aux != g_boot_srv_registry) return NULL;
+    *err = -T_E_INVAL;
+    if (count > SRV_MAX_ROUTES || (count && !routes)) return NULL;
+    for (u32 i = 0; i < count; i++) {
+        const struct srv_route *r = &routes[i];
+        if (!r->name_len || r->name_len > SRV_NAME_MAX || r->reserved) return NULL;
+        if ((r->name_len == 1 && r->name[0] == '.') ||
+            (r->name_len == 2 && r->name[0] == '.' && r->name[1] == '.')) return NULL;
+        for (u32 j = 0; j < SRV_NAME_MAX; j++) {
+            u8 c = r->name[j];
+            if (j < r->name_len ? (c < 0x21 || c > 0x7e || c == '/') : c != 0)
+                return NULL;
+        }
+        for (u32 j = 0; j < i; j++)
+            if (srv_name_eq((const char *)r->name, r->name_len,
+                            (const char *)routes[j].name, routes[j].name_len)) return NULL;
+    }
+    struct SrvDomain *d = srv_domain_create(err);
+    if (!d) return NULL;
+    struct SrvRegistry *reg = srv_registry_create();
+    if (!reg) { srv_domain_unref(d); *err = -T_E_NOMEM; return NULL; }
+    reg->domain = d;
+    reg->source = g_boot_srv_registry;
+    srv_registry_ref(reg->source);
+    reg->route_count = count;
+    for (u32 i = 0; i < count; i++) reg->routes[i] = routes[i];
+    struct Spoor *root = devsrv_attach_registry(reg);
+    srv_registry_unref(reg);
+    if (!root) { *err = -T_E_NOMEM; return NULL; }
+    root->flag |= CWALKONLY;
+    *err = 0;
+    return root;
+}
+
 // devsrv_conn_of — the SrvConn behind a connection Spoor, or NULL if `c`
 // is not one. A devsrv Spoor's aux discriminates its flavor: a SrvRegistry
 // (SRV_REGISTRY_MAGIC) for a /srv root, a devsrv_svc_ref (DEVSRV_SVC_MAGIC)
@@ -857,13 +950,18 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
     // recycled under another name, and a path read in a later hold would key
     // this node as that post.
     u64 qpath = 0;
-    {
+    int route = srv_route_index(reg, s, (u8)len);
+    if (route >= 0) {
+        // An offline resident still has a reserved, stable name. Opening it
+        // fails until a trusted posting is live in the retained boot source.
+        qpath = (1ULL << 63) | ((u64)route + 1);
+    } else {
         irq_state_t st = spin_lock_irqsave(&reg->lock);
         struct SrvService *svc = srv_find_locked(reg, s, (u8)len);
         bool live = svc && svc->state == SRV_STATE_LIVE;
         if (live) qpath = svc->qid_path;
         spin_unlock_irqrestore(&reg->lock, st);
-        if (!live) return NULL;        // only a LIVE service is walkable
+        if (!live) return NULL;
     }
 
     struct devsrv_svc_ref *ref = kmalloc(sizeof(*ref), KP_ZERO);
@@ -977,6 +1075,10 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     struct devsrv_svc_ref *ref = (struct devsrv_svc_ref *)c->aux;
     struct SrvRegistry    *reg = ref->reg;
     if (!reg)                                      return NULL;
+    struct SrvDomain *domain = reg->domain; // charge the view, not the provider
+    bool routed = srv_route_index(reg, ref->name, ref->name_len) >= 0;
+    if (routed) reg = reg->source; // kept alive by the view's service-ref
+    if (!reg) return NULL;
 
     // (U) Each attempt starts with NO recorded cause. A service-ref Spoor can be
     // opened more than once, so without this a refusal's EACCES would still be
@@ -1016,7 +1118,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
         // and name a different service's authority than the one we connect to.
         service_cap_posted = svc->cap_posted;
         spin_unlock_irqrestore(&reg->lock, ls);
-        if (!live) return NULL;
+        if (!live || (routed && service_cap_posted)) return NULL;
     }
 
     // (U) Connect admission (STALK-DESIGN.md section 5.2 / D8). Decided HERE,
@@ -1048,7 +1150,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // Mint the connection (peer + server identity captured BY VALUE -- no raw
     // Proc* / SrvService* held, so neither a peer exit nor a tombstone-then-
     // rebind turns a later read into a UAF). create ref == 1.
-    struct SrvConn *cn = srvconn_create(proc_stripes(p), p->pid,
+    struct SrvConn *cn = srvconn_create_in(domain, &ref->open_errno, proc_stripes(p), p->pid,
                                         proc_is_console_attached(p), poster_stripes,
                                         ring_msize);
     if (!cn) return NULL;

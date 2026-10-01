@@ -54,6 +54,13 @@ extern int sys_spawn_with_perms_for_proc(struct Proc *p,
                                          const u32 *fds, u32 fd_count,
                                          caps_t cap_mask, u32 perm_flags);
 
+struct spawn_allowance;
+extern int sys_spawn_full_argv_for_proc(struct Proc *, const char *, size_t,
+    const char *, u32, u32, const u32 *, u32, caps_t, u32);
+extern int sys_spawn_full_argv_debug_for_proc(struct Proc *, const char *, size_t,
+    const char *, u32, u32, const u32 *, u32, caps_t, u32,
+    bool, u32, u32, const u32 *, u32, const struct spawn_allowance *, u32, u32, u32);
+
 // A-5b #827b: the per-bit grant gate, exported so the decision can be driven
 // directly on synthetic Procs (decoupled from the heavyweight spawn body).
 extern int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
@@ -176,6 +183,36 @@ void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void) {
     TEST_EXPECT_EQ(rc, -1,
         "perm_flags set + parent not console-attached → -1");
 
+    unprivileged->caps |= CAP_POST_SERVICE | CAP_TCB_DIAL | CAP_SET_IDENTITY;
+    proc_mark_console_attached(unprivileged);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(unprivileged, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "console and capabilities do not mint factory role");
+    struct Proc *valid_parent = current_thread()->proc;
+    TEST_ASSERT(!proc_may_create_srv_registry(valid_parent), "boot test caller lacks factory role");
+    caps_t parent_caps = valid_parent->caps;
+    valid_parent->caps |= CAP_SET_IDENTITY;
+    TEST_EXPECT_EQ(sys_spawn_with_perms_for_proc(valid_parent, "hello", 5,
+        NULL, 0, CAP_NONE, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "legacy permission spawn refuses factory delegation");
+    TEST_EXPECT_EQ(sys_spawn_full_argv_for_proc(valid_parent, "hello", 5,
+        NULL, 0, 0, NULL, 0, CAP_NONE, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "argv spawn refuses factory delegation");
+    TEST_EXPECT_EQ(sys_spawn_full_argv_debug_for_proc(valid_parent, "hello", 5,
+        NULL, 0, 0, NULL, 0, CAP_NONE, SPAWN_PERM_SESSION_REGISTRY,
+        true, 1000, 1000, NULL, 0, NULL, 0, 0, 0), -1,
+        "identity/budget/phenotype/debug spawn core refuses factory delegation");
+    valid_parent->caps = parent_caps;
+    proc_mark_session_registry(unprivileged);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(unprivileged, SPAWN_PERM_SESSION_REGISTRY), 0,
+        "explicit factory holder delegates");
+    struct Proc *child = proc_alloc();
+    TEST_ASSERT(child, "factory stamp target");
+    apply_spawn_perms(child, 0);
+    TEST_ASSERT(!proc_may_create_srv_registry(child), "ordinary spawn has no factory role");
+    apply_spawn_perms(child, SPAWN_PERM_SESSION_REGISTRY);
+    TEST_ASSERT(proc_may_create_srv_registry(child), "explicit spawn stamps factory role");
+    child->state = PROC_STATE_ZOMBIE;
+    proc_free(child);
     // Clean up the throwaway Proc.
     unprivileged->state = PROC_STATE_ZOMBIE;
     proc_free(unprivileged);

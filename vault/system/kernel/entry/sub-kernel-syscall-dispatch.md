@@ -15,12 +15,24 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-30
+updated: 2026-10-01
 ---
+## Session registry factory
+
+Native call 127 copies at most sixteen 40-byte route records into bounded
+kernel scratch before construction. It checks the explicit factory role before
+copyin; source-fd validation takes and releases a handle snapshot. Invalid
+flags/count, copy faults, wrong handle kind/rights, private source roots,
+allocation failure and full descriptor tables fail without publishing a root.
+All spawn-permission entry paths retain the shared grant check; public bit 10
+cannot be delegated by a caller lacking internal factory role bit 29.
+The C/kernel, C/libt and Rust compiled ABI witnesses agree on number, bit and
+record layout. See [[sub-kernel-devsrv]].
+
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is 123. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 127. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before

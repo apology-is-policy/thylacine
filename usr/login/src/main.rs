@@ -1085,6 +1085,27 @@ unsafe fn unbind_home(mut sess: HomeSession) {
     t_putstr("login: logout: home proxy reaped\n");
 }
 
+// Create the view before authenticating: Corvus itself is charged to this
+// session, and neither the boot source nor the factory role goes to children.
+unsafe fn private_service_registry() -> i64 {
+    use libthyla_rs::{SrvRoute, t_srv_registry_new};
+    const NAMES: [&[u8]; 11] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
+        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama"];
+    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 11];
+    for (r, name) in routes.iter_mut().zip(NAMES) {
+        r.name_len = name.len() as u32;
+        r.name[..name.len()].copy_from_slice(name);
+    }
+    let source = t_open(-1, b"/srv".as_ptr(), 4, T_OPATH);
+    if source < 0 { return source; }
+    let root = t_srv_registry_new(source, routes.as_ptr(), routes.len(), 0);
+    let _ = t_close(source);
+    if root < 0 { return root; }
+    let rc = t_mount(b"/srv".as_ptr(), 4, root, T_MREPL);
+    let _ = t_close(root);
+    rc
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // Secret hygiene (#828 A-F1): login handles the cleartext passphrase + the
@@ -1095,6 +1116,11 @@ pub extern "C" fn rs_main() -> i64 {
     unsafe {
         let _ = t_set_dumpable(0);
         let _ = t_set_traceable(0);
+    }
+    let registry_rc = unsafe { private_service_registry() };
+    if registry_rc < 0 {
+        t_putstr("login: private service registry failed\n");
+        return 1;
     }
     let mut user: Vec<u8> = Vec::new();
     let mut pass: Vec<u8> = Vec::new();

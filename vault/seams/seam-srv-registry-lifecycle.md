@@ -2,12 +2,35 @@
 id: seam-srv-registry-lifecycle
 type: seam
 title: "The /srv registry entry lifecycle: tombstones never free; one shared boot registry"
-status: open
+status: closed
+closed-by: chg-2026-10-01-session-service-registries
 surface: [sub-kernel-devsrv]
 opened-by: chg-2026-05-19-srv-birth
 created: 2026-07-31
 updated: 2026-10-01
 ---
+## October 1 D7 completion
+
+Closed by login's private replacement registry, fixed trusted resident routes,
+retained per-Proc posting memberships and connection/domain quotas. Local names
+and trusted tombstones stay inside the session allocation; logout releases that
+allocation after its last covering reference. It does not recycle trusted names
+inside a live registry or increase the boot service table.
+
+Focused kernel fixtures cover isolation, root replacement, trusted-route
+refusal, poster death after namespace changes, allocation rollback, role
+delegation and retained-domain admission. Real CPU1 boot passes 1830/1830;
+three distinct concurrent logins, overlapping same-user logins, surviving home
+access, twenty distinct login/logout cycles and encrypted Haul posting with
+three users live pass. Corvus multi-owner AUTH and the separate Stratum session
+lease/drain dependency are required, documented parts of this closure.
+
+The record [[chg-2026-10-01-session-service-registries]] identifies evidence and
+limits. Storage-failure final key eviction is a separate remaining obligation:
+[[seam-stratum-final-eviction-failure]]. No fresh SMP/sanitizer qualification or
+Main landing is claimed. The prerequisite and original diagnosis below are
+historical; their open-work descriptions are superseded by this completion.
+
 ## October 1 implementation checkpoint
 
 Listener slots and `handle_get` snapshots now carry covering registry refs;

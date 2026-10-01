@@ -382,6 +382,7 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // 3.2). Ungated: SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) are already
 // self-reachable, so this only moves the seal earlier than the child could.
 #define T_SPAWN_PERM_SEAL              (1u << 9)
+#define T_SPAWN_PERM_SESSION_REGISTRY  (1u << 10)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
@@ -2501,6 +2502,20 @@ static inline long t_pivot_root(long new_root_fd) {
         : "r"(x8)
         : "memory", "cc"
     );
+    return x0;
+}
+
+#define T_SYS_SRV_REGISTRY_NEW 127
+struct t_srv_route { unsigned int name_len, reserved; unsigned char name[32]; };
+_Static_assert(sizeof(struct t_srv_route) == 40, "D7 route ABI");
+static inline long t_srv_registry_new(long source, const struct t_srv_route *routes,
+                                      unsigned long count, unsigned long flags) {
+    register long x0 __asm__("x0") = source;
+    register long x1 __asm__("x1") = (long)routes;
+    register long x2 __asm__("x2") = (long)count;
+    register long x3 __asm__("x3") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_SRV_REGISTRY_NEW;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory", "cc");
     return x0;
 }
 

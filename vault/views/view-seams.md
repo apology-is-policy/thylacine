@@ -23,6 +23,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-pouch-guard-pages]] | closed | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
+| [[seam-srv-registry-lifecycle]] | closed | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
 | [[seam-221-idle-pump-wake]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
@@ -101,7 +102,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-slub-debug-mode]] | open | sub-kernel-mm-slub | chg-2026-05-04-p1e-slub | named at P1-E; still unbuilt |
 | [[seam-sparse-mpidr]] | open | sub-kernel-sched-smp | chg-2026-06-05-863-smp-soundness-core | the DTB MPIDR -> dense-logical-index map |
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
-| [[seam-srv-registry-lifecycle]] | open | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
+| [[seam-stratum-final-eviction-failure]] | open | sub-stratum-session | chg-2026-10-01-session-service-registries |  |
 | [[seam-stratum-notify-peercred]] | open | sub-stratum-session, sub-stratum-server | chg-2026-08-02-stratum-sweep |  |
 | [[seam-tapestry-battery-unowned]] | open | sub-tapestryd | chg-2026-09-02-h4b1-claim | H-4b-1 placement-claim doc pass, 2026-09-02 |
 | [[seam-tickless-bare-metal]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | owed at Lazarus / RPi |

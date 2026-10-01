@@ -51,8 +51,9 @@ Ctrl-C after unmounting its clients.
 Provision a token file separately and restrict its permissions with
 `chmod 600 /path/to/token`. For a mount in the current shell, enter
 `imperium post` and complete the physical SAK and trusted key prompt.
-The currently supported trusted path is serial; QEMU's serial monitor sends
-BREAK with Ctrl-A, then b. In the elevated shell:
+In Halcyon, press Ctrl+Alt+F10 to enter the trusted authorization dialog.
+Serial recovery, when explicitly enabled at boot, uses QEMU monitor BREAK
+(Ctrl-A, then b). In the elevated shell:
 
 ```sh
 mkdir -p /tmp/remote
@@ -66,6 +67,18 @@ abdicate
 
 Replace the example address, token path and filename with your server's values.
 `abdicate` ends the elevated scope and its background relays.
+
+The posted name belongs to this login session. Another login has its own
+`/srv`, even for the same username, so its services neither collide with nor
+become visible in yours. Resident names such as `corvus` and `net` are reserved
+and cannot be replaced by a Haul post. Log out to retire the session registry;
+trusted names are not recycled while that registry remains live.
+
+If a connection is refused for lack of space, close unused mounts or relays
+and retry. Each session permits 16 retained service connections, all sessions
+together 48, within the system-wide limit of 64. A closed connection still
+counts while another endpoint retains it; raising privileges does not bypass
+these bounds.
 
 ### Confirm that a directory is remote
 

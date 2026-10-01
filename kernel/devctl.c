@@ -699,6 +699,10 @@ static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
         if (!n) { f->full = true; return false; } f->off += n; } while (0)
     EMIT_STR("conn peer=");   EMIT_DEC(row->peer_pid);
     EMIT_STR(" msize=");      EMIT_DEC(row->msize);
+    EMIT_STR(row->session_domain ? " session=" : " boot="); EMIT_DEC(row->domain_used);
+    EMIT_STR(" guests="); EMIT_DEC(row->sessions_used);
+    EMIT_STR(" all="); EMIT_DEC(row->global_used);
+    EMIT_STR(" domains="); EMIT_DEC(row->domains_retained);
     EMIT_STR(row->byte_mode ? " byte" : " 9p");
     EMIT_STR(row->kernel_attached ? " ka" : " -");
     EMIT_STR(row->state == 1 ? " live" : " torn");

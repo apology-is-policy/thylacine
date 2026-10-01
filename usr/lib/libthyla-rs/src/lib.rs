@@ -3895,3 +3895,18 @@ macro_rules! eprintln {
         $crate::eprint!("{}\n", core::format_args!($($arg)*));
     }};
 }
+
+// D7: explicit login-only factory role; never a fork-grantable capability.
+pub const T_SPAWN_PERM_SESSION_REGISTRY: u64 = 1 << 10;
+pub const T_SYS_SRV_REGISTRY_NEW: u64 = 127;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SrvRoute { pub name_len: u32, pub reserved: u32, pub name: [u8; 32] }
+const _: () = assert!(core::mem::size_of::<SrvRoute>() == 40);
+#[inline(always)]
+pub unsafe fn t_srv_registry_new(source: i64, routes: *const SrvRoute, count: usize, flags: u64) -> i64 {
+    let mut x0 = source;
+    asm!("svc #0", inlateout("x0") x0, in("x1") routes, in("x2") count,
+         in("x3") flags, in("x8") T_SYS_SRV_REGISTRY_NEW, options(nostack));
+    x0
+}

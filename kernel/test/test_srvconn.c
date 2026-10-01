@@ -147,6 +147,38 @@ void test_srvconn_create_destroy(void) {
     for (u32 i = 0; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
     TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
                    "capacity fixture releases every object");
+    // The production structures/allocator also exercise the composed budget.
+    struct SrvDomain *domains[SRV_MAX_DOMAINS];
+    int err = 0;
+    for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) {
+        domains[i] = srv_domain_create(&err);
+        TEST_ASSERT(domains[i] && err == 0, "admit domain up to bound");
+    }
+    TEST_ASSERT(srv_domain_create(&err) == NULL && err == -T_E_NOSPC, "domain limit");
+    for (u32 i = 0; i < SRV_SESSION_CONNS_TOTAL; i++) {
+        held[i] = srvconn_create_in(domains[i / SRV_SESSION_CONNS], &err,
+                                    1, 1, false, 2, SRVCONN_MSIZE);
+        TEST_ASSERT(held[i], "session partition capacity");
+        if (i == SRV_SESSION_CONNS - 1)
+            TEST_ASSERT(srvconn_create_in(domains[0], &err, 1, 1, false, 2,
+                        SRVCONN_MSIZE) == NULL && err == -T_E_NOSPC, "per-domain cap");
+    }
+    TEST_ASSERT(srvconn_create_in(domains[3], &err, 1, 1, false, 2,
+                SRVCONN_MSIZE) == NULL && err == -T_E_NOSPC, "combined session cap");
+    for (u32 i = SRV_SESSION_CONNS_TOTAL; i < SRV_MAX_CONNS; i++) {
+        held[i] = srvconn_create(1, 1, false, 2, SRVCONN_MSIZE);
+        TEST_ASSERT(held[i], "boot retains 16 slots at guest saturation");
+    }
+    srv_domain_unref(domains[0]);
+    TEST_ASSERT(srv_domain_create(&err) == NULL, "connections retain retired domain ticket");
+    for (u32 i = 0; i < SRV_SESSION_CONNS; i++) srvconn_unref(held[i]);
+    domains[0] = srv_domain_create(&err);
+    TEST_ASSERT(domains[0], "last connection returns domain ticket");
+    for (u32 i = SRV_SESSION_CONNS; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
+    for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) srv_domain_unref(domains[i]);
+    u32 n = 99;
+    srv_domain_counts(NULL, NULL, NULL, NULL, &n);
+    TEST_EXPECT_EQ(n, 0u, "all domain tickets returned");
 }
 
 // ---------------------------------------------------------------------------

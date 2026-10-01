@@ -3427,7 +3427,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // MAY_POST_SERVICE holder in the post-relinquish getty loop -- see joey_thunk).
 // login is NOT granted CONSOLE_TRUSTED, so I-27 (only corvus is console-attached
 // during a session) is untouched.
-#define LOGIN_PERMS ((unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE)
+#define LOGIN_PERMS ((unsigned int)(T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SESSION_REGISTRY))
 
 #if THYLA_BOOT_PROBES  /* #61: login + recover boot-test E2E helpers */
 // do_login_e2e -- prove the /sbin/login orchestration NON-interactively on the
@@ -3545,6 +3545,121 @@ static int login_e2e_run(const char *user, size_t ulen,
     return 0;
 }
 
+// D7 live-session witness. Keep real login input pipes open, so the shells,
+// proxies and private registries coexist. No /dev/consctl endowment: independent
+// pipe sessions must not race the physical console's line discipline.
+struct registry_login_probe { long pid, input, output; };
+static int registry_probe_expect(long fd, const char *want, size_t len) {
+    size_t matched = 0;
+    char tail[257] = {0};
+    for (int turns = 0; turns < 120; turns++) {
+        struct pollfd pf = {.fd = (int)fd, .events = POLLIN, .revents = 0};
+        long n = t_poll(&pf, 1, 500);
+        if (n < 0) { t_putstr("D7 probe: poll error\n"); return -1; }
+        if (!n) continue;
+        unsigned char buf[257];
+        long got = t_read(fd, buf, sizeof(buf)-1);
+        if (got <= 0) { t_putstr("D7 probe: read EOF/error\n"); return -1; }
+        buf[got] = 0;
+        for (long j = 0; j <= got; j++) tail[j] = (char)buf[j];
+        for (long j = 0; j < got; j++) {
+            matched = buf[j] == (unsigned char)want[matched] ? matched + 1 : 0;
+            if (matched == len) return 0;
+        }
+    }
+    t_putstr("D7 probe timeout; last output: "); t_putstr(tail); t_putstr("\n");
+    return -1;
+}
+static int registry_probe_send(struct registry_login_probe *p, const char *text, size_t len) {
+    return write_all(p->input, (const unsigned char *)text, len);
+}
+static int registry_probe_start(struct registry_login_probe *p, const char *creds, size_t len) {
+    long in = -1, out = -1;
+    p->pid = p->input = p->output = -1;
+    if (t_pipe(&in, &p->input) < 0) return -1;
+    if (t_pipe(&p->output, &out) < 0) { t_close(in); t_close(p->input); p->input = -1; return -1; }
+    static const char name[] = "/bin/login";
+    static const char args[] = "login\0--no-session\0";
+    unsigned int fds[3] = {(unsigned int)in, (unsigned int)out, (unsigned int)out};
+    struct t_sys_spawn_args req = {
+        .name_va = (unsigned long)name, .name_len = sizeof(name)-1,
+        .argv_data_va = (unsigned long)args, .argv_data_len = sizeof(args)-1, .argc = 2,
+        .fd_list_va = (unsigned long)fds, .fd_count = 3,
+        .perm_flags = LOGIN_PERMS, .cap_mask = LOGIN_CAPS,
+    };
+    p->pid = t_spawn_full_argv(&req);
+    t_close(in); t_close(out);
+    if (p->pid < 0) return -1;
+    if (registry_probe_send(p, creds, len) < 0) return -1;
+    static const char ready[] = "echo d7-ready | tr a-z A-Z\r";
+    if (registry_probe_send(p, ready, sizeof(ready)-1) < 0) return -1;
+    return registry_probe_expect(p->output, "D7-READY", 8);
+}
+static int registry_probe_finish(struct registry_login_probe *p) {
+    if (p->input >= 0) t_close(p->input);
+    if (p->output >= 0) t_close(p->output);
+    p->input = p->output = -1;
+    if (p->pid < 0) return 0;
+    int status = -1;
+    long rc = t_wait_pid_for((int)p->pid, 0, &status);
+    p->pid = -1;
+    return rc > 0 && status == 0 ? 0 : -1;
+}
+static int registry_login_overlap(void) {
+    struct registry_login_probe ps[4];
+    for (int i = 0; i < 4; i++) ps[i].pid = ps[i].input = ps[i].output = -1;
+    static const char a[] = "michael\ncorrect-horse-battery-staple-v1\n";
+    static const char b[] = "cora\nkora\n";
+    static const char c[] = "susan\nanatomy-trombone-glacier-velvet-42\n";
+    int rc = -1;
+    if (registry_probe_start(&ps[0], a, sizeof(a)-1) ||
+        registry_probe_start(&ps[1], b, sizeof(b)-1) ||
+        registry_probe_start(&ps[2], c, sizeof(c)-1)) goto done;
+    t_putstr("joey: D7 three distinct login sessions simultaneously ready\n");
+    if (registry_probe_start(&ps[3], a, sizeof(a)-1)) goto done;
+    t_putstr("joey: D7 second same-user session ready\n");
+    if (registry_probe_finish(&ps[3])) goto done;
+    // The surviving login must retain its home/DEK and ability to execute.
+    static const char check[] = "echo d7-survived > /home/michael/d7-survived\rcat /home/michael/d7-survived | tr a-z A-Z\r";
+    if (registry_probe_send(&ps[0], check, sizeof(check)-1) ||
+        registry_probe_expect(ps[0].output, "D7-SURVIVED", 11)) goto done;
+    t_putstr("joey: D7 same-user logout preserved surviving home\n");
+    rc = 0;
+done:
+    for (int i = 3; i >= 0; i--) if (registry_probe_finish(&ps[i])) rc = -1;
+    if (rc) t_putstr("joey: D7 overlapping login probe FAILED\n");
+    else t_putstr("joey: D7 overlapping login probe PASS\n");
+    return rc;
+}
+
+// Distinct names must retire with the session instead of accumulating boot
+// tombstones. Test-only accounts are idempotent on a preserved CI pool.
+static int registry_login_cycles(void) {
+    static const char pass[] = "d7-fixture-password";
+    for (unsigned i = 0; i < 20; i++) {
+        char user[] = "d7user00";
+        user[6] = (char)('0' + i / 10); user[7] = (char)('0' + i % 10);
+        long fd = connect_corvus();
+        if (fd < 0) { t_putstr("D7 cycles: connect failed\n"); return -1; }
+        unsigned char tx[128], rx[512], st = 255;
+        size_t rlen = 0, n = build_user_create(tx, user, 8, pass, sizeof(pass)-1);
+        int rc = corvus_exchange(fd, 5, tx, n, rx, sizeof(rx), &st, &rlen);
+        (void)t_explicit_bzero(rx, sizeof(rx)); // recovery enrollment reply
+        t_close(fd);
+        if (rc || (st != 0 && st != 2)) {
+            char num[32];
+            t_putstr("D7 cycles: create "); t_putstr(user);
+            t_putstr(" transport="); t_putstr(itoa_dec(rc, num, sizeof(num)));
+            t_putstr(" status="); t_putstr(itoa_dec(st, num, sizeof(num))); t_putstr("\n");
+            return -1;
+        }
+        // On st=2 the actual login proves this is the existing fixture account.
+        if (login_e2e_run(user, 8, pass, sizeof(pass)-1)) return -1;
+    }
+    t_putstr("joey: D7 twenty distinct login/logout cycles PASS\n");
+    return 0;
+}
+
 static int do_login_e2e(void) {
     // michael FIRST (the historical single-user gate), then cora -- the
     // second-user leg whose fresh /srv/home-cora post exercises the shared
@@ -3555,7 +3670,26 @@ static int do_login_e2e(void) {
     if (login_e2e_run("michael", 7,
                       "correct-horse-battery-staple-v1", 31) != 0)
         return -1;
-    return login_e2e_run("cora", 4, "kora", 4);
+    if (login_e2e_run("cora", 4, "kora", 4)) return -1;
+    if (registry_login_overlap()) return -1;
+    if (registry_login_cycles()) return -1;
+#if THYLA_D7_HOLD_LOGINS
+    // Explicit test image only: retain these two real pipe-backed sessions
+    // while the interactive getty authenticates the third user and exercises
+    // Haul. They have no physical-console line-discipline endowment. The VM
+    // harness owns the lifetime; ordinary and production images omit this.
+    static struct registry_login_probe held[2];
+    static const char b[] = "cora\nkora\n";
+    static const char c[] = "susan\nanatomy-trombone-glacier-velvet-42\n";
+    for (int i = 0; i < 2; i++) held[i].pid = held[i].input = held[i].output = -1;
+    if (registry_probe_start(&held[0], b, sizeof(b)-1) ||
+        registry_probe_start(&held[1], c, sizeof(c)-1)) {
+        for (int i = 1; i >= 0; i--) (void)registry_probe_finish(&held[i]);
+        return -1;
+    }
+    t_putstr("joey: D7 holding cora and susan for three-user Haul test\n");
+#endif
+    return 0;
 }
 
 // A-5c-c-2: do_recover_e2e -- prove the /sbin/login `!recover` UX drives a LIVE

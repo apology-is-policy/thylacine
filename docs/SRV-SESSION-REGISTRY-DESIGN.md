@@ -254,3 +254,56 @@ peak or per-domain attribution. The new diagnostic/test fixtures must measure
 domain charging after implementation. Evidence and matched kernel/ramfs/pool/key
 artifacts: `work/oct1-srv-sessions/baseline-ci/` and `baseline-console.log`. The
 run used one CPU, completed a real home-backed login and logout, and exited zero.
+
+## Discovered authentication prerequisite
+
+The D7 real overlap witness reached the first private home and then Corvus
+refused the second AUTH. Its singleton AUTH slot is an implementation narrowing
+of `corvus.tla` AuthSuccess, which already permits separate owner Procs. Completing
+the approved concurrent-login acceptance therefore also requires lifting that
+narrowing. Keep the existing eight-connection Corvus bound and at most one AUTH
+session per kernel-stamped owner stripes, with the exact creating connection
+owning teardown. No wire verb, token format, new capability or larger connection
+limit is introduced. Store each immutable user/principal, token and keypair
+independently. Select token-bearing operations by that token, never a global
+current-session variable. Forwarded tokens retain their existing UNWRAP use;
+only their creating connection can SESSION_CLOSE them. Closing another connection
+cannot erase them. Wipe every retired slot's secrets before reuse. CLEARANCE_ACTIVATE_SELF
+continues to require a live proof for the requesting principal; with multiple
+records, compare its captured principal identity rather than choosing whichever
+session happened to be installed last. The same-user overlap and first-logout
+witness must also verify the storage coordinator's per-connection DEK leases.
+
+The same-user acceptance also requires Stratum to retain one authenticated
+DEK lease per connection/dataset pair. Each new connection proves UNWRAP even
+if another session has installed the key; only the final lease release evicts.
+The existing 64 lease entries bound pairs, and provisioning reserves its lease
+before installing a new key. Disk/wire formats and SYSTEM-only gates stay fixed.
+Implementation is isolated in `stratum-astra`, branch `codex/astra-session-dek`.
+
+## Storage failure boundary discovered during acceptance
+
+Final home-key eviction must first drain dirty filesystem buffers while their
+DEKs are installed. Otherwise the next whole-pool commit can fail ELOCKED on
+the logged-out home, breaking unrelated Corvus account persistence. The Stratum
+fix drains under `fs->global` EX, excluding writers through key removal; a drain
+failure preserves the key and returns the error. This is not a durability
+commit, and only the last proven lease requests eviction.
+
+Explicit eviction retains the lease on failure so the caller can retry.
+Connection destruction retains Stratum's existing best-effort policy: it cannot
+retain the dying connection identity, and failed final eviction can leave a key
+resident. D7 does not claim storage-failure recovery or prompt key erasure in
+that case; follow-up must specify recovery without losing dirty data or allowing
+new accesses. Normal logout, subsequent commit, relogin and surviving sessions
+are the acceptance witnesses for this change.
+
+## Post-activation demand measurement
+
+Measured console demand in `haul-measured-1790862575463068000` (exit zero,
+42.18s): three live users consume 4+4+4 session connections before mount,
+12/48 aggregate and 22/64 global, with 3/16 retained domains. After a completed
+read while Haul remains mounted, the active session uses 5/16, the other two
+4 each, aggregate 13/48 and global 23/64 (boot 10). Remaining margins at that
+snapshot are 11 active-session, 35 session-aggregate, 41 global connections,
+and 13 domains. These are measured snapshots, not peak-workload guarantees.

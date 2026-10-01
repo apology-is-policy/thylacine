@@ -216,6 +216,7 @@ struct srvconn_chan {
 // p9_srvconn_transport (srvconn_attach_dev9p_root) — the SrvConn itself
 // is pure transport + identity (stalk-3b-β retired the old embedded
 // per-SrvConn p9_client).
+struct SrvDomain;
 struct SrvConn {
     u64                 magic;             // SRV_CONN_MAGIC; 0 once freed
     int                 ref;               // refcount; create → 1 (atomic)
@@ -264,6 +265,7 @@ struct SrvConn {
     // BEFORE teardown/free (the ctl walker holds the registry lock across
     // its whole walk, so it can never observe a freed conn).
     struct SrvConn     *ctl_next;
+    struct SrvDomain   *domain; // owned admission ticket; NULL = boot
 
     // Pollers registered on this connection's server endpoint (P5-poll-b).
     // The hook list is connection-wide because the server endpoint Spoor
@@ -366,6 +368,13 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // Returns NULL on exhausted capacity, allocation failure or a bad msize. A 9P-mode session
 // over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
+struct SrvDomain *srv_domain_create(int *err);
+void srv_domain_ref(struct SrvDomain *d);
+void srv_domain_unref(struct SrvDomain *d);
+void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
+                       u32 *global, u32 *domains);
+struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+    u64 peer_stripes, int peer_pid, bool peer_console, u64 server_stripes, u32 msize);
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
                                bool peer_console, u64 server_stripes,
                                u32 msize);
@@ -618,6 +627,8 @@ u64 srvconn_total_freed(void);
 // violation (or produced > consumed with the attached client parked) is
 // the reply-undrained arm of the loss discriminator.
 struct srvconn_ctl_row {
+    bool session_domain;
+    u32 domain_used, sessions_used, global_used, domains_retained;
     int  peer_pid;
     u32  msize;
     u8   state;            // enum srvconn_state

@@ -10,8 +10,15 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-30
+updated: 2026-10-01
 ---
+## Native ceiling 127
+
+The native ceiling now includes SRV_REGISTRY_NEW (127). The Vivarium
+compile-time separation assertion advances with it; there is no row at that
+number and no Linux phenotype factory operation. The new entry is native
+only and retains the kernel role gate. See [[sub-kernel-syscall-abi]].
+
 ## Purpose
 
 A Linux binary issues Linux syscall numbers. This layer decides, for each

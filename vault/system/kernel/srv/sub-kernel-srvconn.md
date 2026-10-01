@@ -3,40 +3,44 @@ id: sub-kernel-srvconn
 type: sub
 title: "srvconn — the /srv per-connection byte transport"
 parent: moc-kernel-srv
-code: [kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c]
+code: [kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c, tools/test-srvconn-admission.py]
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [prose, gate-smp]
-locks: [lock-srvconn-chan-lock]
+locks: [lock-srvconn-chan-lock, lock-srv-admission]
 hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
 updated: 2026-10-01
 ---
-## Admission (October 1)
+## Admission (October 1, D7)
 
-`srvconn_create` reserves one of 64 global slots with an atomic compare/exchange
-before allocating the object or either ring. The count includes constructors
-in flight and torn transports still held by endpoints. The successful CAS is
-the admission point; relaxed ordering suffices for the count because object
-publication and lifetime retain their existing synchronization. Allocation
-rollback releases the reservation after freeing partial storage; final unref
-releases it after both rings and the object are freed. Teardown and nonfinal
-unref never release capacity. Invalid ring classes are refused before admission.
+One admission lock reserves all applicable counters before allocation:
+16 transports per session, 48 for sessions combined, and 64 globally.
+Boot/internal connections use the global bound only. At most 16 session
+domains may remain retained. Constructors in flight and torn but referenced
+transports count; teardown never releases their tickets. Allocation rollback
+and final destruction return tickets only after storage is freed.
 
-The earlier `devsrv_open_connect` check sampled two diagnostic counters before
-allocation. Two opens could pass that check together; it was not the hard
-memory bound claimed here. Those counters remain observations only. The new
-bound is global: it does not establish per-session fairness or fix registry
-name exhaustion (O1-SRV-1, [[seam-srv-registry-lifecycle]]).
+A registry owns a refcounted `SrvDomain`; each admitted connection owns another
+reference. Connections do not retain the registry, so no registry/backlog cycle
+is introduced. The last domain reference returns its domain slot. A routed
+resident connection charges the requesting private view, not its boot provider.
+`/ctl/9p-sessions` exposes session/boot class and local, aggregate, global and
+retained-domain counts; they are observations, not authorization inputs.
 
-`srvconn.create_destroy` covers the real kernel allocation boundary, both ring
-classes, retained teardown and one-slot replacement. The host fixture
-`tools/test-srvconn-admission.py` compiles the production lifecycle bodies with
-allocator/locking stubs: it fails each of the three allocations and reenters
-creation during construction and destruction. It is admission/rollback evidence,
-not a host test of ARM layout or an SMP qualification.
+The predecessor CAS reserved only the global count. The new single-lock
+transaction replaces it so an over-limit session cannot reserve boot margin,
+even transiently. No allocation, storage free or final domain release occurs
+under the admission lock. The diagnostic list lock may precede admission;
+admission never enters the list or a registry lock.
+
+The actual-source host fixture checks all allocation failures, reentrant
+construction, independent session quotas, aggregate and global saturation,
+rollback and retained teardown. Eight intended mutants fail. Real kernel
+fixtures cover domain retirement and route charging. These are focused
+functional checks, not a new SMP/sanitizer qualification.
 
 ## Event-loop I/O
 

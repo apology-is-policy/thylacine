@@ -9,12 +9,81 @@ is claimed. The separate user-authority drafts remain untouched.
 
 The operator approved the concrete contract in
 `docs/SRV-SESSION-REGISTRY-DESIGN.md`, including the new factory role/ABI and
-resource partition. Scripture lands before consumers. O1-SRV-1 remains active
-until private roots, routes, poster death, quotas and real session regressions
-are implemented and verified. Work/evidence: `work/oct1-srv-sessions/`. Baseline
+resource partition. Scripture landed before consumers. O1-SRV-1 is implemented
+and functionally verified: private roots, routes, poster death, quotas and real
+session regressions. Final delivery steps are tracked below. Work/evidence: `work/oct1-srv-sessions/`. Baseline
 CI console login returned 14 connection rows in one global diagnostic snapshot;
 it is neither a peak measurement nor a per-session charge measurement. All four
 protected drafts remain byte-exact; the baseline VM exited and Mac was released.
+
+D7 completes the contract ratified in scripture `7c723cb58`. The first real
+three-user overlap exposed Corvus's singleton AUTH restriction (D7-R1). Its
+existing multi-owner model is now implemented as eight connection-owned records.
+A second session for the same principal then exposed Stratum's singleton home
+DEK lease (D7-R3). An isolated Stratum worktree now proves each new token and
+retains the key until the last lease ends. Both are required dependencies of the
+approved multi-user acceptance, with no new wire/disk formats or capability bits.
+
+Latest ordinary evidence `runtime-1790859547205293000` passes CI build,
+CPU1 boot **1830/1830**, three distinct overlapping login shells, a second
+same-user login, logout with surviving home access, **twenty distinct login/
+logout cycles**, and console inventory. The readiness witnesses use lowercase
+commands through `tr`, so terminal echo cannot satisfy them. The create-cycle
+failure exposed D7-R4: dirty home data left after DEK eviction made an unrelated
+whole-pool fsync fail ELOCKED. The isolated Stratum fix drains dirty buffers
+under EX before key removal. Its public filesystem regression now passes;
+15 Corvus mount tests pass, including bad-proof/live-key mismatch refusal.
+
+Haul evidence `haul-1790860032829361000` passes the real OpenSSL npxf service
+with cora and susan held live beside interactive michael: denied unprivileged
+post, trusted grant, encrypted mount/read, remote marker, refused second mount,
+unmount, hangup, repost and abdication. Inventory witnesses **three domains**.
+The first attempt never booted because its QMP socket path was too long; short
+unique `/tmp` sockets fix that harness failure (D7-T3).
+
+Corvus's actual session module passes three host tests/four intended mutants;
+Stratum's actual lease functions pass/four mutants; transport admission passes/
+eight mutants. The compiled kernel/libt/Rust ABI fixtures agree. The new factory
+allocation-boundary fixture passes and rejects three reference-leak mutants.
+The first factory harness extractor/negative diagnostic was corrected before
+acceptance; earlier failure logs are retained.
+
+Graphical media and Lantern pass in `graphics-1790860141254336000`. The outer
+runner's 600-second budget interrupted a still-progressing manual scenario
+(D7-T4); that is **incomplete**, not a pass or a guest assertion failure.
+The same pinned image passes the full manual scenario in 641.97 seconds and
+dedicated F10 SAK states in 191.75 seconds, with fresh pools, in
+`graphics-followup-1790860998507733000`. SAK includes real authority, denial,
+abdication, cancellation, expiry and five-failure lockout. Screenshots are
+1280x800; no fresh 800x720 or Pi qualification is claimed.
+Final ordinary CPU1 boot passes 1830/1830 with the additional cap-posted route
+and spawn-entry refusal tests in `native-1790862154801753000`. All overlap and
+twenty-name probes pass again. An empty-process-group cleanup error interrupted
+the native runner after observer PASS/EOF (D7-T6); followup uses the same pinned
+image and checks actual exits. `native-followup-1790862433207487000` passes
+observer (41.56s), readiness (44.11s), and service-wire (41.27s), each with exit
+zero and an empty owned process group after bounded child reaping. Stratum host checks cover all 73 CTest targets: 72 passed on the first full
+run; the superseded singleton expectation in test_corvus_provision was updated
+and passed independently with production unchanged. Its dependency is committed
+as `61dde3727921e70e2c72fbd3c9e2044a192f4a54` on the isolated
+`codex/astra-session-dek` branch. All eight Corvus model negatives pass their
+expected-failure check. Vault render/lint passes: 1412 notes, zero failures,
+one existing staleness warning (63 dossiers). Source pins and all four draft
+bytes are verified; normal hooks guard this checkpoint. The local commit
+receipt is `work/oct1-srv-sessions/committed.json`. No Main landing is claimed.
+
+The first runtime wrappers passed an ignored `--cpus` argument to test.sh; those
+early ordinary boots were SMP4 (console runs CPU1). Corrected wrappers now use
+`THYLACINE_TEST_CPUS=1`; earlier evidence must not be called CPU1 ordinary boots.
+
+
+Measured console demand in `haul-measured-1790862575463068000` (exit zero,
+42.18s): three live users consume 4+4+4 session connections before mount,
+12/48 aggregate and 22/64 global, with 3/16 retained domains. After a completed
+read while Haul remains mounted, the active session uses 5/16, the other two
+4 each, aggregate 13/48 and global 23/64 (boot 10). Remaining margins at that
+snapshot are 11 active-session, 35 session-aggregate, 41 global connections,
+and 13 domains. These are measured snapshots, not peak-workload guarantees.
 
 ## Registry repair pickup (October 1, after reconciliation)
 

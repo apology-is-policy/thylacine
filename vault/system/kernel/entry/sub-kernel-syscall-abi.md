@@ -19,8 +19,17 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-01
 ---
+## Session registry factory ABI
+
+Native syscall 127 is SRV_REGISTRY_NEW: boot O_PATH fd, route pointer, count,
+zero flags. Each route is 40 bytes (u32 length, u32 reserved, 32 name bytes).
+Public spawn bit 10 delegates the dedicated factory role. Kernel C, libt C
+and Rust wrappers agree under tools/test-srv-registry-abi.py; the native
+ceiling and Vivarium separation assertions advance to 127. No Linux-number
+translation row or Imperium capability is introduced. See [[sub-kernel-devsrv]].
+
 ## Purpose
 
 The contract half of the userspace boundary. [[sub-kernel-exception]] defines

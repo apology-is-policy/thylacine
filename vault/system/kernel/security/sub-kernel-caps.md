@@ -16,8 +16,17 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-01
 ---
+## Registry creation is a role, not an Imperium capability
+
+The D7 factory uses explicit spawn permission bit 10 / Proc role bit 29.
+Neither POST_SERVICE nor TCB_DIAL nor SET_IDENTITY implies it; console
+attachment is insufficient too. Only a holder may explicitly delegate it.
+Bootstrap gives it to Joey, Joey gives it to login, and ordinary children do
+not inherit it. This keeps authority to mint fresh quota domains separate
+from authority to post within an existing session. See [[sub-kernel-devsrv]].
+
 
 ## Administrative authority specification
 

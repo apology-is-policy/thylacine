@@ -66,13 +66,9 @@
 // ownership records do not survive a corvus restart; FS persistence
 // (loading /var/lib/corvus/) lands once that tree is mounted.
 //
-// Multi-session at v1.0: corvus accepts multiple connections in
-// parallel BUT keeps a single global SESSION. v1.0's kernel cap
-// SRV_CONN_PER_PROC_MAX=1 plus joey being the single console-attached
-// Proc means there's exactly one active connection at any time, so
-// per-conn-session is equivalent to global session here. Multi-session
-// support (a Session per Conn keyed by peer stripes) lifts when the
-// multi-peer surface lands.
+// D7 multi-session: at most one AUTH record per kernel-stamped owner,
+// bounded by the eight transport connections. Token borrowing selects the
+// authenticated record; only its original connection can retire it.
 //
 // Spec correspondence (specs/corvus.tla; P5-corvus-spec at c00de63):
 //
@@ -83,8 +79,8 @@
 //                           UnwrapOwnerOnly; the cross-user refusal is
 //                           the BuggyUnwrapCrossUser negative.
 //   SessionUserImmutable  — Session::{user,keypair} set once at
-//                           session_install(); cleared whole-record at
-//                           session_clear(); no in-place setter.
+//                           Sessions::install(); cleared whole-record at
+//                           Sessions::clear_connection(); no in-place setter.
 //   ConnAccept(p)         — accept_one() — new Conn record born at
 //                           t_srv_accept return.
 //   ConnTeardown(p)       — close_conn() — Conn record cleared on
@@ -1939,142 +1935,19 @@ const RESP_HDR_LEN: usize = 3;
 // the DEK envelope which is the largest response payload.
 const MAX_RESPONSE_FRAME: usize = RESP_HDR_LEN + ENVELOPE_LEN;
 
-// =============================================================================
-// Session table — single global slot at v1.0.
-// =============================================================================
-//
-// Spec (specs/corvus.tla) models Sessions as SUBSET SessionRecord with at
-// most one record per owner_proc. At v1.0 corvus has a single global
-// SESSION slot — adequate because joey is the only console-attached
-// Proc and the kernel cap SRV_CONN_PER_PROC_MAX=1 means at most one live
-// connection per peer. Multi-session (per-Conn Session keyed by peer
-// stripes) lifts when the multi-peer surface lands.
-//
-// The session carries the AEGIS-unwrapped hybrid keypair (P5-corvus-
-// bringup-d): AUTH installs it, WRAP / UNWRAP read it, session_clear
-// wipes it. The keypair slab is the load-bearing secret in corvus's
-// mlock'd RAM.
+// D7: separate immutable AUTH records, bounded by the existing connection
+// limit. The server loop is single-threaded; no selected-session global exists.
+mod sessions;
+static mut SESSIONS: sessions::Sessions = sessions::Sessions::new();
 
-#[repr(C)]
-struct Session {
-    active: bool,
-    user_len: u8,
-    user: [u8; MAX_USER_LEN],
-    token: [u8; TOKEN_LEN],
-    keypair: [u8; KEYPAIR_LEN],
-    // A-5b: conn_id of the connection that ran the successful AUTH. The
-    // global AUTH session is cleared on THIS connection's close (close_conn)
-    // or an explicit SESSION_CLOSE -- never on a non-owning bearer-token
-    // connection's close, so a 2nd Proc presenting the token for an UNWRAP
-    // (the section 6.3 forward; e.g. the A-5b storage coordinator pulling a
-    // home DEK) cannot wipe a live login session by disconnecting. 0 = none.
-    owner_conn_id: u64,
+unsafe fn session_token_matches(token: &[u8]) -> bool {
+    (&*core::ptr::addr_of!(SESSIONS)).find(token).is_some()
 }
-
-static mut SESSION: Session = Session {
-    active: false,
-    user_len: 0,
-    user: [0; MAX_USER_LEN],
-    token: [0; TOKEN_LEN],
-    keypair: [0; KEYPAIR_LEN],
-    owner_conn_id: 0,
-};
-
-unsafe fn session_active() -> bool {
-    core::ptr::read(core::ptr::addr_of!(SESSION.active))
+unsafe fn session_user_copy(token: &[u8]) -> Option<Vec<u8>> {
+    (&*core::ptr::addr_of!(SESSIONS)).find(token).map(|s| s.user().to_vec())
 }
-
-unsafe fn session_install(user: &[u8], token: &[u8; TOKEN_LEN], keypair: &[u8; KEYPAIR_LEN],
-                          owner_conn_id: u64) {
-    let s = core::ptr::addr_of_mut!(SESSION);
-    let user_ptr = core::ptr::addr_of_mut!((*s).user) as *mut u8;
-    let token_ptr = core::ptr::addr_of_mut!((*s).token) as *mut u8;
-    let kp_ptr = core::ptr::addr_of_mut!((*s).keypair) as *mut u8;
-    for i in 0..MAX_USER_LEN {
-        core::ptr::write(user_ptr.add(i), 0);
-    }
-    for i in 0..user.len() {
-        core::ptr::write(user_ptr.add(i), user[i]);
-    }
-    for i in 0..TOKEN_LEN {
-        core::ptr::write(token_ptr.add(i), token[i]);
-    }
-    core::ptr::copy_nonoverlapping(keypair.as_ptr(), kp_ptr, KEYPAIR_LEN);
-    core::ptr::write(core::ptr::addr_of_mut!((*s).user_len), user.len() as u8);
-    core::ptr::write(core::ptr::addr_of_mut!((*s).owner_conn_id), owner_conn_id);
-    core::ptr::write(core::ptr::addr_of_mut!((*s).active), true);
-}
-
-unsafe fn session_token_matches(candidate: &[u8]) -> bool {
-    if candidate.len() != TOKEN_LEN {
-        return false;
-    }
-    if !session_active() {
-        return false;
-    }
-    let token_ptr = core::ptr::addr_of!(SESSION.token) as *const u8;
-    let mut diff: u8 = 0;
-    for i in 0..TOKEN_LEN {
-        let tok_byte = core::ptr::read(token_ptr.add(i));
-        diff |= tok_byte ^ candidate[i];
-    }
-    diff == 0
-}
-
-unsafe fn session_user_copy() -> Option<Vec<u8>> {
-    if !session_active() {
-        return None;
-    }
-    let s = core::ptr::addr_of!(SESSION);
-    let len = core::ptr::read(core::ptr::addr_of!((*s).user_len)) as usize;
-    if len == 0 || len > MAX_USER_LEN {
-        return None;
-    }
-    let user_ptr = core::ptr::addr_of!((*s).user) as *const u8;
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        out.push(core::ptr::read(user_ptr.add(i)));
-    }
-    Some(out)
-}
-
-unsafe fn session_keypair_copy() -> Option<[u8; KEYPAIR_LEN]> {
-    if !session_active() {
-        return None;
-    }
-    let s = core::ptr::addr_of!(SESSION);
-    let kp_ptr = core::ptr::addr_of!((*s).keypair) as *const u8;
-    let mut out = [0u8; KEYPAIR_LEN];
-    core::ptr::copy_nonoverlapping(kp_ptr, out.as_mut_ptr(), KEYPAIR_LEN);
-    Some(out)
-}
-
-unsafe fn session_clear() {
-    let s = core::ptr::addr_of_mut!(SESSION);
-    // Clear active FIRST so a concurrent reader can't observe a stale
-    // token bound to a cleared session.
-    core::ptr::write(core::ptr::addr_of_mut!((*s).active), false);
-    let user_ptr = core::ptr::addr_of_mut!((*s).user) as *mut u8;
-    let token_ptr = core::ptr::addr_of_mut!((*s).token) as *mut u8;
-    let kp_ptr = core::ptr::addr_of_mut!((*s).keypair) as *mut u8;
-    for i in 0..MAX_USER_LEN {
-        core::ptr::write(user_ptr.add(i), 0);
-    }
-    for i in 0..TOKEN_LEN {
-        core::ptr::write(token_ptr.add(i), 0);
-    }
-    // The keypair is the load-bearing secret — volatile-wipe it.
-    for i in 0..KEYPAIR_LEN {
-        core::ptr::write_volatile(kp_ptr.add(i), 0);
-    }
-    core::ptr::write(core::ptr::addr_of_mut!((*s).user_len), 0);
-    core::ptr::write(core::ptr::addr_of_mut!((*s).owner_conn_id), 0);
-}
-
-// A-5b: the conn_id that owns the live AUTH session (0 = none). The owner is
-// the connection that ran AUTH; only its close clears the session.
-unsafe fn session_owner_conn_id() -> u64 {
-    core::ptr::read(core::ptr::addr_of!(SESSION.owner_conn_id))
+unsafe fn session_keypair_copy(token: &[u8]) -> Option<[u8; KEYPAIR_LEN]> {
+    (&*core::ptr::addr_of!(SESSIONS)).find(token).map(|s| *s.keypair())
 }
 
 // =============================================================================
@@ -2142,7 +2015,7 @@ fn stage_response(response: &mut Vec<u8>, status: u8, payload: &[u8]) {
 //   [1..1+ul]      user
 //   [1+ul..3+ul]   pass_len u16 LE (1..=MAX_PASS_LEN)
 //   [3+ul..]       passphrase
-unsafe fn handle_auth(owner_conn_id: u64, payload: &[u8], response: &mut Vec<u8>) {
+unsafe fn handle_auth(handle: i64, owner_conn_id: u64, payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() < 3 {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
@@ -2163,31 +2036,13 @@ unsafe fn handle_auth(owner_conn_id: u64, payload: &[u8], response: &mut Vec<u8>
     }
     let passphrase = &payload[1 + user_len + 2..1 + user_len + 2 + pass_len];
 
-    // Refuse AUTH while a session is bound.
-    //
-    // Read this as an IMPLEMENTATION narrowing, not a spec requirement -- the
-    // distinction was lost here and #139 was the bill. corvus.tla AuthSuccess
-    // says `~(\E s \in sessions : s.owner_proc = p)`: no session owned by THIS
-    // Proc. The model permits concurrent sessions from different Procs. What
-    // runs below is the single global SESSION slot (see the struct's note), so
-    // it refuses AUTH from ANY Proc while ANY session exists -- strictly
-    // stricter than the model, and the elided `s.owner_proc = p` is exactly
-    // where the strictness hides.
-    //
-    // The narrowing was sound for the world it was written in (joey the only
-    // console-attached Proc, one connection per peer). Login and user programs
-    // arrived later and the bound stayed; a correct bound whose reason had
-    // expired. The consequence was not a refused login but a structural one: no
-    // post-login program could ever obtain a session token, so the token-gated
-    // CLEARANCE_ACTIVATE (verb 15) became unreachable for every user-launched
-    // program -- CAP_JIT included, i.e. all of GL.
-    //
-    // Verb 18 (CLEARANCE_ACTIVATE_SELF) routes around it without touching this
-    // gate, because widening it is the larger change: per-connection sessions
-    // re-open the A-5b cross-session-wipe question that owner_conn_id closed.
-    // That lift stays available (it is what the model already describes) and is
-    // the right move if a second verb ever needs the same escape.
-    if session_active() {
+    // The model's one-session-per-owner-Proc rule. Live kernel stripes cannot
+    // be confused with a reused pid; a second connection cannot rebind an owner.
+    let peer = match peer_live_info(handle) {
+        Some(p) => p,
+        None => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    };
+    if !(&*core::ptr::addr_of!(SESSIONS)).can_auth(peer.stripes) {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
@@ -2238,8 +2093,13 @@ unsafe fn handle_auth(owner_conn_id: u64, payload: &[u8], response: &mut Vec<u8>
     }
     let _ = t_explicit_bzero(entropy.as_mut_ptr(), TOKEN_ENTROPY_BYTES);
 
-    session_install(user, &token, &keypair, owner_conn_id);
+    let installed = (&mut *core::ptr::addr_of_mut!(SESSIONS)).install(
+        peer.stripes, owner_conn_id, state.principal_id, user, &token, &keypair);
     wipe(&mut keypair);
+    if !installed {
+        wipe(&mut token);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
 
     stage_response(response, STATUS_OK, &token);
     wipe(&mut token);
@@ -3057,7 +2917,7 @@ unsafe fn handle_clearance_list(payload: &[u8], response: &mut Vec<u8>) {
     if !session_token_matches(payload) {
         return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
-    let user = match session_user_copy() {
+    let user = match session_user_copy(payload) {
         Some(u) => u,
         None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
@@ -3253,7 +3113,7 @@ unsafe fn handle_clearance_activate(handle: i64, payload: &[u8], response: &mut 
     if !session_token_matches(token) {
         return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
-    let user = match session_user_copy() {
+    let user = match session_user_copy(token) {
         Some(u) => u,
         None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
@@ -3324,15 +3184,7 @@ unsafe fn handle_clearance_activate_self(handle: i64, payload: &[u8], response: 
     // Compared by id, not by name -- ids come from the monotonic allocator with
     // burned entries, so they cannot be recycled onto a different human the way
     // a re-created name could.
-    let sess_user = match session_user_copy() {
-        Some(u) => u,
-        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
-    };
-    let sess_principal = match user_states_find(&sess_user) {
-        Some(s) => s.principal_id,
-        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
-    };
-    if sess_principal != peer.principal_id {
+    if !(&*core::ptr::addr_of!(SESSIONS)).has_principal(peer.principal_id) {
         return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
 
@@ -4453,7 +4305,7 @@ unsafe fn handle_wrap(payload: &[u8], response: &mut Vec<u8>) {
     if !session_token_matches(token) {
         return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
-    let session_user = match session_user_copy() {
+    let session_user = match session_user_copy(token) {
         Some(u) => u,
         None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
@@ -4465,7 +4317,7 @@ unsafe fn handle_wrap(payload: &[u8], response: &mut Vec<u8>) {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    let mut keypair = match session_keypair_copy() {
+    let mut keypair = match session_keypair_copy(token) {
         Some(kp) => kp,
         None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
@@ -4534,7 +4386,7 @@ unsafe fn handle_unwrap(payload: &[u8], response: &mut Vec<u8>) {
     if !session_token_matches(token) {
         return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
-    let session_user = match session_user_copy() {
+    let session_user = match session_user_copy(token) {
         Some(u) => u,
         None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
@@ -4546,7 +4398,7 @@ unsafe fn handle_unwrap(payload: &[u8], response: &mut Vec<u8>) {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    let mut keypair = match session_keypair_copy() {
+    let mut keypair = match session_keypair_copy(token) {
         Some(kp) => kp,
         None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
@@ -4577,19 +4429,12 @@ unsafe fn handle_session_close(conn_id: u64, payload: &[u8], response: &mut Vec<
     if !session_token_matches(payload) {
         return stage_response(response, STATUS_NOT_FOUND, &[]);
     }
-    // Only the session-OWNING connection may close it via the verb. A
-    // non-owning bearer-token connection -- the storage coordinator pulling a
-    // per-user DEK over the S6.3 token-forward -- holds a valid token but must
-    // not wipe a live login session (that would break A-4 legate elevation,
-    // which re-presents the same token). The connection-close path
-    // (close_conn) already gates on ownership; this gates the explicit verb,
-    // completing the lift. session_owner_conn_id() is 0 only when no session
-    // is active and conn_id is always >= 1 (the allocator skips the 0
-    // sentinel), so a non-owner can never alias the no-owner state.
-    if conn_id != session_owner_conn_id() {
+    // A forwarded token may use a record, never retire its owner.
+    let owner = (&*core::ptr::addr_of!(SESSIONS)).find(payload).map(|s| s.connection());
+    if owner != Some(conn_id) {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
-    session_clear();
+    (&mut *core::ptr::addr_of_mut!(SESSIONS)).clear_connection(conn_id);
     stage_response(response, STATUS_OK, &[]);
 }
 
@@ -4867,7 +4712,7 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
         let conn_id = conn.conn_id;
 
         match verb_id {
-            VERB_AUTH => handle_auth(conn_id, &payload_owned, &mut conn.pending_response),
+            VERB_AUTH => handle_auth(conn_handle, conn_id, &payload_owned, &mut conn.pending_response),
             VERB_SESSION_CLOSE => handle_session_close(conn_id, &payload_owned,
                                                        &mut conn.pending_response),
             VERB_UNWRAP => handle_unwrap(&payload_owned, &mut conn.pending_response),
@@ -5496,17 +5341,9 @@ unsafe fn close_conn(conns: &mut Vec<Conn>, idx: usize) {
     wipe(&mut conn.out_buf);
     wipe(&mut conn.pending_request);
     wipe(&mut conn.pending_response);
-    // A-5b: clear the global AUTH session only when its OWNING connection
-    // (the one that ran AUTH) closes. A non-owning bearer-token connection
-    // -- e.g. the A-5b storage coordinator that presented login's token for
-    // an UNWRAP -- disconnecting must NOT wipe a live login session (that
-    // would break mid-session A-4 legate elevation, which re-presents the
-    // same token). The SESSION_CLOSE verb is likewise owner-gated
-    // (handle_session_close); only process shutdown clears unconditionally.
-    let owner = session_owner_conn_id();
-    if owner != 0 && conn.conn_id == owner {
-        session_clear();
-    }
+    // Retire exactly this connection's AUTH record. A borrowed token and
+    // another user's connection are independent of this lifetime.
+    (&mut *core::ptr::addr_of_mut!(SESSIONS)).clear_connection(conn.conn_id);
     // IM-3: a requester that left takes its pending request with it (a later
     // SAK must find nothing pending); its parked read dies with the conn.
     imperium_pending_cancel_if_conn(conn.conn_id);
@@ -5726,13 +5563,13 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     let rc = unsafe { srv_server_loop(listener, &notes) };
+    unsafe { (&mut *core::ptr::addr_of_mut!(SESSIONS)).clear_all() };
+    let _ = unsafe { t_close(listener) };
     if rc < 0 {
         t_putstr("corvus: srv_server_loop FAILED\n");
         return 1;
     }
 
-    unsafe { session_clear() };
-    let _ = unsafe { t_close(listener) };
     t_putstr("corvus: srv_server_loop returned cleanly; shutting down\n");
     0
 }

@@ -1,11 +1,13 @@
 ---
 id: sub-corvus
 type: sub
-title: "corvus — the key agent: one session, one keypair in mlock'd RAM, and a design whose justification was deleted underneath it"
+title: "corvus — the key agent and connection-owned authentication records"
 parent: moc-userspace
 code:
   - usr/corvus/src/main.rs
   - usr/corvus/src/provincia.rs
+  - usr/corvus/src/sessions.rs
+  - tools/test-corvus-sessions.py
   - usr/corvus/Cargo.toml
 audit: hard
 guarded-by: [inv-i22, inv-i23]
@@ -15,7 +17,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-18
+updated: 2026-10-01
 ---
 
 ## Administrative authority specification
@@ -85,8 +87,8 @@ Graphical service ownership was approved on 2026-09-18; see
 `docs/GRAPHICAL-SAK-OWNERSHIP.md` and `docs/GRAPHICAL-SAK-PORTABILITY.md`.
 The service is a TCB member. Corvus must not accept secrets before exclusive
 presentation/input acknowledgement, or bypass existing request/grant validation.
-Pi 400/Pi 500 require independent hardware qualification. This is approved design,
-not implemented behavior; serial remains the enforced path. Halcyon and Beacon
+Pi 400/Pi 500 require independent hardware qualification. Graphical episodes are implemented and runtime-tested; serial is an explicit
+recovery setting. Halcyon and Beacon
 must never collect the Imperium key through an ordinary surface.
 
 **Reached as a 9P server.** corvus posts `/srv/corvus` and serves a
@@ -306,12 +308,14 @@ a fresh phrase shown only to them.
 
 ## Data structures
 
-**`Session`** — a single global slot: an active flag, the user name and
-its length, the token, the unwrapped keypair, and the identifier of the
-connection that ran the successful AUTH. Installed whole, cleared whole;
-there is no in-place setter for the user or the keypair, which is how the
-"a session's identity never changes" property is made unexpressible rather
-than checked. The keypair is volatile-wiped on clear.
+**`Sessions` / `Session`** — eight records, bounded by the existing connection
+limit. Each immutable record contains the owning Proc stripes, connection id,
+principal id, user, token and unwrapped keypair. AUTH refuses a second record
+for the same owner or connection and checks token uniqueness. Every token
+lookup compares all token bytes in every slot. Only the owning connection's
+close or owner-authenticated SESSION_CLOSE clears it; clear volatile-wipes
+user, token and keypair. Borrowed tokens select a record but cannot retire it.
+Server exit clears the whole table even after a loop error.
 
 **`Conn`** — the per-connection arena: the handle, a monotonic
 process-unique identifier assigned at accept, the peer snapshot, the 9P
@@ -343,26 +347,16 @@ corvus is single-threaded. One `poll` over the listener and every live
 connection, then a service pass; no locks, no shared mutable state across
 threads, and none of the wait/wake reasoning the kernel notes carry.
 
-The interesting consequence is that "single-threaded" does not mean
-"single-client". Up to eight connections are live at once, they interleave
-at request granularity, and the *global* session is the shared state
-between them. Two mechanisms make that safe, and only one of them is
-written down:
+Up to eight connections interleave at request granularity. D7 removes the
+single global AUTH slot: independent owners, including the same principal,
+may authenticate concurrently. WRAP/UNWRAP and token-bearing clearance calls
+select the exact token's record. CLEARANCE_ACTIVATE_SELF checks whether the
+kernel-stamped principal has a live authenticated record. No selected-session
+global or cross-dispatch borrow is used. The actual module's three host tests
+and four deliberate mutants cover owner retirement, collision, reuse and wipe;
+real login overlap supplies the userspace integration witness.
 
-- **The AUTH gate.** A second AUTH while a session is bound is refused
-  with PermissionDenied. This is what actually prevents one client
-  overwriting another's session — and its consequence is that corvus
-  serves one *user* at a time, not one connection at a time.
-- **The ownership tag.** The session records which connection created it,
-  and only that connection's close — or an explicit, token-authenticated
-  SESSION_CLOSE — clears it. A non-owning bearer-token connection
-  disconnecting must not wipe a live login session, because the storage
-  coordinator presents the login token over its own transient connection
-  to pull a home DEK, and mid-session legate elevation re-presents the
-  same token. The identifier is monotonic and **skips zero on the 64-bit
-  wrap**, because zero is the "no owner" sentinel: a recycled id that
-  aliased it would let an unrelated connection's close pass the ownership
-  gate and wipe a session it never created.
+The following AUTH-gate history describes the implementation before D7.
 
 ### The AUTH gate is a narrowing, not a design — and it cost a capability
 
@@ -511,17 +505,14 @@ boot-fatal and it is spawned once — but the time-windowed, persisted limit
 covering authentication as well is a separate design item that has not
 landed.
 
-**Multi-session** is the standing lift. The session table is one slot; the
-design's model already permits a set of session records keyed by owner,
-and the connection-ownership tag is the piece that was added in
-anticipation. What remains is making the session per-connection rather
-than global, and the AUTH gate's refusal is what stands in for it today.
+**Multi-session** is implemented by D7 as described above. The historical
+single-slot caveats below explain its origin; they no longer describe AUTH.
 
 **No `Tflush`.** The 9P server has no flush handler, because the
 kernel-internal client is single-flight — it blocks for each reply before
 issuing the next request, so no request is ever outstanding to cancel. A
 pipelined client would need one; this is the transport-layer twin of the
-same not-yet-multiplexed posture the single session slot describes above.
+separate transport constraint; multiple AUTH records do not implement Tflush.
 
 **Rate limiting does not cover authentication.** Repeated wrong-passphrase
 AUTH attempts are bounded only by the cost of Argon2id itself.

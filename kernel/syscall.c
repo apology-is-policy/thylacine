@@ -2695,6 +2695,37 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
                                const u8 *aname, u64 aname_len,
                                u64 n_uname, u64 flags);
 
+s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+    const struct srv_route *routes, u64 count, u64 flags) {
+    if (!proc_may_create_srv_registry(p)) return -T_E_ACCES;
+    if (flags || count > SRV_MAX_ROUTES) return -T_E_INVAL;
+    if (source_fd > 0x7fffffffUL) return -T_E_BADF;
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)source_fd, &hh) < 0) return -T_E_BADF;
+    if (hh.kind != KOBJ_SPOOR || !hh.obj) { handle_put(&hh); return -T_E_INVAL; }
+    if (!(hh.rights & RIGHT_READ)) { handle_put(&hh); return -T_E_ACCES; }
+    int err;
+    struct Spoor *root = devsrv_session_root(p, hh.obj, routes, (u32)count, &err);
+    handle_put(&hh);
+    if (!root) return err;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, root);
+    if (fd < 0) { spoor_clunk(root); return -T_E_MFILE; }
+    return fd;
+}
+
+static s64 sys_srv_registry_new_handler(u64 fd, u64 va, u64 count, u64 flags) {
+    struct Thread *t = current_thread();
+    struct Proc *p = t ? t->proc : NULL;
+    if (!proc_may_create_srv_registry(p)) return -T_E_ACCES;
+    if (flags || count > SRV_MAX_ROUTES) return -T_E_INVAL;
+    u64 len = count * sizeof(struct srv_route);
+    if (len && !sys_validate_user_buf(va, len)) return -T_E_FAULT;
+    struct srv_route scratch[SRV_MAX_ROUTES];
+    for (u64 i = 0; i < len; i++)
+        if (uaccess_load_u8(va + i, ((u8 *)scratch) + i)) return -T_E_FAULT;
+    return sys_srv_registry_new_for_proc(p, fd, scratch, count, flags);
+}
+
 static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
                                        u64 aname_len, u64 n_uname,
                                        u64 flags) {
@@ -8976,6 +9007,8 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // suite can drive the per-bit decision directly on synthetic Procs.
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
+    if ((perm_flags & SPAWN_PERM_SESSION_REGISTRY) &&
+        !proc_may_create_srv_registry(p)) return -1;
     if ((perm_flags & SPAWN_PERM_SEAT_MANAGER) && !proc_is_console_attached(p)) return -1;
     if ((perm_flags & (SPAWN_PERM_SEAT_SERVICE | SPAWN_PERM_SEAT_CLIENT))
             && !proc_is_console_attached(p) && !proc_is_seat_manager(p)) return -1;
@@ -9029,6 +9062,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
 // (a real spawn races the child's exit clearing g_console_owner, so the owner-set
 // wiring is unobservable through a full spawn).
 void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
+    if (perm_flags & SPAWN_PERM_SESSION_REGISTRY) proc_mark_session_registry(p);
     if (perm_flags & SPAWN_PERM_SEAT_MANAGER) proc_mark_seat_manager(p);
     if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
     if (perm_flags & SPAWN_PERM_SEAT_CLIENT) (void)proc_set_seat_client(p);
@@ -15961,6 +15995,11 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
 
     case SYS_BURROW_PROTECT:
         ctx->regs[0] = (u64)sys_burrow_protect_handler(ctx->regs[0], ctx->regs[1],
+                                                       ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_SRV_REGISTRY_NEW:
+        ctx->regs[0] = (u64)sys_srv_registry_new_handler(ctx->regs[0], ctx->regs[1],
                                                        ctx->regs[2], ctx->regs[3]);
         return;
 

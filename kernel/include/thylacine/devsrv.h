@@ -51,23 +51,18 @@ struct poll_waiter;
 // SYS_POST_SERVICE kernel-stack name scratch.
 #define SRV_NAME_MAX  32u
 
-// Service registry capacity. The "corvus is the sole service; 8 is
-// headroom" era ended: the resident boot posts SIX permanent services
-// (stratum-fs, stratum-ctl, corvus, net, ptyfs, tapestry) and tombstones
-// never free (a dead poster's entry pins its NAME + slot forever -- the
-// stale-handle defense), so the boot-probe socket (pouch-sock-demo) + the
-// login-E2E home-michael tombstones made 8 EXACTLY full at the login
-// prompt (#30): michael forever REBINDS his own tombstone by name (no new
-// slot) while any OTHER user's fresh /srv/home-<user> post found no free
-// slot -> devsrv_create -1 -> the pouch bind's EACCES -> a permanently
-// unprovisionable home. 16 = the 8 occupants + ~8 distinct per-boot
-// usernames of headroom; each unit also costs kernel STACK in
-// srv_registry_drain (SRV_MAX_SERVICES x SRV_ACCEPT_BACKLOG pointers --
-// 2 KiB at 16), so a further raise should land with the real fix: the
-// entry-free-at-last-handle-ref lifecycle that retires tombstone
-// accumulation entirely (the recorded v1.x seam). A post past the cap
-// still fails fast; a TOMBSTONE rebind needs no free slot.
+// Private posting capacity of each registry. Login's D7 factory gives every
+// session its own mortal table; immutable resident routes occupy separate
+// slots. Trusted tombstones reserve their names until that registry retires.
+// Keep this bound tied to the drain stack (16 x 16 pointers ~= 2 KiB), not to
+// the number of usernames that have logged in since boot.
 #define SRV_MAX_SERVICES  16u
+
+// Native syscall 127 manifest; all unused name bytes must be zero.
+struct srv_route { u32 name_len; u32 reserved; u8 name[32]; };
+_Static_assert(sizeof(struct srv_route) == 40, "D7 route ABI size");
+struct Spoor *devsrv_session_root(struct Proc *p, struct Spoor *source,
+    const struct srv_route *routes, u32 count, int *err);
 
 // SRV_SERVICE_MAGIC — sentinel at offset 0 of struct SrvService. Lets the
 // KObj_Srv handle-release path discriminate a service object from a
@@ -102,6 +97,10 @@ struct poll_waiter;
 // this at corvus's MAX_USERS order (~256); v1.0 caps at 64 — a tunable,
 // raised when a multi-user workload needs the headroom.
 #define SRV_MAX_CONNS  64u
+#define SRV_SESSION_CONNS 16u
+#define SRV_SESSION_CONNS_TOTAL 48u
+#define SRV_MAX_DOMAINS 16u
+#define SRV_MAX_ROUTES 16u
 
 // DEVSRV_SVC_MAGIC — sentinel at offset 0 of struct devsrv_svc_ref, the
 // aux of a service Spoor (a /srv root walked to a service name). Lets

@@ -336,6 +336,7 @@ struct Proc {
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
 
+
     // #344: formerly `wait_active`, the RW-2 2B-F1/F2 per-Proc wait_pid_for
     // serialization that refused a genuinely-concurrent 2nd waiter with -1.
     // The #344 multi-waiter lift -- a per-Thread stack `poll_waiter` on
@@ -959,6 +960,10 @@ struct Proc {
     // park reads it lock-free. KP_ZERO-fresh NONE; never rfork-inherited. Fills
     // the deliberate u32 tail pad, so sizeof is unchanged.
     u32                debug_birth_hold;
+    // D7 posting lifetime ledger. Never inherited; close before draining.
+    spin_lock_t        srv_post_lock;
+    bool               srv_posts_closed;
+    struct SrvPostMembership *srv_post_memberships;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1162,6 +1167,9 @@ _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
 // Proc execs alone). NOT propagated by rfork; never set on kproc (the caught bit
 // never is).
 #define PROC_CAUGHT_CLAIM_SHIFT     22u
+#define PROC_FLAG_SESSION_REGISTRY (1u << 29)
+void proc_mark_session_registry(struct Proc *p);
+bool proc_may_create_srv_registry(const struct Proc *p);
 #define PROC_FLAG_CAUGHT_CLAIM_MASK (0x7fu << PROC_CAUGHT_CLAIM_SHIFT)  // bits 22..28
 _Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
@@ -1185,8 +1193,8 @@ _Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 408,
- "struct Proc size: IM-2 appended the propagating-legate pair (legate_caps "
+_Static_assert(sizeof(struct Proc) == 424,
+ "D7 appends a posting ledger without changing earlier offsets. IM-2 appended the propagating-legate pair (legate_caps "
  "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
  "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "

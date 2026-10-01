@@ -22,6 +22,46 @@ needed the operator.
 
 
 ---
+## 2026-10-01 (Astra) -- D7 private registries reveal two session singletons
+
+The operator ratified the factory role, syscall 127, fixed resident routes and
+16/48/64 transport policy in `7c723cb58`. The implementation replaces login's
+inherited boot registry rather than increasing its table or recycling trusted
+names. Per-Proc retained memberships make death independent of namespace
+mutation; a separate domain keeps transport charges alive without a backlog
+reference cycle.
+
+Real overlap was essential. The second user hit Corvus's global AUTH slot;
+a second login for the same user then hit Stratum's singleton DEK lease.
+Corvus now implements its existing model's per-owner records. Stratum's isolated
+Astra branch retains independently proven connection/dataset leases; an already
+unlocked key is not a substitute for checking a new token.
+
+Twenty distinct names found a third issue: logout removed a key before dirty
+home writes had been encrypted. The next unrelated Corvus fsync failed ELOCKED.
+A public-FS host test reproduced that exact failure, then passed after draining
+under EX before eviction. Explicit failure retains the key/lease for retry;
+best-effort disconnect eviction under storage failure remains a disclosed debt.
+No disk/wire format or crypto primitive changed.
+
+The real CPU1 runtime passes overlap, surviving-home access and twenty names.
+Encrypted npxf posting/mounting also passes with three users live. Two harness
+errors are kept in evidence: an overlong QMP socket path (no VM boot), and an
+outer ten-minute cap interrupting a progressing graphical manual scenario.
+Neither is recast as a guest defect or a passing test. The same image passes
+the full manual workflow in 641.97s, and F10 SAK states in 191.75s. Final CPU1
+boot passes 1830/1830; native observer/readiness/service-wire each exit zero.
+A final harness cleanup error was QEMU briefly remaining in its exiting state,
+resolved by recording exits before bounded reaping. All 73 Stratum targets have
+passing results after replacing one superseded singleton expectation; Stratum
+dependency `61dde372` is committed on Astra's isolated branch. Completion and
+verification receipts are tracked in the interaction status.
+
+The operator's October 1-2 50-boot/SMP/ASan/UBSan waiver remains explicit.
+Review is single-agent, not an independent audit. Peer trees, four protected
+authority/settings drafts and unfinished stop branches remain untouched.
+
+---
 ## 2026-10-01 (Astra) -- make listener registry retention real
 
 The next step after `db2aa73fe` was the old /srv headroom report. Tracing it

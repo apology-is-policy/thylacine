@@ -207,6 +207,7 @@ static spin_lock_t g_proc_table_lock = SPIN_LOCK_INIT;
 // entry; this only sets the non-zero-default values.
 static void proc_init_fields(struct Proc *p, int pid) {
     p->magic = PROC_MAGIC;
+    spin_lock_init(&p->srv_post_lock);
     p->pid   = pid;
     // PTY-1a: a parentless Proc is its own session + group leader (sid =
     // pgid = pid). rfork_internal overwrites both with the parent's (a
@@ -676,6 +677,7 @@ void proc_free(struct Proc *p) {
     // quiesce + NULL the table); this does real work only for the direct
     // `state=ZOMBIE; proc_free()` orphan/rollback paths whose table is
     // still intact (round-2 F4).
+    srv_proc_exit_notify(p); // also covers construction/rollback frees
     proc_quiesce_owned_devices(p);
 
     // P3-Da: release the address space here, BEFORE handle_table_free. The
@@ -3015,6 +3017,17 @@ struct Proc *proc_test_console_owner(void) {
 // propagated by rfork. specs/corvus.tla pins it as MarkMayPost gating
 // PostService.
 
+void proc_mark_session_registry(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC || p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_session_registry: invalid Proc");
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SESSION_REGISTRY, __ATOMIC_RELAXED);
+}
+
+bool proc_may_create_srv_registry(const struct Proc *p) {
+    return p && p->magic == PROC_MAGIC &&
+        (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SESSION_REGISTRY);
+}
+
 void proc_mark_may_post_service(struct Proc *p) {
     if (!p)                    extinction("proc_mark_may_post_service(NULL)");
     if (p->magic != PROC_MAGIC)
@@ -4043,11 +4056,10 @@ void exits_code(int code, const char *msg) {
     // P5-corvus-srv-impl-a2: tombstone any /srv service this Proc posted
     // (specs/corvus.tla ServiceTombstone). Done here — p still ALIVE,
     // still this thread's own valid Proc — and BEFORE the g_proc_table_-
-    // lock acquire: srv_proc_exit_notify takes only the leaf registry
-    // lock, so it never enters a lock-ordering relation with
-    // g_proc_table_lock. exits() is the sole termination path at v1.0
-    // (proc.c: state reaches ZOMBIE only through here); a future async-
-    // kill path must call srv_proc_exit_notify too.
+    // lock acquire: notification detaches memberships under srv_post_lock,
+    // then drains their registries outside it. Neither stage holds the
+    // process-table lock. Group-death and proc_free rollback paths also
+    // invoke this idempotent notification.
     srv_proc_exit_notify(p);
 
     // P5-hostowner-b-a: drop any pending /cap grant targeting this Proc.

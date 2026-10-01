@@ -12,8 +12,16 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-01
 ---
+## Session transport accounting
+
+Each /ctl/9p-sessions row now reports whether the connection is charged to
+a session plus local, combined-session, global and retained-domain counts.
+Counts are sampled under the admission lock while the diagnostic list pins
+the connection; they are point-in-time observations rather than peaks or
+authority decisions. See [[sub-kernel-srvconn]].
+
 ## Purpose
 
 The `/ctl` Dev (`dc='C'`, uppercase to leave `c` for the console): eight flat

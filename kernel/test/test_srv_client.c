@@ -626,13 +626,22 @@ void test_srv_client_remote_recycle(void) {
     TEST_ASSERT(svc != NULL && !svc->remote, "the recycled entry is plain, as posted");
 
     srv_proc_exit_notify(b);
-    TEST_ASSERT(post_svc_decl(a, "now-remote", 10, SRV_MODE_9P, false, true) >= 0,
+    // D7 closes a dead Proc's posting admission permanently. A new process,
+    // not a resurrected poster, must exercise the second recycle direction.
+    struct Proc *c = make_test_proc();
+    TEST_ASSERT(c != NULL, "replacement poster");
+    c->caps |= CAP_POST_SERVICE;
+    c->legate_scope_id = 0x9abc;
+    TEST_ASSERT(post_svc_decl(c, "now-remote", 10, SRV_MODE_9P, false, true) >= 0,
                 "a remote post of a new name recycles the plain tombstone");
     svc = srv_lookup_in(srv_boot_registry(), "now-remote", 10);
     TEST_ASSERT(svc == old, "the recycle arm took the slot again");
     TEST_ASSERT(svc != NULL && svc->remote, "the recycled entry is remote, as posted");
 
     srv_proc_exit_notify(a);
+    srv_proc_exit_notify(c);
+    c->legate_scope_id = 0;
+    drop_test_proc(c);
     a->legate_scope_id = b->legate_scope_id = 0;
     drop_test_proc(a);
     drop_test_proc(b);

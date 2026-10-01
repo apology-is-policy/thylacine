@@ -2428,6 +2428,7 @@ enum {
     //
     // Load-bearing only while syscalls are appended in ascending order at the
     // tail -- which is the append-only rule the number space already runs on.
+    SYS_SRV_REGISTRY_NEW = 127, // boot O_PATH fd, 40-byte routes, count, flags=0
     SYS__NATIVE_TOP,
 };
 
@@ -2808,6 +2809,7 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // acquires a gate, this bit needs the same one or it becomes a bypass. NOT a cap
 // (rfork does not propagate proc_flags).
 #define SPAWN_PERM_SEAL              (1u << 9)
+#define SPAWN_PERM_SESSION_REGISTRY (1u << 10)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
@@ -2817,7 +2819,7 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SEAT_MANAGER | \
                                       SPAWN_PERM_SEAT_SERVICE | \
                                       SPAWN_PERM_SEAT_CLIENT | \
-                                      SPAWN_PERM_SEAL)
+                                      SPAWN_PERM_SEAL | SPAWN_PERM_SESSION_REGISTRY)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

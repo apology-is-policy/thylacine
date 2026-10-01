@@ -10,8 +10,18 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-01
 ---
+## Session posting ownership
+
+The factory role is explicitly granted, never inherited by rfork. New Procs
+initialize a private posting lock, empty registry-membership list and open
+posting latch. These fields are appended, preserving existing assembly-visible
+offsets. Successful posts retain each participating registry once. Exit closes
+the latch and detaches the memberships before draining; proc_free repeats the
+idempotent notification for construction/rollback paths. Membership never
+depends on the current namespace. See [[sub-kernel-devsrv]].
+
 ## Graphical seat incarnations
 
 The kernel binds one boot-designated hardware service, one normal compositor
