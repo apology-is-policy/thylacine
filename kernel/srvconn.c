@@ -10,6 +10,7 @@
 
 #include <thylacine/extinction.h>
 #include <thylacine/errno.h>
+#include <thylacine/devsrv.h>  // SRV_MAX_CONNS: shared admission bound
 #include <thylacine/page.h>
 #include <thylacine/poll.h>
 #include <thylacine/rendez.h>
@@ -26,6 +27,30 @@
 
 static u64 g_srvconn_created;
 static u64 g_srvconn_freed;
+
+// Includes constructors in flight and torn connections whose storage is still
+// referenced. Statistics (created/freed) are separate observations, not an
+// admission transaction. Reserve before the first allocation; return capacity
+// only after all storage is freed. The CAS is the admission linearization
+// point; relaxed ordering suffices for this numeric bound (object publication
+// and lifetime have their own locks/refcount ordering).
+static u32 g_srvconn_reserved;
+
+static bool srvconn_reserve(void) {
+    u32 used = __atomic_load_n(&g_srvconn_reserved, __ATOMIC_RELAXED);
+    while (used < SRV_MAX_CONNS) {
+        if (__atomic_compare_exchange_n(&g_srvconn_reserved, &used, used + 1u,
+                                        true, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return true;
+    }
+    return false;
+}
+
+static void srvconn_unreserve(void) {
+    u32 pre = __atomic_fetch_sub(&g_srvconn_reserved, 1u, __ATOMIC_RELAXED);
+    if (pre == 0 || pre > SRV_MAX_CONNS)
+        extinction("srvconn_unreserve: corrupt admission count");
+}
 
 // #210: the /ctl/9p-sessions registry — every live SrvConn, singly linked
 // through cn->ctl_next. A zeroed spin_lock_t is the unlocked form (the
@@ -337,9 +362,13 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     // DMSRVBULK bulk class. Rejecting everything else keeps the ring
     // memory a two-point policy, not an arbitrary-size demand.
     if (msize != SRVCONN_MSIZE && msize != SRVCONN_BULK_MSIZE) return NULL;
+    if (!srvconn_reserve()) return NULL;
 
     struct SrvConn *cn = kmalloc(sizeof(*cn), KP_ZERO);
-    if (!cn) return NULL;
+    if (!cn) {
+        srvconn_unreserve();
+        return NULL;
+    }
 
     // Heap ring storage, 2x msize per direction (holds one whole msize
     // frame with a second in flight -- the #841 pipeline headroom the
@@ -353,6 +382,7 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     if (!b_c2s || !b_s2c) {
         kfree(b_c2s);
         kfree(cn);
+        srvconn_unreserve();
         return NULL;
     }
 
@@ -489,6 +519,7 @@ void srvconn_unref(struct SrvConn *cn) {
     cn->s2c.buf = NULL;
     kfree(cn);
     __atomic_fetch_add(&g_srvconn_freed, 1u, __ATOMIC_RELAXED);
+    srvconn_unreserve();
 }
 
 void srvconn_teardown(struct SrvConn *cn) {

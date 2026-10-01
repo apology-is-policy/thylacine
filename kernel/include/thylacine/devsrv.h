@@ -91,7 +91,10 @@ struct poll_waiter;
 // §6.2). corvus accepts promptly, so a short backlog suffices.
 #define SRV_ACCEPT_BACKLOG  16u
 
-// Global cap on live /srv connections. Each SrvConn pins two heap rings
+// Global cap on allocated /srv connections, including constructors in flight
+// and torn objects retained by endpoints. srvconn_create atomically reserves
+// before allocating; final unref or allocation rollback returns capacity.
+// Each SrvConn pins two heap rings
 // (2 x 64 KiB at the default class; 2 x 256 KiB for a DMSRVBULK service
 // — CF-3 B) plus a small struct; the cap bounds the worst-case
 // user-drivable exposure at 64 x ~516 KiB ~= 32 MiB if every conn were

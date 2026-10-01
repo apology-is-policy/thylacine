@@ -186,3 +186,14 @@ The separate waiters-stops and stay-stopped work is still under review; do not
 infer its clearance from the TC-1b landing. Consult the current interaction
 status and Yip before further imports.
 No live clipboard is delivered by the kernel/protocol/storage checkpoints alone.
+
+## Temporary verification waiver (operator, 2026-10-01)
+
+For Astra only, on October 1 and October 2, 2026 (Europe/Prague), the operator
+suspends the 50-boot, ASan, UBSan and SMP gates. Do not launch those gates during
+this window or describe them as passed for new changes. Keep focused functional,
+lifetime, isolation and quota tests, ordinary single-CPU boot/runtime checks,
+applicable model counterexamples, self-review, documentation and normal hooks.
+The waiver expires at the start of October 3; it does not alter Main/Aux policy
+or waive investigation of an observed failure. Record the actual verification
+and the waived gates in each checkpoint.

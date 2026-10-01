@@ -985,11 +985,8 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // would report the stale cause. A wrong errno is worse than a generic one.
     ref->open_errno = 0;
 
-    // Global live-connection cap (soft; the per-service backlog is the hard
-    // bound). The per-Proc cap was removed (stalk-3b-β / 3a-audit F4): a session
-    // needs corvus AND its stratum-fs concurrently.
-    if (srvconn_total_created() - srvconn_total_freed() >= SRV_MAX_CONNS)
-        return NULL;
+    // srvconn_create reserves global capacity atomically before allocating.
+    // A created-minus-freed check here would race concurrent constructors.
 
     // Resolve the service; capture poster stripes + transport mode under the
     // registry lock, atomically with the LIVE check (both immutable while LIVE).

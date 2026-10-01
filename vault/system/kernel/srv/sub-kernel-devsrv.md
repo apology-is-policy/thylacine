@@ -261,12 +261,11 @@ entry is unreachable and cannot be unmounted by name -- it holds its slot and
 its source ref until the namespace ends (B-1d-v audit round 3, F3; the general
 fix is a generation in the mount key, tracked in OPEN-BUGS).
 
-**open=connect** (`devsrv_open_connect`): global soft cap
-(`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
-per-service backlog under the lock) → resolve the service and capture
+**open=connect** (`devsrv_open_connect`): resolve the service and capture
 `poster_stripes` + `mode` + `ring_msize` + `cape` under the registry
-lock ATOMICALLY with the LIVE check → `srvconn_create` (identity by value;
-create ref 1) → byte-mode flag and cape mark if selected
+lock ATOMICALLY with the LIVE check → enforce connect authority →
+`srvconn_create` (atomically reserve global capacity before allocation;
+identity by value; create ref 1) → byte-mode flag and cape mark if selected
 (`srvconn_set_byte_mode` / `srvconn_set_cape`, both before publication)
 → +1 ref
 for the backlog slot → `srv_backlog_push_locked` (re-checks LIVE
@@ -344,7 +343,7 @@ Constants: `SRV_NAME_MAX` 32 · `SRV_MAX_SERVICES` 16 (raised 8→16 at
 #30 when permanent tombstones filled the registry at the login prompt;
 the raise discipline + the ~2 KiB drain-stack cost live in the header
 comment) · `SRV_ACCEPT_BACKLOG` 16 (a connect past a full backlog fails
-fast) · `SRV_MAX_CONNS` 64 (the global soft cap bounding worst-case
+fast) · `SRV_MAX_CONNS` 64 (the allocator's atomic reservation bound limiting
 ring memory at ≈32 MiB all-bulk).
 
 ## Concurrency

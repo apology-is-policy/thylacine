@@ -116,6 +116,37 @@ void test_srvconn_create_destroy(void) {
     srvconn_unref(cn);
     TEST_EXPECT_EQ(srvconn_total_freed(), freed0 + 1,
         "the last unref frees the connection");
+
+    // Boot runs this fixture before resident service users. Constructors and
+    // torn-but-retained transports must consume the SAME bounded capacity.
+    // Alternating classes proves admission is shared rather than per class.
+    TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
+        "capacity fixture starts without retained connections");
+    struct SrvConn *held[SRV_MAX_CONNS];
+    for (u32 i = 0; i < SRV_MAX_CONNS; i++) {
+        held[i] = srvconn_create(1, 1, false, 0,
+                                i & 1u ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE);
+        TEST_ASSERT(held[i] != NULL, "admit every slot up to the global limit");
+    }
+    u64 at_limit = srvconn_total_created();
+    TEST_ASSERT(srvconn_create(1, 1, false, 0, SRVCONN_MSIZE) == NULL,
+                "reject constructor beyond global capacity");
+    srvconn_ref(held[0]);
+    srvconn_teardown(held[0]);
+    srvconn_teardown(held[0]);
+    srvconn_unref(held[0]);
+    TEST_ASSERT(srvconn_create(1, 1, false, 0, SRVCONN_BULK_MSIZE) == NULL,
+                "teardown and nonfinal unref do not return capacity");
+    TEST_EXPECT_EQ(srvconn_total_created(), at_limit,
+                   "refused constructors do not count as created");
+    srvconn_unref(held[0]);
+    held[0] = srvconn_create(1, 1, false, 0, SRVCONN_MSIZE);
+    TEST_ASSERT(held[0] != NULL, "final unref returns one capacity slot");
+    TEST_ASSERT(srvconn_create(1, 1, false, 0, SRVCONN_MSIZE) == NULL,
+                "final unref returns exactly one slot");
+    for (u32 i = 0; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
+    TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
+                   "capacity fixture releases every object");
 }
 
 // ---------------------------------------------------------------------------

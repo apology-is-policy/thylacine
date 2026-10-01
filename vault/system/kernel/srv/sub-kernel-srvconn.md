@@ -3,7 +3,7 @@ id: sub-kernel-srvconn
 type: sub
 title: "srvconn — the /srv per-connection byte transport"
 parent: moc-kernel-srv
-code: [kernel/srvconn.c, kernel/include/thylacine/srvconn.h]
+code: [kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c]
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [prose, gate-smp]
@@ -12,8 +12,32 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-01
 ---
+## Admission (October 1)
+
+`srvconn_create` reserves one of 64 global slots with an atomic compare/exchange
+before allocating the object or either ring. The count includes constructors
+in flight and torn transports still held by endpoints. The successful CAS is
+the admission point; relaxed ordering suffices for the count because object
+publication and lifetime retain their existing synchronization. Allocation
+rollback releases the reservation after freeing partial storage; final unref
+releases it after both rings and the object are freed. Teardown and nonfinal
+unref never release capacity. Invalid ring classes are refused before admission.
+
+The earlier `devsrv_open_connect` check sampled two diagnostic counters before
+allocation. Two opens could pass that check together; it was not the hard
+memory bound claimed here. Those counters remain observations only. The new
+bound is global: it does not establish per-session fairness or fix registry
+name exhaustion (O1-SRV-1, [[seam-srv-registry-lifecycle]]).
+
+`srvconn.create_destroy` covers the real kernel allocation boundary, both ring
+classes, retained teardown and one-slot replacement. The host fixture
+`tools/test-srvconn-admission.py` compiles the production lifecycle bodies with
+allocator/locking stubs: it fails each of the three allocations and reenters
+creation during construction and destruction. It is admission/rollback evidence,
+not a host test of ARM layout or an SMP qualification.
+
 ## Event-loop I/O
 
 `srvconn_io_nonblock` shares the same rings and channel locks as blocking

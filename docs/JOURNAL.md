@@ -32656,3 +32656,24 @@ slots. A single MAX_PANES definition ties the existing Tapestry bound to HIN1.
 named tests. Single-agent self-review, no independent audit. The pool is not yet
 activated; media still admits two, clipboard/focus/host integration remains open.
 Authority drafts and Aux TC-1b regions are preserved.
+
+
+### 2026-10-01: enforce the documented service-connection memory bound (Astra)
+
+The D7 registry design pass exposed O1-SRV-2: the 64-connection limit was a
+pre-allocation sample of separate created/freed counters. Concurrent constructors
+could pass together, so it was not a hard ring-memory bound. Admission now uses
+a CAS reservation in srvconn_create, includes in-flight allocation and torn but
+retained transports, and returns capacity only after rollback/final freeing.
+The number 64, ring classes, connect authority and public ABI are unchanged.
+
+The default build and CPU=1 boot pass 1830/1830, including a mixed-class capacity
+fixture and retained-teardown/replacement checks. A native fixture compiling the
+actual lifecycle bodies covers three allocation-failure sites and deterministic
+reentrant construction/free intervals; five deliberate mutants fail as intended.
+It stubs allocator and lock infrastructure and is not an SMP or ARM-layout proof.
+Existing model results and single-agent self-review are recorded in
+work/oct1-srv-admission/. The operator waived 50-boot, ASan, UBSan and SMP gates
+for Astra on October 1-2 (Europe/Prague); these gates were not run for this change.
+All four authority/settings drafts remain separate. O1-SRV-1 still owns private
+registries, resident-service routing, poster death and per-session fairness.

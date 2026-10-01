@@ -360,7 +360,10 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // (c2s / s2c) + poll list. The connection is born LIVE with refcount 1 —
 // the caller owns that reference and drops it via srvconn_unref.
 //
-// Returns NULL on allocation failure or a bad msize. A 9P-mode session
+// Reserves one of SRV_MAX_CONNS slots before allocating. The reservation lasts
+// through transport teardown until final unref frees the rings and object;
+// every allocation-failure path returns it. Constructors in flight count too.
+// Returns NULL on exhausted capacity, allocation failure or a bad msize. A 9P-mode session
 // over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,

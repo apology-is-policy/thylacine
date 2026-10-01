@@ -7,6 +7,27 @@ is claimed. The separate user-authority drafts remain untouched.
 
 ## Registry repair pickup (October 1, after reconciliation)
 
+O1-SRV-2 (fixed and verified, October 1): the documented 64-connection
+memory bound was only a pre-allocation `created - freed` check. Concurrent
+opens could both pass it; constructors in flight were not counted. Admission
+now reserves atomically in `srvconn_create` before allocating and returns the
+reservation after failed allocation or final destruction, never at transport
+teardown. The numeric bound is unchanged; no session authority or ABI is added.
+Default build and CPU=1 boot pass 1830/1830. The native fixture covers all
+three allocation failures, in-flight admission and retained teardown/final-free
+ordering; five deliberate mutants fail as intended. Source pins, self-review
+and evidence are in `work/oct1-srv-admission/`.
+
+The unchanged full Corvus model run is INCOMPLETE: its 180-second limit expired
+with 5,643,365 distinct states and 2,658,591 pending at the last progress report.
+No counterexample was observed; this is not a clean-model pass. Its eight
+existing buggy configurations all produce their intended counterexamples. The model does not
+represent constructor/CAS allocation admission; the focused C fixture does.
+
+The operator waived Astra's 50-boot, ASan, UBSan and SMP gates for October 1-2
+(Europe/Prague). Focused tests, ordinary single-CPU boot, applicable existing
+models, self-review and normal hooks remain. No new matrix result is claimed.
+
 Qualified reconciliation is committed as `db2aa73fe`; all four completed
 monitors are paused. Astra is now addressing the old registry capacity/lifetime
 queue. The first prerequisite adds covering registry refs to listener table
