@@ -5,6 +5,40 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Registry repair pickup (October 1, after reconciliation)
+
+Qualified reconciliation is committed as `db2aa73fe`; all four completed
+monitors are paused. Astra is now addressing the old registry capacity/lifetime
+queue. The first prerequisite adds covering registry refs to listener table
+slots and `handle_get` snapshots, including poll's hold-until-sweep path.
+Mortal-registry regression fixtures cover namespace removal, concurrent-close
+ordering through a retained snapshot, and handle-allocation rollback. This is
+an internal lifetime repair under STALK-DESIGN 5.1, not a new posting policy.
+
+O1-SRV-1 owns the open exhaustion repair: the boot registry still has 16 slots;
+trusted tombstones retain their names to prevent unauthorized restart claims.
+Do not free those names or merely enlarge the constant. Per-session registries
+remain the selected D7 direction, but userspace creation, inherited system
+service routing, per-registry poster death and connection fairness still need
+their implementation contract completed. This prerequisite alone does not
+close that item or activate session registries. Evidence for the current work
+is kept in `work/oct1-srv-lifetime/`. Default build and boot pass 1830/1830;
+three isolated source mutants fail at their intended new assertions and four
+existing model mutant configurations produce their expected counterexamples.
+The full 50-boot default/UBSan matrix finished at 09:34 UTC: **50/50 PASS**,
+ten boots each at default SMP 1/4/8 and UBSan SMP 4/8. All five rows report
+zero corruption, external-kill, injection-miss, timing and other failures.
+`matrix-verified.json` verifies every individual boot and row summary against
+the pinned source/index. All four original authority/settings draft bytes
+were restored; Mac and Pi are free. No new graphical or Pi qualification is
+claimed for this kernel-only prerequisite. The separate registry capacity,
+poster-death routing and per-session fairness work remains O1-SRV-1.
+The listener/poll-retention seam is closed by this checkpoint; review remains
+single-agent, not an independent adversarial audit. Main/Aux received Yip
+notes 57/31 when this scope started. Normal hooks and Vault checks precede
+commit; the checkpoint receipt is `work/oct1-srv-lifetime/committed.json`.
+
+
 ## Current pickup (October 1)
 
 The operator approved resuming qualified Main/Aux reconciliation, reviewing the

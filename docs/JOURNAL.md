@@ -22,6 +22,41 @@ needed the operator.
 
 
 ---
+## 2026-10-01 (Astra) -- make listener registry retention real
+
+The next step after `db2aa73fe` was the old /srv headroom report. Tracing it
+showed why neither a larger constant nor freeing every tombstone is enough:
+trusted tombstones also reserve restart names, and the per-session registry
+chosen by STALK D7 is not exposed to login. Its kernel mechanism has a further
+prerequisite: listener handles and retained poll snapshots had no covering
+registry reference. They were safe only while boot's registry lived forever.
+
+The first repair makes those references real. Posting supplies the table-slot
+reference, failed allocation aborts then releases it, and handle_get/put holds
+the registry across the complete poll registration/sweep interval. Closing a
+listener does not unpost it or release a trusted name. Two existing kernel
+fixtures now prove last-root removal, a real poll hook retained across close,
+last-snapshot destruction, and allocation-failure rollback on mortal registries.
+
+The full 1830-test boot passes. Three deliberate source defects fail at their
+intended new assertions. The first unfiltered negative run instead exhausted
+boot's references and failed at an earlier guard; the checker rejected that
+as evidence for the new witness, so isolated test-selection fixtures were used
+for the negative runs and then removed. Four existing model mutant cfgs retain
+their expected counterexamples. The full matrix finished at 09:34 UTC with
+50/50 passing boots and zero failures in every category, including timing.
+The first result-validator draft expected an extra prefix on the gate's final
+success line; checking the harness corrected that parser assumption without
+rerunning or changing any guest result. Evidence: `work/oct1-srv-lifetime/`.
+
+The poll-retain seam closes; O1-SRV-1 and the broader registry seam remain open.
+Per-session creation, inherited system-service routes, registry-scoped poster
+exit and admission fairness must be designed together. No capacity raise,
+trusted-name recycling, session activation, Main landing or new graphical/Pi
+qualification is claimed. All four separate drafts remain byte-preserved.
+Review is single-agent under the operator's standing direction.
+
+---
 ## 2026-10-01 (Astra) -- qualified Aux reconciliation completes
 
 Qualified Aux `6df985512` joins Main `8746a8a24` on Astra, following the

@@ -260,17 +260,13 @@ void srv_registry_unref(struct SrvRegistry *reg) {
         // fast-fails on the magic check (UAF defense, mirroring
         // spoor_free_internal).
         //
-        // stalk-3b/A-5b ORDERING OBLIGATION (audit F2): kfree frees
-        // entries[] too. A raw interior pointer into entries[] -- a
-        // SrvService* held by a KObj_Srv listener handle's obj, or by an
-        // in-flight devsrv_open_connect / svc_listener_poll -- carries NO
-        // registry ref. In stalk-3a/3b this never dangles (every such pointer
-        // is into the immortal boot registry, which never reaches ref 0).
-        // When A-5b (#827) mints a MORTAL per-session registry, its last unref MUST
-        // be ordered AFTER every listener/connection handle into it is
-        // closed (the session poster is group-terminated first, #811,
-        // closing its KObj_Srv listener) -- or the listener handle / the
-        // devsrv_svc_ref must hold a registry ref that already covers it.
+        // Listener handles and handle_get snapshots each hold a registry
+        // ref, including poll's retained snapshot until after its waiter
+        // sweep. Open/connect is covered by its service-ref Spoor. Thus no
+        // syscall or registered listener poller can still borrow entries[]
+        // at the last drop. Raw internal/test pointers require an explicitly
+        // retained registry or root Spoor; magic is a corruption check, not
+        // a substitute for that lifetime guarantee.
         srv_registry_drain(reg);
         reg->magic = 0;
         kfree(reg);
@@ -485,8 +481,9 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
 // Spoor `root` (resolved from its aux) rather than the boot registry, and
 // reached through SYS_WALK_CREATE on a /srv dir rather than the SYS_POST_-
 // SERVICE syscall. The listener handle's obj is the registry entry; the entry
-// outlives the handle (tombstoned at the poster's exit, never freed by handle
-// close), so handle_release_obj's KOBJ_SRV case is a no-op for it.
+// stays allocated for the registry's lifetime. Each listener and borrowed
+// handle snapshot pins that registry; closing a listener does not unpost it
+// or release its trusted name reservation.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
                          const char *name, size_t name_len, enum srv_mode mode,
                          bool bulk, bool cape, bool remote) {
@@ -526,13 +523,16 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
         return -1;
 
     // Install the KObj_Srv listener handle. handle_alloc does not take a
-    // reference; the listener is non-transferable (handle_dup rejects KObj_Srv)
-    // so it is pinned to p.
+    // reference, so transfer one covering registry ref to the table slot.
+    // The root Spoor keeps reg alive through rollback/commit even if a peer
+    // closes the newly installed handle before this function returns.
+    srv_registry_ref(reg);
     hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, svc);
     if (h < 0) {
         // Phase 2 (failure): roll the reservation back to its prior state so a
         // retry -- or another poster -- can still claim the name.
         srv_abort(svc, prior);
+        srv_registry_unref(reg);
         return -1;
     }
 

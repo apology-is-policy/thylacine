@@ -152,9 +152,9 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // offset 0. Post-stalk-3c a KObj_Srv handle is ONLY a service
         // listener:
         //   SRV_SERVICE_MAGIC — a service registry entry from create=post
-        //     (devsrv_post_listener). Its lifetime is the poster Proc's
-        //     (tombstoned by exits() -> srv_proc_exit_notify, never freed),
-        //     NOT the handle's — closing the handle must not touch it. No-op.
+        //     (devsrv_post_listener). Every handle/snapshot pins the containing
+        //     registry. Dropping that ref does not unpost a service or clear
+        //     its name; entries live until their registry's final unref.
         //   SRV_CONN_MAGIC — a SrvConn. Before stalk-3c a client connection
         //     was a KObj_Srv handle (the retired SYS_SRV_CONNECT); now the
         //     connection ENDPOINTS are KOBJ_SPOOR conn Spoors (released via
@@ -178,7 +178,9 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
                 srvconn_teardown(cn);
             }
             srvconn_unref(cn);
-        } else if (m != SRV_SERVICE_MAGIC) {
+        } else if (m == SRV_SERVICE_MAGIC) {
+            srv_registry_unref(((struct SrvService *)obj)->reg);
+        } else {
             extinction("handle_release_obj(KOBJ_SRV): obj has neither "
                        "service nor connection magic (corruption / UAF)");
         }
@@ -252,15 +254,12 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         spoor_ref((struct Spoor *)obj);
         break;
     case KOBJ_SRV:
-        // RW-5 R1-F1: handle_GET reaches this (the #844 snapshot bumps the obj
-        // refcount under the table lock); handle_dup does NOT (NoSrvDup rejects).
-        // The no-op acquire is BALANCED with handle_release_obj's KOBJ_SRV arm
-        // ONLY because post-stalk-3c a KObj_Srv handle is always a SERVICE
-        // listener (SRV_SERVICE_MAGIC -> no-op release). If a KObj_Srv handle
-        // ever again named a ref-counted SrvConn (SRV_CONN_MAGIC -> teardown +
-        // srvconn_unref), this no-op would underflow the get/put pairing (a UAF)
-        // -- it would then need a real srvconn_ref here (cf. the KOBJ_LOOM arm,
-        // which DOES ref because a Loom obj is ref-counted).
+        // NoSrvDup rejects dup, but handle_get reaches this under the table
+        // lock. A snapshot keeps entries[] and its embedded poll list alive
+        // across concurrent close; poll releases it only after unregistering.
+        // Production KObj_Srv objects are exclusively service listeners.
+        if (*(const u64 *)obj == SRV_SERVICE_MAGIC)
+            srv_registry_ref(((struct SrvService *)obj)->reg);
         break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:

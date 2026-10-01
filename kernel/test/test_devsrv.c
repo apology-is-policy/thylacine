@@ -44,6 +44,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/poll.h>
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/spoor.h>
@@ -375,6 +376,22 @@ void test_devsrv_post_rollback(void) {
     TEST_EXPECT_EQ(srv_registry_count(), 0,
         "failed post left no stale registry entry (srv_abort rolled back)");
 
+    // The same failure on a mortal registry must undo the listener's
+    // provisional retain as well as its reserved name.
+    u64 destroyed0 = srv_registry_total_destroyed();
+    struct SrvRegistry *reg = srv_registry_create();
+    TEST_ASSERT(reg != NULL, "rollback mortal registry");
+    struct Spoor *root = devsrv_attach_registry(reg);
+    TEST_ASSERT(root != NULL, "rollback registry root");
+    TEST_EXPECT_EQ(devsrv_post_listener(p, root, "rollback", 8,
+                                       SRV_MODE_BYTE, false, false, false), -1,
+        "mortal post fails at handle allocation");
+    TEST_EXPECT_EQ(srv_lookup_in(reg, "rollback", 8), NULL,
+        "failed post returns mortal slot to FREE");
+    spoor_clunk(root);
+    srv_registry_unref(reg);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)1,
+        "failed listener allocation leaks no registry ref");
     drop_test_proc(p);
 }
 
@@ -428,6 +445,43 @@ void test_devsrv_registry_lifecycle(void) {
     TEST_EXPECT_EQ(spoor_total_allocated() - sp_alloc0,
                    spoor_total_freed() - sp_freed0,
         "no Spoor leaked across the registry lifecycle");
+
+    // A listener pins its containing registry independently of the namespace.
+    // Then model poll's precise retain/register/close/sweep/put schedule: a
+    // peer closes the table slot while its waiter is still registered.
+    struct Proc *p = make_marked_test_proc();
+    TEST_ASSERT(p != NULL, "mortal listener poster");
+    reg = srv_registry_create();
+    TEST_ASSERT(reg != NULL, "listener registry");
+    root = devsrv_attach_registry(reg);
+    TEST_ASSERT(root != NULL, "listener registry root");
+    int h = devsrv_post_listener(p, root, "pinned", 6,
+                                SRV_MODE_BYTE, false, false, false);
+    TEST_ASSERT(h >= 0, "post listener in mortal registry");
+    spoor_clunk(root);
+    srv_registry_unref(reg);
+    TEST_ASSERT(srv_registry_total_destroyed() - destroyed0 == 1,
+        "listener survives removal of every namespace/creator ref");
+
+    struct Handle held;
+    TEST_ASSERT(handle_get(p, h, &held) == 0, "retain listener snapshot");
+    struct Rendez rendez = {0};
+    struct poll_waiter waiter;
+    poll_waiter_init(&waiter, &rendez);
+    TEST_EXPECT_EQ(srv_handle_poll(held.obj, POLLIN, &waiter), 0,
+        "empty listener registers without readiness");
+    TEST_ASSERT(waiter.list != NULL, "listener waiter registered");
+    TEST_EXPECT_EQ(handle_close(p, h), 0, "peer closes table slot");
+    TEST_ASSERT(srv_registry_total_destroyed() - destroyed0 == 1,
+        "retained poll snapshot keeps registry and waiter list alive");
+    TEST_EXPECT_EQ(srv_handle_poll(held.obj, POLLIN, NULL), 0,
+        "close does not unpost or tombstone the service");
+    poll_waiter_list_unregister(&waiter);
+    TEST_EXPECT_EQ(waiter.list, NULL, "sweep removes the embedded-list hook");
+    handle_put(&held);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)2,
+        "last snapshot frees mortal registry after poll sweep");
+    drop_test_proc(p);
 }
 
 // devsrv.svc_ref_holds_registry — a /srv/<name> service-ref Spoor + a 2nd

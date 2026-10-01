@@ -283,9 +283,9 @@ extern struct Dev devsrv;
 // heap-allocated, refcounted SrvRegistry reached THROUGH the mounted
 // devsrv root Spoor (the root's `aux`), not a global or a Territory field
 // (Plan-9-true — named through the namespace). Boot mounts one immortal
-// registry on the kproc `/srv` synthetic dir; login (A-5b-body) mounts a
-// fresh per-session registry, so a second user's coordinator is
-// structurally unnameable (I-1).
+// registry on the kproc `/srv` synthetic dir. Login still inherits that
+// boot registry; fresh per-session registries remain the D7 implementation
+// target, not the current isolation mechanism.
 //
 // Registry-ref discipline (mirrors dev9p's attached_owner): EVERY devsrv
 // Spoor instance carrying `aux = reg` holds exactly ONE registry ref — the
@@ -293,7 +293,9 @@ extern struct Dev devsrv;
 // /srv/<name> service-ref Spoor. devsrv_close drops exactly one. spoor_ref
 // (same instance) adds NO registry ref; only a new instance (spoor_clone +
 // walk0, or a fresh service-ref) does. The registry outlives any single
-// Spoor; it is freed at the last srv_registry_unref.
+// Spoor. Each KObj_Srv listener slot and handle_get snapshot also holds
+// one registry ref, released on close/put (poll puts only after its sweep).
+// The registry is freed at the last srv_registry_unref.
 
 // srv_registry_create — allocate a fresh registry (ref = 1; stamps each
 // entry's permanent magic + poll_list + reg back-pointer). Returns NULL on

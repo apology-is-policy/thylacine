@@ -14,7 +14,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | arc | status | chunks |
 |---|---|---|
 | [[arc-arch81]] | active | 1 |
-| [[arc-astra-halcyon-followup]] | active | 2 |
+| [[arc-astra-halcyon-followup]] | active | 3 |
 | [[arc-boosty]] | active | 5 |
 | [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 89
+## Open seams: 88
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -98,7 +98,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-nuname-trust-stamp]] (sub-kernel-syscall-dispatch, sub-kernel-ninep-attach)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
 - [[seam-poll-hooks-per-list]] (sub-kernel-poll)
-- [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
 - [[seam-pouch-dirfd]] (sub-pouch-fs)
 - [[seam-pouch-dup2-target]] (sub-pouch-process)
 - [[seam-pouch-errno-channel]] (sub-pouch-seam, sub-pouch-fs, sub-pouch-net)
@@ -135,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-01 [[chg-2026-10-01-srv-listener-retention]] — Listener handles and poll snapshots retain their service registry
 - 2026-09-30 [[chg-2026-09-30-held-launch]] — The held launch: ambush spawns held where the kernel has the hold
 - 2026-09-30 [[chg-2026-09-30-image-slide]] — The image slide: a deck names a picture, and view shows it
 - 2026-09-30 [[chg-2026-09-30-kernel-chunk]] — The kernel chunk: the trusted episode's lock re-checks, and walks without recursion
@@ -142,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-29 [[chg-2026-09-29-birth-hold]] — The birth hold: a spawned child parked before its first instruction
 - 2026-09-29 [[chg-2026-09-29-i47-close]] — I-47 ENFORCED: a picture laid once per block, and a token that routes rather than guards
 - 2026-09-29 [[chg-2026-09-29-layout-notice]] — A session's layout notice is no longer lost with the surface that carried it
-- 2026-09-29 [[chg-2026-09-29-ns-session-root-names]] — /proc/<pid>/ns names a 9P session root by the file its session came over -- a display-only origin on the root's dev9p priv
 <!-- generated:end -->

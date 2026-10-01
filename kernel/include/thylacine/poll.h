@@ -111,18 +111,10 @@
 //       likewise runs only at the Spoor's last clunk, deferring the free of
 //       `cn->poll_list`.
 //
-//   CAVEAT -- the KObj_Srv LISTENER retain is INERT (RW-2 R2-poll F1). The
-//   only KObj_Srv path that registers a poll waiter is a SrvService listener
-//   (`svc_listener_poll` -> `svc->poll_list`); but `handle_acquire_obj` /
-//   `handle_release_obj` are NO-OPS for KObj_Srv, so the retained `held[]`
-//   entry holds no ref to the SrvService or its registry. Listener-poll
-//   lifetime is safe ONLY because the sole registry today is the immortal
-//   boot registry (`g_boot_srv_registry`; SrvService entries are tombstoned,
-//   never freed). A mortal per-session registry (A-5b / #827, see
-//   `kernel/devsrv.c` `srv_registry_unref`'s `kfree(reg)`) reintroduces the
-//   round-1 UAF on the listener-poll path: it MUST then take a real
-//   `srv_registry_ref` at register and drop it post-sweep (or thread a
-//   registry ref through `held[]`). Tracked.
+//   KObj_Srv listener snapshots take a covering srv_registry_ref through
+//   handle_get. The registry contains both the service entry and poll list;
+//   retaining it until AFTER the sweep prevents their destruction even when
+//   a peer closes the listener and the last namespace root concurrently.
 //
 // THE Dev.poll vtable op (declared in <thylacine/dev.h>)
 //

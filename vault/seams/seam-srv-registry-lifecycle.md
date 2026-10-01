@@ -6,8 +6,19 @@ status: open
 surface: [sub-kernel-devsrv]
 opened-by: chg-2026-05-19-srv-birth
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-10-01
 ---
+## October 1 implementation checkpoint
+
+Listener slots and `handle_get` snapshots now carry covering registry refs;
+poll drops its snapshot after sweeping the embedded waiter list. The mortal
+registry lifecycle/rollback witnesses pass in the full 1830-test boot and
+reject three targeted source mutants. All 50 default/UBSan SMP boots pass,
+with zero entries in every failure category, including timing exceptions.
+The historical diagnosis below describes the pre-fix implementation. Registry
+capacity, per-session activation, poster-exit routing and fairness remain open;
+this prerequisite must not be reported as the complete registry repair.
+
 ## What is owed
 
 The v1.x registry-entry lifecycle: **entry-free-at-last-handle-ref**

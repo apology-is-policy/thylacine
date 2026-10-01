@@ -4,7 +4,7 @@ type: arc
 title: "Astra: Halcyon trusted UI and September integration follow-up"
 status: active
 design: ["docs/HALCYON-TRUSTED-EPISODE.md"]
-chunks: [chg-2026-09-24-vendor-checkout-integrity, chg-2026-09-24-lex-curiata-fidelity]
+chunks: [chg-2026-09-24-vendor-checkout-integrity, chg-2026-09-24-lex-curiata-fidelity, chg-2026-10-01-srv-listener-retention]
 follow-ons: []
 exit-criteria:
   - "[ ] Restore Lex curiata visual fidelity and verify Ctrl-Alt-F10 end to end"

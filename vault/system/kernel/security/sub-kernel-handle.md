@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-01
 ---
 ## Purpose
 
@@ -132,21 +132,21 @@ negation of the spec's `h.kobj \in TxKObjs` precondition.
 
 **One kind is split by a magic word rather than by its enum.** A `KOBJ_SRV`
 object is discriminated at release time by the `u64` at offset 0:
-`SRV_SERVICE_MAGIC` (a registry entry whose lifetime is the poster Proc's,
-so closing the handle must *not* touch it) versus `SRV_CONN_MAGIC` (a
-refcounted connection). Anything else extincts as corruption. Post-`stalk-3c`
-the connection arm is unreachable — connection endpoints became `KOBJ_SPOOR`
-— but it is deliberately retained as a UAF guard.
+`SRV_SERVICE_MAGIC` (a listener registry entry) versus `SRV_CONN_MAGIC`
+(a refcounted connection). Anything else extincts as corruption. Post-stalk-3c
+connection handles are unreachable: endpoints are `KOBJ_SPOOR`. The defensive
+connection release arm remains; any future reintroduction of that handle kind
+would also require a matching connection acquire.
 
-**The acquire side is not symmetric with the release side, and the asymmetry
-is load-bearing.** `handle_acquire_obj`'s `KOBJ_SRV` arm is a deliberate
-no-op, balanced against a release arm that *does* work — sound only because
-a `KObj_Srv` handle is now always a service listener, whose release is also
-a no-op. The code says so explicitly: if a `KObj_Srv` handle ever again named
-a refcounted `SrvConn`, this no-op would underflow the get/put pairing into a
-UAF. `KOBJ_LOOM` and `KOBJ_PCI` are the contrasting cases — both name
-refcounted objects, so both *must* bump, and their comments say why a no-op
-would free the object early.
+**Listener acquire/release holds the containing registry.** Posting transfers
+one registry ref into the table slot. `handle_get` takes another under the
+table lock; `handle_close` and `handle_put` release outside it. Thus a listener
+snapshot pins both the service and its embedded poll list after all namespace
+roots and the table slot disappear. Poll releases its snapshot after its sweep.
+The final registry drop can drain and free, but a normal close does not unpost
+or release a trusted name reservation. A failed listener allocation aborts its
+reservation before dropping the provisional registry ref. The lifecycle and
+rollback fixtures in `kernel/test/test_devsrv.c` exercise these cases.
 
 **Two kinds carry a runtime convention check.** `handle_alloc` extincts if a
 `KOBJ_BURROW` arrives with `handle_count <= 0`, or a `KOBJ_LOOM` with
@@ -336,8 +336,8 @@ atomics for diagnostics only.
   completeness assert fails the build otherwise. Do not "fix" that assert by
   widening a mask.
 - A new kind whose object is refcounted **must** bump in
-  `handle_acquire_obj`. The `KOBJ_SRV` no-op is sound only because that
-  handle is always a non-refcounted service listener.
+  `handle_acquire_obj`. `KOBJ_SRV` pins its containing registry, because
+  its service pointer is interior to that allocation.
 - Any new fd-creating path must install through `handle_install_locked`
   under the table lock — the `#844` F1 lesson, now with four callers. It is
   the single install chokepoint and takes the starting index and the

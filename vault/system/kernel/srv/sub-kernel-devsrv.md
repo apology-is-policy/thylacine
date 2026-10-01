@@ -26,6 +26,19 @@ three-user/service-post coverage; increasing the constant alone is insufficient.
 See `docs/ASTRA-2026-09-24-STATUS.md` for the reconciled operator queue.
 
 
+## Listener lifetime prerequisite (October 1)
+
+`devsrv.registry_lifecycle` now removes all namespace/create references while
+keeping a listener, retains a handle snapshot and registers a poll waiter,
+closes the original handle, then sweeps the hook before the final put. The
+registry is destroyed exactly at that final put. `devsrv.post_rollback` also
+checks that a full handle table leaks no provisional ref on a mortal registry.
+The default 1830-test boot passes; three deliberate source mutants fail at the
+intended assertions. All 50 default/UBSan SMP boots pass with zero failures
+or timing exceptions. Four relevant existing model mutants still produce
+their expected counterexamples. Single-agent self-review only. Evidence:
+`work/oct1-srv-lifetime/`. This does not close the capacity/session-policy seam.
+
 ## Nonblocking endpoints
 
 `CNONBLOCK` selects `srvconn_io_nonblock` on raw client/server transport
@@ -356,9 +369,11 @@ single-threaded on the accept path — a documented precondition, not a
 guard). Registry-ref discipline: every devsrv Spoor INSTANCE carrying
 `aux = reg` holds exactly one ref (the mounted root, each cross-clone,
 each svc-ref), dropped at `devsrv_close`; `spoor_ref` on the same
-instance adds none. The mortal-registry ordering obligation
-([[fnd-stalk3a-r1-f2]]) is the standing constraint on any future
-non-immortal registry.
+instance adds none. Every listener table slot and every `handle_get`
+snapshot now holds an additional covering registry ref. Poll keeps its
+snapshot until after unregistering its waiter. This discharges the raw-listener
+allocation-lifetime obligation ([[fnd-stalk3a-r1-f2]]); per-registry poster
+termination and session activation remain separate, unfinished work.
 
 ## Invariants enforced
 
@@ -449,9 +464,10 @@ What an auditor attacks here:
 - **The peer read's fail-closure**: every mutable field rides ONE
   alive-gated walk — a dead peer must never yield stale caps, a stale
   renderer grant, or a reused pid.
-- **The mortal-registry obligation**: any future non-immortal registry
-  must order its last unref after every handle into `entries[]` closes,
-  or give those holders covering refs ([[seam-srv-registry-lifecycle]]).
+- **Mortal-registry lifetime**: listener slots and handle snapshots keep
+  `entries[]` alive with covering registry refs. Poll must unregister before
+  its final put; raw internal pointers need a covering root/registry ref
+  ([[seam-srv-registry-lifecycle]]).
 - **I-1**: no EL0-reachable path may bind a registry other than through
   a mounted root's aux.
 
@@ -482,8 +498,10 @@ What an auditor attacks here:
   code post-stalk-3c (the only KObj_Srv obj is a listener; conn
   endpoints are Spoors) — retained as a corruption canary
   ([[fnd-stalk3c-r1-f1]]).
-- The listener handle's obj points INTO `entries[]`; closing it is a
-  no-op (the entry's lifetime is the poster's, tombstoned never freed).
+- The listener handle's obj points INTO `entries[]`; closing it releases
+  its covering registry ref, without unposting or freeing its trusted name.
+  A failed handle allocation aborts the reservation, then drops the provisional
+  ref. Namespace roots can disappear before listeners without freeing them.
 - `srv_lookup_in` returns a pointer whose `state` may change after the
   call — every consumer re-validates under the lock (the push and the
   accept both do).

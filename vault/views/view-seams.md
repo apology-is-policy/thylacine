@@ -19,6 +19,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
+| [[seam-poll-srv-registry-retain]] | closed | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-pouch-guard-pages]] | closed | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
@@ -78,7 +79,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-nuname-trust-stamp]] | open | sub-kernel-syscall-dispatch, sub-kernel-ninep-attach | chg-2026-09-06-9p-identity-absorb | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
 | [[seam-poll-hooks-per-list]] | open | sub-kernel-poll | fnd-b0poll-r7-f1 | v1.x |
-| [[seam-poll-srv-registry-retain]] | open | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |
 | [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-pouch-errno-channel]] | open | sub-pouch-seam, sub-pouch-fs, sub-pouch-net | chg-2026-05-22-p6-syscall-seam | POUCH-DESIGN.md 5.1 |
