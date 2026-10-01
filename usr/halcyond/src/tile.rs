@@ -492,6 +492,8 @@ impl Tile {
             // The frame's records apply as they arrive; only the paint waits.
             Control::SyncBegin => self.hold.open(),
             Control::SyncEnd => self.hold.close(),
+            // The session owns binding validation; the visual transcript has no authority.
+            Control::TerminalBinding(_) => {},
         }
     }
 

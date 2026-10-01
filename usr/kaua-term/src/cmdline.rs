@@ -66,6 +66,7 @@ impl ArgError {
 /// [prog [args...]]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cmdline {
+    pub interaction: bool,
     pub tier: Tier,
     /// The palette cells are born in. `None` = no host declared one, so the
     /// caller uses the vt default: a kaua-term nobody themed is just a
@@ -107,9 +108,11 @@ fn parse_dim(a: Option<&[u8]>, fallback: u16) -> u16 {
 pub fn parse(args: &[&[u8]]) -> Result<Cmdline, ArgError> {
     let mut i = 0usize;
     let mut tier = Tier::None;
+    let mut interaction = false;
     let mut palette = None;
     while let Some(flag) = args.get(i) {
         match *flag {
+            b"--interaction" => { interaction = true; i += 1; continue; }
             b"--beacon" => {
                 tier =
                     Tier::parse(args.get(i + 1).copied().unwrap_or(b"")).ok_or(ArgError::Beacon)?;
@@ -138,6 +141,7 @@ pub fn parse(args: &[&[u8]]) -> Result<Cmdline, ArgError> {
         argv.push(String::from(DEFAULT_PROG));
     }
     Ok(Cmdline {
+        interaction,
         tier,
         palette,
         cols,
@@ -272,5 +276,17 @@ mod tests {
         for t in [Tier::None, Tier::Cells, Tier::Rich] {
             assert_eq!(Tier::parse(t.as_str().as_bytes()), Some(t));
         }
+    }
+}
+
+#[cfg(test)]
+mod interaction_args {
+    use super::*;
+    #[test]
+    fn interaction_is_explicit_and_does_not_shift_dimensions() {
+        assert!(!parse(&[]).unwrap().interaction);
+        let args: &[&[u8]] = &[b"--interaction", b"80", b"24", b"/bin/ut"];
+        let c=parse(args).unwrap();assert!(c.interaction);
+        assert_eq!((c.cols,c.rows),(80,24));assert_eq!(c.argv[0],"/bin/ut");
     }
 }

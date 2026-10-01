@@ -879,6 +879,37 @@ impl Surface {
         Ok(())
     }
 
+    /// One ordered compositor decision; callers must keep this off clipboard UI paths.
+    pub fn interaction_control(
+        &self,
+        request: libhalcyon::interaction_control::Request,
+    ) -> Result<libhalcyon::interaction_control::Reply, TapError> {
+        use libhalcyon::interaction_control::{Reply, Request, REPLY_BYTES};
+        let bytes = request.encode();
+        if Request::decode(&bytes) != Some(request) {
+            return Err(TapError::Protocol);
+        }
+        let fd = unsafe { t_open(self.root, b"ctl".as_ptr(), 3, libthyla_rs::T_ORDWR) };
+        if fd < 0 { return Err(errno_to_taperror(fd)); }
+        let owned = OwnedFd(fd);
+        let n = unsafe { t_write(owned.0, bytes.as_ptr(), bytes.len()) };
+        if n < 0 { return Err(errno_to_taperror(n)); }
+        if n as usize != bytes.len() { return Err(TapError::Protocol); }
+        // The write advances the seekable fid by REQUEST_BYTES. Read its
+        // immutable receipt from zero, preserving partial-read/error semantics.
+        let mut reply = [0; REPLY_BYTES];
+        let mut at = 0;
+        while at < reply.len() {
+            let n = unsafe {
+                libthyla_rs::t_pread(owned.0, reply[at..].as_mut_ptr(), reply.len()-at, at as i64)
+            };
+            if n < 0 { return Err(errno_to_taperror(n)); }
+            if n == 0 || n as usize > reply.len()-at { return Err(TapError::Protocol); }
+            at += n as usize;
+        }
+        Reply::decode(&reply, request).ok_or(TapError::Protocol)
+    }
+
     fn submit_present(&mut self, flags: u32, rects: &[Rect]) -> Result<(), TapError> {
         if rects.len() > MAX_RECTS {
             return Err(TapError::Present);

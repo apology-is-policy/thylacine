@@ -4,6 +4,7 @@ type: sub
 title: "kaua-term — the crash-isolated per-tile terminal and its record stream"
 parent: moc-userspace-shell-tui
 code:
+  - usr/kaua-term/src/cmdline.rs
   - usr/kaua-term/src/lib.rs
   - usr/kaua-term/src/wire.rs
   - usr/kaua-term/src/main.rs
@@ -16,8 +17,19 @@ hazards: []
 abis: []
 design: ["docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-28
+updated: 2026-10-01
 ---
+## Sealed terminal binding (October 1)
+
+Halcyon starts its sealed host with `--interaction`. Before spawning the
+ordinary application, the host binds its actual master to Tapestry's exact
+poster and announces the locator on its private UP pipe. Control subtag 9
+carries version 1/reserved 0/u64 locator; 7/8 retain SyncBegin/SyncEnd. The VT
+producer cannot synthesize this record from app output. Owner Drop revokes;
+kernel process death is the backstop. Standalone hosts without the switch
+retain existing behavior. A locator alone grants no application authority.
+
+
 ## Purpose
 
 `kaua-term` is the crash-isolated terminal a session tile runs: ONE process

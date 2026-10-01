@@ -4,6 +4,7 @@ type: sub
 title: "libhalcyon -- the Daylight tokens, the save format, and the restore planner"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libhalcyon/src/interaction_control.rs
   - usr/lib/libhalcyon/src/lib.rs
   - usr/lib/libhalcyon/src/cursor.rs
   - usr/lib/libhalcyon/src/interaction_wire.rs
@@ -32,8 +33,17 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-29
+updated: 2026-10-01
 ---
+## Renderer admission codec (October 1)
+
+`interaction_control` pins internal HIA1 requests (80 bytes) and replies
+(40 bytes), with exact lengths, reserved-zero and operation-specific validation.
+It is distinct from application HIN1. Replies echo operation/request ID and
+focus/seat/foreground epochs; consumers must match a single pending operation.
+They are never transferable authority. Clipboard activation remains separate.
+
+
 ## Shared capacity
 
 The existing pane limit now lives in `layout::MAX_PANES` (32), shared by Tapestry and the HIN1 controller bound. `MAX_CONTROLLERS` derives from it with a u16 representability assertion; wire values and capacity are unchanged.

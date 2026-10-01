@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**570 owned · 46 unowned · 616 files (92% owned) · ~12300 unswept lines.**
+**573 owned · 45 unowned · 618 files (92% owned) · ~12024 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **82 files, ~37926 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **83 files, ~38186 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -76,14 +76,13 @@ Excluded as harness and counted here rather than dropped: **82 files, ~37926 lin
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 132 | 12 | 1566 |
 | usr/quarry | 0 | 1 | 1033 |
-| usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 32 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 77 | 1 | 72 |
+| usr/lib | 78 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
-| usr/tapestryd | 8 | 2 | 21 |
+| usr/tapestryd | 9 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
 | usr/coreutils | 65 | 0 | 0 |
@@ -98,6 +97,7 @@ Excluded as harness and counted here rather than dropped: **82 files, ~37926 lin
 | usr/https | 1 | 0 | 0 |
 | usr/imperium | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
+| usr/kaua-term | 4 | 0 | 0 |
 | usr/lantern | 4 | 0 | 0 |
 | usr/lictor | 30 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
@@ -136,7 +136,6 @@ Excluded as harness and counted here rather than dropped: **82 files, ~37926 lin
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 277 |
-| usr/kaua-term/src/cmdline.rs | 276 |
 | kernel/include/thylacine/spinlock.h | 275 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |

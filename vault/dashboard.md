@@ -137,9 +137,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-01 [[chg-2026-10-01-session-service-registries]] — Private session service registries with retained connection budgets
 - 2026-10-01 [[chg-2026-10-01-srv-connection-admission]] — Reserve service-connection capacity before allocation
 - 2026-10-01 [[chg-2026-10-01-srv-listener-retention]] — Listener handles and poll snapshots retain their service registry
+- 2026-10-01 [[chg-2026-10-01-terminal-admission]] — Sealed terminal bindings and ordered compositor admission
 - 2026-09-30 [[chg-2026-09-30-held-launch]] — The held launch: ambush spawns held where the kernel has the hold
 - 2026-09-30 [[chg-2026-09-30-image-slide]] — The image slide: a deck names a picture, and view shows it
 - 2026-09-30 [[chg-2026-09-30-kernel-chunk]] — The kernel chunk: the trusted episode's lock re-checks, and walks without recursion
 - 2026-09-29 [[chg-2026-09-29-beacon-aside]] — A Markdown block quote is a Beacon aside -- checked by the manual, boxed where the console wraps, framed by Halcyon
-- 2026-09-29 [[chg-2026-09-29-birth-hold]] — The birth hold: a spawned child parked before its first instruction
 <!-- generated:end -->

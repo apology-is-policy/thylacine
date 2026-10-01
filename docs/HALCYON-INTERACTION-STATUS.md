@@ -5,6 +5,49 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Terminal admission checkpoint (October 1)
+
+The next HI-1 slice implements sealed Kaua binding announcements and Tapestry's
+ordered terminal controller/focus admission. Kaua subtag 9 preserves shipped
+SyncBegin/SyncEnd 7/8; Halcyon supplies the actual spawned child PID and owned
+leaf to the compositor. HIA1 Bind/Publish/Check/Unbind rides the declared session
+ctl; kernel observer STATE/WATCH/ACK/CHECK and exact surface lifetime gate it.
+Application clipboard authority remains inactive. Async broker receipt matching,
+ordered cancellation, direct graphical clients and the mode widget remain next.
+
+Evidence: `work/oct1-hi-admission/`. 57 Kaua, 149 libhalcyon and 112 pure
+Tapestry tests pass; the actual compositor admission fixture passes 14 tests,
+and six intended source mutants fail at their named assertions. Source review
+fixed newly accepted connections accidentally consuming watcher poll results,
+request-time SAK generation changes, identity overflow and ctl reply offsets.
+The first native run was interrupted by host ENOSPC; QMP confirmed io-error.
+The second passed ordinary CPU1 1830/1830, then the probe killed itself with its
+synthetic terminal's close-induced hangup. Notes handling now waits for the asynchronous master-clunk notification. The
+corrected native image `native-1790867780923570000` passes admission (40.23s)
+and observer (39.97s). Final guarded source passes the extracted production
+identity-exhaustion test and six named mutants in `final-fixtures/`.
+
+Graphical image `graphics-1790867967117463000` passes session media (76.29s)
+and dedicated physical F10 SAK (94.48s), both with actual exit zero. Both real
+terminal tiles register their sealed host binding; no registration refusal is
+logged. View, PNG/JPEG Gallery, manual history/theme, grant, abdication, wrong
+key and cancellation are covered. The 1280x800 workspace and prompt captures
+were visually inspected. This is no new Pi, 800x720 or graphical failure-recovery
+qualification. The ordinary CPU1 1830/1830 run preceded probe-only cleanup and
+the final surface-ID checked-add guard; the final graphical tests use that guard.
+All source pins and four protected drafts are exact. Self-review, retained
+failures and scope limits are in `work/oct1-hi-admission/self-review.md`.
+The October 1-2 50-boot/SMP/ASan/UBSan waiver remains explicit. No Main landing
+or live clipboard/mode widget is delivered by this checkpoint.
+
+The operator explicitly authorized obvious-bloat cleanup. Four older worktrees'
+ignored Cargo caches were removed with unchanged source/index/HEAD/status; stale
+Thylacine/Stratum TLC states were archived before removal. Receipt:
+`work/oct1-space-cleanup/receipt.json`; physical recovery 4.73 GiB (APFS shares
+many blocks behind the approximately 60 GiB directory totals). No source,
+branch, counterexample, screenshot or paired boot artifact was removed.
+
+
 ## D7 activation (approved October 1)
 
 The operator approved the concrete contract in

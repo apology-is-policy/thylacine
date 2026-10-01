@@ -15,3 +15,5 @@ libthyla-rs = { path = "../lib/libthyla-rs" }
 kaua-term = { path = "../kaua-term" }
 ptyhold = { path = "../lib/ptyhold" }
 inlinewire = { path = "../lib/inlinewire" }
+libhalcyon = { path = "../lib/libhalcyon" }
+libtapestry = { path = "../lib/libtapestry" }

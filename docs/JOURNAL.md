@@ -22,6 +22,46 @@ needed the operator.
 
 
 ---
+## 2026-10-01 (Astra) -- terminal admission meets the actual compositor
+
+With D7 delivered, the next useful boundary was ownership rather than exposing
+an unfinished clipboard. The integration immediately found the old binding
+announcement reservation colliding with Aux's shipped synchronized-output tags.
+Moving the unused announcement to 9 preserves 7/8 and was recorded on Yip.
+Halcyon now supplies its real sealed child's PID, and Tapestry checks its kernel
+binding against the exact owned leaf/surface. Merely reporting a locator does
+not authorize an app. Publish and Check share the compositor's ordering, using
+fresh kernel ownership and current focus; asynchronous broker cancellation and
+application activation still remain.
+
+Review caught two integration traps that pure protocol roundtrips miss: adding
+watch fds changed the meaning of the poll vector's tail, and writing a request
+advanced the ordinary ctl read offset past its reply. The loop now uses its
+pre-accept connection count and the client uses positioned reply reads. A seat
+transition can also happen after the loop's initial sample, so each admission
+samples its generation and invalidates any earlier context. Connection/surface
+incarnations cannot wrap; saturated layout epochs refuse admission.
+
+The actual-source fixture checks denial and revocation ordering, with six
+mutants failing their named assertions. Native testing exposed a different
+boundary in the harness: the synthetic foreground process also owns its master,
+so cleanup sent itself tty:hup. Opening notes prevented default termination;
+waiting on readiness rather than assuming close was synchronous then made the
+probe pass. Production ownership did not need a change for that harness fix.
+The retained native receipts are in work/oct1-hi-admission/; graphical delivery
+and final results are recorded in the interaction status and change record.
+
+A real host ENOSPC interrupted the first ordinary boot. QMP reported io-error;
+that run was quit and kept as a failure. The operator explicitly authorized
+obvious-bloat cleanup across Thylacine/Stratum. Four older ignored Cargo caches
+reported roughly 60 GiB, but APFS shared blocks meant actual recovery was only
+4.73 GiB. HEAD/index/diff/status fingerprints stayed unchanged. Stale TLC work
+areas were archived; source, branches, logs, screenshots and counterexamples
+were retained. Main68/Aux41 carry that handoff, and work/oct1-space-cleanup/
+contains the receipts. The fresh ordinary CPU1 boot then passed. No waived
+50-boot/SMP/sanitizer result is inferred from these checks.
+
+
 ## 2026-10-01 (Astra) -- D7 private registries reveal two session singletons
 
 The operator ratified the factory role, syscall 127, fixed resident routes and

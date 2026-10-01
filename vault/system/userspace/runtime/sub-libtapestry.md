@@ -15,8 +15,17 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-09-29
+updated: 2026-10-01
 ---
+## Internal admission client (October 1)
+
+`Surface::interaction_control` submits HIA1 on its owning connection's ctl,
+then uses positioned reads from zero for the immutable reply and matches its
+operation/request ID. Every call owns and closes its fid. This synchronous
+helper serves host setup and native qualification, not the future asynchronous
+clipboard hot path. It exposes no application clipboard authority by itself.
+
+
 ## Purpose
 
 The client half of the graphics protocol: connect to the compositor,

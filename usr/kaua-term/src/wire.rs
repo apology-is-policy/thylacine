@@ -54,6 +54,7 @@ const C_OSC7: u8 = 5;
 const C_SCREEN_ERASED: u8 = 6;
 const C_SYNC_BEGIN: u8 = 7;
 const C_SYNC_END: u8 = 8;
+const C_TERMINAL_BINDING: u8 = 9;
 
 /// A down-channel input record (halcyond -> kaua-term).
 #[derive(Clone, Debug, PartialEq)]
@@ -177,6 +178,12 @@ pub fn encode_record(rec: &Record, out: &mut Vec<u8>) {
                 Control::ScreenErased => p.push(C_SCREEN_ERASED),
                 Control::SyncBegin => p.push(C_SYNC_BEGIN),
                 Control::SyncEnd => p.push(C_SYNC_END),
+                Control::TerminalBinding(id) => {
+                    p.push(C_TERMINAL_BINDING);
+                    put_u32(&mut p, 1);
+                    put_u32(&mut p, 0);
+                    p.extend_from_slice(&id.to_le_bytes());
+                }
             }
             T_CONTROL
         }
@@ -384,6 +391,12 @@ pub fn parse_record(tag: u8, payload: &[u8]) -> Result<Record, WireError> {
                 C_SCREEN_ERASED => Control::ScreenErased,
                 C_SYNC_BEGIN => Control::SyncBegin,
                 C_SYNC_END => Control::SyncEnd,
+                C_TERMINAL_BINDING => {
+                    if r.u32()? != 1 || r.u32()? != 0 { return Err(WireError::Malformed); }
+                    let id = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
+                    if id == 0 || id > i64::MAX as u64 { return Err(WireError::Malformed); }
+                    Control::TerminalBinding(id)
+                }
                 _ => return Err(WireError::Malformed),
             };
             Record::Control(c)
@@ -736,5 +749,26 @@ mod tests {
         put_u32(&mut p, 2);
         p.extend_from_slice(&[0xff, 0xfe]); // invalid UTF-8
         assert_eq!(parse_record(T_CONTROL, &p), Err(WireError::Malformed));
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    #[test]
+    fn binding_locator_has_distinct_exact_wire_shape() {
+        let mut bytes = Vec::new();
+        encode_record(&Record::Control(Control::TerminalBinding(0x0102030405060708)), &mut bytes);
+        assert_eq!(bytes, [2,17,0,0,0,9,1,0,0,0,0,0,0,0,8,7,6,5,4,3,2,1]);
+        assert_eq!(parse_record(2,&bytes[5..]), Ok(Record::Control(Control::TerminalBinding(0x0102030405060708))));
+        assert_eq!(parse_record(2,&[7]),Ok(Record::Control(Control::SyncBegin)));
+        assert_eq!(parse_record(2,&[8]),Ok(Record::Control(Control::SyncEnd)));
+        for len in 0..17 { assert!(parse_record(2,&bytes[5..5+len]).is_err()); }
+        for at in [6,10,21] {
+            let mut bad=bytes.clone(); bad[at]=0xff;
+            assert!(parse_record(2,&bad[5..]).is_err());
+        }
+        let mut bad=bytes.clone();bad[14..22].fill(0);assert!(parse_record(2,&bad[5..]).is_err());
+        bytes.push(0);assert!(parse_record(2,&bytes[5..]).is_err());
     }
 }

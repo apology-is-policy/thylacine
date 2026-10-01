@@ -93,6 +93,9 @@
 // event overflowing the bounded queue WEDGES the surface (force-retire +
 // CLOSE), never blocks and never drops a control event for a live client.
 
+#[path = "interaction.rs"]
+mod interaction;
+
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -1731,6 +1734,8 @@ pub struct Comp {
     probe_count: u32,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
+    interaction_seat: Option<u64>,
+    interactions: [Option<interaction::Binding>; pane::MAX_PANES],
     screen: Option<Screen>,
     scanout: Scanout,
     /// Warp-4: the resource id the DEVICE currently scans out (0 = none/
@@ -2550,6 +2555,8 @@ impl Comp {
             probe_tick: u64::MAX,
             probe_count: 0,
             layout: Layout::new(),
+            interaction_seat: None,
+            interactions: core::array::from_fn(|_| None),
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
@@ -2649,9 +2656,10 @@ impl Comp {
         }
     }
 
-    pub fn next_conn_id(&mut self) -> u64 {
-        self.conn_seq = self.conn_seq.wrapping_add(1);
-        self.conn_seq
+    pub fn next_conn_id(&mut self) -> Option<u64> {
+        // Connection identities outlive individual fids and must never repeat.
+        self.conn_seq = self.conn_seq.checked_add(1)?;
+        Some(self.conn_seq)
     }
 
     fn surf(&self, n: usize) -> Option<&Surface> {
@@ -2679,7 +2687,8 @@ impl Comp {
     /// Mint a surface slot for `conn_id` (F9 caps enforced by the caller).
     fn mint(&mut self, conn_id: u64, peer: u64, principal: u32) -> Option<usize> {
         let n = self.surfaces.iter().position(|s| s.is_none())?;
-        self.gen_seq = self.gen_seq.wrapping_add(1);
+        // Surface incarnations used by pending admission must never repeat.
+        self.gen_seq = self.gen_seq.checked_add(1)?;
         self.surfaces[n] = Some(Surface {
             cursor: libhalcyon::cursor::Shape::Arrow,
             gen: self.gen_seq,
@@ -10286,6 +10295,7 @@ struct Fid {
     path: u64,
     gen: u32, // the surface generation captured at bind (0 for static qids)
     opened: bool,
+    interaction: Option<[u8; libhalcyon::interaction_control::REPLY_BYTES]>,
 }
 
 enum Disp {
@@ -15591,6 +15601,7 @@ impl Conn {
                 path,
                 gen,
                 opened: false,
+                interaction: None,
             });
             return true;
         }
@@ -15601,6 +15612,7 @@ impl Conn {
                     path,
                     gen,
                     opened: false,
+                    interaction: None,
                 });
                 true
             }
@@ -16198,6 +16210,7 @@ impl Conn {
                 path,
                 gen,
                 opened: true,
+                interaction: None,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16222,6 +16235,7 @@ impl Conn {
                 path,
                 gen: 0,
                 opened: true,
+                interaction: None,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16242,6 +16256,7 @@ impl Conn {
                 path,
                 gen: 0,
                 opened: true,
+                interaction: None,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16298,6 +16313,11 @@ impl Conn {
         let cap = ((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4)).min(a.count as usize);
 
         if f.path == P_CTL {
+            if let Some(reply)=f.interaction {
+                let off=(a.offset as usize).min(reply.len());
+                let end=off.saturating_add(cap).min(reply.len());
+                return p9::build_rread(&mut self.out_buf,tag,&reply[off..end]);
+            }
             // `display W H` first: the line a client parses to size a
             // fullscreen create (placement stays hidden -- D5 -- but the
             // DISPLAY geometry is global, not placement).
@@ -17490,6 +17510,14 @@ impl Conn {
         }
 
         if f.path == P_CTL {
+            if f.interaction.is_some() { return self.err(tag, p9::E_BUSY); }
+            if a.data.starts_with(b"HIA1") {
+                if a.offset!=0 {return self.err(tag,p9::E_INVAL);}
+                return match self.interaction_control(comp,i,a.data) {
+                    Ok(())=>p9::build_rwrite(&mut self.out_buf,tag,a.count),
+                    Err(e)=>self.err(tag,e),
+                };
+            }
             return match self.global_ctl(comp, a.data) {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),

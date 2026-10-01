@@ -192,8 +192,9 @@ the existing Lictor/Tapestry exclusion path before accepting trusted input.
 
 Before controller registration is exposed, complete the authenticated host-to-
 Halcyon binding announcement, Tapestry context publication and acknowledgement,
-and direct application peer checks. The kaua-term binding announcement uses Control subtag 7, agreed with Aux on
-Yip call 0108 turn 22; his ScreenErased uses 6. Its fixed body is u32 version 1,
+and direct application peer checks. The kaua-term binding announcement uses Control subtag 9. The earlier unused reservation of 7 collided with the
+integrated SyncBegin=7 / SyncEnd=8 records; those shipped meanings remain
+unchanged (October 1, Yip 0108 note 40). ScreenErased remains 6. Its fixed body is u32 version 1,
 u32 reserved zero, u64 binding ID. Decode requires exactly 16 body bytes and a
 nonzero ID, without a variable-length allocation. The record is a locator:
 Halcyon sends the binding ID and the child PID it actually spawned for this
@@ -265,3 +266,36 @@ copy precedes syscall copyout: a copyout fault may consume a notification cursor
 so STATE is the repeatable recovery query, and readiness is never the authority.
 Tests must cover this distinction without treating a lost notification as a
 successful admission or permission to retain stale ownership.
+
+## Ordered compositor control encoding (October 1 integration)
+
+The existing Tapestry `ctl` fid on the renderer's declared connection also
+accepts fixed HIA1 records. This is an internal renderer/compositor operation,
+not an application endpoint. Each request is exactly 80 bytes: magic HIA1 at0,
+u16 version1 at4, u16 operation at6, u64 nonzero request ID at8, u32 leaf at16,
+u32 expected host PID at20, and u64 binding/foreground epoch/subject stripes/
+controller generation/context ID/context epoch at24/32/40/48/56/64. The final
+u64 at72 is reserved zero. Operations1..4 are Bind, Publish, Check, Unbind.
+Bind uses leaf/host PID/binding; Unbind uses leaf/binding. Their remaining fields
+are zero. Publish/Check use every identity/epoch field, all nonzero, with PID0.
+A fixed40-byte reply echoes the prefix/op/request, then u64 focus, seat and
+foreground epochs at16/24/32. Failures use existing Rlerror values. Reads on the
+same fid return that immutable reply; one operation per fid prevents replay
+from becoming a second admission. Close and reopen for another operation.
+
+Bind verifies the declared session, its exact live surface incarnation and
+kernel STATE's binder PID before retaining an observer watch. A locator cannot
+select another tile's host. Publish invalidates the old context before ACK;
+CHECK revalidates the stored complete scope, normal seat, actual focused live
+surface and kernel CHECK. The response is bound to one request, never a bearer
+credential. The broker must match pending scope and process all observed
+revocations before using it. This encoding alone does not activate clipboard
+access or replace the requirement for an asynchronous broker adapter.
+
+Replies use positioned reads from offset zero: writing advances a seekable
+9P fid by 80 bytes. The immutable reply is exactly 40 bytes. A successful
+operation seals the fid against further writes; rejected operations have no
+receipt. New context IDs require increasing context epochs within a controller
+generation. Foreground retirement and SAK invalidate that generation. Both the
+loop and each request sample the seat. Connection and surface-incarnation IDs never wrap; layout epochs
+saturate and saturated admission is refused. No stale identity is reused.

@@ -268,6 +268,7 @@ struct SessionTile {
     cols: u16,
     rows: u16,
     dirty: bool,
+    binding_locator: Option<u64>,
     /// The one-shot "this tile presents objects" witness (test builds).
     #[cfg(feature = "test-mode")]
     objs_said: bool,
@@ -351,6 +352,7 @@ impl SessionTile {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
         let mut cmd = Command::new("/bin/kaua-term");
+        cmd.arg("--interaction");
         // Everything this compositor DECLARES to the tile: the RICH render
         // tier (halcyond rasterizes the transcript, which is what arms a tile
         // shell's zones and a tool's objects -- KAUA-TERM.md R1), and the
@@ -431,6 +433,7 @@ impl SessionTile {
             cols,
             rows,
             dirty: true,
+            binding_locator: None,
             #[cfg(feature = "test-mode")]
             objs_said: false,
             #[cfg(feature = "test-mode")]
@@ -981,6 +984,24 @@ impl SessionTile {
             match self.dec.next_frame() {
                 Some(Ok((tag, payload))) => match parse_record(tag, &payload) {
                     Ok(rec) => {
+                        if let Record::Control(kaua_term::Control::TerminalBinding(id)) = rec {
+                            // A sealed host may announce once. Kernel observer validation follows;
+                            // this locator alone never registers a controller.
+                            if self.binding_locator.is_some() { return Ingested::Crashed; }
+                            self.binding_locator = Some(id);
+                            let request=libhalcyon::interaction_control::Request {
+                                op:libhalcyon::interaction_control::Op::Bind,request:1,
+                                leaf:self.leaf,binder_pid:self.child.pid() as u32,binding:id,
+                                foreground:0,subject:0,controller:0,context:0,epoch:0,
+                            };
+                            if self.surf.interaction_control(request).is_err() {
+                                say!("halcyond: terminal ownership registration refused for leaf={}",self.leaf);
+                            } else {
+                                #[cfg(feature="test-mode")]
+                                say!("halcyond: terminal ownership registered leaf={}",self.leaf);
+                            }
+                            continue;
+                        }
                         let alt_enter = matches!(rec, Record::Mode(ScreenMode::AltScreen));
                         #[cfg(feature = "test-mode")]
                         match &rec {

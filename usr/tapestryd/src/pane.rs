@@ -1154,7 +1154,7 @@ impl Layout {
         // header that the carve (guarded by `in_active_root`) refuses to
         // honour -- a file saying something the screen does not.
         self.zoomed_id = None;
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         true
     }
 
@@ -1187,7 +1187,7 @@ impl Layout {
             }
         }
         if dropped > 0 {
-            self.epoch += 1;
+            self.epoch = self.epoch.saturating_add(1);
         }
         dropped
     }
@@ -1370,7 +1370,7 @@ impl Layout {
                 .unwrap_or(r),
         };
         self.zoomed_id = None;
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         true
     }
 
@@ -1425,7 +1425,7 @@ impl Layout {
                 self.workspaces[wi].focused = id;
             }
         }
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         Some(unhosted)
     }
 
@@ -1437,7 +1437,7 @@ impl Layout {
         match self.get_mut(slot) {
             Some(p) if p.fresh && matches!(p.kind, Kind::Leaf { surface: None }) => {
                 p.fresh = false;
-                self.epoch += 1;
+                self.epoch = self.epoch.saturating_add(1);
                 true
             }
             _ => false,
@@ -1763,7 +1763,7 @@ impl Layout {
                 if self.in_active_root(new_leaf) {
                     self.focused = new_leaf;
                 }
-                self.epoch += 1;
+                self.epoch = self.epoch.saturating_add(1);
                 return Some(new_leaf);
             }
         }
@@ -1814,7 +1814,7 @@ impl Layout {
         if self.in_active_root(new_leaf) {
             self.focused = new_leaf;
         }
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         Some(new_leaf)
     }
 
@@ -1930,7 +1930,7 @@ impl Layout {
         };
         if p.weight != w {
             p.weight = w;
-            self.epoch += 1;
+            self.epoch = self.epoch.saturating_add(1);
         }
         true
     }
@@ -1973,7 +1973,7 @@ impl Layout {
                     // which silently disabled the ratified vanish rule.
                     p.creator_conn = 0;
                     p.creator_peer = 0;
-                    self.epoch += 1;
+                    self.epoch = self.epoch.saturating_add(1);
                     return Some(f);
                 }
             }
@@ -2013,7 +2013,7 @@ impl Layout {
         if let Some(Kind::Leaf { surface }) = self.get_mut(leaf).map(|p| &mut p.kind) {
             *surface = Some(n);
         }
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         Some(leaf)
     }
 
@@ -2033,7 +2033,7 @@ impl Layout {
             // r2 F2 (P0): filled means the reservation is spent. See `host_for`.
             p.creator_conn = 0;
             p.creator_peer = 0;
-            self.epoch += 1;
+            self.epoch = self.epoch.saturating_add(1);
             Some(slot)
         } else {
             None
@@ -2091,7 +2091,7 @@ impl Layout {
     pub fn close(&mut self, slot: usize) -> Vec<usize> {
         let mut unhosted = Vec::new();
         self.close_inner(slot, &mut unhosted);
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         unhosted
     }
 
@@ -2323,7 +2323,7 @@ impl Layout {
             Some(l) => {
                 if self.focused != l {
                     self.focused = l;
-                    self.epoch += 1;
+                    self.epoch = self.epoch.saturating_add(1);
                 }
                 // Walking up, make the path the active child of each
                 // tab/stack ancestor (revealing the focused leaf).
@@ -2336,7 +2336,7 @@ impl Layout {
                         if let Some(at) = children.iter().position(|&c| c == cur) {
                             if *active != at {
                                 *active = at;
-                                self.epoch += 1;
+                                self.epoch = self.epoch.saturating_add(1);
                             }
                         }
                     }
@@ -2373,7 +2373,7 @@ impl Layout {
                 {
                     if *m != mode {
                         *m = mode;
-                        self.epoch += 1;
+                        self.epoch = self.epoch.saturating_add(1);
                     }
                     true
                 } else {
@@ -2411,7 +2411,7 @@ impl Layout {
             self.zoomed_id = Some(id);
             self.focus(slot);
         }
-        self.epoch += 1;
+        self.epoch = self.epoch.saturating_add(1);
         true
     }
 
@@ -2419,7 +2419,7 @@ impl Layout {
     /// the tmux rule). No-op when not zoomed.
     pub fn unzoom(&mut self) {
         if self.zoomed_id.take().is_some() {
-            self.epoch += 1;
+            self.epoch = self.epoch.saturating_add(1);
         }
     }
 
@@ -2609,7 +2609,7 @@ impl Layout {
                     self.get_mut(oldroot).unwrap().weight = DEFAULT_WEIGHT;
                     self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
                     self.reseat_root(oldroot, c);
-                    self.epoch += 1;
+                    self.epoch = self.epoch.saturating_add(1);
                     self.focus(slot);
                     return true;
                 }
@@ -2645,7 +2645,7 @@ impl Layout {
                         {
                             children.swap(i, j);
                         }
-                        self.epoch += 1;
+                        self.epoch = self.epoch.saturating_add(1);
                         self.focus(slot);
                         return true;
                     }
@@ -2670,7 +2670,7 @@ impl Layout {
             }
             self.get_mut(slot).unwrap().parent = Some(anc);
             self.get_mut(slot).unwrap().weight = share;
-            self.epoch += 1;
+            self.epoch = self.epoch.saturating_add(1);
             self.focus(slot);
             return true;
         }
@@ -2727,7 +2727,7 @@ impl Layout {
                     }
                     _ => return false,
                 };
-                self.epoch += 1;
+                self.epoch = self.epoch.saturating_add(1);
                 return self.focus(target);
             }
             cur = p;

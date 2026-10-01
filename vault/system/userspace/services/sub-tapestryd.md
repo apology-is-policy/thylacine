@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-present, prose, gate-smp]
@@ -14,6 +14,20 @@ design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
 updated: 2026-10-01
 ---
+## Terminal admission (October 1)
+
+`interaction.rs` implements HIA1 on the declared renderer connection. Binding
+retains the exact leaf/surface incarnation and kernel observer watch, checking
+the expected sealed child PID. Publish clears old context before kernel ACK;
+Check requires matching scope, fresh kernel ownership, actual focus and normal
+seat. Watches precede connection requests in the poll pass; newly accepted
+connections have no result in that pass. Surface reuse, watch retirement and
+SAK invalidate contexts. Each request resamples the seat to catch transitions
+since the loop's sample. Connection and surface-incarnation IDs stop at exhaustion; layout epochs
+saturate and saturated admission is refused. Replies are immutable per ctl fid.
+No application clipboard endpoint is activated by this layer.
+
+
 ## October 1 startup recheck
 
 The fresh merged boot still logs missing `/lib/halcyon/profile` and

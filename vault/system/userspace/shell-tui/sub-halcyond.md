@@ -48,6 +48,16 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-01
 ---
+## Terminal observer registration (October 1)
+
+The session accepts one binding announcement from its sealed Kaua child and
+registers it with the actual child PID, leaf and owning Tapestry connection.
+Duplicate announcements retire the terminal. Refusal leaves ordinary input
+alive without interaction authority. This one-time synchronous setup does not
+nominate an app. Asynchronous nomination, ordered pending-reply cancellation,
+clipboard activation and the mode widget remain unfinished.
+
+
 ## October 1 integration verification
 
 Qualified Main/Aux are composed with the owned PollWorker/Stream service:

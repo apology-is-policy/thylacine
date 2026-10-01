@@ -17,6 +17,7 @@
 extern crate alloc;
 
 mod observer;
+mod admission;
 mod readiness;
 #[cfg(feature = "readiness-qualification")]
 mod readiness_qualification;
@@ -161,6 +162,7 @@ pub extern "C" fn rs_main() -> i64 {
         if arg == b"--service" { return service::run(); }
         if arg == b"--service-transport" { return service::transport_child(); }
         if arg == b"--service-media-client" { return service::media_client(); }
+        if let Some(result) = admission::run(arg) { return result; }
         if let Some(result) = observer::run(arg) {
             return result;
         }
