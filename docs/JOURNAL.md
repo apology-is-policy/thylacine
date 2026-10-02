@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-10-02 (Astra) -- preserve pane lifetimes across the service mailbox
+
+Tracing app registration found two points to settle first. The root design and
+HIN1 already let applications name their own contexts, while a subsidiary note
+wrongly described those names as host-issued. The note now distinguishes names
+from authenticated routes and kernel peer identity. The compositor connection
+is already shared by UI registration and the preopened ordered control stream.
+
+The route table itself could retarget a live token, and its coalesced snapshots
+could not distinguish removal/recreation of an identical pair. The red witness
+records the first behavior. Incarnations now bind both desired snapshots and
+actual media fids/results, so a stale upload cannot become a replacement pane's
+image. The native probe deliberately retains a real file across replacement,
+then proves fresh registration still works. Evidence and measured results are
+in work/oct2-hi-routes and HALCYON-INTERACTION-STATUS. This supplies route lifetime
+bookkeeping; app dispatch and populated clipboard cancellation remain unfinished.
+
+---
 ## 2026-10-02 (Astra) -- make waiting replies cancellable
 
 The media pump assumed every request produced an immediate response. Reusing

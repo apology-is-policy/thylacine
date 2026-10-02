@@ -46,7 +46,7 @@ use libthyla_rs::fs::File;
 use libthyla_rs::handle::Rights;
 
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
-use halcyond::paneroute::{self, Node, Quiet};
+use halcyond::paneroute::{self, Node, Quiet, Route, Routes};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
     t_close, t_getuid, t_open, t_srv_accept, t_srv_peer, t_walk_create, TPollFd, TSrvPeerInfo,
@@ -124,7 +124,7 @@ fn is_dir(node: Node) -> bool {
 /// it must inject into. The compositor drains these and calls the tile's
 /// `Tile::place_image` (whose raster cache enforces the per-pane stored quota).
 pub struct PaneCompletedImage {
-    token: u128,
+    route: Route,
     pub id: u128,
     pub leaf: u32,
     pub w: u32,
@@ -136,6 +136,7 @@ pub struct PaneCompletedImage {
 struct Fid {
     fid: u32,
     node: Node,
+    route: Option<Route>,
     opened: bool,
 }
 
@@ -304,11 +305,12 @@ impl Protocol {
         self.accum.as_ref().map_or(0, |(_, a)| a.reserved_bytes())
     }
 
-    fn fid_set(&mut self, fid: u32, node: Node) -> bool {
+    fn fid_set(&mut self, fid: u32, node: Node, route: Option<Route>) -> bool {
         if let Some(i) = self.fid_find(fid) {
             self.fids[i] = Some(Fid {
                 fid,
                 node,
+                route,
                 opened: false,
             });
             return true;
@@ -317,6 +319,7 @@ impl Protocol {
             self.fids[i] = Some(Fid {
                 fid,
                 node,
+                route,
                 opened: false,
             });
             return true;
@@ -343,10 +346,10 @@ impl Protocol {
             p9::P9_TVERSION => self.h_version(tmsg, tag),
             p9::P9_TATTACH => self.h_attach(tmsg, tag),
             p9::P9_TWALK => self.h_walk(tmsg, tag, routes, diag),
-            p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
-            p9::P9_TREAD => self.h_read(tmsg, tag, budget.max_pixels),
+            p9::P9_TLOPEN => self.h_lopen(tmsg, tag, routes),
+            p9::P9_TREAD => self.h_read(tmsg, tag, budget.max_pixels, routes),
             p9::P9_TWRITE => self.h_write(tmsg, tag, out, routes, budget, diag),
-            p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
+            p9::P9_TGETATTR => self.h_getattr(tmsg, tag, routes),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
             _ => self.err(tag, p9::E_NOSYS),
@@ -402,7 +405,7 @@ impl Protocol {
         if a.fid == p9::P9_NOFID || self.fid_find(a.fid).is_some() {
             return self.err(tag, p9::E_INVAL);
         }
-        if !self.fid_set(a.fid, Node::Root) {
+        if !self.fid_set(a.fid, Node::Root, None) {
             return self.err(tag, p9::E_NOMEM);
         }
         p9::build_rattach(&mut self.out_buf, tag, &qid_of(Node::Root))
@@ -430,13 +433,18 @@ impl Protocol {
         if a.newfid != a.fid && self.fid_find(a.newfid).is_some() {
             return self.err(tag, p9::E_INVAL);
         }
+        if !routes.fid_current(f.node, f.route) {
+            return self.err(tag, p9::E_NOENT);
+        }
         let mut cur = f.node;
+        let mut pin = f.route;
         let mut qids: [p9::Qid; p9::P9_MAX_WALK] = [p9::Qid::default(); p9::P9_MAX_WALK];
         let mut n = 0usize;
         for k in 0..(a.nwname as usize).min(p9::P9_MAX_WALK) {
-            match paneroute::walk_child(cur, a.names[k], |t| routes.contains_key(&t)) {
-                Some(p) => {
+            match routes.walk(cur, pin, a.names[k]) {
+                Some((p, route)) => {
                     cur = p;
+                    pin = route;
                     qids[n] = qid_of(p);
                     n += 1;
                 }
@@ -454,13 +462,13 @@ impl Protocol {
             }
             return self.err(tag, p9::E_NOENT);
         }
-        if n == a.nwname as usize && !self.fid_set(a.newfid, cur) {
+        if n == a.nwname as usize && !self.fid_set(a.newfid, cur, pin) {
             return self.err(tag, p9::E_NOMEM);
         }
         p9::build_rwalk(&mut self.out_buf, tag, &qids[..n])
     }
 
-    fn h_lopen(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_lopen(&mut self, tmsg: &[u8], tag: u16, routes: &Routes) -> Result<usize, ()> {
         let a = match p9::parse_tlopen(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -470,18 +478,25 @@ impl Protocol {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         if f.opened {
             return self.err(tag, p9::E_PROTO);
         }
         self.fids[i] = Some(Fid {
             fid: f.fid,
             node: f.node,
+            route: f.route,
             opened: true,
         });
         p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.node), 0)
     }
 
-    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64) -> Result<usize, ()> {
+    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64, routes: &Routes) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -491,6 +506,12 @@ impl Protocol {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         if !f.opened {
             return self.err(tag, p9::E_PROTO);
         }
@@ -526,6 +547,12 @@ impl Protocol {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         // Only an opened `place` file accepts writes.
         let token = match f.node {
             Node::Place(t) if f.opened => t,
@@ -583,11 +610,11 @@ impl Protocol {
                 if id == 0 || u64::from(w) * u64::from(h) > budget.max_pixels {
                     return self.err(tag, p9::E_INVAL);
                 }
-                if let Some(&leaf) = routes.get(&token) {
+                if let Some(route) = f.route.filter(|r| r.token == token && routes.current(*r)) {
                     out.push(PaneCompletedImage {
-                        token,
+                        route,
                         id,
-                        leaf,
+                        leaf: route.leaf,
                         w,
                         h,
                         argb,
@@ -609,7 +636,7 @@ impl Protocol {
         }
     }
 
-    fn h_getattr(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_getattr(&mut self, tmsg: &[u8], tag: u16, routes: &Routes) -> Result<usize, ()> {
         let fid = match p9::parse_tgetattr(tmsg) {
             Ok(f) => f,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -619,6 +646,12 @@ impl Protocol {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         let mode = mode_of(f.node);
         let nlink = if is_dir(f.node) { 2u64 } else { 1u64 };
         // Fill the security trio -- dev9p's per-component X-search reads it, and
@@ -675,54 +708,9 @@ pub enum PostError {
     Unavailable,
     Published(Error),
 }
-const ROUTES: usize = 32;
 const _: () = assert!(core::mem::size_of::<PaneCompletedImage>() <= 128);
-#[derive(Clone, Copy)]
-struct Routes {
-    slots: [Option<(u128, u32)>; ROUTES],
-}
-const _: () = assert!(core::mem::size_of::<Routes>() <= 32 * 128);
-impl Routes {
-    fn empty() -> Self {
-        Self {
-            slots: [None; ROUTES],
-        }
-    }
-    fn get(&self, token: &u128) -> Option<&u32> {
-        self.slots
-            .iter()
-            .flatten()
-            .find(|(t, _)| t == token)
-            .map(|(_, l)| l)
-    }
-    fn contains_key(&self, token: &u128) -> bool {
-        self.get(token).is_some()
-    }
-    fn insert(&mut self, token: u128, leaf: u32) -> bool {
-        if let Some(slot) = self
-            .slots
-            .iter_mut()
-            .find(|s| s.is_some_and(|(t, _)| t == token))
-        {
-            *slot = Some((token, leaf));
-            return true;
-        }
-        if let Some(slot) = self.slots.iter_mut().find(|s| s.is_none()) {
-            *slot = Some((token, leaf));
-            return true;
-        }
-        false
-    }
-    fn remove_leaf(&mut self, leaf: u32) {
-        for slot in &mut self.slots {
-            if slot.is_some_and(|(_, l)| l == leaf) {
-                *slot = None;
-            }
-        }
-    }
-}
 fn completion_route_current(routes: &Routes, image: &PaneCompletedImage) -> bool {
-    routes.get(&image.token) == Some(&image.leaf)
+    image.leaf == image.route.leaf && routes.current(image.route)
 }
 // The desired route table is a bounded, coalesced metadata mailbox: 32 records.
 // Removing a route updates this same durable state; revocations cannot fall out
@@ -886,9 +874,10 @@ impl PanePlaceServer {
             m.failed = true;
             return out;
         }
+        let routes = m.routes;
         for slot in &mut m.completed {
             if let Some(img) = slot.take() {
-                out.push(img);
+                if completion_route_current(&routes, &img) { out.push(img); }
             }
         }
         drop(m);
@@ -976,6 +965,9 @@ fn serve_owner(
             }
         }
         if let Some(s) = seat.as_mut() {
+            // Copy under the mailbox lock; release before any control I/O.
+            let desired = shared.mail.lock().routes;
+            s.routes(desired);
             s.pump()?;
             if stopping && s.retired() {
                 return Ok(());

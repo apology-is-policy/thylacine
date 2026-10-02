@@ -2,7 +2,7 @@
 //! No Surface/EventRing or normal presentation wait is borrowed here. Public
 //! clipboard dispatch stays disabled until its controller/protocol adapter is
 //! complete; this owner holds the shared interaction owner and its seat lifecycle.
-use halcyond::interaction::Interaction;
+use halcyond::{interaction::Interaction, paneroute::Routes};
 use libhalcyon::seat_control::{Op, Request, Snapshot};
 use libthyla_rs::{
     err::{Error, Result},
@@ -20,6 +20,7 @@ pub struct Link {
     // Keep the normal reservation fid pinned through retirement of this lane.
     _reservation: File,
     interaction: Interaction,
+    routes: Routes,
     state: Snapshot,
     next: u64,
     joined: bool,
@@ -37,6 +38,7 @@ impl Link {
                 .map_err(|_| Error::Io)?,
             _reservation: setup.reservation,
             interaction,
+            routes: Routes::empty(),
             state: setup.snapshot,
             next: 1,
             joined: false,
@@ -82,6 +84,18 @@ impl Link {
     pub fn stop(&mut self) {
         self.stopping = true;
         let _ = self.interaction.seat(None);
+    }
+    /// Called before draining admission records. Coalescing may hide a removal,
+    /// but never its new route incarnation. No app output exists yet; the app
+    /// adapter must also deliver/retire the returned cancellation before ACK.
+    pub fn routes(&mut self, desired: Routes) {
+        desired.retired_since(&self.routes, |r| {
+            let _ = self.interaction.route_gone(halcyond::controllers::RouteKey {
+                leaf: r.leaf,
+                incarnation: r.incarnation,
+            });
+        });
+        self.routes = desired;
     }
     pub fn pump(&mut self) -> Result<()> {
         self.pump_seat()?;

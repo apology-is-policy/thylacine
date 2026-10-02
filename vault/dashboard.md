@@ -141,5 +141,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-02 [[chg-2026-10-02-interaction-owner]] — Shared controller and clipboard execution owner
 - 2026-10-02 [[chg-2026-10-02-ordered-interaction]] — Ordered ownership notifications and admission decisions
 - 2026-10-02 [[chg-2026-10-02-ordered-progress]] — Drive retained ordered-stream work before sleeping
-- 2026-10-02 [[chg-2026-10-02-seat-cancellation-contract]] — Ratify strict clipboard cancellation and identify the progress prerequisite
+- 2026-10-02 [[chg-2026-10-02-pane-route-lifetimes]] — Pin service work to exact pane route lifetimes
 <!-- generated:end -->

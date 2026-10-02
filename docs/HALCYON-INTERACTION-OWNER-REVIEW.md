@@ -101,3 +101,34 @@ cancellation, partial-frame reuse and buffered-input survival. Real SrvConn
 schedules additionally exercise park/progress/resume/flush/unsent cancellation;
 partial-write cancellation is controlled host evidence. No independent audit or
 complete clipboard/SAK barrier qualification is claimed.
+
+## Route lifetime handoff review
+
+HI1-R21: a live token could be retargeted by Routes::insert; the red witness in
+work/oct2-hi-routes/red.log reproduces it. A coalesced remove/reinsert of the
+same token/leaf also had no distinct identity. The fixed table now assigns
+non-reused incarnations, rejects occupied token/leaf changes, permits idempotent
+registration, and allows removal even when capacity or the allocator is spent.
+
+Actual media fids pin that incarnation on the first token walk. Revalidation
+covers clone, parent walk, open, read, write and getattr, including a partially
+uploaded image. Clunk remains usable. Complete images are checked before mailbox
+publication and before UI delivery. UI-driven route mutation cannot silently
+retarget a retained result. The same copied-table comparison retires old broker
+owners before the service consumes its next admission record. The table is
+compile-time bounded to 2048 bytes; this is not a full service-resource ledger.
+
+The protocol test compiles production parsers, route code, accumulator and
+handlers. Six mutations cover live retargeting, duplicate leaves, reused
+incarnations, stale-fid admission, lost snapshot retirement and name-only
+completion checks. The native extension uses real kernel 9P fids, partial writes,
+a queued completion and a newly opened replacement. Results are in the status
+note. No independent review or full clipboard activation is claimed.
+
+The context-source wording is clarified to match root-design section 2 and HIN1
+Bind: apps name their fields; authenticated host routes and fresh kernel peers
+establish ownership. Context IDs cannot establish identity. Both current UI
+registration and preopened ordered control use the declared EventRing session,
+so a different compositor connection is not silently substituted. Moving Bind
+into the dedicated owner and delivering authenticated host metadata remain part
+of the next dispatch adapter; the current public endpoint stays disabled.

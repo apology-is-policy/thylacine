@@ -362,10 +362,55 @@ impl Drop for Children {
         }
     }
 }
+fn route_lifetime(server: &mut crate::paneplace::PanePlaceServer) -> Result {
+    use libthyla_rs::io::Write;
+    check(server.register(10, 10), "lifetime route")?;
+    check(!server.register(10, 11), "live token retargeted")?;
+    check(!server.register(11, 10), "duplicate leaf")?;
+    let path = server.place_address(10);
+    let split = path[5..].find('/').ok_or("lifetime path")? + 5;
+    let root = file(unsafe {
+        t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), split, T_OREAD)
+    }, "lifetime root")?;
+    let sub = &path[split+1..];
+    let open = || file(unsafe {
+        t_open(root.as_raw_fd() as i64, sub.as_ptr(), sub.len(), T_ORDWR)
+    }, "lifetime place");
+    let mut old = open()?;
+    let mut header = inlinewire::PlaceHeader::argb(1, 1);
+    header.id = 10;
+    old.write_all(&header.pack()).map_err(|_| "lifetime partial header")?;
+    server.unregister_leaf(10);
+    check(server.register(10, 10), "lifetime replacement")?;
+    let mut buf = [0;32];
+    check(unsafe { t_pread(old.as_raw_fd() as i64, buf.as_mut_ptr(), buf.len(), 0) } == -2,
+        "old media fid read replacement")?;
+    check(unsafe { t_write(old.as_raw_fd() as i64, buf.as_ptr(), 4) } == -2,
+        "old upload reached replacement")?;
+    drop(old);
+    let mut image = header.pack().to_vec();
+    image.extend_from_slice(&0xff123456u32.to_le_bytes());
+    let mut fresh = open()?;
+    fresh.write_all(&image).map_err(|_| "replacement upload")?;
+    drop(fresh);
+    // Rwrite precedes UI drain; removal must discard that queued old lifetime.
+    server.unregister_leaf(10);
+    check(server.register(10, 10), "queued replacement")?;
+    check(server.take_completed().is_empty(), "queued image survived retirement")?;
+    let mut fresh = open()?;
+    fresh.write_all(&image).map_err(|_| "fresh lifetime upload")?;
+    let images = server.take_completed();
+    check(images.len() == 1 && images[0].leaf == 10 && images[0].argb == [0xff123456],
+        "fresh lifetime lost pixels")?;
+    server.unregister_leaf(10);
+    t_putstr("service-probe: route lifetimes PASS -- stale fid, partial upload, queued image, fresh replacement\n");
+    Ok(())
+}
 fn media() -> Result {
     let user = format!("probe-{}", unsafe { t_getpid() });
     let mut server =
         crate::paneplace::PanePlaceServer::post(&user).map_err(|_| "post actual media adapter")?;
+    route_lifetime(&mut server)?;
     let notes = notes::Notes::open_self().map_err(|_| "child notifications")?;
     for _wave in 0..2 {
         let mut children = Children(Vec::new());

@@ -8,9 +8,13 @@ leaf, binding and foreground epoch. Direct graphical ownership is a later adapte
 to the existing surface contract, not a terminal-route shortcut.
 
 Preparation requires a live kernel peer snapshot (connection incarnation,
-process stripes and principal), the session principal, a host-supplied context
-and epoch, and the current normal seat generation. Application-supplied values
-must be compared with that host context before this API is called. An occupied
+process stripes and principal), the session principal, an authenticated host route,
+and the current normal seat generation. HIN1 Bind supplies the application-owned
+context ID and epoch; the adapter checks their nonzero form and binds them to
+that route and the freshly sampled peer. They are names, never credentials.
+Tapestry retains the full published tuple and checks it on subsequent admission.
+This follows the application-state ownership in the root design and the HIN1
+Bind codec; no host-to-application context allocation channel is introduced. An occupied
 leaf or binding is refused until explicitly retired. Preparation burns a fresh
 monotone controller generation even if its eventual publication fails.
 
@@ -126,3 +130,18 @@ close that connection rather than replace its suffix or reuse its framing.
 The protocol owner must also discard its retained semantic state and buffers;
 stream cancellation alone is not the aggregate SAK barrier. Ticket generations
 survive cancellation. Completed replies already delivered are not recalled.
+
+## Route mailbox lifetimes
+
+The UI's fixed 32-slot desired route table allocates a nonzero, never-reused
+incarnation when it inserts a pane. Re-registering the same live token/leaf is
+idempotent; changing either half of an occupied pair is refused. Removal never
+needs a spare slot and never resets the allocator. Exhaustion refuses insertion.
+A copied desired snapshot can coalesce remove/recreate safely: the executor
+retires each old incarnation absent from the new snapshot before using it.
+
+The media adapter pins the route when a fid first walks into a token directory.
+A dead fid cannot walk, clone, open, read, write or stat its replacement, even
+when token and leaf are reused. Clunk and flush remain possible. Queued media
+results carry the same incarnation and are checked both at publication and UI
+drain. This does not change the one-principal media authority policy.

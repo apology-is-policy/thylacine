@@ -5,6 +5,48 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Route lifetime adapter (October 2)
+
+HI1-R21 (fixed): a live token could be retargeted, and coalesced removal/recreation
+of the same token/leaf had no distinct lifetime. A red actual-source witness
+reproduces live retargeting. The shared fixed route table now allocates nonzero,
+non-reused incarnations, refuses occupied token/leaf changes, and keeps removal
+possible at capacity/exhaustion. An unchanged live registration is idempotent.
+
+Media fids pin their route when entering its token directory. Clone, parent
+walk, open, read, write and stat reject a retired incarnation; stale transfer
+operations release the matching accumulator and clunk still works. Completed
+images retain the same identity, checked at mailbox publication and UI drain.
+The service compares desired snapshots and retires old broker routes before
+processing admission records, including coalesced identical-name replacement.
+
+517 Halcyon host tests pass. The actual-source protocol/route harness passes 50
+cases including shared codec/accumulator/stream cases, plus six intended named
+mutation failures. The seat gate passes coordinator13, Lictor2 and route12, with
+its nine intended failures. Guest Halcyon/probe checks pass. A fresh CI image
+passes ordinary CPU1 boot1830/1830. Real SrvConn service-wire passes36.74s, including
+an open fid held across replacement, rejected stale read/partial upload, queued
+image retirement, fresh replacement pixels and two waves of two media clients.
+Evidence: work/oct2-hi-routes/native-1790946887191531000. The fresh graphical
+image passes session-media in71.34s and physical F10 SAK in88.40s (empty,
+confer/use/abdicate, wrong key, cancellation, restoration). View, manual,
+prompt and restored-workspace captures were inspected at1280x800; no new
+minimum-display claim. Pair: graphics-1790947090886106000. The completed own
+host build cache was removed with a manifest to preserve native build headroom.
+
+The subsidiary context wording now matches root design/HIN1: applications name
+contexts; authenticated host routes and fresh kernel peers establish ownership.
+Existing UI Bind and ordered control both use the declared EventRing connection.
+Host binding metadata, dedicated-owner Bind/Publish/Check dispatch, exact peer
+resampling, runtime deadline close/join and app/cache/partial-response retirement
+before HSC ACK still need integration, followed by resource accounting, real
+clipboard clients and approved modal visuals. The ledger must reconcile the
+older 32-control + 2-media + 4-handshake reservation with the newer ratified
+16-connection session / 48-session-combined registry policy; no limit is silently
+raised or activation claimed. Public clipboard remains disabled.
+No Main landing or new Pi/minimum-display/SMP/sanitizer coverage; October 2 waiver
+and protected draft preservation apply. Review remains single-agent.
+
 ## Deferred reply and cancellation transport (October 2)
 
 The stream pump now explicitly parks one reply while continuing bounded input

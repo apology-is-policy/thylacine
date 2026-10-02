@@ -1,6 +1,7 @@
 //! Executor-owned terminal controller lifetimes; not a wire authentication API.
 //!
-//! Routes/context come from the terminal host adapter and Peer from fresh kernel
+//! Host routes come from the terminal adapter; context names from the app.
+//! Neither is a credential. Peer comes from fresh kernel
 //! connection metadata. A HIN1 scope or pane token alone cannot create either.
 //! Publish completion is provisional until its exact receipt and live peer are
 //! checked. Retirement cancels the exact broker Owner through a synchronous
@@ -27,7 +28,7 @@ pub struct RouteKey {
     pub leaf: u32,
     pub incarnation: u64,
 }
-/// Published by the authenticated host adapter after the HIA binding setup.
+/// Authenticated host route after HIA setup, with app-owned context names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Terminal {
     pub route: RouteKey,

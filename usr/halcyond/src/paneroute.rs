@@ -31,6 +31,80 @@ pub enum Node {
     Place(u128),
 }
 
+/// UI-allocated lifetime of a pane route. A token locates; it is not authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub token: u128,
+    pub leaf: u32,
+    pub incarnation: u64,
+}
+/// Durable desired state, copied across the UI/service mailbox. An incarnation
+/// changes even if remove/recreate is coalesced into a single observed snapshot.
+/// No queue capacity is needed to remove a route, and allocation never wraps.
+#[derive(Clone, Copy)]
+pub struct Routes {
+    slots: [Option<Route>; 32],
+    next: u64,
+}
+const _: () = assert!(core::mem::size_of::<Routes>() <= 2048);
+impl Routes {
+    pub fn empty() -> Self {
+        Self { slots: [None; 32], next: 1 }
+    }
+    pub fn get(&self, token: &u128) -> Option<&Route> {
+        self.slots.iter().flatten().find(|r| r.token == *token)
+    }
+    pub fn contains_key(&self, token: &u128) -> bool {
+        self.get(token).is_some()
+    }
+    pub fn current(&self, route: Route) -> bool {
+        self.get(&route.token) == Some(&route)
+    }
+    pub fn insert(&mut self, token: u128, leaf: u32) -> bool {
+        if leaf == 0 { return false; }
+        if let Some(old) = self.get(&token) { return old.leaf == leaf; }
+        if self.slots.iter().flatten().any(|r| r.leaf == leaf) { return false; }
+        let Some(next) = self.next.checked_add(1) else { return false; };
+        let Some(slot) = self.slots.iter_mut().find(|s| s.is_none()) else { return false; };
+        *slot = Some(Route { token, leaf, incarnation: self.next });
+        self.next = next;
+        true
+    }
+    pub fn remove_leaf(&mut self, leaf: u32) {
+        for slot in &mut self.slots {
+            if slot.is_some_and(|r| r.leaf == leaf) { *slot = None; }
+        }
+    }
+    /// Retire old owners before acting on the replacement desired snapshot.
+    pub fn retired_since(&self, old: &Self, mut retire: impl FnMut(Route)) {
+        for &r in old.slots.iter().flatten() {
+            if !self.current(r) { retire(r); }
+        }
+    }
+    /// A root fid is unpinned. Every descendant must name its exact live route.
+    pub fn fid_current(&self, node: Node, route: Option<Route>) -> bool {
+        match (node, route) {
+            (Node::Root, None) => true,
+            (Node::Dir(token) | Node::Place(token), Some(r)) =>
+                token == r.token && self.current(r),
+            _ => false,
+        }
+    }
+    /// Resolve one step without allowing a stale fid to escape through '..',
+    /// clone itself, or reattach to a new lifetime bearing the same name.
+    pub fn walk(&self, node: Node, route: Option<Route>, name: &[u8])
+        -> Option<(Node, Option<Route>)>
+    {
+        if !self.fid_current(node, route) { return None; }
+        let next = walk_child(node, name, |t| self.contains_key(&t))?;
+        let pin = match next {
+            Node::Root => None,
+            Node::Dir(t) | Node::Place(t) => Some(*self.get(&t)?),
+        };
+        Some((next, pin))
+    }
+}
+
 /// The 32-byte canonical wire spelling of a token: 32 lowercase hex digits,
 /// most-significant nibble first. The sole form `parse_hex32` accepts, so
 /// encode/decode round-trip and a token has no alias.
@@ -130,6 +204,71 @@ pub fn place_tail(token: u128) -> alloc::string::String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_route_cannot_be_retargeted() {
+        let mut r = Routes::empty();
+        assert!(r.insert(10, 7));
+        let pin = *r.get(&10).unwrap();
+        assert!(r.insert(10, 7));
+        assert!(r.current(pin));
+        assert!(!r.insert(10, 8));
+        assert!(!r.insert(11, 7));
+        assert!(!r.insert(12, 0));
+        assert!(r.current(pin));
+    }
+    #[test]
+    fn coalesced_replacement_retires_even_identical_names() {
+        let mut r = Routes::empty();
+        assert!(r.insert(10, 7));
+        let old = r;
+        let pin = *r.get(&10).unwrap();
+        r.remove_leaf(7);
+        assert!(r.insert(10, 7));
+        assert!(!r.current(pin));
+        assert!(r.get(&10).unwrap().incarnation > pin.incarnation);
+        let mut retired = alloc::vec::Vec::new();
+        r.retired_since(&old, |r| retired.push(r));
+        assert_eq!(retired, [pin]);
+        r.retired_since(&r, |_| panic!("unchanged route retired"));
+    }
+    #[test]
+    fn full_table_and_exhaustion_still_allow_removal() {
+        let mut r = Routes::empty();
+        for i in 1..=32 { assert!(r.insert(i, i as u32)); }
+        assert!(!r.insert(33, 33));
+        r.remove_leaf(7);
+        assert!(r.insert(33, 7));
+        r.next = u64::MAX;
+        r.remove_leaf(7);
+        assert!(!r.insert(34, 7));
+        assert!(!r.contains_key(&33));
+        assert!(r.insert(1, 1)); // idempotence consumes no new generation
+        r.remove_leaf(1);
+        assert!(!r.contains_key(&1));
+    }
+    #[test]
+    fn stale_fids_cannot_walk_clone_or_escape() {
+        let mut r = Routes::empty();
+        assert!(r.insert(10, 7));
+        let (dir, pin) = r.walk(Node::Root, None, &hex32(10)).unwrap();
+        let (file, pin) = r.walk(dir, pin, b"place").unwrap();
+        assert!(r.fid_current(file, pin));
+        assert!(!r.fid_current(Node::Place(11), pin));
+        assert!(!r.fid_current(Node::Root, pin));
+        assert!(!r.fid_current(file, None));
+        r.remove_leaf(7); assert!(r.insert(10, 7));
+        for node in [dir, file] {
+            assert!(!r.fid_current(node, pin));
+            for name in [b".".as_slice(), b"..", b"place"] {
+                assert_eq!(r.walk(node, pin, name), None);
+            }
+        }
+        let (_, fresh) = r.walk(Node::Root, None, &hex32(10)).unwrap();
+        assert_ne!(fresh, pin);
+        assert!(r.fid_current(dir, fresh));
+        assert_eq!(r.walk(dir, fresh, b".."), Some((Node::Root, None)));
+    }
 
     #[test]
     fn hex32_round_trips() {

@@ -40,19 +40,20 @@ cases=[
  ('gate-replay',g,'self.acknowledged = false;','/* stale acknowledgement survives */','no_replay_across_episode_failure_or_restoration'),
  ]
 s=(root/'usr/halcyond/src/paneplace.rs').read_text()
-body=s[s.index('pub struct PaneCompletedImage {'):s.index('#[derive(Copy, Clone)]\nstruct Fid')]+s[s.index('const ROUTES:'):s.index('// The desired route table')]
+body=s[s.index('pub struct PaneCompletedImage {'):s.index('#[derive(Copy, Clone)]\nstruct Fid')]+s[s.index('const _: () = assert!(core::mem::size_of::<PaneCompletedImage>'):s.index('// The desired route table')]
+body = 'extern crate alloc;\n#[path="'+str(root/'usr/halcyond/src/paneroute.rs')+'"] mod paneroute;\nuse paneroute::{Route,Routes};\n'+body
 tests='''
 #[test] fn exact_route_survives_but_replacement_does_not() {
  let mut r=Routes::empty(); assert!(r.insert(10,7));
- let image=PaneCompletedImage {token:10,id:55,leaf:7,w:1,h:1,argb:vec![1]};
+ let image=PaneCompletedImage {route:*r.get(&10).unwrap(),id:55,leaf:7,w:1,h:1,argb:vec![1]};
  assert!(completion_route_current(&r,&image));
- r.remove_leaf(7);assert!(r.insert(11,7));
+ r.remove_leaf(7);assert!(r.insert(10,7));
  assert!(!completion_route_current(&r,&image), "retired token reached replacement tile");
 }
 #[test] fn full_metadata_cannot_drop_revocation() {
  let mut r=Routes::empty();for i in 1..=32 {assert!(r.insert(i,i as u32));}
  assert!(!r.insert(33,33));r.remove_leaf(10);assert!(!r.contains_key(&10));
- assert!(r.insert(33,10));assert_eq!(r.get(&33),Some(&10));assert!(!r.contains_key(&10));
+ assert!(r.insert(33,10));assert_eq!(r.get(&33).map(|r|r.leaf),Some(10));assert!(!r.contains_key(&10));
 }
 '''
 
@@ -64,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='thylacine-seat-') as directory:
     for name, source, before, after, test in cases:
         assert source.count(before) == 1, name
         compile_run(out, name, source.replace(before,after), test, 'assertion')
-    before='routes.get(&image.token) == Some(&image.leaf)'
+    before='image.leaf == image.route.leaf && routes.current(image.route)'
     assert body.count(before) == 1
-    compile_run(out, 'leaf-only', body.replace(before, 'routes.slots.iter().flatten().any(|(_,l)| *l == image.leaf)')+tests,
+    compile_run(out, 'leaf-only', body.replace(before, 'true')+tests,
                 expected_failure='retired token reached replacement tile')

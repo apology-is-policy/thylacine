@@ -4,6 +4,7 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - tools/test-pane-routes.py
   - usr/halcyond/src/interaction.rs
   - usr/halcyond/src/controllers.rs
   - usr/halcyond/src/session_seat.rs
@@ -52,6 +53,24 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Pane route lifetimes
+
+The fixed desired route table in paneroute allocates nonzero monotone local
+incarnations. Re-registering a live pair is idempotent; live token retargeting
+and duplicate leaves refuse. Coalescing remove/recreate cannot hide retirement,
+even with identical token and leaf. Removal remains possible at capacity and
+allocator exhaustion. The table has a 2048-byte compile-time metadata ceiling.
+
+Media fids pin their route on the first walk into a token directory. Every
+subsequent walk/clone, open, read, write and stat requires that exact lifetime;
+stale operations return ENOENT and release a matching partial accumulator.
+Clunk still works. Completions carry the incarnation and are rechecked at both
+mailbox publication and UI drain. The service compares desired snapshots and
+retires missing broker routes before consuming the next admission record.
+No new authority, endpoint, connection capacity or dynamic payload allocation
+is added. Public clipboard dispatch remains gated; see work/oct2-hi-routes and
+HALCYON-INTERACTION-STATUS for measured verification and remaining adapters.
+
 ## Deferred output retirement
 
 The common stream pump accepts explicit parked replies and exact-ticket resumption.
