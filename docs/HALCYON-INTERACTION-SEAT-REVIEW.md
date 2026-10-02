@@ -1,8 +1,11 @@
 # Clipboard cancellation at trusted-seat takeover
 
-Status: **proposal, awaiting the operator's choice**. October 1, 2026;
-source baseline `fda6de374`. No seat ABI, failure policy or application endpoint
-is changed by this review. This is a prerequisite to live HI-1 activation.
+Status: **A approved by the operator, October 2, 2026** ("Let's do A.").
+Source investigation baseline `fda6de374`. Strict cancellation before trusted
+input and the existing five-second timeout are ratified. B is rejected.
+Implementation and live endpoint activation are not established by approval.
+See HALCYON-INTERACTION-SEAT-PROGRESS.md for the blocking presentation dependency
+found while tracing the implementation.
 
 ## Finding
 
@@ -62,7 +65,7 @@ These primary sources were checked October 1. The following design is our
 inference for the verified Thylacine architecture, not an attributed upstream
 implementation.
 
-## A. Preserve strict cancellation with a userspace quiescence barrier (recommended)
+## A. Preserve strict cancellation with a userspace quiescence barrier (approved)
 
 Keep the existing kernel seat phases, process roles and five-second quiescence
 deadline. Extend the authenticated Lictor/Tapestry protocol: Lictor's final ACK
@@ -76,10 +79,12 @@ to every enabled session broker, including hidden sessions. Brokers participate
 before enabling their endpoint, through the existing declared renderer
 connection. The participant set is bounded by the existing compositor connection
 limit; duplicate registrations do not allocate another participant. No broker
-can join during quiescence. Even zero participants requires Tapestry's aggregate
+can join during quiescence. The October 2 progress amendment moves cancellation
+control to a separately serviced lane, bound through the declared connection. Even zero participants requires Tapestry's aggregate
 acknowledgement, so a delayed registration cannot race the snapshot.
 
-Each broker's UI owner closes admission, calls `Broker::seat(None)`, discards
+Each broker's service owner closes admission (the October 2 progress amendment
+places this owner on a dedicated executor), calls `Broker::seat(None)`, discards
 unsent application success/data replies and safely retires in-flight writes
 before acknowledging. Incomplete frames close their connection rather than
 resuming with a different reply. CQEs/buffers remain owned until completion or
@@ -97,8 +102,8 @@ an older obligation. A new normal generation requires fresh registration/state
 before clipboard operations resume. Committed clipboard contents survive;
 uncompleted transfers do not.
 
-Tapestry must continue only the bounded cancellation/control pump during
-QUIESCING; today's early sleep/continue would otherwise deadlock the handshake.
+Tapestry's independent coordinator continues the bounded cancellation/control
+pump during QUIESCING; the main graphics loop may remain parked.
 Lictor accepts that control during quiescence while keeping normal GPU/input
 requests excluded. Neither loop waits synchronously for an application reply.
 
@@ -108,7 +113,7 @@ no grant, then follows the existing safe display restoration path. There is no
 new forced process kill, bypass, infinite wait or silent downgrade. Keyboard
 and scanout exclusion begins immediately; secret input starts only after the
 aggregate acknowledgement. This adds a normal-session responsiveness dependency
-to SAK and is the substantive policy choice requiring approval.
+to SAK and is the substantive policy choice approved on October 2.
 
 The broker already holds its session's clipboard; this acknowledgement is a
 cleanup obligation of that existing trusted implementation, not a new claim
@@ -120,7 +125,7 @@ encoding/identity rules, owner-loop cancellation and participant lifecycle,
 Lictor ACK gate, then native and graphical qualification. No kernel ABI addition
 is proposed; if implementation requires one, reopen this review first.
 
-## B. Preserve SAK independence; permit already-admitted normal work to finish
+## B. Preserve SAK independence; permit already-admitted normal work to finish (rejected)
 
 Retain the current Lictor takeover path and explicitly weaken the clipboard
 contract: work admitted by Tapestry before SAK may complete after takeover;

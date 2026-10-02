@@ -5,6 +5,19 @@ arrangement within the approved userspace service; it adds no syscall, wire
 operation, authority role or clipboard guarantee. The native worker is implemented and connected to the existing two-connection
 session media service. Expanded interaction admission remains unimplemented.
 
+## October 2 ownership amendment (approved)
+
+For the activated clipboard service, the operator approved the dedicated owners
+in HALCYON-INTERACTION-SEAT-PROGRESS. The session service executor replaces its
+readiness-only worker and owns protocol state, clipboard mutation and admission
+completion independently of rendering. The existing media implementation below
+remains the as-built baseline until migration is verified. The UI communicates
+through bounded commands/results and never waits synchronously for service work.
+This does not move focus authority out of Tapestry or permit clipboard data in
+Lictor. Existing nonblocking transport, identity, quota and buffer-lifetime rules
+remain. No polling worker is repurposed into a parser without this explicit
+consumer migration; its generic readiness-only API remains unchanged.
+
 ## The capacity constraint
 
 The approved service reserves 32 controller, two media and four handshake

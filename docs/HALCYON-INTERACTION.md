@@ -374,6 +374,15 @@ while a trusted SAK episode owns the seat. Entering that episode cancels pending
 clipboard transfers; already delivered bytes cannot be recalled. Imperium-key
 fields never publish clipboard data through this service.
 
+October 2 ratification: Lictor's final quiescence ACK also requires an
+exact-generation acknowledgement from Tapestry that every enabled session
+broker has cancelled pending clipboard work. Zero participants still requires
+the aggregate acknowledgement. The existing five-second deadline applies; a
+stalled participant fails the episode without a grant. No polling-only substitute
+or fallback to completing pre-SAK pending work is permitted. The complete
+contract is option A in `HALCYON-INTERACTION-SEAT-REVIEW.md`; implementation
+remains gated on the progress dependency in `HALCYON-INTERACTION-SEAT-PROGRESS.md`.
+
 ## 10. Native pointer
 
 Tapestry owns a display-coordinate pointer and the topmost normal-seat cursor

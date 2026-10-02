@@ -207,3 +207,20 @@ factory role/syscall, fixed resident routes, scoped posting lifecycle, and
 16 retained session domains. Implement through focused tests and real login/
 Halcyon regressions. Keep the four protected drafts separate. This ratifies the
 new D7 contract; do not ask again for these authority/ABI/resource-policy terms.
+
+## Clipboard / SAK cancellation (operator-approved, 2026-10-02)
+
+The operator chose A in `docs/HALCYON-INTERACTION-SEAT-REVIEW.md`: strict
+clipboard cancellation before trusted input, aggregate userspace acknowledgement
+and the existing five-second quiescence timeout if a participant stalls. B's
+weaker completion policy is rejected. Do not ask again about that choice.
+No new kernel ABI, forced process kill or bypass is authorized by this choice.
+The presentation/cancellation progress dependency must be resolved before
+activation; see `docs/HALCYON-INTERACTION-SEAT-PROGRESS.md`.
+
+The operator also approved dedicated control owners in
+`docs/HALCYON-INTERACTION-SEAT-PROGRESS.md`: a bounded Tapestry coordinator/control
+route and one protocol/clipboard executor per Halcyon session, replacing that
+service's readiness-only worker. This resolves blocking presentation dependencies
+without changing kernel roles or syscalls. Do not ask again for this ownership
+choice. Record concrete encoding and resource limits before implementing.

@@ -12,8 +12,15 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-10-01
+updated: 2026-10-02
 ---
+## Clipboard cancellation progress boundary
+
+Normal GPU RPC parking and synchronous presentation form the dependency
+recorded in [[sub-halcyond#Clipboard seat-ordering seam]]. The approved
+clipboard cancellation barrier is not yet installed. Display/input isolation
+does not establish the separate broker's cancellation order.
+
 ## Terminal admission (October 1)
 
 `interaction.rs` implements HIA1 on the declared renderer connection. Binding

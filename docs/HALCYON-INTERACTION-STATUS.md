@@ -5,23 +5,35 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
-## Trusted-seat cancellation integration review (October 1)
+## Trusted-seat cancellation: approved A, progress prerequisite (October 2)
 
-Live clipboard activation exposes an unresolved ordering requirement: Lictor's
-hardware ACK does not wait for Halcyon to cancel an already queued admission
-receipt. Tapestry's local suspension cannot retract that receipt. The pure
-broker cancels correctly once notified; delivering that notification before
-trusted input is not currently guaranteed. The endpoint remains disabled.
+The operator chose A: strict clipboard cancellation before trusted input, an
+exact-generation aggregate userspace acknowledgement, and the existing five-
+second timeout if a participant stalls. B's weaker completion rule is rejected.
+Approval is recorded in AGENTS and the interaction/trusted-seat specifications.
+The application clipboard endpoint remains disabled; no barrier is installed yet.
 
-`docs/HALCYON-INTERACTION-SEAT-REVIEW.md` records the verified path, two
-controlled production-source schedules and alternatives. Proposed A preserves
-strict cancellation using a bounded userspace aggregate acknowledgement, with
-the explicit cost that a stalled normal renderer can cause SAK's existing
-five-second quiesce timeout. B keeps SAK independent but permits already-admitted
-clipboard work to complete during an episode. Neither change is ratified yet.
-Evidence is in `work/oct1-hi-seat-review/`; no new guest/graphical result is
-claimed. This is the remaining decision before wiring seat cancellation into
-application activation, not a failure of trusted key isolation.
+Implementation tracing found a dependency missed in the October 1 review:
+Halcyon synchronously waits for present's Rwrite; Tapestry can synchronously wait
+for a GPU reply that Lictor parks during SAK. Making Lictor await either owner's
+cancellation creates a circular wait, resolved only by failing the episode at
+the deadline. This is a source-proven reachable dependency, not a newly run
+native failure or a claim that the existing SAK path is broken.
+
+`docs/HALCYON-INTERACTION-SEAT-PROGRESS.md` is the concrete follow-up review.
+The operator approved independently scheduled cancellation/service owners and
+a bounded control lane, preserving A's authority and failure policy. The broader
+resumable-graphics alternative was not selected. Both choices are ratified;
+implementation must replace the service's readiness-only ownership deliberately
+and must not activate a barrier containing the circular wait.
+`work/oct2-hi-seat/source-path.json` pins the inspected production files.
+
+The original ordering gap and its two controlled production-source schedules
+remain in `work/oct1-hi-seat-review/` and
+`docs/HALCYON-INTERACTION-SEAT-REVIEW.md`. Tapestry's local suspension cannot
+retract an already queued receipt; Broker::seat cancels when notified, not at an
+unobserved global transition. Trusted key isolation is a separate property.
+No new guest, graphical, SMP or sanitizer result is claimed by this review.
 
 ## Asynchronous clipboard admission (October 1)
 

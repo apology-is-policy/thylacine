@@ -126,7 +126,12 @@ ref Spoors pin a posting generation (today they hold a name and registry).
 
 Login's initial route manifest is explicit and reviewed against producers:
 `corvus`, `net`, `nocturne`, `nocturne-ctl`, `lictor`, `tapestry`, `warp`,
-`stratum-fs`, `stratum-ctl`, `ptyfs`, `diorama`. Missing optional residents may
+`stratum-fs`, `stratum-ctl`, `ptyfs`, `diorama`. The October 2 approved
+interaction extension adds `tapestry-interaction`, a separately serviced
+cancellation lane owned by Tapestry, with exact registered peer admission and
+unchanged connection quotas; see HALCYON-INTERACTION-SEAT-PROGRESS. The route
+is reserved before activation, not a claim that its service already runs.
+Missing optional residents may
 stay reserved/offline; no wildcard fallback. Add another resident only by an
 intentional login-policy update. No home-*, halcyon-* or boot-test service routes.
 Existing byte-service gates still deny the ordinary shell's direct coordinator

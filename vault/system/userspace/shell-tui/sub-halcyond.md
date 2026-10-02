@@ -47,16 +47,23 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 ## Clipboard seat-ordering seam
 
 `Broker::seat(None)` cancels locally when notified. Current Lictor/Tapestry
 exclusion does not order that call before trusted input: an earlier HIA1 receipt
 can already be queued to the broker. Application activation remains disabled
-pending the contract decision in
+pending implementation of approved option A in
 [the seat review](../../../../docs/HALCYON-INTERACTION-SEAT-REVIEW.md).
 Display/key isolation does not itself establish clipboard cancellation.
+
+The current session owner blocks in `Surface::submit_present` until Tapestry's
+Rwrite. Tapestry can itself block in a normal GPU RPC that Lictor parks outside
+NORMAL. A cancellation barrier executed by those same owners would introduce
+a circular wait. The approved execution-ownership amendment is specified in
+[the progress prerequisite](../../../../docs/HALCYON-INTERACTION-SEAT-PROGRESS.md);
+no independent clipboard executor or control route is implemented.
 
 ## Pending clipboard admission (October 1)
 

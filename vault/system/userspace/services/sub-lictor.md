@@ -51,8 +51,15 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-10-01
+updated: 2026-10-02
 ---
+## Clipboard cancellation progress boundary
+
+Normal GPU RPC parking and synchronous presentation form the dependency
+recorded in [[sub-halcyond#Clipboard seat-ordering seam]]. The approved
+clipboard cancellation barrier is not yet installed. Display/input isolation
+does not establish the separate broker's cancellation order.
+
 ## October 1 production-debt recheck
 
 The stable Main/Aux tree retains the open defaults/geometry/lifecycle items
