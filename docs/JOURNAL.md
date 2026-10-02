@@ -22,6 +22,34 @@ needed the operator.
 
 
 ---
+## 2026-10-02 (Astra) -- ordered stream meets the initial seat
+
+A separate normal-ownership journal was necessary because drawing notices
+coalesce: A->B->A cannot erase the loss that cancels an unfinished copy. One
+stream now carries loss and decisions in the compositor's order. Independent
+read/write slots preserve progress while HSC remains a separate cancellation
+owner. Actual-source tests exercise overflow, malformed records, late CQEs,
+subject changes and old-binding events.
+
+The native test caught an assumption the host fixtures missed: generation zero
+is the initial normal seat. The new decoder rejected a valid Publish receipt,
+poisoning its journal. The decisive retained trace is in
+work/oct2-hi-ordered/graphics-1790935513437021000: focus 16, seat 0, foreground 3.
+Earlier diagnostic prints went to Tapestry's readiness stdout, so their absence
+misled me into suspecting a kernel transport failure. Kernel reply tracing proved
+a valid server EIO; the correct console sink then exposed the codec rejection.
+The kernel tracing is removed. The fix has both a zero-seat source regression
+and an intended mutant; corrected native admission passes in 36.71 seconds and
+the ordinary boot passes 1830/1830. This demonstrates why a green isolated gate
+is not a substitute for the real protocol path.
+
+Host disk pressure interrupted one bake. Own disposable cache and redundant
+paired artifacts were removed with hash manifests; logs and a failing image
+survive. No peer checkout was touched. Normal Halcyon media (71.54s) and physical F10 SAK (88.19s) pass with
+inspected 1280x800 captures in graphics-1790935933737513000; application registration/reply cancellation still precede
+public clipboard activation and the approved visible modal work.
+
+---
 ## 2026-10-02 (Astra) -- one owner before ordered notification delivery
 
 Connecting controller publication to the clipboard exposed an integration

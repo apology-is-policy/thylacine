@@ -16,7 +16,7 @@ pub struct Setup {
 }
 pub struct Link {
     channel: Channel,
-    admission: tapestry::admission::Channel,
+    admission: tapestry::ordered::Channel,
     // Keep the normal reservation fid pinned through retirement of this lane.
     _reservation: File,
     interaction: Interaction,
@@ -33,7 +33,7 @@ impl Link {
             .map_err(|_| Error::InvalidArgument)?;
         let mut link = Self {
             channel: Channel::open().map_err(|_| Error::Io)?,
-            admission: tapestry::admission::Channel::from_file(setup.admission)
+            admission: tapestry::ordered::Channel::from_file(setup.admission)
                 .map_err(|_| Error::Io)?,
             _reservation: setup.reservation,
             interaction,
@@ -71,7 +71,7 @@ impl Link {
         self.admission.poll_fd()
     }
     pub fn ready(&self) -> bool {
-        self.joined
+        self.joined && self.admission.ready()
     }
     pub fn retired(&self) -> bool {
         self.retired
@@ -81,12 +81,27 @@ impl Link {
         let _ = self.interaction.seat(None);
     }
     pub fn pump(&mut self) -> Result<()> {
+        self.pump_seat()?;
+        self.admission.pump().map_err(|_| Error::Io)?;
+        if let Some(record) = self.admission.take() {
+            use libhalcyon::interaction_events::Body;
+            match record.body {
+                Body::Ready(_) => {}
+                // App dispatch remains disabled; an unsolicited decision is a protocol fault.
+                Body::Decision { .. } => return Err(Error::Io),
+                body => {
+                    let _ = self.interaction.observe(body).map_err(|_| Error::Io)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn pump_seat(&mut self) -> Result<()> {
         if self.retired {
             return Ok(());
         }
-        // Keep a parked HIA exchange and its registered storage alive; pump
-        // never waits for normal graphics or an admission response.
-        self.admission.pump().map_err(|_| Error::Io)?;
+        // The cancellation lane never waits for normal graphics or an
+        // ordered admission response.
         self.channel.pump().map_err(|_| Error::Io)?;
         let Some(done) = self.channel.take() else {
             return Ok(());

@@ -5,6 +5,56 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Ordered ownership delivery (October 2)
+
+The compositor now delivers terminal snapshots, focus loss, binding retirement,
+seat reset and admission decisions through one ordered 80-byte stream. A fixed
+64-record journal fails closed on overflow. The session executor drains it
+independently of its HSC cancellation lane; coalesced drawing notices confer no
+clipboard authority. One read and one write may be pending without sharing their
+buffers; an early decision cannot escape before its write completion.
+
+Evidence in `work/oct2-hi-ordered/`: Halcyon 501, libtapestry 22 and final
+libhalcyon 168 host tests pass (691 across the three crates). Actual-source gates
+pass 24 producer cases plus identity checks and six mutants, 57 composed owner
+cases with nine mutants, and 16 wire/channel cases plus the declared-session
+predicate with eight mutants. The full image passes ordinary CPU1 1830/1830 and
+native ordered admission in 36.71s, including a parked read with progressing
+writes, publication, focus A->B->A and retirement before the corresponding
+receipt. Normal Halcyon session-media passes in 71.54s; physical F10 SAK
+passes in 88.19s (empty episode, confer/use/abdicate, wrong key, cancellation,
+restoration). Inline View, the trusted prompt and restored workspace captures
+were inspected at 1280x800. Evidence is graphics-1790935933737513000. This is not
+populated app-controller clipboard qualification or fresh 800x720/Pi coverage.
+Focused images omit the GOROOT bake; Alpine/clade fixtures remain absent.
+
+HI1-R17 (fixed): the first selector required the distinct console-renderer role,
+which a declared Halcyon session does not carry. It now checks declaration plus
+fresh kernel peer stripes, principal and liveness, consistent with HSR. The
+actual predicate is exercised against identity changes and dead peers.
+HI1-R18 (fixed): seat generation zero is the valid initial normal seat. The new
+codec incorrectly refused it and poisoned its journal at the first publication.
+The native trace recorded a valid Publish reply (focus=16, seat=0, foreground=3)
+being rejected. Codec and actual-producer regressions cover zero; the named
+reject-initial-seat mutation fails. Several diagnostic runs were needed because
+compositor stdout is a readiness pipe, not its diagnostic console. An early
+claim that the request had not reached Tapestry was disproven and corrected.
+Temporary kernel diagnostics are removed; there is no kernel change here.
+
+The mutant witness originally used unwrap/custom panic text, which the harness
+correctly did not count as the required assertion witness; it now uses assert_eq.
+An omitted Reply import in the added host fixture was also corrected. Failed logs
+remain. Host disk ENOSPC during a bake was repaired by removing own disposable
+host cache and redundant image copies, retaining logs, hashes and a failing
+paired image. These failed builds/runs are not counted as passes.
+
+Public clipboard remains disabled. Next: authenticated application registration
+and HIA dispatch, control deadlines/drain and partial reply cancellation; then
+total resource accounting and two-client qualification before activation.
+Native clipboard clients and the approved modal status/caret painting follow.
+Single-agent self-review: HALCYON-INTERACTION-ORDERED-REVIEW. No independent
+review, Main landing, Pi/minimum-display or waived SMP/sanitizer result is claimed.
+
 ## Shared interaction owner (October 2)
 
 `Interaction` now composes the controller table and Broker under one monotone

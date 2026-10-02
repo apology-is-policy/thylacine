@@ -8,8 +8,11 @@ extern crate self as libthyla_rs;
 mod abi;
 #[path = "../../usr/lib/libhalcyon/src/interaction_control.rs"]
 pub mod interaction_control;
+#[path = "../../usr/lib/libhalcyon/src/interaction_events.rs"]
+pub mod interaction_events;
+const E_IO:u32=5;
 pub use abi::TPtyInteractionState;
-use interaction_control::{Op, Request};
+use interaction_control::{Op, Reply, Request};
 use std::cell::RefCell;
 pub const T_POLLIN: u16 = 1;
 pub const T_POLLHUP: u16 = 16;
@@ -192,6 +195,8 @@ struct Comp {
     declared: u64,
     interaction_seat: Option<u64>,
     interactions: [Option<interaction::Binding>; 2],
+    ordered: [Option<interaction::Feed>; 2],
+    next_ordered: u64,
 }
 impl Comp {
     fn session_declared(&self, c: u64) -> bool {
@@ -242,6 +247,8 @@ fn setup() -> (Comp, Request) {
             declared: 3,
             interaction_seat: None,
             interactions: [None, None],
+            ordered: [None,None],
+            next_ordered: 1,
         },
         Request {
             op: Op::Bind,
@@ -478,4 +485,69 @@ fn seat_generation_change_between_loop_and_request_revokes_context() {
     let next = Request { controller: 2, ..p };
     c.interaction_request(3, next).unwrap();
     assert!(check(&mut c, next));
+}
+
+#[test]
+fn ordered_producer_replays_decision_without_repeating_kernel_authority() {
+    use interaction_events::Body;
+    let (mut c,r)=setup();c.ordered_install(3).unwrap();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Ready(_)));
+    let mut conn=Conn {conn_id:3,fids:[Some(Fid{interaction:None})]};
+    conn.ordered_control(&mut c,0,&r.encode()).unwrap();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Terminal{subject:0,..}));
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Decision{result:Ok(_),..}));
+    let p=Request{op:Op::Publish,request:2,binder_pid:0,foreground:1,subject:30,controller:1,context:1,epoch:1,..r};
+    conn.ordered_control(&mut c,0,&p.encode()).unwrap();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Terminal{subject:30,..}));
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Decision{result:Ok(_),..}));
+    c.layout.epoch=10;c.interaction_focus_lost(0);c.layout.epoch=12;c.interaction_focus_lost(0);
+    let q=Request{op:Op::Check,request:3,..p};conn.ordered_control(&mut c,0,&q.encode()).unwrap();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::FocusLost{epoch:10,..}));
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::FocusLost{epoch:12,..}));
+    let decision=c.ordered_pop(3).unwrap().unwrap();
+    let checks=K.with(|k|k.borrow().checks);conn.ordered_control(&mut c,0,&q.encode()).unwrap();
+    assert_eq!(c.ordered_pop(3).unwrap().unwrap().body,decision.body);
+    assert_eq!(K.with(|k|k.borrow().checks),checks);
+    c.ordered_remove(3);assert!(c.interaction_request(3,q).is_err());
+}
+
+#[test]
+fn ordered_overflow_retires_context_and_reopen_cannot_revive_it() {
+    let (mut c,p)=active();c.ordered_install(3).unwrap();
+    let first=c.ordered_pop(3).unwrap().unwrap();
+    for _ in 0..65 {c.interaction_focus_lost(0);}
+    assert_eq!(c.ordered_pop(3),Err(E_IO));
+    assert!(!check(&mut c,p));
+    c.ordered_remove(3);c.ordered_install(3).unwrap();
+    let next=c.ordered_pop(3).unwrap().unwrap();assert_ne!(first.body,next.body);
+    assert!(!check(&mut c,p));
+}
+#[test]
+fn ordered_same_epoch_subject_and_surface_retirement_arrive_before_decision() {
+    use interaction_events::Body;
+    let (mut c,p)=active();c.ordered_install(3).unwrap();
+    c.ordered_pop(3).unwrap();c.ordered_pop(3).unwrap();
+    K.with(|k| {let mut k=k.borrow_mut();k.state.subject_stripes=99;k.ready=true;});
+    let mut fds=alloc::vec::Vec::new();c.interaction_poll(&mut fds);
+    for f in &mut fds {f.revents=T_POLLIN;}
+    c.interaction_ready(&fds);
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Terminal{foreground:1,subject:99,..}));
+    assert!(!check(&mut c,p));
+    c.surface.gen+=1;c.interaction_sweep();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Retired{binding:10,..}));
+}
+
+#[test]
+fn ordered_initial_seat_zero_publishes_without_poison() {
+    use interaction_events::Body;
+    let (mut c,r)=setup(); c.gpu.seat=0; c.ordered_install(3).unwrap();
+    c.ordered_pop(3).unwrap();
+    let mut conn=Conn{conn_id:3,fids:[Some(Fid{interaction:None})]};
+    conn.ordered_control(&mut c,0,&r.encode()).unwrap();
+    c.ordered_pop(3).unwrap();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Decision{result:Ok(Reply{seat:0,..}),..}));
+    let p=Request{op:Op::Publish,request:2,binder_pid:0,foreground:1,subject:30,controller:1,context:1,epoch:1,..r};
+    conn.ordered_control(&mut c,0,&p.encode()).unwrap();c.ordered_pop(3).unwrap();
+    assert!(matches!(c.ordered_pop(3).unwrap().unwrap().body,Body::Decision{result:Ok(Reply{seat:0,..}),..}));
+    assert!(check(&mut c,p));
 }

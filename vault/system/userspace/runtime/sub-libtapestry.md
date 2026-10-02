@@ -4,6 +4,7 @@ type: sub
 title: "libtapestry — the client weave and the shared event ring"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libtapestry/src/ordered.rs
   - usr/lib/libtapestry/src/seat.rs
   - usr/lib/libtapestry/src/lib.rs
   - usr/lib/libtapestry/src/ring.rs
@@ -19,6 +20,15 @@ design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
 updated: 2026-10-02
 ---
+## Ordered interaction channel
+
+`ordered::Channel` selects one unused ctl fid on the existing declared session
+connection. It has independent read/write SQEs and nonoverlapping 80-byte buffers
+in one registered allocation. It keeps a decision private until the exact write
+CQE succeeds, regardless of completion order. Receiver faults are terminal.
+Ring retirement precedes buffer and fid release; no borrowed UI ring is used.
+A parked read does not prevent writes. HSC cancellation uses its separate lane.
+
 ## Independent seat channel (October 2)
 
 `seat` separates normal-connection HSR setup from HSC cancellation. The latter

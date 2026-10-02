@@ -4,6 +4,7 @@ type: sub
 title: "libhalcyon -- the Daylight tokens, the save format, and the restore planner"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libhalcyon/src/interaction_events.rs
   - usr/lib/libhalcyon/src/seat_control.rs
   - usr/lib/libhalcyon/src/interaction_control.rs
   - usr/lib/libhalcyon/src/lib.rs
@@ -36,6 +37,14 @@ design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-I
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Ordered ownership codec and journal
+
+`interaction_events` defines the strict 80-byte HIO1 notification/decision record,
+a 64-record journal and contiguous-sequence receiver. Sequence gaps, malformed
+records or journal overflow poison the history. Initial normal seat generation
+zero is valid; it is not absence of seat membership. Inline journal storage is
+bounded to 8 KiB. See HALCYON-INTERACTION-ORDERED for the field table and limits.
+
 ## Seat control core (October 2)
 
 `seat_control` supplies strict HSR1/HSC1 codecs and an allocation-free bounded

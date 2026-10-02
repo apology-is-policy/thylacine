@@ -172,6 +172,117 @@ fn broker_native(ring: &EventRing, q: Request, other_leaf: u32) -> Result {
     libthyla_rs::println!("ADMISSION async broker PASS");
     Ok(())
 }
+fn ordered_next(
+    channel: &mut tapestry::ordered::Channel,
+) -> Result<libhalcyon::interaction_events::Record> {
+    let deadline = libthyla_rs::time::monotonic_ns() + 5_000_000_000;
+    loop {
+        channel.pump().map_err(|e| {
+            libthyla_rs::println!("ORDERED pump error: {:?}", e);
+            "ordered pump"
+        })?;
+        if let Some(record) = channel.take() {
+            return Ok(record);
+        }
+        require(
+            libthyla_rs::time::monotonic_ns() < deadline,
+            "ordered record deadline",
+        )?;
+        let mut p = libthyla_rs::TPollFd {
+            fd: channel.poll_fd(),
+            events: libthyla_rs::T_POLLIN,
+            revents: 0,
+        };
+        unsafe {
+            libthyla_rs::t_poll(&mut p, 1, 20);
+        }
+    }
+}
+fn ordered_native(ring: &EventRing, p: Request, other: u32) -> Result {
+    use libhalcyon::interaction_events::Body;
+    let file = tapestry::ordered::Channel::preopen(ring).map_err(|_| "ordered open")?;
+    let mut channel = tapestry::ordered::Channel::from_file(file).map_err(|_| "ordered ring")?;
+    require(
+        matches!(ordered_next(&mut channel)?.body, Body::Ready(_)),
+        "ordered ready",
+    )?;
+    require(
+        matches!(ordered_next(&mut channel)?.body,Body::Terminal{binding,subject,..} if binding==p.binding && subject==p.subject),
+        "ordered initial binding",
+    )?;
+    let pubq = Request {
+        request: 101,
+        controller: 4,
+        ..p
+    };
+    channel.start(pubq).map_err(|_| "ordered publish")?;
+    require(
+        matches!(ordered_next(&mut channel)?.body,Body::Terminal{subject,..} if subject==p.subject),
+        "ordered ack notification",
+    )?;
+    require(
+        matches!(
+            ordered_next(&mut channel)?.body,
+            Body::Decision {
+                request: 101,
+                result: Ok(_),
+                ..
+            }
+        ),
+        "ordered publication decision",
+    )?;
+    // Leave a read parked, then prove it does not prevent the same fid's WRITE.
+    channel.pump().map_err(|_| "ordered park")?;
+    focus(ring, other)?;
+    focus(ring, p.leaf)?;
+    channel
+        .start(Request {
+            op: Op::Check,
+            request: 102,
+            ..pubq
+        })
+        .map_err(|_| "ordered check")?;
+    let loss = match ordered_next(&mut channel)?.body {
+        Body::FocusLost { binding, epoch, .. } if binding == p.binding => epoch,
+        _ => return Err("ordered focus loss before decision"),
+    };
+    require(
+        matches!(ordered_next(&mut channel)?.body,Body::Decision{request:102,result:Ok(r),..} if r.focus>loss),
+        "ordered returned-focus decision",
+    )?;
+    let unbind = Request {
+        op: Op::Unbind,
+        request: 103,
+        leaf: p.leaf,
+        binder_pid: 0,
+        binding: p.binding,
+        foreground: 0,
+        subject: 0,
+        controller: 0,
+        context: 0,
+        epoch: 0,
+    };
+    channel.start(unbind).map_err(|_| "ordered unbind")?;
+    require(
+        matches!(ordered_next(&mut channel)?.body,Body::Retired{binding,..} if binding==p.binding),
+        "ordered retirement",
+    )?;
+    require(
+        matches!(
+            ordered_next(&mut channel)?.body,
+            Body::Decision {
+                request: 103,
+                result: Ok(_),
+                ..
+            }
+        ),
+        "ordered unbind decision",
+    )?;
+    channel.pump().map_err(|_| "ordered drop park")?;
+    drop(channel);
+    libthyla_rs::println!("ADMISSION ordered ownership stream PASS");
+    Ok(())
+}
 fn native() -> Result {
     // This probe is also its synthetic terminal's foreground process. Queue
     // carrier loss so closing our own master cannot terminate the test before
@@ -311,13 +422,7 @@ fn native() -> Result {
         },
         other_leaf,
     )?;
-    surf.interaction_control(Request {
-        op: Op::Unbind,
-        request: 9,
-        binder_pid: 0,
-        ..r
-    })
-    .map_err(|_| "unbind")?;
+    ordered_native(&ring, p3, other_leaf)?;
     require(binding.state().is_err(), "observer unbind not retired")?;
     require(
         surf.interaction_control(Request {

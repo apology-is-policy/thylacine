@@ -68,6 +68,7 @@ use libthyla_rs::{
 };
 
 pub mod admission;
+pub mod ordered;
 pub mod seat;
 mod ring;
 

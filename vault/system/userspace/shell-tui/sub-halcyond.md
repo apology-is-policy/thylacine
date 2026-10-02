@@ -52,6 +52,17 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Ordered ownership consumption
+
+The session service owns an HIO1 channel alongside independent HSC cancellation.
+HSC pumps first. Ordered terminal/focus/retirement records resolve leaf plus
+binding to an exact local controller route; stale bindings cannot retire a
+replacement. Reset retires payload/controller state without adding seat membership.
+Stream faults take the existing posted-service fatal exit. Public application
+registration and decision dispatch remain disabled pending reply retirement,
+control deadlines and the complete resource ledger. See the interaction status
+for native evidence and the remaining modal/clipboard work.
+
 ## Shared interaction execution owner (October 2)
 
 The session's HSC Link now holds `Interaction`: the existing controller table

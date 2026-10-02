@@ -211,6 +211,46 @@ impl Interaction {
                 .map(Completion::Clipboard),
         }
     }
+    /// Called only with records from the authenticated ordered compositor stream.
+    pub fn observe(
+        &mut self,
+        body: libhalcyon::interaction_events::Body,
+    ) -> Result<Option<Completed>, Failure> {
+        use libhalcyon::interaction_events::Body;
+        let (leaf, binding) = match body {
+            Body::FocusLost { leaf, binding, .. }
+            | Body::Terminal { leaf, binding, .. }
+            | Body::Retired { leaf, binding } => (leaf, binding),
+            Body::Reset => {
+                let normal = self.normal;
+                let done = self.seat(None);
+                self.seat(normal);
+                return Ok(done);
+            }
+            _ => return Err(Failure::Invalid),
+        };
+        let route = self
+            .controllers
+            .route_for_binding(leaf, binding)
+            .or_else(|| {
+                self.flight
+                    .filter(|f| f.request.leaf == leaf && f.request.binding == binding)
+                    .and_then(|f| f.route)
+            });
+        let Some(route) = route else {
+            return Ok(None);
+        };
+        Ok(match body {
+            Body::FocusLost { epoch, .. } => self.focus_lost(route, epoch),
+            Body::Terminal {
+                foreground,
+                subject,
+                ..
+            } => self.terminal_state(route, foreground, subject),
+            Body::Retired { .. } => self.route_gone(route),
+            _ => unreachable!(),
+        })
+    }
     pub fn report(
         &mut self,
         peer: Peer,
@@ -695,6 +735,64 @@ mod tests {
             Some(Completion::Control { result: Err(_), .. })
         ));
         assert!(i.begin(peer(), s, target(), 0, 0).is_err());
+    }
+    #[test]
+    fn stream_events_match_binding_before_resolving_local_route() {
+        use libhalcyon::interaction_events::Body;
+        let mut i = owner();
+        let s = register(&mut i);
+        let q = i.begin(peer(), s, target(), 3, 0).unwrap();
+        assert_eq!(
+            i.observe(Body::Retired {
+                leaf: terminal().route.leaf,
+                binding: 99
+            }),
+            Ok(None)
+        );
+        assert_eq!(
+            i.observe(Body::FocusLost {
+                leaf: terminal().route.leaf,
+                binding: 99,
+                epoch: 11
+            }),
+            Ok(None)
+        );
+        assert!(i
+            .observe(Body::FocusLost {
+                leaf: terminal().route.leaf,
+                binding: 4,
+                epoch: 11
+            })
+            .unwrap()
+            .is_some());
+        assert_eq!(finish(&mut i, q, 10), None);
+        let q = i.begin(peer(), s, target(), 3, 0).unwrap();
+        assert!(i
+            .observe(Body::Terminal {
+                leaf: terminal().route.leaf,
+                binding: 4,
+                foreground: 5,
+                subject: 99
+            })
+            .unwrap()
+            .is_some());
+        assert_eq!(finish(&mut i, q, 10), None);
+        assert!(i.begin(peer(), s, target(), 0, 0).is_err());
+    }
+    #[test]
+    fn stream_reset_retires_without_granting_seat_membership() {
+        use libhalcyon::interaction_events::Body;
+        let mut i = owner();
+        let s = register(&mut i);
+        let q = i.begin(peer(), s, target(), 1, 0).unwrap();
+        assert!(i.observe(Body::Reset).unwrap().is_some());
+        assert_eq!(finish(&mut i, q, 10), None);
+        assert!(i.begin(peer(), s, target(), 0, 0).is_err());
+        let s2 = register(&mut i);
+        assert!(s2.controller > s.controller);
+        i.seat(None);
+        i.observe(Body::Reset).unwrap();
+        assert_eq!(i.publish(terminal(), peer()), Err(Failure::Denied));
     }
     #[test]
     fn explicit_unbind_cancels_the_real_broker_and_retains_slot() {

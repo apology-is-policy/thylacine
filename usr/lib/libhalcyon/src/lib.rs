@@ -29,3 +29,5 @@ pub mod skeleton;
 pub mod tag;
 pub mod theme;
 pub mod toml;
+
+pub mod interaction_events;

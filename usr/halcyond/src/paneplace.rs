@@ -752,7 +752,7 @@ impl PanePlaceServer {
     }
     pub fn post_on(user: &str, ring: &tapestry::EventRing) -> Result<Self, PostError> {
         let admission =
-            tapestry::admission::Channel::preopen(ring).map_err(|_| PostError::Unavailable)?;
+            tapestry::ordered::Channel::preopen(ring).map_err(|_| PostError::Unavailable)?;
         let (reservation, snapshot) =
             tapestry::seat::reserve(ring).map_err(|_| PostError::Unavailable)?;
         Self::start(
@@ -928,14 +928,11 @@ fn serve_owner(
                 return Err(Error::TimedOut);
             }
             seat.pump()?;
-            let mut p = TPollFd {
-                fd: seat.fd(),
-                events: T_POLLIN,
-                revents: 0,
-            };
-            unsafe {
-                libthyla_rs::t_poll(&mut p, 1, 10);
-            }
+            let mut p = [
+                TPollFd { fd: seat.fd(), events: T_POLLIN, revents: 0 },
+                TPollFd { fd: seat.admission_fd(), events: T_POLLIN, revents: 0 },
+            ];
+            unsafe { libthyla_rs::t_poll(p.as_mut_ptr(), p.len(), 10); }
         }
     }
     let mut conns = Vec::new();

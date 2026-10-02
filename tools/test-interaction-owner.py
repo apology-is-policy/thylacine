@@ -10,6 +10,7 @@ import tempfile
 
 root = Path(__file__).resolve().parent.parent
 modules = {
+    'interaction_events': 'usr/lib/libhalcyon/src/interaction_events.rs',
     'interaction_wire': 'usr/lib/libhalcyon/src/interaction_wire.rs',
     'interaction_body': 'usr/lib/libhalcyon/src/interaction_body.rs',
     'interaction_control': 'usr/lib/libhalcyon/src/interaction_control.rs',

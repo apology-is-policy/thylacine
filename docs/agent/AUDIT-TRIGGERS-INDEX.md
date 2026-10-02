@@ -208,3 +208,5 @@
 - HI-1 terminal controller lifecycle: `usr/halcyond/src/controllers.rs`; provisional publication, peer/scope/route identity, monotone reports, terminal-subject retirement and broker cancellation.
 
 - HI-1 shared interaction owner: `usr/halcyond/src/interaction.rs`, broker/controllers, session_seat/paneplace and native probe imports; shared sequence, retained transport slot, route incarnation and unified cancellation.
+
+- HI-1 ordered ownership delivery: interaction_events/ordered, compositor interaction and ctl, session_seat and native admission; journal ordering, initial zero seat, duplex lifetime and fail-closed overflow.

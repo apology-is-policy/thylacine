@@ -259,6 +259,13 @@ impl Controllers {
             }
         }
     }
+    pub(crate) fn route_for_binding(&self, leaf: u32, binding: u64) -> Option<RouteKey> {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|e| e.terminal.route.leaf == leaf && e.terminal.binding == binding)
+            .map(|e| e.terminal.route)
+    }
     fn remove(&mut self, slot: usize, retire: &mut impl FnMut(Owner)) {
         if let Some(e) = self.entries[slot].take() {
             retire(e.authority.owner);

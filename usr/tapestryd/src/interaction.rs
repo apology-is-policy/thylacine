@@ -51,8 +51,18 @@ impl Comp {
         Some((n, surface.gen))
     }
     pub fn interaction_suspend(&mut self) {
+        let changed = self
+            .interactions
+            .iter()
+            .flatten()
+            .any(|b| b.context.is_some());
         for b in self.interactions.iter_mut().flatten() {
             b.context = None;
+        }
+        if changed {
+            for f in self.ordered.iter_mut().flatten() {
+                let _ = f.journal.push(Body::Reset);
+            }
         }
     }
     pub fn interaction_sweep(&mut self) {
@@ -61,7 +71,7 @@ impl Comp {
                 self.interaction_surface(b.conn, b.leaf) != Some((b.surface, b.generation))
             });
             if stale {
-                self.interactions[i] = None;
+                self.interaction_retire(i);
             }
         }
     }
@@ -86,7 +96,7 @@ impl Comp {
                 continue;
             }
             if p.revents & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0 {
-                self.interactions[i] = None;
+                self.interaction_retire(i);
                 continue;
             }
             match b.watch.read() {
@@ -99,10 +109,16 @@ impl Comp {
                     {
                         b.context = None;
                     }
+                    let changed = b.state.foreground_epoch != s.foreground_epoch
+                        || b.state.subject_stripes != s.subject_stripes
+                        || b.state.flags != s.flags;
                     b.state = s;
+                    if changed {
+                        self.interaction_notify_terminal(i);
+                    }
                 }
                 Err(Error::WouldBlock) => {}
-                _ => self.interactions[i] = None,
+                _ => self.interaction_retire(i),
             }
         }
     }
@@ -156,6 +172,7 @@ impl Comp {
                 context: None,
                 last_controller: 0,
             });
+            self.interaction_notify_terminal(slot);
             return Ok(Reply {
                 op: r.op,
                 request: r.request,
@@ -170,7 +187,7 @@ impl Comp {
             return Err(p9::E_PERM);
         }
         if r.op == Op::Unbind {
-            self.interactions[i] = None;
+            self.interaction_retire(i);
             return Ok(Reply {
                 op: r.op,
                 request: r.request,
@@ -180,10 +197,20 @@ impl Comp {
             });
         }
         let s = state(b.id)?;
-        if s.foreground_epoch != b.state.foreground_epoch || s.flags & 2 == 0 {
+        let changed = b.state.foreground_epoch != s.foreground_epoch
+            || b.state.subject_stripes != s.subject_stripes
+            || b.state.flags != s.flags;
+        if s.foreground_epoch != b.state.foreground_epoch
+            || s.flags & 2 == 0
+            || b.context.is_some_and(|c| c.subject != s.subject_stripes)
+        {
             b.context = None;
         }
         b.state = s;
+        if changed {
+            self.interaction_notify_terminal(i);
+        }
+        let b = self.interactions[i].as_mut().unwrap();
         if r.op == Op::Publish {
             if r.controller < b.last_controller
                 || (r.controller == b.last_controller
@@ -197,6 +224,9 @@ impl Comp {
             b.id.acknowledge(r.foreground, r.subject).map_err(errno)?;
             b.context = Some(r);
             b.last_controller = r.controller;
+            // ACK changes nomination even when the foreground epoch is unchanged.
+            b.state = state(b.id)?;
+            self.interaction_notify_terminal(i);
         } else {
             let c = b.context.ok_or(p9::E_NOENT)?;
             if (c.controller, c.context, c.epoch, c.foreground, c.subject)
@@ -246,5 +276,156 @@ impl Conn {
         let result = comp.interaction_request(self.conn_id, r).map(Reply::encode);
         self.fids[i].as_mut().unwrap().interaction = Some(Transaction { request: r, result });
         result.map(|_| ())
+    }
+}
+
+use libhalcyon::interaction_events::{Body, Journal, Record};
+pub(super) struct Feed {
+    conn: u64,
+    journal: Journal,
+}
+impl Comp {
+    pub(super) fn ordered_install(&mut self, conn: u64) -> Result<(), u32> {
+        if !self.session_declared(conn) || self.ordered.iter().flatten().any(|f| f.conn == conn) {
+            return Err(p9::E_PERM);
+        }
+        let slot = self
+            .ordered
+            .iter()
+            .position(Option::is_none)
+            .ok_or(p9::E_NOMEM)?;
+        let next = self.next_ordered.checked_add(1).ok_or(p9::E_NOMEM)?;
+        let mut journal = Journal::new(self.next_ordered).ok_or(p9::E_INVAL)?;
+        for b in self
+            .interactions
+            .iter()
+            .flatten()
+            .filter(|b| b.conn == conn)
+        {
+            journal.push(terminal_event(b)).map_err(|_| p9::E_NOMEM)?;
+        }
+        self.next_ordered = next;
+        self.ordered[slot] = Some(Feed { conn, journal });
+        Ok(())
+    }
+    fn ordered_emit(&mut self, conn: u64, event: Body) -> Result<(), u32> {
+        let Some(f) = self.ordered.iter_mut().flatten().find(|f| f.conn == conn) else {
+            return Ok(());
+        };
+        if f.journal.push(event).is_err() {
+            for b in self
+                .interactions
+                .iter_mut()
+                .flatten()
+                .filter(|b| b.conn == conn)
+            {
+                b.context = None;
+            }
+            return Err(super::E_IO);
+        }
+        Ok(())
+    }
+    pub(super) fn ordered_remove(&mut self, conn: u64) {
+        for f in &mut self.ordered {
+            if f.as_ref().is_some_and(|f| f.conn == conn) {
+                *f = None;
+            }
+        }
+        for b in self
+            .interactions
+            .iter_mut()
+            .flatten()
+            .filter(|b| b.conn == conn)
+        {
+            b.context = None;
+        }
+    }
+    pub(super) fn ordered_pop(&mut self, conn: u64) -> Result<Option<Record>, u32> {
+        self.ordered
+            .iter_mut()
+            .flatten()
+            .find(|f| f.conn == conn)
+            .ok_or(p9::E_NOENT)?
+            .journal
+            .pop()
+            .map_err(|_| super::E_IO)
+    }
+    pub(super) fn interaction_focus_lost(&mut self, surface: usize) {
+        for i in 0..self.interactions.len() {
+            if let Some(b) = &self.interactions[i] {
+                if b.surface == surface {
+                    let (conn, event) = (
+                        b.conn,
+                        Body::FocusLost {
+                            leaf: b.leaf,
+                            binding: b.id.locator(),
+                            epoch: self.layout.epoch,
+                        },
+                    );
+                    let _ = self.ordered_emit(conn, event);
+                }
+            }
+        }
+    }
+    fn interaction_retire(&mut self, i: usize) {
+        if let Some(b) = self.interactions[i].take() {
+            let _ = self.ordered_emit(
+                b.conn,
+                Body::Retired {
+                    leaf: b.leaf,
+                    binding: b.id.locator(),
+                },
+            );
+        }
+    }
+    fn interaction_notify_terminal(&mut self, i: usize) {
+        if let Some(b) = &self.interactions[i] {
+            let (conn, event) = (b.conn, terminal_event(b));
+            let _ = self.ordered_emit(conn, event);
+        }
+    }
+}
+fn terminal_event(b: &Binding) -> Body {
+    Body::Terminal {
+        leaf: b.leaf,
+        binding: b.id.locator(),
+        foreground: b.state.foreground_epoch,
+        subject: if b.state.flags & 2 != 0 {
+            b.state.subject_stripes
+        } else {
+            0
+        },
+    }
+}
+impl Conn {
+    pub(super) fn ordered_control(
+        &mut self,
+        comp: &mut Comp,
+        i: usize,
+        data: &[u8],
+    ) -> Result<(), u32> {
+        if !comp
+            .ordered
+            .iter()
+            .flatten()
+            .any(|f| f.conn == self.conn_id && !f.journal.failed())
+        {
+            return Err(super::E_IO);
+        }
+        let r = Request::decode(data).ok_or(p9::E_INVAL)?;
+        // The existing cache performs the authority operation at most once.
+        let _ = self.interaction_control(comp, i, data);
+        let transaction = self.fids[i]
+            .as_ref()
+            .unwrap()
+            .interaction
+            .ok_or(p9::E_INVAL)?;
+        if transaction.request != r {
+            return Err(p9::E_INVAL);
+        }
+        let result = transaction
+            .result
+            .and_then(|b| Reply::decode(&b, r).ok_or(super::E_IO));
+        comp.ordered_emit(self.conn_id, Body::decision(r, result))
     }
 }

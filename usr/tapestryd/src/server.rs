@@ -1737,6 +1737,8 @@ pub struct Comp {
     seat_coordinator: Option<crate::seat_coordinator::Owner>,
     interaction_seat: Option<u64>,
     interactions: [Option<interaction::Binding>; pane::MAX_PANES],
+    ordered: [Option<interaction::Feed>; MAX_CONNS],
+    next_ordered: u64,
     screen: Option<Screen>,
     scanout: Scanout,
     /// Warp-4: the resource id the DEVICE currently scans out (0 = none/
@@ -2564,6 +2566,8 @@ impl Comp {
             seat_coordinator: None,
             interaction_seat: None,
             interactions: core::array::from_fn(|_| None),
+            ordered: core::array::from_fn(|_| None),
+            next_ordered: 1,
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
@@ -7844,6 +7848,7 @@ impl Comp {
         }
         let prev = self.last_focus;
         self.last_focus = cur; // set first: a wedge-retire below re-enters
+        if let Some(n) = prev { self.interaction_focus_lost(n); }
         let t = self.tick;
         let focus_ev = |value: u32| Tevent {
             kind: TEV_FOCUS,
@@ -8785,6 +8790,7 @@ impl Comp {
     fn retire_conn(&mut self, conn_id: u64) {
         // Before any surface/GPU teardown that might park during SAK.
         self.retire_seat_declaration(conn_id);
+        self.ordered_remove(conn_id);
         let seat = self.session_declared(conn_id);
         self.teardown_conn = Some(conn_id);
         for n in 0..MAX_SURFACES {
@@ -15504,6 +15510,8 @@ pub struct Conn {
     out_buf: Vec<u8>,
     defer: bool,
     pending_reads: Vec<PendingRead>,
+    ordered_fid: Option<u32>,
+    ordered_read: Option<(u32, u16)>,
     pending_fences: Vec<PendingFence>,
     pending_ring_fences: Vec<PendingRingFence>,
     /// Per-fid generation pins for the regenerating text files (ctl,
@@ -15608,6 +15616,8 @@ impl Conn {
             out_buf: Vec::new(),
             defer: false,
             pending_reads: Vec::new(),
+            ordered_fid: None,
+            ordered_read: None,
             pending_fences: Vec::new(),
             pending_ring_fences: Vec::new(),
             text_snaps: Vec::new(),
@@ -15664,6 +15674,10 @@ impl Conn {
     }
 
     fn fid_clunk(&mut self, comp: &mut Comp, fid: u32) {
+        if self.ordered_fid == Some(fid) {
+            self.ordered_fid = None; self.ordered_read = None;
+            comp.ordered_remove(self.conn_id);
+        }
         if self.seat_fid == Some(fid) { self.seat_fid = None; }
         let mut gone: Option<Fid> = None;
         if let Some(i) = self.fid_find(fid) {
@@ -15712,6 +15726,8 @@ impl Conn {
         // own witness -- a spent latch here silenced the second fill.
         self.fid_full_said = false;
         self.pending_reads.clear();
+        self.ordered_fid = None;
+        self.ordered_read = None;
         self.pending_fences.clear();
         self.pending_ring_fences.clear();
         self.text_snaps.clear();
@@ -15724,6 +15740,8 @@ impl Conn {
         comp.retire_conn(self.conn_id);
         comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
+        self.ordered_fid = None;
+        self.ordered_read = None;
         self.pending_fences.clear();
         self.pending_ring_fences.clear();
         self.text_snaps.clear();
@@ -16347,6 +16365,16 @@ impl Conn {
         let cap = ((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4)).min(a.count as usize);
 
         if f.path == P_CTL {
+            if self.ordered_fid == Some(a.fid) {
+                if a.offset != 0 || cap < libhalcyon::interaction_events::RECORD_BYTES || self.ordered_read.is_some() {
+                    return self.err(tag,p9::E_INVAL);
+                }
+                return match comp.ordered_pop(self.conn_id) {
+                    Ok(Some(record)) => p9::build_rread(&mut self.out_buf,tag,&record.encode()),
+                    Ok(None) => {self.ordered_read=Some((a.fid,tag)); self.defer=true; Ok(0)},
+                    Err(e) => self.err(tag,e),
+                };
+            }
             if self.seat_fid == Some(a.fid) {
                 let (_, result) = self.seat_transaction.ok_or(())?;
                 let reply = match result { Ok(r) => r.encode(), Err(e) => return self.err(tag,e) };
@@ -17587,6 +17615,24 @@ impl Conn {
         }
 
         if f.path == P_CTL {
+            if a.data.starts_with(b"HIO1") {
+                if a.offset != 0 || a.data != libhalcyon::interaction_events::SELECT || f.interaction.is_some()
+                    || self.seat_fid == Some(a.fid) || self.ordered_fid.is_some()
+                    || !self.peer_is_declared_session(comp) {
+                    return self.err(tag,p9::E_PERM);
+                }
+                return match comp.ordered_install(self.conn_id) {
+                    Ok(()) => {self.ordered_fid=Some(a.fid); p9::build_rwrite(&mut self.out_buf,tag,a.count)},
+                    Err(e) => self.err(tag,e),
+                };
+            }
+            if self.ordered_fid == Some(a.fid) {
+                if a.offset != 0 {return self.err(tag,p9::E_INVAL);}
+                return match self.ordered_control(comp,i,a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf,tag,a.count),
+                    Err(e) => self.err(tag,e),
+                };
+            }
             if a.data.starts_with(b"HSR1") {
                 if a.offset != 0 || f.interaction.is_some() {return self.err(tag,p9::E_INVAL);}
                 return match self.seat_reservation(comp,a.fid,a.data) {
@@ -18396,6 +18442,15 @@ impl Conn {
             layer_stride,
         )
         .map(|_| ())
+    }
+
+    /// Revalidate the declared session against current kernel peer metadata.
+    fn peer_is_declared_session(&self, comp:&Comp)->bool {
+        let mut info=TSrvPeerInfo::default();
+        comp.session_declared(self.conn_id) && self.peer_stripes!=0
+            && unsafe {t_srv_peer(self.handle,&mut info)}==0
+            && info.alive==1 && info.stripes==self.peer_stripes
+            && info.principal_id==self.peer_principal
     }
 
     /// cfg-3 (AURORA-CONFIG.md section 3.3): does this conn's LIVE peer
@@ -20280,6 +20335,7 @@ impl Conn {
         // Cancel site 4 (Tflush): the held reply under oldtag dies; per 9P
         // the client reuses oldtag only after this Rflush.
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
+        if self.ordered_read.is_some_and(|(_,tag)| tag == a.oldtag) {self.ordered_read = None;}
         self.pending_fences.retain(|pf| pf.tag != a.oldtag);
         self.pending_ring_fences.retain(|pf| pf.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
@@ -20346,6 +20402,19 @@ impl Conn {
     /// Deliver held event reads whose surfaces have events (or died: EOF).
     /// False = the conn's transport failed (caller closes it).
     pub fn poll_events(&mut self, comp: &mut Comp) -> bool {
+        if let Some((_,tag)) = self.ordered_read {
+            match comp.ordered_pop(self.conn_id) {
+                Ok(Some(record)) => {
+                    self.ordered_read=None;
+                    if !self.deliver_read(tag,&record.encode()) {return false;}
+                }
+                Err(e) => {
+                    self.ordered_read=None;
+                    if !self.deliver_error(tag,e) {return false;}
+                }
+                Ok(None) => {}
+            }
+        }
         let mut i = 0;
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
@@ -20449,6 +20518,12 @@ impl Conn {
         true
     }
 
+    fn deliver_error(&mut self, tag:u16, code:u32)->bool {
+        self.out_buf.clear(); self.out_buf.resize(SRV_MSIZE_USIZE,0);
+        match p9::build_rlerror(&mut self.out_buf,tag,code) {
+            Ok(len)=>self.send_all(len), Err(_)=>false,
+        }
+    }
     fn deliver_read(&mut self, tag: u16, data: &[u8]) -> bool {
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);

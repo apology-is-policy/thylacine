@@ -14,6 +14,18 @@ design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
 updated: 2026-10-02
 ---
+## Ordered ownership journal
+
+A fresh live kernel peer matching the declared session may select HIO1 on one
+unused ctl fid. The normal compositor owner orders terminal snapshots, focus
+loss, retirement, reset and HIA decisions in one bounded 64-record journal per
+connection. At most one read parks on that fid. Clunk/reset/disconnect removes
+it; flush cancels the pending tag. Overflow poisons all unread history and clears
+that connection's published contexts. Exact HIA retries use the existing cached
+decision and never repeat kernel ACK/CHECK. Kernel generation zero is the initial
+normal seat, and valid successful receipts preserve it. Coalesced TEV notices
+remain a drawing mechanism. This adds no kernel authority or clipboard endpoint.
+
 ## Clipboard cancellation progress boundary
 
 A guarded independent service thread owns `seat_coordinator` and the reserved
