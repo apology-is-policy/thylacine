@@ -7,7 +7,7 @@
 //! No kernel peer sampling or application wire dispatch is performed here.
 use crate::{
     clipboard::Owner,
-    clipbroker::{Broker, Completed, Target},
+    clipbroker::{Broker, Completed, Target, ADMISSION_MS},
     controllers::{Controllers, ModeReport, Peer, RouteKey, Terminal},
 };
 use libhalcyon::{
@@ -28,6 +28,8 @@ struct Flight {
     route: Option<RouteKey>,
     kind: Kind,
     usable: bool,
+    started: u64,
+    reported: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub struct Interaction {
     broker: Broker,
     normal: Option<u64>,
     flight: Option<Flight>,
+    closed: bool,
 }
 const _: () = assert!(core::mem::size_of::<Interaction>() <= 18 * 1024);
 
@@ -57,23 +60,32 @@ impl Interaction {
             broker: Broker::new(session)?,
             normal: None,
             flight: None,
+            closed: false,
         })
     }
     fn idle(&self) -> Result<(), Failure> {
         if self.flight.is_some() {
             Err(Failure::Busy)
-        } else if self.normal.is_none() {
+        } else if self.closed || self.normal.is_none() {
             Err(Failure::Denied)
         } else {
             Ok(())
         }
     }
-    fn start(&mut self, request: Request, route: Option<RouteKey>, kind: Kind) -> Request {
+    fn start(
+        &mut self,
+        request: Request,
+        route: Option<RouteKey>,
+        kind: Kind,
+        now: u64,
+    ) -> Request {
         self.flight = Some(Flight {
             request,
             route,
             kind,
             usable: true,
+            started: now,
+            reported: false,
         });
         request
     }
@@ -87,8 +99,10 @@ impl Interaction {
         route: RouteKey,
         binder_pid: u32,
         binding: u64,
+        now: u64,
     ) -> Result<Request, Failure> {
         self.idle()?;
+        now.checked_add(ADMISSION_MS).ok_or(Failure::Invalid)?;
         if route.incarnation == 0 || !matches!(op, Op::Bind | Op::Unbind) {
             return Err(Failure::Invalid);
         }
@@ -112,13 +126,19 @@ impl Interaction {
             // restore transfers for a terminal the host has already retired.
             self.route_gone(route);
         }
-        Ok(self.start(r, Some(route), Kind::Control))
+        Ok(self.start(r, Some(route), Kind::Control, now))
     }
-    pub fn publish(&mut self, terminal: Terminal, peer: Peer) -> Result<Request, Failure> {
+    pub fn publish(
+        &mut self,
+        terminal: Terminal,
+        peer: Peer,
+        now: u64,
+    ) -> Result<Request, Failure> {
         self.idle()?;
+        now.checked_add(ADMISSION_MS).ok_or(Failure::Invalid)?;
         let id = self.broker.control_id()?;
         let r = self.controllers.prepare(terminal, peer, id)?;
-        Ok(self.start(r, Some(terminal.route), Kind::Publish))
+        Ok(self.start(r, Some(terminal.route), Kind::Publish, now))
     }
     pub fn begin(
         &mut self,
@@ -129,9 +149,10 @@ impl Interaction {
         now: u64,
     ) -> Result<Request, Failure> {
         self.idle()?;
+        now.checked_add(ADMISSION_MS).ok_or(Failure::Invalid)?;
         let a = self.controllers.authority(peer, scope)?;
         let r = self.broker.begin(a, target, length, now)?;
-        Ok(self.start(r, None, Kind::Clipboard))
+        Ok(self.start(r, None, Kind::Clipboard, now))
     }
     pub fn get(
         &mut self,
@@ -141,9 +162,10 @@ impl Interaction {
         now: u64,
     ) -> Result<Request, Failure> {
         self.idle()?;
+        now.checked_add(ADMISSION_MS).ok_or(Failure::Invalid)?;
         let a = self.controllers.authority(peer, scope)?;
         let r = self.broker.get(a, target, now)?;
-        Ok(self.start(r, None, Kind::Clipboard))
+        Ok(self.start(r, None, Kind::Clipboard, now))
     }
     pub fn commit(
         &mut self,
@@ -155,9 +177,10 @@ impl Interaction {
         now: u64,
     ) -> Result<Request, Failure> {
         self.idle()?;
+        now.checked_add(ADMISSION_MS).ok_or(Failure::Invalid)?;
         let a = self.controllers.authority(peer, scope)?;
         let r = self.broker.commit(a, target, transfer, expected, now)?;
-        Ok(self.start(r, None, Kind::Clipboard))
+        Ok(self.start(r, None, Kind::Clipboard, now))
     }
     /// Apply all observed invalidations before calling. `fresh` is required for
     /// publication; it is freshly sampled kernel metadata, not a cached Hello.
@@ -173,6 +196,28 @@ impl Interaction {
             return None;
         }
         self.flight = None;
+        if f.reported {
+            return None;
+        }
+        let result = if Self::overdue(f, now) {
+            Err(Failure::Timeout)
+        } else {
+            result
+        };
+        self.deliver(f, fresh, result, now)
+    }
+    fn overdue(f: Flight, now: u64) -> bool {
+        now.checked_sub(f.started)
+            .is_none_or(|elapsed| elapsed >= ADMISSION_MS)
+    }
+    fn deliver(
+        &mut self,
+        f: Flight,
+        fresh: Option<Peer>,
+        result: Result<Reply, Failure>,
+        now: u64,
+    ) -> Option<Completion> {
+        let request = f.request;
         let result = if f.usable { result } else { Err(Failure::Gone) };
         match f.kind {
             Kind::Control => {
@@ -302,11 +347,39 @@ impl Interaction {
     pub fn cancel_pending(&mut self, target: Target) -> Option<Completed> {
         self.broker.cancel_pending(target)
     }
-    pub fn expire(&mut self, now: u64) -> Option<Completed> {
-        self.broker.expire(now)
+    pub fn expire(&mut self, now: u64) -> Option<Completion> {
+        let done = if let Some(f) = self
+            .flight
+            .filter(|f| !f.reported && Self::overdue(*f, now))
+        {
+            self.flight.as_mut().unwrap().reported = true;
+            self.deliver(f, None, Err(Failure::Timeout), now)
+        } else {
+            None
+        };
+        let expired = self.broker.expire(now).map(Completion::Clipboard);
+        done.or(expired)
     }
     pub fn deadline(&self) -> Option<u64> {
-        self.broker.deadline()
+        let control = self
+            .flight
+            .filter(|f| !f.reported)
+            .map(|f| f.started + ADMISSION_MS);
+        match (control, self.broker.deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    /// Only after closing/joining the channel has retired its borrowed I/O.
+    pub fn transport_closed(&mut self, now: u64) -> Option<Completion> {
+        self.closed = true;
+        let done = self
+            .flight
+            .take()
+            .filter(|f| !f.reported)
+            .and_then(|f| self.deliver(f, None, Err(Failure::Gone), now));
+        self.seat(None);
+        done
     }
     pub fn generation(&self) -> u64 {
         self.broker.generation()
@@ -386,7 +459,8 @@ impl Interaction {
         done
     }
     pub fn seat(&mut self, normal: Option<u64>) -> Option<Completed> {
-        let normal = normal.filter(|n| *n != 0);
+        let normal = if self.closed { None } else { normal };
+        // Generation zero is the initial normal seat; only None revokes it.
         if self.normal == normal {
             return None;
         }
@@ -458,7 +532,7 @@ mod tests {
         i.complete(q, Some(peer()), Ok(receipt(q, focus)), 0)
     }
     fn register(i: &mut Interaction) -> Scope {
-        let q = i.publish(terminal(), peer()).unwrap();
+        let q = i.publish(terminal(), peer(), 0).unwrap();
         match finish(i, q, 10).unwrap() {
             Completion::Published { result: Ok(s), .. } => s,
             other => panic!("{other:?}"),
@@ -490,19 +564,264 @@ mod tests {
         ));
     }
     #[test]
+    fn initial_zero_seat_registers_copies_and_retires_without_revival() {
+        let mut i = Interaction::new(1, 1000).unwrap();
+        assert_eq!(i.publish(terminal(), peer(), 0), Err(Failure::Denied));
+        i.seat(Some(0));
+        let published = i.publish(terminal(), peer(), 0);
+        assert_eq!(
+            published.as_ref().map(|_| ()),
+            Ok(()),
+            "initial normal seat must admit publication"
+        );
+        let q = published.unwrap();
+        let Some(Completion::Published {
+            result: Ok(scope), ..
+        }) = i.complete(
+            q,
+            Some(peer()),
+            Ok(Reply {
+                seat: 0,
+                ..receipt(q, 10)
+            }),
+            0,
+        )
+        else {
+            panic!("initial publication failed")
+        };
+        i.report(peer(), scope, 1, Mode::Normal, false, "nora")
+            .unwrap();
+        let q = i.begin(peer(), scope, target(), 2, 0).unwrap();
+        let Some(Completion::Clipboard(Completed {
+            result: Ok(Outcome::Begun(id)),
+            ..
+        })) = i.complete(
+            q,
+            None,
+            Ok(Reply {
+                seat: 0,
+                ..receipt(q, 10)
+            }),
+            0,
+        )
+        else {
+            panic!("initial copy staging failed")
+        };
+        assert_eq!(i.write(peer(), scope, id, 0, b"hi", 0), Ok(2));
+        let q = i.commit(peer(), scope, target(), id, 0, 0).unwrap();
+        assert!(matches!(
+            i.complete(
+                q,
+                None,
+                Ok(Reply {
+                    seat: 0,
+                    ..receipt(q, 10)
+                }),
+                0
+            ),
+            Some(Completion::Clipboard(Completed {
+                result: Ok(Outcome::Committed(1)),
+                ..
+            }))
+        ));
+        let q = i.get(peer(), scope, target(), 0).unwrap();
+        let Some(Completion::Clipboard(Completed {
+            result: Ok(Outcome::Clipboard(snapshot)),
+            ..
+        })) = i.complete(
+            q,
+            None,
+            Ok(Reply {
+                seat: 0,
+                ..receipt(q, 10)
+            }),
+            0,
+        )
+        else {
+            panic!("initial paste snapshot failed")
+        };
+        assert_eq!(
+            i.read(peer(), scope, snapshot.transfer, 0, 2, 0),
+            Ok(&b"hi"[..])
+        );
+        i.seat(Some(0)); // An unchanged live sample must not retire the owner.
+        assert!(i.mode(terminal().route).is_some());
+        i.seat(None);
+        assert_eq!(i.mode(terminal().route), None);
+        assert!(i.read(peer(), scope, snapshot.transfer, 0, 2, 0).is_err());
+        i.seat(Some(0));
+        assert!(i
+            .report(peer(), scope, 2, Mode::Normal, false, "nora")
+            .is_err());
+        let q = i.publish(terminal(), peer(), 0).unwrap();
+        assert!(q.controller > scope.controller);
+        assert!(matches!(
+            i.complete(
+                q,
+                Some(peer()),
+                Ok(Reply {
+                    seat: 0,
+                    ..receipt(q, 10)
+                }),
+                0
+            ),
+            Some(Completion::Published { result: Ok(_), .. })
+        ));
+    }
+    fn control_request(i: &mut Interaction, publish: bool, now: u64) -> Request {
+        if publish {
+            i.publish(terminal(), peer(), now).unwrap()
+        } else {
+            i.control(Op::Bind, terminal().route, 42, 4, now).unwrap()
+        }
+    }
+    fn failure(done: Option<Completion>) -> Option<Failure> {
+        match done {
+            Some(Completion::Control { result: Err(e), .. })
+            | Some(Completion::Published { result: Err(e), .. }) => Some(e),
+            Some(Completion::Clipboard(Completed { result: Err(e), .. })) => Some(e),
+            _ => None,
+        }
+    }
+    #[test]
+    fn control_expiry_reports_once_and_holds_slot_until_exact_drain() {
+        for publish in [false, true] {
+            let mut i = owner();
+            let q = control_request(&mut i, publish, 17);
+            assert_eq!(i.deadline(), Some(17 + ADMISSION_MS));
+            assert_eq!(i.expire(16 + ADMISSION_MS), None);
+            assert_eq!(failure(i.expire(17 + ADMISSION_MS)), Some(Failure::Timeout));
+            assert!(i.busy());
+            assert_eq!(i.deadline(), None);
+            assert_eq!(i.expire(18 + ADMISSION_MS), None);
+            assert_eq!(
+                i.publish(terminal(), peer(), 18 + ADMISSION_MS),
+                Err(Failure::Busy)
+            );
+            assert_eq!(
+                i.complete(
+                    Request { binding: 99, ..q },
+                    Some(peer()),
+                    Ok(receipt(q, 10)),
+                    18 + ADMISSION_MS
+                ),
+                None
+            );
+            assert!(i.busy());
+            assert_eq!(
+                i.complete(q, Some(peer()), Ok(receipt(q, 10)), 18 + ADMISSION_MS),
+                None
+            );
+            assert!(!i.busy());
+            let p = i.publish(terminal(), peer(), 18 + ADMISSION_MS).unwrap();
+            assert!(p.request > q.request);
+            assert!(!publish || p.controller > q.controller);
+        }
+    }
+    #[test]
+    fn delayed_control_completion_checks_time_without_an_expiry_pass() {
+        for publish in [false, true] {
+            for now in [16, 17 + ADMISSION_MS - 1, 17 + ADMISSION_MS] {
+                let mut i = owner();
+                let q = control_request(&mut i, publish, 17);
+                let done = i.complete(q, Some(peer()), Ok(receipt(q, 10)), now);
+                assert_eq!(
+                    failure(done),
+                    if now == 17 + ADMISSION_MS - 1 {
+                        None
+                    } else {
+                        Some(Failure::Timeout)
+                    }
+                );
+                assert!(!i.busy());
+            }
+        }
+    }
+    #[test]
+    fn control_clock_regression_expires_and_overflow_cannot_start() {
+        for publish in [false, true] {
+            let mut i = owner();
+            let q = control_request(&mut i, publish, 17);
+            assert_eq!(failure(i.expire(16)), Some(Failure::Timeout));
+            assert_eq!(i.complete(q, Some(peer()), Ok(receipt(q, 10)), 17), None);
+        }
+        let mut i = owner();
+        let late = u64::MAX - ADMISSION_MS + 1;
+        assert_eq!(i.publish(terminal(), peer(), late), Err(Failure::Invalid));
+        assert_eq!(
+            i.control(Op::Bind, terminal().route, 42, 4, late),
+            Err(Failure::Invalid)
+        );
+        let s = register(&mut i);
+        assert_eq!(s.controller, 1);
+        assert_eq!(i.begin(peer(), s, target(), 2, late), Err(Failure::Invalid));
+        assert!(!i.busy());
+        assert_eq!(i.payload_reservation(), 0);
+        let q = i
+            .control(Op::Unbind, terminal().route, 0, 4, u64::MAX - ADMISSION_MS)
+            .unwrap();
+        assert_eq!(i.deadline(), Some(u64::MAX));
+        assert_eq!(
+            failure(i.complete(q, None, Ok(receipt(q, 10)), u64::MAX)),
+            Some(Failure::Timeout)
+        );
+    }
+    #[test]
+    fn transport_close_is_terminal_and_does_not_duplicate_expired_results() {
+        for publish in [false, true] {
+            for expire in [false, true] {
+                let mut i = owner();
+                let q = control_request(&mut i, publish, 0);
+                if expire {
+                    assert_eq!(failure(i.expire(ADMISSION_MS)), Some(Failure::Timeout));
+                }
+                let done = i.transport_closed(ADMISSION_MS);
+                assert_eq!(
+                    failure(done),
+                    if expire { None } else { Some(Failure::Gone) }
+                );
+                assert!(!i.busy());
+                assert_eq!(i.deadline(), None);
+                assert_eq!(i.transport_closed(ADMISSION_MS), None);
+                i.seat(Some(2));
+                assert_eq!(
+                    i.publish(terminal(), peer(), ADMISSION_MS),
+                    Err(Failure::Denied)
+                );
+                assert_eq!(i.complete(q, Some(peer()), Ok(receipt(q, 10)), 0), None);
+            }
+        }
+    }
+    #[test]
+    fn transport_close_retires_registered_modes_payload_and_pending_check() {
+        let mut i = owner();
+        let s = register(&mut i);
+        i.report(peer(), s, 1, Mode::Normal, false, "nora").unwrap();
+        let id = stage(&mut i, s, b"secret");
+        let q = i.commit(peer(), s, target(), id, 0, 0).unwrap();
+        assert_eq!(failure(i.transport_closed(1)), Some(Failure::Gone));
+        assert_eq!(i.mode(terminal().route), None);
+        assert_eq!(i.payload_reservation(), 0);
+        assert_eq!(i.generation(), 0);
+        i.seat(Some(2));
+        assert!(i.report(peer(), s, 2, Mode::Normal, false, "nora").is_err());
+        assert_eq!(finish(&mut i, q, 10), None);
+        assert_eq!(i.transport_closed(2), None);
+    }
+    #[test]
     fn control_publication_and_clipboard_share_one_sequence_and_slot() {
         let mut i = owner();
-        let q = i.control(Op::Bind, terminal().route, 42, 4).unwrap();
+        let q = i.control(Op::Bind, terminal().route, 42, 4, 0).unwrap();
         assert_eq!(q.request, 1);
-        assert_eq!(i.publish(terminal(), peer()), Err(Failure::Busy));
+        assert_eq!(i.publish(terminal(), peer(), 0), Err(Failure::Busy));
         assert!(matches!(
             finish(&mut i, q, 10),
             Some(Completion::Control { result: Ok(_), .. })
         ));
-        let p = i.publish(terminal(), peer()).unwrap();
+        let p = i.publish(terminal(), peer(), 0).unwrap();
         assert_eq!(p.request, 2);
         assert_eq!(
-            i.control(Op::Unbind, terminal().route, 0, 4),
+            i.control(Op::Unbind, terminal().route, 0, 4, 0),
             Err(Failure::Busy)
         );
         let Some(Completion::Published { result: Ok(s), .. }) = finish(&mut i, p, 10) else {
@@ -510,10 +829,10 @@ mod tests {
         };
         let c = i.begin(peer(), s, target(), 0, 0).unwrap();
         assert_eq!(c.request, 3);
-        assert_eq!(i.publish(terminal(), peer()), Err(Failure::Busy));
+        assert_eq!(i.publish(terminal(), peer(), 0), Err(Failure::Busy));
         assert!(finish(&mut i, c, 10).is_some());
         assert_eq!(
-            i.control(Op::Unbind, terminal().route, 0, 4)
+            i.control(Op::Unbind, terminal().route, 0, 4, 0)
                 .unwrap()
                 .request,
             4
@@ -547,7 +866,7 @@ mod tests {
         for old_event in [true, false] {
             let mut i = owner();
             let route = terminal().route;
-            let q = i.control(Op::Bind, route, 42, 4).unwrap();
+            let q = i.control(Op::Bind, route, 42, 4, 0).unwrap();
             i.route_gone(if old_event {
                 RouteKey {
                     incarnation: 1,
@@ -567,7 +886,7 @@ mod tests {
     fn pending_publication_cannot_survive_retirement_or_missing_peer() {
         for cause in 0..5 {
             let mut i = owner();
-            let q = i.publish(terminal(), peer()).unwrap();
+            let q = i.publish(terminal(), peer(), 0).unwrap();
             match cause {
                 0 => {
                     i.disconnect(peer().connection);
@@ -663,16 +982,19 @@ mod tests {
             let q = i.commit(peer(), s, target(), id, 0, 0).unwrap();
             assert_eq!(i.deadline(), Some(ADMISSION_MS));
             let done = if sak {
-                i.seat(None)
+                i.seat(None).map(Completion::Clipboard)
             } else {
                 i.expire(ADMISSION_MS)
             };
-            assert!(done.unwrap().result.is_err());
+            assert!(matches!(
+                done,
+                Some(Completion::Clipboard(Completed { result: Err(_), .. }))
+            ));
             assert!(i.busy());
             if sak {
                 i.seat(Some(3));
             }
-            assert_eq!(i.publish(terminal(), peer()), Err(Failure::Busy));
+            assert_eq!(i.publish(terminal(), peer(), 0), Err(Failure::Busy));
             assert_eq!(finish(&mut i, q, 10), None);
             assert_eq!(i.generation(), 0);
             assert!(!i.busy());
@@ -684,7 +1006,7 @@ mod tests {
     #[test]
     fn seat_round_trip_cannot_revive_pending_host_control() {
         let mut i = owner();
-        let q = i.control(Op::Bind, terminal().route, 42, 4).unwrap();
+        let q = i.control(Op::Bind, terminal().route, 42, 4, 0).unwrap();
         i.seat(None);
         i.seat(Some(2));
         assert!(i.busy());
@@ -701,8 +1023,8 @@ mod tests {
     fn invalid_controls_and_receipts_never_authorize() {
         let mut i = owner();
         let r = terminal().route;
-        assert_eq!(i.control(Op::Bind, r, 0, 4), Err(Failure::Invalid));
-        let q = i.control(Op::Bind, r, 42, 4).unwrap();
+        assert_eq!(i.control(Op::Bind, r, 0, 4, 0), Err(Failure::Invalid));
+        let q = i.control(Op::Bind, r, 42, 4, 0).unwrap();
         assert_eq!(q.request, 2);
         assert!(matches!(
             finish(&mut i, q, 0),
@@ -727,7 +1049,7 @@ mod tests {
         let mut i = owner();
         let s = register(&mut i);
         let id = stage(&mut i, s, b"retire");
-        let q = i.control(Op::Unbind, terminal().route, 0, 4).unwrap();
+        let q = i.control(Op::Unbind, terminal().route, 0, 4, 0).unwrap();
         assert!(i.write(peer(), s, id, 0, b"x", 0).is_err());
         assert_eq!(i.payload_reservation(), 0);
         assert!(matches!(
@@ -792,7 +1114,7 @@ mod tests {
         assert!(s2.controller > s.controller);
         i.seat(None);
         i.observe(Body::Reset).unwrap();
-        assert_eq!(i.publish(terminal(), peer()), Err(Failure::Denied));
+        assert_eq!(i.publish(terminal(), peer(), 0), Err(Failure::Denied));
     }
     #[test]
     fn explicit_unbind_cancels_the_real_broker_and_retains_slot() {

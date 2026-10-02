@@ -52,6 +52,26 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Initial seat and control deadlines
+
+Some(0) is the initial normal seat; only None removes membership. Both the
+controller table and shared owner preserve that distinction. Seat revocation
+retires scopes even when a later join carries the same generation.
+
+Every shared-owner request carries the existing 30-second admission allowance.
+Expiry of host control or publication returns one failure without freeing its
+transport slot. Provisional publication is retired, and exact late completion
+only drains. Completion checks time independently of the timer pass. Clock
+regression fails closed; deadline overflow is refused before mutation. Confirmed
+channel closure retires modes/transfers and permanently disables that owner.
+The runtime adapter must close/join the real channel before notifying closure;
+these pure transitions alone do not implement I/O teardown or public dispatch.
+
+507 host tests, 63 owner cases with 15 intended counterexamples and 37 controller
+cases with eight counterexamples pass; guest Halcyon/probe compile. Native results
+and limits are recorded in the interaction status. No clipboard activation is
+claimed. Review is single-agent and the October 2 gate waiver still applies.
+
 ## Local ordered-stream progress
 
 The ordered exchange exposes runnable local work: a deliverable retained record

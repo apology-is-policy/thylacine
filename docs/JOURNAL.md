@@ -22,6 +22,30 @@ needed the operator.
 
 
 ---
+## 2026-10-02 (Astra) -- finish the initial-seat correction across owners
+
+Following the ordered wire into its consumers exposed the same zero-generation
+assumption in Interaction and Controllers. The earlier native probe exercised
+the wire and broker, but not this composition. A new composed schedule refused
+publication on the old source, then passed the complete copy/paste and revoke
+sequence after removing both filters. Two separate mutations guard against
+repairing only one layer. Evidence: work/oct2-hi-initial-seat/red.log.
+
+The next dispatch dependency was bounded control lifetime. CHECK already had
+an expiry, but Bind/Publish did not. They now share its allowance, report once,
+retire provisional authority and keep the slot occupied until completion/drain.
+A deadline is not permission to reuse a kernel-borrowed buffer. The explicit
+transport-closed transition is terminal; the runtime still owes real close/join.
+
+The new test first had an extra delimiter, then its custom assert message did
+not satisfy the mutation driver's witness rule; both failures remain in logs
+and were corrected before counting results. Guest checking exhausted disk while
+writing metadata. The completed host cache was disposable and its removal let
+the same check pass. Superseded passed image pairs were then hash-recorded and
+removed for fresh native verification; peer trees and failed evidence were kept.
+Measured results and remaining activation work are in the interaction status.
+
+---
 ## 2026-10-02 (Astra) -- stop relying on a seat timeout for progress
 
 While tracing the next application adapter, source review found a subtle local

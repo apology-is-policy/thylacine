@@ -5,6 +5,43 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Initial-seat registration and deadline core (October 2)
+
+HI1-R20 (fixed): Interaction and Controllers still filtered Some(0) into None,
+although HSC and ordered admission use zero for the initial normal seat. The
+new composed register/copy/paste/retire schedule reproduced the refusal before
+the fix. Both owners now distinguish zero from absence. An unchanged sample
+preserves registration; a None/Some(0) round trip cannot revive old scopes.
+
+Every shared-owner flight now uses the existing 30-second admission allowance.
+Bind/Publish expiry retires provisional authority and emits one terminal result;
+the slot remains occupied until exact completion or confirmed channel teardown.
+Late completions independently check time. Clock regression fails closed; an
+unrepresentable deadline is refused before state mutation. Transport closure
+retires all controllers and transfers and permanently disables that owner.
+The runtime adapter must still perform the actual I/O close/join before calling
+that terminal notification; a timeout alone never licenses buffer reuse.
+
+507 Halcyon host tests, 63 actual-source owner cases with 15 intended mutations,
+and 37 controller cases with eight intended mutations pass. Halcyon and the
+native source-sharing probe both compile for the guest. Evidence:
+work/oct2-hi-initial-seat. The initial test syntax error and a custom assertion
+message rejected by the mutant harness were corrected; failed logs remain.
+Guest metadata compilation hit ENOSPC; removing this checkout's completed host
+build cache allowed the unchanged guest check to pass. Older superseded passed
+image pairs were removed with hash manifests for native build headroom; source,
+logs, screenshots and failed-run evidence remain. Fresh native F10 SAK passes in 89.43 seconds on graphics-1790940969694285000,
+covering empty episode, confer/use/abdicate, wrong key, cancellation and restored
+workspace. Prompt and restoration captures were inspected at 1280x800. This
+exercises real HSC seat transitions with app dispatch disabled; populated owner
+timeout/copy schedules remain host evidence. No new CPU1 boot suite is claimed.
+
+Public clipboard dispatch remains disabled. Next: authenticated route/context
+and app dispatch, runtime deadline teardown and pending/partial reply retirement;
+then aggregate resource qualification, native two-client tests and modal clients.
+Single-agent self-review, protected drafts and October 2's explicit gate waiver
+remain in force. No Main landing, fresh Pi/minimum-display, SMP or sanitizer result.
+
 ## Ordered service progress (October 2)
 
 HI1-R19: after consuming an ownership record, the session service could sleep

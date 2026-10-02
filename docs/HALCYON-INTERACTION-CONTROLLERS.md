@@ -82,5 +82,25 @@ allocation remains the Broker's separate bounded store.
 
 The application-to-HIA dispatch adapter is still absent. Its control/publication
 timeout must close or drain the channel and deliver a terminal error to this
-owner; the existing `expire`/`deadline` methods only cover Broker CHECK work.
+owner. The shared deadline core below covers every request kind; its runtime
+dispatch and teardown adapter must still be connected.
 No public activation or total-resource qualification follows from instantiation.
+
+## Admission deadlines and drained completions
+
+Every shared-owner request carries the existing 30-second admission allowance,
+measured in monotonic milliseconds. Bind and Publish use the same allowance as
+CHECK. A regressed clock fails the request; a start too near u64 exhaustion to
+represent the deadline is refused before publication or payload mutation.
+Expiry returns one terminal result and retires a provisional controller before
+any late receipt can activate it. It never releases the transport slot. An exact
+late completion drains that slot without emitting a second result. Unmatched
+completions cannot drain it. Completion itself checks the deadline, so a delayed
+executor pass cannot admit work by processing its reply before its timer.
+
+The transport adapter must close/join or drain the actual channel after expiry.
+A transport-closed notification may release the slot only after outstanding I/O
+has ceased; it permanently disables this owner and retires all registrations and
+transfers. A fresh service instance, HSC join and registrations are required for
+recovery. This is userspace lifetime bookkeeping, not a new authority or ABI.
+Public dispatch and the adapter remain gated until connected and qualified.

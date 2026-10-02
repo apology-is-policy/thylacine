@@ -49,3 +49,29 @@ terminal/focus events before completion, control/publication deadline teardown,
 partial reply cancellation, resource ledger and native clients. HSC now owns
 Interaction but the HIA application lane is still idle. This does not close the
 public endpoint activation seam. October 2 SMP/50-boot/sanitizer waiver applies.
+
+## Initial normal seat and bounded control completion
+
+R6 / HI1-R20: the codec correction did not remove two owner-layer zero filters.
+The composed regression fails on the original owner before publication; separate
+mutants restore each filter. A full in-memory registration, copy, commit, paste,
+unchanged sample, revocation and same-generation rejoin proves initial zero is
+usable while revoked scopes remain dead. None alone means no normal membership.
+
+Control and Publish now use the same 30-second allowance as CHECK. The owner
+checks the clock on both timer delivery and exact completion. Expiry delivers
+one failure and removes provisional registration, retaining the actual flight.
+An exact late completion drains without a second result; a wrong Request leaves
+it busy. Starting near numeric exhaustion is refused before any owner mutation.
+A confirmed closed channel disables this owner permanently, even after a later
+seat sample. Only the future runtime adapter may attest closure after joining
+outstanding I/O; this pure core neither drops a Ring nor proves native teardown.
+
+Self-review checked provisional-entry cleanup, monotone IDs, all three request
+kinds, cancellation before timeout, clock regression and boundary equality,
+wrong/duplicate completion, payload and mode retirement, and closed-owner reuse.
+No locks, allocation, wire changes or new authority are added. Inline metadata
+still satisfies its 18 KiB ceiling. Runtime app dispatch remains off; guest
+compilation and native SAK regression do not substitute for populated two-client
+or partial-reply cancellation qualification. Measured evidence is recorded in
+HALCYON-INTERACTION-STATUS and work/oct2-hi-initial-seat.

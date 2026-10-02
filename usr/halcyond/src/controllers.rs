@@ -322,7 +322,7 @@ impl Controllers {
         Ok(())
     }
     pub fn seat(&mut self, normal: Option<u64>, mut retire: impl FnMut(Owner)) {
-        let normal = normal.filter(|n| *n != 0);
+        // Generation zero is the initial normal seat; only None revokes it.
         if self.normal == normal {
             return;
         }
