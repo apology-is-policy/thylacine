@@ -5,7 +5,7 @@
 //!
 //! One pending decision globally serializes publication and bounds metadata.
 //! Get pins bytes and Commit validates them before issuing CHECK. IDs never
-//! repeat. Completion, invalidation, expiry and publication run on the UI owner.
+//! repeat. Completion, invalidation, expiry and publication run on the service owner.
 //! A graphical focus loss records an epoch boundary for an outstanding Get or
 //! Commit: an earlier admitted decision may finish, but a later one cannot use
 //! focus that returned in the meantime. Controller loss/SAK cancels immediately.
@@ -83,6 +83,20 @@ impl Broker {
     }
     pub fn payload_reservation(&self) -> usize {
         self.store.payload_reservation()
+    }
+    /// The interaction owner shares this sequence with Bind/Publish/Unbind.
+    /// Its transport slot, not `pending`, retains cancelled in-flight control
+    /// work until the actual completion. Never create a second HIA sequencer.
+    pub(crate) fn control_id(&mut self) -> Result<u64, Failure> {
+        if self.seat.is_none() {
+            return Err(Failure::Denied);
+        }
+        if self.pending.is_some() {
+            return Err(Failure::Busy);
+        }
+        let id = self.next;
+        self.next = id.checked_add(1).ok_or(Failure::Busy)?;
+        Ok(id)
     }
     fn check(&self, a: Authority, t: Target) -> Result<Request, Failure> {
         if self.seat.is_none() {
@@ -203,6 +217,7 @@ impl Broker {
             || r.foreground != p.authority.foreground
             || self.seat != Some(p.seat)
             || r.seat != p.seat
+            || r.focus == 0
             || r.focus == u64::MAX
             || p.focus_lost.is_some_and(|lost| r.focus >= lost)
         {

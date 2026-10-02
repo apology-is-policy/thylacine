@@ -1,8 +1,8 @@
 //! Clipboard cancellation owner, polled by the session service executor.
 //! No Surface/EventRing or normal presentation wait is borrowed here. Public
 //! clipboard dispatch stays disabled until its controller/protocol adapter is
-//! complete; this owner holds the broker and its seat lifecycle already.
-use halcyond::clipbroker::Broker;
+//! complete; this owner holds the shared interaction owner and its seat lifecycle.
+use halcyond::interaction::Interaction;
 use libhalcyon::seat_control::{Op, Request, Snapshot};
 use libthyla_rs::{
     err::{Error, Result},
@@ -19,7 +19,7 @@ pub struct Link {
     admission: tapestry::admission::Channel,
     // Keep the normal reservation fid pinned through retirement of this lane.
     _reservation: File,
-    broker: Broker,
+    interaction: Interaction,
     state: Snapshot,
     next: u64,
     joined: bool,
@@ -28,15 +28,15 @@ pub struct Link {
     acknowledged: Option<(u64, u64)>,
 }
 impl Link {
-    pub fn new(setup: Setup) -> Result<Self> {
-        let broker =
-            Broker::new(setup.snapshot.registration).map_err(|_| Error::InvalidArgument)?;
+    pub fn new(setup: Setup, principal: u32) -> Result<Self> {
+        let interaction = Interaction::new(setup.snapshot.registration, principal)
+            .map_err(|_| Error::InvalidArgument)?;
         let mut link = Self {
             channel: Channel::open().map_err(|_| Error::Io)?,
             admission: tapestry::admission::Channel::from_file(setup.admission)
                 .map_err(|_| Error::Io)?,
             _reservation: setup.reservation,
-            broker,
+            interaction,
             state: setup.snapshot,
             next: 1,
             joined: false,
@@ -78,7 +78,7 @@ impl Link {
     }
     pub fn stop(&mut self) {
         self.stopping = true;
-        let _ = self.broker.seat(None);
+        let _ = self.interaction.seat(None);
     }
     pub fn pump(&mut self) -> Result<()> {
         if self.retired {
@@ -98,7 +98,7 @@ impl Link {
             Err(tapestry::seat::Error::Transport(-1))
                 if self.joined && matches!(done.request.op, Op::Cancelled | Op::Retire) =>
             {
-                let _ = self.broker.seat(None);
+                let _ = self.interaction.seat(None);
                 self.state.revision = 0;
                 return self.send(Op::State);
             }
@@ -114,17 +114,17 @@ impl Link {
                 return Err(Error::PermissionDenied);
             }
             self.joined = true;
-            let _ = self.broker.seat(Some(self.state.generation));
+            let _ = self.interaction.seat(Some(self.state.generation));
         }
         if self.stopping {
-            let _ = self.broker.seat(None);
+            let _ = self.interaction.seat(None);
             return self.send(Op::Retire);
         }
         if self.state.phase != 0 {
             // With public clipboard dispatch still off there are no app replies
             // to retire. Its eventual adapter MUST discard unsent output and
             // close partial frames here before this exact acknowledgement.
-            let _ = self.broker.seat(None);
+            let _ = self.interaction.seat(None);
             let identity = (self.state.generation, self.state.revision);
             if done.request.op == Op::Cancelled {
                 self.acknowledged = Some(identity);
@@ -133,7 +133,7 @@ impl Link {
                 return self.send(Op::Cancelled);
             }
         } else if !self.state.enabled {
-            let _ = self.broker.seat(None);
+            let _ = self.interaction.seat(None);
             self.acknowledged = None;
             return self.send(Op::Join);
         }

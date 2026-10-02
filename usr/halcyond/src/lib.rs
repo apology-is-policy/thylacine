@@ -18,6 +18,7 @@ pub mod chrome;
 pub mod clipboard;
 pub mod clipbroker;
 pub mod controllers;
+pub mod interaction;
 pub mod downq;
 pub mod grid;
 pub mod help;

@@ -251,6 +251,14 @@ impl Controllers {
             .find(|e| e.pending.is_none() && e.terminal.route == focused)
             .and_then(|e| e.report)
     }
+    /// Only for the owner's trusted ordered notifications; never a wire query.
+    pub(crate) fn on_route(&self, route: RouteKey, mut visit: impl FnMut(Authority)) {
+        for e in self.entries.iter().flatten() {
+            if e.pending.is_none() && e.terminal.route == route {
+                visit(e.authority);
+            }
+        }
+    }
     fn remove(&mut self, slot: usize, retire: &mut impl FnMut(Owner)) {
         if let Some(e) = self.entries[slot].take() {
             retire(e.authority.owner);

@@ -918,7 +918,7 @@ fn serve_owner(
     setup: Option<crate::session_seat::Setup>,
 ) -> Result<(), Error> {
     let mut seat = match setup {
-        Some(s) => Some(crate::session_seat::Link::new(s)?),
+        Some(s) => Some(crate::session_seat::Link::new(s, shared.principal)?),
         None => None,
     };
     let deadline = libthyla_rs::time::monotonic_ns() + 4_000_000_000;

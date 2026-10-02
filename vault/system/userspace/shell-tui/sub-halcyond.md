@@ -4,6 +4,7 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - usr/halcyond/src/interaction.rs
   - usr/halcyond/src/controllers.rs
   - usr/halcyond/src/session_seat.rs
   - usr/halcyond/src/lib.rs
@@ -51,10 +52,35 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Shared interaction execution owner (October 2)
+
+The session's HSC Link now holds `Interaction`: the existing controller table
+and Broker with one request sequence and one in-flight transport slot. Local
+cancellation does not permit reuse until the exact completion drains. Bind
+tracks route incarnation before an entry exists; host Unbind retires local
+transfers before sending. CHECK refuses zero focus epochs. Seat transitions
+retire both subsystems before HSC acknowledgement; a late reply cannot recreate
+authority even after restoration. Focus loss alone retains the mode record and
+the earliest Get/Commit boundary. Combined inline metadata is at most 18 KiB;
+the guarded service stack is 128 KiB, with peak usage not measured here.
+
+499 host tests, 49 actual-source schedules, nine owner mutants and no_std guest
+binary check pass; the existing 37-test/eight-mutant controller gate also passes.
+The native probe includes the same owner modules; its initial missing-import
+build failure is retained. The corrected full image passes CPU1 1830/1830 and
+physical F10 SAK in 89.07s, with inspected 1280x800 screenshots. Its controller
+table is empty while app dispatch is off: populated cancellation remains host
+evidence. Limits and artifacts are in the phase status and `work/oct2-hi-owner/`.
+Single-agent review only.
+
+HIA application dispatch stays idle, and the public endpoint stays disabled.
+Ordered authenticated event delivery, control/publication timeout teardown,
+partial application replies, total resource accounting and clients remain owed.
+
 ## Controller lifecycle core (October 2)
 
-`controllers` is a pure terminal adapter core, not yet instantiated by the
-service executor. It reserves 32 entries and at most one pending publication,
+`controllers` is a pure terminal adapter core, now held by the
+service executor through Interaction. It reserves 32 entries and at most one pending publication,
 with no heap allocation and a compile-time 16 KiB metadata ceiling. A host
 Terminal record carries exact local route incarnation, leaf, observer binding,
 foreground epoch, context and epoch. Peer carries a freshly sampled connection

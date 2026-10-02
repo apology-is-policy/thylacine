@@ -22,6 +22,10 @@ mod admission;
 mod clipboard;
 #[path = "../../halcyond/src/clipbroker.rs"]
 mod clipbroker;
+#[path = "../../halcyond/src/controllers.rs"]
+mod controllers;
+#[path = "../../halcyond/src/interaction.rs"]
+mod interaction;
 mod readiness;
 mod service_owner;
 mod seat_control;

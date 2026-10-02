@@ -47,3 +47,40 @@ Public dispatch remains disabled until authenticated route/context delivery,
 ordered focus and terminal retirement, request serialization, pending/partial
 reply cancellation, clients and the complete activation ledger are connected
 and exercised together.
+
+## Shared execution owner
+
+The executor's `Interaction` holds the controller table and Broker together.
+The Broker's monotone request sequence covers both clipboard CHECK and control
+Bind/Publish/Unbind; no second sequence is started for publication. A single
+in-flight slot stays occupied until its exact HIA completion is consumed, even
+when local cancellation, disconnect, timeout or SAK has already invalidated the
+application operation. This is separate from the transport's borrowed buffer
+lifetime: freeing one does not imply the other has completed.
+
+Trusted ordered focus/terminal/route/peer events enter this owner before a
+completion from the same executor pass. Terminal retirement synchronously
+calls Broker::drop_owner. Focus loss calls Broker::lose_focus and retains the
+registration/mode. Seat changes retire every controller and cancel the Broker
+before HSC acknowledgement. A late completion can drain the slot but cannot
+restore cancelled authority. Output is returned as values to the protocol owner;
+this does not itself send a reply or close a partial application frame.
+
+This composition implements the already-approved serialization contract. It
+does not invent a lossless feed from existing TEV_FOCUS/TEV_LAYOUT events:
+those are intentionally coalesced. Production delivery still needs the distinct
+ordered control feed and receipt/event ordering described in the status note.
+
+The session's HSC Link now constructs this owner with its already kernel-read
+principal, and applies every join/cancel/stop seat transition to it. Bind stores
+the local route incarnation even before there is a controller; route removal
+invalidates that receipt. Host Unbind retires local controllers/transfers before
+sending the request, including when the transport later refuses it. Zero focus
+epochs are malformed for every receipt, including CHECK (layout epochs start
+at one). An 18 KiB compile-time ceiling covers combined inline metadata; payload
+allocation remains the Broker's separate bounded store.
+
+The application-to-HIA dispatch adapter is still absent. Its control/publication
+timeout must close or drain the channel and deliver a terminal error to this
+owner; the existing `expire`/`deadline` methods only cover Broker CHECK work.
+No public activation or total-resource qualification follows from instantiation.

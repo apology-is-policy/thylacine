@@ -22,6 +22,33 @@ needed the operator.
 
 
 ---
+## 2026-10-02 (Astra) -- one owner before ordered notification delivery
+
+Connecting controller publication to the clipboard exposed an integration
+precondition: separate request counters cannot share HIA's serialized channel.
+The new Interaction composes the existing table and Broker rather than creating
+another authority table. A cancelled request continues to occupy its transport
+slot until the actual completion drains. Twelve composed schedules and nine
+named mutations cover that distinction and byte-verified retained snapshots.
+
+Self-review found two easy-to-miss boundaries: pending Bind has no controller
+entry yet, so it needs its own route incarnation; and CHECK's zero focus receipt
+needed the same refusal as Publish. Host Unbind also retires local transfers
+before the transport can fail. A full-image build caught the probe's direct
+source imports missing the new modules, which the individual Halcyon check could
+not see. Failed evidence remains in work/oct2-hi-owner. Canonical host tests
+pass 499/499; no broader activation claim follows from those tests.
+
+HSC now instantiates this shared owner, but application HIA dispatch and ordered
+focus/terminal delivery still follow. Existing TEV events deliberately coalesce
+and cannot be treated as lossless authority history. The approved mode visuals
+are unchanged; this work adds no new rendering. Native measured evidence belongs
+in HALCYON-INTERACTION-STATUS: the corrected image passes CPU1 1830/1830 and
+physical F10 SAK (89.07s), with inspected 1280x800 prompt/restoration screenshots.
+The native scenario has no app controllers yet; it is a seat regression rather
+than a populated clipboard qualification. The four separate drafts remain protected.
+
+---
 ## 2026-10-01 (Astra) -- asynchronous clipboard decisions
 
 The synchronous admission helper was suitable for setup, but using it for every

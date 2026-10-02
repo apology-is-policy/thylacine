@@ -206,3 +206,5 @@
 - HI-1 dedicated seat/service owners: seat_control, seat, service_worker, seat_coordinator, session_seat, paneplace and native probes; independent progress, exact cancellation, bounded lifecycle and token-preserving publication.
 
 - HI-1 terminal controller lifecycle: `usr/halcyond/src/controllers.rs`; provisional publication, peer/scope/route identity, monotone reports, terminal-subject retirement and broker cancellation.
+
+- HI-1 shared interaction owner: `usr/halcyond/src/interaction.rs`, broker/controllers, session_seat/paneplace and native probe imports; shared sequence, retained transport slot, route incarnation and unified cancellation.

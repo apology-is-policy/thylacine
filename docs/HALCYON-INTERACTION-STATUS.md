@@ -5,6 +5,46 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Shared interaction owner (October 2)
+
+`Interaction` now composes the controller table and Broker under one monotone
+HIA request sequence and one in-flight slot. Local cancellation, disconnect,
+expiry or SAK cannot free that slot until its exact completion drains. Pending
+Bind carries its route incarnation before a controller exists. Host Unbind
+retires local transfers first, even when its request later fails. CHECK now
+rejects malformed zero focus receipts. Focus-only loss retains mode and uses
+the earliest admission boundary; terminal nomination retirement cancels mode
+and payload together.
+
+The session HSC Link constructs the owner with its kernel-read principal and
+applies joins/cancellation/stop to both subsystems. It does not yet issue
+application HIA requests. Public clipboard dispatch remains disabled.
+
+499 host tests, 49 combined actual-source schedules (12 new owner cases), nine
+intended owner mutations, the unchanged 37-test/eight-controller-mutant gate and
+no_std guest binary check pass. Evidence: `work/oct2-hi-owner/`. Self-review in
+HALCYON-INTERACTION-OWNER-REVIEW; no independent audit claim. An ambiguous mutant
+source match was narrowed, and a full-build probe import omission was repaired;
+both failed logs remain.
+
+Fresh native `graphics-1790931634423476000` passes the ordinary CPU1 boot
+1830/1830 and physical F10 graphical SAK in 89.07 seconds: empty episode,
+confer/use/abdicate, wrong key, cancellation and restoration. The 1280x800 prompt
+and restored workspace screenshots were visually inspected. The controller table
+is empty in this runtime scenario because application dispatch remains off;
+populated cancellation schedules are host evidence, not native app qualification.
+The focused image omits the GOROOT bake; no new Go, Alpine/clade fixture, Pi,
+minimum-display, SMP or sanitizer qualification is claimed. Paired artifacts,
+hashes and logs remain; the passed disposable guest disk was removed after
+recording its hash. Source pins and four protected draft hashes match.
+
+Next: ordered authenticated route/terminal/focus delivery, then HIA application
+dispatch including control timeouts/drain and pending/partial reply retirement.
+Ahead: aggregate resource ledger, two-client qualification, endpoint activation,
+native clipboard clients and the approved modal terminal/Nora/status painting.
+Keep the four authority/settings drafts separate. No Main landing; October 2's
+50-boot/SMP/sanitizer gates stay waived. Older completed monitors stay paused.
+
 ## Controller lifecycle core and visual decision (October 2)
 
 The operator approved accent-filled mode chips and Nora-style proportional
