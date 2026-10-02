@@ -11,6 +11,8 @@ modules={
 }
 sources={k:(root/v).read_text() for k,v in modules.items()}
 cases=[
+ ('lost-local-rearm','ordered','self.selected && self.read.is_none() && self.record.is_none()','false','ordered::tests::local_rearm_and_retained_records_do_not_need_an_unrelated_wakeup'),
+ ('blocked-decision-spins','ordered','!matches!(r.body, Body::Decision { .. })','true','ordered::tests::local_rearm_and_retained_records_do_not_need_an_unrelated_wakeup'),
  ('reject-initial-seat','interaction_events','|| w[2] == u64::MAX','|| w[2] == u64::MAX || w[3] == 0','interaction_events::tests::initial_normal_seat_generation_zero_is_valid'),
  ('overflow-overwrite','interaction_events','self.len == CAPACITY','false','interaction_events::tests::overflow_discards_history_and_never_recovers_in_place'),
  ('sequence-gap','interaction_events','r.sequence != self.next','false','interaction_events::tests::duplicate_gap_wrong_ready_and_exhaustion_poison'),

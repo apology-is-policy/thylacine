@@ -52,6 +52,14 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Local ordered-stream progress
+
+The ordered exchange exposes runnable local work: a deliverable retained record
+or a read/write needing submission. The service folds this into its poll timeout,
+so consuming a record rearms the channel without waiting for an unrelated seat
+State timeout. Pending I/O and decisions awaiting their write CQE do not spin.
+HSC remains first in the executor pass; no extra timer or authority is introduced.
+
 ## Ordered ownership consumption
 
 The session service owns an HIO1 channel alongside independent HSC cancellation.

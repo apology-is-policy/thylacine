@@ -22,6 +22,19 @@ needed the operator.
 
 
 ---
+## 2026-10-02 (Astra) -- stop relying on a seat timeout for progress
+
+While tracing the next application adapter, source review found a subtle local
+work boundary: Channel::pump submitted I/O before Link consumed the record, so
+the service could sleep after consuming its final record without a read armed.
+HSC's independent State timeout made it progress eventually, hiding the delay.
+The exchange now exposes a runnable hint, distinguishing queued local work from
+an in-flight operation. That feeds the existing service poll deadline. Two named
+mutations prove both immediate rearm and absence of a blocked-decision spin.
+The ownership and cancellation order is unchanged; the app endpoint stays off.
+Verification and native outcomes live in the status and work/oct2-hi-progress.
+
+---
 ## 2026-10-02 (Astra) -- ordered stream meets the initial seat
 
 A separate normal-ownership journal was necessary because drawing notices

@@ -5,6 +5,24 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Ordered service progress (October 2)
+
+HI1-R19: after consuming an ownership record, the session service could sleep
+before arming its next read. HSC's 250ms State timeout supplied eventual progress,
+but unrelated seat wakeups should not be required to drain this journal. The
+exchange now exposes bounded local work as a runnable hint; the service uses a
+zero poll timeout only while such work exists. An in-flight read or a decision
+waiting for its write completion stays asleep on kernel readiness. HSC remains
+first in each executor pass, and no new polling timer or authority is added.
+
+23 libtapestry host tests, 17 actual-source wire/channel cases plus the identity
+predicate, ten intended mutations and guest compilation pass. The rebuilt image
+passes normal media in 71.43s and physical F10 SAK in 89.22s, including wrong-key
+refusal, cancellation and restoration. Prompt/restoration screenshots inspected
+at 1280x800. No new CPU1 boot matrix, minimum-display or Pi run is claimed. Evidence:
+work/oct2-hi-progress. Public dispatch remains disabled; the registration,
+control-deadline, reply-cancellation and resource-ledger work still follows.
+
 ## Ordered ownership delivery (October 2)
 
 The compositor now delivers terminal snapshots, focus loss, binding retirement,

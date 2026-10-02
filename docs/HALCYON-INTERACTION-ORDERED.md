@@ -62,7 +62,12 @@ bounded to 8 KiB per journal, 64 KiB total, plus eight small routing records.
 Each consumer retains one 80-byte read buffer and one 80-byte write buffer,
 page-rounded by Loom registration. One read and one write may be in flight,
 with distinct buffers/tags. Teardown joins/removes the ring before freeing
-registered memory. No 100 Hz polling or unsolicited 9P reply is introduced.
+registered memory. The exchange exposes a runnable hint when it holds a deliverable record or has
+an unsubmitted write/read rearm. The service chooses a zero poll timeout only
+for that local work; an in-flight read or a decision waiting for its write CQE
+sleeps on readiness. Consuming a record therefore cannot depend on an unrelated
+HSC timeout to arm the next read. No 100 Hz polling or unsolicited 9P reply is
+introduced.
 
 Overflow or sequence exhaustion poisons the stream, discards unread entries,
 invalidates that connection's published interaction contexts and fails pending

@@ -20,6 +20,14 @@ design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
 updated: 2026-10-02
 ---
+## Local ordered-stream progress
+
+The ordered exchange exposes runnable local work: a deliverable retained record
+or a read/write needing submission. The service folds this into its poll timeout,
+so consuming a record rearms the channel without waiting for an unrelated seat
+State timeout. Pending I/O and decisions awaiting their write CQE do not spin.
+HSC remains first in the executor pass; no extra timer or authority is introduced.
+
 ## Ordered interaction channel
 
 `ordered::Channel` selects one unused ctl fid on the existing declared session

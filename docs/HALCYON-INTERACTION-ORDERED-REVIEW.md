@@ -42,3 +42,12 @@ work/oct2-hi-ordered. Failed native/build/harness evidence remains. Temporary
 kernel tracing was removed. App dispatch, deadlines, reply cancellation,
 aggregate resource accounting, populated two-client native tests and user-facing
 modal painting remain integration work; this checkpoint does not activate them.
+
+Progress follow-up (HI1-R19): the receiver could consume its final record after
+the channel's submission pass, then the service waited without a new read armed.
+Existing HSC timeouts hid the missing immediate rearm. The runnable hint is true
+only for deliverable retained records or unsubmitted I/O; it is false for a
+parked read and an early decision still awaiting Rwrite. Controlled schedules
+and lost-rearm/blocked-decision-spin mutants pin both sides. The service folds
+this hint into its existing poll deadline and still pumps HSC first. No buffer
+is reused, no additional thread/timer is added, and authority order is unchanged.

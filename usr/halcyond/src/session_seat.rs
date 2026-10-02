@@ -73,6 +73,9 @@ impl Link {
     pub fn ready(&self) -> bool {
         self.joined && self.admission.ready()
     }
+    pub fn runnable(&self) -> bool {
+        self.admission.runnable()
+    }
     pub fn retired(&self) -> bool {
         self.retired
     }

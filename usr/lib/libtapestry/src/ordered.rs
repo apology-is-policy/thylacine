@@ -47,6 +47,19 @@ impl Exchange {
     pub fn ready(&self) -> bool {
         !self.failed && self.selected && self.receiver.identity().is_some()
     }
+    /// Local work must run before sleeping on kernel readiness.
+    pub fn runnable(&self) -> bool {
+        if self.failed {
+            return false;
+        }
+        let deliverable = self.record.is_some_and(|r| {
+            !matches!(r.body, Body::Decision { .. })
+                || (self.write.is_none() && self.outbound.is_none())
+        });
+        deliverable
+            || (self.write.is_none() && self.outbound.is_some())
+            || (self.selected && self.read.is_none() && self.record.is_none())
+    }
     pub fn start(&mut self, r: Request) -> Result<[u8; 80], Error> {
         if self.failed {
             return Err(Error::Protocol);
@@ -209,6 +222,9 @@ mod native {
                 exchange: Exchange::new(),
             })
         }
+        pub fn runnable(&self) -> bool {
+            self.exchange.runnable()
+        }
         pub fn ready(&self) -> bool {
             self.exchange.ready()
         }
@@ -320,6 +336,27 @@ mod tests {
             ),
         }
         .encode()
+    }
+    #[test]
+    fn local_rearm_and_retained_records_do_not_need_an_unrelated_wakeup() {
+        let mut e = ready();
+        assert!(e.runnable());
+        let r = e.submit_read().unwrap().unwrap();
+        assert!(!e.runnable());
+        e.start(q()).unwrap();
+        assert!(e.runnable());
+        let w = e.submit_write().unwrap().unwrap();
+        assert!(!e.runnable());
+        e.complete(r.tag, 80, &decision(2)).unwrap();
+        assert!(!e.runnable()); // A blocked decision cannot busy-spin.
+        e.complete(w.tag, 80, &[]).unwrap();
+        assert!(e.runnable());
+        e.take().unwrap();
+        assert!(e.runnable()); // Rearm immediately after the last record.
+        let r = e.submit_read().unwrap().unwrap();
+        assert!(!e.runnable());
+        assert!(e.complete(r.tag, -5, &[]).is_err());
+        assert!(!e.runnable());
     }
     #[test]
     fn parked_read_does_not_block_write_and_cqe_order_cannot_release_early() {

@@ -1068,7 +1068,9 @@ fn serve_owner(
                 n += 1;
             }
         }
-        let timeout = if !stopping && conns.iter().any(|c| c.stream.runnable()) {
+        let timeout = if seat.as_ref().is_some_and(|s| s.runnable())
+            || (!stopping && conns.iter().any(|c| c.stream.runnable()))
+        {
             0
         } else {
             -1
