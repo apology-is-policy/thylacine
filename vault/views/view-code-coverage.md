@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**575 owned · 45 unowned · 620 files (92% owned) · ~12024 unswept lines.**
+**581 owned · 45 unowned · 626 files (92% owned) · ~12024 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **83 files, ~38315 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **85 files, ~38811 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -77,12 +77,12 @@ Excluded as harness and counted here rather than dropped: **83 files, ~38315 lin
 | kernel | 132 | 12 | 1566 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/libthyla-rs | 32 | 1 | 196 |
+| usr/libthyla-rs | 33 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 79 | 1 | 72 |
+| usr/lib | 81 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
-| usr/tapestryd | 9 | 2 | 21 |
+| usr/tapestryd | 10 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
 | usr/coreutils | 65 | 0 | 0 |
@@ -91,7 +91,7 @@ Excluded as harness and counted here rather than dropped: **83 files, ~38315 lin
 | usr/diorama | 2 | 0 | 0 |
 | usr/gallery | 2 | 0 | 0 |
 | usr/halcyon | 2 | 0 | 0 |
-| usr/halcyond | 37 | 0 | 0 |
+| usr/halcyond | 38 | 0 | 0 |
 | usr/haul | 5 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
@@ -99,7 +99,7 @@ Excluded as harness and counted here rather than dropped: **83 files, ~38315 lin
 | usr/joey | 1 | 0 | 0 |
 | usr/kaua-term | 4 | 0 | 0 |
 | usr/lantern | 4 | 0 | 0 |
-| usr/lictor | 30 | 0 | 0 |
+| usr/lictor | 31 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/manual | 7 | 0 | 0 |

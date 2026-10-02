@@ -15,8 +15,16 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-01
+updated: 2026-10-02
 ---
+## Resident cancellation route (October 2)
+
+Login's fixed resident service map now includes `tapestry-interaction`, so a
+session cannot shadow the cancellation coordinator with a locally posted name.
+The route is not authority: Tapestry requires an exact normal-renderer
+reservation and fresh kernel peer stripes. It charges one session connection;
+D7's 16 per-session / 48 combined / 64 global limits remain unchanged.
+
 ## D7 concurrent sessions (October 1)
 
 Before AUTH, login replaces `/srv` with a private factory-created view and

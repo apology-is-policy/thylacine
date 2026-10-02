@@ -26,6 +26,9 @@
 //      reads a pane's /env through /proc/<pid>/environ, as it can write that
 //      pane's pts -- and those panes are one authority domain
 //      (dec-2026-09-29-inline-media-one-principal).
+// The independently scheduled service owns protocol, peer checks, buffers and
+// the clipboard broker. The UI exchanges bounded route/budget metadata and
+// moved image results; it never lends a Surface or protocol state to the owner.
 // The DoS floor: MAX_CONNS bounds concurrent transfers; the per-image cap
 // (`max_pixels`, the heap residual DIVIDED by MAX_CONNS -- set each loop by the
 // compositor) bounds a single transfer AND, times MAX_CONNS, the aggregate
@@ -34,23 +37,20 @@
 // its content share; the cache evicts oldest rasters, leaving readable captions.
 // Admission and completion also honor the smallest live cache's pixel budget.
 
-use alloc::collections::BTreeMap;
+use crate::serviceio::NativeEndpoint;
 use alloc::string::String;
 use alloc::vec::Vec;
 use halcyond::servicewire::{Handler, Interest, Stream};
-use crate::serviceio::NativeEndpoint;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::File;
 use libthyla_rs::handle::Rights;
-use libthyla_rs::poll::AsFd;
-use libthyla_rs::poll_worker::{PollWorker, WatchId};
 
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
 use halcyond::paneroute::{self, Node, Quiet};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_getuid, t_open, t_srv_accept, t_srv_peer, t_walk_create, TPollFd,
-    TSrvPeerInfo, T_OPATH, T_OREAD, T_POLLHUP, T_POLLIN, T_POLLOUT, T_POLLERR, T_POLLNVAL, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_getuid, t_open, t_srv_accept, t_srv_peer, t_walk_create, TPollFd, TSrvPeerInfo,
+    T_OPATH, T_OREAD, T_POLLERR, T_POLLHUP, T_POLLIN, T_POLLNVAL, T_POLLOUT, T_WALK_OPEN_FROM_ROOT,
 };
 
 const SRV_MSIZE: u32 = halcyond::servicewire::MAX_FRAME as u32;
@@ -124,6 +124,7 @@ fn is_dir(node: Node) -> bool {
 /// it must inject into. The compositor drains these and calls the tile's
 /// `Tile::place_image` (whose raster cache enforces the per-pane stored quota).
 pub struct PaneCompletedImage {
+    token: u128,
     pub id: u128,
     pub leaf: u32,
     pub w: u32,
@@ -151,12 +152,11 @@ struct Budget {
     max_pixels: u64,
     others_reserved: usize,
     residual_bytes: u64,
+    completion_slots: usize,
 }
 
 #[derive(Default)]
 struct Diag {
-    accepted: Quiet,
-    refused: Quiet,
     walk_noent: Quiet,
     unrouted: Quiet,
 }
@@ -164,39 +164,110 @@ struct Diag {
 // The accepted endpoint is explicitly nonblocking before Conn exists. The
 // common pump owns input/offsets; Protocol owns fids, accumulator and ONE reply.
 struct Conn {
-    watch: WatchId,
+    file: File,
     ready: i16,
     stream: Stream,
     protocol: Protocol,
 }
 impl Conn {
-    fn new(watch: WatchId) -> Self {
-        Self { watch, ready: 0, stream: Stream::new(), protocol: Protocol::new() }
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            ready: 0,
+            stream: Stream::new(),
+            protocol: Protocol::new(),
+        }
     }
     fn events(&self) -> i16 {
-        match self.stream.interest() { Interest::Read => T_POLLIN, Interest::Write => T_POLLOUT }
+        match self.stream.interest() {
+            Interest::Read => T_POLLIN,
+            Interest::Write => T_POLLOUT,
+        }
     }
-    fn service(&mut self, worker: &mut PollWorker, out: &mut Vec<PaneCompletedImage>, routes: &BTreeMap<u128, u32>, budget: Budget, diag: &mut Diag, deadline: u64) -> Result<bool, Error> {
-        let mut reply = Reply { protocol: &mut self.protocol, out, routes, budget, diag };
-        worker.with_fd(self.watch, |fd| self.stream.service(&mut NativeEndpoint(fd as i64), &mut reply, deadline))
+    fn service(
+        &mut self,
+        out: &mut Vec<PaneCompletedImage>,
+        shared: &Shared,
+        control: &libthyla_rs::service_worker::Control,
+        other_accums: usize,
+        diag: &mut Diag,
+        deadline: u64,
+    ) -> bool {
+        let mut reply = Reply {
+            protocol: &mut self.protocol,
+            out,
+            shared,
+            control,
+            other_accums,
+            diag,
+        };
+        self.stream.service(
+            &mut NativeEndpoint(self.file.as_raw_fd() as i64),
+            &mut reply,
+            deadline,
+        )
     }
 }
 struct Reply<'a> {
     protocol: &'a mut Protocol,
     out: &'a mut Vec<PaneCompletedImage>,
-    routes: &'a BTreeMap<u128, u32>,
-    budget: Budget,
+    shared: &'a Shared,
+    control: &'a libthyla_rs::service_worker::Control,
+    other_accums: usize,
     diag: &'a mut Diag,
 }
 impl Handler for Reply<'_> {
     fn dispatch(&mut self, frame: &[u8]) -> Result<(), ()> {
         let hdr = p9::peek_header(frame)?;
-        match self.protocol.dispatch(frame, hdr, self.out, self.routes, self.budget, self.diag) {
+        let (routes, budget) = {
+            let m = self.shared.mail.lock();
+            if m.failed {
+                return Err(());
+            }
+            (
+                m.routes,
+                Budget {
+                    max_pixels: m.max_pixels,
+                    others_reserved: self.other_accums
+                        + m.completed
+                            .iter()
+                            .flatten()
+                            .map(|i| i.argb.len() * 4)
+                            .sum::<usize>(),
+                    residual_bytes: m.residual,
+                    completion_slots: m.completed.iter().filter(|s| s.is_none()).count(),
+                },
+            )
+        };
+        match self
+            .protocol
+            .dispatch(frame, hdr, self.out, &routes, budget, self.diag)
+        {
             Disp::Fatal => Err(()),
-            Disp::Reply(n) => { self.protocol.out_buf.truncate(n); Ok(()) }
+            Disp::Reply(n) => {
+                self.protocol.out_buf.truncate(n);
+                // Publication precedes Rwrite: a successful client may exit or
+                // publish its transcript object immediately after that reply.
+                // Move payloads; no queue ever duplicates an image allocation.
+                if !self.out.is_empty() {
+                    let mut m = self.shared.mail.lock();
+                    for img in self.out.drain(..) {
+                        if !completion_route_current(&m.routes, &img) {
+                            continue;
+                        }
+                        let slot = m.completed.iter_mut().find(|s| s.is_none()).ok_or(())?;
+                        *slot = Some(img);
+                    }
+                    drop(m);
+                    self.control.notify().map_err(|_| ())?;
+                }
+                Ok(())
+            }
         }
     }
-    fn reply(&self) -> &[u8] { &self.protocol.out_buf }
+    fn reply(&self) -> &[u8] {
+        &self.protocol.out_buf
+    }
 }
 
 struct Protocol {
@@ -258,13 +329,15 @@ impl Protocol {
         tmsg: &[u8],
         hdr: p9::Header,
         out: &mut Vec<PaneCompletedImage>,
-        routes: &BTreeMap<u128, u32>,
+        routes: &Routes,
         budget: Budget,
         diag: &mut Diag,
     ) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
-        if self.out_buf.try_reserve_exact(SRV_MSIZE_USIZE).is_err() { return Disp::Fatal; }
+        if self.out_buf.try_reserve_exact(SRV_MSIZE_USIZE).is_err() {
+            return Disp::Fatal;
+        }
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
         let r = match hdr.mtype {
             p9::P9_TVERSION => self.h_version(tmsg, tag),
@@ -335,8 +408,13 @@ impl Protocol {
         p9::build_rattach(&mut self.out_buf, tag, &qid_of(Node::Root))
     }
 
-    fn h_walk(&mut self, tmsg: &[u8], tag: u16, routes: &BTreeMap<u128, u32>,
-        diag: &mut Diag) -> Result<usize, ()> {
+    fn h_walk(
+        &mut self,
+        tmsg: &[u8],
+        tag: u16,
+        routes: &Routes,
+        diag: &mut Diag,
+    ) -> Result<usize, ()> {
         let a = match p9::parse_twalk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -371,12 +449,7 @@ impl Protocol {
                 // not (yet) routed, or malformed (a 32-byte name is a token
                 // attempt; anything else is not a place path).
                 if let Some(n) = diag.walk_noent.next() {
-                    say!(
-                        "halcyond: place walk NOENT at root (nwname={} first={} bytes; {} so far)",
-                        a.nwname,
-                        a.names[0].len(),
-                        n
-                    );
+                    let _ = n; // diagnostics must be drained by the UI, never written here
                 }
             }
             return self.err(tag, p9::E_NOENT);
@@ -437,10 +510,13 @@ impl Protocol {
         tmsg: &[u8],
         tag: u16,
         out: &mut Vec<PaneCompletedImage>,
-        routes: &BTreeMap<u128, u32>,
+        routes: &Routes,
         budget: Budget,
         diag: &mut Diag,
     ) -> Result<usize, ()> {
+        if out.len() >= budget.completion_slots {
+            return self.err(tag, p9::E_BUSY);
+        }
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -455,6 +531,15 @@ impl Protocol {
             Node::Place(t) if f.opened => t,
             _ => return self.err(tag, p9::E_INVAL),
         };
+        // Charge queued completions and the current conversion peak even on
+        // a reused fid. Keeping an accumulator object cannot bypass admission
+        // for the next image after an earlier completion moved into the queue.
+        let current_peak = (self.reserved() as u64).saturating_mul(2);
+        let next_peak = budget.max_pixels.saturating_mul(8).max(current_peak);
+        if (budget.others_reserved as u64).saturating_add(next_peak) > budget.residual_bytes {
+            self.accum = None;
+            return self.err(tag, p9::E_NOMEM);
+        }
         // One place transfer per connection at a time: a second place-fid write
         // while one is in flight is refused (bounds the held partials).
         match &mut self.accum {
@@ -474,7 +559,8 @@ impl Protocol {
                 // the compositor heap. Fail clean (the client falls back to a
                 // report), never OOM.
                 let new_peak = budget.max_pixels.saturating_mul(8);
-                if (budget.others_reserved as u64).saturating_add(new_peak) > budget.residual_bytes {
+                if (budget.others_reserved as u64).saturating_add(new_peak) > budget.residual_bytes
+                {
                     return self.err(tag, p9::E_NOMEM);
                 }
                 self.accum = Some((a.fid, PlaceAccum::new(budget.max_pixels)));
@@ -498,15 +584,17 @@ impl Protocol {
                     return self.err(tag, p9::E_INVAL);
                 }
                 if let Some(&leaf) = routes.get(&token) {
-                    out.push(PaneCompletedImage { id, leaf, w, h, argb });
+                    out.push(PaneCompletedImage {
+                        token,
+                        id,
+                        leaf,
+                        w,
+                        h,
+                        argb,
+                    });
                 } else {
                     if let Some(n) = diag.unrouted.next() {
-                        say!(
-                            "halcyond: place completed {}x{} but its token is not routed (tile gone; {} so far)",
-                            w,
-                            h,
-                            n
-                        );
+                        let _ = n; // diagnostics must be drained by the UI, never written here
                     }
                     return self.err(tag, p9::E_NOENT);
                 }
@@ -580,216 +668,443 @@ impl Protocol {
     }
 }
 
-/// Once POST succeeds, failure must end the posting process: closing the
-/// listener does not unpost its name. The session caller handles this explicitly.
+/// Once setup may have published a listener or enabled a participant, failure
+/// ends the session. It must not leave a live poster with a dead executor.
 #[derive(Debug)]
 pub enum PostError {
     Unavailable,
     Published(Error),
 }
-
-/// The per-user session place server. PollWorker owns all watched handles;
-/// token routes, peer checks and completed rasters stay on the UI thread.
-pub struct PanePlaceServer {
-    worker: PollWorker,
-    listener: WatchId,
-    listener_armed: bool,
-    listener_ready: bool,
-    conns: Vec<Conn>,
-    completed: Vec<PaneCompletedImage>,
-    /// token -> live tile leaf. The compositor keeps this current
-    /// (`register`/`unregister_leaf`); a walk resolves a token ONLY while it is
-    /// present, so a closed tile's token fails closed (E_NOENT).
-    routes: BTreeMap<u128, u32>,
-    /// The session's own principal (from t_getuid at post). A connection whose
-    /// peer principal differs is refused at accept -- the authority gate; tokens route.
-    principal: u32,
-    /// The session user, for the `/srv/halcyon-<user>/...` addresses this
-    /// server hands panes (`place_address`). Owned so the compositor need not
-    /// thread it alongside the server.
-    user: String,
-    /// The current per-image pixel cap (heap residual / (8*MAX_CONNS)), set each
-    /// loop by the compositor.
-    max_pixels: u64,
-    /// The current total place-path residual in BYTES (the heap left after the
-    /// scrollback budget + baseline + the display-scaled atlas). The live
-    /// AGGREGATE bound (F2/F5): a new transfer is admitted only if the buffers
-    /// already reserved by OTHER connections plus this transfer's worst-case
-    /// peak fit here -- so two accums, one sized at a pre-resize (larger) cap,
-    /// cannot combine to over-commit the heap.
-    residual_bytes: u64,
-    diag: Diag,
+const ROUTES: usize = 32;
+const _: () = assert!(core::mem::size_of::<PaneCompletedImage>() <= 128);
+#[derive(Clone, Copy)]
+struct Routes {
+    slots: [Option<(u128, u32)>; ROUTES],
 }
-
-impl PanePlaceServer {
-    /// Post `/srv/halcyon-<user>` (9P-mode; perm 0). Requires
-    /// MAY_POST_SERVICE (login grants the session compositor the bit, one hop).
-    /// Unavailable means no name was published; media may stay unavailable.
-    /// Published means the caller must exit so the registry cannot retain a
-    /// dead endpoint. Start the worker and preallocate connection metadata
-    /// before POST so ordinary allocation/startup failures publish nothing.
-    pub fn post(user: &str) -> Result<PanePlaceServer, PostError> {
-        let mut worker = PollWorker::new(MAX_CONNS + 1).map_err(|_| PostError::Unavailable)?;
-        let mut conns = Vec::new();
-        conns.try_reserve_exact(MAX_CONNS).map_err(|_| PostError::Unavailable)?;
-        let uid = unsafe { t_getuid() };
-        if uid < 0 {
-            return Err(PostError::Unavailable); // fail-closed: without a principal the accept gate cannot hold.
+const _: () = assert!(core::mem::size_of::<Routes>() <= 32 * 128);
+impl Routes {
+    fn empty() -> Self {
+        Self {
+            slots: [None; ROUTES],
         }
-        let mut name = String::with_capacity(8 + user.len());
-        name.push_str("halcyon-");
-        name.push_str(user);
-        let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
-        if srv < 0 {
-            return Err(PostError::Unavailable);
-        }
-        let listener =
-            unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD, 0) };
-        let _ = unsafe { t_close(srv) };
-        if listener < 0 {
-            return Err(PostError::Unavailable);
-        }
-        let listener = unsafe { File::from_raw_fd(listener as i32, Rights::READ) };
-        let listener = worker.register_owned(listener, T_POLLIN).map_err(PostError::Published)?;
-        Ok(PanePlaceServer {
-            worker,
-            listener,
-            listener_armed: true,
-            listener_ready: false,
-            conns,
-            completed: Vec::new(),
-            routes: BTreeMap::new(),
-            principal: uid as u32,
-            user: String::from(user),
-            max_pixels: PLACE_MAX_PIXELS_HARD,
-            residual_bytes: PLACE_MAX_PIXELS_HARD * 8 * MAX_CONNS as u64,
-            diag: Diag::default(),
-        })
     }
-
-    /// The `/env/HALCYON_PLACE` address a pane's programs open to place into a
-    /// tile: `/srv/halcyon-<user>/<hex(token)>/place`. The compositor writes
-    /// this into the tile's environment before spawning it.
+    fn get(&self, token: &u128) -> Option<&u32> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|(t, _)| t == token)
+            .map(|(_, l)| l)
+    }
+    fn contains_key(&self, token: &u128) -> bool {
+        self.get(token).is_some()
+    }
+    fn insert(&mut self, token: u128, leaf: u32) -> bool {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|s| s.is_some_and(|(t, _)| t == token))
+        {
+            *slot = Some((token, leaf));
+            return true;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.is_none()) {
+            *slot = Some((token, leaf));
+            return true;
+        }
+        false
+    }
+    fn remove_leaf(&mut self, leaf: u32) {
+        for slot in &mut self.slots {
+            if slot.is_some_and(|(_, l)| l == leaf) {
+                *slot = None;
+            }
+        }
+    }
+}
+fn completion_route_current(routes: &Routes, image: &PaneCompletedImage) -> bool {
+    routes.get(&image.token) == Some(&image.leaf)
+}
+// The desired route table is a bounded, coalesced metadata mailbox: 32 records.
+// Removing a route updates this same durable state; revocations cannot fall out
+// of a full queue. The executor copies metadata, never holds this lock for I/O.
+struct Mailbox {
+    routes: Routes,
+    revision: u64,
+    max_pixels: u64,
+    residual: u64,
+    completed: [Option<PaneCompletedImage>; MAX_CONNS],
+    failed: bool,
+}
+struct Shared {
+    user: String,
+    principal: u32,
+    published: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    mail: libthyla_rs::sync::Mutex<Mailbox>,
+    seat: libthyla_rs::sync::Mutex<Option<crate::session_seat::Setup>>,
+}
+pub struct PanePlaceServer {
+    owner: libthyla_rs::service_worker::ServiceWorker<Shared>,
+}
+impl PanePlaceServer {
+    /// Media-only native fixtures do not register clipboard authority.
+    pub fn post(user: &str) -> Result<Self, PostError> {
+        Self::start(user, None)
+    }
+    pub fn post_on(user: &str, ring: &tapestry::EventRing) -> Result<Self, PostError> {
+        let admission =
+            tapestry::admission::Channel::preopen(ring).map_err(|_| PostError::Unavailable)?;
+        let (reservation, snapshot) =
+            tapestry::seat::reserve(ring).map_err(|_| PostError::Unavailable)?;
+        Self::start(
+            user,
+            Some(crate::session_seat::Setup {
+                reservation,
+                admission,
+                snapshot,
+            }),
+        )
+    }
+    fn start(user: &str, seat: Option<crate::session_seat::Setup>) -> Result<Self, PostError> {
+        let uid = unsafe { t_getuid() };
+        if uid < 0 || user.is_empty() || user.len() > 24 {
+            return Err(PostError::Unavailable);
+        }
+        let published = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let shared = Shared {
+            user: String::from(user),
+            principal: uid as u32,
+            published: published.clone(),
+            seat: libthyla_rs::sync::Mutex::new(seat),
+            mail: libthyla_rs::sync::Mutex::new(Mailbox {
+                routes: Routes::empty(),
+                revision: 0,
+                max_pixels: PLACE_MAX_PIXELS_HARD,
+                residual: PLACE_MAX_PIXELS_HARD * 8 * MAX_CONNS as u64,
+                completed: core::array::from_fn(|_| None),
+                failed: false,
+            }),
+        };
+        libthyla_rs::service_worker::ServiceWorker::new(shared, run_owner)
+            .map(|owner| Self { owner })
+            .map_err(|e| {
+                if published.load(core::sync::atomic::Ordering::Acquire) {
+                    PostError::Published(e)
+                } else {
+                    PostError::Unavailable
+                }
+            })
+    }
     pub fn place_address(&self, token: u128) -> String {
+        let user = &self.owner.state().unwrap().user;
         let hex = paneroute::hex32(token);
-        let mut s = String::with_capacity(13 + self.user.len() + 32 + 6);
+        let mut s = String::with_capacity(13 + user.len() + 32 + 6);
         s.push_str("/srv/halcyon-");
-        s.push_str(&self.user);
+        s.push_str(user);
         s.push('/');
-        for &b in hex.iter() {
+        for b in hex {
             s.push(b as char);
         }
         s.push_str("/place");
         s
     }
-
-    /// Bind a token to a live tile leaf (called when the compositor spawns the
-    /// tile, alongside writing the tile's `/env/HALCYON_PLACE`).
-    pub fn register(&mut self, token: u128, leaf: u32) {
-        self.routes.insert(token, leaf);
+    pub fn register(&mut self, token: u128, leaf: u32) -> bool {
+        let Ok(shared) = self.owner.state() else {
+            return false;
+        };
+        {
+            let mut m = shared.mail.lock();
+            if !m.routes.insert(token, leaf) {
+                return false;
+            }
+            let Some(n) = m.revision.checked_add(1) else {
+                m.failed = true;
+                return false;
+            };
+            m.revision = n;
+        }
+        self.owner.wake().is_ok()
     }
-
-    /// Drop every token routing to `leaf` (called when the tile closes/crashes),
-    /// so a subsequent walk to it fails closed.
     pub fn unregister_leaf(&mut self, leaf: u32) {
-        self.routes.retain(|_, &mut l| l != leaf);
+        if let Ok(shared) = self.owner.state() {
+            let mut m = shared.mail.lock();
+            m.routes.remove_leaf(leaf);
+            for slot in &mut m.completed {
+                if slot.as_ref().is_some_and(|i| i.leaf == leaf) {
+                    *slot = None;
+                }
+            }
+            if let Some(n) = m.revision.checked_add(1) {
+                m.revision = n;
+            } else {
+                m.failed = true;
+            }
+        }
+        let _ = self.owner.wake();
     }
-
-    /// Set the effective per-image pixel cap AND the total residual budget. The
-    /// compositor derives both from the live display-scaled atlas residual: the
-    /// per-image cap is `residual / (8*MAX_CONNS)` (clamped to
-    /// `[PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD]`), and `residual_bytes` is the
-    /// full residual -- the live aggregate ceiling checked at new-accum
-    /// admission (F2/F5), which catches a stale accum sized at a pre-resize cap.
-    pub fn set_budget(&mut self, per_image_px: u64, residual_bytes: u64) {
-        self.max_pixels = per_image_px.clamp(PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD);
-        // Never below the space one clamped image needs, so a small display can
-        // still admit one transfer.
-        self.residual_bytes = residual_bytes.max(self.max_pixels * 8);
+    pub fn set_budget(&mut self, per_image: u64, residual: u64) {
+        let Ok(shared) = self.owner.state() else {
+            return;
+        };
+        let mut m = shared.mail.lock();
+        let max = per_image.clamp(PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD);
+        let residual = residual.max(max * 8);
+        let changed = m.max_pixels != max || m.residual != residual;
+        m.max_pixels = max;
+        m.residual = residual;
+        drop(m);
+        if changed {
+            let _ = self.owner.wake();
+        }
     }
-
-    /// Complete buffered requests need another turn even without a read edge.
     pub fn runnable(&self) -> bool {
-        self.conns.iter().any(|c| c.stream.runnable())
+        self.owner
+            .state()
+            .is_ok_and(|s| s.mail.lock().completed.iter().any(Option::is_some))
     }
-
-    /// One descriptor represents every service source in the UI poll set.
     pub fn push_fds(&self, fds: &mut Vec<TPollFd>) {
-        fds.push(TPollFd { fd: self.worker.as_raw_fd(), events: T_POLLIN, revents: 0 });
+        fds.push(TPollFd {
+            fd: self.owner.notice_fd(),
+            events: T_POLLIN,
+            revents: 0,
+        });
     }
-
-    /// One bounded UI pass; the worker reports readiness only. Protocol state,
-    /// peer checks and image delivery never leave this thread. Errors are fatal
-    /// to the posting compositor, not permission to leave a dead service name.
     pub fn service(&mut self) -> Result<(), Error> {
-        for event in self.worker.take_ready()?.iter() {
-            if event.watch == self.listener {
-                if event.events & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0 { return Err(Error::Io); }
-                self.listener_ready = true;
-                self.listener_armed = false;
-            } else if let Some(c) = self.conns.iter_mut().find(|c| c.watch == event.watch) {
-                c.ready |= event.events;
-            }
+        self.owner.check()?;
+        if self.owner.state()?.mail.lock().failed {
+            Err(Error::Io)
+        } else {
+            Ok(())
         }
-        if self.listener_ready && self.conns.len() < MAX_CONNS && self.worker.free_slots()? > 0 {
-            self.listener_ready = false;
-            let h = self.worker.with_fd(self.listener, |fd| unsafe { t_srv_accept(fd as i64) })?;
-            if h >= 0 {
-                let file = unsafe { File::from_raw_fd(h as i32, Rights::READ | Rights::WRITE) };
-                let mut info = TSrvPeerInfo::default();
-                if unsafe { libthyla_rs::t_set_nonblock(h, true) } == 0
-                    && unsafe { t_srv_peer(h, &mut info) } == 0
-                    && info.alive == 1 && info.principal_id == self.principal {
-                    let watch = self.worker.register_owned(file, T_POLLIN)?;
-                    self.conns.push(Conn::new(watch));
-                    if let Some(n) = self.diag.accepted.next() {
-                        say!("halcyond: place conn from principal {} ({} so far)", info.principal_id, n);
-                    }
-                } else {
-                    if let Some(n) = self.diag.refused.next() {
-                        say!("halcyond: place conn REFUSED (peer {} alive {} != self {}; {} so far)",
-                            info.principal_id, info.alive, self.principal, n);
-                    }
-                    // Refused peers close via File before any publication.
-                }
-            } else if h != -11 { return Err(Error::Io); }
-        }
-        if !self.conns.is_empty() { self.conns.rotate_left(1); }
-        let deadline = libthyla_rs::time::monotonic_ns().saturating_add(2_000_000);
-        let mut i = self.conns.len();
-        while i > 0 {
-            i -= 1;
-            if self.conns[i].ready != 0 || self.conns[i].stream.runnable() {
-                let others = self.conns.iter().enumerate().filter(|(j, _)| *j != i)
-                    .map(|(_, c)| c.protocol.reserved()).sum();
-                let budget = Budget { max_pixels: self.max_pixels, others_reserved: others,
-                    residual_bytes: self.residual_bytes };
-                let close = self.conns[i].ready & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
-                    || !self.conns[i].service(&mut self.worker, &mut self.completed, &self.routes, budget, &mut self.diag, deadline)?;
-                self.conns[i].ready = 0;
-                if close {
-                    let c = self.conns.remove(i);
-                    self.worker.remove(c.watch)?;
-                } else if !self.conns[i].stream.runnable() {
-                    // Buffered work remains disarmed and keeps the UI runnable.
-                    // Partial input or blocked output needs real readiness.
-                    self.worker.rearm(self.conns[i].watch, self.conns[i].events())?;
-                }
-            }
-        }
-        // A retired connection still consumes a worker slot. Reclamation emits
-        // a notice; only then rearm the listener. A full service cannot spin.
-        if !self.listener_armed && !self.listener_ready && self.conns.len() < MAX_CONNS
-            && self.worker.free_slots()? > 0 {
-            self.worker.rearm(self.listener, T_POLLIN)?;
-            self.listener_armed = true;
-        }
-        Ok(())
     }
-
-    /// Take the rasters completed since the last call (each tagged with its
-    /// target tile leaf).
     pub fn take_completed(&mut self) -> Vec<PaneCompletedImage> {
-        core::mem::take(&mut self.completed)
+        let mut out = Vec::new();
+        let Ok(shared) = self.owner.state() else {
+            return out;
+        };
+        let mut m = shared.mail.lock();
+        if out.try_reserve_exact(MAX_CONNS).is_err() {
+            m.failed = true;
+            return out;
+        }
+        for slot in &mut m.completed {
+            if let Some(img) = slot.take() {
+                out.push(img);
+            }
+        }
+        drop(m);
+        let _ = self.owner.wake();
+        out
+    }
+}
+fn run_owner(shared: &Shared, control: &libthyla_rs::service_worker::Control) -> Result<(), Error> {
+    let setup = shared.seat.lock().take();
+    let participated = setup.is_some();
+    let result = serve_owner(shared, control, setup);
+    // A stopped or failed posted service cannot leave a dead resident name.
+    // Shutdown occurs at process/session exit; no console write can precede it
+    // on failure because ordinary console output parks during trusted input.
+    if result.is_err()
+        && (participated || shared.published.load(core::sync::atomic::Ordering::Acquire))
+    {
+        unsafe {
+            libthyla_rs::t_exit_group(1);
+        }
+    }
+    result
+}
+fn serve_owner(
+    shared: &Shared,
+    control: &libthyla_rs::service_worker::Control,
+    setup: Option<crate::session_seat::Setup>,
+) -> Result<(), Error> {
+    let mut seat = match setup {
+        Some(s) => Some(crate::session_seat::Link::new(s)?),
+        None => None,
+    };
+    let deadline = libthyla_rs::time::monotonic_ns() + 4_000_000_000;
+    if let Some(seat) = seat.as_mut() {
+        while !seat.ready() {
+            if control.stopping() || libthyla_rs::time::monotonic_ns() >= deadline {
+                return Err(Error::TimedOut);
+            }
+            seat.pump()?;
+            let mut p = TPollFd {
+                fd: seat.fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            unsafe {
+                libthyla_rs::t_poll(&mut p, 1, 10);
+            }
+        }
+    }
+    let mut conns = Vec::new();
+    conns
+        .try_reserve_exact(MAX_CONNS)
+        .map_err(|_| Error::NoMemory)?;
+    let mut completed = Vec::new();
+    completed
+        .try_reserve_exact(MAX_CONNS)
+        .map_err(|_| Error::NoMemory)?;
+    let name = alloc::format!("halcyon-{}", shared.user);
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
+    if root < 0 {
+        return Err(Error::Io);
+    }
+    let fd = unsafe { t_walk_create(root, name.as_ptr(), name.len(), T_OREAD, 0) };
+    unsafe {
+        t_close(root);
+    }
+    if fd < 0 {
+        return Err(Error::Io);
+    }
+    let listener = unsafe { File::from_raw_fd(fd as i32, Rights::READ) };
+    // Publication has happened; caller error paths now end the posting Proc.
+    // This flag is independent of mailbox revision and cannot be coalesced.
+    shared
+        .published
+        .store(true, core::sync::atomic::Ordering::Release);
+    libthyla_rs::service_worker::qualify_published()?;
+    control.ready()?;
+    let mut diag = Diag::default();
+    let mut stopping = false;
+    loop {
+        control.drain_wake()?;
+        if control.stopping() {
+            stopping = true;
+            if let Some(s) = seat.as_mut() {
+                s.stop();
+            } else {
+                return Ok(());
+            }
+        }
+        if let Some(s) = seat.as_mut() {
+            s.pump()?;
+            if stopping && s.retired() {
+                return Ok(());
+            }
+        }
+        if shared.mail.lock().failed {
+            return Err(Error::Io);
+        }
+        if !stopping {
+            if !conns.is_empty() {
+                conns.rotate_left(1);
+            }
+            let deadline = libthyla_rs::time::monotonic_ns() + 2_000_000;
+            let mut i = conns.len();
+            while i > 0 {
+                i -= 1;
+                let c: &Conn = &conns[i];
+                if c.ready == 0 && !c.stream.runnable() {
+                    continue;
+                }
+                let others = conns
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, c)| c.protocol.reserved())
+                    .sum::<usize>();
+                let close = conns[i].ready & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
+                    || !conns[i].service(
+                        &mut completed,
+                        shared,
+                        control,
+                        others,
+                        &mut diag,
+                        deadline,
+                    );
+                if close {
+                    conns.remove(i);
+                } else {
+                    conns[i].ready = 0;
+                }
+            }
+        }
+        let mut poll = [TPollFd::default(); MAX_CONNS + 4];
+        poll[0] = TPollFd {
+            fd: control.stop_fd(),
+            events: T_POLLIN,
+            revents: 0,
+        };
+        let mut n = 1;
+        let seat_index = seat.as_ref().map(|s| {
+            let i = n;
+            poll[i] = TPollFd {
+                fd: s.fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            n += 1;
+            i
+        });
+        let admission_index = seat.as_ref().map(|s| {
+            let i = n;
+            poll[i] = TPollFd {
+                fd: s.admission_fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            n += 1;
+            i
+        });
+        let listener_index = if !stopping && conns.len() < MAX_CONNS {
+            let i = n;
+            poll[i] = TPollFd {
+                fd: listener.as_raw_fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            n += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let base = n;
+        if !stopping {
+            for c in &conns {
+                poll[n] = TPollFd {
+                    fd: c.file.as_raw_fd(),
+                    events: c.events(),
+                    revents: 0,
+                };
+                n += 1;
+            }
+        }
+        let timeout = if !stopping && conns.iter().any(|c| c.stream.runnable()) {
+            0
+        } else {
+            -1
+        };
+        Error::from_syscall_return(unsafe { libthyla_rs::t_poll(poll.as_mut_ptr(), n, timeout) })?;
+        for i in [seat_index, admission_index, listener_index]
+            .into_iter()
+            .flatten()
+        {
+            if poll[i].revents & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0 {
+                return Err(Error::Io);
+            }
+        }
+        if !stopping {
+            for (i, c) in conns.iter_mut().enumerate() {
+                c.ready |= poll[base + i].revents;
+            }
+        }
+        if listener_index.is_some_and(|i| poll[i].revents & T_POLLIN != 0) {
+            let fd = unsafe { t_srv_accept(listener.as_raw_fd() as i64) };
+            if fd >= 0 {
+                let file = unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) };
+                let mut peer = TSrvPeerInfo::default();
+                if unsafe { libthyla_rs::t_set_nonblock(fd, true) } == 0
+                    && unsafe { t_srv_peer(fd, &mut peer) } == 0
+                    && peer.alive == 1
+                    && peer.principal_id == shared.principal
+                {
+                    conns.push(Conn::new(file));
+                }
+            } else if fd != -11 {
+                return Err(Error::Io);
+            }
+        }
     }
 }

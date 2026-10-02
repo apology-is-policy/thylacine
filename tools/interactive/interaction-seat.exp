@@ -1,0 +1,42 @@
+#!/usr/bin/expect -f
+# Real physical SAK against a participant whose ordinary present is parked.
+set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_SERIAL_SAK) 0
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+proc key {chord} {global repo qmp; if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} {lc_fail $e}}
+proc shot {name} {
+    global repo qmp
+    if {[info exists ::env(SAK_SCREENSHOT_DIR)]} {
+        exec $repo/tools/screendump.sh -s $qmp [file join $::env(SAK_SCREENSHOT_DIR) seat-$name.png]
+    }
+}
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "kaua-term-probe --seat-healthy"
+lc_expect "SEAT healthy participant ready" "registered independent owner"
+key "ctrl+alt+f10"
+lc_expect "lictor: ordinary GPU RPC parked before cancellation ACK" "compositor RPC really parked"
+lc_expect "SEAT normal present remains pending" "normal present not prematurely recycled"
+lc_expect "cons: trusted episode BEGIN (SAK)" "kernel opened trusted episode"
+after 700
+shot exclusive
+key ret
+lc_expect "SEAT exact cancellation acknowledged" "exact live cancellation"
+lc_expect "SEAT trusted input opened with present still pending" "control progresses independently"
+lc_expect "seat-episode: PASS independent cancellation and restored presentation" "present completes after restoration"
+lc_run_expect "echo seat-healthy-live | tr a-z A-Z" "SEAT-HEALTHY-LIVE"
+lc_send "kaua-term-probe --seat-stalled"
+lc_expect "SEAT stalled participant ready" "registered stalled participant"
+set started [clock milliseconds]
+key "ctrl+alt+f10"
+lc_expect "SEAT deliberately withholding cancellation" "participant does not acknowledge"
+lc_expect "seat-episode: PASS stalled refusal and restored presentation" "stall fails closed and restores"
+set elapsed [expr {[clock milliseconds]-$started}]
+if {$elapsed<4500 || $elapsed>15000} {lc_fail "stall timeout outside expected bound: $elapsed ms"}
+lc_pass "stall refused within bounded timeout ($elapsed ms)"
+shot restored
+lc_run_expect "echo seat-stalled-live | tr a-z A-Z" "SEAT-STALLED-LIVE"
+lc_quit
+exit 0

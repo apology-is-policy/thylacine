@@ -1199,7 +1199,7 @@ fn place_residual(gs: &GlyphSource) -> u64 {
     const ATLAS_PAGE_BYTES: u64 = 512 * 512;
     let atlas = gs.evict_pages() as u64 * ATLAS_PAGE_BYTES;
     BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas
-        + libthyla_rs::poll_worker::MEMORY_RESERVE)
+        + (libthyla_rs::service_worker::STACK_BYTES + libthyla_rs::service_worker::GUARD_BYTES + 64 * 1024))
 }
 
 fn place_cap(gs: &GlyphSource) -> u64 {
@@ -1216,7 +1216,7 @@ fn pane_channel(places: &mut Option<PanePlaceServer>, leaf: u32) -> Option<Strin
     if token == 0 {
         return None;
     }
-    p.register(token, leaf);
+    if !p.register(token, leaf) { return None; }
     Some(p.place_address(token))
 }
 
@@ -1865,7 +1865,7 @@ pub fn run(home: Option<String>) -> i64 {
     // failure before publication leaves inline media unavailable. Once published,
     // failure must end the poster so its registry name is retired.
     let user = session_user();
-    let mut places: Option<PanePlaceServer> = match user.as_deref().map(PanePlaceServer::post) {
+    let mut places: Option<PanePlaceServer> = match user.as_deref().map(|u| PanePlaceServer::post_on(u,&ring)) {
         Some(Ok(server)) => Some(server),
         Some(Err(crate::paneplace::PostError::Published(error))) => {
             say!("halcyond: published media service failed: {:?}; ending session", error);

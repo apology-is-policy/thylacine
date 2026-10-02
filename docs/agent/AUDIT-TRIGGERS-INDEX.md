@@ -202,3 +202,5 @@
 - **The birth hold -- `SPAWN_DEBUG_HELD`: a held spawn parks its child before its first instruction; `stop` converts, `start` / explicit `detach` release, the implicit close keeps; the orphan rule; the stop park's death re-check; the spawn-args mirror check (DEBUG-FS-DESIGN 5f; I-39)** -- `kernel/proc.c`, `arch/arm64/vectors.S`, `kernel/syscall.c`, `kernel/devproc.c`, `kernel/include/thylacine/{syscall,proc,exec}.h`, the spawn-args mirrors (`usr/lib/libt`, `usr/lib/libthyla-rs`, pouch 0026), `tools/check-spawn-args-mirrors.py`
 
 - **HI-1 asynchronous clipboard admission** -- `usr/halcyond/src/clipbroker.rs`, `usr/lib/libtapestry/src/admission.rs`, `usr/tapestryd/src/interaction.rs`, ctl dispatch, `usr/kaua-term-probe/src/admission.rs`
+
+- HI-1 dedicated seat/service owners: seat_control, seat, service_worker, seat_coordinator, session_seat, paneplace and native probes; independent progress, exact cancellation, bounded lifecycle and token-preserving publication.

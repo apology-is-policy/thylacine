@@ -51,6 +51,7 @@ macro_rules! say {
 mod gpu;
 mod input;
 mod server;
+mod seat_coordinator;
 
 use alloc::vec::Vec;
 
@@ -431,6 +432,8 @@ impl Driver for Tapestryd {
         // teardown's ordering witness (destroy WHILE BOUND). Unlike the W-3a
         // probe above this is a WITNESS, not a measurement: its arms assert.
         self.comp.warp_img_selftest();
+
+        self.comp.start_seat_coordinator()?;
 
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.

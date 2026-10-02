@@ -30,9 +30,9 @@ At baseline 981b89caa:
    SAK refusal. The same dependency exists during setup and synchronous control
    operations; converting just the steady-state present call is insufficient.
 
-This is source-level reachability, not a measured new guest failure. No barrier
-has been installed and no passing old graphical test is relabelled a test of
-this proposed handshake. Evidence in `work/oct2-hi-seat/source-path.json` pins
+This was source-level reachability at the design checkpoint. The October 2
+implementation and native forced parking evidence are now recorded in
+HALCYON-INTERACTION-STATUS; old graphical runs are not relabelled as new tests. Evidence in `work/oct2-hi-seat/source-path.json` pins
 the inspected files and source baseline.
 
 ## Unsafe shortcuts excluded
@@ -140,7 +140,8 @@ Internal HSC1 records are fixed-size little-endian, version 1. Requests are
 at8, reservation at16, seat generation at24 and observed revision at32. Operations
 1 Join, 2 State, 3 Cancelled, 4 Retire; unknown values or trailing bytes fail.
 Join binds the connecting stripes to the reserved incarnation in normal phase;
-State observes or waits for a changed revision. Cancelled acknowledges the exact
+State observes or waits for a changed revision (at most 250 ms; an unchanged
+observation lets an idle executor retire without waiting for the next episode). Cancelled acknowledges the exact
 quiescing generation and revision only after local cancellation and retirement
 of application writes. Retire reports orderly disabled service, not a transport
 EOF. Repeated exact transactions are idempotent; request ID reuse with changed
@@ -163,7 +164,7 @@ incarnation that has never enabled or has completed orderly Retire. The main
 loop and coordinator serialize these short table transitions; neither holds the
 table lock across protocol I/O. It cannot withdraw a live participant to skip ACK.
 
-The aggregate to Lictor extends its existing typed broker request with opcode65,
+The aggregate to Lictor extends its existing typed broker request with opcode66 (65 remains the shipped pointer Cursor),
 SeatQuiesced followed by u64 generation. Only the currently designated compositor
 process can use it. Lictor accepts it only in QUIESCING for its exact current
 generation, and does not reuse it for another episode. Kernel ACK still requires
@@ -172,10 +173,13 @@ private scanout, retired normal hardware work and released physical keys.
 Each new coordinator/executor thread reserves a 128-KiB stack plus one 4-KiB
 guard, with fallible construction and kernel-confirmed exit before reclamation.
 The Halcyon executor replaces its existing PollWorker rather than stacking a
-second service worker. Fixed UI command/result queues each hold at most 32
-metadata records of at most 128 bytes; image/text buffers move ownership and
-remain charged to the existing service limits. Full queues refuse new work;
-revocation/seat state has an independent monotone latch and cannot be dropped.
+second service worker. The UI command side is a fixed desired-route table of 32 metadata records,
+each below 128 bytes; repeated updates coalesce. Results use two moved-image
+slots, below the approved 32-record ceiling. Payloads stay charged to existing
+service limits. Capacity refuses new work; revocation modifies durable table
+state and cannot be dropped. Nonblocking pipe hints drain in batches of 64;
+EAGAIN means a wake is already pending. Completed images retain their exact
+route token and publish before client success.
 Control wire buffers are capped at 4 KiB input plus 4 KiB output per lane.
 At ten coordinator connections that is at most 80 KiB, excluding fixed fid,
 participant and thread metadata (separately measured before activation).
@@ -184,3 +188,26 @@ All lifecycle and buffer charges, including paused exchanges and retired peers,
 remain in the activation ledger until actually reclaimed. No early reply permits
 surface-slot reuse or normal display admission. Native tests must qualify the
 ownership transfer and independent progress, not only the wire codec.
+
+
+## As-built qualification limits
+
+The independent worker uses four pipe FDs and a 128-KiB guarded stack (132 KiB
+reservation). Each Halcyon executor additionally owns two four-entry SQPOLL
+rings (HIA/HSC), registered fixed buffers of 120/96 bytes, pinned ctl files and
+one reserved HSR fid. Kernel mappings, pipe pages, retained connections and
+allocator overhead remain owed in the complete activation ledger; the 64-KiB
+service metadata reserve in Halcyon's image-budget calculation is conservative
+headroom, not a measured total. Coordinator metadata is fixed for eight members,
+ten connection records and four fids per connection; wire storage is bounded
+at 80 KiB. The coordinator's 10ms status loop adds periodic work; total idle CPU
+cost remains unmeasured and belongs with the existing Lictor idle-cost item.
+
+Native qualification forces a real ordinary RPC after observing QUIESCING and
+proves it parked before ACK. It also proves the application's present remains
+pending through EXCLUSIVE and returns after restoration. This closes the
+circular-wait progress dependency without changing the rendering completion
+contract; a separate pre-chord queued-request timing experiment was not run.
+The unfinished app adapter must cancel queued/partial clipboard replies before
+calling Cancelled; an empty broker in this checkpoint is not evidence of that
+future adapter's correctness.

@@ -4,6 +4,7 @@ type: sub
 title: "Lictor - the trusted graphical seat and normal hardware broker"
 parent: moc-userspace
 code:
+  - usr/lictor/src/quiescence.rs
   - usr/caps-probe/Cargo.toml
   - usr/caps-probe/src/main.rs
   - usr/lictor/Cargo.toml
@@ -55,10 +56,17 @@ updated: 2026-10-02
 ---
 ## Clipboard cancellation progress boundary
 
-Normal GPU RPC parking and synchronous presentation form the dependency
-recorded in [[sub-halcyond#Clipboard seat-ordering seam]]. The approved
-clipboard cancellation barrier is not yet installed. Display/input isolation
-does not establish the separate broker's cancellation order.
+Trusted input now additionally requires `quiescence::Gate`'s exact-generation
+aggregate acknowledgement from the designated compositor's fresh kernel PID
+and stripes. Typed opcode 66 is SeatQuiesced; 65 remains Cursor. SeatState and
+SeatQuiesced progress even while ordinary GPU requests are parked. A wrong
+phase/generation cannot authorize the episode; hardware retirement and released
+physical keys must also pass. Missing cancellation reaches the existing bounded
+failure/restoration path. No clipboard payload, new kernel role or syscall enters
+Lictor. Native healthy/stalled physical F10 probes and graphical regressions
+are pinned in HALCYON-INTERACTION-STATUS; no Pi/minimum-mode qualification is
+claimed. The test-mode parked-RPC marker is emitted only in QUIESCING, before
+this sole hardware-owner thread can ACK into EXCLUSIVE.
 
 ## October 1 production-debt recheck
 

@@ -5,35 +5,77 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
-## Trusted-seat cancellation: approved A, progress prerequisite (October 2)
+## Dedicated cancellation and service owners (October 2)
 
-The operator chose A: strict clipboard cancellation before trusted input, an
-exact-generation aggregate userspace acknowledgement, and the existing five-
-second timeout if a participant stalls. B's weaker completion rule is rejected.
-Approval is recorded in AGENTS and the interaction/trusted-seat specifications.
-The application clipboard endpoint remains disabled; no barrier is installed yet.
+The approved A barrier is implemented in userspace: Lictor requires an exact-
+generation aggregate acknowledgement in addition to hardware retirement and
+released keys before trusted input. Tapestry owns an independent bounded
+coordinator on `/srv/tapestry-interaction`; each Halcyon session owns one service
+executor, replacing its readiness-only worker. The executor owns the media
+parser/connections, Broker, HIA channel and separate HSC cancellation lane.
+There are no new kernel roles or syscalls. Public clipboard dispatch stays off.
 
-Implementation tracing found a dependency missed in the October 1 review:
-Halcyon synchronously waits for present's Rwrite; Tapestry can synchronously wait
-for a GPU reply that Lictor parks during SAK. Making Lictor await either owner's
-cancellation creates a circular wait, resolved only by failing the episode at
-the deadline. This is a source-proven reachable dependency, not a newly run
-native failure or a claim that the existing SAK path is broken.
+HSR reservations are authenticated by the declared normal renderer connection;
+HSC joins additionally match kernel stripes and a physical control connection.
+A live peer's EOF does not cancel its obligation. Exact Cancelled, orderly
+Retire or fresh kernel-confirmed process death can discharge it. Restoration
+requires a fresh Join. Request/revision/registration counters never wrap.
+Lictor opcode 66 preserves the shipped Cursor opcode 65.
 
-`docs/HALCYON-INTERACTION-SEAT-PROGRESS.md` is the concrete follow-up review.
-The operator approved independently scheduled cancellation/service owners and
-a bounded control lane, preserving A's authority and failure policy. The broader
-resumable-graphics alternative was not selected. Both choices are ratified;
-implementation must replace the service's readiness-only ownership deliberately
-and must not activate a barrier containing the circular wait.
-`work/oct2-hi-seat/source-path.json` pins the inspected production files.
+The service moves completed rasters through two bounded slots and retains 32
+route metadata records. Wake bytes are coalesced hints to durable state; a full
+pipe cannot drop revocation. Publication precedes successful Rwrite. Route
+rechecks retain the exact token so a replacement tile cannot receive an old
+completion. HIA setup opens a movable File on the UI connection; the executor
+constructs its own Ring without unsafe Send. An in-flight HIA buffer remains
+owned until its real completion/teardown. The current channel is idle because
+the public application/controller adapter remains incomplete.
 
-The original ordering gap and its two controlled production-source schedules
-remain in `work/oct1-hi-seat-review/` and
-`docs/HALCYON-INTERACTION-SEAT-REVIEW.md`. Tapestry's local suspension cannot
-retract an already queued receipt; Broker::seat cancels when notified, not at an
-unobserved global transition. Trusted key isolation is a separate property.
-No new guest, graphical, SMP or sanitizer result is claimed by this review.
+Verification in `work/oct2-hi-seat/`: 13 coordinator and two Lictor gate tests;
+17 libtapestry tests; the prior migration host run totals 524 (Halcyon 476,
+libtapestry 17, Lictor 31). Eight intended barrier mutations fail at their named
+assertions. Two actual-source route schedules pass; the leaf-only mutant fails
+at the replacement-tile assertion. Native service-owner tests cover independent
+progress, failure, joined stop, FD rollback and 16,384 coalesced wake hints.
+
+Native `native-1790920987886335000` passes ordinary CPU1 1830/1830, admission
+(36.94s), media wire (36.55s), and physical F10 parked GPU/present (44.65s).
+The deterministic fixture parks a real ordinary QueryDisplayInfo RPC after the
+coordinator observes QUIESCING; the log proves Lictor has parked it before
+aggregate ACK. The application present remains pending through trusted input;
+both complete after restoration. This forces the post-chord parking schedule;
+it does not separately measure a pre-chord queued-request race. The stalled participant never reaches
+EXCLUSIVE and restores in 6,660ms including the 1,500ms failure notice.
+
+Final native `native-1790921264443297000` passes CPU1 1830/1830 and, using the
+explicit opt-in qualification probe, media wire (36.73s) plus before/after-post
+failure, process exit and repost (36.51s). Both media clients finish while the
+UI deliberately does no service work. This is registry recovery, not graphical
+session restart. Final focused images opt out of the GOROOT bake to fit host
+disk space; earlier foundation default images passed, but no new Go toolchain
+qualification is claimed. Paired kernel/ramfs/pristine pools, hashes, logs and
+screenshots remain. Passed disposable guest disks were removed with hash records.
+
+Final graphical `graphics-1790921444675376000` passes session media (72.54s)
+and physical F10 authorization (90.65s): View, PNG/JPEG Gallery, manual history/
+theme, Gallery restoration, confer/use/abdicate, wrong-key and cancellation.
+The 1280x800 manual-history and trusted-prompt screenshots were visually inspected.
+
+Review findings and repairs are in
+`docs/HALCYON-INTERACTION-SEAT-IMPLEMENTATION-REVIEW.md`. The earlier probe's
+post-ACK console write parked during EXCLUSIVE; its witness now prints after
+restoration and the harness observes the kernel's episode marker. A stronger
+fixture initially looked up the request's zero reservation instead of the reply
+ID; its failed run remains, followed by the corrected passing run above.
+
+Remaining HI-1: application/controller nomination and incarnation handling,
+ordered focus/terminal delivery, full activation resource ledger, persistent
+clipboard protocol/application replies and their cancellation before ACK, native
+clients and two-client endpoint qualification. This checkpoint enables the seat
+barrier and migrates existing media; it does not expose a clipboard endpoint.
+HI-2's mode widget and Nora/ut workflows follow. Four authority/settings drafts
+remain separate, no Main landing, single-agent self-review only. October 2's
+50-boot/SMP/ASan/UBSan waiver applies; no fresh Pi/minimum-display qualification.
 
 ## Asynchronous clipboard admission (October 1)
 

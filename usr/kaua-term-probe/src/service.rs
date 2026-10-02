@@ -273,7 +273,7 @@ fn media() -> Result {
     for _wave in 0..2 {
         let mut children = Children(Vec::new());
         for id in 1..=2u32 {
-            server.register(id as u128, id);
+            check(server.register(id as u128, id), "route capacity")?;
             let mut cmd = process::Command::new("/bin/kaua-term-probe");
             cmd.arg("--service-media-client")
                 .arg(server.place_address(id as u128))
@@ -281,6 +281,21 @@ fn media() -> Result {
             children
                 .0
                 .push(Some(cmd.spawn().map_err(|_| "spawn actual media client")?));
+        }
+        // Both clients must complete while the UI does not service transport
+        // or drain completions. This catches a regression to UI-owned parsing.
+        let idle_end = time::monotonic_ns() + 10_000_000_000;
+        for slot in &mut children.0 {
+            let child = slot.as_mut().unwrap();
+            loop {
+                if let Some(status) = child.try_wait().map_err(|_| "independent media reap")? {
+                    check(status.success(), "independent media client")?;
+                    break;
+                }
+                check(time::monotonic_ns() < idle_end, "media needs UI progress")?;
+                unsafe { t_poll(core::ptr::null_mut(), 0, 10); }
+            }
+            *slot = None;
         }
         let mut seen = [false; 2];
         let deadline = time::monotonic_ns() + 10_000_000_000;

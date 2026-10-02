@@ -14,6 +14,7 @@ mod typography;
 pub mod skein;
 pub mod keymap;
 pub mod limits;
+pub mod quiescence;
 pub mod fence;
 pub mod cursor_queue;
 #[cfg(feature = "backend")]

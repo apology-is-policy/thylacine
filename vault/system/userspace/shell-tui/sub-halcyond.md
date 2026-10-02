@@ -4,6 +4,7 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - usr/halcyond/src/session_seat.rs
   - usr/halcyond/src/lib.rs
   - usr/halcyond/src/clipboard.rs
   - usr/halcyond/src/clipbroker.rs
@@ -51,19 +52,22 @@ updated: 2026-10-02
 ---
 ## Clipboard seat-ordering seam
 
-`Broker::seat(None)` cancels locally when notified. Current Lictor/Tapestry
-exclusion does not order that call before trusted input: an earlier HIA1 receipt
-can already be queued to the broker. Application activation remains disabled
-pending implementation of approved option A in
-[the seat review](../../../../docs/HALCYON-INTERACTION-SEAT-REVIEW.md).
-Display/key isolation does not itself establish clipboard cancellation.
+The session media service now runs on one dedicated `ServiceWorker`, replacing
+its readiness-only worker. It owns the two protocol connections, Broker, idle
+HIA channel and independent HSC cancellation lane. UI commands are a fixed
+32-route desired-state table plus budgets; results are two moved raster slots.
+No mutable transport/graphics buffer is lent between owners. Exact routing
+tokens survive to publication, which precedes the client's successful Rwrite.
+A leaf reused under a new token cannot consume an old completion.
 
-The current session owner blocks in `Surface::submit_present` until Tapestry's
-Rwrite. Tapestry can itself block in a normal GPU RPC that Lictor parks outside
-NORMAL. A cancellation barrier executed by those same owners would introduce
-a circular wait. The approved execution-ownership amendment is specified in
-[the progress prerequisite](../../../../docs/HALCYON-INTERACTION-SEAT-PROGRESS.md);
-no independent clipboard executor or control route is implemented.
+The HSC link applies local cancellation before exact-generation/revision ACK.
+The broker is empty because the public application clipboard adapter is still
+disabled. Future application reply queues must be cancelled/retired before ACK;
+the current empty-owner test is not proof for that unfinished adapter.
+Independent progress, physical F10 while GPU/present are parked, bounded refusal,
+media delivery without UI service, posted-process failure/repost and graphical
+regressions are recorded in HALCYON-INTERACTION-STATUS. Lictor still owns all
+trusted display/input. No new kernel role or syscall is introduced.
 
 ## Pending clipboard admission (October 1)
 

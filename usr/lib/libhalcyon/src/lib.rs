@@ -24,6 +24,7 @@ pub mod layout;
 pub mod motion;
 pub mod place;
 pub mod scale;
+pub mod seat_control;
 pub mod skeleton;
 pub mod tag;
 pub mod theme;

@@ -68,6 +68,7 @@ use libthyla_rs::{
 };
 
 pub mod admission;
+pub mod seat;
 mod ring;
 
 /// H-4b-3: the env var the layout-restore tool seeds into a spawned child's

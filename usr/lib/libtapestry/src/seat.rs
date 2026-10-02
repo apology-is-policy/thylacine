@@ -1,9 +1,7 @@
-//! Serialized HIA1 exchanges. One preopened ctl, one operation and one SQE in
-//! flight: no per-action open, thread, allocation or blocking RPC. The native
-//! shell below uses Loom SQPOLL on the SAME authenticated compositor connection.
-//! Cancellation removes broker authority; it does not reuse the DMA buffer before
-//! its CQE. A cancelled exchange must still be drained, or the channel dropped.
-use libhalcyon::interaction_control::{Reply, Request, REPLY_BYTES, REQUEST_BYTES};
+//! Independent HSC1 lane. Uses a separate registered control handle; it never
+//! borrows the renderer EventRing or waits for presentation. The HIA1 channel
+//! remains separate because its completions have different authority meaning.
+use libhalcyon::seat_control::{Reply, Request, REPLY_BYTES, REQUEST_BYTES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -159,72 +157,107 @@ impl Exchange {
 mod native {
     use super::*;
     use crate::{EventRing, TapError};
-    use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, SETUP_SQPOLL};
-    use libthyla_rs::{fs::File, handle::Rights};
-    /// Drop order matters: destroy/join the ring before releasing its buffer or
-    /// fid. The retained EventRing keeps the authenticated session alive.
+    use libhalcyon::seat_control::{Op, Snapshot};
+    use libthyla_rs::{
+        fs::File,
+        handle::Rights,
+        loom::{RegisteredBuffer, Ring, Sqe, SETUP_SQPOLL},
+        *,
+    };
+    fn open_at(root: i64, path: &[u8], mode: u32) -> Result<File, TapError> {
+        let fd = unsafe { t_open(root, path.as_ptr(), path.len(), mode) };
+        if fd < 0 {
+            return Err(TapError::Connect);
+        }
+        Ok(unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) })
+    }
+    /// Normal-connection setup only, before the UI starts presenting. The ctl
+    /// pins this connection in the kernel; the reservation is not a credential.
+    pub fn reserve(session: &EventRing) -> Result<(File, Snapshot), TapError> {
+        let ctl = open_at(session.root(), b"ctl", T_ORDWR)?;
+        let q = Request {
+            op: Op::Reserve,
+            request: 1,
+            registration: 0,
+            generation: 0,
+            revision: 0,
+        };
+        let bytes = q.encode();
+        if unsafe { t_write(ctl.as_raw_fd() as i64, bytes.as_ptr(), bytes.len()) }
+            != bytes.len() as i64
+        {
+            return Err(TapError::Connect);
+        }
+        if unsafe { t_lseek(ctl.as_raw_fd() as i64, 0, T_SEEK_SET) } != 0 {
+            return Err(TapError::Connect);
+        }
+        let mut bytes = [0u8; REPLY_BYTES];
+        let mut at = 0;
+        while at < bytes.len() {
+            let n = unsafe {
+                t_read(
+                    ctl.as_raw_fd() as i64,
+                    bytes[at..].as_mut_ptr(),
+                    bytes.len() - at,
+                )
+            };
+            if n <= 0 || n as usize > bytes.len() - at {
+                return Err(TapError::Connect);
+            }
+            at += n as usize;
+        }
+        let r = Reply::decode(&bytes, q).ok_or(TapError::Connect)?;
+        if r.state.phase != 0 || r.state.enabled {
+            return Err(TapError::Connect);
+        }
+        Ok((ctl, r.state))
+    }
+    /// Drop order retires the SQPOLL ring before releasing registered storage
+    /// and the control fid. Construct on its owner thread; no unsafe Send cast.
     pub struct Channel {
         ring: Ring,
         buffer: RegisteredBuffer,
         _ctl: File,
-        _session: Option<EventRing>,
         exchange: Exchange,
     }
     impl Channel {
-        /// Setup only: opening/registering this channel may block. All later
-        /// start/pump/take operations are bounded and never wait for a reply.
-        pub fn open(session: &EventRing) -> Result<Self, TapError> {
-            let mut channel = Self::from_file(Self::preopen(session)?)?;
-            channel._session = Some(session.clone());
-            Ok(channel)
-        }
-        /// Open on the UI's authenticated connection during setup. File is
-        /// movable; EventRing/Ring are not. The executor builds its own ring.
-        pub fn preopen(session: &EventRing) -> Result<File, TapError> {
-            let fd = unsafe {
-                libthyla_rs::t_open(session.root(), b"ctl".as_ptr(), 3, libthyla_rs::T_ORDWR)
-            };
-            if fd < 0 {
-                return Err(TapError::Connect);
-            }
-            Ok(unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) })
-        }
-        pub fn from_file(ctl: File) -> Result<Self, TapError> {
-            let fd = ctl.as_raw_fd();
+        pub fn open() -> Result<Self, TapError> {
+            let root = open_at(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry-interaction", T_OREAD)?;
+            let ctl = open_at(root.as_raw_fd() as i64, b"ctl", T_ORDWR)?;
             let ring = Ring::setup(4, SETUP_SQPOLL).map_err(|_| TapError::Loom)?;
             let mut buffer =
                 RegisteredBuffer::new(REQUEST_BYTES + REPLY_BYTES).map_err(|_| TapError::Loom)?;
             buffer.as_mut_slice().fill(0);
             ring.register_buffers(&[buffer.buf_reg()])
                 .map_err(|_| TapError::Loom)?;
-            ring.register_handles(&[fd as i32])
+            ring.register_handles(&[ctl.as_raw_fd()])
                 .map_err(|_| TapError::Loom)?;
             Ok(Self {
                 ring,
                 buffer,
                 _ctl: ctl,
-                _session: None,
                 exchange: Exchange::new(),
             })
         }
         pub fn poll_fd(&self) -> i32 {
             self.ring.raw_fd()
         }
-        pub fn start(&mut self, request: Request) -> Result<(), Error> {
-            let bytes = self.exchange.start(request)?;
-            self.buffer.as_mut_slice()[..REQUEST_BYTES].copy_from_slice(&bytes);
+        pub fn start(&mut self, q: Request) -> Result<(), Error> {
+            let b = self.exchange.start(q)?;
+            self.buffer.as_mut_slice()[..REQUEST_BYTES].copy_from_slice(&b);
             Ok(())
         }
         pub fn take(&mut self) -> Option<Completion> {
             self.exchange.take()
         }
         pub fn pump(&mut self) -> Result<(), Error> {
-            // At most one CQE can belong to this channel. Never run an
-            // unbounded reap/rearm loop, even for a fast compositor.
-            if let Some(cqe) = self.ring.reap() {
-                let n = (cqe.result.max(0) as usize).min(REPLY_BYTES);
-                let bytes = &self.buffer.as_mut_slice()[REQUEST_BYTES..REQUEST_BYTES + n];
-                self.exchange.complete(cqe.user_data, cqe.result, bytes);
+            if let Some(c) = self.ring.reap() {
+                let n = (c.result.max(0) as usize).min(REPLY_BYTES);
+                self.exchange.complete(
+                    c.user_data,
+                    c.result,
+                    &self.buffer.as_mut_slice()[REQUEST_BYTES..REQUEST_BYTES + n],
+                );
             }
             if let Some(s) = self.exchange.submission()? {
                 let sqe = match s.io {
@@ -242,7 +275,6 @@ mod native {
                     self.exchange.retry_submission(s);
                     return Err(Error::Transport(-e.as_errno()));
                 }
-                // SQPOLL handles the protocol and wakes the existing poll loop.
                 self.ring
                     .enter(1, 0, 0)
                     .map_err(|e| Error::Transport(-e.as_errno()))?;
@@ -252,103 +284,67 @@ mod native {
     }
 }
 #[cfg(feature = "guest")]
-pub use native::Channel;
+pub use native::{reserve, Channel};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhalcyon::interaction_control::Op;
-    fn request(id: u64) -> Request {
+    use libhalcyon::seat_control::{Op, Snapshot};
+    fn request(n: u64) -> Request {
         Request {
-            op: Op::Check,
-            request: id,
-            leaf: 1,
-            binder_pid: 0,
-            binding: 2,
-            foreground: 3,
-            subject: 4,
-            controller: 5,
-            context: 6,
-            epoch: 7,
+            op: Op::State,
+            request: n,
+            registration: 9,
+            generation: 0,
+            revision: 2,
         }
     }
-    fn reply(r: Request) -> [u8; REPLY_BYTES] {
+    fn receipt(q: Request) -> [u8; REPLY_BYTES] {
         Reply {
-            op: r.op,
-            request: r.request,
-            focus: 8,
-            seat: 9,
-            foreground: r.foreground,
+            op: q.op,
+            request: q.request,
+            state: Snapshot {
+                registration: 9,
+                generation: 1,
+                revision: 3,
+                phase: 1,
+                enabled: false,
+            },
         }
         .encode()
     }
-    fn writing(e: &mut Exchange, id: u64) -> Submission {
-        e.start(request(id)).unwrap();
-        e.submission().unwrap().unwrap()
+    #[test]
+    fn parked_state_partial_reply_and_wrong_cqe() {
+        let mut e = Exchange::new();
+        let q = request(1);
+        e.start(q).unwrap();
+        let w = e.submission().unwrap().unwrap();
+        e.complete(w.tag + 1, 40, &[]);
+        assert_eq!(e.submission(), Ok(None));
+        e.complete(w.tag, 40, &[]);
+        let r = e.submission().unwrap().unwrap();
+        assert_eq!(e.start(request(2)), Err(Error::Busy));
+        let b = receipt(q);
+        e.complete(r.tag, 17, &b[..17]);
+        let r = e.submission().unwrap().unwrap();
+        e.complete(r.tag, 39, &b[17..]);
+        assert_eq!(e.take().unwrap().result.unwrap().state.phase, 1);
+        assert_eq!(e.start(q), Err(Error::Invalid));
+        assert!(e.start(request(2)).is_ok());
     }
     #[test]
-    fn delayed_partial_and_duplicate_completions() {
+    fn denied_join_and_corrupt_receipt_are_distinct() {
         let mut e = Exchange::new();
-        let w = writing(&mut e, 1);
-        assert_eq!(e.start(request(2)), Err(Error::Busy));
-        assert_eq!(e.submission(), Ok(None));
-        e.complete(w.tag + 1, 80, &[]);
-        assert_eq!(e.take(), None);
-        e.complete(w.tag, 80, &[]);
-        let r = e.submission().unwrap().unwrap();
-        e.complete(w.tag, 80, &[]);
-        assert_eq!(e.submission(), Ok(None));
-        let bytes = reply(request(1));
-        e.complete(r.tag, 13, &bytes[..13]);
-        let r = e.submission().unwrap().unwrap();
-        assert_eq!(r.io, Io::Read { offset: 13 });
-        e.complete(r.tag, 27, &bytes[13..]);
-        assert_eq!(e.start(request(2)), Err(Error::Busy));
-        assert_eq!(e.take().unwrap().result.unwrap().request, 1);
-        assert_eq!(e.start(request(1)), Err(Error::Invalid));
-        let next = writing(&mut e, 2);
-        assert!(next.tag > r.tag);
-        e.complete(r.tag, 27, &bytes[13..]);
-        assert_eq!(e.take(), None);
-    }
-    #[test]
-    fn denial_is_not_an_empty_success_and_can_be_followed_by_new_request() {
-        let mut e = Exchange::new();
-        let w = writing(&mut e, 1);
+        e.start(request(1)).unwrap();
+        let w = e.submission().unwrap().unwrap();
         e.complete(w.tag, -1, &[]);
         assert_eq!(e.take().unwrap().result, Err(Error::Transport(-1)));
-        writing(&mut e, 2);
-    }
-    #[test]
-    fn truncation_eof_overrun_and_mismatched_receipts_poison() {
-        for n in [0, 1, 79, 81] {
-            let mut e = Exchange::new();
-            let w = writing(&mut e, 1);
-            e.complete(w.tag, n, &[]);
-            assert_eq!(e.take().unwrap().result, Err(Error::Protocol));
-            assert_eq!(e.start(request(2)), Err(Error::Protocol));
-        }
-        for n in [0, 41, -5, 40] {
-            let mut e = Exchange::new();
-            let w = writing(&mut e, 1);
-            e.complete(w.tag, 80, &[]);
-            let r = e.submission().unwrap().unwrap();
-            e.complete(r.tag, n, &reply(request(2)));
-            assert!(e.take().unwrap().result.is_err());
-            assert_eq!(e.start(request(2)), Err(Error::Protocol));
-        }
-    }
-    #[test]
-    fn refused_enqueue_and_tag_exhaustion_never_reuse() {
-        let mut e = Exchange::new();
-        let a = writing(&mut e, 1);
-        e.retry_submission(a);
-        let b = e.submission().unwrap().unwrap();
-        assert!(b.tag > a.tag);
-        e.complete(a.tag, 80, &[]);
-        assert_eq!(e.take(), None);
-        e.retry_submission(b);
-        e.next_tag = u64::MAX;
-        assert_eq!(e.submission(), Err(Error::Exhausted));
+        e.start(request(2)).unwrap();
+        let w = e.submission().unwrap().unwrap();
+        e.complete(w.tag, 40, &[]);
+        let r = e.submission().unwrap().unwrap();
+        e.complete(r.tag, 56, &receipt(request(1)));
+        assert_eq!(e.take().unwrap().result, Err(Error::Protocol));
+        assert_eq!(e.start(request(3)), Err(Error::Protocol));
     }
 }

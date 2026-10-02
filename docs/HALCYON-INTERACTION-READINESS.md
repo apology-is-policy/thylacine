@@ -10,8 +10,10 @@ session media service. Expanded interaction admission remains unimplemented.
 For the activated clipboard service, the operator approved the dedicated owners
 in HALCYON-INTERACTION-SEAT-PROGRESS. The session service executor replaces its
 readiness-only worker and owns protocol state, clipboard mutation and admission
-completion independently of rendering. The existing media implementation below
-remains the as-built baseline until migration is verified. The UI communicates
+completion independently of rendering. The media migration is now verified by native independent-client, failure/
+repost and graphical checks recorded in HALCYON-INTERACTION-STATUS. The older
+readiness-only arrangement below remains historical design for PollWorker,
+not the current session service owner. The UI communicates
 through bounded commands/results and never waits synchronously for service work.
 This does not move focus authority out of Tapestry or permit clipboard data in
 Lictor. Existing nonblocking transport, identity, quota and buffer-lifetime rules
@@ -33,7 +35,7 @@ the UI loop uses at most 34 base descriptors and retains its current write
 handling. A later removal of that fallback needs its own complete readiness
 accounting; it must not be disguised as a property of this change.
 
-## Prefer readiness aggregation over a second protocol executor
+## Historical readiness-only arrangement (superseded for session service)
 
 Use one bounded native worker to poll service descriptors and report readiness
 through one pipe to the UI loop. Keep accept, peer checks, 9P framing, fid state,

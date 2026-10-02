@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-present, prose, gate-smp]
@@ -16,10 +16,28 @@ updated: 2026-10-02
 ---
 ## Clipboard cancellation progress boundary
 
-Normal GPU RPC parking and synchronous presentation form the dependency
-recorded in [[sub-halcyond#Clipboard seat-ordering seam]]. The approved
-clipboard cancellation barrier is not yet installed. Display/input isolation
-does not establish the separate broker's cancellation order.
+A guarded independent service thread owns `seat_coordinator` and the reserved
+`/srv/tapestry-interaction` route. Its Lictor connection is separate from normal
+GPU RPCs. The fixed eight-member table binds an HSR reservation on the declared
+renderer connection to a fresh kernel-stripes-matched HSC physical lane. At
+most two unbound lanes and ten total connections exist, each with four fids and
+4 KiB input/output. Unknown peers are refused before protocol use.
+
+A frozen generation/revision requires exact cancellation from every potentially
+active member. Raw EOF or normal declaration loss does not discharge a live
+obligation; a retained FD supports fresh kernel death proof. Orderly Retire is
+explicit. Exact retries cache decisions, Tflush preserves request history,
+identity counters never wrap, and State waits at most 250ms. The short table
+lock is never held across 9P/GPU I/O, allocation or joins. The 10ms coordinator
+loop may send Lictor opcode 66 only after the aggregate is ready; physical keys
+and hardware quiescence remain separate gates. A posted coordinator failure
+ends Tapestry before any console write that might park during EXCLUSIVE.
+
+The test-only one-shot present control forces a real ordinary GPU query to park
+during QUIESCING. Native evidence proves cancellation opens trusted input while
+that RPC and the application present remain pending, then both resume normally.
+The complete kernel-memory/idle-cost ledger and application clipboard endpoint
+remain outstanding; see HALCYON-INTERACTION-STATUS.
 
 ## Terminal admission (October 1)
 

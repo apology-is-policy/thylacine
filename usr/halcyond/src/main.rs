@@ -62,6 +62,7 @@ mod chromeset;
 mod menuset;
 mod railset;
 mod paneplace;
+mod session_seat;
 mod placesrv;
 mod serviceio;
 mod session;

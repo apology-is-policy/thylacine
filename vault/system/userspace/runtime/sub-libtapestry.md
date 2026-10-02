@@ -4,6 +4,7 @@ type: sub
 title: "libtapestry — the client weave and the shared event ring"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libtapestry/src/seat.rs
   - usr/lib/libtapestry/src/lib.rs
   - usr/lib/libtapestry/src/ring.rs
   - usr/lib/libtapestry/src/admission.rs
@@ -16,8 +17,19 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-10-01
+updated: 2026-10-02
 ---
+## Independent seat channel (October 2)
+
+`seat` separates normal-connection HSR setup from HSC cancellation. The latter
+uses an independently opened resident service connection, fixed 96-byte buffer,
+four-entry SQPOLL ring, monotone request/CQE identities and one exchange. Pump
+never waits on rendering. Ring teardown precedes registered buffer/fid release.
+HIA `preopen`/`from_file` moves only an owned File from setup to the service
+executor, which constructs its own Ring; no unsafe Send of EventRing or Ring.
+The original `open` also retains its EventRing. Registered in-flight HIA storage
+must remain alive even when the broker has cancelled the action.
+
 ## Internal admission client (October 1)
 
 `Surface::interaction_control` is the synchronous setup/test helper. The

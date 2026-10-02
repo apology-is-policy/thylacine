@@ -181,6 +181,7 @@ fn native() -> Result {
     ring.global_ctl("session on").map_err(|_| "declare")?;
     let surf = Surface::fullscreen_on(&ring).map_err(|_| "surface")?;
     ring.global_ctl("session on").map_err(|_| "redeclare")?;
+    crate::seat_control::exercise(&ring)?;
     let owner_leaf = leaf(&ring, &surf)?;
     focus(&ring, owner_leaf)?;
     let master = ptyhold::Master::mint().map_err(|_| "master")?;

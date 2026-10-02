@@ -4,6 +4,8 @@ type: sub
 title: "libthyla-rs — the native runtime: RAII over the handle table, one error type, and two invariants it makes unexpressible"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libthyla-rs/src/service_worker.rs
+  - usr/kaua-term-probe/src/service_owner.rs
   - usr/lib/libthyla-rs/src/alloc.rs
   - usr/lib/libthyla-rs/src/cap.rs
   - usr/lib/libthyla-rs/src/env.rs
@@ -46,8 +48,26 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-02
 ---
+## Dedicated service owner (October 2)
+
+`ServiceWorker<S>` owns shared state, four nonblocking pipe FDs and a 128-KiB
+stack plus 4-KiB guard. Its child borrows those allocations until kernel clear-tid
+join. Setup and explicit shutdown have five-second bounds; ambiguous join
+retains storage until Proc exit rather than freeing live memory. Drop emits no
+ordinary console write, which could park during SAK. Pipe bytes are coalesced
+wake hints; durable caller state and stop/status atomics carry meaning. Reads
+drain bounded 64-byte batches; EAGAIN on a write means a wake already exists.
+
+The API deliberately differs from PollWorker: the service owner runs protocol
+work itself and never borrows rendering state. Native tests cover progress while
+the UI waits, fault notice, joined/idempotent stop, partial-pipe FD rollback and
+16,384 wake hints. The explicit `poll-worker-test` feature also supplies service
+constructor/publication/loop fault hooks for opt-in probe images. Default builds
+contain no armed fault controls. Media failure tests now assert executor-driven
+Proc exit and registry repost, not PollWorker's old UI error seam.
+
 ## Purpose
 
 The runtime every *authored* Thylacine program stands on. The native half of

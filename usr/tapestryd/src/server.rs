@@ -1734,6 +1734,7 @@ pub struct Comp {
     probe_count: u32,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
+    seat_coordinator: Option<crate::seat_coordinator::Owner>,
     interaction_seat: Option<u64>,
     interactions: [Option<interaction::Binding>; pane::MAX_PANES],
     screen: Option<Screen>,
@@ -2486,6 +2487,11 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
+    pub fn start_seat_coordinator(&mut self) -> Result<(), libdriver::Error> {
+        self.seat_coordinator = Some(crate::seat_coordinator::start().map_err(|_|libdriver::Error::Hardware)?);
+        Ok(())
+    }
+
     pub fn new(gpu: Gpu, declared: Option<u16>, bundle: libhalcyon::instrument::Bundle) -> Comp {
         let theme = bundle.theme;
         let (derived, src) = match declared {
@@ -2555,6 +2561,7 @@ impl Comp {
             probe_tick: u64::MAX,
             probe_count: 0,
             layout: Layout::new(),
+            seat_coordinator: None,
             interaction_seat: None,
             interactions: core::array::from_fn(|_| None),
             screen: None,
@@ -8766,7 +8773,18 @@ impl Comp {
     /// the intermediate passes (a crash with N tiles is one transition to
     /// `Direct(console)`, not N-1 composed passes of dead tiles beside it);
     /// the last retire already sees a declared conn hosting nothing.
+    fn retire_seat_declaration(&mut self, conn_id: u64) {
+        if let Some(owner) = &self.seat_coordinator {
+            if owner.state().and_then(|s| s.table.lock().declaration_gone(conn_id)
+                .map_err(|_| libthyla_rs::err::Error::Io)).is_err() {
+                // Console writes may park during the trusted episode.
+                unsafe { libthyla_rs::t_exit_group(1); }
+            }
+        }
+    }
     fn retire_conn(&mut self, conn_id: u64) {
+        // Before any surface/GPU teardown that might park during SAK.
+        self.retire_seat_declaration(conn_id);
         let seat = self.session_declared(conn_id);
         self.teardown_conn = Some(conn_id);
         for n in 0..MAX_SURFACES {
@@ -15499,6 +15517,13 @@ pub struct Conn {
     /// Entries die at clunk and at session reset (Tversion) and conn
     /// death; a fresh offset-0 read replaces the pin.
     text_snaps: Vec<(u32, u64, Vec<u8>)>,
+    // One HSR transaction per connection, not per 512-fid table. The highest
+    // request survives clunk so fid reuse cannot replay an old reservation.
+    #[cfg(feature = "test-mode")]
+    seat_park_next: bool,
+    seat_fid: Option<u32>,
+    seat_transaction: Option<(libhalcyon::seat_control::Request,
+        core::result::Result<libhalcyon::seat_control::Reply, u32>)>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -15586,6 +15611,10 @@ impl Conn {
             pending_fences: Vec::new(),
             pending_ring_fences: Vec::new(),
             text_snaps: Vec::new(),
+            #[cfg(feature = "test-mode")]
+            seat_park_next: false,
+            seat_fid: None,
+            seat_transaction: None,
         }
     }
 
@@ -15635,6 +15664,7 @@ impl Conn {
     }
 
     fn fid_clunk(&mut self, comp: &mut Comp, fid: u32) {
+        if self.seat_fid == Some(fid) { self.seat_fid = None; }
         let mut gone: Option<Fid> = None;
         if let Some(i) = self.fid_find(fid) {
             gone = self.fids[i].take();
@@ -15676,6 +15706,7 @@ impl Conn {
         comp.retire_conn(self.conn_id);
         comp.warp_retire_conn(self.conn_id);
         self.fids = [NO_FID; MAX_FIDS];
+        self.seat_fid = None;
         // A new session gets a new one-shot budget (fid-lift audit F5): the
         // reset empties the table, so a table that fills AGAIN deserves its
         // own witness -- a spent latch here silenced the second fill.
@@ -16316,6 +16347,14 @@ impl Conn {
         let cap = ((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4)).min(a.count as usize);
 
         if f.path == P_CTL {
+            if self.seat_fid == Some(a.fid) {
+                let (_, result) = self.seat_transaction.ok_or(())?;
+                let reply = match result { Ok(r) => r.encode(), Err(e) => return self.err(tag,e) };
+                let off = usize::try_from(a.offset).unwrap_or(usize::MAX).min(reply.len());
+                let end = off.saturating_add(cap).min(reply.len());
+                return p9::build_rread(&mut self.out_buf,tag,&reply[off..end]);
+            }
+
             if let Some(transaction)=f.interaction {
                 let reply = match transaction.result { Ok(b) => b, Err(e) => return self.err(tag,e) };
                 let off=(a.offset as usize).min(reply.len());
@@ -17499,6 +17538,40 @@ impl Conn {
         }
     }
 
+    fn seat_reservation(&mut self, comp: &Comp, fid: u32, bytes: &[u8]) -> core::result::Result<(), u32> {
+        use libhalcyon::seat_control::{Op, Peer, Reply, Request};
+        let q = Request::decode(bytes).ok_or(p9::E_INVAL)?;
+        if !matches!(q.op,Op::Reserve|Op::Withdraw) { return Err(p9::E_INVAL); }
+        if self.seat_fid.is_some_and(|old| old != fid) { return Err(p9::E_BUSY); }
+        if let Some((old,result)) = self.seat_transaction {
+            if old == q { return if self.seat_fid == Some(fid) { result.map(|_|()) } else { Err(p9::E_INVAL) }; }
+            if q.request <= old.request { return Err(p9::E_INVAL); }
+        }
+        let result = (|| {
+            let mut info = TSrvPeerInfo::default();
+            if !comp.session_declared(self.conn_id) || self.peer_stripes == 0
+                || unsafe { t_srv_peer(self.handle,&mut info) } != 0
+                || info.alive != 1 || info.stripes != self.peer_stripes { return Err(p9::E_PERM); }
+            let shared = comp.seat_coordinator.as_ref().ok_or(p9::E_BUSY)?
+                .state().map_err(|_|E_IO)?;
+            let mut table = shared.table.lock();
+            let peer = Peer {stripes:info.stripes,declaration:self.conn_id};
+            let state = match q.op {
+                Op::Reserve => table.reserve(peer).map_err(crate::seat_coordinator::errno)?,
+                Op::Withdraw => {
+                    let mut state = table.reservation(peer,q.registration).map_err(crate::seat_coordinator::errno)?;
+                    table.withdraw(peer,q.registration).map_err(crate::seat_coordinator::errno)?;
+                    state.enabled=false;
+                    state
+                }
+                _ => return Err(p9::E_INVAL),
+            };
+            Ok(Reply {op:q.op,request:q.request,state})
+        })();
+        self.seat_fid=Some(fid); self.seat_transaction=Some((q,result));
+        result.map(|_|())
+    }
+
     fn h_write(&mut self, comp: &mut Comp, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
@@ -17514,6 +17587,15 @@ impl Conn {
         }
 
         if f.path == P_CTL {
+            if a.data.starts_with(b"HSR1") {
+                if a.offset != 0 || f.interaction.is_some() {return self.err(tag,p9::E_INVAL);}
+                return match self.seat_reservation(comp,a.fid,a.data) {
+                    Ok(())=>p9::build_rwrite(&mut self.out_buf,tag,a.count),
+                    Err(e)=>self.err(tag,e),
+                };
+            }
+            if self.seat_fid == Some(a.fid) {return self.err(tag,p9::E_BUSY);}
+
             if a.data.starts_with(b"HIA1") {
                 if a.offset!=0 {return self.err(tag,p9::E_INVAL);}
                 return match self.interaction_control(comp,i,a.data) {
@@ -17780,6 +17862,30 @@ impl Conn {
                 Err(e) => self.err(tag, e),
             },
             FK_PRESENT => {
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.seat_park_next) {
+                    // Deterministic qualification only: hold this owned present
+                    // until the independent coordinator observes QUIESCING,
+                    // then issue a real ordinary GPU RPC. No completion or
+                    // acknowledgement is synthesized by this fixture.
+                    let end = libthyla_rs::time::monotonic_ns() + 4_000_000_000;
+                    loop {
+                        let phase = comp.seat_coordinator.as_ref()
+                            .and_then(|o| o.state().ok())
+                            .and_then(|s| {
+                                let reply = self.seat_transaction.as_ref()?.1.as_ref().ok()?;
+                                s.table.lock().reservation(libhalcyon::seat_control::Peer {
+                                    stripes: self.peer_stripes, declaration: self.conn_id,
+                                }, reply.state.registration).ok().map(|s| s.phase)
+                            });
+                        if phase == Some(1) { break; }
+                        if libthyla_rs::time::monotonic_ns() >= end {
+                            return self.err(tag, E_IO);
+                        }
+                        unsafe { libthyla_rs::t_poll(core::ptr::null_mut(), 0, 10); }
+                    }
+                    if comp.gpu.query_display_info().is_err() { return self.err(tag, E_IO); }
+                }
                 // Warp-C C-4: the whole dispatch is timed and charged to
                 // the arm it took (`present` records the arm).
                 let t0 = Instant::now();
@@ -18380,6 +18486,13 @@ impl Conn {
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        #[cfg(feature = "test-mode")]
+        if s == "test-seat-park-next-present" {
+            if !comp.session_conns.iter().any(|&(id, _)| id == self.conn_id)
+                || self.seat_transaction.is_none() { return Err(p9::E_PERM); }
+            self.seat_park_next = true;
+            return Ok(());
+        }
         if let Some(rest) = s.strip_prefix("session ") {
             // The display handoff is a DECLARATION, made by the session
             // compositor on its own conn: a Session principal only (the
@@ -18506,6 +18619,7 @@ impl Conn {
                 }
                 "off" => {
                     let seat = comp.session_declared(self.conn_id);
+                    comp.retire_seat_declaration(self.conn_id);
                     comp.session_conns.retain(|&(c, _)| c != self.conn_id);
                     // The mirror of the declare above, and TY-6 F7: a seat
                     // that gives the display back must give the display's

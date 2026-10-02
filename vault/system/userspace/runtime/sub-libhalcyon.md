@@ -4,6 +4,7 @@ type: sub
 title: "libhalcyon -- the Daylight tokens, the save format, and the restore planner"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libhalcyon/src/seat_control.rs
   - usr/lib/libhalcyon/src/interaction_control.rs
   - usr/lib/libhalcyon/src/lib.rs
   - usr/lib/libhalcyon/src/cursor.rs
@@ -33,8 +34,18 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-10-01
+updated: 2026-10-02
 ---
+## Seat control core (October 2)
+
+`seat_control` supplies strict HSR1/HSC1 codecs and an allocation-free bounded
+Coordinator. Kernel-derived Peer identity is separate from decoded records.
+Eight slots retain live cancellation obligations across notification, EOF and
+failed episodes. Exact peer/lane/generation/revision checks, fresh rejoin,
+request/identity exhaustion and an initially unknown seat all fail closed.
+Thirteen actual-core schedules pass; six coordinator mutations and two Lictor
+gate mutations fail at their intended assertions. This does not activate HIN1.
+
 ## Renderer admission codec (October 1)
 
 `interaction_control` pins internal HIA1 requests (80 bytes) and replies

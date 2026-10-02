@@ -1089,9 +1089,9 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 // session, and neither the boot source nor the factory role goes to children.
 unsafe fn private_service_registry() -> i64 {
     use libthyla_rs::{SrvRoute, t_srv_registry_new};
-    const NAMES: [&[u8]; 11] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
-        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama"];
-    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 11];
+    const NAMES: [&[u8]; 12] = [b"corvus", b"net", b"nocturne", b"nocturne-ctl",
+        b"lictor", b"tapestry", b"warp", b"stratum-fs", b"stratum-ctl", b"ptyfs", b"diorama", b"tapestry-interaction"];
+    let mut routes = [SrvRoute { name_len: 0, reserved: 0, name: [0; 32] }; 12];
     for (r, name) in routes.iter_mut().zip(NAMES) {
         r.name_len = name.len() as u32;
         r.name[..name.len()].copy_from_slice(name);

@@ -243,7 +243,8 @@ pub fn run() -> i64 {
     }
 }
 
-/// Child exits on the same Result seam consumed by session.rs. The parent
+use libthyla_rs::service_worker::qualification::{self as sq, Fault as SFault};
+/// The executor exits the posting Proc on a published failure. The parent
 /// witnesses the registry after process teardown; this is NOT Warden/UI recovery.
 pub fn failure_server() -> i64 {
     fn serve() -> Result<i64> {
@@ -251,7 +252,7 @@ pub fn failure_server() -> i64 {
         let name = libthyla_rs::env::args().nth(3).ok_or("failure name")?;
         let name = core::str::from_utf8(name).map_err(|_| "failure name utf8")?;
         if mode == b"register" {
-            q::fail_next(Fault::Register);
+            sq::fail_next(SFault::Published);
         }
         let mut server = match crate::paneplace::PanePlaceServer::post(name) {
             Err(crate::paneplace::PostError::Published(Error::NoMemory)) if mode == b"register" => {
@@ -261,7 +262,7 @@ pub fn failure_server() -> i64 {
             Ok(s) if mode == b"poll" => s,
             _ => return Err("failure post disposition"),
         };
-        q::fail_next(Fault::Poll);
+        sq::fail_next(SFault::Service);
         need(
             unsafe { libthyla_rs::t_write(1, b"R".as_ptr(), 1) } == 1,
             "failure server ready",
@@ -309,7 +310,7 @@ pub fn media_failure() -> i64 {
             }
         }
         let name = format!("no-post-{}", unsafe { libthyla_rs::t_getpid() });
-        q::fail_next(Fault::Startup);
+        sq::fail_next(SFault::Startup);
         need(
             matches!(
                 crate::paneplace::PanePlaceServer::post(&name),
@@ -345,7 +346,7 @@ pub fn media_failure() -> i64 {
             }
             let status = child.0.wait().map_err(|_| "wait failure server")?;
             need(
-                status.code() == Some(42),
+                status.code() == Some(1),
                 "posted failure did not reach process exit",
             )?;
             need(

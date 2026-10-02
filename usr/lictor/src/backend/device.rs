@@ -443,7 +443,7 @@ impl Device {
             Request::InputDrain { .. } => {
                 return Err(Error::BadField);
             }
-            Request::SeatState => {
+            Request::SeatState | Request::SeatQuiesced { .. } => {
                 return Err(Error::BadField);
             }
         }

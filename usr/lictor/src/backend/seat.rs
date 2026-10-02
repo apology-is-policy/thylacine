@@ -20,6 +20,7 @@ impl Input {
 pub struct Seat {
     pub phase: u32,
     pub generation: u64,
+    quiescence: crate::quiescence::Gate,
     mods: Mods,
     active: bool,
     sequence: u64,
@@ -30,6 +31,10 @@ pub struct Seat {
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
 impl Seat {
+    pub fn acknowledge_cancellation(&mut self, generation: u64) -> bool {
+        self.phase == 1 && self.generation == generation && self.quiescence.acknowledge(generation)
+    }
+
     pub fn input(&mut self, inputs: &mut [Input]) {
         for input in inputs.iter_mut() {
             let mut events: Vec<RawInputEvent> = Vec::new();
@@ -72,6 +77,7 @@ impl Seat {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.phase = m.phase; self.generation = m.generation;
+        self.quiescence.observe(self.generation, self.phase);
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
             0 => {},
@@ -86,7 +92,7 @@ impl Seat {
                     self.active = true; self.sequence = 0; self.masked = 0;
                     super::diagnostic(&alloc::format!("lictor: trusted scanout active generation={}\n", self.generation));
                 }
-                if released {
+                if released && self.quiescence.ready(self.generation) {
                     self.mods = Mods::default();
                     if ep::call(ep::ACK, &mut m).is_err() { self.fail("quiescence acknowledgement"); }
                     // ACK intentionally doesn't return a status envelope. Read

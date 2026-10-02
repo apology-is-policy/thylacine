@@ -23,6 +23,8 @@ mod clipboard;
 #[path = "../../halcyond/src/clipbroker.rs"]
 mod clipbroker;
 mod readiness;
+mod service_owner;
+mod seat_control;
 #[cfg(feature = "readiness-qualification")]
 mod readiness_qualification;
 mod service;
@@ -36,6 +38,8 @@ macro_rules! say {
 #[allow(dead_code)]
 #[path = "../../halcyond/src/paneplace.rs"]
 mod paneplace;
+#[path = "../../halcyond/src/session_seat.rs"]
+mod session_seat;
 // Use the shipped pump and syscall adapter, not a probe reimplementation.
 extern crate self as halcyond;
 #[path = "../../halcyond/src/servicewire.rs"]
@@ -162,10 +166,12 @@ pub extern "C" fn rs_main() -> i64 {
         if arg == b"--service-readiness-failure" { return readiness_qualification::media_failure(); }
         #[cfg(feature = "readiness-qualification")]
         if arg == b"--readiness-failure-server" { return readiness_qualification::failure_server(); }
+        if arg == b"--service-owner" { return service_owner::run(); }
         if arg == b"--readiness" { return readiness::run(); }
         if arg == b"--service" { return service::run(); }
         if arg == b"--service-transport" { return service::transport_child(); }
         if arg == b"--service-media-client" { return service::media_client(); }
+        if let Some(result) = seat_control::run(arg) { return result; }
         if let Some(result) = admission::run(arg) { return result; }
         if let Some(result) = observer::run(arg) {
             return result;
