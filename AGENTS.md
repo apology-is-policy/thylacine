@@ -224,3 +224,10 @@ route and one protocol/clipboard executor per Halcyon session, replacing that
 service's readiness-only worker. This resolves blocking presentation dependencies
 without changing kernel roles or syscalls. Do not ask again for this ownership
 choice. Record concrete encoding and resource limits before implementing.
+
+## Modal visuals (operator-approved, 2026-10-02)
+
+Use Nora's mode colour roles at accent strength with filled status chips and
+contrasting ink. INS has a thin bar; NOR a solid proportional-width character
+block; VIS filled character spans with a distinct moving head. Follow section 4
+of HALCYON-INTERACTION.md. The open-frame preview was exploratory and is superseded.

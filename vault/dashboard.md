@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-02 [[chg-2026-10-02-controller-lifecycle]] — Terminal controller lifecycle core and approved modal appearance
 - 2026-10-02 [[chg-2026-10-02-independent-seat-owners]] — Independent cancellation owners and migrated Halcyon media service
 - 2026-10-02 [[chg-2026-10-02-seat-cancellation-contract]] — Ratify strict clipboard cancellation and identify the progress prerequisite
 - 2026-10-01 [[chg-2026-10-01-async-clipboard-admission]] — Asynchronous clipboard admission and one-use pending decisions
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-01 [[chg-2026-10-01-session-service-registries]] — Private session service registries with retained connection budgets
 - 2026-10-01 [[chg-2026-10-01-srv-connection-admission]] — Reserve service-connection capacity before allocation
 - 2026-10-01 [[chg-2026-10-01-srv-listener-retention]] — Listener handles and poll snapshots retain their service registry
-- 2026-10-01 [[chg-2026-10-01-terminal-admission]] — Sealed terminal bindings and ordered compositor admission
 <!-- generated:end -->

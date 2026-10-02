@@ -119,6 +119,18 @@ as color. Optional short context: NOR / Transcript, INS / Address, VIS / Nora.
 Menus preserve the base mode and may show a short prefix hint. Search uses CMD.
 Context labels are bounded plain text, never Beacon markup or trusted identity.
 
+Visual refinement approved by the operator on October 2: use accent-filled mode
+chips with contrasting text, following Nora's semantic colour roles (normal
+accent, insert green, visual violet, command gold). INS uses a thin insertion
+bar. NOR paints a solid background block across the current character's actual
+laid width and redraws its text in contrasting ink. VIS fills the selected
+character spans and distinguishes the moving head with an outline. Use the
+layout's existing positions, preserving kerning, wrapping and combined visible
+characters; blanks and end-of-line positions need a visible fallback extent.
+Do not overlay a second host caret on Nora's self-painted one. This supersedes
+the exploratory open-frame/quiet-field preference, not the mode ownership rules.
+The appearance is approved; no native implementation or timing result is implied.
+
 Mode updates carry controller generation, context epoch and sequence. Mode reports describe application behavior; they do not grant clipboard or seat
 authority. The broker
 keeps the latest update per live controller, rejects stale updates, and derives

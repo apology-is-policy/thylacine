@@ -5,6 +5,36 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Controller lifecycle core and visual decision (October 2)
+
+The operator approved accent-filled mode chips and Nora-style proportional
+background blocks: thin INS bar, solid NOR character block, filled VIS spans
+with a distinct head. Section 4 of HALCYON-INTERACTION records that choice;
+the earlier open-frame preview is superseded. Native painting is still owed.
+
+`controllers.rs` now provides the allocation-free 32-entry terminal lifecycle
+core. Publication remains pending until its exact HIA receipt and a fresh live
+kernel peer snapshot match. Controller generations never repeat; mode reports
+have complete scopes, bounded inline labels and increasing sequences. Mode
+lookup uses an exact externally chosen route, never a peer's claimed focus.
+Disconnect, route/foreground/subject retirement and SAK return the exact old
+Owner through the synchronous broker cancellation callback. A same-epoch change
+of nominated subject also retires the controller (self-review R1).
+
+Evidence in `work/oct2-hi-controllers/`: final Halcyon host 487/487; actual-source
+controller/broker/store/codec schedules 37/37, including 11 new lifecycle tests;
+eight named mutations fail their intended assertions; no_std aarch64 guest
+library check passes. The initial mutant harness falsely rejected the correct
+custom `field 2` assertion; its log is retained and the witness matcher repaired.
+Review is single-agent, not independent. No new boot, graphical or Pi run is
+claimed for this internal library addition. October 2's waived gates stay waived.
+
+The core is not yet instantiated by the service executor and is not a peer
+authenticator. Next: authenticated host route/context delivery, one HIA request
+sequencer for setup/publication/checks, ordered terminal/focus events, application
+protocol/reply cancellation, native clients and total resource accounting. The
+public endpoint remains disabled. No Main landing or authority-draft changes.
+
 ## Dedicated cancellation and service owners (October 2)
 
 The approved A barrier is implemented in userspace: Lictor requires an exact-

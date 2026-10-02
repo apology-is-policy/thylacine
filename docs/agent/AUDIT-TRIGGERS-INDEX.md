@@ -204,3 +204,5 @@
 - **HI-1 asynchronous clipboard admission** -- `usr/halcyond/src/clipbroker.rs`, `usr/lib/libtapestry/src/admission.rs`, `usr/tapestryd/src/interaction.rs`, ctl dispatch, `usr/kaua-term-probe/src/admission.rs`
 
 - HI-1 dedicated seat/service owners: seat_control, seat, service_worker, seat_coordinator, session_seat, paneplace and native probes; independent progress, exact cancellation, bounded lifecycle and token-preserving publication.
+
+- HI-1 terminal controller lifecycle: `usr/halcyond/src/controllers.rs`; provisional publication, peer/scope/route identity, monotone reports, terminal-subject retirement and broker cancellation.

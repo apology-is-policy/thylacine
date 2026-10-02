@@ -4,6 +4,7 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - usr/halcyond/src/controllers.rs
   - usr/halcyond/src/session_seat.rs
   - usr/halcyond/src/lib.rs
   - usr/halcyond/src/clipboard.rs
@@ -50,6 +51,39 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Controller lifecycle core (October 2)
+
+`controllers` is a pure terminal adapter core, not yet instantiated by the
+service executor. It reserves 32 entries and at most one pending publication,
+with no heap allocation and a compile-time 16 KiB metadata ceiling. A host
+Terminal record carries exact local route incarnation, leaf, observer binding,
+foreground epoch, context and epoch. Peer carries a freshly sampled connection
+incarnation, live process stripes and principal; neither is decoded authority.
+
+Prepare burns a monotone controller generation and emits HIA Publish. Exact
+successful receipt, normal seat/foreground and fresh matching peer are required
+before authority lookup succeeds. Refusal retires that provisional entry;
+wrong/old requests cannot consume another entry. The eventual channel owner
+must serialize all HIA operations with one sequence and retain borrowed storage
+through cancellation. This core neither opens descriptors nor performs kernel
+checks. Each clipboard admission still uses the existing compositor CHECK.
+
+Mode records contain a 64-byte inline UTF-8 label, readonly bit, mode and strictly
+increasing sequence. Invalid reports preserve prior state. Presentation selects
+an exact focused route; unknown/pending owners return no report. Retirement
+invokes a synchronous callback with the old broker Owner. Both foreground epoch
+and nominated subject are checked, because an ACK can replace a nomination at
+the same epoch. Seat restoration never resurrects old scopes. Focus-only changes
+retain registration and use the broker's separate ordered admission boundary.
+
+Verification: 487 host tests; 37 combined actual-source schedules including 11
+controller cases; eight named mutants; no_std guest library compile. Evidence
+and self-review: `work/oct2-hi-controllers/`. Runtime event delivery, dispatch,
+reply retirement, clients and the aggregate resource ledger remain activation
+prerequisites; no new graphical result is claimed. The operator-approved visual
+direction is now accent-filled chips and proportional NOR/VIS background blocks
+with contrasting text, plus an INS bar; native implementation is still owed.
+
 ## Clipboard seat-ordering seam
 
 The session media service now runs on one dedicated `ServiceWorker`, replacing
