@@ -75,3 +75,29 @@ still satisfies its 18 KiB ceiling. Runtime app dispatch remains off; guest
 compilation and native SAK regression do not substitute for populated two-client
 or partial-reply cancellation qualification. Measured evidence is recorded in
 HALCYON-INTERACTION-STATUS and work/oct2-hi-initial-seat.
+
+## Deferred reply transport and cancellation review
+
+The protocol chooses an explicit immediate Reply, Park(ticket), or
+Cancel(ticket)+reply. Exactly one park is permitted per connection and its ticket
+must increase. Resumption checks a matching ticket and empty output slot before
+calling the builder, so even a bad callback cannot mutate a retained reply on a
+stale/busy resume. No additional reply allocation or queue exists; metadata still
+fits 64 bytes and frame/byte/time budgets apply while parking and flushing.
+
+Cancellation clears buffered input and the unsent reply. A partly sent frame
+poisons the connection permanently; the caller must close its actual endpoint.
+Already fully delivered frames are not recalled. The handler must retire its
+own request/cache/controller state before an HSC acknowledgement, and this
+transport is not itself an authority check. Existing media handlers always
+return immediate Reply and retain their publication-before-Rwrite behavior.
+
+The owner now exposes drain_required: cancelled CHECK expiry can return no new
+application result while retaining transport work. Tests pin that durable flag
+and its removal on exact drain. This was identified while designing the runtime
+adapter, before enabling dispatch. Six transport mutations and the added owner
+mutation cover overwritten busy output, stale tickets, ticket reuse, lost
+cancellation, partial-frame reuse and buffered-input survival. Real SrvConn
+schedules additionally exercise park/progress/resume/flush/unsent cancellation;
+partial-write cancellation is controlled host evidence. No independent audit or
+complete clipboard/SAK barrier qualification is claimed.

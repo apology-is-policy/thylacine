@@ -104,3 +104,25 @@ has ceased; it permanently disables this owner and retires all registrations and
 transfers. A fresh service instance, HSC join and registrations are required for
 recovery. This is userspace lifetime bookkeeping, not a new authority or ABI.
 Public dispatch and the adapter remain gated until connected and qualified.
+
+## Deferred application transport replies
+
+The bounded 9P stream pump permits one parked reply per connection while
+continuing to parse other requests, including Tflush. The protocol owner keeps
+the pending tag/fid and semantic result. A nonzero, increasing local ticket
+identifies each park; client tag reuse is not a ticket. A second park must be
+refused by the protocol while the first exists. The transport rejects accidental
+double parking. Immediate replies retain their existing single-buffer ordering.
+
+Resumption checks the exact park ticket and an empty output slot before invoking
+the reply builder. Busy, cancelled or stale resumptions cannot mutate retained
+output. Tflush can cancel the exact park and queue its ordinary immediate reply.
+An empty result is legal only when explicitly parked, never an implicit success.
+No new wire format, allocation pool or reply queue is introduced.
+
+For seat retirement, discard buffered requests and wholly unsent replies before
+acknowledging. If any byte of the current frame has been written, permanently
+close that connection rather than replace its suffix or reuse its framing.
+The protocol owner must also discard its retained semantic state and buffers;
+stream cancellation alone is not the aggregate SAK barrier. Ticket generations
+survive cancellation. Completed replies already delivered are not recalled.

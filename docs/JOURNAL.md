@@ -22,6 +22,28 @@ needed the operator.
 
 
 ---
+## 2026-10-02 (Astra) -- make waiting replies cancellable
+
+The media pump assumed every request produced an immediate response. Reusing
+that assumption for a clipboard Tread would either block flush or treat waiting
+as malformed. The explicit parked state now keeps input progressing without a
+second reply buffer. Local monotone tickets distinguish a cancelled request from
+a reused client tag. Resumption checks the output slot before invoking its
+builder, an ordering guarded by an intended mutation.
+
+The cancellation boundary is byte-exact: unsent output and buffered input can
+be discarded, but any partial frame closes the connection. Host schedules cover
+every byte boundary; a real SrvConn probe adds parked progress, resumption and
+flush. While composing this, I exposed drain_required on Interaction: an expired
+CHECK already cancelled at the app layer still owns a transport slot even though
+expire returns no additional application result. The signal prevents a caller
+from equating None with nothing left to drain. Public dispatch remains off.
+
+The first wrong-ticket mutation was ambiguous; the harness refused to count it,
+and the exact resume guard now identifies its target. Focused and native evidence
+is in work/oct2-hi-replies; measured outcomes and limits are in the status note.
+
+---
 ## 2026-10-02 (Astra) -- finish the initial-seat correction across owners
 
 Following the ordered wire into its consumers exposed the same zero-generation

@@ -27,9 +27,16 @@ pub trait Endpoint {
     fn now_ns(&self) -> u64;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dispatch {
+    Reply,
+    Park(u64),
+    Cancel(u64),
+}
+
 pub trait Handler {
-    /// Replace the reply only here. The input is one bounded complete frame.
-    fn dispatch(&mut self, request: &[u8]) -> Result<(), ()>;
+    /// Dispatch one bounded frame; a parked request leaves the reply empty.
+    fn dispatch(&mut self, request: &[u8]) -> Result<Dispatch, ()>;
     fn reply(&self) -> &[u8];
 }
 
@@ -44,11 +51,43 @@ pub struct Stream {
     input: Vec<u8>,
     sent: usize,
     reply_len: usize,
+    parked: u64,
+    last_park: u64,
+    closed: bool,
 }
 
 impl Stream {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build output only after its ticket and slot are known to be current.
+    pub fn resume_reply<H: Handler>(
+        &mut self,
+        ticket: u64,
+        handler: &mut H,
+        build: impl FnOnce(&mut H) -> Result<(), ()>,
+    ) -> Result<(), ()> {
+        if self.closed || ticket == 0 || self.parked != ticket || self.reply_len != 0 {
+            return Err(());
+        }
+        if build(handler).is_err() || !(7..=MAX_FRAME).contains(&handler.reply().len()) {
+            self.closed = true;
+            return Err(());
+        }
+        self.reply_len = handler.reply().len();
+        self.parked = 0;
+        Ok(())
+    }
+
+    /// A partial frame poisons the connection; its suffix must never be reused.
+    pub fn cancel_output(&mut self) -> bool {
+        self.closed |= self.sent != 0;
+        self.input.clear();
+        self.reply_len = 0;
+        self.parked = 0;
+        self.sent = 0;
+        !self.closed
     }
 
     pub fn interest(&self) -> Interest {
@@ -62,7 +101,7 @@ impl Stream {
     /// A complete (or malformed) buffered header needs a UI turn. Partial
     /// frames wait for READ; pending replies wait for WRITE. No timer polling.
     pub fn runnable(&self) -> bool {
-        self.reply_len == 0 && !matches!(self.frame_len(), Ok(None))
+        self.closed || (self.reply_len == 0 && !matches!(self.frame_len(), Ok(None)))
     }
 
     fn frame_len(&self) -> Result<Option<usize>, ()> {
@@ -85,6 +124,9 @@ impl Stream {
         handler: &mut impl Handler,
         deadline_ns: u64,
     ) -> bool {
+        if self.closed {
+            return false;
+        }
         let mut frames = 0;
         let mut bytes = 0;
         loop {
@@ -117,14 +159,35 @@ impl Stream {
             match self.frame_len() {
                 Err(()) => return false,
                 Ok(Some(len)) => {
-                    if handler.dispatch(&self.input[..len]).is_err() {
+                    let Ok(action) = handler.dispatch(&self.input[..len]) else {
                         return false;
-                    }
+                    };
                     let reply_len = handler.reply().len();
-                    if !(7..=MAX_FRAME).contains(&reply_len) {
-                        return false;
+                    match action {
+                        Dispatch::Park(ticket) => {
+                            if ticket == 0
+                                || ticket <= self.last_park
+                                || self.parked != 0
+                                || reply_len != 0
+                            {
+                                return false;
+                            }
+                            self.parked = ticket;
+                            self.last_park = ticket;
+                        }
+                        Dispatch::Reply | Dispatch::Cancel(_) => {
+                            if !(7..=MAX_FRAME).contains(&reply_len) {
+                                return false;
+                            }
+                            if let Dispatch::Cancel(ticket) = action {
+                                if ticket == 0 || self.parked != ticket {
+                                    return false;
+                                }
+                                self.parked = 0;
+                            }
+                            self.reply_len = reply_len;
+                        }
                     }
-                    self.reply_len = reply_len;
                     self.input.drain(..len);
                     frames += 1;
                 }
@@ -225,10 +288,10 @@ mod tests {
         seen: Vec<u8>,
     }
     impl Handler for Echo {
-        fn dispatch(&mut self, req: &[u8]) -> Result<(), ()> {
+        fn dispatch(&mut self, req: &[u8]) -> Result<Dispatch, ()> {
             self.seen.push(req[4]);
             self.reply = req.to_vec();
-            Ok(())
+            Ok(Dispatch::Reply)
         }
         fn reply(&self) -> &[u8] {
             &self.reply
@@ -238,6 +301,168 @@ mod tests {
         let mut v = vec![id; n];
         v[..4].copy_from_slice(&(n as u32).to_le_bytes());
         v
+    }
+    struct Deferred {
+        actions: VecDeque<Dispatch>,
+        bytes: Vec<u8>,
+        seen: Vec<u8>,
+    }
+    impl Handler for Deferred {
+        fn dispatch(&mut self, req: &[u8]) -> Result<Dispatch, ()> {
+            self.seen.push(req[4]);
+            let action = self.actions.pop_front().ok_or(())?;
+            self.bytes = if matches!(action, Dispatch::Park(_)) {
+                Vec::new()
+            } else {
+                req.to_vec()
+            };
+            Ok(action)
+        }
+        fn reply(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    fn deferred(actions: &[Dispatch]) -> Deferred {
+        Deferred {
+            actions: actions.iter().copied().collect(),
+            bytes: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+    #[test]
+    fn parked_read_allows_flush_and_stale_resumption_cannot_replace_output() {
+        let mut s = Stream::new();
+        let mut h = deferred(&[Dispatch::Park(1), Dispatch::Cancel(1)]);
+        let mut p = Peer::new([frame(1, 7), frame(2, 7)].concat());
+        p.credit = 0;
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert_eq!(h.seen, [1, 2]);
+        assert_eq!(s.interest(), Interest::Write);
+        let original = h.bytes.clone();
+        let mut built = false;
+        assert!(s
+            .resume_reply(1, &mut h, |_| {
+                built = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!built);
+        assert_eq!(h.bytes, original);
+        p.credit = usize::MAX;
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert_eq!(p.output, frame(2, 7));
+    }
+    #[test]
+    fn exact_park_resumes_only_after_immediate_reply_drains() {
+        let mut s = Stream::new();
+        let mut h = deferred(&[Dispatch::Park(1), Dispatch::Reply]);
+        let mut p = Peer::new([frame(1, 7), frame(2, 7)].concat());
+        p.credit = 0;
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        let mut built = false;
+        assert!(s
+            .resume_reply(1, &mut h, |_| {
+                built = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!built);
+        p.credit = usize::MAX;
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert!(!s.runnable());
+        assert!(s
+            .resume_reply(2, &mut h, |_| {
+                built = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!built);
+        assert_eq!(
+            s.resume_reply(1, &mut h, |h| {
+                h.bytes = frame(9, 9);
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(s.interest(), Interest::Write);
+        assert!(s
+            .resume_reply(1, &mut h, |_| {
+                built = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!built);
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert_eq!(p.output, [frame(2, 7), frame(9, 9)].concat());
+    }
+    #[test]
+    fn cancelled_output_discards_buffered_input_and_partial_frames_poison() {
+        for credit in 0..9 {
+            let mut s = Stream::new();
+            let mut h = Echo::default();
+            let mut p = Peer::new([frame(1, 9), frame(2, 7)].concat());
+            p.credit = credit;
+            assert!(s.service(&mut p, &mut h, u64::MAX));
+            assert_eq!(h.seen, [1]);
+            assert_eq!(s.cancel_output(), credit == 0);
+            p.credit = usize::MAX;
+            assert_eq!(s.service(&mut p, &mut h, u64::MAX), credit == 0);
+            assert_eq!(h.seen, [1]);
+            assert_eq!(p.output, frame(1, 9)[..credit]);
+        }
+        let mut s = Stream::new();
+        let mut h = Echo::default();
+        let mut p = Peer::new(frame(1, 9));
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert!(s.cancel_output()); // A fully delivered frame needs no suffix.
+        assert_eq!(p.output, frame(1, 9));
+    }
+    #[test]
+    fn cancellation_preserves_ticket_monotonicity_and_drops_old_park() {
+        let mut s = Stream::new();
+        let mut h = deferred(&[Dispatch::Park(7), Dispatch::Park(7)]);
+        let mut p = Peer::new(frame(1, 7));
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert!(s.cancel_output());
+        let mut built = false;
+        assert!(s
+            .resume_reply(7, &mut h, |_| {
+                built = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!built);
+        p.input.extend(frame(2, 7));
+        assert!(!s.service(&mut p, &mut h, u64::MAX));
+    }
+    #[test]
+    fn malformed_deferred_transitions_and_failed_builders_refuse() {
+        for actions in [
+            vec![Dispatch::Park(0)],
+            vec![Dispatch::Park(1), Dispatch::Park(2)],
+            vec![Dispatch::Park(1), Dispatch::Cancel(2)],
+            vec![Dispatch::Cancel(0)],
+        ] {
+            let mut s = Stream::new();
+            let mut p = Peer::new((0..actions.len()).flat_map(|i| frame(i as u8, 7)).collect());
+            let mut h = deferred(&actions);
+            assert!(!s.service(&mut p, &mut h, u64::MAX));
+        }
+        for bytes in [0, 6, MAX_FRAME + 1] {
+            let mut s = Stream::new();
+            let mut h = deferred(&[Dispatch::Park(1)]);
+            let mut p = Peer::new(frame(1, 7));
+            assert!(s.service(&mut p, &mut h, u64::MAX));
+            assert!(s
+                .resume_reply(1, &mut h, |h| {
+                    h.bytes = vec![0; bytes];
+                    Ok(())
+                })
+                .is_err());
+            assert!(!s.cancel_output());
+            assert!(!s.service(&mut p, &mut h, u64::MAX));
+            assert!(p.output.is_empty());
+        }
     }
     #[test]
     fn short_writes_do_not_repeat_dispatch_or_lose_a_byte() {

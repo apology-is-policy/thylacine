@@ -21,7 +21,7 @@
 // accumulator instead of an audio ring.
 
 use alloc::vec::Vec;
-use halcyond::servicewire::{Handler, Interest, Stream};
+use halcyond::servicewire::{Dispatch, Handler, Interest, Stream};
 use crate::serviceio::NativeEndpoint;
 
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
@@ -163,11 +163,11 @@ struct Reply<'a> {
     max_pixels: u64,
 }
 impl Handler for Reply<'_> {
-    fn dispatch(&mut self, frame: &[u8]) -> Result<(), ()> {
+    fn dispatch(&mut self, frame: &[u8]) -> Result<Dispatch, ()> {
         let hdr = p9::peek_header(frame)?;
         match self.protocol.dispatch(frame, hdr, self.out, self.max_pixels) {
             Disp::Fatal => Err(()),
-            Disp::Reply(n) => { self.protocol.out_buf.truncate(n); Ok(()) }
+            Disp::Reply(n) => { self.protocol.out_buf.truncate(n); Ok(Dispatch::Reply) }
         }
     }
     fn reply(&self) -> &[u8] { &self.protocol.out_buf }

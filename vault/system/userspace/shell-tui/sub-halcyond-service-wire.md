@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON-INTERACTION.md", "docs/HALCYON-INTERACTION-READINESS.md"]
 created: 2026-09-25
-updated: 2026-09-25
+updated: 2026-10-02
 ---
 ## Purpose
 
@@ -33,10 +33,20 @@ call SYS_SET_NONBLOCK on each accepted Spoor before publishing it. Default
 SrvConn server writes block; readiness alone never guarantees a whole reply
 fits. Failure to set the mode closes the new connection.
 
-`Handler::dispatch` receives exactly one complete bounded 9P frame. It replaces
-one reply buffer, which remains immutable until the last byte is written.
-`Stream::service` never redispatches a request merely because its reply blocks.
-A later request, including Tflush, cannot overtake the preceding reply.
+`Handler::dispatch` receives exactly one complete bounded 9P frame. An immediate
+reply remains immutable until its last byte is written; a later request cannot
+overtake that output. Explicit Park accepts one nonzero increasing local ticket
+with no reply bytes. While parked, later requests including Tflush can dispatch.
+Cancel retires the exact ticket and queues the ordinary flush reply. The protocol
+owns pending tags, fids and semantic state; tickets are never raw client tags.
+
+`resume_reply` checks the exact ticket and empty output slot BEFORE invoking its
+builder, so stale or busy resumptions cannot overwrite output. A failed builder
+or malformed reply permanently closes the stream. `cancel_output` discards
+buffered input, unsent output and the park, preserving ticket history. Any byte
+already sent from the current frame poisons the connection: its suffix cannot
+be replaced. The protocol must separately retire cached/pending authority and
+bytes before HSC acknowledgement; this primitive alone is not the SAK barrier.
 
 ## Mechanism
 
@@ -65,25 +75,28 @@ claimed by this checkpoint.
 
 ## Concurrency
 
-All protocol work stays on the UI thread. The session adapter uses the native
-readiness worker in [[sub-libthyla-rs]] and polls one notification descriptor.
-It borrows each live endpoint for a bounded I/O turn without holding the worker
-mutex. The console adapter retains direct polling. No protocol work crosses
-into the readiness worker.
+The session adapter's dedicated ServiceWorker owns protocol parsing and I/O;
+its UI exchanges bounded durable metadata and completed images through a mailbox.
+Its independent HSC lane runs before ordinary transport each executor pass.
+The console adapter retains direct UI-thread polling. The native transport probe
+also exercises PollWorker owned-descriptor readiness. Neither adapter borrows a
+reply buffer across threads; no lock is held for a service syscall.
 
 ## Invariants enforced
 
-- A partially accepted reply retains its byte offset and buffer unchanged.
+- A partially accepted reply retains its byte offset and buffer unchanged, or
+  cancellation closes the connection permanently.
+- Park tickets never repeat; cancelled or busy resumptions never run the builder.
 - A committed request dispatches once, even across multiple WouldBlock returns.
 - Buffered complete frames cannot lose their wake when the kernel ring is empty.
 - A full reply ring yields to other connections and UI events.
 - EOF, invalid lengths and terminal I/O errors close the connection, discarding
-  its uncommitted protocol state. Session handles retire through the worker and join; console handles close on Drop;
+  its uncommitted protocol state. Session handles close on their service owner before join; console handles close on Drop;
   the service name itself remains registered until poster process exit.
 
 ## Connection capacity (prepared, not active)
 
-`servicepool::Pool` is fixed UI-thread metadata (at most 4 KiB), with monotonically
+`servicepool::Pool` is fixed single-owner metadata (at most 4 KiB), with monotonically
 unique connection IDs, 32 controller slots derived from the shared MAX_PANES,
 two media slots and four two-second handshakes. One handshake per kernel peer;
 one controller per live leaf. The adapter must authenticate leaf ownership before
@@ -114,16 +127,19 @@ At most 32 KiB input plus 32 KiB output payload allocation per connection, plus
 bounded metadata; image accumulator accounting is unchanged. Each syscall's
 byte count is bounded by the remaining turn credit. No eager input maximum
 allocation, periodic service wake or connection-limit increase. The session
-readiness worker adds one thread, separately accounted in its runtime dossier.
+service owner adds one thread, separately accounted in its runtime dossier.
 
 ## Prosecution
 
 `servicewire::tests` exercises split/full frames, short writes, blocked readers,
 ordered replies without redispatch, already-buffered continuation, malformed
-lengths, truncated EOF, byte/deadline yields and another peer's progress.
+lengths, truncated EOF, byte/deadline yields and another peer's progress. Added
+park/flush/resume, exact/stale tickets, cancelled buffered input and every partial
+write boundary are checked by actual-source tests and six named mutations.
 `kaua-term-probe --service` compiles this exact pump and native adapter and
 exercises real SrvConn rings plus PollWorker owned-descriptor write readiness.
-It also compiles the production PanePlaceServer source and runs two waves of two child
+It additionally exercises parked requests, immediate progress, exact resumption,
+flush and unsent cancellation on real SrvConn endpoints. It also compiles the production PanePlaceServer source and runs two waves of two child
 clients through the real kernel 9P client, checking routed image bytes, clean
 child exits, one UI service fd and quiet waits between slot-reuse waves. The `service-wire`
 interactive gate requires CI Imperium enrollment and uses an explicit serial

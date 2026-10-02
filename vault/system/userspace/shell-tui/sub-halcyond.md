@@ -52,6 +52,19 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-02
 ---
+## Deferred output retirement
+
+The common stream pump accepts explicit parked replies and exact-ticket resumption.
+Media adapters continue to return immediate replies; publication still precedes
+Rwrite. Stream cancellation discards unsent output/input, while partial output
+permanently closes the connection. The interaction adapter must also retire its
+own semantic/cache state before HSC acknowledgement. That adapter remains gated.
+
+Interaction exposes drain_required even when a cancelled CHECK's expiry returns
+no second app result. The transport owner must drain or close/join before reuse.
+Current focused results are in HALCYON-INTERACTION-STATUS and
+work/oct2-hi-replies; public clipboard dispatch remains disabled.
+
 ## Initial seat and control deadlines
 
 Some(0) is the initial normal seat; only None removes membership. Both the

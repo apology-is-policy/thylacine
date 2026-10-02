@@ -40,7 +40,7 @@
 use crate::serviceio::NativeEndpoint;
 use alloc::string::String;
 use alloc::vec::Vec;
-use halcyond::servicewire::{Handler, Interest, Stream};
+use halcyond::servicewire::{Dispatch, Handler, Interest, Stream};
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::File;
 use libthyla_rs::handle::Rights;
@@ -217,7 +217,7 @@ struct Reply<'a> {
     diag: &'a mut Diag,
 }
 impl Handler for Reply<'_> {
-    fn dispatch(&mut self, frame: &[u8]) -> Result<(), ()> {
+    fn dispatch(&mut self, frame: &[u8]) -> Result<Dispatch, ()> {
         let hdr = p9::peek_header(frame)?;
         let (routes, budget) = {
             let m = self.shared.mail.lock();
@@ -261,7 +261,7 @@ impl Handler for Reply<'_> {
                     drop(m);
                     self.control.notify().map_err(|_| ())?;
                 }
-                Ok(())
+                Ok(Dispatch::Reply)
             }
         }
     }

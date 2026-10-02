@@ -360,6 +360,9 @@ impl Interaction {
         let expired = self.broker.expire(now).map(Completion::Clipboard);
         done.or(expired)
     }
+    pub fn drain_required(&self) -> bool {
+        self.flight.is_some_and(|f| f.reported)
+    }
     pub fn deadline(&self) -> Option<u64> {
         let control = self
             .flight
@@ -682,6 +685,20 @@ mod tests {
             Some(Completion::Clipboard(Completed { result: Err(e), .. })) => Some(e),
             _ => None,
         }
+    }
+    #[test]
+    fn cancelled_check_still_requests_transport_drain_at_its_deadline() {
+        let mut i = owner();
+        let s = register(&mut i);
+        let q = i.get(peer(), s, target(), 0).unwrap();
+        assert!(i.cancel_pending(target()).is_some());
+        assert!(!i.drain_required());
+        assert_eq!(i.expire(ADMISSION_MS), None);
+        assert!(i.drain_required());
+        assert!(i.busy());
+        assert_eq!(i.deadline(), None);
+        assert_eq!(finish(&mut i, q, 10), None);
+        assert!(!i.drain_required());
     }
     #[test]
     fn control_expiry_reports_once_and_holds_slot_until_exact_drain() {

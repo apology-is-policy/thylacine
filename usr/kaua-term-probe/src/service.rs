@@ -1,7 +1,7 @@
 //! Real SrvConn backpressure proof, using the exact Halcyon stream pump and
 //! native adapter. Requires an explicitly conferred POST_SERVICE provincia.
 use crate::serviceio::NativeEndpoint;
-use crate::servicewire::{Handler, Interest, Stream};
+use crate::servicewire::{Dispatch, Handler, Interest, Stream};
 use ::alloc::{format, vec, vec::Vec};
 use libthyla_rs::{fs::File, handle::Rights, poll::AsFd, poll_worker::PollWorker, *};
 
@@ -31,7 +31,7 @@ struct Response {
     seen: usize,
 }
 impl Handler for Response {
-    fn dispatch(&mut self, frame: &[u8]) -> core::result::Result<(), ()> {
+    fn dispatch(&mut self, frame: &[u8]) -> core::result::Result<Dispatch, ()> {
         if frame.len() != 7 || frame[4] as usize != self.seen {
             return Err(());
         }
@@ -39,7 +39,7 @@ impl Handler for Response {
         let len = self.bytes.len() as u32;
         self.bytes[..4].copy_from_slice(&len.to_le_bytes());
         self.seen += 1;
-        Ok(())
+        Ok(Dispatch::Reply)
     }
     fn reply(&self) -> &[u8] {
         &self.bytes
@@ -85,6 +85,102 @@ fn poll(worker: &PollWorker, timeout: i32) -> Result<i64> {
     } else {
         Ok(n)
     }
+}
+struct DeferredResponse {
+    bytes: Vec<u8>,
+    step: u8,
+}
+impl Handler for DeferredResponse {
+    fn dispatch(&mut self, frame: &[u8]) -> core::result::Result<Dispatch, ()> {
+        if frame.len() != 7 {
+            return Err(());
+        }
+        let action = match self.step {
+            0 => Dispatch::Park(1),
+            1 => Dispatch::Reply,
+            2 => Dispatch::Park(2),
+            3 => Dispatch::Cancel(2),
+            4 => Dispatch::Park(3),
+            _ => return Err(()),
+        };
+        self.step += 1;
+        self.bytes = if matches!(action, Dispatch::Park(_)) {
+            Vec::new()
+        } else {
+            frame.to_vec()
+        };
+        Ok(action)
+    }
+    fn reply(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+fn deferred_native(client: &File, server: &File) -> Result {
+    let mut stream = Stream::new();
+    let mut handler = DeferredResponse {
+        bytes: Vec::new(),
+        step: 0,
+    };
+    let mut bytes = Vec::new();
+    for step in 0..5 {
+        requests(client, 1)?;
+        check(
+            stream.service(
+                &mut NativeEndpoint(server.as_raw_fd() as i64),
+                &mut handler,
+                u64::MAX,
+            ),
+            "deferred dispatch",
+        )?;
+        let n = read_some(client, &mut bytes, 32)?;
+        check(
+            n == if step == 1 || step == 3 { 7 } else { 0 },
+            "parked reply leaked or flush stalled",
+        )?;
+        if step == 1 {
+            stream
+                .resume_reply(1, &mut handler, |h| {
+                    h.bytes = vec![7, 0, 0, 0, 0x42, 0, 0];
+                    Ok(())
+                })
+                .map_err(|_| "exact deferred resume")?;
+            check(
+                stream.service(
+                    &mut NativeEndpoint(server.as_raw_fd() as i64),
+                    &mut handler,
+                    u64::MAX,
+                ),
+                "deferred output",
+            )?;
+            bytes.clear();
+            check(
+                read_some(client, &mut bytes, 32)? == 7 && bytes == [7, 0, 0, 0, 0x42, 0, 0],
+                "deferred bytes",
+            )?;
+        }
+        if step == 3 || step == 4 {
+            if step == 4 {
+                check(stream.cancel_output(), "unwritten cancellation")?;
+            }
+            let mut called = false;
+            let old = if step == 3 { 2 } else { 3 };
+            check(
+                stream
+                    .resume_reply(old, &mut handler, |_| {
+                        called = true;
+                        Ok(())
+                    })
+                    .is_err()
+                    && !called,
+                "cancelled reply builder ran",
+            )?;
+        }
+        bytes.clear();
+    }
+    t_putstr(
+        "service-probe: deferred replies PASS -- park, progress, resume, flush, cancellation\n",
+    );
+    Ok(())
 }
 fn native() -> Result {
     let root = file(
@@ -226,6 +322,7 @@ fn native() -> Result {
         unsafe { t_read(client.as_raw_fd() as i64, &mut byte, 1) } == 0,
         "owned server not closed at join",
     )?;
+    deferred_native(&other_client, &other_server)?;
     // Handles close through their owners; the service itself is tombstoned
     // only when this poster process exits. No system service is changed.
     Ok(())

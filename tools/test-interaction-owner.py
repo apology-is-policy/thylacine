@@ -23,6 +23,9 @@ sources = {name: (root / path).read_text() for name, path in modules.items()}
 limit = re.search(r'^pub const MAX_PANES: usize = .*?;',
                   (root / 'usr/lib/libhalcyon/src/layout.rs').read_text(), re.M).group()
 cases = [
+    ('lost-cancelled-drain', 'interaction',
+     'self.flight.is_some_and(|f| f.reported)', 'false',
+     'cancelled_check_still_requests_transport_drain_at_its_deadline'),
     ('late-control-success', 'interaction',
      'if Self::overdue(f, now)', 'if false',
      'delayed_control_completion_checks_time_without_an_expiry_pass'),

@@ -5,6 +5,40 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Deferred reply and cancellation transport (October 2)
+
+The stream pump now explicitly parks one reply while continuing bounded input
+processing, so a waiting admission cannot prevent Tflush. Park tickets are
+nonzero and monotonically increasing. Resumption checks ticket and output-slot
+availability before invoking the reply builder; stale, cancelled or busy results
+cannot overwrite another response. Immediate media replies preserve their
+previous serialization and completion-before-success order.
+
+Cancellation discards buffered requests and wholly unsent output. If any byte
+of the current frame was sent, the connection is permanently poisoned and must
+close; no replacement suffix is emitted. Handler-owned cached/semantic state
+still needs retirement by the forthcoming app protocol adapter before HSC ACK.
+The owner also exposes durable drain-required state when an already-cancelled
+CHECK expires without another application result, avoiding a future adapter's
+mistaking None for no transport work.
+
+513 Halcyon host tests, 11 stream cases with six intended mutations, 64 owner
+cases with 16 intended mutations and guest Halcyon/probe checks pass. The first
+wrong-ticket mutation matched two sites; the harness refused it and the match
+was narrowed. Failed log retained. Fresh ordinary CPU1 boot passes 1830/1830. Real SrvConn service-wire passes
+in 36.31 seconds, including the new deferred-reply witness and the existing
+two waves of two production media clients. The paired artifact and source hashes
+are retained in native-1790941886177916000. A Handler comment was clarified after
+that run; its exact comment-only delta is recorded. No new graphical run is
+claimed for this transport checkpoint. Evidence: work/oct2-hi-replies.
+
+These primitives do not activate the clipboard endpoint or extend connection
+capacity. Authenticated routes, complete app dispatch, real timeout close/join,
+reply/cache retirement before HSC ACK, total accounting and native two-client
+clipboard qualification remain, followed by modal clients and painting. No Main
+landing or new Pi/minimum-display/SMP/sanitizer coverage. October 2 waiver and
+single-agent review remain in force.
+
 ## Initial-seat registration and deadline core (October 2)
 
 HI1-R20 (fixed): Interaction and Controllers still filtered Some(0) into None,
