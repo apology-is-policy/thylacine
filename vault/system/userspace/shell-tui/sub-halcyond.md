@@ -6,6 +6,7 @@ parent: moc-userspace-shell-tui
 code:
   - usr/halcyond/src/hostbindings.rs
   - tools/test-host-bindings.py
+  - tools/fixtures/interaction-protocol.rs
   - tools/test-pane-routes.py
   - usr/halcyond/src/interaction.rs
   - usr/halcyond/src/controllers.rs
@@ -307,6 +308,16 @@ the fontdue rasterizer + atlas cache, the paper-light stylesheet, and the
 per-frame **cartoon** display list ([[sub-cartoon]]) that an in-process CPU
 executor weaves into a [[sub-libtapestry]] surface. It is the format-fuzz
 frontier for the display: every byte it renders is untrusted app output.
+
+## Native integration update (October 3)
+
+The nondefault interaction-qualification build dispatches HIN1 operations through
+Link/Interaction; see HALCYON-INTERACTION-STATUS for current qualification.
+It samples peers per frame and receipt, retires application connections before
+HSC ACK, and enforces the 32/2/4 pool. The image residual reserves protocol,
+clipboard and native metadata separately from media. Deadline polling uses the
+earliest transfer/admission/handshake expiry. Full pressure/activation remains
+HI1-R24; modal/editor clients are not delivered by this adapter alone.
 
 ## Contract
 

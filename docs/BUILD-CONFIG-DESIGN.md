@@ -460,3 +460,13 @@ untouched by this arc. git-on-viv remains the active mission; this is the detour
   yet. Next: the configurator core (lane 2), account decoupling folded in (lane 3),
   the wizard (lane 4), the manifest + forage (lane 5). The account-gate move is
   audit-bearing at impl.
+
+## Native interaction qualification option (October 3)
+
+`HALCYON_INTERACTION_QUALIFICATION` is a display-group bool, default `n`.
+`--set HALCYON_INTERACTION_QUALIFICATION=y` opts into the native HIN1 adapter;
+its legacy environment shim is `THYLACINE_INTERACTION_QUALIFICATION=1`.
+The build maps it to the nondefault `halcyond/interaction-qualification` Cargo
+feature and logs the choice. Normal builds retain media-only discovery and two
+media connections. This is a development qualification option while HI1-R24
+capacity and failure checks remain outstanding; it does not enable modal UI.

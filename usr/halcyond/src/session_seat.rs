@@ -1,7 +1,7 @@
 //! Clipboard cancellation owner, polled by the session service executor.
 //! No Surface/EventRing or normal presentation wait is borrowed here. Public
-//! clipboard dispatch stays disabled until its controller/protocol adapter is
-//! complete; this owner holds the shared interaction owner and its seat lifecycle.
+//! clipboard dispatch shares this owner with the native protocol adapter.
+//! All retirement callbacks finish before acknowledgement of a trusted episode.
 use halcyond::{hostbindings::{Bindings, Desired}, interaction::Interaction, paneroute::Routes};
 use libhalcyon::seat_control::{Op, Request, Snapshot};
 use libthyla_rs::{
@@ -9,6 +9,22 @@ use libthyla_rs::{
     fs::File,
 };
 use tapestry::seat::Channel;
+/// Application lifecycle callbacks run on the same service owner. Retirement
+/// must close partial application frames before returning to the HSC sender.
+pub trait Applications {
+    fn retire(&mut self, owner: &mut Interaction) -> Result<()>;
+    fn prune(&mut self, owner: &mut Interaction) -> Result<()>;
+    fn complete(&mut self, done: halcyond::interaction::Completion);
+    fn decision(&mut self, owner: &mut Interaction, request: libhalcyon::interaction_control::Request,
+        result: core::result::Result<libhalcyon::interaction_control::Reply, libhalcyon::interaction_wire::Failure>, now: u64) -> Result<bool>;
+}
+impl Applications for () {
+    fn retire(&mut self, _: &mut Interaction) -> Result<()> { Ok(()) }
+    fn prune(&mut self, _: &mut Interaction) -> Result<()> { Ok(()) }
+    fn complete(&mut self, _: halcyond::interaction::Completion) {}
+    fn decision(&mut self, _: &mut Interaction, _: libhalcyon::interaction_control::Request,
+        _: core::result::Result<libhalcyon::interaction_control::Reply, libhalcyon::interaction_wire::Failure>, _: u64) -> Result<bool> { Ok(false) }
+}
 pub struct Setup {
     pub reservation: File,
     pub admission: File,
@@ -24,6 +40,7 @@ pub struct Link {
     // Keep the normal reservation fid pinned through retirement of this lane.
     _reservation: File,
     interaction: Interaction,
+    queued: Option<libhalcyon::interaction_control::Request>,
     routes: Routes,
     state: Snapshot,
     next: u64,
@@ -32,6 +49,7 @@ pub struct Link {
     retired: bool,
     acknowledged: Option<(u64, u64)>,
 }
+const _: () = assert!(core::mem::size_of::<Link>() <= 48 * 1024);
 impl Link {
     pub fn new(setup: Setup, principal: u32) -> Result<Self> {
         let interaction = Interaction::new(setup.snapshot.registration, principal)
@@ -46,6 +64,7 @@ impl Link {
             bindings: Bindings::new(),
             _reservation: setup.reservation,
             interaction,
+            queued: None,
             routes: Routes::empty(),
             state: setup.snapshot,
             next: 1,
@@ -84,7 +103,7 @@ impl Link {
         self.joined && self.admission.as_ref().is_some_and(|a| a.ready())
     }
     pub fn runnable(&self) -> bool {
-        self.admission.as_ref().is_some_and(|a| a.runnable())
+        self.queued.is_some() || self.admission.as_ref().is_some_and(|a| a.runnable())
     }
     #[cfg(feature="test-mode")]
     pub fn bound_count(&self) -> u64 { self.bound_count }
@@ -113,17 +132,24 @@ impl Link {
         (self.joined && !self.stopping && !self.retired && self.state.enabled && self.state.phase == 0)
             .then_some(self.state.generation)
     }
-    pub fn pump(&mut self) -> Result<()> {
-        self.pump_seat()?;
-        let now = libthyla_rs::time::monotonic_ns() / 1_000_000;
-        let _ = self.interaction.expire(now);
-        if self.interaction.drain_required() {
-            // Channel drops its ring (which joins SQPOLL) before registered
-            // storage. A timer alone never frees borrowed transport buffers.
-            drop(self.admission.take());
-            let _ = self.interaction.transport_closed(now);
-            return Err(Error::TimedOut);
+    pub fn session(&self) -> u64 { self.state.registration }
+    pub fn context(&mut self, peer: halcyond::controllers::Peer) -> halcyond::application::Context<'_> {
+        halcyond::application::Context { owner: &mut self.interaction, bindings: &self.bindings,
+            desired: &self.hosts, queued: &mut self.queued, peer,
+            now: libthyla_rs::time::monotonic_ns() / 1_000_000 }
+    }
+    pub fn disconnect(&mut self, connection: u64) { self.interaction.disconnect(connection); }
+    pub fn deadline(&self) -> Option<u64> { self.interaction.deadline().map(|d| d.saturating_mul(1_000_000)) }
+    pub fn pump(&mut self) -> Result<()> { self.pump_with(&mut ()) }
+    pub fn pump_with(&mut self, apps: &mut impl Applications) -> Result<()> {
+        self.pump_seat(apps)?;
+        apps.prune(&mut self.interaction)?;
+        if let Some(q) = self.queued.take() {
+            self.admission.as_mut().ok_or(Error::Io)?.start(q).map_err(|_| Error::Io)?;
         }
+        let now = libthyla_rs::time::monotonic_ns() / 1_000_000;
+        if let Some(done) = self.interaction.expire(now) { apps.complete(done); }
+        retire_overdue(&mut self.interaction, &mut self.admission, now)?;
         let admission = self.admission.as_mut().ok_or(Error::Io)?;
         admission.pump().map_err(|_| Error::Io)?;
         if let Some(record) = admission.take() {
@@ -131,15 +157,22 @@ impl Link {
             match record.body {
                 Body::Ready(_) => {}
                 Body::Decision { leaf, binding, request, op, result } => {
-                    let q = self.bindings.request().ok_or(Error::Io)?;
+                    let q = self.interaction.request().ok_or(Error::Io)?;
                     if (q.leaf, q.binding, q.request, q.op) != (leaf, binding, request, op) {
                         return Err(Error::Io);
                     }
                     // Remember the remote side effect independently of the
                     // locally usable receipt (which can be Gone after SAK).
-                    if !self.bindings.complete(q, result.map(|_| ())) { return Err(Error::Io); }
-                    let _ = self.interaction.complete(q, None,
-                        result.map_err(|_| libhalcyon::interaction_wire::Failure::Denied), now);
+                    let raw_result = result;
+                    let result = result.map_err(|_| libhalcyon::interaction_wire::Failure::Denied);
+                    if matches!(op, libhalcyon::interaction_control::Op::Bind | libhalcyon::interaction_control::Op::Unbind) {
+                        if !self.bindings.complete(q, raw_result.map(|_| ())) { return Err(Error::Io); }
+                        let _ = self.interaction.complete(q, None, result, now);
+                    } else if !apps.decision(&mut self.interaction, q, result, now)? {
+                        // A cancelled/closed client's exact receipt still drains
+                        // the shared lane; it cannot revive an application fid.
+                        if let Some(done) = self.interaction.complete(q, None, result, now) { apps.complete(done); }
+                    }
                     #[cfg(feature="test-mode")]
                     if op == libhalcyon::interaction_control::Op::Bind && result.is_ok() {
                         self.bound_count = self.bound_count.checked_add(1).ok_or(Error::Io)?;
@@ -152,7 +185,10 @@ impl Link {
                             self.bindings.terminal_state(leaf, binding, foreground),
                         _ => {}
                     }
-                    let _ = self.interaction.observe(body).map_err(|_| Error::Io)?;
+                    if let Some(done) = self.interaction.observe(body).map_err(|_| Error::Io)? {
+                        apps.complete(halcyond::interaction::Completion::Clipboard(done));
+                    }
+                    apps.prune(&mut self.interaction)?;
                 }
             }
         }
@@ -170,7 +206,7 @@ impl Link {
         }
         Ok(())
     }
-    fn pump_seat(&mut self) -> Result<()> {
+    fn pump_seat(&mut self, apps: &mut impl Applications) -> Result<()> {
         if self.retired {
             return Ok(());
         }
@@ -188,6 +224,7 @@ impl Link {
                 if self.joined && matches!(done.request.op, Op::Cancelled | Op::Retire) =>
             {
                 let _ = self.interaction.seat(None);
+                apps.retire(&mut self.interaction)?;
                 self.state.revision = 0;
                 return self.send(Op::State);
             }
@@ -207,13 +244,14 @@ impl Link {
         }
         if self.stopping {
             let _ = self.interaction.seat(None);
+            apps.retire(&mut self.interaction)?;
             return self.send(Op::Retire);
         }
         if self.state.phase != 0 {
-            // With public clipboard dispatch still off there are no app replies
-            // to retire. Its eventual adapter MUST discard unsent output and
-            // close partial frames here before this exact acknowledgement.
             let _ = self.interaction.seat(None);
+            // No rendering or normal HIA wait occurs in this barrier. The
+            // callback closes application fds and drops cached/partial replies.
+            apps.retire(&mut self.interaction)?;
             let identity = (self.state.generation, self.state.revision);
             if done.request.op == Op::Cancelled {
                 self.acknowledged = Some(identity);
@@ -223,6 +261,7 @@ impl Link {
             }
         } else if !self.state.enabled {
             let _ = self.interaction.seat(None);
+            apps.retire(&mut self.interaction)?;
             self.acknowledged = None;
             return self.send(Op::Join);
         }
@@ -231,4 +270,14 @@ impl Link {
         }
         self.send(Op::State)
     }
+}
+
+/// An expired receipt is not proof that borrowed I/O has finished. Close/join
+/// the ordered ring before releasing registered storage or the owner's flight.
+/// Shared with the native stalled-WRITE qualification, without a test clock.
+pub fn retire_overdue(owner: &mut Interaction, channel: &mut Option<tapestry::ordered::Channel>, now: u64) -> Result<()> {
+    if !owner.drain_required() { return Ok(()); }
+    drop(channel.take());
+    let _ = owner.transport_closed(now);
+    Err(Error::TimedOut)
 }

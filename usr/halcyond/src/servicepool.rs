@@ -1,4 +1,4 @@
-//! Connection capacity, not application authority. The future service adapter
+//! Connection capacity, not application authority. The native service adapter
 //! supplies kernel peer identities and verifies live leaf ownership before
 //! promotion. It must retire on disconnect/expiry, then release ONLY after the
 //! readiness worker has relinquished the fd. No parsing, allocation or syscalls.
@@ -11,7 +11,19 @@ pub const CONNECTION_SLOTS: usize = CONTROL_SLOTS + MEDIA_SLOTS + HANDSHAKE_SLOT
 pub const HANDSHAKE_NS: u64 = 2_000_000_000;
 pub const BUFFER_CEILING: usize = CONNECTION_SLOTS * 2 * MAX_RECORD;
 pub const PAYLOAD_CEILING: usize = BUFFER_CEILING + crate::clipboard::PAYLOAD_CEILING;
+/// Fixed native metadata and registered-buffer reserve, separate from both
+/// protocol/clipboard payloads and the worker's explicit stack/guard mapping.
+/// The native adapter asserts Conn <=8KiB, Link <=48KiB, Shared <=16KiB;
+/// 38*8 +48 +16 =368KiB leaves144KiB for rings' user mappings and allocator slack.
+pub const METADATA_RESERVE: usize = 512 * 1024;
+pub const WORKING_RESERVE: usize = PAYLOAD_CEILING + METADATA_RESERVE;
 const _: () = assert!(PAYLOAD_CEILING == 7 * 1024 * 1024 + 384 * 1024);
+
+/// Millisecond poll deadline, rounded up so sub-ms deadlines do not busy-spin.
+/// An absent deadline alone permits indefinite sleep; overdue work runs now.
+pub fn poll_timeout(now: u64, deadline: Option<u64>) -> i32 {
+    deadline.map_or(-1, |d| d.saturating_sub(now).div_ceil(1_000_000).min(i32::MAX as u64) as i32)
+}
 
 /// Monotone connection identity; never an fd or reusable array index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +58,7 @@ struct Entry {
     retiring: bool,
 }
 
-/// Single UI-owner fixed metadata. Retiring entries retain their class quota,
+/// Single service-owner fixed metadata. Retiring entries retain their class quota,
 /// leaf exclusion and peer handshake exclusion until worker reclamation.
 pub struct Pool {
     entries: [Option<Entry>; CONNECTION_SLOTS],
@@ -202,6 +214,15 @@ const _: () = assert!(core::mem::size_of::<Pool>() <= 4096);
 mod tests {
     use super::*;
 
+    #[test]
+    fn deadline_wakes_without_descriptor_activity_and_does_not_spin() {
+        assert_eq!(poll_timeout(10, None), -1);
+        assert_eq!(poll_timeout(10, Some(10)), 0);
+        assert_eq!(poll_timeout(10, Some(9)), 0);
+        assert_eq!(poll_timeout(10, Some(11)), 1);
+        assert_eq!(poll_timeout(0, Some(30_000_000_000)), 30_000);
+        assert_eq!(poll_timeout(0, Some(u64::MAX)), i32::MAX);
+    }
     #[test]
     fn all_reserves_coexist_and_refusals_preserve_handshake() {
         let mut p = Pool::new();

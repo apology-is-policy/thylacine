@@ -16,6 +16,14 @@
 
 extern crate alloc;
 
+#[path = "../../halcyond/src/application.rs"]
+mod application;
+#[path = "../../halcyond/src/apprecord.rs"]
+mod apprecord;
+#[path = "../../halcyond/src/servicepool.rs"]
+mod servicepool;
+mod clipboard_client;
+mod admission_deadline;
 mod observer;
 mod admission;
 #[path = "../../halcyond/src/clipboard.rs"]
@@ -174,6 +182,7 @@ pub extern "C" fn rs_main() -> i64 {
         if arg == b"--readiness-failure-server" { return readiness_qualification::failure_server(); }
         if arg == b"--service-owner" { return service_owner::run(); }
         if arg == b"--readiness" { return readiness::run(); }
+        if arg == b"--clipboard" { return clipboard_client::run(); }
         if arg == b"--service" { return service::run(); }
         if arg == b"--service-transport" { return service::transport_child(); }
         if arg == b"--service-media-client" { return service::media_client(); }

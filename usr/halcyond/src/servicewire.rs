@@ -73,6 +73,9 @@ impl Stream {
         Self::default()
     }
 
+    pub fn resume_available(&self, ticket: u64) -> bool {
+        !self.closed && ticket != 0 && self.parked == ticket && self.reply_len == 0
+    }
     /// Build output only after its ticket and slot are known to be current.
     pub fn resume_reply<H: Handler>(
         &mut self,

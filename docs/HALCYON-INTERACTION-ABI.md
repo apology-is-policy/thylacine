@@ -136,3 +136,25 @@ encoding uses a fixed64-byte prefix and borrowed snapshot, copying only requeste
 ranges into existing output storage. Existing wire values/bounds are unchanged.
 Public9P dispatch, native peer sampling, pool admission, pending-tag/Tflush mapping,
 aggregate transport ledger and the HSC output barrier remain activation gates.
+
+## Native session adapter
+
+With the explicit nondefault interaction-qualification feature, the pane service
+exports `<token>/interaction` alongside `<token>/place` and
+snapshots its locator into the sealed tile child's HALCYON_INTERACTION env.
+The route is not authority: each accepted peer and each admission completion
+is authenticated through native connection metadata and ordered PTY checks.
+
+The negotiated 9P msize is at most 8192. Larger HIN1 records span contiguous
+Twrite offsets. Eight 9P fids have local monotone application incarnations; input
+reservations include actual stream capacity and every other fid. One parked
+admission per connection still permits synchronous second-fid Unbind/Cancel.
+Tflush cancels its exact tag, and Tclunk its exact fid incarnation. Repeated
+Tversion after initial negotiation closes this connection rather than silently
+resetting authority. Cached Read replies contain coordinates and borrow the
+still-admitted snapshot at each positioned read; no second payload cache exists.
+
+After a foreground transition, Bind may report Gone before the ordered new
+epoch arrives. A client may make a bounded new registration attempt with a new
+request ID. This does not permit retry of uncertain commits. Production UI
+clients and the full capacity/pressure qualification remain separate work.

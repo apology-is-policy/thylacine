@@ -8,6 +8,8 @@ name = "kaua-term-probe"
 path = "src/main.rs"
 
 [features]
+# Nondefault until HI1-R24 pressure and application workflow qualification.
+interaction-qualification = []
 readiness-qualification = ["libthyla-rs/poll-worker-test"]
 
 [dependencies]

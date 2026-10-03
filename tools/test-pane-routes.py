@@ -8,7 +8,7 @@ route = (root/'usr/halcyond/src/paneroute.rs').read_text()
 s = (root/'usr/halcyond/src/paneplace.rs').read_text()
 # Extract syscall-free production definitions, not a second protocol model.
 body = s[s.index('const SRV_MSIZE:'):s.index('// The accepted endpoint')]
-body += s[s.index('struct Protocol {'):s.index('/// Once setup may have published')]
+body += s[s.index('#[derive(Clone, Copy, PartialEq, Eq)]\nenum Class'):s.index('/// Once setup may have published')]
 body += s[s.index('const _: () = assert!(core::mem::size_of::<PaneCompletedImage>'):s.index('// The desired route table')]
 tests = r'''
 #[cfg(test)] mod protocol_tests {
@@ -19,7 +19,7 @@ fn call(p: &mut Protocol, r: &Routes, kind:u8, data:&[u8]) -> Vec<u8> {
  let mut out=Vec::new();
  let d=p.dispatch(&frame,p9::peek_header(&frame).unwrap(),&mut out,r,
   Budget{max_pixels:64,others_reserved:0,residual_bytes:512,completion_slots:2},&mut Diag::default());
- match d { Disp::Reply(n)=>p.out_buf[..n].to_vec(), Disp::Fatal=>panic!("fatal") }
+ match d { Disp::Reply(n)=>p.out_buf[..n].to_vec(), Disp::Fatal=>panic!("fatal"), _=>panic!("unexpected async reply") }
 }
 fn walk(p:&mut Protocol,r:&Routes,from:u32,to:u32,names:&[&[u8]]) -> Vec<u8> {
  let mut b=from.to_le_bytes().to_vec();b.extend_from_slice(&to.to_le_bytes());b.extend_from_slice(&(names.len() as u16).to_le_bytes());
@@ -40,6 +40,9 @@ fn write(p:&mut Protocol,r:&Routes,offset:u64,data:&[u8]) -> Vec<u8> {
  let mut b=3u32.to_le_bytes().to_vec();b.extend_from_slice(&offset.to_le_bytes());b.extend_from_slice(&(data.len() as u32).to_le_bytes());b.extend_from_slice(data);call(p,r,p9::P9_TWRITE,&b)
 }
 fn noent(reply:Vec<u8>) {assert_eq!(reply[4],p9::P9_RLERROR);assert_eq!(u32::from_le_bytes(reply[7..11].try_into().unwrap()),p9::E_NOENT);}
+#[test] fn media_only_adapter_has_no_interaction_endpoint() {
+ let (mut p,r)=setup();assert_eq!(walk(&mut p,&r,2,4,&[b"interaction"])[4],p9::P9_RLERROR);
+}
 #[test] fn reused_name_cannot_reopen_clone_walk_or_stat_old_fids() {
  let (mut p,mut r)=setup();r.remove_leaf(7);assert!(r.insert(10,7));
  noent(open(&mut p,&r));
@@ -68,7 +71,11 @@ fn noent(reply:Vec<u8>) {assert_eq!(reply[4],p9::P9_RLERROR);assert_eq!(u32::fro
 }
 }
 '''
+tests += (root/'tools/fixtures/interaction-protocol.rs').read_text()
 cases=[
+ ('ignore-app-flush','body','self.application.as_mut().ok_or(())?.cancel(p.fid, ctx.owner).map_err(|_| ())?;', 'let _ = p.fid;', 'application_protocol_tests::flush_exact_park_retires_publish_and_late_receipt_cannot_bind'),
+ ('block-cross-fid-unbind','body','let allowance = halcyond::servicewire::MAX_FRAME.saturating_sub(input_capacity);', 'if self.pending.is_some() { return self.err(tag, p9::E_BUSY); } let allowance = halcyond::servicewire::MAX_FRAME.saturating_sub(input_capacity);', 'application_protocol_tests::cross_fid_unbind_releases_park_without_waiting_for_check'),
+
  ('retarget-live', 'route','return old.leaf == leaf','return true','paneroute::tests::live_route_cannot_be_retargeted'),
  ('duplicate-leaf', 'route','if self.slots.iter().flatten().any(|r| r.leaf == leaf)', 'if false','paneroute::tests::live_route_cannot_be_retargeted'),
  ('reuse-incarnation', 'route','self.next = next;', 'let _ = next;', 'paneroute::tests::coalesced_replacement_retires_even_identical_names'),
@@ -88,7 +95,13 @@ with tempfile.TemporaryDirectory(prefix='thyla-route-') as tmp:
    if area=='route':rsrc=src.replace(before,after)
    else:bsrc=src.replace(before,after)
   rp=out/(name+'-route.rs');rp.write_text(rsrc)
-  prefix='extern crate alloc;\nuse alloc::vec::Vec;\n'
+  prefix='extern crate alloc;\nextern crate self as libhalcyon;\nuse alloc::vec::Vec;\n'
+  prefix+='pub mod layout { pub const MAX_PANES: usize = 32; }\n'
+  for module in ['interaction_wire','interaction_body','interaction_frame','interaction_control','interaction_events']:
+   prefix+=f'#[path="{root}/usr/lib/libhalcyon/src/{module}.rs"] mod {module};\n'
+  for module in ['application','apprecord','clipboard','clipbroker','controllers','interaction','hostbindings']:
+   prefix+=f'#[path="{root}/usr/halcyond/src/{module}.rs"] mod {module};\n'
+  prefix+='const CONNECTION_SLOTS: usize = 38;\nuse application::{Application, Context as AppContext, WriteResult};\nuse interaction_wire::Failure;\n'
   for module,path in [('paneroute',rp),('p9',root/'usr/lib/ninep/src/lib.rs'),('inlineaccum',root/'usr/halcyond/src/inlineaccum.rs'),('servicewire',root/'usr/halcyond/src/servicewire.rs')]:
    prefix+=f'#[path="{path}"] mod {module};\n'
   prefix+='extern crate self as halcyond;\nuse paneroute::{Node,Quiet,Route,Routes};\nuse inlineaccum::{AccumStep,PlaceAccum};\n'

@@ -1208,7 +1208,14 @@ build_userspace() {
     rs_targets=$(rustup target list --installed 2>/dev/null || true)
     if grep -q "^$USR_RS_TARGET$" <<<"$rs_targets"; then
         echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
-        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose )
+        local hi_features=()
+        case "${THYLACINE_INTERACTION_QUALIFICATION:-0}" in
+            0) ;;
+            1) hi_features=(--features halcyond/interaction-qualification)
+               echo "==> Halcyon interaction qualification ENABLED (not a release default)" ;;
+            *) echo "THYLACINE_INTERACTION_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
+        esac
+        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${hi_features[@]+"${hi_features[@]}"} )
         echo "==> Userspace Rust built under $USR_RS_BUILD"
         ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true
     else

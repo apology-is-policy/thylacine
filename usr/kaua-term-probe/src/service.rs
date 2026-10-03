@@ -323,6 +323,7 @@ fn native() -> Result {
         "owned server not closed at join",
     )?;
     deferred_native(&other_client, &other_server)?;
+    crate::admission_deadline::run()?;
     // Handles close through their owners; the service itself is tombstoned
     // only when this poster process exits. No system service is changed.
     Ok(())

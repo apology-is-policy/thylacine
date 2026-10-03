@@ -29,6 +29,7 @@ pub enum Node {
     Root,
     Dir(u128),
     Place(u128),
+    Interaction(u128),
 }
 
 /// UI-allocated lifetime of a pane route. A token locates; it is not authority.
@@ -88,7 +89,7 @@ impl Routes {
     pub fn fid_current(&self, node: Node, route: Option<Route>) -> bool {
         match (node, route) {
             (Node::Root, None) => true,
-            (Node::Dir(token) | Node::Place(token), Some(r)) =>
+            (Node::Dir(token) | Node::Place(token) | Node::Interaction(token), Some(r)) =>
                 token == r.token && self.current(r),
             _ => false,
         }
@@ -102,7 +103,7 @@ impl Routes {
         let next = walk_child(node, name, |t| self.contains_key(&t))?;
         let pin = match next {
             Node::Root => None,
-            Node::Dir(t) | Node::Place(t) => Some(*self.get(&t)?),
+            Node::Dir(t) | Node::Place(t) | Node::Interaction(t) => Some(*self.get(&t)?),
         };
         Some((next, pin))
     }
@@ -158,7 +159,7 @@ pub fn walk_child(cur: Node, name: &[u8], live: impl Fn(u128) -> bool) -> Option
         return Some(match cur {
             Node::Root => Node::Root,
             Node::Dir(_) => Node::Root,
-            Node::Place(t) => Node::Dir(t),
+            Node::Place(t) | Node::Interaction(t) => Node::Dir(t),
         });
     }
     match cur {
@@ -171,6 +172,7 @@ pub fn walk_child(cur: Node, name: &[u8], live: impl Fn(u128) -> bool) -> Option
             }
         }
         Node::Dir(t) if name == b"place" => Some(Node::Place(t)),
+        Node::Dir(t) if name == b"interaction" => Some(Node::Interaction(t)),
         _ => None,
     }
 }

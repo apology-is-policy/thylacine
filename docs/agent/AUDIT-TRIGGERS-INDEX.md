@@ -216,3 +216,5 @@
 - HI-1 application transaction records: `usr/halcyond/src/apprecord.rs`, observed publication, servicewire aggregate budgets and `tools/test-app-records.py`.
 
 - HI-1 application operation dispatcher: `usr/halcyond/src/application.rs`, borrowed `interaction_body` response encoding and `tools/test-application-dispatch.py`.
+
+- HI-1 native application adapter: paneplace/session_seat/session, pool/wire/application, actual protocol fixture and native clipboard/deadline probes.

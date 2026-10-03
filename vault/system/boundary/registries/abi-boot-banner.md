@@ -10,6 +10,7 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/ls-halcyon-clipboard.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
@@ -490,3 +491,10 @@ That is the implementation track's call.
 [[sub-substrate-gates]] · [[sub-substrate-machine]] ·
 [[sub-substrate-interactive]] · [[moc-substrate]] · [[sub-kernel-cons]] (the
 delivery half).
+
+### Native clipboard qualification consumer (October 3)
+
+The opt-in `ls-halcyon-clipboard` scenario fails on `EXTINCTION:` during boot
+and session work. It is a new mirror of the unchanged prefix, not a new banner
+or message-body contract. Its native byte/SAK workflow is recorded in the
+Halcyon interaction status and substrate interactive dossier.

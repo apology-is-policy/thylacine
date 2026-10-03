@@ -15,6 +15,7 @@ lc_expect "CAP_POST_SERVICE" "posting authority"
 lc_expect "imperium key: " "trusted key prompt"
 lc_raw_send "imperium-key-michael-v1\r" "fixture key"
 lc_expect "imperium: conferred" "post capability conferred"
+set timeout 75
 lc_send "kaua-term-probe --service"
 expect {
     -ex "service-probe: PASS -- real SrvConn stall, peer progress, short write, ordered replies, worker wake, actual media adapter" {

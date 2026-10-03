@@ -145,3 +145,19 @@ A dead fid cannot walk, clone, open, read, write or stat its replacement, even
 when token and leaf are reused. Clunk and flush remain possible. Queued media
 results carry the same incarnation and are checked both at publication and UI
 drain. This does not change the one-principal media authority policy.
+
+## Native completion, cancellation and deadlines
+
+Link services HSC first. The application adapter synchronously retires control
+and handshake endpoints before HSC acknowledgement, including partial replies.
+Media connections cannot acquire interaction authority. Pruning closes an old
+route or invalid controller before further I/O. Kernel peer metadata is freshly
+sampled at dispatch and at every matching Publish/CHECK receipt.
+
+One shared queue and Interaction sequencer own HIA independently of any client
+connection. Closing/cancelling a client does not release that transport flight;
+its exact late receipt drains without reviving the app. A monotonic deadline
+also drives the native poll timeout. On expiry, retire_overdue drops/joins the
+ordered Channel before transport_closed frees the flight. The real 9P withheld-
+Rwrite test also sends a late reply after teardown onto a retained session and
+checks a fresh ring. No remote rollback is inferred from local cancellation.

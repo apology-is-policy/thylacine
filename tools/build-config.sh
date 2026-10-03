@@ -127,6 +127,10 @@ bc_def display HALCYON_THEME string "" "env:THYLACINE_HALCYON_THEME" \
   "Halcyon theme" \
   "Name of a theme in usr/lib/halcyon/themes/ (without .toml) to bake as /lib/halcyon/theme.toml. Empty = the PROFILE's own compiled-in theme. A theme file declares the profile it was designed for (profile = \"instrument-v1\" in its [meta]; none = the legacy schema); one baked under the other profile is PROJECTED onto it rather than refused, so it works but is not what its author drew -- the wizard tags each file with its schema so the pairing is a choice. The TYPE here is a free string rather than a choice on purpose -- the bake installs whatever *.toml is in that directory, so an enumerated list would refuse a theme the bake would take. The WIZARD reads the directory at run time and offers the real files as a numbered menu, so dropping a .toml in is all it takes to make it selectable. Needs a Halcyon renderer (either lever above) to be visible; on a pure-aurora image the file is baked and simply unread."
 
+bc_def display HALCYON_INTERACTION_QUALIFICATION bool n "env:THYLACINE_INTERACTION_QUALIFICATION" \
+  "Halcyon interaction qualification (development only)" \
+  "Opt in to the native HIN1 clipboard adapter and expanded session service pool. Remains off pending HI1-R24 capacity and failure qualification; this does not deliver the modal terminal or Nora clients. Normal builds expose only the existing media routes."
+
 # pool-control ----------------------------------------------------------------
 bc_def pool DISK_SIZE string 16M "env:THYLACINE_DISK_SIZE" \
   "Scratch disk size" \

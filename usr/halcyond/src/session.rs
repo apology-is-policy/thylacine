@@ -154,6 +154,7 @@ const HALCYON_MOTION_ENV_PATH: &str = "/env/HALCYON_MOTION";
 /// every program in the pane inherits ITS pane's address and the compositor's
 /// own /env stays clean between spawns. `view` opens it to place inline.
 const HALCYON_PLACE_ENV_PATH: &str = "/env/HALCYON_PLACE";
+const HALCYON_INTERACTION_ENV_PATH: &str = "/env/HALCYON_INTERACTION";
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -384,6 +385,7 @@ impl SessionTile {
         // its `view` place into a DIFFERENT pane. So a no-channel pane's child
         // snapshots an ABSENT env var, never a stale one.
         let _ = libthyla_rs::fs::remove_file(HALCYON_PLACE_ENV_PATH);
+        let _ = libthyla_rs::fs::remove_file(HALCYON_INTERACTION_ENV_PATH);
         if let Some(addr) = place_addr {
             if File::create(HALCYON_PLACE_ENV_PATH)
                 .and_then(|mut f| f.write_all(addr.as_bytes()))
@@ -394,8 +396,16 @@ impl SessionTile {
                 say!("halcyond: pane leaf={} inline {}", leaf, addr);
             }
         }
+        if let Some(addr) = place_addr.filter(|_| cfg!(feature="interaction-qualification")).and_then(|a| a.strip_suffix("/place")) {
+            let locator = alloc::format!("{}/interaction", addr);
+            if File::create(HALCYON_INTERACTION_ENV_PATH)
+                .and_then(|mut f| f.write_all(locator.as_bytes())).is_err() {
+                let _ = libthyla_rs::fs::remove_file(HALCYON_INTERACTION_ENV_PATH);
+            }
+        }
         let spawned = cmd.spawn();
         let _ = libthyla_rs::fs::remove_file(HALCYON_PLACE_ENV_PATH);
+        let _ = libthyla_rs::fs::remove_file(HALCYON_INTERACTION_ENV_PATH);
         let mut child = spawned.ok()?;
         let pid = child.pid();
         // Stdio::Piped guarantees both ends, but never leak a spawned kaua-term:
@@ -1198,7 +1208,7 @@ fn place_residual(gs: &GlyphSource) -> u64 {
     const ATLAS_PAGE_BYTES: u64 = 512 * 512;
     let atlas = gs.evict_pages() as u64 * ATLAS_PAGE_BYTES;
     BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas
-        + (libthyla_rs::service_worker::STACK_BYTES + libthyla_rs::service_worker::GUARD_BYTES + 64 * 1024))
+        + (libthyla_rs::service_worker::STACK_BYTES + libthyla_rs::service_worker::GUARD_BYTES + if cfg!(feature="interaction-qualification") { halcyond::servicepool::WORKING_RESERVE as u64 } else { 64 * 1024 }))
 }
 
 fn place_cap(gs: &GlyphSource) -> u64 {
@@ -1937,6 +1947,8 @@ pub fn run(home: Option<String>) -> i64 {
     let mut hints: Vec<(String, String)> = Vec::new();
     // The tile-status feed's one-shot refusal notice (the H-3b round F4
     // posture: a refusal drops that exit, the next exit mark retries).
+    #[cfg(feature="interaction-qualification")]
+    say!("halcyond: interaction qualification enabled");
     let mut status_refusal_said = false;
 
     let mut cart = cartoon::Cartoon::new();

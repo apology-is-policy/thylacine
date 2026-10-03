@@ -25,6 +25,16 @@ services. The protocol adapters in [[sub-halcyond]] keep all fid, token,
 principal and image decisions. This mechanism prepares the existing service
 for persistent interaction clients; it does not enable a clipboard endpoint.
 
+## Native integration update (October 3)
+
+The qualification build of the native session adapter subtracts actual input capacity from
+all-fid record allowance, negotiates 8 KiB frames and grows output lazily. Exact
+park tickets map to native9P tags; cross-fid synchronous cancellation can progress
+while one admission is parked. Pool accounting releases only after descriptor
+close; earliest deadlines bound otherwise-idle polls. WORKING_RESERVE separately
+reserves 7.375 MiB payload/protocol plus 512 KiB metadata/mapping slack; stack/guard
+are charged by the session. Full all-slot pressure evidence remains HI1-R24.
+
 ## Contract
 
 `Endpoint` is strictly nonblocking: Again preserves state, zero read is EOF,

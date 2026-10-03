@@ -23,6 +23,15 @@ This is the pure per-connection service component, not an activated native 9P
 endpoint. [[sub-halcyond-interaction-record]] supplies transaction assembly and
 replay; [[sub-halcyond]] owns controller and clipboard authority.
 
+## Native integration update (October 3)
+
+The opt-in native pane adapter now supplies Context with fresh peer, observed host,
+shared owner and one queued HIA request. answer_status permits deferred 9P writes
+to finish without copying encoded data. route/valid support retirement before
+further I/O. The new actual-parser fixture covers positioned responses, exact
+flush, clunk/reused numeric fid and cross-fid Unbind. Production UI clients and
+full capacity qualification remain separate from this native adapter.
+
 ## Contract
 
 Application::new takes a session and an injected kernel peer. open takes a

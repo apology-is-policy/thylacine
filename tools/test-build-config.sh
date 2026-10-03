@@ -190,5 +190,16 @@ bc_reset; bc_apply_preset ci; bc_export
 eq "a caller-set PROFILE outranks the ci pin" "${THYLACINE_HALCYON_PROFILE:-}" "instrument"
 unset THYLACINE_HALCYON_PROFILE
 
+# Explicitly nondefault: a release preset must not expose the new endpoint.
+unset THYLACINE_INTERACTION_QUALIFICATION
+bc_reset; bc_apply_preset production; bc_export
+eq "production interaction qualification OFF" "${THYLACINE_INTERACTION_QUALIFICATION:-}" "0"
+unset THYLACINE_INTERACTION_QUALIFICATION
+bc_reset; bc_apply_preset default
+eq "default interaction qualification OFF" "$(bc_get HALCYON_INTERACTION_QUALIFICATION)" "n"
+bc_set HALCYON_INTERACTION_QUALIFICATION=y; bc_export
+eq "explicit interaction qualification export" "${THYLACINE_INTERACTION_QUALIFICATION:-}" "1"
+unset THYLACINE_INTERACTION_QUALIFICATION
+
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

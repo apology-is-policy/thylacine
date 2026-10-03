@@ -178,3 +178,30 @@ enables it through `readiness-qualification`; neither feature is default.
 Ordinary builds contain neither control state nor qualification commands. Tests
 must opt in explicitly and use a matching image; default interactive sweeps skip
 these two fixture-dependent gates with status 77.
+
+## Dedicated native adapter ledger (October 3)
+
+The readiness-only arrangement above is historical. The qualification service owner
+polls at most 42 entries: 38 connections, listener, control wake, HSC and HIA.
+There is no per-connection worker or ring. Each of its two control channels has
+one 4-entry SQPOLL ring (one page at the current geometry) and one page-rounded
+registered buffer. Four worker pipe FDs and a pinned reservation are additional
+fixed resources. The UI has only the service notice fd; route and image results
+cross a bounded mailbox.
+
+Userspace payload/protocol ceiling remains 7.375 MiB. Metadata is reserved
+separately: 38 * 8 KiB connection upper bounds plus 48 KiB Link plus 16 KiB Shared =
+368 KiB. A 512 KiB allowance covers those objects, the two ring/buffer mapping pairs
+and remaining fixed vectors/context/allocation slack. The worker's 128 KiB stack
+and 4 KiB guard are additional. Const assertions enforce native object ceilings;
+the qualification image residual deducts the entire reserve before offering raster capacity.
+Output buffers grow lazily; 8 KiB msize leaves room for 16 KiB fragmented records
+inside the aggregate 32 KiB input budget. Retained capacities, not just lengths,
+are charged. Media still has exactly two raster slots.
+
+Kernel costs remain separate: each accepted default service connection costs
+one credit and 128 KiB of ring storage; 38 peers alone use 4.75 MiB of such rings.
+Attached kernel 9P clients and receive/RPC/fid storage add costs described in
+HALCYON-INTERACTION-CONNECTION-BUDGET. The complete pressure ledger, native
+all-slot and multi-session application load are still HI1-R24, not implied by
+the two-process byte/SAK test or by the userspace reservation calculation.

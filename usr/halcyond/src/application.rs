@@ -12,6 +12,16 @@ use crate::{apprecord::{CachedReply, Progress, Record, Ticket},
 use libhalcyon::{interaction_body::{EncodedResponse, Request, Response, Scope},
     interaction_control::Request as Admission, interaction_wire::{Failure, MAX_RECORD}};
 
+/// Borrowed service-executor state for one bounded native dispatch pass.
+/// The one queued request belongs to the HIA owner even if its client closes.
+pub struct Context<'a> {
+    pub owner: &'a mut Interaction,
+    pub bindings: &'a Bindings,
+    pub desired: &'a Desired,
+    pub queued: &'a mut Option<Admission>,
+    pub peer: Peer,
+    pub now: u64,
+}
 pub const FIDS: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteResult { Partial, Answered, Pending(Admission) }
@@ -64,6 +74,14 @@ impl Application {
         self.fids.iter().flatten().map(|f| f.record.input_reserved()).sum()
     }
     pub fn output_reserved(&self) -> usize { 0 } // all reply metadata is inline
+    pub fn route(&self) -> Option<Route> { self.route }
+    pub fn valid(&self, owner: &Interaction) -> bool {
+        self.scope.is_none_or(|scope| owner.registered(self.peer, scope))
+    }
+    pub fn answer_status(&self, fid: u64) -> Result<(), Failure> {
+        self.fids[self.index(fid)?].as_ref().unwrap().record.reply()
+            .ok_or(Failure::Busy)?.as_ref().map(|_| ()).map_err(|e| *e)
+    }
     pub fn pending_request(&self) -> Option<Admission> { self.pending.map(|p| p.request) }
     pub fn scope(&self) -> Option<Scope> { self.scope }
     pub fn write(&mut self, fid: u64, fresh: Peer, offset: u64, bytes: &[u8],

@@ -16,6 +16,7 @@ code:
   - tools/interactive/serial-listen.py
   - tools/interactive/test-serial-bridge.py
   - tools/interactive/ls-halcyon-session-instrument.exp
+  - tools/interactive/ls-halcyon-clipboard.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
   - tools/interactive/pci-net-load.exp
@@ -52,7 +53,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-03
 ---
 ## Purpose
 
@@ -71,6 +72,19 @@ production login provisioning alone is insufficient. The native probe posts
 its own temporary byte service only after POST_SERVICE is conferred, uses real
 SrvConn rings, stalls one reply reader, verifies another peer progresses and
 checks resumed replies byte-for-byte. It does not exercise the graphical UI.
+
+The service probe also posts a real 9P server that withholds an ordered WRITE
+reply until the production 30-second deadline retires its ring. An original
+Rwrite sent before Rflush is isolated from a fresh ring on the retained client
+session. This tests joined local callback retirement, not remote rollback.
+The scenario permits 75 seconds for this probe including its existing checks.
+
+`ls-halcyon-clipboard` requires the explicit interaction qualification option;
+it skips without it. With a matching image it verifies 20,000 bytes across two
+processes, enters physical Ctrl+Alt+F10 with a retained read snapshot, requires
+the old application connection to fail afterward, then rebinds and checks that
+the session value survived. It captures the trusted scene and restored workspace.
+This is not the pending/partial-output SAK or multi-session capacity witness.
 
 ## Contract
 

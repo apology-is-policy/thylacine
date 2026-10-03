@@ -26,7 +26,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-30
+updated: 2026-10-03
 ---
 ## Purpose
 
@@ -85,6 +85,13 @@ inputs, while `forage.sh` resolves and checks those inputs before a build.
 `MANIFEST` and `FORAGE_ROOT` isolate fixture tests; they are not permission to
 silently substitute downloaded bytes for a pinned archive. DOSBox and game
 baking follow the same configured input path as the existing toolchain.
+
+The display-group `HALCYON_INTERACTION_QUALIFICATION` bool defaults off in all
+presets. Its environment shim is `THYLACINE_INTERACTION_QUALIFICATION`; the
+Rust build maps the enabled value to `halcyond/interaction-qualification` and
+logs it. This development option exposes the HIN1 adapter and expanded pool
+for HI1-R24 qualification. Normal builds keep media-only discovery. Tests pin
+the production/default refusal and explicit enabled export.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a

@@ -89,6 +89,10 @@ impl Interaction {
         });
         request
     }
+    pub fn request(&self) -> Option<Request> { self.flight.map(|f| f.request) }
+    pub fn registered(&self, peer: Peer, scope: Scope) -> bool {
+        self.controllers.authority(peer, scope).is_ok()
+    }
     pub fn busy(&self) -> bool {
         self.flight.is_some()
     }
