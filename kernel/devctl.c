@@ -33,7 +33,8 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spoor.h>
-#include <thylacine/srvconn.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
+#include <thylacine/srvconn.h>
+#include <thylacine/devsrv.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
 #include <thylacine/thread.h>   // ARCH 8.12: THREAD_KSTACK_* (/ctl/kstack)
 #include <thylacine/thread.h>
@@ -703,6 +704,12 @@ static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
     EMIT_STR(" guests="); EMIT_DEC(row->sessions_used);
     EMIT_STR(" all="); EMIT_DEC(row->global_used);
     EMIT_STR(" domains="); EMIT_DEC(row->domains_retained);
+    EMIT_STR(" credits="); EMIT_DEC(row->domain_credits);
+    EMIT_STR("/"); EMIT_DEC(row->session_domain ? SRV_CREDITS_DOMAIN : SRV_CREDITS_GLOBAL);
+    EMIT_STR(" guestcredits="); EMIT_DEC(row->session_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_SESSIONS);
+    EMIT_STR(" allcredits="); EMIT_DEC(row->global_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_GLOBAL);
     EMIT_STR(row->byte_mode ? " byte" : " 9p");
     EMIT_STR(row->kernel_attached ? " ka" : " -");
     EMIT_STR(row->state == 1 ? " live" : " torn");
@@ -756,13 +763,35 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
     }
     EMIT_STR("\n");
     return true;
+}
+
+// Emit the bounded global summary first; detail may fill the 4 KiB read buffer.
+// Snapshot takes only admission lock, before the diagnostic-list walk begins.
+static bool format_9p_admission(struct ctl_9p_fmt *f) {
+    struct srv_admission_snapshot s;
+    srv_domain_snapshot(NULL, &s);
+    size_t n;
+    EMIT_STR("admission count="); EMIT_DEC(s.global_count);
+    EMIT_STR(" guests="); EMIT_DEC(s.session_count);
+    EMIT_STR(" boot="); EMIT_DEC(s.local_count);
+    EMIT_STR(" credits="); EMIT_DEC(s.global_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_GLOBAL);
+    EMIT_STR(" guestcredits="); EMIT_DEC(s.session_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_SESSIONS);
+    EMIT_STR(" bootcredits="); EMIT_DEC(s.local_credits);
+    EMIT_STR(" domainlimit="); EMIT_DEC(SRV_CREDITS_DOMAIN);
+    EMIT_STR(" domains="); EMIT_DEC(s.domains);
+    EMIT_STR("/"); EMIT_DEC(SRV_MAX_DOMAINS);
+    EMIT_STR(" creditbytes="); EMIT_DEC(SRV_CREDIT_BYTES);
+    EMIT_STR("\n");
+    return true;
 #undef EMIT_STR
 #undef EMIT_DEC
 }
 
 static size_t format_9p_sessions(char *buf, size_t cap) {
     struct ctl_9p_fmt f = { buf, cap, 0, false };
-    srvconn_ctl_iterate(format_9p_conn_cb, &f);
+    if (format_9p_admission(&f)) srvconn_ctl_iterate(format_9p_conn_cb, &f);
     if (!f.full) p9_attached_ctl_iterate(format_9p_sess_cb, &f);
     return f.off;
 }

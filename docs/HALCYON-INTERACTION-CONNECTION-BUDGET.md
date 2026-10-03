@@ -1,7 +1,8 @@
 # Halcyon connection admission: resource-policy review
 
 Status: APPROVED by the operator, October 3, 2026 (option A).
-Implementation pending; no quota or endpoint has changed yet.
+Implemented and verified on October 3; see HALCYON-INTERACTION-STATUS.md.
+The clipboard endpoint remains disabled pending its separate integration.
 Source baseline: Astra e61fced0163706822ee3b11e3f072dfd4eca6222.
 This ratifies the numeric resource amendment to SRV-SESSION-REGISTRY-DESIGN. Registry ownership, peer identity and privileges stay
 as ratified. Evidence lives in work/oct2-hi-budget/.

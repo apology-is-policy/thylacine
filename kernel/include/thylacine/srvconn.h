@@ -240,6 +240,7 @@ struct SrvConn {
     // recv cap, so the negotiated session msize can never exceed what
     // the rings carry. Immutable for the conn's lifetime.
     u32                 msize;
+    u32 credit_charge; // immutable admission ticket; not negotiated msize
 
     // Kernel-client-side blocking-recv deadline. Absolute ns on the
     // timer_now_ns timebase; 0 = no deadline (blocks indefinitely,
@@ -362,7 +363,7 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // (c2s / s2c) + poll list. The connection is born LIVE with refcount 1 —
 // the caller owns that reference and drops it via srvconn_unref.
 //
-// Reserves one of SRV_MAX_CONNS slots before allocating. The reservation lasts
+// Reserves class-weighted credits before allocating. The reservation lasts
 // through transport teardown until final unref frees the rings and object;
 // every allocation-failure path returns it. Constructors in flight count too.
 // Returns NULL on exhausted capacity, allocation failure or a bad msize. A 9P-mode session
@@ -371,6 +372,12 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 struct SrvDomain *srv_domain_create(int *err);
 void srv_domain_ref(struct SrvDomain *d);
 void srv_domain_unref(struct SrvDomain *d);
+// One coherent admission snapshot; NULL domain selects the boot counts.
+struct srv_admission_snapshot {
+    u32 local_count, session_count, global_count, domains;
+    u32 local_credits, session_credits, global_credits;
+};
+void srv_domain_snapshot(struct SrvDomain *d, struct srv_admission_snapshot *out);
 void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
                        u32 *global, u32 *domains);
 struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
@@ -629,6 +636,7 @@ u64 srvconn_total_freed(void);
 struct srvconn_ctl_row {
     bool session_domain;
     u32 domain_used, sessions_used, global_used, domains_retained;
+    u32 domain_credits, session_credits, global_credits;
     int  peer_pid;
     u32  msize;
     u8   state;            // enum srvconn_state

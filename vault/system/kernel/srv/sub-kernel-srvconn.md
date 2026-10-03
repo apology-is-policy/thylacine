@@ -17,7 +17,10 @@ updated: 2026-10-03
 ## Admission (October 1, D7)
 
 One admission lock reserves all applicable counters before allocation:
-16 transports per session, 48 for sessions combined, and 64 globally.
+96 credits per session, 192 for sessions combined, and 256 globally.
+Default connections cost one credit (128 KiB of rings); bulk connections cost
+four (512 KiB). Counts remain separate from credits. The charge is captured
+before allocation and retained independently of later protocol negotiation.
 Boot/internal connections use the global bound only. At most 16 session
 domains may remain retained. Constructors in flight and torn but referenced
 transports count; teardown never releases their tickets. Allocation rollback
@@ -38,16 +41,31 @@ admission never enters the list or a registry lock.
 
 The actual-source host fixture checks all allocation failures, reentrant
 construction, independent session quotas, aggregate and global saturation,
-rollback and retained teardown. Eight intended mutants fail. Real kernel
+rollback and retained teardown. The focused fixture includes weighted mixed-class boundaries and intended
+mutants for bulk charging and exact final return. Real kernel
 fixtures cover domain retirement and route charging. These are focused
 functional checks, not a new SMP/sanitizer qualification.
 
-## Open resource-policy review
+The October 3 implementation is qualified by 50 clean boots across default
+SMP1/4/8 and UBSan SMP4/8, eleven intended source-fixture mutants, and native
+service/media/SAK checks. No total-memory, clipboard, Pi or ASan claim follows.
 
-The current 16/48/64 count contract conflicts with Halcyon's larger persistent
-client reservation. `docs/HALCYON-INTERACTION-CONNECTION-BUDGET.md` records
-measured ARM64 object sizes and proposes class-weighted admission. The operator approved option A on October 3; implementation is pending.
-The current executable quotas above still apply until that implementation.
+## Weighted admission (October 3)
+
+The ratified contract is `docs/HALCYON-INTERACTION-CONNECTION-BUDGET.md`.
+Global and combined ring ceilings remain 32/24 MiB; one session may consume
+12 MiB. These are ring bounds, not total kernel memory. At least one credit per
+connection also bounds object counts; the service's independent slot/handshake
+limits still apply. Compile-time assertions tie charges to both ring classes.
+
+`srv_domain_snapshot` samples counts, credits and retained domains under one
+admission lock. `srv_domain_counts` preserves its count-only interface. The
+connection captures `credit_charge`; final destruction copies it before freeing
+the object and returns it only after all transport storage is freed. Partial
+construction returns the identical reserved charge after rollback. Saturation
+returns ENOSPC before allocation, including a bulk request with only three
+credits left. Boot may borrow unused global credits; sessions cannot consume
+the 64-credit protected margin. No namespace or privilege semantics change.
 
 ## Event-loop I/O
 

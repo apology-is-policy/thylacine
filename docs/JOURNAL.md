@@ -32916,3 +32916,21 @@ work/oct1-srv-admission/. The operator waived 50-boot, ASan, UBSan and SMP gates
 for Astra on October 1-2 (Europe/Prague); these gates were not run for this change.
 All four authority/settings drafts remain separate. O1-SRV-1 still owns private
 registries, resident-service routing, poster death and per-session fairness.
+
+
+### 2026-10-03: weighted service-connection admission (Astra)
+
+Implement operator-approved option A after scripture commit 6d9cc4647. Default
+connections cost one credit and bulk four, with 96/192/256 session/combined/
+global limits. Preserve the 32 MiB global ring ceiling and the requesting-domain
+lifetime: allocation rollback and final storage destruction return exact charges,
+while teardown and retained references do not. Diagnostics distinguish counts
+from credits and print a bounded summary before potentially truncated detail.
+
+The source-sharing allocator fixture passes with eleven intended mutants. Fresh
+CPU1 boot passes 1830/1830; native service-wire, graphical media and physical F10
+SAK pass. Full default SMP1/4/8 and UBSan SMP4/8 matrix: 50/50 clean boots, zero
+failures in every classifier category, including timing. The matrix used
+CLADE=0/GOROOT=1. No new ASan, Pi, minimum-display or full clipboard qualification
+is claimed. Single-agent self-review; four unrelated drafts preserved. The
+clipboard adapter, complete allocation ledger and modal clients remain open.

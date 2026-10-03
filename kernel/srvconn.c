@@ -25,6 +25,14 @@
 // SRVCONN_ROOT_FID moved to <thylacine/srvconn.h> (stalk-3b-β) so the shared
 // srvconn_attach_dev9p_root helper (9p_attach.c) can pass the same root fid.
 
+_Static_assert(4u * SRVCONN_MSIZE == SRV_CREDIT_BYTES * SRV_CREDIT_DEFAULT,
+               "default ring allocation must match its admission charge");
+_Static_assert(4u * SRVCONN_BULK_MSIZE == SRV_CREDIT_BYTES * SRV_CREDIT_BULK,
+               "bulk ring allocation must match its admission charge");
+_Static_assert(SRV_CREDITS_DOMAIN <= SRV_CREDITS_SESSIONS &&
+               SRV_CREDITS_SESSIONS < SRV_CREDITS_GLOBAL,
+               "session partition must preserve boot margin");
+
 static u64 g_srvconn_created;
 static u64 g_srvconn_freed;
 
@@ -32,10 +40,11 @@ static u64 g_srvconn_freed;
 // boot's margin, even transiently. No allocation or final free under this lock.
 struct SrvDomain {
     int ref;
-    u32 used;
+    u32 used, credits;
 };
 static spin_lock_t g_srv_admission_lock;
 static u32 g_srvconn_reserved, g_srvconn_session_reserved, g_srv_domains;
+static u32 g_srvconn_credits, g_srvconn_session_credits;
 
 struct SrvDomain *srv_domain_create(int *err) {
     spin_lock(&g_srv_admission_lock);
@@ -66,7 +75,7 @@ void srv_domain_unref(struct SrvDomain *d) {
     int pre = __atomic_fetch_sub(&d->ref, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0) extinction("srv_domain_unref: underflow");
     if (pre != 1) return;
-    if (d->used) extinction("srv_domain_unref: charged domain");
+    if (d->used || d->credits) extinction("srv_domain_unref: charged domain");
     kfree(d);
     spin_lock(&g_srv_admission_lock);
     if (!g_srv_domains) extinction("srv_domain_unref: domain count");
@@ -74,37 +83,63 @@ void srv_domain_unref(struct SrvDomain *d) {
     spin_unlock(&g_srv_admission_lock);
 }
 
-static bool srvconn_reserve(struct SrvDomain *d) {
+static bool srvconn_reserve(struct SrvDomain *d, u32 charge) {
     spin_lock(&g_srv_admission_lock);
-    bool ok = g_srvconn_reserved < SRV_MAX_CONNS &&
-        (!d || (d->used < SRV_SESSION_CONNS &&
-                g_srvconn_session_reserved < SRV_SESSION_CONNS_TOTAL));
+    // Subtraction is safe: these counters are maintained within their bounds.
+    // Check all partitions before changing any; a refused session cannot even
+    // transiently borrow boot's margin. Only the two validated classes enter.
+    bool ok = charge <= SRV_CREDITS_GLOBAL - g_srvconn_credits &&
+        (!d || (charge <= SRV_CREDITS_DOMAIN - d->credits &&
+                charge <= SRV_CREDITS_SESSIONS - g_srvconn_session_credits));
     if (ok) {
         g_srvconn_reserved++;
-        if (d) { d->used++; g_srvconn_session_reserved++; srv_domain_ref(d); }
+        g_srvconn_credits += charge;
+        if (d) {
+            d->used++; d->credits += charge;
+            g_srvconn_session_reserved++; g_srvconn_session_credits += charge;
+            srv_domain_ref(d);
+        }
     }
     spin_unlock(&g_srv_admission_lock);
     return ok;
 }
 
-static void srvconn_unreserve(struct SrvDomain *d) {
+static void srvconn_unreserve(struct SrvDomain *d, u32 charge) {
     spin_lock(&g_srv_admission_lock);
-    if (!g_srvconn_reserved || (d && (!d->used || !g_srvconn_session_reserved)))
+    if ((charge != SRV_CREDIT_DEFAULT && charge != SRV_CREDIT_BULK) ||
+        !g_srvconn_reserved || g_srvconn_credits < charge ||
+        (d && (!d->used || !g_srvconn_session_reserved ||
+               d->credits < charge || g_srvconn_session_credits < charge)))
         extinction("srvconn_unreserve: corrupt admission count");
-    g_srvconn_reserved--;
-    if (d) { d->used--; g_srvconn_session_reserved--; }
+    g_srvconn_reserved--; g_srvconn_credits -= charge;
+    if (d) {
+        d->used--; d->credits -= charge;
+        g_srvconn_session_reserved--; g_srvconn_session_credits -= charge;
+    }
     spin_unlock(&g_srv_admission_lock);
     srv_domain_unref(d);
 }
 
+void srv_domain_snapshot(struct SrvDomain *d, struct srv_admission_snapshot *out) {
+    spin_lock(&g_srv_admission_lock);
+    *out = (struct srv_admission_snapshot) {
+        .local_count = d ? d->used : g_srvconn_reserved - g_srvconn_session_reserved,
+        .session_count = g_srvconn_session_reserved, .global_count = g_srvconn_reserved,
+        .domains = g_srv_domains,
+        .local_credits = d ? d->credits : g_srvconn_credits - g_srvconn_session_credits,
+        .session_credits = g_srvconn_session_credits, .global_credits = g_srvconn_credits,
+    };
+    spin_unlock(&g_srv_admission_lock);
+}
+
 void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
                        u32 *global, u32 *domains) {
-    spin_lock(&g_srv_admission_lock);
-    if (local) *local = d ? d->used : g_srvconn_reserved - g_srvconn_session_reserved;
-    if (sessions) *sessions = g_srvconn_session_reserved;
-    if (global) *global = g_srvconn_reserved;
-    if (domains) *domains = g_srv_domains;
-    spin_unlock(&g_srv_admission_lock);
+    struct srv_admission_snapshot s;
+    srv_domain_snapshot(d, &s);
+    if (local) *local = s.local_count;
+    if (sessions) *sessions = s.session_count;
+    if (global) *global = s.global_count;
+    if (domains) *domains = s.domains;
 }
 
 // #210: the /ctl/9p-sessions registry — every live SrvConn, singly linked
@@ -419,12 +454,13 @@ struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err, u64 peer_s
     if (err) *err = -T_E_INVAL;
     if (msize != SRVCONN_MSIZE && msize != SRVCONN_BULK_MSIZE) return NULL;
     if (err) *err = -T_E_NOSPC;
-    if (!srvconn_reserve(domain)) return NULL;
+    u32 charge = msize == SRVCONN_MSIZE ? SRV_CREDIT_DEFAULT : SRV_CREDIT_BULK;
+    if (!srvconn_reserve(domain, charge)) return NULL;
     if (err) *err = -T_E_NOMEM;
 
     struct SrvConn *cn = kmalloc(sizeof(*cn), KP_ZERO);
     if (!cn) {
-        srvconn_unreserve(domain);
+        srvconn_unreserve(domain, charge);
         return NULL;
     }
 
@@ -440,7 +476,7 @@ struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err, u64 peer_s
     if (!b_c2s || !b_s2c) {
         kfree(b_c2s);
         kfree(cn);
-        srvconn_unreserve(domain);
+        srvconn_unreserve(domain, charge);
         return NULL;
     }
 
@@ -450,6 +486,7 @@ struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err, u64 peer_s
 
     spin_lock_init(&cn->lock);
     cn->domain             = domain;
+    cn->credit_charge      = charge;
     cn->msize              = msize;
     cn->state              = SRVCONN_STATE_LIVE;
     cn->peer_stripes       = peer_stripes;
@@ -584,9 +621,10 @@ void srvconn_unref(struct SrvConn *cn) {
     cn->c2s.buf = NULL;
     cn->s2c.buf = NULL;
     struct SrvDomain *domain = cn->domain;
+    u32 charge = cn->credit_charge;
     kfree(cn);
     __atomic_fetch_add(&g_srvconn_freed, 1u, __ATOMIC_RELAXED);
-    srvconn_unreserve(domain);
+    srvconn_unreserve(domain, charge);
 }
 
 void srvconn_teardown(struct SrvConn *cn) {
@@ -1186,8 +1224,15 @@ void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
     for (struct SrvConn *cn = g_srvconn_ctl_head; cn; cn = cn->ctl_next) {
         struct srvconn_ctl_row row;
         row.session_domain = cn->domain != NULL;
-        srv_domain_counts(cn->domain, &row.domain_used, &row.sessions_used,
-                          &row.global_used, &row.domains_retained);
+        struct srv_admission_snapshot admission;
+        srv_domain_snapshot(cn->domain, &admission);
+        row.domain_used = admission.local_count;
+        row.sessions_used = admission.session_count;
+        row.global_used = admission.global_count;
+        row.domains_retained = admission.domains;
+        row.domain_credits = admission.local_credits;
+        row.session_credits = admission.session_credits;
+        row.global_credits = admission.global_credits;
         row.peer_pid        = cn->peer_pid;
         row.msize           = cn->msize;
         row.state           = (u8)cn->state;

@@ -24,12 +24,12 @@ def function(name):
 
 
 bodies = "\n".join(function(n) for n in (
-    "srv_domain_create", "srv_domain_ref", "srv_domain_unref", "srv_domain_counts",
+    "srv_domain_create", "srv_domain_ref", "srv_domain_unref", "srv_domain_snapshot", "srv_domain_counts",
     "srvconn_reserve", "srvconn_unreserve", "srvconn_create_in", "srvconn_create",
     "srvconn_ref", "srvconn_teardown", "srvconn_unref"))
 constants = []
 for path, names in (
-    ("devsrv.h", ["SRV_MAX_CONNS", "SRV_SESSION_CONNS", "SRV_SESSION_CONNS_TOTAL", "SRV_MAX_DOMAINS"]),
+    ("devsrv.h", ["SRV_MAX_CONNS", "SRV_CREDIT_DEFAULT", "SRV_CREDIT_BULK", "SRV_CREDITS_GLOBAL", "SRV_CREDITS_DOMAIN", "SRV_CREDITS_SESSIONS", "SRV_MAX_DOMAINS"]),
     ("srvconn.h", ["SRVCONN_MSIZE", "SRVCONN_BULK_MSIZE", "SRV_CONN_MAGIC"]),
 ):
     header = (ROOT / "kernel/include/thylacine" / path).read_text()
@@ -51,7 +51,8 @@ typedef uint8_t u8;
 #define T_E_NOSPC 28
 #define T_E_NOMEM 12
 typedef int spin_lock_t;
-struct SrvDomain { int ref; u32 used; };
+struct SrvDomain { int ref; u32 used, credits; };
+struct srv_admission_snapshot { u32 local_count, session_count, global_count, domains; u32 local_credits, session_credits, global_credits; };
 #define SRVCONN_STATE_LIVE 1
 #define SRVCONN_STATE_TORN 2
 #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
@@ -60,12 +61,13 @@ struct SrvConn {
     u64 magic, peer_stripes, server_stripes, client_deadline_ns;
     int ref, lock, state, peer_pid, poll_list;
     bool peer_console, client_timed_out;
-    u32 msize;
+    u32 msize, credit_charge;
     struct SrvDomain *domain;
     struct channel c2s, s2c;
 };
 static u64 g_srvconn_created, g_srvconn_freed;
 static u32 g_srvconn_reserved, g_srvconn_session_reserved, g_srv_domains;
+static u32 g_srvconn_credits, g_srvconn_session_credits;
 static spin_lock_t g_srv_admission_lock;
 static unsigned allocations, blocks, fail_at, linked;
 static void (*allocation_hook)(void), (*free_hook)(void);
@@ -106,7 +108,7 @@ static void expect_full(void) {
 static void empty(void) {
     CHECK(blocks == 0 && linked == 0, "storage or diagnostic-list leak");
     CHECK(g_srvconn_created == g_srvconn_freed, "lifecycle counter imbalance");
-    CHECK(g_srvconn_reserved == 0, "reservation leaked after rollback or destruction");
+    CHECK(g_srvconn_reserved == 0 && g_srvconn_credits == 0 && g_srvconn_session_credits == 0, "reservation leaked after rollback or destruction");
 }
 static void domains_test(void) {
     int err;
@@ -116,25 +118,25 @@ static void domains_test(void) {
     }
     CHECK(!srv_domain_create(&err) && err == -T_E_NOSPC, "domain bound bypass");
     struct SrvConn *cs[SRV_MAX_CONNS];
-    for (unsigned i = 0; i < SRV_SESSION_CONNS_TOTAL; i++) {
-        cs[i] = srvconn_create_in(ds[i / SRV_SESSION_CONNS], &err, 1, 1, false, 2, SRVCONN_MSIZE);
+    for (unsigned i = 0; i < SRV_CREDITS_SESSIONS; i++) {
+        cs[i] = srvconn_create_in(ds[i / SRV_CREDITS_DOMAIN], &err, 1, 1, false, 2, SRVCONN_MSIZE);
         CHECK(cs[i] && !err, "session partition early refusal");
-        if (i == SRV_SESSION_CONNS - 1)
+        if (i == SRV_CREDITS_DOMAIN - 1)
             CHECK(!srvconn_create_in(ds[0], &err, 1, 1, false, 2, SRVCONN_MSIZE)
                   && err == -T_E_NOSPC, "local domain limit bypass");
     }
     CHECK(!srvconn_create_in(ds[3], &err, 1, 1, false, 2, SRVCONN_MSIZE)
           && err == -T_E_NOSPC, "session combined limit bypass");
-    for (unsigned i = SRV_SESSION_CONNS_TOTAL; i < SRV_MAX_CONNS; i++) {
+    for (unsigned i = SRV_CREDITS_SESSIONS; i < SRV_MAX_CONNS; i++) {
         cs[i] = make(); CHECK(cs[i], "boot margin stolen by sessions");
     }
     expect_full();
     // Registry retirement cannot mint another domain while its conns survive.
     srv_domain_unref(ds[0]);
     CHECK(!srv_domain_create(&err), "retained domain ticket returned early");
-    for (unsigned i = 0; i < SRV_SESSION_CONNS; i++) srvconn_unref(cs[i]);
+    for (unsigned i = 0; i < SRV_CREDITS_DOMAIN; i++) srvconn_unref(cs[i]);
     ds[0] = srv_domain_create(&err); CHECK(ds[0], "final connection lost domain ticket");
-    for (unsigned i = SRV_SESSION_CONNS; i < SRV_MAX_CONNS; i++) srvconn_unref(cs[i]);
+    for (unsigned i = SRV_CREDITS_DOMAIN; i < SRV_MAX_CONNS; i++) srvconn_unref(cs[i]);
     for (unsigned i = 0; i < SRV_MAX_DOMAINS; i++) srv_domain_unref(ds[i]);
     CHECK(!g_srv_domains && !g_srvconn_session_reserved, "domain or session charge leaked");
     empty();
@@ -151,6 +153,74 @@ static void domains_test(void) {
         fail_at = 0;
     }
     srv_domain_unref(d); empty();
+}
+static void weighted_test(void) {
+    struct SrvConn *held[256];
+    int err;
+    struct SrvDomain *d = srv_domain_create(&err);
+    CHECK(d, "weighted domain create");
+    for (unsigned scope = 0; scope < 2; scope++) {
+        struct SrvDomain *owner = scope ? d : NULL;
+        unsigned limit = scope ? 96 : 256;
+        unsigned n = 0;
+        // Leave exactly three credits, so even a single remaining bulk fails.
+        for (; n < limit - 3; n++) {
+            held[n] = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE);
+            CHECK(held[n], "weighted default capacity");
+        }
+        unsigned before = allocations;
+        CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE)
+              && err == -T_E_NOSPC && allocations == before, "bulk must cost four credits");
+        srvconn_unref(held[--n]); // exactly four credits now free
+        if (!owner) allocation_hook = expect_full;
+        struct SrvConn *bulk = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE);
+        CHECK(bulk, "bulk exact fit");
+        struct srv_admission_snapshot snap;
+        srv_domain_snapshot(owner, &snap);
+        CHECK(snap.local_count == n + 1 && snap.local_credits == limit,
+              "diagnostics conflate credits and counts");
+        srvconn_ref(bulk); srvconn_teardown(bulk); srvconn_unref(bulk);
+        CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE),
+              "retained bulk returns credit early");
+        if (!owner) free_hook = expect_full;
+        srvconn_unref(bulk);
+        for (unsigned j = 0; j < 4; j++) {
+            held[n++] = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE);
+            CHECK(held[n-1], "bulk final free did not return four credits");
+        }
+        CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE), "bulk returned excess credit");
+        for (unsigned j = 0; j < n; j++) srvconn_unref(held[j]);
+    }
+    for (unsigned failure = 1; failure <= 3; failure++) {
+        fail_at = allocations + failure;
+        CHECK(!srvconn_create_in(d, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE), "bulk allocation failure ignored");
+        CHECK(!d->used && !d->credits && !g_srvconn_session_credits && !g_srvconn_credits,
+              "bulk rollback leaked credits");
+        fail_at = 0;
+    }
+    srv_domain_unref(d); empty();
+    struct SrvDomain *a = srv_domain_create(&err), *b = srv_domain_create(&err);
+    struct SrvDomain *c = srv_domain_create(&err);
+    CHECK(a && b && c, "combined weighted domains");
+    for (unsigned i = 0; i < 48; i++) {
+        held[i] = srvconn_create_in(i < 24 ? a : b, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE);
+        CHECK(held[i], "combined bulk capacity");
+    }
+    unsigned before = allocations;
+    CHECK(!srvconn_create_in(c, &err, 1, 1, false, 2, SRVCONN_MSIZE)
+          && err == -T_E_NOSPC && before == allocations, "combined bulk charge bypass");
+    for (unsigned i = 48; i < 64; i++) {
+        held[i] = srvconn_create(1, 1, false, 2, SRVCONN_BULK_MSIZE);
+        CHECK(held[i], "bulk boot margin unavailable");
+    }
+    expect_full();
+    struct srv_admission_snapshot snap;
+    srv_domain_snapshot(c, &snap);
+    CHECK(snap.global_count == 64 && snap.global_credits == 256 &&
+          snap.session_count == 48 && snap.session_credits == 192,
+          "combined weighted snapshot incorrect");
+    for (unsigned i = 0; i < 64; i++) srvconn_unref(held[i]);
+    srv_domain_unref(a); srv_domain_unref(b); srv_domain_unref(c); empty();
 }
 int main(void) {
     CHECK(srvconn_create(1, 1, false, 2, 0) == NULL, "invalid class admitted");
@@ -175,33 +245,38 @@ int main(void) {
     srvconn_unref(held[0]); expect_full();
     // Reenter during final freeing: capacity may return only AFTER storage.
     free_hook = expect_full; srvconn_unref(held[0]);
-    held[0] = srvconn_create(1, 1, false, 2, SRVCONN_BULK_MSIZE);
+    held[0] = make();
     CHECK(held[0], "final unref lost capacity"); expect_full();
     for (unsigned i = 0; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
-    empty(); domains_test(); puts("PASS: domains, partitions, retained tickets, allocation rollback, in-flight admission, retained teardown, final free");
+    empty(); domains_test(); weighted_test(); puts("PASS: domains, partitions, retained tickets, allocation rollback, in-flight admission, retained teardown, final free");
 }
 '''
 
 mutants = {
-    "local-domain-limit": ("d->used < SRV_SESSION_CONNS", "true", "local domain limit bypass"),
-    "combined-domain-limit": ("g_srvconn_session_reserved < SRV_SESSION_CONNS_TOTAL", "true", "session combined limit bypass"),
+    "combined-bulk-undercharge": ("g_srvconn_session_credits += charge;", "g_srvconn_session_credits++;", "corrupt admission count"),
+
+    "bulk-unit-charge": ("msize == SRVCONN_MSIZE ? SRV_CREDIT_DEFAULT : SRV_CREDIT_BULK", "SRV_CREDIT_DEFAULT", "bulk must cost four credits"),
+    "bulk-return-one": ("u32 charge = cn->credit_charge;", "u32 charge = SRV_CREDIT_DEFAULT;", "bulk final free did not return four credits"),
+
+    "local-domain-limit": ("charge <= SRV_CREDITS_DOMAIN - d->credits", "true", "local domain limit bypass"),
+    "combined-domain-limit": ("charge <= SRV_CREDITS_SESSIONS - g_srvconn_session_credits", "true", "session combined limit bypass"),
     "domain-retention": ("srv_domain_ref(d);", "/* missing retain */", "srv_domain_unref: charged domain"),
 
     "ignored-admission-refusal": (
-        "if (!srvconn_reserve(domain)) return NULL;", "(void)srvconn_reserve(domain);",
+        "if (!srvconn_reserve(domain, charge)) return NULL;", "(void)srvconn_reserve(domain, charge);",
         "in-flight or retained storage lost its reservation"),
     "missing-reservation": (
-        "if (!srvconn_reserve(domain)) return NULL;", "/* missing reservation */",
+        "if (!srvconn_reserve(domain, charge)) return NULL;", "/* missing reservation */",
         "corrupt admission count"),
     "struct-rollback-leak": (
-        "if (!cn) {\n        srvconn_unreserve(domain);",
+        "if (!cn) {\n        srvconn_unreserve(domain, charge);",
         "if (!cn) {", "reservation leaked after rollback"),
     "ring-rollback-leak": (
-        "kfree(cn);\n        srvconn_unreserve(domain);",
+        "kfree(cn);\n        srvconn_unreserve(domain, charge);",
         "kfree(cn);", "reservation leaked after rollback"),
     "premature-release": (
         "srvconn_ctl_unlink(cn);",
-        "srvconn_unreserve(cn->domain);\n    srvconn_ctl_unlink(cn);",
+        "srvconn_unreserve(cn->domain, cn->credit_charge);\n    srvconn_ctl_unlink(cn);",
         "in-flight or retained storage lost its reservation"),
 }
 
@@ -214,10 +289,10 @@ with tempfile.TemporaryDirectory(prefix="srvconn-admission-") as directory:
             assert actual.count(old) == 1, name
             actual = actual.replace(old, new)
             if name == "premature-release":
-                tail = "__atomic_fetch_add(&g_srvconn_freed, 1u, __ATOMIC_RELAXED);\n    srvconn_unreserve(domain);"
+                tail = "__atomic_fetch_add(&g_srvconn_freed, 1u, __ATOMIC_RELAXED);\n    srvconn_unreserve(domain, charge);"
                 assert actual.count(tail) == 1
                 actual = actual.replace(tail, "__atomic_fetch_add(&g_srvconn_freed, 1u, __ATOMIC_RELAXED);")
-                actual = actual.replace("    struct SrvDomain *domain = cn->domain;\n", "")
+                actual = actual.replace("    struct SrvDomain *domain = cn->domain;\n", "").replace("    u32 charge = cn->credit_charge;\n", "")
         (path / "fixture.c").write_text("\n".join(constants) + "\n" + fixture + actual + tests)
         subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
                         "-Werror", "-Wno-unused-function", str(path / "fixture.c"),

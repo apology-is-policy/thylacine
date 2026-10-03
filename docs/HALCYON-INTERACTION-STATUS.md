@@ -5,23 +5,48 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
-## Connection budget review (approved October 3)
+## Weighted connection admission (October 3, verified)
 
-HI1-R22 (open): the approved 32-control/2-media/4-handshake service pool cannot
-fit the later 16-connection D7 session quota. The concrete alternatives and
-weighted-credit recommendation are in HALCYON-INTERACTION-CONNECTION-BUDGET.md.
-The operator approved weighted admission on October 3. Implementation is next;
-no quota or authority changed yet, and clipboard remains disabled. Actual ARM64
-layouts and a CPU1 graphical startup capture are in work/oct2-hi-budget/:
-session6, combined6, global17, domains1. This is not a full-pane workload.
-The proposal retains the global32MiB and combined24MiB ring ceilings while
-raising one session's share to12MiB; it explicitly accounts for the separate
-fixed-buffer increase and excludes unmeasured transient/fid/server overhead.
-The initial serial redirection probe hit the console-attachment gate. A normal
-tile capture succeeded; its outer cleanup wrapper attempted to signal an
-already-exited group and failed. No jobs or lease remained. Both failures and
-the corrective wrapper edit are retained; no automated runtime pass is claimed.
-Review is single-agent. A scripture commit records that signoff before implementation; existing protected drafts and previous verification stand.
+Operator-approved option A follows scripture commit 6d9cc4647. Connections now
+cost one credit for the default class or four for bulk, with limits of 96 per
+session, 192 across sessions and 256 globally. Global/combined ring ceilings
+remain 32/24 MiB; the explicitly approved local share is 12 MiB. Connection
+counts remain separate. The exact charge survives teardown and returns only
+after storage is freed. A bounded diagnostic summary precedes detail rows.
+HI1-R22 is closed for kernel admission. Clipboard dispatch and modal clients
+still require the integration described in the route-lifetime section below;
+this checkpoint does not activate them or complete their allocation ledger.
+
+The actual-source allocator/interleaving fixture passes with eleven intended
+mutant failures: bulk undercharge and wrong final return, local/combined limits,
+retainers and allocation rollback. A fresh CI image passes ordinary CPU1 boot
+1830/1830. Real service-wire passes in 35.97 seconds, including independent
+clients, route lifetimes and cancellation-owner witnesses. Evidence:
+work/oct3-hi-credits/native-1791046386688434000. The graphical pair,
+graphics-1791046578879478000, passes session-media in 75.58 seconds and physical
+F10 SAK in 87.97 seconds (empty, confer/use/abdicate, wrong key, cancellation
+and restoration). Summary and prompt captures were inspected at 1280x800.
+
+The full 50-boot matrix passed: ten clean boots each for default SMP1/4/8 and
+UBSan SMP4/8. Every individual classifier result and all five category summaries
+were checked: zero corruption, external kills, injection misses, timing or other
+failures. Total boot exposure was 2,244 seconds; the complete runner took about
+39 minutes including builds. Bake configuration was CLADE=0, GOROOT=1. The driver
+retains raw logs only for failures; all fifty per-boot outcomes and the final
+raw boot/harness logs are retained in work/oct3-hi-credits. This is SMP/UBSan
+coverage, not an ASan, Pi or minimum-display qualification.
+
+The startup capture reports 17 global connections using 26 credits: six session
+connections use 12, eleven boot connections use 14, and one domain is retained.
+This is not a full 32-controller or multi-user application workload. The complete
+HI allocation ledger and real clipboard client qualification remain ahead.
+The four original drafts match their preserved hashes; the matrix released its
+lease. Review is single-agent, with no independent audit or Main landing claimed.
+
+Earlier measurement caveats remain in the approved budget review: the October 2
+serial redirection probe was correctly refused to a non-console graphical
+process; its corrected capture's outer wrapper then signalled an exited process
+group. Those logs remain separate from today's successful new native runs.
 
 ## Route lifetime adapter (October 2)
 

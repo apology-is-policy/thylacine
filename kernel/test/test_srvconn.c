@@ -123,11 +123,18 @@ void test_srvconn_create_destroy(void) {
     TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
         "capacity fixture starts without retained connections");
     struct SrvConn *held[SRV_MAX_CONNS];
-    for (u32 i = 0; i < SRV_MAX_CONNS; i++) {
-        held[i] = srvconn_create(1, 1, false, 0,
-                                i & 1u ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE);
-        TEST_ASSERT(held[i] != NULL, "admit every slot up to the global limit");
+    u32 nheld = 0, used = 0;
+    while (used < SRV_CREDITS_GLOBAL) {
+        bool bulk = (nheld & 1u) && SRV_CREDITS_GLOBAL - used >= 4;
+        held[nheld] = srvconn_create(1, 1, false, 0,
+                                    bulk ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE);
+        TEST_ASSERT(held[nheld] != NULL, "admit mixed classes up to credit limit");
+        used += bulk ? 4 : 1; nheld++;
     }
+    struct srv_admission_snapshot snapshot;
+    srv_domain_snapshot(NULL, &snapshot);
+    TEST_EXPECT_EQ(snapshot.global_credits, 256u, "mixed classes consume exact credits");
+    TEST_EXPECT_EQ(snapshot.global_count, nheld, "connection counts remain distinct");
     u64 at_limit = srvconn_total_created();
     TEST_ASSERT(srvconn_create(1, 1, false, 0, SRVCONN_MSIZE) == NULL,
                 "reject constructor beyond global capacity");
@@ -140,11 +147,13 @@ void test_srvconn_create_destroy(void) {
     TEST_EXPECT_EQ(srvconn_total_created(), at_limit,
                    "refused constructors do not count as created");
     srvconn_unref(held[0]);
+    TEST_ASSERT(srvconn_create(1, 1, false, 0, SRVCONN_BULK_MSIZE) == NULL,
+                "one credit cannot admit bulk");
     held[0] = srvconn_create(1, 1, false, 0, SRVCONN_MSIZE);
     TEST_ASSERT(held[0] != NULL, "final unref returns one capacity slot");
     TEST_ASSERT(srvconn_create(1, 1, false, 0, SRVCONN_MSIZE) == NULL,
                 "final unref returns exactly one slot");
-    for (u32 i = 0; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
+    for (u32 i = 0; i < nheld; i++) srvconn_unref(held[i]);
     TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
                    "capacity fixture releases every object");
     // The production structures/allocator also exercise the composed budget.
@@ -155,26 +164,26 @@ void test_srvconn_create_destroy(void) {
         TEST_ASSERT(domains[i] && err == 0, "admit domain up to bound");
     }
     TEST_ASSERT(srv_domain_create(&err) == NULL && err == -T_E_NOSPC, "domain limit");
-    for (u32 i = 0; i < SRV_SESSION_CONNS_TOTAL; i++) {
-        held[i] = srvconn_create_in(domains[i / SRV_SESSION_CONNS], &err,
+    for (u32 i = 0; i < SRV_CREDITS_SESSIONS; i++) {
+        held[i] = srvconn_create_in(domains[i / SRV_CREDITS_DOMAIN], &err,
                                     1, 1, false, 2, SRVCONN_MSIZE);
         TEST_ASSERT(held[i], "session partition capacity");
-        if (i == SRV_SESSION_CONNS - 1)
+        if (i == SRV_CREDITS_DOMAIN - 1)
             TEST_ASSERT(srvconn_create_in(domains[0], &err, 1, 1, false, 2,
                         SRVCONN_MSIZE) == NULL && err == -T_E_NOSPC, "per-domain cap");
     }
     TEST_ASSERT(srvconn_create_in(domains[3], &err, 1, 1, false, 2,
                 SRVCONN_MSIZE) == NULL && err == -T_E_NOSPC, "combined session cap");
-    for (u32 i = SRV_SESSION_CONNS_TOTAL; i < SRV_MAX_CONNS; i++) {
+    for (u32 i = SRV_CREDITS_SESSIONS; i < SRV_MAX_CONNS; i++) {
         held[i] = srvconn_create(1, 1, false, 2, SRVCONN_MSIZE);
-        TEST_ASSERT(held[i], "boot retains 16 slots at guest saturation");
+        TEST_ASSERT(held[i], "boot retains 64 credits at guest saturation");
     }
     srv_domain_unref(domains[0]);
     TEST_ASSERT(srv_domain_create(&err) == NULL, "connections retain retired domain ticket");
-    for (u32 i = 0; i < SRV_SESSION_CONNS; i++) srvconn_unref(held[i]);
+    for (u32 i = 0; i < SRV_CREDITS_DOMAIN; i++) srvconn_unref(held[i]);
     domains[0] = srv_domain_create(&err);
     TEST_ASSERT(domains[0], "last connection returns domain ticket");
-    for (u32 i = SRV_SESSION_CONNS; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
+    for (u32 i = SRV_CREDITS_DOMAIN; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
     for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) srv_domain_unref(domains[i]);
     u32 n = 99;
     srv_domain_counts(NULL, NULL, NULL, NULL, &n);

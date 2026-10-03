@@ -86,19 +86,16 @@ struct Spoor *devsrv_session_root(struct Proc *p, struct Spoor *source,
 // §6.2). corvus accepts promptly, so a short backlog suffices.
 #define SRV_ACCEPT_BACKLOG  16u
 
-// Global cap on allocated /srv connections, including constructors in flight
-// and torn objects retained by endpoints. srvconn_create atomically reserves
-// before allocating; final unref or allocation rollback returns capacity.
-// Each SrvConn pins two heap rings
-// (2 x 64 KiB at the default class; 2 x 256 KiB for a DMSRVBULK service
-// — CF-3 B) plus a small struct; the cap bounds the worst-case
-// user-drivable exposure at 64 x ~516 KiB ~= 32 MiB if every conn were
-// bulk (realistically only the FS mounts are). CORVUS-DESIGN §6.2 sizes
-// this at corvus's MAX_USERS order (~256); v1.0 caps at 64 — a tunable,
-// raised when a multi-user workload needs the headroom.
-#define SRV_MAX_CONNS  64u
-#define SRV_SESSION_CONNS 16u
-#define SRV_SESSION_CONNS_TOTAL 48u
+// October 3 ratified weighted ring budget: 128 KiB per credit, held from
+// pre-allocation admission until final storage destruction. Counts are bounded
+// too, since the smallest connection costs one. These are NOT total-memory caps.
+#define SRV_CREDIT_BYTES (128u * 1024u)
+#define SRV_CREDIT_DEFAULT 1u
+#define SRV_CREDIT_BULK 4u
+#define SRV_CREDITS_GLOBAL 256u
+#define SRV_CREDITS_SESSIONS 192u
+#define SRV_CREDITS_DOMAIN 96u
+#define SRV_MAX_CONNS SRV_CREDITS_GLOBAL
 #define SRV_MAX_DOMAINS 16u
 #define SRV_MAX_ROUTES 16u
 

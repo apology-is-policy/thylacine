@@ -12,15 +12,22 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-10-01
+updated: 2026-10-03
 ---
 ## Session transport accounting
 
-Each /ctl/9p-sessions row now reports whether the connection is charged to
-a session plus local, combined-session, global and retained-domain counts.
-Counts are sampled under the admission lock while the diagnostic list pins
-the connection; they are point-in-time observations rather than peaks or
-authority decisions. See [[sub-kernel-srvconn]].
+`/ctl/9p-sessions` begins with a bounded admission summary: global/session/boot
+connection counts, global and session credit usage/limits, boot credits,
+per-domain limit, retained domains and bytes per credit. It precedes the detail
+walk, so truncating the 4 KiB read buffer does not hide the global summary.
+Each connection row retains existing count fields and adds local/session/global
+credits with explicit limits. Counts are never silently reinterpreted as credits.
+
+Each snapshot is coherent under the admission lock. Summary and detail rows
+are sampled at different instants, not a transaction or a peak measurement.
+The detail walk retains the existing diagnostic-list-before-admission lock
+order. The summary releases admission before starting that walk. These are
+observations, not authorization inputs; see [[sub-kernel-srvconn]].
 
 ## Purpose
 

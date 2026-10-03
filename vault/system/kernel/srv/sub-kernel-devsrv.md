@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-10-01
+updated: 2026-10-03
 ---
 ## D7 implementation (October 1)
 
@@ -35,7 +35,9 @@ latch. Death marks posting closed, detaches the list, then drains matching
 posts and drops references outside that lock; `proc_free` covers rollback.
 The registry lock never surrounds allocation or teardown. Handle, poll,
 namespace and service-leaf references retain their earlier lifetime rules.
-See [[sub-kernel-srvconn]] for 16/48/64 admission and retained-domain lifetime.
+See [[sub-kernel-srvconn]] for the ratified 96/192/256 credit admission
+(default1/bulk4) and retained-domain lifetime. Private names, resident routes
+and the 16-entry accept backlog are unchanged.
 
 The older capacity diagnosis below is historical. The implementation and its
 multi-session dependencies are under final verification in
