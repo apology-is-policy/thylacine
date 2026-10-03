@@ -26,6 +26,8 @@ mod clipbroker;
 mod controllers;
 #[path = "../../halcyond/src/interaction.rs"]
 mod interaction;
+#[path = "../../halcyond/src/hostbindings.rs"]
+mod hostbindings;
 mod readiness;
 mod service_owner;
 mod seat_control;

@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-03 [[chg-2026-10-03-halcyon-host-handoff]] — Move sealed terminal binding to the session service owner
 - 2026-10-03 [[chg-2026-10-03-weighted-srv-admission]] — Charge service connections by immutable ring allocation
 - 2026-10-02 [[chg-2026-10-02-controller-lifecycle]] — Terminal controller lifecycle core and approved modal appearance
 - 2026-10-02 [[chg-2026-10-02-deferred-service-replies]] — Park and cancel bounded service replies
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-02 [[chg-2026-10-02-interaction-deadlines]] — Preserve initial seat membership and bound control lifetimes
 - 2026-10-02 [[chg-2026-10-02-interaction-owner]] — Shared controller and clipboard execution owner
 - 2026-10-02 [[chg-2026-10-02-ordered-interaction]] — Ordered ownership notifications and admission decisions
-- 2026-10-02 [[chg-2026-10-02-ordered-progress]] — Drive retained ordered-stream work before sleeping
 <!-- generated:end -->

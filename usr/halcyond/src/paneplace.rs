@@ -717,6 +717,9 @@ fn completion_route_current(routes: &Routes, image: &PaneCompletedImage) -> bool
 // of a full queue. The executor copies metadata, never holds this lock for I/O.
 struct Mailbox {
     routes: Routes,
+    hosts: halcyond::hostbindings::Desired,
+    #[cfg(feature="test-mode")]
+    bound_count: u64,
     revision: u64,
     max_pixels: u64,
     residual: u64,
@@ -732,6 +735,8 @@ struct Shared {
 }
 pub struct PanePlaceServer {
     owner: libthyla_rs::service_worker::ServiceWorker<Shared>,
+    #[cfg(feature="test-mode")]
+    seen_bindings: u64,
 }
 impl PanePlaceServer {
     /// Media-only native fixtures do not register clipboard authority.
@@ -765,6 +770,9 @@ impl PanePlaceServer {
             seat: libthyla_rs::sync::Mutex::new(seat),
             mail: libthyla_rs::sync::Mutex::new(Mailbox {
                 routes: Routes::empty(),
+                hosts: halcyond::hostbindings::Desired::empty(),
+                #[cfg(feature="test-mode")]
+                bound_count: 0,
                 revision: 0,
                 max_pixels: PLACE_MAX_PIXELS_HARD,
                 residual: PLACE_MAX_PIXELS_HARD * 8 * MAX_CONNS as u64,
@@ -773,7 +781,7 @@ impl PanePlaceServer {
             }),
         };
         libthyla_rs::service_worker::ServiceWorker::new(shared, run_owner)
-            .map(|owner| Self { owner })
+            .map(|owner| Self { owner, #[cfg(feature="test-mode")] seen_bindings: 0 })
             .map_err(|e| {
                 if published.load(core::sync::atomic::Ordering::Acquire) {
                     PostError::Published(e)
@@ -812,10 +820,25 @@ impl PanePlaceServer {
         }
         self.owner.wake().is_ok()
     }
+    /// Only the UI calls this, with metadata from its sealed child's pipe.
+    pub fn bind_host(&mut self, leaf: u32, pid: u32, binding: u64) -> bool {
+        let Ok(shared) = self.owner.state() else { return false; };
+        {
+            let mut m = shared.mail.lock();
+            let routes = m.routes;
+            let Some(route) = routes.leaf(leaf) else { return false; };
+            if !m.hosts.announce(&routes, halcyond::hostbindings::Host { route, pid, binding }) {
+                return false;
+            }
+        }
+        self.owner.wake().is_ok()
+    }
     pub fn unregister_leaf(&mut self, leaf: u32) {
         if let Ok(shared) = self.owner.state() {
             let mut m = shared.mail.lock();
             m.routes.remove_leaf(leaf);
+            let routes = m.routes;
+            m.hosts.retain(&routes);
             for slot in &mut m.completed {
                 if slot.as_ref().is_some_and(|i| i.leaf == leaf) {
                     *slot = None;
@@ -858,6 +881,16 @@ impl PanePlaceServer {
     }
     pub fn service(&mut self) -> Result<(), Error> {
         self.owner.check()?;
+        #[cfg(feature="test-mode")]
+        {
+            let count = self.owner.state()?.mail.lock().bound_count;
+            if count != self.seen_bindings {
+                self.seen_bindings = count;
+                // Console output can park during SAK: diagnostics belong to
+                // the UI, never the independent cancellation executor.
+                say!("halcyond: service-owner terminal bindings={}", count);
+            }
+        }
         if self.owner.state()?.mail.lock().failed {
             Err(Error::Io)
         } else {
@@ -966,9 +999,19 @@ fn serve_owner(
         }
         if let Some(s) = seat.as_mut() {
             // Copy under the mailbox lock; release before any control I/O.
-            let desired = shared.mail.lock().routes;
-            s.routes(desired);
+            let (routes, hosts) = { let m = shared.mail.lock(); (m.routes, m.hosts) };
+            s.routes(routes, hosts);
             s.pump()?;
+            #[cfg(feature="test-mode")]
+            {
+                let changed = {
+                    let mut m = shared.mail.lock();
+                    let changed = m.bound_count != s.bound_count();
+                    m.bound_count = s.bound_count();
+                    changed
+                };
+                if changed { control.notify()?; }
+            }
             if stopping && s.retired() {
                 return Ok(());
             }

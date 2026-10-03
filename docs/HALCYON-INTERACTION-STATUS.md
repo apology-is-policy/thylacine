@@ -5,6 +5,41 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Trusted host handoff (October 3, verified)
+
+The sealed child's binding announcement now enters a bounded UI/service mailbox
+with child PID and exact pane incarnation. The executor performs Bind/Unbind on
+its ordered compositor channel, using the shared Interaction sequence. The UI
+no longer blocks on the registration RPC. Raw remote success and locally usable
+receipts have separate lifetimes: old remote observers must retire before a
+replacement can bind; an earlier ordered Retired record wins over late success.
+Refusal does not spin, and removal remains possible with all 32 slots occupied.
+
+HI1-R23 (fixed, including fresh-host native regression): the old HSC
+adapter restored local seat membership only on Join, leaving it absent after
+an enabled NORMAL restoration. The normal snapshot now reinstates the generation;
+previously this had no activated clipboard client. Remote terminal observers
+survive SAK; controller authority does not. The runtime deadline path drops the
+ordered ring before its registered storage and only then notifies closure.
+A deliberately stalled-lane teardown experiment still remains before activation.
+
+523 Halcyon host tests pass. The new actual-source fixture passes 17 cases and
+eight intended mutation failures; guest Halcyon compiles. The preliminary native
+pair native-1791051471493589000 passes CPU1 boot1830/1830 and real service-wire in
+36.12s. Review then corrected a UI refusal edge: a pane legitimately lacking a
+media route must keep its terminal. The final graphical pair graphics-1791051624023696000 rebuilds that source:
+media passes in 71.65s and physical F10 SAK in 89.78s (empty, confer/use/abdicate,
+wrong key, cancellation and restoration). A further 49.35s real guest run proves
+a new third sealed terminal binds after SAK restoration and executes a command.
+Prompt, restored workspace and new-terminal captures were inspected at1280x800. Evidence, source pins and failed harness attempts are retained in
+work/oct3-hi-bindings. No public clipboard, Main landing or fresh Pi/minimum-display,
+SMP/sanitizer qualification is claimed. Existing kernel code is unchanged.
+
+Remaining: actual app HIN1/9P dispatch and fresh peer validation, authenticated
+Publish/Check, pending/cache/partial-output retirement before HSC ACK, full
+allocation accounting, real two-client clipboard tests and approved modal visuals.
+Single-agent self-review and four protected draft preservation continue.
+
 ## Weighted connection admission (October 3, verified)
 
 Operator-approved option A follows scripture commit 6d9cc4647. Connections now

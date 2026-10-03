@@ -968,7 +968,7 @@ impl SessionTile {
     }
 
     /// Drain one wake's worth of records from the up-pipe into the tile.
-    fn ingest(&mut self, buf: &mut [u8]) -> Ingested {
+    fn ingest(&mut self, buf: &mut [u8], places: &mut Option<PanePlaceServer>) -> Ingested {
         // SAFETY: SVC wrapper over the caller's stack buffer.
         let n = unsafe { t_read(self.up_fd, buf.as_mut_ptr(), buf.len()) };
         if n <= 0 {
@@ -989,16 +989,15 @@ impl SessionTile {
                             // this locator alone never registers a controller.
                             if self.binding_locator.is_some() { return Ingested::Crashed; }
                             self.binding_locator = Some(id);
-                            let request=libhalcyon::interaction_control::Request {
-                                op:libhalcyon::interaction_control::Op::Bind,request:1,
-                                leaf:self.leaf,binder_pid:self.child.pid() as u32,binding:id,
-                                foreground:0,subject:0,controller:0,context:0,epoch:0,
-                            };
-                            if self.surf.interaction_control(request).is_err() {
-                                say!("halcyond: terminal ownership registration refused for leaf={}",self.leaf);
-                            } else {
-                                #[cfg(feature="test-mode")]
-                                say!("halcyond: terminal ownership registered leaf={}",self.leaf);
+                            // No compositor I/O on the UI owner. The executor validates
+                            // this exact route and kernel binding on its ordered lane.
+                            if let Some(p) = places.as_mut() {
+                                if !p.bind_host(self.leaf, self.child.pid() as u32, id) {
+                                    // A pane may legitimately have no media route
+                                    // (e.g. token allocation refused). Keep its terminal;
+                                    // only interaction registration is unavailable.
+                                    say!("halcyond: terminal interaction unavailable leaf={}", self.leaf);
+                                }
                             }
                             continue;
                         }
@@ -2980,7 +2979,7 @@ pub fn run(home: Option<String>) -> i64 {
             let Some(t) = tiles.get_mut(&leaf) else {
                 continue;
             };
-            match t.ingest(&mut inbuf) {
+            match t.ingest(&mut inbuf, &mut places) {
                 Ingested::Live => {
                     if !ingest_announced {
                         ingest_announced = true;

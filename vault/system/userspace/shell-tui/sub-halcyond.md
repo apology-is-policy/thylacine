@@ -4,6 +4,8 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - usr/halcyond/src/hostbindings.rs
+  - tools/test-host-bindings.py
   - tools/test-pane-routes.py
   - usr/halcyond/src/interaction.rs
   - usr/halcyond/src/controllers.rs
@@ -51,8 +53,43 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-10-02
+updated: 2026-10-03
 ---
+## Trusted terminal host handoff
+
+The UI receives the one-shot binding locator from its sealed kaua-term child.
+`PanePlaceServer::bind_host` captures the child PID and exact live Route under
+the mailbox lock; it performs no compositor I/O. Missing routes refuse only
+interaction registration, preserving the pane's terminal. Host metadata is a
+fixed 32-entry desired table, pruned with route removal. It is not an application
+registration endpoint and does not make a path token an authority credential.
+
+`session_seat::Link` dispatches Bind/Unbind through the already-preopened ordered
+HIA channel on the dedicated service executor. Interaction supplies the shared
+request sequence and transport slot. `hostbindings::Bindings` separately tracks
+remote observer obligations: raw successful Bind requires cleanup even if the
+local receipt became unusable. Cleanup precedes replacement on the same leaf;
+ordered Retired before a late Decision cannot resurrect an observer. A refusal
+is attempted at most once per normal seat generation. ENOENT confirms absence;
+EPERM does not. Full tables retain old cleanup obligations and wait for room.
+
+Seat suspension clears local controller authority while the compositor retains
+its terminal observer. An enabled NORMAL snapshot restores Interaction's seat
+generation. The independent HSC pump runs first; no console diagnostic is printed
+by the service executor. Test counters cross the mailbox and print from the UI.
+All-flight expiry closes the ordered channel before notifying terminal closure:
+Channel field order drops/joins the ring before releasing its registered buffer.
+A posted executor failure keeps the existing process-exit policy. A deliberately
+stalled-lane runtime teardown experiment remains an activation requirement.
+
+The desired table is bounded at 4096 bytes and the remote-obligation table at
+4096 bytes by compile-time assertions; exact route storage remains bounded at
+2048 bytes. No new connections, threads, syscalls or dynamic payload storage.
+Focused host fixtures cover coalescing, exact metadata, full-table draining,
+late success, retirement, refusal and suspension, including intended mutations.
+Current measured native evidence and limits are in HALCYON-INTERACTION-STATUS
+and work/oct3-hi-bindings. Public clipboard dispatch remains disabled.
+
 ## Pane route lifetimes
 
 The fixed desired route table in paneroute allocates nonzero monotone local

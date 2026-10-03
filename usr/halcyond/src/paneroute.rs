@@ -54,6 +54,9 @@ impl Routes {
     pub fn get(&self, token: &u128) -> Option<&Route> {
         self.slots.iter().flatten().find(|r| r.token == *token)
     }
+    pub fn leaf(&self, leaf: u32) -> Option<Route> {
+        self.slots.iter().flatten().find(|r| r.leaf == leaf).copied()
+    }
     pub fn contains_key(&self, token: &u128) -> bool {
         self.get(token).is_some()
     }

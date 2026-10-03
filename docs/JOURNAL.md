@@ -22,6 +22,28 @@ needed the operator.
 
 
 ---
+## 2026-10-03 (Astra) -- move terminal registration onto its service owner
+
+After weighted admission, the next adapter still performed Bind synchronously
+on Halcyon's UI thread. The dedicated executor now receives exact host metadata
+through the desired-state mailbox. Its remote-observer ledger deliberately
+outlives local authority: a successful late Bind still needs retirement, while
+an ordered retirement cannot be undone by that late receipt. The full-table
+fixture replaces all 32 routes between snapshots and drains before rebinding.
+
+Two review corrections mattered. The HSC consumer needed to restore local seat
+membership from enabled NORMAL snapshots, not only Join. Diagnostic output must
+stay on the UI thread because console writes may park during SAK. A third edge
+was corrected after the preliminary native run: refusal to allocate a media
+route withholds interaction registration, but must not crash a healthy terminal.
+
+The first standalone harness omitted its alloc import; a mutation then exposed
+a missing post-success retirement witness, followed by an assertion-shape issue.
+All are retained in work/oct3-hi-bindings. Measured results and outstanding
+activation requirements are in HALCYON-INTERACTION-STATUS. Public clipboard is
+still gated; this is authenticated host handoff, not completed copy/paste.
+
+---
 ## 2026-10-02 (Astra) -- preserve pane lifetimes across the service mailbox
 
 Tracing app registration found two points to settle first. The root design and

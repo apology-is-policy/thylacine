@@ -210,3 +210,5 @@
 - HI-1 shared interaction owner: `usr/halcyond/src/interaction.rs`, broker/controllers, session_seat/paneplace and native probe imports; shared sequence, retained transport slot, route incarnation and unified cancellation.
 
 - HI-1 ordered ownership delivery: interaction_events/ordered, compositor interaction and ctl, session_seat and native admission; journal ordering, initial zero seat, duplex lifetime and fail-closed overflow.
+
+- HI-1 trusted host handoff: `usr/halcyond/src/hostbindings.rs`, session/service adapters and `tools/test-host-bindings.py`.
