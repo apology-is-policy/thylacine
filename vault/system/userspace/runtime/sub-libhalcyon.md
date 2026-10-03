@@ -35,7 +35,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 ## Ordered ownership codec and journal
 
@@ -824,3 +824,16 @@ Lictor uses the same pixels in its private VirtIO cursor plane. The software
 helper is not a qualification claim for a future framebuffer backend: its
 caller must supply the complete scene and correct damage. The CPU mirror of a
 GPU-only surface is not such a scene (`docs/HALCYON-INTERACTION.md` section 14).
+
+## Borrowed HIN1 response encoding (October 3)
+
+interaction_body::Response::encoded returns EncodedResponse with a 64-byte
+inline prefix and borrowed payload. copy_range copies directly into caller
+storage at any bounded position; overflow/beyond-end offsets produce EOF. The
+existing encode convenience function uses this same representation and one final
+Vec allocation, removing its separate temporary body allocation. All prior typed
+bounds and wire values remain unchanged. An explicit Read fixture checks every
+offset/count combination and unchanged output tails; Hello uses the full64-byte
+prefix. The payload pointer remains the caller's admitted snapshot. This supplies
+no lifetime/authority itself; [[sub-halcyond-application]] revalidates the transfer
+before borrowing it. All169 libhalcyon host tests pass.

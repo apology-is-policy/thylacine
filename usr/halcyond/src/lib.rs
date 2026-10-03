@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod apprecord;
+pub mod application;
 pub mod chrome;
 pub mod clipboard;
 pub mod clipbroker;

@@ -2050,3 +2050,12 @@ Completion rechecks the current cap before replying, so a split during upload
 cannot report success for a now-oversized raster. Session uploads require a
 nonzero HPL2 image ID, and a token whose pane disappeared returns ENOENT;
 the legacy console's id-less wire path remains separate.
+
+## Application request dispatch (October 3)
+
+[[sub-halcyond-application]] now owns eight HIN1 transaction fids per connection,
+all ten operation dispatches, exact asynchronous completion/cancellation and
+borrowed snapshot responses. It composes the existing Interaction authority owner
+with the record layer; it is not a new authority table. Its decision entry checks
+fresh peer metadata before Publish and CHECK. The native 9P adapter and aggregate
+HSC output barrier remain unwired; public clipboard access is still disabled.

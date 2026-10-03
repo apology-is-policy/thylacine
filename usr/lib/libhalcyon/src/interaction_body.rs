@@ -189,9 +189,6 @@ impl<'a> Read<'a> {
         }
     }
 }
-fn put16(out: &mut Vec<u8>, n: u16) {
-    out.extend_from_slice(&n.to_le_bytes());
-}
 fn put32(out: &mut Vec<u8>, n: u32) {
     out.extend_from_slice(&n.to_le_bytes());
 }
@@ -476,28 +473,30 @@ impl<'a> Response<'a> {
         Ok(response)
     }
 
-    pub fn encode(self, id: u64) -> Result<Vec<u8>, Error> {
-        let mut b = Vec::new();
+    /// A fixed prefix and a borrowed payload. No second snapshot allocation.
+    pub fn encoded(self, id: u64) -> Result<EncodedResponse<'a>, Error> {
+        let mut b = Prefix { bytes: [0; 64], len: wire::HEADER_BYTES };
+        let mut payload: &[u8] = &[];
         let op = match self {
             Self::Hello { session } => {
-                put64(&mut b, nonzero(session)?);
+                b.u64(nonzero(session)?);
                 for n in [
                     wire::MAX_TEXT,
                     wire::MAX_CHUNK,
                     wire::MAX_LABEL,
                     wire::MAX_RECORD,
                 ] {
-                    put32(&mut b, n as u32);
+                    b.u32(n as u32);
                 }
                 for n in [WRITE_SLOTS, READ_SLOTS, MAX_CONTROLLERS, 0] {
-                    put16(&mut b, n);
+                    b.u16(n);
                 }
-                put32(&mut b, IDLE_MS);
-                put32(&mut b, LIFETIME_MS);
+                b.u32(IDLE_MS);
+                b.u32(LIFETIME_MS);
                 Operation::Hello
             }
             Self::Bound { controller } => {
-                put64(&mut b, nonzero(controller)?);
+                b.u64(nonzero(controller)?);
                 Operation::BindController
             }
             Self::Mode => Operation::ReportMode,
@@ -507,43 +506,110 @@ impl<'a> Response<'a> {
                 length,
             } => {
                 text_length(length)?;
-                put64(&mut b, nonzero(transfer)?);
-                put64(&mut b, generation);
-                put32(&mut b, length);
-                put32(&mut b, 0);
+                b.u64(nonzero(transfer)?);
+                b.u64(generation);
+                b.u32(length);
+                b.u32(0);
                 Operation::GetClipboard
             }
             Self::Read { offset, data } => {
                 chunk(offset, data.len(), true)?;
-                put32(&mut b, offset);
-                put32(&mut b, data.len() as u32);
-                b.extend_from_slice(data);
+                b.u32(offset);
+                b.u32(data.len() as u32);
+                payload = data;
                 Operation::ReadClipboard
             }
             Self::Begun { transfer } => {
-                put64(&mut b, nonzero(transfer)?);
+                b.u64(nonzero(transfer)?);
                 Operation::BeginCopy
             }
             Self::Written { count } => {
                 chunk(0, count as usize, false)?;
-                put32(&mut b, count);
-                put32(&mut b, 0);
+                b.u32(count);
+                b.u32(0);
                 Operation::WriteCopy
             }
             Self::Committed { generation } => {
-                put64(&mut b, nonzero(generation)?);
+                b.u64(nonzero(generation)?);
                 Operation::CommitCopy
             }
             Self::Cancelled => Operation::Cancel,
             Self::Unbound => Operation::UnbindController,
         };
-        envelope(id, op, true, &b)
+        let header = Header { request_id: id, operation: op, response: true,
+            length: b.len + payload.len() }.encode()?;
+        b.bytes[..wire::HEADER_BYTES].copy_from_slice(&header);
+        Ok(EncodedResponse { prefix: b.bytes, used: b.len, payload })
+    }
+    pub fn encode(self, id: u64) -> Result<Vec<u8>, Error> {
+        let encoded = self.encoded(id)?;
+        let mut out = alloc::vec![0; encoded.len()];
+        encoded.copy_range(0, &mut out);
+        Ok(out)
+    }
+
+}
+
+// The largest fixed body is Hello's 40 bytes. Inline metadata is counted by
+// the owning connection, while the payload remains in the admitted read slot.
+struct Prefix { bytes: [u8; 64], len: usize }
+impl Prefix {
+    fn put(&mut self, bytes: &[u8]) {
+        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+    }
+    fn u16(&mut self, n: u16) { self.put(&n.to_le_bytes()); }
+    fn u32(&mut self, n: u32) { self.put(&n.to_le_bytes()); }
+    fn u64(&mut self, n: u64) { self.put(&n.to_le_bytes()); }
+}
+pub struct EncodedResponse<'a> { prefix: [u8; 64], used: usize, payload: &'a [u8] }
+impl EncodedResponse<'_> {
+    pub fn len(&self) -> usize { self.used + self.payload.len() }
+    pub fn is_empty(&self) -> bool { false }
+    /// Copy only the requested slice straight into an existing 9P reply buffer.
+    /// Out-of-range offsets are EOF; no addition can wrap on a hostile offset.
+    pub fn copy_range(&self, offset: usize, out: &mut [u8]) -> usize {
+        if offset >= self.len() { return 0; }
+        let count = out.len().min(self.len() - offset);
+        let first = if offset < self.used { count.min(self.used - offset) } else { 0 };
+        out[..first].copy_from_slice(&self.prefix[offset.min(self.used)..offset.min(self.used) + first]);
+        if first < count {
+            let start = (offset + first) - self.used;
+            out[first..count].copy_from_slice(&self.payload[start..start + count - first]);
+        }
+        count
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn borrowed_response_ranges_match_wire_fixture_without_copying_payload() {
+        let payload = [b'a', b'b', b'c', b'd'];
+        let view = Response::Read { offset: 7, data: &payload }.encoded(9).unwrap();
+        assert_eq!(view.payload.as_ptr(), payload.as_ptr());
+        let expected = [b'H', b'I', b'N', b'1', 1, 0, 5, 0,
+            36, 0, 0, 0, 1, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0,
+            7, 0, 0, 0, 4, 0, 0, 0, b'a', b'b', b'c', b'd'];
+        for offset in 0..=expected.len() + 1 {
+            for count in 0..=expected.len() + 1 {
+                let mut out = alloc::vec![0xa5; count];
+                let n = view.copy_range(offset, &mut out);
+                let want = expected.get(offset..).unwrap_or(&[]);
+                assert_eq!(n, count.min(want.len()));
+                assert_eq!(&out[..n], &want[..n]);
+                assert!(out[n..].iter().all(|b| *b == 0xa5));
+            }
+        }
+        assert_eq!(view.copy_range(usize::MAX, &mut [0; 8]), 0);
+        let hello = Response::Hello { session: 1 }.encoded(1).unwrap();
+        assert_eq!(hello.len(), 64);
+        let mut bytes = [0; 64]; assert_eq!(hello.copy_range(0, &mut bytes), 64);
+        assert_eq!(Response::decode(&bytes, Operation::Hello, 1), Ok(Response::Hello { session: 1 }));
+        assert_eq!(Response::Read { offset: 0, data: &payload }.encoded(0).err(), Some(Error::Malformed));
+        assert_eq!(Response::Read { offset: wire::MAX_TEXT as u32, data: &payload }.encoded(1).err(), Some(Error::TooLarge));
+    }
     const S: Scope = Scope {
         session: 1,
         controller: 2,

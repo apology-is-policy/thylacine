@@ -120,3 +120,19 @@ or perform the aggregate HSC output barrier. `servicewire` exposes actual input
 capacity at dispatch and remaining-budget hooks for the adapter to reconcile
 transport and caches. Native operation dispatch and the total ledger remain
 prerequisites to activation.
+
+## Prepared application dispatcher and borrowed responses
+
+Application now owns eight transaction records per accepted-connection identity
+and dispatches all ten typed operations through Interaction. Its caller provides
+fresh kernel metadata and the remaining input budget after transport charges;
+the component subtracts other fids. It pins the route across all fid lifetimes.
+The native HIA decision entry retires dead/replaced peers before delivering a
+Publish or CHECK receipt. Trusted local cancellation completions retain exact
+target matching; cross-fid Unbind forwards its cancelled admission immediately.
+
+Read caches hold transfer coordinates, not another payload allocation. Response
+encoding uses a fixed64-byte prefix and borrowed snapshot, copying only requested
+ranges into existing output storage. Existing wire values/bounds are unchanged.
+Public9P dispatch, native peer sampling, pool admission, pending-tag/Tflush mapping,
+aggregate transport ledger and the HSC output barrier remain activation gates.

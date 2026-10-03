@@ -113,3 +113,10 @@ implied by pure host tests or the existing native transport regression.
 ## Provenance
 
 (generated -- incoming touched backlinks)
+
+## Application composition (October 3)
+
+[[sub-halcyond-application]] composes eight records with one authenticated
+controller and one asynchronous admission. Replies retain fixed metadata or
+read-transfer coordinates, never a second text allocation. Its input allowance
+subtracts other fids; the native caller must still subtract transport capacity.

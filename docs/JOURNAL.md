@@ -32974,3 +32974,16 @@ failures in every classifier category, including timing. The matrix used
 CLADE=0/GOROOT=1. No new ASan, Pi, minimum-display or full clipboard qualification
 is claimed. Single-agent self-review; four unrelated drafts preserved. The
 clipboard adapter, complete allocation ledger and modal clients remain open.
+
+
+## 2026-10-03 -- Astra: prepared HIN1 application dispatcher
+
+All ten operations compose the existing Interaction owner with eight replay fids,
+fresh peer/route pinning and exact admission completion. Read replies reference
+admitted snapshots and encode ranges without a second payload cache. Cross-fid
+Unbind completion (HI1-R26) and CHECK peer-exit retirement (HI1-R27) were fixed and
+prosecuted. Halcyon553/libhalcyon169, actual-source111 plus ten intended mutants,
+guest/prod, fresh boot1830/1830 and service-wire36.54s pass. Evidence and self-review
+are in work/oct3-hi-dispatch. No independent review, native clipboard activation,
+Main landing, new graphics or Pi/SMP/sanitizer qualification. Native adapter,
+HSC output barrier, aggregate ledger and modal clients remain. Four drafts kept.

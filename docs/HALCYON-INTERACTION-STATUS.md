@@ -5,6 +5,45 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Application operation dispatcher (October 3, prepared and verified)
+
+All ten HIN1 operations now dispatch through the existing Interaction owner.
+Eight record fids share the connection's controller, exact admission target and
+remaining input allowance. Local fid incarnations cannot be reused; the peer
+and route stay pinned even after all fids are clunked. Native callers must
+supply fresh peer metadata at request/decision time. The decision entry retires
+a dead or replaced peer before Publish or CHECK can take effect.
+
+Cached read replies retain only admitted-transfer coordinates. Each response
+revalidates the transfer and borrows its immutable snapshot. A 64-byte inline
+prefix plus borrowed payload is copied directly into caller-provided output
+storage; no second text cache or temporary body allocation is required. The
+explicit wire fixture checks every offset/count boundary and borrowed identity.
+
+HI1-R26 (fixed before delivery): Unbind on one fid can cancel an admission on
+another. Forward its completion immediately to that pending record; waiting for
+the later drained HIA receipt would strand the application reply. HI1-R27 (fixed
+before delivery): fresh peer checks are required at CHECK completion as well as
+Publish. Peer exit retires pending work before a successful CHECK could publish.
+Both are covered by intended source mutations. HI1-R24 remains open: the native
+adapter still owes transport-budget subtraction and the complete allocation ledger.
+
+553 Halcyon and169 libhalcyon host tests pass; the actual-source fixture passes111
+cases and ten intended named mutants. Guest/probe and production checks pass.
+A fresh paired CI image passes CPU1 boot1830/1830 and native service-wire36.54s.
+Source pins, review, failed harness attempts and results are retained in
+work/oct3-hi-dispatch. Original four draft hashes match; single-agent self-review.
+No native two-process clipboard, new graphical/Pi/minimum-display or fresh
+SMP/sanitizer qualification is claimed. This checkpoint does not change kernel
+code, land Main, or expose the public interaction endpoint.
+
+Next: wire this dispatcher into the actual accepted 9P connections; fresh native
+peer sampling, the32/2/4 service pool and tag/Tflush routing; shared HIA completion
+demultiplexing; retire application records and partial output before HSC ACK;
+exercise overdue-write teardown and native two-client clipboard. Then connect
+Nora and the approved modal terminal/status/caret workflows. The current native
+Link still handles host Bind/Unbind only, so activation remains blocked.
+
 ## HIN1 transaction lifetimes (October 3, verified foundations)
 
 Per-fid application records now validate fragmented typed requests, retain the

@@ -214,3 +214,5 @@
 - HI-1 trusted host handoff: `usr/halcyond/src/hostbindings.rs`, session/service adapters and `tools/test-host-bindings.py`.
 
 - HI-1 application transaction records: `usr/halcyond/src/apprecord.rs`, observed publication, servicewire aggregate budgets and `tools/test-app-records.py`.
+
+- HI-1 application operation dispatcher: `usr/halcyond/src/application.rs`, borrowed `interaction_body` response encoding and `tools/test-application-dispatch.py`.
