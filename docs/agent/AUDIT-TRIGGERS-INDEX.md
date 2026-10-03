@@ -212,3 +212,5 @@
 - HI-1 ordered ownership delivery: interaction_events/ordered, compositor interaction and ctl, session_seat and native admission; journal ordering, initial zero seat, duplex lifetime and fail-closed overflow.
 
 - HI-1 trusted host handoff: `usr/halcyond/src/hostbindings.rs`, session/service adapters and `tools/test-host-bindings.py`.
+
+- HI-1 application transaction records: `usr/halcyond/src/apprecord.rs`, observed publication, servicewire aggregate budgets and `tools/test-app-records.py`.

@@ -100,3 +100,23 @@ Invalid=EINVAL(22), Unsupported=EOPNOTSUPP(95), Timeout=ETIMEDOUT(110).
 Unknown transport errors are preserved as transport failures. Framing budget
 exhaustion maps to Busy, malformed offset/body to Invalid; transfer timeout and
 lost owner remain distinct. This allocates no new kernel errno.
+
+## Prepared transaction owner
+
+Halcyon's `apprecord::Record` implements one transaction fid above Receiver.
+The connection owner assigns a never-reused fid incarnation and subtracts other
+fids plus transport storage before supplying input/output allowances. A separate
+24-byte prefix distinguishes a new request from replay while retaining one exact
+old body. All partial bytes and allocated capacity count. Typed body validation
+precedes dispatch; changed same-ID records poison assembly until cancellation.
+Pending writes return Busy without replacing the original admission. Completion
+requires the exact incarnation/request ticket. Cancel drops request/result bytes
+but retains the ID watermark, so a cancelled ID cannot become a new mutation.
+Cached results may be semantic values or references to the admitted snapshot;
+the final adapter must not copy a read snapshot into an uncounted cache.
+
+This component does not activate an endpoint, sample a kernel peer, map Tflush
+or perform the aggregate HSC output barrier. `servicewire` exposes actual input
+capacity at dispatch and remaining-budget hooks for the adapter to reconcile
+transport and caches. Native operation dispatch and the total ledger remain
+prerequisites to activation.

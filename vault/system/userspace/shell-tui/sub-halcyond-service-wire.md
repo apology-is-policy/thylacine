@@ -7,6 +7,7 @@ code:
   - usr/halcyond/src/servicewire.rs
   - usr/halcyond/src/serviceio.rs
   - usr/halcyond/src/servicepool.rs
+  - tools/test-service-replies.py
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -15,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON-INTERACTION.md", "docs/HALCYON-INTERACTION-READINESS.md"]
 created: 2026-09-25
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 ## Purpose
 
@@ -47,6 +48,21 @@ buffered input, unsent output and the park, preserving ticket history. Any byte
 already sent from the current frame poisons the connection: its suffix cannot
 be replaced. The protocol must separately retire cached/pending authority and
 bytes before HSC acknowledgement; this primitive alone is not the SAK barrier.
+
+## Aggregate cache accounting
+
+`dispatch_buffered` passes the actual input allocation capacity, including any
+spare capacity and pipelined bytes. `input_allowance` excludes protocol/fid
+caches; the pump refuses growth beyond it. `output_reserved` and
+`output_allowance` likewise bound reply capacity before any byte is sent, both
+for immediate and resumed replies. The defaults preserve media behavior; an
+interaction adapter must override them with the complete connection ledger.
+Cancellation releases the input allocation, rather than retaining its capacity.
+The protocol still owns and must retire its output/caches before HSC ACK.
+
+These hooks prevent a future adapter from silently counting only live lengths.
+They do not activate [[sub-halcyond-interaction-record]], raise quotas, or prove
+the full session allocation ledger. The native media adapter remains two slots.
 
 ## Mechanism
 

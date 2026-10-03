@@ -10,6 +10,8 @@ import tempfile
 
 root = Path(__file__).resolve().parent.parent
 modules = {
+    'hostbindings': 'usr/halcyond/src/hostbindings.rs',
+    'paneroute': 'usr/halcyond/src/paneroute.rs',
     'interaction_events': 'usr/lib/libhalcyon/src/interaction_events.rs',
     'interaction_wire': 'usr/lib/libhalcyon/src/interaction_wire.rs',
     'interaction_body': 'usr/lib/libhalcyon/src/interaction_body.rs',

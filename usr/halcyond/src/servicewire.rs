@@ -38,6 +38,18 @@ pub trait Handler {
     /// Dispatch one bounded frame; a parked request leaves the reply empty.
     fn dispatch(&mut self, request: &[u8]) -> Result<Dispatch, ()>;
     fn reply(&self) -> &[u8];
+    /// Remaining aggregate input allowance after all protocol/fid caches.
+    fn input_allowance(&self) -> usize { MAX_FRAME }
+    /// Capacity handed to dispatch includes partially consumed input storage.
+    /// New caches must fit beside it, not count only the current frame length.
+    fn dispatch_buffered(&mut self, request: &[u8], input_reserved: usize) -> Result<Dispatch, ()> {
+        let _ = input_reserved;
+        self.dispatch(request)
+    }
+    /// Remaining output allowance after cached semantic/wire results. Adapters
+    /// retaining a Vec report its capacity; the default is a borrowed slice.
+    fn output_allowance(&self) -> usize { MAX_FRAME }
+    fn output_reserved(&self) -> usize { self.reply().len() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +83,7 @@ impl Stream {
         if self.closed || ticket == 0 || self.parked != ticket || self.reply_len != 0 {
             return Err(());
         }
-        if build(handler).is_err() || !(7..=MAX_FRAME).contains(&handler.reply().len()) {
+        if build(handler).is_err() || !Self::reply_fits(handler) {
             self.closed = true;
             return Err(());
         }
@@ -80,10 +92,17 @@ impl Stream {
         Ok(())
     }
 
+    pub fn input_reserved(&self) -> usize { self.input.capacity() }
+    fn reply_fits(handler: &impl Handler) -> bool {
+        let length = handler.reply().len();
+        (7..=MAX_FRAME).contains(&length) && handler.output_reserved() >= length
+            && handler.output_reserved() <= handler.output_allowance().min(MAX_FRAME)
+    }
+
     /// A partial frame poisons the connection; its suffix must never be reused.
     pub fn cancel_output(&mut self) -> bool {
         self.closed |= self.sent != 0;
-        self.input.clear();
+        self.input = Vec::new();
         self.reply_len = 0;
         self.parked = 0;
         self.sent = 0;
@@ -130,12 +149,14 @@ impl Stream {
         let mut frames = 0;
         let mut bytes = 0;
         loop {
+            let input_allowance = handler.input_allowance().min(MAX_FRAME);
+            if self.input.capacity() > input_allowance { return false; }
             if bytes == BYTES_PER_TURN || io.now_ns() >= deadline_ns {
                 return true;
             }
             if self.reply_len != 0 {
                 let reply = handler.reply();
-                if reply.len() != self.reply_len {
+                if reply.len() != self.reply_len || !Self::reply_fits(handler) {
                     return false;
                 }
                 let count = (self.reply_len - self.sent).min(BYTES_PER_TURN - bytes);
@@ -159,7 +180,7 @@ impl Stream {
             match self.frame_len() {
                 Err(()) => return false,
                 Ok(Some(len)) => {
-                    let Ok(action) = handler.dispatch(&self.input[..len]) else {
+                    let Ok(action) = handler.dispatch_buffered(&self.input[..len], self.input.capacity()) else {
                         return false;
                     };
                     let reply_len = handler.reply().len();
@@ -176,7 +197,7 @@ impl Stream {
                             self.last_park = ticket;
                         }
                         Dispatch::Reply | Dispatch::Cancel(_) => {
-                            if !(7..=MAX_FRAME).contains(&reply_len) {
+                            if !Self::reply_fits(handler) {
                                 return false;
                             }
                             if let Dispatch::Cancel(ticket) = action {
@@ -193,12 +214,14 @@ impl Stream {
                 }
                 Ok(None) => {
                     let len = self.input.len();
-                    let count = (MAX_FRAME - len)
+                    let count = (input_allowance - len)
                         .min(READ_CHUNK)
                         .min(BYTES_PER_TURN - bytes);
                     if count == 0 || self.input.try_reserve_exact(count).is_err() {
                         return false;
                     }
+                    // An allocator may return more capacity than requested.
+                    if self.input.capacity() > input_allowance { return false; }
                     self.input.resize(len + count, 0);
                     let result = io.read(&mut self.input[len..]);
                     match result {
@@ -328,6 +351,57 @@ mod tests {
             bytes: Vec::new(),
             seen: Vec::new(),
         }
+    }
+    struct Budgeted {
+        echo: Echo,
+        input: usize,
+        output: usize,
+        seen_capacity: usize,
+    }
+    impl Handler for Budgeted {
+        fn dispatch(&mut self, bytes: &[u8]) -> Result<Dispatch, ()> { self.echo.dispatch(bytes) }
+        fn dispatch_buffered(&mut self, bytes: &[u8], capacity: usize) -> Result<Dispatch, ()> {
+            self.seen_capacity = capacity;
+            self.dispatch(bytes)
+        }
+        fn reply(&self) -> &[u8] { self.echo.reply() }
+        fn input_allowance(&self) -> usize { self.input }
+        fn output_allowance(&self) -> usize { self.output }
+        fn output_reserved(&self) -> usize { self.echo.reply.capacity() }
+    }
+    #[test]
+    fn transport_shares_budgets_with_retained_protocol_caches() {
+        let mut h = Budgeted { echo: Echo::default(), input: 1000, output: 7, seen_capacity: 0 };
+        let mut s = Stream::new(); let mut p = Peer::new(frame(1, 7));
+        assert!(s.service(&mut p, &mut h, u64::MAX));
+        assert_eq!(h.seen_capacity, 1000, "dispatch saw length instead of allocation");
+        assert_eq!(s.input_reserved(), 1000);
+        assert_eq!(p.output.len(), 7);
+        // A cache cannot silently take bytes still owned by the stream.
+        h.input = 999;
+        assert_eq!(s.service(&mut p, &mut h, u64::MAX), false);
+        assert!(s.cancel_output());
+        assert_eq!(s.input_reserved(), 0, "retirement kept transport bytes");
+    }
+    #[test]
+    fn over_budget_output_is_refused_before_any_wire_byte() {
+        let mut h = Budgeted { echo: Echo::default(), input: 1000, output: 6, seen_capacity: 0 };
+        let mut s = Stream::new(); let mut p = Peer::new(frame(1, 7));
+        assert_eq!(s.service(&mut p, &mut h, u64::MAX), false);
+        assert!(p.output.is_empty());
+        // A tiny live slice backed by excessive reserved storage also fails.
+        h.echo.reply = Vec::with_capacity(1000); h.echo.reply.extend_from_slice(&frame(2, 7));
+        h.output = 7;
+        assert_eq!(Stream::reply_fits(&h), false, "spare Vec capacity disappeared from ledger");
+    }
+    #[test]
+    fn growing_frame_cannot_borrow_protocol_cache_reservation() {
+        let mut h = Budgeted { echo: Echo::default(), input: 1000, output: 1000, seen_capacity: 0 };
+        let mut s = Stream::new(); let mut p = Peer::new(frame(1, 1001));
+        assert_eq!(s.service(&mut p, &mut h, u64::MAX), false);
+        assert!(h.echo.seen.is_empty());
+        assert!(s.input_reserved() <= 1000);
+        assert!(p.output.is_empty());
     }
     #[test]
     fn parked_read_allows_flush_and_stale_resumption_cannot_replace_output() {

@@ -146,7 +146,12 @@ impl Link {
                     }
                 }
                 body => {
-                    if let Body::Retired { leaf, binding } = body { self.bindings.retired(leaf, binding); }
+                    match body {
+                        Body::Retired { leaf, binding } => self.bindings.retired(leaf, binding),
+                        Body::Terminal { leaf, binding, foreground, .. } =>
+                            self.bindings.terminal_state(leaf, binding, foreground),
+                        _ => {}
+                    }
                     let _ = self.interaction.observe(body).map_err(|_| Error::Io)?;
                 }
             }

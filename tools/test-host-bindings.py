@@ -12,6 +12,14 @@ modules = {
 }
 source = (root / modules['hostbindings']).read_text()
 cases = [
+    ('pending-observation', 'e.remote && !e.dead && e.host.route == route',
+     '!e.dead && e.host.route == route', 'ordered_foreground_before_bind_is_provisional_and_exact'),
+    ('removed-observation', '&& desired.contains(e.host))', ')',
+     'ordered_foreground_before_bind_is_provisional_and_exact'),
+    ('late-terminal-revival', 'if !e.dead && e.host.route.leaf == leaf',
+     'if e.host.route.leaf == leaf', 'ordered_foreground_before_bind_is_provisional_and_exact'),
+    ('failed-snapshot-reuse', 'Op::Bind if result.is_err() => e.foreground = None,', '',
+     'failed_bind_discards_observation_and_success_requires_a_snapshot'),
     ('lost-remote-cleanup', 'e.remote = true', 'e.remote = false',
      'late_success_keeps_cleanup_and_replacement_cannot_bypass_it'),
     ('retirement-revival', 'result.is_ok() && !f.retired', 'result.is_ok()',
@@ -22,7 +30,8 @@ cases = [
      'late_success_keeps_cleanup_and_replacement_cannot_bypass_it'),
     ('id-only-completion', 'if f.request != request', 'if f.request.request != request.request',
      'exact_completion_and_unrelated_retirement'),
-    ('leaf-only-retirement', 'e.host.binding == binding', 'true',
+    ('leaf-only-retirement', 'if e.host.route.leaf == leaf && e.host.binding == binding {',
+     'if e.host.route.leaf == leaf {',
      'exact_completion_and_unrelated_retirement'),
     ('skip-incarnation', '!routes.current(host.route)', 'false',
      'exact_host_metadata_and_removal_at_capacity'),

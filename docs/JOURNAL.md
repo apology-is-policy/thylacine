@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-10-03 (Astra) -- retain exact application transactions
+
+Prepared fragmented HIN1 transactions, exact replay and fid-incarnation tickets,
+plus observed-host registration lookup. The important integration trap was
+memory accounting: existing transport buffers can already occupy the full
+allowance, so caches must share that budget. Added actual-capacity/budget hooks;
+kept the complete adapter/ledger as open HI1-R24 instead of claiming activation.
+Review caught collapsed wire errors (HI1-R25); a red test reproduced the failure
+before the explicit error map. Initial compile and mutation-diagnostic mistakes
+are preserved in work/oct3-hi-apprecords alongside the source pins.
+
+538 host tests and47 intended mutants pass across the relevant source fixtures.
+Native boot1830/1830 and service-wire36.09s pass; the final rebuilt graphical
+pair passes media71.74s and F10SAK89.66s. The source-pin delta discloses the
+record error fix after the preliminary native image. No actual new clipboard,
+Pi/minimum-display or fresh SMP/sanitizer claim. Next is the full9P app adapter,
+HSC cache/output retirement and native two-client qualification before modal UI.
+
 ## 2026-10-03 (Astra) -- move terminal registration onto its service owner
 
 After weighted admission, the next adapter still performed Bind synchronously

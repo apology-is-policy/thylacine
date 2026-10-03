@@ -128,6 +128,25 @@ impl Interaction {
         }
         Ok(self.start(r, Some(route), Kind::Control, now))
     }
+    /// Production terminal registration takes its route from the walked fid,
+    /// its observation from the authenticated host table, and its peer from
+    /// the accepted kernel connection. HIN1 supplies only context names.
+    pub fn publish_on(
+        &mut self,
+        bindings: &crate::hostbindings::Bindings,
+        desired: &crate::hostbindings::Desired,
+        route: crate::paneroute::Route,
+        peer: Peer,
+        context: u64,
+        epoch: u64,
+        now: u64,
+    ) -> Result<Request, Failure> {
+        let (binding, foreground) = bindings.observed(desired, route).ok_or(Failure::Gone)?;
+        self.publish(Terminal {
+            route: RouteKey { leaf: route.leaf, incarnation: route.incarnation },
+            binding, foreground, context, epoch,
+        }, peer, now)
+    }
     pub fn publish(
         &mut self,
         terminal: Terminal,
@@ -565,6 +584,49 @@ mod tests {
                 ..
             }))
         ));
+    }
+    #[test]
+    fn observed_registration_uses_kernel_nomination_and_fresh_completion_peer() {
+        use crate::{hostbindings::{Bindings, Desired, Host}, paneroute::Routes};
+        let mut routes = Routes::empty(); assert!(routes.insert(123, 1));
+        let route = *routes.get(&123).unwrap();
+        let mut desired = Desired::empty();
+        let host = Host { route, pid: 11, binding: 9 };
+        assert!(desired.announce(&routes, host));
+        let mut bindings = Bindings::new();
+        let mut i = Interaction::new(1, 1000).unwrap(); i.seat(Some(2));
+        let action = bindings.plan(&desired, Some(2)).unwrap();
+        let q = i.control(Op::Bind, RouteKey { leaf: 1, incarnation: route.incarnation }, 11, 9, 0).unwrap();
+        assert!(bindings.started(action, q, 2));
+        bindings.terminal_state(1, 9, 5);
+        assert_eq!(i.publish_on(&bindings, &desired, route, peer(), 1, 1, 0), Err(Failure::Gone));
+        assert!(bindings.complete(q, Ok(()))); finish(&mut i, q, 10).unwrap();
+        // Before Publish ACK, an unacknowledged nomination has subject zero.
+        i.observe(libhalcyon::interaction_events::Body::Terminal {
+            leaf: 1, binding: 9, foreground: 5, subject: 0,
+        }).unwrap();
+        let q = i.publish_on(&bindings, &desired, route, peer(), 1, 1, 0).unwrap();
+        assert_eq!((q.binding, q.foreground, q.subject), (9, 5, peer().stripes));
+        let mut dead = peer(); dead.alive = false;
+        assert!(matches!(i.complete(q, Some(dead), Ok(receipt(q, 10)), 0),
+            Some(Completion::Published { result: Err(Failure::Gone), .. })));
+        let q = i.publish_on(&bindings, &desired, route, peer(), 1, 2, 0).unwrap();
+        // The ACK's ordered Terminal event precedes its successful decision.
+        i.observe(libhalcyon::interaction_events::Body::Terminal {
+            leaf: 1, binding: 9, foreground: 5, subject: peer().stripes,
+        }).unwrap();
+        let scope = match finish(&mut i, q, 10).unwrap() {
+            Completion::Published { result: Ok(s), .. } => s, other => panic!("{other:?}")
+        };
+        i.report(peer(), scope, 1, Mode::Normal, false, "terminal").unwrap();
+        i.seat(None); i.seat(Some(2));
+        assert!(i.report(peer(), scope, 2, Mode::Visual, false, "stale").is_err());
+        let q = i.publish_on(&bindings, &desired, route, peer(), 2, 1, 0).unwrap();
+        i.route_gone(RouteKey { leaf: 1, incarnation: route.incarnation });
+        assert!(matches!(finish(&mut i, q, 10),
+            Some(Completion::Published { result: Err(Failure::Gone), .. })));
+        routes.remove_leaf(1); assert!(routes.insert(123, 1)); desired.retain(&routes);
+        assert_eq!(i.publish_on(&bindings, &desired, *routes.get(&123).unwrap(), peer(), 1, 1, 0), Err(Failure::Gone));
     }
     #[test]
     fn initial_zero_seat_registers_copies_and_retires_without_revival() {

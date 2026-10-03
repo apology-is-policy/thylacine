@@ -5,6 +5,46 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## HIN1 transaction lifetimes (October 3, verified foundations)
+
+Per-fid application records now validate fragmented typed requests, retain the
+exact last request/result, and compare retries without a second body allocation.
+A changed request with the same ID is rejected. Cancellation releases retained
+bytes while preserving the ID watermark; completion tickets include a local fid
+incarnation, preventing a late reply from attaching to a reused numeric fid.
+These are prepared protocol components; the public clipboard endpoint stays off.
+
+The service now retains ordered foreground observations on the exact live host
+binding. `Interaction::publish_on` takes that observation plus injected kernel
+peer metadata, retaining the existing fresh-peer completion check. Subject zero
+before nomination ACK does not block preparation. This helper does not itself
+sample an accepted native fd or connect the application dispatcher.
+
+HI1-R24 (open integration obligation): simply adding replay caches beside the
+media pump's full-size buffers would exceed the approved aggregate allowance.
+The stream now reports its actual reserved input capacity to dispatch, honors
+remaining input/output allowances, counts reply capacity and releases input
+storage on cancellation. The forthcoming protocol adapter must supply all-fid
+cache charges and the complete ledger; this change does not claim that total.
+HI1-R25 (fixed): review reproduced collapsed wire failures in the new record
+owner. Unsupported, too-large and invalid requests now preserve their existing
+ABI errors, including empty writes. The red witness is retained.
+
+538 Halcyon host tests pass. Actual-source fixtures pass records19 with10 intended
+mutations, host observations19 with12, shared owner83 with16 and stream14 with9.
+Guest Halcyon/probe and production Halcyon checks pass. Preliminary native image
+native-1791054606410726000 passes boot1830/1830 and service-wire36.09s. Its pin
+predates only the new record's error-map fix/harness; the final rebuilt graphical
+pair graphics-1791054799884834000 includes that fix, passing media in71.74s
+and physical F10SAK in89.66s. Captures are inspected at1280x800. No actual new
+clipboard client, Main landing, Pi/minimum-display or fresh SMP/sanitizer
+qualification is claimed. Evidence/review: work/oct3-hi-apprecords. Four protected
+drafts remain separate; review is single-agent.
+
+Next: full HIN1/9P operation dispatch and native peer sampling, completion
+routing, cache/partial-output retirement before HSC ACK, overdue-write teardown,
+complete allocation ledger and real two-client clipboard, then modal clients.
+
 ## Trusted host handoff (October 3, verified)
 
 The sealed child's binding announcement now enters a bounded UI/service mailbox

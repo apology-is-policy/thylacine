@@ -49,6 +49,7 @@ struct Entry {
     remote: bool,
     dead: bool,
     attempted: Option<(Op, u64)>,
+    foreground: Option<u64>,
 }
 #[derive(Clone, Copy)]
 struct Flight { action: Action, request: Request, seat: u64, retired: bool }
@@ -83,7 +84,7 @@ impl Bindings {
                 i
             } else {
                 let Some(i) = self.entries.iter().position(Option::is_none) else { continue; };
-                self.entries[i] = Some(Entry { host: h, remote: false, dead: false, attempted: None });
+                self.entries[i] = Some(Entry { host: h, remote: false, dead: false, attempted: None, foreground: None });
                 i
             };
             let e = self.entries[index].unwrap();
@@ -103,6 +104,24 @@ impl Bindings {
         self.flight = Some(Flight { action, request, seat, retired: false });
         true
     }
+    /// Ordered kernel-observer state may precede the successful Bind decision.
+    /// It is a nomination epoch, never proof that an application owns the host.
+    pub fn terminal_state(&mut self, leaf: u32, binding: u64, foreground: u64) {
+        for e in self.entries.iter_mut().flatten() {
+            if !e.dead && e.host.route.leaf == leaf && e.host.binding == binding {
+                e.foreground = (foreground != 0).then_some(foreground);
+            }
+        }
+    }
+    /// Return only the exact desired live observer, never a reusable leaf or
+    /// a late success for a removed route. Publish supplies a fresh kernel peer
+    /// and the compositor verifies/acknowledges its foreground membership.
+    pub fn observed(&self, desired: &Desired, route: Route) -> Option<(u64, u64)> {
+        self.entries.iter().flatten().find_map(|e| {
+            (e.remote && !e.dead && e.host.route == route && desired.contains(e.host))
+                .then(|| e.foreground.map(|epoch| (e.host.binding, epoch))).flatten()
+        })
+    }
     pub fn request(&self) -> Option<Request> { self.flight.map(|f| f.request) }
     /// Input is the raw ordered result, not Interaction's locally usable one.
     pub fn complete(&mut self, request: Request, result: Result<(), u32>) -> bool {
@@ -114,7 +133,8 @@ impl Bindings {
             Op::Bind if result.is_ok() && !f.retired => e.remote = true,
             // ENOENT is a confirmed absence; EPERM is not. A dead/removed
             // surface produces Retired in order before its refusal decision.
-            Op::Unbind if result.is_ok() || result == Err(2) => e.remote = false,
+            Op::Unbind if result.is_ok() || result == Err(2) => { e.remote = false; e.foreground = None; },
+            Op::Bind if result.is_err() => e.foreground = None,
             _ => {}
         }
         self.flight = None;
@@ -125,6 +145,7 @@ impl Bindings {
             if e.host.route.leaf == leaf && e.host.binding == binding {
                 e.remote = false;
                 e.dead = true;
+                e.foreground = None;
             }
         }
         if let Some(f) = self.flight.as_mut() {
@@ -147,6 +168,44 @@ mod tests {
             foreground: 0, subject: 0, controller: 0, context: 0, epoch: 0 };
         assert!(b.started(a, r, seat));
         (a, r)
+    }
+    #[test]
+    fn ordered_foreground_before_bind_is_provisional_and_exact() {
+        let mut rs = Routes::empty(); let mut d = Desired::empty(); let mut b = Bindings::new();
+        let h = host(&mut rs, 1, 1); assert!(d.announce(&rs, h));
+        let (_, r) = start(&mut b, &d, 0, 1);
+        b.terminal_state(1, h.binding, 3);
+        assert_eq!(b.observed(&d, h.route), None, "pending Bind became authority");
+        assert!(b.complete(r, Ok(())));
+        assert_eq!(b.observed(&d, h.route), Some((h.binding, 3)));
+        b.terminal_state(1, h.binding + 1, 99);
+        assert_eq!(b.observed(&d, h.route), Some((h.binding, 3)), "wrong binding changed epoch");
+        b.terminal_state(1, h.binding, 4);
+        assert_eq!(b.observed(&d, h.route), Some((h.binding, 4)));
+        assert_eq!(b.observed(&Desired::empty(), h.route), None, "removed desired host survived");
+        rs.remove_leaf(1); let replacement = host(&mut rs, 1, 1);
+        assert!(d.announce(&rs, replacement));
+        assert_eq!(b.observed(&d, replacement.route), None, "leaf reuse inherited observer");
+        assert_eq!(b.observed(&d, h.route), None);
+        b.retired(1, h.binding);
+        b.terminal_state(1, h.binding, 10);
+        assert_eq!(b.entries[0].unwrap().foreground, None, "late Terminal revived retirement");
+    }
+    #[test]
+    fn failed_bind_discards_observation_and_success_requires_a_snapshot() {
+        let mut rs = Routes::empty(); let mut d = Desired::empty(); let mut b = Bindings::new();
+        let h = host(&mut rs, 1, 1); assert!(d.announce(&rs, h));
+        let (_, r) = start(&mut b, &d, 0, 1);
+        b.terminal_state(1, h.binding, 3); assert!(b.complete(r, Err(1)));
+        assert_eq!(b.observed(&d, h.route), None);
+        let (_, r) = start(&mut b, &d, 1, 2); assert!(b.complete(r, Ok(())));
+        assert_eq!(b.observed(&d, h.route), None, "refused observation was reused");
+        b.terminal_state(1, h.binding, 4);
+        assert_eq!(b.observed(&d, h.route), Some((h.binding, 4)));
+        assert_eq!(b.plan(&d, None), None); // SAK keeps the terminal observer.
+        assert_eq!(b.observed(&d, h.route), Some((h.binding, 4)));
+        b.terminal_state(1, h.binding, 0);
+        assert_eq!(b.observed(&d, h.route), None);
     }
     #[test]
     fn exact_host_metadata_and_removal_at_capacity() {

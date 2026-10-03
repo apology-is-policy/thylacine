@@ -55,6 +55,19 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-03
 ---
+## Prepared application transaction integration
+
+[[sub-halcyond-interaction-record]] owns fragmented HIN1 records and replay
+lifetimes. [[sub-halcyond-service-wire]] exposes transport capacity and remaining
+budget hooks. Their application dispatcher and HSC output barrier are not yet
+active. Host Bindings retains foreground snapshots received on the ordered
+compositor channel, including snapshots before the Bind decision. Lookup needs
+remote success, a live exact route and the current desired host; retirement and
+failed Bind discard observations. SAK retires controller contexts while keeping
+the kernel terminal observer. Interaction::publish_on uses the observed binding
+and foreground with freshly supplied Peer metadata and app context names. It
+cannot infer app ownership from a path token or unacknowledged subject zero.
+
 ## Trusted terminal host handoff
 
 The UI receives the one-shot binding locator from its sealed kaua-term child.

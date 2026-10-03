@@ -6,12 +6,16 @@ import tempfile
 root = Path(__file__).resolve().parent.parent
 source = (root / 'usr/halcyond/src/servicewire.rs').read_text()
 cases = [
+ ('input-allowance-ignored', 'handler.input_allowance().min(MAX_FRAME)', 'MAX_FRAME', 'transport_shares_budgets_with_retained_protocol_caches'),
+ ('frame-length-as-capacity', 'handler.dispatch_buffered(&self.input[..len], self.input.capacity())', 'handler.dispatch_buffered(&self.input[..len], len)', 'transport_shares_budgets_with_retained_protocol_caches'),
+ ('output-quota-ignored', '&& handler.output_reserved() <= handler.output_allowance().min(MAX_FRAME)', '', 'over_budget_output_is_refused_before_any_wire_byte'),
+
  ('overwrite-busy', '|| self.reply_len != 0', '', 'exact_park_resumes_only_after_immediate_reply_drains'),
  ('wrong-ticket', 'if self.closed || ticket == 0 || self.parked != ticket || self.reply_len != 0 {', 'if self.closed || ticket == 0 || self.reply_len != 0 {', 'exact_park_resumes_only_after_immediate_reply_drains'),
  ('retain-cancelled-park', 'self.parked = 0;\n        self.sent = 0;', 'self.sent = 0;', 'cancellation_preserves_ticket_monotonicity_and_drops_old_park'),
  ('reuse-park-ticket', 'ticket <= self.last_park', 'false', 'cancellation_preserves_ticket_monotonicity_and_drops_old_park'),
  ('reuse-partial-frame', 'self.closed |= self.sent != 0;', 'self.closed |= false;', 'cancelled_output_discards_buffered_input_and_partial_frames_poison'),
- ('retain-buffered-input', 'self.input.clear();', 'let _ = &self.input;', 'cancelled_output_discards_buffered_input_and_partial_frames_poison'),
+ ('retain-buffered-input', 'self.input = Vec::new();', 'let _ = &self.input;', 'cancelled_output_discards_buffered_input_and_partial_frames_poison'),
 ]
 with tempfile.TemporaryDirectory(prefix='thylacine-service-replies-') as tmp:
  out = Path(tmp)
