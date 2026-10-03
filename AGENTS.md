@@ -231,3 +231,11 @@ Use Nora's mode colour roles at accent strength with filled status chips and
 contrasting ink. INS has a thin bar; NOR a solid proportional-width character
 block; VIS filled character spans with a distinct moving head. Follow section 4
 of HALCYON-INTERACTION.md. The open-frame preview was exploratory and is superseded.
+
+## Weighted connection admission (operator-approved, 2026-10-03)
+
+The operator chose option A in HALCYON-INTERACTION-CONNECTION-BUDGET.md:
+default-class connections cost one credit, bulk four; limits are 96 per session,
+192 for sessions combined and 256 globally. This supersedes D7's 16/48/64 count
+limits, retaining its ownership and lifetime rules. Commit the ratified design
+before implementation. The October 1-2 verification waiver has expired.

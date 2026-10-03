@@ -327,6 +327,10 @@ Initial limits, exposed by Hello and checked before allocating:
   Do not eagerly allocate maximum buffers. A peer gets bound slots only for
   leaves it owns and one unbound handshake; full pools refuse promptly. The
   existing two-connection media policy cannot consume the control reserve.
+  The October 3 operator-approved connection-budget amendment uses weighted
+  kernel admission (96 session / 192 combined / 256 global credits; default1,
+  bulk4). See HALCYON-INTERACTION-CONNECTION-BUDGET.md for costs and native
+  acceptance; this kernel ceiling does not replace the service slot reserves.
 
 Clipboard starts empty (generation zero). Commit validates full length and UTF-8,
 rechecks foreground admission, compares the expected generation, and atomically

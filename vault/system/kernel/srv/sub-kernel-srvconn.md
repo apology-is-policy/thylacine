@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-01
+updated: 2026-10-03
 ---
 ## Admission (October 1, D7)
 
@@ -41,6 +41,13 @@ construction, independent session quotas, aggregate and global saturation,
 rollback and retained teardown. Eight intended mutants fail. Real kernel
 fixtures cover domain retirement and route charging. These are focused
 functional checks, not a new SMP/sanitizer qualification.
+
+## Open resource-policy review
+
+The current 16/48/64 count contract conflicts with Halcyon's larger persistent
+client reservation. `docs/HALCYON-INTERACTION-CONNECTION-BUDGET.md` records
+measured ARM64 object sizes and proposes class-weighted admission. The operator approved option A on October 3; implementation is pending.
+The current executable quotas above still apply until that implementation.
 
 ## Event-loop I/O
 

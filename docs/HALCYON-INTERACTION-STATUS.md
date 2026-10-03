@@ -5,6 +5,24 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Connection budget review (approved October 3)
+
+HI1-R22 (open): the approved 32-control/2-media/4-handshake service pool cannot
+fit the later 16-connection D7 session quota. The concrete alternatives and
+weighted-credit recommendation are in HALCYON-INTERACTION-CONNECTION-BUDGET.md.
+The operator approved weighted admission on October 3. Implementation is next;
+no quota or authority changed yet, and clipboard remains disabled. Actual ARM64
+layouts and a CPU1 graphical startup capture are in work/oct2-hi-budget/:
+session6, combined6, global17, domains1. This is not a full-pane workload.
+The proposal retains the global32MiB and combined24MiB ring ceilings while
+raising one session's share to12MiB; it explicitly accounts for the separate
+fixed-buffer increase and excludes unmeasured transient/fid/server overhead.
+The initial serial redirection probe hit the console-attachment gate. A normal
+tile capture succeeded; its outer cleanup wrapper attempted to signal an
+already-exited group and failed. No jobs or lease remained. Both failures and
+the corrective wrapper edit are retained; no automated runtime pass is claimed.
+Review is single-agent. A scripture commit records that signoff before implementation; existing protected drafts and previous verification stand.
+
 ## Route lifetime adapter (October 2)
 
 HI1-R21 (fixed): a live token could be retargeted, and coalesced removal/recreation

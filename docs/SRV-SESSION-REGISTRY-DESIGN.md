@@ -139,24 +139,27 @@ connection while admitting its sealed CAP_TCB_DIAL home proxy.
 
 ## Resource policy and ownership
 
-Ratified initial bounds:
+October 3 amendment, operator-approved option A:
+`HALCYON-INTERACTION-CONNECTION-BUDGET.md` supersedes the original 16/48/64
+connection-count limits. One credit is 128 KiB of ring storage: a default
+connection costs one and a bulk connection four, from the immutable msize class.
 
 | Resource | Bound | Meaning |
 | --- | --- | --- |
-| All allocated/in-flight connections | 64 | existing global bound |
-| Connections charged to session domains combined | 48 | preserves 16 slots from session consumption |
-| Connections charged to one session domain | 16 | one session cannot monopolize the guest partition |
+| Global credits | 256 | 32 MiB of rings; at most 256 default or 64 bulk connections |
+| Session credits combined | 192 | 24 MiB; preserves 64 credits from session consumption |
+| Credits per session domain | 96 | 12 MiB; at most 96 default or 24 bulk connections |
 | Retained session resource domains | 16 | includes retired registries with retained connections |
 | Private names per registry | 16 | unchanged local table; routes separate |
 
-Boot may borrow unused capacity up to the global bound; it is not capped at
-16. Session traffic cannot consume the protected 16-slot margin. This is
-bounded admission, not a promise that sixteen simultaneous sessions can each
-obtain sixteen connections. Saturation fails promptly with ENOSPC. No forced
-connection revocation or blocking credit wait is introduced. Validate actual
-boot, console and graphical demand before activation; if these proposed bounds
-cannot satisfy the acceptance workload, report the measurement and revise the
-policy before claiming completion.
+Boot may borrow unused global capacity. Sessions cannot consume the 64-credit
+margin, equivalent to 16 bulk or 64 default connections. Each connection costs
+at least one credit, bounding object count too. This does not guarantee full
+capacity to every retained session or protect boot against its own exhaustion.
+Saturation fails promptly with ENOSPC; no eviction or credit wait is added.
+Count diagnostics stay distinct from credit diagnostics. Ring limits exclude
+other kernel/server allocations; the amendment documents their measured costs
+and the remaining full allocation ledger required before clipboard activation.
 
 The requesting namespace view owns the charge, including connects routed to
 boot. Accepted server endpoints, kernel 9P attachments, clones and retained
@@ -173,7 +176,7 @@ are gone. Namespace rebinding, closing a listener, teardown, fork or selecting
 another pathname cannot create a new domain. Only the trusted factory can.
 
 A single short admission critical section checks and updates global, guest and
-domain counters together; no allocation occurs under that lock. Partially
+domain credit and connection counters together; no allocation occurs under that lock. Partially
 reserving the global pool before a failed domain check must not transiently
 consume boot's protected margin. Rollback and final destruction release all
 three counts after freeing transport storage. Preserve the focused constructor
