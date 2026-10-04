@@ -50,6 +50,7 @@ pub struct Link {
     acknowledged: Option<(u64, u64)>,
 }
 const _: () = assert!(core::mem::size_of::<Link>() <= 48 * 1024);
+pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
 impl Link {
     pub fn new(setup: Setup, principal: u32) -> Result<Self> {
         let interaction = Interaction::new(setup.snapshot.registration, principal)

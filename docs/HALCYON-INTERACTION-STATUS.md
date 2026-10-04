@@ -5,6 +5,52 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Live-tile pressure investigation (October 4, open)
+
+HI1-R30 (open, display mapping admission): retaining real terminal controllers
+in full-size tabs reaches the existing 128 MiB shared-mapping limit before the
+clipboard controller reserve. With 11 parked controllers and 12 host bindings,
+Halcyon has 30387 pages mapped; the next triple-buffer weave requests 2613,
+exceeding 32768. Hidden tabs retain their weaves. The refused tile emits `layout verb "close 17" refused rc -2` after
+libtapestry destroys its partially created surface and Tapestry closes the
+hosting leaf. Source plus the preceding retire trace establish that this is a
+redundant close (ENOENT), not evidence of a leaked empty leaf. A visible
+capacity-refusal notice is still missing.
+This is a failed live-tile acceptance run, not a clipboard credit failure or a
+passing maximum-pressure check. A dormant-weave lifecycle would require a
+separate graphics contract; no quota or lifecycle change has been made.
+
+HI1-R31 is repaired: the complete failing inventory was 13 masters, 39 stdio
+slaves, 13 control and 13 readiness fids, plus two unopened roots: exactly 80.
+The table now budgets six persistent fids per pair plus sixteen root/transient
+entries (112 total), preserving the existing sixteen-pair limit. Deferred-read
+and deferred-write bounds stay at 80 independently; a larger handle table must
+not silently enlarge retained payload queues. No authority or syscall change.
+
+The actual-table selftest exercises sixteen six-fid terminal shapes, headroom,
+refusal, reuse and complete teardown twice. Three actual-dispatch legs each
+park eighty data reads, readiness reads or writes, refuse operation 81 and
+reclaim retained state. The first version of this new fixture bypassed response
+buffer initialization and failed; correcting it to use dispatch resolved that
+fixture error. The failed log is retained, not reclassified as a pass.
+
+Fresh final CI image passes CPU1 boot 1830/1830 and all ptyfs startup
+selftests. The native graphical run retains fourteen authenticated controllers
+across sixteen live PTYs, enters physical Ctrl+Alt+F10 SAK, then verifies every
+old connection is closed and all fourteen controllers reconnect/read/cancel
+successfully. Final run: 107.68 s at 1280x800. Captures and exact source/image
+manifests are in work/oct4-hi-pressure/graphics-1791094456386770000.
+
+Evidence and single-agent review: work/oct4-hi-pressure. The full-size mapping
+failure and the original over-capacity scenario remain failed. This narrower
+positive proves the existing sixteen-PTY envelope, not 32 controllers or all
+pane shapes. HI1-R24 still owns mixed/multiple-session demand, the complete
+allocation ledger and partial-output cancellation. Clipboard/modal clients and
+status/caret integration remain unfinished; the feature is still nondefault.
+Four separate drafts are preserved. No Main landing, fresh SMP/sanitizer/Pi or
+minimum-display qualification. HALCYON-HIDDEN-WEAVE-REVIEW.md is a scope proposal
+awaiting the operator, not permission to implement a new graphics lifecycle.
+
 ## Full-service admission repair (October 4)
 
 HI1-R29 is fixed: the native owner keeps polling the listener when its slots

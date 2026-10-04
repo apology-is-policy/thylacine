@@ -10,6 +10,7 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/ls-halcyon-clipboard-pty-capacity.exp"
   - "tools/interactive/ls-halcyon-clipboard.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
@@ -498,3 +499,10 @@ The opt-in `ls-halcyon-clipboard` scenario fails on `EXTINCTION:` during boot
 and session work. It is a new mirror of the unchanged prefix, not a new banner
 or message-body contract. Its native byte/SAK workflow is recorded in the
 Halcyon interaction status and substrate interactive dossier.
+
+### Existing PTY-envelope consumer (October 4)
+
+The opt-in `ls-halcyon-clipboard-pty-capacity` scenario also fails on
+`EXTINCTION:` during boot/session setup. Its executable matcher is an ABI mirror,
+not merely a literal mention. The runner keeps the failed larger-workspace
+witness separate from this sixteen-PTY/fourteen-controller qualification.

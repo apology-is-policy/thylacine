@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-28
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -167,13 +167,25 @@ reading for the child's first output races the child's slave open and
 gets a spurious 0. The master needs no such latch: the mint **is** its
 open, so `n_master == 0` implies it once was 1.
 
-`Conn` carries a 32-entry fid table and two flat park queues — a
+`Conn` carries a 112-entry fid table and two flat park queues — a
 `Vec<PendingRead>` and, since s7 F3, a `Vec<PendingWrite>`. A
 `PendingWrite{fid, slot_n, tag, data}` owns its un-acked input bytes (a
 `Vec`, so unlike the `Copy` `PendingRead` it is moved, not copied —
-`poll_writes` indexes and `remove`s). Bounds: 8 connections, 32 fids,
+`poll_writes` indexes and `remove`s). Bounds: 8 connections, 112 fids per connection,
 **16 pts pairs** — a bound rather than headroom, since an unbounded pts
 table is a DoS vector.
+
+
+The shared `/dev/pts` mount drives one kernel 9P client across all terminal
+processes. An ordinary ptyhold/ut terminal retains **six** fids: master, three
+separately opened stdio slaves, ctl and readiness. The table therefore covers
+16 pairs times six plus 16 root/transient entries. This repairs the earlier
+four-per-pair undercount: the live witness filled 80 entries with 13 complete
+terminals plus two roots. More independent endpoint opens still consume finite
+entries; the headroom is not a per-process allocation guarantee. Existing pair,
+connection and global deferred-write tag limits remain unchanged. Deferred reads
+and writes retain their separate 80-entry per-connection ceilings (MAX_PENDING),
+including raw protocol peers without the kernel client's 64-tag bound.
 
 ## Concurrency
 
@@ -396,6 +408,16 @@ output ONLCR, line overflow), the ctl battery (render, atomic reject,
 winsize-changed-only, mixed apply, TCSAFLUSH, the walk grammar), and the
 teardown tail (drain-then-EOF, the hup edge fires once, a slave close is
 not an edge, free-on-last-unref).
+
+The capacity leg exercises the actual Conn binding table with all sixteen
+ordinary terminal shapes and sixteen root/transient entries. It checks the pair
+bound, one excess fid refusal, clunk/reuse and complete pair reclamation over two
+waves. Its local pairs have no kernel IDs, so it cannot unregister live terminals
+or signal real process groups. Three actual-handler parking legs also prove
+80 accepted data reads, readiness reads or writes, refusal of operation 81,
+and teardown reclamation. The October 4 graphical capacity scenario retains
+14 authenticated controller processes across all 16 live terminal pairs; this
+is not a thirty-two-controller qualification.
 
 The 9P layer and the kernel registration are proven separately by the
 in-guest `/dev/pts` boot probe and the `pty-probe` openpty E2E, which

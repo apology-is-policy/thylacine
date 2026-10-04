@@ -1194,6 +1194,11 @@ fn serve_owner(
     control: &libthyla_rs::service_worker::Control,
     setup: Option<crate::session_seat::Setup>,
 ) -> Result<(), Error> {
+    #[cfg(feature="interaction-qualification")]
+    say!("halcyond: interaction ledger conn={} link={} shared={} pool={} slots={} heap={}",
+        core::mem::size_of::<Conn>(), crate::session_seat::FIXED_BYTES,
+        core::mem::size_of::<Shared>(), core::mem::size_of::<Pool>(),
+        ACTIVE_CONNECTIONS, libthyla_rs::alloc::footprint());
     let mut seat = match setup {
         Some(s) => Some(crate::session_seat::Link::new(s, shared.principal)?),
         None => None,

@@ -33068,3 +33068,27 @@ interaction gate remains. HI1-R24 still owns the complete memory ledger,
 maximum live-tile/multi-session demand and pending/partial-output SAK checks.
 The 32-slot control reserve is an upper bound shared with MAX_PANES; containers
 also consume that pane limit, so it is not a promise of 32 application tiles.
+
+
+## 2026-10-04 -- Astra: terminal pressure and fid bookkeeping
+
+The live clipboard pressure test revealed two independent terminal limits.
+Full-size hidden tabs retained triple-buffer weaves until the 128 MiB shared-map
+ceiling refused another tab. A smaller-layout witness then failed at ptyfs's
+80-fid table. An exact inventory showed six handles per normal terminal, against
+a formula budgeting four. Corrected to 112 fids for the existing sixteen pairs,
+with unchanged 80-operation queue bounds. The queue coupling was caught during
+self-review; a new actual-dispatch regression guards it. Failed runs and the
+fixture's response-buffer setup correction are recorded in the review.
+
+Fresh final CI image passes CPU1 boot 1830/1830 and all ptyfs startup
+selftests. The native graphical run retains fourteen authenticated controllers
+across sixteen live PTYs, enters physical Ctrl+Alt+F10 SAK, then verifies every
+old connection is closed and all fourteen controllers reconnect/read/cancel
+successfully. Final run: 107.68 s at 1280x800. Captures and exact source/image
+manifests are in work/oct4-hi-pressure/graphics-1791094456386770000.
+
+This repairs HI1-R31 only. Hidden-buffer suspension is a separate, unratified
+scope/lifecycle proposal; the original larger pressure failure remains open.
+The full clipboard ledger and client/modal integration remain unfinished.
+Single-agent WIP checkpoint, no Main landing or fresh broad gate claims.

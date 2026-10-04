@@ -319,6 +319,16 @@ clipboard and native metadata separately from media. Deadline polling uses the
 earliest transfer/admission/handshake expiry. Full pressure/activation remains
 HI1-R24; modal/editor clients are not delivered by this adapter alone.
 
+## Qualification allocation accounting (October 4)
+
+The opt-in interaction build logs native Conn/Link/Shared/Pool sizes and slot
+count when its protocol owner starts. Link exposes its fixed size separately
+from retained payloads. The startup heap number is process-wide and precedes
+Link construction; it is not a worker peak. These diagnostics support HI1-R24's
+still-open complete ledger. They do not change quotas or activate interaction
+in normal builds. Existing full-size pressure reaches the shared-map ceiling;
+see the unratified HALCYON-HIDDEN-WEAVE-REVIEW scope proposal.
+
 ## Saturated listener progress (October 4)
 
 The service continues polling and accepting its listener while all native slots

@@ -177,7 +177,7 @@ fn payload() -> Vec<u8> {
     (0..20000).map(|i| b'a' + (i % 26) as u8).collect()
 }
 fn test(mode: &str) -> Result<()> {
-    if !matches!(mode, "copy" | "read" | "hold") {
+    if !matches!(mode, "copy" | "read" | "hold" | "park") {
         return Err("mode");
     }
     let mut c = Client::connect()?;
@@ -188,6 +188,25 @@ fn test(mode: &str) -> Result<()> {
         readonly: false,
         label: "clipboard qualification",
     })?;
+    if mode == "park" {
+        // A real foreground owner in each terminal retains its own native
+        // connection, without using one of the two read-snapshot slots.
+        t_putstr("clipboard-probe: controller PARKED\n");
+        let mut key = [0u8; 1];
+        if unsafe { t_read(0, key.as_mut_ptr(), 1) } <= 0 {
+            return Err("park input");
+        }
+        let mut output = [0u8; 24];
+        if unsafe { t_pread(c.file.as_raw_fd() as i64, output.as_mut_ptr(), output.len(), 0) } >= 0 {
+            return Err("park connection survived SAK");
+        }
+        drop(c);
+        let mut c = Client::connect()?;
+        let (transfer, _, _) = c.get()?;
+        c.call(Request::Cancel { transfer })?;
+        c.call(Request::Unbind { scope: c.scope })?;
+        return Ok(());
+    }
     let expected = payload();
     if mode == "copy" {
         let (old, generation, _) = c.get()?;

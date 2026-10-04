@@ -135,11 +135,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-04 [[chg-2026-10-04-halcyon-capacity-refusal]] — Reject excess Halcyon service connections promptly
+- 2026-10-04 [[chg-2026-10-04-pty-fid-capacity]] — Account all six ordinary terminal handles
 - 2026-10-03 [[chg-2026-10-03-halcyon-app-records]] — Prepare exact HIN1 replay and shared buffer budgets
 - 2026-10-03 [[chg-2026-10-03-halcyon-application-dispatch]] — Dispatch HIN1 operations with borrowed replies
 - 2026-10-03 [[chg-2026-10-03-halcyon-host-handoff]] — Move sealed terminal binding to the session service owner
 - 2026-10-03 [[chg-2026-10-03-halcyon-native-clipboard]] — Qualify the native Halcyon clipboard adapter
 - 2026-10-03 [[chg-2026-10-03-weighted-srv-admission]] — Charge service connections by immutable ring allocation
 - 2026-10-02 [[chg-2026-10-02-controller-lifecycle]] — Terminal controller lifecycle core and approved modal appearance
-- 2026-10-02 [[chg-2026-10-02-deferred-service-replies]] — Park and cancel bounded service replies
 <!-- generated:end -->

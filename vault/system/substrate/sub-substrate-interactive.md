@@ -12,6 +12,7 @@ code:
   - tools/interactive/service-readiness-failure.exp
   - tools/interactive/service-wire.exp
   - tools/interactive/service-capacity.exp
+  - tools/interactive/ls-halcyon-clipboard-pty-capacity.exp
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
   - tools/interactive/serial-listen.py
@@ -96,6 +97,17 @@ closing either admitted peer; afterward their limit reads must still work and a
 freed slot must admit a replacement. Three waves check reclamation. Before the
 listener repair the child remained blocked. This is the default two-media-slot
 witness, not a substitute for the full graphical controller/session workload.
+
+## Existing PTY-envelope clipboard witness
+
+`ls-halcyon-clipboard-pty-capacity` requires the nondefault interaction build.
+It retains fourteen real foreground controller processes in half-width tabs,
+beside two other shells, filling the existing sixteen-PTY envelope. Physical
+Ctrl+Alt+F10 runs a no-pending-request trusted episode. Each controller is then
+focused and must observe its old connection closed before reconnecting through
+fresh Hello/Bind/Get/Cancel/Unbind. No synthetic peer identity is supplied.
+This witness does not replace the failed larger/full-size pressure run or
+qualify a thirty-two-controller/multiple-session allocation guarantee.
 
 ## Contract
 

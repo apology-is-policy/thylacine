@@ -220,3 +220,5 @@
 - HI-1 native application adapter: paneplace/session_seat/session, pool/wire/application, actual protocol fixture and native clipboard/deadline probes.
 
 - HI-1 saturated native listener: paneplace, native service probe and service-capacity scenario.
+
+- HI-1 PTY handle envelope: ptyfs, clipboard park probe and graphical PTY-capacity scenario.
