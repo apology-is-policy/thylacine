@@ -5,6 +5,18 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
+## Reusable systems design review (October 4)
+
+The operator requested designs for the asynchronous lifecycle gap and replacement
+of the 128 MiB shared-mapping stopgap. The concrete proposed contracts, prior art,
+verified implementation fit, staged delivery and binding decisions are in
+[ASYNC-MEMORY-DESIGN-REVIEW](ASYNC-MEMORY-DESIGN-REVIEW.md), with specifications
+[ASYNC-SERVICE-LIFECYCLE](ASYNC-SERVICE-LIFECYCLE.md) and
+[SHARED-MEMORY-ACCOUNTING](SHARED-MEMORY-ACCOUNTING.md). These are review drafts;
+new kernel ABI/authority/policy terms await ratification. No async private scopes,
+new memory accounts or clipboard client activation are claimed implemented.
+The existing storage repair and its verified matrix remain separate evidence.
+
 ## Hidden terminal storage (October 4, matrix verified)
 
 HI1-R30: the original full-width mapping-pressure workload now passes with the

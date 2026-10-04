@@ -10,8 +10,17 @@ validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-09-23
+updated: 2026-10-04
 ---
+
+## Shared retention design review
+
+addrspace_charge_shared_map still enforces PROC_SHARED_MAP_MAX_PAGES per
+address space; it is separate from the capacity-derived private-page budget.
+The proposed replacement is docs/SHARED-MEMORY-ACCOUNTING.md, reviewed with the
+async prerequisite in docs/ASYNC-MEMORY-DESIGN-REVIEW.md. No replacement account,
+pressure API or relaxed mapping admission is implemented by those drafts.
+
 ## Purpose
 
 "Two Procs, one address space" was **unrepresentable** until L-1, because

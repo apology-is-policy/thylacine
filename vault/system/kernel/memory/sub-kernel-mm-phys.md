@@ -9,8 +9,18 @@ guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity]
 locks: [lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-10-04
 ---
+
+## Shared-memory accounting review
+
+The user-pool charge applies to alloc_user_pages/PG_USER backing. The current
+DMA weave/GPU BO constructor dma_create_body uses raw alloc_pages, so those
+buffers are not included by that tag path. The proposed durable-account and
+reserve-classification replacement is in docs/SHARED-MEMORY-ACCOUNTING.md;
+it is a review draft, not installed enforcement. Existing pool semantics and
+the separate shared-map floor remain in force.
+
 ## Purpose
 
 Every physical 4 KiB frame that is not the kernel image, the

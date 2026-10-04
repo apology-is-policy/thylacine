@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
 - 2026-10-04 [[chg-2026-10-04-halcyon-capacity-refusal]] — Reject excess Halcyon service connections promptly
 - 2026-10-04 [[chg-2026-10-04-hidden-storage-design]] — Approve cooperative hidden terminal pixel storage
 - 2026-10-04 [[chg-2026-10-04-hidden-storage-implementation]] — Retire hidden terminal pixels while preserving live panes
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-04 [[chg-2026-10-04-pty-fid-capacity]] — Account all six ordinary terminal handles
 - 2026-10-03 [[chg-2026-10-03-halcyon-app-records]] — Prepare exact HIN1 replay and shared buffer budgets
 - 2026-10-03 [[chg-2026-10-03-halcyon-application-dispatch]] — Dispatch HIN1 operations with borrowed replies
-- 2026-10-03 [[chg-2026-10-03-halcyon-host-handoff]] — Move sealed terminal binding to the session service owner
 <!-- generated:end -->

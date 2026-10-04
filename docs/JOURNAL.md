@@ -1,5 +1,22 @@
 # The autonomous-run journal
 
+## 2026-10-04: design reusable connection and memory lifecycles
+
+The clipboard client exposed that Loom starts after synchronous service attach;
+its private-mode successor must progress and retire without a cooperating peer.
+The design extends Loom rather than accumulating blocked I/O workers. Review
+also found that a PID check cannot distinguish writers to an RFMEM-shared ring;
+the proposed private mode explicitly excludes that aliasing configuration.
+
+The 128 MiB failure is separate from the growable heap. Tracing physical backing
+found dma_create_body using raw alloc_pages for client-driven weave/GPU BO
+storage. The proposed replacement therefore includes that allocation path,
+durable sponsorship, retained-object claims and pressure/failure reporting.
+Changing one ceiling would leave an accounting gap. Both proposals are recorded
+in ASYNC-MEMORY-DESIGN-REVIEW.md and await binding-contract approval. No new
+facility is implemented and no numeric ABI is reserved by these drafts.
+
+
 ## 2026-10-04: hidden storage matrix completes
 
 Implementation8b2212c0e passed the default SMP1/4/8 and UBSan SMP4/8 matrix,

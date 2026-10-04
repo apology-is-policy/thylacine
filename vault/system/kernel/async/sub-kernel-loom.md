@@ -15,8 +15,17 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-04
 ---
+
+## Proposed private service lifecycle
+
+Current Loom starts from attached service handles; synchronous native service
+setup and the mid-frame join trust assumption remain outside its asynchronous
+contract. The proposed extension is reviewed in docs/ASYNC-SERVICE-LIFECYCLE.md
+and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. It is not implemented or ratified; legacy
+rings and the current authority contract are unchanged.
+
 ## Purpose
 
 A syscall per file operation is a trap per operation. Loom is the shared-memory
