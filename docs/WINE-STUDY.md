@@ -10,6 +10,10 @@
 > source (Appendix B) and are tagged **[V]** verified at the source, **[S]** seen
 > only in a search-engine extract (the egress proxy blocked the page), or **[R]**
 > recalled and unconfirmed. Inferences are marked *(inference)*.
+>
+> **Follow-up (2026-10-04):** the operator chose translator-first. The x86
+> translation layer this study's sections 6-7 depend on is drafted in
+> `docs/X86-TRANSLATION-DESIGN.md`.
 
 ---
 
