@@ -11,6 +11,8 @@ code:
   - kernel/9p_transport_mq.c
   - kernel/9p_attach.c
   - kernel/include/thylacine/9p_client.h
+  - tools/test-9p-client-progress.py
+  - tools/host-tests/9p-client-progress.c
 audit: hard
 guarded-by: [inv-i9, inv-i10, inv-i11]
 validated-by: [spec-9p-client, spec-reader-frame, gate-smp]
@@ -606,3 +608,26 @@ yet bound to live private Loom scopes. The shared session validator rejects
 unsupported Rversion dialects and framing-impossible sizes before VERSIONED;
 legacy handshakes inherit that correction. AS-2 supplies owner/slot/retirement
 bindings before these helpers become userspace-accessible.
+
+## Exclusive native request progress
+
+p9_client_progress_bind attaches caller-owned progress storage to a fresh,
+unpublished client and queues native version/attach without I/O. The scope must
+retain both until client destruction and cannot export the client as a Spoor.
+The regular async submission builds into out_buf and retains it across partial
+TX, refusing another build with EAGAIN until that borrow ends. Progress alternates
+TX/RX, one backend call per visit, and reuses the ordinary session and demux.
+Unknown or not-yet-sent reply tags abort this private stream. Blocking builders
+and reader pumps refuse private clients before accessing that buffer.
+
+Terminal paths clear TX ownership before callbacks; each inflight slot is removed
+before its callback can free the RPC. Explicit abort has no peer-dependent wait.
+Private abandon suppresses its one RPC callback as before, then terminally aborts
+the exclusive stream. Whole-ring consumers must detach delivery before discarding
+completions; scope consumers use abort. This helper does not implement Loom's
+completion reservations, slots, deadline scheduling or retirement owner.
+
+Host actual-source ASan/UBSan/eight mutations and the shared native fixture
+qualify partial framing, duplex fairness, every byte cancellation, hostile replies
+and callbacks freeing their storage. Fresh CPU1 boot1830/1830 and existing
+9p_client197states/five mutants pass. No new broad/graphics/private ABI activation.

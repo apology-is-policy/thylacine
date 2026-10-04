@@ -192,3 +192,35 @@ All source pins and four original draft hashes match; paired clean boot artifact
 are retained. No new full matrix, graphical/Pi qualification, private setup or
 clipboard activation. Next: private request progress, close/exec/exit abort and
 bounded local retirement, then clients and end-to-end adoption.
+
+## AS-R6: zero-deadline handshake contract (October 4)
+
+While connecting AS-1 to the private request engine, its handshake helper was
+found to reject deadline0 although the approved ABI specifies no deadline for0.
+Correct the helper and add a never-expiring handshake control; retain absolute
+nonzero deadline tests. No private userspace activation has occurred. Owned by
+Astra; blocks the request-progress checkpoint.
+
+## AS-2d: private request progress (October 4)
+
+The existing p9_client now accepts an exclusive progress cursor on a fresh
+unpublished client. Handshake and requests reuse existing builders, tags and
+reply dispatch. Submission reserves the outgoing frame until its partial send
+finishes; another submit receives EAGAIN before touching it. Alternating TX/RX
+visits use at most one backend callback and one complete reply. Abort detaches
+TX/parser borrows and completes remaining requests without peer flush/clunk.
+Private ownerless/premature replies fail closed; legacy blocking entry points
+refuse these private clients before touching shared frame storage.
+
+AS-R6 is closed: zero deadline now means none, including a handshake driven at
+UINT64_MAX time; existing absolute nonzero deadlines retain their tests.
+Actual-source client ASan/UBSan and eight named mutations pass, including
+success/abort callbacks that immediately free RPC storage. Framing ASan/UBSan
+and12mutations pass. The same private fixture passes in fresh native CPU1
+boot1830/1830. Existing9p_client model197states and five expected aggregate
+Invariants counterexamples pass. Evidence: work/oct4-async-service/as2d,
+check-1791134120223514000, host-1791134082058710000 and
+host-1791133991553906000. Source pins and all four protected hashes verified.
+No private Loom table, close/exec owner hooks, retirement queue, completed
+clipboard or fresh broad/graphical/Pi qualification is claimed. Those consumers
+remain the next implementation; the 128MiB protection remains unchanged.

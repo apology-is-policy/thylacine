@@ -171,12 +171,13 @@ struct hs_fixture {
     struct fixture f;struct p9_session s;struct p9_handshake_progress h;u8 out[256];
     bool version_reply,attach_reply;
 };
-static void hs_init(struct hs_fixture *x) {
+static void hs_init_deadline(struct hs_fixture *x, u64 deadline) {
     memset(x,0,sizeof(*x));init(&x->f);x->f.pipe.chunk=1;
     CHECK(!p9_session_init(&x->s,17,256),"handshake session init");
-    CHECK(!p9_handshake_progress_init(&x->h,&x->s,&x->f.p,x->out,sizeof(x->out),1007,1000),"handshake init");
+    CHECK(!p9_handshake_progress_init(&x->h,&x->s,&x->f.p,x->out,sizeof(x->out),1007,deadline),"handshake init");
     CHECK(x->f.pipe.sends==0 && x->f.pipe.recvs==0,"handshake init has no I/O");
 }
+static void hs_init(struct hs_fixture *x) { hs_init_deadline(x,1000); }
 static void hs_peer(struct hs_fixture *x) {
     struct pipe *p=&x->f.pipe;
     if(!x->version_reply && x->h.phase==P9_HS_VERSION_RECV) {
@@ -257,4 +258,11 @@ static void handshake_errors(void) {
     }
 }
 
-int main(void) { version_refusal();send_boundaries();receive_boundaries();malformed();handshake_boundaries();handshake_errors();puts("PASS AS-1 framing: every partial boundary, bounded steps, cancellation, EOF, malformed and coalesced frames"); }
+static void handshake_no_deadline(void) {
+    struct hs_fixture x;hs_init_deadline(&x,0);
+    int rc=0;
+    for(unsigned n=0;n<200 && !rc;n++) { hs_peer(&x);rc=hs_step(&x,~(u64)0); }
+    CHECK(rc==1 && x.h.phase==P9_HS_READY,"zero deadline never expires");
+    p9_handshake_progress_abort(&x.h);
+}
+int main(void) { version_refusal();send_boundaries();receive_boundaries();malformed();handshake_boundaries();handshake_errors();handshake_no_deadline();puts("PASS AS-1 framing: every partial boundary, bounded steps, cancellation, EOF, malformed and coalesced frames"); }

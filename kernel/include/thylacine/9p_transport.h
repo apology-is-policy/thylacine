@@ -290,7 +290,7 @@ struct p9_handshake_progress {
     int reason;
 };
 // init queues Tversion but performs no transport I/O. Requires a fresh session
-// and progress cursor. Returns 0 or -errno. deadline is absolute and nonzero.
+// and progress cursor. Returns 0 or -errno. deadline is absolute; zero means none.
 int p9_handshake_progress_init(struct p9_handshake_progress *h,
                               struct p9_session *s,
                               struct p9_transport_progress *p,

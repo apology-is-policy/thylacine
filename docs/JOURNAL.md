@@ -1,5 +1,19 @@
 # The autonomous-run journal
 
+## 2026-10-04: private request progress without blocking entry
+
+The p9_client extension keeps one immutable partial TX and alternates TX/RX
+visits, using the existing protocol builders and demux. Eight source mutations
+and native boot1830/1830 exercise refusal before frame overwrite, cancellation
+at each byte, premature/unknown replies and callbacks freeing their own RPC.
+The old helper rejected deadline0 despite the approved contract: AS-R6 restores
+no-deadline semantics and verifies it at UINT64_MAX. Framing12mutants still pass.
+Existing9p_client197states/five counterexamples pass. Evidence under
+work/oct4-async-service/as2d retains the host declaration and ordering mistakes,
+corrected checks and paired clean images. Private Loom ownership, completion
+obligations, close/exec and retirement remain next; no activation yet.
+
+
 ## 2026-10-04: private ring fork and sharing guards
 
 AS-2c makes private setup and process sharing mutually exclusive under the AS

@@ -14,7 +14,7 @@ MUTANTS=[
  ('coalesced','size_t left = p->rx_goal - p->rx_have;','size_t left = p->frame_limit - p->rx_have;','receive resumes suffix'),
  ('close-before-abort','if (t->state == P9_TRANS_PROGRESS) return -1;','if (false) return -1;','legacy close cannot bypass abort'),
  ('send-limit','len > p->frame_limit','len > p->transport->recv_cap','send respects negotiated limit'),
- ('deadline','if (now_ns >= h->deadline_ns)','if (false)','absolute deadline at every handshake byte'),
+ ('deadline','if (h->deadline_ns && now_ns >= h->deadline_ns)','if (false)','absolute deadline at every handshake byte'),
  ('principal','NULL, 0, NULL, 0, h->principal','NULL, 0, NULL, 0, 0','captured principal on wire'),
  ('version:dialect','if (version_ptr[i] != P9_DEFAULT_VERSION[i]) return -1;','if (false) return -1;','unsupported dialect refused'),
  ('version:msize','if (msize < P9_HDR_LEN || s->msize < P9_HDR_LEN) return -1;','if (false) return -1;','framing-impossible msize refused'),

@@ -293,3 +293,51 @@ The failed run is preserved, and both native mutants were rerun after correction
 Single-agent review, not independent audit. No new broad matrix or graphical
 qualification is claimed; whole-system qualification is owed with the private
 consumer. Four authority/settings drafts remain exact and unstaged.
+
+## AS-2d: bounded private request driver
+
+A caller binds only a fresh unpublished client, retaining its external progress
+storage until destruction. Client.lock serializes cursor, immutable queued
+out_buf, tag registration, reply parsing and abort. Submission may build one
+frame but performs no transport I/O; while a partial TX owns out_buf, another
+submission completes EAGAIN before building. Every progress visit does one
+transport callback at most. Alternating TX and RX means backpressure cannot
+strand a reply needed to drain the server. Scope deadlines after attachment
+remain the enclosing private owner's responsibility; the handshake checks its
+own absolute deadline, with zero meaning none as already approved.
+
+The shared session builders and demux remain the sole protocol implementation.
+An exclusive client has no ownerless flush/clunk flows: an unknown tag or a
+reply for a not-yet-sent request is terminal. The dispatcher still validates
+reply type and length. Terminal paths detach sending/transport borrows before
+callbacks, which may immediately free their RPC. A completed success is removed
+before callback, so later abort cannot complete it twice. Private abandon retains
+its existing no-callback promise for that one RPC, then aborts the entire stream;
+it never waits for peer acknowledgement. Normal private owners use explicit
+abort so all accepted requests receive completion. Whole-ring detachment is the
+only consumer allowed to discard completion delivery obligations.
+
+Legacy shared clients have progressNULL and retain their existing paths. Every
+blocking builder, elected reader pump and synchronous close refuses a bound
+private client before modifying out_buf. No Spoor export or user setup is enabled.
+Destroy requires exclusive ownership as before and completes local teardown
+before freeing client storage. It does not release the enclosing scope or server
+endpoint, whose lifetime/accounting remains with the AS-2 owner to be integrated.
+
+Tests: full real client declarations and extracted actual functions, with real
+wire/session/transport source, pass ASan/UBSan; eight deliberate mutations expose
+TX overwrite, RX starvation, premature reply, missing sending guard, lost/double
+terminal, retained TX borrow and blocking entry. The same fixture runs against
+actual kernel locks/allocator in CPU1 boot1830/1830. It covers every request TX
+and reply RX byte cancellation boundary and callbacks freeing their own storage.
+Framing12mutants and zero-deadline control also pass. Existing9p_client197states
+and five expected aggregate counterexamples pass. ARM64 compiles three full
+units. These checks do not establish private Loom scheduling or usercopy safety.
+
+Initial host fixture declared wakeup with the wrong return type: corrected to
+the actual int declaration. A new zero-deadline test initially ran before old
+framing tests, changing a mutant's first failure message; moving it after the
+established tests retained both controls without weakening any oracle. Failed
+and passing logs are retained in work/oct4-async-service/as2d. AS-R6's helper
+contract mismatch is repaired; no prior userspace private exposure existed.
+Single-agent review; broad integrated qualification and consumers remain owed.

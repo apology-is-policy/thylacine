@@ -230,3 +230,5 @@
 - **AS-2b native admission** -- Exact creator/image value snapshots, shared DAC, registry/slot/generation targets, prepared connection ownership and checked backlog publication.
 
 - **AS-2c private sharing/COW** -- AddrSpace private guards versus process ownership, Proc allocation rollback, tagged ring omission and actual-source/native fixtures.
+
+- **AS-2d exclusive request progress** -- Private p9_client cursors, partial TX/RX, demux/callback lifetimes, abort and zero-deadline handshake.

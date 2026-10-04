@@ -915,7 +915,11 @@ static int test_build_getattr(struct p9_session *s, u8 *out, size_t cap, void *c
 
 // A demuxed reply drives on_complete, which posts a CQE carrying the op's
 // user_data + the mapped (success = 0) result.
+#include "private_client_fixture.h"
+
 void test_9p_client_async_op_posts_cqe(void) {
+    const char *private_error = private_client_fixture_run();
+    TEST_ASSERT(private_error == NULL, private_error);
     struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);

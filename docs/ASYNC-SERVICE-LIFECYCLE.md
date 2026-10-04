@@ -1,6 +1,6 @@
 # Asynchronous private service connections
 
-Status: APPROVED by the operator, October 4, 2026. Implementation pending.
+Status: APPROVED by the operator, October 4, 2026. Implementation in progress; see ASYNC-SERVICE-STATUS.md.
 Approval includes both contracts and async-first implementation order.
 Baseline: Astra 8b2212c0e. Companion: SHARED-MEMORY-ACCOUNTING.md.
 This extends Loom; it does not introduce a second asynchronous I/O subsystem.

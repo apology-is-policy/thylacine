@@ -389,7 +389,7 @@ int p9_handshake_progress_init(struct p9_handshake_progress *h,
                               u32 principal, u64 deadline_ns) {
     if (!h || !s || s->magic != P9_SESSION_MAGIC || s->state != P9_SESS_INIT ||
         !progress_live(p) || p->tx || p->rx_have ||
-        p->frame_limit != s->msize || !out || !deadline_ns ||
+        p->frame_limit != s->msize || !out ||
         p9_session_inflight(s) || s->total_sent || p->transport->total_sent ||
         p->transport->total_recvd) return -T_E_INVAL;
     *h = (struct p9_handshake_progress){
@@ -413,7 +413,7 @@ int p9_handshake_progress_step(struct p9_handshake_progress *h, u64 now_ns) {
     if (h->phase == P9_HS_FAILED) return h->reason;
     if (!progress_live(h->progress)) return handshake_fail(h, -T_E_CANCELED);
     if (h->phase == P9_HS_READY) return 1;
-    if (now_ns >= h->deadline_ns) return handshake_fail(h, -T_E_TIMEDOUT);
+    if (h->deadline_ns && now_ns >= h->deadline_ns) return handshake_fail(h, -T_E_TIMEDOUT);
     if (h->phase == P9_HS_VERSION_SEND || h->phase == P9_HS_ATTACH_SEND) {
         int rc = p9_transport_progress_send(h->progress);
         if (rc < 0) return handshake_fail(h, -T_E_IO);

@@ -138,8 +138,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
 - 2026-10-04 [[chg-2026-10-04-async-native-admission]] — Prepare exact native service admission before backlog publication
 - 2026-10-04 [[chg-2026-10-04-async-owner-lifetime]] — Separate process ownership from asynchronous descriptor retention
+- 2026-10-04 [[chg-2026-10-04-async-request-progress]] — Drive private native requests through bounded partial I/O
 - 2026-10-04 [[chg-2026-10-04-async-service-abi-reservation]] — Reserve Loom private service encoding before consumers
 - 2026-10-04 [[chg-2026-10-04-async-service-as0]] — Pin the private service ABI and cancellation model
 - 2026-10-04 [[chg-2026-10-04-async-service-as1]] — Resumable native service framing and handshake
-- 2026-10-04 [[chg-2026-10-04-async-sharing-guards]] — Exclude private ring aliases from process sharing and COW
 <!-- generated:end -->

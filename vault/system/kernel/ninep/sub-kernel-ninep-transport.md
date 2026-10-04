@@ -273,3 +273,13 @@ CC/CFLAGS for a working host sanitizer toolchain. The real-channel guest witness
 is the expanded srvconn.nonblocking_backpressure test. These are bounded fixture
 claims, blind to future Loom table admission/retirement and full concurrent use.
 See docs/ASYNC-SERVICE-STATUS.md for measured qualification and remaining work.
+
+## Request-driver integration and zero deadline
+
+The private p9_client driver now owns resumable framing through version/attach
+and subsequent RPCs, alternating TX/RX visits. Its client lock serializes progress
+with abort; no shared legacy session is terminally cancelled through this path.
+Handshake deadline0 means none (AS-R6 correction); a nonzero absolute deadline
+still expires regardless of partial peer progress. Host framing12mutants and
+zero-deadline control pass; native request fixture covers the same handshake.
+No private Loom activation or global transport policy change follows.

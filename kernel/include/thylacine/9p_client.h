@@ -180,6 +180,15 @@ struct p9_rpc {
 // must not sleep. Returns 0 when it took the fid, -1 when the fid stays bound.
 typedef int (*p9_orphan_sink_fn)(void *arg, u32 fid);
 
+// Exclusive native service progress. The enclosing scope owns this storage and
+// backend until client destruction, and never exports the client as a Spoor.
+struct p9_client_progress {
+    struct p9_transport_progress io;
+    struct p9_handshake_progress handshake;
+    struct p9_rpc *sending;
+    bool rx_next;
+};
+
 struct p9_client {
     u32                  magic;
     // Per-client lock. Protects session.outstanding[], session.bound_fids[],
@@ -190,6 +199,7 @@ struct p9_client {
     spin_lock_t          lock;
     struct p9_session    session;
     struct p9_transport  transport;
+    struct p9_client_progress *progress; // NULL legacy; immutable after private bind
     // Shared outbound Tmsg buffer. Used only under c->lock during the
     // build+send of one op (serialized), so the elected-reader pipeline can
     // share it across ops without per-op allocation. NOTE (#375): on c2s
@@ -660,6 +670,20 @@ typedef int (*p9_session_build_fn)(struct p9_session *s, u8 *out, size_t cap,
 // (-P9_E_INVAL) WITHOUT firing a callback -- nothing was taken over.
 int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
                            p9_session_build_fn build, void *build_ctx);
+
+// Bind a fresh, unpublished client to caller-owned progress storage; queues
+// version without I/O. No peer wait. Borrow ends only at client destruction.
+int p9_client_progress_bind(struct p9_client *c, struct p9_client_progress *p,
+                            struct p9_transport_try_ops ops, u32 principal,
+                            u64 deadline_ns);
+// One transport callback and at most one complete reply per visit. Alternates
+// partial TX/RX so a full sender cannot starve replies. Returns 0 pending,
+// 1 ready/progress, or negative terminal error. Caller supplies monotonic time.
+int p9_client_progress_step(struct p9_client *c, u64 now_ns);
+// Abort only this exclusive client, complete every accepted RPC exactly once,
+// and detach all parser/TX borrows locally. Does not free enclosing storage.
+void p9_client_progress_abort(struct p9_client *c);
+
 
 // Drive the elected reader for ONE frame, then release the reader role. For
 // async ops there is no blocked submitter, so completions are pumped by the
