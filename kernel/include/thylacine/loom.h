@@ -37,6 +37,8 @@
 struct Burrow;
 struct Spoor;
 struct Proc;
+struct loom_pool;
+struct loom_pool_bank;
 struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
 struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in kernel/loom.c)
 
@@ -436,6 +438,8 @@ struct Loom {
     u32 sqe_size;
     u32 cqe_size;
     u32 ring_size;
+    u32 receipt_off;  // optional paired32-byte CQ receipts; zero for legacy rings
+    u32 receipt_size;
     // Kernel-PRIVATE authoritative completion-queue tail (under `lock`). The
     // shared `loom_ring_hdr.cq_tail` is a userspace-READABLE mirror; loom_post_cqe
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
@@ -570,6 +574,10 @@ _Static_assert(__builtin_offsetof(struct Loom, magic) == 0,
 // Returns NULL on bad args / OOM. `exempt` is the creator's I-32 exemption:
 // the ring is a user allocation, refused past the user pool unless exempt.
 struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt);
+// Internal layout constructor for the private service owner. Geometry only:
+// no identity, charge, mapping, authority or public setup-feature activation.
+struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt);
+
 
 // Refcount. loom_unref's last drop clunks every registered Spoor and
 // burrow_unref's the ring (releasing the kernel's handle_count; the user
@@ -620,6 +628,15 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
 // pipe.c producer precedent) and does NOT sleep or re-enter p9_client_*, so it
 // composes with the c->lock the async-completion path holds (the seam contract).
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
+// Publish one already committed pooled result, pairing CQE+receipt before the
+// release-tail. bank/pool belong to this ring and must remain pinned through
+// this call. All pool state mutations use l->lock. Full CQ returns -EAGAIN and
+// leaves the result PENDING; success makes it LEASED. No CQ acknowledgement can
+// return a payload. Returns -EOPNOTSUPP on a ring without receipt geometry.
+// Caller owns MORE-before-terminal queue ordering and scope/ring authority.
+int loom_post_pool_cqe(struct Loom *l, struct loom_pool_bank *bank,
+                       struct loom_pool *pool, u32 member);
+
 
 // KT-1.5: the KObj_Loom .poll hook (poll_scan_one's KOBJ_LOOM arm). Registers
 // pw on l->cq_waiters + reports POLLIN iff a CQE is ready. See loom.c.

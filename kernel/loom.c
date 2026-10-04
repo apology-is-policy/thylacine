@@ -16,6 +16,7 @@
 // holds a reference.
 
 #include <thylacine/loom.h>
+#include <thylacine/loom_service_pool.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -190,7 +191,8 @@ static u32 align_up_u32(u32 x, u32 a) { return (x + (a - 1u)) & ~(a - 1u); }
 
 static bool is_pow2_u32(u32 x) { return x != 0u && (x & (x - 1u)) == 0u; }
 
-struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
+static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exempt,
+                                        bool receipts) {
     if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return NULL;
     if (!is_pow2_u32(cq_entries))                                   return NULL;
     if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return NULL;
@@ -206,7 +208,9 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     u32 sqe_size      = sq_entries * (u32)sizeof(struct loom_sqe);
     u32 cqe_off       = align_up_u32(sqe_off + sqe_size, 64u);
     u32 cqe_size      = cq_entries * (u32)sizeof(struct loom_cqe);
-    u32 ring_end      = cqe_off + cqe_size;
+    u32 receipt_off  = receipts ? align_up_u32(cqe_off + cqe_size, 64u) : 0;
+    u32 receipt_size = receipts ? cq_entries * (u32)sizeof(struct loom_service_buffer_receipt) : 0;
+    u32 ring_end     = receipts ? receipt_off + receipt_size : cqe_off + cqe_size;
     u32 ring_size     = (ring_end + (PAGE_SIZE - 1u)) & ~((u32)PAGE_SIZE - 1u);
 
     struct Loom *l = kmalloc(sizeof(struct Loom), KP_ZERO);
@@ -236,6 +240,8 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     l->sqe_size      = sqe_size;
     l->cqe_size      = cqe_size;
     l->ring_size     = ring_size;
+    l->receipt_off   = receipt_off;
+    l->receipt_size  = receipt_size;
     l->cq_tail       = 0;   // kernel-private authoritative CQ tail (the shared mirror starts 0 too)
 
     // Stamp the immutable geometry into the shared ring header. The Burrow pages
@@ -252,6 +258,14 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
 
     __atomic_fetch_add(&g_loom_created, 1, __ATOMIC_RELAXED);
     return l;
+}
+
+struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
+    return loom_create_layout(sq_entries, cq_entries, exempt, false);
+}
+
+struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt) {
+    return loom_create_layout(sq_entries, cq_entries, exempt, true);
 }
 
 // Last-ref teardown. No concurrent access (refcount hit 0), so no lock is
@@ -702,6 +716,7 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
 
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (flags & LOOM_CQE_SERVICE_BUFFER) return -1;
 
     spin_lock(&l->lock);
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
@@ -733,6 +748,13 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     cqe[idx].user_data = user_data;
     cqe[idx].result    = result;
     cqe[idx].flags     = flags;
+    // A non-pooled result must not inherit a prior payload receipt at a reused
+    // CQ slot. Legacy rings have no companion array and keep their old layout.
+    if (l->receipt_size) {
+        struct loom_service_buffer_receipt *r =
+            (void *)(l->ring_kva + l->receipt_off);
+        r[idx] = (struct loom_service_buffer_receipt){0};
+    }
     // Advance the private tail, then publish it to the shared mirror with a
     // release store (so a user-side load-acquire of cq_tail sees a fully-written
     // slot). The mirror also overwrites any hostile value userspace wrote.
@@ -753,6 +775,44 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     poll_waiter_list_wake(&l->cq_waiters);
     return 0;
 }
+
+int loom_post_pool_cqe(struct Loom *l, struct loom_pool_bank *bank,
+                       struct loom_pool *pool, u32 member) {
+    if (!l || l->magic != LOOM_MAGIC || !bank || !pool) return -T_E_INVAL;
+    if (!l->receipt_size) return -T_E_OPNOTSUPP;
+    spin_lock(&l->lock);
+    struct loom_ring_hdr *h = (void *)(l->ring_kva + l->hdr_off);
+    u32 tail = l->cq_tail;
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);
+    if ((u32)(tail - head) >= l->cq_entries) {
+        spin_unlock(&l->lock);
+        return -T_E_AGAIN;
+    }
+    struct loom_pool_result result;
+    int rc = loom_pool_peek(bank, pool, member, &result);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    // Only kernel-private tail/mask/offsets choose the destination. Shared
+    // receipts are an output mirror, never authority for the pool transition.
+    u32 idx = tail & (l->cq_entries - 1u);
+    struct loom_cqe *cq = (void *)(l->ring_kva + l->cqe_off);
+    struct loom_service_buffer_receipt *receipts =
+        (void *)(l->ring_kva + l->receipt_off);
+    cq[idx] = (struct loom_cqe){ .user_data = result.user_data,
+        .result = (s32)result.length,
+        .flags = LOOM_CQE_SERVICE_BUFFER | (result.more ? LOOM_CQE_MORE : 0) };
+    receipts[idx] = result.receipt;
+    // The member must be returnable before the consumer can observe the CQE.
+    // A failed transition leaves this unadvertised slot free to overwrite;
+    // the private tail is unchanged. No callback or unlock separates these.
+    rc = loom_pool_deliver(bank, pool, &result.receipt);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    l->cq_tail = tail + 1u;
+    __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+    poll_waiter_list_wake(&l->cq_waiters);
+    return 0;
+}
+
 
 // =============================================================================
 // Loom-3: SQE dispatch + the submit-time pin (I-30) + SYS_LOOM_ENTER.

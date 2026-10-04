@@ -81,7 +81,11 @@ static void test_proc_drop(struct Proc *p) {
 // Geometry: the ring layout is consistent, page-rounded, and the header is
 // stamped with the immutable masks/counts (visible via the kernel direct map).
 // ---------------------------------------------------------------------------
+#include "loom_receipt_fixture.h"
+
 void test_loom_create_geometry(void) {
+    const char *receipt_error = loom_receipt_fixture();
+    TEST_ASSERT(receipt_error == NULL, receipt_error);
     u64 created0 = loom_total_created();
 
     struct Loom *l = loom_create(8, 16, false);

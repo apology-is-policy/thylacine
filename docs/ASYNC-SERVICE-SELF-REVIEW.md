@@ -508,3 +508,26 @@ initializers. Session construction failure and transport failure do not adopt
 external storage. Destroy aborts any bound progress before clearing the client
 and never frees an external TX. Read/write/handshake protocol and lock order are
 unchanged; the source-mapped model does not prove allocation or alias ownership.
+
+## AS-2h: paired receipt publication self-review (October 4)
+
+Single-agent review of construction, publication and failure paths: old layout
+calls the same factored constructor with receipts=false; bounded power-of-two
+inputs keep all arithmetic within u32. The internal true constructor supplies
+geometry only and is not exposed through setup. Kernel-private offsets/tail
+select the write; hostile shared head can stall or lose the caller's observations
+but cannot widen the allocation. Receipt, CQE and LEASED transition occur under
+one Loom lock before the release tail. No allocator, callback or peer wait runs
+inside that lock. Poll wake follows unlock while the caller retains the ring.
+Full CQ changes no pool state and returns EAGAIN. An impossible failed deliver
+leaves tail unchanged. Nonpool publication clears stale receipts and refuses the
+buffer flag. MORE/final ordering remains a request-owner obligation.
+
+Host publication observation is deterministic same-thread instrumentation, not
+concurrent ARM execution. Native test uses real constructors, pool and cleanup;
+its static pool is fixture-owned, not a demonstration of syscall registration.
+The first draft host compile redundantly defined inline rendez_init; the stub
+was removed before the passing actual-source run. Eight named mutations,
+ASan/UBSan, both clean pool models and11 named counterexamples pass; native
+1830/1830 passes. Foundation50/50 at26c21df87 predates this change. No independent
+audit or completed private-mode qualification is claimed.

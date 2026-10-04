@@ -30,6 +30,14 @@ The owner must hold its ring lock and retain canonical Burrow pins throughout.
 It must resolve authority, mapping ranges and exclusion against accepted fixed
 I/O before prepare. Those are caller obligations, not proven by this helper.
 
+## Mechanism
+
+Registration has a validate pass followed by an infallible reservation pass.
+Cells store their pool reference and local ordinal. Lookups scan at most64
+cells, keeping quota and physical overlap global to this ring without a second
+pool-slot registry. A result remains in its cell until publication/return.
+
+
 ## Data structures
 
 One zero-initialized loom_pool_bank per ring has64 cells,5128bytes including
@@ -113,13 +121,6 @@ Evidence and native build outcome live in docs/ASYNC-SERVICE-STATUS.md and
 work/oct4-async-service/buffer-pools. No throughput, multi-stream fairness,
 graphical result, syscall activation or complete private-I/O claim follows.
 
-## Mechanism
-
-Registration has a validate pass followed by an infallible reservation pass.
-Cells store their pool reference and local ordinal. Lookups scan at most64
-cells, keeping quota and physical overlap global to this ring without a second
-pool-slot registry. A result remains in its cell until publication/return.
-
 ## Concurrency
 
 No independent lock domain: every operation belongs under the caller's ring
@@ -167,3 +168,14 @@ its own writer-drain path; scope retirement alone cannot release payloads.
 Operator-selected option C, scripture30695b43e, ABI3eb14ae73 and modele6a50ae1e.
 AS-2e implementation and native/host evidence are recorded in
 ASYNC-SERVICE-STATUS.md. Review staffing is explicitly single-agent.
+
+## Paired publication integration
+
+loom_post_pool_cqe supplies the Deliver binding: under the ring lock, copy the
+pending result into the matching CQ/receipt slot, move PENDING to LEASED, then
+release the shared tail. Full CQ keeps PENDING. A pool and bank must belong to
+and remain pinned by that ring; this internal API does not perform registration.
+The caller still establishes source authority and MORE-before-final order.
+The foundation core has50/50 clean combined matrix coverage at26c21df87. The
+new publication helper has actual-source eight-mutant/sanitizer, pool-model
+and native1830/1830 coverage; broad integration qualification remains owed.

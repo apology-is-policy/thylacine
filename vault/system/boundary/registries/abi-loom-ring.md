@@ -172,3 +172,12 @@ The AS-R8 Rust API correction makes raw buffer registration unsafe and adds
 range-bounded views; all shared structures, syscall numbers, flags and offsets
 above are unchanged. No kernel/C mirror change is required for a Rust safety
 qualifier. Actual full-module host and native compilation check the caller API.
+
+## Optional internal receipt geometry
+
+The internal constructor now builds the approved64-aligned array of32-byte
+receipts after the CQ, without changing legacy rings or loom_params. Maximum
+page-rounded layout675840bytes is verified natively and on host. Publication
+pairs CQE/receipt/lease before release-tail and clears receipts for ordinary
+CQEs. Public PRIVATE_SERVICE/SERVICE_BUFFERS setup remains rejected; output
+parameter wiring and owned client consumption remain activation obligations.

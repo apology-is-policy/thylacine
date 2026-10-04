@@ -2136,3 +2136,38 @@ owner must reserve and retain the enclosing allocations. Caller storage must be
 disjoint and exclusive until destroy completes. No private ABI or clipboard
 activation; full owner/retirement integration and combined broad matrix remain.
 Evidence: work/oct4-async-service/owner-storage/{host-final,checked.json}.
+
+## AS-2h: paired payload receipts and foundation qualification (October 4)
+
+The combined foundation at26c21df87 passed50/50 clean boots across default
+CPU1/4/8 and UBSan CPU4/8, ten each. Every failure category, including timing,
+was zero. Source/index and four protected drafts matched; the runner released
+Mac. This covers AS-2e pool core, AS-R8 Rust borrow correction, AS-2f worker
+tickets and AS-2g preallocated protocol storage. It supersedes their earlier
+broad-gate debt, not the incomplete private runtime. Evidence:
+work/oct4-async-service/pool-foundation-matrix/verified.json.
+
+New internal receipt geometry preserves legacy layouts and adds32bytes per CQ
+slot only to the optional constructor. Maximum geometry is675840 page-rounded
+bytes; allocator occupancy and charge belong to the private owner. Paired
+publication uses private geometry/tail, copies CQE and receipt, makes the member
+LEASED, then release-publishes the tail. Full CQ leaves PENDING intact. Ordinary
+CQEs clear old receipts; the untyped producer cannot mint SERVICE_BUFFER. CQ
+acknowledgement and terminal delivery never return a payload.
+
+Actual-source host ASan/UBSan and eight intended assertion failures pass. The
+release-store observer checks paired state at publication; it is not an ARM
+weak-memory proof. The shared native fixture checks minimum/maximum geometry,
+full CQ, corrupt mirrors, explicit return, clearing and counter wrap. Fresh CI
+build and CPU1 boot1830/1830 pass. Pool model clean cases464/6416states and all
+11 named counterexamples pass. Evidence:
+work/oct4-async-service/owner-integration/receipt-host-passed.json and
+receipt-native-passed.json. The earlier matrix predates this receipt change;
+combined broad qualification of the new private owner remains an activation gate.
+
+These internal helpers do not establish caller identity, pool-to-ring binding,
+charges or MORE-before-terminal scheduling. Their caller must retain the ring
+and pool, serialize all pool mutations with the same ring lock and enforce
+request order. Close/exec/reaper, private slot/protocol integration and safe
+owned clients remain. Public feature masks stay disabled; no clipboard, Pi or
+fresh graphical qualification is claimed.
