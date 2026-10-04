@@ -228,3 +228,5 @@
 - **AS-2a asynchronous descriptor retention** -- AddrSpace owner/total refs, Proc/syscall ownership predicates, Burrow exact-payer helpers and lifetime/device fixtures.
 
 - **AS-2b native admission** -- Exact creator/image value snapshots, shared DAC, registry/slot/generation targets, prepared connection ownership and checked backlog publication.
+
+- **AS-2c private sharing/COW** -- AddrSpace private guards versus process ownership, Proc allocation rollback, tagged ring omission and actual-source/native fixtures.

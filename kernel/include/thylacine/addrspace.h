@@ -157,10 +157,14 @@ struct AddrSpace {
     // Separate from ref so those predicates never count cleanup as a mapper.
     // Increment after taking the total ref; decrement before dropping it.
     int            owners;
+    // AS-2: live private-ring setup/retirement guards, under lock. Sharing and
+    // guard admission are one exclusion domain. Each guard owns a kernel pin;
+    // it persists until the final local ring borrow retires, not merely close.
+    u32            private_rings;
 };
 
 _Static_assert(sizeof(struct AddrSpace) == 80,
-               "AddrSpace: existing 72-byte layout plus owner count and padding; "
+               "AddrSpace: existing layout plus owner/private-ring counts; "
                "internal drift alarm, not a userspace ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM
@@ -181,6 +185,19 @@ struct AddrSpace *addrspace_alloc(u32 page_budget);
 // already holds an owner reference; a kernel-only pin must not resurrect an
 // ownerless address space. RFMEM takes this reference before publishing a child.
 void addrspace_ref(struct AddrSpace *as);
+// As above, but return false if private rings forbid another process owner.
+// Caller already owns the AS. Sharing and private_begin serialize under as->lock;
+// do not call either while already holding that lock. The void ref is a checked
+// internal form, never a policy-refusal path; proc_alloc_in uses the try form.
+bool addrspace_try_ref(struct AddrSpace *as);
+
+// Reserve/release a private ring's sharing guard and descriptor pin. Begin only
+// succeeds for exactly one process owner. Caller owns that image, and publishes
+// no ring until the guard succeeds. End is after local retirement: no pending
+// kernel user-buffer write may remain. It does not wait for a peer or drain VMAs.
+bool addrspace_private_begin(struct AddrSpace *as);
+void addrspace_private_end(struct AddrSpace *as);
+
 
 // Kernel-only lifetime pins: no execution or process-sharing authority. Caller
 // holds a live owner or pin across pin acquisition. Unpin is NULL-safe; the last

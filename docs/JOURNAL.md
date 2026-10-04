@@ -1,5 +1,20 @@
 # The autonomous-run journal
 
+## 2026-10-04: private ring fork and sharing guards
+
+AS-2c makes private setup and process sharing mutually exclusive under the AS
+lock, with a descriptor pin retained until actual local retirement. COW omits
+every private ring VMA piece while keeping ordinary buffers' clone behavior.
+The new negative fixture exposed an assertion-reporting mistake: TEST_ASSERT
+inside a void helper returned to a continuing parent test, which replaced the
+failure label. Returning the error explicitly fixes attribution; both mutants
+now fail by name, and the clean native boot passes1830/1830. Existing COW models
+pass three clean/seven buggy configurations; actual-source ASan/UBSan covers
+11mutants and300 concurrent schedules. Evidence: work/oct4-async-service/as2c.
+No private ABI activation or broad/graphical claim. Next is request progress and
+local retirement; the memory-account hierarchy follows the async facility.
+
+
 ## 2026-10-04: both lifecycle contracts approved
 
 The operator read both specifications and approved them, including async-first

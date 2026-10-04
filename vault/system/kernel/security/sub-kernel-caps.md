@@ -465,3 +465,11 @@ principal/groups, by value. Ordinary owner-first DAC consumes the same structure
 no worker, special principal or synthetic Proc supplies authority. New operations
 must resample; a saved ring cannot cache grants permanently. Existing live peer
 checks and capability revocation semantics remain in place.
+
+## Private ring sharing and fork exclusion
+
+Private command-ring memory cannot acquire a second process writer: AS guard
+admission and process-owner acquisition share one lock, and COW omits tagged
+ring VMAs. This supplements identity checks, which cannot distinguish writers
+sharing one SQ page. Kernel lifetime pins do not count as authority-sharing
+owners. These helpers do not activate the private Loom ABI.

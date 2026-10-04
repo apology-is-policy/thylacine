@@ -449,3 +449,10 @@ Private service identity capture uses the existing process-table walk lock and
 returns values only. It does not change foreground groups, signals or stopping.
 Exact address-space matching distinguishes an exec successor from the creator
 image even when stripes remains unchanged. No new sharing guard is active yet.
+
+## Private ring sharing and fork exclusion
+
+RFMEM's proc_alloc_in path now refuses while the source AS has a private-ring
+guard. Admission is serialized with setup under the AS lock, not a racy owner
+count precheck. Ordinary fork omits tagged ring VMAs; job-control semantics stay
+unchanged. Private mode is still unavailable to userspace.

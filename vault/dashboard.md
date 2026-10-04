@@ -141,5 +141,5 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-04 [[chg-2026-10-04-async-service-abi-reservation]] — Reserve Loom private service encoding before consumers
 - 2026-10-04 [[chg-2026-10-04-async-service-as0]] — Pin the private service ABI and cancellation model
 - 2026-10-04 [[chg-2026-10-04-async-service-as1]] — Resumable native service framing and handshake
-- 2026-10-04 [[chg-2026-10-04-async-transport-qualified]] — Async transport and TLS pass the complete boot matrix
+- 2026-10-04 [[chg-2026-10-04-async-sharing-guards]] — Exclude private ring aliases from process sharing and COW
 <!-- generated:end -->

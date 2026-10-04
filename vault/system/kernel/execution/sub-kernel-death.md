@@ -572,3 +572,10 @@ ALIVE+stripes+exact-AddrSpace check refuses zombie/reaped creators and the old
 image after exec; only values escape. This prerequisite adds no death hook or
 retirement worker yet. The eventual scope latch must close admission before
 owner cleanup, and descriptor/buffer pins must outlive pending local borrows.
+
+## Private ring sharing and fork exclusion
+
+A private-ring guard is a descriptor pin, not a process owner. Last-owner death
+still drains VMAs; the guard's eventual local-retirement release can destroy the
+remaining descriptor without a second drain or a dead Proc pointer. Guard hooks
+for the private Loom consumer are pending; no new death sweep is active.

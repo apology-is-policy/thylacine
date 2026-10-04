@@ -259,3 +259,37 @@ This remains an internal prerequisite. No private setup/REGISTER/SQE activation,
 new asynchronous cleanup worker, shared-AS guard, COW omission, exec abort or
 clipboard activation is claimed. Broad integrated qualification follows those
 consumers. All four protected drafts remain separate; review is single-agent.
+
+## AS-2c: sharing exclusion and selective fork omission
+
+Begin requires an existing owner and exactly one owner under the same AS lock
+that try_ref uses to admit sharing. Therefore simultaneous setup and sharing
+cannot both succeed. A last-owner drain may coexist with guard retention, but
+cannot destroy the descriptor because each guard owns a total lifetime pin.
+End drops that pin outside the AS lock. Its caller must wait for actual local
+retirement, not just descriptor removal; wiring that caller is still owed.
+proc_alloc_in's refusal leaves as NULL and uses normal unpublished rollback.
+No policy path calls the checked void ref to convert a normal refusal into panic.
+
+COW classification excludes the kernel-only private ring flag before every
+mapping-kind arm; protection/splitting preserves the flag. This prevents both
+writable and permanently read-only aliases in the child. Ordinary buffers are
+not tagged, so existing lazy COW and eager writable refusal remain intact.
+The tag consumes an unused state bit; size and user permission ceilings do not
+change. There is still no userspace path to create a private ring.
+
+The actual-source sanitizer fixture exercises serial and concurrent reference
+schedules, including200 competing setup/share attempts and100 final-drop races;
+eleven mutations fail. Native tests use real proc allocation/rollback and actual
+protect splitting, clone, Burrow mapping counts and cleanup. Two source mutants
+fail the inherited-ring and missing-buffer assertions; clean CPU1 boot1830/1830
+passes. The existing COW model's three clean/seven buggy configurations give
+their expected named results; it does not model private rings. Evidence is in
+work/oct4-async-service/as2c. AS-R5 exposed nested TEST_ASSERT's local return:
+the helper returned into a continuing test, allowing a second failure to replace
+the first label. Explicit error propagation corrects this in both new fixtures.
+The failed run is preserved, and both native mutants were rerun after correction.
+
+Single-agent review, not independent audit. No new broad matrix or graphical
+qualification is claimed; whole-system qualification is owed with the private
+consumer. Four authority/settings drafts remain exact and unstaged.

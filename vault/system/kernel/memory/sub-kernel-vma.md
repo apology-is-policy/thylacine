@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -739,3 +739,12 @@ are lazy-anonymous only). Witness: `demand_page.file_pages_charge_the_holder`.
 
 [[moc-kernel-memory]] · [[sub-kernel-fault]] · [[sub-kernel-mmu]] ·
 [[sub-kernel-burrow]] · [[inv-i12]] · [[inv-i7]] · [[inv-i32]]
+
+## Private ring sharing and fork exclusion
+
+VMA_FLAG_PRIVATE_RING is kernel-only state, preserved by protect and splitting.
+COW clone omits every tagged piece before its ordinary kind dispatch, including
+read-only aliases. Ordinary registered I/O buffers must never receive this tag;
+they keep existing clone semantics. No user mapping flag or permission ceiling
+is added. Native split/clone tests and two intended source mutations distinguish
+private omission from accidentally omitting ordinary lazy buffers.

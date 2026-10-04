@@ -67,10 +67,33 @@ static void addrspace_lifetime_get(struct AddrSpace *as) {
     if (pre <= 0) extinction("addrspace_ref on a dead AddrSpace");
 }
 
-void addrspace_ref(struct AddrSpace *as) {
+bool addrspace_try_ref(struct AddrSpace *as) {
+    if (!as) extinction("addrspace_ref(NULL)");
+    spin_lock(&as->lock);
+    if (as->private_rings) { spin_unlock(&as->lock); return false; }
     addrspace_lifetime_get(as);
     int pre = __atomic_fetch_add(&as->owners, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0) extinction("addrspace_ref without a live owner");
+    spin_unlock(&as->lock);
+    return true;
+}
+
+void addrspace_ref(struct AddrSpace *as) {
+    if (!addrspace_try_ref(as)) extinction("addrspace_ref bypassed private-ring refusal");
+}
+
+bool addrspace_private_begin(struct AddrSpace *as) {
+    if (!as) return false;
+    spin_lock(&as->lock);
+    if (__atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) != 1 ||
+        as->private_rings == ~(u32)0) {
+        spin_unlock(&as->lock);
+        return false;
+    }
+    addrspace_lifetime_get(as);
+    ++as->private_rings;
+    spin_unlock(&as->lock);
+    return true;
 }
 
 void addrspace_pin(struct AddrSpace *as) {
@@ -101,6 +124,7 @@ static void addrspace_lifetime_put(struct AddrSpace *as) {
     // the final owner in addrspace_unref; kernel pins do not extend mapping
     // ownership. Only local page-table storage remains to destroy here.
     if (as->vmas) extinction("AddrSpace final lifetime drop before mapping drain");
+    if (as->private_rings) extinction("AddrSpace final lifetime drop with private rings");
 
     // B-1a': nothing returns to the pool here. The pool is physical -- every
     // page the drain just freed returned its charge at free_pages, and the
@@ -141,6 +165,15 @@ void addrspace_unpin(struct AddrSpace *as) {
     addrspace_lifetime_put(as);
 }
 
+void addrspace_private_end(struct AddrSpace *as) {
+    if (!as) extinction("addrspace_private_end(NULL)");
+    spin_lock(&as->lock);
+    if (!as->private_rings) extinction("addrspace_private_end without a guard");
+    --as->private_rings;
+    spin_unlock(&as->lock);
+    addrspace_lifetime_put(as); // may free; never under as->lock
+}
+
 
 // =============================================================================
 // LINEAGE L-4b: the copy-on-write clone (see the header for what each VMA kind
@@ -152,7 +185,8 @@ void addrspace_unpin(struct AddrSpace *as) {
 // writable PTEs -- so the test is written once. A guard VMA has no Burrow and is
 // excluded by the first term.
 static bool vma_is_cow(const struct Vma *v) {
-    return v->burrow && v->burrow->type == BURROW_TYPE_ANON_LAZY;
+    return !(v->flags & VMA_FLAG_PRIVATE_RING) &&
+           v->burrow && v->burrow->type == BURROW_TYPE_ANON_LAZY;
 }
 
 // Build the child's counterpart of one parent VMA. Returns false on any failure;
@@ -160,6 +194,11 @@ static bool vma_is_cow(const struct Vma *v) {
 // to unwind anything except what it allocated and has not yet handed over.
 static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
                           const struct Vma *src_vma) {
+    // Private kernel ring pages can submit operations, so a child must never
+    // inherit them, even as read-only aliases or after protect/split. Ordinary
+    // registered user-buffer VMAs are NOT tagged and retain their existing
+    // clone semantics. This is omission, not a new user-settable map flag.
+    if (src_vma->flags & VMA_FLAG_PRIVATE_RING) return true;
     // A guard VMA (no Burrow, prot 0) is pure reserved address space. It must be
     // reproduced or the child silently loses its stack guard page -- an overflow
     // would then corrupt the VMA below instead of faulting.

@@ -233,7 +233,45 @@ void test_addrspace_share_drains_at_last_ref(void) {
     burrow_unref(b);
 }
 
+static const char *private_ring_sharing_failure(void) {
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
+    if (!as) return "private sharing AS";
+    bool first = addrspace_private_begin(as);
+    bool second = first && addrspace_private_begin(as);
+    if (!second) {
+        if (first) addrspace_private_end(as);
+        addrspace_unref(as);
+        return "two private rings on one owner";
+    }
+    u64 created = proc_total_created(), destroyed = proc_total_destroyed();
+    struct Proc *blocked = proc_alloc_in(as, proc_default_page_budget());
+    bool refused = blocked == NULL;
+    if (blocked) { blocked->state = PROC_STATE_ZOMBIE; proc_free(blocked); }
+    bool rollback = proc_total_created() - created == proc_total_destroyed() - destroyed;
+    addrspace_private_end(as);
+    bool still_guarded = !addrspace_try_ref(as);
+    if (!still_guarded) addrspace_unref(as);
+    addrspace_private_end(as);
+    struct Proc *allowed = proc_alloc_in(as, proc_default_page_budget());
+    bool sharing_resumed = allowed && allowed->as == as;
+    bool shared_refused = !addrspace_private_begin(as);
+    if (!shared_refused) addrspace_private_end(as);
+    if (allowed) { allowed->state = PROC_STATE_ZOMBIE; proc_free(allowed); }
+    bool exit_guard = addrspace_private_begin(as);
+    addrspace_unref(as);
+    // A guard is a descriptor pin, never another user mapping owner.
+    bool ownerless = exit_guard && addrspace_owner_count(as) == 0 && as->vmas == NULL;
+    if (exit_guard) addrspace_private_end(as);
+    if (!(refused && rollback)) return "real Proc allocation refuses private sharing without leaks";
+    if (!(still_guarded && sharing_resumed)) return "last retired guard releases sharing exclusion";
+    if (!shared_refused) return "two real owners refuse a private ring";
+    if (!ownerless) return "private retirement guard survives last owner safely";
+    return NULL;
+}
+
 void test_addrspace_proc_alloc_in_shares(void) {
+    const char *private_failure = private_ring_sharing_failure();
+    TEST_ASSERT(private_failure == NULL, private_failure);
     struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc returned NULL");
 

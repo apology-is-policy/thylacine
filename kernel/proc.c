@@ -419,8 +419,10 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     // as->context_id, so one space is one ASID however many Procs hold it, and
     // I-31 needs nothing new.
     if (share) {
-        addrspace_ref(share);
-        p->as = share;
+        // Private-ring guard and this owner reservation use the same AS lock.
+        // A check of owner_count before allocation would race a ring setup.
+        // On refusal leave as NULL for the ordinary unpublished rollback below.
+        if (addrspace_try_ref(share)) p->as = share;
     } else {
         // I-32 (A): seed the new space's enforced cap from the CALLER's
         // authorization, passed in rather than read off the half-built Proc.

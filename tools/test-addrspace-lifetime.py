@@ -8,6 +8,10 @@ from pathlib import Path
 import argparse,os,shlex,subprocess,tempfile
 ROOT=Path(__file__).resolve().parent.parent
 MUTANTS=[
+ ('private-sharing','if (as->private_rings) { spin_unlock(&as->lock); return false; }','if (false) { spin_unlock(&as->lock); return false; }','private guard refuses sharing'),
+ ('already-shared','if (__atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) != 1 ||','if (false ||','shared image refuses private guard'),
+ ('guard-no-pin','    addrspace_lifetime_get(as);\n    ++as->private_rings;','    ++as->private_rings;','guard pins lifetime without adding owner'),
+ ('guard-leak','    --as->private_rings;','    (void)as->private_rings;','final guard releases pin and exclusion'),
  ('pin-as-owner','void addrspace_pin(struct AddrSpace *as) {\n    addrspace_lifetime_get(as);','void addrspace_pin(struct AddrSpace *as) {\n    addrspace_ref(as);','pin is not an owner'),
  ('no-owner-get','int pre = __atomic_fetch_add(&as->owners, 1, __ATOMIC_ACQ_REL);','int pre = __atomic_load_n(&as->owners, __ATOMIC_ACQUIRE);','owner increments both counts'),
  ('skip-drain','if (pre == 1) vma_drain_in(as);','if (false) vma_drain_in(as);','last owner drains before last pin'),

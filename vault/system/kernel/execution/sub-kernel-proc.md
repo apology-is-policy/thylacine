@@ -631,3 +631,10 @@ that same lock; keeping a Proc identity cannot let an old ring sample the new
 image. Only immutable identity/provenance values escape. The direct snapshot
 requires a lifetime-safe caller and supports legacy synchronous opens. Scope
 publication still needs its own exit/exec/abort latch; this helper is no substitute.
+
+## Private ring sharing and fork exclusion
+
+proc_alloc_in uses addrspace_try_ref under the AS lock. Any private-ring guard
+refuses a new process owner; the unpublished Proc keeps as NULL and follows
+normal rollback, balancing creation/destruction. Existing kernel descriptor pins
+alone do not block sharing. Private setup is still inactive.

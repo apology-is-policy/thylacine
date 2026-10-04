@@ -600,3 +600,13 @@ code; existing COW/capacity models do not model this descriptor-pin distinction.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Private ring sharing and fork exclusion
+
+Private-ring admission and addrspace_try_ref serialize under the AS lock.
+Only one process owner may start a guard; any outstanding guard refuses another
+owner. Each guard owns a kernel descriptor pin until local retirement, including
+after last-owner mapping drain. proc_alloc_in handles refusal through ordinary
+unpublished rollback. The count uses former padding: sizeof AddrSpace remains80.
+Native Proc/COW tests and actual-source ASan/UBSan concurrency/mutations qualify
+the helpers; private runtime consumers remain pending.

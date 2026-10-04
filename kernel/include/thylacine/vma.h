@@ -62,6 +62,12 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // write into a segfault.
 #define VMA_FLAG_COW        (1u << 1)
 
+// AS-2: kernel-owned private Loom SQ/CQ mapping. Never a userspace map flag.
+// COW fork omits it; protect/range splits retain it. Only the private ring
+// setup path may stamp it, never registration of an ordinary user I/O buffer.
+#define VMA_FLAG_PRIVATE_RING (1u << 2)
+
+
 // The permission CEILING (B-1a; ARCH 6.5 "The permission ceiling"; I-12): bits
 // 8..10 of `flags` hold the VMA_PROT_* set this mapping may never be raised past.
 // Fixed by the mint and lowered only by PROTECT_SEAL; nothing raises it.
@@ -77,12 +83,12 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // the eager-anon SHARE arm sound: an eager mapping is shared across a fork only
 // when its CEILING excludes WRITE, since the current prot can be raised back.
 //
-// Lives in `flags` so struct Vma stays 64 bytes. The two bits below it are the
-// mapping's STATE (shared-in, COW); the D-3b split's "no flags" refusal reads
+// Lives in `flags` so struct Vma stays 64 bytes. The low bits below it are the
+// mapping's STATE (shared-in, COW, private ring); the D-3b split's "no flags" refusal reads
 // the state bits only (VMA_FLAG_STATE_MASK).
 #define VMA_FLAG_MAX_SHIFT  8
 #define VMA_FLAG_MAX_MASK   (7u << VMA_FLAG_MAX_SHIFT)
-#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW)
+#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW | VMA_FLAG_PRIVATE_RING)
 
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).

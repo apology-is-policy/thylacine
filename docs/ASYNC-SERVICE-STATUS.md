@@ -9,7 +9,7 @@ implementation follows this facility as approved.
 | AS-0 contract | Approved | Scripture4722f34e8; concrete numeric/layout reservation in ASYNC-SERVICE-ABI.md. |
 | AS-0 ABI/model | Verified | Three compiled mirrors, 22 constants, five records and three intended source-mirror mismatches; model 5,828 states and seven named counterexamples. Private setup remains rejected. |
 | AS-1 progress | Qualified | Resumable framing/native-root handshake and real SrvConn adapter; byte-boundary host fixture, 12 mutants, ASan/UBSan, CPU1 boot1830/1830. 50/50 clean default/SMP/kernel-UBSan boots after TLS repair; AS-2 must bind helpers to private ownership. |
-| AS-2 scopes | In progress | AS-2a descriptor lifetime and AS-2b native admission prerequisites; private table/owner guards, retirement, deadlines and completion obligations remain. |
+| AS-2 scopes | In progress | Descriptor lifetime, native admission and sharing/COW guards verified; private table, request progress, retirement, deadlines and completion obligations remain. |
 | AS-3 clients | Pending | C/Rust APIs plus native stalled/malformed-peer and repeated-reconnect fixtures. |
 | AS-4 adoption | Pending | Clipboard/MODE clients, SAK cancellation at every phase, responsive graphics and logout. |
 
@@ -157,3 +157,38 @@ counterexamples are observed for post_without_marker, identity_cached_on_fid
 and dead_proc_stale (aggregate Invariants). The clean Corvus gate remains
 suspended by its earlier operator decision. All four draft hashes and source
 pins match after verification; matching boot artifacts are retained with hashes.
+
+## AS-R5: nested native assertion attribution (October 4)
+
+The AS-2c omit-ordinary source mutation triggered the intended buffer-clone
+assertion, but the new void helper returned only to its caller. A later parent
+assertion overwrote the harness's one failure message. The gate correctly
+refused to accept the wrong final label. Both new nested fixtures now return
+an error to their registered test, which stops on that first failure. No
+production correction follows from this test-harness attribution defect.
+Evidence: work/oct4-async-service/as2c/check-1791132814198835000. The corrected
+native mutants and fresh clean gate are pending; the prior mutant build is
+not a runnable clean image.
+
+## AS-2c: private ring sharing and fork guards (October 4)
+
+Private-ring guard admission and new process-owner acquisition serialize under
+AddrSpace.lock. A guard holds a descriptor pin until local retirement; it does
+not keep mappings or a dead process alive. proc_alloc_in refuses sharing and
+rolls back normally while any guard exists. AddrSpace remains80bytes.
+Kernel-only private ring VMA state survives protect/split and is omitted from
+COW children, including read-only pieces. Ordinary registered buffers retain
+their existing clone rules; their registration never stamps the private tag.
+
+Actual-source lifecycle ASan/UBSan passes eleven intended mutations, 100 final
+reference races and200 guard-versus-sharing races. Fresh CI CPU1 boot1830/1830
+passes. Two real guest source mutations separately fail the named inherited-ring
+and missing-ordinary-buffer assertions. Existing COW models pass three clean
+configurations (580/10636/2996states) and seven intended counterexamples.
+Evidence: work/oct4-async-service/as2c/check-1791133210590134000 and
+host-1791132695331926000. AS-R5 is closed: helpers propagate the first error to
+the registered test, preventing a later failure from replacing its message.
+All source pins and four original draft hashes match; paired clean boot artifacts
+are retained. No new full matrix, graphical/Pi qualification, private setup or
+clipboard activation. Next: private request progress, close/exec/exit abort and
+bounded local retirement, then clients and end-to-end adoption.

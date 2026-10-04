@@ -445,7 +445,45 @@ void test_cow_clone_shares_readonly_eager_anon(void) {
     drop_proc_for_cow(parent);
 }
 
+// Private ring omission is selective. Protect must preserve its kernel tag,
+// and ordinary I/O/storage VMAs retain their existing COW behavior.
+static const char *private_ring_clone_failure(void) {
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
+    struct Burrow *ring = burrow_create_anon(2 * PAGE_SIZE, false);
+    struct Burrow *buffer = burrow_create_anon_lazy(PAGE_SIZE);
+    if (!as || !ring || !buffer) {
+        addrspace_unref(as); burrow_unref(ring); burrow_unref(buffer);
+        return "private COW fixtures";
+    }
+    spin_lock(&as->lock);
+    int r = burrow_map_in(as, true, ring, COW_TEST_VA, 2 * PAGE_SIZE, VMA_PROT_RW);
+    int b = burrow_map_in(as, true, buffer, COW_TEST_VA + 4 * PAGE_SIZE, PAGE_SIZE, VMA_PROT_RW);
+    struct Vma *rv = vma_lookup_in(as, COW_TEST_VA);
+    if (rv) rv->flags |= VMA_FLAG_PRIVATE_RING;
+    int protected = r == 0 ? burrow_protect_in(as, true, COW_TEST_VA, PAGE_SIZE,
+                                               VMA_PROT_READ, false) : -1;
+    rv = vma_lookup_in(as, COW_TEST_VA);
+    struct Vma *tail = vma_lookup_in(as, COW_TEST_VA + PAGE_SIZE);
+    bool tagged = rv && tail && rv != tail && (rv->flags & VMA_FLAG_PRIVATE_RING) &&
+                  (tail->flags & VMA_FLAG_PRIVATE_RING);
+    spin_unlock(&as->lock);
+    struct AddrSpace *child = addrspace_clone(as, true);
+    bool omitted = child && !vma_lookup_in(child, COW_TEST_VA) &&
+                   !vma_lookup_in(child, COW_TEST_VA + PAGE_SIZE);
+    struct Vma *bv = child ? vma_lookup_in(child, COW_TEST_VA + 4 * PAGE_SIZE) : NULL;
+    bool copied = bv && bv->burrow != buffer && (bv->flags & VMA_FLAG_COW);
+    bool refs = burrow_mapping_count(ring) == 2;
+    addrspace_unref(child); addrspace_unref(as); burrow_unref(ring); burrow_unref(buffer);
+    if (!(r == 0 && b == 0 && protected == 0 && tagged))
+        return "private ring protect/split keeps kernel-only tag on both pieces";
+    if (!(omitted && refs)) return "COW child omits private ring mapping and reference";
+    if (!copied) return "COW child still clones ordinary user buffer";
+    return NULL;
+}
+
 void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void) {
+    const char *private_failure = private_ring_clone_failure();
+    TEST_ASSERT(private_failure == NULL, private_failure);
     struct Proc *parent = proc_alloc();
     TEST_ASSERT(parent != NULL, "proc_alloc");
 
