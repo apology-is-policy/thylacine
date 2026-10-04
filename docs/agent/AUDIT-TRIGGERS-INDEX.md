@@ -240,3 +240,5 @@
 - **Rust registered payload ownership** -- Raw registration safety, completion-limited Tapestry borrows, Weft unresolved-I/O slices, native caller failure/drop discipline and compile-fail/fault tests.
 
 - **AS-2f private worker accounting ticket** -- `kernel/proc.c`, `proc.h`, `test_proc.c` and actual-source budget fixture; stripes/image admission, serialized ticket consumption, exec/reap refund identity.
+
+- **AS-2g preallocated private protocol storage** -- `kernel/9p_client.c`, `9p_client.h`, `private_client_fixture.h` and actual-source runner; no hidden bulk allocation, external lifetime versus heap ownership.

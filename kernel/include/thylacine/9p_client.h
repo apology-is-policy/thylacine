@@ -221,6 +221,7 @@ struct p9_client {
     u8                   out_buf_inline[P9_CLIENT_OUT_BUF_MAX];
     u8                  *out_buf;
     u32                  out_buf_cap;
+    bool                 out_buf_owned; // only legacy allocated bulk storage is freed here
     size_t               recv_cap;     // transport recv-buf cap; per-rpc reply_buf size
     // Pipeline state (ARCH §21.10). inflight[tag] is the submitter's stack
     // p9_rpc for the op holding `tag`, or NULL (free / op died + unwound,
@@ -401,6 +402,17 @@ int  p9_client_init(struct p9_client *c,
                      u32 root_fid, u32 msize,
                      struct p9_transport_ops transport_ops,
                      u8 *recv_buf, size_t recv_cap);
+
+// Allocation-free initialization for an exclusive owner with precharged storage.
+// Both buffers must hold the proposed msize and remain disjoint from each other
+// and *c, exclusively owned through destroy (including progress_abort callbacks).
+// init failure leaves the caller owning both buffers; destroy never frees them.
+// The client must be fresh or previously destroyed, never concurrently in use.
+// This does not itself bind the private transport or grant service authority.
+int p9_client_init_preallocated(struct p9_client *c, u32 root_fid, u32 msize,
+                                struct p9_transport_ops transport_ops,
+                                u8 *recv_buf, size_t recv_cap,
+                                u8 *send_buf, u32 send_cap);
 
 // Tear down: clobbers magic, destroys session + transport.
 void p9_client_destroy(struct p9_client *c);

@@ -12,7 +12,7 @@ struct pc_fixture {
     struct p9_client client;
     struct p9_client_progress progress;
     struct pc_pipe pipe;
-    u8 recv[512];
+    u8 recv[512], send[512];
     struct pc_op op[3];
 };
 static struct pc_fixture pc;
@@ -55,7 +55,7 @@ static const char *pc_ready(void) {
     pc_zero(&pc,sizeof(pc));pc.pipe.chunk=512;
     struct p9_transport_ops ops={.send=pc_bad_send,.recv=pc_bad_recv,.close=pc_bad_close,.ctx=&pc.pipe};
     struct p9_transport_try_ops nb={.send=pc_send,.recv=pc_recv,.abort=pc_abort,.ctx=&pc.pipe};
-    PC_CHECK(p9_client_init(&pc.client,0,256,ops,pc.recv,sizeof(pc.recv))==0,"client init");
+    PC_CHECK(p9_client_init_preallocated(&pc.client,0,256,ops,pc.recv,sizeof(pc.recv),pc.send,sizeof(pc.send))==0,"client init");
     PC_CHECK(p9_client_progress_bind(&pc.client,&pc.progress,nb,1234,0)==0,"private bind/no deadline");
     PC_CHECK(!pc.pipe.calls,"bind must not do I/O");
     PC_CHECK(p9_client_handshake(&pc.client,0,0,0,0,0)<0,"blocking handshake refused");
@@ -169,8 +169,33 @@ static const char *pc_callback_release(void) {
     }
     return 0;
 }
+static u8 pc_big_rx[P9_CLIENT_OUT_BUF_MAX + 128];
+static u8 pc_big_tx[P9_CLIENT_OUT_BUF_MAX + 128];
+static const char *pc_storage(void) {
+    if(pc.client.magic==P9_CLIENT_MAGIC)p9_client_destroy(&pc.client);
+    pc_zero(&pc,sizeof(pc));
+    struct p9_transport_ops ops={.send=pc_bad_send,.recv=pc_bad_recv,.close=pc_bad_close,.ctx=&pc.pipe};
+    u32 n=(u32)sizeof(pc_big_rx);
+    PC_CHECK(p9_client_init_preallocated(&pc.client,0,n,ops,pc_big_rx,n,pc_big_tx,n-1)<0,"short provided TX refused");
+    PC_CHECK(p9_client_init_preallocated(&pc.client,0,n,ops,pc_big_rx,n-1,pc_big_tx,n)<0,"short provided RX refused");
+    PC_CHECK(p9_client_init_preallocated(&pc.client,0,n,ops,pc_big_rx,n,NULL,n)<0,"missing provided TX refused");
+    PC_CHECK(pc.client.magic!=P9_CLIENT_MAGIC,"invalid storage never publishes client");
+    PC_CHECK(!p9_client_init_preallocated(&pc.client,0,n,ops,pc_big_rx,n,pc_big_tx,n),"provided bulk init");
+    PC_CHECK(pc.client.out_buf==pc_big_tx&&pc.client.out_buf_cap==n&&!pc.client.out_buf_owned,"provided bulk uses exact owner storage");
+    pc_big_tx[0]=0x53;
+    p9_client_destroy(&pc.client);p9_client_destroy(&pc.client);
+    PC_CHECK(pc_big_tx[0]==0x53&&!pc.client.out_buf&&!pc.client.out_buf_owned,"owner storage survives destroy");
+    PC_CHECK(!p9_client_init(&pc.client,0,n,ops,pc_big_rx,n),"legacy bulk init");
+    PC_CHECK(pc.client.out_buf_owned==(pc.client.out_buf!=pc.client.out_buf_inline),"legacy bulk keeps ownership");
+    p9_client_destroy(&pc.client);
+    PC_CHECK(!p9_client_init_preallocated(&pc.client,0,256,ops,pc.recv,sizeof(pc.recv),pc.send,sizeof(pc.send)),"provided reinit");
+    PC_CHECK(!pc.client.out_buf_owned&&pc.client.out_buf==pc.send,"reinit clears legacy ownership");
+    p9_client_destroy(&pc.client);
+    return NULL;
+}
 static const char *private_client_fixture_run(void) {
-    const char *err=pc_partial_and_duplex();
+    const char *err=pc_storage();
+    if(!err)err=pc_partial_and_duplex();
     if(!err)err=pc_cancel_and_malformed();
     if(!err)err=pc_callback_release();
     if(pc.client.magic==P9_CLIENT_MAGIC)p9_client_destroy(&pc.client);

@@ -1,5 +1,15 @@
 # The autonomous-run journal
 
+## 2026-10-04: explicit protocol-buffer storage
+
+The private owner needs all metadata/payload transport storage accounted before
+admission; legacy bulk initialization could allocate TX invisibly to that ledger.
+Added a preallocated constructor and explicit TX ownership at destroy. Shared
+client fixture,13 intended source mutants, host sanitizers, existing9p_client
+model/five counterexamples and native1830/1830 pass. Legacy init behavior remains;
+private runtime remains off while charged owner/retirement integration continues.
+
+
 ## 2026-10-04: private worker charge identity
 
 Added stripes-keyed, process-lock-serialized tickets for private worker retirement.

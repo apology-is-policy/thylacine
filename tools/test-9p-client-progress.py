@@ -6,8 +6,13 @@ Acquire Yip before running. This does not qualify private Loom ownership.
 from pathlib import Path
 import argparse,os,shlex,subprocess,tempfile,re
 ROOT=Path(__file__).resolve().parent.parent
-NAMES=['map_error','client_copy','client_mark_dead_locked','client_send_progress_signal','client_orphan_fid_locked','ownerless_dispatch_locked','client_honour_locked','demux_frame_locked','p9_client_submit_async','p9_client_progress_bind','p9_client_progress_abort','p9_client_progress_step','p9_client_init','p9_client_destroy','p9_client_handshake','client_max_read_count','p9_client_read']
+NAMES=['map_error','client_copy','client_mark_dead_locked','client_send_progress_signal','client_orphan_fid_locked','ownerless_dispatch_locked','client_honour_locked','demux_frame_locked','p9_client_submit_async','p9_client_progress_bind','p9_client_progress_abort','p9_client_progress_step','p9_client_init_storage','p9_client_init','p9_client_init_preallocated','p9_client_destroy','p9_client_handshake','client_max_read_count','p9_client_read']
 MUTANTS=[
+ ('provided-cap','send_cap < msize','false','short provided TX refused'),
+ ('provided-rx','recv_cap < msize','false','short provided RX refused'),
+ ('hidden-bulk','if (provided) {','if (provided && msize <= P9_CLIENT_OUT_BUF_MAX) {','provided bulk uses exact owner storage'),
+ ('owned-provided','c->out_buf = send_buf;','c->out_buf = send_buf; c->out_buf_owned = true;','free without allocator ownership'),
+ ('leak-bulk','c->out_buf_owned = true;','c->out_buf_owned = false;','legacy bulk keeps ownership'),
  ('overwrite-tx','if (c->progress && c->progress->io.tx)', 'if (false)', 'pending TX refuses buffer overwrite'),
  ('starve-rx','if (p->io.tx && !p->rx_next)', 'if (p->io.tx)', 'blocked sender cannot starve reply'),
  ('early-reply','(!owner || owner->sending)', '(!owner)', 'malformed or premature reply aborts once'),

@@ -631,3 +631,23 @@ Host actual-source ASan/UBSan/eight mutations and the shared native fixture
 qualify partial framing, duplex fairness, every byte cancellation, hostile replies
 and callbacks freeing their storage. Fresh CPU1 boot1830/1830 and existing
 9p_client197states/five mutants pass. No new broad/graphics/private ABI activation.
+
+## Preallocated private transport storage
+
+`p9_client_init_preallocated` initializes the same client/session/transport using
+caller-owned RX and TX regions large enough for the proposed msize. It does not
+allocate a bulk transmit buffer; these regions and the client itself belong to
+the future charged private scope. They must be mutually disjoint, exclusively
+owned and retained through destroy and its abort callbacks. The constructor
+checks capacities before publication; it does not establish ring authority or
+perform an accounting transaction.
+
+The internal `out_buf_owned` flag records only an allocation made by the legacy
+initializer. Destroy frees that allocation once, clears the flag and pointer,
+and leaves supplied storage to its owner. The original initializer retains its
+heap-allocation/inline-fallback bulk behavior. Shared native/host private-client
+fixtures use provided storage through partial progress, malformed replies and
+abort; bulk/reinit checks, five additional storage mutants, existing eight
+progress mutants and native1830/1830 pass. Existing9p_client model197states/five
+counterexamples pass. Broad qualification and charged private-owner integration
+remain owed; no new userspace ABI is activated.

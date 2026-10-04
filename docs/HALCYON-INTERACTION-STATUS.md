@@ -2112,3 +2112,27 @@ public feature masks are unchanged. Private close/exec/reaper, metadata charging
 protocol/receipt integration and safe owned clients remain. Broad matrix debt
 now covers AS-2e, AS-R8 and this helper; earlier50/50 covers AS-2a-d only.
 Evidence: work/oct4-async-service/owner/{ticket-host-final,native-passed.json}.
+
+## AS-2g: preallocated protocol storage (October 4)
+
+p9_client_init_preallocated accepts the owning scope's charged RX/TX storage
+without hidden bulk-TX allocation. It rejects null/short storage before client
+publication. The explicit out_buf_owned flag makes destroy free only the legacy
+heap-owned bulk buffer; external storage survives abort/destroy and remains the
+owner's responsibility. Reinitialization resets ownership. The original init
+retains its inline/default and heap-or-inline bulk behavior.
+
+The shared native/host private-client fixture now uses provided buffers for
+real framing/request progress and checks bulk boundaries, ownership and reinit.
+Actual-source ASan/UBSan passes with13 intended mutants (five storage, eight
+progress); allocator instrumentation catches foreign free and leaked storage.
+The original wrong-owner mutant triggered ASan bad-free during fixture cleanup
+before the assertion could print; a bounded host allocation tracker now reports
+that same violation directly. Existing9p_client model197states and five intended
+aggregate Invariants counterexamples pass; native CPU1 boot1830/1830 passes.
+
+This supplies storage ownership, not its charge transaction: the private ring
+owner must reserve and retain the enclosing allocations. Caller storage must be
+disjoint and exclusive until destroy completes. No private ABI or clipboard
+activation; full owner/retirement integration and combined broad matrix remain.
+Evidence: work/oct4-async-service/owner-storage/{host-final,checked.json}.

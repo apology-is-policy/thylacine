@@ -1764,13 +1764,16 @@ void p9_client_mark_devgone(struct p9_client *c) {
 // Lifecycle.
 // =============================================================================
 
-int p9_client_init(struct p9_client *c,
+static int p9_client_init_storage(struct p9_client *c,
                     u32 root_fid, u32 msize,
                     struct p9_transport_ops transport_ops,
-                    u8 *recv_buf, size_t recv_cap) {
+                    u8 *recv_buf, size_t recv_cap,
+                    u8 *send_buf, u32 send_cap, bool provided) {
     if (!c) return -P9_E_INVAL;
     if (!recv_buf) return -P9_E_INVAL;
     if (recv_cap < P9_HDR_LEN) return -P9_E_INVAL;
+    if (provided && (!send_buf || send_cap < msize || recv_cap < msize))
+        return -P9_E_INVAL;
     int rc = p9_session_init(&c->session, root_fid, msize);
     if (rc < 0) return -P9_E_INVAL;
     rc = p9_transport_init(&c->transport, transport_ops, recv_buf, recv_cap);
@@ -1805,11 +1808,16 @@ int p9_client_init(struct p9_client *c,
     c->orphan_kept     = 0;
     c->out_buf     = c->out_buf_inline;
     c->out_buf_cap = P9_CLIENT_OUT_BUF_MAX;
-    if (msize > P9_CLIENT_OUT_BUF_MAX) {
+    c->out_buf_owned = false;
+    if (provided) {
+        c->out_buf = send_buf;
+        c->out_buf_cap = send_cap;
+    } else if (msize > P9_CLIENT_OUT_BUF_MAX) {
         u8 *big = kmalloc(msize, 0);
         if (big) {
             c->out_buf     = big;
             c->out_buf_cap = msize;
+            c->out_buf_owned = true;
         }
     }
     c->magic        = P9_CLIENT_MAGIC;
@@ -1850,6 +1858,21 @@ int p9_client_init(struct p9_client *c,
     return 0;
 }
 
+int p9_client_init(struct p9_client *c, u32 root_fid, u32 msize,
+                   struct p9_transport_ops transport_ops,
+                   u8 *recv_buf, size_t recv_cap) {
+    return p9_client_init_storage(c, root_fid, msize, transport_ops,
+                                  recv_buf, recv_cap, NULL, 0, false);
+}
+
+int p9_client_init_preallocated(struct p9_client *c, u32 root_fid, u32 msize,
+                                struct p9_transport_ops transport_ops,
+                                u8 *recv_buf, size_t recv_cap,
+                                u8 *send_buf, u32 send_cap) {
+    return p9_client_init_storage(c, root_fid, msize, transport_ops,
+                                  recv_buf, recv_cap, send_buf, send_cap, true);
+}
+
 void p9_client_destroy(struct p9_client *c) {
     if (!c) return;
     if (c->magic != P9_CLIENT_MAGIC) return;
@@ -1864,9 +1887,11 @@ void p9_client_destroy(struct p9_client *c) {
     if (c->done_reply_buf) { kfree(c->done_reply_buf); c->done_reply_buf = NULL; }
     spin_unlock(&c->lock);
     // CF-3 B: release a heap out_buf (bulk-msize tier). The inline tier is
-    // storage inside *c -- nothing to free. No op is in flight at destroy
-    // (the last attached ref dropped), so no builder can be mid-frame here.
-    if (c->out_buf && c->out_buf != c->out_buf_inline) kfree(c->out_buf);
+    // storage inside *c -- nothing to free. Preallocated private storage belongs
+    // to its enclosing charged owner, which releases it after destroy. No op is
+    // in flight (the last attached ref dropped), so no builder is mid-frame.
+    if (c->out_buf_owned) kfree(c->out_buf);
+    c->out_buf_owned = false;
     c->out_buf     = NULL;
     c->out_buf_cap = 0;
     // L1e: free the Larder's lazily-allocated page buffers (the attr/dentry
