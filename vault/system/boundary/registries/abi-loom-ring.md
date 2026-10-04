@@ -11,8 +11,16 @@ mirrors:
   - "usr/lib/libthyla-rs/src/loom.rs: Sqe / Cqe / BufReg / Params (size + full offset_of! sets)"
   - "usr/lib/libthyla-rs/src/loom.rs: the ring header as five bare offset constants (HDR_SQ_HEAD=0 .. HDR_FLAGS=32), no struct, no assert"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-04
 ---
+## Private service reservations (AS-0)
+
+The approved lifecycle extension reserves setup bit2, register subops2..6 and
+SQE opcode20. See docs/ASYNC-SERVICE-ABI.md for exact versioned records and
+private-only field meanings. Opcode19 remains reserved. These allocations do
+not enable the feature or change the legacy valid masks; compiled C/Rust record
+mirrors and runtime implementation follow in separate commits.
+
 ## The surface
 
 Loom is the io_uring inversion: userspace posts 9P-shaped op descriptors into

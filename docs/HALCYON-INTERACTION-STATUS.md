@@ -13,7 +13,8 @@ verified implementation fit, staged delivery and binding decisions are in
 [ASYNC-MEMORY-DESIGN-REVIEW](ASYNC-MEMORY-DESIGN-REVIEW.md), with specifications
 [ASYNC-SERVICE-LIFECYCLE](ASYNC-SERVICE-LIFECYCLE.md) and
 [SHARED-MEMORY-ACCOUNTING](SHARED-MEMORY-ACCOUNTING.md). The operator approved both detailed contracts, including async-first order.
-AS-0 ABI reservation and lifecycle verification are the active next steps. No async private scopes,
+AS-0 ABI reservation and lifecycle verification are active; pickup is
+[ASYNC-SERVICE-STATUS](ASYNC-SERVICE-STATUS.md). No async private scopes,
 new memory accounts or clipboard client activation are claimed implemented.
 The existing storage repair and its verified matrix remain separate evidence.
 
