@@ -10,7 +10,7 @@ code:
   - tools/check-loom-service-abi.py
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i32]
-validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-service, gate-smp]
+validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-service, spec-loom-service-buffers, gate-smp]
 locks: []
 abis: [abi-loom-ring, abi-loom-service]
 design:
@@ -663,3 +663,10 @@ and new-record alignment, plus the full kernel header's unchanged64/16/88-byte
 envelope and disabled private masks. Three intended mirror mutations are detected.
 This supersedes the earlier mirrors-pending statement only; no pool handler is
 enabled and the ownership model/implementation are still owed.
+
+### Provided-buffer model gate (October 4)
+
+[[spec-loom-service-buffers]] separates CQ acknowledgement from payload return
+and source-local retirement from retained pool completions. Two bounded clean
+runs (464/6416 states) and eleven named counterexamples pass. This is a design
+model, with no enabled kernel pool handler or claim of actual payload safety yet.

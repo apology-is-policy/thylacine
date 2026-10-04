@@ -371,3 +371,19 @@ This proves declaration/layout consistency, not decoder validation, copyout
 rollback, payload ownership, cancellation, or native runtime behavior. The model
 and consuming implementation must supply those proofs. First SDK invocation
 failure and corrected logs remain in work/oct4-async-service/buffer-pools.
+
+## Explicit payload model (October 4)
+
+The focused loom_service_buffers model passes464 states (one member/two leases)
+and6416 (two members/three leases), both with two pool generations. Eleven
+intentional mutations fail their named safety/temporal properties. Local
+retirement needs no peer, CQ delivery/ack or payload return fairness. Single
+stream; physical aliasing, real bytes, locks and multi-stream fairness remain
+actual-source/runtime requirements. Evidence: work/oct4-async-service/buffer-pools/model-passed.json.
+No private activation, new native boot or graphical qualification in this step.
+
+Self-review only: verified that the older service model's fair CQ draining is
+not imported into the new retirement proof. Successful pending payloads survive
+Retire; pool re-creation requires all leases gone. Model enumerates a single
+stream and abstracts bytes as unique nonces; implementation gates must not use
+this result as proof of physical lifetime or cross-stream scheduling.

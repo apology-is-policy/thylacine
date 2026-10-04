@@ -136,10 +136,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-10-04 [[chg-2026-10-04-async-buffer-pool-abi]] — Pin provided-buffer records in three compiled mirrors
 - 2026-10-04 [[chg-2026-10-04-async-buffer-pool-design]] — Separate private streaming payload leases from completion consumption
+- 2026-10-04 [[chg-2026-10-04-async-buffer-pool-model]] — Model payload ownership separately from completion consumption
 - 2026-10-04 [[chg-2026-10-04-async-memory-approved]] — Ratify both lifecycle contracts and async-first delivery
 - 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
 - 2026-10-04 [[chg-2026-10-04-async-native-admission]] — Prepare exact native service admission before backlog publication
 - 2026-10-04 [[chg-2026-10-04-async-owner-lifetime]] — Separate process ownership from asynchronous descriptor retention
 - 2026-10-04 [[chg-2026-10-04-async-request-progress]] — Drive private native requests through bounded partial I/O
-- 2026-10-04 [[chg-2026-10-04-async-service-abi-reservation]] — Reserve Loom private service encoding before consumers
 <!-- generated:end -->

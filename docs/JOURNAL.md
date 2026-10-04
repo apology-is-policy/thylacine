@@ -33294,3 +33294,13 @@ CPU1 boot1830/1830 passes after correcting a new fixture's listener-close
 assumption to use real poster death. Three required Corvus connection mutants produce their expected counterexamples.
 The full clean Corvus run remains suspended; an accidental launch was stopped
 and its incomplete log retained without a success claim. Private runtime/clipboard are still inactive; no Main landing.
+
+## Explicit payload model (October 4)
+
+The focused loom_service_buffers model passes464 states (one member/two leases)
+and6416 (two members/three leases), both with two pool generations. Eleven
+intentional mutations fail their named safety/temporal properties. Local
+retirement needs no peer, CQ delivery/ack or payload return fairness. Single
+stream; physical aliasing, real bytes, locks and multi-stream fairness remain
+actual-source/runtime requirements. Evidence: work/oct4-async-service/buffer-pools/model-passed.json.
+No private activation, new native boot or graphical qualification in this step.

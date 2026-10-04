@@ -3024,3 +3024,17 @@ One slot/two incarnations, a one-entry CQ and independently retained peer refs:
 weakly fair. Terminal result commit is distinct from later CQ delivery. See
 vault/specs/spec-loom-service.md for blind spots; byte encoding is checked by
 `tools/check-loom-service-abi.py`, not this model.
+
+## loom_service_buffers.tla — explicit payload leases (October 4)
+
+Scripture30695b43e, ABI3eb14ae73. Claim reserves a member; Reply commits bytes
+and a pending MORE; Deliver publishes CQE+receipt; Ack releases only CQ capacity;
+Return releases the exact payload; Stop/Finalize/Retire terminate scope work
+without consumer/peer progress. Reuse represents fully released pool replacement.
+These actions are design obligations, not claims of current handler coverage.
+AS-2 must add actual-source bindings as each runtime transition is introduced.
+
+Two clean configurations:464 and6416 states; eleven named mutant failures.
+Run specs/check-loom-service-buffers.py. No fairness on reply, delivery, CQ ack,
+payload return or peer close. Only local cleanup is weakly fair. One stream,
+no physical alias/weak-memory proof; see spec-loom-service-buffers for bounds.

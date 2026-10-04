@@ -273,3 +273,13 @@ The first attempt stopped at the compiler's stale default MacOSX26 SDK path,
 before source validation; the host gate now honors CFLAGS and was rerun using
 the actual xcrun SDK. No machine-wide compiler setting changed. No sanitizer,
 new boot or graphical result is claimed for these declarations.
+
+## Explicit payload model (October 4)
+
+The focused loom_service_buffers model passes464 states (one member/two leases)
+and6416 (two members/three leases), both with two pool generations. Eleven
+intentional mutations fail their named safety/temporal properties. Local
+retirement needs no peer, CQ delivery/ack or payload return fairness. Single
+stream; physical aliasing, real bytes, locks and multi-stream fairness remain
+actual-source/runtime requirements. Evidence: work/oct4-async-service/buffer-pools/model-passed.json.
+No private activation, new native boot or graphical qualification in this step.

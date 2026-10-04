@@ -2021,3 +2021,13 @@ is claimed. Remaining interaction implementation is unchanged: the real
 controller/host binding and ordered Tapestry focus admission, enforced aggregate
 protocol/fid/buffer and kernel-resource limits, expanded service activation,
 application clipboard clients, mode widget and transcript/Nora workflows.
+
+## Explicit payload model (October 4)
+
+The focused loom_service_buffers model passes464 states (one member/two leases)
+and6416 (two members/three leases), both with two pool generations. Eleven
+intentional mutations fail their named safety/temporal properties. Local
+retirement needs no peer, CQ delivery/ack or payload return fairness. Single
+stream; physical aliasing, real bytes, locks and multi-stream fairness remain
+actual-source/runtime requirements. Evidence: work/oct4-async-service/buffer-pools/model-passed.json.
+No private activation, new native boot or graphical qualification in this step.
