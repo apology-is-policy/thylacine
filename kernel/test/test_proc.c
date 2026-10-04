@@ -1047,6 +1047,48 @@ static void stripes_child_entry(void *arg) {
     exits("ok");
 }
 
+// Real process table / incarnation lookup; synthetic Procs are unscheduled.
+// Changing the image pointer below isolates the refund predicate, not a claim
+// of the future private-ring exec integration. Restore it before proc_free.
+static const char *sqpoll_ticket_fixture(void) {
+    struct Proc *p = proc_alloc(), *q = proc_alloc();
+    if (!p || !q) {
+        if (p) { p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+        if (q) { q->state = PROC_STATE_ZOMBIE; proc_free(q); }
+        return "ticket fixture allocation";
+    }
+    struct ProcSqpollTicket t = {0}, u = {0};
+    struct AddrSpace *original = p->as;
+    const char *error = NULL;
+#define TICKET_CHECK(cond, msg) do { if (!(cond)) { error = msg; goto done; } } while (0)
+    p->principal_id = 1000;
+    p->thread_count = PROC_THREAD_MAX - 1;
+    proc_test_link(p); proc_test_link(q);
+    TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, q->as, &t), "ticket wrong image");
+    TICKET_CHECK(proc_sqpoll_ticket_charge(p->stripes, original, &t), "ticket admission");
+    TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, original, &u), "ticket cap");
+    proc_test_unlink(p); p->thread_count = 0; proc_test_link(p);
+    TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, original, &t), "ticket occupied");
+    TICKET_CHECK(proc_sqpoll_ticket_charge(p->stripes, original, &u), "ticket second");
+    proc_test_unlink(p); p->as = q->as; proc_test_link(p);
+    proc_sqpoll_ticket_release(&t);
+    TICKET_CHECK(p->loom_sqpoll_count == 1 && !t.stripes, "ticket refund across image change");
+    proc_sqpoll_ticket_release(&t);
+    TICKET_CHECK(p->loom_sqpoll_count == 1, "ticket duplicate refund");
+    proc_test_unlink(p); p->as = original; proc_test_link(p);
+    // The second ticket survives actual descriptor destruction. No pointer to
+    // that descriptor is retained by the ticket or dereferenced by release.
+    proc_test_unlink(p); p->state = PROC_STATE_ZOMBIE; proc_free(p); p = NULL;
+    proc_sqpoll_ticket_release(&u);
+    TICKET_CHECK(!u.stripes && !q->loom_sqpoll_count, "ticket release after reap");
+done:
+    proc_sqpoll_ticket_release(&t); proc_sqpoll_ticket_release(&u);
+    if (p) { proc_test_unlink(p); p->as = original; p->thread_count = 0; p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+    proc_test_unlink(q); q->state = PROC_STATE_ZOMBIE; proc_free(q);
+#undef TICKET_CHECK
+    return error;
+}
+
 // proc.stripes_smoke
 //   Verifies the P5-corvus-srv per-Proc identity tag:
 //     * proc_stripes(NULL) is 0 — the fail-closed sentinel.
@@ -1056,6 +1098,8 @@ static void stripes_child_entry(void *arg) {
 //     * an rfork'd child's tag is non-zero and differs from its
 //       parent's — the tag is minted, never inherited.
 void test_proc_stripes_smoke(void) {
+    const char *ticket_error = sqpoll_ticket_fixture();
+    TEST_ASSERT(ticket_error == NULL, ticket_error);
     // Fail-closed: a NULL Proc reads as stripes 0.
     TEST_EXPECT_EQ(proc_stripes(NULL), (u64)0,
         "proc_stripes(NULL) must be 0 (fail-closed sentinel)");

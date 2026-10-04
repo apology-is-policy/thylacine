@@ -579,3 +579,12 @@ A private-ring guard is a descriptor pin, not a process owner. Last-owner death
 still drains VMAs; the guard's eventual local-retirement release can destroy the
 remaining descriptor without a second drain or a dead Proc pointer. Guard hooks
 for the private Loom consumer are pending; no new death sweep is active.
+
+## Private worker refund after reap
+
+The pending private owner uses ProcSqpollTicket, not a saved Proc pointer.
+Release consumes the ticket under lifecycle lock even after the creator has
+been reaped; only a still-present matching stripes identity has its count
+decremented. ZOMBIE retains a counter, exec retains that same process counter,
+and replacement descriptors are untouched. Actual worker retirement must precede
+release. This adds no active death/close hook yet; see [[sub-kernel-proc]].

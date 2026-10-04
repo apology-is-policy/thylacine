@@ -473,3 +473,12 @@ admission and process-owner acquisition share one lock, and COW omits tagged
 ring VMAs. This supplements identity checks, which cannot distinguish writers
 sharing one SQ page. Kernel lifetime pins do not count as authority-sharing
 owners. These helpers do not activate the private Loom ABI.
+
+## Private worker budget identity
+
+The internal ticket helper resolves a live creator/image before charging its
+ordinary shared thread budget. Existing resource exemption controls the cap,
+never whether the worker is counted; even exempt counters refuse overflow.
+The ticket carries only stripes, not cached credentials or authority. It cannot
+authorize a service request and adds no capability or inheritance rule. Private
+ring runtime remains gated; [[sub-kernel-proc]] owns the lifetime contract.

@@ -456,3 +456,11 @@ RFMEM's proc_alloc_in path now refuses while the source AS has a private-ring
 guard. Admission is serialized with setup under the AS lock, not a racy owner
 count precheck. Ordinary fork omits tagged ring VMAs; job-control semantics stay
 unchanged. Private mode is still unavailable to userspace.
+
+## Private worker budget lifetime
+
+ProcSqpollTicket serializes its charge/refund under the existing lifecycle lock,
+without a signal, wake, allocation or scheduler callback. Admission uses the
+ordinary thread-plus-SQPOLL limit and refuses a group already terminating. The
+private owner must invoke it outside Loom/protocol locks. This does not alter
+job-control ownership or stop/resume behavior; see [[sub-kernel-proc]].

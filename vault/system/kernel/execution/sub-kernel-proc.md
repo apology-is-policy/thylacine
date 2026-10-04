@@ -3,7 +3,7 @@ id: sub-kernel-proc
 type: sub
 title: "The Proc: table, lineage, creation, and wait"
 parent: moc-kernel-execution
-code: ["kernel/proc.c", "kernel/include/thylacine/proc.h"]
+code: ["kernel/proc.c", "kernel/include/thylacine/proc.h", "kernel/test/test_proc.c"]
 audit: hard
 guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44]
 validated-by: [gate-smp]
@@ -638,3 +638,22 @@ proc_alloc_in uses addrspace_try_ref under the AS lock. Any private-ring guard
 refuses a new process owner; the unpublished Proc keeps as NULL and follows
 normal rollback, balancing creation/destruction. Existing kernel descriptor pins
 alone do not block sharing. Private setup is still inactive.
+
+## Private worker accounting tickets
+
+`proc_sqpoll_ticket_charge` resolves permanent creator stripes and the retained
+original address space under `g_proc_table_lock`, refuses dead/terminating images,
+and atomically checks/counts the ordinary shared thread limit. Its eight-byte
+kernel-owned ticket starts empty and cannot be copied or overwritten while held.
+`proc_sqpoll_ticket_release` consumes it under the same lock, matching stripes
+without requiring the old image: exec does not reset the Proc's counter. Reaping
+the creator makes release a no-op on process counters, never a lookup by recycled
+address or PID. Repeated release of the same retained ticket is harmless; a fresh
+charge requires that all prior ticket users have returned. The owner must keep
+storage alive until actual worker retirement. No wait, allocation or callback.
+
+The private runtime consumer remains gated. Legacy synchronous Loom continues
+using its existing charge API. Tests: actual-source ASan/UBSan,100 pthread
+admission/refund schedules, eight intended mutants and the expanded native
+`proc.stripes_smoke` fixture including real Proc destruction. Fresh boot1830/1830;
+broad SMP/UBSan matrix remains owed for this primitive.

@@ -1235,6 +1235,52 @@ void proc_sqpoll_uncharge(struct Proc *p) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
+// Private rings may retire after creator exec/reap. Resolve by permanent
+// stripes only under the process-table lock; no saved Proc address is read.
+// Ticket consumption and decrement share that lock, including duplicate release.
+struct sqpoll_ticket_ctx {
+    u64 stripes;
+    const struct AddrSpace *as;
+    bool release;
+    bool charged;
+};
+static int sqpoll_ticket_cb(struct Proc *p, void *arg) {
+    struct sqpoll_ticket_ctx *c = arg;
+    if (p->stripes != c->stripes) return 0;
+    if (c->release) {
+        // An exec changes as, not the Proc's worker count. Zombie still has a
+        // ledger; a fully reaped creator simply does not appear in the walk.
+        if (p->loom_sqpoll_count > 0) p->loom_sqpoll_count--;
+    } else if (p->state == PROC_STATE_ALIVE && !p->group_exit_msg &&
+               p->as == c->as && p->loom_sqpoll_count < 0x7fffffff &&
+               (proc_resource_exempt(p) ||
+                (u64)p->thread_count + (u64)p->loom_sqpoll_count < PROC_THREAD_MAX)) {
+        p->loom_sqpoll_count++;
+        c->charged = true;
+    }
+    return 1;
+}
+bool proc_sqpoll_ticket_charge(u64 stripes, const struct AddrSpace *as,
+                               struct ProcSqpollTicket *ticket) {
+    if (!stripes || !as || !ticket) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct sqpoll_ticket_ctx c = { stripes, as, false, false };
+    if (!ticket->stripes) {
+        proc_for_each_walk(kproc(), sqpoll_ticket_cb, &c);
+        if (c.charged) ticket->stripes = stripes;
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return c.charged;
+}
+void proc_sqpoll_ticket_release(struct ProcSqpollTicket *ticket) {
+    if (!ticket) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct sqpoll_ticket_ctx c = { ticket->stripes, NULL, true, false };
+    ticket->stripes = 0;
+    if (c.stripes) proc_for_each_walk(kproc(), sqpoll_ticket_cb, &c);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
 bool proc_child_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;

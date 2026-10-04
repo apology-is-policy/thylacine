@@ -1526,6 +1526,20 @@ bool proc_thread_cap_ok(struct Proc *p);
 bool proc_sqpoll_charge(struct Proc *p);
 void proc_sqpoll_uncharge(struct Proc *p);
 
+// Private service worker charge: no Proc pointer survives admission. The ticket
+// is zero-initialized, noncopyable kernel-owned storage, retained through actual
+// worker retirement. Both operations serialize its contents under the process
+// table lock; never call while holding that lock or a Loom/protocol lock.
+// Caller retains the original AddrSpace descriptor across admission. Admission
+// requires that live original image; refund matches only stripes so
+// exec cannot strand a charge in the surviving Proc. A reaped creator needs no
+// counter refund, and cannot make a replacement Proc receive one. Concurrent
+// refunds of this same ticket are harmless; do not reuse it until both return.
+struct ProcSqpollTicket { u64 stripes; };
+bool proc_sqpoll_ticket_charge(u64 stripes, const struct AddrSpace *as,
+                               struct ProcSqpollTicket *ticket);
+void proc_sqpoll_ticket_release(struct ProcSqpollTicket *ticket);
+
 // proc_child_cap_ok -- the rfork/spawn gate. Returns true if the Proc is exempt
 //   OR child_count < PROC_CHILD_MAX. Takes g_proc_table_lock for the read (the
 //   child_count write domain). Checked EARLY in rfork_internal (before the heavy

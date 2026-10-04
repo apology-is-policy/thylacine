@@ -443,3 +443,36 @@ mutants violate the exact named borrow tests. Review remains single-agent;
 concurrent native transport, graphics and broad gates are recorded separately.
 Safe provided-pool storage/leases remain to implement; this boundary repair does
 not make the existing raw Ring API automatically own all future submissions.
+
+## AS-2f: creator worker accounting through retirement (October 4)
+
+Private worker tickets contain permanent creator stripes, not a retained Proc
+pointer. Admission resolves a live, nonterminating creator and its exact pinned
+image under the process-table lock, checks the shared thread budget and fills
+a previously empty ticket. Refund consumes the same ticket under that lock and
+resolves by stripes alone: exec preserves the counter, a reaped creator has no
+remaining counter, and a replacement process never receives the refund. Exempt
+creators still count workers and cannot overflow the signed counter.
+
+Actual-source host checks under ASan/UBSan pass, including100 two-thread
+admission/release schedules and eight intended mutation failures. Native
+proc.stripes_smoke extends its real table fixture with cap/refund/image-identity
+and actual descriptor destruction; fresh CPU1 boot1830/1830 passes. The image
+change is a controlled fixture, not private-ring exec qualification. Its final
+version unlinks synthetic Procs before mutating image/count fields.
+
+This internal helper is for the pending private owner; legacy Loom behavior and
+public feature masks are unchanged. Private close/exec/reaper, metadata charging,
+protocol/receipt integration and safe owned clients remain. Broad matrix debt
+now covers AS-2e, AS-R8 and this helper; earlier50/50 covers AS-2a-d only.
+Evidence: work/oct4-async-service/owner/{ticket-host-final,native-passed.json}.
+
+Single-agent self-review: no saved process address, no process lookup outside
+the lifecycle lock, no allocator/callback/wait under that lock; duplicate release
+of one retained ticket serializes, and occupied admission cannot overwrite it.
+The ticket is kernel-owned and noncopyable by contract; callers must not reuse
+its storage while an operation still references it, and must retain the input AS
+descriptor across admission. The unchanged legacy charge API cannot be used by
+the future detached private owner. No Loom lock may enclose ticket operations.
+The first identity mutation failed an earlier state assertion; the revised
+missing-creator case identifies that failure directly. Original logs retained.

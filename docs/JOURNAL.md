@@ -1,5 +1,14 @@
 # The autonomous-run journal
 
+## 2026-10-04: private worker charge identity
+
+Added stripes-keyed, process-lock-serialized tickets for private worker retirement.
+Eight intended mutants,100 concurrent schedules and native1830/1830 pass. The
+native fixture's unscheduled image/count mutation is now unlinked from the table
+while modified. This qualifies the accounting primitive, not an async close or
+exec path; private owner/retirement integration continues with broad gates owed.
+
+
 ## 2026-10-04: provided-buffer ABI mirrors
 
 Scripture30695b43e now has three compiled mirrors:30 constants/10 records,
