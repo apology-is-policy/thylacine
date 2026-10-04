@@ -11,6 +11,7 @@ code:
   - tools/interactive/readiness-qualification.exp
   - tools/interactive/service-readiness-failure.exp
   - tools/interactive/service-wire.exp
+  - tools/interactive/service-capacity.exp
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
   - tools/interactive/serial-listen.py
@@ -53,7 +54,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-03
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -85,6 +86,16 @@ processes, enters physical Ctrl+Alt+F10 with a retained read snapshot, requires
 the old application connection to fail afterward, then rebinds and checks that
 the session value survived. It captures the trusted scene and restored workspace.
 This is not the pending/partial-output SAK or multi-session capacity witness.
+
+## Full native service capacity witness
+
+`service-capacity` uses the existing CI POST_SERVICE fixture to post the actual
+native pane adapter. Two promoted media clients stay connected while a separate
+child attempts a third kernel 9P attach. It must fail within 1.5 seconds without
+closing either admitted peer; afterward their limit reads must still work and a
+freed slot must admit a replacement. Three waves check reclamation. Before the
+listener repair the child remained blocked. This is the default two-media-slot
+witness, not a substitute for the full graphical controller/session workload.
 
 ## Contract
 

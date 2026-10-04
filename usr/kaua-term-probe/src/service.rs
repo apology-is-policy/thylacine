@@ -577,3 +577,121 @@ pub fn transport_child() -> i64 {
         }
     }
 }
+
+// Fill the actual media adapter with retained native 9P clients. A rejected
+// third attach must finish while BOTH admitted clients remain alive.
+pub fn capacity() -> i64 {
+    fn open_media(path: &str) -> Result<(File, File)> {
+        let split = path[5..].find('/').ok_or("capacity path")? + 5;
+        let root = file(
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), split, T_OREAD) },
+            "capacity root",
+        )?;
+        let sub = &path[split + 1..];
+        let media = file(
+            unsafe { t_open(root.as_raw_fd() as i64, sub.as_ptr(), sub.len(), T_ORDWR) },
+            "capacity media",
+        )?;
+        Ok((root, media))
+    }
+    fn reclaimed_media(path: &str) -> Result<(File, File)> {
+        // Closing a client does not synchronously run the independent server.
+        // Require bounded reclamation, not same-instruction slot reuse.
+        let deadline = time::monotonic_ns() + 1_500_000_000;
+        loop {
+            match open_media(path) {
+                Ok(pair) => return Ok(pair),
+                Err(_) if time::monotonic_ns() < deadline => unsafe {
+                    t_poll(core::ptr::null_mut(), 0, 10);
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    fn readable(media: &File) -> Result {
+        let mut bytes = [0u8; 64];
+        check(
+            unsafe { t_pread(media.as_raw_fd() as i64, bytes.as_mut_ptr(), bytes.len(), 0) } > 0,
+            "capacity damaged existing media",
+        )
+    }
+    let result = (|| {
+        let mut server =
+            crate::paneplace::PanePlaceServer::post(&format!("capacity-{}", unsafe { t_getpid() }))
+                .map_err(|_| "capacity post")?;
+        check(server.register(1, 1), "capacity register")?;
+        let path = server.place_address(1);
+        for wave in 0..3 {
+            t_putstr(&format!("service-capacity: wave {} fill\n", wave));
+            let mut held = Vec::new();
+            held.push(reclaimed_media(&path)?);
+            held.push(reclaimed_media(&path)?);
+            let split = path[5..].find('/').ok_or("capacity root path")? + 5;
+            let mut command = process::Command::new("/bin/kaua-term-probe");
+            command.arg("--service-capacity-excess").arg(&path[..split]);
+            let mut children = Children(vec![Some(command.spawn().map_err(|_| "capacity child")?)]);
+            let deadline = time::monotonic_ns() + 1_500_000_000;
+            let status = loop {
+                if let Some(status) = children.0[0]
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .map_err(|_| "capacity reap")?
+                {
+                    break Some(status);
+                }
+                if time::monotonic_ns() >= deadline {
+                    break None;
+                }
+                unsafe {
+                    t_poll(core::ptr::null_mut(), 0, 10);
+                }
+            };
+            if status.is_none() {
+                // Release the retained peers before cleanup so the pre-fix
+                // blocking attach can wake; the timeout is already a failure.
+                drop(held);
+                return Err("full adapter blocked excess attach");
+            }
+            children.0[0] = None;
+            check(
+                status.unwrap().success(),
+                "full adapter admitted excess attach",
+            )?;
+            t_putstr(&format!("service-capacity: wave {} refused\n", wave));
+            readable(&held[0].1)?;
+            readable(&held[1].1)?;
+            t_putstr(&format!("service-capacity: wave {} replace\n", wave));
+            drop(held.pop());
+            let replacement = reclaimed_media(&path)?;
+            readable(&replacement.1)?;
+            held.push(replacement);
+            t_putstr(&format!("service-capacity: wave {} reused\n", wave));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            t_putstr("service-capacity: PASS -- full refusal, live peers and reclamation\n");
+            0
+        }
+        Err(e) => {
+            t_putstr(&format!("service-capacity: FAIL -- {}\n", e));
+            1
+        }
+    }
+}
+pub fn capacity_excess() -> i64 {
+    let Some(path) = env::args().nth(2) else {
+        return 2;
+    };
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        0
+    } else {
+        unsafe {
+            t_close(fd);
+        }
+        1
+    }
+}

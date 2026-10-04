@@ -1349,7 +1349,10 @@ fn serve_owner(
             n += 1;
             i
         });
-        let listener_index = if !stopping && conns.len() < ACTIVE_CONNECTIONS {
+        // A full service must still accept-and-close excess endpoints. Omitting
+        // the listener would strand their kernel 9P attach until a live peer
+        // disconnects. One accept per pass keeps rejection work bounded.
+        let listener_index = if !stopping {
             let i = n;
             poll[i] = TPollFd {
                 fd: listener.as_raw_fd(),
@@ -1400,7 +1403,10 @@ fn serve_owner(
             if fd >= 0 {
                 let file = unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) };
                 let mut peer = TSrvPeerInfo::default();
-                if unsafe { libthyla_rs::t_set_nonblock(fd, true) } == 0
+                // The File drops here on saturation, before Conn or protocol buffers
+                // are allocated. Existing peers retain their slots unchanged.
+                if conns.len() < ACTIVE_CONNECTIONS
+                    && unsafe { libthyla_rs::t_set_nonblock(fd, true) } == 0
                     && unsafe { t_srv_peer(fd, &mut peer) } == 0
                     && peer.alive == 1
                     && peer.principal_id == shared.principal

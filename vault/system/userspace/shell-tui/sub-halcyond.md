@@ -54,7 +54,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-10-03
+updated: 2026-10-04
 ---
 ## Prepared application transaction integration
 
@@ -318,6 +318,16 @@ HSC ACK, and enforces the 32/2/4 pool. The image residual reserves protocol,
 clipboard and native metadata separately from media. Deadline polling uses the
 earliest transfer/admission/handshake expiry. Full pressure/activation remains
 HI1-R24; modal/editor clients are not delivered by this adapter alone.
+
+## Saturated listener progress (October 4)
+
+The service continues polling and accepting its listener while all native slots
+are occupied. One excess endpoint per pass is closed before Conn or buffer
+allocation; it cannot wait indefinitely for an admitted peer to disconnect.
+Existing peers keep their allocations and rotating work budget. HSC is still
+processed first. The listener is omitted only while the service is stopping.
+The native service-capacity fixture proves the old blocked attach, prompt
+refusal with two media peers retained, and three waves of close/reuse.
 
 ## Contract
 

@@ -218,3 +218,5 @@
 - HI-1 application operation dispatcher: `usr/halcyond/src/application.rs`, borrowed `interaction_body` response encoding and `tools/test-application-dispatch.py`.
 
 - HI-1 native application adapter: paneplace/session_seat/session, pool/wire/application, actual protocol fixture and native clipboard/deadline probes.
+
+- HI-1 saturated native listener: paneplace, native service probe and service-capacity scenario.
