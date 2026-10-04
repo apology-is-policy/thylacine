@@ -80,9 +80,49 @@ static M4_SRV_TID: AtomicU32 = AtomicU32::new(0);
 static M4_READY: AtomicU32 = AtomicU32::new(0);
 static M4_RESULT: AtomicU32 = AtomicU32::new(SR_PENDING);
 
+// Keep transport failures observable without exposing TLS bytes. This wrapper
+// forwards exactly the same blocking operations and adds no retry or delay.
+struct M4Stream {
+    sock: TcpStream,
+    role: &'static str,
+    iteration: u32,
+}
+impl libthyla_rs::io::Read for M4Stream {
+    fn read(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
+        let r = self.sock.read(buf);
+        if !matches!(r, Ok(n) if n != 0) {
+            t_putstr(&format!(
+                "tlsperf M4 {} iteration {} read: {:?}\n",
+                self.role,
+                self.iteration + 1,
+                r
+            ));
+        }
+        r
+    }
+}
+impl libthyla_rs::io::Write for M4Stream {
+    fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+        let r = self.sock.write(buf);
+        if !matches!(r, Ok(n) if n != 0) {
+            t_putstr(&format!(
+                "tlsperf M4 {} iteration {} write: {:?}\n",
+                self.role,
+                self.iteration + 1,
+                r
+            ));
+        }
+        r
+    }
+    fn flush(&mut self) -> libthyla_rs::err::Result<()> {
+        Ok(())
+    }
+}
+
 /// The server Thread entry (arg = the handshake count): announce on the
 /// loopback, then accept + run the SERVER side of `n` TLS handshakes, recording
-/// its outcome for main to read after the join. Never prints (only main does).
+/// its outcome for main to read after the join. Failures include role/iteration
+/// diagnostics; no key, certificate or record contents are logged.
 extern "C" fn m4_server_entry(n: u64) {
     let _ = thread::set_tid_address(&M4_SRV_TID);
     let code = m4_server_run(n as u32);
@@ -102,7 +142,7 @@ fn m4_server_run(n: u32) -> u32 {
     M4_READY.store(1, Ordering::Release);
     let _ = libthyla_rs::torpor::wake_all(&M4_READY);
 
-    for _ in 0..n {
+    for iteration in 0..n {
         let (sock, _peer) = match listener.accept() {
             Ok(s) => s,
             Err(_) => return SR_ACCEPT,
@@ -110,9 +150,21 @@ fn m4_server_run(n: u32) -> u32 {
         // accept() drives the SERVER handshake to completion (reads the client
         // Finished); a close sends close_notify. No app data -- M4 is the
         // handshake only.
+        let sock = M4Stream {
+            sock,
+            role: "server",
+            iteration,
+        };
         let mut tls = match tls::TlsServerStream::accept(sock, cfg.clone()) {
             Ok(t) => t,
-            Err(_) => return SR_TLS,
+            Err(e) => {
+                t_putstr(&format!(
+                    "tlsperf M4 server iteration {}: {:?}\n",
+                    iteration + 1,
+                    e
+                ));
+                return SR_TLS;
+            }
         };
         tls.close();
     }
@@ -155,11 +207,23 @@ fn run_m4(n: u32) -> Result<(), &'static str> {
     let mut total_ns: u64 = 0;
     let mut min_ns: u64 = u64::MAX;
     let mut max_ns: u64 = 0;
-    for _ in 0..n {
+    for iteration in 0..n {
         let sock = TcpStream::connect(addr).map_err(|_| "tcp connect")?;
+        let sock = M4Stream {
+            sock,
+            role: "client",
+            iteration,
+        };
         let t = Instant::now();
-        let mut tls =
-            tls::TlsStream::connect(sock, M4_HOST, cfg.clone()).map_err(|_| "tls handshake")?;
+        let mut tls = tls::TlsStream::connect(sock, M4_HOST, cfg.clone()).map_err(|e| {
+            t_putstr(&format!(
+                "tlsperf M4 client iteration {}: {:?}; server status {}\n",
+                iteration + 1,
+                e,
+                M4_RESULT.load(Ordering::Acquire)
+            ));
+            "tls handshake"
+        })?;
         let dt = t.elapsed().as_nanos() as u64;
         tls.close();
         total_ns += dt;

@@ -33191,3 +33191,15 @@ Apple ASan startup deadlock isolated with minimal and full-fixture process
 samples; LLVM22 with explicit SDK path works without global host edits (AS-R2).
 Single-agent checkpoint; full SMP/kernel-UBSan gate follows. No public private
 scope or clipboard activation. Evidence and paired images: work/oct4-async-service.
+
+### 2026-10-04 Astra: TLS coalesced-close regression found by AS-1 gate
+
+The full gate's CPU1 boot3 failed tlsperf after1830 kernel tests passed.
+Stopped the matrix and reproduced server317 EOF/Io followed by client318
+EOF/Io with diagnostic live stress. A deterministic actual-driver regression
+proved that Finished+close_notify in one read bypassed the wrapper's
+WriteTraffic-only completion latch. Latch rustls's authenticated protocol state
+after each successful step instead; reject early close without another read.
+Fresh CPU1 boot, coalesced/bytewise/early-close and certificate controls plus
+1000 live handshakes pass. Full matrix restart pending. Single-agent review;
+protected drafts preserved. Evidence work/oct4-async-service/as-r3.

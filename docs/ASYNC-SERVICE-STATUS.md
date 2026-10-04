@@ -61,3 +61,30 @@ expected verdicts (aggregate Invariants, not separately named subproperties).
 Full SMP/kernel-UBSan matrix is next; no new graphical/Pi/min-display or live
 clipboard claim. The helpers have no userspace activation yet. Build, guest log
 and matched boot artifacts: work/oct4-async-service/build-1791126222276802000.
+
+## AS-R3: TLS boot-probe handshake failure (October 4)
+
+The AS-1 broad matrix stopped after default-smp1 boot3 failed tlsperf M4
+with "tls handshake"; Joey exited1 and the kernel reported that failure.
+Boots1/2 passed; all1830 kernel tests in boot3 passed before the userspace probe.
+The diagnostic currently discards the underlying TLS error and iteration.
+Preserved serial/harness logs are in work/oct4-async-service/as-r3. No50-boot
+qualification is claimed. Diagnose this failure before continuing AS-2 or
+restarting the gate. The stopped wrapper restored all protected drafts and
+released Mac.
+
+AS-R3 repaired: diagnostic stress on CPU1 recorded server iteration317 EOF/Io,
+then client318 EOF/Io after the server exited. A deterministic real-driver
+fixture combining client Finished and close_notify reproduced Io at every run.
+The wrapper had latched establishment only on WriteTraffic; rustls can report
+PeerClosed first when these records share a read. It now latches completion
+from rustls::CommonState::is_handshaking after each successful processing step.
+A close before completion fails without another peer read; a close after
+completion preserves successful authentication and returns clean EOF.
+
+Fresh CI CPU1 boot1830/1830, the coalesced/bytewise/early-close controls, the
+untrusted-certificate control and1000 live TLS handshakes pass. Evidence:
+work/oct4-async-service/as-r3/probe-1791127579804936000; pre-fix deterministic
+failure: probe-1791127476255271000; live failure: probe-1791127314181498000.
+The old matrix also completed boot4 before termination; its three passes and
+one failure are not a qualification. Full default/SMP/UBSan restart is pending.

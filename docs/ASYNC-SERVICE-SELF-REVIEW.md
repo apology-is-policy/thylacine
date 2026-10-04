@@ -92,3 +92,26 @@ real channels but does not expose the future private Loom table, ABI handlers,
 CQ obligations, ownership guards or asynchronous retirement queue. No completed
 AS-2/3/4, clipboard activation, fresh graphical/Pi/min-display or full SMP gate
 claim belongs to this implementation checkpoint. Matrix qualification follows.
+
+## AS-R3: completed handshake followed by coalesced clean close
+
+The single role macro now derives completion from rustls's authenticated
+protocol state after successful processing, before interpreting the edge
+notification. Error returns bypass the latch; peer closure alone never sets it.
+This avoids both losing a valid completed handshake and treating an early
+close as authentication. The transport still flushes staged records before
+returning success. The early-close check precedes any next blocking fill.
+Both roles share the correction; no verifier, certificate policy or netd close
+semantics change.
+
+The actual driver's deterministic fixture supplies Finished+close in one read,
+then the same stream bytewise, and tests a plaintext close before ClientHello.
+The coalesced arm failed Io before the repair and passes after it. Existing
+untrusted-certificate rejection remains green. CPU1 live stress reproduced
+server317/client318 EOFs before the repair and completes1000 after it. The
+benchmark's retained diagnostics report role, iteration, TLS error and I/O
+outcome without recording records, keys or certificate material.
+
+Single-agent self-review, not an independent audit. These results establish
+the regression and narrow runtime correction; full matrix is still pending.
+General TLS blocking-I/O deadlines remain the existing dossier seam.

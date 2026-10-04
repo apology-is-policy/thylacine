@@ -127,5 +127,17 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_exits(1) }
     }
 
+    // Finished and close_notify in one read (and bytewise), plus early-close refusal.
+    let close_result = (|| {
+        let client = tls::client_config(tls::load_roots_pem(LOOPBACK_CERT)?);
+        let server = tls::server_config_single_cert(LOOPBACK_CERT, LOOPBACK_KEY)?;
+        tls::loopback_close_regression(client, server, LOOPBACK_HOST)
+    })();
+    if let Err(e) = close_result {
+        t_putstr(&alloc::format!("tls-smoke: coalesced-close FAIL {:?}\n", e));
+        unsafe { t_exits(1) }
+    }
+    t_putstr("tls-smoke: coalesced-close PASS (Finished+close, bytewise, early-close refusal)\n");
+
     unsafe { t_exits(0) }
 }

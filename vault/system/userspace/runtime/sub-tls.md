@@ -6,6 +6,8 @@ parent: moc-userspace-runtime
 code:
   - usr/lib/tls/src/lib.rs
   - usr/lib/tls/Cargo.toml
+  - usr/tls-smoke/src/main.rs
+  - usr/tlsperf/src/main.rs
 audit: light
 guarded-by: []
 validated-by: [prose]
@@ -14,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/NET-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -143,7 +145,7 @@ caller opened and nothing else.
 Every fallible operation returns the crate's error type; the read/write
 implementations flatten it to the runtime's transport error, since the
 trait signature admits nothing richer. A peer close during the handshake
-is a transport error; a peer close after establishment is a clean
+is a handshake error (or transport error on raw EOF); a peer close after establishment is a clean
 end-of-file returning zero, which is the distinction a caller actually
 needs.
 
@@ -157,6 +159,25 @@ Whatever the underlying stream and the pure-Rust provider cost. There is
 no buffering strategy beyond "read up to eight kilobytes per fill", no
 zero-copy path, and no attempt at record-size tuning. It is a correctness
 adapter; a throughput-shaped variant would be a different design.
+
+## October 4 handshake/close correction (AS-R3)
+
+The wrapper must not equate the idle WriteTraffic notification with handshake
+completion. A peer can send Finished and close_notify together; rustls can
+report PeerClosed before WriteTraffic. After each successful record-processing
+step the role macro now latches `!conn.is_handshaking()`. Errors cannot set the
+latch, and close alone cannot establish authority. The shared handshake driver
+flushes pending output, then accepts an authenticated completed handshake or
+rejects an early close without another blocking read.
+
+The deterministic real-driver regression in tls-smoke failed Io before the
+fix; it now passes coalesced Finished+close, bytewise delivery and early-close
+refusal. The untrusted-certificate control still rejects. Instrumented live
+CPU1 stress reproduced server317 EOF/Io followed by client318 EOF/Io before
+repair and passes1000 consecutive handshakes after it. tlsperf retains bounded
+failure diagnostics (role, iteration, enum error and I/O outcome, no TLS bytes).
+Fresh CPU1 boot1830/1830 passes; full matrix remains pending in
+`docs/ASYNC-SERVICE-STATUS.md`. Evidence: work/oct4-async-service/as-r3.
 
 ## Prosecution
 
