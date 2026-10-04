@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**589 owned · 45 unowned · 634 files (92% owned) · ~12026 unswept lines.**
+**590 owned · 47 unowned · 637 files (92% owned) · ~12266 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **88 files, ~40179 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,13 +74,13 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40179 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 11 | 17 | 2486 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 132 | 12 | 1566 |
+| kernel | 133 | 12 | 1566 |
 | usr/quarry | 0 | 1 | 1033 |
+| usr/libthyla-rs | 33 | 2 | 318 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/libthyla-rs | 33 | 1 | 196 |
+| usr/lib | 83 | 2 | 190 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 83 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 11 | 2 | 23 |
 | mm | 8 | 0 | 0 |
@@ -150,6 +150,8 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40179 lin
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
+| usr/lib/libthyla-rs/src/loom/service_abi.rs | 122 |
+| usr/lib/libt/include/thyla/loom_service.h | 118 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |

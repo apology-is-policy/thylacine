@@ -13,6 +13,8 @@
 //! corrupt its own ring view, never the kernel's (the kernel copies every SQE to
 //! private memory and keeps `sq_head` / `cq_tail` kernel-private).
 
+pub mod service_abi; // AS-0 reservations only; no runtime private-mode support.
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::err::{Error, Result};

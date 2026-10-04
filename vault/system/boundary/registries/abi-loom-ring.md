@@ -19,7 +19,7 @@ The approved lifecycle extension reserves setup bit2, register subops2..6 and
 SQE opcode20. See docs/ASYNC-SERVICE-ABI.md for exact versioned records and
 private-only field meanings. Opcode19 remains reserved. These allocations do
 not enable the feature or change the legacy valid masks; compiled C/Rust record
-mirrors and runtime implementation follow in separate commits.
+mirrors are pinned by [[abi-loom-service]]; runtime implementation follows.
 
 ## The surface
 
@@ -29,7 +29,8 @@ drives them, and R-messages return as completion entries. The whole
 transport is **five structures on a page both sides write**, so the layout is
 not a convenience — it is the protocol.
 
-Unlike [[abi-t-stat]], this ABI has exactly **one** mirror, `libthyla-rs`.
+Unlike [[abi-t-stat]], these five legacy ring structures have exactly **one**
+mirror, `libthyla-rs`.
 Neither pouch nor the Go fork speaks Loom; the ring is native-only.
 
 | struct | size | role | writer |

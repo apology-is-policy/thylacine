@@ -6,11 +6,13 @@ title: "Loom — the io_uring inversion over 9P"
 code:
   - kernel/loom.c
   - kernel/include/thylacine/loom.h
+  - kernel/include/thylacine/loom_service_abi.h
+  - tools/check-loom-service-abi.py
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i32]
-validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, gate-smp]
+validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-service, gate-smp]
 locks: []
-abis: []
+abis: [abi-loom-ring, abi-loom-service]
 design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
@@ -18,13 +20,16 @@ created: 2026-08-02
 updated: 2026-10-04
 ---
 
-## Proposed private service lifecycle
+## Approved private service lifecycle
 
 Current Loom starts from attached service handles; synchronous native service
 setup and the mid-frame join trust assumption remain outside its asynchronous
-contract. The proposed extension is reviewed in docs/ASYNC-SERVICE-LIFECYCLE.md
+contract. The approved extension is reviewed in docs/ASYNC-SERVICE-LIFECYCLE.md
 and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. It is approved but not implemented; legacy
-rings and the current authority contract are unchanged.
+rings and the current authority contract are unchanged. AS-0 has compiled
+record mirrors and a bounded lifecycle model; no private service handler is
+enabled. The exact boundary is [[abi-loom-service]] and implementation progress
+is recorded in docs/ASYNC-SERVICE-STATUS.md.
 
 ## Purpose
 

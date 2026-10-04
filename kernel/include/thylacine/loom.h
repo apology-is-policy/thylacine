@@ -27,6 +27,7 @@
 #ifndef THYLACINE_LOOM_H
 #define THYLACINE_LOOM_H
 
+#include <thylacine/loom_service_abi.h> // reserved AS-0 surface; not enabled
 #include <thylacine/handle.h>     // rights_t
 #include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
 #include <thylacine/rendez.h>     // struct Rendez (the Loom-4c SQPOLL park)

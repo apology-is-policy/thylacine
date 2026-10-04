@@ -58,7 +58,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-joey]] | kernel/joey.c, kernel/include/thylacine/joey.h | inv-i27 | - **The trust-root stamps must stay in the child's own context, before exec.** |
 | [[sub-kernel-kaslr]] | arch/arm64/kaslr.c, arch/arm64/kaslr.h | inv-i16 | - **The never-zero guarantee** must survive any change to the mask or the mixing. |
 | [[sub-kernel-larder]] | kernel/larder.c, kernel/include/thylacine/larder.h | inv-i38 | - **The gen-ring event-logging completeness**: every NEW mutation path |
-| [[sub-kernel-loom]] | kernel/loom.c, kernel/include/thylacine/loom.h | inv-i29, inv-i30, inv-i32 | - **Never compute an index from a shared word.** The private counter and private |
+| [[sub-kernel-loom]] | kernel/loom.c, kernel/include/thylacine/loom.h, kernel/include/thylacine/loom_service_abi.h, tools/check-loom-service-abi.py | inv-i29, inv-i30, inv-i32 | - **Never compute an index from a shared word.** The private counter and private |
 | [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h | inv-i32 | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
 | [[sub-kernel-mm-slub]] | mm/slub.c, mm/slub.h |  | - The destroy guard must stay `alloc_count - free_count` — reverting |
 | [[sub-kernel-mmu]] | arch/arm64/mmu.c, arch/arm64/mmu.h | inv-i12, inv-i13, inv-i16, inv-i31, inv-i32, inv-i39 | On any change here: that no PTE constructor can produce writable-and-executable |

@@ -163,7 +163,10 @@ not a promise that the server freed its endpoint or undid an operation.
 - Responses may still be drained as implementation cleanup, but after the abort
   latch no callback may publish a new success/descriptor. A prior published
   success is not rewritten. Outstanding operations receive exactly one terminal
-  CQE each; multishot has exactly one final CQE without MORE.
+  CQE each; multishot has exactly one final CQE without MORE. Here publication
+  means committing the terminal result under the scope lock. Delivery of that
+  already-committed result into a previously full CQ may follow an abort; it
+  cannot create fresh authority or make the aborted scope usable.
 - RETIRED is published only after all local parsers, callbacks, user-buffer
   borrows and fid cleanup references have relinquished the scope. A cancellation
   acknowledgement alone is never permission to reuse user storage.

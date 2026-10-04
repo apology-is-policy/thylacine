@@ -33162,3 +33162,17 @@ Single-agent WIP checkpoint: no Main landing or fresh full SMP/sanitizer/Pi/
 minimum-display claim. The real Halcyon failed-reveal notice still needs a
 capture. Clipboard/modal completion remains open. Evidence is in
 work/oct4-hidden-storage; review in HALCYON-HIDDEN-WEAVE-SELF-REVIEW.md.
+
+
+## 2026-10-04 -- Astra: approved async and memory work, AS-0
+
+The operator approved both designs and async-first order. Scripture4722f34e8
+records approval; d2362ec11 reserves the exact private service ABI before code.
+AS-0 adds actual kernel/native-C/Rust layout mirrors and a repeatable byte gate:
+22 constants, five records, all offsets and ARM64 C compilation, with three
+intended source-mirror mismatch failures. The finite model passes5,828 states
+and seven named counterexamples, including cancellation independent of a peer.
+The full kernel header confirms private mode remains rejected. No runtime
+handler or new broad/graphical qualification yet; AS-1 transport is next.
+All four authority/settings drafts preserved. Single-agent review and evidence
+are in ASYNC-SERVICE-SELF-REVIEW.md and work/oct4-async-service.

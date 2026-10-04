@@ -3010,3 +3010,17 @@ existing RecycleGate and completion proof. Allocation refusal is stuttering;
 Abort models partial resume setup. Visibility actions invalidate older offers.
 The finite counters stop; they never wrap. Geometry, 9P encoding, SAK control
 progress and exact native mapping accounting remain implementation/runtime tests.
+
+## loom_service.tla — private service lifecycle (AS-0, October 4)
+
+Approved ASYNC-SERVICE-LIFECYCLE.md, scripture4722f34e8. Model-before-runtime:
+no action is claimed to bind to a live private handler yet. AS-1/2 must add the
+actual source binding for Admit, completion commit, Abort, Finish, Retire and
+reuse. Existing legacy Loom specs remain binding for their paths.
+
+One slot/two incarnations, a one-entry CQ and independently retained peer refs:
+5,828 states, depth28, seven named safety/temporal counterexamples. Run
+`specs/check-loom-service.py`. No peer fairness; local execution/CQ draining are
+weakly fair. Terminal result commit is distinct from later CQ delivery. See
+vault/specs/spec-loom-service.md for blind spots; byte encoding is checked by
+`tools/check-loom-service-abi.py`, not this model.

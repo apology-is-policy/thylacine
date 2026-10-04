@@ -7,7 +7,7 @@ implementation follows this facility as approved.
 | Stage | State | Evidence / remaining work |
 | --- | --- | --- |
 | AS-0 contract | Approved | Scripture4722f34e8; concrete numeric/layout reservation in ASYNC-SERVICE-ABI.md. |
-| AS-0 ABI/model | In progress | Compile actual C/Rust mirrors and exercise cancellation, reuse, CQ pressure and retained endpoint obligations. No runtime feature enabled. |
+| AS-0 ABI/model | Verified | Three compiled mirrors, 22 constants, five records and three intended source-mirror mismatches; model 5,828 states and seven named counterexamples. Private setup remains rejected. |
 | AS-1 progress | Pending | Nonblocking SrvConn framing/handshake and terminal transport, byte-boundary failure tests. |
 | AS-2 scopes | Pending | Private table/owner guards, accounting, asynchronous retirement, deadlines and completion obligations. |
 | AS-3 clients | Pending | C/Rust APIs plus native stalled/malformed-peer and repeated-reconnect fixtures. |
