@@ -24,3 +24,12 @@ These are reservations only. Legacy valid masks and opcode count are unchanged,
 so declarations alone cannot enable private service admission. No C/Pouch/Go
 runtime wrapper is claimed. [[spec-loom-service]] models the lifecycle, not the
 binary encoding. [[sub-kernel-loom]] owns implementation and activation.
+
+## Approved companion encoding, mirrors pending
+
+Operator-selected option C is specified in docs/ASYNC-SERVICE-BUFFERS.md:
+setup8; register7/8/9; POOL kind4; BUFFER_SELECT16; CQ receipt flag4, preserving
+F_NOTIF2. A32-byte companion receipt retains full pool/lease identities without
+changing CQE16 or user_data. Five new records and pool-mode setup geometry are
+reserved in scripture; the compiled mirrors still contain only the original
+22 constants/five records until the following ABI checkpoint. No activation.

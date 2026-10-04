@@ -258,3 +258,12 @@ scope/authority/policy approval questions. Reserve concrete ABI encodings before
 consumers. Keep the 128 MiB protection until the replacement accounting passes
 its activation gates; keep clipboard nondefault until its full arc is verified.
 Single-agent and protected-draft preservation remain in force.
+
+## Private service payload ownership (operator-approved, 2026-10-04)
+
+The operator selected C in the AS-R7 review: implement explicit provided-buffer
+pools now, with independent payload leases and completion consumption. Follow
+ASYNC-SERVICE-BUFFERS.md; commit concrete encodings before consumers. This keeps
+SQE/CQE sizes and existing limits, adds checked receipts/returns and bounded
+empty-pool backpressure. Do not repeat the C-versus-single-shot scope question.
+Private runtime and clipboard remain gated on their full qualification.

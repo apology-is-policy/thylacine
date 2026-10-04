@@ -1,5 +1,17 @@
 # The autonomous-run journal
 
+## 2026-10-04: explicit payload leases before streaming reads
+
+AS-2 prerequisites passed all50 default/SMP/kernel-UBSan boots with zero failure
+classifications and exact source/draft restoration. Read-only review found the
+private multishot reservation lacked per-shot payload ownership: CQ consumption
+does not mean the caller finished reading the buffer. The operator selected C,
+explicit pools now. The contract retains SQE/CQE sizes and correlation, adds
+full-width companion receipts and explicit return, and keeps empty-pool
+backpressure independent of cancellation. AS-R8 also queues the raw Rust buffer
+registration safety-boundary repair. Private runtime remains off; this is a
+design/qualification checkpoint before mirrors and consumers.
+
 ## 2026-10-04: private request progress without blocking entry
 
 The p9_client extension keeps one immutable partial TX and alternates TX/RX

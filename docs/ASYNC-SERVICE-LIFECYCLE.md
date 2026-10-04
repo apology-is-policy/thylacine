@@ -282,3 +282,14 @@ migration; the shared protocol library can adopt Mycelium separately later.
 Review conclusion: this is the recommended single design. It costs a native
 9P progress refactor, but avoids permanently assigning clipboard availability
 to trusted-server promptness. No implementation or new authority is claimed.
+
+## Provided-buffer ownership extension (October 4)
+
+The operator selected explicit pools now (option C), superseding any assumption
+that multishot READ can reuse one fixed slice on CQ consumption. Follow
+ASYNC-SERVICE-BUFFERS.md for bounded pool membership, full-incarnation receipts,
+explicit return and CQ-independent payload lifetimes. A scope can locally
+retire while prior payload leases remain owned by the ring's pool and consumer;
+retirement is not permission to reuse those payloads. SAK acknowledgement still
+requires ending actual local clipboard users. Kernel retirement never forges a
+consumer return. This choice does not activate private mode or alter MM order.

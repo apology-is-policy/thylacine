@@ -9,7 +9,7 @@ implementation follows this facility as approved.
 | AS-0 contract | Approved | Scripture4722f34e8; concrete numeric/layout reservation in ASYNC-SERVICE-ABI.md. |
 | AS-0 ABI/model | Verified | Three compiled mirrors, 22 constants, five records and three intended source-mirror mismatches; model 5,828 states and seven named counterexamples. Private setup remains rejected. |
 | AS-1 progress | Qualified | Resumable framing/native-root handshake and real SrvConn adapter; byte-boundary host fixture, 12 mutants, ASan/UBSan, CPU1 boot1830/1830. 50/50 clean default/SMP/kernel-UBSan boots after TLS repair; AS-2 must bind helpers to private ownership. |
-| AS-2 scopes | In progress | Descriptor lifetime, native admission and sharing/COW guards verified; private table, request progress, retirement, deadlines and completion obligations remain. |
+| AS-2 scopes | In progress | Descriptor lifetime, native admission and sharing/COW guards verified; Request progress is verified; private table, provided pools, retirement, deadlines and completion obligations remain. |
 | AS-3 clients | Pending | C/Rust APIs plus native stalled/malformed-peer and repeated-reconnect fixtures. |
 | AS-4 adoption | Pending | Clipboard/MODE clients, SAK cancellation at every phase, responsive graphics and logout. |
 
@@ -224,3 +224,36 @@ host-1791133991553906000. Source pins and all four protected hashes verified.
 No private Loom table, close/exec owner hooks, retirement queue, completed
 clipboard or fresh broad/graphical/Pi qualification is claimed. Those consumers
 remain the next implementation; the 128MiB protection remains unchanged.
+
+## AS-2 prerequisites: broad qualification (October 4)
+
+Committed lifetime/admission/sharing/request-progress helpers at7571ad4e4 passed
+50/50 clean boots: defaultCPU1/4/8 and kernel-UBSanCPU4/8, ten each. Every row has
+zero corruption, external-kill, inject-miss, timing and other classifications.
+The runner exited0, restored all four original drafts and released Mac; verify.py
+checked all50 individual records, five rows, pinned source/HEAD/index and hashes.
+Evidence: work/oct4-async-service/as2-matrix/{verified.json,smp.log}. This qualifies
+the prerequisites, not private Loom scopes or future pool code. No new graphical,
+Pi, minimum-display or completed clipboard claim.
+
+## AS-R7: streaming payload ownership (operator selected C)
+
+The private ABI reservation allowed MULTISHOT READ without a per-shot buffer
+handoff. Legacy payload MULTISHOT is already rejected; no shipped private READ
+corruption is claimed. Scalar rearm only checks CQ space, and Rust Ring::reap
+releases its CQ slot before the caller processes separate payload bytes.
+The operator chose explicit provided-buffer pools now. Contract/encodings are
+ASYNC-SERVICE-BUFFERS.md; source evidence/review/qualification plan are under
+work/oct4-async-service/buffer-pools. Design is complete; mirror/implementation
+and actual runtime proof remain required before closing this activation gap.
+
+## AS-R8: raw Rust registration safety boundary (owned AS-3 repair)
+
+Ring::register_buffers currently accepts integer VA descriptors through a safe
+Rust method without owning the backing or requiring an unsafe lifetime/exclusivity
+obligation. Safe callers can submit kernel I/O while retaining ordinary mutable
+buffer slices. Pins keep storage alive but cannot establish Rust aliasing rules.
+No new guest crash is claimed; this is a verified source API defect. Repair the
+raw boundary and all callers, then build pool APIs that take ownership and return
+borrow-checked payload leases. It blocks safe-client qualification; tests include
+compile-fail ownership cases and native byte/lifetime schedules.

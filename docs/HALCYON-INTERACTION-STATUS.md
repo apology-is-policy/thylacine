@@ -14,8 +14,10 @@ verified implementation fit, staged delivery and binding decisions are in
 [ASYNC-SERVICE-LIFECYCLE](ASYNC-SERVICE-LIFECYCLE.md) and
 [SHARED-MEMORY-ACCOUNTING](SHARED-MEMORY-ACCOUNTING.md). The operator approved both detailed contracts, including async-first order.
 AS-0 ABI reservation and lifecycle verification are active; pickup is
-[ASYNC-SERVICE-STATUS](ASYNC-SERVICE-STATUS.md). AS-2 now has exact descriptor lifetime, native admission, sharing/COW guards and bounded private request progress; private scope ownership/retirement and clients are still being implemented. No async private scopes,
-new memory accounts or clipboard client activation are claimed implemented.
+[ASYNC-SERVICE-STATUS](ASYNC-SERVICE-STATUS.md). AS-2 now has exact descriptor lifetime, native admission, sharing/COW guards and bounded private request progress; private scope ownership/retirement and clients are still being implemented. These prerequisites passed50/50 clean default/SMP/kernel-UBSan boots. The operator
+selected explicit provided-buffer pools to resolve streaming payload ownership;
+see ASYNC-SERVICE-BUFFERS.md and AS-R7/AS-R8 in the async status. No async private
+scopes, new memory accounts or clipboard client activation are claimed implemented.
 The existing storage repair and its verified matrix remain separate evidence.
 
 ## Hidden terminal storage (October 4, matrix verified)

@@ -14,14 +14,15 @@ LOOM_SETUP_VALID unchanged until activation; defining a constant is not support.
 The C and Rust service ABI headers explicitly say this is unavailable initially.
 
 Private mode initially accepts CONNECT20, WALK1, LOPEN2, READ4, WRITE5, CLUNK10.
-SQE flags are zero except READ may use existing MULTISHOT; LINK, DRAIN and
+SQE flags are zero except READ may use BUFFER_SELECT and, with it, MULTISHOT
+as specified in ASYNC-SERVICE-BUFFERS.md; LINK, DRAIN and
 CQE_SKIP are refused, preserving a terminal completion obligation for every
 accepted request. Existing64-byte SQE and16-byte CQE sizes/offsets do not change.
 
 ## Slot identities
 
 A reference is16bytes: slot:u32 at0, reserved-zero:u32 at4, incarnation:u64 at8.
-Slots range0..63 across one shared target/scope/fid table. Incarnation0 is
+Slots range0..63 across one shared target/scope/fid/pool table. Incarnation0 is
 invalid; a ring-global monotone counter mints each reservation, stops before wrap,
 and never reuses an incarnation. User-provided indices cannot choose generations.
 
@@ -88,6 +89,9 @@ _resv1[0] remains registered-buffer byte offset; buffer index/len retain meaning
 | READ/WRITE | file byte offset | registered buffer slice |0|
 | CLUNK |0| all zero |0|
 
+For pooled READ only, ASYNC-SERVICE-BUFFERS.md overrides the fixed-buffer
+fields above with a pool slot/incarnation; it does not change source/deadline.
+
 Initial WALK disallows slash/NUL/dot/dot-dot; a root clone is empty. This is a
 relative service fid walk, not general namespace traversal. A client may walk
 components sequentially without a new path decoder. LOPEN rejects create/truncate
@@ -115,3 +119,20 @@ compares emitted record bytes across C and Rust. Runtime tests must additionally
 reject malformed versions/fields, stale incarnations, destination reuse, wrong
 kinds, foreign scopes and live-slot reap. Layout tests alone cannot prove those
 semantic checks. No runtime support or clipboard activation follows from AS-0.
+
+## Provided-buffer pool extension (October 4)
+
+The operator selected explicit pools (option C) to close AS-R7 before private
+runtime activation. ASYNC-SERVICE-BUFFERS.md owns the concrete companion ABI:
+setup SERVICE_BUFFERS8 requiring PRIVATE_SERVICE4; register7/8/9 for pool
+creation, exact lease return and pool query; kindPOOL4 in the existing64-slot
+table; SQE BUFFER_SELECT16; CQE SERVICE_BUFFER4. F_NOTIF2 remains reserved.
+Private MULTISHOT READ now requires BUFFER_SELECT and a pool incarnation,
+not repeated writes into one fixed slice. Ordinary fixed single-shot READ
+remains available under its original field interpretation.
+
+SQE64, CQE16 and user_data remain fixed. Pool-enabled setup exposes32-byte
+per-CQ-slot receipts through loom_params._resv1[0..2], and still returns88bytes.
+Five new layouts (member24, create1568, receipt32, return40, snapshot64) and their
+exact offsets/zero rules are in the companion. This is the scripture reservation;
+compiled mirrors and runtime qualification follow, with valid masks still off.

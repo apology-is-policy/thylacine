@@ -341,3 +341,18 @@ established tests retained both controls without weakening any oracle. Failed
 and passing logs are retained in work/oct4-async-service/as2d. AS-R6's helper
 contract mismatch is repaired; no prior userspace private exposure existed.
 Single-agent review; broad integrated qualification and consumers remain owed.
+
+## AS-2 prerequisite matrix and provided-buffer contract
+
+The full50-boot matrix on7571ad4e4 is verified across all five rows and failure
+categories; draft/source/index checks and resource cleanup passed. It does not
+exercise an enabled private handler. Evidence: work/oct4-async-service/as2-matrix.
+
+AS-R7 review follows actual payload rejection/scalar rearm and Rust CQ release.
+Operator-selected C separates payload return from CQ-head acknowledgement via
+full64-bit pool/lease identities and per-slot receipts. Reviewed stale returns,
+slot reuse, prior success delayed across abort, EOF without lease, empty-pool
+progress, provisional overlap exclusion, full-CQ terminal ordering, exact-payer
+retention and close/exec. No new code or runtime result is claimed. AS-R8 records
+the raw Rust registration safety correction required before client qualification.
+This is single-agent self-review, not independent audit.

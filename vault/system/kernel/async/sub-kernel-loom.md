@@ -640,3 +640,16 @@ an exec never refunds against the successor's space (the audit's F4;
 [[chg-2026-08-16-loom-backstop-closed]] (the thread-ledger backstop, and the
 one-line fix that would have leaked). 2026-09-23 (L): the identity cape's two
 Loom rules (the caped `GETATTR` copy; the caped create gid).
+
+## Provided-buffer contract, not yet enabled (October 4)
+
+The operator selected explicit pools for private streaming READ. The contract
+in docs/ASYNC-SERVICE-BUFFERS.md reserves receipt/return ownership independently
+of CQ consumption, preserving64/16-byte descriptors and correlation. Pool members
+and service slots stay bounded; empty-pool backpressure cannot block cancellation.
+No handlers or new mirrors are implemented by this documentation checkpoint.
+AS-R8 in the async status also owns the raw Rust registration safety correction.
+
+The supporting owner/admission/request engine at7571ad4e4 passed50/50 clean
+CPU1/4/8 and kernel-UBSanCPU4/8 boots, with exact source/draft checks. Those
+prerequisite results do not qualify the future private-ring or pool consumer.
