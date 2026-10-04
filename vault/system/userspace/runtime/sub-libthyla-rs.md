@@ -22,6 +22,7 @@ code:
   - usr/lib/libthyla-rs/src/io.rs
   - usr/lib/libthyla-rs/src/jit.rs
   - usr/lib/libthyla-rs/src/loom.rs
+  - usr/lib/libthyla-rs/src/loom/service_abi.rs
   - usr/lib/libthyla-rs/src/net.rs
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
@@ -48,7 +49,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-02
+updated: 2026-10-04
 ---
 ## Dedicated service owner (October 2)
 
@@ -790,3 +791,16 @@ negative controls must fail the named assertions. The opt-in service-failure
 probe checks unpublished rollback and process-exit/repost, not Warden recovery.
 See the interaction status for actual results and outstanding expanded-service
 qualification. No production ABI or externally writable fault control exists.
+
+## Private Loom ABI module and open ownership work
+
+loom/service_abi.rs is now owned here as a runtime declaration mirror rather
+than only an ABI registry pin. Its30 constants and10 repr(C) records match
+kernel/native C under the independent byte gate; new pool records pin alignment
+as well as size/offset. It exposes no working private client yet.
+
+AS-R8 in docs/ASYNC-SERVICE-STATUS.md tracks safe raw register_buffers accepting
+integer VAs without an asynchronous lifetime/exclusivity obligation. Pins do not
+make concurrent Rust slices sound. AS-3 must correct that boundary and callers,
+then expose owned pool storage and borrow-checked payload leases. It is an open
+qualification requirement, not something these new declarations have repaired.

@@ -8,6 +8,7 @@ code:
   - kernel/include/thylacine/errno.h
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libt/include/thyla/poll.h
+  - usr/lib/libt/include/thyla/loom_service.h
   - usr/lib/libt/src/start.S
   - usr/lib/libthyla-rs/src/lib.rs
   - usr/lib/libthyla-rs/src/pty_interaction.rs
@@ -860,3 +861,12 @@ they mint by the file its session came over, for `/proc/<pid>/ns` alone.
 name. No argument, flag or return changed; where each inner stamps is
 [[sub-kernel-syscall-dispatch]]'s, what the root carries
 [[sub-kernel-ninep-dev9p]]'s.
+
+## Native C private Loom records
+
+Owns the libt loom_service.h mirror, previously indexed only by the ABI pin.
+It declares the same30 constants/10 records as kernel C and Rust, including
+provided-buffer create/receipt/return/query layouts. Every field offset and size
+is asserted; new pool records also assert eight-byte alignment. No wrappers or
+syscall numbers are added, and no private mode is enabled. See [[abi-loom-service]]
+and [[sub-kernel-loom]]; tools/check-loom-service-abi.py checks independent bytes.

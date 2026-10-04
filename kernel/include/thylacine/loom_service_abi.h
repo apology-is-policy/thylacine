@@ -115,4 +115,101 @@ _Static_assert(__builtin_offsetof(struct loom_service_snapshot, pending_terminal
 _Static_assert(__builtin_offsetof(struct loom_service_snapshot, reason) == 56, "loom_service_snapshot.reason");
 _Static_assert(__builtin_offsetof(struct loom_service_snapshot, status_flags) == 60, "loom_service_snapshot.status_flags");
 
+
+// Provided-buffer reservations, scripture30695b43e and ASYNC-SERVICE-BUFFERS.md.
+// No valid mask, handler, or runtime support is enabled by these declarations.
+#define LOOM_SETUP_SERVICE_BUFFERS 8u
+#define LOOM_REGISTER_SERVICE_POOL 7u
+#define LOOM_REGISTER_RETURN_SERVICE_BUFFER 8u
+#define LOOM_REGISTER_QUERY_SERVICE_POOL 9u
+#define LOOM_SERVICE_POOL 4u
+#define LOOM_SERVICE_POOL_MEMBERS 64u
+#define LOOM_SQE_BUFFER_SELECT 16u
+#define LOOM_CQE_SERVICE_BUFFER 4u
+
+struct loom_service_pool_member {
+    u32 buffer_index;
+    u32 reserved;
+    u64 offset;
+    u64 length;
+};
+_Static_assert(sizeof(struct loom_service_pool_member) == 24, "loom_service_pool_member size");
+_Static_assert(_Alignof(struct loom_service_pool_member) == 8, "loom_service_pool_member alignment");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_member, buffer_index) == 0, "loom_service_pool_member.buffer_index");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_member, reserved) == 4, "loom_service_pool_member.reserved");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_member, offset) == 8, "loom_service_pool_member.offset");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_member, length) == 16, "loom_service_pool_member.length");
+
+struct loom_service_pool_create {
+    u32 size;
+    u16 version;
+    u16 flags;
+    u32 count;
+    u32 reserved;
+    struct loom_service_ref result;
+    struct loom_service_pool_member members[64];
+};
+_Static_assert(sizeof(struct loom_service_pool_create) == 1568, "loom_service_pool_create size");
+_Static_assert(_Alignof(struct loom_service_pool_create) == 8, "loom_service_pool_create alignment");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, size) == 0, "loom_service_pool_create.size");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, version) == 4, "loom_service_pool_create.version");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, flags) == 6, "loom_service_pool_create.flags");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, count) == 8, "loom_service_pool_create.count");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, reserved) == 12, "loom_service_pool_create.reserved");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, result) == 16, "loom_service_pool_create.result");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_create, members) == 32, "loom_service_pool_create.members");
+
+struct loom_service_buffer_receipt {
+    struct loom_service_ref pool;
+    u32 member;
+    u32 reserved;
+    u64 lease;
+};
+_Static_assert(sizeof(struct loom_service_buffer_receipt) == 32, "loom_service_buffer_receipt size");
+_Static_assert(_Alignof(struct loom_service_buffer_receipt) == 8, "loom_service_buffer_receipt alignment");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_receipt, pool) == 0, "loom_service_buffer_receipt.pool");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_receipt, member) == 16, "loom_service_buffer_receipt.member");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_receipt, reserved) == 20, "loom_service_buffer_receipt.reserved");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_receipt, lease) == 24, "loom_service_buffer_receipt.lease");
+
+struct loom_service_buffer_return {
+    u32 size;
+    u16 version;
+    u16 flags;
+    struct loom_service_buffer_receipt receipt;
+};
+_Static_assert(sizeof(struct loom_service_buffer_return) == 40, "loom_service_buffer_return size");
+_Static_assert(_Alignof(struct loom_service_buffer_return) == 8, "loom_service_buffer_return alignment");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_return, size) == 0, "loom_service_buffer_return.size");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_return, version) == 4, "loom_service_buffer_return.version");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_return, flags) == 6, "loom_service_buffer_return.flags");
+_Static_assert(__builtin_offsetof(struct loom_service_buffer_return, receipt) == 8, "loom_service_buffer_return.receipt");
+
+struct loom_service_pool_snapshot {
+    u32 size;
+    u16 version;
+    u16 flags;
+    struct loom_service_ref pool;
+    u32 members;
+    u32 available;
+    u32 busy;
+    u32 pending;
+    u32 leased;
+    u32 streams;
+    u64 reserved[2];
+};
+_Static_assert(sizeof(struct loom_service_pool_snapshot) == 64, "loom_service_pool_snapshot size");
+_Static_assert(_Alignof(struct loom_service_pool_snapshot) == 8, "loom_service_pool_snapshot alignment");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, size) == 0, "loom_service_pool_snapshot.size");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, version) == 4, "loom_service_pool_snapshot.version");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, flags) == 6, "loom_service_pool_snapshot.flags");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, pool) == 8, "loom_service_pool_snapshot.pool");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, members) == 24, "loom_service_pool_snapshot.members");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, available) == 28, "loom_service_pool_snapshot.available");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, busy) == 32, "loom_service_pool_snapshot.busy");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, pending) == 36, "loom_service_pool_snapshot.pending");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, leased) == 40, "loom_service_pool_snapshot.leased");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, streams) == 44, "loom_service_pool_snapshot.streams");
+_Static_assert(__builtin_offsetof(struct loom_service_pool_snapshot, reserved) == 48, "loom_service_pool_snapshot.reserved");
+
 #endif

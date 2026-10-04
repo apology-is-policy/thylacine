@@ -134,5 +134,6 @@ remains available under its original field interpretation.
 SQE64, CQE16 and user_data remain fixed. Pool-enabled setup exposes32-byte
 per-CQ-slot receipts through loom_params._resv1[0..2], and still returns88bytes.
 Five new layouts (member24, create1568, receipt32, return40, snapshot64) and their
-exact offsets/zero rules are in the companion. This is the scripture reservation;
-compiled mirrors and runtime qualification follow, with valid masks still off.
+exact offsets/zero rules are in the companion. The three compiled mirrors now pin all30 constants/10 records against
+independent byte vectors and full ARM64 envelope guards. Runtime qualification
+and pool ownership model/consumers follow; valid masks remain off.

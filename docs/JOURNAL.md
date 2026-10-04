@@ -1,5 +1,14 @@
 # The autonomous-run journal
 
+## 2026-10-04: provided-buffer ABI mirrors
+
+Scripture30695b43e now has three compiled mirrors:30 constants/10 records,
+ARM64 envelope/refusal checks and three intended mismatch failures. The initial
+host invocation exposed the installed LLVM stale SDK default; a scoped xcrun SDK
+flag corrected the command. Private runtime remains disabled. Adopted previously
+unowned mirror files into their existing C ABI/Rust runtime dossiers. Next is the
+focused pool ownership model, before consuming kernel/client code.
+
 ## 2026-10-04: explicit payload leases before streaming reads
 
 AS-2 prerequisites passed all50 default/SMP/kernel-UBSan boots with zero failure

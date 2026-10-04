@@ -653,3 +653,13 @@ AS-R8 in the async status also owns the raw Rust registration safety correction.
 The supporting owner/admission/request engine at7571ad4e4 passed50/50 clean
 CPU1/4/8 and kernel-UBSanCPU4/8 boots, with exact source/draft checks. Those
 prerequisite results do not qualify the future private-ring or pool consumer.
+
+## Provided-buffer mirrors compiled (October 4)
+
+The three service headers/modules now include the five pool records and eight
+new constants specified in docs/ASYNC-SERVICE-BUFFERS.md. The ABI gate checks
+30 constants/10 records, actual serialized bytes, every asserted field offset
+and new-record alignment, plus the full kernel header's unchanged64/16/88-byte
+envelope and disabled private masks. Three intended mirror mutations are detected.
+This supersedes the earlier mirrors-pending statement only; no pool handler is
+enabled and the ownership model/implementation are still owed.

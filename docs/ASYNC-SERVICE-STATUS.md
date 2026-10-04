@@ -257,3 +257,19 @@ No new guest crash is claimed; this is a verified source API defect. Repair the
 raw boundary and all callers, then build pool APIs that take ownership and return
 borrow-checked payload leases. It blocks safe-client qualification; tests include
 compile-fail ownership cases and native byte/lifetime schedules.
+
+## Provided-buffer ABI mirrors (October 4)
+
+Under scripture30695b43e, kernel C, native C and Rust now declare30 constants
+and10 records, including all five pool/receipt controls. All new sizes, field
+offsets and eight-byte alignment are asserted. Independent serialized vectors,
+ARM64 header compilation and the full kernel-envelope gate pass; three deliberate
+kernel/C/Rust constant mutations fail the intended mirror comparison. Existing
+64/16/88-byte records and valid-mask refusal remain pinned. The pool model and
+runtime implementation remain next, with AS-R7 open until ownership is qualified.
+
+Evidence: work/oct4-async-service/buffer-pools/abi-passed.json and its logs.
+The first attempt stopped at the compiler's stale default MacOSX26 SDK path,
+before source validation; the host gate now honors CFLAGS and was rerun using
+the actual xcrun SDK. No machine-wide compiler setting changed. No sanitizer,
+new boot or graphical result is claimed for these declarations.

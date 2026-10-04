@@ -356,3 +356,18 @@ progress, provisional overlap exclusion, full-CQ terminal ordering, exact-payer
 retention and close/exec. No new code or runtime result is claimed. AS-R8 records
 the raw Rust registration safety correction required before client qualification.
 This is single-agent self-review, not independent audit.
+
+## Provided-buffer ABI mirror checkpoint
+
+All three actual mirrors agree with manually packed independent vectors for
+30 constants/10 records. New fields include full-width pool incarnation and lease
+identities; companion receipt does not overload user_data. Static alignment/offset
+checks and full kernel header compilation preserve SQE64/CQE16/Params88, distinct
+MORE/F_NOTIF/receipt flags, distinct selection flag and disabled private setup.
+Three independent constant mutants fail by their expected mirror labels.
+CFLAGS affects only host compilation; freestanding ARM64 checks remain separate.
+
+This proves declaration/layout consistency, not decoder validation, copyout
+rollback, payload ownership, cancellation, or native runtime behavior. The model
+and consuming implementation must supply those proofs. First SDK invocation
+failure and corrected logs remain in work/oct4-async-service/buffer-pools.

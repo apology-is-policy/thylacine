@@ -232,3 +232,5 @@
 - **AS-2c private sharing/COW** -- AddrSpace private guards versus process ownership, Proc allocation rollback, tagged ring omission and actual-source/native fixtures.
 
 - **AS-2d exclusive request progress** -- Private p9_client cursors, partial TX/RX, demux/callback lifetimes, abort and zero-deadline handshake.
+
+- **Private service provided-buffer ABI reservations** -- `kernel/include/thylacine/loom_service_abi.h`, native C/Rust mirrors and `tools/check-loom-service-abi.py`; pool receipt/return encoding and activation guards.

@@ -121,3 +121,108 @@ const _: () = assert!(core::mem::offset_of!(Snapshot, pending_terminals) == 52);
 const _: () = assert!(core::mem::offset_of!(Snapshot, reason) == 56);
 const _: () = assert!(core::mem::offset_of!(Snapshot, status_flags) == 60);
 
+
+// Provided-buffer reservations, scripture30695b43e. No runtime activation.
+pub const SETUP_SERVICE_BUFFERS: u32 = 8;
+pub const REGISTER_SERVICE_POOL: u32 = 7;
+pub const REGISTER_RETURN_SERVICE_BUFFER: u32 = 8;
+pub const REGISTER_QUERY_SERVICE_POOL: u32 = 9;
+pub const SERVICE_POOL: u32 = 4;
+pub const SERVICE_POOL_MEMBERS: u32 = 64;
+pub const SQE_BUFFER_SELECT: u32 = 16;
+pub const CQE_SERVICE_BUFFER: u32 = 4;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolMember {
+    pub buffer_index: u32,
+    pub reserved: u32,
+    pub offset: u64,
+    pub length: u64,
+}
+const _: () = assert!(core::mem::size_of::<PoolMember>() == 24);
+const _: () = assert!(core::mem::align_of::<PoolMember>() == 8);
+const _: () = assert!(core::mem::offset_of!(PoolMember, buffer_index) == 0);
+const _: () = assert!(core::mem::offset_of!(PoolMember, reserved) == 4);
+const _: () = assert!(core::mem::offset_of!(PoolMember, offset) == 8);
+const _: () = assert!(core::mem::offset_of!(PoolMember, length) == 16);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolCreate {
+    pub size: u32,
+    pub version: u16,
+    pub flags: u16,
+    pub count: u32,
+    pub reserved: u32,
+    pub result: SlotRef,
+    pub members: [PoolMember; 64],
+}
+const _: () = assert!(core::mem::size_of::<PoolCreate>() == 1568);
+const _: () = assert!(core::mem::align_of::<PoolCreate>() == 8);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, size) == 0);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, version) == 4);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, flags) == 6);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, count) == 8);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, reserved) == 12);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, result) == 16);
+const _: () = assert!(core::mem::offset_of!(PoolCreate, members) == 32);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferReceipt {
+    pub pool: SlotRef,
+    pub member: u32,
+    pub reserved: u32,
+    pub lease: u64,
+}
+const _: () = assert!(core::mem::size_of::<BufferReceipt>() == 32);
+const _: () = assert!(core::mem::align_of::<BufferReceipt>() == 8);
+const _: () = assert!(core::mem::offset_of!(BufferReceipt, pool) == 0);
+const _: () = assert!(core::mem::offset_of!(BufferReceipt, member) == 16);
+const _: () = assert!(core::mem::offset_of!(BufferReceipt, reserved) == 20);
+const _: () = assert!(core::mem::offset_of!(BufferReceipt, lease) == 24);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferReturn {
+    pub size: u32,
+    pub version: u16,
+    pub flags: u16,
+    pub receipt: BufferReceipt,
+}
+const _: () = assert!(core::mem::size_of::<BufferReturn>() == 40);
+const _: () = assert!(core::mem::align_of::<BufferReturn>() == 8);
+const _: () = assert!(core::mem::offset_of!(BufferReturn, size) == 0);
+const _: () = assert!(core::mem::offset_of!(BufferReturn, version) == 4);
+const _: () = assert!(core::mem::offset_of!(BufferReturn, flags) == 6);
+const _: () = assert!(core::mem::offset_of!(BufferReturn, receipt) == 8);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    pub size: u32,
+    pub version: u16,
+    pub flags: u16,
+    pub pool: SlotRef,
+    pub members: u32,
+    pub available: u32,
+    pub busy: u32,
+    pub pending: u32,
+    pub leased: u32,
+    pub streams: u32,
+    pub reserved: [u64; 2],
+}
+const _: () = assert!(core::mem::size_of::<PoolSnapshot>() == 64);
+const _: () = assert!(core::mem::align_of::<PoolSnapshot>() == 8);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, size) == 0);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, version) == 4);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, flags) == 6);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, pool) == 8);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, members) == 24);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, available) == 28);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, busy) == 32);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, pending) == 36);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, leased) == 40);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, streams) == 44);
+const _: () = assert!(core::mem::offset_of!(PoolSnapshot, reserved) == 48);
