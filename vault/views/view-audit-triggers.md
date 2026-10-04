@@ -40,7 +40,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9, inv-i44 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c, kernel/test/test_devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
-| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py | inv-i1 | What an auditor attacks here: |
+| [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py, kernel/test/test_devsrv_conn.c, tools/test-service-admission.py, tools/host-tests/service-admission.c | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, tools/test-pci-msi-dtb.py, kernel/include/thylacine/dtb.h, kernel/test/test_dtb.c | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |

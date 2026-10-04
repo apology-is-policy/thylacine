@@ -457,3 +457,11 @@ under the process lifecycle lock. It adds no new capability bit and changes no
 capability inheritance rule. Userspace must spawn the terminal host sealed before
 its first user instruction; the kernel's current seal check is not a historical
 proof of when that seal was first stamped. See [[sub-kernel-pts]].
+
+## AS-2b admission (October 4)
+
+Async admission captures a live creator's atomic caps together with its durable
+principal/groups, by value. Ordinary owner-first DAC consumes the same structure;
+no worker, special principal or synthetic Proc supplies authority. New operations
+must resample; a saved ring cannot cache grants permanently. Existing live peer
+checks and capability revocation semantics remain in place.

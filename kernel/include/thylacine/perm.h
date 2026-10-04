@@ -19,6 +19,7 @@
 #include <thylacine/handle.h>   // rights_t (rights_for_omode)
 
 struct Proc;
+struct ProcAccessIdentity;
 struct t_stat;
 
 // Permission bits, positioned to match the rwx triple in a POSIX mode so a
@@ -30,6 +31,16 @@ struct t_stat;
 // proc_in_group — is `gid` one of p's groups (primary or supplementary)?
 // GID_INVALID is never a member.
 bool proc_in_group(const struct Proc *p, u32 gid);
+
+// Value-based form for admitted asynchronous work. `p` is lifetime-safe during
+// capture; the resulting immutable value holds no process/address-space pointer.
+// Caps are sampled atomically once. Capture each newly admitted operation, not
+// once for the lifetime of a ring; this is not a permanent cached capability.
+bool perm_identity_from_proc(const struct Proc *p, struct ProcAccessIdentity *out);
+bool perm_identity_in_group(const struct ProcAccessIdentity *id, u32 gid);
+int perm_check_identity(const struct ProcAccessIdentity *id,
+                        const struct t_stat *st, unsigned want);
+
 
 // perm_check — owner-first POSIX check of p against the file described by st.
 // `want` is a subset of PERM_R|PERM_W|PERM_X. Returns 0 (allowed) / -1 (denied).

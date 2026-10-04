@@ -29,6 +29,7 @@
 #include <thylacine/types.h>
 
 struct Thread;
+struct Proc;
 
 // PROC_MAGIC — sentinel set at proc_alloc / proc_init; checked at proc_free.
 // Sits at offset 0 so SLUB's `*(void **)obj = freelist` write on
@@ -98,6 +99,34 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // Fixed-size to keep the Proc cache slot bounded; corvus holds the full
 // membership and a consumer resolves beyond the cache by principal_id.
 #define PROC_SUPP_GIDS_MAX 15
+
+// AS-2: immutable admission values, not references to a Proc. A private service
+// operation samples the creator once before admission; completion never borrows
+// a kernel worker's identity or resamples a dead/replaced process. Not an ABI.
+struct ProcAccessIdentity {
+    caps_t caps;
+    u32 principal_id;
+    u32 primary_gid;
+    u32 supp_gids[PROC_SUPP_GIDS_MAX];
+    u8 supp_gid_count;
+};
+struct ProcServiceIdentity {
+    struct ProcAccessIdentity access;
+    u64 stripes;
+    int pid;
+    bool console_attached;
+};
+
+// Direct capture requires an already lifetime-safe caller Proc (ordinary open).
+// The stripes+exact-AS variant is for asynchronous admission: caller pins `as`,
+// and the process-table lock covers ALIVE, incarnation and exec's AS swap. Only
+// values escape. Failed capture clears output; NULL/zero inputs fail closed.
+// A successful capture is submission-time authority, not an ongoing liveness
+// proof. The consumer must still serialize publication with its abort latch.
+bool proc_service_identity_snapshot(const struct Proc *p,
+                                    struct ProcServiceIdentity *out);
+bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
+                                      struct ProcServiceIdentity *out);
 
 // #65 (invariant I-32): the per-Proc resource floor. Fixed maxima that bound a
 // non-TCB Proc's resource use so a fork/thread/memory bomb is bounded, not

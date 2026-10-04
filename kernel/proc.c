@@ -36,6 +36,7 @@
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
+#include <thylacine/perm.h>
 #include <thylacine/pts.h>
 #include <thylacine/dtb.h>
 #include <thylacine/rendez.h>
@@ -3319,6 +3320,44 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
     if (pid_out)         *pid_out         = ctx.pid;
     if (console_owner_out) *console_owner_out = ctx.console_owner;
     return true;
+}
+
+// AS-2 admission identity. As with peer_snapshot_cb, no Proc pointer escapes
+// the table walk. Exec swaps p->as under this same lock; an old ring cannot
+// capture the successor image even though exec preserves the Proc's stripes.
+bool proc_service_identity_snapshot(const struct Proc *p,
+                                    struct ProcServiceIdentity *out) {
+    if (!out) return false;
+    *out = (struct ProcServiceIdentity){0};
+    if (!p || !proc_stripes(p)) return false;
+    perm_identity_from_proc(p, &out->access);
+    out->stripes = proc_stripes(p);
+    out->pid = p->pid;
+    out->console_attached = proc_is_console_attached(p);
+    return true;
+}
+
+struct service_snapshot_ctx {
+    u64 stripes;
+    const struct AddrSpace *as;
+    struct ProcServiceIdentity *out;
+    bool found;
+};
+static int service_snapshot_cb(struct Proc *p, void *arg) {
+    struct service_snapshot_ctx *c = arg;
+    if (p->state != PROC_STATE_ALIVE || p->stripes != c->stripes || p->as != c->as)
+        return 0;
+    c->found = proc_service_identity_snapshot(p, c->out);
+    return c->found ? 1 : 0;
+}
+bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
+                                      struct ProcServiceIdentity *out) {
+    if (!out) return false;
+    *out = (struct ProcServiceIdentity){0};
+    if (!stripes || !as) return false;
+    struct service_snapshot_ctx c = { stripes, as, out, false };
+    proc_for_each(service_snapshot_cb, &c);
+    return c.found;
 }
 
 // proc_caps_by_stripes — caps-only wrapper over the richer snapshot. Keeps

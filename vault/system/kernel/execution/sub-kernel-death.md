@@ -564,3 +564,11 @@ ALIVE). The table itself is still freed at `proc_free`
 ([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
 `proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
 (`vivarium.socktab_ready_release_paths`).
+
+## AS-2b admission (October 4)
+
+Asynchronous admission snapshots never retain a Proc pointer. The table-locked
+ALIVE+stripes+exact-AddrSpace check refuses zombie/reaped creators and the old
+image after exec; only values escape. This prerequisite adds no death hook or
+retirement worker yet. The eventual scope latch must close admission before
+owner cleanup, and descriptor/buffer pins must outlive pending local borrows.

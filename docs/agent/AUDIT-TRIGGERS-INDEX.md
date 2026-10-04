@@ -226,3 +226,5 @@
 - **Cooperative hidden terminal pixel storage** -- `usr/tapestryd/src/{storage,server}.rs`, libtapestry, Halcyon session and native storage probes: visibility/unbind, pixel generation fids, retained pins, complete first repaint, bounded failure/retry.
 
 - **AS-2a asynchronous descriptor retention** -- AddrSpace owner/total refs, Proc/syscall ownership predicates, Burrow exact-payer helpers and lifetime/device fixtures.
+
+- **AS-2b native admission** -- Exact creator/image value snapshots, shared DAC, registry/slot/generation targets, prepared connection ownership and checked backlog publication.

@@ -196,3 +196,66 @@ with original evidence retained. No independent review is claimed (single-agent)
 Focused evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/as2a/check-1791130311682969000. No AS-2a broad matrix, graphical or Pi claim;
 the preceding 50/50 matrix qualified AS-1/TLS before these changes. Private
 setup remains rejected. The ownership engine and userspace clients are next.
+
+## AS-2b: exact admission identity and native target publication
+
+Ordinary open and private preparation now share one native registry admission
+core. The target retains the navigation registry view, exact fixed service slot,
+name and per-slot generation. Both slot and generation matter: recycling can
+move a name into a different slot whose independent generation counter matches.
+There is no global fallback and a 33..255-byte valid name cannot truncate to a
+native 32-byte name. Routes retain the source through the view and charge the
+view's SrvDomain; capability-posted providers cannot satisfy resident routes.
+Strict private capture/preparation refuses byte, cape and remote-marked posts.
+The legacy byte capability/self-post gate still runs before allocation.
+
+Preparation allocates/charges the SrvConn and holds a registry reference without
+publishing anything. Publication takes only the retained service's registry
+lock, checks LIVE and exact generation again, and transfers a separate reference
+to the backlog. It is single-owner, single-publication state; the future scope
+owner must hold its abort/admission latch across this call. Publication never
+allocates, waits, exchanges bytes or wakes callbacks. Separate wake runs after
+caller locks are released; the admission reference keeps the wait-list storage
+alive even if the poster exits. Release tears down an unpublished connection
+locally; a published caller takes its own transport ref before dropping the
+admission. Server-held references continue to retain storage/credits. This is
+not proof of the not-yet-implemented scope cancellation linearization.
+
+ProcAccessIdentity captures principal, primary/supplementary groups and atomic
+caps by value. Ordinary permission helpers delegate to the same owner-first DAC
+logic; no fake Proc and no worker authority. Private admission can match creator
+stripes AND its pinned exact AddrSpace under the process-table lock, the same
+lock as exec's image swap. ALIVE is required, only values escape, failure clears
+output. Capture anew per operation; a ring is not a permanent grant cache.
+Connection principal remains the CONNECT identity, and existing live peer checks
+remain unchanged. Capturing successfully is not itself a continued liveness
+proof: the scope's exit/exec/abort latch still has to serialize publication.
+
+Actual-source host fixture passes ASan/UBSan and ten intended named mutations:
+wrong image, dead creator, missing target generation, cross-slot ABA, replacement
+at publication, raw endpoint escape, provider rather than consumer charging,
+lost supplementary groups, owner fallthrough, and omitted cancellation teardown.
+The fixture uses registry/connection/table doubles; native tests separately cover
+real process-table values, exec-image discrimination, dead Proc refusal, actual
+SrvConn references, prepare invisibility, duplicate publish, actual poster death
+and rebind, explicit recapture, unsupported modes and long-name refusal. Fresh
+CI CPU1 boot passes all1830 registered tests. Six complete C translation units
+compile for ARM64. The three required Corvus kernel-connection mutants produce their expected
+aggregate Invariants counterexamples. They are not a model of this new C engine.
+
+AS-R4 was a new test error: closing a listener does not unpost a live service.
+The corrected fixture asserts that invariant, then kills the fixture Proc through
+its real cleanup and reposts from a new marked Proc. Original failure evidence
+is preserved. The first model command used a relative configuration path that
+TLC resolved from the module directory; it failed before model exploration.
+The corrected invocation uses absolute paths without repeating the passed boot.
+I also mistakenly started the clean Corvus configuration before reading its
+dossier: that full run is suspended by earlier operator direction. Stopped only
+our exact Java process, retained its incomplete log (no PASS), and removed its
+temporary states. Ran the three required connection mutants; no model inputs
+or bounds changed. See work/oct4-async-service/as2b/model-command-note.md.
+
+This remains an internal prerequisite. No private setup/REGISTER/SQE activation,
+new asynchronous cleanup worker, shared-AS guard, COW omission, exec abort or
+clipboard activation is claimed. Broad integrated qualification follows those
+consumers. All four protected drafts remain separate; review is single-agent.

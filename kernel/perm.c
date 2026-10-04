@@ -4,46 +4,59 @@
 #include <thylacine/syscall.h>
 #include <thylacine/handle.h>
 
-bool proc_in_group(const struct Proc *p, u32 gid) {
-    if (!p)                  return false;
-    if (gid == GID_INVALID)  return false;
-    if (gid == p->primary_gid) return true;
+bool perm_identity_from_proc(const struct Proc *p, struct ProcAccessIdentity *out) {
+    if (!out) return false;
+    *out = (struct ProcAccessIdentity){0};
+    if (!p) return false;
+    out->caps = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
+    out->principal_id = p->principal_id;
+    out->primary_gid = p->primary_gid;
     u8 n = p->supp_gid_count;
     if (n > PROC_SUPP_GIDS_MAX) n = PROC_SUPP_GIDS_MAX;
+    out->supp_gid_count = n;
+    for (u8 i = 0; i < n; i++) out->supp_gids[i] = p->supp_gids[i];
+    return true;
+}
+
+bool perm_identity_in_group(const struct ProcAccessIdentity *id, u32 gid) {
+    if (!id || gid == GID_INVALID) return false;
+    if (gid == id->primary_gid) return true;
+    u8 n = id->supp_gid_count;
+    if (n > PROC_SUPP_GIDS_MAX) n = PROC_SUPP_GIDS_MAX;
     for (u8 i = 0; i < n; i++)
-        if (p->supp_gids[i] == gid) return true;
+        if (id->supp_gids[i] == gid) return true;
     return false;
 }
 
-int perm_check(const struct Proc *p, const struct t_stat *st, unsigned want) {
-    if (!p || !st)           return -1;
+bool proc_in_group(const struct Proc *p, u32 gid) {
+    struct ProcAccessIdentity id;
+    return perm_identity_from_proc(p, &id) && perm_identity_in_group(&id, gid);
+}
+
+int perm_check_identity(const struct ProcAccessIdentity *id,
+                        const struct t_stat *st, unsigned want) {
+    if (!id || !st) return -1;
     want &= (PERM_R | PERM_W | PERM_X);
-    // RW-5 R4-F1: a check for NO specific permission must fail CLOSED, not
-    // short-circuit to ALLOW (`(bits & 0) == 0` is vacuously true). No caller
-    // passes want == 0 (perm_want_for_omode never returns 0), so this only
-    // hardens the default polarity of the security gate against a future caller.
+    // RW-5 R4-F1: an empty permission request fails closed, including for a
+    // DAC-override holder. Keep this policy identical for synchronous opens
+    // and immutable asynchronous admission snapshots.
     if (want == 0) return -1;
-
-    // The DAC-override: a capability, NEVER an identity (I-22). No principal_id
-    // -- not even PRINCIPAL_SYSTEM -- is special-cased here. CAP_HOSTOWNER is
-    // the unified fs-admin authority; CAP_DAC_OVERRIDE (A-4a) is the finer
-    // rwx-bypass split out of it, conferred via a legate clearance grant. Either
-    // bypasses the rwx check. caps is read ATOMICALLY (RW-5 F2): proc_become_legate
-    // is a cross-thread writer of p->caps since A-4a (a plain load is C11-racy).
-    caps_t caps = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
-    if (caps & (CAP_HOSTOWNER | CAP_DAC_OVERRIDE)) return 0;
-
-    // Owner-first POSIX: an owner is judged on owner bits ONLY (even when group/
-    // other would grant more -- it can always chmod itself the bit). The file's
-    // uid is PRINCIPAL_INVALID (0) when a Dev could not vouch for it (dev9p F2
-    // fail-closed) -- a real principal never matches it, so the owner branch is
-    // not taken and the check falls through to group/other.
+    // I-22: authority is a capability, never a special principal. The Proc
+    // wrapper samples caps atomically; a private operation keeps that one
+    // admission-time value, never the SQPOLL worker's or a successor's caps.
+    if (id->caps & (CAP_HOSTOWNER | CAP_DAC_OVERRIDE)) return 0;
+    // POSIX owner-first: do not fall through to more permissive group/other.
     unsigned bits;
-    if (p->principal_id == st->uid)        bits = (st->mode >> 6) & 7u;  // owner
-    else if (proc_in_group(p, st->gid))    bits = (st->mode >> 3) & 7u;  // group
-    else                                   bits = st->mode & 7u;         // other
-
+    if (id->principal_id == st->uid)             bits = (st->mode >> 6) & 7u;
+    else if (perm_identity_in_group(id, st->gid)) bits = (st->mode >> 3) & 7u;
+    else                                        bits = st->mode & 7u;
     return (bits & want) == want ? 0 : -1;
+}
+
+int perm_check(const struct Proc *p, const struct t_stat *st, unsigned want) {
+    struct ProcAccessIdentity id;
+    if (!perm_identity_from_proc(p, &id)) return -1;
+    return perm_check_identity(&id, st, want);
 }
 
 unsigned perm_want_for_omode(u32 omode) {

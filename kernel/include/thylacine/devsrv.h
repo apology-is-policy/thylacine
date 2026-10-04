@@ -41,6 +41,7 @@
 
 struct Dev;
 struct Proc;
+struct ProcServiceIdentity;
 struct Spoor;
 struct SrvConn;
 struct SrvRegistry;
@@ -128,6 +129,45 @@ struct devsrv_svc_ref {
     // so it needs no lock.
     int  open_errno;
 };
+
+// AS-2 internal native target/admission API. No userspace layout or raw endpoint
+// escape. The target holds the ACTUAL navigation registry view (including its
+// domain/source), exact name and post generation. A re-post needs a new target.
+struct SrvServiceTarget {
+    struct SrvRegistry *view;
+    struct SrvService *service; // exact fixed slot; generation alone is per-slot
+    u64 generation;
+    u8 name_len;
+    char name[SRV_NAME_MAX];
+};
+struct SrvConnectAdmission {
+    struct SrvRegistry *view;     // own ref keeps the service slot/source alive
+    struct SrvService *service;  // stable storage under view's retained registry
+    struct SrvConn *conn;        // own create ref; borrowed until release
+    u64 generation;
+    bool published;
+};
+// Caller pins the root Spoor through capture. Only an actual native CWALKONLY
+// registry root is accepted. No global fallback, peer I/O or capability mint.
+int devsrv_service_target_init(struct Spoor *root, const char *name, u32 len,
+                               struct SrvServiceTarget *out);
+void devsrv_service_target_clear(struct SrvServiceTarget *target);
+// Prepare owns all local storage/credits before publication. No peer can see it.
+// Target and identity are immutable caller-owned values during this call.
+int devsrv_service_prepare(const struct SrvServiceTarget *target,
+                           const struct ProcServiceIdentity *identity,
+                           struct SrvConnectAdmission *out);
+// Serialize publish with the caller's abort/admission latch. This only takes
+// the registry lock: no allocation, wait, protocol byte or waiter callback.
+// The post generation/LIVE state is rechecked here. Publish at most once.
+int devsrv_connect_publish(struct SrvConnectAdmission *admission);
+// After dropping the caller's lock, wake accept/poll waiters. Admission must
+// remain owned until this returns. A concurrent tombstone cannot free its slot.
+void devsrv_connect_wake(struct SrvConnectAdmission *admission);
+// Drop the create and view refs. Unpublished connections are torn down locally;
+// published consumers must have taken their own conn ref before release. On
+// post-publication failure the caller tears the conn down before releasing.
+void devsrv_connect_release(struct SrvConnectAdmission *admission);
 
 // F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
 // by `devsrv_close` / `devsrv_poll` to discriminate the aux's owning

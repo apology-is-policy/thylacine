@@ -3,7 +3,7 @@ id: sub-kernel-devsrv
 type: sub
 title: "devsrv — the /srv service registry, Dev, and accept/peer syscalls"
 parent: moc-kernel-srv
-code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py]
+code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py, kernel/test/test_devsrv_conn.c, tools/test-service-admission.py, tools/host-tests/service-admission.c]
 audit: hard
 guarded-by: [inv-i1]
 validated-by: [spec-corvus, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-10-03
+updated: 2026-10-04
 ---
 ## D7 implementation (October 1)
 
@@ -605,3 +605,15 @@ tail runs for every arm, so deleting the check masked it), when the rebind
 identity check was deleted, and when connect stopped capturing it. The 9p-mode
 connect has NO unit case ([[seam-srv-9p-connect-unit]]); the boot E2E
 (joey/login/legate → corvus + stratumd) is its regression.
+
+## AS-2b admission (October 4)
+
+Private-service targets retain the actual CWALKONLY native registry view, fixed
+service slot and its generation. A name alone, or a generation from another
+slot, cannot identify a replacement. Strict targets reject byte/cape/remote.
+Preparation captures route/mode/domain and reserves weighted connection storage;
+publication separately rechecks LIVE/generation under the registry lock. The
+caller serializes publish with cancellation and wakes outside its lock. Admission
+holds the registry until local release; an accepted endpoint holds actual
+connection storage/credits until its final release. Legacy opens use the same
+core and still perform their normal blocking handshake afterward.

@@ -9,7 +9,7 @@ implementation follows this facility as approved.
 | AS-0 contract | Approved | Scripture4722f34e8; concrete numeric/layout reservation in ASYNC-SERVICE-ABI.md. |
 | AS-0 ABI/model | Verified | Three compiled mirrors, 22 constants, five records and three intended source-mirror mismatches; model 5,828 states and seven named counterexamples. Private setup remains rejected. |
 | AS-1 progress | Qualified | Resumable framing/native-root handshake and real SrvConn adapter; byte-boundary host fixture, 12 mutants, ASan/UBSan, CPU1 boot1830/1830. 50/50 clean default/SMP/kernel-UBSan boots after TLS repair; AS-2 must bind helpers to private ownership. |
-| AS-2 scopes | Pending | Private table/owner guards, accounting, asynchronous retirement, deadlines and completion obligations. |
+| AS-2 scopes | In progress | AS-2a descriptor lifetime and AS-2b native admission prerequisites; private table/owner guards, retirement, deadlines and completion obligations remain. |
 | AS-3 clients | Pending | C/Rust APIs plus native stalled/malformed-peer and repeated-reconnect fixtures. |
 | AS-4 adoption | Pending | Clipboard/MODE clients, SAK cancellation at every phase, responsive graphics and logout. |
 
@@ -114,3 +114,46 @@ CI CPU1 boot pass. Guest tests cover true sharing versus kernel pins, last-owner
 VMA-only device quiescence and exact-payer refund after Proc death. Evidence:
 /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/as2a/check-1791130311682969000. This checkpoint has no new broad/graphical/Pi qualification.
 AS-2 scope admission, sharing/exec guards and retirement worker are still pending.
+
+## AS-R4: AS-2b native admission gate (October 4)
+
+The first fresh AS-2b CPU1 gate reports 1829/1830 and kernel-test extinction.
+Owned investigation blocks this admission checkpoint; do not rerun until its
+concrete assertion is understood. Build and serial evidence are preserved in
+work/oct4-async-service/as2b/check-1791131840841607000. All four protected
+drafts were restored and Mac released by the runner. Host admission sanitizer
+and ten intended mutants passed; they do not override a failing native gate.
+
+AS-R4 diagnosis: the new test closed the listener then tried to repost while
+the original poster was alive. The existing registry contract deliberately
+keeps that service LIVE on descriptor close; poster death (or scoped authority
+teardown) tombstones it. The listener-retention test in `kernel/test/test_devsrv.c` already
+asserts this rule. Corrected the new fixture to assert that close preserves LIVE,
+then run real Proc death and repost from a fresh marked Proc. Production source
+is unchanged by this correction. The corrected native gate is pending.
+
+## AS-2b: native admission prerequisite (October 4)
+
+Immutable actual-creator access snapshots and exact-AddrSpace lookup now share
+ordinary DAC semantics. Native targets retain the actual registry, exact service
+slot and generation. Common preparation/publication serves both legacy opens and
+future private scopes, preserving route/domain/byte authority and weighted
+connection accounting. No peer I/O occurs before publication or in the new
+private preparation API. The future scope abort latch must serialize publish.
+
+Host ASan/UBSan and ten deliberate source mutants pass. Six ARM64 translation
+units compile. Corrected fresh CI CPU1 boot passes1830/1830; actual Proc death,
+repost, server reference retention and no-peer preparation are exercised.
+Evidence: work/oct4-async-service/as2b/host-1791131759653901000 and
+work/oct4-async-service/as2b/check-1791131963071346000. AS-R4's incorrect listener
+close assumption is corrected and its failing run preserved. The model runner's
+relative config lookup failed before exploration; the three required connection
+mutants then passed with absolute paths. The mistakenly launched suspended clean
+Corvus run was stopped; its partial log is not success. See model-command-note.md.
+No new broad/SMP/graphical/Pi result; private runtime and clipboard remain off.
+
+AS-R4 closed: corrected native gate passes1830/1830. AS-2b required model
+counterexamples are observed for post_without_marker, identity_cached_on_fid
+and dead_proc_stale (aggregate Invariants). The clean Corvus gate remains
+suspended by its earlier operator decision. All four draft hashes and source
+pins match after verification; matching boot artifacts are retained with hashes.

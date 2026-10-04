@@ -1355,7 +1355,84 @@ void test_devsrv_srv_connect_gate_decides(void) {
 // unconditionally would satisfy the refusal assertion.
 // ---------------------------------------------------------------------------
 
+// AS-2 native two-phase admission. Intentionally no server responder: capture,
+// prepare, abort and publication MUST return without handshake/peer progress.
+static void test_private_service_admission(void) {
+    struct Proc *poster = make_marked_test_proc();
+    struct Proc *client = make_test_proc();
+    struct SrvRegistry *reg = srv_registry_create();
+    TEST_ASSERT(poster && client && reg, "private admission fixtures");
+    struct Spoor *root = devsrv_attach_registry(reg);
+    TEST_ASSERT(root != NULL, "native navigation root");
+    root->flag |= CWALKONLY;
+    int listener = devsrv_post_listener(poster, root, "async", 5, SRV_MODE_9P,
+                                       false, false, false);
+    TEST_ASSERT(listener >= 0, "strict native post");
+    struct SrvService *svc = srv_lookup_in(reg, "async", 5);
+    struct SrvServiceTarget target;
+    TEST_EXPECT_EQ(devsrv_service_target_init(root, "async", 5, &target), 0,
+                   "capture exact target");
+    TEST_ASSERT(target.view == reg && target.service == svc, "exact registry and slot");
+    struct ProcServiceIdentity id;
+    TEST_ASSERT(proc_service_identity_snapshot(client, &id), "actual client values");
+    struct SrvConnectAdmission a;
+    u64 freed = srvconn_total_freed();
+    TEST_EXPECT_EQ(devsrv_service_prepare(&target, &id, &a), 0, "prepare without peer");
+    TEST_EXPECT_EQ(srv_backlog_depth(svc), 0, "prepare is invisible to server");
+    TEST_ASSERT(a.conn->peer_stripes == client->stripes && a.conn->peer_pid == client->pid,
+                "connection captures caller, not kernel worker");
+    devsrv_connect_release(&a); // cancellation wins before publication
+    TEST_EXPECT_EQ(srv_backlog_depth(svc), 0, "cancelled prepare leaves no backlog");
+    TEST_EXPECT_EQ(srvconn_total_freed(), freed + 1, "unpublished storage refunds");
+    TEST_EXPECT_EQ(devsrv_service_prepare(&target, &id, &a), 0, "prepare publish case");
+    TEST_EXPECT_EQ(devsrv_connect_publish(&a), 0, "publish once");
+    TEST_EXPECT_EQ(devsrv_connect_publish(&a), -T_E_INVAL, "duplicate publication refused");
+    devsrv_connect_wake(&a);
+    struct SrvConn *accepted = srv_accept_blocking(svc, poster->stripes);
+    TEST_ASSERT(accepted == a.conn, "accept receives exact prepared connection");
+    devsrv_connect_release(&a);
+    TEST_EXPECT_EQ(srvconn_total_freed(), freed + 1, "server ref retains real storage");
+    srvconn_teardown(accepted); srvconn_unref(accepted);
+    TEST_EXPECT_EQ(srvconn_total_freed(), freed + 2, "final endpoint frees storage");
+
+    TEST_EXPECT_EQ(devsrv_service_prepare(&target, &id, &a), 0, "prepare rebind race");
+    handle_close(poster, (hidx_t)listener);
+    TEST_EXPECT_EQ(svc->state, SRV_STATE_LIVE,
+                   "listener close alone does not unpost a live service");
+    drop_test_proc(poster); // real death path tombstones and drains the post
+    poster = make_marked_test_proc();
+    TEST_ASSERT(poster != NULL, "replacement poster");
+    listener = devsrv_post_listener(poster, root, "async", 5, SRV_MODE_9P,
+                                    false, false, false);
+    TEST_ASSERT(listener >= 0, "repost exact name");
+    TEST_EXPECT_EQ(devsrv_connect_publish(&a), -T_E_NOENT, "old admission refuses repost");
+    devsrv_connect_release(&a);
+    TEST_EXPECT_EQ(devsrv_service_prepare(&target, &id, &a), -T_E_NOENT,
+                   "old target refuses replacement incarnation");
+    devsrv_service_target_clear(&target);
+    TEST_EXPECT_EQ(devsrv_service_target_init(root, "async", 5, &target), 0,
+                   "explicit recapture admits replacement");
+    devsrv_service_target_clear(&target);
+    TEST_ASSERT(devsrv_post_listener(poster, root, "raw", 3, SRV_MODE_BYTE,
+                                     false, false, false) >= 0, "byte fixture");
+    TEST_EXPECT_EQ(devsrv_service_target_init(root, "raw", 3, &target), -T_E_OPNOTSUPP,
+                   "private target cannot expose raw byte endpoint");
+    TEST_ASSERT(devsrv_post_listener(poster, root, "remote", 6, SRV_MODE_9P,
+                                     false, false, true) >= 0, "remote fixture");
+    TEST_EXPECT_EQ(devsrv_service_target_init(root, "remote", 6, &target), -T_E_OPNOTSUPP,
+                   "private target refuses remote-marked native service");
+    char long_name[33]; for (u32 i = 0; i < sizeof(long_name); i++) long_name[i] = 'x';
+    TEST_EXPECT_EQ(devsrv_service_target_init(root, long_name, sizeof(long_name), &target),
+                   -T_E_NOENT, "long valid basename never truncates");
+    root->flag &= ~CWALKONLY;
+    TEST_EXPECT_EQ(devsrv_service_target_init(root, "async", 5, &target), -T_E_OPNOTSUPP,
+                   "plain descriptor is not navigation registration");
+    spoor_clunk(root); drop_test_proc(client); drop_test_proc(poster);
+    srv_registry_unref(reg);
+}
+
 void test_devsrv_srv_connect_gate(void) {
+    test_private_service_admission();
     srv_registry_reset();
 
     // A TCB poster (the MAY_POST_SERVICE mark) posts a byte service -- the

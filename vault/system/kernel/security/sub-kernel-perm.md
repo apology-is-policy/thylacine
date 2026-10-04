@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 3.7.1", "docs/IDENTITY-DESIGN.md section 9.6"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -199,3 +199,12 @@ belong in the clearance set.
 [[chg-2026-08-02-authority-sweep]] · [[chg-2026-09-06-9p-identity-absorb]]
 (the F1 `rights_for_omode` table + the caller-policy disclaim, folded at the
 docs/reference retirement).
+
+## AS-2b admission (October 4)
+
+ProcAccessIdentity is an immutable principal/group/capability value. Ordinary
+perm_check delegates to perm_check_identity using a fresh atomic caps sample;
+async admission can use the same owner-first policy without a synthetic Proc or
+kernel-worker credentials. The empty-want guard precedes overrides, and no
+principal bypasses DAC. Each operation captures once at admission; retaining a
+ring does not grant a permanent capability cache.

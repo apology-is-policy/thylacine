@@ -33230,3 +33230,17 @@ checks exercise authority sharing, device quiescence and exact refund. Broad
 qualification for this prerequisite remains pending with AS-2 implementation.
 Single-agent self-review; all four protected drafts preserved. Evidence:
 /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/as2a/check-1791130311682969000
+
+### 2026-10-04 Astra: AS-2b admission preparation
+
+Reused ordinary native /srv admission for private target preparation. Exact
+registry/slot/generation targets, immutable creator+image snapshots and shared
+DAC prevent worker authority and stale-name reuse. Connection credits/storage
+are reserved before a separate checked publication; no peer handshake in this
+new helper path. Legacy synchronous open retains its existing behavior.
+
+Actual-source ASan/UBSan plus ten mutants and ARM64 compilation pass. Fresh
+CPU1 boot1830/1830 passes after correcting a new fixture's listener-close
+assumption to use real poster death. Three required Corvus connection mutants produce their expected counterexamples.
+The full clean Corvus run remains suspended; an accidental launch was stopped
+and its incomplete log retained without a success claim. Private runtime/clipboard are still inactive; no Main landing.

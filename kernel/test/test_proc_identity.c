@@ -236,7 +236,48 @@ void test_proc_identity_set_rejects_system_supp_gid(void) {
 
 // The peer-snapshot data path that feeds srv_peer_info: looking up kproc by
 // its stripes yields its identity; the 0 sentinel + an unassigned tag fail.
+// Native unpublished fixtures use the production process-table walk; no thread
+// runs in these Procs while the test changes their fields/exec-image pointer.
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
+static void test_service_admission_identity(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "service identity proc");
+    p->principal_id = 123; p->primary_gid = 456;
+    p->supp_gid_count = 1; p->supp_gids[0] = 789;
+    p->caps = CAP_DAC_OVERRIDE;
+    proc_test_link(p);
+    struct AddrSpace *old = p->as;
+    addrspace_pin(old);
+    struct ProcServiceIdentity id;
+    bool initial = proc_service_snapshot_by_stripes(p->stripes, old, &id);
+    bool values = id.access.principal_id == 123 && id.access.primary_gid == 456 &&
+        id.access.supp_gid_count == 1 && id.access.supp_gids[0] == 789 &&
+        id.access.caps == CAP_DAC_OVERRIDE && id.stripes == p->stripes && id.pid == p->pid;
+    p->caps = CAP_NONE;
+    bool recaptured = proc_service_snapshot_by_stripes(p->stripes, old, &id) &&
+                      id.access.caps == CAP_NONE;
+    struct AddrSpace *replacement = addrspace_alloc(p->page_budget);
+    TEST_ASSERT(replacement != NULL, "replacement image");
+    p->as = replacement; // isolated fixture; production swap is table-locked
+    bool old_rejected = !proc_service_snapshot_by_stripes(p->stripes, old, &id) &&
+                        id.stripes == 0 && id.access.caps == 0;
+    bool new_found = proc_service_snapshot_by_stripes(p->stripes, replacement, &id);
+    p->as = old; addrspace_unref(replacement);
+    u64 stripes = p->stripes;
+    p->state = PROC_STATE_ZOMBIE;
+    bool zombie_rejected = !proc_service_snapshot_by_stripes(stripes, old, &id);
+    proc_test_unlink(p); proc_free(p);
+    bool dead_rejected = !proc_service_snapshot_by_stripes(stripes, old, &id);
+    addrspace_unpin(old);
+    TEST_ASSERT(initial && values, "actual creator identity captured by value");
+    TEST_ASSERT(recaptured, "new admission observes live caps");
+    TEST_ASSERT(old_rejected && new_found, "same stripes cannot borrow replacement image");
+    TEST_ASSERT(zombie_rejected && dead_rejected, "dead creator cannot be admitted");
+}
+
 void test_proc_identity_peer_snapshot_by_stripes(void) {
+    test_service_admission_identity();
     struct Proc *kp = kproc();
     caps_t caps = 0; u32 pid_out = 0xABCDu; u32 gid_out = 0xABCDu;
     int    procpid = -7;

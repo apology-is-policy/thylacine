@@ -62,6 +62,28 @@ static struct t_stat mkstat(u32 mode, u32 uid, u32 gid) {
 // =============================================================================
 
 void test_perm_check_owner_group_other(void) {
+    // AS-2: the captured value survives authority/group changes and contains
+    // no pointer to the Proc. A NEW admission observes the new capabilities.
+    struct Proc source;
+    mkproc(&source, 101, 202, CAP_NONE);
+    source.supp_gids[0] = 303; source.supp_gid_count = 1;
+    struct ProcAccessIdentity before, after;
+    TEST_ASSERT(perm_identity_from_proc(&source, &before), "capture identity");
+    source.supp_gids[0] = 404; source.caps = CAP_DAC_OVERRIDE;
+    TEST_ASSERT(perm_identity_from_proc(&source, &after), "recapture authority");
+    struct t_stat group_file = mkstat(0040, 999, 303);
+    struct t_stat locked_file = mkstat(0000, 999, 303);
+    TEST_EXPECT_EQ(perm_check_identity(&before, &group_file, PERM_R), 0,
+                   "captured supplementary group retained by value");
+    TEST_EXPECT_EQ(perm_check_identity(&before, &locked_file, PERM_R), -1,
+                   "later grant cannot change old admission");
+    TEST_EXPECT_EQ(perm_check_identity(&after, &locked_file, PERM_R), 0,
+                   "new admission captures grant");
+    source.caps = CAP_NONE;
+    TEST_EXPECT_EQ(perm_check(&source, &locked_file, PERM_R), -1,
+                   "ordinary open samples revocation");
+    TEST_EXPECT_EQ(perm_check_identity(&after, &locked_file, 0), -1,
+                   "snapshot override cannot bypass empty request guard");
     // 0640: owner rw-, group r--, other ---. uid 100, gid 200.
     struct t_stat st = mkstat(0640u, 100u, 200u);
     struct Proc p;

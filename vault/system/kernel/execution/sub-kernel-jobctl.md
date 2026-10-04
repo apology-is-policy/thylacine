@@ -442,3 +442,10 @@ ACQUIRE/SET_FG also advances the pts epoch, including redundant calls. These
 operations never wait for compositor acknowledgement. Interaction CHECK samples
 membership and epoch together; the ordinary signal/foreground snapshot behavior
 is unchanged. See [[sub-kernel-pts]].
+
+## AS-2b admission (October 4)
+
+Private service identity capture uses the existing process-table walk lock and
+returns values only. It does not change foreground groups, signals or stopping.
+Exact address-space matching distinguishes an exec successor from the creator
+image even when stripes remains unchanged. No new sharing guard is active yet.

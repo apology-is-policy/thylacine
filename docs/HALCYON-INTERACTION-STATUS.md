@@ -14,7 +14,7 @@ verified implementation fit, staged delivery and binding decisions are in
 [ASYNC-SERVICE-LIFECYCLE](ASYNC-SERVICE-LIFECYCLE.md) and
 [SHARED-MEMORY-ACCOUNTING](SHARED-MEMORY-ACCOUNTING.md). The operator approved both detailed contracts, including async-first order.
 AS-0 ABI reservation and lifecycle verification are active; pickup is
-[ASYNC-SERVICE-STATUS](ASYNC-SERVICE-STATUS.md). No async private scopes,
+[ASYNC-SERVICE-STATUS](ASYNC-SERVICE-STATUS.md). AS-2 now has exact descriptor lifetime and native admission prerequisites; private scope ownership/retirement and clients are still being implemented. No async private scopes,
 new memory accounts or clipboard client activation are claimed implemented.
 The existing storage repair and its verified matrix remain separate evidence.
 

@@ -622,3 +622,12 @@ so the table is no longer reference-free. The exit close already reset it
 ([[sub-kernel-death]]); what `viv_socktab_free` catches is the direct
 `state = ZOMBIE; proc_free()` paths that never ran that close, whose cached
 Spoors it clunks with the same Tclunk the `handle_table_free` beside it sends.
+
+## AS-2b admission (October 4)
+
+proc_service_snapshot_by_stripes matches ALIVE, permanent stripes and the exact
+pinned AddrSpace under the process-table walk lock. Exec swaps its image under
+that same lock; keeping a Proc identity cannot let an old ring sample the new
+image. Only immutable identity/provenance values escape. The direct snapshot
+requires a lifetime-safe caller and supports legacy synchronous opens. Scope
+publication still needs its own exit/exec/abort latch; this helper is no substitute.
