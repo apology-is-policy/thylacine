@@ -115,3 +115,16 @@ outcome without recording records, keys or certificate material.
 Single-agent self-review, not an independent audit. These results establish
 the regression and narrow runtime correction; full matrix is still pending.
 General TLS blocking-I/O deadlines remain the existing dossier seam.
+
+## AS-1 / AS-R3 broad qualification
+
+The fresh AS-1/TLS matrix on8542dbb4b completed50/50 clean boots: ten each
+at default CPU1/4/8 and kernel-UBSan CPU4/8. Every row records zero corruption,
+external-kill, inject-miss, timing and other classifications. The wrapper exited0,
+restored all four protected drafts, released Mac, and the separate log/pin
+check verified every individual boot, five summaries, original source hashes
+and empty index. Evidence: work/oct4-async-service/as-r3/matrix-fixed/verified.json
+and smp.log. This qualifies the transport helpers and TLS correction, not private
+Loom runtime, clipboard activation or a fresh graphical/Pi/min-display run.
+Single-agent self-review remains the operator-approved staffing. The next AS-2a
+draft is separate and has no guest qualification from this matrix.

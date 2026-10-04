@@ -8,7 +8,7 @@ implementation follows this facility as approved.
 | --- | --- | --- |
 | AS-0 contract | Approved | Scripture4722f34e8; concrete numeric/layout reservation in ASYNC-SERVICE-ABI.md. |
 | AS-0 ABI/model | Verified | Three compiled mirrors, 22 constants, five records and three intended source-mirror mismatches; model 5,828 states and seven named counterexamples. Private setup remains rejected. |
-| AS-1 progress | Implemented; broad gate pending | Resumable framing/native-root handshake and real SrvConn adapter; byte-boundary host fixture, 12 mutants, ASan/UBSan, CPU1 boot1830/1830. AS-2 must bind these helpers to private ownership. |
+| AS-1 progress | Qualified | Resumable framing/native-root handshake and real SrvConn adapter; byte-boundary host fixture, 12 mutants, ASan/UBSan, CPU1 boot1830/1830. 50/50 clean default/SMP/kernel-UBSan boots after TLS repair; AS-2 must bind helpers to private ownership. |
 | AS-2 scopes | Pending | Private table/owner guards, accounting, asynchronous retirement, deadlines and completion obligations. |
 | AS-3 clients | Pending | C/Rust APIs plus native stalled/malformed-peer and repeated-reconnect fixtures. |
 | AS-4 adoption | Pending | Clipboard/MODE clients, SAK cancellation at every phase, responsive graphics and logout. |
@@ -88,3 +88,14 @@ work/oct4-async-service/as-r3/probe-1791127579804936000; pre-fix deterministic
 failure: probe-1791127476255271000; live failure: probe-1791127314181498000.
 The old matrix also completed boot4 before termination; its three passes and
 one failure are not a qualification. Full default/SMP/UBSan restart is pending.
+
+## AS-1 broad qualification (October 4)
+
+The fresh AS-1/TLS matrix on8542dbb4b completed50/50 clean boots: ten each
+at default CPU1/4/8 and kernel-UBSan CPU4/8. Every row records zero corruption,
+external-kill, inject-miss, timing and other classifications. The wrapper exited0,
+restored all four protected drafts, released Mac, and the separate log/pin
+check verified every individual boot, five summaries, original source hashes
+and empty index. Evidence: work/oct4-async-service/as-r3/matrix-fixed/verified.json
+and smp.log. This qualifies the transport helpers and TLS correction, not private
+Loom runtime, clipboard activation or a fresh graphical/Pi/min-display run.

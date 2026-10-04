@@ -33203,3 +33203,14 @@ after each successful step instead; reject early close without another read.
 Fresh CPU1 boot, coalesced/bytewise/early-close and certificate controls plus
 1000 live handshakes pass. Full matrix restart pending. Single-agent review;
 protected drafts preserved. Evidence work/oct4-async-service/as-r3.
+
+### 2026-10-04 Astra: AS-1 and TLS broad gate complete
+
+The fresh AS-1/TLS matrix on8542dbb4b completed50/50 clean boots: ten each
+at default CPU1/4/8 and kernel-UBSan CPU4/8. Every row records zero corruption,
+external-kill, inject-miss, timing and other classifications. The wrapper exited0,
+restored all four protected drafts, released Mac, and the separate log/pin
+check verified every individual boot, five summaries, original source hashes
+and empty index. Evidence: work/oct4-async-service/as-r3/matrix-fixed/verified.json
+and smp.log. This qualifies the transport helpers and TLS correction, not private
+Loom runtime, clipboard activation or a fresh graphical/Pi/min-display run.
