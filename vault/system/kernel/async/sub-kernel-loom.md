@@ -23,7 +23,7 @@ updated: 2026-10-04
 Current Loom starts from attached service handles; synchronous native service
 setup and the mid-frame join trust assumption remain outside its asynchronous
 contract. The proposed extension is reviewed in docs/ASYNC-SERVICE-LIFECYCLE.md
-and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. It is not implemented or ratified; legacy
+and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. It is approved but not implemented; legacy
 rings and the current authority contract are unchanged.
 
 ## Purpose

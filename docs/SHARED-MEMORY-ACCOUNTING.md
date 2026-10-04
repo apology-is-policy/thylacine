@@ -1,6 +1,7 @@
 # Capacity-backed shared memory and retention accounts
 
-Status: PROPOSED for operator ratification, October 4, 2026. Design only.
+Status: APPROVED by the operator, October 4, 2026. Implementation pending.
+Approval includes both contracts and async-first implementation order.
 Baseline: Astra 8b2212c0e. Companion: ASYNC-SERVICE-LIFECYCLE.md.
 This replaces a fixed shared-mapping floor with explicit accounting and policy.
 It does not replace the growable heap or promise unlimited/pinned/swap-backed RAM.
@@ -353,9 +354,9 @@ memory pressure, service crash/restart and long-run idle/peak footprint. Qualify
 QEMU and later Pi separately. ASan/UBSan/SMP follow current repository policy;
 host tests alone cannot establish hardware fence correctness or UI usability.
 
-## 11. Binding choices requested
+## 11. Ratified choices (October 4)
 
-Approve the durable hierarchical accounts, restricted allocation vouchers,
+The operator approved the durable hierarchical accounts, restricted allocation vouchers,
 whole-retention-unit charging, capacity-derived unconfined ceilings, explicit
 reserve classification, pressure notifications and failure-preserving recovery.
 The initial depth 16 and pressure fractions are tunable proposed policy, exposed

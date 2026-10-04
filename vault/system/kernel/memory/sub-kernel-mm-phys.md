@@ -18,7 +18,7 @@ The user-pool charge applies to alloc_user_pages/PG_USER backing. The current
 DMA weave/GPU BO constructor dma_create_body uses raw alloc_pages, so those
 buffers are not included by that tag path. The proposed durable-account and
 reserve-classification replacement is in docs/SHARED-MEMORY-ACCOUNTING.md;
-it is a review draft, not installed enforcement. Existing pool semantics and
+it is an approved design, not installed enforcement. Existing pool semantics and
 the separate shared-map floor remain in force.
 
 ## Purpose

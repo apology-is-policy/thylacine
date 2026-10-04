@@ -1,5 +1,13 @@
 # The autonomous-run journal
 
+## 2026-10-04: both lifecycle contracts approved
+
+The operator read both specifications and approved them, including async-first
+order. This scripture checkpoint ratifies private Loom scopes and durable shared
+memory accounts; numeric ABI reservations and implementation follow separately.
+The current mapping ceiling and nondefault clipboard gate remain in force.
+
+
 ## 2026-10-04: design reusable connection and memory lifecycles
 
 The clipboard client exposed that Loom starts after synchronous service attach;

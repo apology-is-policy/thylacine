@@ -17,7 +17,7 @@ updated: 2026-10-04
 
 addrspace_charge_shared_map still enforces PROC_SHARED_MAP_MAX_PAGES per
 address space; it is separate from the capacity-derived private-page budget.
-The proposed replacement is docs/SHARED-MEMORY-ACCOUNTING.md, reviewed with the
+The approved replacement is docs/SHARED-MEMORY-ACCOUNTING.md, reviewed with the
 async prerequisite in docs/ASYNC-MEMORY-DESIGN-REVIEW.md. No replacement account,
 pressure API or relaxed mapping admission is implemented by those drafts.
 

@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-04 [[chg-2026-10-04-async-memory-approved]] — Ratify both lifecycle contracts and async-first delivery
 - 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
 - 2026-10-04 [[chg-2026-10-04-halcyon-capacity-refusal]] — Reject excess Halcyon service connections promptly
 - 2026-10-04 [[chg-2026-10-04-hidden-storage-design]] — Approve cooperative hidden terminal pixel storage
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-04 [[chg-2026-10-04-hidden-storage-qualification]] — Verify all fifty hidden-storage SMP and UBSan boots
 - 2026-10-04 [[chg-2026-10-04-pty-fid-capacity]] — Account all six ordinary terminal handles
 - 2026-10-03 [[chg-2026-10-03-halcyon-app-records]] — Prepare exact HIN1 replay and shared buffer budgets
-- 2026-10-03 [[chg-2026-10-03-halcyon-application-dispatch]] — Dispatch HIN1 operations with borrowed replies
 <!-- generated:end -->

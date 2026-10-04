@@ -248,3 +248,13 @@ program and transcript, with fresh buffers and full repaint on reveal. Keep
 existing kernel memory limits. Follow TAPESTRY-STORAGE.md; scripture before
 implementation and generation/lifetime/runtime verification before activation.
 This is graphics-storage management, not process suspension or a larger heap.
+
+## Async service and memory lifecycles (operator-approved, 2026-10-04)
+
+The operator read and approved ASYNC-SERVICE-LIFECYCLE.md and
+SHARED-MEMORY-ACCOUNTING.md, including async-first implementation order in
+ASYNC-MEMORY-DESIGN-REVIEW.md. Implement those contracts without repeating their
+scope/authority/policy approval questions. Reserve concrete ABI encodings before
+consumers. Keep the 128 MiB protection until the replacement accounting passes
+its activation gates; keep clipboard nondefault until its full arc is verified.
+Single-agent and protected-draft preservation remain in force.

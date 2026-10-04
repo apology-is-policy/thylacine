@@ -1,6 +1,11 @@
 # Two clipboard prerequisites: operator review
 
-October 4, 2026. PROPOSED, not implemented or ratified. Astra, single-agent.
+October 4, 2026. APPROVED, not yet implemented. Astra, single-agent.
+
+The operator read both specifications and approved them, including order:
+"approved including order." This ratifies the contracts below. Numeric ABI
+reservations precede their consumers; no second approval is needed for the
+choices already recorded here.
 
 ## Recommendation in ordinary language
 
@@ -32,7 +37,7 @@ claim is made. No new names are needed: Loom remains Loom, Burrow remains Burrow
   retention/metadata ledgers, account hierarchy and vouchers, backend constraints,
   pressure, precise errors and MM-0..MM-4 migration gates.
 
-## Binding decisions to ratify
+## Ratified binding decisions
 
 1. **Extend Loom with private service scopes.** Terminal cancellation affects
    only a freshly created private connection, never an inherited/shared mount.
@@ -50,12 +55,9 @@ claim is made. No new names are needed: Loom remains Loom, Burrow remains Burrow
    tunable 1/8 warning,1/32 critical with 1/64 hysteresis; hierarchy depth 16 bounds
    metadata work. These are transparent proposed defaults, not hardware truths.
 
-The operator has asked for both designs; this document does not mistake that
-request for approval of every new ABI/authority/resource-policy term. Repository
-DESIGN-FORKS requires user signoff followed by a scripture-only commit before
-implementation. On ratification, reserve numeric ABI values with Main/Aux and
-commit mirrors before writing consumers. Existing protected authority drafts
-remain separate and unchanged.
+The operator approved both detailed designs and their order on October 4.
+Record numeric ABI reservations with Main/Aux and commit mirrors before writing
+consumers. Existing protected authority drafts remain separate and unchanged.
 
 ## Delivery order and cost
 
