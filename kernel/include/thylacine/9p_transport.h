@@ -74,6 +74,7 @@ enum p9_transport_state {
     P9_TRANS_OPEN   = 1,   // active
     P9_TRANS_CLOSED = 2,   // explicit close; no further I/O
     P9_TRANS_ERROR  = 3,   // sink on first I/O failure; no further I/O
+    P9_TRANS_PROGRESS = 4, // exclusive nonblocking driver; legacy I/O refused
 };
 
 // =============================================================================
@@ -219,5 +220,86 @@ int  p9_transport_exchange(struct p9_transport *t,
 
 bool   p9_transport_is_open(const struct p9_transport *t);
 size_t p9_transport_last_recv_len(const struct p9_transport *t);
+
+// Private-service progress (ASYNC-SERVICE-LIFECYCLE, AS-1). These callbacks
+// MUST NOT sleep. They return a positive partial byte count, EAGAIN (-11) for
+// no progress, zero for EOF, or another negative value for a terminal error.
+// abort tears down both directions locally; it does not release storage, wait
+// for a peer, or send Tclunk/Tflush. The existing blocking vtable is unchanged.
+struct p9_transport_try_ops {
+    int (*send)(void *ctx, const u8 *buf, size_t len);
+    int (*recv)(void *ctx, u8 *buf, size_t cap);
+    void (*abort)(void *ctx);
+    void *ctx;
+};
+
+// One exclusive driver, serialized with cancellation by the enclosing client
+// lock. No internal locks or allocations. Caller owns/pins transport, buffers
+// and backend until its actual local retirement. Queued TX bytes are immutable
+// kernel storage borrowed through send completion/abort, never a user pointer.
+struct p9_transport_progress {
+    struct p9_transport *transport;
+    struct p9_transport_try_ops ops;
+    const u8 *tx;
+    size_t tx_len, tx_sent;
+    size_t rx_have, rx_goal, frame_limit;
+    bool aborted;
+    bool bytes_sent;  // sticky: cancellation cannot promise remote rollback
+};
+
+// On a fresh unused OPEN transport, enter exclusive PROGRESS mode; existing
+// blocking send/recv then refuse it. Never bind two progress cursors to one
+// transport. Failure leaves it unchanged. frame_limit is the proposed msize.
+int p9_transport_progress_init(struct p9_transport_progress *p,
+                              struct p9_transport *t,
+                              struct p9_transport_try_ops ops,
+                              size_t frame_limit);
+// Negotiation may shrink the limit only at a TX/RX frame boundary.
+int p9_transport_progress_limit(struct p9_transport_progress *p, size_t limit);
+// Queue one complete encoded frame, no I/O. Refuses while another TX is queued.
+int p9_transport_progress_queue(struct p9_transport_progress *p,
+                               const u8 *msg, size_t len);
+// Each call invokes at most ONE backend callback, copying at most frame_limit
+// bytes. send: 0 pending, 1 complete, -1 terminal/invalid. recv: 0 pending,
+// >=7 complete frame in transport.recv_buf, -1 terminal/invalid. A complete
+// RX buffer is borrowed until the next recv call. EAGAIN preserves both cursors.
+int p9_transport_progress_send(struct p9_transport_progress *p);
+int p9_transport_progress_recv(struct p9_transport_progress *p);
+// Idempotent terminal latch; no future I/O, no freeing of caller storage.
+void p9_transport_progress_abort(struct p9_transport_progress *p);
+
+// Resumable native-root handshake over the same session codec/dispatcher.
+// Caller has already captured the actual principal and SrvConn peer identity.
+// Native roots use empty uname/aname, like devsrv's existing attach path.
+// The enclosing client lock serializes init/step/abort; no callback may sleep.
+// Session, progress and immutable queued out-buffer survive until retirement.
+enum p9_handshake_phase {
+    P9_HS_VERSION_SEND, P9_HS_VERSION_RECV,
+    P9_HS_ATTACH_SEND, P9_HS_ATTACH_RECV,
+    P9_HS_READY, P9_HS_FAILED,
+};
+struct p9_handshake_progress {
+    struct p9_session *session;
+    struct p9_transport_progress *progress;
+    u8 *out;
+    size_t out_cap;
+    u32 principal;
+    u64 deadline_ns;
+    enum p9_handshake_phase phase;
+    enum p9_handshake_phase failed_phase;
+    int reason;
+};
+// init queues Tversion but performs no transport I/O. Requires a fresh session
+// and progress cursor. Returns 0 or -errno. deadline is absolute and nonzero.
+int p9_handshake_progress_init(struct p9_handshake_progress *h,
+                              struct p9_session *s,
+                              struct p9_transport_progress *p,
+                              u8 *out, size_t out_cap,
+                              u32 principal, u64 deadline_ns);
+// At most one bounded transport copy per visit, then shared session dispatch.
+// 0 pending, 1 ready, -errno terminal. Deadline never resets on partial bytes.
+int p9_handshake_progress_step(struct p9_handshake_progress *h, u64 now_ns);
+// Local terminal teardown without Tclunk/Tflush. Original terminal reason wins.
+void p9_handshake_progress_abort(struct p9_handshake_progress *h);
 
 #endif  // THYLACINE_9P_TRANSPORT_H

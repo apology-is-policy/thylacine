@@ -138,8 +138,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
 - 2026-10-04 [[chg-2026-10-04-async-service-abi-reservation]] — Reserve Loom private service encoding before consumers
 - 2026-10-04 [[chg-2026-10-04-async-service-as0]] — Pin the private service ABI and cancellation model
+- 2026-10-04 [[chg-2026-10-04-async-service-as1]] — Resumable native service framing and handshake
 - 2026-10-04 [[chg-2026-10-04-halcyon-capacity-refusal]] — Reject excess Halcyon service connections promptly
 - 2026-10-04 [[chg-2026-10-04-hidden-storage-design]] — Approve cooperative hidden terminal pixel storage
 - 2026-10-04 [[chg-2026-10-04-hidden-storage-implementation]] — Retire hidden terminal pixels while preserving live panes
-- 2026-10-04 [[chg-2026-10-04-hidden-storage-qualification]] — Verify all fifty hidden-storage SMP and UBSan boots
 <!-- generated:end -->

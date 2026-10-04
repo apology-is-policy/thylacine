@@ -157,4 +157,13 @@ bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st);
 struct p9_client;
 struct SrvConn *p9_srvconn_transport_conn(const struct p9_client *c);
 
+// AS-1 exclusive native-service adapter. The future private-service admission
+// path must own a fresh SrvConn with NO other client/embedded handshake. It must
+// retain its reference through local retirement; this vtable takes/drops none.
+// It is NOT an adapter for an arbitrary shared native connection. Unlike the
+// legacy byte-mode attachment above it never waits or performs namespace work.
+// Abort tears down both directions but leaves credit/storage charged until the
+// real last reference. The progress core bounds every copy to negotiated msize.
+struct p9_transport_try_ops p9_srvconn_progress_ops(struct SrvConn *cn);
+
 #endif  // THYLACINE_9P_SRVCONN_TRANSPORT_H

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**590 owned · 47 unowned · 637 files (92% owned) · ~12266 unswept lines.**
+**591 owned · 46 unowned · 637 files (92% owned) · ~12106 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **88 files, ~40179 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40179 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 11 | 17 | 2486 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 133 | 12 | 1566 |
+| kernel | 134 | 11 | 1406 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/libthyla-rs | 33 | 2 | 318 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
@@ -144,7 +144,6 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40179 lin
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/gnumake/generated/glob.h | 163 |
-| kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |

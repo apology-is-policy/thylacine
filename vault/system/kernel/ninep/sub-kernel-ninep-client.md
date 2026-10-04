@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-09-30
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -594,3 +594,15 @@ Open: [[seam-841-mi-harness]] · [[seam-350-async-eagain]] ·
 (generated — incoming `touched` backlinks, newest first; never hand-written.
 Until the renderer emits this section, walk the backlinks of this id in
 `record/changes/`: the [[lin-9p-client]] members are the curated spine.)
+
+
+## Private progress foundation (AS-1)
+
+The existing shared client's blocking/elected-reader behavior is unchanged.
+The same underlying transport/session modules now provide exclusive nonblocking
+frame cursors and native-root handshake helpers, documented in
+[[sub-kernel-ninep-transport]]. They are not a second protocol engine and are not
+yet bound to live private Loom scopes. The shared session validator rejects
+unsupported Rversion dialects and framing-impossible sizes before VERSIONED;
+legacy handshakes inherit that correction. AS-2 supplies owner/slot/retirement
+bindings before these helpers become userspace-accessible.

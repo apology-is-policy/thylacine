@@ -224,6 +224,19 @@ void test_9p_session_version_handshake(void) {
     TEST_EXPECT_EQ((u64)s.negotiated_msize, (u64)8192, "negotiated msize = server's smaller value");
     TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TVERSION, "result kind = TVERSION");
     TEST_EXPECT_EQ((u64)r.version_len, (u64)8, "version string len");
+
+    // AS-R1: syntax alone is not protocol agreement. Rejection precedes
+    // VERSIONED publication and applies to legacy and private clients alike.
+    p9_session_init(&s, 0, 16384);
+    len = synth_rversion(g_buf, sizeof(g_buf), 8192);
+    g_buf[len - 1] = 'M';  // 9P2000.M is not implemented
+    rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, -1, "unsupported dialect refused");
+    TEST_EXPECT_EQ((u64)s.state, (u64)P9_SESS_INIT, "bad dialect leaves INIT");
+    len = synth_rversion(g_buf, sizeof(g_buf), 0);
+    rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, -1, "zero msize refused");
+    TEST_EXPECT_EQ((u64)s.state, (u64)P9_SESS_INIT, "bad msize leaves INIT");
 }
 
 void test_9p_session_attach_handshake(void) {

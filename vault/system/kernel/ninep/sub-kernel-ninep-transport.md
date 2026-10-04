@@ -3,7 +3,7 @@ id: sub-kernel-ninep-transport
 type: sub
 title: "9P transport core + backends"
 parent: moc-kernel-ninep
-code: [kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h]
+code: [kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h, kernel/include/thylacine/9p_srvconn_transport.h, tools/test-9p-progress.py, tools/host-tests/9p-progress.c]
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -234,3 +234,31 @@ session+transport+spoor handshake) + the srvconn arm's coverage riding
 incl. the 16c-F8 part-3 adapter-close leg) and the client suites
 (`9p_client.send_backpressure_*`, `9p_client.loom_multi_inflight_*` — the
 mq consumers).
+
+
+## Private nonblocking progress (AS-1)
+
+`p9_transport_progress` adds resumable frame cursors to this same transport
+layer. It accepts only a fresh OPEN transport and transitions it to PROGRESS;
+legacy I/O and close refuse that mode. A dedicated try-vtable has partial byte
+counts, EAGAIN, EOF and terminal errors; it cannot hide a blocking callback.
+One step invokes at most one callback, copying no more than negotiated msize.
+TX storage is borrowed unchanged through completion/abort. RX reads exactly one
+header/body, preserving partial offsets across EAGAIN and leaving coalesced
+successor frames in the pipe. Oversize/EOF/error aborts the entire private stream.
+
+`p9_handshake_progress` composes those cursors with the existing session engine.
+It uses native empty uname/aname and a captured principal, shares version/tag/fid
+validation, and reaches READY only on complete Rattach. Deadline is absolute.
+Abort is local and idempotent; it sends no Tflush/Tclunk, never drops storage or
+pretends retained server endpoint references disappeared. SrvConn's adapter uses
+srvconn_io_nonblock and srvconn_teardown. Caller supplies exclusive ownership,
+serialization and pinned lifetimes; public private-scope admission is not enabled.
+
+`tools/test-9p-progress.py` links actual sources and exercises every partial byte
+boundary, malformed/coalesced frames, cancellation, deadlines, captured identity
+and errno limits. It detects12 intended source mutations. --sanitize accepts
+CC/CFLAGS for a working host sanitizer toolchain. The real-channel guest witness
+is the expanded srvconn.nonblocking_backpressure test. These are bounded fixture
+claims, blind to future Loom table admission/retirement and full concurrent use.
+See docs/ASYNC-SERVICE-STATUS.md for measured qualification and remaining work.

@@ -192,3 +192,24 @@ struct SrvConn *p9_srvconn_transport_conn(const struct p9_client *c) {
     if (!st || st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return NULL;
     return st->cn;
 }
+
+// Private progress uses the existing role-aware nonblocking channel primitive.
+// The owner provides exclusivity and the lifetime reference (header contract).
+static int srvconn_progress_send(void *ctx, const u8 *buf, size_t len) {
+    return (int)srvconn_io_nonblock(ctx, false, true, (void *)buf, (long)len);
+}
+
+static int srvconn_progress_recv(void *ctx, u8 *buf, size_t cap) {
+    return (int)srvconn_io_nonblock(ctx, false, false, buf, (long)cap);
+}
+
+static void srvconn_progress_abort(void *ctx) {
+    srvconn_teardown(ctx);
+}
+
+struct p9_transport_try_ops p9_srvconn_progress_ops(struct SrvConn *cn) {
+    return (struct p9_transport_try_ops){
+        .send = srvconn_progress_send, .recv = srvconn_progress_recv,
+        .abort = srvconn_progress_abort, .ctx = cn,
+    };
+}

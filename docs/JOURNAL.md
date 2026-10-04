@@ -33176,3 +33176,18 @@ The full kernel header confirms private mode remains rejected. No runtime
 handler or new broad/graphical qualification yet; AS-1 transport is next.
 All four authority/settings drafts preserved. Single-agent review and evidence
 are in ASYNC-SERVICE-SELF-REVIEW.md and work/oct4-async-service.
+
+
+## 2026-10-04 -- Astra: AS-1 transport progress
+
+Nonblocking cursors and native-root handshake reuse existing9P transport/session
+code and SrvConn try-I/O. Partial frames retain progress, cancellation needs no
+peer reply, absolute deadline does not reset, and READY requires full Rattach.
+The shared version dispatcher now rejects unsupported dialect/zero framing size
+before VERSIONED (AS-R1). Actual-source fixture plus12 intended mutations and
+LLVM ASan/UBSan pass; real SrvConn guest and version regressions pass in fresh
+CI CPU1 boot1830/1830. Existing9p_client model197states/five buggy configs pass.
+Apple ASan startup deadlock isolated with minimal and full-fixture process
+samples; LLVM22 with explicit SDK path works without global host edits (AS-R2).
+Single-agent checkpoint; full SMP/kernel-UBSan gate follows. No public private
+scope or clipboard activation. Evidence and paired images: work/oct4-async-service.

@@ -48,6 +48,8 @@
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/9p_session.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -1187,6 +1189,75 @@ void test_srvconn_ctl_counters(void) {
     TEST_ASSERT(!p2.found, "freed conn unlinked from the registry");
 }
 
+// AS-1 exercises the real adapter and channel role guards. Static session
+// storage keeps this fixture off the small kernel stack; tests are serialized.
+static struct p9_session g_progress_session;
+static u8 g_progress_out[256], g_progress_recv[256], g_progress_peer[256];
+static void test_srvconn_private_progress(void) {
+    struct SrvConn *cn = srvconn_create(123, 11, false, 456, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "private progress connection");
+    struct p9_srvconn_transport adapter;
+    TEST_ASSERT(p9_srvconn_transport_init(&adapter, cn) == 0, "progress adapter");
+    struct p9_transport transport;
+    struct p9_transport_progress progress;
+    struct p9_handshake_progress handshake;
+    TEST_ASSERT(p9_transport_init(&transport, p9_srvconn_transport_ops(&adapter),
+        g_progress_recv, sizeof(g_progress_recv)) == 0, "progress transport");
+    TEST_ASSERT(p9_transport_progress_init(&progress, &transport,
+        p9_srvconn_progress_ops(cn), 256) == 0, "private nonblocking mode");
+    TEST_ASSERT(p9_session_init(&g_progress_session, 17, 256) == 0, "progress session");
+    TEST_ASSERT(p9_handshake_progress_init(&handshake, &g_progress_session,
+        &progress, g_progress_out, sizeof(g_progress_out), 1007, 100) == 0,
+        "queue native handshake");
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0, "send version");
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, false, g_progress_peer, 256),
+        21L, "server gets one complete version");
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0,
+        "empty alive peer yields without blocking");
+    int len = p9_build_tversion(g_progress_peer, sizeof(g_progress_peer),
+        P9_NOTAG, 128, (const u8 *)"9P2000.L", 8);
+    TEST_ASSERT(len == 21, "version response fixture");
+    g_progress_peer[4] = P9_RVERSION;
+    for (int i = 0; i < len; i++) {
+        TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, true, &g_progress_peer[i], 1),
+            1L, "one response byte");
+        if (i == 0) {
+            spin_lock(&cn->s2c.lock); cn->s2c.reading = true; spin_unlock(&cn->s2c.lock);
+            TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0,
+                "private reader never bypasses a busy role");
+            TEST_EXPECT_EQ(progress.rx_have, 0u, "busy role retained byte");
+            spin_lock(&cn->s2c.lock); cn->s2c.reading = false; spin_unlock(&cn->s2c.lock);
+        }
+        TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0,
+            "partial version remains resumable");
+    }
+    TEST_EXPECT_EQ(handshake.phase, P9_HS_ATTACH_SEND, "version validated");
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0, "send attach");
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, false, g_progress_peer, 256),
+        23L, "server gets native attach");
+    TEST_EXPECT_EQ(g_progress_peer[19], (u8)(1007 & 255), "captured principal low byte");
+    u8 reply[20] = {20, 0, 0, 0, P9_RATTACH, 0, 0, 0x80};
+    reply[5] = g_progress_peer[5]; reply[6] = g_progress_peer[6];
+    for (unsigned i = 0; i < sizeof(reply); i++) {
+        TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, true, &reply[i], 1), 1L,
+            "attach response byte");
+        TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1),
+            i + 1 == sizeof(reply) ? 1 : 0, "READY only on complete attach");
+    }
+    TEST_EXPECT_EQ(progress.frame_limit, 128u, "negotiation bounds future frames");
+    srvconn_ref(cn); // retained peer endpoint outlives local retirement
+    p9_handshake_progress_abort(&handshake);
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), -T_E_CANCELED,
+        "abort cannot be revived by a ready root");
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, true, reply, 1), -(long)T_E_PIPE,
+        "abort tears down the actual channel");
+    TEST_EXPECT_EQ(p9_transport_close(&transport), 0, "release adapter after abort");
+    p9_session_destroy(&g_progress_session);
+    srvconn_unref(cn); // original local owner
+    TEST_EXPECT_EQ(cn->ref, 1, "retained peer reference remains charged");
+    srvconn_unref(cn);
+}
+
 // Discriminates poll-ready from write-all-ready: only three bytes remain, yet
 // a 16-byte nonblocking write must return three without parking the seat loop.
 void test_srvconn_nonblocking_backpressure(void);
@@ -1218,4 +1289,5 @@ void test_srvconn_nonblocking_backpressure(void) {
     TEST_EXPECT_EQ(sp->dev->read(sp, &byte, 1, 0), 0L, "drained EOF");
     TEST_EXPECT_EQ(sp->dev->write(sp, &byte, 1, 0), -(long)T_E_PIPE, "dead peer write");
     spoor_clunk(sp);
+    test_srvconn_private_progress();
 }

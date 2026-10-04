@@ -27,7 +27,8 @@ setup and the mid-frame join trust assumption remain outside its asynchronous
 contract. The approved extension is reviewed in docs/ASYNC-SERVICE-LIFECYCLE.md
 and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. It is approved but not implemented; legacy
 rings and the current authority contract are unchanged. AS-0 has compiled
-record mirrors and a bounded lifecycle model; no private service handler is
+record mirrors and a bounded lifecycle model. AS-1 supplies the nonblocking
+transport/handshake helpers in [[sub-kernel-ninep-transport]]; no private service handler is
 enabled. The exact boundary is [[abi-loom-service]] and implementation progress
 is recorded in docs/ASYNC-SERVICE-STATUS.md.
 

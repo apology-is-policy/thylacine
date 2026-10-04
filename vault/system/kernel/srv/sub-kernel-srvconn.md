@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-03
+updated: 2026-10-04
 ---
 ## Admission (October 1, D7)
 
@@ -561,3 +561,15 @@ plain conns) and at the attach (`9p_srvconn_transport.remote_attach`,
 [[sub-kernel-ninep-attach]]). Threaded cases use the cooperative harness
 + the #109 terminal-park reap handshake + `SC_YIELD_UNTIL` observable
 waits.
+
+
+## Private progress witness (AS-1)
+
+The nonblocking-backpressure kernel test also drives a fresh, exclusively owned
+connection through the real p9_srvconn_progress_ops adapter: byte-at-a-time
+version/attach, busy reader-role refusal, captured principal, full-response-only
+readiness, terminal abort and a peer reference surviving local release. The
+adapter reuses srvconn_io_nonblock and srvconn_teardown; it acquires/releases no
+reference itself. This preserves the ordinary final-reference charge rule.
+Private Loom admission/retirement is not activated by the fixture; progress
+and qualification are tracked in docs/ASYNC-SERVICE-STATUS.md.

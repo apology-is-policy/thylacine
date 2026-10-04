@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-30
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -64,7 +64,10 @@ retirement rules are mechanically enforced.
 (Tattach/Rattach, binds `root_fid`) → OPEN → CLOSED. Tversion never enters
 `outstanding[]` — it uses NOTAG (0xFFFF, outside the 0..63 index range) and
 the dispatcher special-cases Rversion in state INIT, negotiating msize DOWN
-to `min(server, proposed)`.
+to `min(server, proposed)`. It validates the exact supported 9P2000.L dialect
+and refuses a negotiated size smaller than a frame header before publishing
+VERSIONED; syntax alone is not protocol agreement.
+`9p_session.version_handshake` includes those refusal regressions.
 
 **Tag pool**: tag value == index into
 `outstanding[P9_SESSION_MAX_OUTSTANDING]` (64). `alloc_tag` returns the

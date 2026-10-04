@@ -1079,6 +1079,13 @@ static int dispatch_rversion(struct p9_session *s,
     int rc = p9_parse_rversion(rmsg, len, &tag, &msize, &version_ptr, &version_len);
     if (rc < 0) return -1;
     if (tag != P9_NOTAG) return -1;
+    // AS-R1: parsing a version string is not agreement on the dialect. This
+    // engine only implements 9P2000.L. Refuse before publishing VERSIONED;
+    // otherwise an "unknown" reply can enable .L operations on a non-.L peer.
+    if (version_len != sizeof(P9_DEFAULT_VERSION)) return -1;
+    for (size_t i = 0; i < sizeof(P9_DEFAULT_VERSION); i++)
+        if (version_ptr[i] != P9_DEFAULT_VERSION[i]) return -1;
+    if (msize < P9_HDR_LEN || s->msize < P9_HDR_LEN) return -1;
     // Negotiate down: per spec the server's msize is the final value.
     s->negotiated_msize  = (msize <= s->msize) ? msize : s->msize;
     s->state             = P9_SESS_VERSIONED;
