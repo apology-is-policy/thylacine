@@ -1,5 +1,15 @@
 # The autonomous-run journal
 
+## 2026-10-04: hidden terminal storage approved
+
+The operator selected cooperative hidden-buffer suspension over retaining the
+resolution-dependent tab limit or raising the shared-map ceiling. Halcyon uses
+the growable private heap already; the observed failure was 30387+2613 pages
+against the separate 32768-page mapping budget. TAPESTRY-STORAGE.md records
+visibility offers, fresh pixel fids, repaint and backend retirement obligations.
+This scripture precedes implementation; the failed pressure gate remains open.
+
+
 **What this is for.** After a long autonomous run the operator needs to
 reconstruct what happened without stitching together `git log`, six phase-status
 rows, and a memory directory. This is that single thread: what landed, in order,

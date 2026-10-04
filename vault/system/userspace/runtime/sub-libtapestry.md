@@ -18,8 +18,16 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-10-02
+updated: 2026-10-04
 ---
+## Approved hidden storage extension (October 4)
+
+TAPESTRY-STORAGE.md records the approved cooperative suspension contract.
+Keep semantic surfaces and release hidden pixel generations, with compositor
+visibility, fresh generation-bound fids, full repaint on reveal and existing
+backend retirement pins. No kernel quota increase. This is design, not shipped
+behavior; HI1-R30 and its original full-size pressure failure remain open.
+
 ## Local ordered-stream progress
 
 The ordered exchange exposes runnable local work: a deliverable retained record

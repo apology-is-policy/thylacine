@@ -16,6 +16,10 @@ Tapestry is the answer to "what is Loom *for*, beyond files?" — the concrete
 consumer that shapes Loom-5 (multishot) and Loom-6 (registered buffers + the
 native API), and the benchmark workload graphics imposes on both.
 
+The October 4, 2026 approved cooperative hidden-buffer extension is specified
+in [TAPESTRY-STORAGE](TAPESTRY-STORAGE.md). It preserves I-40, legacy clients
+and existing memory ceilings; implementation/qualification are pending.
+
 ---
 
 ## 1. Naming

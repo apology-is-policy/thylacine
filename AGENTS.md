@@ -239,3 +239,12 @@ default-class connections cost one credit, bulk four; limits are 96 per session,
 192 for sessions combined and 256 globally. This supersedes D7's 16/48/64 count
 limits, retaining its ownership and lifetime rules. Commit the ratified design
 before implementation. The October 1-2 verification waiver has expired.
+
+## Hidden terminal pixel storage (operator-approved, 2026-10-04)
+
+The operator selected option 1 in HALCYON-HIDDEN-WEAVE-REVIEW.md: cooperative
+suspension of hidden terminal pixel buffers, preserving pane identity, geometry,
+program and transcript, with fresh buffers and full repaint on reveal. Keep
+existing kernel memory limits. Follow TAPESTRY-STORAGE.md; scripture before
+implementation and generation/lifetime/runtime verification before activation.
+This is graphics-storage management, not process suspension or a larger heap.

@@ -1,6 +1,6 @@
 # Hidden terminal graphics: scope and lifecycle review
 
-October 4, Astra. Proposal for operator review, not a ratified contract.
+October 4, Astra. Option 1 APPROVED by the operator: "I will go with your recommendation."
 HI1-R30 blocks claiming the larger live-tile clipboard pressure qualification.
 
 ## Observed behaviour
@@ -91,11 +91,10 @@ TEV_FOCUS is not visibility, zero-sized CONFIGURE is ignored, and Surface::drop
 retires the surface identity. The proposed combination reuses those mechanisms
 without inventing a second authority owner. No novel security claim is made.
 
-## Decision requested
+## Decision (October 4)
 
-Choose whether hidden-buffer suspension belongs in this delivery or whether to
-finish clipboard/modal interaction under the current graphics limits. The
-scope/lifecycle change requires operator review under
-[DESIGN-FORKS](agent/DESIGN-FORKS.md), whose instruction is to obtain signoff
-before a new mechanism determines scripture. No implementation is authorized
-by this proposal alone. The independent six-fid PTY repair continues meanwhile.
+The operator selected cooperative hidden-buffer suspension for this delivery.
+The alternatives of retaining the present lifecycle or raising the mapping
+ceiling were not selected. The concrete contract is in
+[TAPESTRY-STORAGE](TAPESTRY-STORAGE.md); commit that scripture before code.
+This is scope approval, not a claim of implemented or qualified suspension.

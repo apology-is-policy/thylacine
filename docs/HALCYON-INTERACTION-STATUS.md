@@ -17,8 +17,9 @@ hosting leaf. Source plus the preceding retire trace establish that this is a
 redundant close (ENOENT), not evidence of a leaked empty leaf. A visible
 capacity-refusal notice is still missing.
 This is a failed live-tile acceptance run, not a clipboard credit failure or a
-passing maximum-pressure check. A dormant-weave lifecycle would require a
-separate graphics contract; no quota or lifecycle change has been made.
+passing maximum-pressure check. The operator approved cooperative hidden-buffer suspension on October 4.
+TAPESTRY-STORAGE.md specifies the lifecycle; implementation/qualification are
+pending. No quota change is authorized or made.
 
 HI1-R31 is repaired: the complete failing inventory was 13 masters, 39 stdio
 slaves, 13 control and 13 readiness fids, plus two unopened roots: exactly 80.
@@ -48,8 +49,8 @@ pane shapes. HI1-R24 still owns mixed/multiple-session demand, the complete
 allocation ledger and partial-output cancellation. Clipboard/modal clients and
 status/caret integration remain unfinished; the feature is still nondefault.
 Four separate drafts are preserved. No Main landing, fresh SMP/sanitizer/Pi or
-minimum-display qualification. HALCYON-HIDDEN-WEAVE-REVIEW.md is a scope proposal
-awaiting the operator, not permission to implement a new graphics lifecycle.
+minimum-display qualification. Option 1 in HALCYON-HIDDEN-WEAVE-REVIEW.md is now approved; the original
+full-size failure stays red until its matching workload passes the new lifecycle.
 
 ## Full-service admission repair (October 4)
 
