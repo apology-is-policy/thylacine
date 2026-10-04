@@ -44,7 +44,12 @@ Native observations:
 Remaining before full qualification:
 - Legacy media/manual graphical regression passed71.60s. Inline View, pane/zoom
   Gallery, physicalSAK return, manual catalogue and live Signal theme inspected.
-- No freshly completed broad SMP/sanitizer matrix, Pi or minimum display claim.
+- Full matrix on8b2212c0e: default SMP1/4/8 and UBSan SMP4/8, ten boots
+  each, all50PASS and zero in every failure category. Actual runner exit0,
+  source/index pin and four original draft hashes verified. Raw passing boot
+  logs are overwritten by the standard harness; per-boot outcomes/seconds and
+  final raw boot log are preserved. This gate is blind to graphical workloads
+  and hardware-specific backend behavior. No ASan, Pi or minimum-display claim.
 - Visible failure notice exists, but no screenshot of a real Halcyon failed
   reveal yet. Raw protocol mapping failure/recovery is measured separately.
 - Initial mapping denial remains generic Map, no errno-specific ENOMEM claim.

@@ -5,7 +5,7 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
-## Hidden terminal storage (October 4, implementation under qualification)
+## Hidden terminal storage (October 4, matrix verified)
 
 HI1-R30: the original full-width mapping-pressure workload now passes with the
 approved cooperative storage lifecycle, within unchanged limits. The failure
@@ -33,8 +33,13 @@ Evidence: work/oct4-hidden-storage, including paired images, source pins,
 failed fixture runs and self-review. The fixture corrections concern SQPOLL
 progress and consume-once mapping grants; no failed run is labelled a pass.
 The notice is implemented but a real Halcyon failed-reveal screenshot remains
-unverified. Legacy media/manual regression passes71.60s with inspected captures; broad qualification remains open;
-no new SMP/sanitizer, Pi, minimum-display or Main landing claim. Clipboard
+unverified. Legacy media/manual regression passes71.60s with inspected captures;
+hardware and failed-reveal notice qualification remain open;
+the five-row SMP/UBSan matrix now passes all 50 boots, with zero corruption,
+external-kill, inject-miss, timing or other classifications. The verified receipt
+is work/oct4-hidden-storage/matrix-verified.json (implementation8b2212c0e);
+all four protected drafts match their original bytes. No ASan, Pi,
+minimum-display or Main landing claim. Clipboard
 activation and application/modal work remain incomplete under HI1-R24.
 
 HI1-R31 is repaired: the complete failing inventory was 13 masters, 39 stdio
@@ -67,7 +72,8 @@ allocation ledger and partial-output cancellation. Clipboard/modal clients and
 status/caret integration remain unfinished; the feature is still nondefault.
 Four separate drafts are preserved. No Main landing, fresh SMP/sanitizer/Pi or
 minimum-display qualification. Option 1 in HALCYON-HIDDEN-WEAVE-REVIEW.md is now approved; the original
-full-size workload now passes; broader qualification is still pending.
+full-size workload and the subsequent 50-boot matrix now pass; hardware and
+failed-reveal notice qualifications are still pending.
 
 ## Full-service admission repair (October 4)
 

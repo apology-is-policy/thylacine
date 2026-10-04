@@ -16,7 +16,8 @@ updated: 2026-10-04
 ---
 ## Cooperative hidden storage (October 4)
 
-TAPESTRY-STORAGE.md is implemented on Astra, with qualification in progress.
+TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and
+the five-row50boot SMP/UBSan matrix pass.
 Owned content opt-in, TEV_STORAGE13 and exact visibility tokens preserve the
 semantic surface while retiring hidden pixels. Fresh pixel generations bind
 weave/present fids; full unheld repaint precedes publication. Client mapping,
@@ -31,8 +32,9 @@ storage, and withhold blind input until a successful repaint.
 stale offer/fid, mapping pin/nonalias, first-full-frame, abort/retry and legacy
 checks pass. Actual mapping refusal after22retained generations recovers after
 release without surface destruction. Full-width16PTY/14controller physicalF10
-passes; hidden output survives reveal and resize. Full qualification, visible
-failure capture and application activation remain open. Evidence and limitations:
+passes; hidden output survives reveal and resize. The matrix has50individualPASS outcomes and zero in every failure class.
+Its boot coverage does not qualify graphical workloads, Pi or minimum displays;
+real Halcyon failed-reveal capture and application activation remain open. Evidence and limitations:
 docs/HALCYON-INTERACTION-STATUS.md, work/oct4-hidden-storage/self-review.md.
 
 ## Ordered ownership journal

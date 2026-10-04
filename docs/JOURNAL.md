@@ -1,5 +1,16 @@
 # The autonomous-run journal
 
+## 2026-10-04: hidden storage matrix completes
+
+Implementation8b2212c0e passed the default SMP1/4/8 and UBSan SMP4/8 matrix,
+ten boots per row. Every individual result and all failure classifications were
+checked:50PASS, zero corruption/external-kill/inject-miss/timing/other. Runner
+restored all four drafts and released Mac. Evidence is in
+work/oct4-hidden-storage/matrix-verified.json; the standard harness preserves
+outcomes but overwrites successful raw per-boot logs. No Pi, ASan, minimum-display
+or real Halcyon failed-reveal screenshot is claimed. Clipboard remains nondefault.
+
+
 ## 2026-10-04: hidden terminal storage approved
 
 The operator selected cooperative hidden-buffer suspension over retaining the
