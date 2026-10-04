@@ -2,7 +2,7 @@
 id: spec-loom-service-buffers
 type: spec
 title: "loom_service_buffers.tla: payload return is independent of CQ acknowledgement"
-models: [sub-kernel-loom]
+models: [sub-kernel-loom, sub-kernel-loom-pools]
 pins: [inv-i29, inv-i30, inv-i32]
 cfgs:
   - "check-loom-service-buffers.py clean-one: 464 states; one member/two leases/two generations"

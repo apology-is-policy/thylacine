@@ -64,6 +64,7 @@ set(KERNEL_SRCS
     pagemap.c
     image.c
     loom.c
+    loom_service_pool.c
     weft.c
     vma.c
     elf.c

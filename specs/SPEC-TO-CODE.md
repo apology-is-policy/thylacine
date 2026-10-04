@@ -3038,3 +3038,10 @@ Two clean configurations:464 and6416 states; eleven named mutant failures.
 Run specs/check-loom-service-buffers.py. No fairness on reply, delivery, CQ ack,
 payload return or peer close. Only local cleanup is weakly fair. One stream,
 no physical alias/weak-memory proof; see spec-loom-service-buffers for bounds.
+
+The pool core now binds Claim to loom_pool_claim, Reply's metadata commit to
+loom_pool_commit, Deliver's metadata transition to loom_pool_deliver, Return
+to loom_pool_return and Stop's member release to loom_pool_release_busy in
+kernel/loom_service_pool.c. Actual payload copy, paired shared-CQ publication,
+cancellation locking and scope Finalize/Retire remain owner integration gates.
+No new core helper reads CQ head.

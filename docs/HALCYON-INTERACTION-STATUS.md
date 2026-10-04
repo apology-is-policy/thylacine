@@ -2031,3 +2031,29 @@ retirement needs no peer, CQ delivery/ack or payload return fairness. Single
 stream; physical aliasing, real bytes, locks and multi-stream fairness remain
 actual-source/runtime requirements. Evidence: work/oct4-async-service/buffer-pools/model-passed.json.
 No private activation, new native boot or graphical qualification in this step.
+
+## AS-2e: bounded payload pool core (October 4)
+
+The dormant kernel pool module implements transactional provisional registration,
+combined64-member admission, canonical extent exclusion, BUSY/PENDING/LEASED
+transitions, full-incarnation/nonce returns and retained results independent of
+source refs. No CQ-head hook, peer I/O, allocations, callbacks or private setup
+activation. Caller lock, exact backing pins/charges, fixed-I/O exclusion, shared
+CQ publication and owner cancellation remain explicit integration obligations.
+
+Actual-source host ASan/UBSan and eleven intended semantic mutations pass. The
+shared native fixture runs inside loom.register_buffers; fresh CI image boots
+1830/1830. Metadata ledger: bank5128, descriptor32, cell80, copied result48bytes;
+these are sizes, not allocation-charge measurements. Relevant broad SMP/UBSan
+qualification remains owed for the new core; earlier50/50 was the AS-2a-d base.
+No graphical/Pi/runtime-client result is claimed.
+
+First fixture compile failed on POSIX errno names: corrected to canonical T_E_*.
+Shared-fixture extraction then produced two wrong member names: compiler caught
+both; fixed before execution. First native wrapper treated quaestor's expected
+unowned-path return1 as a fatal error, before any build; corrected and adopted
+new surfaces into a pool dossier and existing Loom tests into the Loom dossier.
+Logs and diagnoses remain in work/oct4-async-service/buffer-pools.
+
+Host evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/buffer-pools/core-1791139023201923000
+Native evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/buffer-pools/native-1791139106929169000

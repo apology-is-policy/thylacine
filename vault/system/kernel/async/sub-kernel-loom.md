@@ -5,6 +5,7 @@ parent: moc-kernel-async
 title: "Loom — the io_uring inversion over 9P"
 code:
   - kernel/loom.c
+  - kernel/test/test_loom.c
   - kernel/include/thylacine/loom.h
   - kernel/include/thylacine/loom_service_abi.h
   - tools/check-loom-service-abi.py
@@ -670,3 +671,7 @@ enabled and the ownership model/implementation are still owed.
 and source-local retirement from retained pool completions. Two bounded clean
 runs (464/6416 states) and eleven named counterexamples pass. This is a design
 model, with no enabled kernel pool handler or claim of actual payload safety yet.
+
+The dormant pool transition module and shared native fixture are documented in
+[[sub-kernel-loom-pools]]. Actual Loom buffer tests exercise it, but the private
+setup flags and ring dispatch remain disabled pending owner integration.

@@ -387,3 +387,39 @@ not imported into the new retirement proof. Successful pending payloads survive
 Retire; pool re-creation requires all leases gone. Model enumerates a single
 stream and abstracts bytes as unique nonces; implementation gates must not use
 this result as proof of physical lifetime or cross-stream scheduling.
+
+## AS-2e: bounded payload pool core (October 4)
+
+The dormant kernel pool module implements transactional provisional registration,
+combined64-member admission, canonical extent exclusion, BUSY/PENDING/LEASED
+transitions, full-incarnation/nonce returns and retained results independent of
+source refs. No CQ-head hook, peer I/O, allocations, callbacks or private setup
+activation. Caller lock, exact backing pins/charges, fixed-I/O exclusion, shared
+CQ publication and owner cancellation remain explicit integration obligations.
+
+Actual-source host ASan/UBSan and eleven intended semantic mutations pass. The
+shared native fixture runs inside loom.register_buffers; fresh CI image boots
+1830/1830. Metadata ledger: bank5128, descriptor32, cell80, copied result48bytes;
+these are sizes, not allocation-charge measurements. Relevant broad SMP/UBSan
+qualification remains owed for the new core; earlier50/50 was the AS-2a-d base.
+No graphical/Pi/runtime-client result is claimed.
+
+First fixture compile failed on POSIX errno names: corrected to canonical T_E_*.
+Shared-fixture extraction then produced two wrong member names: compiler caught
+both; fixed before execution. First native wrapper treated quaestor's expected
+unowned-path return1 as a fatal error, before any build; corrected and adopted
+new surfaces into a pool dossier and existing Loom tests into the Loom dossier.
+Logs and diagnoses remain in work/oct4-async-service/buffer-pools.
+
+Host evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/buffer-pools/core-1791139023201923000
+Native evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/buffer-pools/native-1791139106929169000
+
+Self-review, not independent audit: all prepare validation precedes mutation;
+provisional quota/exclusion is immediately visible; no pin/callback occurs here;
+exact returns inspect private cells; byte-count maximum is signed-CQE bounded;
+nonce exhaustion precedes empty-pool wait; snapshot clears ABI reserved fields;
+stream release cannot clear pending/leased cells. Rotation is only among pool
+members: inter-stream fairness is a required owner policy still to implement.
+Code carries no completion publication/final ordering claim beyond its stored
+result. Native helper returns errors to outer assertion. Reap has no teardown
+shortcut that would falsely acknowledge consumer leases.

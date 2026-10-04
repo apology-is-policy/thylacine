@@ -317,7 +317,11 @@ void test_loom_register_replaces(void) {
 // I-30 buffer-pin substrate), exposing its contiguous direct-map slice for
 // zero-copy payload. Mirrors specs/loom.tla's `reg` slot + ObjPinnedToSnapshot.
 // ---------------------------------------------------------------------------
+#include "private_pool_fixture.h"
+
 void test_loom_register_buffers(void) {
+    const char *pool_error = private_pool_fixture_run();
+    TEST_ASSERT(pool_error == NULL, pool_error);
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc");
 
