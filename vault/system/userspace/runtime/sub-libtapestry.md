@@ -20,13 +20,26 @@ design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
 updated: 2026-10-04
 ---
-## Approved hidden storage extension (October 4)
+## Cooperative hidden storage (October 4)
 
-TAPESTRY-STORAGE.md records the approved cooperative suspension contract.
-Keep semantic surfaces and release hidden pixel generations, with compositor
-visibility, fresh generation-bound fids, full repaint on reveal and existing
-backend retirement pins. No kernel quota increase. The companion [[spec-tapestry-storage]] is clean at 287 states and
-seven named counterexamples; production implementation is still pending; HI1-R30 and its original full-size pressure failure remain open.
+TAPESTRY-STORAGE.md is implemented on Astra, with qualification in progress.
+Owned content opt-in, TEV_STORAGE13 and exact visibility tokens preserve the
+semantic surface while retiring hidden pixels. Fresh pixel generations bind
+weave/present fids; full unheld repaint precedes publication. Client mapping,
+Tapestry generation, backend import and scanout each retain their own lifetime
+obligation. There is no quota increase or forced reclaim. Legacy clients keep
+their prior lifecycle. The library exposes open_storage_claim_on, handle_storage,
+is_drawable and is_ready; the renderer must quiesce pixel borrows before handling
+storage, and withhold blind input until a successful repaint.
+
+[[spec-tapestry-storage]]:287states/7namedmutants; existing present model6clean/
+10namedmutants.122Tapestry+23library tests;11actual-source mutations. Native
+stale offer/fid, mapping pin/nonalias, first-full-frame, abort/retry and legacy
+checks pass. Actual mapping refusal after22retained generations recovers after
+release without surface destruction. Full-width16PTY/14controller physicalF10
+passes; hidden output survives reveal and resize. Full qualification, visible
+failure capture and application activation remain open. Evidence and limitations:
+docs/HALCYON-INTERACTION-STATUS.md, work/oct4-hidden-storage/self-review.md.
 
 ## Local ordered-stream progress
 

@@ -2,7 +2,7 @@
 
 Binding scope approved October 4, 2026, option 1 of
 HALCYON-HIDDEN-WEAVE-REVIEW.md. This is the protocol and implementation contract;
-implementation and qualification are still pending. I-40 and the existing
+implementation is on Astra and qualification is in progress. I-40 and the existing
 Tapestry ownership, placement, event and resize contracts continue to apply.
 
 ## Purpose and bounds

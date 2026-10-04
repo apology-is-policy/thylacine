@@ -48,7 +48,7 @@ use libthyla_rs::{
 };
 use tapestry::{
     DisplayInfo, EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY,
-    TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE,
+    TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE, TEV_STORAGE,
 };
 
 use crate::chromeset::{self, read_file, ChromeAction};
@@ -906,8 +906,8 @@ impl SessionTile {
         gs: &mut GlyphSource,
         sheet: &Sheet,
     ) -> bool {
-        if !self.dirty {
-            return true;
+        if !self.dirty || !self.surf.is_drawable() {
+            return true; // retain semantic dirtiness while pixels are absent
         }
         self.dirty = false;
         let (sw, sh) = (self.surf.w as usize, self.surf.h as usize);
@@ -1245,6 +1245,7 @@ fn reconcile(
     // The session's resolved terminal palette: a tile created LATER must be
     // born in the same theme as the ones already up.
     palette: vt::Palette,
+    status: &mut statusset::StatusBar,
 ) {
     let layout = match read_file(troot, "layout") {
         Some(s) => s,
@@ -1314,7 +1315,7 @@ fn reconcile(
         // Mint at the leaf's own content rect (a CONFIGURE still corrects any
         // staleness); fall back to the display size if geometry is unreadable.
         let (w, h) = leaf_geometry(troot, leaf).unwrap_or((geom.disp_w, geom.disp_h));
-        let surf = match Surface::open_claim_on(ring, w, h, token) {
+        let surf = match Surface::open_storage_claim_on(ring, w, h, token) {
             Ok(s) => s,
             Err(e) => {
                 // A leaf the compositor cannot host (the surface pool is at
@@ -1325,6 +1326,7 @@ fn reconcile(
                     leaf,
                     e
                 );
+                status.notify("Cannot open terminal: display resources unavailable", true);
                 let mut cmd = alloc::string::String::new();
                 let _ = core::fmt::write(&mut cmd, format_args!("close {}", leaf));
                 layout_verb(troot, &cmd);
@@ -2214,6 +2216,7 @@ pub fn run(home: Option<String>) -> i64 {
         // any wait (first-present-wins scanout; frame ticks reach only visible
         // surfaces).
         for t in tiles.values_mut() {
+            if !t.surf.is_drawable() { continue; }
             // HALCYON 14.3: an open synchronized frame holds this tile's
             // paint, and only this tile's; a gone child's never waits.
             if t.dirty && t.exit.is_none() && t.tile.hold.holds(now_ns) {
@@ -2269,6 +2272,21 @@ pub fn run(home: Option<String>) -> i64 {
                 match t.surf.poll_event() {
                     Ok(Some(e)) => match e.kind {
                         TEV_CLOSE => reap.push(leaf),
+                        TEV_STORAGE => match t.surf.handle_storage(&e) {
+                            Ok(resumed) => {
+                                if resumed { t.fit_to_surface(geom, &mut wire_out); }
+                                t.dirty = true;
+                                t.tile.hold.cut();
+                                #[cfg(feature = "test-mode")]
+                                say!("halcyond: tile {} pixels {}", leaf,
+                                    if t.surf.is_drawable() { "resident" } else { "dormant" });
+                            }
+                            Err(TapError::Busy) => {} // superseded offer, keep the current mapping
+                            Err(e) => {
+                                say!("halcyond: tile {} storage refused {:?}", leaf, e);
+                                status.notify("Tab display unavailable; switch away and back to retry", true);
+                            }
+                        },
                         TEV_CONFIGURE => match t.surf.handle_configure(&e) {
                             Ok(_) => {
                                 t.fit_to_surface(geom, &mut wire_out);
@@ -2286,7 +2304,7 @@ pub fn run(home: Option<String>) -> i64 {
                         // A dead tile's keys drop (its ut is gone); a live
                         // tile only ever sees KEY when focused (compositor
                         // routing), so this is the focus-routed input path.
-                        TEV_KEY if t.exit.is_none() => {
+                        TEV_KEY if t.exit.is_none() && t.surf.is_ready() => {
                             // H-4d: on the VT's normal screen, Esc enters the
                             // transcript's Normal mode and Normal keeps every
                             // key (the Helix-modal boundary, HALCYON.md 4); a
@@ -2313,7 +2331,7 @@ pub fn run(home: Option<String>) -> i64 {
                         // an obj run's glyphs opens its verb menu at the
                         // pointer (the compositor focused the tile on the
                         // press; the menu grabs input while placed).
-                        TEV_PTR_BTN if t.exit.is_none() => {
+                        TEV_PTR_BTN if t.exit.is_none() && t.surf.is_ready() => {
                             if e.code == BTN_LEFT && e.value == 1 {
                                 let req = t.click(&rules, &sheet, &mut gs);
                                 // The receiver's witness (the compositor says
@@ -2405,6 +2423,7 @@ pub fn run(home: Option<String>) -> i64 {
                 home.as_deref(),
                 &mut places,
                 sheet.theme.terminal,
+                &mut status,
             );
             if tiles.is_empty() {
                 break;
@@ -2838,7 +2857,7 @@ pub fn run(home: Option<String>) -> i64 {
         // spin without ever reading the frame's close (14.3).
         if tiles
             .values()
-            .any(|t| t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
+            .any(|t| t.surf.is_drawable() && t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
         {
             continue;
         }
@@ -2923,7 +2942,7 @@ pub fn run(home: Option<String>) -> i64 {
         // may have hidden its cursor, and then there is nothing to wake for.
         // Re-sampled here rather than reused from (0e) so the deadline is
         // measured from the wait it bounds.
-        let caret_tick = if motion && tiles.values().any(|t| t.tile.paints_caret(inst_profile)) {
+        let caret_tick = if motion && tiles.values().any(|t| t.surf.is_drawable() && t.tile.paints_caret(inst_profile)) {
             Some(libhalcyon::motion::caret_next_step_ms(
                 libthyla_rs::time::monotonic_ns() / 1_000_000,
             ))
@@ -2936,7 +2955,7 @@ pub fn run(home: Option<String>) -> i64 {
         let hold_now = libthyla_rs::time::monotonic_ns();
         let hold_due = tiles
             .values()
-            .filter(|t| t.dirty && t.exit.is_none())
+            .filter(|t| t.surf.is_drawable() && t.dirty && t.exit.is_none())
             .filter_map(|t| t.tile.hold.due_ms(hold_now))
             .min();
         let timeout = libhalcyon::motion::fold_timeout(timeout, hold_due);

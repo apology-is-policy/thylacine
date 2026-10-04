@@ -33102,3 +33102,27 @@ This repairs HI1-R31 only. Hidden-buffer suspension is a separate, unratified
 scope/lifecycle proposal; the original larger pressure failure remains open.
 The full clipboard ledger and client/modal integration remain unfinished.
 Single-agent WIP checkpoint, no Main landing or fresh broad gate claims.
+
+
+## 2026-10-04 -- Astra: cooperative hidden terminal pixels
+
+Following the operator's option1 approval, scripture cfa478824 and model-first
+3a5c9a0e8 establish the separate pixel lifetime. Halcyon's growable ThylaAlloc
+heap was already in use; the observed refusal was the unchanged128MiB shared-map
+ceiling. Hidden terminal surfaces now release pixels cooperatively, preserving
+jobs/transcripts/geometry and reopening generation-bound fids on reveal. Full
+unheld repaint precedes input; refusal keeps the semantic pane and reports a
+retry notice. Lictor retirement pins and the independent SAK owners remain intact.
+
+122+23host tests,11source mutants, storage287states/7mutants and existing
+present6clean/10mutants pass. Native protocol36.67s proves stale refusal,
+pinned old-map nonalias, abort/retry and actual mapping refusal after22retained
+generations followed by recovery. Original full-width16PTY/14controller+F10
+passes107.63s; all14 reconnect. Hidden output/resize/close60.29s and existing
+media/manual/theme/SAK71.60s have inspected1280x800 captures. Boot1830/1830.
+Failed fixture attempts are retained with their polling/share-claim diagnoses.
+
+Single-agent WIP checkpoint: no Main landing or fresh full SMP/sanitizer/Pi/
+minimum-display claim. The real Halcyon failed-reveal notice still needs a
+capture. Clipboard/modal completion remains open. Evidence is in
+work/oct4-hidden-storage; review in HALCYON-HIDDEN-WEAVE-SELF-REVIEW.md.

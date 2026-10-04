@@ -115,6 +115,12 @@ and they grow with it. Dragging a divider stops at a limit, and a chord that
 would take a pane past one has no effect: on a display 1280 pixels wide, a
 row holds at most four panes side by side.
 
+A hidden terminal keeps running and receiving output. Halcyon can release its
+pixel buffers while retaining its transcript, then repaint when it becomes
+visible. If the status bar reports that a tab's display is unavailable, its
+program is still alive. Switch away and back to retry after display resources
+become available. Text input is withheld until the tab has repainted.
+
 ### Close a tile
 
 Super+Shift+Q closes the focused tile. If a command is still running in it,
@@ -378,6 +384,12 @@ which is why a program cannot delete the transcript.
 
 The session's transcripts share one memory budget. When the budget is
 exhausted, the oldest lines are removed first.
+
+The pixel buffers used to display a terminal have a separate lifetime and
+budget from its transcript and private heap. Hiding a tab can release these
+shared mappings without erasing text or suspending the program. Revealing it
+creates fresh buffers and paints the retained terminal state before accepting
+input. Other graphical applications keep their own buffer policy.
 
 ### When a tile's program ends
 

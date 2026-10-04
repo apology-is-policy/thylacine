@@ -5,22 +5,37 @@ Approved specification: `docs/HALCYON-INTERACTION.md`. Astra owns this arc in
 implementation and self-review, as the operator requested; no independent audit
 is claimed. The separate user-authority drafts remain untouched.
 
-## Live-tile pressure investigation (October 4, open)
+## Hidden terminal storage (October 4, implementation under qualification)
 
-HI1-R30 (open, display mapping admission): retaining real terminal controllers
-in full-size tabs reaches the existing 128 MiB shared-mapping limit before the
-clipboard controller reserve. With 11 parked controllers and 12 host bindings,
-Halcyon has 30387 pages mapped; the next triple-buffer weave requests 2613,
-exceeding 32768. Hidden tabs retain their weaves. The refused tile emits `layout verb "close 17" refused rc -2` after
-libtapestry destroys its partially created surface and Tapestry closes the
-hosting leaf. Source plus the preceding retire trace establish that this is a
-redundant close (ENOENT), not evidence of a leaked empty leaf. A visible
-capacity-refusal notice is still missing.
-This is a failed live-tile acceptance run, not a clipboard credit failure or a
-passing maximum-pressure check. The operator approved cooperative hidden-buffer suspension on October 4.
-TAPESTRY-STORAGE.md (scripture cfa478824) specifies the lifecycle. Its
-companion storage model explores 287 states and seven intended named violations;
-production implementation and native qualification are pending. No quota change is authorized or made.
+HI1-R30: the original full-width mapping-pressure workload now passes with the
+approved cooperative storage lifecycle, within unchanged limits. The failure
+was 30387 mapped pages plus2613 requested exceeding32768 (128MiB), separate
+from Halcyon's growable private heap. The original failed evidence is retained.
+
+Scripture cfa478824 and model-first3a5c9a0e8 precede implementation. Owned content
+surfaces opt in; hidden pixels retire only after client quiescence and backend
+unbind. Semantic panes/jobs/transcripts persist. Fresh generation-bound weave
+and present fids plus a complete unheld first repaint precede reveal. Allocation
+or mapping refusal keeps the job and reports a visible retry notice. No kernel
+mapping, PTY, service, fid or surface ceiling is increased.
+
+Measured:122Tapestry+23libtapestry host tests, storage model287states/7named
+mutants, all6existing present configurations/10namedmutants, and11actual-source
+mutant failures. Fresh CI boot1830/1830. Original full-width16PTY/14controller
+pressure and physicalF10 restore pass107.63s; all14controllers reconnect.
+Native protocol36.67s verifies stale offers/fids, retained-map pin/nonalias,
+full-first-frame gating, abort, later retry and legacy sibling. A real mapping
+refusal after22retained generations recovers after release without losing the
+surface; shell health/logout pass. Hidden output/resize/close60.29s has five
+inspected1280x800 captures, including preserved output and the still-live shell.
+
+Evidence: work/oct4-hidden-storage, including paired images, source pins,
+failed fixture runs and self-review. The fixture corrections concern SQPOLL
+progress and consume-once mapping grants; no failed run is labelled a pass.
+The notice is implemented but a real Halcyon failed-reveal screenshot remains
+unverified. Legacy media/manual regression passes71.60s with inspected captures; broad qualification remains open;
+no new SMP/sanitizer, Pi, minimum-display or Main landing claim. Clipboard
+activation and application/modal work remain incomplete under HI1-R24.
 
 HI1-R31 is repaired: the complete failing inventory was 13 masters, 39 stdio
 slaves, 13 control and 13 readiness fids, plus two unopened roots: exactly 80.
@@ -43,15 +58,16 @@ old connection is closed and all fourteen controllers reconnect/read/cancel
 successfully. Final run: 107.68 s at 1280x800. Captures and exact source/image
 manifests are in work/oct4-hi-pressure/graphics-1791094456386770000.
 
-Evidence and single-agent review: work/oct4-hi-pressure. The full-size mapping
-failure and the original over-capacity scenario remain failed. This narrower
+Evidence and single-agent review: work/oct4-hi-pressure. The earlier full-size mapping
+failure is superseded by the matched hidden-storage witness above; the original
+over-capacity scenario remains a failed attempt. This narrower
 positive proves the existing sixteen-PTY envelope, not 32 controllers or all
 pane shapes. HI1-R24 still owns mixed/multiple-session demand, the complete
 allocation ledger and partial-output cancellation. Clipboard/modal clients and
 status/caret integration remain unfinished; the feature is still nondefault.
 Four separate drafts are preserved. No Main landing, fresh SMP/sanitizer/Pi or
 minimum-display qualification. Option 1 in HALCYON-HIDDEN-WEAVE-REVIEW.md is now approved; the original
-full-size failure stays red until its matching workload passes the new lifecycle.
+full-size workload now passes; broader qualification is still pending.
 
 ## Full-service admission repair (October 4)
 

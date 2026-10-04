@@ -26,6 +26,7 @@ mod clipboard_client;
 mod admission_deadline;
 mod observer;
 mod admission;
+mod storage;
 #[path = "../../halcyond/src/clipboard.rs"]
 mod clipboard;
 #[path = "../../halcyond/src/clipbroker.rs"]
@@ -182,6 +183,7 @@ pub extern "C" fn rs_main() -> i64 {
         if arg == b"--readiness-failure-server" { return readiness_qualification::failure_server(); }
         if arg == b"--service-owner" { return service_owner::run(); }
         if arg == b"--readiness" { return readiness::run(); }
+        if arg == b"--storage" { return storage::run(); }
         if arg == b"--clipboard" { return clipboard_client::run(); }
         if arg == b"--service-capacity" { return service::capacity(); }
         if arg == b"--service-capacity-excess" { return service::capacity_excess(); }

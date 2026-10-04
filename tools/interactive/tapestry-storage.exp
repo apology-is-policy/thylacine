@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+# Console boot: real generation-bound surface protocol and library handling.
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "kaua-term-probe --storage"
+expect {
+    -ex "storage-probe: PASS" {lc_pass "live Tapestry storage generations and retry"}
+    -re {storage-probe: FAIL[^\r\n]*\r?\n} {lc_fail "storage protocol probe failed"}
+    timeout {lc_fail "storage protocol probe timed out"}
+}
+lc_run_expect "echo storage-shell-live | tr a-z A-Z" "STORAGE-SHELL-LIVE"
+lc_quit
+exit 0

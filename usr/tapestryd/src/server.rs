@@ -886,6 +886,8 @@ pub const TEV_LAYOUT: u16 = 10;
 pub const TEV_PTR_LEAVE: u16 = 11;
 /// HALCYON-INSTRUMENT 9.3 (I-7): a picker/help chord to the rail owner.
 pub const TEV_CHORD: u16 = 12;
+/// TAPESTRY-STORAGE v1: code 1 suspend / 2 resume, value+rune = u64 token.
+pub const TEV_STORAGE: u16 = 13;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -960,6 +962,8 @@ impl FrameIntent {
 }
 
 struct Surface {
+    // Pixel residency is independent of this surface/hosting incarnation.
+    storage: tapestryd::storage::Storage,
     cursor: libhalcyon::cursor::Shape,
     gen: u32,        // the slot-reuse guard (net-3d); fids capture it at bind
     owner_conn: u64, // F2: the minting conn's id
@@ -2701,6 +2705,7 @@ impl Comp {
         // Surface incarnations used by pending admission must never repeat.
         self.gen_seq = self.gen_seq.checked_add(1)?;
         self.surfaces[n] = Some(Surface {
+            storage: tapestryd::storage::Storage::new(),
             cursor: libhalcyon::cursor::Shape::Arrow,
             gen: self.gen_seq,
             owner_conn: conn_id,
@@ -3046,6 +3051,125 @@ impl Comp {
                 }
             }
         }
+    }
+
+    /// Storage visibility is placement, not focus or missed FRAME ticks.
+    fn storage_visible(&self, n: usize) -> bool {
+        self.surface_target(n).is_some() && self.surf(n).is_some_and(|s| !s.backgrounded)
+    }
+    fn storage_unbound(&self, n: usize) -> bool {
+        self.surf(n).is_some_and(|s| s.gl_src.is_none() && (self.bound_res == 0 ||
+            (!s.res_ids.contains(&self.bound_res) && !s.old_weave.as_ref()
+                .is_some_and(|(_, ids)| ids.contains(&self.bound_res)))))
+    }
+    fn storage_sync(&mut self) {
+        let mut wedged = Vec::new();
+        for n in 0..MAX_SURFACES {
+            if !self.surf(n).is_some_and(|s| s.storage.enabled()) { continue; }
+            let visible = self.storage_visible(n);
+            let unbound = self.storage_unbound(n);
+            let offer = self.surf_mut(n).unwrap().storage.reconcile(visible, unbound);
+            if let Some(o) = offer {
+                let ev = Tevent { kind: TEV_STORAGE, code: o.kind as u16,
+                    value: o.token as u32, rune: (o.token >> 32) as u32,
+                    mods: 0, flags: 0, tick: self.tick };
+                if !self.push_event(n, ev) { wedged.push(n); }
+            }
+        }
+        for n in wedged { self.retire(n); }
+    }
+    /// Caller already proved no bound scanout and invalidated pixel admission.
+    /// Existing Lictor pins survive ambiguous backend retire completion; neither
+    /// this handle close nor the client's later clunk bypasses those references.
+    fn storage_retire_pixels(&mut self, n: usize) {
+        let s = self.surf_mut(n).unwrap();
+        let current = s.weave.take();
+        let ids = core::mem::replace(&mut s.res_ids, [0; WEAVE_SLOTS as usize]);
+        let old = s.old_weave.take();
+        s.shown_slot = None;
+        s.held = None;
+        s.slot_stride = 0;
+        s.comp_attached = false;
+        s.res_stale = [true; WEAVE_SLOTS as usize];
+        s.ack_deferred = false;
+        s.slots_presented = 0;
+        s.patchwork = false;
+        if let Some(w) = current { self.release_gen(&w, &ids); }
+        if let Some((w, ids)) = old { self.release_gen(&w, &ids); }
+    }
+    fn storage_ctl(&mut self, n: usize, command: &str) -> Result<(), u32> {
+        if command == "1" {
+            let s = self.surf_mut(n).ok_or(p9::E_NOENT)?;
+            if s.storage.enabled() { return Ok(()); }
+            if s.weave.is_none() || s.chrome_bind.is_some() || s.is_menu || s.is_status || s.is_rail
+                || s.gl_src.is_some() { return Err(p9::E_INVAL); }
+            s.storage.enable();
+            self.storage_sync();
+            return Ok(());
+        }
+        let mut words = command.split_ascii_whitespace();
+        let verb = words.next().ok_or(p9::E_INVAL)?;
+        let raw = words.next().ok_or(p9::E_INVAL)?;
+        if !raw.bytes().all(|b| b.is_ascii_digit()) || words.next().is_some() { return Err(p9::E_INVAL); }
+        let token: u64 = raw.parse().map_err(|_| p9::E_INVAL)?;
+        self.storage_sync(); // current placement, including a visibility reversal
+        match verb {
+            "suspend" => {
+                let safe = !self.storage_visible(n) && self.storage_unbound(n);
+                self.surf_mut(n).ok_or(p9::E_NOENT)?.storage.suspend(token, safe).map_err(|_| E_AGAIN)?;
+                self.storage_retire_pixels(n);
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: storage suspended surface {} token {}", n, token);
+            }
+            "resume" => {
+                if !self.storage_visible(n) { return Err(E_AGAIN); }
+                let target = self.surface_target(n).ok_or(E_AGAIN)?;
+                self.surf_mut(n).ok_or(p9::E_NOENT)?.storage.resume(token).map_err(|_| E_AGAIN)?;
+                let allocated = self.alloc_weave(n, target.w, target.h);
+                let (weave, stride, ids, attached) = match allocated {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = self.surf_mut(n).unwrap().storage.abort(token);
+                        return Err(e);
+                    }
+                };
+                let s = self.surf_mut(n).unwrap();
+                s.weave = Some(weave); s.slot_stride = stride; s.res_ids = ids;
+                s.comp_attached = attached; s.w = target.w; s.h = target.h;
+                s.state = SurfState::Woven; s.res_stale = [true; WEAVE_SLOTS as usize];
+                s.shown_slot = None; s.held = None; s.offered = None;
+                s.slots_presented = 0; s.patchwork = false; s.presents = 0;
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: storage resumed surface {} token {} generation {} {}x{}",
+                    n, token, s.storage.generation(), s.w, s.h);
+                self.reconcile();
+            }
+            "abort" => {
+                if !self.storage_unbound(n) { return Err(E_AGAIN); }
+                self.surf_mut(n).ok_or(p9::E_NOENT)?.storage.abort(token).map_err(|_| E_AGAIN)?;
+                self.storage_retire_pixels(n);
+                // Repaint the compositor floor, never retain a failed image.
+                self.geom_sig = self.geom_sig.wrapping_add(1);
+                self.reconcile();
+            }
+            _ => return Err(p9::E_INVAL),
+        }
+        Ok(())
+    }
+    fn storage_presented(&mut self, n: usize) {
+        let pending = match self.surf_mut(n) {
+            Some(s) => {
+                s.storage.presented();
+                s.offered.filter(|(_, w, h)| *w != s.w || *h != s.h)
+            }
+            None => return,
+        };
+        // A configure can arrive during a resume's first repaint, with no
+        // displaced weave to trigger the ordinary deferred-resize re-offer.
+        if let Some((_, w, h)) = pending {
+            if !self.emit_configure_to(n, w, h) { self.retire(n); return; }
+        }
+        self.reconcile();
     }
 
     fn release_gen(&mut self, w: &Weave, res_ids: &[u32; WEAVE_SLOTS as usize]) {
@@ -5302,7 +5426,7 @@ impl Comp {
 
     fn resize_ack_inner(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
         let s = self.surf(n).ok_or(p9::E_BADF)?;
-        if s.weave.is_none() {
+        if s.weave.is_none() && (!s.storage.enabled() || s.storage.resident()) {
             return Err(p9::E_INVAL); // no generation to reweave
         }
         let (os, ow, oh) = s.offered.ok_or(p9::E_INVAL)?;
@@ -5319,6 +5443,11 @@ impl Comp {
         if w != ow || h != oh {
             return Err(p9::E_INVAL); // the ack must echo the offer
         }
+        if s.storage.enabled() && !s.storage.resident() {
+            let s = self.surf_mut(n).unwrap();
+            s.w = w; s.h = h; s.offered = None;
+            return Ok(()); // semantic geometry only, no hidden allocation
+        }
         if w == s.w && h == s.h {
             // A same-size offer (the redraw request) acked: legal no-op.
             self.surf_mut(n).unwrap().offered = None;
@@ -5331,10 +5460,13 @@ impl Comp {
             return Err(E_AGAIN);
         }
 
+        let next_storage = s.storage.resized().map_err(|_| E_AGAIN)?;
         // Reweave: mint the new generation FIRST (a failure leaves the
         // current one untouched and the offer standing for a retry).
         let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
         let s = self.surf_mut(n).unwrap();
+        s.storage = next_storage;
+        if s.storage.enabled() { s.shown_slot = None; }
         let old = s.weave.take().unwrap();
         let old_res = s.res_ids;
         s.old_weave = Some((old, old_res));
@@ -7603,7 +7735,8 @@ impl Comp {
             // must agree: a lone foreground leaf beside a zero-rect
             // backgrounded one is borderless (recompute counts foreground
             // leaves), and this conjunct is the guard that it stayed so.
-            let full = self.surf(n).is_some_and(|s| s.w == dw && s.h == dh)
+            let full = self.surf(n).is_some_and(|s| s.w == dw && s.h == dh
+                && (!s.storage.enabled() || s.storage.phase() == tapestryd::storage::Phase::Resident))
                 && active_vis[0].2
                     == (Rect {
                         x: 0,
@@ -7833,6 +7966,7 @@ impl Comp {
             }
         }
         self.focus_sync();
+        self.storage_sync();
     }
 
     /// Emit the TEV_FOCUS lost/gained pair when the focused surface
@@ -9076,6 +9210,14 @@ impl Comp {
                 return true;
             }
         }
+        if ev.kind == TEV_STORAGE {
+            // Latest state replaces an unread offer; ctl validates delivered
+            // old tokens too. No queue growth under repeated visibility flips.
+            if let Some(old) = s.events.iter_mut().find(|e| e.kind == TEV_STORAGE) {
+                *old = ev;
+                return true;
+            }
+        }
         if ev.kind == TEV_CONFIGURE {
             // Unacked CONFIGUREs coalesce -- only the latest serial matters
             // (section 18.3): replace a queued unread one WHOLESALE.
@@ -9228,6 +9370,7 @@ impl Comp {
             self.reconcile();
         }
         self.comp_replay_deferred_imports();
+        self.storage_sync();
         // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
         // FRAME -- that is exactly what makes the console renderer's FRAME-driven
         // loop go dormant while the session owns the display.
@@ -9235,7 +9378,7 @@ impl Comp {
             .layout
             .visible_hosted()
             .iter()
-            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded && s.storage.resident()))
             .map(|v| v.1)
             .collect();
         vis.extend(self.visible_chrome().iter().map(|v| v.0));
@@ -10319,6 +10462,7 @@ struct Fid {
     path: u64,
     gen: u32, // the surface generation captured at bind (0 for static qids)
     opened: bool,
+    pixel_gen: u64, // capture at open; checked only by opted-in pixel files
     interaction: Option<interaction::Transaction>,
 }
 // Includes the exact request/decision cache; fixed across all eight connections.
@@ -15644,6 +15788,7 @@ impl Conn {
                 gen,
                 opened: false,
                 interaction: None,
+                pixel_gen: 0,
             });
             return true;
         }
@@ -15655,6 +15800,7 @@ impl Conn {
                     gen,
                     opened: false,
                     interaction: None,
+                pixel_gen: 0,
                 });
                 true
             }
@@ -16263,6 +16409,7 @@ impl Conn {
                 gen,
                 opened: true,
                 interaction: None,
+                pixel_gen: 0,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16288,6 +16435,7 @@ impl Conn {
                 gen: 0,
                 opened: true,
                 interaction: None,
+                pixel_gen: 0,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16309,6 +16457,7 @@ impl Conn {
                 gen: 0,
                 opened: true,
                 interaction: None,
+                pixel_gen: 0,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16344,6 +16493,10 @@ impl Conn {
         if is_pane(f.path) && comp.layout.slot_of_id(pane_id(f.path)).is_none() {
             return self.err(tag, p9::E_NOENT);
         }
+        let pixel_gen = if is_surf(f.path) {
+            comp.surf(surf_n(f.path)).map_or(0, |s| s.storage.generation())
+        } else { 0 };
+        self.fids[i].as_mut().unwrap().pixel_gen = pixel_gen;
         self.fids[i].as_mut().unwrap().opened = true;
         let q = self.qid_of(f.path);
         p9::build_rlopen(&mut self.out_buf, tag, &q, 0)
@@ -17290,7 +17443,7 @@ impl Conn {
             }
             FK_WEAVE => {
                 let surf = comp.surf(n).unwrap();
-                if surf.state == SurfState::Minted {
+                if surf.state == SurfState::Minted || surf.weave.is_none() || !surf.storage.admits(f.pixel_gen) {
                     return self.err(tag, p9::E_INVAL);
                 }
                 let mut s = String::new();
@@ -17908,6 +18061,11 @@ impl Conn {
                 Err(e) => self.err(tag, e),
             },
             FK_PRESENT => {
+                if !comp.surf(n).is_some_and(|s| s.weave.is_some() && s.storage.admits(f.pixel_gen)) {
+                    return self.err(tag, p9::E_BADF);
+                }
+                let repainting = comp.surf(n).is_some_and(|s| s.storage.enabled()
+                    && s.storage.phase() == tapestryd::storage::Phase::Repainting);
                 #[cfg(feature = "test-mode")]
                 if core::mem::take(&mut self.seat_park_next) {
                     // Deterministic qualification only: hold this owned present
@@ -17939,6 +18097,10 @@ impl Conn {
                 let r = self.present(comp, n, a.data);
                 let arm = comp.cost_arm;
                 comp.cost_add(arm, t0);
+                if repainting {
+                    if r.is_ok() { comp.storage_presented(n); }
+                    else if let Some(s) = comp.surf_mut(n) { s.shown_slot = None; }
+                }
                 match r {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
@@ -19083,6 +19245,9 @@ impl Conn {
             comp.surf_mut(n).ok_or(p9::E_NOENT)?.cursor = shape;
             return Ok(());
         }
+        if let Some(rest) = s.strip_prefix("storage ") {
+            return comp.storage_ctl(n, rest);
+        }
         if let Some(rest) = s.strip_prefix("create ") {
             let mut it = rest.split_ascii_whitespace();
             let w: u32 = it
@@ -19293,6 +19458,7 @@ impl Conn {
                 comp.gl_retarget(n);
                 return Ok(());
             }
+            if comp.surf(n).is_some_and(|s| s.storage.enabled()) { return Err(p9::E_INVAL); }
             let v: u32 = rest.parse().map_err(|_| p9::E_INVAL)?;
             if !comp
                 .warp_ctxs
@@ -19395,6 +19561,11 @@ impl Conn {
             }
         }
 
+        let covers_full = rects_cover_full(&rects, w, h);
+        let st = &comp.surf(n).ok_or(p9::E_BADF)?.storage;
+        if !st.accepts_present(st.generation(), covers_full, hold) {
+            return Err(p9::E_INVAL);
+        }
         // #164: past every validation gate = a well-formed present, on
         // any routing arm below. Malformed spam never reaches this line,
         // so it cannot hold the clock awake; hidden-surface presents are
@@ -19425,7 +19596,6 @@ impl Conn {
         // (rects_cover_full): the battery's multi-rect leg presents the
         // full frame as two tiles, which a single-full-rect shortcut
         // falsely latched (the moveB pane-center regression).
-        let covers_full = rects_cover_full(&rects, w, h);
         let mut latched = false;
         if let Some(s) = comp.surf_mut(n) {
             s.slots_presented |= 1 << slot;
@@ -20390,6 +20560,9 @@ impl Conn {
         let n = surf_n(f.path);
         if !comp.surf_owned(n, self.conn_id, f.gen) {
             return self.err(tag, p9::E_NOENT);
+        }
+        if !comp.surf(n).is_some_and(|s| s.weave.is_some() && s.storage.admits(f.pixel_gen)) {
+            return self.err(tag, p9::E_BADF);
         }
         match comp.weft_ensure(n) {
             Some((share_id, size)) => p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0),

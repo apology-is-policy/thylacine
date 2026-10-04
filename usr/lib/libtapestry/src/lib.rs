@@ -164,6 +164,8 @@ pub const TEV_PTR_LEAVE: u16 = 11;
 /// has none of them there), while the CLOSE falls back to the compositor's
 /// own structural close.
 pub const TEV_CHORD: u16 = 12;
+/// Opt-in pixel storage: code 1 suspend / 2 resume, value+rune = u64 token.
+pub const TEV_STORAGE: u16 = 13;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]
@@ -297,6 +299,8 @@ pub struct Surface {
     /// rotation, so such a surface stays letterboxed however small its
     /// damage; a rotating client's partial present latches the crop.
     single_slot: bool,
+    storage_enabled: bool,
+    storage_ready: bool,
 }
 
 #[cfg(feature = "guest")]
@@ -466,7 +470,15 @@ impl Surface {
         Self::open_claim_on(&ring, w, h, token)
     }
 
+    /// Opt-in terminal surface. Handle TEV_STORAGE and check is_drawable before
+    /// borrowing pixels, is_ready before forwarding text input after reveal.
+    pub fn open_storage_claim_on(ring: &EventRing, w: u32, h: u32, token: u128) -> Result<Surface, TapError> {
+        Self::open_on_bound_inner(ring, w, h, Mint::Claim(token), true)
+    }
     fn open_on_bound(ring: &EventRing, w: u32, h: u32, mint: Mint) -> Result<Surface, TapError> {
+        Self::open_on_bound_inner(ring, w, h, mint, false)
+    }
+    fn open_on_bound_inner(ring: &EventRing, w: u32, h: u32, mint: Mint, storage_enabled: bool) -> Result<Surface, TapError> {
         // H-4b-3: a restored child's FIRST content surface consumes the
         // placement claim the restore tool seeded in its /env (13.7's opaque
         // cookie -- plain `open` lands it in the tool's target leaf without
@@ -539,6 +551,10 @@ impl Surface {
             return fail_created(ctl, &[ctl], TapError::Create);
         }
 
+        if storage_enabled {
+            let rc = unsafe { t_write(ctl, b"storage 1".as_ptr(), 9) };
+            if rc < 0 { return fail_created(ctl, &[ctl], errno_to_taperror(rc)); }
+        }
         // The weave: geometry read + the zero-copy map (Tweft under the
         // kernel's SYS_WEFT_MAP).
         let mut path = alloc::string::String::new();
@@ -614,6 +630,8 @@ impl Surface {
             presents: 0,
             slot_seen: [SLOT_UNSEEN; MAX_SLOTS],
             single_slot: false,
+            storage_enabled,
+            storage_ready: !storage_enabled,
         })
     }
 
@@ -674,6 +692,14 @@ impl Surface {
             return Err(errno_to_taperror(rc));
         }
 
+        if self.storage_enabled && !self.is_drawable() {
+            self.w=w; self.h=h; self.stride=w*4;
+            return Ok(()); // dormant geometry acknowledgement, no pixel map
+        }
+        self.install_weave(Some((w,h)))
+    }
+
+    fn install_weave(&mut self, expected: Option<(u32,u32)>) -> Result<(), TapError> {
         let mut path = alloc::string::String::new();
         let _ = core::fmt::write(&mut path, format_args!("surface/{}/weave", self.id));
         let new_fd = unsafe { t_open(self.root, path.as_ptr(), path.len(), T_OREAD) };
@@ -698,7 +724,9 @@ impl Surface {
                 return Err(TapError::Protocol);
             }
         };
-        if gw != w || gh != h || stride != w * 4 || nslots != self.nslots {
+        if expected.is_some_and(|v| v != (gw, gh)) || gw == 0 || gh == 0
+            || gw.checked_mul(4) != Some(stride) || nslots != self.nslots
+            || (stride as u64).checked_mul(gh as u64).is_none_or(|bytes| bytes > slot_stride) {
             unsafe { t_close(new_fd) };
             return Err(TapError::Protocol);
         }
@@ -708,9 +736,19 @@ impl Surface {
             return Err(TapError::Map);
         }
 
+        let (w, h) = (gw, gh);
+        let present = if self.storage_enabled {
+            let path = alloc::format!("surface/{}/present", self.id);
+            let fd = unsafe { t_open(self.root, path.as_ptr(), path.len(), T_OWRITE) };
+            if fd < 0 { unsafe { t_close(new_fd) }; return Err(TapError::Map); }
+            fd
+        } else { self.present_fd };
+        if self.storage_enabled && self.present_fd >= 0 { unsafe { t_close(self.present_fd) }; }
+        self.present_fd = present;
+        self.storage_ready = !self.storage_enabled;
         // The swap: the old fid's clunk drops the old generation's client
         // mapping (its VA is dead after this line).
-        unsafe { t_close(self.weave_fd) };
+        if self.weave_fd >= 0 { unsafe { t_close(self.weave_fd) }; }
         self.weave_fd = new_fd;
         self.map_va = map_va as u64;
         self.w = w;
@@ -722,6 +760,47 @@ impl Surface {
         // carries usable content.
         self.invalidate_slots();
         Ok(())
+    }
+
+    pub fn is_drawable(&self) -> bool { self.map_va != 0 }
+    /// False until the first completed full repaint after reveal.
+    pub fn is_ready(&self) -> bool { self.is_drawable() && self.storage_ready }
+    fn storage_command(&mut self, verb: &str, token: u64) -> Result<(), TapError> {
+        let cmd = alloc::format!("storage {} {}", verb, token);
+        let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
+        if rc < 0 { Err(errno_to_taperror(rc)) } else { Ok(()) }
+    }
+    /// Handle on the rendering owner, between completed presents. Busy means
+    /// an obsolete offer. Other failures preserve the semantic surface and
+    /// require a visible refusal notice. True means reveal needs a full paint.
+    pub fn handle_storage(&mut self, ev: &Event) -> Result<bool, TapError> {
+        if ev.kind != TEV_STORAGE || !self.storage_enabled { return Ok(false); }
+        let token = (ev.rune as u64) << 32 | ev.value as u64;
+        if token == 0 || ev.mods != 0 || ev.flags != 0 { return Err(TapError::Protocol); }
+        match ev.code {
+            1 => {
+                // A visibility reversal can refuse: retain the old mapping
+                // until Rwrite so that refusal leaves a usable resident image.
+                self.storage_command("suspend", token)?;
+                self.map_va=0; self.storage_ready=false; self.invalidate_slots();
+                for fd in [&mut self.weave_fd, &mut self.present_fd] {
+                    let old=core::mem::replace(fd,-1);
+                    if old >= 0 { unsafe { t_close(old) }; }
+                }
+                Ok(false)
+            }
+            2 => {
+                self.storage_command("resume", token)?;
+                if let Err(e) = self.install_weave(None) {
+                    // Failed setup holds no new fid. Retire only the exact
+                    // unpresented generation; never destroy this terminal.
+                    let _ = self.storage_command("abort", token);
+                    return Err(e);
+                }
+                Ok(true)
+            }
+            _ => Err(TapError::Protocol),
+        }
     }
 
     /// BUFFER AGE of the slot `pixels` is about to hand out (GPU-DESIGN
@@ -778,6 +857,7 @@ impl Surface {
 
     /// The CURRENT draw slot's pixels (u32 BGRA little-endian: 0xAARRGGBB).
     pub fn pixels(&mut self) -> &mut [u32] {
+        assert!(self.is_drawable(), "pixels requested on a dormant surface");
         let base = self.map_va + (self.cur_slot as u64) * self.slot_stride;
         let count = (self.w as usize) * (self.h as usize);
         // SAFETY: the mapped weave covers nslots * slot_stride bytes and
@@ -914,6 +994,7 @@ impl Surface {
     }
 
     fn submit_present(&mut self, flags: u32, rects: &[Rect]) -> Result<(), TapError> {
+        if !self.is_drawable() { return Err(TapError::Present); }
         if rects.len() > MAX_RECTS {
             return Err(TapError::Present);
         }
@@ -957,6 +1038,7 @@ impl Surface {
             // bookkeeping must not advance either.
             return Err(TapError::Present);
         }
+        self.storage_ready = true;
         self.slot_seen[self.cur_slot as usize] = self.presents;
         self.presents += 1;
         if !self.single_slot {

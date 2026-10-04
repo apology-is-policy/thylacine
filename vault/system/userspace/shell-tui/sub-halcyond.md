@@ -4,6 +4,8 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - tools/interactive/ls-halcyon-hidden-storage.exp
+  - tools/interactive/ls-halcyon-storage-output.exp
   - usr/halcyond/src/hostbindings.rs
   - tools/test-host-bindings.py
   - tools/fixtures/interaction-protocol.rs
@@ -56,6 +58,17 @@ design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON
 created: 2026-09-05
 updated: 2026-10-04
 ---
+## Hidden terminal pixel residency (October 4)
+
+Terminal content uses the opt-in TAPESTRY-STORAGE lifecycle. Dormant tiles keep
+jobs/transcripts and dirty state, consume output, and skip pixel, caret and
+held-frame wake work. Resume maps fresh pixels and fully repaints before input
+is forwarded. A refused reveal preserves the job and displays a bounded notice;
+switch away/back retries. New-terminal admission failure also displays a notice.
+No private heap or shared-map quota increase. Full-width16PTY/14controllerF10
+and hidden-output/resize witnesses pass at1280x800; broader qualification and
+actual failed-reveal notice capture remain open. See interaction status.
+
 ## Prepared application transaction integration
 
 [[sub-halcyond-interaction-record]] owns fragmented HIN1 records and replay

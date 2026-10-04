@@ -222,3 +222,5 @@
 - HI-1 saturated native listener: paneplace, native service probe and service-capacity scenario.
 
 - HI-1 PTY handle envelope: ptyfs, clipboard park probe and graphical PTY-capacity scenario.
+
+- **Cooperative hidden terminal pixel storage** -- `usr/tapestryd/src/{storage,server}.rs`, libtapestry, Halcyon session and native storage probes: visibility/unbind, pixel generation fids, retained pins, complete first repaint, bounded failure/retry.
