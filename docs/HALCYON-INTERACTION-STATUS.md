@@ -18,8 +18,9 @@ redundant close (ENOENT), not evidence of a leaked empty leaf. A visible
 capacity-refusal notice is still missing.
 This is a failed live-tile acceptance run, not a clipboard credit failure or a
 passing maximum-pressure check. The operator approved cooperative hidden-buffer suspension on October 4.
-TAPESTRY-STORAGE.md specifies the lifecycle; implementation/qualification are
-pending. No quota change is authorized or made.
+TAPESTRY-STORAGE.md (scripture cfa478824) specifies the lifecycle. Its
+companion storage model explores 287 states and seven intended named violations;
+production implementation and native qualification are pending. No quota change is authorized or made.
 
 HI1-R31 is repaired: the complete failing inventory was 13 masters, 39 stdio
 slaves, 13 control and 13 readiness fids, plus two unopened roots: exactly 80.

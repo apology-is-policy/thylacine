@@ -25,8 +25,8 @@ updated: 2026-10-04
 TAPESTRY-STORAGE.md records the approved cooperative suspension contract.
 Keep semantic surfaces and release hidden pixel generations, with compositor
 visibility, fresh generation-bound fids, full repaint on reveal and existing
-backend retirement pins. No kernel quota increase. This is design, not shipped
-behavior; HI1-R30 and its original full-size pressure failure remain open.
+backend retirement pins. No kernel quota increase. The companion [[spec-tapestry-storage]] is clean at 287 states and
+seven named counterexamples; production implementation is still pending; HI1-R30 and its original full-size pressure failure remain open.
 
 ## Local ordered-stream progress
 

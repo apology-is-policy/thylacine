@@ -2989,3 +2989,24 @@ those six is not a bug but a CONTROL -- `syscall_irqs_kthread` -- whose
 violation is the pass, and the gate's header says why at length, because
 reading that row as a defect and "fixing" it would delete the only evidence
 that the clean rows mean anything.
+
+## tapestry_storage.tla — cooperative hidden pixels (October 4)
+
+Scope approved in cfa478824, TAPESTRY-STORAGE.md. Companion to the existing
+present/slot model; it preserves that model's DMA, composition and retirement
+obligations. Model first: no production implementation in this checkpoint.
+
+Two never-reused generations and three visibility epochs explore 287 states,
+depth 20. Client, server, backend and scanout holders are distinct. All seven
+mutants fail their named safety invariant: stale offers (OfferFresh), old fids
+(FidFresh), resume after destroy (NoResurrection), release under a mapping
+(ClientBacked), release under backend work (DeviceBacked), suspension while
+bound (SuspendedUnbound), and publishing before full paint (FirstFrameComplete).
+`specs/check-tapestry-storage.py` verifies exact verdicts and the clean fingerprint.
+No fairness or eventual-resume claim: unavailable memory/device can refuse reveal.
+
+The client drain is structural in this companion, discharged by tapestry_present's
+existing RecycleGate and completion proof. Allocation refusal is stuttering;
+Abort models partial resume setup. Visibility actions invalidate older offers.
+The finite counters stop; they never wrap. Geometry, 9P encoding, SAK control
+progress and exact native mapping accounting remain implementation/runtime tests.
