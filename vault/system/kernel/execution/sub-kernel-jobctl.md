@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -337,6 +337,15 @@ handler, conclude "caught", and refuse the very stop the caller requested via
 not derivable from the primitives: a fourth stop source would have to make it
 afresh, exactly as the self-stop did when it chose freshness-plus-orphan over
 the gate.
+
+## Process membership versus cleanup lifetime (AS-2a)
+
+Kernel descriptor pins are not Procs and never join a session or process group.
+The AddrSpace owner/total split in [[sub-kernel-addrspace]] leaves job-control
+membership, stop ownership, wait reports and orphan decisions on their existing
+Proc-table paths. An ownerless accounting descriptor can outlive reaping without
+creating a live group member. The fresh CPU1 boot includes the existing job-control
+tests; this prerequisite makes no new stop-protocol or graphical qualification.
 
 ## Provenance
 

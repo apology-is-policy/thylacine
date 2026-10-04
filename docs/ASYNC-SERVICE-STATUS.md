@@ -99,3 +99,18 @@ check verified every individual boot, five summaries, original source hashes
 and empty index. Evidence: work/oct4-async-service/as-r3/matrix-fixed/verified.json
 and smp.log. This qualifies the transport helpers and TLS correction, not private
 Loom runtime, clipboard activation or a fresh graphical/Pi/min-display run.
+
+## AS-2a: descriptor lifetime prerequisite (October 4)
+
+AddrSpace now distinguishes process owners from kernel descriptor pins. The last
+owner drains mappings; the final total reference frees descriptor/page tables.
+Device and authority sharing predicates count owners, and delayed Burrow cleanup
+can settle the exact original payer without a dead Proc pointer. Existing memory
+limits and private-setup refusal remain unchanged. This is not the MM hierarchy.
+
+Actual-source lifecycle ASan/UBSan plus seven mutants, ARM64 compilation, five
+clean existing model configurations/twelve intended counterexamples and fresh
+CI CPU1 boot pass. Guest tests cover true sharing versus kernel pins, last-owner
+VMA-only device quiescence and exact-payer refund after Proc death. Evidence:
+/Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/as2a/check-1791130311682969000. This checkpoint has no new broad/graphical/Pi qualification.
+AS-2 scope admission, sharing/exec guards and retirement worker are still pending.

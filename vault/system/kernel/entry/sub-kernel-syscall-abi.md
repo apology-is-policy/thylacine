@@ -19,7 +19,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 ## Session registry factory ABI
 
@@ -552,6 +552,14 @@ be one 4 KiB staging buffer per round trip.
   the on-device toolchain needed absolute paths.** Both mirrors carry 256
   correctly. The stale copies are in the kernel header's own prose, describing
   the calls the bound applies to.
+
+## Internal ownership prerequisite (AS-2a)
+
+Spawn's existing budget stamp now distinguishes process owners from kernel
+AddrSpace pins. This changes no syscall number, argument record, errno, grant
+or cap: the internal AddrSpace grows from72 to80 bytes with existing offsets
+preserved. The private Loom encodings remain reserved and setup remains refused;
+[[abi-loom-service]] is still the boundary contract for their later activation.
 
 ## Provenance
 

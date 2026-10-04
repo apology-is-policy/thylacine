@@ -204,7 +204,7 @@ buddy-rounded count actually billed), and `shared_out`.
   attach, the JIT create, the Loom ring.
 - **`burrow_charge_claim`** is a **read-and-clear**, returning what this Proc's
   ADDRESS SPACE paid or zero if it is not the recorded payer -- a record whose
-  space has died is never claimed: that space's count died with it and the
+  descriptor has died is never claimed: its count died with it and the
   region's pages return to the pool when they are freed, so there is nothing
   left to settle and the record simply stays. The clear is what makes a
   refund exactly-once: two paths racing to settle the same region cannot both
@@ -545,6 +545,19 @@ is ever *about* the preamble.
 The model is three types behind for the same reason, and that gap is
 substantive rather than cosmetic: it predates the sparse backings entirely. See
 [[spec-burrow]] for what that does and does not leave unproven.
+
+## Exact payer retained after process exit (AS-2a)
+
+`burrow_charge_claim_in` and `burrow_charge_restore_in` take the exact live
+AddrSpace instead of consulting a Proc. Legacy wrappers delegate to these forms.
+The asynchronous caller must hold a descriptor pin and a Burrow reference:
+claim before release, refund only after actual storage destruction, restore on a
+nonfinal drop. This retains the existing leaf lock and claim-once semantics;
+no PID lookup or successor image can receive the refund. A native test destroys
+the Proc, rejects a fresh address space as payer, and settles the pinned original
+account after the last buffer release. The conservative claim/restore window
+and legacy shared-out detach policy are unchanged; the new MM hierarchy is not
+implemented here. Evidence is in ASYNC-SERVICE-SELF-REVIEW.md.
 
 ## Provenance
 

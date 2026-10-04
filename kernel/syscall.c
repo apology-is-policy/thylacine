@@ -9477,7 +9477,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // Safe here for the same reason the store above is: pre-EL0, no peer thread
     // yet, and ahead of all four chargers enumerated above -- so no charge has
     // been decided against the value being replaced.
-    if (p->as && __atomic_load_n(&p->as->ref, __ATOMIC_ACQUIRE) == 1)
+    if (p->as && addrspace_owner_count(p->as) == 1)
         __atomic_store_n(&p->as->page_budget, page_budget, __ATOMIC_RELEASE);
     // VIVARIUM V-1b + Design D (section 13.10.3): the declaration, then the
     // decision -- BEFORE exec_setup and before EL0, where a plain store is

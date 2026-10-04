@@ -136,10 +136,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-10-04 [[chg-2026-10-04-async-memory-approved]] — Ratify both lifecycle contracts and async-first delivery
 - 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
+- 2026-10-04 [[chg-2026-10-04-async-owner-lifetime]] — Separate process ownership from asynchronous descriptor retention
 - 2026-10-04 [[chg-2026-10-04-async-service-abi-reservation]] — Reserve Loom private service encoding before consumers
 - 2026-10-04 [[chg-2026-10-04-async-service-as0]] — Pin the private service ABI and cancellation model
 - 2026-10-04 [[chg-2026-10-04-async-service-as1]] — Resumable native service framing and handshake
 - 2026-10-04 [[chg-2026-10-04-async-transport-qualified]] — Async transport and TLS pass the complete boot matrix
 - 2026-10-04 [[chg-2026-10-04-halcyon-capacity-refusal]] — Reject excess Halcyon service connections promptly
-- 2026-10-04 [[chg-2026-10-04-hidden-storage-design]] — Approve cooperative hidden terminal pixel storage
 <!-- generated:end -->

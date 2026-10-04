@@ -5,8 +5,11 @@
 // page table's leaves) is managed by vma.c, burrow.c and the fault path, which
 // reach it through Proc.as exactly as they used to reach the inline fields.
 //
-// At L-1 the refcount never exceeds 1. It is written atomically anyway -- see
-// the header for why a "1 today" counter is still the wrong place to be lazy.
+// AS-2a distinguishes constructor/Proc ownership from kernel descriptor pins.
+// The last owner drains mappings on its ordinary teardown path (FILE clunk may
+// sleep). Kernel pins retain the descriptor/account and page tables only;
+// I/O buffers have separate Burrow refs. A single total lifetime counter alone
+// decides final destruction, after the owner has completed mapping drain.
 
 #include <thylacine/addrspace.h>
 #include <thylacine/burrow.h>    // L-4b: burrow_clone_cow + the type dispatch
@@ -50,11 +53,12 @@ struct AddrSpace *addrspace_alloc(u32 page_budget) {
     }
 
     spin_lock_init(&as->lock);
+    __atomic_store_n(&as->owners, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&as->ref, 1, __ATOMIC_RELEASE);
     return as;
 }
 
-void addrspace_ref(struct AddrSpace *as) {
+static void addrspace_lifetime_get(struct AddrSpace *as) {
     if (!as) extinction("addrspace_ref(NULL)");
     int pre = __atomic_fetch_add(&as->ref, 1, __ATOMIC_ACQ_REL);
     // A ref taken on a dead object is a use-after-free in progress; catching it
@@ -63,12 +67,26 @@ void addrspace_ref(struct AddrSpace *as) {
     if (pre <= 0) extinction("addrspace_ref on a dead AddrSpace");
 }
 
+void addrspace_ref(struct AddrSpace *as) {
+    addrspace_lifetime_get(as);
+    int pre = __atomic_fetch_add(&as->owners, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0) extinction("addrspace_ref without a live owner");
+}
+
+void addrspace_pin(struct AddrSpace *as) {
+    addrspace_lifetime_get(as);
+}
+
+int addrspace_owner_count(const struct AddrSpace *as) {
+    return as ? __atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) : 0;
+}
+
 int addrspace_ref_count(const struct AddrSpace *as) {
     if (!as) return 0;
     return __atomic_load_n(&as->ref, __ATOMIC_ACQUIRE);
 }
 
-void addrspace_unref(struct AddrSpace *as) {
+static void addrspace_lifetime_put(struct AddrSpace *as) {
     // NULL-safe: a kernel-only Proc has no address space, and a rollback that
     // fired before addrspace_alloc ran has none either.
     if (!as) return;
@@ -76,21 +94,13 @@ void addrspace_unref(struct AddrSpace *as) {
     int pre = __atomic_fetch_sub(&as->ref, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0) extinction("addrspace_unref of an already-released AddrSpace");
     if (pre > 1) return;
+    if (__atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) != 0)
+        extinction("AddrSpace final lifetime drop with live owners");
 
-    // Last reference -- so this is the point at which the mappings genuinely
-    // stop being anyone's, and therefore the point at which they are freed.
-    //
-    // L-3 moved the drain here from the callers. It used to run in proc_free
-    // (and in proc_exec_replace, on the outgoing space), which was correct only
-    // while `ref` could never exceed 1: draining at A DEATH and draining at THE
-    // LAST REFERENCE are the same event exactly when there is one reference.
-    // Under RFMEM they separate, and the old placement would have had the first
-    // sharer to die free a VMA list the survivor was still translating through.
-    //
-    // Nothing between the decrement and here can take a new reference: a ref is
-    // only ever taken from a Proc that already holds one (rfork, from a live
-    // parent), so reaching zero means no holder is left to hand one out.
-    vma_drain_in(as);
+    // Final descriptor lifetime reference. Ordinary mappings were drained by
+    // the final owner in addrspace_unref; kernel pins do not extend mapping
+    // ownership. Only local page-table storage remains to destroy here.
+    if (as->vmas) extinction("AddrSpace final lifetime drop before mapping drain");
 
     // B-1a': nothing returns to the pool here. The pool is physical -- every
     // page the drain just freed returned its charge at free_pages, and the
@@ -114,6 +124,23 @@ void addrspace_unref(struct AddrSpace *as) {
     as->pgtable_root = 0;
     kfree(as);
 }
+
+void addrspace_unref(struct AddrSpace *as) {
+    if (!as) return;
+    int pre = __atomic_fetch_sub(&as->owners, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0) extinction("addrspace_unref without an owner");
+    // Keep this owner's lifetime reference across the potentially sleeping FILE
+    // clunks. Concurrent kernel unpins cannot free the descriptor during drain.
+    // No new owner may be made from an ownerless descriptor; no CPU may still
+    // translate through it at this point (the existing exit/exec obligation).
+    if (pre == 1) vma_drain_in(as);
+    addrspace_lifetime_put(as);
+}
+
+void addrspace_unpin(struct AddrSpace *as) {
+    addrspace_lifetime_put(as);
+}
+
 
 // =============================================================================
 // LINEAGE L-4b: the copy-on-write clone (see the header for what each VMA kind

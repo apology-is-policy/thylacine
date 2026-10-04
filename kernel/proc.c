@@ -632,7 +632,7 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // child's DEATH would run this walk and reset device registers its parent
     // is still driving. Any future change that lets a hardware handle reach a
     // second Proc must add a sole-ownership gate here, exactly like walk (b).
-    bool as_sole = (addrspace_ref_count(p->as) == 1);
+    bool as_sole = (addrspace_owner_count(p->as) == 1);
     for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
         if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
@@ -2665,7 +2665,8 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     // I-2 publication bound: a child published after the check carries caps
     // bounded by the parent this join already weighed, so it widens nothing the
     // check admitted.
-    int refs = addrspace_ref_count(p->as);
+    // Kernel-only retirement pins retain storage, never a competing mapper.
+    int refs = addrspace_owner_count(p->as);
     if (refs <= 1) return;
 
     struct proc_image_walk w = { .target = p, .out = out, .zombies = 0, .bits = 0 };
@@ -2698,7 +2699,7 @@ void proc_image_stamp_locked(struct Proc *p, u32 bits) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_image_stamp_locked: NULL or corrupted Proc");
     __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
-    if (!p->as || addrspace_ref_count(p->as) <= 1) return;
+    if (!p->as || addrspace_owner_count(p->as) <= 1) return;
     struct proc_image_walk w = { .target = p, .out = NULL, .zombies = 0, .bits = bits };
     proc_image_visit(proc_image_stamp_one, &w);
 }

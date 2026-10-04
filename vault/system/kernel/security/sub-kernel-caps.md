@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 ## Registry creation is a role, not an Imperium capability
 
@@ -411,6 +411,16 @@ so the invariant holds trivially today.
   nothing pins a sentence.
 - The reserved-bit block lists `CAP_SIGNAL_ANY` as a future bit, then notes
   it was realized as `CAP_KILL`. Next free bit is `1<<12`.
+
+## Image sharing excludes kernel descriptor pins (AS-2a)
+
+`proc_image_join_locked` and `proc_image_stamp_locked` use address-space process
+owner count, not the total count that includes asynchronous cleanup pins. The
+pin retains storage/accounting but cannot write the user's image or confer
+process authority. Actual live sharers still block elevation, and the existing
+zombie subtraction and table publication proof are unchanged. Native tests
+exercise sole-plus-pin, real shared Proc, then sole-plus-pin again. No new
+capability or authority inheritance rule is introduced by this prerequisite.
 
 ## Provenance
 

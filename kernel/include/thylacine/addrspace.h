@@ -9,12 +9,11 @@
 // features block on the SAME extraction, which is why it is the arc's stage 0
 // rather than a COW implementation detail.
 //
-// At L-1 nothing shares: `ref` is 1 for every AddrSpace in the tree, allocated
-// by proc_alloc and dropped by proc_free. The refcount is written through
-// __atomic_* from the start anyway -- an int that is "always 1 today" and
-// becomes contended at L-3 is exactly the latent-P1 shape CLAUDE.md's
-// multi-thread-shared-state rule warns about, and the cost of getting it right
-// now is one line.
+// RFMEM shares mappings through owner references. AS-2a also admits kernel
+// descriptor pins for asynchronous cleanup: they keep the exact account alive
+// after Proc death, but not arbitrary file-backed VMAs. The final owner drains
+// mappings; the final total lifetime reference releases descriptor/page tables.
+// Registered I/O buffers have their own Burrow refs and stable direct-map KVAs.
 //
 // WHICH FIELDS LIVE HERE, AND WHY EACH ONE
 //
@@ -70,12 +69,10 @@
 struct Vma;
 
 struct AddrSpace {
-    // Procs sharing this address space. 1 at L-1 (nothing shares yet); becomes
-    // genuinely contended at L-3 (RFMEM) and L-5 (fork). Accessed via
-    // __atomic_* with ACQ_REL on the drop, matching the Spoor/SrvConn
-    // discipline -- the last release must happen-after every other sharer's
-    // final access.
-    int            ref;
+    // Total lifetime references, including kernel descriptor pins. Accessed
+    // via __atomic_* with ACQ_REL on drop; the final release happens after
+    // every holder's final access. owners below separately governs mappings.
+    int            ref; // total lifetime: process/constructor owners + kernel pins
 
     // Was Proc.vma_lock (#713). Serializes every `vmas` mutation and the
     // demand-page reader, and guards the three I-32 counters below so they stay
@@ -84,7 +81,7 @@ struct AddrSpace {
     spin_lock_t    lock;
 
     // PA of the L0 translation table for TTBR0 (user half). Created by
-    // addrspace_alloc, destroyed by the last addrspace_unref.
+    // addrspace_alloc, destroyed by the last total lifetime drop.
     paddr_t        pgtable_root;
 
     // The rolling-ASID context (generation | hardware ASID) -- RW-1 B-F1, ARCH
@@ -152,14 +149,19 @@ struct AddrSpace {
     // the successor's space, which never paid. From a global counter at
     // addrspace_alloc; never 0, never reused.
     u64            id;
+
+    // AS-2a: only constructor/Proc references contribute to ownership. A
+    // kernel retirement pin keeps the descriptor/account alive, not arbitrary
+    // mappings. It cannot execute userspace, share authority, or postpone
+    // last-Proc device quiescence. I/O buffers need independent Burrow pins.
+    // Separate from ref so those predicates never count cleanup as a mapper.
+    // Increment after taking the total ref; decrement before dropping it.
+    int            owners;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 72,
-               "AddrSpace is 72 bytes: ref+lock (8) + pgtable_root (8) + "
-               "context_id (8) + vmas (8) + the three I-32 u32 axes + "
-               "page_budget + page_peak + pgtable_pages + file_pages (28, "
-               "padded to 32) + id (8). "
-               "Growth is fine -- this assert is a drift alarm, not an ABI.");
+_Static_assert(sizeof(struct AddrSpace) == 80,
+               "AddrSpace: existing 72-byte layout plus owner count and padding; "
+               "internal drift alarm, not a userspace ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM
 // (either the struct or the page table), having freed whatever it did get --
@@ -175,21 +177,37 @@ _Static_assert(sizeof(struct AddrSpace) == 72,
 // narrowing of this Proc, and its default is the pool itself.)
 struct AddrSpace *addrspace_alloc(u32 page_budget);
 
-// Take a reference. L-3 (RFMEM) is the first caller with a real second sharer:
-// rfork(RFPROC|RFMEM) hands the child the parent's address space instead of a
-// fresh one, so from here on `ref` is genuinely a count and not a formality.
+// Take a constructor/Proc owner reference and its lifetime reference. Caller
+// already holds an owner reference; a kernel-only pin must not resurrect an
+// ownerless address space. RFMEM takes this reference before publishing a child.
 void addrspace_ref(struct AddrSpace *as);
 
-// Drop a reference; the last one DRAINS THE VMA LIST, destroys the page table
-// and frees the struct. NULL-safe (a kernel-only Proc, or a rollback before
-// addrspace_alloc ran).
+// Kernel-only lifetime pins: no execution or process-sharing authority. Caller
+// holds a live owner or pin across pin acquisition. Unpin is NULL-safe; the last
+// total ref alone frees the descriptor/page tables. The last OWNER drains
+// mappings through the ordinary exit/exec path, which can sleep on file clunk.
+// No Proc pointer is needed or permitted after its owner's lifetime ends.
+void addrspace_pin(struct AddrSpace *as);
+void addrspace_unpin(struct AddrSpace *as);
+
+// Constructor/Proc owner count, excluding kernel pins. Use for process sharing
+// and last-process device quiescence, with the existing publication/exit proof.
+// This is a snapshot, not a lock or permission to create a concurrent owner.
+int addrspace_owner_count(const struct AddrSpace *as);
+
+// Drop an owner reference; the last OWNER drains mappings, then drops its
+// lifetime reference. The last total ref frees page tables and the descriptor.
+// NULL-safe (kernel-only Proc or rollback before addrspace_alloc ran).
 //
 // The drain lives here rather than in the callers -- L-3 moved it -- because the
 // VMA list is a property of the ADDRESS SPACE, not of any one Proc that happens
 // to reference it. Draining at a Proc's death was indistinguishable from
 // draining at the last reference only while nothing shared; under RFMEM the two
 // come apart, and every caller that drained on its own would have torn down a
-// surviving sharer's mappings. Both such callers existed (proc_free and
+// surviving sharer's mappings. Here "last reference" means the last OWNER;
+// kernel-only pins retain the descriptor and independently pinned I/O buffers,
+// without moving potentially sleeping file-mapping teardown into retirement.
+// Both such callers existed (proc_free and
 // proc_exec_replace -- the latter reached by a vfork child execing, which is the
 // posix_spawn shape exactly), so this is one fix at the right layer rather than
 // a gate repeated at each site.
@@ -212,6 +230,9 @@ void addrspace_ref(struct AddrSpace *as);
 // its own argument:
 //   - proc_free: every thread was reaped and on_cpu-spun first, so no CPU holds
 //     this TTBR0 at all.
+//   - kernel-only pins: do not install TTBR0 or authorize VA accesses. Their
+//     final unpin only destroys page tables whose last owner already met this
+//     obligation before draining mappings;
 //   - proc_exec_replace (L-2): the execing thread IS live and holds it, so the
 //     swap writes TTBR0_EL1 with the NEW address space's (distinct) ASID and
 //     `isb`s BEFORE the drop -- after which no walk on this CPU reaches the old
@@ -296,15 +317,11 @@ void addrspace_unref(struct AddrSpace *as);
 // the break OOMing later, when there is nowhere good to put the failure.
 struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt);
 
-// How many Procs currently reference this address space. 0 for NULL (a
-// kernel-only Proc shares nothing with anyone).
+// Total lifetime references, including kernel pins. 0 for NULL. Diagnostic
+// only: process-sharing and device-quiescence predicates use owner_count.
 //
-// Read for exactly one KIND of question: "am I the last holder, so is this
-// state mine alone to tear down?" -- proc_free's device quiesce asks it, and the
-// tests assert on it. It is NOT a lock and must not be used to decide whether a
-// concurrent sharer may appear: the answer is only stable when the caller can
-// argue no new reference can be taken (a dying Proc can argue that; a live one
-// cannot).
+// A count is not a lock and cannot justify taking a reference to an otherwise
+// unpinned object. Destruction is decided only by the atomic final-ref drop.
 int addrspace_ref_count(const struct AddrSpace *as);
 
 // =============================================================================

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 ## Session posting ownership
 
@@ -583,6 +583,17 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   caller, making the stated condition unreachable. The property the design
   relies on holds by a different mechanism entirely; see [[sub-kernel-pts]]
   and task #69.
+
+## Process owners and asynchronous pins (AS-2a)
+
+AddrSpace total lifetime references now include kernel descriptor pins. Image
+join/stamping and last-driver VMA quiescence use `addrspace_owner_count`, which
+counts only constructor/Proc owners. A pending cleanup is not a competing image
+mapper and cannot suppress final device reset. Actual shared Procs retain their
+ordinary sharing/elevation behavior. Final owner release drains VMAs before its
+total reference is dropped; kernel pins retain only the descriptor/account.
+See [[sub-kernel-addrspace]] and ASYNC-SERVICE-SELF-REVIEW.md for lifetime proof
+and native sharing/device tests. Private Loom is not activated here.
 
 ## Provenance
 

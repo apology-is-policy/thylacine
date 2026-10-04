@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 ## Session registry factory
 
@@ -1056,6 +1056,14 @@ threshold so small transfers never pay the extra handle lookup.
   It is an argument to the shared body one layer down. The sentence is an
   accurate description of `dma_handle.c` sitting on top of `syscall.c`'s copy,
   which is how a reader is most likely to believe the parameterisation is here.
+
+## Spawn budget ownership predicate (AS-2a)
+
+The pre-EL0 spawn budget stamp uses `addrspace_owner_count(as) == 1` rather than
+the total descriptor reference count. Kernel retirement pins confer no process
+sharing, so they cannot masquerade as an owner and suppress the resolved budget.
+Actual shared address spaces retain their existing cap. This changes no syscall
+record or memory limit; [[sub-kernel-addrspace]] owns the new internal distinction.
 
 ## Provenance
 

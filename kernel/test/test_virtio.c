@@ -6,7 +6,9 @@
 // at v1.0 P4-F).
 
 #include "test.h"
+#include "../../arch/arm64/uart.h"
 
+#include <thylacine/addrspace.h>
 #include <thylacine/burrow.h>
 #include <thylacine/handle.h>
 #include <thylacine/mmio_handle.h>
@@ -277,13 +279,22 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
 
     // The handle table holds no KObj_MMIO; the device is reachable only via the
     // VMA. The VMA walk (round-2 F1) is what must still find + reset it.
+    // A kernel descriptor pin must not masquerade as a second driver.
+    struct AddrSpace *as = p->as;
+    addrspace_pin(as);
     int n = proc_quiesce_owned_devices(p);
-    TEST_EXPECT_EQ(n, expected,
-                   "proc death resets a device held ONLY by a VMA (fd closed)");
 
     // proc_free walks + releases the VMA + Burrow (-> kobj_mmio_unref); then
     // drop the test's own km ref. Mirrors test_mmio_map_install_vma.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+    int owners_after = addrspace_owner_count(as);
+    bool mappings_gone = as->vmas == NULL;
+    addrspace_unpin(as);
     kobj_mmio_unref(km);
+    TEST_EXPECT_EQ(n, expected,
+                   "proc death resets a VMA-only device despite a descriptor pin");
+    TEST_EXPECT_EQ(owners_after, 0, "last driver owner gone");
+    TEST_ASSERT(mappings_gone, "descriptor pin does not retain MMIO mappings");
+    uart_puts("[AS-2a] pinned last-owner VMA-only device quiescence exercised\n");
 }

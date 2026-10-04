@@ -997,8 +997,8 @@ void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages) {
     spin_unlock(&v->lock);
 }
 
-u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
-    if (!v || !p) return 0;
+u32 burrow_charge_claim_in(struct Burrow *v, const struct AddrSpace *as) {
+    if (!v || !as) return 0;
     if (v->magic != VMO_MAGIC)
         extinction("burrow_charge_claim on corrupted BURROW (use-after-free?)");
     u32 pages = 0;
@@ -1007,11 +1007,12 @@ u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
     // zero pages is meaningless, so zero pages IS "nothing held". The key is
     // the ADDRESS SPACE that paid (B-1a' audit F4): a pid survives exec, and a
     // handle that outlives the outgoing space (a non-CLOEXEC Loom) would
-    // otherwise refund against the successor's space, which never paid. A
-    // record whose space has died is never claimed -- that space's count died
-    // with it and the region's pages return to the pool when they are freed
-    // -- so there is nothing left to settle and the record simply stays.
-    if (v->charge_pages != 0 && p->as && v->charge_as_id == p->as->id) {
+    // otherwise refund against the successor's space, which never paid.
+    // A kernel pin can retain the exact payer after its final Proc exits;
+    // callers then use this AddrSpace-keyed form without a dead Proc pointer.
+    // A record whose descriptor really died is never claimed: its counter died
+    // too, and the physical pages return to the pool when storage is freed.
+    if (v->charge_pages != 0 && v->charge_as_id == as->id) {
         pages           = v->charge_pages;
         v->charge_as_id = 0;
         v->charge_pages = 0;
@@ -1020,8 +1021,8 @@ u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
     return pages;
 }
 
-void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
-    if (!v || !p || !p->as || pages == 0) return;
+void burrow_charge_restore_in(struct Burrow *v, const struct AddrSpace *as, u32 pages) {
+    if (!v || !as || pages == 0) return;
     if (v->magic != VMO_MAGIC)
         extinction("burrow_charge_restore on corrupted BURROW (use-after-free?)");
     spin_lock(&v->lock);
@@ -1035,9 +1036,17 @@ void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
         spin_unlock(&v->lock);
         extinction("burrow_charge_restore: the region was re-charged mid-settle");
     }
-    v->charge_as_id = p->as->id;
+    v->charge_as_id = as->id;
     v->charge_pages = pages;
     spin_unlock(&v->lock);
+}
+
+u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
+    return burrow_charge_claim_in(v, p ? p->as : NULL);
+}
+
+void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
+    burrow_charge_restore_in(v, p ? p->as : NULL, pages);
 }
 
 bool burrow_is_shared_out(const struct Burrow *v) {

@@ -60,6 +60,10 @@
 #include <thylacine/proc.h>
 #include <thylacine/vma.h>
 
+// Existing KERNEL_TESTS-only process-table fixtures.
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
+
 void test_addrspace_alloc_shape(void);
 void test_addrspace_refcount(void);
 void test_addrspace_kproc_has_none(void);
@@ -84,6 +88,84 @@ void test_addrspace_alloc_shape(void) {
     addrspace_unref(as);
 }
 
+// A descriptor pin is not a Proc sharing the image. The last Proc still
+// drains mappings; independently pinned anonymous buffers survive that drain.
+static void test_addrspace_kernel_pin_lifetime(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "pin fixture Proc");
+    struct AddrSpace *as = p->as;
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
+    if (!b) {
+        p->state = PROC_STATE_ZOMBIE; proc_free(p);
+        TEST_ASSERT(false, "pin fixture buffer");
+    }
+    int rc = burrow_map_in(as, true, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW);
+    if (rc != 0) {
+        burrow_unref(b); p->state = PROC_STATE_ZOMBIE; proc_free(p);
+        TEST_ASSERT(false, "pin fixture mapping");
+    }
+    spin_lock(&as->lock);
+    bool charged = addrspace_charge_pages(as, 1, false);
+    spin_unlock(&as->lock);
+    if (!charged) {
+        burrow_unref(b); p->state = PROC_STATE_ZOMBIE; proc_free(p);
+        TEST_ASSERT(false, "pin fixture page charge");
+    }
+    burrow_charge_record(b, p, 1);
+    addrspace_pin(as);
+    bool distinct = addrspace_ref_count(as) == 2 && addrspace_owner_count(as) == 1;
+    proc_test_link(p);
+    irq_state_t lock = proc_table_lock_acquire();
+    bool sole_allowed = proc_elevation_allowed_locked(p);
+    proc_table_lock_release(lock);
+
+    struct Proc *peer = proc_alloc_in(as, proc_default_page_budget());
+    bool peer_allocated = peer != NULL;
+    bool shared_refused = false;
+    if (peer) {
+        proc_test_link(peer);
+        lock = proc_table_lock_acquire();
+        shared_refused = !proc_elevation_allowed_locked(p);
+        proc_table_lock_release(lock);
+        proc_test_unlink(peer);
+        peer->state = PROC_STATE_ZOMBIE;
+        proc_free(peer);
+    }
+    lock = proc_table_lock_acquire();
+    bool sole_again = proc_elevation_allowed_locked(p);
+    proc_table_lock_release(lock);
+    proc_test_unlink(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    // No Proc pointer is touched after this point. Our descriptor and buffer
+    // pins are independent, exactly as a pending async operation requires.
+    bool descriptor_live = addrspace_ref_count(as) == 1 && addrspace_owner_count(as) == 0;
+    bool mappings_gone = as->vmas == NULL && burrow_mapping_count(b) == 0;
+    bool buffer_live = burrow_handle_count(b) == 1;
+    struct AddrSpace *replacement = addrspace_alloc(proc_default_page_budget());
+    bool wrong_payer_refused = replacement && burrow_charge_claim_in(b, replacement) == 0;
+    addrspace_unref(replacement);
+    u32 charge = burrow_charge_claim_in(b, as);
+    bool once = charge == 1 && burrow_charge_claim_in(b, as) == 0;
+    burrow_charge_restore_in(b, as, charge);
+    u32 settled = burrow_charge_claim_in(b, as);
+    u32 before = __atomic_load_n(&as->page_count, __ATOMIC_ACQUIRE);
+    bool freed = burrow_unref_freed(b);
+    if (freed) addrspace_uncharge_pages(as, settled);
+    else burrow_charge_restore_in(b, as, settled);
+    bool refunded = freed && settled == 1 && before >= 1 &&
+        __atomic_load_n(&as->page_count, __ATOMIC_ACQUIRE) == before - 1;
+    addrspace_unpin(as);
+    TEST_ASSERT(wrong_payer_refused && once, "only the exact payer claims once after Proc death");
+    TEST_ASSERT(refunded, "last buffer release refunds its pinned payer after Proc death");
+    TEST_ASSERT(distinct, "kernel pin retains descriptor without another owner");
+    TEST_ASSERT(sole_allowed && sole_again, "kernel pin does not block a sole image's elevation");
+    TEST_ASSERT(peer_allocated && shared_refused, "real live Proc sharing still blocks elevation");
+    TEST_ASSERT(descriptor_live, "descriptor survives the creator Proc");
+    TEST_ASSERT(mappings_gone, "last owner drains mappings before final kernel unpin");
+    TEST_ASSERT(buffer_live, "independent buffer pin survives last-owner mapping drain");
+}
+
 void test_addrspace_refcount(void) {
     struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc returned NULL");
@@ -106,6 +188,8 @@ void test_addrspace_refcount(void) {
     // NULL-safe by contract: a kernel-only Proc, or a proc_alloc rollback that
     // failed before addrspace_alloc ran, reaches proc_free with as == NULL.
     addrspace_unref(NULL);
+    addrspace_unpin(NULL);
+    test_addrspace_kernel_pin_lifetime();
 }
 
 void test_addrspace_share_drains_at_last_ref(void) {

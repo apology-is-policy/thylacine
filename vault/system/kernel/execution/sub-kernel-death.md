@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 ## Session registry retirement
 
@@ -477,6 +477,16 @@ What a change **must** re-establish:
   only by a thread of this process for its own wait, so with exec alone the clear
   is a guard, not a repair -- posters from other processes set caught bits, never
   claims ([[sub-kernel-notes]]).
+
+## Descriptor retention after last process (AS-2a)
+
+Last-driver VMA quiescence counts AddrSpace process owners, excluding kernel
+cleanup pins. A pin cannot suppress MMIO reset before the driver's mappings
+are drained. The last owner retains a total reference while VMA teardown may
+sleep; subsequent private-service cleanup can retain the exact descriptor and
+independent anonymous buffers without retaining the process or its file VMAs.
+ZOMBIE/death-wake ordering is unchanged. [[sub-kernel-addrspace]] owns the split;
+ASYNC-SERVICE-SELF-REVIEW.md records native device and post-death refund tests.
 
 ## Provenance
 

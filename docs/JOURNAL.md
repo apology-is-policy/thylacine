@@ -33214,3 +33214,19 @@ check verified every individual boot, five summaries, original source hashes
 and empty index. Evidence: work/oct4-async-service/as-r3/matrix-fixed/verified.json
 and smp.log. This qualifies the transport helpers and TLS correction, not private
 Loom runtime, clipboard activation or a fresh graphical/Pi/min-display run.
+
+### 2026-10-04 Astra: AS-2a descriptor and payer lifetime
+
+Split AddrSpace process owners from total lifetime references. Owner teardown
+retains its reference across VMA drain, so delayed kernel cleanup cannot inherit
+filesystem-dependent clunks. Final total release frees local descriptor/tables;
+I/O buffers keep independent Burrow pins. Sharing/elevation, device reset and
+spawn budget predicates use owners. Exact-AS Burrow claim/restore preserves the
+original payer after Proc death. No private runtime or relaxed memory limit.
+
+Actual-source sanitizer/seven mutants, six ARM64 units, five clean existing
+model configurations/twelve counterexamples and fresh CPU1 boot pass; native
+checks exercise authority sharing, device quiescence and exact refund. Broad
+qualification for this prerequisite remains pending with AS-2 implementation.
+Single-agent self-review; all four protected drafts preserved. Evidence:
+/Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/as2a/check-1791130311682969000
