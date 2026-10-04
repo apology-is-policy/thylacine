@@ -116,6 +116,10 @@ impl Exchange {
             self.write = None;
         }
     }
+    pub fn completed_read(&self, tag: u64, result: i32) -> bool {
+        !self.failed && result == RECORD_BYTES as i32
+            && self.read.is_some_and(|s| s.tag == tag)
+    }
     pub fn complete(&mut self, tag: u64, result: i32, bytes: &[u8]) -> Result<(), Error> {
         if self.failed {
             return Err(Error::Protocol);
@@ -211,7 +215,9 @@ mod native {
             let mut buffer = RegisteredBuffer::new(160).map_err(|_| TapError::Loom)?;
             buffer.as_mut_slice().fill(0);
             buffer.as_mut_slice()[..SELECT.len()].copy_from_slice(&SELECT);
-            ring.register_buffers(&[buffer.buf_reg()])
+            // SAFETY: owned byte storage; this client tracks submitted ranges and
+            // borrows them only before submission or after their matching completion.
+            unsafe { ring.register_buffers(&[buffer.buf_reg()]) }
                 .map_err(|_| TapError::Loom)?;
             ring.register_handles(&[file.as_raw_fd()])
                 .map_err(|_| TapError::Loom)?;
@@ -236,7 +242,7 @@ mod native {
         }
         pub fn start(&mut self, r: Request) -> Result<(), Error> {
             let b = self.exchange.start(r)?;
-            self.buffer.as_mut_slice()[..80].copy_from_slice(&b);
+            self.buffer.as_mut_range(0..80).ok_or(Error::Invalid)?.copy_from_slice(&b);
             Ok(())
         }
         pub fn pump(&mut self) -> Result<(), Error> {
@@ -245,11 +251,10 @@ mod native {
                 let Some(c) = self.ring.reap() else {
                     break;
                 };
-                self.exchange.complete(
-                    c.user_data,
-                    c.result,
-                    &self.buffer.as_mut_slice()[80..160],
-                )?;
+                let bytes = if self.exchange.completed_read(c.user_data, c.result) {
+                    self.buffer.as_slice_range(80..160).ok_or(Error::Invalid)?
+                } else { &[] };
+                self.exchange.complete(c.user_data, c.result, bytes)?;
             }
             let mut count = 0;
             for read in [false, true] {
@@ -441,5 +446,20 @@ mod tests {
         e.retry(r2);
         e.next = u64::MAX;
         assert_eq!(e.submit_read(), Err(Error::Exhausted));
+    }
+
+    #[test]
+    fn simultaneous_write_does_not_borrow_pending_read() {
+        let mut e=ready();
+        e.start(q()).unwrap();
+        let w=e.submit_write().unwrap().unwrap();
+        let r=e.submit_read().unwrap().unwrap();
+        assert!(!e.completed_read(w.tag, 80));
+        assert!(!e.completed_read(r.tag+1, 80));
+        assert!(!e.completed_read(r.tag, -1));
+        assert!(!e.completed_read(r.tag, 81));
+        assert!(e.completed_read(r.tag, 80));
+        e.complete(w.tag, 80, &[]).unwrap();
+        assert!(e.completed_read(r.tag, 80));
     }
 }

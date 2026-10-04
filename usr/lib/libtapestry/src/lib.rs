@@ -1290,7 +1290,9 @@ impl EventRing {
             }
         };
         staging.as_mut_slice().fill(0);
-        if ring.register_buffers(&[staging.buf_reg()]).is_err() {
+        // SAFETY: owned byte storage; this client tracks submitted ranges and
+        // borrows them only before submission or after their matching completion.
+        if unsafe { ring.register_buffers(&[staging.buf_reg()]) }.is_err() {
             unsafe { t_close(root) };
             return Err(TapError::Loom);
         }
@@ -1509,11 +1511,11 @@ impl RingCore {
         };
         rc.map_err(|_| TapError::Loom)?;
         while let Some(cqe) = self.ring.reap() {
-            if ring::route(
+            if ring::route_completion(
                 &mut self.slots,
-                self.staging.as_mut_slice(),
                 cqe.user_data,
                 cqe.result,
+                |range| self.staging.as_slice_range(range),
             ) {
                 self.layout_hint = true;
             }

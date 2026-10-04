@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md", "docs/LOOM.md"]
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -170,3 +170,9 @@ count. The master-write lock is held across the nap, so a terminal reply
 (CPR) can wait <= 200 ms and then itself retry <= 200 ms -- a bounded 400 ms
 stall, never a deadlock, because the holder always gives up.
 
+
+## Raw Loom caller ownership (October 4)
+
+Loom-stress raw registration now uses an explicit unsafe block. Its only
+payload READ is inspected after terminal completion; later concurrent FSYNC
+operations do not touch the buffer, and wait failures terminate the probe.

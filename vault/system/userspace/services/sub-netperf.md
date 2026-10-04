@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/NET-PERF.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-09-17
-updated: 2026-09-21
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -103,3 +103,9 @@ completion. It is blind to packet loss/reordering outside QEMU, real-hardware
 interrupt delivery, and application protocol acknowledgements beyond the test
 fixture. Historical timing values in NET-PERF describe their recorded workload
 and must not be compared to runs with admission waits without disclosing them.
+
+## Raw Loom caller ownership (October 4)
+
+The Weft benchmark handles tx_buf's Result before filling payload. A failed
+wait cannot silently expose bytes from an unresolved operation. Successful
+measurements retain the same fill/push/wait sequence and requested byte count.

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -830,3 +830,11 @@ authority — [[inv-i43]]); this file owns both.
 absorbed from docs/reference/77: a persistent Proc that chroots pins its root
 Spoor (and the 9P session behind it) for life, since v1.0 has no unchroot -- the
 reason long-running init uses short-lived child probes, not its own chroot.
+
+## Raw Loom caller ownership (October 4)
+
+The symlink probe's Loom registration is explicitly unsafe with a serialized
+payload lifetime. mklink now terminates the probe on an unresolved syscall/wait
+failure instead of allowing an expected-error leg to reuse its buffer. Completed
+negative CQEs still exercise ordinary DAC error checks. No namespace ABI or
+Territory mechanism changed.

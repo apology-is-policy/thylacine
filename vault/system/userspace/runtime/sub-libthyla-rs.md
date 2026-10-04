@@ -799,8 +799,35 @@ than only an ABI registry pin. Its30 constants and10 repr(C) records match
 kernel/native C under the independent byte gate; new pool records pin alignment
 as well as size/offset. It exposes no working private client yet.
 
-AS-R8 in docs/ASYNC-SERVICE-STATUS.md tracks safe raw register_buffers accepting
-integer VAs without an asynchronous lifetime/exclusivity obligation. Pins do not
-make concurrent Rust slices sound. AS-3 must correct that boundary and callers,
-then expose owned pool storage and borrow-checked payload leases. It is an open
-qualification requirement, not something these new declarations have repaired.
+AS-R8 raw registration is now explicitly unsafe: integer VAs carry the full
+asynchronous lifetime and alias-exclusion obligation through terminal completion
+or local retirement, including wait errors and table replacement. The owned pool
+API remains an AS-3 gate; these declarations alone do not provide it.
+
+## Registered payload ownership correction (AS-R8)
+
+`Ring::register_buffers` is an unsafe raw API. A kernel pin keeps allocation
+backing alive; it does not authorize overlapping Rust references during I/O.
+The caller must exclude accesses through every alias and retain that obligation
+after a failed enter, cancellation request or table replacement until actual
+completion/retirement. It cannot infer retirement from CQ head movement.
+
+`RegisteredBuffer::as_slice_range(Range<usize>) -> Option<&[u8]>` and
+`as_mut_range -> Option<&mut [u8]>` check ordered in-bounds ranges before directly
+forming only that slice, with no intermediate reference to the whole registered
+allocation. Empty end ranges work; reversed/overflow-shaped ranges fail. These
+methods do not inspect kernel state: raw registration's caller must ensure the
+chosen range is locally owned. The future safe pool wrapper will own that state.
+
+`WeftFlow::tx_buf` and `rx_buf` now return Result slices, refusing WouldBlock while
+inflight is set. This covers successful admission followed by an enter/reap
+error: wait preserves inflight on those errors, and neither getter can create a
+reference until the matching terminal CQE is consumed. Ordinary successful
+push/wait/pop use is unchanged apart from explicit Result handling. The separate
+Weft readiness header retains its atomic protocol.
+
+Actual Loom module compile-fail tests require unsafe registration and reject
+range alias/drop misuse. Actual Weft getters/wait are exercised with controlled
+enter/reap failures; two removed-guard mutations fail the named borrow assertions.
+These host syscall doubles do not qualify real transport ownership. Native
+caller build, boot and graphical results are in ASYNC-SERVICE-STATUS.md.

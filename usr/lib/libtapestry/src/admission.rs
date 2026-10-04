@@ -99,6 +99,14 @@ impl Exchange {
             self.inflight = None;
         }
     }
+    pub fn completed_read_len(&self, tag: u64, result: i32) -> Option<usize> {
+        let s = self.inflight?;
+        if self.failed || s.tag != tag || result <= 0 { return None; }
+        match s.io {
+            Io::Read { offset } if result as usize <= REPLY_BYTES - offset => Some(result as usize),
+            _ => None,
+        }
+    }
     pub fn complete(&mut self, tag: u64, result: i32, bytes: &[u8]) {
         let Some(s) = self.inflight else { return };
         if s.tag != tag {
@@ -195,7 +203,9 @@ mod native {
             let mut buffer =
                 RegisteredBuffer::new(REQUEST_BYTES + REPLY_BYTES).map_err(|_| TapError::Loom)?;
             buffer.as_mut_slice().fill(0);
-            ring.register_buffers(&[buffer.buf_reg()])
+            // SAFETY: owned byte storage; this client tracks submitted ranges and
+            // borrows them only before submission or after their matching completion.
+            unsafe { ring.register_buffers(&[buffer.buf_reg()]) }
                 .map_err(|_| TapError::Loom)?;
             ring.register_handles(&[fd as i32])
                 .map_err(|_| TapError::Loom)?;
@@ -212,7 +222,7 @@ mod native {
         }
         pub fn start(&mut self, request: Request) -> Result<(), Error> {
             let bytes = self.exchange.start(request)?;
-            self.buffer.as_mut_slice()[..REQUEST_BYTES].copy_from_slice(&bytes);
+            self.buffer.as_mut_range(0..REQUEST_BYTES).ok_or(Error::Invalid)?.copy_from_slice(&bytes);
             Ok(())
         }
         pub fn take(&mut self) -> Option<Completion> {
@@ -222,8 +232,9 @@ mod native {
             // At most one CQE can belong to this channel. Never run an
             // unbounded reap/rearm loop, even for a fast compositor.
             if let Some(cqe) = self.ring.reap() {
-                let n = (cqe.result.max(0) as usize).min(REPLY_BYTES);
-                let bytes = &self.buffer.as_mut_slice()[REQUEST_BYTES..REQUEST_BYTES + n];
+                let bytes = if let Some(n) = self.exchange.completed_read_len(cqe.user_data, cqe.result) {
+                    self.buffer.as_slice_range(REQUEST_BYTES..REQUEST_BYTES+n).ok_or(Error::Invalid)?
+                } else { &[] };
                 self.exchange.complete(cqe.user_data, cqe.result, bytes);
             }
             if let Some(s) = self.exchange.submission()? {
@@ -350,5 +361,22 @@ mod tests {
         e.retry_submission(b);
         e.next_tag = u64::MAX;
         assert_eq!(e.submission(), Err(Error::Exhausted));
+    }
+
+    #[test]
+    fn payload_borrow_requires_matching_read_completion() {
+        let mut e=Exchange::new();
+        e.start(request(1)).unwrap();
+        let w=e.submission().unwrap().unwrap();
+        assert_eq!(e.completed_read_len(w.tag, REQUEST_BYTES as i32), None);
+        e.complete(w.tag, REQUEST_BYTES as i32, &[]);
+        let r=e.submission().unwrap().unwrap();
+        assert_eq!(e.completed_read_len(w.tag, 1), None);
+        assert_eq!(e.completed_read_len(r.tag+1, 1), None);
+        assert_eq!(e.completed_read_len(r.tag, -1), None);
+        assert_eq!(e.completed_read_len(r.tag, REPLY_BYTES as i32+1), None);
+        assert_eq!(e.completed_read_len(r.tag, 1), Some(1));
+        e.complete(r.tag, -1, &[]);
+        assert_eq!(e.completed_read_len(r.tag, 1), None);
     }
 }

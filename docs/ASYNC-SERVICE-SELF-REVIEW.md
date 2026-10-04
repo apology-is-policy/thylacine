@@ -423,3 +423,23 @@ members: inter-stream fairness is a required owner policy still to implement.
 Code carries no completion publication/final ordering claim beyond its stored
 result. Native helper returns errors to outer assertion. Reap has no teardown
 shortcut that would falsely acknowledge consumer leases.
+
+## AS-R8 raw boundary and caller audit (October 4)
+
+The raw Rust registration boundary is explicitly unsafe. Caller review found
+three concrete reference hazards: whole EventRing staging borrowed while other
+surface writes are pending; Ordered taking RX on a WRITE CQE with READ pending;
+and Weft getters accepting borrows after an unresolved enter/reap error. Fixes
+use direct completed ranges, exact read tags and inflight refusal respectively.
+Admission/seat also filter stale/write CQEs before borrowing. Symlink-probe now
+ends on unresolved wait errors rather than reusing storage in an expected-error
+leg. Full caller reasoning is in work/oct4-async-service/asr8/caller-audit.md.
+
+Compile-fail checks use the actual Loom module, not a signature imitation.
+Weft controlled failures use actual extracted getters and wait; the extractor's
+first unscoped selection failed compilation and was corrected to impl WeftFlow.
+No guest bug claim is inferred from that fixture setup failure. Four Tapestry
+mutants violate the exact named borrow tests. Review remains single-agent;
+concurrent native transport, graphics and broad gates are recorded separately.
+Safe provided-pool storage/leases remain to implement; this boundary repair does
+not make the existing raw Ring API automatically own all future submissions.

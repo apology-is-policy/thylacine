@@ -33330,3 +33330,35 @@ Logs and diagnoses remain in work/oct4-async-service/buffer-pools.
 
 Host evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/buffer-pools/core-1791139023201923000
 Native evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/buffer-pools/native-1791139106929169000
+
+## AS-R8: raw Rust payload ownership corrected (October 4)
+
+Raw register_buffers is unsafe with the full asynchronous alias/lifetime
+contract. All ten native call sites now acknowledge and enforce it. Registered
+storage exposes checked direct range views. EventRing borrows only a validated
+completed slot, Ordered never borrows pending RX for a WRITE completion, and
+admission/seat filter tag/phase/length before making any view. Weft getters return
+WouldBlock while an operation remains unresolved, including enter/reap failure.
+The symlink probe terminates on lost completion rather than reusing its payload.
+
+Actual full Loom module: range runtime checks plus three intended compiler
+rejections (unsafe call, alias and premature drop). Tapestry27/27 host tests;
+four exact source-mutant failures. Actual Weft getters/wait: controlled enter
+and reap failures plus two missing-guard mutants. Fresh native caller build and
+CPU1 boot1830/1830 pass. Existing on-wire structs and kernel ABI are unchanged.
+
+Graphical paired-artifact runs: session media71.98s and physical F10 SAK88.98s,
+both exit0 with their scenario PASS assertions. Gallery-restored and SAK prompt
+1280x800 captures inspected. No new minimum-display or Pi qualification; no
+clipboard activation. The old wrapper's removed registration-log assertion
+stopped after passing media; source history proves removal in49a574b09, so the
+media result was retained and only unrun SAK resumed on hash-verified artifacts.
+
+AS-R8's raw boundary/caller correction is implemented with these focused results.
+The owned provided-pool wrapper and broad qualification remain activation gates.
+AS-2e's new kernel core likewise still owes its broad SMP/UBSan matrix; earlier
+50/50 covers AS-2a-d only. Next: private ring owner, accounting, close/exec/reaper,
+then scope/protocol/receipt integration and safe pool clients before clipboard.
+
+Native evidence: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/asr8/native-1791139902448434000
+Graphics: /Users/northkillpd/projects/thylacine-astra/work/oct4-async-service/asr8/graphics-1791140090219845000

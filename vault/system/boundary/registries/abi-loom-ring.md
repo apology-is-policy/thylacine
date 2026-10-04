@@ -167,3 +167,8 @@ what tells the author their edit reached a userspace ABI at all.
 
 [[sub-kernel-loom]] · [[spec-loom]] · [[abi-t-stat]] · [[abi-ninep-wire]] ·
 [[moc-boundary]].
+
+The AS-R8 Rust API correction makes raw buffer registration unsafe and adds
+range-bounded views; all shared structures, syscall numbers, flags and offsets
+above are unchanged. No kernel/C mirror change is required for a Rust safety
+qualifier. Actual full-module host and native compilation check the caller API.

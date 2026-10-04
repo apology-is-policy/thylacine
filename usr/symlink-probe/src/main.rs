@@ -169,7 +169,13 @@ fn mklink(ring: &Ring, buf: &mut RegisteredBuffer, hidx: u32, name: &str, target
         slice[n..n + t].copy_from_slice(target.as_bytes());
     }
     let sqe = Sqe::symlink(hidx, 0, 0, n as u32, (n + t) as u32, 0, 0xD1_0000 + n as u64);
-    ring.submit_one_wait(&sqe)?.ok().map(|_| ())
+    // A syscall/wait failure does not prove the payload writer has retired.
+    // This probe cannot safely continue reusing its buffer in that case.
+    let cqe = match ring.submit_one_wait(&sqe) {
+        Ok(cqe) => cqe,
+        Err(_) => fail("symlink-probe: FAIL -- unresolved Loom operation\n"),
+    };
+    cqe.ok().map(|_| ())
 }
 
 // Best-effort teardown of a previous boot's tree. The pool PERSISTS across
@@ -609,7 +615,9 @@ pub extern "C" fn rs_main() -> i64 {
         Ok(b) => b,
         Err(_) => fail("symlink-probe: FAIL -- RegisteredBuffer::new\n"),
     };
-    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
+    // SAFETY: owned byte storage; this client tracks submitted ranges and
+    // borrows them only before submission or after their matching completion.
+    if unsafe { ring.register_buffers(&[buf.buf_reg()]) }.is_err() {
         fail("symlink-probe: FAIL -- register_buffers\n");
     }
     // O_PATH on the work directory: born RIGHT_READ|RIGHT_WRITE (the create-

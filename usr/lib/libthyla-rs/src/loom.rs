@@ -187,6 +187,24 @@ impl RegisteredBuffer {
         unsafe { core::slice::from_raw_parts_mut(self.va as *mut u8, self.len) }
     }
 
+    /// Borrow only this byte range, without creating a reference to other
+    /// regions that a separately admitted operation may still own. Raw buffer
+    /// registration's caller must still exclude I/O on the requested range.
+    pub fn as_slice_range(&self, range: core::ops::Range<usize>) -> Option<&[u8]> {
+        if range.start > range.end || range.end > self.len { return None; }
+        // SAFETY: bounds checked against this live allocation; only the selected
+        // bytes are referenced. Async exclusion is the raw registration contract.
+        Some(unsafe { core::slice::from_raw_parts(
+            (self.va as *const u8).add(range.start), range.end - range.start) })
+    }
+
+    /// Mutable counterpart to `as_slice_range`; no wider intermediate slice.
+    pub fn as_mut_range(&mut self, range: core::ops::Range<usize>) -> Option<&mut [u8]> {
+        if range.start > range.end || range.end > self.len { return None; }
+        Some(unsafe { core::slice::from_raw_parts_mut(
+            (self.va as *mut u8).add(range.start), range.end - range.start) })
+    }
+
     /// The `BufReg` descriptor to hand to `Ring::register_buffers`.
     pub fn buf_reg(&self) -> BufReg {
         BufReg { va: self.va, len: self.len as u64 }
@@ -505,7 +523,19 @@ impl Ring {
 
     /// Pin `bufs` (each a VA range within one anonymous RW VMA) for zero-copy
     /// payload. Replaces any prior buffer table. `bufs.len() <= MAX_REG_BUFFERS`.
-    pub fn register_buffers(&self, bufs: &[BufReg]) -> Result<()> {
+    ///
+    /// # Safety
+    /// The integer ranges must name byte storage whose ownership permits all
+    /// subsequent asynchronous operations submitted through this ring. From SQ
+    /// publication until terminal completion/local retirement, do not create or
+    /// use Rust references overlapping a kernel-owned range (including through
+    /// another registration/alias). READ requires exclusive writable bytes;
+    /// WRITE must not race a mutable borrow. Kernel pins retain backing memory,
+    /// but do not establish Rust aliasing/exclusivity. A failed enter, CQ reaping,
+    /// cancellation request or table replacement alone is not proof that older
+    /// operations have retired. Preserve those obligations on every error/drop
+    /// path. Registering does not transfer ownership from `RegisteredBuffer`.
+    pub unsafe fn register_buffers(&self, bufs: &[BufReg]) -> Result<()> {
         if bufs.len() as u64 > MAX_REG_BUFFERS as u64 {
             return Err(Error::InvalidArgument);
         }

@@ -771,10 +771,13 @@ impl WeftFlow {
         // WHOLE shared ring as buffer 0.
         let ring = Ring::setup(Self::RING_ENTRIES, 0)?;
         ring.register_handles(&[data_fd])?;
-        ring.register_buffers(&[BufReg {
+        // SAFETY: retained Weft mapping, single-operation ownership protocol.
+        // Payload getters refuse even an unresolved error-path inflight op.
+        // Header readiness accesses use the separate atomic Weft protocol.
+        unsafe { ring.register_buffers(&[BufReg {
             va: ring_va,
             len: geom.ring_size as u64,
-        }])?;
+        }]) }?;
         Ok(WeftFlow {
             ring,
             ring_va,
@@ -786,24 +789,28 @@ impl WeftFlow {
 
     /// The ring's payload region as a writable slice -- fill it directly for a
     /// true zero-copy [`push`](WeftFlow::push) (no app->ring copy). Borrows `self`,
-    /// so it cannot be held across a `push` / `wait`.
-    pub fn tx_buf(&mut self) -> &mut [u8] {
+    /// so it cannot be held across a `push` / `wait`. Returns WouldBlock while
+    /// any operation is unresolved, including after an enter/wait error.
+    pub fn tx_buf(&mut self) -> Result<&mut [u8]> {
+        if self.inflight.is_some() { return Err(Error::WouldBlock); }
         let base = (self.ring_va + self.geom.payload_off as u64) as *mut u8;
         // SAFETY: [ring_va+payload_off, +payload_size) is the payload region of this
         // Proc's own SYS_WEFT_MAP'd ring mapping (a live RW anon page span). The &mut
         // borrow is tied to &mut self, so no concurrent alias and no overlap with an
         // in-flight op (push/pop take &mut self).
-        unsafe { core::slice::from_raw_parts_mut(base, self.geom.payload_size as usize) }
+        Ok(unsafe { core::slice::from_raw_parts_mut(base, self.geom.payload_size as usize) })
     }
 
     /// The ring's payload region as a read-only slice -- read the bytes a
     /// [`pop`](WeftFlow::pop) delivered (the first [`Completion::bytes`] are
     /// valid). Zero-copy: those bytes were written by netd into this shared
-    /// mapping, never copied through a 9P body.
-    pub fn rx_buf(&self) -> &[u8] {
+    /// mapping, never copied through a 9P body. Returns WouldBlock until the
+    /// matching completion ended any outstanding operation.
+    pub fn rx_buf(&self) -> Result<&[u8]> {
+        if self.inflight.is_some() { return Err(Error::WouldBlock); }
         let base = (self.ring_va + self.geom.payload_off as u64) as *const u8;
         // SAFETY: as tx_buf, but a shared read-only borrow tied to &self.
-        unsafe { core::slice::from_raw_parts(base, self.geom.payload_size as usize) }
+        Ok(unsafe { core::slice::from_raw_parts(base, self.geom.payload_size as usize) })
     }
 
     /// The ring's payload-region capacity (the max single push/pop length).
@@ -895,7 +902,7 @@ impl WeftFlow {
         if data.len() > cap {
             return Err(Error::InvalidArgument);
         }
-        self.tx_buf()[..data.len()].copy_from_slice(data);
+        self.tx_buf()?[..data.len()].copy_from_slice(data);
         let t = self.push(data.len())?;
         Ok(self.wait(t)?.bytes())
     }
@@ -907,7 +914,7 @@ impl WeftFlow {
         let t = self.pop(buf.len())?;
         let n = self.wait(t)?.bytes();
         let n = core::cmp::min(n, buf.len());
-        buf[..n].copy_from_slice(&self.rx_buf()[..n]);
+        buf[..n].copy_from_slice(&self.rx_buf()?[..n]);
         Ok(n)
     }
 

@@ -547,3 +547,25 @@ The owning connection and live surface generation gate the write. The stored
 preference affects only the surface under the pointer; it cannot change another
 surface, upload an image, warp the pointer or capture input. Divider tracks have
 a compositor-owned resize shape (`docs/HALCYON-INTERACTION.md` section 14).
+
+## Completion-scoped payload borrows (AS-R8)
+
+RingCore::pump calls ring::route_completion with a lazy range accessor. Only a
+matching slot/generation completion invokes it, and only for that completion's
+positive bounded byte count. The view starts at the slot's EV_REGION offset;
+other surface regions may still be written by pending reads. EOF/errors/stale
+completions never borrow payload. The old whole-staging mutable slice is gone.
+
+Ordered Channel has independent read/write submissions: completed_read checks
+exact read tag and RECORD_BYTES before creating an immutable RX view. A WRITE
+completion never references RX while READ is pending. Admission/seat use
+completed_read_len to require a matching current READ and valid byte count;
+stale/duplicate/write/error CQEs get no payload view. Request copies use direct
+mutable ranges, never a whole-allocation reference across another operation.
+
+All raw registrations explicitly acknowledge the unsafe asynchronous contract;
+channel field order still closes/joins the ring before dropping backing/fids.
+The Exchange rules prevent reusing request bytes before WRITE completion and
+retain unresolved operations after enter errors. Event reads remain single-shot.
+27 host tests include four new ownership assertions; four source mutations fail
+their named tests. This correction adds no wire message or clipboard authority.

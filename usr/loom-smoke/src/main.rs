@@ -69,7 +69,9 @@ pub extern "C" fn rs_main() -> i64 {
         Ok(b) => b,
         Err(_) => fail("loom-smoke: FAIL -- RegisteredBuffer::new\n"),
     };
-    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
+    // SAFETY: owned byte storage; this client tracks submitted ranges and
+    // borrows them only before submission or after their matching completion.
+    if unsafe { ring.register_buffers(&[buf.buf_reg()]) }.is_err() {
         fail("loom-smoke: FAIL -- register_buffers\n");
     }
 

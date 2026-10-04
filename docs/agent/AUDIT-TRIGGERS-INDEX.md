@@ -236,3 +236,5 @@
 - **Private service provided-buffer ABI reservations** -- `kernel/include/thylacine/loom_service_abi.h`, native C/Rust mirrors and `tools/check-loom-service-abi.py`; pool receipt/return encoding and activation guards.
 
 - **Private service payload pool state** -- Canonical extent/provisional quota, immutable per-member results, independent payload return and retained-source cleanup; actual C pool module and shared native/host fixtures.
+
+- **Rust registered payload ownership** -- Raw registration safety, completion-limited Tapestry borrows, Weft unresolved-I/O slices, native caller failure/drop discipline and compile-fail/fault tests.
