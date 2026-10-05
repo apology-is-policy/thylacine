@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**38 dossiered · 1 missing · 39 modules.**
+**39 dossiered · 0 missing · 39 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -72,7 +72,7 @@ reads as missing, which is the intended pressure.
 | syscall_irqs.tla | [[spec-syscall-irqs]] | dossiered |
 | tapestry_present.tla | [[spec-tapestry-present]] | dossiered |
 | territory.tla | [[spec-territory]] | dossiered |
-| territory_shed.tla | `spec-territory-shed` | **missing** |
+| territory_shed.tla | [[spec-territory-shed]] | dossiered |
 | tsleep.tla | [[spec-tsleep]] | dossiered |
 | weft.tla | [[spec-weft]] | dossiered |
 | weft_readiness.tla | [[spec-weft-readiness]] | dossiered |
