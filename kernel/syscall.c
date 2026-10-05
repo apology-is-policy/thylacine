@@ -7328,8 +7328,24 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     } else if (paid) {
         // Neither alias was fully torn down, so the region -- and the charge
         // that belongs to it -- survives. Put the claim back for the retry or
-        // for exit to settle. `wb` is still live: a partial teardown by
-        // definition left a mapping holding it.
+        // for exit to settle.
+        //
+        // AS-R9: claim/restore is a use-after-free write for any caller that can
+        // lose its last reference inside the window, and the five other callers
+        // were migrated to the settled drops for exactly that reason. THIS one
+        // is sound, and the premise is worth naming rather than inheriting:
+        //   1. every failure return in burrow_unmap_reporting precedes that
+        //      function's first mutation, so a nonzero rc leaves its alias
+        //      attached -- it is not a partial teardown but no teardown;
+        //   2. this arm runs only when rc_x or rc_w is nonzero, so at least one
+        //      of the two aliases still holds a mapping ref on `wb`;
+        //   3. both aliases live in p->as, whose lock is held across the whole
+        //      claim/unmap/restore interval, so no concurrent unmap of either
+        //      can run; refs held by any other address space only ADD to the
+        //      counts and can never drive them to {0,0} while (2) holds.
+        // Premise 1 is the fragile one: a failure return added BELOW the
+        // mutation point in burrow_unmap_reporting would silently make this a
+        // UAF. burrow.unmap_failure_leaves_mapping_attached pins it.
         burrow_charge_restore(wb, p, paid);
     }
     spin_unlock(&p->as->lock);

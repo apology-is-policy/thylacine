@@ -383,14 +383,14 @@ int weft_share_unregister(struct Proc *owner, u64 share_id) {
     // where the sharer's I-32 charge is settled -- nothing downstream can do
     // it, because there IS no downstream. If it does not free, the sharer still
     // maps the region and its own detach will settle instead (that detach sees
-    // freed == true once this pin is gone), so put the claim back.
+    // freed == true once this pin is gone), so the record is left in place for it.
     // Removal-before-free (R2-F5) is unchanged: the entry is already unlinked.
-    u32 paid = burrow_charge_claim(victim, owner);
-    if (burrow_unref_freed(victim)) {
-        if (paid) proc_page_uncharge(owner, paid);
-    } else if (paid) {
-        burrow_charge_restore(victim, owner, paid);
-    }
+    // AS-R9: the drop decides and settles under one hold of the Burrow's lock,
+    // so a concurrent final drop by the sharer's own detach cannot strand the
+    // record or leave this path writing through freed storage.
+    u32 refund = 0;
+    (void)burrow_unref_settled(victim, owner, &refund);
+    if (refund) proc_page_uncharge(owner, refund);
     return 0;
 }
 
@@ -442,12 +442,9 @@ void weft_share_release_owner(struct Proc *owner) {
     // auditable at an arbitrary instant rather than only at quiescence (the
     // same reason vma_drain uncharges the shared-in axis for a dying Proc).
     for (u32 i = 0; i < n; i++) {
-        u32 paid = burrow_charge_claim(orphans[i], owner);
-        if (burrow_unref_freed(orphans[i])) {
-            if (paid) proc_page_uncharge(owner, paid);
-        } else if (paid) {
-            burrow_charge_restore(orphans[i], owner, paid);
-        }
+        u32 refund = 0;   // AS-R9: settled under the Burrow's own lock
+        (void)burrow_unref_settled(orphans[i], owner, &refund);
+        if (refund) proc_page_uncharge(owner, refund);
     }
 }
 

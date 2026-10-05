@@ -21,7 +21,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 
 ## Approved private service lifecycle
@@ -321,12 +321,24 @@ also **clears** it — and refunds only what comes back. A region the owner neve
 paid for returns zero, so nothing is refunded. The clear is what makes the
 refund exactly-once: two paths racing to settle cannot both win.
 
-The claim happens **before** the drop, because a freeing drop takes the record
-with it. If the drop turns out not to free, the claim is put back. The window
+The claim happens **inside the drop**, under the Burrow's own lock, through
+`burrow_unref_settled` ([[sub-kernel-burrow]]). A drop that does not end the
+occupancy leaves the record alone; the drop that does takes it.
+
+This dossier previously recorded the older arrangement — claim, drop, and
+restore the claim if the drop turned out not to free — and said "the window
 between claim and restore is a real one, and its failure mode is deliberately
-chosen: a concurrent settler sees the cleared record and skips, leaving a
-charge that outlives its region until the payer's next release point. An
-over-charge on the payer — never a refund to a Proc that did not pay.
+chosen: a concurrent settler sees the cleared record and skips, leaving a charge
+that outlives its region until the payer's next release point. An over-charge on
+the payer — never a refund to a Proc that did not pay." **That was wrong, and it
+was not a chosen trade-off but an unnoticed defect (AS-R9).** The lock
+serialised each of the three operations and none of the gaps. A sibling holder's
+final drop inside the window freed the descriptor, so the restore wrote through
+a dead pointer — usually an `extinction`, since the free clobbers `magic` and
+SLUB does not zero the slot — and the holder that actually freed the region found
+an empty record and refunded nothing. Both `loom_drop_pin_settling` and the
+displaced registered-buffer pins now settle through the drop; the full analysis
+and the repair are in [[sub-kernel-burrow]].
 
 **The direction of the error is the whole design.** An over-charge caps a Proc
 early; an under-charge inflates its budget, which is the bound failing. Every

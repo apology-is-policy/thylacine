@@ -385,6 +385,11 @@ void test_jit_icache_sync_gate(void);
 void test_jit_write_through_writer_visible_at_exec(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
+// AS-R9: settled drops + the JIT remaining-reference premise.
+void test_burrow_settled_drop_retains_nonfinal_charge(void);
+void test_burrow_settled_drop_exact_payer(void);
+void test_burrow_settled_mapping_drop_defers_free(void);
+void test_burrow_unmap_failure_leaves_mapping_attached(void);
 void test_vmo_dup_oom_rollback(void);
 void test_vmo_file_create_close_round_trip(void);
 void test_vmo_file_create_failure_retains_spoor(void);
@@ -2326,6 +2331,15 @@ struct test_case g_tests[] = {
     { "burrow.via_handle_table",          test_vmo_via_handle_table,          false, NULL },
     { "burrow.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "burrow.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
+    // AS-R9: the charge decision inside the drop's lock interval.
+    { "burrow.settled_drop_retains_nonfinal_charge",
+      test_burrow_settled_drop_retains_nonfinal_charge, false, NULL },
+    { "burrow.settled_drop_exact_payer",
+      test_burrow_settled_drop_exact_payer,             false, NULL },
+    { "burrow.settled_mapping_drop_defers_free",
+      test_burrow_settled_mapping_drop_defers_free,     false, NULL },
+    { "burrow.unmap_failure_leaves_mapping_attached",
+      test_burrow_unmap_failure_leaves_mapping_attached, false, NULL },
 
     // I-42 / CL-7k: the JIT capability. jit.dual_alias_pte_wx_clean is the
     // invariant test -- it reads the real L3 descriptors, not the VMA prots.

@@ -313,18 +313,20 @@ static struct Proc *loom_owner_live(struct Loom *l) {
     return o;
 }
 
-// Settle one of the Loom's Burrow pins: claim whatever charge the owner holds
-// on it, drop the pin, and refund only if this drop ended the occupancy. The
-// claim returns 0 for a region the owner never paid for, which is what keeps
-// a shared-in Weft ring from being refunded to its consumer.
+// Settle one of the Loom's Burrow pins: drop the pin and settle the owner's
+// charge in the SAME lock interval, refunding only if this drop ended the
+// occupancy. The claim returns 0 for a region the owner never paid for, which
+// is what keeps a shared-in Weft ring from being refunded to its consumer.
+//
+// AS-R9: this used to claim, drop, then restore on a nonfinal drop. Another
+// holder's final drop could land in that window, so the restore wrote through a
+// freed descriptor and the record was missing when the holder that DID free the
+// region looked for it. A nonzero refund now comes only from the freeing drop.
 static void loom_drop_pin_settling(struct Loom *l, struct Burrow *b) {
-    struct Proc *o  = loom_owner_live(l);
-    u32          paid = o ? burrow_charge_claim(b, o) : 0;
-    if (burrow_unref_freed(b)) {
-        if (paid) proc_page_uncharge(o, paid);
-    } else if (paid) {
-        burrow_charge_restore(b, o, paid);   // !freed => b is still live
-    }
+    struct Proc *o = loom_owner_live(l);
+    u32 refund = 0;
+    (void)burrow_unref_settled(b, o, &refund);
+    if (refund) proc_page_uncharge(o, refund);
 }
 
 // The join predicate. Read with ACQUIRE to pair with the kthread's terminal
@@ -703,12 +705,9 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     // claim returns 0 for exactly that case.
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
         if (old[i]) {
-            u32 paid = burrow_charge_claim(old[i], p);
-            if (burrow_unref_freed(old[i])) {
-                if (paid) proc_page_uncharge(p, paid);
-            } else if (paid) {
-                burrow_charge_restore(old[i], p, paid);   // !freed => still live
-            }
+            u32 refund = 0;   // AS-R9: settled under the Burrow's own lock
+            (void)burrow_unref_settled(old[i], p, &refund);
+            if (refund) proc_page_uncharge(p, refund);
         }
     }
     return 0;

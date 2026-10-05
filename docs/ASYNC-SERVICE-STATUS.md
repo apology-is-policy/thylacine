@@ -430,7 +430,7 @@ request order. Close/exec/reaper, private slot/protocol integration and safe
 owned clients remain. Public feature masks stay disabled; no clipboard, Pi or
 fresh graphical qualification is claimed.
 
-## AS-R9: Burrow settlement races the final reference (open)
+## AS-R9: Burrow settlement races the final reference (repair written, UNRUN)
 
 Review of private retirement found the existing claim/drop/restore sequence in
 legacy Loom and full eager VMA detach. After a non-final drop returns false,
@@ -453,3 +453,162 @@ and pin.json. They are not applied to source. HEAD remains c822021a2. Four
 authority/settings drafts are untouched; no resource lease or job is active.
 Continue the approved modal visuals/status work without enabling private async
 services or the clipboard endpoint.
+
+**SUPERSEDED October 5.** The operator authorised Corona to implement the
+resumed async service lifecycle and production memory accounting, beginning with
+AS-R9, and Astra gave the implementation handoff (Yip call 0161). The pause above
+is recorded for history; it no longer governs. The preserved owner draft is
+still unapplied, and private async, the replacement accounting and the clipboard
+all remain gated on their own qualification.
+
+## Corona AS-R9: charge settlement inside the drop (October 5 -- SOURCE COMPLETE, UNRUN)
+
+Corona checkout `/Users/northkillpd/projects/thylacine-corona`, branch
+`corona/async-memory`, base `5ff62b78809846af4780ec41f82d1676e7584e80` (verified
+equal to Astra's tip; all six of the handoff `base.json` source hashes match).
+
+**Verification posture, measured on this tree.** The host double HAS now run and
+AS-R9 is **reproduced**; everything requiring the guest has not run. The Mac lease
+is held by Main for its signal7 landing gates and Corona is queued behind it, so
+no kernel build, native test, model or boot has happened. The operator cleared the
+host double specifically (a single-file clang compile with no QEMU, CMake or
+parallelism cannot change a gate's verdict), and running it early was what caught
+two build faults in seconds instead of on contended hardware -- see below.
+
+**The defect, widened from the original write-up.** AS-R9 was recorded above as a
+pattern "in legacy Loom". It is not confined there: the claim/drop/restore
+sequence has **six** instances, five of them in live production paths
+independent of the dormant private owner --
+`kernel/loom.c:322` (`loom_drop_pin_settling`), `kernel/loom.c:706` (displaced
+registered-buffer pins), `kernel/weft.c:388` (share unregister),
+`kernel/weft.c:445` (owner orphan sweep), `kernel/vma.c:386` (eager-ANON detach
+in `vma_detach_range_in`) -- plus `kernel/syscall.c:7320` (JIT destroy), which is
+sound and is treated separately below.
+
+**Severity, measured rather than asserted.** `burrow_free_internal` clobbers
+`magic` and returns the slot to SLUB, which its own comment notes does not zero
+the slot. So a stale restore lands on a slot that is either still free
+(`magic == 0`, so `burrow_charge_restore_in` extincts -- a whole-system kill
+reachable from an ordinary pair of concurrent closes, and the dominant outcome),
+reissued with no charge recorded (the payer's charge is planted on an unrelated
+region; it becomes a wrong refund -- an I-32 under-count -- only if that region
+is never `burrow_charge_record`'d, since that call overwrites unconditionally,
+and is later settled against the same AddrSpace id: reachable for backings that
+take no record, but **not** the likely case), or reissued with a charge (the
+`charge_pages != 0` arm extincts with "re-charged mid-settle", a **fabricated**
+fault whose own comment asserts the case cannot happen). The write can also race
+a concurrent `burrow_create` initialising that slot. Independently, the holder
+that actually frees the region reads the momentarily-cleared record and refunds
+nothing, so the payer stays charged for pages that no longer exist. `g_vmo_cache`
+being Burrow-specific bounds a reissued slot to being a Burrow.
+
+**The repair.** `kernel/burrow.c` + `burrow.h`:
+`burrow_charge_claim_locked` (the claim with `v->lock` already held, so there is
+one claim implementation rather than two); `burrow_unref_settled_in` /
+`burrow_unref_settled`; `burrow_release_mapping_settled_deferred`. The
+decrement, the `{0,0}` dual-counter decision and the charge claim run in one hold
+of the lock. A non-qualifying drop leaves the record alone, so the holder that
+does qualify still finds it; a qualifying drop takes it under the lock, so
+settlement is exactly-once. Neither form touches the Burrow after the reference
+it dropped is gone, so no caller needs a surviving reference. The refund returns
+as a scalar so the caller applies it outside the leaf lock. `payer` is the exact
+AddrSpace incarnation; `NULL` settles nothing. The mapping form keeps the
+deferred contract and qualifies on `freed || shared_out`, reading `shared_out`
+under the same lock -- monotonic false -> true, so a later observation can only
+add a reason to settle. `kernel/vma.c` gained `vma_free_settled_deferred`, of
+which `vma_free_deferred` is now the no-payer wrapper, so the Vma validation is
+not duplicated. All five unsafe callers migrated.
+
+**JIT destroy: proven sound, kept, premise named.** Its restore-path reference is
+guaranteed by three facts, now written at the site instead of inherited from a
+comment that asserted the conclusion: every failure return in
+`burrow_unmap_reporting` precedes that function's first mutation, so a nonzero rc
+is no teardown rather than a partial one and leaves its alias attached; the
+restore arm runs only when one of the two unmaps failed, so at least one alias
+still holds a mapping ref; and both aliases live in `p->as`, whose lock is held
+across the whole interval, while refs from any other address space only add to
+the counts. Premise one is the fragile half -- a failure return added below the
+mutation point would silently make the site a use-after-free write -- so
+`burrow.unmap_failure_leaves_mapping_attached` pins it rather than a comment.
+
+**Three false claims deleted, not softened.** `burrow.h`, the Burrow dossier and
+the Loom dossier each described this window as benign over-charging, the Loom
+dossier calling its failure mode "deliberately chosen". It was neither benign nor
+chosen: the descriptions omitted the use-after-free write entirely, and
+"never a refund to a Proc that did not pay" is false in the reissued-slot case.
+`burrow.h`'s claim/restore contract now states that the API is legal only for a
+caller holding an independent reference across the interval, and names JIT as the
+only such caller.
+
+**Tests written, none executed.** Native: `burrow.settled_drop_retains_nonfinal_charge`,
+`burrow.settled_drop_exact_payer`, `burrow.settled_mapping_drop_defers_free`,
+`burrow.unmap_failure_leaves_mapping_attached` (each with a positive control one
+variable away where a negative assertion would otherwise be satisfiable by a
+broken fixture). `kernel/test/test_addrspace.c`'s async-owner settle -- the case
+the exact-payer form exists for, where only an AddrSpace pin names the payer --
+now settles through the drop. Host double `work/oct5-as-r9/asr9-fixture.py`, 12
+legs: three pre-fix schedules (handle/handle, mapping/handle, handle/mapping),
+the reissued-clean and reissued-charged outcomes, a **positive control** that
+runs the identical sequence with no racer and requires the restore to complete
+(without it an `extinction()` miswired to always exit 42 would "reproduce" the
+bug on any input), four repaired schedules, and a shared_out discrimination pair
+one variable apart. The pre-fix functions are extracted with
+`git show 5ff62b788:kernel/burrow.c` rather than from the working tree, so the
+repair cannot launder the premise; `work/oct5-as-r9/verify-verbatim.py` separately
+proves the handoff fixture's four functions are byte-identical to shipped source
+and prints its denominator so a zero-block run cannot pass as agreement.
+
+**AS-R9 IS REPRODUCED (host double, 2026-10-05).** `work/oct5-as-r9/asr9-fixture.py`,
+`CC=llvm@22` with a scoped `-isysroot $(xcrun --show-sdk-path)`. Evidence:
+`work/oct5-as-r9/asr9-fixture.json` + `leg-*.log` + `mutant-*.log`.
+**12/12 legs and 5/5 mutants behaved exactly as predicted**, each leg carrying a
+distinct exit code so it cannot pass by dying the wrong way:
+
+| leg | exit | what it witnesses |
+|---|---|---|
+| `old-handle-handle` | 42 | non-final handle drop, racing final handle drop -> restore on a clobbered descriptor |
+| `old-mapping-handle` | 42 | non-final MAPPING drop, racing final handle drop (mixed holders) |
+| `old-handle-mapping` | 42 | non-final handle drop, racing final MAPPING drop (the other drop order) |
+| `old-recycled-clean` | 44 | slot reissued empty -> charge PLANTED on an unrelated region, then refunded: the I-32 under-count |
+| `old-recycled-charged` | 43 | slot reissued charged -> FABRICATED `re-charged mid-settle` |
+| `control-no-race` | 1 | **positive control**: identical sequence, no racer -> the restore COMPLETES |
+| `new-*` (6 legs) | 0 | repaired: settled once under one lock; non-final drops retain the record; exact-payer holds; shared_out pair discriminates |
+
+The pre-fix functions are extracted with `git show 5ff62b788:kernel/burrow.c`, not
+from the working tree, so the repair cannot launder the premise; every extracted
+body is asserted to be a verbatim substring of its source. The five mutants each
+reddened their **named** leg with its **named** exit code (M1 claim-on-every-drop
+-> 70; M2 ignore-shared-out -> 45; M3 always-settle-mapping -> 70; M4
+exact-payer-ignored -> 73; M5 claim-does-not-clear -> 75), which is what makes
+them discriminating rather than merely detecting.
+
+**Boundary of that evidence, stated rather than left implied.** The double is a
+cooperative single-threaded schedule: its lock is a counter, its allocator a
+static slot whose state is rewritten, and no freed host memory is ever
+dereferenced. It establishes that the shipped pre-fix functions and the repaired
+ones behave differently under one named interleaving with the implementation as
+the single changed variable. It does **not** establish ARM weak-memory behaviour,
+real SLUB timing, or that the interleaving is reachable from any particular
+syscall pair. Those need the guest.
+
+**Still owed, all lease-blocked:** `tools/build.sh kernel --config ci`; the four
+new `burrow.*` tests plus the burrow/vma/weft/loom/capacity/resource/addrspace
+suites; the burrow and capacity models; and `tools/ci-smp-gate.sh` -- this is an
+SMP race fix, so a single-CPU green proves little, and the October 1-2 waiver has
+expired. Then the audit round: the `kernel/burrow.c` + `burrow.h` row in
+`docs/AUDIT-TRIGGERS.md` (VMO / BURROW) is triggered, and now carries an AS-R9
+addendum with a PROSECUTE list. Astra holds review; per AGENTS.md's single-agent
+rule Corona does not spawn reviewer subagents.
+
+**Two build faults the early run caught**, both of which would otherwise have
+burned contended lease time: llvm@22 defaults to a sysroot that does not exist
+(`MacOSX26.sdk`), fixed with a scoped `-isysroot` -- the same stale-SDK trap the
+October 4 journal entry already records, so it has now recurred and belongs in
+the recipe rather than in each author's memory; and `-Werror` rejected two of the
+mutations for leaving `shared_out` unreferenced, which is a property of the
+mutation, not of the repair.
+
+**Dossiers co-staged:** `sub-kernel-burrow` (the AS-R9 section and the corrected
+contract), `sub-kernel-vma`, `sub-kernel-loom`, `sub-kernel-weft`. `quaestor lint`
+reports 0 failures; its 2 warnings (`sub-kernel-loom-pools` section order, 47
+stale dossiers) are pre-existing and not introduced here.

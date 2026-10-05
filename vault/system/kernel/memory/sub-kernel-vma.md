@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -168,10 +168,14 @@ still resident would be charged for the rest of the address space's life
 before it). Then the shape. A WHOLE mapping goes through `vma_remove_in` +
 `vma_free_deferred`, its Burrow chained onto `*out_dead` if that drop was the
 last; a `SHARED_IN` whole mapping uncharges the shared-in budget for its span;
-an eager `ANON` whole mapping claims its charge record for `payer` BEFORE the
-drop and refunds it iff the drop freed the pages or the region survives only
-in another Proc (`shared_out`), else restores the claim for the drop that does
-end it (#130/#131, unchanged from the exact-match detach) -- so an eager
+an eager `ANON` whole mapping settles its charge record for `payer` INSIDE the
+drop -- `vma_free_settled_deferred` -> `burrow_release_mapping_settled_deferred`,
+which claims iff the drop freed the pages or the region survives only in another
+Proc (`shared_out`), and otherwise leaves the record for the drop that does end
+it (#130/#131; AS-R9 moved the decision from three separate lock acquisitions in
+this function into the drop's own critical section, because a sibling holder's
+final drop between the non-final drop and the restore left this path writing
+through freed storage -- see [[sub-kernel-burrow]]) -- so an eager
 region's block and its charge go with its LAST piece, and a trimmed eager
 mapping refunds nothing (its pages are still allocated: an eager Burrow is one
 buddy block and cannot be split physically, stated rather than discovered). A
@@ -504,8 +508,9 @@ Since B-1a', four more: that the RELEASE precedes the reshape in phase 3 for
 every plain lazy overlap -- a trim or removal that ran first would orphan the
 overlap's resident slots, charged for the address space's life
 ([[spec-capacity]], `BUGGY_DETACH_NO_REFUND`); that an eager whole mapping's
-claim is taken BEFORE the drop and restored when the region survives on this
-Proc's own claim, and that a TRIMMED eager mapping refunds nothing; that the
+charge is settled BY the drop, leaving the record in place when the region
+survives on this Proc's own claim, and that a TRIMMED eager mapping refunds
+nothing; that the
 headroom formula counts the removals the range makes before the piece it adds
 (and the caller's `extra_vmas`), so `vma_replace_range_in`'s insert stays
 infallible; and that no caller loops the exact-match removers (`vma_remove` /

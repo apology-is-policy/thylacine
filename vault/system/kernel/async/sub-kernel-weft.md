@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-08-24
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -290,7 +290,12 @@ holding that process's lock, with no way to name who paid. Sixty-four pages per
 closed flow, monotonically.
 
 The release rule is now: the sharer settles **when the region is shared out and
-this process has unmapped it**, whether or not the pages freed. Once it has
+this process has unmapped it**, whether or not the pages freed. Both of this
+file's settle sites — the explicit share unregister and the owner orphan sweep —
+take that decision inside the reference drop (`burrow_unref_settled`,
+[[sub-kernel-burrow]]): AS-R9 found that claiming the record, dropping the pin
+and restoring the record on a non-final drop left a window in which another
+holder's final drop freed the descriptor under the restore. Once it has
 handed the region across and let go of its own view, it cannot reach those pages,
 and charging a process for memory it cannot touch caps it for nothing — from
 there the consumer's own shared-mapping axis accounts them.

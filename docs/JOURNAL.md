@@ -1,5 +1,84 @@
 # The autonomous-run journal
 
+## 2026-10-05: AS-R9 charge settlement (corona) -- SOURCE ONLY, NOTHING RUN
+
+The operator authorised corona to assist Astra on the approved async/memory arc,
+AS-R9 first; that direction supersedes the October 5 park recorded in
+ASYNC-SERVICE-STATUS.md. Astra gave the handoff on Yip 0161 and holds review.
+
+Base 5ff62b788 verified equal to Astra's tip, and all six source hashes in her
+base.json match. I grepped the claim/drop/restore sequence before reading her
+caller list and got SIX sites, which agreed with hers: loom.c:322, loom.c:706,
+weft.c:388, weft.c:445, vma.c:386, syscall.c:7320. That widens the write-up
+above it, which called this a pattern "in legacy Loom" -- five of the six are
+live production paths, independent of the dormant private owner.
+
+Severity: I first told Astra the I-32 under-count was the serious outcome. Then
+I read burrow_free_internal's tail instead of reasoning from the name, and it
+clobbers magic and hands the slot to SLUB, which its own comment says does not
+zero it. So the dominant outcome is an extinction -- a whole-system kill from an
+ordinary pair of concurrent closes -- and the under-count needs a named
+precondition (the reissued region never burrow_charge_record'd, since that call
+overwrites unconditionally, and later settled against the same AddrSpace id). I
+corrected that on the call rather than leave the inflated claim standing. A third
+outcome is a FABRICATED "re-charged mid-settle" extinction whose own comment
+asserts the case cannot happen.
+
+Repair: burrow_charge_claim_locked + burrow_unref_settled{,_in} +
+burrow_release_mapping_settled_deferred put the decrement, the {0,0} decision and
+the claim in one hold of v->lock; a non-qualifying drop now leaves the record
+alone, which is what fixes the converse loss Astra identified (the holder that
+frees finds an empty record). Five callers migrated; vma.c got
+vma_free_settled_deferred with vma_free_deferred as its no-payer wrapper.
+
+JIT destroy I was asked to prove rather than assume, and it is sound: every
+failure return in burrow_unmap_reporting precedes its first mutation, so a
+nonzero rc leaves its alias attached; the restore arm runs only when an unmap
+failed; both aliases live in the one AddrSpace whose lock is held across the
+interval. The old comment asserted the conclusion ("a partial teardown by
+definition left a mapping holding it") without the premise, so I wrote all three
+in and pinned the fragile one with burrow.unmap_failure_leaves_mapping_attached
+-- a failure return added below the mutation point would silently make that site
+a UAF.
+
+Deleted three statements that were wrong, rather than softening them: burrow.h,
+sub-kernel-burrow and sub-kernel-loom each called this window benign
+over-charging, the Loom dossier calling its failure mode "deliberately chosen".
+It was neither benign nor chosen.
+
+Two wrong turns, both caught by guards I had put in on purpose. My
+verify-verbatim splitter found 3 of 4 function blocks and refused to compare --
+it prints its denominator, so a partial comparison could not pass as agreement;
+I replaced the regex with an explicit scanner and got 4/4 verbatim. The first
+apply script resolved its repo root one directory short and died on the read, not
+the write, because it validates every anchor before touching any file.
+
+UPDATE, same run: the operator cleared the host double (a single-file compile
+cannot change a gate's verdict, and debugging my own typos off-lease keeps the
+lease for real gates). It ran, and AS-R9 is REPRODUCED: 12/12 legs and 5/5
+mutants exactly as predicted, each leg on a distinct exit code so none can pass
+by dying the wrong way. The three pre-fix schedules hit the stale restore (42),
+the reissued-empty slot witnessed the I-32 under-count (44), the reissued-charged
+slot produced the fabricated "re-charged mid-settle" (43), and the positive
+control -- same sequence, no racer -- let the restore complete (1), which is what
+proves the other eleven legs are measuring the race and not a harness that always
+fails. Vindicating the decision to run early: it immediately found two build
+faults (llvm@22's nonexistent default sysroot -- the SAME stale-SDK trap the
+October 4 entry records, so it has recurred and belongs in the recipe, not in
+memory; and -Werror rejecting two mutations for leaving shared_out unreferenced).
+Both would have been discovered on contended hardware otherwise.
+
+What "fixed" does NOT cover: nothing here has been built or run IN THE GUEST. Mac
+is held by main for its signal7 gates and I am queued behind it. The 12-leg host double, the
+four native tests, the mutants, the burrow/capacity models and the audit round
+are all owed; the fixture is UNRUN and I am not calling it a reproduction. The
+fixture extracts the pre-fix functions with `git show 5ff62b788:kernel/burrow.c`
+rather than from my tree, so my own repair cannot launder its premise, and it
+carries a positive control -- the identical sequence with no racer, which must
+let the restore COMPLETE -- because without one an extinction() miswired to
+always exit 42 would "reproduce" the bug on any input.
+
+
 ## 2026-10-04: explicit protocol-buffer storage
 
 The private owner needs all metadata/payload transport storage accounted before

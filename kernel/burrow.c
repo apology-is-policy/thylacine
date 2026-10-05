@@ -997,12 +997,12 @@ void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages) {
     spin_unlock(&v->lock);
 }
 
-u32 burrow_charge_claim_in(struct Burrow *v, const struct AddrSpace *as) {
-    if (!v || !as) return 0;
-    if (v->magic != VMO_MAGIC)
-        extinction("burrow_charge_claim on corrupted BURROW (use-after-free?)");
-    u32 pages = 0;
-    spin_lock(&v->lock);
+// The claim itself, with v->lock ALREADY held -- the settled drops below need
+// it inside the critical section that decides finality, which is the whole
+// point of AS-R9; burrow_charge_claim_in is the same operation taking the lock
+// for callers that only want the claim.
+static u32 burrow_charge_claim_locked(struct Burrow *v, const struct AddrSpace *as) {
+    if (!as) return 0;
     // charge_pages -- not charge_as_id -- is the "held" sentinel: a charge of
     // zero pages is meaningless, so zero pages IS "nothing held". The key is
     // the ADDRESS SPACE that paid (B-1a' audit F4): a pid survives exec, and a
@@ -1013,12 +1013,89 @@ u32 burrow_charge_claim_in(struct Burrow *v, const struct AddrSpace *as) {
     // A record whose descriptor really died is never claimed: its counter died
     // too, and the physical pages return to the pool when storage is freed.
     if (v->charge_pages != 0 && v->charge_as_id == as->id) {
-        pages           = v->charge_pages;
+        u32 pages       = v->charge_pages;
         v->charge_as_id = 0;
         v->charge_pages = 0;
+        return pages;
     }
+    return 0;
+}
+
+u32 burrow_charge_claim_in(struct Burrow *v, const struct AddrSpace *as) {
+    if (!v || !as) return 0;
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_charge_claim on corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    u32 pages = burrow_charge_claim_locked(v, as);
     spin_unlock(&v->lock);
     return pages;
+}
+
+// AS-R9: the settled handle drop. The decrement, the dual-counter free decision
+// and the charge claim all run in ONE hold of v->lock, so no other holder can
+// interleave between "this drop was not the last" and the settlement of the
+// record -- the window that made the old claim-drop-restore sequence a
+// use-after-free write (see the contract in burrow.h). The free runs outside
+// the lock, leaf discipline as everywhere else, and `v` is not touched after it.
+bool burrow_unref_settled_in(struct Burrow *v, const struct AddrSpace *payer,
+                             u32 *out_refund) {
+    if (out_refund) *out_refund = 0;
+    if (!v) return false;                      // NULL-safe, mirroring burrow_unref_freed
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_unref_settled of corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    if (v->handle_count <= 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_unref_settled of zero-ref BURROW");
+    }
+    v->handle_count--;
+    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
+    // Claim ONLY on the drop that ends the occupancy. A nonfinal drop leaves the
+    // record in place for whoever does end it -- the old code cleared it here
+    // and put it back afterwards, which is exactly how a racing final holder
+    // came to read an empty record and refund nothing.
+    u32 refund = should_free ? burrow_charge_claim_locked(v, payer) : 0;
+    spin_unlock(&v->lock);
+
+    if (should_free)
+        burrow_free_internal(v);
+    if (out_refund) *out_refund = refund;
+    return should_free;
+}
+
+bool burrow_unref_settled(struct Burrow *v, const struct Proc *payer, u32 *out_refund) {
+    return burrow_unref_settled_in(v, payer ? payer->as : NULL, out_refund);
+}
+
+// AS-R9: the settled mapping drop, deferred. The twin of
+// burrow_release_mapping_deferred -- same {0,0} decision, same "return the dead
+// Burrow rather than free it under the caller's as->lock" contract -- with the
+// charge decision folded into the same critical section.
+struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
+                                                       const struct AddrSpace *payer,
+                                                       u32 *out_refund) {
+    if (out_refund) *out_refund = 0;
+    if (!v)                       extinction("burrow_release_mapping_settled(NULL)");
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_release_mapping_settled of corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    if (v->mapping_count <= 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_release_mapping_settled of zero-mapping BURROW");
+    }
+    v->mapping_count--;
+    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
+    // A shared-out region settles on the sharer's detach even when the drop does
+    // not free it: the mapping that survives is in a Proc that cannot name the
+    // payer, so there is no later settler. Read under this same lock -- monotonic
+    // false -> true, so observing it here rather than before the drop can only
+    // ADD a reason to settle, never miss one that mattered.
+    bool shared_out = v->shared_out;
+    u32  refund = (should_free || shared_out) ? burrow_charge_claim_locked(v, payer) : 0;
+    spin_unlock(&v->lock);
+
+    if (out_refund) *out_refund = refund;
+    return should_free ? v : NULL;
 }
 
 void burrow_charge_restore_in(struct Burrow *v, const struct AddrSpace *as, u32 pages) {

@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 ## Session registry factory
 
@@ -753,11 +753,23 @@ staging buffers are private by construction. Three shared concerns:
   instruction-cache publish takes a Burrow reference under the address-space
   lock, drops the lock, does the maintenance, and releases — so a sibling
   tearing the region down concurrently frees it there instead of underneath.
-- **A charge claim is taken before the drop that could free its record.** The
-  detach core (`vma_detach_range_in`, [[sub-kernel-vma]] since B-1a') snapshots
-  the Burrow pointer rather than the VMA — the removal frees the VMA struct, so
-  that pointer dangles the moment it returns — and claims the page charge
-  *before* the drop, because a freeing drop takes the payment record with it.
+- **A charge claim is taken BY the drop that could free its record.** The detach
+  core (`vma_detach_range_in`, [[sub-kernel-vma]] since B-1a') snapshots the
+  Burrow pointer rather than the VMA — the removal frees the VMA struct, so that
+  pointer dangles the moment it returns — and settles the page charge *inside*
+  the reference drop, under the Burrow's own lock
+  (`burrow_release_mapping_settled_deferred`, [[sub-kernel-burrow]]). It used to
+  claim *before* the drop and restore the claim when the drop reported non-final.
+  AS-R9 showed that was a use-after-free write rather than the benign
+  over-charge it was documented as: another holder's final drop could land in
+  that window, so the restore wrote through a freed descriptor, and the holder
+  that actually freed the region found an empty record and refunded nothing.
+  `SYS_JIT_DESTROY` is the one caller still allowed the claim-then-restore form,
+  because it holds `as->lock` and a surviving alias for the whole interval. That
+  premise is now written at the site instead of inherited, and pinned by
+  `burrow.unmap_failure_leaves_mapping_attached`: every failure return in
+  `burrow_unmap_reporting` precedes that function's first mutation, so a nonzero
+  rc is NO teardown rather than a partial one and leaves its alias attached.
 
 ### Detach admission is decided by identity (2026-09-16)
 

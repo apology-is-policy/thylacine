@@ -148,11 +148,15 @@ static void test_addrspace_kernel_pin_lifetime(void) {
     u32 charge = burrow_charge_claim_in(b, as);
     bool once = charge == 1 && burrow_charge_claim_in(b, as) == 0;
     burrow_charge_restore_in(b, as, charge);
-    u32 settled = burrow_charge_claim_in(b, as);
+    // AS-R9: settle THROUGH the drop. This is the case the exact-payer form
+    // exists for -- the paying Proc is gone and only an AddrSpace pin names the
+    // payer -- and it is exactly the shape the old claim-drop-restore sequence
+    // made racy: a sibling holder's final drop between the drop and the restore
+    // left this path writing through freed storage.
     u32 before = __atomic_load_n(&as->page_count, __ATOMIC_ACQUIRE);
-    bool freed = burrow_unref_freed(b);
-    if (freed) addrspace_uncharge_pages(as, settled);
-    else burrow_charge_restore_in(b, as, settled);
+    u32 settled = 0;
+    bool freed = burrow_unref_settled_in(b, as, &settled);
+    if (settled) addrspace_uncharge_pages(as, settled);
     bool refunded = freed && settled == 1 && before >= 1 &&
         __atomic_load_n(&as->page_count, __ATOMIC_ACQUIRE) == before - 1;
     addrspace_unpin(as);
