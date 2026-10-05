@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -75,17 +75,30 @@ another EL0 instruction:
    or a wake may have made something more urgent runnable
 2. **the die-check** — the Proc may be group-terminating, in which case this
    thread self-exits and never returns
-3. **note delivery** — a queued note may need to be pushed onto the user stack
-   as a handler frame, or may default-terminate the Proc
-4. **the stop-check** — a debugger or a job-control stop may be pending, in
+3. **the stop-check** — a debugger or a job-control stop may be pending, in
    which case the thread parks here
+4. **note delivery** — a queued note may need to be pushed onto the user stack
+   as a handler frame, or may default-terminate the Proc. Only the synchronous
+   tail has this leg ([[seam-el0-irq-tail-no-notes]])
 
-The order is load-bearing in two places. The die-check runs **after** the
+The order is load-bearing in three places. The die-check runs **after** the
 preempt, so a Proc that is group-terminated *during* the preempt's context
 switch is still caught before any EL0 instruction runs. The stop-check runs
 **after** the die-check, which is how "death wins over a stop" is made
 mechanical rather than aspirational — a thread that is both dying and stopped
-takes the death path.
+takes the death path. And the stop-check runs **before** note delivery, so a
+stop wins over a note: the debugger sees the interrupted context rather than a
+handler frame, and a note that arrives during the stop is taken the moment the
+stop clears. Plan 9's `notify` runs `procctl` before it looks at a note, and
+Linux's signal-delivery-stop comes before the handler frame (DEBUG-FS-DESIGN
+4.2). Until 2026-10-05 the notes ran first.
+
+The notes leg can apply a stop itself: an uncaught `tty:susp` takes its default
+action there. The thread must park before it runs another EL0 instruction, so
+after a stop it applied, the leg runs the die-check and the stop-check again,
+parks, and looks at the queue once more. One budget of `NOTE_QUEUE_DEPTH`
+passes, shared with the discard loop, bounds the masked tail against a flooded
+queue ([[sub-kernel-notes]], [[spec-tail-order]]).
 
 These run at the *vector* level, not inside the C handlers. That matters: by
 the time the tail executes, the handler has returned and its crash-dump frame
@@ -106,9 +119,12 @@ path unmasks". A syscall body now runs with interrupts ON: `syscall_dispatch`
 unmasks after setting the per-thread in-syscall marker, and re-masks
 UNCONDITIONALLY before returning. So the property is preserved by a re-mask
 rather than by an absence, which is a weaker guarantee and is therefore
-asserted rather than assumed — `el0_return_stop_check` carries an
-interrupt-state assert, and it sits in that function precisely because its only
-two callers are the two tails that reach this trampoline.
+asserted rather than assumed. Each tail's last C call carries an
+interrupt-state assert: `el0_return_stop_check` on the IRQ tail, and the notes
+leg on the synchronous and birth tails. `el0_return_stop_check` keeps its own
+assert as well, because it has three callers: the two tails, and the notes
+leg's re-pass, which parks the thread for a stop the leg applied. The birth
+park asserts it for the held child's tail.
 
 The unmask is confined to the syscall body. Kernel fault handling shares the
 EL0-synchronous slot and is **not** unmasked, so the recursion guard on that
@@ -175,7 +191,7 @@ stack, zeroes it, and writes the image's entry as the return address, EL0 with
 interrupts clear as the saved state, and the user stack as the EL0 stack
 pointer. That is the frame the first instruction would have been interrupted
 with. It then masks and runs the ordinary return sequence over that frame --
-preempt, die-check, notes, and a park -- and leaves through the shared return's
+preempt, die-check, a park, then notes -- and leaves through the shared return's
 local label, exactly as the fork trampoline does. It lives in this file for the
 same reason.
 
@@ -315,6 +331,13 @@ and read by C as a struct, so the two descriptions are pinned together by
 compile-time assertions on the total size and on the offset of every special
 register. That pairing is the whole safety argument for the frame — there is no
 runtime check that assembly and C agree.
+
+One bit of the saved processor state is not the program's: `SPSR_EL1_SS` (bit
+21), which `exception.h` names, is the software-step state the `eret` installs.
+It belongs to the kernel's step machine. A note's delivery clears it before it
+saves the interrupted context, so no saved user context carries it, and a
+return through `SYS_NOTED` or `rt_sigreturn` comes back without it
+(DEBUG-FS-DESIGN 5.5).
 
 ## Concurrency
 

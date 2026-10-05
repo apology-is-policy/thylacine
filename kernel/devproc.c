@@ -39,6 +39,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/env.h>      // V-4b-6: env_render_environ -- /proc/<pid>/environ
+#include <thylacine/errno.h>    // T_E_SRCH -- a step whose target died (DEBUG-FS-DESIGN 5.5)
 #include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
@@ -2849,15 +2850,16 @@ int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl)
     return w.state;
 }
 
-// The wait's verdict on one scan state: +1 stopped, 0 exited/gone or (a step's
-// wait) its slot released, -1 denied, DEVPROC_WAIT_POLL for a live target not
-// yet stopped (re-scan).
-enum { DEVPROC_WAIT_POLL = 2 };
+// The wait's verdict on one scan state: +1 stopped, 0 exited/gone,
+// DEVPROC_WAIT_RELEASED for a step's wait whose slot was released, -1 denied,
+// DEVPROC_WAIT_POLL for a live target not yet stopped (re-scan).
+enum { DEVPROC_WAIT_POLL = 2, DEVPROC_WAIT_RELEASED = 3 };
 static int devproc_wait_verdict(int state) {
-    if (state == 1)                return 1;    // stopped
-    if (state == -1 || state == 2) return 0;    // exited/gone, or the step's slot released
-    if (state == -2)               return -1;   // denied (I-39 / kproc)
-    return DEVPROC_WAIT_POLL;                   // 0: ALIVE, not yet stopped
+    if (state == 1)  return 1;                       // stopped
+    if (state == -1) return 0;                       // exited/gone
+    if (state == 2)  return DEVPROC_WAIT_RELEASED;   // the step's slot released
+    if (state == -2) return -1;                      // denied (I-39 / kproc)
+    return DEVPROC_WAIT_POLL;                        // 0: ALIVE, not yet stopped
 }
 
 // Test hook (the *_for_test convention: absent from the header, extern-declared
@@ -2867,8 +2869,9 @@ int devproc_wait_verdict_for_test(int state) {
     return devproc_wait_verdict(state);
 }
 
-// Block until a wait event. Returns +1 stopped, 0 exited/gone or (a step's
-// wait, ctl set) slot released, -1 denied / caller death-interrupted. Same
+// Block until a wait event. Returns +1 stopped, 0 exited/gone,
+// DEVPROC_WAIT_RELEASED (a step's wait, ctl set) slot released, -1 denied /
+// caller death-interrupted. Same
 // bounded-poll cadence as devproc_debug_wait_stopped.
 static int devproc_wait_block(int pid, struct Proc *caller, struct Spoor *ctl) {
     struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
@@ -2885,6 +2888,23 @@ static int devproc_wait_block(int pid, struct Proc *caller, struct Spoor *ctl) {
     }
 }
 
+// The step write's return on its wait's verdict. Only a re-stop completes the
+// step. A target that is gone, or one this ctl no longer holds (a detach on the
+// same ctl resumed it and cancelled the step), fails it with -T_E_SRCH, as
+// ptrace(2) answers ESRCH for a tracee that does not exist or is not traced by
+// the caller. -1 is a denial or the caller's own death interrupt.
+static long devproc_step_result(int ev, long n) {
+    if (ev == 1) return n;
+    if (ev == 0 || ev == DEVPROC_WAIT_RELEASED) return -T_E_SRCH;
+    return -1;
+}
+
+// Test hook (the *_for_test convention): the step write's return for a verdict.
+long devproc_step_result_for_test(int ev, long n);
+long devproc_step_result_for_test(int ev, long n) {
+    return devproc_step_result(ev, n);
+}
+
 static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf || n < 0) return -1;
     if (off < 0)             return -1;
@@ -2894,7 +2914,7 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
 
     int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc, NULL);
     if (ev < 0) return -1;   // denied or caller death-interrupted
-    const char *msg = ev ? "stopped\n" : "exited\n";
+    const char *msg = (ev == 1) ? "stopped\n" : "exited\n";
 
     size_t total = 0; while (msg[total]) total++;
     if ((size_t)off >= total) return 0;   // EOF
@@ -3004,7 +3024,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // 8a-2b-2: single-step the head thread one instruction. Arm + resume under
         // the lock, then block (outside the lock) until the target re-stops (the
         // step completed) / exits / the slot is released; -1 only if the CALLER was
-        // death-interrupted.
+        // death-interrupted, -T_E_SRCH if the target died or the slot went first.
         int pid = proc_qid_pid(c->qid.path);
         struct devproc_step_ctx s = { .target_pid = pid, .caller = t->proc, .ctl = c, .result = 0 };
         proc_for_each(devproc_step_walk_cb, &s);
@@ -3018,7 +3038,11 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // resumes from sleep(), so all_threads_parked reads "still parked" before
         // the step even runs. fully_stopped's debug_stop_req==0 gate rejects that
         // window and waits for the real re-stop.
-        return (devproc_wait_block(pid, t->proc, c) >= 0) ? n : -1;
+        //
+        // A target that died during the step fails the write, never succeeds
+        // (DEBUG-FS-DESIGN 5.5): the tail delivers notes after the stop clears, so
+        // a terminating note can end it on the very resume.
+        return devproc_step_result(devproc_wait_block(pid, t->proc, c), n);
     }
 
     if (v == CTL_VERB_HWBREAK || v == CTL_VERB_HWRMBREAK) {

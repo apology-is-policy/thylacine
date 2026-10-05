@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -305,14 +305,17 @@ or a held child still loading.
 (`el0_return_stop_check`, the `sleep`/`tsleep` detour, and each Thread's own
 `debug_rendez`). Each resume clears **only its own owner**; the park
 predicate is the disjunction, false in a dying group. Death overrides both:
-the stop-check runs *after* the die-check at the tail, and reads the owners'
+the stop-check runs *after* the die-check at the tail (and before the notes
+leg, so a stop in turn wins over a note), and reads the owners'
 flags (`proc_stop_owned`), not the predicate, so a thread killed between the
 two still enters the park; the park loop re-checks `group_exit_msg` on every
 wake, so a kill racing a stop terminates the thread inside the park rather
 than eret-ing to EL0. Only death does: the park
 sleeps in `sleep_death_only`, so a terminate latch's wake is absorbed and a
-stopped thread stays stopped, meeting the note at its next checkpoint once a
-resume lets it run (DEBUG-FS-DESIGN 5g). The second owner and its fans are
+stopped thread stays stopped. Once a resume lets it run, it meets the note as
+the park returns, in the notes leg that follows on the synchronous and birth
+tails; a park on the IRQ tail, which delivers no notes, leaves it to the next
+checkpoint (DEBUG-FS-DESIGN 4.2, 5g). The second owner and its fans are
 [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
 
 The loop checks death twice per pass since 2026-09-29: at the top, and again

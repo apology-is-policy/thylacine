@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -77,6 +77,13 @@ that are not obvious.
   run to absorb it reads as unsettled to the debugger. The parent suspends,
   on another rendez, take the latch's wake and absorb it. The registration
   and the death wake are `sleep`'s own, so [[inv-i9]] holds unchanged.
+  `el0_return_stop_check`, the tail's stop park, has had a third caller since
+  2026-10-05, after the two tails: the notes leg, which
+  parks for a stop it applied itself (an uncaught `tty:susp`) before the
+  thread runs again. `rendez.tail_parks_for_the_stop_it_applies` runs that
+  leg, masked, on a kernel thread and requires the park on `debug_rendez` and
+  no return until the stop lifts; a `child_exit` is its control, one variable
+  away ([[sub-kernel-notes]]).
 - `wakeup(r)` wakes the at-most-one sleeper; a no-op if none. Returns
   whether it woke anyone. Safe from IRQ context.
 - **The producer's obligation**: make `cond` true *before* calling

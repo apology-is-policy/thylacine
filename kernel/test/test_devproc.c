@@ -28,6 +28,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/env.h>             // V-4b-6: env_create/write -- /proc/<pid>/environ
+#include <thylacine/errno.h>
 #include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
 #include <thylacine/page.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
@@ -1977,12 +1978,22 @@ void test_devproc_debug_stop_start_resume(void) {
     int v_stopped  = devproc_wait_verdict_for_test(1);
     int v_denied   = devproc_wait_verdict_for_test(-2);
     int v_notyet   = devproc_wait_verdict_for_test(0);
-    TEST_EXPECT_EQ(v_released, 0, "the released slot's verdict ends the step's wait");
+    TEST_EXPECT_EQ(v_released, 3,
+                   "the released slot's verdict ends the step's wait, apart from an exit");
     TEST_EXPECT_EQ(v_gone, 0, "a gone target's verdict ends the wait");
     TEST_EXPECT_EQ(v_stopped, 1, "a stopped target's verdict ends it stopped");
     TEST_EXPECT_EQ(v_denied, -1, "a denied scan's verdict ends it denied");
-    TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1,
+    TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1 && v_notyet != v_released,
                 "a live target not yet stopped polls on");
+    // And the step write answers each verdict: only a re-stop completes the step.
+    extern long devproc_step_result_for_test(int ev, long n);
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_stopped, 5L), 5L,
+                   "a re-stopped target completes the step");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_gone, 5L), (long)(-T_E_SRCH),
+                   "a step whose target is gone fails ESRCH");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_released, 5L), (long)(-T_E_SRCH),
+                   "a step whose slot was released fails ESRCH, never success");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_denied, 5L), -1L, "a denied step fails");
 
     TEST_ASSERT(dctl != NULL, "open target ctl (dying)");
     TEST_EXPECT_EQ(f_attach, an, "attach returns n (dying)");

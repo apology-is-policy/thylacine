@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -245,7 +245,8 @@ its own (`Thread.note_claim`), and its peers find the family claimed and re-park
 -- as Linux interrupts one thread for a process-directed signal. The claim is the
 claimant's, and it ends at the claimant's EL0-return tail whatever that tail
 delivered: `notes_deliver_at_el0_return` runs the delivery body
-(`notes_deliver_tail`) and then `notes_release_claims`, which ANDs the thread's
+(`notes_deliver_tail`), once more after each stop it applied (below), and then
+`notes_release_claims`, which ANDs the thread's
 bits out and, if the family is still caught -- the tail ended short of the note
 -- runs `proc_caught_note_wake` under the process-table lock so a parked peer
 re-reads its condition and unwinds for it. A thread's own claim stays open to
@@ -321,7 +322,10 @@ family, and every later wait -- the claimant's own retry included -- refused the
 claimed family and parked: Ctrl-C was dead in a blocked `recv`. Two changes close
 it. The claim is released by its owner's tail, as above. And the tail now loops
 past a discarded note to the next one, as Linux's `get_signal` does, bounded by
-`NOTE_QUEUE_DEPTH` so a flood of ignored notes cannot hold the thread there. *An
+`NOTE_QUEUE_DEPTH` so a flood of ignored notes cannot hold the thread there.
+Since 2026-10-05 it also passes over the queue again after a stop it applied,
+once the thread has parked for it, and those passes spend the same budget as
+the discards ([[spec-tail-order]]). *An
 argument from "every return delivers" must say what each return handles.*
 Witnesses: `rendez.caught_note_tail_discards_and_releases` (the reviewer's chain on
 the real tail: two ignored notes and a caught one, the tail loops to the caught
@@ -403,7 +407,23 @@ sixteen queue slots went with it. `notes_stop_note_name_locked` is the STOP-clas
 twin of the terminate scanner: the tail consults it after the terminate check
 misses, and on a hit applies the stop through `proc_job_stop_self` — the same
 primitive `SYS_NOTED(NDFLT)` uses, so the #240 freshness (`susp_stop_armed`) and
-orphan-rule guards both apply without restating. The peek only yields a note once
+orphan-rule guards both apply without restating.
+
+**A stop the leg applies is parked in the leg.** Since 2026-10-05 the tail's
+stop check runs before the notes leg (DEBUG-FS-DESIGN 4.2), so a stop the leg
+applies has no later check to park it. The thread must not run another EL0
+instruction under its own stop, so `notes_deliver_tail` reports the applied stop
+(the stop arm returns true, as the orphan discard does), and
+`notes_deliver_at_el0_return` runs the tail's die check and stop check again,
+parks, and then looks at the queue afresh. Linux does the same: `get_signal`
+parks in `do_signal_stop` and loops back for the next signal. The re-pass and
+the discard loop share one budget of `NOTE_QUEUE_DEPTH`, so the masked tail is
+bounded however the queue is flooded. `tail_order.tla` checks the order, the
+re-pass and the budget ([[spec-tail-order]]). The kernel witness is
+`rendez.tail_parks_for_the_stop_it_applies`. It runs the real leg, masked, on a
+thread with a queued `tty:susp` and asserts that the thread parks on its own
+`debug_rendez` and returns only once the stop is lifted. Its control, one
+variable away, queues a `child_exit`, which stops nothing and returns at once. The peek only yields a note once
 its family bit is *unmasked*, so the deferred stop lands exactly when the guest
 unblocks the signal; a `tty:cont` that arrived meanwhile has already disarmed the
 freshness flag, so the superseded `^Z` evaporates rather than resurrecting.

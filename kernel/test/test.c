@@ -342,6 +342,7 @@ void test_rendez_caught_wake_tty_cont(void);
 void test_rendez_caught_wake_orphan_hup_cont(void);
 void test_rendez_caught_note_one_unwind(void);
 void test_rendez_caught_note_tail_discards_and_releases(void);
+void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_caught_note_release_wakes_peer(void);
 void test_rendez_caught_note_ends_wait4(void);
 void test_tsleep_fast_path_cond_true(void);
@@ -2261,6 +2262,7 @@ struct test_case g_tests[] = {
                                        test_rendez_caught_wake_orphan_hup_cont, false, NULL },
     { "rendez.caught_note_one_unwind", test_rendez_caught_note_one_unwind, false, NULL },
     { "rendez.caught_note_tail_discards_and_releases", test_rendez_caught_note_tail_discards_and_releases, false, NULL },
+    { "rendez.tail_parks_for_the_stop_it_applies", test_rendez_tail_parks_for_the_stop_it_applies, false, NULL },
     { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
     { "rendez.caught_note_ends_wait4",         test_rendez_caught_note_ends_wait4,         false, NULL },
     { "tsleep.fast_path_cond_true",

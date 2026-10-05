@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5"]
 created: 2026-08-03
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -73,7 +73,7 @@ mid-step. This is the Linux per-task model.
 
 **Two interactions between the three features are handled explicitly.** During a
 step, watchpoints are loaded *disabled*, so the stepped instruction's own data
-access cannot trap a watchpoint and derail the "exactly one instruction" property.
+access cannot trap a watchpoint and derail the step's bound of one instruction.
 And a step from a breakpointed address loads that one breakpoint disabled — the
 step-over — so the instruction being stepped does not immediately re-trap.
 

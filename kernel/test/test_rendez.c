@@ -1603,7 +1603,9 @@ static void c3_tail(void) {
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
     ctx.sp = NOTE_NAME_MAX;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
     notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
 }
 
 // rendez.caught_note_tail_discards_and_releases -- the reviewer's chain. A child
@@ -1695,6 +1697,106 @@ void test_rendez_caught_note_tail_discards_and_releases(void) {
     TEST_EXPECT_EQ(rc2, SLEEP_NOTEINTR,
         "the retried wait unwinds again: the tail released the claim, so the note "
         "it could not deliver is not stranded behind it");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// The notes leg parks for a stop it applies itself (DEBUG-FS-DESIGN 4.2).
+// ---------------------------------------------------------------------------
+
+// rendez.tail_parks_for_the_stop_it_applies -- the tail stops before it
+// delivers notes, so the default stop of an uncaught tty:susp, which only the
+// notes leg can apply, would leave the thread running EL0 code with its stop
+// set unless the leg parks for it. The tail runs on this kernel thread, masked
+// as in production: it must park on its own debug_rendez and return only once
+// the stop is lifted. The control is one variable away: child_exit, which
+// stops nothing, returns at once and leaves the Proc unstopped.
+static volatile u32  g_d_run;
+static volatile bool g_d_returned;
+static volatile bool g_d_exited;
+
+static void d_entry(void) {
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.sp = NOTE_NAME_MAX;
+    g_d_run++;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_d_returned = true;
+    test_kthread_park_terminal(&g_d_exited);
+}
+
+// One leg on a fresh anchored group (a leader in the same session, another
+// group), so the orphan rule cannot discard the stop. Returns whether the tail
+// parked on its debug_rendez before it returned; *returned_early says it came
+// back before the stop was lifted, *stopped that the Proc took the stop.
+static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *joined) {
+    struct Proc *leader = proc_alloc();
+    struct Proc *m = leader ? proc_alloc() : NULL;
+    *returned_early = false; *stopped = false; *joined = false;
+    if (!leader || !m) {
+        if (leader) { leader->state = PROC_STATE_ZOMBIE; proc_free(leader); }
+        return false;
+    }
+    proc_test_link(leader);
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    g_d_run = 0; g_d_returned = false; g_d_exited = false;
+    bool posted = notes_post(m, note, 0u, NULL, true) == 0;
+    struct Thread *t = posted ? thread_create(m, d_entry) : NULL;
+    bool parked = false;
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!g_d_returned && timer_now_ns() < dl) {
+            if (g_d_run == 1u && t->state == THREAD_SLEEPING &&
+                t->rendez_blocked_on == &t->debug_rendez) {
+                parked = true;
+                break;
+            }
+            sched();
+        }
+        *returned_early = g_d_returned;
+        *stopped = __atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) != 0;
+        irq_state_t s = proc_table_lock_acquire();
+        proc_job_cont_proc(m);
+        proc_table_lock_release(s);
+        dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!g_d_returned && timer_now_ns() < dl) sched();
+        if (g_d_returned) { test_kthread_join_free(t, &g_d_exited); *joined = true; }
+    }
+    // A thread that never came back still lives in m, and proc_free would
+    // extinct the suite here, before the asserts could name the failure.
+    if (t && !*joined) return parked;
+    proc_test_unlink(m);
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
+    return parked;
+}
+
+void test_rendez_tail_parks_for_the_stop_it_applies(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    bool early_c, stopped_c, joined_c;
+    bool parked_c = d_leg(NOTE_NAME_CHILD_EXIT, &early_c, &stopped_c, &joined_c);
+    // The legs share the g_d_* flags: a control thread still alive would write
+    // them under the second leg.
+    TEST_ASSERT(joined_c, "control: the tail returned and its thread was joined");
+    bool early_s, stopped_s, joined_s;
+    bool parked_s = d_leg(NOTE_NAME_TTY_SUSP, &early_s, &stopped_s, &joined_s);
+
+    TEST_ASSERT(!parked_c && early_c, "control: child_exit stops nothing, so the tail returns at once");
+    TEST_ASSERT(!stopped_c, "control: and the Proc took no stop");
+    TEST_ASSERT(joined_s, "the stopped tail returned once the stop was lifted, and was joined");
+    TEST_ASSERT(stopped_s, "the uncaught tty:susp applied its default stop in the notes leg");
+    TEST_ASSERT(parked_s,
+        "the notes leg parked for the stop it applied, on the thread's own debug_rendez");
+    TEST_ASSERT(!early_s, "the tail did not return to EL0 while its stop was set");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 

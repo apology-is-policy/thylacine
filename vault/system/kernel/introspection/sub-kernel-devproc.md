@@ -17,7 +17,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -397,6 +397,12 @@ the last drop (#844). A dying target reads as gone to the step's scan as to
 `stop`'s (audit round 3). The scan's state reaches the wait only through
 `devproc_wait_verdict`: stopped, gone, released and denied end it, and
 anything else polls on (`devproc.debug_stop_start_resume` legs (g) and (f)).
+Only a re-stop completes the step: the write returns its byte count for
+stopped, and fails with `T_E_SRCH` for gone and for released, as ptrace(2)
+answers `ESRCH` for a tracee that does not exist or is not traced by the
+caller; a denial fails it as well (`devproc_step_result`, which leg (g) asserts
+through its test hook). Until 2026-10-05 a step whose slot a `detach` released
+returned success.
 `/proc/<pid>/wait` is not slot-bound: it passes no ctl and waits for a stop or
 the exit.
 

@@ -1063,6 +1063,37 @@ Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/1/3, clean, all
 
 Verification: `cargo test -p haul --lib` on the host: 59 passed, 1 ignored (the live-server interop test); frame.rs 7/7. Each frame.rs rule sabotaged on the host fails its own test: fetch_min replaced by a store (the Rversion test), the MSG_MAX ceiling dropped (the ceiling test), the type check dropped (the Twalk test and the Rversion test's wrong-direction leg); restored, 7/7. main 4630aef7 merged into the WIP branch (only the generated view-code-coverage conflicted; re-rendered); the CI-image bake of that tree is clean. tools/test.sh 1847/1847 PASS (banner; 0 FAIL, 0 EXTINCTION, 0 LEAKED-PROC; ambush-probe stage C fired at the entry). haul-hangup (46 s), haul-unreachable (61 s), haul-npxf, haul-post and haul-cape (45 s each) PASS, each on its first attempt, against npxf-server built from the operator's tree (connection-log-default). each its own bake, haul-hangup once (LS_CI_ATTEMPTS=1), restored: S1 without REPLY.up -- oversize leg 1 red ("mount check: CANNOT read" for /tmp/big1), the hang-up leg green; S2 without REPLY.down -- leg 1 green, leg 2 red the same way (/tmp/big2); S3 with the warning below 15 bytes -- the 15-byte leg red (no warning in 90 s); S4 below 17 -- the 16-byte control red (warned). S5 (the peer reports STILL OPEN whatever haul did, no bake): haul-hangup's hang-up leg, haul-npxf's relay leg and haul-post's remote-FIN arm each red ("did not close its side"), every leg before them green, and haul-unreachable and haul-cape, which read no verdict, green. Re-baked clean after.
 
+## Tail order: the EL0-return tail stops before it delivers notes — 2026-10-05
+
+The operator's vote of 2026-10-05 ("Stop before notes"; OPEN-BUGS 2026-09-30 10:05Z). Scripture, code, witnesses,
+model and dossiers in one commit *(pending)*, the squash of `aux-3-tail-order`.
+
+- **die -> stop -> notes.** `.Lel0_sync_return` and the birth tail (`userland_enter_held`) run the stop leg before
+  the notes leg (DEBUG-FS-DESIGN 4.2), as Plan 9's `notify` runs `procctl` first and Linux's signal-delivery-stop
+  precedes the handler frame. A note posted during a stop is taken as the stop clears. The IRQ tail is unchanged and
+  still delivers no notes.
+- **A stop the notes leg applies is parked in the leg.** The stop arm returns true; `notes_deliver_at_el0_return`
+  runs the die check and the stop check again, then passes over the queue afresh, inside one `NOTE_QUEUE_DEPTH`
+  budget shared with the discard loop.
+- **A step meets a note at the handler's entry.** Both frame builders clear `SPSR_EL1_SS` before they save the
+  context (DEBUG-FS-DESIGN 5.5, Linux's rule), so the step reports at the handler's first instruction and no saved
+  context carries the bit.
+- **Only a re-stop completes a step.** A step whose target died, or whose slot a `detach` released, fails with
+  `T_E_SRCH` (`devproc_step_result`; round 1 F3).
+- **The #713 assert** sits in each tail's last C call.
+- `specs/tail_order.tla` (new): 2 clean and 5 buggy cfgs, gated by `specs/check-tail-order.sh`; `debug_step.tla`'s
+  prose says a step runs at most one instruction.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/6 P3, clean. F1-F4 and F6 fixed; F5 (the
+Linux-phenotype builder's SS clear has no witness) tracked in OPEN-BUGS 2026-10-05 22:45Z.
+
+Verification: `tools/test.sh` 1865/1865 with debug-probe's resume, death-step and caught-step legs, on the WIP merge
+292ccb2b4 and again after round 1 (1864601e7). Sabotages, one bake each, each red where designed: the old order
+(resume), the native builder keeping SS (caught-step), the stop arm returning false (the kernel test), a gone target
+read as success (death-step), a released slot read as success (devproc leg (g)), a witness that never continues the
+job (named by the leak check, no extinction). `specs/check-tail-order.sh` ALL CFGS AS CLAIMED; debug_stop 19 cfgs,
+debug_step 3 and death_wake 2 as claimed. `tools/ci-smp-gate.sh` *(pending)*.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

@@ -4879,9 +4879,11 @@ static int stop_park_wake_cond(void *arg) {
 // below, and the birth park of a held spawn (DEBUG-FS-DESIGN 5f). They differ
 // only in what may hold the thread, so `wake_cond` names it: true once nothing
 // does (stop_park_wake_cond -- both stop owners clear; birth_park_wake_cond --
-// the birth hold as well). Returns only to proceed to the eret; group death does
-// not return. A latched interrupt does neither: the thread stays parked and
-// meets the note at its next checkpoint once it runs (DEBUG-FS-DESIGN 5g).
+// the birth hold as well). Returns only to proceed -- into the notes leg on the
+// synchronous and birth tails, which park before they deliver, or to the eret on
+// the IRQ tail (DEBUG-FS-DESIGN 4.2); group death does not return. A latched
+// interrupt does neither: the thread stays parked, and meets the note as the
+// park returns, or on the IRQ tail at its next checkpoint (DEBUG-FS-DESIGN 5g).
 static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
                           struct Proc *p, int (*wake_cond)(void *)) {
     // 8a-1c: publish the EL0-entry trapframe pointer (== the current SP at the
@@ -4936,7 +4938,7 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
             // A step-resume is IRQ-masked from here to the eret (KERNEL_EXIT masks
             // DAIF), so no preempt lands between arming SPSR.SS and the eret.
             if (t->debug_ss_armed && ctx)
-                ctx->spsr |= (1ull << 21);   // SPSR_EL1.SS
+                ctx->spsr |= SPSR_EL1_SS;
             t->debug_trapframe = NULL;   // 8a-1c: no longer parked -> stop pointing at the (about-to-be-live) frame
             return;
         }
@@ -4950,8 +4952,8 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
         // either way the loop's death check fires next iteration. Only a
         // resume or death wakes it: the latch, caught-note and stop walks pass
         // a thread on its own debug_rendez by, a stray wake is absorbed, and a
-        // latched note stays queued for the thread's next checkpoint after the
-        // stop clears (DEBUG-FS-DESIGN 5g; ParkEndsOnlyInDeath). The rendez
+        // latched note stays queued until the stop clears (DEBUG-FS-DESIGN 5g;
+        // ParkEndsOnlyInDeath). The rendez
         // is THIS thread's own (single-waiter
         // -- a multi-thread target parks each thread on its own debug_rendez,
         // never a shared one).
@@ -4960,18 +4962,19 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
 }
 
 void el0_return_stop_check(struct exception_context *ctx) {
-    // ARCH 8.12. THE #713 GUARD, and this is the right function for it: the
-    // only two callers are vectors.S's EL0-return tails (the 0x480 IRQ tail
-    // and .Lel0_sync_return), and in both this is the LAST C call before
-    // `b .Lexception_return` -> KERNEL_EXIT, which installs ELR/SPSR and erets
-    // under an INHERITED mask. That is the one surviving #713-class window
+    // ARCH 8.12. THE #713 GUARD. KERNEL_EXIT installs ELR/SPSR and erets under
+    // an INHERITED mask, so every leg of an EL0-return tail runs masked and each
+    // tail's LAST C call asserts it (DEBUG-FS-DESIGN 4.2): this check on the
+    // 0x480 IRQ tail; on .Lel0_sync_return the notes leg follows it and asserts
+    // again, and calls it once more to park for a stop that leg applied. That is
+    // the one surviving #713-class window
     // that does not mask locally; #713 was the year-long AEGIS corruption,
     // 3-13% of boots, never at -smp 1.
     //
     // Since syscall bodies run with interrupts ON, this is the assert that
     // catches an unmask leaking past syscall_dispatch's re-mask -- the single
     // way this chunk could resurrect it.
-    ASSERT_IRQS_MASKED("the EL0-return tail is about to reach KERNEL_EXIT, "
+    ASSERT_IRQS_MASKED("an EL0-return tail runs masked to KERNEL_EXIT, "
                        "which inherits its mask (#713)");
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
@@ -5022,8 +5025,9 @@ void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp) {
 
 void el0_birth_park(struct exception_context *ctx) {
     // The #713 guard, for the tail's reason: userland_enter_held masked before
-    // entering the birth tail, and KERNEL_EXIT follows this call.
-    ASSERT_IRQS_MASKED("the birth tail is about to reach KERNEL_EXIT, "
+    // entering the birth tail, which runs masked to KERNEL_EXIT; the notes leg
+    // after this park asserts it again as the tail's last call.
+    ASSERT_IRQS_MASKED("the birth tail runs masked to KERNEL_EXIT, "
                        "which inherits its mask (#713)");
     // Extinct rather than return: the tail can skip a stop for a corrupt
     // thread, but here a return erets a held child.
@@ -5045,7 +5049,8 @@ void el0_birth_park(struct exception_context *ctx) {
 
     // Group death never returns from the park, and a latched interrupt does not
     // end it: a held child stays held until it is released, or converted and
-    // resumed, and meets the note at its next checkpoint (DEBUG-FS-DESIGN 5g).
+    // resumed, and meets the note in the notes leg that follows this park
+    // (DEBUG-FS-DESIGN 4.2, 5g).
     el0_stop_park(ctx, t, p, birth_park_wake_cond);
 }
 

@@ -1874,8 +1874,9 @@ void test_notes_ndflt_dispatch(void) {
 // EL0-return tail's non-catchable-kill branch would pick it up. `kill` arms no
 // terminate latch (notes_name_terminate_latch returns 0 for NOTE_BIT_KILL), so
 // the post woke nothing at all -- and a job-stopped target parked in
-// el0_return_stop_check leaves only via group_exit_msg / !proc_stop_requested /
-// thread_die_pending, none of which a latchless queued kill satisfies. The post
+// el0_return_stop_check leaves only via group_exit_msg / !proc_stop_requested
+// (and, until DEBUG-FS-DESIGN 5g, thread_die_pending), none of which a
+// latchless queued kill satisfies. The post
 // returned SUCCESS and the Proc lived forever.
 //
 // The park loop is not driven here (it needs a scheduled thread). What is

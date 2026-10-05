@@ -636,12 +636,47 @@ The single structurally-safe park is the **EL0-return tail** (`vectors.S:328`
 sync + the `0x480` IRQ tail): zero locks held, `preempt_count==0` guaranteed, the
 clean saved EL0 frame at `kstack_base + KSTACK_TOTAL - 288`, and the DAIF-masked
 `eret` still ahead. A stop becomes a **new fourth leg** there, ordered AFTER
-`el0_return_die_check` (so death always wins over a stop) and beside
-`notes_deliver_at_el0_return`:
+`el0_return_die_check` (so death always wins over a stop) and BEFORE
+`notes_deliver_at_el0_return` (so a stop wins over a note, and a note that
+arrives during the stop is taken the moment the stop clears; §5g):
 
 ```
-tail: preempt_check_irq -> el0_return_die_check -> [notes] -> STOP-CHECK -> eret
+tail: preempt_check_irq -> el0_return_die_check -> STOP-CHECK -> [notes] -> eret
 ```
+
+The bracketed leg is the synchronous tail's alone: the `0x480` IRQ tail delivers
+no notes (`seam-el0-irq-tail-no-notes`). Plan 9 orders the checkpoint the same
+way (`notify` runs `procctl` before it looks at a note), and so does Linux, whose
+ptrace signal-delivery-stop comes before the handler frame. Until 2026-10-05 the
+notes leg ran first, so a note could end a thread with a stop pending, and a note
+latched during a stop waited for the next synchronous entry (OPEN-BUGS
+2026-09-30; the operator chose stop-first on 2026-10-05).
+
+During a stop pending at the stop check the debugger sees the interrupted
+context, not a handler frame. A note's frame is built after the stop clears, from
+the registers as the debugger left them, as Linux builds the handler frame after
+the signal-delivery-stop. A stop posted while the notes leg runs is taken like
+any other, at the thread's next checkpoint: the thread erets into the frame the
+leg built and parks in the IRQ tail of the stop's resched kick, after at most the
+handler's first instruction, so that stop shows the handler's context.
+
+**A stop the notes leg applies.** The notes leg can stop the thread itself: an
+uncaught `tty:susp` takes its default action there (`proc_job_stop_self`). The
+thread must park before it runs another EL0 instruction, so after an applied
+default stop the leg runs the die check and the stop check again, parks, and then
+looks at the queue again. Linux does the same: `get_signal` parks in
+`do_signal_stop` and then loops back for the next signal. Each pass starts
+afresh, so it reads the handler address and the saved `sp` as the stop left them
+(a peer's `SYS_NOTIFY`, a debugger's `regs` write). The re-passes count against
+the notes leg's discard budget (`NOTE_QUEUE_DEPTH` passes in all per tail), so the
+masked tail stays bounded and a peer that floods the queue cannot hold the CPU in
+it.
+
+**The mask guard follows the order.** KERNEL_EXIT erets under an inherited mask
+(#713, ARCH §8.12), so the last C call of each tail asserts that interrupts are
+masked: the stop check on the IRQ tail, and the notes leg on the synchronous tail
+and on the birth tail of a held spawn (§5f). The birth tail runs the same order,
+with its birth park in the stop leg's place.
 
 On observing a pending stop, the thread transitions to `THREAD_SLEEPING` under
 its `wait_lock` (the `sleep()` discipline) and sleeps on a per-Proc *debugger
@@ -816,6 +851,26 @@ parking the thread (§4.2) instead of terminating the Proc. The kernel-side
   tail. Re-set `SPSR.SS` to keep stepping; clear `MDSCR.SS` to stop. Returning
   with `SPSR.SS=0` while `MDSCR.SS=1` is Active-pending = stuck-PC re-trap — the
   classic bug to avoid.
+- **A step that meets a note.** The tail runs its stop check before its notes
+  (§4.2), so a step-resume can leave the park with a note pending. A note with a
+  handler takes the step: the delivery clears `SPSR.SS` in the trapframe before
+  it saves the interrupted context or builds the handler frame, the eret takes the
+  EC `0x32` at once, and the step reports at the handler's first instruction,
+  before it runs. That is Linux's rule (arm64 `handle_signal`: "Step into the
+  signal handler if we are stepping"; `signal_delivered` then stops the tracee
+  with `ptrace_notify(SIGTRAP)`). It traps exactly once, because completing the
+  step clears `MDSCR.SS`. Because the clear comes first, the saved context never
+  carries `SS` either: the bit is the kernel's step machine, not the program's
+  state. So the return through `SYS_NOTED` or `rt_sigreturn` comes back with
+  `SPSR.SS=0`, and an outstanding step completes at the restored PC, as the step
+  of any other syscall completes at the instruction after it. Linux re-derives the
+  bit on every sigreturn for the same reason (`valid_user_regs` ->
+  `user_regs_reset_single_step`). A note whose action ends the thread ends the
+  step with it: the step write fails with `T_E_SRCH` (the target no longer lives),
+  never success. A note whose default action stops the thread (an uncaught `tty:susp`) parks it
+  before the step runs (§4.2), and the step stays outstanding until the job stop
+  ends, as a step of a job-stopped target does: neither stop owner can run the
+  other's stop (`specs/pty_stop.tla` `StopCompatI39`).
 - **Step-over-breakpoint** (mandatory): a thread resuming at a breakpointed PC
   re-traps forever. On resume, if the PC matches an armed breakpoint, disable
   that bp's `E` bit, single-step one instruction, re-enable it (the Linux
@@ -829,7 +884,10 @@ parking the thread (§4.2) instead of terminating the Proc. The kernel-side
   the re-stop ends when the slot is released (a `detach` from another thread of
   the debugger; the writer holds its own ctl fd for the whole write, so a close
   cannot land mid-step), when the target is gone, and when its group is dying
-  (§5g).
+  (§5g). Only the re-stop completes the step: a wait that ends any other way
+  fails the write with `T_E_SRCH`, never success -- the target no longer lives,
+  or the caller no longer holds it, as ptrace(2) answers `ESRCH` for a tracee
+  that does not exist or is not traced by the caller.
 - Note the Cortex-A76 erratum 1463225 (step-into-SVC) for real hardware
   (Lazarus); QEMU/HVF is unaffected.
 
@@ -1816,7 +1874,8 @@ any thread of a multi-threaded spawner can consume).
    `.Lexception_return`. It builds the initial EL0 frame below its current stack
    (ELR = the entry, SPSR = EL0t with DAIF clear, SP_EL0 = the user stack, every
    GPR zero), masks, and runs a **birth tail**: the ordinary EL0-return sequence
-   (preempt check, die-check, note delivery) and then the park. The park
+   with the park as its stop leg (preempt check, die-check, the park, then note
+   delivery, §4.2). The park
    publishes `debug_trapframe` as that frame, so `regs`, `step` and `hwbreak`
    address the first instruction. It marks the child PARKED and wakes the
    spawner under the lock, then sleeps on its own `debug_rendez` while the hold
@@ -1872,8 +1931,9 @@ any thread of a multi-threaded spawner can consume).
    child dies with its spawner too.
 
 10. **A latched interrupt at the birth park.** The park ignores it, as every stop
-    park does since §5g: the held child stays held, and meets the note at its
-    next checkpoint once it is released, or converted and resumed. Until then the
+    park does since §5g: the held child stays held, and meets the note as it
+    leaves the park, once it is released, or converted and resumed (the birth
+    tail's notes leg follows the park). Until then the
     birth park ended the child with the note's name (`birth_park_terminate`),
     and the first draft of that re-ran the checkpoint in place, which spun with
     interrupts masked once note delivery declined a debugger-written stack
@@ -1956,8 +2016,8 @@ in a family the thread has not masked, as a reason to unwind
 (`thread_die_pending`). Five waits unwound for it, and none of them should:
 
 - **The tail's stop park** left the park on the latch, so that the thread could
-  eret and take the note at its next checkpoint. Only the synchronous tail
-  delivers notes (`seam-el0-irq-tail-no-notes`), and a compute-bound thread
+  eret and take the note at its next checkpoint. Only the synchronous and birth
+  tails deliver notes (`seam-el0-irq-tail-no-notes`), and a compute-bound thread
   re-enters only through the IRQ tail, whose stop check sent it into the park and
   straight back out. So a debug- or job-stopped thread that was sent an interrupt
   ran at EL0 with its stop still set. It never settled (§5e), so a debugger could
@@ -1998,15 +2058,16 @@ in a family the thread has not masked, as a reason to unwind
 stays queued and the latch stays armed, so nothing is lost and the note's
 disposition does not change. Only group death ends a stopped thread: `kill`,
 `SYS_EXIT_GROUP`, EXITKILL, the orphan rule, anything through
-`proc_group_terminate`. When the stop clears, the thread returns to EL0 and takes
-the note at its next note checkpoint, the synchronous tail of its next syscall or
-fault, where an uncaught interrupt terminates it. A thread that makes neither is
-the running compute-bound case, and takes the note once
-`seam-el0-irq-tail-no-notes` is closed. Plan 9 handles the note right after the
-stop, because `notify` runs `procctl` first; Thylacine's tail delivers notes
-before its stop check, so a note that arrives during a stop waits for the next
-synchronous entry. Which of the two a checkpoint should run first is an open
-question (OPEN-BUGS, 2026-09-30).
+`proc_group_terminate`. When the stop clears, the thread takes the note at once:
+the synchronous tail and the birth tail run their stop check before their note
+delivery (§4.2), so the park returns straight into the delivery, where an
+uncaught interrupt terminates the thread. Plan 9 handles the note right after the
+stop in the same way, because `notify` runs `procctl` first. A thread parked by
+the IRQ tail, which delivers no notes, takes the note at its next synchronous
+entry; the running compute-bound thread takes it once
+`seam-el0-irq-tail-no-notes` is closed. (Until 2026-10-05 the notes leg ran
+first, and a note that arrived during a stop waited for the next synchronous
+entry; OPEN-BUGS 2026-09-30, closed by the operator's choice of stop-first.)
 
 The rule is about a thread that has parked. An interrupt that reaches a thread
 before its stop takes effect (still running, blocked in an ordinary sleep, or on
@@ -2026,11 +2087,10 @@ absorbed: it re-checks its condition and sleeps again. The five waits use it:
    clears, the outer wait re-checks as before: an ordinary one unwinds for an
    armed latch then, and the thread takes the note at its tail.
 3. **The birth park.** A held child with an interrupt latched stays held.
-   Converted and resumed, or released, it meets the note at its next checkpoint.
-   The birth tail's note delivery before the park is unchanged: a note latched
-   while the child is still loading is delivered there, and the child exits
-   before its first instruction, because it has not parked and is not yet
-   stopped.
+   Converted and resumed, or released, it meets the note as it leaves the park:
+   the birth tail parks before it delivers notes, so a note latched while the
+   child is still loading waits for the park as well, and a child released with
+   an uncaught interrupt pending exits before its first instruction.
 4. **The vfork suspend** and 5. **the held spawn's birth wait**
    (`await_child_release`). The parent returns when the child releases it, or
    dies with its group. A latched interrupt waits for the return and is taken at

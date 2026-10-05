@@ -5745,10 +5745,11 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     //
     // Round-2 F4 (aux#253): the SELF arm used to keep its thread-count gate,
     // and the paragraph here used to argue that was deliberate. It named a real
-    // property (a self-kill cannot be SWALLOWED by a stop, since the tail
-    // delivers notes before el0_return_stop_check) and mistook it for the whole
-    // obligation -- a full note ring made the self-kill fail for want of space.
-    // Both arms now route through the ONE predicate below.
+    // property (a self-kill cannot be SWALLOWED by a stop) and mistook it for the
+    // whole obligation -- a full note ring made the self-kill fail for want of
+    // space. Both arms now route through the ONE predicate below, and the
+    // property rests on it: it terminates the group, and every stop park ends a
+    // dying thread.
     if (postnote_kill_cascade_locked(target, w->name)) {
         w->result = 1;
         return 1;

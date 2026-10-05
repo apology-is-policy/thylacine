@@ -37,6 +37,10 @@ struct exception_context {
     u64 far;        // FAR_EL1 (faulting address; valid for translation / alignment faults)
 };
 
+// SPSR_EL1.SS (bit 21), the software-step state the eret installs. It is the
+// kernel's step machine, never part of a saved user context (DEBUG-FS-DESIGN 5.5).
+#define SPSR_EL1_SS (1ull << 21)
+
 // Set VBAR_EL1 to the kernel exception vector table. Call from
 // boot_main once MMU is on and the kernel is running at high VA.
 //

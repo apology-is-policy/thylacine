@@ -2295,15 +2295,15 @@ spawner a latch of its own (`slatch`).
 
 | Spec action | Code site (as-built, 8a-1b-beta) | Invariant pinned |
 |---|---|---|
-| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` + `notes_deliver`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
+| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` and BEFORE `notes_deliver_at_el0_return`, whose re-pass runs both again for a stop the notes leg applies -- `tail_order.tla`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
 | `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`; proceed only while no death is published; a latch at the handshake parks the Thread all the same) | `kernel/proc.c::el0_stop_park` (the loop both stop legs share; the tail's leg `el0_return_stop_check` passes `stop_park_wake_cond`) parks via `sleep_death_only(&t->debug_rendez, wake_cond, p)` -- `kernel/sched.c::sleep_common` in its death-only mode takes the per-Thread `wait_lock`, registers `rendez_blocked_on = &t->debug_rendez` + `THREAD_SLEEPING`, re-checks the cond BEFORE sleeping, and returns early only for `group_exit_msg` (`thread_group_death_pending`), never for a latch. The proceed path re-checks `group_exit_msg` (ACQUIRE) after `wake_cond` passes | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. `NoEretIntoDeath`: the EXITKILL release (`devproc_debug_release_cb`) terminates and THEN clears the stop, both RELEASE, so a Thread that read the cleared flag sees the terminate at the re-check. `BUGGY_NO_DEATH_RECHECK` = no re-check (`no_death_recheck_tail`). The pre-5g exits for a latch (`LatchExit`) are knobs here and on `ResumeThread`. |
 | `RegisterBuggy` (observe BEFORE register, OUTSIDE the lock) | (none -- the anti-pattern the impl does NOT do; the buggy cfg only) | `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostStop` fail. |
 | `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `debug_stop_req` is set (the model's `sflag`) and every thread is `parked && on_cpu==false` (a job stop or a birth hold parks threads too, and neither is a debug stop). A dying target (`group_exit_msg` set) reads gone and ends the wait instead: its closer no longer parks for a stop (DEBUG-FS-DESIGN 5g), and the model's death is its Threads reaching `dead`, below this. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
 | `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/proc.c::proc_debug_resume` walk (waking only `rendez_blocked_on == &peer->debug_rendez` peers) + the `proc_group_terminate` death cascade. The per-Thread `debug_rendez` is single-waiter, and `wakeup` re-validates `r->waiter` under `r->lock`; all resume paths are serialized under `g_proc_table_lock` | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
 | `ResumeThread(t)` (woken park -> re-run the tail; a wake by the latch alone, with the park's condition false and no death published, is ABSORBED: the Thread stays parked, and confirmed) | `kernel/proc.c::el0_stop_park` loop -- a woken parked Thread re-checks `group_exit_msg` (death wins) then the stop flags; returns to the tail (-> eret) only when both owners are clear and death is still unpublished. The latch's wake (`proc_interrupt_terminate_wake`) never returns the park: `sleep_death_only` re-checks and sleeps again (DEBUG-FS-DESIGN 5g) | a resume never resumes a dead Thread; death wins on the re-run. `ParkEndsOnlyInDeath`: a parked Thread ends only in a group death. `BUGGY_TAIL_LATCH_ERETS` = the latch returns the park and the tail erets with the stop set (the pre-5g leg; `tail_latch_erets`, `NoLostStop`); `BUGGY_LATCH_ENDS_STOP` = the park ends the Thread for the latch (the pre-5g birth rule; `latch_ends_stop`). |
-| `BirthArrive` / `BirthMark` (the held child's head Thread reaches its birth tail; `unborn` -> `parked`, waking the spawner) | `arch/arm64/vectors.S::userland_enter_held` (the zeroed first-entry frame from `kernel/proc.c::el0_birth_frame_init`, then the birth tail, straight-line: preempt check, die-check, note delivery, `el0_birth_park`, `.Lexception_return`) + `kernel/proc.c::el0_birth_park` -> `proc_birth_hold_mark_parked_locked` under `g_proc_table_lock` (every write of the mark wakes the parent's `child_waiters`) | `BirthWaitReleases`: the arrival releases the spawner's wait. |
+| `BirthArrive` / `BirthMark` (the held child's head Thread reaches its birth tail; `unborn` -> `parked`, waking the spawner) | `arch/arm64/vectors.S::userland_enter_held` (the zeroed first-entry frame from `kernel/proc.c::el0_birth_frame_init`, then the birth tail, straight-line: preempt check, die-check, `el0_birth_park`, note delivery, `.Lexception_return`) + `kernel/proc.c::el0_birth_park` -> `proc_birth_hold_mark_parked_locked` under `g_proc_table_lock` (every write of the mark wakes the parent's `child_waiters`) | `BirthWaitReleases`: the arrival releases the spawner's wait. |
 | `BirthLoop` / `BirthAcquire` / `BirthRegisterObserve` / `BirthResume` (the birth park: proceed only with the hold AND both stop owners clear, then only while no death is published; a latch's wake is absorbed as at the tail) | `kernel/proc.c::el0_stop_park(ctx, t, p, birth_park_wake_cond)` -- the tail's loop with a wider condition; `birth_park_wake_cond` reads the hold FIRST (ACQUIRE), then `proc_stop_requested`. A latched interrupt's wake is absorbed by `sleep_death_only`: the child stays held, and meets the note at its first checkpoint after the release (DEBUG-FS-DESIGN 5g) | `NoEL0WhileHeld` + `NoEretIntoDeath` + `ParkEndsOnlyInDeath`. `BUGGY_BIRTH_LATCH_ERETS` = the latch returns the park and the birth tail erets (`birth_latch_erets`); `BUGGY_LATCH_ENDS_STOP` = the park ends the child (`latch_ends_stop`). `BUGGY_HELD_RUNS_FREE` = the park returns at once; `BUGGY_NO_DEATH_RECHECK` = no re-check after the wake condition (`no_death_recheck`, the finding the clean held cfg made against the first draft). The re-run knob of audit round 1 (F1, a masked spin once note delivery declined a frame) retired with the old rule: the park consults no note delivery, so nothing re-runs. |
-| `PostInterrupt` + `WakeFrom(t, "intr")` (an interrupt-terminate latched on any live target; its post wakes either park) | the LS-5c latch, armed on the note's commit when nothing would catch the note, and `kernel/proc.c::proc_interrupt_terminate_wake`, which wakes each peer's `rendez_blocked_on` except a Thread's own `debug_rendez`: the kernel passes a stop park by, where the model's wake reaches it and is absorbed. The absorb changes no variable, so the kernel's runs are among the model's, with steps left out (the caught note's walk and a second stop's sleeper walk skip the same way). A `sleep_death_only` sleep still absorbs any wake that reaches it (re-check, re-sleep); the note stays queued for the Thread's next checkpoint after the stop clears | `ParkEndsOnlyInDeath` + `NoLostStop` (the tail) + `NoEL0WhileHeld` (the birth park). |
+| `PostInterrupt` + `WakeFrom(t, "intr")` (an interrupt-terminate latched on any live target; its post wakes either park) | the LS-5c latch, armed on the note's commit when nothing would catch the note, and `kernel/proc.c::proc_interrupt_terminate_wake`, which wakes each peer's `rendez_blocked_on` except a Thread's own `debug_rendez`: the kernel passes a stop park by, where the model's wake reaches it and is absorbed. The absorb changes no variable, so the kernel's runs are among the model's, with steps left out (the caught note's walk and a second stop's sleeper walk skip the same way). A `sleep_death_only` sleep still absorbs any wake that reaches it (re-check, re-sleep); the note stays queued until the stop clears; the sync and birth tails then take it as the park ends, their notes leg following the stop leg (`tail_order.tla` `MeetsQueue`), and the IRQ tail and the nested parks at the next checkpoint | `ParkEndsOnlyInDeath` + `NoLostStop` (the tail) + `NoEL0WhileHeld` (the birth park). |
 | `RequestStop` on a held target + `ConvertFinish` (deliver the stop, THEN clear the hold: two stores in one lock section) | `kernel/devproc.c` `DBG_RC_STOP`: `proc_debug_stop_deliver(target)` then `proc_birth_hold_convert_locked(target)` (which leaves the hold standing when no stop is pending), under `g_proc_table_lock` | `NoEL0WhileHeld`: the park's hold-first read sees at least one of them. `BUGGY_CONVERT_CLEARS_FIRST` = the other order. A dying target takes no stop in the kernel (`proc_debug_stop_deliver` refuses it, so the conversion leaves the hold standing, and the held child dies at a death check: the birth park's once it has parked, or the birth tail's, before the park, while it is still loading); `RequestStop` and `FaultStop` carry no `~gflag` guard, so the refusal only removes runs (DEBUG-FS-DESIGN 5g). |
 | `StartRelease` + `ReleaseSlot`'s detach branch (RELEASE: clear the hold, THEN the resume's wake) and the implicit close (KEEPS the hold) | `kernel/devproc.c` `DBG_RC_START` and the explicit `detach` in `devproc_debug_walk_cb`: `proc_birth_hold_release_locked` then `proc_debug_resume`; `devproc_debug_release_cb` (the ctl fd closing without detach) leaves the hold | `EventuallyHoldResolved`; `licensed` only on a deliberate release (`NoEL0WhileHeld`). |
 | `SpawnerScan` / `SpawnerWakeUp` (the synchronous held spawn) | `kernel/syscall.c` spawn body -> `kernel/proc.c::spawn_await_birth` -> `await_child_release` (the vfork park generalized, on `child_waiters`) with `spawn_birth_released` (the child parked, released, not ALIVE, or gone) | `BirthWaitReleases`. `BUGGY_BIRTH_WAIT_UNWOKEN` = clearing the hold does not wake the spawner. |
@@ -2329,7 +2329,8 @@ gate, the tail's `proc_stop_owned`) and the walks that pass a stop park by
 (`proc_interrupt_terminate_wake`, `proc_caught_note_wake`,
 `proc_stop_wake_sleepers_locked`). Both parks' answer to a latched interrupt is
 modelled (2026-09-30, DEBUG-FS-DESIGN 5g): the wake is absorbed, and the note
-waits for the Thread's next checkpoint after the stop clears. `ParkEndsOnlyInDeath`
+waits until the stop clears (where the Thread then meets it is `tail_order.tla`'s,
+below, whose gate a change to the tails' leg order also runs). `ParkEndsOnlyInDeath`
 and `SpawnReturnsAfterBirth` restate the clean model's own guards, so the clean
 run cannot fail them: each earns its place by the buggy cfg that puts a pre-5g
 exit back and violates it, and the kernel tests hold the code to it. The model
@@ -2350,27 +2351,72 @@ path), which the loop handles airtight.
 A SIBLING of `debug_stop.tla` (NOT an extension -- `debug_stop`'s 4 buggy cfgs
 are the landed gate, and a breakpoint-fired stop is trigger-agnostic so it reuses
 that machinery unchanged). The ONLY genuine protocol growth in 8a-2 is the STEP:
-a `step` resumes a stopped Thread for EXACTLY ONE EL0 instruction, then re-parks;
+a `step` resumes a stopped Thread for AT MOST ONE EL0 instruction (none when the
+resume meets a note with a handler, DEBUG-FS-DESIGN 5.5), then re-parks;
 the death composition rides the SAME tail die-check-first (the loom_multishot /
 loom_order sibling precedent). Landed model-first at **8a-2b-alpha**; the impl
-sites land at **8a-2b-2** (this is a RESERVATION until then).
+sites landed at **8a-2b-2**.
 
 | cfg | knob(s) | checks | outcome | distinct |
 |---|---|---|---|---|
 | `debug_step.cfg` | all knobs FALSE (2 Threads) | `Safety` (StepExactlyOne) + `EventuallyAllDead` + `StepEventuallyReparks` | clean | 146 |
-| `debug_step_buggy_runs_free.cfg` | `BUGGY_STEP_RUNS_FREE` | `Safety` | violation (StepExactlyOne) | 68 |
+| `debug_step_buggy_runs_free.cfg` | `BUGGY_STEP_RUNS_FREE` | `Safety` | violation (StepExactlyOne) | 33 (`-workers 1`) |
 | `debug_step_buggy_death_lost.cfg` | `BUGGY_STEP_DEATH_LOST` | `EventuallyAllDead` | violation | 146 |
 
-| Spec action | Code site (RESERVED -- lands at 8a-2b-2) | Invariant pinned |
+| Spec action | Code site | Invariant pinned |
 |---|---|---|
 | `RequestStep(t)` (arm a step, wake to the tail) | the `step` ctl verb (`kernel/devproc.c`) -> a per-Thread step-armed flag + the debug-rendez wake (`proc_debug_resume`-shaped) | -- |
-| `Tail(t)` (die-check FIRST, then arm SS or re-park) | `kernel/proc.c::el0_return_stop_check` extended: after the die-check, if a step is armed set `MDSCR.SS` + `SPSR.SS` in the resumed frame (arm one instruction) else re-park | `EventuallyAllDead` (death wins over a step); the die-check-first ordering. `BUGGY_STEP_DEATH_LOST` = the SS EC auto-continues bypassing the tail die-check. |
+| `Tail(t)` (die-check FIRST, then arm SS or re-park) | `kernel/proc.c::el0_return_stop_check` -> `el0_stop_park`: after the die-check, a park left with the step armed sets `SPSR.SS` in the resumed frame (`MDSCR.SS` is the per-thread debug state `hwdebug.c` loads), else it re-parks. On the synchronous tail the notes leg follows, and a note with a handler clears `SPSR.SS` again, so that step runs no instruction and reports at the handler's entry (DEBUG-FS-DESIGN 5.5; beneath this model, which has no notes) | `EventuallyAllDead` (death wins over a step); the die-check-first ordering. `BUGGY_STEP_DEATH_LOST` = the SS EC auto-continues bypassing the tail die-check. |
 | `StepExec(t)` (one EL0 instruction -> SS EC -> tail) | `arch/arm64/exception.c` EC 0x32 (software step) route -> return to the EL0-return tail (re-park); `arch/arm64/hwdebug.c` the SS-machine arm/disarm + the step-over-breakpoint dance (disable the bp E-bit, step, re-enable) | `StepExactlyOne` (one instruction per step window). `BUGGY_STEP_RUNS_FREE` = the SS EC never re-traps (the SPSR.SS/MDSCR.SS stuck/missing-re-trap family). |
 | `SetGflag` / `DeathWake` | `kernel/proc.c::proc_group_terminate` + the death cascade (unchanged from `debug_stop`) | death completes even against a step in flight. |
 
 Pre-commit gate (from 8a-2b-2): `debug_step.cfg` clean GREEN + the 2 buggy cfgs
 confirmed, on any change to the step arm/re-park (`el0_return_stop_check` step
 leg), the SS-machine (`hwdebug.c`), or the EC 0x32 route (`exception.c`).
+
+## tail_order.tla — the EL0-return tails' leg order (operator vote 2026-10-05, "Stop before notes"; DEBUG-FS-DESIGN 4.2, 5.5, 5g)
+
+A companion to `debug_stop.tla`, which verifies the park itself and has no note
+delivery. This model abstracts the park to one step (death if the group is
+dying; hold while a stop owner or the birth hold is set; proceed otherwise) and
+checks where the tails call it: the die-check, the stop leg, the notes leg, and
+the notes leg's re-pass for a stop it applies, all inside one budget. It landed
+with the tail-order chunk's audit round 1 (F6: the re-pass was outside every
+model, and the debug row's model gate reads on any change to where a park is
+called).
+
+| cfg | knob(s) | checks | outcome | distinct (`-workers 1`) |
+|---|---|---|---|---|
+| `tail_order.cfg` | none; DEPTH 3 | `TypeOK` + `MeetsQueue` + `NoEretUnderOwnStop` + `TailEnds` | clean | 23146 |
+| `tail_order_birth.cfg` | `BIRTH` | the same | clean | 45272 |
+| `tail_order_buggy_notes_first.cfg` | `BUGGY_NOTES_FIRST` | the invariants | violation (`MeetsQueue`) | 3146 |
+| `tail_order_buggy_birth_notes_first.cfg` | `BUGGY_NOTES_FIRST` + `BIRTH` | the invariants | violation (`MeetsQueue`, on the birth tail) | 3390 |
+| `tail_order_buggy_no_repass.cfg` | `BUGGY_NO_REPASS` | the invariants | violation (`NoEretUnderOwnStop`) | 649 |
+| `tail_order_buggy_budget_first.cfg` | `BUGGY_BUDGET_FIRST` | the invariants | violation (`NoEretUnderOwnStop`) | 4368 |
+| `tail_order_buggy_no_budget.cfg` | `BUGGY_NO_BUDGET` | the invariants + `TailEnds` | violation (`TailEnds`; the invariants hold) | 9022 |
+
+| Spec action | Code site (as-built) | Invariant pinned |
+|---|---|---|
+| `Enter` / `DieCheck` / `StopLeg` / `Park` (the first two legs; the park as one step) | `arch/arm64/vectors.S` `.Lel0_sync_return`: `bl el0_return_die_check`, `bl el0_return_stop_check`, `bl notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, `notes_deliver_at_el0_return` | `MeetsQueue`: the stop leg runs before the notes leg, so a note posted during a stop is met as the stop ends. `BUGGY_NOTES_FIRST` = the order before the vote (the S1 sabotage's shape). |
+| `NotesLeg` (`"plain"` / `"caught"` / `"term"` / `"susp"`) | `kernel/notes.c::notes_deliver_tail`: the discard loop (`if (++*passes < NOTE_QUEUE_DEPTH) goto again; return false;`), a frame build (returns false), a terminating default (`exits`), the stop arm (`notes_stop_dequeue_locked` -> `proc_job_stop_self`, returns true, as does the orphan rule's discard) | -- |
+| `Repass` + `Proceed` at `leg = "repass"` (the die-check, the stop leg, then `++passes`) | `kernel/notes.c::notes_deliver_at_el0_return`: `while (notes_deliver_tail(ctx, &passes)) { el0_return_die_check(); el0_return_stop_check(ctx); if (++passes >= NOTE_QUEUE_DEPTH) break; }` | `NoEretUnderOwnStop`. `BUGGY_NO_REPASS` = the stop arm returns false (the S3 sabotage's shape); `BUGGY_BUDGET_FIRST` = the budget break before the die-check and the stop leg. |
+| `Spend` (one budget for the passes and the discards) | `notes_deliver_tail`'s `*passes` and the loop's `++passes` | `TailEnds`: a flood cannot hold the masked tail. `BUGGY_NO_BUDGET` = neither counts. |
+| `Post` / `DebugStop` / `DebugResume` / `JobStop` / `JobCont` / `Kill` / `Release` | `notes_post`; `proc_debug_stop_deliver` / `proc_debug_resume`; the job stop and continue (`proc_job_stop_self`, `proc_job_cont_proc`); `proc_group_terminate`; `proc_birth_hold_release_locked` | -- |
+
+Abstracted, said so the green reads no larger: the park (`debug_stop.tla`'s);
+the IRQ tail, which delivers no notes; a note posted in the masked window
+between the notes leg's last decision and the eret, which waits for the next
+checkpoint (`seam-el0-irq-tail-no-notes`); notes left for a self-managing Proc's
+fd reader; and registers (that each pass re-reads the handler, `sp` and the
+sigtab is the kernel tests' and round 1's W3). The kernel test
+`rendez.tail_parks_for_the_stop_it_applies` and debug-probe's resume,
+death-step and caught-step legs hold the code to the model.
+
+Pre-commit gate: `specs/check-tail-order.sh` (the 2 clean cfgs at their pinned
+counts, the 5 buggy cfgs violating their named properties), on any change to
+the tails' leg order (`.Lel0_sync_return`, `userland_enter_held`), to
+`notes_deliver_at_el0_return`'s loop, to what `notes_deliver_tail` returns or
+spends, or to `NOTE_QUEUE_DEPTH` as the tail's budget.
 
 ## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
 

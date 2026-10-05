@@ -330,16 +330,20 @@ _exception_vectors:
 //   2. el0_return_die_check — I-24 group-terminate self-exit (noreturn if so),
 //      AFTER the preempt so a Proc group-terminated during the preempt-switch is
 //      caught before any EL0 instruction runs.
-//   3. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery;
-//      sp still points at the KERNEL_ENTRY trapframe here.
+//   3. el0_return_stop_check(ctx = sp) — I-39 / job-control stop park, AFTER the
+//      die-check (death wins) and BEFORE the notes (a stop wins over a note, and a
+//      note latched during the stop is taken as it clears; DEBUG-FS-DESIGN 4.2).
+//   4. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery,
+//      the last C call (it asserts the #713 mask); sp still points at the
+//      KERNEL_ENTRY trapframe here.
 // ---------------------------------------------------------------------------
 .Lel0_sync_return:
     bl      preempt_check_irq
     bl      el0_return_die_check
+    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */
+    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a stop is pending (AFTER the die-check -- death wins) */
     mov     x0, sp
-    bl      notes_deliver_at_el0_return
-    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (notes clobbered x0; SP == trapframe base here) */
-    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER die-check + notes -- death/interrupt win) */
+    bl      notes_deliver_at_el0_return  /* AFTER the stop (DEBUG-FS-DESIGN 4.2); the #713 assert */
     b       .Lexception_return
 
 .Lexception_return:
@@ -423,8 +427,8 @@ thread_fork_trampoline:
 // check, so nothing can stop a child before its first instruction. This
 // instead BUILDS the EL0 frame that first instruction would have been
 // interrupted with and takes the ordinary EL0-return tail over it: the preempt
-// check, the die-check, note delivery, then the stop leg -- here the birth park,
-// which also holds while the child is held. A debugger that converts the hold
+// check, the die-check, the stop leg -- here the birth park, which also holds
+// while the child is held -- then note delivery. A debugger that converts the hold
 // therefore finds a real saved frame (regs reads the entry, a regs write lands
 // in the frame, a step arms SPSR.SS in it), and KERNEL_EXIT erets from that
 // frame when the child is released.
@@ -440,10 +444,11 @@ thread_fork_trampoline:
 //
 // DAIF: the frame is built with IRQs on (a plain C call, as userland_enter's
 // die-check), then everything is masked for the tail -- the precondition every
-// tail call asserts (#713) and the state KERNEL_EXIT requires. el0_birth_park
-// returns only to eret, as the stop park at the other tails does: neither
-// leaves its park for a latched interrupt (DEBUG-FS-DESIGN 5g), so the tail
-// is straight-line and cannot loop masked.
+// tail call asserts (#713) and the state KERNEL_EXIT requires. The birth park
+// comes before the notes leg, as the stop check does at the sync tail
+// (DEBUG-FS-DESIGN 4.2): neither park ends for a latched interrupt (5g), and
+// the notes leg takes the note as the park returns. The tail is straight-line;
+// the notes leg's own re-passes are bounded by its budget.
 // ---------------------------------------------------------------------------
 .globl userland_enter_held
 .type userland_enter_held, %function
@@ -458,8 +463,8 @@ userland_enter_held:
     bl      preempt_check_irq
     bl      el0_return_die_check         /* I-24: noreturn if the Proc is group-terminating */
     mov     x0, sp
-    bl      notes_deliver_at_el0_return
+    bl      el0_birth_park               /* parks while held or stopped (AFTER the die-check) */
     mov     x0, sp
-    bl      el0_birth_park               /* parks while held or stopped; returns only to eret */
+    bl      notes_deliver_at_el0_return  /* AFTER the park (DEBUG-FS-DESIGN 4.2); the #713 assert */
     b       .Lexception_return
 .size userland_enter_held, . - userland_enter_held

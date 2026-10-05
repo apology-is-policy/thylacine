@@ -2052,17 +2052,19 @@ bool proc_job_stop_proc(struct Proc *m);
 void proc_job_cont_proc(struct Proc *m);
 
 // 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
-// at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),
-// so death/interrupt win over a stop. Fast-paths out when NO stop is pending
+// at every return-to-EL0 AFTER el0_return_die_check and, on the sync tail, BEFORE
+// the notes leg (DEBUG-FS-DESIGN 4.2), so death wins over a stop and a stop over
+// a note; the notes leg calls it again to park for a stop it applied itself.
+// Fast-paths out when NO stop is pending
 // (neither owner -- PTY-1f: the check reads proc_stop_owned's debug|job
 // disjunction, deliberately not the park predicate, so a group that dies
 // after the die check still meets the park's death check); otherwise parks
 // the calling Thread on its own debug_rendez (register-then-observe under
 // wait_lock) until BOTH owners clear, re-checking group death (terminate
 // here, never eret) on every wake.
-// Returns to the tail (-> eret) only when the stop is cleared: a latched
-// interrupt does not end the park, and the thread meets it at its next
-// checkpoint once it runs (DEBUG-FS-DESIGN 5g). 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
+// Returns to the tail only when the stop is cleared: a latched interrupt does
+// not end the park, and the notes leg that follows takes it (the IRQ tail has
+// none, so there it waits for the next checkpoint; DEBUG-FS-DESIGN 5g). 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
 // recorded into the Thread so /proc/<pid>/regs reads the RIGHT saved frame (its
 // kstack offset is not fixed -- see thread.h debug_trapframe).
 struct exception_context;
@@ -2073,10 +2075,10 @@ void el0_return_stop_check(struct exception_context *ctx);
 // frame: every field zero, then ELR = entry, SPSR = EL0t with DAIF clear, SP_EL0
 // = sp. el0_birth_park is the birth tail's stop leg: it announces the arrival,
 // then parks while the hold OR any stop owner holds, re-checking death on every
-// wake. It returns only to take the eret: group death ends the thread in the
-// park, and a latched interrupt does not end it -- a held child stays held
-// until it is released, or converted and resumed, and meets the note at its
-// first checkpoint after that (DEBUG-FS-DESIGN 5g).
+// wake. It returns only to proceed to the notes leg and the eret: group death
+// ends the thread in the park, and a latched interrupt does not end it -- a held
+// child stays held until it is released, or converted and resumed, and meets
+// the note in the notes leg right after (DEBUG-FS-DESIGN 4.2, 5g).
 void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp);
 void el0_birth_park(struct exception_context *ctx);
 

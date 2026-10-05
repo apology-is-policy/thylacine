@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -235,7 +235,9 @@ hangup and still catch the continue; a wake between them would find nothing
 armed. Both wakes pass a stop-parked thread by, and it stays stopped
 (DEBUG-FS-DESIGN 5g). The job resume then lets it run, and it meets the hangup
 at its next note checkpoint: a nested sleeper at once, as its own wait unwinds
-for the latch, and a thread parked at the tail at its next syscall's tail. A
+for the latch; a thread parked at a synchronous or birth tail as the park
+returns, in the notes leg that follows it; and a thread parked at the IRQ tail,
+which delivers no notes, at its next syscall's tail (DEBUG-FS-DESIGN 4.2). A
 caught continue waits for the resume the same way.
 
 **Death wins from inside a stop** — the same clause the debugger's stop must

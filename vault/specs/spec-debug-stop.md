@@ -26,7 +26,7 @@ cfgs:
   - "debug_stop_buggy_spawner_latch_returns.cfg -- SpawnReturnsAfterBirth violated: the spawner's own interrupt returns its birth wait before the child is born"
 gate: "any change to the stop/park/resume protocol, the attach-slot lifetime, the tail ordering of the die-check against the stop-check, the birth park, the hold's writers, the held spawn's wait, or the death-only park sleep"
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Abstraction
 
@@ -61,8 +61,15 @@ it is the first buggy cfg for a reason.
   own flag, and that the two compose is [[spec-pty-stop]]'s obligation, not this
   model's;
 - note delivery. The model latches an interrupt and wakes the parks with it,
-  but has no notes: what a Thread does with its latch once it runs again is the
-  kernel tests' and debug-probe's to show.
+  but has no notes. Where each tail calls the park against its notes leg --
+  after the die-check and, since 2026-10-05, before the notes -- and the leg's
+  re-pass for a stop it applies are [[spec-tail-order]]'s. What a Thread does
+  with its note once it runs again is shown on the device by debug-probe: the
+  `resume` leg meets a note posted during a stop on the very resume, before the
+  child runs another instruction, and the `caught-step` leg's step reports at
+  the handler's first instruction. In the kernel suite,
+  `rendez.tail_parks_for_the_stop_it_applies` shows the notes leg parking for a
+  stop it applied itself.
 
 ## The birth hold (2026-09-29)
 
@@ -133,7 +140,7 @@ its witness.
 | `Attach` / `Detach` | the ctl `attach`/`detach` verbs — claim/release `debug_owner` under the process-table lock |
 | `RequestStop` | `proc_debug_stop_deliver` — the RELEASE store of the stop flag, then the sleeper wake and the EL0 kick; on a held target, then `proc_birth_hold_convert_locked` (`ConvertFinish`) |
 | `FaultStop` | `proc_debug_fault_stop` — the hardware-fire path, which takes the table lock and delivers **only while the slot is owned** |
-| `Park` | `el0_return_stop_check` at both EL0-return tails, ordered *after* the die-check; the loop is `el0_stop_park`, which re-checks death after its wake condition and sleeps in `sleep_death_only`, which a latch's wake does not return |
+| `Park` | `el0_return_stop_check` at both EL0-return tails, ordered *after* the die-check and before the synchronous tail's notes leg, which calls it once more to park for a stop it applied ([[spec-tail-order]]); the loop is `el0_stop_park`, which re-checks death after its wake condition and sleeps in `sleep_death_only`, which a latch's wake does not return |
 | the sleeper detour | the nested stop check inside `sleep`/`tsleep`, so a syscall-blocked Thread can park without reaching the tail; its park (`proc_stop_sleeper_park`) is death-only too |
 | `StartResume` / `StartRelease` | `proc_debug_resume` — clear the flag, then wake every Thread parked on its own debug rendez; on a held target `proc_birth_hold_release_locked` clears the hold first |
 | `ReleaseSlot` | the ctl-fd close hook: resume an attached target, or terminate an `exitkill`-marked launched one; an explicit detach releases a hold, the implicit close keeps it |

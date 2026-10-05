@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -127,7 +127,9 @@ the image's entry, the saved processor state is EL0 with interrupts clear, and
 the EL0 stack pointer is the user stack. That is the frame the first
 instruction would have been interrupted with. It then masks and runs the
 ordinary EL0-return sequence over that frame: the preempt check, the
-die-check, note delivery, and then the park, which here is `el0_birth_park`.
+die-check, the park, which here is `el0_birth_park`, and then note delivery,
+so a note posted while the child is held meets it as the park returns
+(DEBUG-FS-DESIGN 4.2).
 The thread finally leaves through the shared `.Lexception_return`, so
 `KERNEL_EXIT` erets from the frame. A register the debugger wrote while the
 child was parked, or a step it armed, takes effect.

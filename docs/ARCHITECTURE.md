@@ -1460,8 +1460,12 @@ stop when an interrupt arrives, and only `kill` ends it (Plan 9 `postnote`,
 POSIX XSH 2.4.3, Linux `wants_signal`); and a parent suspend must not return
 alive on a latch that a peer thread can still revoke, by installing a handler or
 opening the notes fd, while its child uses the parent's stack or is still
-loading. The latch stays armed and the note queued: the thread takes it at its
-next note checkpoint once the stop clears or the suspend returns. The latch's
+loading. The latch stays armed and the note queued. A thread parked at the
+synchronous tail or the birth tail takes it at that same tail as the stop clears,
+because both tails stop before they deliver notes (operator-voted 2026-10-05;
+DEBUG-FS-DESIGN §4.2). A thread in a nested park, in the IRQ tail's park or in a
+suspend takes it at its next note checkpoint once the stop clears or the suspend
+returns. The latch's
 wake walk, the caught note's and a second stop's pass a thread in a stop park
 by, since that park could only absorb the wake: a stop park is woken by a resume
 or by death alone. And a dying group is never asked to park
@@ -1561,9 +1565,12 @@ wait **without** terminating the Thread, so it is serviced promptly at the tail.
   `proc_flags`, taken by a CAS that re-validates the caught bit), and its peers
   find the family claimed and re-park. The claim is the claimant's, and it ends
   at the claimant's EL0-return tail, whatever the tail delivered: that tail runs
-  at most one handler and can end short of the claimed note (a stop, a frame that
-  will not build), so a claim that waited for its note to drain could refuse
-  every wait in the Proc. Released with its note still queued, the family is
+  at most one handler and can end short of the claimed note (a frame that will
+  not build, a pass budget spent), so a claim that waited for its note to drain
+  could refuse every wait in the Proc. The claim survives a stop the tail parks
+  for, since the stop comes before the notes leg (DEBUG-FS-DESIGN §4.2). Nothing
+  needs it there: a stop holds every thread of the Proc, and the caught note's
+  wake passes a stopped thread by. Released with its note still queued, the family is
   open again and the Proc's sleepers are woken to claim it. The tail itself
   loops past notes it discards, as Linux's `get_signal` loops past ignored
   signals, so a caught note queued behind an ignored one is delivered on the

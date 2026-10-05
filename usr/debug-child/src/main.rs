@@ -24,6 +24,11 @@
 //     instead, so a debug stop parks it at an IRQ tail: x20 holds SENTINEL_SPIN,
 //     x21 the region, region[1] is a counter the loop increments, and region[2]
 //     a flag the debugger WRITES to 1 to end the loop.
+//   * `debug-child spin-caught` (DEBUG-FS-DESIGN 4.2, 5.5) registers a native
+//     note handler and then spins: x20 holds SENTINEL_CAUGHT, x21 the region,
+//     x22 the handler's VA and x24 the loop's first instruction, whose `add` is
+//     the only write to x23. The handler counts its runs in region[3] and
+//     returns with NCONT; region[2] ends the loop as in spin mode.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -53,6 +58,8 @@ const SENTINEL_MEM: u64 = 0xDEB0_0001_CAFE_0001;
 const WATCH_VALUE: u64 = 0xDEB0_0002_CAFE_0002;
 // Spin mode's in-loop proof, the counterpart of SENTINEL_REG.
 const SENTINEL_SPIN: u64 = 0xDEB0_0003_CAFE_0003;
+// Caught mode's.
+const SENTINEL_CAUGHT: u64 = 0xDEB0_0004_CAFE_0004;
 
 // The 8a-2b breakpoint landmark: debug-probe arms a HW breakpoint at this
 // function's entry (its VA is pinned in x22 during the park loop, so the debugger
@@ -108,6 +115,48 @@ fn spin(ptr: *mut u64) -> ! {
     unsafe { t_exits(0) }
 }
 
+// Caught mode (DEBUG-FS-DESIGN 4.2, 5.5). With a handler registered, a posted
+// note is delivered rather than left queued or terminating, so a debugger that
+// steps this loop can watch where the delivery lands: x23 changes only in the
+// loop's first instruction, so a step from there that meets the note shows
+// whether that instruction ran first.
+fn spin_caught(ptr: *mut u64) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "adr x22, 3f",
+            "mov x0, x22",
+            "mov x8, #45",         // SYS_NOTIFY(the handler)
+            "svc #0",
+            "adr x24, 2f",
+            "mov x23, #0",
+            "2:",
+            "add x23, x23, #1",
+            "ldr x10, [x21, #16]", // region[2]: the debugger's exit flag
+            "cbz x10, 2b",
+            "b 4f",
+            "3:",                  // the handler: region[3] += 1, then NCONT
+            "ldr x9, [x21, #24]",
+            "add x9, x9, #1",
+            "str x9, [x21, #24]",
+            "mov x0, #0",
+            "mov x8, #46",         // SYS_NOTED(NCONT)
+            "svc #0",
+            "4:",
+            in("x20") SENTINEL_CAUGHT,
+            in("x21") ptr,
+            out("x0") _,
+            out("x8") _,
+            out("x9") _,
+            out("x10") _,
+            out("x22") _,
+            out("x23") _,
+            out("x24") _,
+        );
+    }
+    yield_now();
+    unsafe { t_exits(0) }
+}
+
 // Dirty mode's file and bytes. MUST match jc-probe.
 const DIRTY_PATH: &str = "/debug-child-dirty";
 const DIRTY_PAYLOAD: &[u8] = b"staged by debug-child, flushed by its exit close\n";
@@ -157,6 +206,9 @@ pub extern "C" fn rs_main() -> i64 {
     let ptr = region.as_mut_ptr();
     if libthyla_rs::env::args().operands().next() == Some(&b"spin"[..]) {
         spin(ptr);
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"spin-caught"[..]) {
+        spin_caught(ptr);
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"dirty"[..]) {
         dirty(ptr);
