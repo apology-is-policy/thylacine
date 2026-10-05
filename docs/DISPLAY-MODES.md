@@ -84,9 +84,10 @@ serial output** so the framebuffer is the sole view and the sole CPR answerer.
 
 **1b uses the seam the kernel already names** (`kernel/cons.c:207-210`): "the
 selector will gate `uart_putc`, not the tap." The write path
-`cons_emit_bulk`/`cons_emit_bulk_wait` (`kernel/cons.c:853-897`) taps aurora's
-`cons_drain` mirror FIRST, then pushes to the UART TX ring second — the two
-sinks are cleanly separable there. 1b gates the **UART-sink half**
+`cons_emit_bulk`/`cons_emit_bulk_wait` keeps the two sinks cleanly separable:
+the echo emit taps aurora's `cons_drain` mirror first and then pushes to the
+UART TX ring, and the process write pushes first and taps what went out once,
+after its pushes (`dec-2026-10-05-console-mirror-tap-order`). 1b gates the **UART-sink half**
 (`cons_tx_push_bulk` / `uart_putc`) on a `serial_silent` flag in the cons state,
 leaving `cons_drain_tap_bulk` untouched so aurora keeps rendering. Emergency IO
 (mode 2's UART) is the un-silenced kernel path (extinction dumps, the trusted
