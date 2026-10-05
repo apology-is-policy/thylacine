@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -36,6 +36,7 @@ struct p9_transport_ops {
     int  (*close)(void *ctx);
     void (*set_recv_deadline)(void *ctx, u64 deadline_ns);  // NULL-permitted
     bool (*recv_timed_out)(void *ctx);                      // NULL-permitted
+    void (*hangup)(void *ctx);                              // NULL-permitted
     void *ctx;
 };
 ```
@@ -52,6 +53,15 @@ struct p9_transport_ops {
   unboundedly. Deadline capability is queryable
   (`p9_client_recv_is_deadline_capable`) and is a hard gate for the
   frame-boundary pumps (Loom SQPOLL, [[sub-kernel-ninep-dev9p-poll]]).
+- `hangup` (ARCH 21.10, "A death hangs up", 2026-10-05): hang up the
+  client-to-server direction of a session that has died, so the server reads
+  EOF once it has drained what was sent. The 9P client calls it once, on the
+  edge of its death, under `c->lock` ([[sub-kernel-ninep-client]]), so it must
+  not sleep and may take only locks ordered after `c->lock`. It is idempotent
+  and reference-neutral: recv and close still work after it. The core's
+  `p9_transport_hangup` skips a NULL op and a CLOSED transport, whose backend
+  has already let go of what it would hang up. An ERROR transport still hangs
+  up: ERROR is the core's verdict on the stream, not a release of the backend.
 - Core API: `p9_transport_init/destroy/close` (close idempotent; destroy
   clobbers `P9_TRANSPORT_MAGIC` and does NOT call the backend close),
   `p9_transport_send` (validates `header.size == len` first),
@@ -92,6 +102,13 @@ c2s/s2c rings):
   for the kernel client; the adapter's close is the one legitimate
   teardown site). `p9_srvconn_transport_destroy` clobbers magic but does
   NOT unref — close-before-destroy is the discipline.
+- `hangup` → `srvconn_teardown` alone: EOF on both rings and every party
+  woken, so the server's worker leaves its serve loop at the death rather
+  than at the last unref. It frees nothing; the adapter's ref stays for
+  `close`, whose own teardown is then a no-op. The teardown takes `cn->lock`
+  around one store, then `c2s.lock` and `s2c.lock` nested, and wakes outside
+  the channel locks ([[lock-9p-client-c-lock]]). Witness:
+  `9p_srvconn_transport.death_tears_down_the_conn`.
 - `p9_srvconn_transport_conn(client)`: the magic-gated downcast the pts
   registry and SYS_SRV_PEER use — every transport ctx struct leads with a
   distinct u32 magic at offset 0, so a non-srvconn backend fails the check
@@ -103,7 +120,12 @@ short writes) and `recv` → `rx_spoor->dev->read`, offset 0 throughout
 (stream semantics). `owns_spoors` decides whether close clunks the pair
 (idempotent: pointers cleared before clunking; `rx != tx` guarded for the
 duplex case). Leaves both deadline ops NULL — not deadline-capable, which
-is exactly why the deadline-requiring pumps reject it.
+is exactly why the deadline-requiring pumps reject it. Its `hangup` calls
+`pipe_hangup_write` on the tx, so the server's reader drains what was sent
+and then reads EOF while the endpoint stays with the transport until close
+([[sub-kernel-pipe]]). Only a pipe can be hung up without closing it; any
+other tx (the tests' mock) is left alone, and its server learns of the death
+at the close. Witness: `pipe.client_death_hangs_up_the_tx_pipe`.
 
 **The loopback backend** (test): `send` invokes a responder function that
 synthesizes the reply into a caller-provided staging buffer; `recv` drains
@@ -111,7 +133,9 @@ it in `chunk_size` pieces (forcing the partial-read paths); refuses a send
 while a prior response is undrained (a test-discipline check real backends
 don't have); armed-deadline + empty models a frame-boundary timeout
 (`-1` + timed_out) vs disarmed EOF (`0`); `p9_loopback_force_eof` drops the
-staged reply to simulate peer death.
+staged reply to simulate peer death. Its `hangup` only counts
+(`lb->hangups`), so a test can require one hangup per death however many
+paths find the session dead.
 
 **The mq backend** (test, Loom-6c): a spinlocked linear byte-FIFO staging N
 replies concurrently — the multi-in-flight harness. Knobs the audits lean
@@ -122,7 +146,9 @@ on the next recv — which runs inside the client's pump/park window where
 `c->lock` is dropped — overwrite the given buffer with 0x5A, deterministically
 modeling a peer rebuilding the shared `out_buf`; the
 `send_backpressure_spill_survives_outbuf_reuse` regression is built on it).
-The ring resets head/tail to 0 on full drain.
+The ring resets head/tail to 0 on full drain. It has no `hangup`, and nor
+does the closer test's stall wrapper, whose inner op would take the
+wrapper's ctx.
 
 ## Data structures
 
@@ -233,4 +259,7 @@ session+transport+spoor handshake) + the srvconn arm's coverage riding
 `test_9p_srvconn_transport.c` (`kernel_attached_skips_teardown_on_handle_close`
 incl. the 16c-F8 part-3 adapter-close leg) and the client suites
 (`9p_client.send_backpressure_*`, `9p_client.loom_multi_inflight_*` — the
-mq consumers).
+mq consumers). The death hangup has one witness per backend that has one:
+`9p_client.death_hangs_up_once` (loopback),
+`9p_srvconn_transport.death_tears_down_the_conn` (srvconn) and
+`pipe.client_death_hangs_up_the_tx_pipe` (spoor over a real pipe).

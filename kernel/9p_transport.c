@@ -248,3 +248,9 @@ bool p9_transport_recv_timed_out(const struct p9_transport *t) {
         return t->ops.recv_timed_out(t->ops.ctx);
     return false;
 }
+
+void p9_transport_hangup(struct p9_transport *t) {
+    if (!t || t->magic != P9_TRANSPORT_MAGIC) return;
+    if (t->state == P9_TRANS_CLOSED) return;
+    if (t->ops.hangup) t->ops.hangup(t->ops.ctx);
+}

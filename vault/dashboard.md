@@ -132,6 +132,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-06 [[chg-2026-10-06-haul-p3b]] — Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
 - 2026-10-06 [[chg-2026-10-06-tail-order]] — Tail order: the EL0-return tail stops before it delivers notes
 - 2026-10-05 [[chg-2026-10-05-haul-p3a]] — Haul P3a: replies held to the session's msize, a short-token warning, and verdict-checked hang-up legs
 - 2026-10-05 [[chg-2026-10-05-signal7-list]] — signal(7)'s list: every kernel wait a listed Linux call reaches ends for a caught note
@@ -139,5 +140,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-30 [[chg-2026-09-30-held-launch]] — The held launch: ambush spawns held where the kernel has the hold
 - 2026-09-30 [[chg-2026-09-30-image-slide]] — The image slide: a deck names a picture, and view shows it
 - 2026-09-30 [[chg-2026-09-30-kernel-chunk]] — The kernel chunk: the trusted episode's lock re-checks, and walks without recursion
-- 2026-09-29 [[chg-2026-09-29-beacon-aside]] — A Markdown block quote is a Beacon aside -- checked by the manual, boxed where the console wraps, framed by Halcyon
 <!-- generated:end -->

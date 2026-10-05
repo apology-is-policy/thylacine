@@ -72,6 +72,7 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
 void test_9p_srvconn_transport_deadline_vtable_routes(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
+void test_9p_srvconn_transport_death_tears_down_the_conn(void);
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
@@ -874,6 +875,35 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
     p9_srvconn_transport_destroy(&st);
     loom_unref(l);
     cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// ARCH 21.10, "A death hangs up": over a /srv connection the hangup is the
+// conn's teardown, so the server learns of the death now, not at the mount's
+// last close. The death is the explicit one -- no transport traffic decides
+// it -- and the control is the same conn while the session lives.
+void test_9p_srvconn_transport_death_tears_down_the_conn(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    struct p9_transport_ops ops;
+    int open_rc = sc_open_handshaked(cn, &st, &ops);
+    bool live = srvconn_is_live(cn);
+    p9_client_mark_devgone(&g_sc_client);
+    bool after = srvconn_is_live(cn);
+
+    p9_client_destroy(&g_sc_client);
+    (void)ops.close(ops.ctx);            // teardown (idempotent) + drop adapter ref
+    p9_srvconn_transport_destroy(&st);
+    cleanup_byte_mode_pair(server, client, conn_h);
+
+    TEST_EXPECT_EQ(open_rc, 0, "handshake -> OPEN over the real srvconn");
+    TEST_ASSERT(live, "control: the conn is live while the session is");
+    TEST_ASSERT(!after, "the session's death tore the conn down");
 }
 
 // =============================================================================

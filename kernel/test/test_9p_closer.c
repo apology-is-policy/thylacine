@@ -240,6 +240,7 @@ static struct p9_transport_ops stall_init(struct stall_tp *st, struct srv_rec *r
     ops.close             = stall_close;
     ops.set_recv_deadline = stall_set_recv_deadline;
     ops.recv_timed_out    = stall_recv_timed_out;
+    ops.hangup            = NULL;   // the inner's would take the wrapper's ctx
     ops.ctx               = st;
     return ops;
 }

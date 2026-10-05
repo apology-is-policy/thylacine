@@ -190,7 +190,14 @@ static void client_copy(u8 *dst, const u8 *src, size_t n) {
 // so this change does not touch the #841 synchronous surface or the boot path.
 static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
     int async_status = devgone ? -P9_E_NODEV : -P9_E_IO;
+    bool was_dead = c->dead;
     c->dead = true;
+    // ARCH 21.10, "A death hangs up": tell the server now, not at the mount's
+    // last close. Once, on the edge -- every later call finds the session
+    // already dead. The op is spinlocks and wakes whose locks nest under
+    // c->lock, and no caller here holds a pipe or srvconn lock: those locks
+    // are private to pipe.c and srvconn.c, neither of which calls the client.
+    if (!was_dead) p9_transport_hangup(&c->transport);
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
         if (!r) continue;

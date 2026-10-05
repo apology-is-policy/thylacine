@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -342,6 +342,21 @@ rejects all subsequent ops; there is no reconnect (destroy + re-init above).
 The sync (WAKE_RENDEZ) front-end and the boot path fail every op `-EIO`;
 the *async* (POST_CQE / Loom) path carries one more distinction (below).
 
+**A death hangs up (ARCH 21.10, 2026-10-05).** On the false-to-true edge of
+`c->dead`, and only there, `client_mark_dead_locked` calls
+`p9_transport_hangup` under `c->lock`, so the server learns of the death now
+rather than at the mount's last close: a pipe-mounted server (haul, a posted
+srv) reads EOF once it has drained what was sent, and a srvconn server's
+worker leaves its serve loop ([[sub-kernel-ninep-transport]]). Before, a
+session the kernel had killed -- a reply with a tag it never issued, an
+oversize frame -- left the server serving a dead mount that told no one. Every
+later call finds the session already dead, so the hangup runs once. The NOTAG
+version exchange in `client_run` is not a death: a refused Rversion fails the
+attach through `map_error` before there is a session to kill, and hangs up
+nothing. Witness: `9p_client.death_hangs_up_once` (two deaths, one hangup;
+then the dead session's close reaches the transport and is not counted as a
+hangup).
+
 **The device-gone death reason ([[inv-i29]] device-gone extension, Menagerie
 step 4).** `client_mark_dead_locked(c, bool devgone)` takes a reason, and the
 three reader sites (`client_wait`'s elected-reader loop and the two
@@ -488,6 +503,11 @@ The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
   `debug_stop_req` is always 0 there.
 - The completion seam (`on_complete`) runs under `c->lock`: no sleep, no
   poll-state lock, no `p9_client_*` re-entry, atomics only.
+- The death hangup runs under `c->lock` too. Its op is spinlocks and wakes
+  whose locks nest after `c->lock`, and neither pipe.c nor srvconn.c calls
+  the client, so nothing ranks above it ([[lock-9p-client-c-lock]]).
+  `p9_client_close` closes the transport under the same lock, so a hangup
+  and the close never overlap, and the hangup skips a CLOSED transport.
 
 ## Invariants enforced
 

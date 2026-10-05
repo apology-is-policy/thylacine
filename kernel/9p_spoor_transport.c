@@ -10,6 +10,7 @@
 
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/dev.h>
+#include <thylacine/pipe.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -98,6 +99,16 @@ static int spoor_transport_close(void *ctx) {
     return 0;
 }
 
+// The server's reader drains what the client sent and then reads EOF. Only a
+// pipe can be hung up without closing it; any other tx (the tests' mock) is
+// left alone, and its server learns of the death at the close.
+static void spoor_transport_hangup(void *ctx) {
+    struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
+    if (!st)                                   return;
+    if (st->magic != P9_SPOOR_TRANSPORT_MAGIC) return;
+    if (st->tx_spoor) (void)pipe_hangup_write(st->tx_spoor);
+}
+
 // =============================================================================
 // Public API.
 // =============================================================================
@@ -144,6 +155,7 @@ struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st) {
     // simply blocks (never observes the idle return). NULL-permitted.
     ops.set_recv_deadline = NULL;
     ops.recv_timed_out    = NULL;
+    ops.hangup            = spoor_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;
 }

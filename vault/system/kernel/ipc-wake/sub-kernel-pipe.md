@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-pipe, gate-smp]
 locks: [lock-pipe-ring, lock-poll-list]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -36,10 +36,18 @@ byte-transport under the 9P spoor-transport adapter.
   (`make -j | tee`) never interleave mid-write (holotype F4); a larger
   write fills what room there is and returns short. It **blocks on the
   `poll_list`** when it cannot proceed and the read end is open;
-  `-EAGAIN` instead when `CNONBLOCK`; `-T_E_PIPE` (EPIPE) when `read_eof`,
-  and it synthesizes the `pipe` note to the writing Proc (13a; the note is
+  `-EAGAIN` instead when `CNONBLOCK`; `-T_E_PIPE` (EPIPE) when `read_eof`
+  or `write_eof` (a hung-up write end refuses like a closed read end: EOF is
+  final, so no byte may follow it), and it synthesizes the `pipe` note to
+  the writing Proc (13a; the note is
   informational, and the return is the load-bearing EPIPE, a flat -1 that
-  reached a guest as EIO or EPERM until #100);
+  reached a guest as EIO or EPERM until #100). A mounted queue posts no
+  note: the `CNBFRAME` arm, which only the 9P transport's tx takes, refuses
+  with EPIPE alone (ARCH 10.3; Plan 9's `pipewrite` posts none for a
+  `CMSG` queue), because its writer is the kernel speaking for a session,
+  on whichever thread sent the request. Until 2026-10-05 it posted the
+  note, so a Proc whose 9P operation rode a pipe-mounted session got a
+  SIGPIPE-shaped note when the server died;
   `-EINTR` when a caught note interrupts a Linux writer's wait. A write
   blocks only before it moves a byte, so an interrupted write never
   discards a count.
@@ -47,10 +55,20 @@ byte-transport under the 9P spoor-transport adapter.
   poll list once — every hook, pollers and blocked readers and writers
   alike; the close is a readiness edge (surviving read end → POLLHUP;
   write end → POLLERR). Then the atomic ring-ref drop; last one frees.
+- **hangup** (`pipe_hangup_write`, ARCH 10.3; the 9P client's death
+  hangup, ARCH 21.10): the close discipline without the ref drop.
+  `write_eof` is set under `r->lock`, then the one wake. The reader drains
+  what was written and then reads EOF, every later write to the end is
+  refused, and the end polls POLLERR, never POLLOUT. The endpoint and its
+  ring ref stay with their holder, whose close still frees once. Spinlock
+  and wake only, so it is legal under the 9P client's `c->lock`
+  ([[lock-9p-client-c-lock]]). It returns false, doing nothing, for
+  anything but a pipe's write end.
 - `.poll` (`devpipe_poll`): sample + register atomically under
   `r->lock` — the canonical register-then-observe implementation.
   Read end: POLLIN on bytes, POLLHUP on `write_eof`. Write end:
-  POLLOUT on room-and-open, POLLERR on `read_eof`.
+  POLLOUT on room with neither EOF flag set, POLLERR on `read_eof` or
+  `write_eof`.
 - `.stat_native` (#96, [[chg-2026-07-29-96-pipe-fstat]]):
   `T_S_IFIFO | 0600`, size 0 (a buffered-count report would invite a
   read sized against it, racing the peer by construction), blksize
@@ -73,11 +91,14 @@ without sleeping again (the note's claim lasts until the EL0-return
 tail, so a second sleep would unwind at once and spin). The acting arm
 drops `r->lock` BEFORE
 `poll_waiter_list_wake`, which walks every hook — pollers and blocked I/O
-alike — under the list lock. The cond (`count > 0 || write_eof`; `count
-< CAP || read_eof`) is `pipe_waiter_ready`, evaluated under the list lock
-that orders the producer's mutation before it. The four wakes still map
-one-to-one onto [[spec-pipe]]'s four buggy configs: delete any one and
-its NoStuck invariant produces the counterexample.
+alike — under the list lock. The sleep's cond, `pipe_waiter_ready`, is the
+hook's `ready` flag, which the walk sets under the list lock that orders
+the producer's mutation before it; the loop then re-samples the ring under
+`r->lock` (a reader proceeds on `count > 0 || write_eof`, a writer on room,
+`read_eof` or `write_eof`). The five wakes -- after a read, after a write,
+in each close, and in the hangup -- each map onto a buggy config of
+[[spec-pipe]]: delete one and its NoStuck invariant produces the
+counterexample.
 
 **Which waits a caught note may end** (ARCH 8.8.3). `pipe_block_locked`
 sleeps with `sleep_noteintr` unless the caller is an elected 9P reader
@@ -144,7 +165,8 @@ is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level).
 [[inv-i9]] specialized to the two-direction state machine —
 [[spec-pipe]]'s `NoStuckReader`/`NoStuckWriter`, now carried on the
 multi-waiter `poll_list` rather than a single-rendez slot. `EofMonotonic`
-pins EOF ordering. The old `SingleWaiter` invariant is **retired** by the
+pins EOF ordering, and `NoByteAfterEof` (2026-10-05) pins the hangup's
+finality: once the write end is hung up, no byte joins the ring. The old `SingleWaiter` invariant is **retired** by the
 multi-waiter lift: the property it named — never two sleepers on one slot
 — was the very constraint the lift removed, not one to keep proving.
 
@@ -166,7 +188,15 @@ unregister.
 ## Prosecution
 
 - Every mutation that can enable a waiter must keep its wake — the
-  four spec buggy configs are the executable list.
+  spec's buggy configs are the executable list.
+- Both write arms must refuse on `write_eof` as well as `read_eof`, and
+  the `CNBFRAME` arm must post no note. Witnesses:
+  `pipe.hangup_write_ends_the_stream` (drain, then EOF; a later write
+  refused; POLLERR and POLLHUP; the ring freed once, at the second close),
+  `pipe.cnbframe_refusal_posts_no_note` (the same refusal without
+  `CNBFRAME` posts the note, one variable away),
+  `pipe_blocking.hangup_wakes_reader_with_eof` and
+  `pipe_blocking.hangup_wakes_writer_with_epipe`.
 - The close-order (flag under lock → drop → poll-list wake → ref
   drop) must hold; waking before the flag is visible loses the edge,
   and dropping the ref before the wake frees the ring, and the list
@@ -226,4 +256,6 @@ build-storm door) →
 retired the two Rendezes for one `poll_waiter_list`, closing the
 EL0-shared crash; `CNONBLOCK`/EAGAIN; the item-11→11c caught-note seam) →
 [[chg-2026-10-05-signal7-list]] (the caught-note EINTR for a Linux
-caller, kept off an elected 9P reader's un-opted receive).
+caller, kept off an elected 9P reader's un-opted receive) →
+[[chg-2026-10-06-haul-p3b]] (the hangup, and no note from a mounted
+queue).

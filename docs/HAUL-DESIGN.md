@@ -166,10 +166,32 @@ until a Tversion has passed. The bound is read from the session rather than
 fixed: the direct mount proposes 4 KiB, a posted service's mount 32 KiB.
 Reading one field of the two version messages does not make haul a client: it
 is the transport learning the frame bound both ends agreed to obey. A reply the
-kernel refuses for any other reason -- a tag it never issued, a type that does
-not answer the request -- still kills the session out of haul's sight; closing
-that needs the kernel to hang up its end of a dead session's transport (P3b,
-the kernel half of the 2026-09-29 review's F1).
+kernel refuses for any other reason once the version exchange is done -- a tag
+it never issued, a type that does not answer the request -- kills the session
+from the kernel's side, and the kernel then hangs up its end of the transport
+(ARCHITECTURE 21.10, "A death hangs up"; P3b, the kernel half of the
+2026-09-29 review's F1). An Rversion the kernel refuses is not a death: the
+exchange runs before there is a session to kill, so the attach fails with no
+hangup, and haul reports the handshake refused, as it does a refusal the server
+sends. The up pump
+reads EOF on the kernel's pipe once it has relayed what the kernel sent. That
+EOF is always the kernel's act -- a session it killed, or a mount taken down --
+so haul says the kernel ended it, distinct from a peer that closed the
+connection, and exits non-zero. A write the kernel's pipe refuses in the other
+direction is the same event and is named the same way.
+
+The stop recorded first names the side. A peer that closes is recorded by the
+down pump before it closes the kernel's reply pipe, so before the kernel can
+see the EOF that kills the session; the up pump's EOF that follows changes
+nothing. The main thread cannot wait for the up pump, though: the call that met
+the death returns as soon as the kernel has hung up, possibly before the pump
+has run. So where main names the end at once -- the `-v` listing and a failed
+attach -- it asks the kernel's pipe itself, a zero-timeout poll for POLLHUP,
+when no stop is recorded yet. At the attach it asks before closing its own copy
+of that pipe's write end: while the copy holds the end open, only the kernel's
+hangup can raise POLLHUP, which tells a session the kernel killed over the
+server's reply from a refusal the server sent. A failed attach drops the
+kernel's refs either way, so after the close the two look alike.
 
 ---
 

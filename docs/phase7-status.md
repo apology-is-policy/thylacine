@@ -1094,6 +1094,32 @@ read as success (death-step), a released slot read as success (devproc leg (g)),
 job (named by the leak check, no extinction). `specs/check-tail-order.sh` ALL CFGS AS CLAIMED; debug_stop 19 cfgs,
 debug_step 3 and death_wake 2 as claimed. `tools/ci-smp-gate.sh` *(pending)*.
 
+## Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine — 2026-10-05
+
+The 2026-09-29 Haul Fable pass's F1, the kernel half (OPEN-BUGS 2026-09-29 ~14:57Z), after P3a's haul half. Scripture,
+code, witnesses, model and dossiers in one commit *(pending)*, the squash of `aux-3-p3b`.
+
+- **A death hangs up** (ARCH 21.10). `client_mark_dead_locked` calls the transport's new `hangup` op once, on the
+  edge of the session's death, under `c->lock`: `pipe_hangup_write` on a pipe's tx, `srvconn_teardown` on a srvconn,
+  a count on the loopback, nothing on the mq or the closer test's stall wrapper. `p9_transport_hangup` skips a NULL op
+  and a CLOSED transport.
+- **A hung-up write end** (ARCH 10.3) is EOF without the close: the reader drains and then reads EOF, both write arms
+  refuse, the end polls POLLERR, and the ring ref stays with its holder.
+- **A mounted queue posts no `pipe` note.** The CNBFRAME arm refuses with EPIPE alone, which closes the 2026-08-17
+  bug of a SIGPIPE-shaped note when a pipe-mounted server died.
+- **haul names Thylacine.** `STOP_KERNEL` prints `haul: Thylacine ended the 9P session with ADDR -- the mount is
+  dead`; `kernel_ended` asks the pipe before haul closes its own copy, so the attach tells `attach (Thylacine refused
+  the server's reply)` from `attach (9P handshake refused)`.
+- `specs/pipe.tla`: `HangupWrite`, the action property `NoByteAfterEof`, two buggy cfgs.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, clean, all fixed (F3 by the two attach
+legs).
+
+Verification: `tools/test.sh` 1871/1871 before and after round 1; every haul leg PASS on the first attempt. Sabotages,
+one bake each, each red exactly on its designed tests (SA-SF); the hangup removed on a `TESTS=n` image turns the
+stray-reply and stray-attach legs red, and haul asking after its close turns the refuse-attach leg red, 3 attempts of
+3 each. TLC pipe: 2 clean and 7 buggy cfgs as claimed. `tools/ci-smp-gate.sh` *(pending)*.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

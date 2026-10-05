@@ -52,7 +52,7 @@ struct pipe_ring {
     size_t                    head;           // next write position; mod PIPE_BUF_SIZE
     size_t                    tail;           // next read position; mod PIPE_BUF_SIZE
     bool                      read_eof;       // read end closed → writes return -T_E_PIPE
-    bool                      write_eof;      // write end closed → reads return 0 (EOF)
+    bool                      write_eof;      // write end closed or hung up → reads return 0 (EOF) after drain
     spin_lock_t               lock;           // protects count/head/tail/{read,write}_eof
     struct poll_waiter_list   poll_list;      // every waiter: pollers AND blocked readers/writers
     u8                        buf[PIPE_BUF_SIZE];
@@ -335,6 +335,20 @@ static void devpipe_close(struct Spoor *c) {
     c->aux = NULL;
 }
 
+bool pipe_hangup_write(struct Spoor *c) {
+    if (!c || c->dev != &devpipe) return false;
+    struct pipe_endpoint *p = priv_of(c);
+    if (!p || p->is_read_end || !p->ring) return false;
+    struct pipe_ring *r = p->ring;
+    // The close discipline without the ref drop: the flag under the lock,
+    // then the one wake (specs/pipe.tla HangupWrite).
+    spin_lock(&r->lock);
+    r->write_eof = true;
+    spin_unlock(&r->lock);
+    poll_waiter_list_wake(&r->poll_list);
+    return true;
+}
+
 static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)off;
     struct pipe_endpoint *p = priv_of(c);
@@ -433,10 +447,11 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // concurrently -- see spoor.h; CNBFRAME itself is transport-tx-only).
     if (spoor_flag_get(c) & CNBFRAME) {
         spin_lock(&r->lock);
-        if (r->read_eof) {
+        // A mounted queue posts no `pipe` note (ARCH 10.3; Plan 9 pipewrite's
+        // CMSG rule): the writer is the kernel speaking for a session, and the
+        // thread it runs on is whichever one sent the request.
+        if (r->read_eof || r->write_eof) {
             spin_unlock(&r->lock);
-            struct Thread *t = current_thread();
-            if (t && t->proc) notes_post_pipe(t->proc);
             return -T_E_PIPE;
         }
         if ((long)(PIPE_BUF_SIZE - r->count) >= n) {
@@ -458,7 +473,10 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // NoStuckWriter (multi-waiter form) is the invariant.
     for (;;) {
         spin_lock(&r->lock);
-        if (r->read_eof) {
+        // A hung-up write end refuses like a closed read end: EOF is final, so
+        // no byte may follow it, and a writer blocked on a full ring meets the
+        // hangup when its wake re-samples here.
+        if (r->read_eof || r->write_eof) {
             spin_unlock(&r->lock);
             // P6-pouch-signals-impl (sub-chunk 13a): synthesize the `pipe`
             // note to the writing Proc. Tolerant of NULL current thread
@@ -558,8 +576,8 @@ static short devpipe_revents_under_lock(struct pipe_ring *r,
         if (r->count > 0)     revents |= POLLIN;
         if (r->write_eof)     revents |= POLLHUP;
     } else {
-        if (!r->read_eof && r->count < PIPE_BUF_SIZE) revents |= POLLOUT;
-        if (r->read_eof)      revents |= POLLERR;
+        if (!r->read_eof && !r->write_eof && r->count < PIPE_BUF_SIZE) revents |= POLLOUT;
+        if (r->read_eof || r->write_eof)                         revents |= POLLERR;
     }
     // POSIX: POLLIN/POLLOUT only set when requested; POLLERR/POLLHUP/
     // POLLNVAL always returned regardless of `events`.

@@ -84,6 +84,8 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_pipe_blocking_hangup_wakes_reader_with_eof(void);
+void test_pipe_blocking_hangup_wakes_writer_with_epipe(void);
 
 // =============================================================================
 // Consumer entries. Each: do one blocking op; publish the result (RELEASE, after
@@ -293,6 +295,66 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
 
     test_kthread_join_free(consumer, &g_consumer_exited);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_wr);
+}
+
+// The hangup (ARCH 21.10) wakes what the close of the write end wakes: a reader
+// blocked on the empty ring returns EOF, and a writer blocked on the full ring
+// is refused, because a hung-up write end takes no more bytes. Each is observed
+// before anything is closed; a sleeper the hangup failed to wake is then
+// released by a close's own wake, on the end the sleeper is not using, so a
+// RED run frees nothing under it.
+void test_pipe_blocking_hangup_wakes_reader_with_eof(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    g_consumer_result = -999; g_consumer_exited = false;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+
+    struct Thread *consumer = thread_create(kproc(), consumer_read_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+
+    bool hung = pipe_hangup_write(g_wr);
+    bool woke = consumer->state != THREAD_SLEEPING;
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    long rc = __atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE);
+    spoor_clunk(g_wr);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    test_kthread_join_free(consumer, &g_consumer_exited);
+    spoor_clunk(g_rd);
+
+    TEST_ASSERT(hung, "the write end hung up");
+    TEST_ASSERT(woke, "the hangup woke the reader blocked on the empty ring");
+    TEST_EXPECT_EQ(rc, 0L, "the woken reader reads EOF");
+}
+
+void test_pipe_blocking_hangup_wakes_writer_with_epipe(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    g_consumer_result = -999; g_consumer_exited = false;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+
+    static u8 fill[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_write(g_wr, fill, (long)PIPE_BUF_SIZE), (long)PIPE_BUF_SIZE,
+        "fill the ring");
+    struct Thread *consumer = thread_create(kproc(), consumer_write_one_byte_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+
+    bool hung = pipe_hangup_write(g_wr);
+    bool woke = consumer->state != THREAD_SLEEPING;
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    long rc = __atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE);
+    spoor_clunk(g_rd);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    test_kthread_join_free(consumer, &g_consumer_exited);
+    spoor_clunk(g_wr);
+
+    TEST_ASSERT(hung, "the write end hung up");
+    TEST_ASSERT(woke, "the hangup woke the writer blocked on the full ring");
+    TEST_EXPECT_EQ(rc, (long)(-T_E_PIPE),
+        "the woken writer is refused: no byte follows EOF");
 }
 
 // THREE readers blocked on one empty pipe -- the fork/dup/thread-shared

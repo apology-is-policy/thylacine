@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -439,6 +439,9 @@ line), and `clunk_killed_while_self_pumping` (a sender reading the
 replies itself, killed in that read over the stall transport: the session
 stays live and the Tclunk is taken back, fid bound). Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.
+The stall transport wraps the mq loopback and declares no `hangup` (ARCH
+21.10): forwarding the inner op would hand it the wrapper's ctx, and the mq
+backend has none to forward, so its server learns of a death at the close.
 
 `kernel/test/test_9p_attach.c` (`p9_attached.*`): lifecycle,
 handshake-failure cleanup (the OOM/rollback ladder), root-walk-read

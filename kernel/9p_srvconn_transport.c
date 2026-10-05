@@ -137,6 +137,16 @@ static int srvconn_transport_close(void *ctx) {
     return 0;
 }
 
+// EOF on both rings, every party woken: the server's worker leaves its serve
+// loop. Spinlocks and wakes only, and it frees nothing -- the adapter's ref
+// stays for close, whose own teardown is then a no-op.
+static void srvconn_transport_hangup(void *ctx) {
+    struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
+    if (!st)                                     return;
+    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return;
+    if (st->cn) srvconn_teardown(st->cn);
+}
+
 // =============================================================================
 // Public API.
 // =============================================================================
@@ -171,6 +181,7 @@ struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st
     ops.close             = srvconn_transport_close;
     ops.set_recv_deadline = srvconn_transport_set_recv_deadline;
     ops.recv_timed_out    = srvconn_transport_recv_timed_out;
+    ops.hangup            = srvconn_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;
 }

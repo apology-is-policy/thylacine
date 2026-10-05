@@ -1,8 +1,10 @@
 #!/usr/bin/expect -f
 # tools/interactive/haul-hangup.exp -- a server that hangs up must make haul
 # FAIL, promptly, rather than hang. (Also here, because they need no real server
-# either: a server that breaks the session's msize, the command form without
-# stdio, and the short-token warning. Each has its own section below.)
+# either: a server that breaks the session's msize, an attach the kernel or the
+# server refuses, a reply the kernel refuses,
+# the command form without stdio, and the short-token warning. Each has its own
+# section below.)
 #
 # THE DEFECT. SYS_ATTACH_9P runs Tversion + Tattach synchronously, reading the
 # replies from a pipe that has no deadline. haul's down pump is the only writer
@@ -170,6 +172,92 @@ foreach {leg answer reply bound} {1 65536 4608 4096 2 2048 3072 2048} {
     catch {exec kill $opid}
     file delete -force $olog
 }
+
+# THE ATTACH, AND ITS CONTROL. A failed attach drops the kernel's references to
+# the pipes, so once haul closes its own copy of the c2s write end the pipe reads
+# POLLHUP whoever refused. haul therefore asks while its copy still holds the end
+# open, when only the kernel's hangup can raise it. Two peers one variable apart:
+# an Rattach carrying a tag the kernel never issued (the kernel kills the session
+# and hangs up, and haul names Thylacine), and an Rlerror answering the Tattach
+# (a refusal the server sent: no death, no hangup, and haul says the handshake
+# was refused). The second goes red if haul asks after its close.
+foreach {leg mode want hardfail did verdict} {
+    stray stray-attach
+    {attach (Thylacine refused the server's reply)}
+    {haul: (cannot reach|cannot dial|attach \((9P|the|haul))|mounted at}
+    {sent an Rattach with tag 65534}
+    {an Rattach the kernel refuses kills the session inside the attach, and haul names Thylacine}
+    refused refuse-attach
+    {attach (9P handshake refused)}
+    {haul: (cannot reach|cannot dial|attach \((Thylacine|the|haul))|mounted at}
+    {refused the Tattach with Rlerror 13}
+    {an Rlerror the server sends fails the attach as a refusal, with no hangup}
+} {
+    set alog /tmp/haul-attach-$leg-[pid].log
+    file delete -force $alog
+    set apid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+        --port 0 --log $alog --mode $mode &]
+    set d [wait_log $alog "*listening*" 5]
+    if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> aport]} {
+        lc_fail "the $mode peer never listened -- its log: $d"
+    }
+    lc_send "mkdir -p /tmp/att$leg"
+    lc_run_expect_hardfail_re "haul -v 10.0.2.2!$aport /tmp/att$leg" "haul: $want" $hardfail
+    lc_run_expect "echo att-$leg-returned | tr a-z A-Z" "ATT-[string toupper $leg]-RETURNED"
+    set ad [wait_log_re $alog $verdict_re 15]
+    foreach w [list "served Tversion" $did] {
+        if {[string first $w $ad] < 0} {
+            lc_fail "the $mode peer did not do what the leg assumes (no \"$w\") -- its log: $ad"
+        }
+    }
+    if {![regexp $closed_re $ad]} {
+        lc_fail "haul kept the connection after the failed attach ($mode) -- the peer's log: $ad"
+    }
+    lc_step "$mode peer: [string map [list "\n" " | "] [string trim $ad]]"
+    lc_pass "haul-hangup: $verdict"
+    catch {exec kill $apid}
+    file delete -force $alog
+}
+
+# A REPLY THE KERNEL REFUSES. A reply carrying a tag the kernel never issued
+# kills the session from the kernel's side, in the 9P client's demux, where haul
+# cannot see it: nothing about the frame's size is wrong, so haul relays it. The
+# kernel then hangs up its end of the transport (ARCHITECTURE 21.10, "A death
+# hangs up"), haul's up pump reads EOF on the kernel's pipe, and haul names
+# Thylacine -- not the server, whose connection is still open -- and exits
+# non-zero. Before the hangup the dead session left haul parked on a dead mount
+# that told no one: the mount check said only that it CANNOT read (the hard-fail
+# arm), and the peer's verdict was STILL OPEN. The mount check's line comes from
+# the main thread, which asks the kernel's pipe rather than waiting for the
+# pump, so it cannot race the pump into "the mount did not take".
+set slog /tmp/haul-stray-[pid].log
+file delete -force $slog
+set spid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+    --port 0 --log $slog --mode stray-reply &]
+set d [wait_log $slog "*listening*" 5]
+if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> sport]} {
+    lc_fail "the stray-reply peer never listened -- its log: $d"
+}
+lc_send "mkdir -p /tmp/stray"
+lc_run_expect_hardfail_re "haul -v 10.0.2.2!$sport /tmp/stray" \
+    "mount check: Thylacine ended the 9P session during the listing" \
+    {haul: (cannot reach|cannot dial|attach \()|mount check: CANNOT read}
+lc_expect "haul: Thylacine ended the 9P session with 10.0.2.2!$sport -- the mount is dead" \
+    "stray reply: haul says Thylacine ended the session"
+lc_run_expect "echo stray-returned | tr a-z A-Z" "STRAY-RETURNED"
+set sd [wait_log_re $slog $verdict_re 15]
+foreach want [list "served Tattach" "sent a reply with tag 65534"] {
+    if {[string first $want $sd] < 0} {
+        lc_fail "the stray-reply peer did not do what the leg assumes (no \"$want\") -- its log: $sd"
+    }
+}
+if {![regexp $closed_re $sd]} {
+    lc_fail "haul kept the connection after Thylacine ended the session -- the peer's log: $sd"
+}
+lc_step "stray-reply peer: [string map [list "\n" " | "] [string trim $sd]]"
+lc_pass "haul-hangup: a reply the kernel refuses ends the session from its side, and haul names Thylacine and exits"
+catch {exec kill $spid}
+file delete -force $slog
 
 # THE COMMAND FORM WITHOUT STDIO. The kernel hands out the lowest free fd, so a
 # haul started with fds 0-2 closed would put its own connection and pipe fds in

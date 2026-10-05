@@ -118,6 +118,13 @@ struct p9_transport_ops {
     // arming resets the signal.
     bool (*recv_timed_out)(void *ctx);
 
+    // Hang up the client->server direction of a session that has died
+    // (ARCH 21.10, "A death hangs up"): the server reads EOF once it has
+    // drained what was sent. NULL-permitted. Called under the 9P client's
+    // c->lock, so it must not sleep and may take only locks ordered after
+    // it. Idempotent and reference-neutral: recv and close still work.
+    void (*hangup)(void *ctx);
+
     // Opaque pointer the backend uses for its state (e.g., a pointer
     // to a `struct p9_loopback`).
     void *ctx;
@@ -195,6 +202,11 @@ int  p9_transport_recv(struct p9_transport *t);
 // frame-aware reader that bypasses p9_transport_recv's ERROR latch.
 void p9_transport_set_recv_deadline(struct p9_transport *t, u64 deadline_ns);
 bool p9_transport_recv_timed_out(const struct p9_transport *t);
+
+// The backend's hangup, unless the transport is CLOSED: a closed backend has
+// already let go of what it would hang up. p9_client_close closes under the
+// same c->lock the hangup runs under, so the two never overlap.
+void p9_transport_hangup(struct p9_transport *t);
 
 // Convenience: send a request, then receive the response. Equivalent
 // to p9_transport_send + p9_transport_recv. Returns the response

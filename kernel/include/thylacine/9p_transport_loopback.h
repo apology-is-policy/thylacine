@@ -59,6 +59,9 @@ struct p9_loopback {
     // fire-and-forget async-clunk drain -- see loopback_send). A test can
     // assert on it; every other unread-reply send still refuses.
     u32                    dropped_rclunks;
+    // Hangups the client asked for (ARCH 21.10): one per death, however many
+    // paths find the session dead.
+    u32                    hangups;
     bool                   closed;
     // Deadline test knob (Loom-4). A real transport blocks recv on an
     // empty pipe until data / the deadline; the synchronous loopback has

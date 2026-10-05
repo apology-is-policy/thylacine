@@ -1667,6 +1667,7 @@ void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_death_hangs_up_once(void);
 void test_9p_client_handoff_skips_stop_parked(void);
 void test_9p_client_role_wait_contract(void);
 void test_9p_client_pump_deadline_idle(void);
@@ -1894,6 +1895,7 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
 void test_9p_srvconn_transport_deadline_vtable_routes(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
+void test_9p_srvconn_transport_death_tears_down_the_conn(void);
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
@@ -1925,12 +1927,17 @@ void test_pipe_close_one_end_keeps_other_alive(void);
 void test_pipe_close_both_ends_frees_ring(void);
 void test_pipe_compose_with_spoor_transport(void);
 void test_pipe_cnbframe_atomic_nonblocking(void);
+void test_pipe_hangup_write_ends_the_stream(void);
+void test_pipe_cnbframe_refusal_posts_no_note(void);
+void test_pipe_client_death_hangs_up_the_tx_pipe(void);
 void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_pipe_blocking_hangup_wakes_reader_with_eof(void);
+void test_pipe_blocking_hangup_wakes_writer_with_epipe(void);
 void test_pipe_blocking_multi_readers_share_one_empty_pipe(void);
 void test_pipe_blocking_multi_writers_share_one_full_pipe(void);
 void test_pipe_blocking_caught_note_ends_read(void);
@@ -3888,6 +3895,9 @@ struct test_case g_tests[] = {
     { "9p_client.async_mark_devgone_posts_nodev_cqe",
                                        test_9p_client_async_mark_devgone_posts_nodev_cqe,
                                                                            false, NULL },
+    { "9p_client.death_hangs_up_once",
+                                       test_9p_client_death_hangs_up_once,
+                                                                           false, NULL },
     { "9p_client.async_handoff_skips_async",
                                        test_9p_client_async_handoff_skips_async,
                                                                            false, NULL },
@@ -4201,6 +4211,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.deadline_vtable_routes",        test_9p_srvconn_transport_deadline_vtable_routes,        false, NULL },
     { "9p_srvconn_transport.devgone_posts_nodev_cqe",       test_9p_srvconn_transport_devgone_posts_nodev_cqe,       false, NULL },
     { "9p_srvconn_transport.transport_err_posts_eio_cqe",   test_9p_srvconn_transport_transport_err_posts_eio_cqe,   false, NULL },
+    { "9p_srvconn_transport.death_tears_down_the_conn",     test_9p_srvconn_transport_death_tears_down_the_conn,     false, NULL },
     { "9p_srvconn_transport.pts_slave_spoor_classifies_t", test_9p_srvconn_transport_pts_slave_spoor_classifies_t, false, NULL },
     { "pipe.smoke",                                         test_pipe_smoke,                                         false, NULL },
     { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },
@@ -4213,13 +4224,18 @@ struct test_case g_tests[] = {
     { "pipe.close_one_end_keeps_other_alive",               test_pipe_close_one_end_keeps_other_alive,               false, NULL },
     { "pipe.close_both_ends_frees_ring",                    test_pipe_close_both_ends_frees_ring,                    false, NULL },
     { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
+    { "pipe.client_death_hangs_up_the_tx_pipe",             test_pipe_client_death_hangs_up_the_tx_pipe,             false, NULL },
     { "pipe.cnbframe_atomic_nonblocking",                   test_pipe_cnbframe_atomic_nonblocking,                   false, NULL },
+    { "pipe.hangup_write_ends_the_stream",                  test_pipe_hangup_write_ends_the_stream,                  false, NULL },
+    { "pipe.cnbframe_refusal_posts_no_note",                test_pipe_cnbframe_refusal_posts_no_note,                false, NULL },
     { "pipe.attach_9p_admits_pipes_only",                   test_pipe_attach_9p_admits_pipes_only,                   false, NULL },
     { "pipe.fstat_reports_fifo",                            test_pipe_fstat_reports_fifo,                            false, NULL },
     { "pipe_blocking.write_wakes_sleeping_reader",          test_pipe_blocking_write_wakes_sleeping_reader,          false, NULL },
     { "pipe_blocking.read_wakes_sleeping_writer",           test_pipe_blocking_read_wakes_sleeping_writer,           false, NULL },
     { "pipe_blocking.close_write_end_wakes_reader_with_eof", test_pipe_blocking_close_write_end_wakes_reader_with_eof, false, NULL },
     { "pipe_blocking.close_read_end_wakes_writer_with_epipe", test_pipe_blocking_close_read_end_wakes_writer_with_epipe, false, NULL },
+    { "pipe_blocking.hangup_wakes_reader_with_eof",        test_pipe_blocking_hangup_wakes_reader_with_eof,        false, NULL },
+    { "pipe_blocking.hangup_wakes_writer_with_epipe",      test_pipe_blocking_hangup_wakes_writer_with_epipe,      false, NULL },
     { "pipe_blocking.multi_readers_share_one_empty_pipe",  test_pipe_blocking_multi_readers_share_one_empty_pipe,  false, NULL },
     { "pipe_blocking.multi_writers_share_one_full_pipe",   test_pipe_blocking_multi_writers_share_one_full_pipe,   false, NULL },
     { "pipe_blocking.caught_note_ends_read",              test_pipe_blocking_caught_note_ends_read,              false, NULL },

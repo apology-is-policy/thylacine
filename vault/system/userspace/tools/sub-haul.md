@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -93,6 +93,36 @@ kernel's reply pipe as a hang-up does, so a waiting call fails and the main
 thread exits non-zero. Read from the Tversion rather than fixed at 4 KiB, the
 bound also passes a posted mount's legitimate 32 KiB replies.
 
+**A session Thylacine ends is named as Thylacine's** (HAUL-DESIGN 2.x;
+ARCHITECTURE 21.10, "A death hangs up"). A reply the kernel refuses after the
+version exchange -- one carrying a tag it never issued, say -- kills the
+session in the 9P client's demux, where haul cannot see it: nothing about the
+frame's size is wrong, so haul relays it. The kernel then hangs up its end of
+the c2s pipe. The up pump reads EOF there, or the down pump's write into the
+kernel's reply pipe is refused, and either records `STOP_KERNEL`: haul prints
+`haul: Thylacine ended the 9P session with ADDR -- the mount is dead` (the
+command form: `... while the command was running`) and exits 1, naming the
+session rather than the server, whose connection is still open. The `-v` mount
+check says `mount check: Thylacine ended the 9P session during the listing`.
+Before the hangup a dead session left haul parked on a dead mount that told no
+one.
+
+The stop recorded first names the side, and main asks the pipe rather than
+waiting for a pump. The kernel hangs up as it marks the session dead, before
+the call that met the death returns, so the up pump may not have run yet.
+`kernel_ended(c2s_rd)` answers true for a recorded `STOP_KERNEL`, or for no
+recorded stop and a zero-timeout poll that finds POLLHUP on the kernel's end;
+a pump that stopped for the peer or for haul recorded that before the kernel
+could see anything. At the attach the order matters. A failed attach drops the
+kernel's references to the pipes, so once haul closes its own copy of the c2s
+write end the pipe reads POLLHUP whoever refused. haul therefore asks while its
+copy still holds the end open, when only the kernel's hangup can raise it:
+`attach (Thylacine refused the server's reply)` for a session the kernel
+killed, and `attach (9P handshake refused)` for an Rlerror the server sent. A
+refused Rversion is not a death: the exchange runs before there is a session
+to kill, so the attach fails with no hangup and reads as the handshake
+refused.
+
 **Both paths cape the session** (HAUL-DESIGN 4.7). npxf reports the host's
 owners (uid 501 and group staff on a Mac). No Thylacine principal holds them,
 so the kernel's rwx check made every guest user "other", and a private
@@ -133,7 +163,8 @@ earlier leg and failed there, its line reading `/` (2026-09-29).
 `UpCtx` owns the outgoing sealer, `DownCtx` the incoming opener. `Ready` marks
 the fd that actually carries readiness: TCP uses its `/ready` sibling; a pipe
 or accepted byte connection uses its own fd. `STOPPED` atomically publishes
-which pump ended, or that haul refused what came down (`STOP_REFUSED`). `REPLY`
+which pump ended, that haul refused what came down (`STOP_REFUSED`), or that
+the kernel let go of the session (`STOP_KERNEL`). `REPLY`
 is the reply bound, one `AtomicU32` (`frame::ReplyBound`). Tokens are wiped
 after handshake; record buffers are bounded by `frame::MSG_MAX` (64 KiB), set
 when libthyla-rs's heap was a fixed 4 MiB (two records
@@ -177,6 +208,10 @@ the mount is dead` (the command form: `... broke while the command was
 running`; the posted form: `... is broken -- the posted mount is dead`; during
 the attach: `attach (haul refused the server's reply)`), exit 1. The record layer's refusals -- a record claiming too much, a failed tag, a
 size field that disagrees with the record -- end the session the same way.
+A session the kernel ends prints `haul: Thylacine ended the 9P session with
+ADDR -- the mount is dead`, exit 1; during the attach it is `attach
+(Thylacine refused the server's reply)`, and a refusal the server sends is
+`attach (9P handshake refused)`.
 Mount/unmount
 builtins expose failures through `$status` and `$errstr`. A private mount at a
 point that is not a directory fails with `haul: mount PATH: not a directory`,
@@ -214,7 +249,17 @@ kernel's 4096-byte proposal after an Rversion claiming 65536, which lowers
 nothing, and 3072 bytes after an Rversion agreeing to 2048 must each be refused
 and named, and haul must exit and close the connection. Each leg leaves one
 half of the bound as the only defence, and a haul without that half parks, its
-mount check unable to read. Its
+mount check unable to read. Three legs hold the kernel's hangup. The
+stray-reply leg answers the mount check's first request with tag 0xFFFE: the
+kernel kills the session and hangs up, haul names Thylacine and exits, and the
+peer sees the connection closed. With the hangup removed from the kernel (a
+`TESTS=n` image, so the boot reaches the leg), the mount check said only that
+it CANNOT read, three attempts of three (2026-10-05). The attach pair runs one
+variable apart: an Rattach carrying a tag the kernel never issued must name
+Thylacine, and an Rlerror answering the Tattach must read as the handshake
+refused, with no hangup. With the hangup removed, the first went red as `attach
+(9P handshake refused)`; with haul asking after its close, the second went red
+as `attach (Thylacine ...)`, each three attempts of three (2026-10-05). Its
 last legs hold the short-token warning: a 15-byte token warns, a 16-byte one
 does not. The bound's rules are host-tested in `frame.rs`: the proposal, the
 ceiling, a Tversion cut short, an Rversion that would raise the bound, a

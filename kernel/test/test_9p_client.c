@@ -58,6 +58,7 @@ void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_death_hangs_up_once(void);
 void test_9p_client_handoff_skips_stop_parked(void);
 void test_9p_client_role_wait_contract(void);
 void test_9p_client_pump_deadline_idle(void);
@@ -1073,6 +1074,36 @@ void test_9p_client_async_mark_devgone_posts_nodev_cqe(void) {
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
     loom_unref(l);
+}
+
+// ARCH 21.10, "A death hangs up": the client asks its transport to hang up
+// once, on the death's edge, however many paths later find the session dead --
+// p9_client_mark_devgone reaches client_mark_dead_locked every time it is
+// called, so the second call is a real second death. The control is the live
+// session, which has asked for nothing, and the close is not a hangup.
+void test_9p_client_death_hangs_up_once(void) {
+    int open_rc = drive_client_open(&g_client, &g_loopback);
+    struct p9_qid q;
+    int walk = p9_client_walk_one(&g_client, 0, 6, (const u8 *)"a", 1, &q);
+    u32 live = g_loopback.hangups;
+    p9_client_mark_devgone(&g_client);
+    u32 first = g_loopback.hangups;
+    p9_client_mark_devgone(&g_client);
+    u32 again = g_loopback.hangups;
+    int close_rc = p9_client_close(&g_client);
+    bool lb_closed = g_loopback.closed;
+    u32 closed = g_loopback.hangups;
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+
+    TEST_EXPECT_EQ(open_rc, 0, "handshake");
+    TEST_EXPECT_EQ(walk, 0, "control: a live op");
+    TEST_EXPECT_EQ(live, 0u, "control: a live session has asked for no hangup");
+    TEST_EXPECT_EQ(first, 1u, "the death hangs up");
+    TEST_EXPECT_EQ(again, 1u, "once: a second death asks for no more");
+    TEST_EXPECT_EQ(close_rc, 0, "the dead session closes");
+    TEST_ASSERT(lb_closed, "the close reached the transport");
+    TEST_EXPECT_EQ(closed, 1u, "the close is not a hangup");
 }
 
 // The elected-reader handoff hands the role to a pending SYNC op and SKIPS an

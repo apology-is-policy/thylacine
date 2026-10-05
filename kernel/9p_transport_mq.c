@@ -130,6 +130,7 @@ struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq) {
     ops.close             = mq_close;
     ops.set_recv_deadline = mq_set_recv_deadline;
     ops.recv_timed_out    = mq_recv_timed_out;
+    ops.hangup            = NULL;
     ops.ctx               = mq;
     return ops;
 }

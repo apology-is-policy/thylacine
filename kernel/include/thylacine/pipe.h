@@ -11,7 +11,9 @@
 //   - write of n <= PIPE_BUF_SIZE proceeds only when all n fit (POSIX
 //     PIPE_BUF atomicity); a larger write fills what room there is. It
 //     blocks while it cannot proceed and the read end is open, and returns
-//     -T_E_PIPE, posting the `pipe` note, once the read end is closed.
+//     -T_E_PIPE, posting the `pipe` note, once the read end is closed or
+//     the write end hung up -- except on a mounted queue (the CNBFRAME
+//     arm), which posts no note (ARCH 10.3).
 //   - Any number of readers and writers may block on either end.
 //   - A CNONBLOCK end returns -T_E_AGAIN where it would block; a CNBFRAME
 //     end (the 9P transport's tx) writes whole frames or nothing.
@@ -61,6 +63,14 @@ void pipe_init(void);
 // The two Spoors share the same ring; the ring's storage outlives
 // EITHER endpoint and is freed only when BOTH are clunked.
 int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end);
+
+// Hang up a write end without closing it (ARCH 10.3; the 9P client's death
+// hangup, ARCH 21.10): the reader drains what was written and then reads
+// EOF, every later write to the end is refused, and the end polls POLLERR.
+// The endpoint and its ring ref stay with their holder, whose close still
+// frees once. Spinlock and wake only, so it is legal under the 9P client's
+// c->lock. False -- and nothing done -- for anything but a pipe's write end.
+bool pipe_hangup_write(struct Spoor *write_end);
 
 // Diagnostic counters (ring-level; one ring per pipe pair).
 u64 pipe_total_allocated(void);

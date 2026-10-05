@@ -278,6 +278,13 @@ the server, and the two sizes in the first line identify the fault for its
 maintainer; on a plain connection anything on the network path could have
 sent it.
 
+When the server closes the connection, Haul prints `haul: 10.0.2.2!5640 closed
+the connection -- the mount is dead` and exits with status 1. When Thylacine
+itself ends the session -- it refused a reply that answers no request it made,
+or the mount was taken down -- Haul prints `haul: Thylacine ended the 9P
+session with 10.0.2.2!5640 -- the mount is dead` instead, and exits with status
+1: the fault lies in the session, not in the server's connection.
+
 A remote disconnect fails pending filesystem operations. The relay ends when
 its connection or elevated scope ends. Token retrieval through corvus is not
 implemented; continue to use the explicit file or environment-source interface.

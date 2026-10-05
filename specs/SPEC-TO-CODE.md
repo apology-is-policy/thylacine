@@ -1441,19 +1441,24 @@ the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascad
 ## pipe.tla — P5-pipe (section added at RW-10; the spec landed P5)
 
 Models the two-direction pipe wait/wake state machine (I-9 specialized):
-bounded ring + reader/writer sleep/wake pairs + EOF/EPIPE on close. Clean cfg
-+ 4 buggy cfgs (`read_no_wake_writer` / `write_no_wake_reader` /
-`close_read_no_wake_writer` / `close_write_no_wake_reader`), each dropping
-one wake edge.
+bounded ring + reader/writer sleep/wake pairs + EOF/EPIPE on close and on
+the hangup. Two clean cfgs (`pipe.cfg`, two threads; `pipe_multi.cfg`, three,
+so two sleep on one side) + 7 buggy cfgs: four that each drop one wake edge
+(`read_no_wake_writer` / `write_no_wake_reader` / `close_read_no_wake_writer`
+/ `close_write_no_wake_reader`), `wake_one_reader` (a write wakes one chosen
+reader, the single-waiter wakeup the multi-waiter lift retired), and the
+hangup's two (`hangup_no_wake_writer`, `hangup_takes_bytes`).
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
-| `ReadDrain` / `ReadEof` / `ReadSleep` | `kernel/pipe.c::pipe_read` (drain under the pipe lock; EOF when write end closed + ring empty; sleep on the read Rendez otherwise) | a reader sleeps only when the ring is empty AND the write end is open |
-| `WriteAppend` / `WriteEpipe` / `WriteSleep` | `kernel/pipe.c::pipe_write` (append under the lock; `-1` + the synthetic `pipe` note when the read end is closed; sleep when full) | a writer sleeps only when the ring is full AND the read end is open |
+| `ReadDrain` / `ReadEof` / `ReadSleep` | `kernel/pipe.c::pipe_read` (drain under the pipe lock; EOF when write end closed or hung up + ring empty; sleep on the ring's poll list otherwise, `pipe_block_locked`) | a reader sleeps only when the ring is empty AND the write end is open |
+| `WriteAppend` / `WriteEpipe` / `WriteSleep` | `kernel/pipe.c::pipe_write` (append under the lock; `-T_E_PIPE` when the read end is closed or the write end hung up, with the synthetic `pipe` note except on the CNBFRAME arm; sleep when full) | a writer sleeps only when the ring is full AND the read end is open |
 | `CloseRead` / `CloseWrite` | `kernel/pipe.c` close paths (wake the OPPOSITE side's sleepers on every close) | the buggy cfgs prove dropping any close-wake edge strands a sleeper |
+| `HangupWrite` (P3b; `writeOpen` tracks the held end) | `kernel/pipe.c::pipe_hangup_write` (write_eof under the lock, then the one wake; no ref drop) + both write arms refusing on `write_eof` | `NoStuckWriter` (`hangup_no_wake_writer`: a hangup that wakes readers only strands a writer) + the action property `NoByteAfterEof` (`hangup_takes_bytes`) |
 
-Pre-commit gate: `pipe.cfg` clean + the 4 buggy cfgs on any change to
-`kernel/pipe.c`'s wait/wake or close paths.
+Pre-commit gate: `pipe.cfg` + `pipe_multi.cfg` clean + every
+`pipe_buggy_*.cfg` (7) violated, on any change to `kernel/pipe.c`'s
+wait/wake, close or hangup paths.
 
 ---
 

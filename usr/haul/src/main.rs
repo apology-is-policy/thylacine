@@ -157,9 +157,13 @@ const PUMP_STACK: u64 = 64 * 1024;
 static STOPPED: AtomicU32 = AtomicU32::new(0);
 
 const STOP_NONE: u32 = 0;
-const STOP_UP: u32 = 1; // kernel -> server direction ended
-const STOP_DOWN: u32 = 2; // server -> kernel direction ended
+const STOP_UP: u32 = 1; // a write to the server failed
+const STOP_DOWN: u32 = 2; // the server's side ended: EOF or an error reading it
 const STOP_REFUSED: u32 = 3; // haul refused what came down; the down pump said what
+/// The kernel's end of the c2s pipe closed: Thylacine ended the session -- it
+/// hung up a session it killed (ARCHITECTURE 21.10), or the mount was taken
+/// down. Never the peer, which is why it is not STOP_UP.
+const STOP_KERNEL: u32 = 4;
 
 /// The largest reply the kernel will take: written by the up pump as the
 /// Tversion goes by, read by the down pump as each reply arrives.
@@ -368,10 +372,11 @@ struct DownCtx {
     peer: String,
 }
 
-/// The kernel -> server pump ended: record it and exit the thread, closing
-/// nothing. `finish_down` explains why this direction has nothing it may close.
-fn finish_up() -> ! {
-    let _ = STOPPED.compare_exchange(STOP_NONE, STOP_UP, Ordering::AcqRel, Ordering::Acquire);
+/// The kernel -> server pump ended: record how (`stop`) and exit the thread,
+/// closing nothing. `finish_down` explains why this direction has nothing it
+/// may close.
+fn finish_up(stop: u32) -> ! {
+    let _ = STOPPED.compare_exchange(STOP_NONE, stop, Ordering::AcqRel, Ordering::Acquire);
     unsafe { libthyla_rs::t_thread_exit() };
 }
 
@@ -404,12 +409,10 @@ fn finish_up() -> ! {
 /// used under its old meaning. STOPPED is set first,
 /// so by the time the kernel can see the EOF, main's diagnosis names this side.
 ///
-/// The up pump's end, `c2s_rd`, is just as exclusive and still stays open.
-/// Closing it would send the kernel's next write into the pipe's read-EOF arm,
-/// which posts a `pipe` note to whichever Proc issued that 9P call
-/// (`kernel/pipe.c`, the CNBFRAME branch): a transport event delivered as that
-/// Proc's own write on a closed pipe. Nor is it needed, because a call is stuck
-/// only while its REPLY direction is. Inside main's synchronous calls, every way
+/// The up pump's end, `c2s_rd`, is just as exclusive and still stays open; main
+/// only polls it (`kernel_ended`), never reads or closes it. Closing it is not
+/// needed, because a call is stuck only while its REPLY direction is. Inside
+/// main's synchronous calls, every way
 /// the up pump can end either follows the kernel's own teardown (EOF on
 /// `c2s_rd`), cannot happen with the kernel's frames (a refused length, a payload
 /// over MSG_MAX, a spent record counter), or comes with netd or the connection
@@ -424,6 +427,30 @@ fn finish_down(ctx: &DownCtx, stop: u32) -> ! {
     unsafe { libthyla_rs::t_thread_exit() };
 }
 
+/// Whether Thylacine ended the session, rather than the peer or haul: the up
+/// pump recorded the kernel's EOF, or nothing is recorded yet and the kernel's
+/// end of c2s is already hung up. The kernel hangs that pipe up as it marks the
+/// session dead (ARCHITECTURE 21.10), before the call that met the death
+/// returns, and the up pump that records it may not have run yet -- so main
+/// asks the pipe instead of waiting for the pump. A pump that stopped for the
+/// peer or for haul recorded that before the kernel could see anything, so a
+/// recorded side always wins.
+fn kernel_ended(c2s_rd: i64) -> bool {
+    match STOPPED.load(Ordering::Acquire) {
+        STOP_KERNEL => true,
+        STOP_NONE => {
+            let mut pfd = libthyla_rs::TPollFd {
+                fd: c2s_rd as i32,
+                events: libthyla_rs::T_POLLIN,
+                revents: 0,
+            };
+            let n = unsafe { libthyla_rs::t_poll(&mut pfd, 1, 0) };
+            n > 0 && pfd.revents & libthyla_rs::T_POLLHUP != 0
+        }
+        _ => false,
+    }
+}
+
 /// kernel -> server. Reads T-messages the kernel wrote into its pipe and puts
 /// them on the wire -- as-is when plain, or as one AEAD record each when the
 /// channel is secured.
@@ -435,7 +462,13 @@ extern "C" fn pump_up(arg: u64) {
     let mut msg: Vec<u8> = Vec::new();
     let mut rec: Vec<u8> = Vec::new();
 
-    while let In::Message(_) = read_frame(ctx.src, &mut msg) {
+    let stop = loop {
+        match read_frame(ctx.src, &mut msg) {
+            In::Message(_) => {}
+            // The source is the kernel's pipe, so its end is the kernel's.
+            In::Ended => break STOP_KERNEL,
+            In::Refused => break STOP_REFUSED,
+        }
         // Before the frame leaves, never after: see ReplyBound::up.
         REPLY.up(&msg);
         let ok = match ctx.sealer.as_mut() {
@@ -449,10 +482,10 @@ extern "C" fn pump_up(arg: u64) {
             },
         };
         if !ok {
-            break;
+            break STOP_UP;
         }
-    }
-    finish_up();
+    };
+    finish_up(stop);
 }
 
 /// server -> kernel. Takes R-messages off the wire and writes them into the
@@ -486,8 +519,10 @@ extern "C" fn pump_down(arg: u64) {
             break STOP_REFUSED;
         }
         REPLY.down(&buf[..n]);
+        // The destination is the kernel's end, so a write it refuses means the
+        // kernel let go of the session -- not that the server did.
         if !write_exact(ctx.dst, ctx.dst_ready, &buf[..n]) {
-            break STOP_DOWN;
+            break STOP_KERNEL;
         }
     };
     finish_down(ctx, stop);
@@ -1101,6 +1136,12 @@ fn run(argv: Args) -> Result<(), String> {
             T_ATTACH_9P_CAPE | T_ATTACH_9P_REMOTE,
         )
     };
+    // Asked before our copy of c2s_wr closes: while it holds the pipe's write
+    // end open, only the kernel's hangup can put POLLHUP on c2s_rd, which tells
+    // a session the kernel killed over the server's reply from a refusal the
+    // server sent. After the close both look alike, since a failed attach drops
+    // the kernel's refs too.
+    let killed = root < 0 && kernel_ended(c2s_rd);
     let _ = unsafe { t_close(c2s_wr) };
     let _ = unsafe { t_close(s2c_rd) };
     if root < 0 {
@@ -1111,6 +1152,7 @@ fn run(argv: Args) -> Result<(), String> {
             STOP_UP => "attach (the connection closed while sending)",
             STOP_DOWN => "attach (the server closed without replying)",
             STOP_REFUSED => "attach (haul refused the server's reply)",
+            _ if killed => "attach (Thylacine refused the server's reply)",
             _ => "attach (9P handshake refused)",
         }));
     }
@@ -1164,6 +1206,9 @@ fn run(argv: Args) -> Result<(), String> {
             }
             Err(_) if STOPPED.load(Ordering::Acquire) == STOP_REFUSED => {
                 step!("mount check: haul refused the server's reply during the listing")
+            }
+            Err(_) if kernel_ended(c2s_rd) => {
+                step!("mount check: Thylacine ended the 9P session during the listing")
             }
             Err(_) if STOPPED.load(Ordering::Acquire) != STOP_NONE => {
                 step!("mount check: the connection ended during the listing")
@@ -1237,6 +1282,11 @@ fn run(argv: Args) -> Result<(), String> {
                         "haul: the 9P session with {} broke while the command was running",
                         args.addr
                     );
+                } else if stop == STOP_KERNEL {
+                    say!(
+                        "haul: Thylacine ended the 9P session with {} while the command was running",
+                        args.addr
+                    );
                 } else {
                     say!(
                         "haul: {} closed the connection while the command was running",
@@ -1269,6 +1319,9 @@ fn run(argv: Args) -> Result<(), String> {
                 // As in the command form: the down pump has said what.
                 say!("haul: the 9P session with {} is broken -- the mount is dead", args.addr);
                 "the 9P session is broken".into()
+            } else if stop == STOP_KERNEL {
+                say!("haul: Thylacine ended the 9P session with {} -- the mount is dead", args.addr);
+                "Thylacine ended the session".into()
             } else {
                 say!("haul: {} closed the connection -- the mount is dead", args.addr);
                 "the peer closed the connection".into()

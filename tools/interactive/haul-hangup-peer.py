@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A host-side TCP peer that misbehaves at a chosen moment: it hangs up on
-haul, or breaks the 9P session's msize.
+haul, breaks the 9P session's msize, or sends a reply the kernel refuses.
 
 Used by the LS-CI scenarios proving that a server which hangs up, or sends a
 reply larger than the session allows, makes haul FAIL rather than hang:
@@ -26,6 +26,23 @@ haul-npxf.exp.
       Tversion's msize as the only bound. No FIN: what is wrong is the server's
       frame, not its liveness, so the verdict is whether haul closes ITS side
       once it has refused the frame.
+
+  --mode stray-reply
+      Get a mount up the same way, then answer the next request with a
+      header-only reply carrying a tag no session issues, and keep the
+      connection open. Nothing about its size is wrong, so haul relays it and
+      the kernel refuses it: the verdict is whether haul learns that the
+      kernel ended the session, and closes its side.
+
+  --mode stray-attach
+      Serve the Tversion, then answer the Tattach with an Rattach carrying
+      that tag, and keep the connection open: the kernel kills the session
+      inside the attach.
+
+  --mode refuse-attach
+      Serve the Tversion, then answer the Tattach with an Rlerror (EACCES),
+      and keep the connection open: a refusal the server sends, which kills
+      nothing. The control for stray-attach, one variable away.
 
 HANGING UP MEANS A FIN, NOT A RESET. Closing a socket that still holds unread
 bytes sends RST on both Linux and Darwin, and in relay mode haul's first record
@@ -61,9 +78,13 @@ import time
 FLIGHTS = ((40, "flight 1", "up"), (64, "flight 2", "down"), (32, "flight 3", "up"))
 
 # version(5) and the 9P2000.L attach. haul relays at most 64 KiB in a frame.
-TVERSION, RVERSION, TATTACH, RATTACH = 100, 101, 104, 105
+TVERSION, RVERSION, TATTACH, RATTACH, RLERROR = 100, 101, 104, 105, 7
+EACCES = 13
 QTDIR = 0x80
 MSG_MIN, MSG_MAX = 7, 64 * 1024
+# Below NOTAG, which only the handshake uses, and above any session's bound on
+# outstanding tags, so no request can own it.
+STRAY_TAG = 0xFFFE
 
 
 class ParentGone(Exception):
@@ -75,7 +96,8 @@ def main():
     ap.add_argument("--port", type=int, required=True,
                     help="0 lets the kernel pick a free port; the port bound is logged")
     ap.add_argument("--log", required=True)
-    ap.add_argument("--mode", choices=("accept-close", "relay-handshake", "oversize-reply"),
+    ap.add_argument("--mode", choices=("accept-close", "relay-handshake", "oversize-reply",
+                                       "stray-reply", "stray-attach", "refuse-attach"),
                     required=True)
     ap.add_argument("--upstream", type=int)
     ap.add_argument("--reply", type=int,
@@ -159,7 +181,7 @@ def main():
         say("%s: sent FIN" % name)
         wait_close(sock, name, "our FIN")
 
-    def oversize_reply(sock):
+    def serve_version(sock):
         kind, tag, frame = recv_frame(sock)
         if kind != TVERSION or len(frame) < 11:
             raise EOFError("the first frame is type %d, not a Tversion" % kind)
@@ -169,15 +191,45 @@ def main():
                    struct.pack("<IH", args.rversion_msize, len(version)) + version)
         say("served Tversion: the guest proposed %d, we answered %d"
             % (proposed, args.rversion_msize))
+
+    def recv_attach(sock):
         kind, tag, _ = recv_frame(sock)
         if kind != TATTACH:
             raise EOFError("the second frame is type %d, not a Tattach" % kind)
-        send_frame(sock, RATTACH, tag, struct.pack("<BIQ", QTDIR, 0, 1))
+        return tag
+
+    def serve_mount(sock):
+        """Serve the Tversion and the Tattach: enough 9P2000.L for a mount."""
+        serve_version(sock)
+        send_frame(sock, RATTACH, recv_attach(sock), struct.pack("<BIQ", QTDIR, 0, 1))
         say("served Tattach")
+
+    def stray_attach(sock):
+        serve_version(sock)
+        tag = recv_attach(sock)
+        send_frame(sock, RATTACH, STRAY_TAG, struct.pack("<BIQ", QTDIR, 0, 1))
+        say("sent an Rattach with tag %d to the Tattach's tag %d" % (STRAY_TAG, tag))
+        wait_close(sock, "guest", "the stray Rattach")
+
+    def refuse_attach(sock):
+        serve_version(sock)
+        send_frame(sock, RLERROR, recv_attach(sock), struct.pack("<I", EACCES))
+        say("refused the Tattach with Rlerror %d" % EACCES)
+        wait_close(sock, "guest", "the refused Tattach")
+
+    def oversize_reply(sock):
+        serve_mount(sock)
         kind, tag, _ = recv_frame(sock)
         send_frame(sock, kind + 1, tag, bytes(args.reply - MSG_MIN))
         say("sent a %d-byte reply to request type %d" % (args.reply, kind))
         wait_close(sock, "guest", "the oversized reply")
+
+    def stray_reply(sock):
+        serve_mount(sock)
+        kind, tag, _ = recv_frame(sock)
+        send_frame(sock, kind + 1, STRAY_TAG, b"")
+        say("sent a reply with tag %d to request type %d tag %d" % (STRAY_TAG, kind, tag))
+        wait_close(sock, "guest", "the stray reply")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -194,6 +246,12 @@ def main():
             hang_up(conn, "guest")
         elif args.mode == "oversize-reply":
             oversize_reply(conn)
+        elif args.mode == "stray-reply":
+            stray_reply(conn)
+        elif args.mode == "stray-attach":
+            stray_attach(conn)
+        elif args.mode == "refuse-attach":
+            refuse_attach(conn)
         else:
             up = socket.create_connection(("127.0.0.1", args.upstream), timeout=10)
             up.settimeout(None)

@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-06
 ---
 ## Event-loop I/O
 
@@ -265,6 +265,17 @@ can never observe POLLHUP without POLLERR; then — outside all chan locks
 — wake both consumer rendezes, both producer wrendezes, both role lists,
 and the conn poll list. Residual buffered bytes still drain before EOF
 surfaces to a reader.
+
+Teardown has two callers in the kernel client's adapter
+([[sub-kernel-ninep-transport]]): its close, at the last attach-session
+unref, and since 2026-10-05 its hangup, when the 9P session dies (ARCH
+21.10). The hangup runs under the 9P client's `c->lock`, so everything
+teardown takes nests there: `cn->lock` around the one store (nothing
+outside this file takes it), then `c2s.lock` and `s2c.lock` in
+`srvconn_poll`'s order, with every wake outside the channel locks
+([[lock-9p-client-c-lock]]). Nothing srvconn.c does under those locks
+calls back into the client. Teardown frees nothing, so the adapter's ref
+stays for the close.
 
 **Free** (`srvconn_unref` last drop): teardown (idempotent) → clobber
 magic → free both ring buffers → free the struct. Sound because every

@@ -25,6 +25,7 @@ int p9_loopback_init(struct p9_loopback *lb,
     lb->sends           = 0;
     lb->recvs           = 0;
     lb->dropped_rclunks = 0;
+    lb->hangups         = 0;
     lb->closed          = false;
     lb->deadline_armed = false;
     lb->timed_out      = false;
@@ -147,6 +148,11 @@ static void loopback_set_recv_deadline(void *ctx, u64 deadline_ns) {
     lb->timed_out      = false;          // arming/disarming clears the signal
 }
 
+static void loopback_hangup(void *ctx) {
+    struct p9_loopback *lb = (struct p9_loopback *)ctx;
+    if (lb && lb->magic == P9_LOOPBACK_MAGIC) lb->hangups++;
+}
+
 static bool loopback_recv_timed_out(void *ctx) {
     struct p9_loopback *lb = (struct p9_loopback *)ctx;
     if (!lb) return false;
@@ -161,6 +167,7 @@ struct p9_transport_ops p9_loopback_ops_for(struct p9_loopback *lb) {
     ops.close             = loopback_close;
     ops.set_recv_deadline = loopback_set_recv_deadline;
     ops.recv_timed_out    = loopback_recv_timed_out;
+    ops.hangup            = loopback_hangup;
     ops.ctx               = lb;
     return ops;
 }
