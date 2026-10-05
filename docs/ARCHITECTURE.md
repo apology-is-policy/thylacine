@@ -1639,8 +1639,9 @@ flag `note_interruptible`, which defaults to false and is written only by the
 owning thread. The vivarium dispatcher sets it for a call on the list, and the
 `syscall_dispatch` wrapper clears it on the way out:
 - **Always:** `accept`, `accept4`, `connect`, `recvfrom`, `recvmsg`, `sendto`,
-  `sendmsg`, `wait4`, `ppoll`, `pselect6`, `futex`, `rt_sigsuspend`,
-  `rt_sigtimedwait`, and `fcntl` with `F_SETLKW` or `F_OFD_SETLKW`.
+  `sendmsg`, `wait4`, `ppoll`, `pselect6`, `futex`, `nanosleep`,
+  `clock_nanosleep`, `rt_sigsuspend`, `rt_sigtimedwait`, and `fcntl` with
+  `F_SETLKW` or `F_OFD_SETLKW`.
 - **On a slow file only:** `read`, `readv`, `write`, `writev`, `pread64`,
   `pwrite64` and `ioctl`. A slow file is a socket, a pipe or FIFO, or a
   character device such as a pts. It is recognised by a socket-table row, or
@@ -1681,6 +1682,10 @@ reach has opted in, and each unwinds with nothing consumed and returns
   counted its waiter found the waiter still registered, so the waiter's
   condition is true when it resumes; a wake that did not count goes on to the
   next waiter.
+- **The sleep under `nanosleep` and `clock_nanosleep`** (VIVARIUM 6.29). Here
+  the deadline wins, as in Linux's `do_nanosleep`: a sleep whose deadline has
+  passed returns 0 even with a note pending, and only a note before the
+  deadline returns `EINTR`, with the time left.
 
 Three waits a listed call can reach do not opt in. The 9P client's send side is
 the first: a back-pressured sender's park and its own pump. An unwind there
@@ -4229,6 +4234,8 @@ Thylacine exposes two clocks through a single POSIX-shaped `SYS_CLOCK_GETTIME(cl
 **The identity syscalls.** Alongside the clock, LS-K adds `SYS_GETPID` / `SYS_GETUID` / `SYS_GETGID` — trivial read-only returns of the calling Proc's `pid` / `principal_id` / `primary_gid` (all already durable Proc fields, A-1a). They carry no capability and mutate nothing.
 
 **Setting the wall clock (net-7a).** The LS-K settability seam is closed by `SYS_CLOCK_SETTIME(clk_id, timespec)` (`= 79`), pulled forward into the network arc so SNTP can actually synchronize (NET-DESIGN §10). Only `CLOCK_REALTIME` is settable (`CLOCK_MONOTONIC` is the boot-counter timebase — `-EINVAL`). The "who may set the clock" capability is **`CAP_HOSTOWNER`** — a clock step is system-global, so it is the host owner's authority, never an identity's (I-22; `-EACCES` otherwise). It re-anchors the **single** wall-clock offset (`g_wallclock_offset_ns`, NOT a two-field anchor) at full-nanosecond granularity via one atomic `u64` store: `CLOCK_REALTIME = timer_now_ns() + offset`, so a runtime re-anchor races GETTIME readers only on a single aligned `u64` — each reads old-or-new, coherent, no seqlock (the LS-K single-`u64` design is what makes the setter SMP-safe). `CLOCK_MONOTONIC` is untouched. The handler validates `clk_id` + the cap before any buffer read, bounds `tv_sec` so `tv_sec·1e9 + tv_nsec` cannot overflow, and routes a bad VA to `-EFAULT`. A non-elevated tool gets `-EACCES`; the SNTP client (net-7a-2) is the consumer, and an admin steps the clock through it.
+
+**A step moves the absolute wall-clock sleeps (VIVARIUM 6.29).** Every wait counts on the monotonic timebase, so a sleep whose deadline is an instant on `CLOCK_REALTIME` (the vivarium's `clock_nanosleep` with `TIMER_ABSTIME`) holds that instant as a monotonic deadline derived through the offset. The re-anchor therefore wakes each such sleeper after it publishes the new offset, from a step list the sleeper hooks before it reads the offset (register-then-observe, I-9). The sleeper measures again: a step past its instant ends the sleep at once, and a step back lengthens it, as POSIX requires. A relative sleep never consults the wall clock, so a step leaves it alone.
 
 **v1.x seams** (recorded, not built):
 - **Userspace timekeeper / continuous NTP discipline** — `SYS_CLOCK_SETTIME` (net-7a) gives the step primitive; a long-running timekeeper that *slews* (gradual `adjtime`-style correction) rather than steps, and the Fuchsia/Genode userspace-maintained-UTC-clock-object SOTA, are the v1.x refinement. v1.0 is step-on-demand via SNTP.

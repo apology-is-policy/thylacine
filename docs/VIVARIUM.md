@@ -3173,6 +3173,110 @@ start EINVAL; a zero length 0; a page of the probe's own data segment declined
 and intact). The RED `nodecommit` (the arm answers 0 without the core) reddens
 L23l: the page keeps its bytes.
 
+### 6.29 Tier 2 — `nanosleep` (101) + `clock_nanosleep` (115): the sleep rows (design 2026-10-05)
+
+Until these rows both numbers were unclassified, so both FORWARDed to ENOSYS.
+On aarch64 musl's `sleep()`, `usleep()` and `nanosleep()` all reach `nanosleep`
+(101): its `__clock_nanosleep` sends `CLOCK_REALTIME` with no flags there and
+everything else to `clock_nanosleep` (115). None of them looks at the error, so
+`busybox sleep 1` returned at once, and a guest that paced itself with a sleep
+spun instead. Thylacine has no sleep syscall (Pouch's musl sleeps through
+`SYS_torpor_wait`, patch 0022), but it has the sleep primitive §5.5.4 reached
+for `ppoll`: `tsleep` with a deadline and a condition that is never true. Both
+rows are Tier-2 shells over one sleep core.
+
+**The arguments, in Linux's order.** `clock_nanosleep(clk, flags, req, rem)`
+judges the clock first, then copies `req` in (EFAULT), then validates it
+(EINVAL unless `tv_sec >= 0` and `0 <= tv_nsec < 1e9`), and only then sleeps.
+`nanosleep(req, rem)` is its relative `CLOCK_MONOTONIC` case, with the same copy
+and the same validation. The clock id is a C `int`, so the row reads its low 32
+bits, as Linux does, and `clock_gettime`'s map narrows the same way from this
+row on. The sleep's clocks are derived from `clock_gettime`'s map (§6.18's time
+family), so the two calls agree on which clocks exist:
+- `CLOCK_REALTIME` (0) sleeps on the wall clock. `CLOCK_MONOTONIC` (1) and
+  `CLOCK_BOOTTIME` (7) sleep on the monotonic clock: a guest never suspends, so
+  BOOTTIME is MONOTONIC here, as `clock_gettime` already says.
+- `CLOCK_MONOTONIC_RAW` (4), `CLOCK_REALTIME_COARSE` (5) and
+  `CLOCK_MONOTONIC_COARSE` (6) answer EOPNOTSUPP. That is Linux's own answer:
+  `clock_gettime` reads those clocks, but their `k_clock`s keep no sleep.
+- A clock `clock_gettime` does not know is EINVAL here too:
+  `CLOCK_PROCESS_CPUTIME_ID` (2), `CLOCK_THREAD_CPUTIME_ID` (3), `CLOCK_TAI`,
+  the alarm clocks, and the negative per-process and fd clocks. Linux answers
+  EINVAL for the thread clock as well. It can sleep on the process CPU clock and
+  on TAI, and the row cannot, because Thylacine keeps neither clock: a recorded
+  divergence, the one `clock_gettime` already makes.
+
+Of the flags only `TIMER_ABSTIME` (1) counts. Linux ignores the other bits, and
+so does the row.
+
+**The sleep.** A relative sleep's deadline is now plus the request on the
+monotonic clock, whatever the clock id. POSIX keeps a relative sleep out of the
+wall clock's reach, and Linux does it by turning a relative `CLOCK_REALTIME`
+timer into a `CLOCK_MONOTONIC` one. An absolute sleep on `CLOCK_MONOTONIC` or
+`CLOCK_BOOTTIME` takes the request itself as its deadline. A request too long to
+add saturates (about 584 years from boot) and never lands on 0, the no-deadline
+sentinel.
+
+At the deadline the order is Linux's `do_nanosleep`, not `do_poll`'s: **the
+expiry wins**. A deadline already past, a zero request included, returns 0 at
+once even with a note pending. So does a sleep that a caught note wakes after
+its deadline has passed. Either way the handler runs as the call returns. A
+`ppoll` answers the same race with `EINTR` (ARCH 8.8.3), and both answers are
+Linux's.
+
+A caught note before the deadline returns `EINTR`. A relative sleep then writes
+what was left into `rem` when `rem` is not NULL: the deadline minus now, which
+is positive, or the expiry would have won. A `rem` that faults makes the call
+EFAULT, as Linux's copy-out does, and an absolute sleep writes no `rem`. Both
+rows are on signal(7)'s never-restarted list ("sleep interfaces ... always fail
+with EINTR"), so the vivarium's lack of a kernel-side `SA_RESTART` (§6.22) costs
+them nothing.
+
+A stop parks inside the wait and resumes against the same deadline, which is
+what Linux's restart after a stop does. Death ends the sleep, and its result is
+immaterial. The deadline is observed at the scheduler tick's granularity, so a
+sleep can run up to a tick (1 ms) long. It never ends short: before the core
+returns 0 for a deadline, it reads the clock rather than trust the wait's
+outcome.
+
+**`TIMER_ABSTIME` on `CLOCK_REALTIME` is built exact, not recorded as a
+divergence.** POSIX and Linux keep an absolute wall-clock sleep pinned to its
+instant: when the clock is set, the sleep ends when the new clock reaches that
+instant, and at once if the step jumped past it. Every wait counts on the
+monotonic timebase, so the instant becomes a monotonic deadline through the
+wall-clock offset (ARCH 22.6), and a step through `SYS_CLOCK_SETTIME` moves it.
+The sleeper therefore hooks a `poll_waiter` on the wall clock's step list before
+it reads the offset, and sleeps until the derived deadline or a step.
+`timer_reset_wallclock_anchor_ns` wakes the list after it publishes a new
+offset. That is register-then-observe (I-9): a step either published before the
+sleeper read the offset, so the sleeper reads the new one, or it walks the list
+after the hook went on, and wakes it. A woken sleeper measures again. A step
+past the instant returns 0, and a step back sleeps on toward the instant's new
+place on the monotonic clock. The expiry rule above is judged on the wall clock
+here. A relative sleep never consults the wall clock.
+
+**Collisions.** Both numbers are below the native ceiling: 101 is
+`SYS_JIT_CREATE` and 115 is `SYS_PCI_IRQ_CREATE`. A PHENO_LINUX Proc never
+reaches a native number, because the vivarium consumes each one first. A native
+program mis-declared as PHENO_LINUX reaches, at these numbers, a sleep of its
+own thread and at most a 16-byte write of `rem` into its own address space,
+never `CAP_JIT`'s or a driver's authority (I-43). Neither row confers authority:
+a sleep needs none.
+
+Witnesses: `vivarium.nanosleep_domain` (the clock verdicts against
+`clock_gettime`'s map, the 32-bit narrowing, the validity rules, the
+saturation); `clock.nanosleep_caught_note` (a Linux sleeper ends with `EINTR`
+and the time left, the native control rides the note out to its deadline, and a
+past deadline with a note pending returns 0); `clock.nanosleep_wall_step` (an
+absolute wall-clock sleep returns promptly when the clock is stepped past its
+instant, and sleeps on when the clock is stepped back); and the pheno-probe legs
+from L319 (a relative sleep lasts at least its request on `CLOCK_MONOTONIC`, on
+both rows; an absolute `CLOCK_MONOTONIC` sleep; EINVAL for a `tv_nsec` of 1e9 on
+both; EOPNOTSUPP for a COARSE clock and EINVAL for the process CPU clock; a
+`SIGCHLD` mid-sleep is `EINTR`, with the handler run and 0 < `rem` < the
+request; a zero sleep returns 0). On a kernel without the rows every leg reads
+ENOSYS.
+
 ---
 
 ## 7. The vivarium — the container runner
