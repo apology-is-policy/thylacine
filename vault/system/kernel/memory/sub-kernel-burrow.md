@@ -260,6 +260,20 @@ scalar precisely so the caller can apply it **outside** the leaf lock. `payer` i
 the exact AddrSpace incarnation; `NULL` means "settle nothing", which is how a
 caller whose policy predicate fails opts out.
 
+**One implementation per decision (AS-R9 self-audit).** The first cut of this
+repair left the `{0,0}` dual-counter decision written *twice* — once in
+`burrow_unref_freed` / `burrow_release_mapping_{freed,deferred}` and again in the
+settled forms — which is the same drift hazard the claim refactor above exists to
+avoid, reintroduced one layer down. It also left
+`burrow_release_mapping_deferred` with no callers at all, since
+`vma_free_deferred` had moved to the settled path. The three unsettled forms are
+now thin wrappers over the settled ones (the mapping-freed form adding only the
+inline free its non-deferred contract promises), so each decision has exactly one
+copy and a caller that holds no charge record still has a name to call that does
+not make it pass NULLs. The settled forms carry the *historical* extinction
+bodies, so the wrappers' messages are unchanged; none of those bodies is in the
+`tools/test-fault.sh` matched set, so they are prose rather than tooling ABI.
+
 `burrow_release_mapping_settled_deferred` keeps its twin's deferred contract —
 hand back the dead Burrow rather than free it under the caller's `as->lock` — and
 qualifies on `freed || shared_out`, reading `shared_out` under that same lock.

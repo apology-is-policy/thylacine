@@ -817,28 +817,20 @@ void burrow_ref(struct Burrow *v) {
     spin_unlock(&v->lock);
 }
 
+// #847: decrement + the dual-counter free decision under v->lock, free OUTSIDE
+// it (leaf discipline -- see file header). Dual-check: free only when BOTH
+// counts reach 0, which maps to the spec's NoUseAfterFree iff invariant --
+// premature free violates (counts > 0 and pages dead), delayed free violates
+// (counts = 0 and pages alive), and exactly one racing unref/release_mapping
+// sees the 0,0 edge.
+//
+// AS-R9 self-audit: that decision now lives in ONE place --
+// burrow_unref_settled_in -- and this is it with no payer, so the {0,0} rule
+// cannot drift between the settled and unsettled spellings. A charge-settling
+// caller wants the settled form directly; this one exists for the callers that
+// hold no charge record.
 bool burrow_unref_freed(struct Burrow *v) {
-    if (!v) return false;                      // NULL-safe
-    if (v->magic != VMO_MAGIC)
-        extinction("burrow_unref of corrupted BURROW (use-after-free?)");
-    // #847: decrement + the dual-counter free decision under v->lock; the
-    // free runs OUTSIDE the lock (leaf discipline -- see file header).
-    spin_lock(&v->lock);
-    if (v->handle_count <= 0) {
-        spin_unlock(&v->lock);
-        extinction("burrow_unref of zero-ref BURROW");
-    }
-    v->handle_count--;
-    // Dual-check: free only when BOTH counts reach 0. Maps to the spec's
-    // NoUseAfterFree iff invariant — premature free violates (counts > 0 ∧
-    // pages dead); delayed free violates (counts = 0 ∧ pages alive). Exactly
-    // one racing unref/release_mapping sees the 0,0 edge.
-    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
-    spin_unlock(&v->lock);
-
-    if (should_free)
-        burrow_free_internal(v);
-    return should_free;
+    return burrow_unref_settled_in(v, NULL, NULL);
 }
 
 void burrow_unref(struct Burrow *v) { (void)burrow_unref_freed(v); }
@@ -917,24 +909,15 @@ void burrow_acquire_mapping(struct Burrow *v) {
     spin_unlock(&v->lock);
 }
 
+// #847: symmetric with burrow_unref -- decrement + dual-check under v->lock,
+// free outside. AS-R9 self-audit: the decision lives once, in
+// burrow_release_mapping_settled_deferred; this is it with no payer, plus the
+// inline free its non-deferred contract promises.
 bool burrow_release_mapping_freed(struct Burrow *v) {
-    if (!v)                       extinction("burrow_release_mapping(NULL)");
-    if (v->magic != VMO_MAGIC)
-        extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
-    // #847: symmetric with burrow_unref -- decrement + dual-check under
-    // v->lock, free outside.
-    spin_lock(&v->lock);
-    if (v->mapping_count <= 0) {
-        spin_unlock(&v->lock);
-        extinction("burrow_release_mapping of zero-mapping BURROW");
-    }
-    v->mapping_count--;
-    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
-    spin_unlock(&v->lock);
-
-    if (should_free)
-        burrow_free_internal(v);
-    return should_free;
+    struct Burrow *dead = burrow_release_mapping_settled_deferred(v, NULL, NULL);
+    if (dead)
+        burrow_free_internal(dead);
+    return dead != NULL;
 }
 
 void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
@@ -945,19 +928,13 @@ void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_fre
 // stack and calls burrow_free_deferred after the unlock, so the FILE arm's
 // possibly-sleeping spoor_clunk never runs under a spinlock. Returns NULL when
 // the Burrow survives (a handle or another mapping still holds it).
+// AS-R9 self-audit: migrating vma_free_deferred to the settled form left this
+// with no callers at all AND a second copy of the {0,0} decision. Kept as the
+// no-payer spelling of the settled form rather than deleted, because it is the
+// published name for "drop a mapping, hand back the dead Burrow, settle
+// nothing" and a caller holding no charge record should not have to pass NULLs.
 struct Burrow *burrow_release_mapping_deferred(struct Burrow *v) {
-    if (!v)                       extinction("burrow_release_mapping(NULL)");
-    if (v->magic != VMO_MAGIC)
-        extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
-    spin_lock(&v->lock);
-    if (v->mapping_count <= 0) {
-        spin_unlock(&v->lock);
-        extinction("burrow_release_mapping of zero-mapping BURROW");
-    }
-    v->mapping_count--;
-    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
-    spin_unlock(&v->lock);
-    return should_free ? v : NULL;
+    return burrow_release_mapping_settled_deferred(v, NULL, NULL);
 }
 
 // D-3c F1: free a Burrow the caller took off a deferred-free stack. Runs the
@@ -1042,11 +1019,11 @@ bool burrow_unref_settled_in(struct Burrow *v, const struct AddrSpace *payer,
     if (out_refund) *out_refund = 0;
     if (!v) return false;                      // NULL-safe, mirroring burrow_unref_freed
     if (v->magic != VMO_MAGIC)
-        extinction("burrow_unref_settled of corrupted BURROW (use-after-free?)");
+        extinction("burrow_unref of corrupted BURROW (use-after-free?)");
     spin_lock(&v->lock);
     if (v->handle_count <= 0) {
         spin_unlock(&v->lock);
-        extinction("burrow_unref_settled of zero-ref BURROW");
+        extinction("burrow_unref of zero-ref BURROW");
     }
     v->handle_count--;
     bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
@@ -1075,13 +1052,13 @@ struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
                                                        const struct AddrSpace *payer,
                                                        u32 *out_refund) {
     if (out_refund) *out_refund = 0;
-    if (!v)                       extinction("burrow_release_mapping_settled(NULL)");
+    if (!v)                       extinction("burrow_release_mapping(NULL)");
     if (v->magic != VMO_MAGIC)
-        extinction("burrow_release_mapping_settled of corrupted BURROW (use-after-free?)");
+        extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
     spin_lock(&v->lock);
     if (v->mapping_count <= 0) {
         spin_unlock(&v->lock);
-        extinction("burrow_release_mapping_settled of zero-mapping BURROW");
+        extinction("burrow_release_mapping of zero-mapping BURROW");
     }
     v->mapping_count--;
     bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
