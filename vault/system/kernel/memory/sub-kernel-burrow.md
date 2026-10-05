@@ -296,6 +296,24 @@ return added below the mutation point would silently make that site a UAF — so
 `burrow.unmap_failure_leaves_mapping_attached` pins it, with a
 correctly-shaped unmap as the positive control one variable away.
 
+**The witness set, and a second self-audit on it.** Four tests pin the repair:
+`burrow.settled_drop_retains_nonfinal_charge` (a non-final drop leaves the record
+alone, and the drop that frees then finds and settles it),
+`burrow.settled_drop_exact_payer` (the payer-identity rule),
+`burrow.settled_mapping_drop_defers_free` (the mixed-holder order, and that the
+dead Burrow is handed back rather than freed inside the drop), and
+`burrow.unmap_failure_leaves_mapping_attached` above. The exact-payer witness as
+first written was *two zero-assertions* -- a NULL payer settles nothing, a
+non-payer settles nothing -- and nothing in it established that a charge was ever
+there to refuse, so a `burrow_charge_record` that recorded nothing would have
+satisfied both arms. It now carries a third arm differing only in WHO makes the
+final drop, which must refund exactly the recorded pages. The mutation set caught
+the payer rule either way (M4, exact-payer-ignored, reddens both refusals) and
+the retains-nonfinal witness independently proves the record is real, so the
+suite was never actually vacuous -- but a test whose discrimination lives in a
+sibling is one deletion away from proving nothing, which is why the control is
+in the fixture that needs it.
+
 `charge_pages`, not `charge_as_id`, is the held sentinel — a charge of zero
 pages is meaningless, so zero pages IS "nothing held" (ids start at 1, but the
 rule does not lean on that).

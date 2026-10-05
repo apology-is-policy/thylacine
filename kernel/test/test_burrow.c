@@ -683,7 +683,21 @@ void test_burrow_settled_drop_exact_payer(void) {
         "the last drop frees regardless of who makes it");
     TEST_EXPECT_EQ(rb, 0u, "a non-payer's final drop must refund nothing");
 
-    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)2, "both regions freed, once each");
+    // The positive control one variable away: the SAME fixture, differing only
+    // in WHO makes the final drop, must refund exactly the recorded pages.
+    // Without it both refusals above are zero-assertions that a
+    // burrow_charge_record which recorded nothing would also satisfy.
+    struct Burrow *c = burrow_create_anon(PAGE_SIZE, false);
+    TEST_ASSERT(c != NULL, "burrow_create_anon NULL");
+    burrow_charge_record(c, payer, 1);
+    u32 rc = 0;
+    TEST_ASSERT(burrow_unref_settled(c, payer, &rc),
+        "the payer's final drop frees");
+    TEST_EXPECT_EQ(rc, 1u,
+        "the PAYER's final drop must refund exactly the recorded pages -- the "
+        "control that makes the two refusals above discriminating");
+
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)3, "all three regions freed, once each");
 
     payer->state = PROC_STATE_ZOMBIE; proc_free(payer);
     other->state = PROC_STATE_ZOMBIE; proc_free(other);
