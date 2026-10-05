@@ -26,6 +26,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h | inv-i34 | - The gate must remain complete across **all four** create sites. A new |
 | [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
 | [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |
+| [[sub-kernel-birth-hold]] | kernel/test/test_birth_hold.c | inv-i39, inv-i24, inv-i9 | - **The hold must never join `proc_stop_requested`.** The detour would park an |
 | [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
 | [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h, kernel/canary.c, kernel/include/thylacine/canary.h, kernel/fault_test.c, tools/test-fault.sh | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
 | [[sub-kernel-burrow]] | kernel/burrow.c, kernel/include/thylacine/burrow.h | inv-i7, inv-i32, inv-i44 | - **The free decision must stay under the lock and the free must stay outside |
@@ -34,7 +35,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-content]] | kernel/devramfs.c, kernel/include/thylacine/devramfs.h, kernel/devenv.c, kernel/env.c, kernel/include/thylacine/env.h, kernel/random.c, kernel/chacha20.c, kernel/include/thylacine/random.h, kernel/include/thylacine/chacha20.h | inv-i1, inv-i12, inv-i16, inv-i28, inv-i32, inv-i33 | - **The random buffer's first fill is not secret, and only boot ordering hides |
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9, inv-i44 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
-| [[sub-kernel-devproc]] | kernel/devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
+| [[sub-kernel-devproc]] | kernel/devproc.c, kernel/test/test_devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
 | [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, tools/test-pci-msi-dtb.py, kernel/include/thylacine/dtb.h, kernel/test/test_dtb.c | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
@@ -73,7 +74,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-poll]] | kernel/poll.c, kernel/include/thylacine/poll.h | inv-i9 | - The sweep's three phases must keep their order: unregister → |
 | [[sub-kernel-proc]] | kernel/proc.c, kernel/include/thylacine/proc.h | inv-i1, inv-i32, inv-i33, inv-i44 | - The `rfork` ledger: every field is inherited, freshened or stripped |
 | [[sub-kernel-pts]] | kernel/pts.c, kernel/include/thylacine/pts.h | inv-i20, inv-i1, inv-i22, inv-i9 | - The signal call must never grow a target parameter. The invariant is the |
-| [[sub-kernel-rendez]] | kernel/sched.c, kernel/include/thylacine/rendez.h | inv-i9, inv-i8 | - **The unconditional `r->lock` acquire in `wakeup` is LOAD-BEARING** |
+| [[sub-kernel-rendez]] | kernel/sched.c, kernel/include/thylacine/rendez.h, kernel/test/test_rendez.c | inv-i9, inv-i8 | - **The unconditional `r->lock` acquire in `wakeup` is LOAD-BEARING** |
 | [[sub-kernel-sched]] | kernel/sched.c, kernel/include/thylacine/sched.h | inv-i8, inv-i17, inv-i21, inv-i44 | - **The mask-before-read rule holds at every per-CPU read.** Any new site |
 | [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S | inv-i21, inv-i18, inv-i8, inv-i9 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
 | [[sub-kernel-spoor]] | kernel/spoor.c, kernel/include/thylacine/spoor.h | inv-i33 | - **The refcount balances on every path.** `spoor_total_allocated` / |
@@ -113,6 +114,6 @@ Generated from note fields — do not edit between the markers
 | [[sub-stratum-session]] | usr/login/src/main.rs, stratum: src/cmd/stratumd/proxy_9p.c, stratum: src/cmd/stratumd/dataset_pattern.c, stratum: src/cmd/stratumd/corvus_notify.c | inv-i1 | - The `/ctl` attach must outlive the session; the DEK lease is bound to |
 | [[sub-tapestryd]] | usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml | inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9 | - The **retire order** is the invariant: unshare before any backing |
 | [[sub-thyla-heap]] | usr/lib/thyla-heap/src/lib.rs, usr/lib/thyla-heap/src/tests.rs, usr/lib/thyla-heap/Cargo.toml, usr/heap-probe/src/main.rs, usr/heap-probe/Cargo.toml | inv-i32 | The audit-trigger row is "The native heap (thyla-heap + ThylaAlloc)" in |
-| [[sub-view]] | usr/view/src/lib.rs, usr/view/src/main.rs, usr/view/Cargo.toml, usr/lib/inlinewire/src/lib.rs, usr/lib/inlinewire/Cargo.toml, usr/view/src/testdata/gray.jpg, usr/view/src/testdata/2x2.png, usr/view/src/testdata/prog.jpg, usr/view/src/testdata/quad.jpg, usr/view/testdata/make-test-jpg.sh, usr/view/testdata/test.jpg, usr/view/testdata/test.png, usr/view/testdata/make-test-png.py |  | - **The decoder against hostile image bytes.** Malformed / truncated / oversize |
+| [[sub-view]] | usr/view/src/lib.rs, usr/view/src/main.rs, usr/view/Cargo.toml, usr/lib/inlinewire/src/lib.rs, usr/lib/inlinewire/Cargo.toml, usr/view/src/testdata/gray.jpg, usr/view/src/testdata/2x2.png, usr/view/src/testdata/prog.jpg, usr/view/src/testdata/quad.jpg, usr/view/testdata/make-test-jpg.sh, usr/view/testdata/test.jpg, usr/view/testdata/test.png, usr/view/testdata/make-test-png.py, usr/view/testdata/test-large.png, usr/view/testdata/make-rgba16-png.py, usr/view/src/testdata/rgba16.png |  | - **The decoder against hostile image bytes.** Malformed / truncated / oversize |
 | [[sub-warden]] | usr/warden/src/main.rs, usr/warden/Cargo.toml | inv-i34 | - **The grant arithmetic**, because nothing re-derives it. The intersection |
 <!-- generated:end -->

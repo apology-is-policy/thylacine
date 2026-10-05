@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-28
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -312,6 +312,15 @@ None crossing a boundary; every ABI record belongs to
 - **`Stdio` / `PreparedStdio`** — the spawn plumbing. The prepared form splits
   what the parent must hold *through* the syscall from what it keeps *after*,
   which is the distinction that gets end-of-file semantics right.
+- **`Command::debug_held`** (2026-09-29) — spawns the child held
+  ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
+  image and parked before its first instruction, and the child runs only when a
+  debugger attached to it releases it, or stops and then starts it. If the
+  spawner exits first, the child is killed. The call blocks while the child
+  loads, so a thread that serves its own child's image must not spawn it held:
+  the two would wait on each other until the spawner is killed. The builder sets
+  `T_SPAWN_DEBUG_HELD` in `TSpawnArgs.debug_flags`, a record the build now checks
+  against the kernel's layout ([[sub-kernel-syscall-abi]]).
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.
@@ -447,6 +456,15 @@ instant, and falling back to the syscall when the page is absent.
   field and the builder hardcodes it to inherit. Nothing native can raise or
   lower a child's budget without hand-building the record, which is the one
   structure the typed layer exists to avoid.
+- **The spawn builder has no search path.** `Command::new` hands its name to
+  the kernel, which resolves it as an open does: an absolute path from the
+  Territory root, a relative one against the working directory. A bare name
+  therefore runs the file of that name in the caller's working directory,
+  where one can be executed. The shell searches its own path list before it
+  spawns, so this reaches a program that spawns another by name: it names a
+  system program absolutely, as lantern names `/bin/view` and view `/bin/cat`.
+  The `process.rs` header says the same, and that a child starts with a copy of
+  the caller's Territory (its working directory included) and environment.
 - **Small blocks freed below a live one keep their pages.** dlmalloc returns
   memory only from the top of its newest segment and from a segment it has
   wholly emptied, so a run of small blocks freed beneath one that stays live is

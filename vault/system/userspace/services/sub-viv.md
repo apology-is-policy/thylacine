@@ -10,7 +10,7 @@ validated-by: [prose]
 locks: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-06
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -132,7 +132,14 @@ unwinds a blocked `wait_pid`.
 **`spawn_raw` is deliberately not `process::Command`.** Command always
 endows the parent's fds 0/1/2, and viv is routinely **fd-less** — joey
 spawns its boot daemons with no fds and output rides `SYS_PUTS` — so the
-endowment's handle lookup would fail the whole spawn.
+endowment's handle lookup would fail the whole spawn. The cost is that
+`spawn_raw` builds the `TSpawnArgs` record by hand, so every change to the
+record reaches this literal too: the birth hold renamed the slot at offset 100
+to `debug_flags` (2026-09-29), which viv leaves 0, since a container's
+entrypoint is never spawned held. The build's mirror check compares the record's
+definition in libthyla-rs with the kernel's ([[sub-kernel-syscall-abi]]); a
+hand-built literal is held to it by the compiler, which refuses a field the
+definition does not have.
 
 **`stdio_born` is captured before any open**, and the reason is a real
 bug class: viv's own transient opens recycle low fd numbers, so a late

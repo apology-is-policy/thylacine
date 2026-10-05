@@ -11,7 +11,7 @@ cfgs:
   - "pty_stop_buggy_death_blocked.cfg -- DeathWinsOverJobStop violated: a job-stopped Proc never dies"
 gate: "any change to stop ownership — a new stop owner, or a resume path that clears a flag it does not own"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-05
 ---
 ## Abstraction
 
@@ -36,6 +36,7 @@ is that adding an owner did not break it.
 |---|---|
 | `StopJob` / `ResumeJob` | `proc_job_stop_proc` / `proc_job_cont_proc`, reached from the `/proc` ctl `suspend`/`resume` verbs and from the terminal's Ctrl-Z path |
 | `StopDebug` / `ResumeDebug` | `proc_debug_stop_deliver` / `proc_debug_resume` |
+| the stops' `~gflag` guard | both delivers refuse a Proc whose `group_exit_msg` is set, under `g_proc_table_lock` |
 | `SetGflag` / `GroupDie` | `proc_group_terminate` and the per-Thread die-check |
 
 | Invariant | Obligation |
@@ -46,6 +47,14 @@ is that adding an owner did not break it.
 `DeathWinsOverJobStop` is the same clause [[spec-debug-stop]] proves against the
 debugger's stop, restated against the second owner — a job-stopped process must
 still be killable, or `kill` on a Ctrl-Z'd job would hang forever.
+
+The kernel has honoured the stops' `~gflag` guard only since DEBUG-FS-DESIGN
+5g (2026-09-30). Before it, a stop delivered after the kill set its owner's
+flag and latched a stop report for a child about to become a zombie: a run the
+model excludes. Now both delivers refuse a dying Proc, and the park predicate
+reads false in a dying group besides (`proc.dying_takes_no_stop`). A report
+latched before the kill, beneath the model, is not reported either: the wait's
+report arm skips a dying child (`proc.wait_pid_for_report_not_reap`).
 
 **Beneath the model:** the terminal line discipline that *decides* to raise a
 stop, the report latches a waiting parent consumes, the orphan rule, and the

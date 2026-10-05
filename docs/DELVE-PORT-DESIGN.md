@@ -265,6 +265,34 @@ has no "stop at exec/entry" primitive today. Two paths:
   audit-bearing). **Recorded, NOT in the 8c arc** — a small, well-scoped kernel
   follow-up if the entry race proves to bite in practice.
 
+  **It bit, and (b) is now designed as the birth hold (2026-09-29,
+  operator-voted; DEBUG-FS-DESIGN §5f).** `/ambush-probe` stage C's intermittent
+  hang was this race: a 640-launch loop caught the child idle in its loop at the
+  launch stop (1 in 160 at 8 CPUs, never at 1), and a control pair against an
+  idling child hung 20/20 on the loop's entry and fired 20/20 on its head. The
+  as-built shape differs from the sentence above in one respect: the slot is
+  **not** pre-claimed. The spawn (`debug_flags` = `SPAWN_DEBUG_HELD`) returns once
+  the child has loaded its image and parked before its first instruction; the
+  debugger then attaches and stops through the ordinary I-39 gate, and its stop
+  takes the hold over. The vote rejected a pre-claimed slot because it would mint
+  a `/proc` handle past the caller's namespace. A held child whose spawner exits
+  first is killed. Path (a) stays the shape for `ambush attach`; `native.Launch`
+  spawns held and orders `attach`, `exitkill`, `stop`.
+
+  The order is load-bearing. Once `stop` converts the hold the orphan rule no
+  longer covers the child, so `exitkill` comes first: a debugger that dies at
+  any point of the launch leaves a child that dies with it, never one resumed
+  free. **Until every tree's kernel carries the hold, the held launch is a
+  build choice.** A kernel without it refuses a nonzero `debug_flags` (its
+  validator rejected any nonzero word at 100), so an ambush that always
+  spawned held would fail every launch there. Ambush spawns held only when
+  built with `-tags thylacine_held`, and a tree's `tools/build.sh` passes the
+  tag exactly when its kernel has `SPAWN_DEBUG_HELD`. The build script and the
+  kernel are versioned together, so no runtime probe or fallback decides it,
+  and a held build on a kernel without the hold fails loudly rather than
+  racing quietly. An untagged build keeps path (a)'s launch, race included.
+  The tag goes when every tree carries the hold.
+
 Path (a) keeps 8c a pure userspace port and delivers both `ambush attach` and
 `ambush exec`.
 
@@ -448,7 +476,9 @@ probe §14 — Delve is too large for the in-`usr/` module pattern).
    (user-voted 2026-07-16); 8c stays a pure userspace port. The `SYS_SPAWN`
    debug-stopped-at-birth flag is the recorded v-next closure if the entry race
    proves to bite in practice (a small, well-scoped kernel follow-up, not in
-   the 8c arc).
+   the 8c arc). It bit: the birth hold is that flag (DEBUG-FS-DESIGN §5f,
+   2026-09-29), and `native.Launch` spawns held where the kernel has it
+   (§7 (b), 2026-09-30).
 
 Reported-at-implementation calls (mine to make + surface, not block on):
 

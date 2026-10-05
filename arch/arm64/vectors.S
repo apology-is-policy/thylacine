@@ -412,3 +412,54 @@ thread_fork_trampoline:
 
     b       .Lexception_return
 .size thread_fork_trampoline, . - thread_fork_trampoline
+
+// ---------------------------------------------------------------------------
+// userland_enter_held -- the birth hold (DEBUG-FS-DESIGN 5f; I-39). The first
+// EL0 entry of a SPAWN_DEBUG_HELD child: x0 = entry_pc, x1 = user_sp; never
+// returns. The held spawn thunk calls it where every other spawn calls
+// userland_enter.
+//
+// userland_enter erets straight from registers, with no frame and no stop
+// check, so nothing can stop a child before its first instruction. This
+// instead BUILDS the EL0 frame that first instruction would have been
+// interrupted with and takes the ordinary EL0-return tail over it: the preempt
+// check, the die-check, note delivery, then the stop leg -- here the birth park,
+// which also holds while the child is held. A debugger that converts the hold
+// therefore finds a real saved frame (regs reads the entry, a regs write lands
+// in the frame, a step arms SPSR.SS in it), and KERNEL_EXIT erets from that
+// frame when the child is released.
+//
+// Why it lives HERE and not in userland.S: thread_fork_trampoline's reason. It
+// ends in the local .Lexception_return, the one audited exit, and that label
+// is deliberately unreachable from outside this file.
+//
+// The frame is carved below the caller's stack, so after the eret SP_EL1 is
+// exactly where userland_enter leaves it, and every later EL0 entry of this
+// thread lands its frame where it would have without the hold. SP stays
+// 16-aligned (EXCEPTION_CTX_SIZE is 18 x 16).
+//
+// DAIF: the frame is built with IRQs on (a plain C call, as userland_enter's
+// die-check), then everything is masked for the tail -- the precondition every
+// tail call asserts (#713) and the state KERNEL_EXIT requires. el0_birth_park
+// returns only to eret, as the stop park at the other tails does: neither
+// leaves its park for a latched interrupt (DEBUG-FS-DESIGN 5g), so the tail
+// is straight-line and cannot loop masked.
+// ---------------------------------------------------------------------------
+.globl userland_enter_held
+.type userland_enter_held, %function
+userland_enter_held:
+    bti     c
+    sub     sp, sp, #EXCEPTION_CTX_SIZE
+    mov     x2, x1                       /* user_sp */
+    mov     x1, x0                       /* entry_pc */
+    mov     x0, sp                       /* the frame */
+    bl      el0_birth_frame_init
+    msr     daifset, #0xf
+    bl      preempt_check_irq
+    bl      el0_return_die_check         /* I-24: noreturn if the Proc is group-terminating */
+    mov     x0, sp
+    bl      notes_deliver_at_el0_return
+    mov     x0, sp
+    bl      el0_birth_park               /* parks while held or stopped; returns only to eret */
+    b       .Lexception_return
+.size userland_enter_held, . - userland_enter_held

@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -162,7 +162,10 @@ snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
    was unkillable and unstoppable. Each pass checks `thread_die_pending`
    (⇒ the sweep, 0) and parks on `proc_stop_sleeper_park` when a stop is
    pending — with every hook already off, so no producer walks to a
-   parked poller; the park returns `SLEEP_INTR` on death (DEATH WINS).
+   parked poller; the park returns `SLEEP_INTR` on group death (DEATH
+   WINS), never for a latch: a latch that lands while the poller is parked
+   waits for the stop to clear, and the next pass's check sweeps it
+   (DEBUG-FS-DESIGN 5g).
    *The preemption point lived here for part of one day, and is gone*
    (round 5 F1 + round-6 S1; operator decision 2026-09-22; removed by ARCH
    8.12 the same day). Worth keeping the shape, because the DEFECT it

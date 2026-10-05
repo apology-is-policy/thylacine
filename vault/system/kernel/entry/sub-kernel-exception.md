@@ -17,14 +17,15 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-10-05
 ---
 ## Purpose
 
 The vector table and the C handlers behind it: every syscall, every interrupt,
 and every fault in the system enters the kernel through one of sixteen slots
 here, and every return to userspace leaves through one of three `eret`s -- a
-fourth path reaches EL0 by branching into the first rather than adding one.
+fourth and a fifth path reach EL0 by branching into the first rather than
+adding one.
 
 ## Contract
 
@@ -163,6 +164,56 @@ Same invariant, opposite action, because one path's registers come from the
 kernel and the other's come from userspace. The sweep is not the rule; *no kernel
 state crosses* is the rule.
 
+### The fifth way in: a held child's birth, which builds its frame first
+
+(2026-09-29, [[sub-kernel-birth-hold]].) A child spawned with
+`SPAWN_DEBUG_HELD` must be stoppable before its first instruction, and the
+spawn trampoline cannot give that: it erets straight from registers, with no
+frame to stop on and no stop check. So a held child's thunk calls
+`userland_enter_held` instead. It carves an exception frame below its own
+stack, zeroes it, and writes the image's entry as the return address, EL0 with
+interrupts clear as the saved state, and the user stack as the EL0 stack
+pointer. That is the frame the first instruction would have been interrupted
+with. It then masks and runs the ordinary return sequence over that frame --
+preempt, die-check, notes, and a park -- and leaves through the shared return's
+local label, exactly as the fork trampoline does. It lives in this file for the
+same reason.
+
+It satisfies each standing rule by the fork trampoline's refusal rather than by
+a new argument. There is no hand-rolled `eret`, so the masking rule has nothing
+to govern: the frame is built with interrupts on, as a plain call, and
+everything is masked before the tail, which is the state the tail requires. The
+register rule is met by construction. This path builds an EL0 context from
+nothing, so it owes the sweep, and the frame is zeroed before its three fields
+are written. The ordering rule is the tail's own, with one difference: the
+stop leg is the **birth park**, which also holds while the hold is set.
+
+The birth tail is straight-line: the park returns only to proceed. Neither
+park answers a latched terminate-interrupt (DEBUG-FS-DESIGN 5g, the operator's
+vote of 2026-09-30). Both sleep in `sleep_death_only`, which returns only for
+group death, so a stopped thread stays stopped and a held child stays held.
+The note stays queued, and the thread meets it at its next note checkpoint
+once it runs: the synchronous tail's `notes_deliver` (the IRQ tail delivers
+none, [[seam-el0-irq-tail-no-notes]]). A note latched while the child is still
+loading is taken by the birth tail's own delivery before the park, and ends
+the child before its first instruction. Three earlier answers are gone. The
+tails' park left for the latch and erets, which let a compute-bound stopped
+thread run with its stop set, since only the synchronous tail delivers notes.
+The birth park ended the held child with the note's name. And a first draft
+before that re-ran the checkpoint in place, which spun forever once note
+delivery declined a stack pointer a debugger wrote (audit round 1, F1). The
+frame sits below the thunk's stack, so after the `eret` the kernel stack
+pointer is where the spawn trampoline would have left it.
+
+The park the birth tail shares with both tails also gained a second death
+check (2026-09-29). It re-reads the group's termination after its wake
+condition passes, because a release can follow a terminate (the debugger's
+exitkill release terminates and then clears the stop). Without it, a thread
+mid-pass could read the cleared flags and `eret` into a dying group. The spec
+found that gap, and it was never specific to the birth tail. The park's sleep
+reads group death alone (`thread_group_death_pending`), so no latch can end
+the park or let a thread leave it.
+
 ### An EL0 fault terminates a Proc; a kernel fault kills the machine
 
 The two synchronous handlers share a fault decoder and diverge on what an
@@ -284,12 +335,16 @@ two slots that could only be reached from the other mode are wired to a loud
 diagnostic, so the invariant's violation is detectable rather than silent.
 
 **[[inv-i24]]** — the die-check in both EL0 return tails, plus the same check at
-the head of both hand-rolled entry paths, is what makes "no thread runs at EL0
-after its Proc becomes a zombie" hold for a freshly-spawned or freshly-exec'd
-thread that would otherwise reach userspace before its next trap.
+the head of both hand-rolled entry paths and in the birth tail, is what makes
+"no thread runs at EL0 after its Proc becomes a zombie" hold for a
+freshly-spawned or freshly-exec'd thread that would otherwise reach userspace
+before its next trap. The park's two death checks, one at the top of each pass
+and one after its wake condition, keep it for a thread that was stopped.
 
 **[[inv-i39]]** — the stop-check in both tails is the debug surface's park
-point, and its position after the die-check is the "death wins" clause.
+point, and its position after the die-check is the "death wins" clause. The
+birth tail's park is where a held child waits for its launcher, and it is the
+only way a held child reaches EL0.
 
 **[[inv-i13]]** — the register sweep before each `eret` is the crossing half:
 no kernel register state reaches EL0.
@@ -338,11 +393,18 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   Raising the threshold instead would only move the load at which that happens.
 - **The frame layout assertions must be updated with the frame.** Assembly
   writes by offset; only the assertions tie it to the struct.
-- **The tail ordering must stay preempt, die, notes, stop.** Moving the
-  die-check before the preempt reopens the group-terminate-during-switch
-  window; moving the stop-check before the die-check breaks "death wins".
-- **A new EL0-return action must be added to both tails**, and see below for
-  why that is currently harder than it sounds.
+- **The tail ordering must stay preempt, die, notes, stop**, in the birth tail
+  too. Moving the die-check before the preempt reopens the
+  group-terminate-during-switch window; moving the stop-check before the
+  die-check breaks "death wins".
+- **The birth tail must never `eret` while its child is held, and no park may
+  leave for a latched interrupt.** Both parks return only to proceed, and group
+  death alone ends a thread inside them (`ParkEndsOnlyInDeath`). A re-run of
+  the checkpoint would spin masked on a frame note delivery declines.
+- **The park must re-check death after its wake condition**, not only at the top
+  of each pass. A release that follows a terminate is legal.
+- **A new EL0-return action must be added to both tails and to the birth
+  tail**, and see below for why that is currently harder than it sounds.
 - **The kernel synchronous handler's user-half check must stay narrow.** It is
   the only thing separating a deliberate crossing from a corrupted kernel
   pointer, and widening it would silently absorb real corruption.

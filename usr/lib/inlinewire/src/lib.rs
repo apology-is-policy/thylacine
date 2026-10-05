@@ -55,7 +55,7 @@ impl PlaceHeader {
         }
     }
 
-    /// The 16-byte wire header (magic, format, w, h; all LE).
+    /// The 32-byte wire header (magic, format, w, h, then the u128 id; all LE).
     pub fn pack(&self) -> [u8; HEADER_LEN] {
         let mut b = [0u8; HEADER_LEN];
         b[0..4].copy_from_slice(&MAGIC.to_le_bytes());
@@ -105,9 +105,105 @@ impl PlaceHeader {
     }
 }
 
+/// The longest limit text: `u64::MAX` is 20 decimal digits, then the newline.
+pub const LIMIT_TEXT_MAX: usize = 21;
+
+/// What a read of `place` at offset 0 answers (HALCYON.md 14.7, the 2026-09-29
+/// refinement): the channel's current per-image limit in pixels, as ASCII
+/// decimal digits and a newline, so a client fits its raster BEFORE it uploads
+/// instead of learning the cap from a refusal (`E_INVAL`, the same answer a
+/// malformed header gets). Returns the filled length.
+pub fn limit_text(pixels: u64, out: &mut [u8; LIMIT_TEXT_MAX]) -> usize {
+    let mut digits = [0u8; LIMIT_TEXT_MAX - 1];
+    let mut n = pixels;
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let len = digits.len() - i;
+    out[..len].copy_from_slice(&digits[i..]);
+    out[len] = b'\n';
+    len + 1
+}
+
+/// The bytes a read of `place` at `offset` for `count` returns: the part of the
+/// limit text the read covers, and nothing past its end (end of file).
+pub fn limit_read(pixels: u64, offset: u64, count: u32, buf: &mut [u8; LIMIT_TEXT_MAX]) -> &[u8] {
+    let n = limit_text(pixels, buf);
+    let start = offset.min(n as u64) as usize;
+    let end = start.saturating_add(count as usize).min(n);
+    &buf[start..end]
+}
+
+/// Parse a limit text exactly as [`limit_text`] writes it: one or more digits
+/// with no leading zero, then one newline, and nothing else. `None` for any
+/// other bytes, a zero limit, or a value past `u64`; the client then uploads
+/// unfitted and lets the server decide.
+pub fn parse_limit(bytes: &[u8]) -> Option<u64> {
+    let (&last, digits) = bytes.split_last()?;
+    if last != b'\n' || digits.is_empty() || digits[0] == b'0' {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &d in digits {
+        if !d.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
+    }
+    Some(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(px: u64) -> ([u8; LIMIT_TEXT_MAX], usize) {
+        let mut b = [0u8; LIMIT_TEXT_MAX];
+        let n = limit_text(px, &mut b);
+        (b, n)
+    }
+
+    #[test]
+    fn the_limit_text_is_decimal_and_a_newline() {
+        let (b, n) = text(1048576);
+        assert_eq!(&b[..n], b"1048576\n");
+        let (b, n) = text(0);
+        assert_eq!(&b[..n], b"0\n");
+        let (b, n) = text(u64::MAX);
+        assert_eq!(&b[..n], b"18446744073709551615\n", "the widest value fits the buffer");
+        assert_eq!(n, LIMIT_TEXT_MAX);
+    }
+
+    #[test]
+    fn a_limit_text_parses_back_and_nothing_else_does() {
+        for px in [1u64, 9, 10, 65536, 1048576, u64::MAX] {
+            let (b, n) = text(px);
+            assert_eq!(parse_limit(&b[..n]), Some(px));
+        }
+        for bad in [
+            &b""[..], b"\n", b"1048576", b"1048576\n\n", b"1048576 \n", b" 1048576\n",
+            b"+5\n", b"0\n", b"01\n", b"12a\n", b"18446744073709551616\n",
+        ] {
+            assert_eq!(parse_limit(bad), None, "{:?}", bad);
+        }
+    }
+
+    #[test]
+    fn a_read_returns_its_window_of_the_text_then_end_of_file() {
+        let mut b = [0u8; LIMIT_TEXT_MAX];
+        assert_eq!(limit_read(1048576, 0, 64, &mut b), b"1048576\n");
+        assert_eq!(limit_read(1048576, 0, 3, &mut b), b"104");
+        assert_eq!(limit_read(1048576, 3, 64, &mut b), b"8576\n");
+        assert_eq!(limit_read(1048576, 8, 64, &mut b), b"", "at the end");
+        assert_eq!(limit_read(1048576, u64::MAX, u32::MAX, &mut b), b"", "far past it");
+        assert_eq!(limit_read(1048576, 0, 0, &mut b), b"");
+    }
 
     #[test]
     fn pack_parse_round_trip() {

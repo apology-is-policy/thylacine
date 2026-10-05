@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -225,8 +225,9 @@ liveness bug when the thing being exempted is a latch.*
 A note with a live handler must run at the return tail — but a peer thread
 blocked in a syscall reaches no return tail until something wakes it. So a caught
 note ARMS a per-Proc mask (`notes_arm_caught_note_locked`, the caught-note
-sub-field of `proc_flags`) and wakes every blocked peer (`proc_caught_note_wake`,
-under the process-table lock). `notes_post` cannot run that wake itself -- the
+sub-field of `proc_flags`) and wakes every blocked peer outside a stop park
+(`proc_caught_note_wake`, under the process-table lock; a stopped thread waits
+for the stop to clear). `notes_post` cannot run that wake itself -- the
 thread walk needs the process-table lock, which it does not take -- so it is the
 POSTER's, and every poster that holds the lock runs it: the interrupt and tty
 fans beside the terminate wake, and the posts with no terminate twin -- a
@@ -235,8 +236,9 @@ child's exit (`proc_exit_notify_parent_locked`), a caught `tty:susp`, `tty:cont`
 outside the lock: a Proc noting itself takes the lock for its wakes after the
 post, and `pipe` needs none -- it posts to the writer's own Proc from inside
 the write, which delivers at that thread's return tail, as Linux sends SIGPIPE
-to the writing thread alone. The wake reaches every blocked peer, but one caught
-note unwinds ONE of them (`thread_caught_note_claim`, the sleep arms' last test):
+to the writing thread alone. The wake reaches every blocked peer outside a stop
+park, but one caught note unwinds ONE of them (`thread_caught_note_claim`, the
+sleep arms' last test):
 the unwinding sleeper claims the note's family in a claim sub-field of
 `proc_flags` by a CAS that re-validates the caught bit and records the family as
 its own (`Thread.note_claim`), and its peers find the family claimed and re-park
@@ -300,6 +302,27 @@ the real tail: two ignored notes and a caught one, the tail loops to the caught
 one, and the retried wait unwinds again), `rendez.caught_note_release_wakes_peer`
 (the tail held until the peer has re-parked, so only the release's wake can
 unwind it), and `notes.caught_note_claim_once`.
+
+### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
+
+An uncaught note whose default is terminate (an `interrupt` nothing catches,
+`tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch, and its post
+wakes every blocked thread of the Proc outside a stop park
+(`proc_interrupt_terminate_wake`). An
+ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
+its return tail: `thread_die_pending` reports the latch in any family the
+thread has not masked, as well as group death. Five waits read
+`thread_group_death_pending` instead, `thread_die_pending`'s group-death leg
+alone with its `exit_close_active` gate. They are the tail's stop park, the
+birth park, the nested stop park a sleep detours into, the vfork suspend and
+the held spawn's birth wait, all through `sleep_death_only`
+([[sub-kernel-rendez]]). The latch's walk passes the stop parks by, since they
+could only absorb its wake, and the parent suspends absorb it: a stopped thread
+stays stopped, and a suspended parent stays suspended
+(DEBUG-FS-DESIGN 5g, the operator's vote of 2026-09-30). No park consumes or
+clears the latch. The note is met at the thread's next note checkpoint once
+it runs, and a revocable latch (a peer can install a handler or open the notes
+file) can no longer return a parent while its child still borrows its stack.
 
 ### A handler that escapes its frame must not deafen the Proc (bug-2)
 

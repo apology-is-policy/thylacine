@@ -5,6 +5,7 @@ parent: moc-kernel-introspection
 title: "/proc — per-process state and the debug control surface"
 code:
   - kernel/devproc.c
+  - kernel/test/test_devproc.c
 audit: hard
 guarded-by: [inv-i26, inv-i39]
 validated-by: [spec-debug-stop, spec-pty-stop, prose, gate-smp]
@@ -16,7 +17,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -101,7 +102,11 @@ mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `w
 too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
 `/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
 keeps its old meaning with NO seal and gates `sched` and `imperium`; `status` is
-ungated.
+ungated. `cmdline` renders no argv yet, and its place in the set seals argv only if
+argv comes from a per-Proc kernel copy, as `environ` does: argv read off the stack would
+read through a vfork child sharing that stack under its own, unsealed Proc, unless
+`cmdline` also joins `mem` and `maps` in the image join (H3+C Fable pass F1; the
+cmdline-argv work owes the choice).
 
 **The set took two corrections, and they are the part worth reading.** The first cut put
 the seal inside `devproc_owner_or_hostowner`, wrong in both directions: it MISSED `maps`
@@ -332,11 +337,83 @@ counterexample resumes even a launched target). The SA-1 ordering — clear the
 stop flag and focus **after** the terminate — keeps the stop from outliving the
 now-NULL owner.
 
+That ordering had a window, and it was not in this file (2026-09-29). A parked
+thread that had just passed its park's death check, before the terminate
+landed, would then read the cleared stop and `eret` into a group that was
+already dying. A `start` sent after a `kill` has the same shape. The park now
+re-checks death after its wake condition passes. The terminate is stored before
+the clear the wake condition reads, both RELEASE, so the ACQUIRE re-check sees
+it and the thread dies without reaching EL0 ([[sub-kernel-death]]). The spec's
+clean held configuration found it, and `BUGGY_NO_DEATH_RECHECK` and its tail
+twin keep it found. The release keeps terminate-then-clear. The order is sound
+because of the re-check, and the code comment at the release says so.
+
+### The birth hold: stop converts, start and detach release, a close keeps
+
+(2026-09-29, [[sub-kernel-birth-hold]].) A child spawned with
+`SPAWN_DEBUG_HELD` is parked in front of its first instruction when its
+launcher attaches. The run-control verbs treat that hold by their own meaning:
+
+- **`stop` converts.** `proc_debug_stop_deliver` first, then the hold is
+  cleared (`proc_birth_hold_convert_locked`), in one `g_proc_table_lock`
+  section. The birth park reads the hold before the stop flags, so it sees one
+  of the two at every instant, and the child never runs between the writes.
+  The conversion refuses when no stop is pending and leaves the hold standing,
+  so a verb that cleared before it delivered would leave the child held rather
+  than open an instant nothing could observe. From then on it is an ordinary
+  debug stop.
+- **`start` releases.** The hold is cleared first, so the resume's wake finds it
+  already gone.
+- **An explicit `detach` releases.** Detach is the debugger's deliberate choice
+  to run the target, so it clears the hold before its resume.
+- **The implicit release keeps the hold.** The ctl fd closing without `detach`
+  (`devproc_debug_release_cb`) clears the stop, or terminates under exitkill,
+  and leaves the hold alone. The hold is the spawner's, not the attach slot's.
+  A debugger that dies after attaching but before stopping leaves the child
+  parked, and the spawner's death then kills it by the orphan rule.
+
+A held child that has not been converted has no debug stop pending, so it is
+not fully stopped, and `mem` and `regs` refuse it until the `stop` lands. The
+debugger's first `stop` is therefore both the conversion and the gate opening.
+`waitstop` alone does not return for a held child: the scan that `stop` and
+`waitstop` wait on (`devproc_stopscan_cb`) counts a target stopped only when
+`debug_stop_req` is set and every thread is parked. A birth hold, or a job
+stop, parks every thread with no debug stop, and reporting it as stopped would
+hand the debugger a refusal on its next read (audit round 1, F2). A dying
+target (`group_exit_msg` set) reads as gone, and the wait ends: its stop will
+never take, the stopped-only surface refuses it anyway, and its last thread
+no longer parks for a stop while it closes its handles (DEBUG-FS-DESIGN 5g),
+so waiting for it to read as parked would last the whole close. A `stop` at a
+dying target sets nothing: a dying Proc takes no new stop
+(`proc_debug_stop_deliver` refuses it under the table lock).
+
+`step` waits on its own scan (`devproc_waitscan_cb`, given the slot owner's
+ctl), and a released slot ends that wait too. A `detach` from another thread
+of the debugger resumes the target, whose step trap then finds no owner and
+delivers no stop, so a wait for the re-stop would last until the target exited
+(audit round 2, F6, 2026-09-30). A close of the ctl fd cannot land mid-step:
+the writer holds its Spoor for the whole write, and the close hook runs only on
+the last drop (#844). A dying target reads as gone to the step's scan as to
+`stop`'s (audit round 3). The scan's state reaches the wait only through
+`devproc_wait_verdict`: stopped, gone, released and denied end it, and
+anything else polls on (`devproc.debug_stop_start_resume` legs (g) and (f)).
+`/proc/<pid>/wait` is not slot-bound: it passes no ctl and waits for a stop or
+the exit.
+
+A step belongs to its slot. A whole-Proc stop cancels a pending step (8a-2c
+F1), and so do a `detach` and the close's release: each calls
+`proc_debug_cancel_steps_locked`, which clears every thread's armed step and
+step-over, so the next attacher never meets a stop it did not ask for (audit
+round 3, RF7; `devproc.debug_release_cancels_step`).
+
 ### Two stop owners, one park
 
 A thread parks on its own `debug_rendez` for either of two independent reasons:
 the debugger's `debug_stop_req`, or job control's `job_stop_req`. The park
-predicate is their disjunction; each owner clears only its own flag.
+predicate is their disjunction; each owner clears only its own flag. A held
+child also parks there, at its birth, but the hold is deliberately not a third
+owner. It stays out of the disjunction and is read only by the birth park
+([[sub-kernel-birth-hold]]).
 
 The debug-fs surface deliberately reads **`debug_stop_req` alone**. A Ctrl-Z'd
 process is parked on the same rendez, but it is not debugger-stopped, and must
@@ -619,7 +696,8 @@ performance backlog.
   reaches the same verdict.
 - **The stopped-only predicate must stay a conjunction**, and must keep reading
   `debug_stop_req` alone. Generalizing it to the job-stop flag makes a Ctrl-Z'd
-  process debugger-readable.
+  process debugger-readable. The stop scan that `stop` and `waitstop` wait on
+  must read it too: parked threads alone may be a job stop or a birth hold.
 - **The park predicate keeps all three terms.** Registration alone is stale
   between a wake and its dispatch, because the waker cannot clear it — only the
   owning thread may, and the death cascade reads it. Dropping the state term
@@ -638,6 +716,10 @@ performance backlog.
   Resuming it orphans it to init to run forever (the launched-orphan leak); an
   explicit `detach` must clear the mark first, and the release must disarm the
   target's breakpoints and watchpoints or the orphan re-traps forever.
+- **On a held target, `stop` delivers before it clears the hold, and `start`
+  and `detach` clear the hold before they resume.** Reverse the conversion and
+  the birth park can read neither the hold nor the stop and run the child. The
+  implicit release must not clear the hold at all.
 - **SPSR must never be written.** Any new register-write path re-inherits this.
 - **No Proc pointer may be held across a lock drop.** The re-resolve-by-pid
   discipline is the lifetime argument for the entire file.

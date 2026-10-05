@@ -21,6 +21,24 @@
 # hard-fail on its "not displayed" fallback, so a channel that silently failed
 # (view fell back to a report) goes RED, never green.
 #
+# THE FIT (HALCYON.md 14.7, the 2026-09-29 refinement): /test-large.png is the
+# same card at 2048x1536, three times the largest per-image limit the channel
+# admits. view reads the limit from `place` and reduces the raster to it before
+# the upload; without the read the upload is over the limit, the channel refuses
+# it, and view says "not displayed". The reduced size is not pinned -- the
+# console's limit follows the renderer's heap -- only that it lies within the
+# channel's limits, keeps the card's 4:3 aspect, and is the size halcyond
+# injected.
+#
+# THE TEXT FALLBACK: a file that is not a picture is handed to `cat`, which view
+# runs as /bin/cat. A spawn resolves a relative name against the working
+# directory, never a search path, so the leg runs `view note.txt` from a
+# directory holding an executable file named cat (a copy of /bin/echo, which
+# would print the name it is given). Only /bin/cat prints the note's line; a
+# bare-name spawn runs the copy there, and fails outright anywhere else. Then
+# `view -- -zq.txt`: cat is handed `--` before the name, so a file whose name
+# starts with '-' is shown, not parsed as cat's options ('z' is none of them).
+#
 # Needs the halcyond-renderer image (THYLACINE_HALCYON=1); SKIPs (77) cleanly on
 # a default aurora image, like ls-halcyon. Runs under HVF; needs the QMP socket +
 # python3 (screendump + gfx_region).
@@ -131,6 +149,40 @@ lc_pass "inline: the decoded image is on the screen (+$delta non-ground px)"
 # Preserve the witness image for review (the operator's screenshot).
 catch {file copy -force /tmp/ls-gfx-inline-post.png $repo/build/ls-gfx-inline-view.png}
 lc_step "inline: witness image saved to build/ls-gfx-inline-view.png"
+
+# THE FIT. A picture three times the channel's largest limit shows reduced.
+lc_run_expect_hardfail "view /test-large.png" "reduced from 2048x1536)" "not displayed"
+if {![regexp {placed inline \(([0-9]+)x([0-9]+), reduced from 2048x1536\)} [tbody] -> fw fh]} {
+    lc_fail "view's reduced line did not parse from the transcript"
+}
+if {$fw * $fh > 1048576 || $fw * $fh < 65536} {
+    lc_fail "view reduced the card to ${fw}x${fh}, outside the channel's limits of 64 Ki to 1 Mi pixels"
+}
+if {abs($fw * 1536 - $fh * 2048) >= 2048} {
+    lc_fail "view reduced the 4:3 card to ${fw}x${fh}, losing its aspect"
+}
+set injected 0
+for {set i 0} {$i < 20} {incr i} {
+    if {[string first "halcyond: inline image placed (${fw}x${fh}" [tbody]] >= 0} { set injected 1; break }
+    after 300
+}
+if {!$injected} { lc_fail "halcyond never logged the ${fw}x${fh} injection -- view reported the reduced picture placed but the raster did not complete on the reader" }
+lc_pass "inline: a 2048x1536 picture was reduced to the channel's limit (${fw}x${fh}) and injected"
+
+# THE TEXT FALLBACK. The note is typed as two quoted words, so the line cat
+# prints never appears in anything typed; the status line arriving without it
+# is the red arm (the copy exits 0).
+lc_send {mkdir /tmp/ivcat}
+lc_send {echo 'marsupial' 'ledger' > /tmp/ivcat/note.txt}
+lc_send {cp /bin/echo /tmp/ivcat/cat}
+lc_send {chmod 755 /tmp/ivcat/cat}
+lc_send {cd /tmp/ivcat}
+lc_run_expect_hardfail_re {view note.txt; echo ivcat $status} "marsupial ledger" {spawn failed|ivcat [0-9]}
+lc_pass "inline: a text file falls back to /bin/cat, never to a file named cat in the working directory"
+lc_send {echo 'wombat' 'burrow' > /tmp/ivcat/-zq.txt}
+lc_run_expect_hardfail_re {view -- -zq.txt; echo ivdash $status} "wombat burrow" {invalid option|ivdash [0-9]}
+lc_send {cd /}
+lc_pass "inline: a file whose name starts with '-' reaches cat as a file, after --"
 
 lc_ctrlc
 sleep 1

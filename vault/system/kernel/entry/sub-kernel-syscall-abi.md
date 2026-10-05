@@ -31,6 +31,18 @@ build checks that they agree.
 
 ## Contract
 
+**`SPAWN_DEBUG_HELD` (the birth hold, 2026-09-29).** The spawn record's last
+forward-compat slot, `_pad_spawn2` at offset 100, becomes `debug_flags`, with
+`SPAWN_DEBUG_HELD = 1 << 0` and the mask `SPAWN_DEBUG_FLAGS_ALL`. A bit outside
+the mask is refused with -1, at the record validator and again at the top of
+the spawn body. The record stays 104 bytes and a caller that zero-fills it is
+unchanged, so this is additive, not an ABI break. The in-tree mirrors rename the
+slot in the same commit: libt's `T_SPAWN_DEBUG_HELD`, libthyla-rs's
+`TSpawnArgs.debug_flags` with `T_SPAWN_DEBUG_HELD` and `Command::debug_held`,
+and the pouch process patch. The Go fork's `spawnArgs` waits on the operator,
+with wiring `SysProcAttr` to the flag. What the flag does is
+[[sub-kernel-birth-hold]]'s.
+
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
 `usr/lib/libt/include/thyla/syscall.h` -- alongside the kernel's `CAP_TCB_DIAL`
@@ -220,6 +232,22 @@ counts across the two mirrors plus the poll header. A case-*sensitive* count of
 `MUST mirror` gives 11, which read against a case-insensitive predecessor looks
 like the phrase halving. It did not — nothing in this census shrank.)
 
+**One record is now pinned (2026-09-29).** `tools/check-spawn-args-mirrors.py`,
+run by `tools/build.sh` before any target, lays the spawn record out from the
+kernel's field list, cross-checks that layout against the header's own offset
+and size assertions, and requires every mirror to match: libt, libthyla-rs and
+the pouch patch by name, offset and size, and the Go fork by offset and size
+when it is present. It stops the build on a mismatch, on a field without an
+offset assertion, on a mirror it cannot parse, and on any Rust repr but one
+plain `#[repr(C)]`, however it is spelled (one inside `cfg_attr`, on one line
+or several, counts). It also proves it can fail before it passes, by mutating each
+source in memory and requiring the comparison to catch every mutation. It was
+built because this record had already drifted: the aux-2 merge grew it to 104
+bytes, and a mirror left at 96 passed its own assertion while the kernel read
+eight bytes past it (#100). The Go fork's committed copy is still that 96-byte
+record, and its builds are right only because they compile an uncommitted fix.
+Every other record on this surface is pinned by nothing but its comments.
+
 ### And the hazard is not only drift; it is concurrent allocation
 
 The sharpest demonstration is a collision that did happen. Two branches
@@ -265,9 +293,9 @@ space between them. The rule binds allocation *from* a released ABI; it cannot
 adjudicate two branches that allocated concurrently from the same free list.
 Nothing prevents the recurrence except that the free list is now shorter.
 
-There is no generator, no shared header, and no build step that reads one file
-and checks the other — `tools/build.sh` never mentions either mirror. The
-enforcement is that a human wrote MUST in a comment.
+Apart from the spawn record's check, there is no generator, no shared header,
+and no build step that reads one file and checks the other. For every other
+record, the enforcement is that a human wrote MUST in a comment.
 
 The clearest statement of this is the poll ABI's slim header, which is worth
 quoting because it is entirely correct and draws no conclusion:
@@ -285,8 +313,9 @@ the same C layout.
 
 ### Growth is by appended field into a reserved slot, and it has worked
 
-The spawn argument record has grown four times — an identity block, a hardware
-allowance block, a page budget, a phenotype-flags word — from 56 bytes to 104,
+The spawn argument record has grown five times — an identity block, a hardware
+allowance block, a page budget, a phenotype-flags word, a debug-flags word —
+from 56 bytes to 104,
 and every existing caller kept working, because each growth either appended past
 the end or claimed a field that was already reserved and required to be zero. The
 page budget is the best case: it took over the tail padding slot (`_pad_allow`,
@@ -307,6 +336,13 @@ phenotype word to 96 (growing the struct to 104) and opened a fresh forward-comp
 pad at 100 — and the offset assertion on it records that history verbatim, so a
 reader is not surprised by a struct that is 104 rather than 96. A `_Static_assert`
 at the point of the hazard, again, is the whole mechanism.
+
+**The fifth growth spent the last reserved slot (2026-09-29).** The debug-flags
+word of the birth hold took the pad the aux-2 merge had opened at offset 100, so
+the struct stayed 104 bytes and a zero-filling caller keeps the old behaviour.
+There is no reserved slot left. The next field appends past the end and grows
+the struct, and every mirror with it, and it is the first growth the mirror
+check will see.
 
 `t_stat` is the same story in the other growth mode. It has grown twice — uid+gid
 (A-2a) took it from 72 to 80, then a per-instance device number plus pad (#100)
@@ -420,7 +456,10 @@ be one 4 KiB staging buffer per round trip.
   A size assertion alone passes on a field reorder.
 - **A mirror change must be made in all three files in the same commit**, because
   nothing else will catch it. The mirrors are subsets, so "not present" is
-  legitimate and indistinguishable from "forgotten".
+  legitimate and indistinguishable from "forgotten". The spawn record is the one
+  exception: its mirror check stops the build on a mirror that disagrees.
+- **A new spawn-record field needs its own offset assertion.** The mirror check
+  takes the layout from those assertions and refuses a field that has none.
 - **Enumerate mirrors by what they MEAN, not by what they CONTAIN.** A census
   that greps for the value cannot find a constant that holds the value only by
   *definition* — "the highest assigned number", "one past the last", "the same

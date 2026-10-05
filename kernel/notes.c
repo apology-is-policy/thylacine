@@ -1289,6 +1289,15 @@ bool thread_die_pending(struct Thread *t) {
     return false;
 }
 
+// A stopped thread keeps its stop when an interrupt arrives, and a parent
+// suspend must not return on a latch a peer can revoke (DEBUG-FS-DESIGN 5g), so
+// the waits that honour that ask only this: group death, which nothing revokes.
+bool thread_group_death_pending(struct Thread *t) {
+    if (!t || t->exit_close_active) return false;
+    struct Proc *p = t->proc;
+    return p && __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL;
+}
+
 // item 11 (ARCH 8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note of a family UNMASKED for THIS thread is queued -- so
 // a caught-note-interruptible sleep should unwind SLEEP_NOTEINTR, return

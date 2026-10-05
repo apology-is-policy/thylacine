@@ -96,6 +96,10 @@ void test_cons_episode_gate(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
+void test_cons_episode_mode_write_straddling_begin(void);
+void test_cons_episode_feed_straddling_begin(void);
+void test_cons_episode_repeat_sak_keeps_saved_owner(void);
+void test_cons_episode_fixture_fails_clean(void);
 void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
@@ -3172,15 +3176,22 @@ struct ep_fixture {
     struct Proc *owner;
 };
 
+static void ep_teardown(struct ep_fixture *f);
+
+// Set only by the fixture's own test: fail once everything below has run,
+// the most a failed setup can leave behind.
+static bool ep_setup_fail_late;
+
 // The post-SAK steady state, minus the SAK: a live trusted authority
 // (attached only through the SAK itself), optionally a live attached owner
 // (the session shell), optionally ARMED through the production op core.
+// A failure tears down what it built: every caller asserts on the result, and
+// the assert returns, so nothing after it would.
 static bool ep_setup(struct ep_fixture *f, bool with_owner, bool armed) {
     cons_test_reset();
     f->trusted = proc_alloc();
     f->owner   = with_owner ? proc_alloc() : NULL;
-    if (!f->trusted || (with_owner && !f->owner)) return false;
-    if (!f->trusted->notes) return false;
+    if (!f->trusted || (with_owner && !f->owner) || !f->trusted->notes) goto fail;
     f->trusted->state = PROC_STATE_ALIVE;
     proc_set_console_trusted(f->trusted);
     if (f->owner) {
@@ -3188,8 +3199,12 @@ static bool ep_setup(struct ep_fixture *f, bool with_owner, bool armed) {
         proc_mark_console_attached(f->owner);
         proc_set_console_owner(f->owner);
     }
-    if (armed && proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_ARM) != 0) return false;
+    if (armed && proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_ARM) != 0) goto fail;
+    if (ep_setup_fail_late) goto fail;
     return true;
+fail:
+    ep_teardown(f);
+    return false;
 }
 
 // Order matters: clearing the trusted authority abandons an open episode AND
@@ -3848,6 +3863,123 @@ void test_cons_episode_saved_owner_death(void) {
     if (!err && proc_test_console_owner() != NULL)          err = "END restored nothing (the saved owner is dead)";
     ep_teardown(&f);
     TEST_ASSERT(err == NULL, err ? err : "saved owner death");
+}
+
+// A consctl mode write and a feed byte each check the episode locklessly and
+// apply under g_cons.lock. The window hook opens an episode between the two, the
+// interleaving a writer racing a SAK can produce; each test's control runs the
+// same call with the hook inert and sees it land.
+static bool g_window_sak;
+static void window_open_episode(void) {
+    if (!g_window_sak) return;
+    g_window_sak = false;
+    cons_test_sak_dispatch();
+}
+
+// A write that passed the check while BEGIN ran must not store its bits over the
+// episode's RAW word: ECHO on under the trusted prompt sends every key to the
+// wire and to the renderer's drain.
+void test_cons_episode_mode_write_straddling_begin(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(CONS_ICANON);                  // cooked, ECHO off
+    cons_test_set_window_hook(window_open_episode);
+    const char *err = NULL;
+    g_window_sak = false;
+    if (cons_set_mode_cmd("+echo", 5, true) != 5L)      err = "control: the write lands with no episode in its window";
+    else if ((cons_test_termios() & CONS_ECHO) == 0u)  err = "control: ECHO is set";
+    if (!err) {
+        cons_test_set_termios(CONS_ICANON);
+        g_window_sak = true;
+        long rv = cons_set_mode_cmd("+echo", 5, true);
+        if (g_window_sak)                               err = "the hook ran inside the write";
+        else if (!cons_episode_active())                err = "the episode opened inside the window";
+        else if (rv != -1L)                             err = "the write that straddled BEGIN is refused";
+        else if ((cons_test_termios() & CONS_ECHO) != 0u)
+                                                        err = "ECHO stays off under the trusted prompt";
+    }
+    if (!err) {
+        // The attached authority is not frozen: its write lands during the episode.
+        proc_mark_console_attached(kproc());
+        long arv = cons_set_mode_cmd("+echo", 5, true);
+        u32 atio = cons_test_termios();
+        proc_revoke_console_attached(kproc());
+        if (arv != 5L || (atio & CONS_ECHO) == 0u)      err = "the attached authority's write lands during the episode";
+    }
+    cons_test_set_window_hook(NULL);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "mode write straddling BEGIN");
+}
+
+// A feed byte that passed the check while BEGIN ran must not become the first
+// byte the trusted reader sees.
+void test_cons_episode_feed_straddling_begin(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(0u);                           // raw: a fed byte lands in the ring as itself
+    cons_test_set_window_hook(window_open_episode);
+    const char *err = NULL;
+    g_window_sak = false;
+    if (cons_feed_write("ab", 2) != 2L)                 err = "control: the feed lands with no episode in its window";
+    else if (cons_test_rx_count() != 2u)                err = "control: two bytes in the ring";
+    if (!err) {
+        g_window_sak = true;
+        long rv = cons_feed_write("c", 1);
+        if (g_window_sak)                               err = "the hook ran inside the feed";
+        else if (!cons_episode_active())                err = "the episode opened inside the window";
+        else if (rv != 0L)                              err = "the byte that straddled BEGIN is refused (a short write of 0)";
+        else if (cons_test_rx_count() != 0u)            err = "the ring holds nothing for the trusted reader";
+    }
+    cons_test_set_window_hook(NULL);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "feed straddling BEGIN");
+}
+
+// A SAK repeated during an open episode must not replace the saved pre-SAK
+// owner. S1 is unseated by the first SAK; S2 takes the empty owner slot
+// mid-episode; the second SAK unseats S2 and must leave S1 saved, so END hands
+// the Ctrl-C target back to S1.
+void test_cons_episode_repeat_sak_keeps_saved_owner(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, true, true), "fixture (armed, owner)");
+    struct Proc *s2 = proc_alloc();
+    if (!s2) ep_teardown(&f);
+    TEST_ASSERT(s2 != NULL, "a second owner");
+    s2->state = PROC_STATE_ALIVE;
+    const char *err = NULL;
+    cons_test_sak_dispatch();
+    if (!cons_episode_active())                                 err = "episode open";
+    else if (proc_test_console_owner_pre_sak() != f.owner)      err = "the first SAK saved S1";
+    if (!err) {
+        proc_mark_console_attached(s2);
+        proc_set_console_owner(s2);
+        cons_test_sak_dispatch();
+        if (proc_test_console_owner() != NULL)                  err = "the repeat SAK unseated S2";
+        else if (proc_test_console_owner_pre_sak() != f.owner)  err = "the repeat SAK kept S1 saved";
+    }
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err && proc_test_console_owner() != f.owner)           err = "END handed the Ctrl-C target back to S1";
+    proc_console_relinquish(s2);
+    s2->state = PROC_STATE_ZOMBIE;
+    proc_free(s2);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "repeat SAK keeps the saved owner");
+}
+
+// The fixture's own failure path: a setup that fails after the ARM leaves the
+// tests after it no trusted authority, no owner and no arm.
+void test_cons_episode_fixture_fails_clean(void) {
+    struct ep_fixture f;
+    ep_setup_fail_late = true;
+    bool built = ep_setup(&f, true, true);
+    ep_setup_fail_late = false;
+    const char *err = NULL;
+    if (built)                                       err = "the forced failure is reported";
+    else if (proc_test_console_trusted() != NULL)    err = "a failed setup leaves no trusted authority";
+    else if (proc_test_console_owner() != NULL)      err = "a failed setup leaves no console owner";
+    else if (cons_episode_armed())                   err = "a failed setup leaves the console unarmed";
+    if (built) ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "fixture fails clean");
 }
 
 // Graphical endpoint tests exercise the same role, generation and visibility

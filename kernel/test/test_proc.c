@@ -1514,7 +1514,28 @@ void test_proc_wait_pid_for_report_not_reap(void) {
     TEST_EXPECT_EQ(wait_pid_for(-(int)c->pgid,
         WAIT_UNTRACED | WAIT_WNOHANG, &st), cpid,
         "the pgrp selector reaches a latched child");
+
+    // A dying child reports neither latch (DEBUG-FS-DESIGN 5g): it is not
+    // stopped, and its zombie reports the death. The latches stay set, and the
+    // same child with the death unpublished -- one variable away -- reports.
+    c->stop_report_pending = true;
+    c->cont_report_pending = true;
+    __atomic_store_n(&c->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    int  dying_r = wait_pid_for(cpid,
+        WAIT_UNTRACED | WAIT_CONTINUED | WAIT_WNOHANG, &st);
+    bool dying_left = c->stop_report_pending && c->cont_report_pending;
+    __atomic_store_n(&c->group_exit_msg, NULL, __ATOMIC_RELEASE);
+    int  live_st = -42;
+    int  live_r  = wait_pid_for(cpid,
+        WAIT_UNTRACED | WAIT_CONTINUED | WAIT_WNOHANG, &live_st);
+    c->stop_report_pending = false;
     legate_drop_linked(c);
+    TEST_EXPECT_EQ(dying_r, 0,
+        "a dying child reports neither its stop nor its continue");
+    TEST_ASSERT(dying_left, "the dying child's latches were left, not consumed");
+    TEST_EXPECT_EQ(live_r, cpid, "the same child alive reports its continue");
+    TEST_EXPECT_EQ(live_st, WAIT_STATUS_CONTINUED,
+        "the live child's first report is the continue");
 
     // Packed-exited vs raw: a failing child (exit_status 1) reads 0x100
     // under a PTY-1e flag and raw 1 without one.
@@ -2024,6 +2045,9 @@ void test_proc_exec_reset_dispositions(void) {
 
 void test_proc_job_stop_orphan_rule(void);
 void test_proc_job_stop_orphan_rule(void) {
+    // Each leg records, releases its fixture, then asserts: a failing assert
+    // returns, and a fixture left linked holds every later drain of kproc's
+    // children (m's static thread even hides it from the runner's release).
     // ---- (a) the TSTP discard vs the anchored stop ----
     struct Proc *m = proc_alloc();
     TEST_ASSERT(m != NULL, "proc_alloc m");
@@ -2037,27 +2061,35 @@ void test_proc_job_stop_orphan_rule(void) {
     m->threads = &orph_th;
     proc_test_link(m);                    // parent kproc (sid 0) -> NO anchor
 
-    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 0,
-        "an uncaught susp on an ORPHANED group is discarded (no member affected)");
-    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "discarded: no stop");
-    TEST_EXPECT_EQ(js_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
-        "discarded: no note either");
+    int orph_stopped = proc_job_stop_pgrp(m->pgid);
+    int orph_req     = (int)m->job_stop_req;
+    u32 orph_notes   = js_note_count(m, NOTE_NAME_TTY_SUSP);
 
     // Anchor the group: re-home m under a same-session out-of-group parent.
     struct Proc *anchor = proc_alloc();
-    TEST_ASSERT(anchor != NULL, "proc_alloc anchor");
-    anchor->sid  = 0x5F01u;
-    anchor->pgid = (u32)anchor->pid;
-    proc_test_link(anchor);
-    proc_test_unlink(m);
-    proc_test_link_child(anchor, m);
-    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1,
-        "the same susp on the now-ANCHORED group stops the member");
-    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "anchored: stopped");
+    int anch_stopped = -9, anch_req = -9;
+    if (anchor) {
+        anchor->sid  = 0x5F01u;
+        anchor->pgid = (u32)anchor->pid;
+        proc_test_link(anchor);
+        proc_test_unlink(m);
+        proc_test_link_child(anchor, m);
+        anch_stopped = proc_job_stop_pgrp(m->pgid);
+        anch_req     = (int)m->job_stop_req;
+    }
     (void)proc_job_cont_pgrp(m->pgid);    // resume for a clean teardown
     m->threads = NULL;
     legate_drop_linked(m);                // unlinks from `anchor` (its parent)
     legate_drop_linked(anchor);
+
+    TEST_EXPECT_EQ(orph_stopped, 0,
+        "an uncaught susp on an ORPHANED group is discarded (no member affected)");
+    TEST_EXPECT_EQ(orph_req, 0, "discarded: no stop");
+    TEST_EXPECT_EQ(orph_notes, 0u, "discarded: no note either");
+    TEST_ASSERT(anchor != NULL, "proc_alloc anchor");
+    TEST_EXPECT_EQ(anch_stopped, 1,
+        "the same susp on the now-ANCHORED group stops the member");
+    TEST_EXPECT_EQ(anch_req, 1, "anchored: stopped");
 
     // ---- (b) the death-side hup+cont fan ----
     __atomic_store_n(&g_js_anchor_release, 0u, __ATOMIC_RELEASE);
@@ -2069,50 +2101,156 @@ void test_proc_job_stop_orphan_rule(void) {
     TEST_YIELD_UNTIL((d = __atomic_load_n(&g_js_anchor_proc,
                                           __ATOMIC_ACQUIRE)) != NULL);
 
-    // c: d's child, its own group in d's session (sid 0), job-stopped.
-    // d anchors c's group (same session, group G != c's group).
-    struct Proc *c = proc_alloc();
-    TEST_ASSERT(c != NULL, "proc_alloc c");
-    c->sid  = d->sid;
-    c->pgid = (u32)c->pid;
-    __atomic_store_n(&c->job_stop_req, 1u, __ATOMIC_RELEASE);
-    c->stop_report_pending = true;
-    proc_test_link_child(d, c);
+    struct Proc *c       = proc_alloc();
+    struct Proc *c2      = proc_alloc();
+    struct Proc *c_run   = proc_alloc();
+    struct Proc *b_dying = proc_alloc();
+    struct Proc *a_run   = proc_alloc();
+    bool made = c && c2 && c_run && b_dying && a_run;
+    if (made) {
+        // c: d's child, its own group in d's session (sid 0), job-stopped.
+        // d anchors c's group (same session, group G != c's group).
+        c->sid  = d->sid;
+        c->pgid = (u32)c->pid;
+        __atomic_store_n(&c->job_stop_req, 1u, __ATOMIC_RELEASE);
+        c->stop_report_pending = true;
+        proc_test_link_child(d, c);
 
-    // c2: also d's child + job-stopped, but a DIFFERENT session -- d never
-    // anchored its group, so d's death must NOT signal it (the
-    // newly-orphaned qualification; a spurious hup here could kill).
-    struct Proc *c2 = proc_alloc();
-    TEST_ASSERT(c2 != NULL, "proc_alloc c2");
-    c2->sid  = 0x5F02u;
-    c2->pgid = (u32)c2->pid;
-    __atomic_store_n(&c2->job_stop_req, 1u, __ATOMIC_RELEASE);
-    proc_test_link_child(d, c2);
+        // c2: also d's child + job-stopped, but a DIFFERENT session -- d never
+        // anchored its group, so d's death must NOT signal it (the
+        // newly-orphaned qualification; a spurious hup here could kill).
+        c2->sid  = 0x5F02u;
+        c2->pgid = (u32)c2->pid;
+        __atomic_store_n(&c2->job_stop_req, 1u, __ATOMIC_RELEASE);
+        proc_test_link_child(d, c2);
+
+        // A running member of c's group, and a second group of d's session
+        // whose one stopped member is dying: a dying Proc takes no stop and
+        // will never need a cont (DEBUG-FS-DESIGN 5g), so its group has no
+        // stopped member and gets no hup+cont -- else its running member dies
+        // of a hup POSIX never sends. c_run is the control one variable away:
+        // its group's stopped member is alive, so it is hupped.
+        c_run->sid  = d->sid;
+        c_run->pgid = c->pgid;
+        proc_test_link_child(d, c_run);
+        b_dying->sid  = d->sid;
+        b_dying->pgid = (u32)b_dying->pid;
+        __atomic_store_n(&b_dying->job_stop_req, 1u, __ATOMIC_RELEASE);
+        __atomic_store_n(&b_dying->group_exit_msg, "killed", __ATOMIC_RELEASE);
+        proc_test_link_child(d, b_dying);
+        a_run->sid  = d->sid;
+        a_run->pgid = b_dying->pgid;
+        proc_test_link_child(d, a_run);
+    }
 
     // The anchor dies: proc_become_zombie_locked runs the orphan rule
     // (before reparenting c/c2 to kproc), then the reap completes.
     __atomic_store_n(&g_js_anchor_release, 1u, __ATOMIC_RELEASE);
     int st = -42;
-    TEST_EXPECT_EQ(wait_pid_for(dpid, 0, &st), dpid, "reap the dying anchor");
-    TEST_EXPECT_EQ(st, 0, "the anchor exited cleanly");
+    int reaped = wait_pid_for(dpid, 0, &st);
 
-    TEST_EXPECT_EQ((int)c->job_stop_req, 0,
-        "the newly-orphaned stopped group was RESUMED (the F8 residual)");
-    TEST_EXPECT_EQ(js_note_count(c, NOTE_NAME_TTY_HUP), 1u,
-        "...with the orphan hup");
-    TEST_EXPECT_EQ(js_note_count(c, NOTE_NAME_TTY_CONT), 1u,
-        "...then the orphan cont");
-    TEST_ASSERT((__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
-                 PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
-        "the uncaught orphan hup armed the terminate latch");
-    TEST_EXPECT_EQ((int)c2->job_stop_req, 1,
-        "a group the dying Proc never anchored keeps its stop");
-    TEST_EXPECT_EQ(js_note_count(c2, NOTE_NAME_TTY_HUP), 0u,
-        "...and got no spurious hup");
+    int  c_req = -9, c2_req = -9;
+    u32  c_hup = 9u, c_cont = 9u, c2_hup = 9u, c_run_hup = 9u, a_run_hup = 9u;
+    bool c_latched = false;
+    if (made) {
+        c_req     = (int)c->job_stop_req;
+        c_hup     = js_note_count(c, NOTE_NAME_TTY_HUP);
+        c_cont    = js_note_count(c, NOTE_NAME_TTY_CONT);
+        c_latched = (__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_TTY_TERMINATE_PENDING) != 0;
+        c2_req    = (int)c2->job_stop_req;
+        c2_hup    = js_note_count(c2, NOTE_NAME_TTY_HUP);
+        c_run_hup = js_note_count(c_run, NOTE_NAME_TTY_HUP);
+        a_run_hup = js_note_count(a_run, NOTE_NAME_TTY_HUP);
+    }
 
     // d's death reparented c/c2 to kproc; the parent-aware unlink cleans up.
     legate_drop_linked(c);
     legate_drop_linked(c2);
+    legate_drop_linked(c_run);
+    legate_drop_linked(b_dying);
+    legate_drop_linked(a_run);
+
+    TEST_ASSERT(made, "proc_alloc c/c2/c_run/b_dying/a_run");
+    TEST_EXPECT_EQ(reaped, dpid, "reap the dying anchor");
+    TEST_EXPECT_EQ(st, 0, "the anchor exited cleanly");
+    TEST_EXPECT_EQ(c_req, 0,
+        "the newly-orphaned stopped group was RESUMED (the F8 residual)");
+    TEST_EXPECT_EQ(c_hup, 1u, "...with the orphan hup");
+    TEST_EXPECT_EQ(c_cont, 1u, "...then the orphan cont");
+    TEST_ASSERT(c_latched, "the uncaught orphan hup armed the terminate latch");
+    TEST_EXPECT_EQ(c2_req, 1,
+        "a group the dying Proc never anchored keeps its stop");
+    TEST_EXPECT_EQ(c2_hup, 0u, "...and got no spurious hup");
+    TEST_EXPECT_EQ(c_run_hup, 1u,
+        "a running member of a group with a live stopped member is hupped");
+    TEST_EXPECT_EQ(a_run_hup, 0u,
+        "a group whose only stopped member is dying has no stopped member: "
+        "its running member got no hup");
+}
+
+void test_proc_dying_takes_no_stop(void);
+
+static bool dts_is_stopped(const char *s) {
+    const char *w = "STOPPED";
+    while (*s && *s == *w) { s++; w++; }
+    return *s == '\0' && *w == '\0';
+}
+
+// A dying Proc takes no new stop (DEBUG-FS-DESIGN 5g; pty_stop.tla's StopJob and
+// StopDebug are guarded ~gflag): neither deliver sets its owner's flag, the job
+// stop latches no report for the parent, and /ctl/procs does not show it
+// STOPPED even with a flag a stop made before the kill left set. Each leg pairs
+// it with a live Proc one variable (group_exit_msg) apart, so a deliver that
+// refused every Proc would fail too.
+void test_proc_dying_takes_no_stop(void) {
+    extern const char *devctl_procs_state_name_for_test(const struct Proc *p);
+    struct Proc *live  = proc_alloc();
+    struct Proc *dying = proc_alloc();
+    TEST_ASSERT(live != NULL && dying != NULL, "proc_alloc live/dying");
+    proc_test_link(live);
+    proc_test_link(dying);
+    __atomic_store_n(&dying->group_exit_msg, "killed", __ATOMIC_RELEASE);
+
+    irq_state_t s = proc_table_lock_acquire();
+    bool live_job  = proc_job_stop_proc(live);
+    bool dying_job = proc_job_stop_proc(dying);
+    bool live_dbg  = proc_debug_stop_deliver(live);
+    bool dying_dbg = proc_debug_stop_deliver(dying);
+    proc_table_lock_release(s);
+    u32  live_jreq  = __atomic_load_n(&live->job_stop_req, __ATOMIC_ACQUIRE);
+    u32  dying_jreq = __atomic_load_n(&dying->job_stop_req, __ATOMIC_ACQUIRE);
+    bool live_rep   = live->stop_report_pending;
+    bool dying_rep  = dying->stop_report_pending;
+    u32  live_dreq  = __atomic_load_n(&live->debug_stop_req, __ATOMIC_ACQUIRE);
+    u32  dying_dreq = __atomic_load_n(&dying->debug_stop_req, __ATOMIC_ACQUIRE);
+
+    // A stop made before the kill leaves the job flag set: the column must
+    // still not call the dying Proc STOPPED.
+    __atomic_store_n(&dying->job_stop_req, 1u, __ATOMIC_RELEASE);
+    bool live_col  = dts_is_stopped(devctl_procs_state_name_for_test(live));
+    bool dying_col = dts_is_stopped(devctl_procs_state_name_for_test(dying));
+
+    s = proc_table_lock_acquire();
+    proc_debug_resume(live);
+    proc_job_cont_proc(live);
+    proc_job_cont_proc(dying);
+    proc_table_lock_release(s);
+    legate_drop_linked(live);
+    legate_drop_linked(dying);
+
+    TEST_ASSERT(live_job, "a live Proc takes the job stop");
+    TEST_EXPECT_EQ((int)live_jreq, 1, "the live Proc's job flag is set");
+    TEST_ASSERT(live_rep, "the live Proc's parent gets its stop report");
+    TEST_ASSERT(!dying_job, "a dying Proc takes no job stop");
+    TEST_EXPECT_EQ((int)dying_jreq, 0, "the dying Proc's job flag stays clear");
+    TEST_ASSERT(!dying_rep, "the dying Proc's parent gets no stop report");
+    TEST_ASSERT(live_dbg, "a live Proc takes the debug stop");
+    TEST_EXPECT_EQ((int)live_dreq, 1, "the live Proc's debug flag is set");
+    TEST_ASSERT(!dying_dbg, "a dying Proc takes no debug stop");
+    TEST_EXPECT_EQ((int)dying_dreq, 0, "the dying Proc's debug flag stays clear");
+    TEST_ASSERT(live_col, "/ctl/procs shows the job-stopped live Proc STOPPED");
+    TEST_ASSERT(!dying_col, "/ctl/procs does not show a dying Proc STOPPED");
 }
 
 void test_proc_exec_drops_image_note_state(void);
@@ -2306,4 +2444,125 @@ void test_proc_rfork_refused_while_terminating(void) {
                    "terminating parent: the rolled-back child's thread is gone");
     TEST_EXPECT_EQ((int)g_strag_kids_after, 0,
                    "terminating parent: no child was published");
+}
+
+// =============================================================================
+// The table walks spend no stack per tree level. Nothing bounds the tree's
+// depth -- PROC_CHILD_MAX caps a parent's children, not its descendants -- so an
+// EL0 chain a few hundred deep carried a recursive walk past the 16 KiB kernel
+// stack into its guard, from any /proc lookup. This chain is thousands deep: a
+// walker spending even 16 bytes a level faults on it.
+// =============================================================================
+
+#define WALK_CHAIN_DEPTH 2048
+
+// In .bss: WALK_CHAIN_DEPTH pointers are a whole kernel stack.
+static struct Proc *g_walk_chain[WALK_CHAIN_DEPTH];
+
+struct walk_chain_seen {
+    int first_pid, last_pid;   // the chain's two ends
+    int first_at, last_at;     // the visit index of each, -1 until seen
+    int visits;
+};
+
+static int walk_chain_cb(struct Proc *p, void *arg) {
+    struct walk_chain_seen *s = arg;
+    if (p->pid == s->first_pid) s->first_at = s->visits;
+    if (p->pid == s->last_pid)  s->last_at  = s->visits;
+    s->visits++;
+    return 0;
+}
+
+void test_proc_walk_deep_chain(void) {
+    int built = 0;
+    struct Proc *parent = kproc();
+    while (built < WALK_CHAIN_DEPTH) {
+        struct Proc *p = proc_alloc();
+        if (!p) break;
+        proc_test_link_child(parent, p);
+        g_walk_chain[built++] = p;
+        parent = p;
+    }
+
+    struct walk_chain_seen s = { -1, -1, -1, -1, 0 };
+    bool found_deepest = false;
+    if (built == WALK_CHAIN_DEPTH) {
+        s.first_pid = g_walk_chain[0]->pid;
+        s.last_pid  = g_walk_chain[built - 1]->pid;
+        (void)proc_for_each(walk_chain_cb, &s);
+        found_deepest = proc_find_by_pid(s.last_pid) == g_walk_chain[built - 1];
+    }
+
+    // Deepest first: proc_free refuses a Proc that still has children.
+    for (int i = built - 1; i >= 0; i--) {
+        proc_test_unlink(g_walk_chain[i]);
+        g_walk_chain[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(g_walk_chain[i]);
+        g_walk_chain[i] = NULL;
+    }
+
+    TEST_EXPECT_EQ(built, WALK_CHAIN_DEPTH, "the whole chain was allocated");
+    TEST_ASSERT(s.first_at >= 0 && s.last_at >= 0,
+                "proc_for_each reached both ends of the chain");
+    TEST_EXPECT_EQ(s.last_at - s.first_at, WALK_CHAIN_DEPTH - 1,
+                   "pre-order visits the chain's links one after another");
+    TEST_ASSERT(found_deepest, "proc_find_by_pid finds the deepest link");
+}
+
+// A small branched tree pins the order and the early exit. A parent's list
+// takes each new child at its FRONT, so linking B then C under A gives A's
+// children as C, B, and the pre-order is A C E B D.
+enum { WALK_A, WALK_B, WALK_C, WALK_D, WALK_E, WALK_NODES };
+
+struct walk_order {
+    int pids[WALK_NODES];
+    int seq[WALK_NODES + 1];   // node indices in visit order (one spare slot)
+    int n;
+    int stop_at;               // the node whose visit returns 7; -1 for none
+};
+
+static int walk_order_cb(struct Proc *p, void *arg) {
+    struct walk_order *w = arg;
+    for (int i = 0; i < WALK_NODES; i++) {
+        if (p->pid != w->pids[i]) continue;
+        if (w->n <= WALK_NODES) w->seq[w->n++] = i;
+        return i == w->stop_at ? 7 : 0;
+    }
+    return 0;
+}
+
+void test_proc_walk_preorder_and_early_exit(void) {
+    struct Proc *t[WALK_NODES] = { 0 };
+    int made = 0;
+    while (made < WALK_NODES && (t[made] = proc_alloc()) != NULL) made++;
+
+    struct walk_order full = { .stop_at = -1 };
+    struct walk_order cut  = { .stop_at = WALK_E };
+    int full_rv = -1, cut_rv = -1;
+    if (made == WALK_NODES) {
+        proc_test_link_child(kproc(), t[WALK_A]);
+        proc_test_link_child(t[WALK_A], t[WALK_B]);
+        proc_test_link_child(t[WALK_A], t[WALK_C]);
+        proc_test_link_child(t[WALK_B], t[WALK_D]);
+        proc_test_link_child(t[WALK_C], t[WALK_E]);
+        for (int i = 0; i < WALK_NODES; i++) full.pids[i] = cut.pids[i] = t[i]->pid;
+        full_rv = proc_for_each(walk_order_cb, &full);
+        cut_rv  = proc_for_each(walk_order_cb, &cut);
+        // Leaves first, so no Proc is unlinked while it still has children.
+        static const int unlink_order[WALK_NODES] = { WALK_D, WALK_E, WALK_B, WALK_C, WALK_A };
+        for (int k = 0; k < WALK_NODES; k++) proc_test_unlink(t[unlink_order[k]]);
+    }
+    for (int i = 0; i < made; i++) {
+        t[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(t[i]);
+    }
+
+    TEST_EXPECT_EQ(made, WALK_NODES, "the tree was allocated");
+    TEST_EXPECT_EQ(full_rv, 0, "a walk no callback stops returns 0");
+    TEST_EXPECT_EQ(full.n, WALK_NODES, "the walk visits each node once");
+    static const int want[WALK_NODES] = { WALK_A, WALK_C, WALK_E, WALK_B, WALK_D };
+    for (int k = 0; k < WALK_NODES; k++)
+        TEST_EXPECT_EQ(full.seq[k], want[k], "pre-order is A C E B D");
+    TEST_EXPECT_EQ(cut_rv, 7, "the stopping callback's value is what the walk returns");
+    TEST_EXPECT_EQ(cut.n, 3, "the walk stops at E: A, C, E, and neither B nor D");
 }

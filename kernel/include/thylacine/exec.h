@@ -541,6 +541,13 @@ int exec_stage_env(struct Proc *p, char **data_out, u32 *len_out,
 __attribute__((noreturn))
 extern void userland_enter(u64 entry_pc, u64 user_sp);
 
+// The birth hold's first entry (asm in arch/arm64/vectors.S; DEBUG-FS-DESIGN
+// 5f): the same (entry_pc, user_sp) contract, but it builds the EL0 frame and
+// takes the EL0-return tail over it, parking at the birth park while the child
+// is held. Only a SPAWN_DEBUG_HELD child's thunk calls it. Never returns.
+__attribute__((noreturn))
+extern void userland_enter_held(u64 entry_pc, u64 user_sp);
+
 // #107 test observable: the (kernel VA, length) span the eager exec paths last
 // asked the arch layer to make instruction-coherent, plus the monotonic COUNT
 // of those requests. Emulated targets model a coherent I-cache, so a stale-

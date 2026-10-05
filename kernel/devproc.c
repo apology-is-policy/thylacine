@@ -964,6 +964,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     p->debug_exitkill = false;                      // the mark dies with the slot
     hwdebug_bp_clear_all(p->debug_hw);              // 8a-2b-1: a dead debugger's breakpoints are disarmed (else the orphaned target re-traps forever)
     hwdebug_wp_clear_all(p->debug_hw);              // 8a-2b-3: likewise its watchpoints (else the orphaned target re-traps on the watched access forever)
+    proc_debug_cancel_steps_locked(p);              // and its pending step (else the next attacher gets a stop it never asked for)
     if (exitkill && p->state == PROC_STATE_ALIVE) {
         // 5d EXITKILL (I-39 die-with-launcher; DEBUG-FS §5d): a debugger-LAUNCHED
         // target dies with its launcher -- the Plan 9 NoStrand-resume would orphan it
@@ -989,10 +990,12 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
         proc_group_terminate(p, "debugger exited");
         // StopImpliesOwned (debug_stop.tla; self-audit SA-1): clear the stop flag +
         // focus so they do not outlive the now-NULL owner (the spec's exitkill
-        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate so gflag is the
-        // wake the parked threads act on -- no resume-window; cosmetic cleanup of a
-        // dying target (matches proc_debug_resume's clears minus the wake, which the
-        // terminate's cascade already did).
+        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate, which is what
+        // keeps it from opening a resume window: a parked thread wakes on the
+        // terminate's cascade and dies at its loop top, and a thread mid-iteration
+        // that reads this clear sees the terminate at el0_stop_park's re-check after
+        // its wake condition (RELEASE here and in the CAS, ACQUIRE there). Matches
+        // proc_debug_resume's clears minus the wake, which the cascade already did.
         __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
     } else {
@@ -1401,8 +1404,11 @@ static bool devproc_dump_sealed_against(const struct Proc *caller,
 // kernel's own execution state (kstack) belong to NOTRACE, through
 // devproc_debug_authorized. One predicate, asked through devproc_read_sealed at every
 // read site -- the dispatch and each walk with its own read path -- so a file is
-// classified here or not at all. cmdline carries no argv yet; it is in the set so
-// that argv arrives sealed. `name` -- the exe path's basename, stamped at exec -- is
+// classified here or not at all. cmdline carries no argv yet, and its place here
+// seals argv only if argv is rendered from a per-Proc kernel copy, as environ is:
+// argv read off the stack would read through a vfork child sharing that stack
+// under its own, unsealed Proc, unless cmdline also joins mem and maps in
+// devproc_read_sealed. `name` -- the exe path's basename, stamped at exec -- is
 // ledger: status, sched and /ctl/procs carry it, as Linux keeps a non-dumpable
 // process's comm public.
 static bool devproc_kind_is_image(u32 kind) {
@@ -1439,7 +1445,8 @@ static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *ta
     // never reached -- hands out the sealed image byte for byte. The rest
     // (cmdline, ns, exe, cwd, environ and the register files) are per-Proc or
     // per-Thread state that no sharer holds a copy of, so for those the target's
-    // own bit is the whole answer.
+    // own bit is the whole answer -- cmdline only while it renders no argv off the
+    // shared stack (devproc_kind_is_image).
     // PRECONDITION for the join below: g_proc_table_lock is held. Every caller
     // satisfies it today -- the read dispatch and each walk with its own read
     // path all run inside proc_for_each -- and devproc_extract_authorized, the
@@ -2243,6 +2250,15 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         // proc_free) so the ctx-switch reader never derefs freed memory.
         hwdebug_bp_clear_all(target->debug_hw);
         hwdebug_wp_clear_all(target->debug_hw);    // 8a-2b-3: likewise the watchpoints
+        // A pending step dies with the slot, as at a whole-Proc stop: left
+        // armed, the head's step trap would stop the target for whoever
+        // attached next (a spurious step EC after this is benign).
+        proc_debug_cancel_steps_locked(target);
+        // 5f: an explicit detach is the debugger's choice to run the target, so
+        // it releases a birth hold too (before the resume's wake). The IMPLICIT
+        // release -- the ctl fd closing without detach -- deliberately does not
+        // (devproc_debug_release_cb): the hold is the spawner's, not the slot's.
+        proc_birth_hold_release_locked(target);
         proc_debug_resume(target);                 // 8a-1b-beta: clear the stop + wake parked threads (ReleaseSlot -> NoStrand)
         d->result = 1;
     } else {
@@ -2281,8 +2297,20 @@ static int devproc_runctl_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != rc->target_pid) return 0;   // keep walking
     if (target->debug_owner != rc->ctl) { rc->result = -1; return 1; }  // not the slot owner
     switch (rc->op) {
-        case DBG_RC_STOP:     proc_debug_stop_deliver(target); break;
-        case DBG_RC_START:    proc_debug_resume(target);       break;
+        // DEBUG-FS-DESIGN 5f, the birth hold. STOP converts a held target:
+        // deliver first, then convert, so the birth park -- which reads the
+        // hold before the stop flags -- always sees one of them and the child
+        // never runs in between (the conversion refuses without a pending stop,
+        // so the reverse order leaves the child held). START releases: clear
+        // first, so the resume's wake finds the hold already gone.
+        case DBG_RC_STOP:
+            proc_debug_stop_deliver(target);
+            proc_birth_hold_convert_locked(target);
+            break;
+        case DBG_RC_START:
+            proc_birth_hold_release_locked(target);
+            proc_debug_resume(target);
+            break;
         case DBG_RC_WAITSTOP: break;   // no mutation; the block is outside the lock
         // 5d EXITKILL (I-39 die-with-launcher): mark the target killed-on-debugger-
         // death. Just records intent (a plain store under g_proc_table_lock,
@@ -2456,8 +2484,32 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
     struct devproc_stopscan_ctx *s = (struct devproc_stopscan_ctx *)arg;
     if (target->pid != s->target_pid) return 0;    // keep walking
     if (target->debug_owner != s->ctl) { s->state = 2; return 1; }  // slot released -- abort the wait
-    s->state = devproc_all_threads_parked(target) ? 1 : 0;   // gamma-shared "fully parked" predicate
+    // A dying target is gone to the wait: its stop will never take (a dying
+    // group is never asked to park, proc_stop_requested) and the stopped-only
+    // surface refuses it (devproc_target_fully_stopped). Its last thread may
+    // still be closing its handles, for as long as a 9P server takes to
+    // answer, so waiting for it to read as parked would be waiting for the exit.
+    if (__atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        s->state = -1;
+        return 1;
+    }
+    // A DEBUG stop is what stop and waitstop wait for. Parked threads alone may
+    // be a job stop or a birth hold, and neither opens the stopped-only surface
+    // (devproc_target_fully_stopped reads debug_stop_req for the same reason),
+    // so reporting them as stopped hands the debugger a refusal on its next read.
+    s->state = (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+                devproc_all_threads_parked(target)) ? 1 : 0;   // + the gamma-shared "fully parked" predicate
     return 1;
+}
+
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): one pass of the scan stop and waitstop
+// poll, since waitstop itself would block on a target that never stops.
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl) {
+    struct devproc_stopscan_ctx s = { .target_pid = pid, .ctl = ctl, .state = -1 };
+    proc_for_each(devproc_stopscan_cb, &s);
+    return s.state;
 }
 
 // tsleep cond for the stop-wait poll: never wakes on the cond (only the deadline
@@ -2474,7 +2526,7 @@ static int devproc_debug_poll_never(void *arg) { (void)arg; return 0; }
 // (single-waiter -- only the caller ever sleeps here); the deadline is the sole
 // wake source. tsleep is death-interruptible, so a debugger killed while waiting
 // unwinds (and its ctl-fd close then resumes the target). Returns +1 stopped,
-// 0 gone / slot-released, -1 caller death-interrupted.
+// 0 gone (reaped or dying) / slot-released, -1 caller death-interrupted.
 #define DEBUG_STOP_POLL_NS  (2ull * 1000ull * 1000ull)   // 2 ms between scans
 static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
     struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
@@ -2757,31 +2809,75 @@ static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off) {
 // =============================================================================
 
 struct devproc_waitscan_ctx {
-    int          target_pid;
-    struct Proc *caller;
-    int          state;   // -2 denied (I-39/kproc), -1 gone/exited, 0 not-yet, 1 stopped
+    int           target_pid;
+    struct Proc  *caller;
+    struct Spoor *ctl;     // step: the slot owner's ctl; /proc/<pid>/wait: NULL (not slot-bound)
+    int           state;   // -2 denied (I-39/kproc), -1 gone/exited, 0 not-yet, 1 stopped, 2 slot released
 };
 static int devproc_waitscan_cb(struct Proc *target, void *arg) {
     struct devproc_waitscan_ctx *w = (struct devproc_waitscan_ctx *)arg;
     if (target->pid != w->target_pid) return 0;   // keep walking -> not found -> stays -1
+    // A step's wait ends when its slot is released: a detach written on the
+    // same ctl by another thread resumes the target and cancels its step, so
+    // it would never re-stop for it. A close of the ctl fd cannot release the
+    // slot meanwhile: the step's own write holds the Spoor (#844), and the
+    // close hook runs at the last clunk, after the step returns.
+    if (w->ctl && target->debug_owner != w->ctl)      { w->state = 2; return 1; }
     if (target == kproc())                            { w->state = -2; return 1; }  // undebuggable
     if (!devproc_debug_authorized_locked(w->caller, target)) { w->state = -2; return 1; }  // I-39
     if (devproc_read_sealed(w->caller, target, PQS_WAIT)) { w->state = -2; return 1; }
     if (target->state != PROC_STATE_ALIVE)            { w->state = -1; return 1; }  // exiting/zombie -> "exited"
+    // A step waits for a re-stop, and a dying target never stops: it is gone
+    // to the step as to stop and waitstop (devproc_stopscan_cb), so the step
+    // does not wait out the exit close. /proc/<pid>/wait waits for the exit.
+    if (w->ctl && __atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        w->state = -1;
+        return 1;
+    }
     w->state = devproc_target_fully_stopped(target) ? 1 : 0;   // debug_stop_req + all parked
     return 1;
 }
 
-// Block until a wait event. Returns +1 stopped, 0 exited/gone, -1 denied /
-// caller death-interrupted. Same bounded-poll cadence as devproc_debug_wait_stopped.
-static int devproc_wait_block(int pid, struct Proc *caller) {
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): one pass of the scan /proc/<pid>/wait
+// (ctl NULL) and step (the slot owner's ctl) poll.
+int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl);
+int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl) {
+    struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .ctl = ctl,
+                                      .state = -1 };
+    proc_for_each(devproc_waitscan_cb, &w);
+    return w.state;
+}
+
+// The wait's verdict on one scan state: +1 stopped, 0 exited/gone or (a step's
+// wait) its slot released, -1 denied, DEVPROC_WAIT_POLL for a live target not
+// yet stopped (re-scan).
+enum { DEVPROC_WAIT_POLL = 2 };
+static int devproc_wait_verdict(int state) {
+    if (state == 1)                return 1;    // stopped
+    if (state == -1 || state == 2) return 0;    // exited/gone, or the step's slot released
+    if (state == -2)               return -1;   // denied (I-39 / kproc)
+    return DEVPROC_WAIT_POLL;                   // 0: ALIVE, not yet stopped
+}
+
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): the verdict for one scan state.
+int devproc_wait_verdict_for_test(int state);
+int devproc_wait_verdict_for_test(int state) {
+    return devproc_wait_verdict(state);
+}
+
+// Block until a wait event. Returns +1 stopped, 0 exited/gone or (a step's
+// wait, ctl set) slot released, -1 denied / caller death-interrupted. Same
+// bounded-poll cadence as devproc_debug_wait_stopped.
+static int devproc_wait_block(int pid, struct Proc *caller, struct Spoor *ctl) {
     struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
     for (;;) {
-        struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .state = -1 };
+        struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .ctl = ctl,
+                                          .state = -1 };
         proc_for_each(devproc_waitscan_cb, &w);
-        if (w.state == 1)  return 1;    // stopped
-        if (w.state == -1) return 0;    // exited/gone
-        if (w.state == -2) return -1;   // denied (I-39 / kproc)
+        int v = devproc_wait_verdict(w.state);
+        if (v != DEVPROC_WAIT_POLL) return v;
         // state 0: ALIVE, not yet stopped -- sleep ~2 ms, then re-scan.
         u64 deadline = timer_now_ns() + DEBUG_STOP_POLL_NS;
         if (tsleep(&pollr, devproc_debug_poll_never, NULL, deadline) == TSLEEP_INTR)
@@ -2796,7 +2892,7 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
 
-    int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc);
+    int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc, NULL);
     if (ev < 0) return -1;   // denied or caller death-interrupted
     const char *msg = ev ? "stopped\n" : "exited\n";
 
@@ -2922,7 +3018,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // resumes from sleep(), so all_threads_parked reads "still parked" before
         // the step even runs. fully_stopped's debug_stop_req==0 gate rejects that
         // window and waits for the real re-stop.
-        return (devproc_wait_block(pid, t->proc) >= 0) ? n : -1;
+        return (devproc_wait_block(pid, t->proc, c) >= 0) ? n : -1;
     }
 
     if (v == CTL_VERB_HWBREAK || v == CTL_VERB_HWRMBREAK) {

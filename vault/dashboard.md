@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 90
+## Open seams: 89
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -65,7 +65,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-console-chrome-on-handoff]] (sub-tapestryd)
 - [[seam-cwg-parenthetical-refuted]] (sub-kernel-boot-sequence)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
-- [[seam-devcap-plain-caps-read]] (sub-kernel-caps)
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
@@ -133,12 +132,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-05 [[chg-2026-10-05-stay-stopped]] — Stay stopped: a stopped thread keeps its stop, and death wins in the exit close
+- 2026-09-30 [[chg-2026-09-30-held-launch]] — The held launch: ambush spawns held where the kernel has the hold
+- 2026-09-30 [[chg-2026-09-30-image-slide]] — The image slide: a deck names a picture, and view shows it
+- 2026-09-30 [[chg-2026-09-30-kernel-chunk]] — The kernel chunk: the trusted episode's lock re-checks, and walks without recursion
+- 2026-09-29 [[chg-2026-09-29-beacon-aside]] — A Markdown block quote is a Beacon aside -- checked by the manual, boxed where the console wraps, framed by Halcyon
+- 2026-09-29 [[chg-2026-09-29-birth-hold]] — The birth hold: a spawned child parked before its first instruction
+- 2026-09-29 [[chg-2026-09-29-i47-close]] — I-47 ENFORCED: a picture laid once per block, and a token that routes rather than guards
 - 2026-09-29 [[chg-2026-09-29-layout-notice]] — A session's layout notice is no longer lost with the surface that carried it
-- 2026-09-29 [[chg-2026-09-29-ns-session-root-names]] — /proc/<pid>/ns names a 9P session root by the file its session came over -- a display-only origin on the root's dev9p priv
-- 2026-09-29 [[chg-2026-09-29-session-workspaces]] — A session's workspaces are the session's: the owner stamp, fresh panes that wait to be asked, the kept last pane, the departure and the takeover
-- 2026-09-29 [[chg-2026-09-29-tile-selection-bands]] — A session tile draws its whole selection, as the console renderer does
-- 2026-09-28 [[chg-2026-09-28-f2-share-move]] — A backgrounded leaf is transparent to a newcomer's share and to a move: the mean over the divided siblings, the nearest visible neighbour
-- 2026-09-28 [[chg-2026-09-28-fl1-sync-output]] — FL-1: a synchronized frame (DEC ?2026) holds the paint -- the vt tracks and reports the mode, the kaua seam carries it as sync_begin/sync_end, halcyond and aurora hold the paint, and lantern writes one frame per slide
-- 2026-09-28 [[chg-2026-09-28-lr1-la-realm]] — LR-1: a remote mount says so -- the declaration rides the 9P session, /proc/<pid>/ns ends its lines in remote, and ls/stat/realm/ns read it
-- 2026-09-25 [[chg-2026-09-25-b1d-dlopen]] — B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness
 <!-- generated:end -->

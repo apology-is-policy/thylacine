@@ -21,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-09-30
 ---
 ## Purpose
 
@@ -193,6 +193,40 @@ stdout; the control was measured — a perturbed context line applies under
 `-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
 fuzz-strict.
 
+**The spawn-args mirror check runs beside it (2026-09-29).**
+`tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the
+dispatcher, for the same one-chokepoint reason: each target builds a different
+copy of `struct sys_spawn_args` (libt, libthyla-rs, the pouch patch, and the Go
+fork when `$GOFORK` has one), so a check inside any one target would miss the
+others. It lays the record out from the kernel header, compares every copy
+field by field, and proves it can fail before it passes. It is sub-second and
+fatal, with no skip switch. Like the hunk check it refuses rather than warns,
+because the failure it guards against is silent: a copy left behind when the
+kernel record grows passes its own size assertion while the kernel reads past
+it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
+
+**Both ambush builds pass `-tags thylacine_held` (2026-09-30).** The Go
+fork's `SysProcAttr.DebugHeld` sets the spawn record's `debug_flags`, and
+ambush's `Launch` sets it only in a build that carries the tag. This tree's
+kernel has the birth hold, so both ambush builds pass the tag from one
+variable, `AMBUSH_TAGS`: `build_ambush`'s ramfs copy for `/ambush-probe`, and
+the `/goroot/bin` copy that nora's `:debug` runs. A launched target stays
+parked until the debugger's stop ([[sub-kernel-birth-hold]]). Each build checks
+both ends of the tag. `ambush_fork_check` asks `go list` which of the pair
+`held_on_thylacine.go` / `held_off_thylacine.go` the tagged build compiles, and
+refuses unless it is the held one, declaring `launchHeld = true` (Go ignores a
+tag no file mentions, so an old fork, or one whose file no longer answers to
+the tag, would build the running-spawn `Launch` under a log line saying held).
+`ambush_artifact_check` reads the tags back from the binary with `go version
+-m`, whose build info survives the strip. Whether `Launch` still acts on the
+constant is behaviour, which `/ambush-probe` checks at the entry. The ramfs
+also carries `/bin/ambush-notelf`, an executable that is not an ELF image, for
+stage D's abandoned-launch leg. A
+kernel without the hold refuses the flag, and both forks are shared by trees
+whose kernels differ, so the choice lives here, in the file versioned with the
+kernel, rather than in the fork or at run time (DELVE-PORT-DESIGN section 7 (b)).
+The tag goes once every tree carries the hold.
+
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit
 target, never from `all`, so a rebuilt graphics binary does not reach the
@@ -228,7 +262,12 @@ configuration at `/lib/dosbox-x/dosbox-x.conf`, plus optional Duke3D and Tomb
 Raider fixture stages. Emulator opt-out also skips its game data. Missing
 external C++ tooling is announced as a skipped build, not emulator coverage.
 View, Gallery, Manual, Nocturne and their probes are curated into the native
-ramfs binary list. `configs/ci.config` selects a serial shell for existing
+ramfs binary list. Under either Halcyon lever (`THYLACINE_HALCYON` or
+`THYLACINE_HALCYON_SESSION`) the pool also carries the inline-media fixtures
+from `usr/view/testdata`, each readback-verified: `/test.png` and `/test.jpg`
+(the 640x400 witness card) and, since 2026-09-29, `/test-large.png` (the same
+card at 2048x1536, which a pane shows only after `view` reduces it to the
+pane's limit). `configs/ci.config` selects a serial shell for existing
 interactive scenarios; the default profile starts the Halcyon session.
 Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
 

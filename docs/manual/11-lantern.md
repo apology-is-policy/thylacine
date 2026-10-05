@@ -1,13 +1,13 @@
 # Presentations with Lantern
 
-`lantern` presents a directory of slides one slide at a time. Each slide is a
-Markdown file written in the subset the Operator's Manual uses, and a manifest
-named `slides.toml` lists the slides in the order they are shown. In a Halcyon
-tile a slide is drawn as a formatted document, with its headings, lists and
-tables set in the tile's typography; on a serial console the same text appears
-without formatting; and when standard output or standard input is not a
-terminal, lantern writes every slide once, in order, without reading the
-keyboard.
+`lantern` presents a directory of slides one slide at a time. A slide is a
+Markdown file written in the subset the Operator's Manual uses, or a PNG or
+JPEG picture, and a manifest named `slides.toml` lists the slides in the order
+they are shown. In a Halcyon tile a slide is drawn as a formatted document,
+with its headings, lists and tables set in the tile's typography, and a picture
+slide shows the picture; on a serial console the same text appears without
+formatting; and when standard output or standard input is not a terminal,
+lantern writes every slide once, in order, without reading the keyboard.
 
 Use lantern to give a talk from a Thylacine display, to rehearse one, or to
 check a deck before presenting it. Lantern controls which slide is shown; the
@@ -20,7 +20,8 @@ another machine over a Haul mount.
 
 ### Present the demo deck
 
-Every image installs a three-slide deck at `/deck`. In a Halcyon shell, run:
+Every image installs a four-slide deck at `/deck`, whose last slide is a
+picture. In a Halcyon shell, run:
 
 ```sh
 lantern /deck
@@ -28,7 +29,7 @@ lantern /deck
 
 Lantern clears the tile and shows the first slide at its top, followed by a
 footer that gives the deck's title and the slide's position, such as
-`Beacon slides  ·  1 / 3`. Space, the right arrow or `n` shows the next slide,
+`Beacon slides  ·  1 / 4`. Space, the right arrow or `n` shows the next slide,
 and the left arrow or `p` shows the previous one. The caret is hidden while a
 slide is on the screen. `q` ends the presentation: the last slide stays on the
 screen, and the shell prompt returns below it.
@@ -65,12 +66,28 @@ title = "Quarterly review"
 slides = ["01-title.md", "02-results.md", "03-plans.md"]
 ```
 
-A slide begins with a title line such as `# Results`. After the title it can
-contain headings, paragraphs, bulleted and numbered lists, tables and code
-blocks, with code spans and emphasis in the text. Links, images, block quotes,
-raw HTML and nested lists are rejected, exactly as they are in a manual
-section. The manual's rule that a section's title does not repeat the number in
-its file name does not apply to slides. See Manual.
+A text slide begins with a title line such as `# Results`. After the title it
+can contain headings, paragraphs, bulleted and numbered lists, tables, code
+blocks and block quotes, with code spans and emphasis in the text. Links,
+images, raw HTML and nested lists are rejected, exactly as they are in a manual
+section; a picture is a slide of its own, as Show a picture describes.
+The manual's rule that a section's title does not repeat the number in its file
+name does not apply to slides. See Manual.
+
+A block quote sets a passage apart. Each of its lines begins with `>`, and it
+holds paragraphs and lists. In a Halcyon tile the passage is framed, on a
+console that reports its width it is drawn inside a box, and through a pipe it
+is plain text. A slide whose content after its title is one block quote is
+therefore shown as a boxed slide:
+
+```md
+# Results
+
+> Revenue rose in every region.
+>
+> - Orders shipped within a day: 98 percent
+> - Returns: down by a third
+```
 
 Check a deck before presenting it:
 
@@ -89,6 +106,37 @@ Slides are read from their files each time they are drawn. An edit saved
 during a rehearsal therefore appears the next time its slide is shown, or at
 once after Ctrl-L. If an edit makes an open slide invalid, the slide shows the
 reasons in place of its content and the presentation continues.
+
+### Show a picture
+
+A slide can be a PNG or JPEG picture instead of Markdown. Put the file in the
+deck's directory and name it in the manifest like any other slide:
+
+```toml
+slides = ["01-title.md", "02-architecture.png", "03-plans.md"]
+```
+
+In a Halcyon session tile the slide shows the picture, followed by the footer.
+A picture larger than the tile accepts is reduced first, keeping its aspect
+ratio, as View describes. On a serial console, through a pipe, and in any
+other terminal, the slide shows the picture's file name in its place, set
+apart as a block quote is:
+
+```text
+Picture: 02-architecture.png
+```
+
+When a tile cannot show the picture, the slide gives the reason below the
+name, and the presentation continues. `lantern --check` decodes every picture
+with `view --check`, so a picture that cannot be shown is reported before the
+talk:
+
+```text
+lantern: 02-architecture.png: not a PNG or JPEG picture
+```
+
+Lantern never decodes a picture itself: `view` checks it and places it on the
+slide, each time in a process of its own. See View.
 
 ### Present a deck from another machine
 
@@ -177,12 +225,26 @@ begins a comment. The file is at most 64 KiB and sets only two keys:
 Every other key is refused, including `scale`, `theme` and `font`, so a deck
 cannot change the display it is shown on. A `[table]` header, a key set twice,
 a slide named twice and a slide name that contains `/` or `\`, begins with `.`
-or `-`, or does not end in `.md` are refused as well. A refusal names the
-manifest and the line:
+or `-`, or does not end in `.md`, `.png`, `.jpg` or `.jpeg` are refused as
+well. The ending is matched exactly, so `photo.PNG` is refused. A refusal
+names the manifest and the line:
 
 ```text
 lantern: /tmp/talk/slides.toml:2: a manifest sets only 'slides' and, optionally, 'title'
 ```
+
+The manifest and every slide must be regular files in the deck's directory. A
+symbolic link is refused, even one that names another file of the same deck,
+so that a deck written by someone else cannot show a file from outside its
+directory, such as one of the presenter's own:
+
+```text
+lantern: /tmp/talk/notes.md: a link; a deck's files are files in its directory
+```
+
+The deck's directory, and each directory above it, is used as named, links
+included. On a Haul mount, a link in that path is set by the machine that
+serves it and can lead to another directory on this one.
 
 ## Technical Details
 
@@ -203,7 +265,8 @@ pipe.
 A terminal renders Beacon when it is a Halcyon tile or the console under a
 renderer that advertises the rich tier. The decision uses the same rules as
 `manual`: the `BEACON` environment variable, the device class of standard
-output, and the `--beacon` option.
+output, and the `--beacon` option. A picture slide shows its picture only in a
+Halcyon session tile; in every other case it shows its file name.
 
 ### Clearing the tile
 
@@ -228,6 +291,23 @@ within that time. The limit keeps a tile from
 waiting indefinitely for a closing mark that never comes. A terminal that does
 not recognise the mode ignores the marks.
 
+### Picture slides
+
+A picture slide is placed before its frame is written. Lantern runs
+`view --embed` with the picture's file as its standard input and reads back
+the reference that `view` writes, then writes the clear, the reference and the
+footer in one write, as it does a text slide. The picture is therefore decoded
+and sent while the previous slide is still on the screen, and a slow decode
+delays the change instead of showing a blank slide. If `view` writes nothing
+and does not exit for 30 seconds, lantern stops it and shows the file name
+with that reason.
+
+Lantern runs `view` while presenting only when the terminal renders Beacon
+richly. In a Halcyon session tile the picture is shown. On a console that
+Halcyon renders, which has no channel for placed pictures, `view` refuses at
+once, and the slide shows the file name with that reason. In every other
+terminal lantern shows the file name without running `view`.
+
 ### Keyboard input
 
 When the shell starts lantern, it recognises the program by name and switches
@@ -240,7 +320,8 @@ this is why Escape does not end a presentation.
 ### Checking and memory
 
 Lantern reads the manifest, then reads and checks every slide before it shows
-the first, and keeps no slide in memory once it has been checked. While a deck
+the first, and keeps no slide in memory once it has been checked. A picture is
+checked by `view --check`, which decodes it in its own process. While a deck
 is open, lantern holds only the slide being shown, whatever the number of
 slides, and reads it again from its file each time it is drawn. This is what
 makes an edit, local or remote, visible at the next redraw.

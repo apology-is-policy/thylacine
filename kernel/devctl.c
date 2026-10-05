@@ -142,12 +142,22 @@ static const char *state_name(enum proc_state s) {
 // The DEBUG stop (debug_stop_req, the attach-gated debugger stop) is deliberately
 // NOT surfaced here -- it is the debugger's private I-39 view, not a job-control
 // state a monitor should expose. job_stop_req is read atomically (a cross-Proc
-// reader holds g_proc_table_lock via proc_for_each but no per-Proc lock).
+// reader holds g_proc_table_lock via proc_for_each but no per-Proc lock). A
+// dying Proc is not stopped (DEBUG-FS-DESIGN 5g): its last thread runs its exit
+// close whatever stop it had, so it shows its own state.
 static const char *procs_state_name(const struct Proc *p) {
     if (p->state == PROC_STATE_ALIVE &&
-        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0)
+        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL)
         return "STOPPED";
     return state_name(p->state);
+}
+
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): the STATE column's word for `p`.
+const char *devctl_procs_state_name_for_test(const struct Proc *p);
+const char *devctl_procs_state_name_for_test(const struct Proc *p) {
+    return procs_state_name(p);
 }
 
 // =============================================================================

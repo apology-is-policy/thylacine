@@ -100,9 +100,16 @@ sleeps on their OWN rpc rendez. A departing reader hands the role off
 an rpc whose thread is parked for a stop (`rpc->stop_parked`, which the thread
 sets itself in `client_debug_stop_park` under `c->lock` for exactly the park's
 span; the Proc's stop flags are not read, because a resume-then-re-stop flips
-them while the thread never runs) so the role lands on a runnable survivor, and skipping an rpc still `sending` (registered, but its
-thread is still getting a frame onto the wire: the #349 send park, or a flush's
-staging) — with `be_reader` as a pure advisory wake-hint (election
+them while the thread never runs) so the role lands on a runnable survivor, and
+skipping an rpc still `sending` (registered, but its thread is still getting a
+frame onto the wire: the #349 send park, or a flush's staging). A dying thread
+is never stop-parked: `client_stop_pending` asks `proc_stop_requested`, which
+answers false once the group's exit message is published, so it does not park,
+and a park its group's death finds ends at once and clears the flag. Its op
+takes the role like any other: `client_wait` bounces the role on if the thread
+is dying outside its exit close, and a closer in its exit close keeps it and
+reads its own reply (DEBUG-FS-DESIGN 5g). The handoff sets `be_reader` as a
+pure advisory wake-hint (election
 is gated solely by `reader_active` under the lock, so two readers are
 impossible regardless of how many carry the hint). A sending thread sleeps on
 the send list, where neither the handoff's wake nor its `be_reader` check
@@ -553,10 +560,13 @@ this surface):
   resume races it); DeathWinsOverStop at every branch.
 - **Role-release completeness**: all FOUR `reader_active` sites must handle
   stop/death without stranding the role or the session; the handoff must
-  skip owners with a stop pending (debugger or job control) AND rpcs still
-  `sending`, AND re-hand-off on a
-  DIED return gated on `be_reader`. A new place a registered rpc's thread can
-  sleep outside `client_wait` must set `sending`.
+  skip an rpc parked for a stop (`stop_parked`, set only inside
+  `client_debug_stop_park`; a dying thread never parks, and
+  `client_stop_pending` and the park it enters must agree, or the loops that
+  park on it spin) AND rpcs still `sending`, AND re-hand-off on a DIED return
+  gated on `be_reader`; a handoff that designates nobody wakes the role-waiter
+  list. A new place a registered rpc's thread can sleep outside `client_wait`
+  must set `sending`.
 - **Park machinery**: every park on shared-reachable state uses the
   multi-waiter list ([[haz-single-waiter-rendez]]); register-then-observe
   under the documented lock order; no stale hook survives a return.

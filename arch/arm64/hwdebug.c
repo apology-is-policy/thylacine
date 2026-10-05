@@ -333,9 +333,11 @@ bool hwdebug_breakpoint_from_el0(u64 elr) {
         // regs.pc == this bp VA (ELR = the bp'd instruction, not yet executed).
         if (proc_debug_fault_stop(p))
             return true;
-        // The debugger detached in the race window (no owner): treat this as a
-        // benign STALE arm -- disable this CPU's debug regs and resume, so the
-        // instruction re-executes untrapped and the detached target runs free.
+        // The debugger detached in the race window (no owner), or the Proc is
+        // dying and takes no new stop: treat this as a benign STALE arm --
+        // disable this CPU's debug regs and resume, so the instruction
+        // re-executes untrapped and the detached target runs free (a dying one
+        // dies at its tail's die check first).
         hwdebug_disable_this_cpu();
         return true;
     }
@@ -375,12 +377,13 @@ bool hwdebug_singlestep_from_el0(u64 elr) {
     // proc_debug_fault_stop (not the raw deliver) gates the re-stop on a live
     // debugger under g_proc_table_lock -- SA-1, symmetric with the bp/wp arms. On a
     // live owner it re-stops (the thread re-parks at the tail). If the debugger
-    // detached in the race window it no-ops (returns false): the step loaded MDE +
-    // the bp table too (hwdebug_load_debug with ss=true), NOT just SS, so disable
-    // ALL of this CPU's debug regs (F3: symmetric with the bp/wp detached arms --
-    // clearing only SS would leave MDE + a stale bp loaded until the next fire /
-    // switch-out) and let the thread run free -- the right outcome for a detached
-    // target.
+    // detached in the race window, or the Proc is dying (it takes no new stop, and
+    // the thread dies at the tail's die check), it no-ops (returns false): the step
+    // loaded MDE + the bp table too (hwdebug_load_debug with ss=true), NOT just SS,
+    // so disable ALL of this CPU's debug regs (F3: symmetric with the bp/wp
+    // detached arms -- clearing only SS would leave MDE + a stale bp loaded until
+    // the next fire / switch-out) and let the thread run free -- the right outcome
+    // for a detached target.
     if (!proc_debug_fault_stop(p))
         hwdebug_disable_this_cpu();
     return true;
@@ -411,8 +414,9 @@ bool hwdebug_watchpoint_from_el0(u64 elr, u64 far) {
         // the step] or `hwrmwatch`es first).
         if (proc_debug_fault_stop(p))
             return true;
-        // Detached in the race window (no owner) -> benign STALE, symmetric with
-        // the bp + the wp_count==0 arms below: disable this CPU + resume.
+        // Detached in the race window (no owner), or dying (no new stop) ->
+        // benign STALE, symmetric with the bp + the wp_count==0 arms below:
+        // disable this CPU + resume.
         hwdebug_disable_this_cpu();
         return true;
     }

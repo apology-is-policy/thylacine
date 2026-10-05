@@ -3150,6 +3150,213 @@ mod tests {
         assert_eq!(r1.1, row1.y, "row 1's rect is row 1's laid line");
     }
 
+    /// A code block with a blank line inside it is ONE pre on the live grid:
+    /// the blank row was never written, so it carries no tag of its own.
+    #[test]
+    fn a_blank_line_inside_a_pre_stays_inside_it_on_the_live_grid() {
+        // A blank line inside a `pre` is a grid row no cell was written to: it
+        // carries no tag, so the rebuild splits the block around it. The parts
+        // carry the pre's episode, and layout lays them in ONE island, the
+        // blank row an empty row of it. The control, one variable away: two
+        // `pre`s with a blank row between are two islands. The grids hold no
+        // row past the content: a blank row outside a block names no zone and
+        // lays as raw output, an island of its own under the legacy sheet.
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let lay = |t: &Tile, gs: &mut GlyphSource| {
+            let (lb, _) = t.scrollback.live_block(
+                t.grid.cells(),
+                20,
+                t.grid.content_rows(),
+                t.grid.wrapped(),
+                &t.spans,
+                false,
+            );
+            let shape: Vec<(char, usize, u32)> = lb
+                .items
+                .iter()
+                .map(|i| match i {
+                    Item::Pre(l) => ('p', l.len(), l[0].episode),
+                    Item::Line(l) => ('l', l.cells.len(), l.episode),
+                    _ => ('?', 0, 0),
+                })
+                .collect();
+            (shape, crate::layout::layout_block(&lb, 400, &sheet, gs))
+        };
+        let mut t = Tile::new(20, 3, libhalcyon::theme::daylight_palette());
+        frame(&mut t, 1, b"zone;k=output");
+        frame(&mut t, 2, b"pre");
+        write(&mut t, vec![(0, 0, cs('a', 2)), (0, 1, cs('b', 2))], (1, 0));
+        write(&mut t, vec![], (2, 0));
+        write(&mut t, vec![(2, 0, cs('c', 2)), (2, 1, cs('d', 2))], (2, 2));
+        frame(&mut t, 3, b"/pre");
+        let (shape, laid) = lay(&t, &mut gs);
+        assert_eq!(shape[..3], [('p', 1, 2), ('l', 0, 0), ('p', 1, 2)], "{:?}", shape);
+        let grounds: Vec<_> = laid.rects.iter().filter(|r| r.color == sheet.ground_pre).collect();
+        assert_eq!(grounds.len(), 1, "one island: {:?}", grounds.len());
+        let g = grounds[0];
+        for item in 0..3 {
+            let l = laid.lines.iter().find(|l| l.src_item == item).expect("each row lays");
+            assert!(l.y >= g.y && l.y + l.h <= g.y + g.h as i32, "row {} inside the island", item);
+        }
+
+        let mut t = Tile::new(20, 3, libhalcyon::theme::daylight_palette());
+        frame(&mut t, 1, b"zone;k=output");
+        frame(&mut t, 2, b"pre");
+        write(&mut t, vec![(0, 0, cs('a', 2)), (0, 1, cs('b', 2))], (1, 0));
+        frame(&mut t, 3, b"/pre");
+        write(&mut t, vec![], (2, 0));
+        frame(&mut t, 4, b"pre");
+        write(&mut t, vec![(2, 0, cs('c', 4)), (2, 1, cs('d', 4))], (2, 2));
+        frame(&mut t, 5, b"/pre");
+        let (shape, laid) = lay(&t, &mut gs);
+        assert_eq!(shape[..3], [('p', 1, 2), ('l', 0, 0), ('p', 1, 4)], "{:?}", shape);
+        // The island each row lies in (the blank row between them names no
+        // zone and lays as raw output, whose ground the legacy sheet shares).
+        let island = |item: usize| {
+            let l = laid.lines.iter().find(|l| l.src_item == item).expect("the row lays");
+            laid.rects
+                .iter()
+                .find(|r| r.color == sheet.ground_pre && l.y >= r.y && l.y + l.h <= r.y + r.h as i32)
+                .map(|r| (r.y, r.h))
+                .expect("the row lies in an island")
+        };
+        assert_ne!(island(0), island(2), "two pres, two islands");
+        assert!(island(1) != island(0) && island(1) != island(2), "the blank row is in neither");
+
+        // Two pres on adjacent rows, no blank row between: two items, two
+        // islands, though each row's line would join the pre item before it.
+        let mut t = Tile::new(20, 2, libhalcyon::theme::daylight_palette());
+        frame(&mut t, 1, b"zone;k=output");
+        frame(&mut t, 2, b"pre");
+        write(&mut t, vec![(0, 0, cs('a', 2)), (0, 1, cs('b', 2))], (1, 0));
+        frame(&mut t, 3, b"/pre");
+        frame(&mut t, 4, b"pre");
+        write(&mut t, vec![(1, 0, cs('c', 4)), (1, 1, cs('d', 4))], (1, 2));
+        frame(&mut t, 5, b"/pre");
+        let (shape, laid) = lay(&t, &mut gs);
+        assert_eq!(shape[..2], [('p', 1, 2), ('p', 1, 4)], "{:?}", shape);
+        let grounds = laid.rects.iter().filter(|r| r.color == sheet.ground_pre).count();
+        assert_eq!(grounds, 2, "two islands");
+    }
+
+    /// An `aside` on the live grid (HALCYON-VISUAL 8.4): its cells carry
+    /// TAG_ASIDE on the hdr byte, a blank row between two of its lines is its
+    /// paragraph break, and layout draws one frame of four `rule` hairlines
+    /// around them, with no ground, the lines inset past the hairline and the
+    /// padding. An aside after a blank row is a frame of its own.
+    #[test]
+    fn an_aside_on_the_live_grid_is_one_frame() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let mut t = Tile::new(20, 5, libhalcyon::theme::daylight_palette());
+        frame(&mut t, 1, b"zone;k=output");
+        frame(&mut t, 2, b"aside");
+        write(&mut t, vec![(0, 0, cs('o', 2)), (0, 1, cs('n', 2)), (0, 2, cs('e', 2))], (1, 0));
+        write(&mut t, vec![], (2, 0));
+        write(&mut t, vec![(2, 0, cs('t', 2)), (2, 1, cs('w', 2)), (2, 2, cs('o', 2))], (3, 0));
+        frame(&mut t, 3, b"/aside");
+        write(&mut t, vec![], (4, 0));
+        frame(&mut t, 4, b"aside");
+        write(&mut t, vec![(4, 0, cs('x', 4))], (4, 1));
+        frame(&mut t, 5, b"/aside");
+        let tag = t.spans.get(2).expect("the aside's tag");
+        assert_eq!(tag.hdr & crate::transcript::TAG_ASIDE, crate::transcript::TAG_ASIDE);
+        assert_eq!(crate::transcript::tag_style_hdr(tag.hdr), 0, "a style keeps no structure bit");
+        let (lb, _) = t.scrollback.live_block(
+            t.grid.cells(),
+            20,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+            false,
+        );
+        let episodes: Vec<u32> = lb
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Line(l) => l.episode,
+                _ => u32::MAX,
+            })
+            .collect();
+        assert_eq!(episodes[..5], [2, 0, 2, 0, 4], "{:?}", episodes);
+        let laid = crate::layout::layout_block(&lb, 400, &sheet, &mut gs);
+        let hair: Vec<_> = laid.rects.iter().filter(|r| r.color == sheet.rule).collect();
+        assert_eq!(hair.len(), 8, "two frames of four hairlines");
+        assert!(hair.iter().all(|r| r.w as i32 == sheet.hairline || r.h as i32 == sheet.hairline));
+        let (top, bottom) = (hair[0], hair[1]);
+        // The blank row between the two asides is in neither: it names no
+        // zone, so it lays as raw output. Inside a frame there is no ground.
+        assert!(
+            !laid.rects.iter().any(|r| r.color == sheet.ground_pre && r.y >= top.y && r.y < bottom.y),
+            "no ground"
+        );
+        let inset = sheet.pad_x + sheet.hairline + sheet.pre_pad_x;
+        for item in [0, 2] {
+            let l = laid.lines.iter().find(|l| l.src_item == item).expect("a line of the first frame");
+            assert!(l.y > top.y && l.y + l.h < bottom.y, "item {} inside the first frame", item);
+            assert_eq!(l.segs[0].x, inset, "item {} inset past the hairline and padding", item);
+        }
+        let x = laid.lines.iter().find(|l| l.src_item == 4).expect("the second aside");
+        assert!(x.y > bottom.y, "the second aside is below the first frame");
+    }
+
+    /// An aside's rows keep its episode when they scroll off: the history
+    /// names them by the aside's open serial (the block registry), the blank
+    /// row between two of them lands as a plain empty line, and layout
+    /// bridges it, so the history lays ONE frame. The row still on the grid
+    /// carries the same episode in the live block.
+    #[test]
+    fn an_aside_s_rows_keep_their_episode_when_they_scroll_off() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let sheet = crate::layout::daylight_sheet(100);
+        let mut t = Tile::new(20, 2, libhalcyon::theme::daylight_palette());
+        // A row as the producer ships it: the full width, the unwritten
+        // columns blank and untagged.
+        let row = |s: &str, span: u32| {
+            let mut r: Vec<Cell> = s.chars().map(|c| cs(c, span)).collect();
+            r.resize(20, cs(' ', 0));
+            r
+        };
+        frame(&mut t, 1, b"zone;k=output");
+        frame(&mut t, 2, b"aside");
+        write(&mut t, vec![(0, 0, cs('x', 2))], (0, 1));
+        frame(&mut t, 3, b"/aside");
+        t.apply(Record::ScrollOff {
+            rows: vec![row("one", 2), row("", 0), row("two", 2)],
+            wrapped: vec![false; 3],
+        });
+        let b = t.scrollback.open_block();
+        let shape: Vec<(usize, u32)> = b
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Line(l) => (l.cells.len(), l.episode),
+                _ => (usize::MAX, u32::MAX),
+            })
+            .collect();
+        assert_eq!(shape, [(3, 2), (0, 0), (3, 2)], "{:?}", shape);
+        let laid = crate::layout::layout_block(b, 400, &sheet, &mut gs);
+        let hair: Vec<_> = laid.rects.iter().filter(|r| r.color == sheet.rule).collect();
+        assert_eq!(hair.len(), 4, "one frame across the blank row");
+        for item in 0..3 {
+            let l = laid.lines.iter().find(|l| l.src_item == item).expect("each row lays");
+            assert!(l.y > hair[0].y && l.y + l.h < hair[1].y, "row {} inside the frame", item);
+        }
+        let (lb, _) = t.scrollback.live_block(
+            t.grid.cells(),
+            20,
+            t.grid.content_rows(),
+            t.grid.wrapped(),
+            &t.spans,
+            false,
+        );
+        match lb.items.first() {
+            Some(Item::Line(l)) => assert_eq!((l.cells.len(), l.episode), (1, 2)),
+            other => panic!("the grid's row: {:?}", other.map(|_| ())),
+        }
+    }
+
     /// The `la` shape: a `pre` box on the live grid with an obj path per
     /// row. A click on row 1's path opens row 1's object.
     #[test]

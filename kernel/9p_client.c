@@ -581,7 +581,9 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
 // detour's register-then-observe under wait_lock (the I-9-critical path). A
 // kproc thread has t->proc == kproc() (non-NULL), but kproc is neither
 // debuggable nor job-stoppable (both delivers reject it), so both flags are
-// always 0 -> this returns false for a kthread.
+// always 0 -> this returns false for a kthread. A dying Proc never reads as
+// stopped either, so a closer in its exit close keeps the reader role and its
+// flush gets its reply.
 static bool client_stop_pending(struct Thread *t) {
     return t && t->proc && proc_stop_requested(t->proc);
 }
@@ -596,9 +598,10 @@ static bool client_stop_pending(struct Thread *t) {
 // sleep()'s death check read this park as a reader mid-frame
 // (thread_reader_blocks_death), which a death does not unwind. stop_unwinds
 // does not matter: the stop detour skips a sleep on debug_rendez. Returns
-// SLEEP_OK on resume, or SLEEP_INTR if the Proc started dying while stopped ->
-// the caller re-loops and client_self_dying() unwinds (DEATH WINS). c->lock
-// HELD on entry + exit.
+// SLEEP_OK on resume, or SLEEP_INTR if the Proc's group started dying while
+// stopped (the park sleeps death-only: a terminate latch waits for the
+// resume) -> the caller re-loops and client_self_dying() unwinds (DEATH WINS).
+// c->lock HELD on entry + exit.
 static int client_debug_stop_park(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *t = current_thread();
     rpc->stop_parked = true;

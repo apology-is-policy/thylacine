@@ -1856,17 +1856,38 @@ static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
     ready(t);
 }
 
-// item 11 (ARCH §8.8.3): the shared core of sleep() and sleep_noteintr().
-// `caught_ok` enables the caught-note unwind (SLEEP_NOTEINTR): when true, a
-// deliverable caught note interrupts the wait ALONGSIDE the death-interrupt.
-// It is OPT-IN per wait because the caught-note unwind returns to userspace and
-// CONTINUES (must be fully EINTR-safe), and some sleeps must NOT be so
-// interrupted (e.g. vfork_await_release, where a live return while the child
-// shares the parent AddrSpace corrupts memory). Death is always checked first.
+// What may end a sleep before its condition holds, each tier including the one
+// before it: group death; a terminate latch (LS-5c, ARCH §8.8.2); a caught note
+// (item 11, §8.8.3). The values start at 2 so that a bool passed where a mode
+// belongs (0 or 1) is refused rather than read as a mode.
+enum sleep_unwind {
+    SLEEP_UNWIND_DEATH = 2,
+    SLEEP_UNWIND_TERMINATE,
+    SLEEP_UNWIND_NOTE,
+};
+
+static bool sleep_death_pending(struct Thread *t, enum sleep_unwind unwind) {
+    return unwind == SLEEP_UNWIND_DEATH ? thread_group_death_pending(t)
+                                        : thread_die_pending(t);
+}
+
+// item 11 (ARCH §8.8.3): the shared core of sleep(), sleep_noteintr() and
+// sleep_death_only(). SLEEP_UNWIND_NOTE enables the caught-note unwind
+// (SLEEP_NOTEINTR): a deliverable caught note interrupts the wait ALONGSIDE the
+// death-interrupt. It is OPT-IN per wait because the caught-note unwind returns
+// to userspace and CONTINUES (must be fully EINTR-safe). SLEEP_UNWIND_DEATH
+// drops the terminate latch as well (DEBUG-FS-DESIGN §5g): a stop park must
+// hold against an interrupt, and a parent suspend must not return on a latch a
+// peer can revoke while its child still shares the parent's AddrSpace. Death is
+// always checked first.
 static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
-                        bool caught_ok) {
+                        enum sleep_unwind unwind) {
+    const bool caught_ok = unwind == SLEEP_UNWIND_NOTE;
     if (!r)    extinction("sleep(NULL rendez)");
     if (!cond) extinction("sleep with NULL cond");
+    if (unwind != SLEEP_UNWIND_DEATH && unwind != SLEEP_UNWIND_TERMINATE &&
+        unwind != SLEEP_UNWIND_NOTE)
+        extinction("sleep: not an unwind mode");
 
     struct Thread *t = current_thread();
     if (!t)                       extinction("sleep: no current thread");
@@ -1889,8 +1910,10 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // on this EL0 Proc -- a debugger stop OR (PTY-1f) a job-control stop;
         // the gate is proc_stop_requested's debug|job disjunction (round-2
         // R2-F2: a flag this detour does not read re-opens the #89 freeze via
-        // the job axis) -- DETOUR: park on our own debug_rendez until BOTH
-        // owners clear, then re-loop to re-check the ORIGINAL cond (the
+        // the job axis), which reads false in a dying group, so a dying Proc's
+        // closer, which reads no death here, never parks for a stop --
+        // DETOUR: park on our own debug_rendez until BOTH owners clear, then
+        // re-loop to re-check the ORIGINAL cond (the
         // syscall re-blocks in place; no unwind, no restart). The flag reads
         // are UNDER wait_lock, held continuously from here through the
         // register + sched-drop below, so they serialize with each deliver's
@@ -1900,9 +1923,12 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // it -- no stop-wake lost (register-then-observe, I-9). Gated
         // `r != &debug_rendez` so the nested park (which IS a sleep on
         // debug_rendez) does not recurse; gated `t->proc` so a kernel thread
-        // (never stoppable) is skipped. SLEEP_INTR from the park = dying /
-        // soft interrupt-terminate while stop-parked -> unwind the outer
-        // syscall (DEATH WINS over a stop, exactly as at the tail).
+        // (never stoppable) is skipped. SLEEP_INTR from the park = group death
+        // while stop-parked -> unwind the outer syscall (DEATH WINS over a
+        // stop, exactly as at the tail). The park sleeps death-only, so a
+        // latched interrupt waits for the stop to clear; this loop's die-check
+        // then unwinds for it if this wait is one that does, and a death-only
+        // wait leaves it for its caller's tail (DEBUG-FS-DESIGN 5g).
         // specs/debug_stop.tla StopWakesSleeper; pty_stop.tla stopOwners.
         if (r != &t->debug_rendez && t->proc && proc_stop_requested(t->proc)) {
             // 8c-3 (#89; DEBUG-FS-DESIGN 5c.6): the elected 9P reader sets
@@ -1923,6 +1949,12 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
                 // classifier reads (SLEEP_INTR aliases death + a transport error;
                 // re-reading debug_stop_req races an async proc_debug_resume). Set
                 // + read by THIS thread only -> a concurrent resume cannot flip it.
+                // A death-only wait's callers read SLEEP_INTR as group death (a
+                // vfork parent would return with its child on its stack), and
+                // only the 9P client's waits set stop_unwinds (the reader's
+                // recv, the rpc sleep, the progress park), none of which waits so.
+                if (unwind == SLEEP_UNWIND_DEATH)
+                    extinction("sleep_death_only: a stop-unwinding 9P wait");
                 t->stop_unwound = true;
                 rc = SLEEP_INTR;
                 break;
@@ -1992,7 +2024,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // immediately, exactly as before. Mirrors the 8c-3 stop block-through
         // above; DeathWinsOverStop holds (both now unwind at a boundary; the
         // EL0-return die-check still precedes the stop-check).
-        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
+        if (sleep_death_pending(t, unwind) && !thread_reader_blocks_death(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             t->state             = THREAD_RUNNING;
@@ -2063,7 +2095,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // loop instead of break; the guarded register-then-observe re-blocks it
         // until a boundary. Without this guard the prompt path silently defeats
         // the register-then-observe guard on the very next wake.
-        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
+        if (sleep_death_pending(t, unwind) && !thread_reader_blocks_death(t)) {
             rc = SLEEP_INTR;
             break;
         }
@@ -2085,18 +2117,22 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     return rc;
 }
 
-// item 11 (ARCH §8.8.3): sleep() is the caught_ok=false wrapper -- the 39
-// existing callers keep their exact semantics (death-interruptible only).
+// item 11 (ARCH §8.8.3): sleep() keeps the semantics its callers were written
+// for: group death or a terminate latch unwinds it, a caught note does not.
 int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
-    return sleep_common(r, cond, arg, false);
+    return sleep_common(r, cond, arg, SLEEP_UNWIND_TERMINATE);
 }
 
-// sleep_noteintr() is the caught_ok=true wrapper: a caught, deliverable note
+// sleep_noteintr() is the SLEEP_UNWIND_NOTE wrapper: a caught, deliverable note
 // interrupts the wait (returns SLEEP_NOTEINTR) alongside death. Opted-in
 // blocking sites (interruptible reads/waits whose unwind is fully EINTR-safe)
 // call this instead of sleep(); the site maps SLEEP_NOTEINTR to -T_E_INTR.
 int sleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg) {
-    return sleep_common(r, cond, arg, true);
+    return sleep_common(r, cond, arg, SLEEP_UNWIND_NOTE);
+}
+
+int sleep_death_only(struct Rendez *r, int (*cond)(void *arg), void *arg) {
+    return sleep_common(r, cond, arg, SLEEP_UNWIND_DEATH);
 }
 
 // P5-tsleep: sleep bounded by an absolute deadline. See rendez.h for the
@@ -2122,7 +2158,8 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // TSLEEP_INTR (death), SLEEP_NOTEINTR -> TSLEEP_NOTEINTR (caught note),
     // otherwise AWOKEN.
     if (deadline_ns == 0) {
-        int src = sleep_common(r, cond, arg, caught_ok);
+        int src = sleep_common(r, cond, arg,
+                               caught_ok ? SLEEP_UNWIND_NOTE : SLEEP_UNWIND_TERMINATE);
         if (src == SLEEP_INTR)     return TSLEEP_INTR;
         if (src == SLEEP_NOTEINTR) return TSLEEP_NOTEINTR;
         return TSLEEP_AWOKEN;
@@ -2166,8 +2203,8 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
         // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2), the tsleep twin of
         // sleep()'s detour: park on debug_rendez when a stop is pending from
-        // EITHER owner (the PTY-1f debug|job disjunction, proc_stop_requested
-        // -- see sleep()'s detour), then re-loop. The detour is BEFORE
+        // EITHER owner (the PTY-1f debug|job disjunction, proc_stop_requested,
+        // false in a dying group -- see sleep()'s detour), then re-loop. The detour is BEFORE
         // timerwait_link (below), so this thread is
         // not on the timer-wait list during the indefinite stop-park -- on resume
         // it re-registers with its ORIGINAL deadline. A deadline that expired while

@@ -44,3 +44,8 @@ beacon = { path = "../lib/beacon" }
 manual = { path = "../manual", default-features = false }
 libhalcyon = { path = "../lib/libhalcyon" }
 kaua = { path = "../lib/kaua", default-features = false }
+
+[dev-dependencies]
+# The shipped deck's picture is decoded by `view`'s own decoder in a host test,
+# so a picture `view` would refuse cannot ship unnoticed (LANTERN-DESIGN 5.1).
+view = { path = "../view", default-features = false }

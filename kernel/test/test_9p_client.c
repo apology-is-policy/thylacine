@@ -1159,6 +1159,8 @@ void test_9p_client_handoff_skips_stop_parked(void) {
     p9_client_handoff_reader(&g_client);
     bool control = rpc_parked.be_reader && !rpc_survivor.be_reader;
 
+    // Unhook the stack rpcs before any verdict, so a failing assert leaves the
+    // shared client holding no pointer into this frame.
     spin_lock(&g_client.lock);
     g_client.inflight[40] = NULL;
     g_client.inflight[41] = NULL;

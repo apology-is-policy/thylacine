@@ -509,7 +509,11 @@ pub struct TSpawnArgs {
     // and moved to 96 by the aux-2 merge, which grew the struct 96 -> 104
     // rather than drop either feature.
     pub pheno_flags:     u32, // 96 — T_SPAWN_PHENO_*
-    pub _pad_spawn2:     u32, // 100 — must be 0 (forward-compat slot)
+    // The birth hold (DEBUG-FS-DESIGN 5f): T_SPAWN_DEBUG_HELD asks for the child
+    // to be held before its first instruction; 0 — what every existing caller
+    // writes — is "not held". It claimed the last forward-compat slot, so the
+    // next field grows the struct and every mirror of it.
+    pub debug_flags:     u32, // 100 — T_SPAWN_DEBUG_*
 }
 // Compile-time pin matching kernel's _Static_assert(sizeof(...) == 104).
 // It pins this mirror to a LITERAL, not to the kernel -- if the kernel grows
@@ -526,7 +530,13 @@ const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_flags) == 88);
 // a live mistake, not a theoretical one -- this pin caught it once already.
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, page_budget) == 92);
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, pheno_flags) == 96);
-const _: () = assert!(core::mem::offset_of!(TSpawnArgs, _pad_spawn2) == 100);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, debug_flags) == 100);
+
+// The birth hold (mirror SPAWN_DEBUG_* in the kernel header): the spawn returns
+// once the child has loaded its image and parked before its first instruction;
+// a debugger's `stop` takes the hold over, `start` / `detach` release it, and a
+// held child whose spawner exits first is killed. Ungated.
+pub const T_SPAWN_DEBUG_HELD: u32 = 1 << 0;
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;

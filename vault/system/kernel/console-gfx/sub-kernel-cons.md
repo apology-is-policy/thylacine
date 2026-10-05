@@ -83,6 +83,28 @@ reverse acquisition. `docs/TRUSTED-PATH.md` and `docs/IMPERIUM-DESIGN.md §11`
 describe the episode state machine. This is serial trusted input, not an
 assertion that every graphical input path is authenticated.
 
+**Refused where it lands (2026-09-29).** A frozen caller's consctl mode write,
+and a renderer feed byte, are refused twice: by a lockless check on entry, which
+is only a fast path, and again under `g_cons.lock` in the critical section that
+would apply them -- `cons_set_mode_cmd` re-asks `cons_caller_frozen()` before it
+stores the mode word, and `cons_rx_accept(byte, is_break, feed)` refuses a feed
+byte while an episode is open (`cons_rx_input` is its `feed = false` wrapper for
+the PL011 path). BEGIN discards the ring and forces RAW under that same lock, so
+a write that passed the entry check while BEGIN ran either landed first and was
+overridden, or is refused: an in-flight `+echo` can no longer open the trusted
+prompt with ECHO on, and an in-flight feed byte can no longer be the first byte
+the trusted reader sees. A refused feed byte leaves the console unchanged, so the
+renderer's retry meets the entry check's -1. `cons_test_set_window_hook` runs a
+test function between the two checks. It exists only under `KERNEL_TESTS`; a
+production kernel compiles the call to nothing, so no indirect-call slot sits on
+a path every renderer drives (the kernel chunk's Fable round F2)
+(`cons.episode_mode_write_straddling_begin`, `cons.episode_feed_straddling_begin`).
+The echo of a feed byte accepted just before BEGIN can still reach the wire
+after it, at most `CONS_ECHO_MAX` bytes, the byte itself discarded: the same
+bounded pre-SAK output as a write's in-flight first chunk (round F1, kept).
+A SAK while an episode is open saves no owner, so the owner END restores is the
+one from before the episode began (`cons.episode_repeat_sak_keeps_saved_owner`).
+
 **Pollers across an episode (B-0 audit round 4 F1, 2026-09-21).** A frozen
 caller's `cons_poll` samples no readiness and files its hook on
 `episode_poll_list`, which the per-byte relay never walks: every hook wake costs

@@ -11793,7 +11793,9 @@ int main(void) {
         // on the EL0 return from its own unmask syscall (an ordinary ^Z can
         // never get there: proc_job_stop_pgrp consumes it at POST time);
         // `exit` -> drain-then-EOF + a clean reap (incl. the orphan-rule
-        // teardown of the session). Boot-fatal;
+        // teardown of the session); then `killst`: a job-stopped child
+        // holding a staged 9P write is killed and must be reaped with no
+        // resume, its write flushed (DEBUG-FS-DESIGN 5g). Boot-fatal;
         // a silent hang is converted to a named FAIL by the probe's watchdog.
         // (Interactive `cat`-under-^Z stays the documented TTIN follow-up --
         // task #18; see docs/reference/136-ptyfs.md.)
@@ -11812,7 +11814,7 @@ int main(void) {
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
                      "jobs/fg-restop/bg/fg-int/maskstop/exit over a live "
-                     "pts)\n");
+                     "pts; killst)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
     }

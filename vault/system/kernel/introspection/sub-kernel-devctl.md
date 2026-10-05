@@ -12,7 +12,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -149,7 +149,11 @@ through the pts path) renders `STOPPED` — the Unix `ps` T-state, via
 stop) is deliberately **not** surfaced: it is the debugger's private I-39 view,
 not a job-control state a monitor should expose, so the render reads
 `job_stop_req` alone. That flag is read atomically — a cross-Proc reader holds
-`g_proc_table_lock` via `proc_for_each` but takes no per-Proc lock.
+`g_proc_table_lock` via `proc_for_each` but takes no per-Proc lock. A dying
+Proc (`group_exit_msg` set) is never shown `STOPPED`, whatever flag a stop made
+before the kill left: its last thread runs its exit close regardless, and a
+dying Proc is not stopped to any reader (DEBUG-FS-DESIGN 5g). The test hook
+`devctl_procs_state_name_for_test` exposes the word to `proc.dying_takes_no_stop`.
 
 ### Offline CPUs render as a short row, not as a busy one
 
