@@ -1002,7 +1002,7 @@ b0002334: 50 of 50 boots PASS across default-smp1, default-smp4, default-smp8, u
 
 The operator's vote of 2026-09-30 05:11Z ("Stay stopped"; DEBUG-FS-DESIGN 5g). Scripture
 51cc0abd (DEBUG-FS-DESIGN 5g and 5.5; ARCHITECTURE 8.8.2; AUDIT-TRIGGERS row 199 + its index line, row 118's addendum; the
-dec note). Code *(pending)*.
+dec note). Code 87eef7c3.
 
 - **One death-only park sleep.** `sleep_death_only` unwinds for group death alone; the tail's stop park, the birth
   park, the nested sleeper park, the vfork suspend and the held spawn's birth wait use it, so a stopped thread keeps

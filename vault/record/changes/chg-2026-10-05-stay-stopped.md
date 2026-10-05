@@ -4,7 +4,7 @@ type: chg
 title: "Stay stopped: a stopped thread keeps its stop, and death wins in the exit close"
 date: 2026-10-05
 arc: arc-go-ide
-commits: ["*(pending)*"]
+commits: ["87eef7c3"]
 touched:
   - sub-kernel-rendez
   - sub-kernel-notes
