@@ -704,12 +704,6 @@ struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
                                                        const struct AddrSpace *payer,
                                                        u32 *out_refund);
 
-// burrow_is_shared_out: has this region been mapped into a SECOND Proc?
-// The discriminator the sharer's own detach needs -- see the field comment on
-// struct Burrow. Monotonic once set, so a read is never stale in the direction
-// that matters (false -> true only ever ADDS a reason to release).
-bool burrow_is_shared_out(const struct Burrow *v);
-
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
 // =============================================================================

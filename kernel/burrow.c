@@ -1103,24 +1103,6 @@ void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
     burrow_charge_restore_in(v, p ? p->as : NULL, pages);
 }
 
-bool burrow_is_shared_out(const struct Burrow *v) {
-    if (!v || v->magic != VMO_MAGIC) return false;
-    // Read under the same leaf lock the setter uses -- the flag is a plain bool
-    // and this costs one uncontended acquire on a path that is already taking
-    // it (the charge claim follows immediately), so there is no reason to reason
-    // about byte-store atomicity instead.
-    //
-    // Monotonic false -> true, so a MISS is the only possible staleness: a share
-    // that lands after this read leaves the sharer charged until its next
-    // release point. That is an over-charge on the sharer -- never a refund to a
-    // Proc that did not pay -- so the race degrades in the safe direction.
-    struct Burrow *m = (struct Burrow *)v;   // the lock is mutable state on a logically-const query
-    spin_lock(&m->lock);
-    bool out = m->shared_out;
-    spin_unlock(&m->lock);
-    return out;
-}
-
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
 // =============================================================================

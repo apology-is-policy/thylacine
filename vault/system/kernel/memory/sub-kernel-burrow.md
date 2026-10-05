@@ -95,8 +95,7 @@ the `out_free` out-parameter every teardown path must thread and must never drop
 locked pass), NULL-safe, unlinking as it goes.
 
 **Charge attribution** is three more calls — `burrow_charge_record` /
-`burrow_charge_claim` / `burrow_charge_restore` — plus
-`burrow_is_shared_out`. They exist for the same reason
+`burrow_charge_claim` / `burrow_charge_restore`. They exist for the same reason
 `burrow_unmap_reporting` does, one axis over; see below.
 
 `burrow_backing_pages(size)` reports what a region of that size actually
@@ -454,9 +453,16 @@ what lets the free arm's per-type double-free guards be simple null tests.
 
 The charge triple is under the same `lock` as the counts. `shared_out` is
 **monotonic** — a region is never un-shared in a way that returns the charge to
-the sharer — which is what makes `burrow_is_shared_out` safe to read without
-the lock: false→true only ever *adds* a reason to release, so a stale read is
-stale in the harmless direction.
+the sharer — which is what lets the settled drops read it *inside* the hold
+that already decides finality: false→true only ever *adds* a reason to release,
+so observing it at drop time can add a reason to settle but never miss one that
+mattered. The `burrow_is_shared_out` accessor that used to answer this question
+is **gone**: AS-R9's repair moved the read into the drop, which removed its only
+caller (the eager-ANON arm of `vma_detach_range_in`), and a callerless
+accessor is the same drift
+hazard as a callerless wrapper. This paragraph also used to say the flag was
+safe to read *without* the lock, which the accessor itself never did — it took
+the leaf lock for the read.
 
 ## Concurrency
 
