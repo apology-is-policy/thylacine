@@ -151,6 +151,26 @@ secure channel a small change:
 npxf's server refuses anything shorter as a runt. Matching it means a malformed
 frame dies at the transport instead of reaching a parser on either side.
 
+**The reply direction is bounded at the session's msize (2026-10-05).** The
+kernel proposes its msize in the Tversion, the first message haul relays up, and
+caps its own receive at it; the server's Rversion may only lower it, and the
+kernel then holds what a reply may carry to the lower value. A reply past
+either is a protocol violation the kernel answers by marking the whole session
+dead. Relayed blind, it killed the mount while haul parked on, with nothing in
+the log. So the up pump reads the msize out of every Tversion before it
+forwards it, the reply pump lowers it to the Rversion's msize (never raising
+it), and the reply pump refuses any frame above it: haul says which server sent
+the reply and by how much, and exits non-zero, as for a peer that hung up.
+`MSG_MAX` stays the ceiling for the up direction, and for the reply direction
+until a Tversion has passed. The bound is read from the session rather than
+fixed: the direct mount proposes 4 KiB, a posted service's mount 32 KiB.
+Reading one field of the two version messages does not make haul a client: it
+is the transport learning the frame bound both ends agreed to obey. A reply the
+kernel refuses for any other reason -- a tag it never issued, a type that does
+not answer the request -- still kills the session out of haul's sight; closing
+that needs the kernel to hang up its end of a dead session's transport (P3b,
+the kernel half of the 2026-09-29 review's F1).
+
 ---
 
 ## 3. The npxf channel
@@ -190,6 +210,7 @@ pipe rather than fail.
 | Transcript binding | both MACs cover `h2`, which covers the version and both ephemerals |
 | Contributory behaviour | an all-zero X25519 result (small-order peer key) aborts |
 | Reorder / replay / truncation detection | per-direction nonce counter; any mismatch fails the tag |
+| **Not provided:** resistance to offline guessing | the server proves possession first: anyone who can reach it sends flight 1 with an ephemeral of its own and receives the server's confirmation MAC, keyed by the token, over a transcript whose shared secret it knows -- then tests candidate tokens offline, at leisure. npxf is not a PAKE, so the token must be high-entropy (section 5) |
 
 **Stated plainly, as npxf's own README does: this is hand-written cryptography
 that has not had third-party review.** Our client is a second implementation of
@@ -320,6 +341,13 @@ failed some other way cannot pass for the fix.
 
 ### 4.1 Running it
 
+**Corrected 2026-10-05: npxf's server now runs on macOS too, and its tree is
+under git.** npxf `af68838` moved the build to CMake and OpenSSL and supports
+Linux and macOS servers; `~/projects/npxf` is a git tree (origin
+`github.com/apology-is-policy/npxf`), and the gates run
+`build/release/npxf-server` on the dev host's loopback, with no thyla-pi tunnel.
+The text below is the 2026-09 record of the Linux-only server and kept as such.
+
 **npxf's SERVER is Linux-only; its crypto core is not, and that distinction is
 worth more than it sounds.** The blockers that stop `npxf-server` compiling on a
 BSD host are not a shim: `server_ops.cpp` has 18 Linux-specific sites built on an
@@ -393,7 +421,9 @@ closes **nothing**: the main thread observes `STOPPED` and lets the *process*
 exit, which closes every fd at once from outside both pumps. The kernel sees the
 same EOF, bounded by the 200 ms poll. Exiting is correct rather than merely
 convenient — haul *is* the transport, so once either direction is dead the
-mount is dead.
+mount is dead. (Superseded in part, 2026-10-05: the reply pump now closes its
+own pipe end on the way out, because the synchronous attach can only be woken
+by that EOF -- section 2.1 states the rule and why that one close is safe.)
 
 ### 4.3 The one that changes the shape: a mount is not visible to the shell
 
@@ -809,6 +839,15 @@ past the cut shows its ordinary realm.
   corvus for the token would keep the secret out of the filesystem and out of
   `/env` entirely. That is its own chunk, and it wants the operator's vote on
   the shape.
+- **The token must be high-entropy (2026-10-05).** The handshake is an offline
+  guessing oracle (3.1): anyone who can reach the server collects one
+  confirmation MAC and tests tokens against it offline, with no rate limit and
+  no log line on the server. A token is therefore a random secret of at least
+  128 bits -- 32 random bytes in hex, say -- and never a memorable password;
+  haul warns when it is handed one shorter than 16 bytes. Closing the oracle
+  takes a PAKE (CPace, or OPAQUE for the augmented case), which changes npxf's
+  wire protocol and is the operator's call. Reordering the flights so the client
+  proves first is not a fix: it moves the oracle to whoever answers the dial.
 - **`/dev/random` is world-rw while `SYS_GETRANDOM` is capability-gated**
   (the standing H-4b-1 item). haul deliberately uses the *gated* path and
   fails closed; a future consumer reaching for the ungated one would be a hole.
