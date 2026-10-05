@@ -1041,7 +1041,7 @@ as claimed (clean 12830 and 17330), pty_stop 4 cfgs as claimed. `tools/ci-smp-ga
 ## Haul P3a: replies held to the session's msize, a short-token warning, and hang-up gates that read the verdict — 2026-10-05
 
 The 2026-09-29 Haul Fable pass's F1 (the haul half), F3, F4 and F5 (OPEN-BUGS 2026-09-29 ~14:57Z). Scripture
-eb2377da (HAUL-DESIGN 2.2, 3.1, 4.1, 4.2 and 5; AUDIT-TRIGGERS row 168's P3a addendum). Code *(pending)*.
+eb2377da (HAUL-DESIGN 2.2, 3.1, 4.1, 4.2 and 5; AUDIT-TRIGGERS row 168's P3a addendum). Code dd65af73.
 
 - **Replies held to the session's msize.** `frame::ReplyBound`: the up pump stores every Tversion's msize before it
   forwards the frame, the down pump asks only once a whole reply has arrived, and an Rversion lowers the bound and
