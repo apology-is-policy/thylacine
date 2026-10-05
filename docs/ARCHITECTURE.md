@@ -1647,17 +1647,46 @@ owning thread. The vivarium dispatcher sets it for a call on the list, and the
 A call that is not on the list rides the note out. Death still unwinds it,
 because `thread_die_pending` is checked first and is unchanged. The note is
 delivered at the call's EL0-return tail. The flag is necessary, not sufficient:
-the call's wait must also have opted in. As built only the two 9P waits have, so
-a listed call whose wait is in the kernel -- a kernel pipe's `read`, `ppoll`,
-`wait4`, `futex` -- still rides the note out until its wait opts in (owned
-work). Within a listed call the flag covers the wait alone, as Linux interrupts
-only the sleep: a step whose effect can land although its reply is abandoned
-clears it -- a socket's dial verb, and everything after `accept` has dequeued a
+the call's wait must also have opted in. Every kernel wait a listed call can
+reach has opted in, and each unwinds with nothing consumed and returns
+`-T_E_INTR`:
+- **The two 9P waits**, the client's RPC wait and the elected reader's receive.
+- **A pipe's read and write.** A pipe blocks only before any byte has moved. The
+  9P byte-pipe transport receives through the same wait, so an elected 9P
+  reader's receive opts in only where its client opted that receive in -- the
+  rule `srvconn`'s receive already follows.
+- **The console's read and write.** For a read, these are the reader-slot wait,
+  the episode park and the data wait. For a write, they are the episode park,
+  the writer role and the ring-room wait. A write the note interrupts after some
+  bytes went out returns the count, as Linux's tty write does. The kernel's own
+  diagnostic writer takes the role without opting in.
+- **`ppoll` and `pselect6`.** This covers the park, and the timeout-only sleep
+  that serves a call with no fds to watch. musl's `pause()` on aarch64 is
+  `ppoll(NULL, 0, NULL, NULL)`, which only death ended before. A producer that
+  keeps a flag set keeps the park's own check from running, so each pass that
+  finds nothing ready also asks for the note itself. Readiness found by the pass
+  wins, then the deadline, then the note: Linux's `do_poll` order.
+- **`wait4` and `futex`.** Each returns a code distinct from its other results
+  (`WAIT_PID_NOTEINTR`, `TORPOR_ERR_EINTR`). In both the data wins. A child's
+  exit readies the wait before its `child_exit` note posts. A futex wake that
+  counted its waiter found the waiter still registered, so the waiter's
+  condition is true when it resumes; a wake that did not count goes on to the
+  next waiter.
+
+Three waits a listed call can reach do not opt in. The 9P client's send side is
+the first: a back-pressured sender's park and its own pump. An unwind there
+drains nothing, so the retry would spin, and the sender moves as soon as the
+reader drains. `poll`'s settle is the second; it is bounded, because the server
+answers or the fail-safe does. The notes fd's read is the third: its data is the
+queued note itself, so a post readies it.
+
+Within a listed call the flag covers the wait alone, as Linux interrupts only
+the sleep: a step whose effect can land although its reply is abandoned clears
+it -- a socket's dial verb, and everything after `accept` has dequeued a
 connection -- and a `connect` whose handshake is interrupted leaves the socket
 `CONNECTING`, so the retry resumes that wait instead of dialing again (VIVARIUM
-6.22). The flag is positive so that a new
-table row, or a new wait inside an old row, can only be killed until someone
-puts it on the list. The failure mode is then a handler that runs late, never
+6.22). The flag is positive so that a new table row, or a new wait inside an old
+row, can only be killed until someone puts it on the list. The failure mode is then a handler that runs late, never
 a spurious `EINTR`. Natives are unchanged: no native syscall sets the flag. When
 11c admits natives, it sets the flag for the waits it opts in; Plan 9
 interrupts every wait.
