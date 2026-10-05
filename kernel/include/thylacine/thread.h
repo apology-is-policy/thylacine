@@ -334,8 +334,13 @@ struct Thread {
     // data loss for a file left open at a multi-thread exit) and the
     // close-time Tclunk (a server-side fid leak per fd). Set/cleared ONLY
     // by the owning Thread, always around a CLOSE THAT MUST WAIT, and read
-    // only via thread_die_pending(self) -- so the read needs no
-    // synchronization. TWO setters since 2026-09-22, and a third would need
+    // only by it (thread_die_pending(self), and since DEBUG-FS-DESIGN 5g
+    // thread_group_death_pending(self)) -- so the read needs no
+    // synchronization. Its waits see no death, so once the group is dying no
+    // stop may park them either: proc_stop_requested reads false then (5g,
+    // death wins in the exit close). An exits() close in a live group still
+    // honours a stop, and the group's death ends that park through its wake
+    // condition. TWO setters since 2026-09-22, and a third would need
     // the same justification: proc_close_handles_at_exit wraps the whole
     // at-exit close (#68 F1, the original), and loom_free brackets its SQPOLL
     // kthread join (the peer-close race that falls OUTSIDE that window --

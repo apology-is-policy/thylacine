@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -97,12 +97,15 @@ missing from the list, no longer ALIVE, or anything but UNBORN. A missing child
 counts as released for the vfork reason: hanging a parent that cannot recover
 is the worse outcome.
 
-The wait breaks early only when the sleep returns `SLEEP_INTR`, which a plain
-sleep does when the caller is dying or carries a terminate latch that will kill
-it on its way back to EL0. Its death then runs the orphan rule, which kills the
-child. A latch can be revoked before that, though: if a peer thread installs a
-handler or opens the notes file first, the caller lives, and its spawn has
-returned while the child may still be loading (see Seams). The parent the body waits on is the
+The wait breaks early only when its sleep returns `SLEEP_INTR`, and the sleep
+is `sleep_death_only` (DEBUG-FS-DESIGN 5g), which returns it only when the
+caller's group is dying. Its death then runs the orphan rule, which kills the
+child. The caller's own terminate latch wakes the wait, which re-checks and
+sleeps again. That latch is revocable, since a peer thread can install a
+handler or open the notes file, so a wait that returned for it could hand its
+caller a pid whose child is still loading. `birth_wait_survives_latch` is the
+witness: a launcher's held child interrupts the launcher mid-wait, sees it
+switched in and asleep again, and only then releases itself. The parent the body waits on is the
 calling Proc, `current_thread()->proc`, because `rfork` forks the current Proc.
 A kernel test that spawns on behalf of another Proc would otherwise wait on the
 wrong children list.
@@ -150,8 +153,9 @@ registered on its own `debug_rendez`, sleeping and off-CPU.
 
 ### The hold is not a stop owner
 
-`proc_stop_requested` stays the debug flag and the job flag only. That
-disjunction drives the `sleep()` detour and the 9P reader handoff. If the hold
+`proc_stop_requested` reads the debug flag and the job flag (and, since 5g,
+whether the group is dying), never the hold. That predicate drives the
+`sleep()` detour and the 9P reader handoff. If the hold
 were in it, an unborn thread would park inside `exec_setup` wherever it slept,
 with no frame, and the birth wait would never be released. So the hold is read
 in exactly one place, the birth park's wake condition. There the thread holds
@@ -207,12 +211,13 @@ runs the same loop, so the fix also closes it for every stopped thread,
 debugger or job-control, and `debug_stop_buggy_no_death_recheck_tail.cfg`
 keeps that half.
 
-The park's latch leg reads `group_exit_msg` once more. `thread_die_pending`
-reports group death as well as a latched interrupt, and a kill that lands
-after the top-of-pass check makes it true. The leg therefore dies on the
-termination, and only a latched interrupt leaves the park alive (audit round
-1, F8). For the tail that means an `eret` to deliver the interrupt. The birth
-park never returns on it, as the next section explains.
+The park has no latch leg any more (5g). Its sleep returns early for group
+death alone, which the loop's checks turn into the thread's exit. A latched
+interrupt's wake never reaches it, and neither does a second stop's: those
+walks pass a thread in a stop park by. (The leg it replaced re-read
+`group_exit_msg`, because `thread_die_pending` reports group death and a latch
+alike, and a kill landing after the top-of-pass check made it true: audit
+round 1, F8. A sleep that reads group death alone cannot confuse the two.)
 
 ### The orphan rule
 
@@ -228,38 +233,42 @@ then on.
 
 ### A latched interrupt at the birth park
 
-The ordinary stop park leaves the park when a terminate-disposition interrupt
-is latched (LS-5c) in a family the thread has not masked, so the thread erets
-and resolves the interrupt at its next checkpoint. A held child must not `eret`, so `el0_birth_park` ends the child
-itself (`birth_park_terminate`). It takes the latched note's name under the
-note queue's lock and exits with it, as note delivery's terminate arm would
-have reported it. The disposition can only be the default, and the latch
-itself says so: it is armed only for a note that nothing catches, in a Proc
-that does not read its own notes, and an ignored note is dropped before it can
-arm it (`notes_arm_intr_terminate_locked`). Only the child's own calls could
-install a handler or open its notes file afterwards, and a held child has made
-none. (The argument cannot rest on the child's history instead: a Linux
-program's caught signals do cross `rfork`. Every held child has a native
-parent, because no Linux call is translated to the held spawn, but the latch's
-rule does not need that.) Nor can a mask defer the latch here, as it would at
-the tail: a held child's thread starts with an empty mask, because only a Linux
-parent's mask crosses `rfork`, and it has run nothing that could set one. If
-the name were somehow not found, the child would still end, with "terminated
-at the birth park", because a held child must never run. Legs (b) and (c) of
-`held_spawn_death_wins` check the name.
+A held child stays held when an interrupt arrives (DEBUG-FS-DESIGN 5g, the
+operator's vote of 2026-09-30). An interrupt that nothing catches arms the
+LS-5c terminate latch, and its post's wake walk
+(`proc_interrupt_terminate_wake`) passes the parked thread by: the park sleeps
+death-only, so the wake could only be absorbed, and a thread run to absorb it
+would read as unsettled to the debugger. The child is still ALIVE, still
+parked, its mark still PARKED; a stop still converts it, and a start or detach
+still releases it. Once it runs, it meets the note at its first note
+checkpoint, the synchronous tail of its first syscall, where the default
+terminate ends it with the note's name. A note latched while the child is
+still loading is taken by the birth tail's own delivery before the park, and
+the child dies before its first instruction. Leg (b) of
+`held_spawn_death_wins` is the witness: the parked /hello child is not
+switched in once across a 100 ms window after the post, stays ALIVE and held,
+and once released dies "interrupt" at the return of libt `_start`'s first
+syscall, `SYS_NOTE_MASK`.
 
-The birth tail is therefore straight-line: the park returns only to proceed.
-The first draft re-ran the checkpoint in place instead and let note delivery
-consume the latch. But note delivery declines a frame whose stack pointer it
-does not trust, and the debugger can write that pointer while the child is
-parked. The masked re-run then never ended. It took its CPU and every thread
-queued on that CPU, and on a single CPU the whole machine (audit round 1, F1;
-leg (c) of `held_spawn_death_wins` is the regression). Sabotaged back in, the
-re-run went round 34 billion times in the boot's 300 seconds and took the test
-runner with it: the runner had woken the child onto its own CPU and yielded to
-it. [[spec-debug-stop]] keeps both wrong answers as buggy configurations:
-`birth_latch_erets` (the tail's eret, against `NoEL0WhileHeld`) and
-`birth_latch_rerun` (the re-run, against `LatchedHeldChildEnds`).
+The birth tail is therefore straight-line: the park returns only to proceed,
+and nothing in it consults note delivery. Two earlier answers are gone. The
+first draft re-ran the checkpoint in place and let note delivery consume the
+latch. But note delivery declines a frame whose stack pointer it does not
+trust, and the debugger can write that pointer while the child is parked. The
+masked re-run then never ended. It took its CPU and every thread queued on
+that CPU, and on a single CPU the whole machine (audit round 1, F1).
+Sabotaged back in, it went round 34 billion times in the boot's 300 seconds
+and took the test runner with it: the runner had woken the child onto its own
+CPU and yielded to it. Its replacement ended the child inside the park with
+the note's name (`birth_park_terminate`, since deleted). Leg (c) of
+`held_spawn_death_wins` keeps the frame case: once it has asserted that the
+stop was delivered and converted the hold, a converted child whose frame SP is
+0 is not switched in by the stop's delivery nor, across a 100 ms window, by
+the latch's post, and a kill still ends it there. [[spec-debug-stop]] keeps the
+wrong answers as buggy configurations: `birth_latch_erets` (the park erets a
+held child, against `NoEL0WhileHeld`) and `latch_ends_stop` (the park ends it,
+against `ParkEndsOnlyInDeath`). `birth_latch_rerun` and `LatchedHeldChildEnds`
+retired with the old rule.
 
 ## Data structures
 
@@ -309,9 +318,9 @@ hold nobody took over dies with its spawner. The ask confers no access, so the
 two-axis gate is untouched.
 
 **[[inv-i24]]** — no EL0 after the group termination: the birth tail's
-die-check, and the park's death checks at the top of each pass, after its wake
-condition and on its latch leg, the last two of which also serve the tail's
-ordinary stop park.
+die-check, and the park's death checks at the top of each pass and after its
+wake condition, the second of which also serves the tail's ordinary stop park.
+The park's sleep returns early for group death alone.
 
 **[[inv-i9]]** — no lost wake: every write out of UNBORN wakes the spawner
 under the lock that its scan holds, and the park's sleep is the audited
@@ -356,15 +365,13 @@ park.
   follows a terminate is legal on every path: EXITKILL, and `start` after
   `kill` (`no_death_recheck`, `no_death_recheck_tail`).
 - **The birth tail must never `eret` while held, and the park returns only to
-  proceed.** A latched interrupt ends the child inside the park. Re-running the
-  checkpoint instead leans on note delivery consuming the latch, which it
-  declines for a frame whose stack pointer a debugger wrote, and the masked
-  re-run spins forever (F1).
-- **A held child inherits no handler and no mask.** The park ends the child on
-  the latch alone, which is right only because nothing can catch or defer the
-  note: a native parent passes neither across `rfork`, and no Linux call
-  reaches the held spawn. A spawn path that let a Linux parent hold its child
-  would break both.
+  proceed.** A latched interrupt's wake passes the park by, and would be
+  absorbed by its death-only sleep if it reached it; the child stays held (5g). Anything in the park that consulted
+  note delivery would reopen F1: delivery declines a frame whose stack pointer
+  a debugger wrote, and a masked re-run spins forever.
+- **The park neither consumes nor clears a latch.** The note belongs to the
+  child's first checkpoint after the release, and it is delivered there with
+  whatever disposition the child then has.
 - **A conversion needs a pending stop.** Without one it must leave the hold
   standing, or a stop verb that clears before it delivers opens an instant
   with nothing holding the child.
@@ -392,14 +399,12 @@ park.
   ZOMBIE. A spawner that replaces its image instead of exiting (a vfork child, a
   Linux-phenotype exec) leaves its held children held until it finally exits.
   That is bounded by the spawner's lifetime.
-- **A revoked latch lets a held spawn return early.** A spawner whose wait
-  breaks on its own terminate latch returns the pid at once. If a peer thread
-  revokes the latch (installs a handler or opens the notes file) before the
-  spawner reaches EL0, the spawner lives on with a child that may still be
-  loading, and its `stop` meets the mid-load case above. The vfork park shares
-  the wait, and there the parent runs on a stack its child still borrows.
-  Tracked in OPEN-BUGS (2026-09-29); a park sleep that only group death
-  interrupts, which the latch-versus-stop design call may bring, would close it.
+- **A revoked latch let a held spawn return early (CLOSED 2026-09-30, 5g).**
+  The wait broke on its caller's own terminate latch, and a peer thread that
+  revoked the latch (a handler installed, or the notes file opened) left the
+  spawner alive with a child that might still be loading; the vfork park
+  shared the wait, with the parent on a stack its child still borrowed. The
+  wait now sleeps death-only, and `birth_wait_survives_latch` is the witness.
 - **The held launch rides a build tag.** The Go fork's
   `SysProcAttr.DebugHeld` sets the flag, and ambush's `Launch` sets it only
   when built with `-tags thylacine_held`, which this tree's `tools/build.sh`

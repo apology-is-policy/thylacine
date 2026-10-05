@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -188,29 +188,31 @@ nothing, so it owes the sweep, and the frame is zeroed before its three fields
 are written. The ordering rule is the tail's own, with one difference: the
 stop leg is the **birth park**, which also holds while the hold is set.
 
-The one thing the birth tail does differently is the one the hold requires.
-The tails' stop park leaves the park for a latched terminate-interrupt, so the
-thread erets and resolves it at its next checkpoint. A held child must not
-`eret`, so the birth park ends the child itself in that case, with the latched
-note's name. The latch is armed only for a note that nothing catches, and only
-the child's own calls could install a handler afterwards, so the default
-disposition is the only one. The birth tail is therefore straight-line, and
-the park returns only to proceed. (A first draft re-ran the checkpoint in
-place and let note delivery consume the latch. Note delivery declines a frame
-whose stack pointer it does not trust, and a debugger can write that pointer,
-so the masked re-run could spin forever: audit round 1, F1.) The frame sits
-below the thunk's stack, so after the `eret` the kernel stack pointer is where
-the spawn trampoline would have left it.
+The birth tail is straight-line: the park returns only to proceed. Neither
+park answers a latched terminate-interrupt (DEBUG-FS-DESIGN 5g, the operator's
+vote of 2026-09-30). Both sleep in `sleep_death_only`, which returns only for
+group death, so a stopped thread stays stopped and a held child stays held.
+The note stays queued, and the thread meets it at its next note checkpoint
+once it runs: the synchronous tail's `notes_deliver` (the IRQ tail delivers
+none, [[seam-el0-irq-tail-no-notes]]). A note latched while the child is still
+loading is taken by the birth tail's own delivery before the park, and ends
+the child before its first instruction. Three earlier answers are gone. The
+tails' park left for the latch and erets, which let a compute-bound stopped
+thread run with its stop set, since only the synchronous tail delivers notes.
+The birth park ended the held child with the note's name. And a first draft
+before that re-ran the checkpoint in place, which spun forever once note
+delivery declined a stack pointer a debugger wrote (audit round 1, F1). The
+frame sits below the thunk's stack, so after the `eret` the kernel stack
+pointer is where the spawn trampoline would have left it.
 
 The park the birth tail shares with both tails also gained a second death
 check (2026-09-29). It re-reads the group's termination after its wake
 condition passes, because a release can follow a terminate (the debugger's
 exitkill release terminates and then clears the stop). Without it, a thread
 mid-pass could read the cleared flags and `eret` into a dying group. The spec
-found that gap, and it was never specific to the birth tail. The park's latch
-leg reads the termination once more, because `thread_die_pending` reports
-group death as well as a latched interrupt, and only the interrupt may leave
-the park alive.
+found that gap, and it was never specific to the birth tail. The park's sleep
+reads group death alone (`thread_group_death_pending`), so no latch can end
+the park or let a thread leave it.
 
 ### An EL0 fault terminates a Proc; a kernel fault kills the machine
 
@@ -395,9 +397,10 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   too. Moving the die-check before the preempt reopens the
   group-terminate-during-switch window; moving the stop-check before the
   die-check breaks "death wins".
-- **The birth tail must never `eret` while its child is held.** The birth park
-  returns only to proceed, and a latched interrupt ends the child inside it. A
-  re-run of the checkpoint would spin masked on a frame note delivery declines.
+- **The birth tail must never `eret` while its child is held, and no park may
+  leave for a latched interrupt.** Both parks return only to proceed, and group
+  death alone ends a thread inside them (`ParkEndsOnlyInDeath`). A re-run of
+  the checkpoint would spin masked on a frame note delivery declines.
 - **The park must re-check death after its wake condition**, not only at the top
   of each pass. A release that follows a terminate is legal.
 - **A new EL0-return action must be added to both tails and to the birth

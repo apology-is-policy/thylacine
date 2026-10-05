@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -225,8 +225,9 @@ liveness bug when the thing being exempted is a latch.*
 A note with a live handler must run at the return tail — but a peer thread
 blocked in a syscall reaches no return tail until something wakes it. So a caught
 note ARMS a per-Proc mask (`notes_arm_caught_note_locked`, the caught-note
-sub-field of `proc_flags`) and wakes every blocked peer (`proc_caught_note_wake`,
-under the process-table lock). Each woken thread re-checks a lock-free predicate,
+sub-field of `proc_flags`) and wakes every blocked peer outside a stop park
+(`proc_caught_note_wake`, under the process-table lock; a stopped thread waits
+for the stop to clear). Each woken thread re-checks a lock-free predicate,
 `thread_caught_note_deliverable`: a caught note is deliverable to *this* thread
 iff it is armed AND unmasked by the thread's own `note_mask` AND in the supported
 set (`caught & ~note_mask & NOTE_MASK_SUPPORTED`). Deliverable → the wait returns
@@ -240,6 +241,27 @@ nothing to deliver, re-sleep, and be re-woken forever. The register-then-observe
 discipline is [[inv-i9]]'s, shared with the death-wake and the report latches:
 the arm stores under the lock the predicate re-reads under, so no wake is lost
 between the check and the sleep.
+
+### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
+
+An uncaught note whose default is terminate (an `interrupt` nothing catches,
+`tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch, and its post
+wakes every blocked thread of the Proc outside a stop park
+(`proc_interrupt_terminate_wake`). An
+ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
+its return tail: `thread_die_pending` reports the latch in any family the
+thread has not masked, as well as group death. Five waits read
+`thread_group_death_pending` instead, `thread_die_pending`'s group-death leg
+alone with its `exit_close_active` gate. They are the tail's stop park, the
+birth park, the nested stop park a sleep detours into, the vfork suspend and
+the held spawn's birth wait, all through `sleep_death_only`
+([[sub-kernel-rendez]]). The latch's walk passes the stop parks by, since they
+could only absorb its wake, and the parent suspends absorb it: a stopped thread
+stays stopped, and a suspended parent stays suspended
+(DEBUG-FS-DESIGN 5g, the operator's vote of 2026-09-30). No park consumes or
+clears the latch. The note is met at the thread's next note checkpoint once
+it runs, and a revocable latch (a peer can install a handler or open the notes
+file) can no longer return a parent while its child still borrows its stack.
 
 ### A handler that escapes its frame must not deafen the Proc (bug-2)
 

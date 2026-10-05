@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -91,8 +91,12 @@ by tag to the owning rpc (frame copied to that rpc's `reply_buf`, waker
 wakes its own rendez), and repeats until its own reply lands; everyone else
 sleeps on their OWN rpc rendez. A departing reader hands the role off
 (`client_handoff_reader_locked`) to one still-pending rpc — skipping
-debug-stopped owners (`p9_rpc.owner->debug_stop_req`) so the role lands on a
-runnable survivor — with `be_reader` as a pure advisory wake-hint (election
+owners a stop parks (`proc_stop_requested(p9_rpc.owner)`: the debugger's or a
+job stop, in a group that is not dying) so the role lands on a runnable
+survivor. A dying owner never reads as stopped: its op goes to the F6 bounce,
+and a dying Proc's closer keeps the reader role, so its exit-close flush gets
+its reply (DEBUG-FS-DESIGN 5g; `9p_client.handoff_skips_debug_stopped_owner`
+elects a dying stopped owner's op where it passes a live one's by) — with `be_reader` as a pure advisory wake-hint (election
 is gated solely by `reader_active` under the lock, so two readers are
 impossible regardless of how many carry the hint).
 
@@ -394,8 +398,9 @@ this surface):
   resume races it); DeathWinsOverStop at every branch.
 - **Role-release completeness**: all FOUR `reader_active` sites must handle
   stop/death without stranding the role or the session; the handoff must
-  skip debug-stopped owners AND re-hand-off on a DIED return gated on
-  `be_reader`.
+  skip owners a stop parks (either owner; a dying owner is not one, and
+  `client_stop_pending` and the park it re-enters must agree, or the tag
+  drain spins) AND re-hand-off on a DIED return gated on `be_reader`.
 - **Park machinery**: every park on shared-reachable state uses the
   multi-waiter list ([[haz-single-waiter-rendez]]); register-then-observe
   under the documented lock order; no stale hook survives a return.

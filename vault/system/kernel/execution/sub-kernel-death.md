@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -195,6 +195,22 @@ whole finding: `group_exit_msg` is set on *every* `SYS_EXIT_GROUP` — a clean
 "dying" and every sleep-capable hook short-circuited, silently dropping the
 dev9p write-behind flush and skipping the close-time Tclunk.
 
+Because the closer reads no death, a stop must not park it either: group death
+clears no stop owner, and a closer parked for a stop would hold the dying Proc
+until the stop cleared (read from the code: a `kill` of a Ctrl-Z'd job with a
+dirty 9P file would live on until `tty:cont`, and a debugger that killed its
+stopped target and waited for the exit before closing its ctl fd would
+deadlock with it). So the park predicate, `proc_stop_requested`, reads false
+once `group_exit_msg` is set, and the closer's sleeps never detour into a stop
+park (DEBUG-FS-DESIGN 5g). A closer that parked while its group still lived,
+as an `exits()` close honours a stop, leaves the park when the group dies: the
+death cascade's wake finds the predicate false. A dying Proc is not stopped to
+anything else either: both stop delivers refuse it, a parent's wait reports
+neither its stop nor its continue, `stop`, `waitstop` and a step's wait read it
+as gone, the orphan rule does not count it as a stopped member, and
+`/ctl/procs` does not show it STOPPED ([[sub-kernel-jobctl]],
+[[sub-kernel-devproc]]).
+
 **The territory release rides the same window** (arm-6 Part D, IDENTITY-DESIGN
 9.9.1; extends #926/#68 from the handle table to the namespace). A Proc's
 Territory — its per-Proc mounts + name-based cwd — was released only at reap
@@ -274,16 +290,26 @@ nothing already written down says "the child has finished loading": the
 child's birth-hold mark. The principle above is kept by the next best means.
 Every write of that mark goes through one setter pair that wakes
 `child_waiters` under the lock, so no path out of UNBORN can skip the wake.
+Since 2026-09-30 the park sleeps in `sleep_death_only` (DEBUG-FS-DESIGN 5g),
+so only the caller's group death returns it early. Its own terminate latch is
+revocable, since a peer can install a handler or open the notes file, and a
+parent that returned on it could live on with a vfork child still on its stack
+or a held child still loading.
 
 **The stop park.** Two independent owners can park a thread —
 `debug_stop_req` (I-39) and `job_stop_req` (I-20) — and they share one park
 (`el0_return_stop_check`, the `sleep`/`tsleep` detour, and each Thread's own
 `debug_rendez`). Each resume clears **only its own owner**; the park
-predicate is the disjunction. Death overrides both: the stop-check runs
-*after* the die-check at the tail, and the park loop re-checks
-`group_exit_msg` on every wake, so a kill racing a stop terminates the
-thread inside the park rather than eret-ing to EL0. The second owner and its
-fans are [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
+predicate is the disjunction, false in a dying group. Death overrides both:
+the stop-check runs *after* the die-check at the tail, and reads the owners'
+flags (`proc_stop_owned`), not the predicate, so a thread killed between the
+two still enters the park; the park loop re-checks `group_exit_msg` on every
+wake, so a kill racing a stop terminates the thread inside the park rather
+than eret-ing to EL0. Only death does: the park
+sleeps in `sleep_death_only`, so a terminate latch's wake is absorbed and a
+stopped thread stays stopped, meeting the note at its next checkpoint once a
+resume lets it run (DEBUG-FS-DESIGN 5g). The second owner and its fans are
+[[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
 
 The loop checks death twice per pass since 2026-09-29: at the top, and again
 after the wake condition passes. The second check is for a release that
@@ -342,7 +368,8 @@ target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
   sleeper's cond-check and its sleep, for **every** rendez sleep. Extended
   by LS-5 to the terminate-disposition `interrupt` latch, which is read
   lock-free by the sleep predicate precisely because the sleep path can
-  never take the notes-queue lock.
+  never take the notes-queue lock. The five death-only waits read group death
+  alone and register for the death wake exactly as every other sleep does.
 - I-39/I-20 compatibility (`StopCompatI39`): neither resume may clear the
   other's owner.
 - #713 composition: the die-check runs *before* the DAIF-masked
@@ -397,7 +424,8 @@ What a change **must** re-establish:
 - the close window's three properties, and that `exit_close_active` stays
   owner-set, bounded to the one close pass, and checked *first* in
   `thread_die_pending`;
-- death winning over both stop owners at every branch.
+- death winning over both stop owners at every branch, the exit close
+  included (a dying group is never asked to park).
 
 ## Seams
 

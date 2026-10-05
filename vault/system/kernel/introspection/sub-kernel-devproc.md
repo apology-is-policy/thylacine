@@ -17,7 +17,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -379,7 +379,32 @@ debugger's first `stop` is therefore both the conversion and the gate opening.
 `waitstop` wait on (`devproc_stopscan_cb`) counts a target stopped only when
 `debug_stop_req` is set and every thread is parked. A birth hold, or a job
 stop, parks every thread with no debug stop, and reporting it as stopped would
-hand the debugger a refusal on its next read (audit round 1, F2).
+hand the debugger a refusal on its next read (audit round 1, F2). A dying
+target (`group_exit_msg` set) reads as gone, and the wait ends: its stop will
+never take, the stopped-only surface refuses it anyway, and its last thread
+no longer parks for a stop while it closes its handles (DEBUG-FS-DESIGN 5g),
+so waiting for it to read as parked would last the whole close. A `stop` at a
+dying target sets nothing: a dying Proc takes no new stop
+(`proc_debug_stop_deliver` refuses it under the table lock).
+
+`step` waits on its own scan (`devproc_waitscan_cb`, given the slot owner's
+ctl), and a released slot ends that wait too. A `detach` from another thread
+of the debugger resumes the target, whose step trap then finds no owner and
+delivers no stop, so a wait for the re-stop would last until the target exited
+(audit round 2, F6, 2026-09-30). A close of the ctl fd cannot land mid-step:
+the writer holds its Spoor for the whole write, and the close hook runs only on
+the last drop (#844). A dying target reads as gone to the step's scan as to
+`stop`'s (audit round 3). The scan's state reaches the wait only through
+`devproc_wait_verdict`: stopped, gone, released and denied end it, and
+anything else polls on (`devproc.debug_stop_start_resume` legs (g) and (f)).
+`/proc/<pid>/wait` is not slot-bound: it passes no ctl and waits for a stop or
+the exit.
+
+A step belongs to its slot. A whole-Proc stop cancels a pending step (8a-2c
+F1), and so do a `detach` and the close's release: each calls
+`proc_debug_cancel_steps_locked`, which clears every thread's armed step and
+step-over, so the next attacher never meets a stop it did not ask for (audit
+round 3, RF7; `devproc.debug_release_cancels_step`).
 
 ### Two stop owners, one park
 

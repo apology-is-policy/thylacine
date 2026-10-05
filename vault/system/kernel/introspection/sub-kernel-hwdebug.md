@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -155,8 +155,9 @@ Every path degrades to *resume the target*, never to a fault:
   caller treats it as a genuinely stray exception and it is fatal to the Proc.
 - An exception with no matching entry, or with the count already cleared — this
   CPU's debug registers are disabled and the instruction resumes.
-- A fire that finds no debugger owning the slot — the same disable-and-resume, so
-  a detached target runs free. The step arm disables *all* debug registers here
+- A fire that finds no debugger owning the slot, or a Proc already dying (which
+  takes no new stop, DEBUG-FS-DESIGN 5g) — the same disable-and-resume, so a
+  detached target runs free and a dying one dies at its tail's die check. The step arm disables *all* debug registers here
   rather than just the step bit, because a step loads the master enable and the
   breakpoint table too; clearing only the step bit would leave a stale breakpoint
   armed until the next switch-out. That symmetry across the three arms was itself

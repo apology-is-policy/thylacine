@@ -1129,15 +1129,19 @@ void test_9p_client_async_handoff_skips_async(void) {
 void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     drive_client_open(&g_client, &g_loopback);
 
-    // Two synthetic owner Procs. The handoff reads ONLY the two stop flags,
-    // so set just those (a full {0} on the ~400-byte struct would emit a
-    // memset the freestanding kernel does not link; every other field is unread).
+    // Two synthetic owner Procs. The handoff asks proc_stop_requested, which
+    // reads the two stop flags and the group's exit message, so set just those
+    // (a full {0} on the ~400-byte struct would emit a memset the freestanding
+    // kernel does not link; every other field is unread). An exit message left
+    // as stack garbage reads as a dying owner, which is not stopped.
     struct Proc owner_stopped;
     struct Proc owner_survivor;
     owner_stopped.debug_stop_req  = 1;   // being debug-stopped
     owner_stopped.job_stop_req    = 0;
+    owner_stopped.group_exit_msg  = NULL;
     owner_survivor.debug_stop_req = 0;   // runnable
     owner_survivor.job_stop_req   = 0;
+    owner_survivor.group_exit_msg = NULL;
 
     // The STOPPED op sits at the LOWER tag: the pre-fix handoff picks the first
     // eligible inflight, so without the skip it would choose owner_stopped and
@@ -1160,11 +1164,8 @@ void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     spin_unlock(&g_client.lock);
 
     p9_client_handoff_reader(&g_client);
-
-    TEST_ASSERT(!rpc_stopped.be_reader,
-                "#89: a debug-stopped owner's op is NOT handed the reader role");
-    TEST_ASSERT(rpc_survivor.be_reader,
-                "#89: the runnable survivor's op IS handed the reader role");
+    bool dbg_skipped  = !rpc_stopped.be_reader;
+    bool dbg_survivor = rpc_survivor.be_reader;
 
     // The JOB leg (PTY-1f, R2-F2): a job-stopped owner is skipped exactly as
     // a debug-stopped one. Flip the stopped owner's axis: debug clear, job
@@ -1175,10 +1176,19 @@ void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     owner_stopped.debug_stop_req = 0;
     owner_stopped.job_stop_req   = 1;    // Ctrl-Z'd (the everyday fg suspend)
     p9_client_handoff_reader(&g_client);
-    TEST_ASSERT(!rpc_stopped.be_reader,
-                "PTY-1f: a JOB-stopped owner's op is NOT handed the reader role");
-    TEST_ASSERT(rpc_survivor.be_reader,
-                "PTY-1f: the survivor takes the role past the job-stopped op");
+    bool job_skipped  = !rpc_stopped.be_reader;
+    bool job_survivor = rpc_survivor.be_reader;
+
+    // A dying owner is not stopped (DEBUG-FS-DESIGN 5g), whatever flag its stop
+    // left: its op takes the role like any other, and client_wait bounces it on
+    // if the thread is dying outside its exit close (F6) -- a closer keeps it
+    // and reads its own reply. One variable (the exit message) from the job leg.
+    rpc_stopped.be_reader  = false;
+    rpc_survivor.be_reader = false;
+    owner_stopped.group_exit_msg = "killed";
+    p9_client_handoff_reader(&g_client);
+    bool dying_taken = rpc_stopped.be_reader && !rpc_survivor.be_reader;
+    owner_stopped.group_exit_msg = NULL;
 
     // Now stop BOTH owners (one per axis): no eligible survivor -> the
     // handoff drops the role (no be_reader set), leaving a future survivor
@@ -1187,9 +1197,10 @@ void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     rpc_survivor.be_reader = false;
     owner_survivor.debug_stop_req = 1;
     p9_client_handoff_reader(&g_client);
-    TEST_ASSERT(!rpc_stopped.be_reader && !rpc_survivor.be_reader,
-                "#89: all owners stopped (either axis) -> the role is dropped");
+    bool dropped = !rpc_stopped.be_reader && !rpc_survivor.be_reader;
 
+    // Unhook the stack rpcs before any verdict, so a failing assert leaves the
+    // shared client holding no pointer into this frame.
     spin_lock(&g_client.lock);
     g_client.inflight[40] = NULL;
     g_client.inflight[41] = NULL;
@@ -1197,6 +1208,19 @@ void test_9p_client_handoff_skips_debug_stopped_owner(void) {
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+
+    TEST_ASSERT(dbg_skipped,
+                "#89: a debug-stopped owner's op is NOT handed the reader role");
+    TEST_ASSERT(dbg_survivor,
+                "#89: the runnable survivor's op IS handed the reader role");
+    TEST_ASSERT(job_skipped,
+                "PTY-1f: a JOB-stopped owner's op is NOT handed the reader role");
+    TEST_ASSERT(job_survivor,
+                "PTY-1f: the survivor takes the role past the job-stopped op");
+    TEST_ASSERT(dying_taken,
+                "5g: a dying owner is not stopped: its op takes the reader role");
+    TEST_ASSERT(dropped,
+                "#89: all owners stopped (either axis) -> the role is dropped");
 }
 
 // =============================================================================

@@ -203,6 +203,13 @@ void test_rendez_intr_terminate_interrupts_sleep(void);
 void test_rendez_intr_terminate_register_observe(void);
 void test_rendez_intr_terminate_masked_sleeps_through(void);
 void test_rendez_intr_terminate_interrupts_tsleep(void);
+void test_rendez_death_only_absorbs_latch(void);
+void test_rendez_death_only_sleeps_past_latch(void);
+void test_rendez_stopped_sleeper_holds_latch(void);
+void test_rendez_latch_wake_skips_stop_park(void);
+void test_rendez_stop_wake_skips_stop_park(void);
+void test_rendez_exit_close_ignores_stop(void);
+void test_rendez_exit_close_park_ends_on_death(void);
 void test_rendez_reader_frame_predicate(void);
 void test_rendez_reader_frame_blocks_death(void);
 void test_rendez_reader_frame_blocks_death_sleep(void);
@@ -298,6 +305,7 @@ void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
+void test_proc_dying_takes_no_stop(void);
 void test_proc_exec_reset_dispositions(void);      // #243 (main)
 void test_proc_exec_drops_image_note_state(void);   // #247
 void test_namespace_bind_smoke(void);
@@ -813,6 +821,7 @@ void test_birth_hold_publication_mark(void);
 void test_birth_hold_released_predicate(void);
 void test_birth_hold_parked_wakes_birth_wait(void);
 void test_birth_hold_orphan_rule(void);
+void test_birth_hold_birth_wait_survives_latch(void);
 void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
 void test_devproc_debug_stop_start_resume(void);
@@ -821,6 +830,7 @@ void test_devproc_debug_regs(void);
 void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
+void test_devproc_debug_release_cancels_step(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_kernel_writer_bracket(void);              // #152
@@ -2035,6 +2045,20 @@ struct test_case g_tests[] = {
                                        test_rendez_intr_terminate_masked_sleeps_through, false, NULL },
     { "rendez.intr_terminate_interrupts_tsleep",
                                        test_rendez_intr_terminate_interrupts_tsleep, false, NULL },
+    { "rendez.death_only_absorbs_latch",
+                                       test_rendez_death_only_absorbs_latch, false, NULL },
+    { "rendez.death_only_sleeps_past_latch",
+                                       test_rendez_death_only_sleeps_past_latch, false, NULL },
+    { "rendez.stopped_sleeper_holds_latch",
+                                       test_rendez_stopped_sleeper_holds_latch, false, NULL },
+    { "rendez.latch_wake_skips_stop_park",
+                                       test_rendez_latch_wake_skips_stop_park, false, NULL },
+    { "rendez.stop_wake_skips_stop_park",
+                                       test_rendez_stop_wake_skips_stop_park, false, NULL },
+    { "rendez.exit_close_ignores_stop",
+                                       test_rendez_exit_close_ignores_stop, false, NULL },
+    { "rendez.exit_close_park_ends_on_death",
+                                       test_rendez_exit_close_park_ends_on_death, false, NULL },
     { "rendez.reader_frame_predicate", test_rendez_reader_frame_predicate,  false, NULL },
     { "rendez.reader_frame_blocks_death",
                                        test_rendez_reader_frame_blocks_death, false, NULL },
@@ -2138,6 +2162,7 @@ struct test_case g_tests[] = {
     { "proc.job_stop_preserves_torpor_wait",
                                        test_proc_job_stop_preserves_torpor_wait, false, NULL },
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
+    { "proc.dying_takes_no_stop",      test_proc_dying_takes_no_stop,      false, NULL },
     { "proc.exec_reset_dispositions",  test_proc_exec_reset_dispositions,  false, NULL },
     { "proc.exec_drops_image_note_state", test_proc_exec_drops_image_note_state, false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
@@ -2840,6 +2865,7 @@ struct test_case g_tests[] = {
     { "devproc.debug_kregs_kstack_wait",       test_devproc_debug_kregs_kstack_wait,       false, NULL },
     { "devproc.debug_kstack_settled",          test_devproc_debug_kstack_settled,          false, NULL },
     { "devproc.debug_step_cancel_on_stop",     test_devproc_debug_step_cancel_on_stop,     false, NULL },
+    { "devproc.debug_release_cancels_step",    test_devproc_debug_release_cancels_step,    false, NULL },
     { "hwdebug.dfr0_enumerate",                test_hwdebug_dfr0_enumerate,                false, NULL },
     { "hwdebug.arm_disarm_roundtrip",          test_hwdebug_arm_disarm_roundtrip,          false, NULL },
     { "hwdebug.bp_table",                      test_hwdebug_bp_table,                      false, NULL },
@@ -4060,6 +4086,7 @@ struct test_case g_tests[] = {
     { "birth_hold.released_predicate",         test_birth_hold_released_predicate,         false, NULL },
     { "birth_hold.parked_wakes_birth_wait",    test_birth_hold_parked_wakes_birth_wait,    false, NULL },
     { "birth_hold.orphan_rule",                test_birth_hold_orphan_rule,                false, NULL },
+    { "birth_hold.birth_wait_survives_latch",  test_birth_hold_birth_wait_survives_latch,  false, NULL },
     { "birth_hold.held_spawn_parks",           test_birth_hold_held_spawn_parks,           false, NULL },
     { "birth_hold.held_spawn_death_wins",      test_birth_hold_held_spawn_death_wins,      false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
@@ -4340,6 +4367,7 @@ void test_soft_warn(const char *msg) {
 }
 
 int proc_test_serial_sak(int posture);
+u32 proc_test_release_leaked(int *pids, u32 max);
 void test_run_all(void) {
     // Legacy console transition tests require the serial recovery posture.
     // Select it explicitly for the fixture; the real boot policy is restored
@@ -4450,6 +4478,27 @@ void test_run_all(void) {
             uart_puts("NP-FIXTURE ");
             if (!current_test->failed)
                 test_fail("test left the dev9p readiness fixture up (see NP-FIXTURE)");
+        }
+
+        // And a fixture Proc a test linked: one that fails before its unlink
+        // leaves it in the table, and the next `while (wait_pid(&st) > 0)`
+        // drain waits on it for good (a live one never exits) or extincts on it
+        // (a fabricated zombie has no exiting thread to reap) -- a red test took
+        // the boot down tens of tests later, and nothing after it was reported.
+        // Same discipline: release it, name it, redden a test that passed
+        // leaking it.
+        int leaked_pid[4];
+        u32 leaked = proc_test_release_leaked(leaked_pid, 4u);
+        if (leaked != 0) {
+            uart_puts("LEAKED-PROC(");
+            for (u32 k = 0; k < leaked && k < 4u; k++) {
+                if (k != 0) uart_puts(",");
+                uart_putdec((u64)leaked_pid[k]);
+            }
+            if (leaked > 4u) uart_puts(",...");
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left a fabricated Proc linked (see LEAKED-PROC)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the

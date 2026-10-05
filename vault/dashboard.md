@@ -132,6 +132,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-05 [[chg-2026-10-05-stay-stopped]] — Stay stopped: a stopped thread keeps its stop, and death wins in the exit close
 - 2026-09-30 [[chg-2026-09-30-held-launch]] — The held launch: ambush spawns held where the kernel has the hold
 - 2026-09-30 [[chg-2026-09-30-image-slide]] — The image slide: a deck names a picture, and view shows it
 - 2026-09-30 [[chg-2026-09-30-kernel-chunk]] — The kernel chunk: the trusted episode's lock re-checks, and walks without recursion
@@ -139,5 +140,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-29 [[chg-2026-09-29-birth-hold]] — The birth hold: a spawned child parked before its first instruction
 - 2026-09-29 [[chg-2026-09-29-i47-close]] — I-47 ENFORCED: a picture laid once per block, and a token that routes rather than guards
 - 2026-09-29 [[chg-2026-09-29-layout-notice]] — A session's layout notice is no longer lost with the surface that carried it
-- 2026-09-29 [[chg-2026-09-29-ns-session-root-names]] — /proc/<pid>/ns names a 9P session root by the file its session came over -- a display-only origin on the root's dev9p priv
 <!-- generated:end -->

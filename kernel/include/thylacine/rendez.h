@@ -96,6 +96,12 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);
 // to -T_E_INTR. sleep() (above) never returns SLEEP_NOTEINTR.
 int sleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg);
 
+// The narrower variant (DEBUG-FS-DESIGN §5g): returns SLEEP_INTR for group death
+// alone. A terminate latch and a caught note wake it and are absorbed -- it
+// re-checks cond and sleeps again. For the waits a latch must not end: the three
+// stop parks and the two parent suspends.
+int sleep_death_only(struct Rendez *r, int (*cond)(void *arg), void *arg);
+
 // Wake the (at most one) thread sleeping on r. If no thread is
 // sleeping, wakeup is a no-op. Returns 1 if a waiter was woken,
 // 0 otherwise.

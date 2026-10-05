@@ -595,6 +595,11 @@ void notes_mark_self_managing(struct Proc *p);
 // those sites.
 bool thread_die_pending(struct Thread *t);
 
+// thread_die_pending's group-death leg alone, with the same exit_close_active
+// gate: never a terminate latch. The predicate of sleep_death_only
+// (DEBUG-FS-DESIGN §5g).
+bool thread_group_death_pending(struct Thread *t);
+
 // item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
 // notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-

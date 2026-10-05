@@ -29,6 +29,10 @@
 //      a zeroed frame, and a breakpoint on the entry fires after `start`. Then
 //      the launcher's own order (attach, exitkill, stop at once), and a ctl fd
 //      closed without `detach`, which must leave the child held.
+//   7. THE STAY-STOPPED RULE (DEBUG-FS-DESIGN 5g): a debug-stopped child in a
+//      loop with no syscall (`debug-child spin`) keeps its stop when an
+//      interrupt arrives -- its counter does not move -- and dies of the note
+//      once started; and a held child keeps its hold the same way.
 //
 // joey spawns + reaps + asserts exit 0 + the "debug-probe: PASS" marker, so any
 // failure gates the boot. On any failure path the child is `killgrp`'d so it can
@@ -45,6 +49,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use alloc::format;
 use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{Read, Write};
+use libthyla_rs::notes::{self, NoteTarget};
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_exits, t_pread, t_putstr, t_pwrite, t_wait_pid_for, T_WAIT_WNOHANG};
@@ -52,6 +57,7 @@ use libthyla_rs::{t_exits, t_pread, t_putstr, t_pwrite, t_wait_pid_for, T_WAIT_W
 // MUST match debug-child.
 const SENTINEL_REG: u64 = 0xDEB0_DEB0;
 const SENTINEL_MEM: u64 = 0xDEB0_0001_CAFE_0001;
+const SENTINEL_SPIN: u64 = 0xDEB0_0003_CAFE_0003;
 
 // t_user_regs byte offsets (the /proc/<pid>/regs ABI, syscall.h).
 const R_X20: usize = 20 * 8;
@@ -492,6 +498,130 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     // ctl / mem_f / regs_f / kregs_f / kstack_f drop here -> ctl close detaches.
 }
 
+// One u64 of the target's memory at `va`, through its /proc mem file.
+fn read_u64_at(mem_f: &File, va: u64, what: &'static str) -> Result<u64, &'static str> {
+    let mut b = [0u8; 8];
+    read_exact_at(mem_f.as_raw_fd() as i64, va as i64, &mut b).map_err(|_| what)?;
+    Ok(u64_le(&b, 0))
+}
+
+// Reap a child that must die on its own, bounded as the breakpoint wait is: one
+// still alive at the end is reported, not waited on forever. Ok only for a
+// nonzero status. The v1.0 status cannot name the note (docs/ERRORS.md), but
+// every leg that calls this leaves the child no other way to exit nonzero.
+fn reap_dead(pid: i32, alive: &'static str, clean: &'static str) -> Result<(), &'static str> {
+    for _ in 0..WP_POLL_TRIES {
+        let mut st: i32 = 0;
+        let r = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+        if r == pid as i64 {
+            return if st != 0 { Ok(()) } else { Err(clean) };
+        }
+        if r < 0 {
+            return Err("debug-probe: FAIL -- the wait for a dying child was refused\n");
+        }
+        let _ = sleep(Duration::from_millis(WP_POLL_MS));
+    }
+    Err(alive)
+}
+
+// The stay-stopped leg (DEBUG-FS-DESIGN 5g): stop a child in a loop with no
+// syscall -- so the stop parks it at an IRQ tail, the tail with no notes leg --
+// then post it an interrupt. The park must hold through it: a park that left
+// for the interrupt would eret the thread straight back into the loop with its
+// stop still set, and its counter would move. Started, the child leaves the
+// loop for a syscall and dies of the note at that syscall's tail.
+fn stopped_intr(child: &Child) -> Result<(), &'static str> {
+    let pid = child.pid();
+    let mut ctl = OpenOptions::new()
+        .write(true)
+        .open(&format!("/proc/{}/ctl", pid))
+        .map_err(|_| "debug-probe: FAIL -- intr: open ctl\n")?;
+    let regs_f = File::open(&format!("/proc/{}/regs", pid)).map_err(|_| "debug-probe: FAIL -- intr: open regs\n")?;
+    let mem_f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&format!("/proc/{}/mem", pid))
+        .map_err(|_| "debug-probe: FAIL -- intr: open mem\n")?;
+    ctl.write_all(b"attach").map_err(|_| "debug-probe: FAIL -- intr: attach\n")?;
+
+    // Stop until x20 shows the spin loop, as the first flow does for its park loop.
+    let mut regs = [0u8; REGS_LEN];
+    let mut in_loop = false;
+    for _ in 0..80 {
+        ctl.write_all(b"stop").map_err(|_| "debug-probe: FAIL -- intr: stop\n")?; // blocks until stopped
+        if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() {
+            return Err("debug-probe: FAIL -- intr: read regs\n");
+        }
+        if u64_le(&regs, R_X20) == SENTINEL_SPIN {
+            in_loop = true;
+            break;
+        }
+        ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- intr: start(retry)\n")?;
+        let _ = sleep(Duration::from_millis(10));
+    }
+    if !in_loop {
+        return Err("debug-probe: FAIL -- intr: child never reached the spin loop (x20 sentinel)\n");
+    }
+    let region = u64_le(&regs, R_X21);
+    if region == 0 || region >= USER_VA_LIMIT {
+        return Err("debug-probe: FAIL -- intr: regs x21 not an EL0 VA\n");
+    }
+    let pc = u64_le(&regs, R_PC);
+    let before = read_u64_at(&mem_f, region + 8, "debug-probe: FAIL -- intr: read the counter\n")?;
+
+    notes::send(NoteTarget::Pid(pid), "interrupt")
+        .map_err(|_| "debug-probe: FAIL -- intr: post the interrupt\n")?;
+    let _ = sleep(Duration::from_millis(HELD_SETTLE_MS));
+
+    // The stopped-only surface answers only while every thread is parked. The
+    // read is retried within the bound, as the other waits here are, because
+    // the verdict is the counter below: a park that left for the interrupt
+    // never settles again, so a read still refused at the end is the escape.
+    let mut parked = false;
+    for _ in 0..WP_POLL_TRIES {
+        if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_ok() {
+            parked = true;
+            break;
+        }
+        let _ = sleep(Duration::from_millis(WP_POLL_MS));
+    }
+    if !parked {
+        return Err("debug-probe: FAIL -- intr: the stopped child never parked again after the interrupt\n");
+    }
+    let after = read_u64_at(&mem_f, region + 8, "debug-probe: FAIL -- intr: read the counter after the interrupt\n")?;
+    if after != before || u64_le(&regs, R_PC) != pc {
+        return Err("debug-probe: FAIL -- intr: the stopped child ran after the interrupt (its counter moved)\n");
+    }
+
+    let one: u64 = 1;
+    if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&one as *const u64) as *const u8, 8, (region + 16) as i64) } != 8 {
+        return Err("debug-probe: FAIL -- intr: write the loop's exit flag via mem\n");
+    }
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- intr: start\n")?;
+    reap_dead(
+        pid,
+        "debug-probe: FAIL -- intr: the started child outlived its interrupt\n",
+        "debug-probe: FAIL -- intr: the started child exited cleanly past its interrupt\n",
+    )
+}
+
+fn stopped_intr_flow() {
+    let child = match Command::new("/bin/debug-child")
+        .arg("spin")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => fail("debug-probe: FAIL -- intr: spawn debug-child spin\n"),
+    };
+    if let Err(msg) = stopped_intr(&child) {
+        die(&child, msg);
+    }
+    t_putstr("debug-probe: intr ok (a stopped child kept its stop; started, it died of the interrupt)\n");
+}
+
 // The runtime address of debug-child's first instruction, from its ELF header.
 fn debug_child_entry() -> Result<u64, &'static str> {
     let f = File::open("/bin/debug-child").map_err(|_| "debug-probe: FAIL -- held: open /bin/debug-child\n")?;
@@ -631,12 +761,33 @@ fn held_close_keeps(child: &Child, entry: u64) -> Result<(), &'static str> {
     stop_expect_birth(&mut ctl, &regs_f, entry)
 }
 
+// Leg 4 (5g): an interrupt at the birth park does not end the held child -- after
+// the post it is still alive and still before its first instruction. Started, it
+// meets the note at its first syscall's tail and dies of it.
+fn held_intr_keeps(child: &Child, entry: u64) -> Result<(), &'static str> {
+    let _ = sleep(Duration::from_millis(HELD_SETTLE_MS));
+    notes::send(NoteTarget::Pid(child.pid()), "interrupt")
+        .map_err(|_| "debug-probe: FAIL -- held: post the interrupt\n")?;
+    let _ = sleep(Duration::from_millis(HELD_SETTLE_MS));
+    let (mut ctl, regs_f) = open_ctl_regs(child.pid())?;
+    ctl.write_all(b"attach")
+        .map_err(|_| "debug-probe: FAIL -- held: attach after the interrupt (did it end the held child?)\n")?;
+    stop_expect_birth(&mut ctl, &regs_f, entry)?;
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- held: start (interrupt)\n")?;
+    reap_dead(
+        child.pid(),
+        "debug-probe: FAIL -- held: the started child outlived its interrupt\n",
+        "debug-probe: FAIL -- held: the started child exited cleanly past its interrupt\n",
+    )
+}
+
 fn held_flow() -> Result<(), &'static str> {
     let entry = debug_child_entry()?;
-    let legs: [(fn(&Child, u64) -> Result<(), &'static str>, &str); 3] = [
+    let legs: [(fn(&Child, u64) -> Result<(), &'static str>, &str); 4] = [
         (held_late_attach, "late attach, entry breakpoint fired"),
         (held_immediate_attach, "attach+exitkill+stop at once"),
         (held_close_keeps, "a close without detach kept the hold"),
+        (held_intr_keeps, "an interrupt kept the hold; started, the child died of it"),
     ];
     for (leg, name) in legs.iter() {
         let child = spawn_held()?;
@@ -673,6 +824,7 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(msg) = debug_flow(&mut child) {
         die(&child, msg);
     }
+    stopped_intr_flow();
     if let Err(msg) = held_flow() {
         fail(msg);
     }

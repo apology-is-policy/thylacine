@@ -2284,8 +2284,9 @@ bool proc_pgrp_in_session(u32 pgid, u32 sid) {
 // ONE g_proc_table_lock hold covers the owner resolve + the membership fan
 // (pgrp_post_cb -- the notes_post_pgrp walk body, so the post + the
 // self-gating terminate-wake ride the established g_proc_table_lock ->
-// q->lock edge; tty:winch is informational and never arms the latch, so the
-// wake is a no-op). pgid 0 refused (the boot group -- kproc/joey -- is never
+// q->lock edge; tty:winch is informational and arms no latch, so the wake acts
+// only on a latch an earlier note left armed, and then only on blocked threads
+// outside a stop park, which re-check it). pgid 0 refused (the boot group -- kproc/joey -- is never
 // a tty-signal target; the notes_post_pgrp precedent), so a bringup winch
 // posts nothing.
 void proc_console_post_winch(void) {
@@ -3177,6 +3178,13 @@ bool proc_caught_note_pending(const struct Proc *p) {
 // no-IPI shape also lets the in-kernel unit test drive this REAL waker under
 // the deterministic single-CPU harness (the death test must hand-roll the
 // cascade to avoid waking idle secondaries).
+//
+// A thread parked on its own debug_rendez is skipped. Both sleeps there (the
+// stop parks) are death-only (DEBUG-FS-DESIGN 5g), so the wake could only be
+// absorbed, and absorbing it runs the thread for a moment: a confirmed stop
+// would read as unsettled and refuse the stopped-only surface. The latch stays
+// armed while a stop lasts, so every later post to the group would repeat that.
+// The death cascade above wakes the parks; this walk has nothing to tell them.
 void proc_interrupt_terminate_wake(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;            // belt: the arm never latches kproc
@@ -3185,7 +3193,7 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
-        if (r) wakeup(r);
+        if (r && r != &peer->debug_rendez) wakeup(r);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
 }
@@ -3199,7 +3207,9 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
 // sites call this right after proc_interrupt_terminate_wake: for a given post
 // exactly one of the two latches is armed (uncaught -> terminate; caught -> this
 // sub-field -- the arms are mutually exclusive by notes_post's arm-refusal), so
-// the other wake is a no-op via its gate.
+// the other wake is a no-op via its gate. A thread in a stop park is skipped for
+// the reason given above: the park is death-only, and a caught note waits for
+// the stop to clear.
 void proc_caught_note_wake(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;            // belt: the arm never latches kproc
@@ -3208,7 +3218,7 @@ void proc_caught_note_wake(struct Proc *p) {
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
-        if (r) wakeup(r);
+        if (r && r != &peer->debug_rendez) wakeup(r);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
 }
@@ -4813,10 +4823,14 @@ void el0_return_die_check(void) {
 // resume clears job_stop_req, and a thread woken by EITHER resume re-checks
 // this cond and re-parks while the OTHER owner still holds (the per-owner
 // clear; a tty:cont can never run a debugger-stopped thread --
-// StopCompatI39 / BUGGY_DOUBLE_STOP). Death is handled separately --
-// sleep()'s own thread_die_pending SLEEP_INTR return breaks the park, and
-// the loop's group_exit check terminates -- so this cond need only track
-// the resumes.
+// StopCompatI39 / BUGGY_DOUBLE_STOP). Death ends the park too:
+// sleep_death_only returns SLEEP_INTR on it, and this cond itself reads true
+// in a dying group (proc_stop_requested answers false once group_exit_msg is
+// set), which is the ONLY way an exit-close closer's nested park ends on
+// death -- its sleep sees no death (DEBUG-FS-DESIGN 5g). So it must stay the
+// park predicate, never the owners' flags alone:
+// rendez.exit_close_park_ends_on_death fails if it is narrowed.
+// el0_stop_park's loop terminates on either.
 static int stop_park_wake_cond(void *arg) {
     const struct Proc *p = (const struct Proc *)arg;
     return !proc_stop_requested(p);
@@ -4826,10 +4840,10 @@ static int stop_park_wake_cond(void *arg) {
 // below, and the birth park of a held spawn (DEBUG-FS-DESIGN 5f). They differ
 // only in what may hold the thread, so `wake_cond` names it: true once nothing
 // does (stop_park_wake_cond -- both stop owners clear; birth_park_wake_cond --
-// the birth hold as well). Returns true to proceed to the eret, false when it
-// left the park for a latched interrupt (the caller decides what that means:
-// the tail erets to deliver it, the birth park ends the child).
-static bool el0_stop_park(struct exception_context *ctx, struct Thread *t,
+// the birth hold as well). Returns only to proceed to the eret; group death does
+// not return. A latched interrupt does neither: the thread stays parked and
+// meets the note at its next checkpoint once it runs (DEBUG-FS-DESIGN 5g).
+static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
                           struct Proc *p, int (*wake_cond)(void *)) {
     // 8a-1c: publish the EL0-entry trapframe pointer (== the current SP at the
     // vector tail; see thread.h debug_trapframe) so /proc/<pid>/regs reads THIS
@@ -4885,37 +4899,24 @@ static bool el0_stop_park(struct exception_context *ctx, struct Thread *t,
             if (t->debug_ss_armed && ctx)
                 ctx->spsr |= (1ull << 21);   // SPSR_EL1.SS
             t->debug_trapframe = NULL;   // 8a-1c: no longer parked -> stop pointing at the (about-to-be-live) frame
-            return true;
+            return;
         }
 
-        // A SOFT interrupt-terminate latched while parked (LS-5c). Its
-        // terminate-vs-handler-vs-mask resolution is notes_deliver's, not
-        // ours; leave the park so the thread reaches its next checkpoint and
-        // delivers it there (standard interrupt checkpoint-delivery -- an
-        // interrupt never preempts mid-EL0). Without this bail, sleep() would
-        // return SLEEP_INTR every iteration on the still-set latch -> a livelock.
-        // thread_die_pending's first leg is group death, which the check at the
-        // top does not rule out here: a kill landing after it makes this read
-        // true, and the tail erets on a false return. So death is read once
-        // more, and only the latch leg leaves the park alive.
-        if (thread_die_pending(t)) {
-            if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
-                t->debug_trapframe = NULL;
-                thread_exit_self();          // noreturn
-            }
-            t->debug_trapframe = NULL;   // 8a-1c: leaving the park to deliver the interrupt
-            return false;
-        }
-
-        // Park (specs/debug_stop.tla Acquire+RegisterObserve). sleep() registers
-        // rendez_blocked_on = &t->debug_rendez under t->wait_lock, re-checks
-        // wake_cond under wait_lock+r->lock (serialized against BOTH resumes'
-        // clear-before-walk -- the register-then-observe I-9 close), and
-        // returns SLEEP_INTR if this Proc is group-terminating (the loop's death
-        // check fires next iteration). The rendez is THIS thread's own
-        // (single-waiter -- a multi-thread target parks each thread on its own
-        // debug_rendez, never a shared one).
-        (void)sleep(&t->debug_rendez, wake_cond, p);
+        // Park (specs/debug_stop.tla Acquire+RegisterObserve). The sleep
+        // registers rendez_blocked_on = &t->debug_rendez under t->wait_lock,
+        // re-checks wake_cond under wait_lock+r->lock (serialized against BOTH
+        // resumes' clear-before-walk -- the register-then-observe I-9 close),
+        // and returns on group death: SLEEP_INTR, or SLEEP_OK when wake_cond
+        // already reads true (stop_park_wake_cond does in a dying group);
+        // either way the loop's death check fires next iteration. Only a
+        // resume or death wakes it: the latch, caught-note and stop walks pass
+        // a thread on its own debug_rendez by, a stray wake is absorbed, and a
+        // latched note stays queued for the thread's next checkpoint after the
+        // stop clears (DEBUG-FS-DESIGN 5g; ParkEndsOnlyInDeath). The rendez
+        // is THIS thread's own (single-waiter
+        // -- a multi-thread target parks each thread on its own debug_rendez,
+        // never a shared one).
+        (void)sleep_death_only(&t->debug_rendez, wake_cond, p);
     }
 }
 
@@ -4945,13 +4946,14 @@ void el0_return_stop_check(struct exception_context *ctx) {
     // sets (specs/debug_stop.tla: the tail observes a set sflag; PTY-1f: the
     // job owner rides the same tail). The birth hold is deliberately not read
     // here: it can only be set before a thread's first instruction, and the
-    // birth park is the one place that consults it (DEBUG-FS-DESIGN 5f).
-    if (!proc_stop_requested(p))
+    // birth park is the one place that consults it (DEBUG-FS-DESIGN 5f). The
+    // owners' flags, not the park predicate: proc_stop_requested reads false in
+    // a dying group, which would send a thread killed since the die check
+    // straight to the eret; the park's own death check ends it instead.
+    if (!proc_stop_owned(p))
         return;
 
-    // A false return (a latched interrupt) needs nothing here: the tail erets
-    // and the interrupt is delivered at the thread's next checkpoint.
-    (void)el0_stop_park(ctx, t, p, stop_park_wake_cond);
+    el0_stop_park(ctx, t, p, stop_park_wake_cond);
 }
 
 // The birth park's wake condition (DEBUG-FS-DESIGN 5f): the birth hold AND both
@@ -4979,33 +4981,6 @@ void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp) {
     ctx->sp   = sp;      // SP_EL0
 }
 
-// A latched terminate at the birth park (DEBUG-FS-DESIGN 5f). The ordinary
-// tail's answer -- eret, and let note delivery resolve the latch at the next
-// checkpoint -- would run a held child. Running the checkpoint again in place
-// would lean on note delivery consuming the latch, which it declines to do for
-// a frame whose SP it does not trust, and a debugger can write that SP: the
-// masked re-run would never end. So the park applies the latch itself. Its
-// disposition can only be the default, and the latch is what says so: it is
-// armed only for a note nothing catches or ignores, in a Proc that does not
-// read its own notes (notes_arm_intr_terminate_locked, below notes_post's
-// SIG_IGN drop), and only the child's own calls could install a handler or
-// open its notes after that. The child exits with the latched note's name, as
-// notes_deliver_at_el0_return's terminate arm would report it. The latch is
-// armed on the note's commit and nothing a parked child can do consumes the
-// note, so the name is always found; were it not, the child would still end,
-// because a held child must never run.
-__attribute__((noreturn))
-static void birth_park_terminate(struct Proc *p, struct Thread *t) {
-    const char *tname = NULL;
-    struct NoteQueue *q = p->notes;
-    if (q) {
-        spin_lock(&q->lock);
-        tname = notes_terminate_note_name_locked(p, t);
-        spin_unlock(&q->lock);
-    }
-    exits(tname ? tname : "terminated at the birth park");
-}
-
 void el0_birth_park(struct exception_context *ctx) {
     // The #713 guard, for the tail's reason: userland_enter_held masked before
     // entering the birth tail, and KERNEL_EXIT follows this call.
@@ -5029,9 +5004,10 @@ void el0_birth_park(struct exception_context *ctx) {
     proc_birth_hold_mark_parked_locked(p);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-    // Group death never returns from the park; a false return is the latch.
-    if (!el0_stop_park(ctx, t, p, birth_park_wake_cond))
-        birth_park_terminate(p, t);
+    // Group death never returns from the park, and a latched interrupt does not
+    // end it: a held child stays held until it is released, or converted and
+    // resumed, and meets the note at its next checkpoint (DEBUG-FS-DESIGN 5g).
+    el0_stop_park(ctx, t, p, birth_park_wake_cond);
 }
 
 // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): the nested stop park a
@@ -5042,12 +5018,17 @@ void el0_birth_park(struct exception_context *ctx) {
 // -- sleep on THIS thread's own debug_rendez until BOTH owners clear
 // (stop_park_wake_cond), then return SLEEP_OK so the caller re-checks its
 // ORIGINAL wait condition and re-blocks in place (the syscall is preserved on
-// the stack; no unwind, no restart). Returns SLEEP_INTR if the Proc is
-// group-terminating (or a soft interrupt-terminate latched) while stop-parked
-// -- sleep()'s own thread_die_pending check catches it -- so the caller
-// unwinds and the thread dies / delivers at its EL0-return tail: DEATH WINS
-// over a stop, exactly as at the tail (pty_stop.tla DeathWinsOverJobStop on
-// the job axis). sleep()'s `r != &debug_rendez` detour gate skips the
+// the stack; no unwind, no restart). Returns SLEEP_INTR when the Proc starts
+// group-terminating while stop-parked, so the caller unwinds and the thread
+// dies at its EL0-return tail: DEATH WINS over a stop, exactly as at the tail
+// (pty_stop.tla DeathWinsOverJobStop on the job axis). SLEEP_OK can also mean
+// the group is dying: a death published before the park's first cond read,
+// which the caller's own die-check meets on its re-check, or an exit-close
+// closer, whose sleeps and die-checks see no death (5g) and which carries on
+// with its close. The park is death-only:
+// a latched interrupt waits for the stop to clear, and the caller's own wait,
+// re-checking then, unwinds for it if it is one that does (DEBUG-FS-DESIGN
+// 5g). sleep()'s `r != &debug_rendez` detour gate skips the
 // stop-check for this nested park (r == debug_rendez here), so there is no
 // recursion. specs/debug_stop.tla: the sleeper's register-then-observe park
 // (StopWakesSleeper -> the handshake -> "stopped"); NoLostStop +
@@ -5060,7 +5041,7 @@ int proc_stop_sleeper_park(struct Thread *t) {
     // "corrupted current" guard. (8c-2 close F3.)
     if (!t || t->magic != THREAD_MAGIC)
         extinction("proc_stop_sleeper_park: corrupt thread");
-    return sleep(&t->debug_rendez, stop_park_wake_cond, t->proc);
+    return sleep_death_only(&t->debug_rendez, stop_park_wake_cond, t->proc);
 }
 
 // The stop-delivery wake cascade, shared by BOTH stop owners (the debugger's
@@ -5082,9 +5063,13 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // wake and the sleeper's detour re-park (register-then-observe, I-9;
 // specs/debug_stop.tla StopWakesSleeper). A RUNNING peer reads NULL
 // rendez_blocked_on and is skipped -- it stops at its tail via the IPI kick.
-// wakeup() re-validates r->waiter under r->lock, so a peer already woken (or
-// by torpor_wake_all) is a safe no-op; wait_lock held across wakeup pins a
-// torpor waiter's stack rendez. LOCK CONTRACT: caller holds g_proc_table_lock
+// A peer already in its stop park is skipped too: a second stop changes nothing
+// the park waits on (a resume or group death ends it, and each wakes it
+// itself), so the wake could only be absorbed, with the cost the latch walk's
+// skip describes (proc_interrupt_terminate_wake). wakeup() re-validates
+// r->waiter under r->lock, so a peer already woken (or by torpor_wake_all) is
+// a safe no-op; wait_lock held across wakeup pins a torpor waiter's stack
+// rendez. LOCK CONTRACT: caller holds g_proc_table_lock
 // (pins p->threads); order g_proc_table_lock -> wait_lock -> (wakeup: r->lock);
 // torpor_lock strictly below g_proc_table_lock. The EL0-running-peer IPI kick
 // is SEPARATE (smp_resched_others below) -- it is group-GLOBAL (a broadcast to
@@ -5105,7 +5090,7 @@ static void proc_stop_wake_sleepers_locked(struct Proc *p) {
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
-        if (r) wakeup(r);
+        if (r && r != &peer->debug_rendez) wakeup(r);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
 }
@@ -5122,9 +5107,26 @@ static void proc_stop_wake_cascade_locked(struct Proc *p) {
     smp_resched_others();
 }
 
-void proc_debug_stop_deliver(struct Proc *p) {
+// proc_debug_cancel_steps_locked -- see proc.h. Under g_proc_table_lock, so
+// p->threads is stable; the RELEASE store pairs with hwdebug_switch_in's and
+// el0_return_stop_check's ACQUIRE reads of debug_ss_armed. (v1.0 arms only the
+// head thread, so this is usually a one-element clear.)
+void proc_debug_cancel_steps_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
-    if (p == g_kproc) return;   // kproc is never debuggable (undebuggable at the gate too)
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        __atomic_store_n(&peer->debug_ss_armed, false, __ATOMIC_RELEASE);
+        peer->debug_stepover_va = 0;
+    }
+}
+
+bool proc_debug_stop_deliver(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return false;
+    if (p == g_kproc) return false;   // kproc is never debuggable (undebuggable at the gate too)
+
+    // A dying Proc takes no new stop (DEBUG-FS-DESIGN 5g): death wins, so the
+    // flag would serve no park and no report. The terminate's set-once CAS runs
+    // under g_proc_table_lock, which the caller holds, so this read is exact.
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) return false;
 
     // Set the stop flag BEFORE the kick (the I-9 shape, mirror of
     // proc_group_terminate's flag-set-before-walk): a thread reaching the tail
@@ -5133,26 +5135,18 @@ void proc_debug_stop_deliver(struct Proc *p) {
     // observes it too. RELEASE pairs with el0_return_stop_check's ACQUIRE.
     __atomic_store_n(&p->debug_stop_req, 1u, __ATOMIC_RELEASE);
 
-    // A whole-Proc stop SUPERSEDES any in-flight single-step (8a-2c F1): cancel
-    // every thread's pending step so a step that a peer's bp/wp fire (or a
-    // detach/re-attach) interrupted before its own EC 0x32 does not leave
-    // debug_ss_armed set -> a spurious SPSR.SS armed into the NEXT resume ->
-    // an unexpected one-instruction stop after a `continue`. Idempotent with the
+    // A whole-Proc stop SUPERSEDES any in-flight single-step (8a-2c F1): a step
+    // that a peer's bp/wp fire interrupted before its own EC 0x32 must not leave
+    // debug_ss_armed set -> a spurious SPSR.SS armed into the NEXT resume -> an
+    // unexpected one-instruction stop after a `continue`. Idempotent with the
     // normal step completion, which already cleared debug_ss_armed at its EC 0x32
-    // (hwdebug_singlestep_from_el0) before reaching this deliver. Under
-    // g_proc_table_lock (both callers hold it: the ctl `stop` verb via
-    // proc_for_each, and proc_debug_fault_stop), so p->threads is stable; the
-    // RELEASE store pairs with hwdebug_switch_in's + el0_return_stop_check's
-    // ACQUIRE reads of debug_ss_armed. (v1.0 arms only the head thread, so this is
-    // usually a one-element clear; the walk is future-proof for a per-thread step.)
-    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
-        __atomic_store_n(&peer->debug_ss_armed, false, __ATOMIC_RELEASE);
-        peer->debug_stepover_va = 0;
-    }
+    // (hwdebug_singlestep_from_el0) before reaching this deliver.
+    proc_debug_cancel_steps_locked(p);
 
     // The 8c-2 sleeper-wake + EL0 IPI kick, shared with the PTY-1f job stop
     // (proc_stop_wake_cascade_locked above carries the full rationale).
     proc_stop_wake_cascade_locked(p);
+    return true;
 }
 
 // proc_debug_fault_stop -- see proc.h. The EC-path (hardware fire) counterpart
@@ -5165,15 +5159,16 @@ void proc_debug_stop_deliver(struct Proc *p) {
 // resume it (specs/debug_stop.tla StopImpliesOwned). The debug_owner read is a
 // plain field read under the lock (the same discipline as attach/detach); a NULL
 // owner (detached in the window) is reported as "not delivered" so the caller
-// falls back to the benign STALE-arm path. smp_resched_others() runs under the
-// lock exactly as the ctl `stop` verb already does it (proc_for_each -> callback
-// -> proc_debug_stop_deliver -> smp_resched_others).
+// falls back to the benign STALE-arm path, and so is a dying Proc, which takes
+// no new stop (its thread dies at the tail's die check). smp_resched_others()
+// runs under the lock exactly as the ctl `stop` verb already does it
+// (proc_for_each -> callback -> proc_debug_stop_deliver -> smp_resched_others).
 bool proc_debug_fault_stop(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return false;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    bool deliver = (p->debug_owner != NULL);
+    // proc_debug_stop_deliver's caller (this frame) now holds g_proc_table_lock.
+    bool deliver = (p->debug_owner != NULL) && proc_debug_stop_deliver(p);
     if (deliver) {
-        proc_debug_stop_deliver(p);   // caller (this frame) now holds g_proc_table_lock
         // 8c-2 #95: the firing M becomes the debug-fs FOCUS, so
         // /proc/<pid>/{regs,kregs,kstack} + step report the M at the stop, not the
         // head. Every bp/step/wp fire routes through here, so this one store covers
@@ -5311,11 +5306,16 @@ void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
 // under g_proc_table_lock -- the same lock wait_pid_for's report arm consumes
 // them under -- and each stop supersedes any unreported cont (latest-state
 // reporting: a parent that never saw the cont sees only the current stop).
+// A dying Proc takes no new stop (DEBUG-FS-DESIGN 5g; pty_stop.tla's StopJob is
+// guarded ~gflag): death wins, and a stop report for a child about to become a
+// zombie would be false. The terminate's set-once CAS runs under
+// g_proc_table_lock, so the check is exact.
 // Returns true iff it stopped `m` (a fresh stop -- the caller issues ONE
 // group-global reschedule IPI after the fan if any member stopped, F2).
 static bool proc_job_stop_one_locked(struct Proc *m) {
     if (!m || m->magic != PROC_MAGIC) return false;
     if (m == g_kproc) return false;   // the boot Proc is never a job-stop target
+    if (__atomic_load_n(&m->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) return false;
     if (__atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) != 0) return false;
     __atomic_store_n(&m->job_stop_req, 1u, __ATOMIC_RELEASE);
     m->stop_report_pending = true;
@@ -5432,12 +5432,16 @@ static bool pgrp_orphaned_locked(u32 pgid, const struct Proc *excl) {
 }
 
 // Any ALIVE member of `pgid` (excluding `excl`) currently job-stopped?
-// The orphan rule fires only for groups with stopped members. Lock held.
+// The orphan rule fires only for groups with stopped members. A dying member is
+// not one: it takes no stop and will never need a cont (DEBUG-FS-DESIGN 5g),
+// and counting it would hup the group's running members. Lock held -- the
+// terminate CAS's lock, so the death read is exact.
 struct pgrp_stopped_ctx { u32 pgid; const struct Proc *excl; bool stopped; };
 static int pgrp_stopped_cb(struct Proc *q, void *arg) {
     struct pgrp_stopped_ctx *c = arg;
     if (q->state == PROC_STATE_ALIVE && q->pgid == c->pgid && q != c->excl &&
-        __atomic_load_n(&q->job_stop_req, __ATOMIC_ACQUIRE) != 0) {
+        __atomic_load_n(&q->job_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&q->group_exit_msg, __ATOMIC_ACQUIRE) == NULL) {
         c->stopped = true;
         return 1;
     }
@@ -5455,9 +5459,10 @@ static bool pgrp_has_job_stopped_locked(u32 pgid, const struct Proc *excl) {
 // per ALIVE member (excluding `excl`), post tty:hup (which arms the
 // terminate latch for an uncaught target -- notes_arm_intr_terminate_locked
 // inside notes_post -- and the terminate-wake unwinds its blocked threads to
-// die at their tails; a stop-parked thread's park loop bails on
-// thread_die_pending and dies too: DEATH WINS from inside a stop), then post
-// tty:cont + job-resume it (so a hup-catching survivor actually runs).
+// die at their tails; a stop-parked thread keeps its stop with the latch armed,
+// DEBUG-FS-DESIGN 5g), then post tty:cont + job-resume it (so a hup-catching
+// survivor actually runs, and a stopped one resumes into the hup: its outer
+// wait unwinds for the latch, or its next syscall's tail delivers it).
 // The hup-then-cont per-member order is POSIX's. Lock held by caller.
 struct pgrp_hupcont_ctx { u32 pgid; const struct Proc *excl; };
 static int pgrp_hupcont_cb(struct Proc *q, void *arg) {
@@ -5729,7 +5734,11 @@ static int child_wait_ready_cond(void *arg) {
 // #811: a caller killed while parked returns via SLEEP_INTR and unwinds to its
 // EL0-return die-check. It does NOT loop -- re-sleeping would re-INTR forever --
 // and it leaves nothing behind, because it registered no state anywhere but its
-// own stack.
+// own stack. Only death does that. The sleep is death-only (DEBUG-FS-DESIGN 5g):
+// the caller's terminate latch is a wake hint a peer thread can revoke (a
+// handler, the notes fd) after it wakes us, and the suspend must not return
+// alive while the child still holds the parent, so the note waits for the
+// release and is taken at the caller's tail.
 // vfork_child_released — LINEAGE L-3c-2's whole decision, extracted so a kernel
 // test can reach it. `child` NULL means "not in the parent's children list".
 //
@@ -5786,7 +5795,7 @@ static void await_child_release(struct Proc *p, int child_pid,
         poll_waiter_list_register(&p->child_waiters, &pw);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-        int sl = sleep(&self_rendez, child_wait_ready_cond, &pw);
+        int sl = sleep_death_only(&self_rendez, child_wait_ready_cond, &pw);
         poll_waiter_list_unregister(&pw);
         if (sl == SLEEP_INTR)
             break;
@@ -5899,7 +5908,13 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
                 zombie = c;
                 break;                       // exit outranks every report
             }
-            if (!reportee && c->state == PROC_STATE_ALIVE) {
+            // A dying child reports neither latch: it is not stopped, and a
+            // cont after the kill resumed nothing it will run (DEBUG-FS-DESIGN
+            // 5g; POSIX reports a child that IS stopped, and Linux's group
+            // exit drops both). Its zombie reports the death. The terminate's
+            // set-once CAS runs under this lock, so the read is exact.
+            if (!reportee && c->state == PROC_STATE_ALIVE &&
+                __atomic_load_n(&c->group_exit_msg, __ATOMIC_ACQUIRE) == NULL) {
                 // Continue outranks stop (proc.h precedence note); each
                 // arm only fires when its flag requested it, so a plain
                 // wait neither sees nor consumes a latch.
@@ -6074,6 +6089,7 @@ void proc_test_link(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_test_link: NULL or corrupted Proc");
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    __atomic_fetch_or(&p->proc_flags, PROC_FLAG_TEST_FIXTURE, __ATOMIC_RELEASE);
     proc_link_child(kproc(), p);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
@@ -6089,6 +6105,7 @@ void proc_test_link_child(struct Proc *parent, struct Proc *p) {
     if (!parent || !p || p->magic != PROC_MAGIC)
         extinction("proc_test_link_child: NULL or corrupted Proc");
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    __atomic_fetch_or(&p->proc_flags, PROC_FLAG_TEST_FIXTURE, __ATOMIC_RELEASE);
     proc_link_child(parent, p);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
@@ -6124,6 +6141,40 @@ void proc_test_unlink(struct Proc *p) {
     p->parent  = NULL;
     p->sibling = NULL;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// proc_test_release_leaked -- the runner's backstop for fixtures a failing test
+// left linked (TEST_ASSERT returns before the test's own unlink). The two link
+// helpers above mark every Proc they splice in and rfork never does, so the
+// rule follows from how a Proc entered the table, not from its shape: a fixture
+// with a hand-linked thread, or one fabricated a zombie, is caught as surely as
+// a thread-less one. Left linked, it holds every later
+// `while (wait_pid(&st) > 0)` drain for good (a live one never exits) or
+// extincts it (a fabricated zombie has no exiting thread to reap). Unlink each
+// marked child of kproc, its subtree with it, and return how many (the first
+// `max` pids land in `pids`). The memory stays allocated, threads and all: the
+// failed test may have left pointers to it anywhere.
+u32 proc_test_release_leaked(int *pids, u32 max);
+u32 proc_test_release_leaked(int *pids, u32 max) {
+    u32 n = 0;
+    struct Proc *kp = kproc();
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    for (struct Proc **pp = &kp->children; *pp; ) {
+        struct Proc *c = *pp;
+        if (!(__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_TEST_FIXTURE)) {
+            pp = &c->sibling;
+            continue;
+        }
+        *pp = c->sibling;
+        if (__atomic_load_n(&kp->child_count, __ATOMIC_RELAXED) > 0)
+            __atomic_fetch_sub(&kp->child_count, 1u, __ATOMIC_RELEASE);
+        c->parent  = NULL;
+        c->sibling = NULL;
+        if (n < max) pids[n] = c->pid;
+        n++;
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return n;
 }
 
 // proc_test_legate_teardown — run the A-4a legate-scope teardown walk for

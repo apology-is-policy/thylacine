@@ -236,9 +236,9 @@ static void client_handoff_reader_locked(struct p9_client *c,
             // `owner` is the submitter's Proc, alive while this rpc is
             // inflight (this deref is as safe as `r->done` above). Async ops
             // (on_complete) are skipped first, so `owner` is never read there.
-            // A death (owner group-terminating, not stopped) sets neither stop
-            // flag -> unaffected: the existing F6 bounce handles the
-            // dying-owner case.
+            // A dying owner never reads as stopped (proc_stop_requested
+            // answers false once group_exit_msg is set) -> the F6 bounce
+            // handles it.
             !(r->owner && proc_stop_requested(r->owner))) {
             // Skip async (POST_CQE) ops: they have no submitter thread to run
             // the reader loop. An async op's reply is demuxed by the
@@ -531,7 +531,9 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
 // detour's register-then-observe under wait_lock (the I-9-critical path). A
 // kproc thread has t->proc == kproc() (non-NULL), but kproc is neither
 // debuggable nor job-stoppable (both delivers reject it), so both flags are
-// always 0 -> this returns false for a kthread.
+// always 0 -> this returns false for a kthread. A dying Proc never reads as
+// stopped either, so a closer in its exit close keeps the reader role and its
+// flush gets its reply.
 static bool client_stop_pending(struct Thread *t) {
     return t && t->proc && proc_stop_requested(t->proc);
 }

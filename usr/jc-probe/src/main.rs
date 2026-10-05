@@ -55,6 +55,12 @@
 //          above takes the POST-time stop, which consumes the signal before
 //          the note is ever left queued.
 //   exit   `exit` -> drain-then-EOF + a clean reap.
+//   killst `debug-child dirty` stages a write on a 9P file and spins; /proc's
+//          `suspend` job-stops it (the owner a ^Z sets) and `kill` kills it,
+//          and it must be reaped with no resume, its write flushed. Its exit
+//          close flushes the bytes, and a close that parked for the stop
+//          would hold the dying job until a resume that never comes
+//          (DEBUG-FS-DESIGN 5g, death wins in the exit close).
 
 #![no_std]
 #![no_main]
@@ -64,11 +70,13 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 use core::time::Duration;
-use libthyla_rs::fs::OpenOptions;
+use libthyla_rs::fs::{self, File, OpenOptions};
+use libthyla_rs::io::{Read, Write};
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::{
-    t_burrow_attach, t_close, t_exit_group, t_fstat, t_open, t_putstr, t_read, t_wait_pid_for,
-    t_write, thread, T_ORDWR, T_WALK_OPEN_FROM_ROOT,
+    t_burrow_attach, t_close, t_exit_group, t_fstat, t_open, t_putstr, t_read, t_wait_if_stopped,
+    t_wait_pid_for, t_write, thread, T_ORDWR, T_WAIT_UNTRACED, T_WAIT_WNOHANG,
+    T_WALK_OPEN_FROM_ROOT,
 };
 
 #[global_allocator]
@@ -129,6 +137,149 @@ extern "C" fn watchdog_main(_arg: u64) {
 
 fn settle() {
     let _ = libthyla_rs::time::sleep(SETTLE);
+}
+
+/// The killst rung's file and bytes. MUST match debug-child's dirty mode.
+const DIRTY_PATH: &str = "/debug-child-dirty";
+const DIRTY_PAYLOAD: &[u8] = b"staged by debug-child, flushed by its exit close\n";
+
+/// The killst reap bound (400 x 25 ms). A correct kernel reaps the killed
+/// child at once; the bound turns a close parked for the stop into a named
+/// FAIL well inside the watchdog.
+const KILLST_TRIES: u32 = 400;
+const KILLST_POLL: Duration = Duration::from_millis(25);
+
+fn ctl_write(pid: i32, verb: &[u8]) -> bool {
+    match OpenOptions::new().write(true).open(&format!("/proc/{}/ctl", pid)) {
+        Ok(mut f) => f.write_all(verb).is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn file_holds(path: &str, want: &[u8]) -> bool {
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 128];
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(_) => return false,
+        }
+    }
+    &buf[..n] == want
+}
+
+/// The killst rung (see the ladder above). A failing run names the failure,
+/// then ends and reaps the child, so it never strands it.
+fn killstop() -> i64 {
+    let _ = fs::remove_file(DIRTY_PATH);
+    let mut child = match Command::new("/bin/debug-child")
+        .arg("dirty")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr("jc-probe: FAIL (spawn debug-child dirty) at leg killst\n");
+            return 13;
+        }
+    };
+    let pid = child.pid();
+
+    // The go-ahead: one byte once the write is staged.
+    let mut tag = [0u8; 1];
+    let got = match child.stdout.as_mut() {
+        Some(o) => o.read(&mut tag).unwrap_or(0),
+        None => 0,
+    };
+    let ready = got == 1 && tag[0] == b'R';
+    // The premise: the server holds none of the bytes yet, so the exit close
+    // has a flush to do. A written-through file would make the rung vacuous;
+    // the same stat after the reap must show the bytes (its control).
+    let stat = if ready { Some(fs::metadata(DIRTY_PATH)) } else { None };
+    let stat_failed = matches!(stat, Some(Err(_)));
+    let staged = matches!(&stat, Some(Ok(m)) if m.len() == 0);
+
+    // Stop the job, and see the stop reported (a report, not a reap).
+    let suspended = staged && ctl_write(pid, b"suspend");
+    let mut stopped = false;
+    if suspended {
+        let mut st: i32 = 0;
+        // SAFETY: SVC wrapper; &mut st is a valid writable i32.
+        let r = unsafe { t_wait_pid_for(pid, T_WAIT_UNTRACED, &mut st as *mut i32) };
+        stopped = r == pid as i64 && t_wait_if_stopped(st);
+    }
+
+    // Kill it while it is stopped, and reap it with no resume.
+    let killed = stopped && ctl_write(pid, b"kill");
+    let mut reaped = false;
+    if killed {
+        for _ in 0..KILLST_TRIES {
+            let mut st: i32 = 0;
+            // SAFETY: as above.
+            let r = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+            if r == pid as i64 {
+                reaped = true;
+                break;
+            }
+            if r < 0 {
+                break;
+            }
+            let _ = libthyla_rs::time::sleep(KILLST_POLL);
+        }
+    }
+    if !reaped {
+        let why = if !ready {
+            "the child did not stage its write"
+        } else if stat_failed {
+            "the stat of the staged file failed"
+        } else if !staged {
+            "the child's bytes reached the server before its close: nothing staged to flush"
+        } else if !suspended {
+            "the /proc suspend write was refused"
+        } else if !stopped {
+            "the job stop was not reported"
+        } else if !killed {
+            "the /proc kill write was refused"
+        } else {
+            "a killed job-stopped child was not reaped: its exit close parked for the stop"
+        };
+        // Named before the cleanup, which the watchdog bounds if it cannot end.
+        t_putstr(&format!("jc-probe: FAIL ({}) at leg killst\n", why));
+        // Never strand it: a resume ends a park the kill could not, a kill
+        // ends the rest, and the reap blocks until it is gone.
+        let _ = ctl_write(pid, b"resume");
+        let _ = ctl_write(pid, b"kill");
+        let mut st: i32 = 0;
+        // SAFETY: as above.
+        let _ = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+        drop(child);
+        let _ = fs::remove_file(DIRTY_PATH);
+        return 13;
+    }
+    drop(child);
+
+    // The flush ran: the kill did not cost the child its accepted write. And the
+    // stat that read 0 before the kill now reads the payload's size, so that 0
+    // was the staging, not a path that cannot see the bytes.
+    let flushed = file_holds(DIRTY_PATH, DIRTY_PAYLOAD);
+    let sized = matches!(fs::metadata(DIRTY_PATH), Ok(m) if m.len() == DIRTY_PAYLOAD.len() as u64);
+    let _ = fs::remove_file(DIRTY_PATH);
+    if !flushed {
+        t_putstr("jc-probe: FAIL (the killed child's exit close did not flush its staged write) at leg killst\n");
+        return 13;
+    }
+    if !sized {
+        t_putstr("jc-probe: FAIL (the stat does not show the flushed bytes: its 0 before the kill proves nothing) at leg killst\n");
+        return 13;
+    }
+    0
 }
 
 /// Per-leg breadcrumb: with silent-hang legs bounded only by the watchdog,
@@ -627,9 +778,16 @@ fn run() -> i64 {
         return 11;
     }
 
+    // (k) A job-stopped child killed with a staged write is reaped, no resume.
+    leg("killst");
+    let r = killstop();
+    if r != 0 {
+        return r;
+    }
+
     WD_DISARM.store(true, core::sync::atomic::Ordering::Release);
     t_putstr(
-        "jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/maskstop/exit over a hosted ut)\n",
+        "jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/maskstop/exit/killst over a hosted ut)\n",
     );
     0
 }

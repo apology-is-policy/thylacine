@@ -575,8 +575,10 @@ struct Proc {
     // THIS flag (the tty:cont fan / SYS_TTY_CONT / the F8 teardown + orphan
     // rule), proc_debug_resume clears only debug_stop_req -- a tty:cont can
     // never run a debugger-stopped thread (StopCompatI39; the
-    // BUGGY_DOUBLE_STOP counterexample). Death overrides both (the park
-    // loop's group_exit_msg check precedes; GroupDie clears stopOwners).
+    // BUGGY_DOUBLE_STOP counterexample). Death overrides both: the park
+    // loop's group_exit_msg check precedes, and proc_stop_requested answers
+    // false once group_exit_msg is set (the models' GroupDie clears
+    // stopOwners; the kernel keeps the flags and gates the predicate).
     // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm (the pts SIGTSTP
     // fan) AND proc_job_stop_proc (the prowl-4 /proc/<pid>/ctl `suspend`),
     // both under g_proc_table_lock; CLEARED (RELEASE) by the job-resume paths
@@ -1149,6 +1151,21 @@ _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "arm-6: the session-hangup flag must not overlap the caught-note "
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
                "relocate PROC_FLAG_SESSION_HANGUP above the field then");
+
+// A Proc the in-kernel test harness spliced into the table (proc_test_link /
+// proc_test_link_child, the test support in proc.c), read only by the test
+// runner's release of a fixture a failing test left linked. rfork links a real
+// child through proc_link_child directly, so no real Proc carries it.
+#define PROC_FLAG_TEST_FIXTURE       (1u << 22)
+_Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
+    PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
+    PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
+    PROC_FLAG_CAUGHT_NOTE_MASK | PROC_FLAG_PIPE_TERMINATE_PENDING |
+    PROC_FLAG_SESSION_HANGUP | PROC_FLAG_SEAT_MANAGER |
+    PROC_FLAG_DEBUG_TAINTED)) == 0,
+    "the test-fixture mark must not overlap another flag");
 
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
@@ -1798,10 +1815,23 @@ void el0_return_die_check(void);
 // (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
 // already in the kernel observes the flag when its syscall/handler returns to the
-// tail. LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
-// proc_group_terminate; the flag-set + wake + IPI take no sleeping lock; the
-// per-peer wait_lock walk is g_proc_table_lock -> wait_lock -> r->lock).
-void proc_debug_stop_deliver(struct Proc *p);
+// tail. A peer already in its stop park is passed by: a second stop changes
+// nothing that park waits on (DEBUG-FS-DESIGN 5g). A dying Proc takes no new
+// stop -- death wins, and the flag would serve no park and no report
+// (pty_stop.tla's StopDebug is guarded ~gflag) -- so it sets nothing and returns
+// false; true iff it delivered. LOCK CONTRACT: caller holds g_proc_table_lock
+// (mirrors proc_group_terminate, whose set-once group_exit_msg CAS runs under
+// it, so the dying check is exact; the flag-set + wake + IPI take no sleeping
+// lock; the per-peer wait_lock walk is g_proc_table_lock -> wait_lock ->
+// r->lock).
+bool proc_debug_stop_deliver(struct Proc *p);
+
+// proc_debug_cancel_steps_locked: cancel every thread's pending single-step
+// (debug_ss_armed and the step-over VA). A whole-Proc stop does it, and so does
+// the end of the debugger's slot (a detach, the ctl-fd close's release): a step
+// left armed would stop the target for whoever attaches next, before it asked.
+// Caller holds g_proc_table_lock.
+void proc_debug_cancel_steps_locked(struct Proc *p);
 
 // proc_stop_sleeper_park: the nested stop park a blocking sleep()/tsleep()
 // detours into when ANY stop is pending -- a debugger stop (8c-2,
@@ -1809,10 +1839,16 @@ void proc_debug_stop_deliver(struct Proc *p);
 // proc_stop_requested's disjunction). Sleeps on the caller's own debug_rendez
 // (the shared stop-park rendez -- one park, two owners, per-owner clears)
 // until BOTH stop owners clear; returns SLEEP_OK (re-check the original wait
-// cond + re-block) or SLEEP_INTR (dying/soft-int while stop-parked -> unwind
-// + die at the tail; DEATH WINS -- pty_stop.tla DeathWinsOverJobStop is the
-// job-owner leg). Called from sched.c's sleep()/tsleep() detour with their
-// wait loop locks RELEASED. The `r != &debug_rendez` detour gate makes this
+// cond + re-block) or SLEEP_INTR (group death while stop-parked -> unwind + die
+// at the tail; DEATH WINS -- pty_stop.tla DeathWinsOverJobStop is the
+// job-owner leg). SLEEP_OK can also mean the group is dying: a death published
+// before the first cond read, which the caller's own die-check then meets, or
+// an exit-close closer, whose die-checks are off (exit_close_active) and which
+// carries on with its close. The sleep is death-only (DEBUG-FS-DESIGN 5g): a latched
+// interrupt or a caught note waits for the stop to clear, and the caller's own
+// wait meets it then. Called from sched.c's sleep()/tsleep() detour, poll's
+// loop and the 9P client's stop park, with their locks RELEASED. The
+// `r != &debug_rendez` detour gate makes this
 // nested park (r == debug_rendez) skip the stop-check -> no recursion.
 // (Named proc_debug_stop_sleeper_park before PTY-1f generalized the cond.)
 int proc_stop_sleeper_park(struct Thread *t);
@@ -1829,8 +1865,10 @@ int proc_stop_sleeper_park(struct Thread *t);
 // could land AFTER a detach's proc_debug_resume cleared it, parking the target
 // with no debugger left to resume it -- the 8a-2 SA-1 strand (specs/debug_stop.
 // tla StopImpliesOwned / NoStrand). Returns false (deliver skipped) when the
-// debugger detached in the race window; the EC caller then treats the fire as a
-// benign STALE arm (disables this CPU's debug regs + resumes the instruction).
+// debugger detached in the race window, or when the Proc is dying (it takes no
+// new stop); the EC caller then treats the fire as a benign STALE arm (disables
+// this CPU's debug regs + resumes the instruction), and a dying thread dies at
+// its tail's die check before any EL0 instruction.
 bool proc_debug_fault_stop(struct Proc *p);
 
 // proc_debug_resume: resume `p` -- clear p->debug_stop_req (RELEASE, ordered
@@ -1882,15 +1920,33 @@ void proc_birth_hold_orphan_rule_locked(struct Proc *p);
 // flag (job_stop_req), per-owner clears.
 // =============================================================================
 
-// The park predicate: is ANY stop owner requesting this Proc parked? The
-// EL0-return tail, the sleep()/tsleep() stop detours, the 9P client's
-// client_stop_pending, and the elected-reader handoff skip ALL read this
-// disjunction (round-2 R2-F2: a flag the audited park machinery does not read
-// re-opens the #89 whole-FS freeze via the job axis). Two ACQUIRE loads off
-// one cache line (job_stop_req occupies debug_stop_req's pad slot).
-static inline bool proc_stop_requested(const struct Proc *p) {
+// A stop owner holds: either owner's flag, dying or not. Two ACQUIRE loads off
+// one cache line (job_stop_req occupies debug_stop_req's pad slot). The
+// EL0-return tail reads this rather than the park predicate below: its park
+// checks group death first, so a dying thread with a stop pending ends there
+// instead of erets (debug_stop.tla NoEretIntoDeath).
+static inline bool proc_stop_owned(const struct Proc *p) {
     return (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) |
             __atomic_load_n(&p->job_stop_req,  __ATOMIC_ACQUIRE)) != 0;
+}
+
+// The park predicate: is ANY stop owner requesting this Proc parked, in a group
+// that is not dying? The sleep()/tsleep() stop detours, poll's loop, the 9P
+// client's client_stop_pending, the elected-reader handoff skip and both parks'
+// wake conditions ALL read this (round-2 R2-F2: a flag the audited park
+// machinery does not read re-opens the #89 whole-FS freeze via the job axis).
+// A dying group is never asked to park (DEBUG-FS-DESIGN 5g): group death clears
+// no stop owner, and a dying Proc's closer reads no death in its sleeps
+// (exit_close_active), so a stop honoured there would hold the exit until the
+// stop cleared. The owners' flags a stop set before the death stay set: the
+// EL0-return tail reads them (proc_stop_owned), so a thread killed after its
+// die check still parks and dies in the park instead of erets; clearing them at
+// the terminate would lose that. Both delivers refuse a dying Proc, so nothing
+// sets them after the kill. The flags are read first, so the common case costs
+// the same two loads.
+static inline bool proc_stop_requested(const struct Proc *p) {
+    return proc_stop_owned(p) &&
+           __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL;
 }
 
 // proc_job_stop_pgrp: the SYS_TTY_SIGNAL TSTP fan-out -- deliver the
@@ -1917,8 +1973,10 @@ static inline bool proc_stop_requested(const struct Proc *p) {
 //     re-suspend a resumed program).
 // An already-job-stopped member is skipped (a second Ctrl-Z on a stopped
 // group is a no-op -- POSIX discards a stop signal for a stopped process).
-// pgid 0 refused (the notes_post_pgrp precedent). Returns the count of
-// members affected (posted or stopped). Lock-free callers only (takes
+// A dying member takes no stop (DEBUG-FS-DESIGN 5g). pgid 0 refused (the
+// notes_post_pgrp precedent). Returns the count of members the fan reached,
+// less an orphaned group's discarded ones: posted, stopped, already stopped,
+// or dying. Lock-free callers only (takes
 // g_proc_table_lock itself; the pts seam calls it with g_pts_lock RELEASED).
 int proc_job_stop_pgrp(u32 pgid);
 
@@ -1935,12 +1993,12 @@ int proc_job_stop_pgrp(u32 pgid);
 // Idempotent: an already-job-stopped Proc answers false and re-latches nothing.
 //
 // Returns true iff it stopped `m`. FALSE IS NOT AN ERROR -- it means the stop
-// was correctly discarded (orphaned group) or already in effect, and the
-// caller's syscall still succeeds. The stop takes EFFECT at the caller's own
-// EL0-return tail (el0_return_stop_check), which runs AFTER
-// el0_return_die_check, so a group-terminate racing this one dies rather than
-// parking (DeathWinsOverStop; pty_stop.tla's StopJob, whose `~gflag` guard the
-// tail enforces at the park rather than at the set).
+// was correctly discarded (orphaned group, or a dying Proc, which takes no
+// stop) or already in effect, and the caller's syscall still succeeds. The stop
+// takes EFFECT at the caller's own EL0-return tail (el0_return_stop_check),
+// which runs AFTER el0_return_die_check, so a group-terminate racing this one
+// dies rather than parking (DeathWinsOverStop). pty_stop.tla's StopJob is
+// guarded ~gflag, and the set enforces it (proc_job_stop_one_locked).
 //
 // Lock-free callers only -- takes g_proc_table_lock itself.
 bool proc_job_stop_self(struct Proc *m);
@@ -1976,13 +2034,15 @@ void proc_job_cont_proc(struct Proc *m);
 // 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
 // at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),
 // so death/interrupt win over a stop. Fast-paths out when NO stop is pending
-// (neither owner -- PTY-1f: the check reads proc_stop_requested's
-// debug|job disjunction); otherwise parks the calling Thread on its own
-// debug_rendez (register-then-observe under wait_lock) until BOTH owners
-// clear, re-checking group death (terminate here, never eret) on every wake.
-// Returns to the tail (-> eret) when the stop
-// is cleared or a soft interrupt-terminate must be delivered at the next tail.
-// 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
+// (neither owner -- PTY-1f: the check reads proc_stop_owned's debug|job
+// disjunction, deliberately not the park predicate, so a group that dies
+// after the die check still meets the park's death check); otherwise parks
+// the calling Thread on its own debug_rendez (register-then-observe under
+// wait_lock) until BOTH owners clear, re-checking group death (terminate
+// here, never eret) on every wake.
+// Returns to the tail (-> eret) only when the stop is cleared: a latched
+// interrupt does not end the park, and the thread meets it at its next
+// checkpoint once it runs (DEBUG-FS-DESIGN 5g). 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
 // recorded into the Thread so /proc/<pid>/regs reads the RIGHT saved frame (its
 // kstack offset is not fixed -- see thread.h debug_trapframe).
 struct exception_context;
@@ -1994,8 +2054,9 @@ void el0_return_stop_check(struct exception_context *ctx);
 // = sp. el0_birth_park is the birth tail's stop leg: it announces the arrival,
 // then parks while the hold OR any stop owner holds, re-checking death on every
 // wake. It returns only to take the eret: group death ends the thread in the
-// park, and a latched terminate-interrupt ends it with the note's name, since a
-// held child can have no handler and must not eret to resolve it.
+// park, and a latched interrupt does not end it -- a held child stays held
+// until it is released, or converted and resumed, and meets the note at its
+// first checkpoint after that (DEBUG-FS-DESIGN 5g).
 void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp);
 void el0_birth_park(struct exception_context *ctx);
 
@@ -2619,8 +2680,11 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // proc_interrupt_terminate_wake — wake every Thread of `p` blocked in a
 // rendez sleep so it unwinds (*_INTR) to its EL0-return tail, where the
 // LS-5b uncaught-interrupt default-terminate fires. Internally gated on
-// proc_intr_terminate_pending (a no-op unless notes_post armed the latch),
-// so interrupt-posting sites call it unconditionally after the post.
+// proc_intr_terminate_pending (a no-op unless a latch is armed, by this post or
+// by an earlier one not yet delivered), so interrupt-posting sites call it
+// unconditionally after the post. A thread in a stop park (blocked on its own
+// debug_rendez) is skipped: the park is death-only and could only absorb the
+// wake (DEBUG-FS-DESIGN 5g).
 //
 // CALLER MUST HOLD g_proc_table_lock (the walk reads p->threads, mutated
 // only under that lock -- the #811 contract proc_group_terminate carries).
@@ -2653,8 +2717,8 @@ bool proc_caught_note_pending(const struct Proc *p);
 // unconditionally after posting. Interrupt-posting sites (which already hold
 // g_proc_table_lock for proc_interrupt_terminate_wake) call BOTH: the terminate
 // wake fires for an UNCAUGHT interrupt (latch armed), this one for a CAUGHT
-// interrupt (the latch was refused, this sub-field armed) -- exactly one is a
-// no-op per post. A caught note of a family posted from a site that does NOT
+// interrupt (the latch was refused, this sub-field armed) -- for a lone post
+// exactly one of them acts. A stop park is skipped here too. A caught note of a family posted from a site that does NOT
 // hold g_proc_table_lock (pipe / child_exit) is delivered at the blocked
 // thread's natural wake instead of promptly (today's behavior, no regression);
 // prompt delivery for those families is the item-11 completeness seam.

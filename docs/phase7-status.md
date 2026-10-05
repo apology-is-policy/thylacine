@@ -998,6 +998,46 @@ trusted authority"). `tools/test.sh` 1788/1788 after merging aux-3 9f0aec83. too
 b0002334: 50 of 50 boots PASS across default-smp1, default-smp4, default-smp8, ubsan-smp4 and ubsan-smp8 (N=10 each),
 0 corruption.
 
+## Stay stopped: a stopped thread keeps its stop, and death wins in the exit close — 2026-09-30
+
+The operator's vote of 2026-09-30 05:11Z ("Stay stopped"; DEBUG-FS-DESIGN 5g). Scripture
+51cc0abd (DEBUG-FS-DESIGN 5g and 5.5; ARCHITECTURE 8.8.2; AUDIT-TRIGGERS row 199 + its index line, row 118's addendum; the
+dec note). Code *(pending)*.
+
+- **One death-only park sleep.** `sleep_death_only` unwinds for group death alone; the tail's stop park, the birth
+  park, the nested sleeper park, the vfork suspend and the held spawn's birth wait use it, so a stopped thread keeps
+  its stop through a latched interrupt and a parent suspend returns only on the child's release or group death.
+- **A stop park is woken by a resume or death alone.** The latch's, a caught note's and a second stop's wake walks
+  pass a thread on its own `debug_rendez` by (round 1 F1, and the stop walk found by the part-2 rewrite).
+- **Death wins in the exit close.** `proc_stop_requested` is false once `group_exit_msg` is set, so a dying Proc's
+  closer never parks for a stop; the tail reads the raw owners (`proc_stop_owned`).
+- **A dying Proc is not stopped to any reader.** Both delivers refuse it; a parent's wait reports neither latch;
+  `stop`, `waitstop` and a step's wait read it as gone; the orphan rule does not count it; `/ctl/procs` does not show
+  it STOPPED (rounds 2 and 3).
+- **A step belongs to its slot.** The whole-Proc stop, `detach` and the ctl-fd close's release cancel a pending
+  step; the step's wait ends on a released slot (round 2 F6, round 3 RF7).
+- **The runner releases a leaked fixture Proc.** `LEAKED-PROC`: a failing test that left a fabricated Proc linked
+  hung the boot at the next drain of kproc's children. The link helpers mark every Proc they splice in
+  (`PROC_FLAG_TEST_FIXTURE`, which rfork never sets); after each test the runner unlinks every marked child of kproc,
+  names it and fails a passing test that left one.
+- `debug_stop.tla`: the latch on any target and on the spawner; three new buggy cfgs, `birth_latch_rerun` retired.
+
+Audit: four rounds, Opus 5.5 reviewing Opus 5.5 (Fable 5.1 out) for rounds 1-3: r1 0/0/0/7 P3, r2 0/0/0/6, r3 0/0/0/7
+(clean); r4 Fable 5.1 reviewing Opus 5.5 (cross-family), 0/0/0/2 P3, both in the runner's release (a fabricated
+zombie, a fixture with a thread), closed by the fixture mark.
+
+Verification: reds on e7d1c0b4, each its own bake, restored clean, each failing exactly its own assertions and running
+to the end of the suite: rleak (devproc (f) + `LEAKED-PROC(1803)`, where dfe25031 hung on the same leak), r1
+(7f9b0634's park code: the death-only tests, the birth wait's latch, the held child's interrupt; the device legs with
+those unregistered), r2 and r2c (the latch walk skip, the STOPPED column, birth-hold (b) and (c)), r3 (the stop walk
+skip), r4 and r4d (the predicate: both exit-close tests, devproc (f), the 9P handoff's dying leg, jc-probe killst), r5
+(the job refusal, the orphan rule, the step's slot, the report arm), r6 (the debug refusal, the step's dying check),
+r7 and r7b (the verdict map, the detach's and the release's cancel); the mark before and after (85c8afa6, 78b34682): a
+leaked zombie fixture extincted the boot and a thread-bearing one hung it, and both are now named and the boot
+completes 1797/1798. `tools/test.sh` 1798/1798 on 78b34682 with debug-probe and jc-probe PASS. TLC: debug_stop 19 cfgs
+as claimed (clean 12830 and 17330), pty_stop 4 cfgs as claimed. `tools/ci-smp-gate.sh` on 47cddabb: PASS, 50 boots and
+0 corruption (default at -smp 1, 4 and 8, UBSan at -smp 4 and 8, ten boots each, every boot PASS).
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

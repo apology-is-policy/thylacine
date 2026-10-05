@@ -13,14 +13,21 @@
 //                                      birth wait; a lost wake fails, bounded
 //   birth_hold.orphan_rule             a held child dies "launcher exited" with
 //                                      its spawner; a released one lives on
+//   birth_hold.birth_wait_survives_latch
+//                                      the spawner's own interrupt does not
+//                                      return its birth wait: it sleeps on
+//                                      until the child is born (5g)
 //   birth_hold.held_spawn_parks        a real held spawn parks /hello on a
 //                                      zeroed frame; release runs it; a
 //                                      conversion keeps it parked at its entry
 //                                      until the resume
-//   birth_hold.held_spawn_death_wins   a kill, and an interrupt, at the birth
-//                                      park end the child there -- the
-//                                      interrupt even on a frame whose SP note
-//                                      delivery refuses
+//   birth_hold.held_spawn_death_wins   a kill at the birth park ends the child
+//                                      there; an interrupt does not (5g), and
+//                                      neither its wake nor a stop's reaches
+//                                      the parked thread: the child stays
+//                                      held, even on a frame whose SP note
+//                                      delivery refuses, and dies of the note
+//                                      once released
 //
 // The devproc half (stop converts, start and detach release, the implicit
 // close keeps) is devproc.debug_birth_hold_ctl, beside the other ctl tests.
@@ -55,6 +62,7 @@ void test_birth_hold_publication_mark(void);
 void test_birth_hold_released_predicate(void);
 void test_birth_hold_parked_wakes_birth_wait(void);
 void test_birth_hold_orphan_rule(void);
+void test_birth_hold_birth_wait_survives_latch(void);
 void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
 
@@ -63,6 +71,10 @@ void test_birth_hold_held_spawn_death_wins(void);
 #define BH_UNSEEN 0xDEADu
 
 #define BH_BUDGET_NS (3ull * 1000ull * 1000ull * 1000ull)
+
+// Long enough for a thread spinning on a checkpoint to be switched in again
+// many times over: the scheduler's tick is milliseconds.
+#define BH_QUIET_NS (100ull * 1000ull * 1000ull)
 
 // A child waits against a wall-clock budget and reports what it saw, because a
 // kernel thunk cannot TEST_ASSERT: the macro returns, and an rfork entry that
@@ -400,6 +412,140 @@ void test_birth_hold_orphan_rule(void) {
 }
 
 // =============================================================================
+// birth_hold.birth_wait_survives_latch
+// =============================================================================
+
+struct bh_latch {
+    struct Proc   *launcher;         // the spawner, written before the fork
+    struct Thread *launcher_thread;
+    int            gpid;             // the held grandchild
+    u32            awaiting;         // the launcher is entering spawn_await_birth
+    u32            returned;         // spawn_await_birth returned
+    u32            gdone;            // the grandchild has stopped reading the launcher
+    u64            since;            // the launcher's dispatch count before the wake
+    u32            asleep;           // premise: it slept in the wait before the post
+    u32            latched;          // premise: the post armed its terminate latch
+    u32            settled;          // it ran on the wake, then slept again or returned
+    u32            early;            // it had returned with the child still unborn
+    u32            saw_return;       // the child's release then returned it
+};
+static struct bh_latch g_bh_latch;
+
+static bool bh_latch_asleep(void *arg) {
+    struct bh_latch *l = (struct bh_latch *)arg;
+    return __atomic_load_n(&l->awaiting, __ATOMIC_ACQUIRE) != 0 &&
+           __atomic_load_n(&l->launcher_thread->state, __ATOMIC_ACQUIRE) ==
+               THREAD_SLEEPING;
+}
+
+// A woken thread is switched in to run, so its dispatch count (nsched, stored
+// atomically at every switch-in for cross-thread readers) moves; its state
+// alone would read SLEEPING just the same had the wake never reached it.
+static bool bh_latch_settled(void *arg) {
+    struct bh_latch *l = (struct bh_latch *)arg;
+    if (__atomic_load_n(&l->returned, __ATOMIC_ACQUIRE) != 0)
+        return true;
+    return __atomic_load_n(&l->launcher_thread->nsched, __ATOMIC_RELAXED) !=
+               l->since &&
+           __atomic_load_n(&l->launcher_thread->state, __ATOMIC_ACQUIRE) ==
+               THREAD_SLEEPING;
+}
+
+static bool bh_latch_returned(void *arg) {
+    struct bh_latch *l = (struct bh_latch *)arg;
+    return __atomic_load_n(&l->returned, __ATOMIC_ACQUIRE) != 0;
+}
+
+static bool bh_latch_gdone(void *arg) {
+    struct bh_latch *l = (struct bh_latch *)arg;
+    return __atomic_load_n(&l->gdone, __ATOMIC_ACQUIRE) != 0;
+}
+
+// Every read of the launcher's thread happens before gdone is set, and the
+// launcher does not exit until it sees gdone (or its own, longer, budget ends).
+static void bh_latch_grand_thunk(void *arg) {
+    struct bh_latch *l = (struct bh_latch *)arg;
+    l->asleep = bh_wait(bh_latch_asleep, l, BH_BUDGET_NS);
+    if (l->asleep) {
+        l->since = __atomic_load_n(&l->launcher_thread->nsched, __ATOMIC_RELAXED);
+        l->latched = notes_post(l->launcher, "interrupt", 0u, NULL, true) == 0 &&
+                     proc_intr_terminate_pending(l->launcher);
+        irq_state_t s = proc_table_lock_acquire();
+        proc_interrupt_terminate_wake(l->launcher);
+        proc_table_lock_release(s);
+        l->settled = bh_wait(bh_latch_settled, l, BH_BUDGET_NS);
+    }
+    l->early = __atomic_load_n(&l->returned, __ATOMIC_ACQUIRE) != 0;
+    irq_state_t s = proc_table_lock_acquire();
+    proc_birth_hold_release_locked(current_thread()->proc);
+    proc_table_lock_release(s);
+    l->saw_return = bh_wait(bh_latch_returned, l, BH_BUDGET_NS);
+    __atomic_store_n(&l->gdone, 1u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+static void bh_latch_launcher_thunk(void *arg) {
+    struct bh_latch *l = (struct bh_latch *)arg;
+    struct Proc *self = current_thread()->proc;
+    l->launcher        = self;
+    l->launcher_thread = current_thread();
+    int gpid = rfork_spawn_held(bh_latch_grand_thunk, l, CAP_NONE);
+    __atomic_store_n(&l->gpid, gpid, __ATOMIC_RELEASE);
+    if (gpid > 0) {
+        __atomic_store_n(&l->awaiting, 1u, __ATOMIC_RELEASE);
+        spawn_await_birth(self, gpid);
+        __atomic_store_n(&l->returned, 1u, __ATOMIC_RELEASE);
+        (void)bh_wait(bh_latch_gdone, l, 4u * BH_BUDGET_NS);
+    }
+    exits("ok");
+}
+
+// The spawner's own interrupt lands while it sleeps in the birth wait. The wait
+// is death-only (DEBUG-FS-DESIGN 5g): the latch's wake is absorbed and the
+// spawner sleeps on until the child is born; a wait that returned for it would
+// hand its caller a pid whose child is still loading. The spawner is a Proc of
+// its own, because kproc, the test thread's, never latches. Its held child
+// interrupts it, watches it settle, and only then releases itself.
+void test_birth_hold_birth_wait_survives_latch(void) {
+    struct bh_latch *l = &g_bh_latch;
+    l->launcher        = NULL;
+    l->launcher_thread = NULL;
+    l->gpid            = 0;
+    l->awaiting        = 0;
+    l->returned        = 0;
+    l->gdone           = 0;
+    l->since           = 0;
+    l->asleep          = 0;
+    l->latched         = 0;
+    l->settled         = 0;
+    l->early           = 1;   // a grandchild that never ran reads as the failure
+    l->saw_return      = 0;
+
+    int lpid = rfork(RFPROC, bh_latch_launcher_thunk, l);
+    int lreaped = -1;
+    if (lpid > 0) {
+        int lst = -1;
+        lreaped = wait_pid_for(lpid, 0, &lst);
+    }
+    int gpid = __atomic_load_n(&l->gpid, __ATOMIC_ACQUIRE);
+    int greaped = bh_reap_bounded(gpid, NULL);
+
+    TEST_ASSERT(lpid > 0 && lreaped == lpid, "the launcher spawned and was reaped");
+    TEST_ASSERT(gpid > 0, "the launcher's held spawn succeeded");
+    TEST_EXPECT_EQ(greaped, gpid, "the held child was reaped by its adopter");
+    TEST_ASSERT(l->asleep,
+        "premise: the launcher slept in its birth wait before the post");
+    TEST_ASSERT(l->latched, "premise: the post armed the launcher's terminate latch");
+    TEST_ASSERT(l->settled,
+        "the launcher ran on the latch's wake, then slept again or returned, "
+        "inside the budget");
+    TEST_ASSERT(!l->early,
+        "the latch did not return the birth wait: the launcher slept on with "
+        "its child unborn");
+    TEST_ASSERT(l->saw_return, "the child's release returned the birth wait");
+}
+
+// =============================================================================
 // birth_hold.held_spawn_parks + birth_hold.held_spawn_death_wins
 // =============================================================================
 
@@ -545,9 +691,9 @@ void test_birth_hold_held_spawn_parks(void) {
         proc_debug_stop_deliver(c);
         proc_birth_hold_convert_locked(c);
         proc_table_lock_release(s);
-        // The delivery wakes every blocked thread of the target; the parked one
-        // re-parks without leaving the birth tail, which settling again with
-        // its stopped PC still the entry shows.
+        // The delivery passes the parked thread by -- a stop park is woken by a
+        // resume or by death alone -- and the thread stays at its birth tail:
+        // settled, with its stopped PC still the entry.
         settled2 = bh_wait(bh_parked_pred, c, BH_BUDGET_NS);
         if (settled2)
             bh_inspect_parked(c, NULL, NULL, &f2, &entry2);
@@ -576,6 +722,47 @@ void test_birth_hold_held_spawn_parks(void) {
     TEST_EXPECT_EQ(st, 0, "the resumed child ran /hello to a clean exit");
 }
 
+// ALIVE and not dying: a group terminate publishes its message at once, while
+// the state reads ALIVE until the last thread has gone.
+static bool bh_alive(struct Proc *c) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool alive = c->state == PROC_STATE_ALIVE &&
+                 __atomic_load_n(&c->group_exit_msg, __ATOMIC_ACQUIRE) == NULL;
+    proc_table_lock_release(s);
+    return alive;
+}
+
+// The head thread asleep on its own debug_rendez, with its dispatch count
+// (nsched), read under the lock while the child is ALIVE. Positive where
+// devproc_all_threads_parked is not: that predicate passes over a dying
+// thread, so it holds for a child already on its way out.
+static bool bh_head_parked(struct Proc *c, u64 *nsched) {
+    irq_state_t s = proc_table_lock_acquire();
+    struct Thread *th = (c->state == PROC_STATE_ALIVE) ? c->threads : NULL;
+    bool parked = false;
+    if (th) {
+        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+        parked = __atomic_load_n(&th->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+                 th->rendez_blocked_on == &th->debug_rendez;
+        spin_unlock_irqrestore(&th->wait_lock, ws);
+        *nsched = __atomic_load_n(&th->nsched, __ATOMIC_RELAXED);
+    }
+    proc_table_lock_release(s);
+    return parked;
+}
+
+// The head thread is parked at the end of the window and was never switched in
+// after its dispatch count read `since`. A woken thread is readied at once and
+// switched in within the window, so the count moves; its state alone would read
+// the same had it run and parked again.
+static bool bh_head_quiet_since(struct Proc *c, u64 since, u64 window_ns) {
+    u64 deadline = timer_now_ns() + window_ns;
+    while (timer_now_ns() < deadline)
+        sched();
+    u64 at = since;
+    return bh_head_parked(c, &at) && at == since;
+}
+
 void test_birth_hold_held_spawn_death_wins(void) {
     // (a) A kill at the birth park: the park's death check ends the thread.
     //     /hello would exit 0 had it run, so a nonzero status is the kill's.
@@ -599,64 +786,100 @@ void test_birth_hold_held_spawn_death_wins(void) {
     TEST_ASSERT(!killed, "the kill ended the child inside the budget");
     TEST_ASSERT(st != 0, "the child died of the kill at its birth park");
 
-    // (b) An interrupt at the birth park: the latch wakes the park, and the park
-    //     applies the interrupt's default action itself, ending the child with
-    //     its name rather than eret'ing a held child to deliver it.
+    // (b) An interrupt at the birth park does not end the child (5g), and its
+    //     wake passes the parked thread by: a stop park is woken by a resume
+    //     or by death alone. The thread stays parked, never switched in, and
+    //     the child stays held. Released, the child runs /hello and meets the
+    //     note at its first checkpoint -- the return of libt _start's first
+    //     syscall, SYS_NOTE_MASK -- and dies of it there.
     pid = bh_spawn_hello_held();
     c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
     settled = c && bh_wait(bh_parked_pred, c, BH_BUDGET_NS);
+    bool stamped = false, latched = false, alive = false, quiet = false;
+    u64 since = 0;
+    u32 hold = BH_UNSEEN;
     int posted = -1;
     char msg[32] = "";
     st = -1;
     reaped = -1;
     killed = false;
     if (c) {
-        if (settled)
+        stamped = settled && bh_head_parked(c, &since);
+        if (stamped)
             posted = notes_post(c, "interrupt", 0u, NULL, true);
-        irq_state_t s = proc_table_lock_acquire();
-        if (posted == 0)
+        // The walk wakes only a Proc whose latch is armed, and a queued note
+        // need not arm it: unarmed, the quiet verdict below would be vacuous.
+        latched = posted == 0 && proc_intr_terminate_pending(c);
+        if (latched) {
+            irq_state_t s = proc_table_lock_acquire();
             proc_interrupt_terminate_wake(c);
-        else if (c->state == PROC_STATE_ALIVE)
-            proc_group_terminate(c, "killed");   // never strand the child
-        proc_table_lock_release(s);
+            proc_table_lock_release(s);
+            quiet = bh_head_quiet_since(c, since, BH_QUIET_NS);
+            alive = bh_alive(c);
+            hold  = bh_hold_of(c);
+        }
+        if (quiet) {
+            bh_release_locked_pair(c);
+        } else {
+            irq_state_t s = proc_table_lock_acquire();
+            if (c->state == PROC_STATE_ALIVE)
+                proc_group_terminate(c, "killed");   // never strand the child
+            proc_table_lock_release(s);
+        }
         reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
     }
     TEST_ASSERT(pid > 0 && c != NULL, "a held spawn returned a live child");
     TEST_ASSERT(settled, "the child settled at its birth park before the interrupt");
+    TEST_ASSERT(stamped, "the settled child's thread sleeps on its debug_rendez");
     TEST_EXPECT_EQ(posted, 0, "the interrupt was posted");
-    TEST_EXPECT_EQ(reaped, pid, "the interrupted child was reaped");
-    TEST_ASSERT(!killed, "the interrupt ended the child without the fallback kill");
-    TEST_ASSERT(st != 0, "the interrupt ended the child at its birth tail");
+    TEST_ASSERT(latched, "premise: the post armed the terminate latch");
+    TEST_ASSERT(alive, "the interrupt did not end the held child");
+    TEST_ASSERT(quiet,
+        "the latch's wake passed the parked thread by: it stayed parked, never "
+        "switched in");
+    TEST_EXPECT_EQ(hold, BIRTH_HOLD_PARKED, "the child is still held");
+    TEST_EXPECT_EQ(reaped, pid, "the released child was reaped");
+    TEST_ASSERT(!killed, "the note ended the released child without the fallback kill");
+    TEST_ASSERT(st != 0, "the released child died rather than exit cleanly");
     TEST_ASSERT(bh_str_eq(msg, "interrupt"),
-                "the child exited with the interrupt's name, as note delivery's "
-                "terminate arm reports it");
+        "released, the child met the note at its first checkpoint and died of "
+        "the interrupt");
 
-    // (c) The same interrupt on a frame note delivery will not touch. The child
-    //     is converted (a debug stop delivered, the hold taken over), and then
-    //     its birth frame's SP is written as 0, which a debugger's regs write
-    //     may do. Note delivery declines a frame whose SP it does not trust, so
-    //     a birth tail that relied on it to consume the latch would re-run its
-    //     checkpoint, masked, until the fallback kill here -- and hang a
-    //     one-CPU machine outright. The park must end the child itself.
+    // (c) The same on a frame note delivery will not touch. The child is
+    //     converted (a debug stop delivered, the hold taken over), and then its
+    //     birth frame's SP is written as 0, which a debugger's regs write may
+    //     do. Neither the stop nor the interrupt wakes the parked thread, so it
+    //     stays parked, never switched in, with nothing re-running a checkpoint
+    //     it cannot pass -- which would hang a one-CPU machine. A kill still
+    //     ends it there.
     pid = bh_spawn_hello_held();
     c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
     settled = c && bh_wait(bh_parked_pred, c, BH_BUDGET_NS);
-    bool resettled = false, sp_zeroed = false;
+    bool converted = false, resettled = false, stop_quiet = false, sp_zeroed = false;
+    stamped = latched = alive = quiet = false;
+    since = 0;
+    u64 at = 0;
     posted = -1;
     msg[0] = '\0';
     st = -1;
     reaped = -1;
     killed = false;
     if (c) {
+        stamped = settled && bh_head_parked(c, &since);
         irq_state_t s = proc_table_lock_acquire();
-        if (settled && c->state == PROC_STATE_ALIVE) {
-            proc_debug_stop_deliver(c);
+        if (stamped && c->state == PROC_STATE_ALIVE) {
+            bool delivered = proc_debug_stop_deliver(c);
             proc_birth_hold_convert_locked(c);
+            converted = delivered &&
+                        __atomic_load_n(&c->debug_stop_req, __ATOMIC_ACQUIRE) == 1u &&
+                        bh_hold_of(c) == BIRTH_HOLD_NONE;
         }
         proc_table_lock_release(s);
-        // The delivery's wake rouses the parked thread; write the frame only
-        // once it has re-parked, as a regs write needs a settled target.
-        resettled = settled && bh_wait(bh_parked_pred, c, BH_BUDGET_NS);
+        // A regs write needs a settled target. A woken thread is readied at
+        // once, so had the delivery woken the park, this wait would settle only
+        // after the thread had run -- and its stamp would have moved.
+        resettled = stamped && bh_wait(bh_parked_pred, c, BH_BUDGET_NS);
+        stop_quiet = resettled && bh_head_parked(c, &at) && at == since;
         s = proc_table_lock_acquire();
         if (resettled && c->state == PROC_STATE_ALIVE) {
             struct Thread *th = c->threads;
@@ -669,24 +892,39 @@ void test_birth_hold_held_spawn_death_wins(void) {
         proc_table_lock_release(s);
         if (sp_zeroed)
             posted = notes_post(c, "interrupt", 0u, NULL, true);
-        s = proc_table_lock_acquire();
-        if (posted == 0)
+        latched = posted == 0 && proc_intr_terminate_pending(c);
+        if (latched) {
+            s = proc_table_lock_acquire();
             proc_interrupt_terminate_wake(c);
-        else if (c->state == PROC_STATE_ALIVE)
-            proc_group_terminate(c, "killed");   // never strand the child
+            proc_table_lock_release(s);
+            quiet = bh_head_quiet_since(c, at, BH_QUIET_NS);
+            alive = bh_alive(c);
+        }
+        s = proc_table_lock_acquire();
+        if (c->state == PROC_STATE_ALIVE)
+            proc_group_terminate(c, "killed");
         proc_table_lock_release(s);
         reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
     }
     TEST_ASSERT(pid > 0 && c != NULL, "a held spawn returned a live child (bad SP)");
     TEST_ASSERT(settled, "the child settled at its birth park (bad SP)");
-    TEST_ASSERT(resettled, "the converted child re-parked after the delivery's wake");
+    TEST_ASSERT(stamped, "the settled child's thread sleeps on its debug_rendez (bad SP)");
+    TEST_ASSERT(converted, "premise: the stop was delivered and converted the hold (bad SP)");
+    TEST_ASSERT(resettled, "the converted child is settled at its park");
     TEST_ASSERT(sp_zeroed, "the parked child's birth frame took SP 0");
     TEST_EXPECT_EQ(posted, 0, "the interrupt was posted (bad SP)");
-    TEST_EXPECT_EQ(reaped, pid, "the interrupted child was reaped (bad SP)");
-    TEST_ASSERT(!killed,
-                "the park ended the child itself: nothing spun waiting for a "
-                "delivery that declines the frame");
-    TEST_ASSERT(st != 0, "the interrupt ended the child at its birth park (bad SP)");
-    TEST_ASSERT(bh_str_eq(msg, "interrupt"),
-                "the child exited with the interrupt's name (bad SP)");
+    TEST_ASSERT(latched, "premise: the post armed the terminate latch (bad SP)");
+    // The interrupt's verdict first, then each wake's: on a kernel without one
+    // of the three rules, the first failure names that rule.
+    TEST_ASSERT(alive, "the interrupt did not end the stopped child (bad SP)");
+    TEST_ASSERT(stop_quiet,
+        "the stop passed the parked thread by: never switched in (bad SP)");
+    TEST_ASSERT(quiet,
+        "the latch's wake passed the parked thread by: nothing re-ran a "
+        "checkpoint it cannot pass (bad SP)");
+    TEST_EXPECT_EQ(reaped, pid, "the killed child was reaped (bad SP)");
+    TEST_ASSERT(!killed, "the kill ended the stopped child inside the budget");
+    TEST_ASSERT(st != 0, "the child died of the kill (bad SP)");
+    TEST_ASSERT(bh_str_eq(msg, "killed"),
+        "the kill, not the interrupt, ended the stopped child (bad SP)");
 }

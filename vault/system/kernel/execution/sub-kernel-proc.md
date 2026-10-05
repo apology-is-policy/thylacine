@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Graphical seat incarnations
 
@@ -95,7 +95,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
 | `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
-| `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list |
+| `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
@@ -191,7 +191,9 @@ the table lock. Per iteration it walks `p->children` once, applying the
 selector (`-1` any / `>0` that pid / `0` the caller's group / `< -1` group
 `-want_pid`) and collecting three facts: is there any matching child, is
 there a matching ZOMBIE, is there a matching child with a PTY-1e report
-latch. Precedence is exit > continue > stop. Then:
+latch (ALIVE and not dying: a dying child is not stopped, so its latches wait
+and its zombie reports the death, DEBUG-FS-DESIGN 5g). Precedence is
+exit > continue > stop. Then:
 
 - no match → `-1` (the POSIX `ECHILD` shape);
 - zombie → unlink under the lock, then **outside** it spin each Thread's
@@ -392,6 +394,15 @@ The three lifecycle states are `INVALID(0)` / `ALIVE` / `ZOMBIE`, with
 There is no REAPED state — by the time `wait_pid` returns the pid, the
 descriptor is freed and its magic clobbered.
 
+`proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
+(bit 22), stamped by the test link helpers (`proc_test_link`,
+`proc_test_link_child`) on every Proc they splice into the table. rfork links
+a child through `proc_link_child` directly and copies only the debug taint
+from its parent, so the mark means exactly "a test linked this", and the test
+runner's `proc_test_release_leaked` unlinks every marked child of kproc that a
+failing test left behind ([[sub-substrate-gates]]). Its assert names every
+flag below it.
+
 ## Concurrency
 
 One lock: [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
@@ -524,7 +535,8 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   no-zombie scan must stay in **one** critical section. `await_child_release`
   (the vfork suspend and the held spawn's birth wait) carries the same rule,
   and every write of the birth-hold mark wakes `child_waiters` under the lock,
-  or a held spawn strands.
+  or a held spawn strands. Its sleep must stay death-only: a latch a peer can
+  revoke must not return a parent early (DEBUG-FS-DESIGN 5g).
 - The I-32 charge helpers hold **no** counter state here; they route to the
   address space and decide only exemption. A caller that charges without
   [[lock-vma]] does not corrupt the count — the compare-and-swap prevents a lost

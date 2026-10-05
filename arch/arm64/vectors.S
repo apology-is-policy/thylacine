@@ -440,10 +440,10 @@ thread_fork_trampoline:
 //
 // DAIF: the frame is built with IRQs on (a plain C call, as userland_enter's
 // die-check), then everything is masked for the tail -- the precondition every
-// tail call asserts (#713) and the state KERNEL_EXIT requires. Unlike the stop
-// park at the other tails, el0_birth_park returns only to eret: it ends the
-// thread itself for a latched terminate-interrupt instead of leaving the park
-// to resolve it, so the tail is straight-line and cannot loop masked.
+// tail call asserts (#713) and the state KERNEL_EXIT requires. el0_birth_park
+// returns only to eret, as the stop park at the other tails does: neither
+// leaves its park for a latched interrupt (DEBUG-FS-DESIGN 5g), so the tail
+// is straight-line and cannot loop masked.
 // ---------------------------------------------------------------------------
 .globl userland_enter_held
 .type userland_enter_held, %function

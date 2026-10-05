@@ -1915,6 +1915,85 @@ void test_devproc_debug_stop_start_resume(void) {
                    "ctl-fd close resumes the target (ReleaseSlot via the close hook)");
     TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)NULL, "close freed the slot");
 
+    // (g) A step's wait ends when its slot is released: a detach from another
+    //     thread of the debugger resumes the target, whose step trap then finds
+    //     no owner and delivers no stop, so waiting for the re-stop would last
+    //     until the target exits. /proc/<pid>/wait (ctl NULL) is not slot-bound.
+    extern int devproc_wait_state_for_test(int pid, struct Proc *caller,
+                                           struct Spoor *ctl);
+    struct Spoor *gctl = open_ctl_for_pid(tgt->pid);
+    long g_attach = 0, g_stop = 0, g_detach = 0;
+    int g_owned = -9, g_released = -9, g_wait = -9;
+    if (gctl) {
+        g_attach   = devproc.write(gctl, attach_cmd, an, 0);
+        g_stop     = devproc.write(gctl, stop_cmd, sn, 0);
+        g_owned    = devproc_wait_state_for_test(tgt->pid, caller, gctl);
+        g_detach   = devproc.write(gctl, detach_cmd, dn, 0);
+        g_released = devproc_wait_state_for_test(tgt->pid, caller, gctl);
+        g_wait     = devproc_wait_state_for_test(tgt->pid, caller, NULL);
+        spoor_clunk(gctl);
+    }
+
+    // (f) A dying target is gone to stop and waitstop: its stop will never take
+    //     and the stopped-only surface refuses it, so the scan they poll ends
+    //     the wait instead of counting threads -- a dying Proc's closer no
+    //     longer parks for a stop (DEBUG-FS-DESIGN 5g), and waiting for it
+    //     would last the whole exit close. Thread-less, the target passes the
+    //     parked test vacuously, so only its death can end the wait early.
+    struct Spoor *dctl = open_ctl_for_pid(tgt->pid);
+    long f_attach = 0, f_stop = 0;
+    int f_live = -9, f_dying = -9, f_step_live = -9, f_step = -9, f_wait = -9;
+    if (dctl) {
+        f_attach    = devproc.write(dctl, attach_cmd, an, 0);
+        f_stop      = devproc.write(dctl, stop_cmd, sn, 0);
+        f_live      = devproc_debug_stop_state_for_test(tgt->pid, dctl);
+        f_step_live = devproc_wait_state_for_test(tgt->pid, caller, dctl);
+        __atomic_store_n(&tgt->group_exit_msg, "killed", __ATOMIC_RELEASE);
+        f_dying     = devproc_debug_stop_state_for_test(tgt->pid, dctl);
+        f_step      = devproc_wait_state_for_test(tgt->pid, caller, dctl);
+        f_wait      = devproc_wait_state_for_test(tgt->pid, caller, NULL);
+        spoor_clunk(dctl);   // the close releases the slot and resumes
+    }
+
+    // Both legs are recorded: release the target before their verdicts, so a
+    // failing one leaves nothing linked.
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_ASSERT(gctl != NULL, "open target ctl (step wait)");
+    TEST_EXPECT_EQ(g_attach, an, "attach returns n (step wait)");
+    TEST_EXPECT_EQ(g_stop, sn, "stop returns n (step wait)");
+    TEST_EXPECT_EQ(g_owned, 1, "the owned, stopped target reads stopped to the step's scan");
+    TEST_EXPECT_EQ(g_detach, dn, "detach returns n (step wait)");
+    TEST_EXPECT_EQ(g_released, 2, "the released slot ends the step's wait");
+    TEST_EXPECT_EQ(g_wait, 0,
+                   "the resumed target reads not-yet to /proc/<pid>/wait, which the slot does not bind");
+    // The scan's state only ends the wait through its verdict: a released slot
+    // must END it, where a live, not-yet-stopped target polls on.
+    extern int devproc_wait_verdict_for_test(int state);
+    int v_released = devproc_wait_verdict_for_test(2);
+    int v_gone     = devproc_wait_verdict_for_test(-1);
+    int v_stopped  = devproc_wait_verdict_for_test(1);
+    int v_denied   = devproc_wait_verdict_for_test(-2);
+    int v_notyet   = devproc_wait_verdict_for_test(0);
+    TEST_EXPECT_EQ(v_released, 0, "the released slot's verdict ends the step's wait");
+    TEST_EXPECT_EQ(v_gone, 0, "a gone target's verdict ends the wait");
+    TEST_EXPECT_EQ(v_stopped, 1, "a stopped target's verdict ends it stopped");
+    TEST_EXPECT_EQ(v_denied, -1, "a denied scan's verdict ends it denied");
+    TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1,
+                "a live target not yet stopped polls on");
+
+    TEST_ASSERT(dctl != NULL, "open target ctl (dying)");
+    TEST_EXPECT_EQ(f_attach, an, "attach returns n (dying)");
+    TEST_EXPECT_EQ(f_stop, sn, "stop returns n (dying)");
+    TEST_EXPECT_EQ(f_live, 1, "the stopped target reads stopped while its group lives");
+    TEST_EXPECT_EQ(f_dying, -1, "the dying target reads gone, which ends the wait");
+    TEST_EXPECT_EQ(f_step_live, 1,
+                   "the stopped target reads stopped to the step's scan while it lives");
+    TEST_EXPECT_EQ(f_step, -1, "the dying target is gone to the step's wait too");
+    TEST_EXPECT_EQ(f_wait, 0, "/proc/<pid>/wait still waits for a dying target's exit");
+
     // (F3, #95-audit) devproc_focus_thread selection: a matched in-list focus is
     // returned; a foreign / NULL focus falls back to head. The deterministic twin
     // of the /ambush-probe stage-C multi-M E2E (the kproc harness cannot reproduce a
@@ -1945,10 +2024,6 @@ void test_devproc_debug_stop_start_resume(void) {
     ft->debug_focus_thread = NULL;
     ft->state = PROC_STATE_ZOMBIE;
     proc_free(ft);
-
-    proc_test_unlink(tgt);
-    tgt->state = PROC_STATE_ZOMBIE;
-    proc_free(tgt);
 }
 
 // 8a-2c F1: a whole-Proc stop SUPERSEDES an in-flight single-step. proc_debug_
@@ -1958,6 +2033,64 @@ void test_devproc_debug_stop_start_resume(void) {
 // one-instruction stop after a `continue`). A minimal synthetic head thread
 // carries the pending step; no kstack/trapframe needed (F1 touches only the two
 // step flags). Non-vacuous: pre-fix the deliver left debug_ss_armed set.
+// A detach, or the ctl-fd close's release, cancels a pending step as a
+// whole-Proc stop does (8a-2c F1): left armed, the head's step trap would stop
+// the target for whoever attached next, before it asked. A zeroed stack Thread
+// carries the armed step; the target is linked so its ctl resolves.
+void test_devproc_debug_release_cancels_step(void);
+void test_devproc_debug_release_cancels_step(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc release-cancel target");
+    tgt->principal_id = tt->proc->principal_id;   // owner -> attach authorized
+    tgt->state        = PROC_STATE_ALIVE;
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic        = THREAD_MAGIC;
+    th.state        = THREAD_SLEEPING;
+    th.next_in_proc = NULL;
+    tgt->threads    = &th;
+    proc_test_link(tgt);
+
+    const char attach_cmd[] = "attach";
+    const char detach_cmd[] = "detach";
+    const long an = (long)sizeof(attach_cmd) - 1;
+    const long dn = (long)sizeof(detach_cmd) - 1;
+    long a1 = -9, d1 = -9, a2 = -9;
+    bool det_ss = true, det_va = true, rel_ss = true, rel_va = true;
+    struct Spoor *c1 = open_ctl_for_pid(tgt->pid);
+    if (c1) {
+        a1 = devproc.write(c1, attach_cmd, an, 0);
+        th.debug_ss_armed    = true;          // a step in flight...
+        th.debug_stepover_va = 0xBEEF000ull;  // ...over this bp
+        d1 = devproc.write(c1, detach_cmd, dn, 0);
+        det_ss = th.debug_ss_armed;
+        det_va = th.debug_stepover_va != 0;
+        spoor_clunk(c1);
+    }
+    struct Spoor *c2 = open_ctl_for_pid(tgt->pid);
+    if (c2) {
+        a2 = devproc.write(c2, attach_cmd, an, 0);
+        th.debug_ss_armed    = true;
+        th.debug_stepover_va = 0xBEEF000ull;
+        spoor_clunk(c2);   // no detach: the close hook's release
+        rel_ss = th.debug_ss_armed;
+        rel_va = th.debug_stepover_va != 0;
+    }
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;              // un-dangle before proc_free
+    tgt->state   = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_ASSERT(c1 != NULL && c2 != NULL, "open the target's ctl twice");
+    TEST_EXPECT_EQ(a1, an, "attach returns n");
+    TEST_EXPECT_EQ(d1, dn, "detach returns n");
+    TEST_ASSERT(!det_ss && !det_va, "a detach cancels the pending step");
+    TEST_EXPECT_EQ(a2, an, "a re-attach returns n");
+    TEST_ASSERT(!rel_ss && !rel_va, "the ctl-fd close's release cancels the pending step");
+}
+
 void test_devproc_debug_step_cancel_on_stop(void) {
     struct Thread *tt = current_thread();
     TEST_ASSERT(tt && tt->proc, "test thread has a proc");
