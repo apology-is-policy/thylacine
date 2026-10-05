@@ -1204,7 +1204,8 @@ in the recv loop, the top-of-loop, and the role-free park; a death still unwinds
 mid-frame block-through via the die-check below the detour). NO new §28 invariant
 and NO spec change (the reader-role is below the `9p_client.tla` +
 `debug_stop.tla` models, both re-verified GREEN; validated by the focused 8c-3
-Fable holotype + the `9p_client.handoff_skips_debug_stopped_owner` regression +
+Fable holotype + the `9p_client.handoff_skips_debug_stopped_owner` regression (since the
+2026-09-30 amendment `9p_client.handoff_skips_stop_parked`) +
 the SMP gate; the block-through decision lives in the sched detour, kproc-immune,
 so it has no deterministic kproc regression — the SMP gate + reasoning are its
 durable coverage).
