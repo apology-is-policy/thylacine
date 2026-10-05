@@ -11197,8 +11197,10 @@ int main(void) {
                 // Read the container's verdict from joey's OWN territory. Do
                 // this whether or not the status is clean: the marker is what
                 // names the failing property, and a wedged/killed container
-                // still leaves whatever it managed to write.
-                char hmark[8];
+                // still leaves whatever it managed to write. Room for a report
+                // that names several legs (the probe's L311-L318 report
+                // together), not only the first.
+                char hmark[64];
                 for (unsigned i = 0; i < sizeof(hmark); i++) hmark[i] = 0;
                 long rfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
                                   T_OREAD);

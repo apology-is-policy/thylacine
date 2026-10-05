@@ -11,8 +11,9 @@
 #
 # The liveness properties were shown able to FAIL before being trusted
 # (SPEC-TO-CODE.md, the poll.tla section); a liveness cfg is 'clean' here.
-# DeathTerminates and StopHonoured also have buggy cfgs of their own, judged
-# like the invariant ones: a TEMPORAL violation of the named property. The
+# DeathTerminates, StopHonoured and CaughtTerminates also have buggy cfgs of
+# their own, judged like the invariant ones: a TEMPORAL violation of the
+# named property. The
 # documented TLC (SPEC-POLICY's v1.8.0) names it; an older build (2.19, Aug
 # 2024) says only "Temporal properties were violated.", and that form is
 # accepted only from a cfg that checks that one property and no other.
@@ -55,7 +56,10 @@ poll_buggy_no_loop_stop_check:StopHonoured
 poll_buggy_verdict_before_settle:NoFalseNotReady
 poll_buggy_sweep_leaves_snapshot:NoSnapshotOutlivesCall
 poll_buggy_no_retry:NoMissedPoll
-poll_buggy_retry_is_timeout:NoSpuriousZero"
+poll_buggy_retry_is_timeout:NoSpuriousZero
+poll_buggy_no_loop_caught_check:CaughtTerminates
+poll_buggy_caught_before_ready:EintrNotOverReady
+poll_buggy_deadline_before_caught:NoZeroOverCaught"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"

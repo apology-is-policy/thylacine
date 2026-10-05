@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-28
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -363,6 +363,16 @@ event-driven; no timing constant appears in this path.
 [[seam-791-smp1-joey]].
 
 ## Caveats
+
+- **The V-1b phenotype leg reports through a file, and joey prints what it
+  holds.** joey stamps `/vivarium/pheno/rootfs/pheno-scratch` with `??` before
+  it runs the container (the pool is PRESERVEd, so a stale `OK` would pass a
+  broken run), waits for it, and reads the report back from outside: `OK`
+  passes, anything else is printed as the failure's marker. The buffer was 8
+  bytes until 2026-10-05, so a red run printed the first 7 bytes of a report
+  that names several legs at once (viv-pheno-probe's L311-L318 report
+  together, `L31adL L31bdL ...`) and named one failing leg of seven. It is 64
+  now ([[chg-2026-10-05-signal7-list]]).
 
 - **joey's boot-fatal pouch provers are matched on a LEG CENSUS, and the
   census strings are not joey's to type** (count them from the header with

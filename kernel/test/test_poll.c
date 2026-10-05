@@ -25,6 +25,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
@@ -1782,4 +1783,202 @@ void test_poll_sleep_for_waits(void) {
     // rather than on a wake. A sleep that returned early every time would fail
     // the floor above; one that never returned would hang the suite here.
     TEST_EXPECT_EQ(sys_poll_sleep_for(10), (s64)0, "a short sleep also returns 0");
+}
+
+// =============================================================================
+// signal(7)'s list (ARCH 8.8.3). ppoll and pselect6 are listed calls: a caught
+// note ends the park, every pass that finds nothing ready asks for it -- after
+// the readiness and before the deadline, Linux's do_poll order -- and the
+// timeout-only sleep behind musl's pause() answers it too. A native caller's
+// waits ride the note out.
+// =============================================================================
+
+static struct Spoor *g_cpq_wr;
+static hidx_t        g_cpq_fd;
+static s32           g_cpq_timeout;
+
+static long cpq_poll(void *arg) {
+    (void)arg;
+    struct pollfd pfds[1] = {
+        { .fd = g_cpq_fd, .events = POLLIN, .revents = 0 },
+    };
+    return (long)sys_poll_for_proc(current_thread()->proc, pfds, 1, g_cpq_timeout);
+}
+
+static void cpq_feed(void *arg) {
+    (void)arg;
+    static const u8 byte = 0x5c;
+    (void)g_cpq_wr->dev->write(g_cpq_wr, &byte, 1L, 0);
+}
+
+// One leg: a fresh Proc polling the read end of a fresh pipe whose two ends it
+// holds, primed with a byte or not.
+static struct test_caught_leg cpq_leg(bool linux_pheno, bool primed, s32 timeout,
+                                      bool pre_post) {
+    struct Proc  *p  = test_caught_proc(linux_pheno);
+    struct Spoor *rd = NULL, *wr = NULL;
+    bool ok = p != NULL && pipe_create(&rd, &wr) == 0;
+    hidx_t hrd = ok ? install_spoor(p, rd, RIGHT_READ)  : (hidx_t)-1;
+    hidx_t hwr = ok ? install_spoor(p, wr, RIGHT_WRITE) : (hidx_t)-1;
+    ok = ok && hrd >= 0 && hwr >= 0;
+    g_cpq_fd = hrd;  g_cpq_wr = wr;  g_cpq_timeout = timeout;
+    if (ok && primed) cpq_feed(NULL);
+    struct test_caught_leg leg = test_caught_run(ok ? p : NULL, cpq_poll, NULL,
+                                                 cpq_feed, NULL, pre_post);
+    test_caught_proc_free(p, &leg);
+    return leg;
+}
+
+void test_poll_caught_note_ends_park(void);
+void test_poll_caught_note_ends_park(void) {
+    struct test_caught_leg leg = cpq_leg(true, false, -1, false);
+    struct test_caught_leg ctl = cpq_leg(false, false, -1, false);
+
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux poller parked, the note posted, the poll returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends a Linux poll's park (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not the fd the release readied");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native poller parked, the note posted, the poll returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native poller and it parked again");
+    TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native poll ends on the readied fd");
+}
+
+// The order, with the note already pending as the call starts.
+void test_poll_caught_note_after_readiness_before_deadline(void);
+void test_poll_caught_note_after_readiness_before_deadline(void) {
+    struct test_caught_leg rdy  = cpq_leg(true, true,  -1, true);
+    struct test_caught_leg none  = cpq_leg(true, false, -1, true);
+    struct test_caught_leg zero  = cpq_leg(true, false,  0, true);
+
+    TEST_ASSERT(rdy.posted && rdy.on_post && rdy.joined,
+        "ready: the poll returned with no release");
+    TEST_EXPECT_EQ(rdy.rc, 1L, "readiness the pass found wins over a pending note");
+    TEST_ASSERT(none.posted && none.on_post && none.joined,
+        "nothing ready: the poll returned with no release, never parked");
+    TEST_EXPECT_EQ(none.rc, -(long)T_E_INTR, "EINTR from the first pass");
+    TEST_ASSERT(zero.posted && zero.on_post && zero.joined,
+        "zero timeout: the poll returned");
+    TEST_EXPECT_EQ(zero.rc, -(long)T_E_INTR,
+        "EINTR, not 0: Linux's do_poll asks for the signal before the timeout");
+}
+
+// The noise twin of poll.death_ends_a_noise_driven_poll: the busy Dev re-flags
+// the hook in every pass, so tsleep's own caught arm, behind its cond test, is
+// never reached while the walking lasts. The loop's own check must end the
+// poll well before the producer goes quiet.
+static struct Proc  *g_pcn_proc;
+static hidx_t        g_pcn_fd;
+static volatile s64  g_pcn_result;
+static volatile u64  g_pcn_return_ns;
+static volatile bool g_pcn_exited;
+
+static void pcn_poll_entry(void) {
+    struct Thread *t = current_thread();
+    t->note_interruptible = true;       // ppoll: on signal(7)'s list
+    struct pollfd pfds[1] = {
+        { .fd = g_pcn_fd, .events = POLLIN, .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_pcn_proc, pfds, 1, -1);
+    t->note_interruptible = false;
+    g_pcn_return_ns = timer_now_ns();
+    __atomic_store_n(&g_pcn_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_pcn_exited);
+}
+
+void test_poll_caught_note_ends_a_noise_driven_poll(void);
+void test_poll_caught_note_ends_a_noise_driven_poll(void) {
+    busy_reset();
+    g_pcn_result = -999; g_pcn_return_ns = 0; g_pcn_exited = false;
+    g_pcn_proc = test_caught_proc(true);
+    g_pcn_fd   = g_pcn_proc ? install_spoor(g_pcn_proc, dev_simple_attach(&g_busy_dev, 0),
+                                            RIGHT_READ)
+                            : (hidx_t)-1;
+    struct Thread *poller = g_pcn_fd >= 0 ? thread_create(g_pcn_proc, pcn_poll_entry) : NULL;
+    const char *err = poller ? NULL : "poller setup";
+    if (poller) ready(poller);
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
+        if (g_busy_samples < 3) err = "non-vacuous: the poller is circling on the noise";
+    }
+    u64 posted = 0;
+    if (!err) {
+        posted = timer_now_ns();
+        if (!test_caught_post(g_pcn_proc)) err = "the interrupt posted and armed the latch";
+    }
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pcn_result, __ATOMIC_ACQUIRE) != -999);
+        s64 r = __atomic_load_n(&g_pcn_result, __ATOMIC_ACQUIRE);
+        if (r == -999)                                err = "a caught note ends a noise-driven poll";
+        else if (r != -(s64)T_E_INTR)                 err = "the poll returned EINTR";
+        else if (g_pcn_return_ns - posted >= BUSY_LATE_NS)
+            err = "the loop's own check ended it, not the producer going quiet";
+        else if (!poll_waiter_list_empty(&g_busy_list)) err = "no hook left behind";
+    }
+    // End a poll the note did not: report POLLIN, walk the list, then reap.
+    bool reaped = poller == NULL;
+    if (poller) {
+        g_busy_ready = true;
+        poll_waiter_list_wake(&g_busy_list);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pcn_result, __ATOMIC_ACQUIRE) != -999);
+        if (__atomic_load_n(&g_pcn_result, __ATOMIC_ACQUIRE) != -999) {
+            test_kthread_join_free(poller, &g_pcn_exited);
+            reaped = __atomic_load_n(&g_pcn_exited, __ATOMIC_ACQUIRE);
+        }
+    }
+    if (reaped) test_caught_proc_free(g_pcn_proc, NULL);
+    g_pcn_proc = NULL;
+    busy_reset();
+    TEST_ASSERT(reaped, "the poller returned and was reaped");
+    TEST_ASSERT(err == NULL, err ? err : "caught note");
+}
+
+static s32 g_cps_timeout;
+
+static long cps_sleep(void *arg) {
+    (void)arg;
+    return (long)sys_poll_sleep_for(g_cps_timeout);
+}
+
+// pause() on aarch64 is ppoll(NULL, 0, NULL, NULL): the timeout-only sleep,
+// which only death ended before. A bounded sleep stands in for it first, so a
+// kernel without the opt-in ends that leg at its timeout rather than never. The
+// last leg is pause() itself: with no deadline tsleep takes sleep_common's
+// caught arm, not tsleep_common's, and a kernel without the opt-in leaves it
+// asleep for good (the fixture keeps its Proc).
+void test_poll_caught_note_ends_pause(void);
+void test_poll_caught_note_ends_pause(void) {
+    g_cps_timeout = 300;
+    struct Proc *lin = test_caught_proc(true);
+    struct test_caught_leg leg = test_caught_run(lin, cps_sleep, NULL, NULL, NULL, false);
+    test_caught_proc_free(lin, &leg);
+    struct Proc *nat = test_caught_proc(false);
+    struct test_caught_leg ctl = test_caught_run(nat, cps_sleep, NULL, NULL, NULL, false);
+    test_caught_proc_free(nat, &ctl);
+    g_cps_timeout = 0;
+    struct Proc *now = test_caught_proc(true);
+    struct test_caught_leg zero = test_caught_run(now, cps_sleep, NULL, NULL, NULL, true);
+    test_caught_proc_free(now, &zero);
+    g_cps_timeout = -1;
+    struct Proc *inf = test_caught_proc(true);
+    struct test_caught_leg forever = test_caught_run(inf, cps_sleep, NULL, NULL, NULL, false);
+    test_caught_proc_free(inf, &forever);
+
+    TEST_ASSERT(lin != NULL && nat != NULL && now != NULL && inf != NULL, "the Procs");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux sleeper parked, the note posted, the sleep returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends the timeout-only sleep: pause() returns");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not the timeout's 0");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native sleeper parked, the note posted, the sleep returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native sleeper and it slept again");
+    TEST_EXPECT_EQ(ctl.rc, 0L, "control: the native sleep ends on its timeout");
+    TEST_ASSERT(zero.posted && zero.on_post && zero.joined, "zero timeout: returned at once");
+    TEST_EXPECT_EQ(zero.rc, -(long)T_E_INTR,
+        "a zero timeout with a note pending is EINTR, as Linux's do_poll answers");
+    TEST_ASSERT(forever.parked && forever.posted,
+        "no timeout: the Linux sleeper parked, the note posted");
+    TEST_ASSERT(forever.on_post && forever.joined,
+        "a caught note ends pause() itself, which has no deadline to end it");
+    TEST_EXPECT_EQ(forever.rc, -(long)T_E_INTR, "no timeout: EINTR");
 }

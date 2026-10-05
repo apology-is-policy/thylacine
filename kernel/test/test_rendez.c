@@ -27,6 +27,7 @@
 #include "test.h"
 
 #include <thylacine/notes.h>   // LS-5c: notes_post arm + NOTE_BIT_INTERRUPT
+#include <thylacine/poll.h>    // caught_note_ends_wait4: the child_waiters wake
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -1814,5 +1815,76 @@ void test_rendez_caught_note_release_wakes_peer(void) {
     TEST_EXPECT_EQ(rc_peer, SLEEP_NOTEINTR,
         "the claimant's tail could not deliver the note, and its release woke the "
         "parked peer, which unwound for it");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_ends_wait4 -- signal(7)'s list (ARCH 8.8.3). wait4 is a
+// listed call. A caught note ends a Linux parent's wait for a live child with
+// WAIT_PID_NOTEINTR, nothing reaped; a native parent's wait rides it out and
+// ends when its last child is gone (-1, the ECHILD shape).
+static struct Proc *g_cwt_par;
+static struct Proc *g_cwt_kid;
+static bool         g_cwt_unlinked;
+
+static long cwt_wait(void *arg) {
+    (void)arg;
+    int status = 0;
+    return (long)wait_pid_for(-1, 0, &status);
+}
+
+static void cwt_release(void *arg) {
+    (void)arg;
+    proc_test_unlink(g_cwt_kid);           // no child left: the re-scan answers -1
+    g_cwt_unlinked = true;
+    poll_waiter_list_wake(&g_cwt_par->child_waiters);
+}
+
+static bool cwt_kid_linked(void) {
+    bool linked = false;
+    irq_state_t s = proc_table_lock_acquire();
+    for (struct Proc *c = g_cwt_par->children; c; c = c->sibling)
+        if (c == g_cwt_kid) linked = true;
+    proc_table_lock_release(s);
+    return linked;
+}
+
+static struct test_caught_leg cwt_leg(bool linux_pheno, bool *kid_kept) {
+    g_cwt_par      = test_caught_proc(linux_pheno);
+    g_cwt_kid      = g_cwt_par ? proc_alloc() : NULL;
+    g_cwt_unlinked = false;
+    if (g_cwt_kid) {
+        g_cwt_kid->state = PROC_STATE_ALIVE;   // alive, nothing to report: the wait blocks
+        proc_test_link_child(g_cwt_par, g_cwt_kid);
+    }
+    struct test_caught_leg leg = test_caught_run(g_cwt_kid ? g_cwt_par : NULL, cwt_wait,
+                                                 NULL, cwt_release, NULL, false);
+    *kid_kept = g_cwt_kid && cwt_kid_linked();
+    if (leg.stranded) return leg;
+    if (g_cwt_kid) {
+        if (!g_cwt_unlinked) proc_test_unlink(g_cwt_kid);
+        g_cwt_kid->state = PROC_STATE_ZOMBIE;
+        proc_free(g_cwt_kid);
+    }
+    test_caught_proc_free(g_cwt_par, &leg);
+    return leg;
+}
+
+void test_rendez_caught_note_ends_wait4(void);
+void test_rendez_caught_note_ends_wait4(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    bool kept = false, ctl_kept = false;
+    struct test_caught_leg leg = cwt_leg(true, &kept);
+    struct test_caught_leg ctl = cwt_leg(false, &ctl_kept);
+
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux parent waited on its live child, the note posted, the wait returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends a Linux parent's wait4 (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, (long)WAIT_PID_NOTEINTR,
+        "WAIT_PID_NOTEINTR, not the no-child -1 that viv_wait4 reports as ECHILD");
+    TEST_ASSERT(kept, "nothing reaped: the child is still the parent's");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native parent waited, the note posted, the wait returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native parent and it waited again");
+    TEST_EXPECT_EQ(ctl.rc, -1L, "control: the native wait ends when its last child is gone");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }

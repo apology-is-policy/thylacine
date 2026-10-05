@@ -349,6 +349,15 @@ struct Thread {
     // close on one of its paths, and clearing there would re-arm the death
     // legs for every later fd in the same table. Fits in the tail padding.
     bool               exit_close_active;
+    // IM-1 across a caught note (cons.c, cons_input_read): a frozen console
+    // read that a caught note unwound marks its thread, so the thread's next
+    // console read re-takes the reader slot by waiting, as a reader frozen
+    // through END does, instead of taking the busy guard's -1. Set and consumed
+    // by the owning thread only; KP_ZERO inits it false; cleared at exec; not
+    // rfork-propagated. A mark the thread never consumes costs its next
+    // console read a wait for a busy slot where it would have been refused.
+    // Fits the padding after exit_close_active -- no size change.
+    bool               cons_frozen_unwound;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
     // this Thread's OWN debugger park rendez. A thread observing a debugger stop

@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i24]
 validated-by: [spec-tsleep, gate-smp]
 locks: [lock-torpor, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -33,8 +33,12 @@ same metaphor, different scope.
   deadline; unequal ⇒ return `TORPOR_OK` at once. `timeout_us < 0`
   blocks indefinitely; `== 0` is a probe (registers, then times out
   immediately if still equal); `> TORPOR_MAX_TIMEOUT_US` (1 h) is
-  `-EINVAL`. Returns 0 / `-EINVAL` / `-EFAULT` / `-ETIMEDOUT`
-  (Linux-numeric, so pouch's `syscall_ret.c` decodes them as errno).
+  `-EINVAL`. Returns 0 / `-EINVAL` / `-EFAULT` / `-ETIMEDOUT` /
+  `-EINTR` (Linux-numeric, so pouch's `syscall_ret.c` decodes them as
+  errno). `-EINTR` (`TORPOR_ERR_EINTR`) means a caught note ended the
+  wait before any WAKE counted it (ARCH 8.8.3); only a Linux `FUTEX_WAIT`
+  — a call on signal(7)'s list — can receive it, so a native
+  `torpor_wait` stays death-only.
 - **0 is deliberately ambiguous** — it means *woken* OR *value already
   differed* (Linux returns `EAGAIN` for the latter; v1.0 collapses
   both because every futex client re-checks its own predicate on
@@ -110,10 +114,11 @@ WAIT, in order (`kernel/torpor.c::sys_torpor_wait_for_proc`):
    interrupt waker does not take `torpor_lock`, and its
    register-after-walk race is closed one layer down by `tsleep`'s
    register-then-observe under [[lock-wait]].
-7. Unlock; `tsleep(&w.rendez, cond_awoken, &w, deadline)`.
+7. Unlock; `tsleep_noteintr(&w.rendez, cond_awoken, &w, deadline)`.
 8. Re-lock; unlink; scribble `w.rendez.waiter = NULL`; unlock. The
    unlink-on-every-exit is the stack-waiter lifetime invariant.
-9. `TSLEEP_TIMEDOUT` ⇒ `-ETIMEDOUT`. `TSLEEP_INTR` is absorbed via
+9. `TSLEEP_TIMEDOUT` ⇒ `-ETIMEDOUT`; `TSLEEP_NOTEINTR` ⇒ `-EINTR`,
+   returned without sleeping again. `TSLEEP_INTR` is absorbed via
    fall-through to `TORPOR_OK` — deliberate and documented in-line:
    the return value is immaterial (the EL0-return die-check
    terminates the thread before it resumes userspace) and the waiter
@@ -126,6 +131,16 @@ WAKE: lock; walk the one bucket; for each `(p, VA)` match with
 if `wakeup` returned true (a waiter whose deadline already fired has
 `r->waiter == NULL`; counting it would overstate — torpor-8 F1). The
 walk leaves waiters linked; the owner unlinks itself.
+
+**A counted wake is never lost to EINTR.** tsleep's caught arm runs
+after its cond test, both under the Rendez lock, and WAKE sets `awoken`
+before `wakeup()` and counts a waiter only when `wakeup()` found it
+registered. So a waiter WAKE counted resumes, reads `awoken` set, and
+returns 0, whatever note is pending. A waiter the note reached first is
+either still unregistered when WAKE marks it (`wakeup()` returns false,
+the count skips it, and the walk goes on to the next waiter) or returns
+0 itself if the mark lands before it re-tests the cond — a spurious
+wakeup, which every futex client already tolerates.
 
 ## Data structures
 
@@ -167,7 +182,8 @@ contention this serializes all torpor traffic.
 
 `-EINVAL` before any state; `-EFAULT` from either load (pre-lock:
 nothing held; under-lock: unlock first, no waiter registered);
-`-ETIMEDOUT` after a clean unlink. Everything else returns 0.
+`-ETIMEDOUT` or `-EINTR` after a clean unlink. Everything else
+returns 0.
 
 ## Performance
 
@@ -186,6 +202,9 @@ the sleep plus the tsleep machinery.
   register-after-walk lost wake.
 - The stop walk must never set `awoken` — a completing stop-wake is
   the #19 bug verbatim.
+- The caught arm must stay after tsleep's cond test, and WAKE must count
+  only a waiter `wakeup()` found registered: either change returns
+  `-EINTR` for a wake the walk counted, and the futex loses it.
 - Any new exit path from WAIT must unlink before the frame pops.
 - The pre-fault must stay OUTSIDE the lock; any future
   page-eviction/reclaim pass must re-establish
@@ -202,9 +221,10 @@ shared-anon futex until Tier-2 burrows).
 - `docs/reference/80-torpor.md` (absorbed) asserted the retired
   held-across-fault lock chain as a present-tense fact four lines
   above the paragraph recording its retirement, still carried "No
-  `-EINTR` at v1.0 — notes/signals don't yet propagate" (three
-  generations stale: #811, LS-5c, #19), and never mentioned either
-  cascade walk.
+  `-EINTR` at v1.0 — notes/signals don't yet propagate" (stale since
+  #811, LS-5c and #19, and simply wrong since
+  [[chg-2026-10-05-signal7-list]], which made a Linux futex wait return
+  `-EINTR`), and never mentioned either cascade walk.
 - The buddy `struct page.refcount` trap does not apply here, but the
   same shape does: `awoken` is a wake LATCH, not a state machine — a
   reader inferring "sleeping" from `awoken == 0` is wrong for a
@@ -216,4 +236,6 @@ shared-anon futex until Tier-2 burrows).
 [[adt-torpor8-r1]]) → #809/#811 death integration →
 [[chg-2026-06-10-ls5c-widen]] →
 [[chg-2026-07-04-torpor-lockfree]] (R-5 pre-fault + #343 mismatch) →
-[[chg-2026-07-18-19-stop-wake]] (the stop twin).
+[[chg-2026-07-18-19-stop-wake]] (the stop twin) →
+[[chg-2026-10-05-signal7-list]] (a caught note ends a Linux futex wait:
+`TORPOR_ERR_EINTR`).

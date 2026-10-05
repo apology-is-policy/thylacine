@@ -2499,7 +2499,11 @@ truthfully recorded "no EINTR retry surface to enable" (patch `0007`). Item 11
 *creates* that surface, for exactly the calls Linux lets a signal interrupt
 (signal(7)). ARCH §8.8.3's 2026-09-29 amendment holds the list and the
 mechanism. Such a call, blocked when a deliverable caught note arrives, unwinds
-and returns `-T_E_INTR` (4), and the tail delivers the handler. Every other
+and returns `-T_E_INTR` (4), and the tail delivers the handler. The kernel's own
+waits unwind as the 9P ones do: a pipe, the console, `ppoll` and `pselect6`,
+`wait4` and `futex` (ARCH §8.8.3 lists them, and the three that do not). So
+musl's `pause()`, which is `ppoll(NULL, 0, NULL, NULL)` on aarch64, returns
+`EINTR` once its handler has run, where before only death ended it. Every other
 call, and every page fault, rides the note out: `socket`, `bind`, `openat`,
 `newfstatat`, a regular file's `read`. The handler runs when the call returns,
 as it would after one of Linux's `TASK_KILLABLE` sleeps. Before the amendment,

@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -880,3 +880,32 @@ open: a second thread connecting the same socket reads `ECONNREFUSED` where Linu
 waits; `connect(AF_UNSPEC)` is unserved in every state; and `read` or `write` on a
 socket that never connected still reaches `ctl`, where Linux says `ENOTCONN` or
 `EPIPE`.
+
+## The listed calls' own waits end for a caught note (2026-10-05)
+
+`note_interruptible` is necessary, not sufficient: the kernel wait a listed call
+blocks in must opt in too, and until [[chg-2026-10-05-signal7-list]] only the
+two 9P waits did. A Linux `read` or `write` on a pipe or the console, `ppoll`,
+`pselect6`, `pause()` (musl's `ppoll(NULL, 0, NULL, NULL)`), `wait4` and a
+`FUTEX_WAIT` all rode a caught note out, so a `SIGCHLD` or `SIGALRM` handler ran
+only when the call returned on its own, and `pause()` never returned for one.
+Each of those waits now opts in ([[sub-kernel-notes]] lists them) and returns
+`-EINTR` with nothing consumed; a pipe or console write that moved bytes returns
+its count. `viv_wait4` maps `WAIT_PID_NOTEINTR` before its `ECHILD` line
+([[sub-kernel-syscall-dispatch]]); the futex's `TORPOR_ERR_EINTR` is already
+`-EINTR` numerically. The kernel restarts none of them: a guest that installed
+its handler with `SA_RESTART` sees `EINTR` where Linux would restart `wait4`, a
+pipe or a futex -- the DEGRADED row of 6.22.
+
+Witnesses: viv-pheno-probe L311-L318, which run under the counting `SIGCHLD`
+handler L301-L310 installed (no `SA_RESTART`), block in each listed call -- a
+pipe read, a write into a full pipe, `ppoll` with no fds and with one,
+`pselect6`, `wait4` by pid, `FUTEX_WAIT` -- while a child exits mid-wait, and
+require `EINTR` with the handler run. Every wait is bounded (its own timeout, or
+a rescuer child that ends it after 10 s), so a kernel that rides the signal out
+fails the leg instead of hanging the probe, and the legs report together
+(`L31a`..`L31g`, each with a class letter for what came back). On the pre-change
+kernel all seven fail. The same handler now interrupts the probe's own blocking
+`wait4` calls when ANOTHER child exits first, which is Linux's behaviour too, so
+every one of them goes through `wait4_r`, a bounded retry on `EINTR`; a probe
+that called `wait4` once would read a sibling's exit as a failure of the leg.

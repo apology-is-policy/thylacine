@@ -842,15 +842,37 @@ unsafe fn futex_wait_until_ne(addr: *const AtomicU32, expected: u32, spins: u32)
     // 2 seconds, RELATIVE -- exactly the timespec shape musl sends.
     let ts: [i64; 2] = [2, 0];
     let mut i = 0u32;
+    let mut intr = 0u32;
     while i < spins {
         if (*addr).load(Ordering::SeqCst) != expected {
             return true;
         }
-        let _ = svc6(NR_FUTEX, addr as u64, FUTEX_WAIT | FUTEX_PRIVATE,
+        let r = svc6(NR_FUTEX, addr as u64, FUTEX_WAIT | FUTEX_PRIVATE,
                      expected as u64, ts.as_ptr() as u64, 0, 0);
-        i += 1;
+        // A caught signal ends the wait early (ARCH 8.8.3); it is not a spin.
+        if r == -4 && intr < 64 {
+            intr += 1;
+        } else {
+            i += 1;
+        }
     }
     (*addr).load(Ordering::SeqCst) != expected
+}
+
+// wait4, issued again while a caught signal interrupts it. The SIGCHLD handler
+// is live through most of the legs below, and a wait that blocks ends in EINTR
+// when a signal lands first -- a by-pid wait when ANOTHER child exits -- as on
+// Linux (ARCH 8.8.3). Code that waits under a handler without SA_RESTART
+// retries, and so does this probe. Bounded: a kernel that answers EINTR
+// forever fails the leg rather than hanging the boot.
+unsafe fn wait4_r(pid: u64, st: u64, opts: u64) -> i64 {
+    let mut r = -4;
+    let mut tries = 0u32;
+    while r == -4 && tries < 256 {
+        r = svc4(NR_WAIT4, pid, st, opts, 0);
+        tries += 1;
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------
@@ -1617,7 +1639,7 @@ unsafe fn run_linux() -> ! {
     let mut sst: i32 = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, fk as u64, &mut sst as *mut i32 as u64, 0, 0) == fk
+        wait4_r(fk as u64, &mut sst as *mut i32 as u64, 0) == fk
             && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0,
         b"L220\n"
     );
@@ -1638,7 +1660,7 @@ unsafe fn run_linux() -> ! {
     sst = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, ek as u64, &mut sst as *mut i32 as u64, 0, 0) == ek
+        wait4_r(ek as u64, &mut sst as *mut i32 as u64, 0) == ek
             && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0,
         b"L222\n"
     );
@@ -1666,7 +1688,7 @@ unsafe fn run_linux() -> ! {
     }
     leg!(rep, ck > 0, b"L229\n");
     sst = -1;
-    let _ = svc4(NR_WAIT4, ck as u64, &mut sst as *mut i32 as u64, 0, 0);
+    let _ = wait4_r(ck as u64, &mut sst as *mut i32 as u64, 0);
     ksa = [SIG_DFL, 0, 0, 0];
     leg!(
         rep,
@@ -1683,7 +1705,7 @@ unsafe fn run_linux() -> ! {
         linux_exit(0)
     }
     sst = -1;
-    let _ = svc4(NR_WAIT4, ck2 as u64, &mut sst as *mut i32 as u64, 0, 0);
+    let _ = wait4_r(ck2 as u64, &mut sst as *mut i32 as u64, 0);
     let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
     leg!(
         rep,
@@ -1724,7 +1746,7 @@ unsafe fn run_linux() -> ! {
     }
     leg!(rep, wrc_f < 0 && fih_child() > 0, b"L234\n"); // the handler ran + forked
     sst = -1;
-    let wr = svc4(NR_WAIT4, fih_child() as u64, &mut sst as *mut i32 as u64, 0, 0);
+    let wr = wait4_r(fih_child() as u64, &mut sst as *mut i32 as u64, 0);
     if !(wr == fih_child() && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
         // Re-emit the child's own marker if it left one (its handle shares
         // offset 0 with ours), so the log names the child's leg, not just ours.
@@ -1823,7 +1845,7 @@ unsafe fn run_linux() -> ! {
         linux_exit(1)                      // the handler did not run / exec failed
     }
     sst = -1;
-    let xr = svc4(NR_WAIT4, xk as u64, &mut sst as *mut i32 as u64, 0, 0);
+    let xr = wait4_r(xk as u64, &mut sst as *mut i32 as u64, 0);
     if !(xk > 0 && xr == xk && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
         let mut cm: [u8; 5] = [0; 5];
         let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
@@ -1851,7 +1873,7 @@ unsafe fn run_linux() -> ! {
         linux_exit(1)
     }
     sst = -1;
-    let kr = svc4(NR_WAIT4, mh_child() as u64, &mut sst as *mut i32 as u64, 0, 0);
+    let kr = wait4_r(mh_child() as u64, &mut sst as *mut i32 as u64, 0);
     if !(mh_child() > 0 && kr == mh_child() && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
         let mut cm: [u8; 5] = [0; 5];
         let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
@@ -2154,7 +2176,7 @@ unsafe fn run_linux() -> ! {
     let mut fst: i32 = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, fk2 as u64, &mut fst as *mut i32 as u64, 0, 0) == fk2
+        wait4_r(fk2 as u64, &mut fst as *mut i32 as u64, 0) == fk2
             && (fst & 0x7f) == 0 && ((fst >> 8) & 0xff) == 0,
         b"L258\n"
     );
@@ -2228,7 +2250,7 @@ unsafe fn run_linux() -> ! {
         let mut st: i32 = -1;
         leg!(
             rep,
-            svc4(NR_WAIT4, kids[k] as u64, &mut st as *mut i32 as u64, 0, 0) == kids[k]
+            wait4_r(kids[k] as u64, &mut st as *mut i32 as u64, 0) == kids[k]
                 && (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0,
             b"L276\n"
         );
@@ -2933,8 +2955,7 @@ unsafe fn run_linux() -> ! {
         // L171 miscount two legs downstream rather than here at the cause.
         leg!(
             rep,
-            svc4(NR_WAIT4, vfpid as u64,
-                 &mut _vst as *mut i32 as u64, 0, 0) == vfpid,
+            wait4_r(vfpid as u64, &mut _vst as *mut i32 as u64, 0) == vfpid,
             b"L159b\n"
         );
     }
@@ -3428,7 +3449,7 @@ unsafe fn run_linux() -> ! {
     // completion.
     leg!(
         rep,
-        svc4(NR_WAIT4, fpid as u64, &mut st as *mut i32 as u64, 0, 0) == fpid,
+        wait4_r(fpid as u64, &mut st as *mut i32 as u64, 0) == fpid,
         b"L170\n"
     );
     // WIFEXITED(st) && WEXITSTATUS(st) == 0. Proves the status was WRITTEN
@@ -3453,7 +3474,7 @@ unsafe fn run_linux() -> ! {
     st = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, (-1i64) as u64, &mut st as *mut i32 as u64, 0, 0) == cpid,
+        wait4_r((-1i64) as u64, &mut st as *mut i32 as u64, 0) == cpid,
         b"L171\n"
     );
 
@@ -3476,7 +3497,7 @@ unsafe fn run_linux() -> ! {
     st = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, xpid as u64, &mut st as *mut i32 as u64, 0, 0) == xpid,
+        wait4_r(xpid as u64, &mut st as *mut i32 as u64, 0) == xpid,
         b"L172b\n"
     );
     leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 7, b"L173\n");
@@ -3500,7 +3521,7 @@ unsafe fn run_linux() -> ! {
     // a passthrough.
     leg!(
         rep,
-        svc4(NR_WAIT4, (-1i64) as u64, &mut st as *mut i32 as u64, WEXITED, 0)
+        wait4_r((-1i64) as u64, &mut st as *mut i32 as u64, WEXITED)
             == NEG_ENOSYS,
         b"L175\n"
     );
@@ -3645,7 +3666,7 @@ unsafe fn run_linux() -> ! {
     st = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, kid as u64, &mut st as *mut i32 as u64, 0, 0) == kid,
+        wait4_r(kid as u64, &mut st as *mut i32 as u64, 0) == kid,
         b"L178\n"
     );
     // Exited cleanly => the re-execed image found 21 closed and 22 open.
@@ -3686,7 +3707,7 @@ unsafe fn run_linux() -> ! {
     st = -1;
     leg!(
         rep,
-        svc4(NR_WAIT4, kid2 as u64, &mut st as *mut i32 as u64, 0, 0) == kid2,
+        wait4_r(kid2 as u64, &mut st as *mut i32 as u64, 0) == kid2,
         b"L183\n"
     );
     leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0, b"L184\n");
@@ -4205,6 +4226,207 @@ unsafe fn run_linux() -> ! {
     };
     leg!(rep, bad == 0, which);
     leg!(rep, sig_fired() > fired1, b"L310\n"); // the notes were delivered late, not lost
+
+    // --- L311-L318 (ARCH 8.8.3): the waits the kernel serves itself. L305
+    // proved a 9P wait; these are a pipe read and write, ppoll with an fd and
+    // with none (musl's pause() is ppoll with none), pselect6, wait4 and a
+    // futex WAIT. Each must return EINTR, with the handler run, when a child's
+    // SIGCHLD lands mid-wait. Every wait is bounded -- by its own 10 s timeout,
+    // or by a rescuer that ends it after 10 s -- so a kernel that rides the
+    // signal out FAILS the leg instead of hanging the probe. The legs all run
+    // and report together, so one run on a kernel without the fix names every
+    // leg it breaks rather than the first.
+    const NEG_EAGAIN: i64 = -11;
+    // A child that exits after `secs`: its exit is the SIGCHLD.
+    unsafe fn fork_interrupter(secs: i64) -> i64 {
+        let f = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if f == 0 {
+            let ts: [i64; 2] = [secs, 0];
+            let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+            linux_exit(0)
+        }
+        f
+    }
+    // A child that waits 10 s for a byte on the stand-down pipe `sd`; given
+    // none, it moves one byte with `op` (NR_READ or NR_WRITE) on `fd` to end
+    // the parent's wait, then exits. With `op` 0 its exit is the rescue.
+    unsafe fn fork_rescuer(sd: [i32; 2], op: u64, fd: i32) -> i64 {
+        let f = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if f == 0 {
+            let _ = svc3(NR_CLOSE, sd[1] as u64, 0, 0);
+            let mut pfd = [PollFd { fd: sd[0], events: POLLIN, revents: 0 }];
+            let ts: [i64; 2] = [10, 0];
+            if svc4(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0) == 0
+                && op != 0
+            {
+                let mut b = [b'r'; 1];
+                let _ = svc3(op, fd as u64, b.as_mut_ptr() as u64, 1);
+            }
+            linux_exit(0)
+        }
+        f
+    }
+    unsafe fn stand_down(sd: [i32; 2]) {
+        let k = b"k";
+        let _ = svc3(NR_WRITE, sd[1] as u64, k.as_ptr() as u64, 1);
+    }
+    unsafe fn reap(kid: i64) -> bool {
+        let mut ws: i32 = -1;
+        wait4_r(kid as u64, &mut ws as *mut i32 as u64, 0) == kid && (ws & 0x7f) == 0
+    }
+    // One leg's verdict: `n` is EINTR and the handler ran after `f0`. A failure
+    // appends "<mark><n><when> " -- n: d a byte or pid (the rescue), z 0, t
+    // ETIMEDOUT, a EAGAIN, c ECHILD, h EINTR with no handler run, w EINTR with
+    // the select set written back, e another error; when: E if the handler ran
+    // before the call began (the leg tested nothing), else L.
+    fn note_leg(bad: &mut [u8; 72], nbad: &mut usize, mark: &[u8; 4], n: i64,
+                kept: bool, f_pre: u64, f0: u64) {
+        let ran = sig_fired() > f0;
+        if n == NEG_EINTR && ran && kept {
+            return;
+        }
+        let c = match n {
+            NEG_EINTR if !ran => b'h',
+            NEG_EINTR => b'w',
+            0 => b'z',
+            -110 => b't',
+            NEG_EAGAIN => b'a',
+            NEG_ECHILD => b'c',
+            _ if n > 0 => b'd',
+            _ => b'e',
+        };
+        let w = if f0 > f_pre { b'E' } else { b'L' };
+        if *nbad + 7 <= bad.len() {
+            bad[*nbad..*nbad + 4].copy_from_slice(mark);
+            bad[*nbad + 4] = c;
+            bad[*nbad + 5] = w;
+            bad[*nbad + 6] = b' ';
+            *nbad += 7;
+        }
+    }
+    let mut bad = [0u8; 72];
+    let mut nbad = 0usize;
+    let mut p: [i32; 2] = [-1, -1];
+    let mut q: [i32; 2] = [-1, -1];
+    leg!(
+        rep,
+        svc3(NR_PIPE2, p.as_mut_ptr() as u64, 0, 0) == 0
+            && svc3(NR_PIPE2, q.as_mut_ptr() as u64, 0, 0) == 0,
+        b"L311\n"
+    );
+
+    // L311a: a read on an empty pipe. The rescuer writes the byte it waits for.
+    let mut sd: [i32; 2] = [-1, -1];
+    leg!(rep, svc3(NR_PIPE2, sd.as_mut_ptr() as u64, 0, 0) == 0, b"L311b\n");
+    let f_pre = sig_fired();
+    let res = fork_rescuer(sd, NR_WRITE, p[1]);
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let mut one = [0u8; 4];
+    let n = svc3(NR_READ, p[0] as u64, one.as_mut_ptr() as u64, 1);
+    stand_down(sd);
+    note_leg(&mut bad, &mut nbad, b"L31a", n, true, f_pre, f0);
+    leg!(rep, res > 0 && int > 0 && reap(res) && reap(int), b"L311c\n");
+    let _ = svc3(NR_CLOSE, sd[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, sd[1] as u64, 0, 0);
+
+    // L312: a write on a full pipe. Fill it without knowing its size: write
+    // non-blocking until a write would block -- 512 at a time, then single
+    // bytes, since a write of n <= PIPE_BUF is atomic and a 512 that does not
+    // fit takes nothing -- then make the end blocking again. The rescuer reads
+    // the byte of room the write waits for.
+    let chunk = [0x5au8; 512];
+    let mut filled: i64 = 0;
+    let mut last: i64 = 0;
+    let mut ok = svc3(NR_FCNTL, q[1] as u64, F_SETFL, O_NONBLOCK) == 0;
+    for len in [512u64, 1] {
+        while ok && filled < (1 << 20) {
+            last = svc3(NR_WRITE, q[1] as u64, chunk.as_ptr() as u64, len);
+            if last <= 0 {
+                break;
+            }
+            filled += last;
+        }
+    }
+    ok = ok && last == NEG_EAGAIN && filled > 0
+        && svc3(NR_FCNTL, q[1] as u64, F_SETFL, 0) == 0;
+    leg!(rep, ok, b"L312\n");
+    leg!(rep, svc3(NR_PIPE2, sd.as_mut_ptr() as u64, 0, 0) == 0, b"L312b\n");
+    let f_pre = sig_fired();
+    let res = fork_rescuer(sd, NR_READ, q[0]);
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let n = svc3(NR_WRITE, q[1] as u64, chunk.as_ptr() as u64, 1);
+    stand_down(sd);
+    note_leg(&mut bad, &mut nbad, b"L31b", n, true, f_pre, f0);
+    leg!(rep, res > 0 && int > 0 && reap(res) && reap(int), b"L312c\n");
+    let _ = svc3(NR_CLOSE, sd[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, sd[1] as u64, 0, 0);
+
+    // L313: ppoll with no fds -- pause(), bounded so a miss returns 0.
+    let ten: [i64; 2] = [10, 0];
+    let f_pre = sig_fired();
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let n = svc4(NR_PPOLL, 0, 0, ten.as_ptr() as u64, 0);
+    note_leg(&mut bad, &mut nbad, b"L31c", n, true, f_pre, f0);
+    leg!(rep, int > 0 && reap(int), b"L313\n");
+
+    // L314: ppoll on the empty pipe's read end.
+    let f_pre = sig_fired();
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let mut pfd = [PollFd { fd: p[0], events: POLLIN, revents: 0 }];
+    let n = svc4(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ten.as_ptr() as u64, 0);
+    note_leg(&mut bad, &mut nbad, b"L31d", n, true, f_pre, f0);
+    leg!(rep, int > 0 && reap(int), b"L314\n");
+
+    // L315: pselect6 on the same fd. Linux writes no set back on an error, so
+    // the bit must still be set.
+    let bit = 1u64 << (p[0] as u64 % 64);
+    let mut rfds = [0u64; 16];
+    rfds[p[0] as usize / 64] = bit;
+    let f_pre = sig_fired();
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let n = svc6(NR_PSELECT6, p[0] as u64 + 1, rfds.as_mut_ptr() as u64, 0, 0,
+                 ten.as_ptr() as u64, 0);
+    let kept = rfds[p[0] as usize / 64] == bit;
+    note_leg(&mut bad, &mut nbad, b"L31e", n, kept, f_pre, f0);
+    leg!(rep, int > 0 && reap(int), b"L315\n");
+
+    // L316: wait4 for one child while another exits. The waited child is the
+    // rescuer: it exits after 10 s unless stood down.
+    leg!(rep, svc3(NR_PIPE2, sd.as_mut_ptr() as u64, 0, 0) == 0, b"L316\n");
+    let f_pre = sig_fired();
+    let res = fork_rescuer(sd, 0, -1);
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let mut ws: i32 = -1;
+    let n = svc4(NR_WAIT4, res as u64, &mut ws as *mut i32 as u64, 0, 0);
+    stand_down(sd);
+    note_leg(&mut bad, &mut nbad, b"L31f", n, true, f_pre, f0);
+    leg!(rep, res > 0 && int > 0 && (n == res || reap(res)) && reap(int), b"L316b\n");
+    let _ = svc3(NR_CLOSE, sd[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, sd[1] as u64, 0, 0);
+
+    // L317: a futex WAIT on a word that holds what it expects.
+    let word: u32 = 0;
+    let f_pre = sig_fired();
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let n = svc6(NR_FUTEX, &word as *const u32 as u64, FUTEX_WAIT | FUTEX_PRIVATE, 0,
+                 ten.as_ptr() as u64, 0, 0);
+    note_leg(&mut bad, &mut nbad, b"L31g", n, true, f_pre, f0);
+    leg!(rep, int > 0 && reap(int), b"L317\n");
+
+    for fd in [p[0], p[1], q[0], q[1]] {
+        let _ = svc3(NR_CLOSE, fd as u64, 0, 0);
+    }
+    if nbad > 0 {
+        bad[nbad - 1] = b'\n';
+    }
+    leg!(rep, nbad == 0, &bad[..nbad]); // L318: every leg above, by name
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
 

@@ -133,11 +133,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-05 [[chg-2026-10-05-haul-p3a]] — Haul P3a: replies held to the session's msize, a short-token warning, and verdict-checked hang-up legs
+- 2026-10-05 [[chg-2026-10-05-signal7-list]] — signal(7)'s list: every kernel wait a listed Linux call reaches ends for a caught note
 - 2026-10-05 [[chg-2026-10-05-stay-stopped]] — Stay stopped: a stopped thread keeps its stop, and death wins in the exit close
 - 2026-09-30 [[chg-2026-09-30-held-launch]] — The held launch: ambush spawns held where the kernel has the hold
 - 2026-09-30 [[chg-2026-09-30-image-slide]] — The image slide: a deck names a picture, and view shows it
 - 2026-09-30 [[chg-2026-09-30-kernel-chunk]] — The kernel chunk: the trusted episode's lock re-checks, and walks without recursion
 - 2026-09-29 [[chg-2026-09-29-beacon-aside]] — A Markdown block quote is a Beacon aside -- checked by the manual, boxed where the console wraps, framed by Halcyon
 - 2026-09-29 [[chg-2026-09-29-birth-hold]] — The birth hold: a spawned child parked before its first instruction
-- 2026-09-29 [[chg-2026-09-29-i47-close]] — I-47 ENFORCED: a picture laid once per block, and a token that routes rather than guards
 <!-- generated:end -->

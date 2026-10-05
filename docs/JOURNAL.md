@@ -22,6 +22,118 @@ needed the operator.
 
 
 ---
+## 2026-10-05 (main, Opus 5.5, effort max) -- signal(7)'s list, the wait's half: every kernel wait a listed Linux call reaches ends for a caught note
+
+**Why this, now.** VIV-EINTR (2026-09-30) built the call's half of the
+operator's vote of 2026-09-29: the vivarium dispatcher marks a call on
+signal(7)'s list `note_interruptible`. The wait's half stayed where item 11
+left it. Only the two 9P waits opted in, so a listed call blocked in a pipe,
+the console, `poll`, `wait4` or a futex rode a caught note out, and musl's
+`pause()` (`ppoll(0, 0, 0, 0)`) never returned for one. It was enqueued as a P2
+(OPEN-BUGS 2026-09-29 ~17:20Z), and the survey found no design question left
+for the operator.
+
+**What landed.** Scripture first: `5d28b427` (ARCH 8.8.3 names every
+interruptible kernel wait and the three that stay out: the 9P send side, poll's
+settle and the notes fd's read) and `94ba5327` (the poll verdict's order). Then
+one code commit, `bb2f284e`: every listed wait opts in through one predicate,
+`thread_caught_note_unwinds(t)`; `WAIT_PID_NOTEINTR` and `TORPOR_ERR_EINTR` are
+mapped to `EINTR` at the vivarium boundary; `poll.tla` models the caught note.
+
+**Wrong turns, and what caught each.**
+- *The poll order.* The 11:45Z design said Linux decides ready, then the
+  deadline, then the signal. Reading `fs/select.c` at 12:00Z showed `do_poll`
+  checks the signal before the deadline. The scripture fix `94ba5327` came
+  before the code was reordered, and `poll_buggy_deadline_before_caught`
+  keeps it.
+- *A probe leg that was right to fail.* L276 (two pipe readers reaped by pid)
+  failed once on the GREEN tree. With the change, a by-pid `wait4` is
+  interrupted when another child's `SIGCHLD` lands first, which is Linux's
+  behaviour. The probe was wrong, not the kernel. Sabotage SH (the `wait4`
+  mapping removed) made it `ECHILD`, which confirmed the diagnosis, and every
+  blocking `wait4` in the probe now retries `EINTR`.
+- *joey truncated the evidence.* It printed 7 bytes of the probe's failure
+  marker, which now names several legs; it reads the whole marker.
+- *A struct with no room.* The round-1 field first went after `note_claim`,
+  and the `sizeof(struct Thread) == 1760` assertion failed: that padding was
+  full. `-fdump-record-layouts-complete` showed free bytes after
+  `exit_close_active`.
+- *My own first fix tore what it fixed.* The self-audit's SA-1 (the drain was
+  tapped with the whole chunk before the push, so a short write's retry showed
+  the tail twice on the renderer) was fixed by tapping per push. The round-2
+  self-audit found that a peer's unit landing between two pushes then sat
+  inside the chunk on the renderer (SA-5). The fix is one tap after the loop.
+  `cons.congested_write_whole_in_drain` is red on the per-push version.
+- *A fix that reversed a recorded ruling.* SA-1 overturned LS-8 item (f) of
+  2026-08-17 ("a documented mirror divergence, not a defect"). The second
+  Fable round flagged the reversal (F1). The operator voted for one tap after
+  the pushes (`dec-2026-10-05-console-mirror-tap-order`, scripture `00484bb6`).
+- *Record notes are append-only once committed.* The change note's audit
+  paragraph was refused on a WIP commit (quaestor R3). It landed with the
+  squash, which adds the note.
+
+**Audit.** Fable 5.1, two rounds, MODEL start == end each time, with the
+implementer's passes beside them: 0 P0 / 0 P1 / 2 P2 / 7 P3. Round 1: F1
+(a frozen console reader lost its frozen standing across the unwind; now
+`Thread.cons_frozen_unwound`). Self: SA-1 and SA-5 (above), SA-2 and SA-3
+(stale comments), and SA-4 (pre-existing: `viv_readv`/`viv_writev` run the byte
+core per entry, owned in OPEN-BUGS 16:36Z, not fixed here). Round 2: F1 (the
+operator's vote), F2 (`pipe.h` and `sub-kernel-pipe` claimed `-1` for EPIPE),
+F3 (the mark survived exec; exec clears it now).
+
+**Evidence.**
+- RED first, each at its named assertion: the 14 caught-note witnesses on the
+  kernel without the change (1847/1861); the round-1 pair (1861/1863); the
+  round-2 pair (1862/1864). Probe L311-L318: all seven legs red without the
+  change.
+- Nine single sabotages (SA-SH), each red exactly where predicted.
+- `specs/check-poll.sh` at `d3a98b30`: every cfg as claimed (14 buggy on their
+  named properties).
+- Clean before the squash: 1864/1864, V-1b PASS.
+- Landing gates on `bb2f284e`: a full build; suite 1864/1864 with V-1b PASS (no
+  FAIL, no EXTINCTION, no poll FAILSAFE); every cfg of the specs whose modelled
+  code it touched as claimed (37 across scheduler, tsleep, death_wake,
+  reader_frame, pty_stop, cons_poll and pipe: each clean cfg clean, each buggy
+  cfg red on a property it checks) and `specs/check-poll.sh` as claimed;
+  `ci-smp-gate` all five rows 10/10 (default-smp1, -smp4, -smp8; ubsan-smp4,
+  -smp8), 0 corruption; on a CI-image bake in its own worktree, 37 of 39
+  non-graphical legs, one attempt each, all PASS (`r5f9-ash`, `viv-run`,
+  `viv-console-ctrlc`, `pty-susp-pouch`, `item10-ctrlc`, `im1-sak-lever` and
+  `ls-8c` among them; `haul-npxf`, `haul-post` and `spawn-mount-probe` against a
+  real npxf server on the host). Two did not run: `s7-nora-probe` needs a
+  session compositor, and `ls-jsc` needs a WebKit payload the CI pool does not
+  carry, so the first JSC run since a Linux futex wait began ending with EINTR
+  is owed at the next WebKit bake.
+
+**What "fixed" covers.** A Linux caller's listed wait ends for a caught note.
+Natives and the kernel's own waits ride the note out, as before. Nothing is
+restarted: an `SA_RESTART` guest sees `EINTR` (VIVARIUM 6.22, DEGRADED).
+`rt_sigsuspend`, `rt_sigtimedwait`, `nanosleep` and `epoll_*` are still ENOSYS
+rows, so they have no wait to opt in.
+
+**The operator's decision.** The console's tap order (above). The EINTR rule
+itself is the 2026-09-29 vote.
+
+## 2026-10-05 (main, Opus 5.5, effort max) -- three P3s: a red 9P client test releases its fixture, the proc_flags word gets a derived check, and the build gets a disk floor
+
+**Why these, and why together.** Three P3s were enqueued during the waiters-stops landing (OPEN-BUGS 2026-10-05 08:13Z, 08:32Z, 10:50Z). They share nothing but timing: they were written while aux held the Mac, and they needed one build and four boots between them. A fourth P3 from the same day, the missing vault note for `specs/territory_shed.tla` (07:58Z), landed separately as `7e7bf077`.
+
+**The fixes.**
+- The 9P client fixture (08:13Z). Seventy `test_9p_client.c` tests destroy the shared client on their last lines, which a failing `TEST_ASSERT` never reaches, so a red test left the client and its loopback open and the next test initialised over live state, burying the first failure under noise. The runner now calls `test_9p_client_release()` after every test in the file. It kills and reaps any op thread still up (`g_dy`, `g_dyx`, `g_dyz`, `g_dle`), then destroys `g_client`, `g_loopback` and `g_mq`. A test that passed while leaving the fixture up is turned red, and a `P9-FIXTURE` line names it. This follows the memory rule that a fixture released on a test's last line is released only by a passing test, so the runner owns the release.
+- The `proc_flags` word (08:32Z). aux's stay-stopped and main's VIV-EINTR each took bit 22, and both compiled, because each flag's `_Static_assert` named only the flags its author knew. `tools/check-proc-flags.py` evaluates every `PROC_FLAG_*` define from `proc.h` and fails on a shared bit (composite masks excepted). build.sh runs it before any target.
+- The disk floor (10:50Z). A bake took the shared Mac's volume to 121 MB free, and every agent's shell then failed. build.sh now refuses a target, and the pool generate, below `THYLACINE_MIN_FREE_GB` (default 6).
+
+**Evidence (the Mac, 15:18-15:21Z, on the WIP commit `9b7a5340` that this landing squashes; the code is the same).**
+- Full `tools/build.sh kernel`: rc 0; `check-proc-flags: 19 defines (1 composite), 30 bits owned, free [30, 31]`; no refusal; one pool generate.
+- Clean suite: 1847/1847, no `P9-FIXTURE` line.
+- Sabotage S1 (a passing test leaves the fixture up): 1846/1847. The one FAIL is `clunk_killed_in_tag_drain`, "test left the 9P client fixture up".
+- Sabotage S2 (a test fails with its sender parked in the tag drain): 1846/1847. The FAIL line carries `P9-FIXTURE`, and the next test, `clunk_dying_waiter_sends_no_flush`, passes on the fixture the runner tore down.
+- Each sabotage boot ran all 1847 tests and then stopped with the expected `EXTINCTION: kernel test suite failed`.
+- Rebuilt clean: 1847/1847, and no sabotage marker left in the file.
+- The checker and the floor had been run red before the batch was committed. The checker failed on a bit-22 collision (naming both flags), an undefined macro and an empty header; its first draft failed every input, because it read `0x7f` as an identifier. The floor, given an unreachable value, refused at entry with rc 1 before doing any build work.
+
+**What it cost.** The batch, committed at 11:10Z, waited about four hours for the Mac. aux's lease lapsed while aux was idle; I asked in yip call 0158 at 12:05Z and got no answer. An API outage then ran from 12:36Z to 15:15Z, and at about 15:18Z I took the Mac with `yip steal` and told aux in the same call. I had budgeted about an hour for the run itself; it took three minutes. The build was incremental, and one suite boot takes about 45 seconds.
+
 ## 2026-10-05 (aux, Opus 5.5 1M, effort max) -- Haul P3a: replies held to the session's msize, a warning for a short token, and hang-up gates that read the verdict
 
 **Why now.** Work order item 6: the 2026-09-29 Haul Fable pass's five P3s (OPEN-BUGS 2026-09-29 ~14:57Z). F1 was the one with a symptom: a server reply the kernel refuses (larger than its receive cap) marks the 9P session dead without closing the pipe, so haul's park form never exits and the mount dies in silence. The fix splits: P3a here (haul, the docs, the gates); P3b the kernel half (the kernel hangs up its end of a dead session's transport, after main's waiters-stops lands on 9p_client.c -- main is to be rung first, as promised on yip 0155); P3c npxf's pre-auth slots (F2), in npxf on a local branch the operator pushes.

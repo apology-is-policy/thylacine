@@ -1418,6 +1418,11 @@ bool proc_caught_note_eintr_ready(struct Proc *p) {
     return p && p->phenotype == PHENO_LINUX;
 }
 
+bool thread_caught_note_unwinds(struct Thread *t) {
+    return t && proc_caught_note_eintr_ready(t->proc) &&
+           !thread_reader_blocks_death(t) && thread_caught_note_claim(t);
+}
+
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
 //
 // Enters with q->lock HELD and the note still queued; ALWAYS releases it. The

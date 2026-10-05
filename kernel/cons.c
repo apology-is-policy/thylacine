@@ -11,6 +11,7 @@
 
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>                 // T_E_INTR (ARCH 8.8.3)
 #include <thylacine/joey.h>                  // #95: boot_is_complete (the drop-report gate)
 #include <thylacine/poll.h>                  // LS-8a: pollable cons (deferred poll-wake)
 #include <thylacine/proc.h>
@@ -332,8 +333,9 @@ static inline void drain_pollwake_store(bool v) { __atomic_store_n(&g_cons_drain
 // dead epoch). Full: drop OLDEST by the deficit so the newest output survives
 // (`overflow` counts the bytes lost). Wakes the drain reader (wakeup is
 // IRQ-safe) and, on the empty->non-empty edge, arms the deferred POLLIN walk +
-// wakes console_mgr. Never nested with g_cons_tx.lock: the emits tap, release,
-// then push.
+// wakes console_mgr. Never nested with g_cons_tx.lock: the echo emit taps,
+// releases, then pushes; the process write pushes, releases, and taps what
+// went out once its pushes are done.
 static void cons_drain_tap_bulk(const u8 *b, u32 n) {
     if (n == 0u || !drain_armed_load()) return;
     if (n > CONS_DRAIN_RING_SIZE) {         // only the newest ring's worth can survive
@@ -760,8 +762,9 @@ static int cons_tx_role_free(void *arg) {
 
 // Claim the writer role, parking until it frees. The audited chan_role_acquire
 // (#354) shape. Returns 0 with the role HELD (caller MUST release), or
-// TSLEEP_INTR on a #811 death-interrupt with the role NOT held.
-static int cons_tx_role_acquire(void) {
+// TSLEEP_INTR on a #811 death-interrupt with the role NOT held, or -- only when
+// `caught_ok` -- TSLEEP_NOTEINTR for a caught note (ARCH 8.8.3), role NOT held.
+static int cons_tx_role_acquire(bool caught_ok) {
     for (;;) {
         irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
         if (!tx_writing_load()) {
@@ -782,9 +785,10 @@ static int cons_tx_role_acquire(void) {
         poll_waiter_list_register(&g_cons_tx.role_waiters, &pw);
         spin_unlock_irqrestore(&g_cons_tx.lock, s);
 
-        int ts = tsleep(&pr, cons_tx_role_free, NULL, 0);
+        int ts = caught_ok ? tsleep_noteintr(&pr, cons_tx_role_free, NULL, 0)
+                           : tsleep(&pr, cons_tx_role_free, NULL, 0);
         poll_waiter_list_unregister(&pw);
-        if (ts == TSLEEP_INTR) return TSLEEP_INTR;
+        if (ts == TSLEEP_INTR || ts == TSLEEP_NOTEINTR) return ts;
         // AWOKEN -- loop and re-contend (another writer may have won).
     }
 }
@@ -833,9 +837,10 @@ static void cons_tx_role_release(void) {
 // role first is what stops that -- the peer parks.
 //
 // Returns false only when a #811 death interrupted the park, in which case the
-// caller emits unserialized rather than silently dropping the line.
+// caller emits unserialized rather than silently dropping the line. A caught
+// note never ends this park: a diagnostic line is not the call's to abandon.
 bool cons_kernel_writer_begin(void) {
-    if (cons_tx_role_acquire() != 0) return false;
+    if (cons_tx_role_acquire(false) != 0) return false;
     cons_tx_flush();
     return true;
 }
@@ -984,40 +989,60 @@ static void cons_emit_bulk(const u8 *b, u32 n) {
 // contiguous against every other producer -- and on a full ring kicks the
 // FIFO then parks until the TX IRQ frees room, then pushes the rest. Returns
 // the bytes accepted: < n only when the write must be cut short -- a #811
-// death-interrupt or the #67 deadline against a stalled host consumer. The
-// caller then returns a SHORT WRITE, which is POSIX-legal and is the inherited
-// "bounded-but-lossy console beats a wedged writer" disposition; it must never
-// become a hang.
+// death-interrupt, a caught note (ARCH 8.8.3), or the #67 deadline against a
+// stalled host consumer. The caller then returns a SHORT WRITE, which is
+// POSIX-legal and is the inherited "bounded-but-lossy console beats a wedged
+// writer" disposition; it must never become a hang.
+//
+// The drain is tapped once, after the pushes, with what went out. Not with the
+// chunk up front: the short count tells the caller what to send again, and a
+// drain that already held the rest would show it twice once the caller did. Not
+// per push either: a peer's unit can land between two pushes on the serial
+// side, and one tap keeps the chunk a single unit in the drain all the same
+// (ARCH 23.5.2). While the serial side is silenced the drain is the only sink
+// and takes the whole chunk at once.
 //
 // I-9 (no lost wake): cons_tx_kick re-evaluates ring + TXIM under the ring lock,
 // and cons_tx_drain_from_irq wakes AFTER releasing that lock, so a slot freed in
 // the window between our full-observation and our park is either seen by
 // tsleep's cond re-check (under the rendez lock) or delivered to this rendez.
-static u32 cons_emit_bulk_wait(const u8 *b, u32 n) {
+static u32 cons_emit_bulk_wait(const u8 *b, u32 n, bool *intr) {
     if (n == 0u) return 0u;
-    cons_drain_tap_bulk(b, n);
     // DISPLAY-MODES.md 1b: serial silenced -> the EL0 write SUCCEEDS fully (the
     // bytes reached the renderer via the tap; the serial sink is intentionally
     // dropped). Returning n, never a short write, so the program never blocks or
     // sees an error for output it "produced". Gated on `drain_armed` (a live
     // renderer): a dead renderer disarms the drain and serial output resumes,
     // so silence never outlives the mirror that justifies it (audit F1).
-    if (cons_serial_silent_load() && drain_armed_load()) return n;
-    if (g_cons_echo_capture) { cons_echo_capture_take(b, n); return n; }
+    if (cons_serial_silent_load() && drain_armed_load()) {
+        cons_drain_tap_bulk(b, n);
+        return n;
+    }
+    if (g_cons_echo_capture) {
+        cons_drain_tap_bulk(b, n);
+        cons_echo_capture_take(b, n);
+        return n;
+    }
     u32 done = 0u;
     for (;;) {
         done += cons_tx_push_bulk(b + done, n - done, false);
-        if (done == n) return n;
+        if (done == n) break;
         cons_tx_kick();
         cons_tx_count_room_wait();
-        int ts = tsleep(&g_cons_tx_room, cons_tx_has_room, NULL,
-                        timer_now_ns() + CONS_TX_ROOM_WAIT_NS);
-        if (ts == TSLEEP_INTR) return done;                 // #811 death -> short write
+        int ts = tsleep_noteintr(&g_cons_tx_room, cons_tx_has_room, NULL,
+                                 timer_now_ns() + CONS_TX_ROOM_WAIT_NS);
+        if (ts == TSLEEP_INTR) break;                       // #811 death -> short write
+        if (ts == TSLEEP_NOTEINTR) {                        // caught note -> short write
+            *intr = true;
+            break;
+        }
         if (ts == TSLEEP_TIMEDOUT) {                        // #67 stalled consumer
             cons_tx_count_drop();
-            return done;                                    // drop the rest -> short write
+            break;                                          // drop the rest -> short write
         }
     }
+    cons_drain_tap_bulk(b, done);
+    return done;
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,8 +1927,10 @@ static int cons_episode_over(void *arg) {
     return !cons_episode_active_load();
 }
 
-// Park until the open episode ENDs. Returns 0 (ended, or none open) or
-// TSLEEP_INTR (#811 death-interrupt; the caller unwinds). The #354
+// Park until the open episode ENDs. Returns 0 (ended, or none open),
+// TSLEEP_INTR (#811 death-interrupt; the caller unwinds) or TSLEEP_NOTEINTR (a
+// caught note, ARCH 8.8.3: the caller returns EINTR). Every caller is a read or
+// write of the console on signal(7)'s list, so the park opts in. The #354
 // register-then-observe shape: the hook is registered under g_cons.lock
 // BEFORE tsleep re-samples the flag under the waiter's own Rendez lock, so an
 // END's clear-then-wake is either seen by the cond re-check or delivered to
@@ -1925,13 +1952,13 @@ static int cons_episode_park(void) {
     g_cons.episode_parked++;
     spin_unlock_irqrestore(&g_cons.lock, s);
 
-    int ts = tsleep(&pr, cons_episode_over, NULL, 0);
+    int ts = tsleep_noteintr(&pr, cons_episode_over, NULL, 0);
     poll_waiter_list_unregister(&pw);
 
     s = spin_lock_irqsave(&g_cons.lock);
     g_cons.episode_parked--;
     spin_unlock_irqrestore(&g_cons.lock, s);
-    return (ts == TSLEEP_INTR) ? TSLEEP_INTR : 0;
+    return (ts == TSLEEP_INTR || ts == TSLEEP_NOTEINTR) ? ts : 0;
 }
 
 // Wake everything an episode transition may have parked: the frozen readers
@@ -2023,7 +2050,8 @@ static int cons_reader_slot_free(void *arg) {
 // Take the reader slot. `wait`: park on reader_waiters while it is held (the
 // register-then-observe shape; the release clears under g_cons.lock and wakes
 // outside it); else the single-reader guard refuses. Returns 0 holding the
-// slot, CONS_SLOT_BUSY when refused, TSLEEP_INTR on a death-interrupt. The
+// slot, CONS_SLOT_BUSY when refused, TSLEEP_INTR on a death-interrupt,
+// TSLEEP_NOTEINTR on a caught note (ARCH 8.8.3; the slot is not held). The
 // busy code is POSITIVE on purpose: TSLEEP_INTR is -1, and a -1 "busy" was
 // indistinguishable from it (cons.read_busy_guard caught the collision).
 #define CONS_SLOT_BUSY  1
@@ -2045,9 +2073,9 @@ static int cons_reader_slot_take(bool wait) {
         poll_waiter_init(&pw, &pr);
         poll_waiter_list_register(&g_cons.reader_waiters, &pw);
         spin_unlock_irqrestore(&g_cons.lock, s);
-        int ts = tsleep(&pr, cons_reader_slot_free, NULL, 0);
+        int ts = tsleep_noteintr(&pr, cons_reader_slot_free, NULL, 0);
         poll_waiter_list_unregister(&pw);
-        if (ts == TSLEEP_INTR) return TSLEEP_INTR;
+        if (ts == TSLEEP_INTR || ts == TSLEEP_NOTEINTR) return ts;
         // AWOKEN -- re-contend (another waiter may have won).
     }
 }
@@ -2077,7 +2105,10 @@ static int cons_data_or_vacate(void *arg) {
 // a 2nd concurrent blocking read returns -1 (the data Rendez is single-waiter;
 // a 2nd sleeper would extinct). Returns the byte count (>= 1) on data, 0 only on
 // a death-interrupt with nothing buffered (immaterial -- a group-flagged Thread
-// never re-enters EL0), or -1 on bad args / reader-busy.
+// never re-enters EL0), -1 on bad args / reader-busy, or -T_E_INTR when a caught
+// note ends one of its waits (ARCH 8.8.3). Every wait comes before the first
+// byte is drained, so the note never costs input; and only a Linux reader in a
+// listed call sees it -- 0 would read as EOF there, which is why it is not 0.
 //
 // #57b: this is the ONE console-input implementation, shared by both front doors
 // -- `devcons` (the SYS_CONSOLE_OPEN syscall path) and `devdev`'s /dev/cons leaf
@@ -2094,23 +2125,39 @@ static int cons_data_or_vacate(void *arg) {
 // a -1 there would read to the shell as its console going away; an attached
 // reader during an episode waits the same way (the holder is the vacating
 // non-attached reader). Every other contender keeps the documented -1.
+//
+// A caught note can end a frozen reader's wait and send it back to EL0 (ARCH
+// 8.8.3) before END. Its retry is still the re-take of a frozen reader, so the
+// thread carries `cons_frozen_unwound` across the call boundary and the next
+// read waits for the slot as `frozen_once` does. The mark is consumed by that
+// next read and set again whenever a frozen wait unwinds for a note.
 long cons_input_read(void *buf, long n) {
     if (!buf || n < 0) return -1;
     if (n == 0)        return 0;
 
     struct Thread *reader = current_thread();
     struct Proc   *rp     = reader ? reader->proc : NULL;
-    bool frozen_once = false;
+    bool frozen_once = reader && reader->cons_frozen_unwound;
+    if (reader) reader->cons_frozen_unwound = false;
 
     for (;;) {
         if (cons_caller_frozen()) {
-            if (cons_episode_park() == TSLEEP_INTR) return 0;
+            int pk = cons_episode_park();
+            if (pk == TSLEEP_INTR) return 0;
+            if (pk == TSLEEP_NOTEINTR) {
+                reader->cons_frozen_unwound = true;
+                return -(long)T_E_INTR;
+            }
             frozen_once = true;
         }
         bool wait = frozen_once ||
                     (cons_episode_active_load() && rp && proc_is_console_attached(rp));
         int rc = cons_reader_slot_take(wait);
-        if (rc == TSLEEP_INTR)    return 0;
+        if (rc == TSLEEP_INTR) return 0;
+        if (rc == TSLEEP_NOTEINTR) {
+            if (frozen_once) reader->cons_frozen_unwound = true;
+            return -(long)T_E_INTR;
+        }
         if (rc == CONS_SLOT_BUSY) return -1;
         break;   // holding the slot; a BEGIN that raced the take is caught under the lock below
     }
@@ -2134,6 +2181,7 @@ long cons_input_read(void *buf, long n) {
 
     u8 *out = (u8 *)buf;
     long got = 0;
+    bool intr = false;
     for (;;) {
         irq_state_t s = spin_lock_irqsave(&g_cons.lock);
         // IM-1: re-checked UNDER the lock BEGIN flips the flag under, before a
@@ -2145,8 +2193,18 @@ long cons_input_read(void *buf, long n) {
             cons_reader_busy_store(false);
             spin_unlock_irqrestore(&g_cons.lock, s);
             poll_waiter_list_wake(&g_cons.reader_waiters);
-            if (cons_episode_park() == TSLEEP_INTR)  return got;
-            if (cons_reader_slot_take(true) != 0)    return got;
+            int pk = cons_episode_park();
+            if (pk == TSLEEP_INTR) return got;
+            if (pk == TSLEEP_NOTEINTR) {                  // vacated before a byte
+                reader->cons_frozen_unwound = true;
+                return -(long)T_E_INTR;
+            }
+            int rc = cons_reader_slot_take(true);
+            if (rc == TSLEEP_NOTEINTR) {
+                reader->cons_frozen_unwound = true;
+                return -(long)T_E_INTR;
+            }
+            if (rc != 0) return got;
             continue;
         }
         u32 c = cons_count_load();
@@ -2166,11 +2224,13 @@ long cons_input_read(void *buf, long n) {
         // guard (reader_busy) means at most one pump runs at a time.
         uart_rx_pump();
         if (got > 0) break;            // read() returns as soon as >= 1 byte is ready
-        if (sleep(&g_cons_data_rendez, cons_data_or_vacate, rp) == SLEEP_INTR) break;
+        int sl = sleep_noteintr(&g_cons_data_rendez, cons_data_or_vacate, rp);
+        if (sl == SLEEP_INTR) break;
+        if (sl == SLEEP_NOTEINTR) { intr = true; break; }
     }
 
     cons_reader_slot_release();
-    return got;
+    return (intr && got == 0) ? -(long)T_E_INTR : got;
 }
 
 static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
@@ -2236,13 +2296,18 @@ long cons_output_write(const void *buf, long n) {
     // IM-1: the FREEZE. A non-attached writer parks BEFORE the role while an
     // episode is open (never holding the role parked -- the attached authority
     // must be able to write), and re-checks after taking it (a BEGIN can land
-    // between the park and the acquire). Death: -1, nothing written.
+    // between the park and the acquire). Death: -1, nothing written. A caught
+    // note (ARCH 8.8.3): -T_E_INTR, nothing written.
     for (;;) {
         if (cons_caller_frozen()) {
-            if (cons_episode_park() == TSLEEP_INTR) return -1;
+            int pk = cons_episode_park();
+            if (pk == TSLEEP_INTR)     return -1;
+            if (pk == TSLEEP_NOTEINTR) return -(long)T_E_INTR;
             continue;
         }
-        if (cons_tx_role_acquire() != 0) return -1;   // #811 death before we wrote anything
+        int ra = cons_tx_role_acquire(true);
+        if (ra == TSLEEP_NOTEINTR) return -(long)T_E_INTR;
+        if (ra != 0) return -1;   // #811 death before we wrote anything
         if (!cons_caller_frozen()) break;
         cons_tx_role_release();
     }
@@ -2261,6 +2326,7 @@ long cons_output_write(const void *buf, long n) {
     const u8 *bytes = (const u8 *)buf;
     u8   stage[CONS_TX_STAGE];
     long i = 0;
+    bool intr = false;
     while (i < n) {
         // IM-1: a writer holding the role when an episode opens finishes the
         // chunk in flight and stops at the next boundary -- a short count (the
@@ -2277,7 +2343,7 @@ long cons_output_write(const void *buf, long n) {
                 used = cons_stage_chunk(bytes + i, n - i, tio, stage, k, &len);
         }
         if (len == 0u) break;                    // unreachable (cap >= 2 and avail >= 1); defensive
-        u32 acc = cons_emit_bulk_wait(stage, len);
+        u32 acc = cons_emit_bulk_wait(stage, len, &intr);
         if (acc != len) {                        // short: map the accepted prefix back to input
             u32 dummy;
             i += cons_stage_chunk(bytes + i, n - i, tio, stage, acc, &dummy);
@@ -2290,7 +2356,11 @@ long cons_output_write(const void *buf, long n) {
     // here and never arms TXIM) and arm the interrupt for any remainder.
     cons_tx_kick();
     cons_tx_role_release();
-    return i;   // a short count == the #67 deadline drop or a #811 death unwind
+    // A caught note in the room wait (ARCH 8.8.3) ends the write like the #67
+    // drop: the count of what went out, or EINTR when nothing did -- as Linux's
+    // tty write answers.
+    if (intr && i == 0) return -(long)T_E_INTR;
+    return i;   // a short count == the #67 deadline drop, a #811 death unwind or a caught note
 }
 
 static long devcons_write(struct Spoor *c, const void *buf, long n, s64 off) {

@@ -5678,3 +5678,38 @@ void test_9p_client_loom_enter_wakes_when_role_frees(void) {
     TEST_ASSERT(read, "the Rread payload reached the registered buffer");
     TEST_ASSERT(!dead, "the session stays live");
 }
+
+// The runner's release, after every test (test.c). A test that fails before its
+// last lines leaves its op threads asleep in g_client, and the client and its
+// transports open. The next test's open re-inits the transport under such a
+// thread, which can then wake into the new test's client as a stale reader or
+// waiter. So every op thread still up is killed and reaped BEFORE the client
+// goes: a destroy under a sleeper frees what it sleeps on. A Loom ring a test
+// leaves alive is not seen here; the ring tests release theirs before their
+// verdicts. Returns whether anything was left up.
+bool test_9p_client_release(void);
+bool test_9p_client_release(void) {
+    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle };
+    bool left = false;
+    for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+        struct test_dying *d = ops[i];
+        if (!d->t) continue;
+        left = true;
+        if (!test_dying_done(d)) test_dying_kill(d);
+        test_dying_reap(d);
+        if (d->t) return true;          // it never exited: leave what it sleeps in
+    }
+    if (g_client.magic == P9_CLIENT_MAGIC) {
+        left = true;
+        p9_client_destroy(&g_client);
+    }
+    if (g_loopback.magic == P9_LOOPBACK_MAGIC) {
+        left = true;
+        p9_loopback_destroy(&g_loopback);
+    }
+    if (g_mq.magic == P9_MQ_LOOPBACK_MAGIC) {
+        left = true;
+        p9_mq_loopback_destroy(&g_mq);
+    }
+    return left;
+}

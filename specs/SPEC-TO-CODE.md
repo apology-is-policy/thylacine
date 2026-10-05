@@ -1033,11 +1033,11 @@ script accepts that wording only from a cfg that checks that one property.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 3562 |
-| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 1206 |
-| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 3562 |
-| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1206 |
-| `poll_local.cfg`                       | `Remote = {}` (every fd local) | `Invariants` | clean | 3242 |
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 7156 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 2446 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 7156 |
+| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 2446 |
+| `poll_local.cfg`                       | `Remote = {}` (every fd local) | `Invariants` | clean | 6534 |
 | `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation | — |
 | `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation | — |
 | `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation | — |
@@ -1047,10 +1047,13 @@ script accepts that wording only from a cfg that checks that one property.
 | `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
 | `poll_buggy_verdict_before_settle.cfg` | `BUGGY_VERDICT_BEFORE_SETTLE` | `NoFalseNotReady` | violation (`MakeReady MakeReady Register EvaluateFirst`: both fds ready, the local one decides, the socket goes unreported) | — |
 | `poll_buggy_sweep_leaves_snapshot.cfg` | `BUGGY_SWEEP_LEAVES_SNAPSHOT` | `NoSnapshotOutlivesCall` | violation (`Register Die SettleDeath`) | — |
-| `poll_armfail.cfg`                     | `ARM_MAY_FAIL`, `Fds = {f1, f2, f3}`, `Remote = {f2, f3}` | `Invariants` | clean | 38844 |
-| `poll_armfail_liveness.cfg`            | `ARM_MAY_FAIL`, `Spec_Live` | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 4306 |
-| `poll_armfail_liveness_notimeout.cfg`  | `ARM_MAY_FAIL`, `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1304 |
+| `poll_armfail.cfg`                     | `ARM_MAY_FAIL`, `Fds = {f1, f2, f3}`, `Remote = {f2, f3}` | `Invariants` | clean | 77732 |
+| `poll_armfail_liveness.cfg`            | `ARM_MAY_FAIL`, `Spec_Live` | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 8640 |
+| `poll_armfail_liveness_notimeout.cfg`  | `ARM_MAY_FAIL`, `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 2642 |
 | `poll_buggy_no_retry.cfg`              | `ARM_MAY_FAIL`, `BUGGY_NO_RETRY` | `NoMissedPoll` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit MakeReady`: the socket's arm is not sent, the park has no timer, and the socket readies) | — |
+| `poll_buggy_no_loop_caught_check.cfg`  | `BUGGY_NO_LOOP_CAUGHT_CHECK`, poll(-1), `Spec_Live` | `CaughtTerminates` | violation (a stop, a note, then `MakeReady`/`Retract` noise keeps every `TSleepCommit` returning on a set flag: the park's caught arm is never reached and the loop has no check of its own) | — |
+| `poll_buggy_caught_before_ready.cfg`   | `BUGGY_CAUGHT_BEFORE_READY` | `EintrNotOverReady` | violation (`MakeReady Register NotePost SnapshotAnswer EvaluateFirst`: the pass found the fd ready, and the note answered first) | — |
+| `poll_buggy_deadline_before_caught.cfg` | `BUGGY_DEADLINE_BEFORE_CAUGHT` | `NoZeroOverCaught` | violation (`AdvanceTime Register SnapshotAnswer NotePost EvaluateFirst`: the deadline lapsed with the note pending, and the call returned 0) | — |
 | `poll_buggy_retry_is_timeout.cfg`      | `ARM_MAY_FAIL`, `BUGGY_RETRY_IS_TIMEOUT` | `NoSpuriousZero` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit RetryWake FinalSample SnapshotAnswer EvaluateFinal`: the timer's expiry takes the final pass, and the call returns 0 before its deadline) | — |
 
 Both liveness properties were shown able to FAIL before being trusted
@@ -1078,6 +1081,9 @@ Spec action ↔ impl mapping:
 | `LoopCheck` / `ParkDeath` / `StopResume` | `kernel/poll.c::sys_poll_for_proc` (the loop's `thread_die_pending` + `proc_stop_requested` -> `proc_stop_sleeper_park`) | With every hook off. `SLEEP_INTR` from the park is `ParkDeath`. |
 | `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., expired ? NULL : &waiters[i], &held[i], &snaps[i])` loop) | The first scan's install-and-sample again, and a fresh snapshot per remote fd. A pass that begins past the deadline -- timeout 0, or the pass after the park timed out -- passes a NULL hook (`ScanHooks`: sample-only). |
 | `Die` / `StopRequest` waking a sleeper | `kernel/proc.c::proc_group_terminate`'s cascade; `proc_stop_wake_sleepers_locked` | Wake the private rendez; tsleep re-loops through `TSleepCommit`. |
+| `NotePost` (ARCH 8.8.3) | `kernel/notes.c::notes_post` arms the caught latch (`notes_arm_caught_note_locked`); `kernel/proc.c::proc_caught_note_wake` wakes each thread's `rendez_blocked_on` except its `debug_rendez` | The wake re-loops tsleep exactly as `Die`'s does. The stop parks are skipped, so both ride the note out. |
+| `TSleepCommit`'s caught branch | `kernel/sched.c::tsleep_common`'s caught arm (`caught_ok && !cond && thread_caught_note_unwinds`), reached through poll's `tsleep_noteintr` | Last in tsleep's order, after the die-check. `TSLEEP_NOTEINTR` goes straight to the sweep and returns `-T_E_INTR`: the thread holds the note's claim, so it never parks again in the call. |
+| `CaughtNow` / `Eintr` in the three verdicts | `kernel/poll.c::sys_poll_for_proc_spoors`: `thread_caught_note_unwinds(t)` between `ready_count > 0` and `poll_expired`; `sys_poll_sleep_for` asks it after a `TIMEDOUT` and at timeout 0 | Linux do_poll's order: readiness, then the signal, then the deadline (`EintrNotOverReady`, `NoZeroOverCaught`). Without it a producer that keeps a flag set keeps the poller from tsleep's arm (`CaughtTerminates`). |
 | `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the same verdict, on every pass after a park) | Every tsleep return goes round (a flag is a hint; TIMEDOUT may be the retry timer's): unhook, die/stop checks, scan, settle, collect, then ready -> return, `poll_expired` -> return 0, else count a re-sleep (`g_poll_resleeps`), `sched_yield_hint`, arm and park again. (The noise backstop this row used to name is gone with the preemption point, ARCH 8.12.) |
 | `SnapshotAnswer(f)` | the send: `poll_scan_one` -> `Dev.poll_snapshot` (`kernel/dev9p_poll.c::dev9p_poll_snapshot`); the answer: `dev9p_poll_snap_complete` (under `c->lock`, from the kthread's demux) | The answer writes the poller's `struct poll_snap` slot, stores `POLL_SNAP_ANSWERED` (RELEASE), and wakes the poller's rendez. `MayDecide` is `kernel/poll.c::poll_settle` (+ `poll_cond_settled`): no SENT or UNSENT slot; `poll_collect` then releases every snapshot (the `c->lock` barrier) before it reads one. |
 | `Arm` | `kernel/poll.c::poll_arm_remote` -> `Dev.poll_arm` (`kernel/dev9p_poll.c::dev9p_poll_arm`) | Only when the call will park, after the verdict: the hook on the poll-state's list FIRST, then an arm on the wire (a covering one reused, else a union arm, linked only once its submit returned 0). Returns 0 when a shortage, a dead session or no memory left the fd uncovered. |
@@ -1088,7 +1094,7 @@ Spec action ↔ impl mapping:
 | `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
 | `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
 | `NoStaleHook` / `NoSnapshotOutlivesCall` (the sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label -> `poll_release_snaps`, then `poll_unhook_all`) | Every exit path goes through the sweep; it is idempotent over a pass that already released and unhooked. |
-| the eleven `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, abandon every unanswered one at the sweep, bound a park any arm failed to cover by the retry timer, and never take that timer's expiry for the call's timeout. |
+| the fourteen `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, abandon every unanswered one at the sweep, bound a park any arm failed to cover by the retry timer, and never take that timer's expiry for the call's timeout; and, from ARCH 8.8.3, ask for a caught note in every pass that found nothing, after the readiness and before the deadline. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See

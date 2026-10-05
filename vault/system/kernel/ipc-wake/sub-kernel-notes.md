@@ -284,6 +284,32 @@ wait and the elected reader's receive) unwound for any caught note, so a
 no native syscall sets it, so natives stay where `proc_caught_note_eintr_ready`
 already put them ([[dec-2026-09-29-caught-signal-slow-calls]]).
 
+**Every kernel wait a listed call reaches opts in (2026-10-05).** The flag is
+necessary, not sufficient: the wait must opt in too, and until
+[[chg-2026-10-05-signal7-list]] only the two 9P waits did, so a listed call
+blocked anywhere else rode the note out. Now every wait a listed call can reach
+opts in, and each unwinds with nothing consumed and returns `-T_E_INTR`: a
+pipe's read and write ([[sub-kernel-pipe]], kept off an elected 9P reader's
+un-opted receive), the console's read and write waits ([[sub-kernel-cons]]),
+`ppoll`/`pselect6`'s park and its timeout-only sleep, which is musl's `pause()`
+([[sub-kernel-poll]]), `wait4` (`WAIT_PID_NOTEINTR`, [[sub-kernel-proc]]) and
+`futex` (`TORPOR_ERR_EINTR`, [[sub-kernel-torpor]]). One predicate decides,
+`thread_caught_note_unwinds`: a Linux phenotype (`proc_caught_note_eintr_ready`),
+not a 9P reader stopped mid-frame (`thread_reader_blocks_death`), and the claim
+won (`thread_caught_note_claim`, which re-runs the deliverable test above). The
+four caught arms in `sleep_common` and `tsleep_common` call it, after the cond
+re-test, the deadline, the stop detour and the die-check, and so does poll's
+loop-level verdict, where readiness wins, then the note, then the deadline, as
+in Linux's `do_poll`. A `noteintr` caller RETURNS on `NOTEINTR`: the claim lasts
+until its EL0-return tail, so a second wait in the same call would unwind at
+once and spin. Three waits a listed call reaches stay out, each for a reason
+(ARCH 8.8.3): the 9P send side (an unwind drains nothing, so the retry spins),
+`poll`'s settle (bounded by the server's answer or the fail-safe), and the notes
+fd's read (its data is the queued note, so a post readies it). Linux restarts
+`wait4`, a pipe and `futex` under `SA_RESTART`; the kernel restarts nothing, so
+a guest that relies on the restart sees `EINTR` — the documented DEGRADED gap
+(VIVARIUM 6.22).
+
 **The claim ends at the tail, not at the drain (VIV-EINTR round-2 F1, P1).** The
 first version cleared a claim with its family's last drain, on the argument that
 the claimant's tail delivers the note on its very next EL0 return. That holds for
@@ -556,12 +582,26 @@ wait (item 11 -- `notes_arm_caught_note_locked` + `thread_caught_note_deliverabl
 (`vivarium_handler_mask`, `blocked|sa_mask|sig`). Already covered and borrowed:
 `SIG_IGN`-at-generation and `pipe`-as-a-TERMINATE-note.
 
+[[chg-2026-10-05-signal7-list]] opted in every kernel wait a call on signal(7)'s
+list reaches (the paragraph above), behind the one predicate
+`thread_caught_note_unwinds`.
+
 ## Tests
 
 `notes.*` covers the queue, both paths, the masks and the fd surface, including
 the `S_IFCHR` report added when a missing metadata slot made `fstat` on a note
 fd fail. The interactive Ctrl-C scenario exercises the uncaught-`interrupt`
 terminate end to end.
+
+The caught-note waits share one fixture in `test.c` (`test_caught_*`): a
+Linux-phenotype Proc whose thread parks in the wait under test, a caught note
+posted to it, and a leg that records whether the wait parked, unwound on the
+post, or rode the note out. Fourteen witnesses use it
+(`pipe_blocking.caught_note_*`, `poll.caught_note_*`,
+`torpor.caught_note_ends_wait`, `rendez.caught_note_ends_wait4`,
+`cons.caught_note_*`); six carry a native control one variable away, and
+opening the phenotype gate turns exactly those six red. `viv-pheno-probe` legs L311-L318 drive each listed call
+from a real Linux binary and require `EINTR` with the handler run.
 
 ## Referenced by
 

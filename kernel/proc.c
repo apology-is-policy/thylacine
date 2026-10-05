@@ -2313,17 +2313,15 @@ void proc_console_post_interrupt(void) {
         // owner has no handler and is not self-managing), wake its blocked
         // threads so the LS-5b terminate fires at their EL0-return tails.
         proc_interrupt_terminate_wake(owner);
-        // item 11 (ARCH 8.8.3, P3-deliver): the CAUGHT twin -- the session
-        // shell IS self-managing, so its `interrupt` is caught (deliverable via
-        // its notes fd), NOT a terminate latch; the wake above is a no-op for
-        // it. THIS wake unwinds an owner blocked in an OPTED-IN caught-note-
-        // interruptible read (SLEEP_NOTEINTR -> -T_E_INTR) so it services the
-        // Ctrl-C promptly instead of a line late. As of 11b-core only the pipe
-        // read is opted in (sleep_noteintr); the shell's actual prompt read
-        // (dev9p pts / cons, cons.c uses plain sleep today) opts in at
-        // 11b-9p/later -- so for the console shell this wake is the wired-ahead
-        // infrastructure whose consumer lands with the reader opt-in (items
-        // 8/10). g_proc_table_lock is held, satisfying both wakes' contract.
+        // item 11 (ARCH 8.8.3): the CAUGHT twin -- an owner with a handler or a
+        // notes fd catches its `interrupt`, which arms the caught latch, not the
+        // terminate one, so the wake above is a no-op for it. THIS wake unwinds
+        // a Linux owner blocked in a call on signal(7)'s list -- its console
+        // read, a pipe, a poll (SLEEP_NOTEINTR -> -T_E_INTR) -- so the handler
+        // runs at once rather than when the call next returns. A native owner
+        // (the `ut` shell) is never unwound: its waits ride the note out, and
+        // its notes fd, whose data is the note, is readied by the post itself.
+        // g_proc_table_lock is held, satisfying both wakes' contract.
         proc_caught_note_wake(owner);
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
@@ -4537,6 +4535,11 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // family's unwind in every wait, so the sub-field is cleared regardless.
     __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
     self->note_claim = 0;
+
+    // A frozen console read's unwind mark (cons.c) belongs to a read of the
+    // outgoing image; carried across, it would make the new image's first
+    // console read wait for a slot the single-reader guard should refuse.
+    self->cons_frozen_unwound = false;
 }
 
 // Test hook (the *_for_test convention; deliberately absent from the header --
@@ -6089,10 +6092,17 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         // group-terminating (a peer / kill flagged it while we waited on a
         // child). Unregister, then return so the waiting Thread unwinds to its
         // EL0-return die-check; do NOT loop (re-sleep would re-INTR = livelock).
-        int sl = sleep(&self_rendez, child_wait_ready_cond, &pw);
+        // A caught note (ARCH 8.8.3) ends the wait with nothing reaped: a
+        // child's exit readies pw before its child_exit note posts, so a wait
+        // that unwinds found no reportable child at its last scan.
+        int sl = sleep_noteintr(&self_rendez, child_wait_ready_cond, &pw);
         poll_waiter_list_unregister(&pw);
         if (sl == SLEEP_INTR) {
             ret = -1;
+            goto out;
+        }
+        if (sl == SLEEP_NOTEINTR) {
+            ret = WAIT_PID_NOTEINTR;
             goto out;
         }
     }
