@@ -1665,7 +1665,9 @@ reach has opted in, and each unwinds with nothing consumed and returns
   `ppoll(NULL, 0, NULL, NULL)`, which only death ended before. A producer that
   keeps a flag set keeps the park's own check from running, so each pass that
   finds nothing ready also asks for the note itself. Readiness found by the pass
-  wins, then the deadline, then the note: Linux's `do_poll` order.
+  wins, then the note, then the deadline, as in Linux's `do_poll` and
+  `do_select`: a note pending when the timeout lapses, or at a zero timeout,
+  returns `EINTR` and not 0.
 - **`wait4` and `futex`.** Each returns a code distinct from its other results
   (`WAIT_PID_NOTEINTR`, `TORPOR_ERR_EINTR`). In both the data wins. A child's
   exit readies the wait before its `child_exit` note posts. A futex wake that
