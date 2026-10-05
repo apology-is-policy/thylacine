@@ -4,7 +4,7 @@ type: chg
 title: "signal(7)'s list: every kernel wait a listed Linux call reaches ends for a caught note"
 date: 2026-10-05
 arc: arc-boosty
-commits: []
+commits: ["5d28b427", "94ba5327", "00484bb6", "bb2f284e"]
 touched:
   - sub-kernel-notes
   - sub-kernel-rendez
