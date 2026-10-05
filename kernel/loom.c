@@ -2050,6 +2050,15 @@ static int loom_cqw_cond(void *arg) {
     return pw->ready ? 1 : 0;
 }
 
+// The same hand-off over two hooks on the ENTER's one Rendez: `cq` on
+// l->cq_waiters, `role` on the pumped client's role-waiter list. One flag per
+// list, as poll.c's poll_cond_any_flagged reads one per fd.
+struct loom_cqw_role { const struct poll_waiter *cq, *role; };
+static int loom_cqw_role_cond(void *arg) {
+    const struct loom_cqw_role *w = (const struct loom_cqw_role *)arg;
+    return (w->cq->ready || w->role->ready) ? 1 : 0;
+}
+
 // Loom-4 wait/reap phase. Block until min_complete CQEs are available, no async
 // op remains in flight, or the caller's Proc is dying. The caller either DRIVES
 // the elected reader itself (the Loom-3 behavior) or -- when a sibling thread of
@@ -2068,6 +2077,14 @@ static int loom_cqw_cond(void *arg) {
 // wakes-waiter the spec models (NoStrandedWaiter) is the SQPOLL-kthread surface
 // (Loom-4c): a loom_enter caller holds a loom ref for the whole call, so loom_free
 // cannot run while a waiter sleeps here -- NoStrandedWaiter holds vacuously now.
+//
+// The reader role, though, belongs to the 9P CLIENT, and a dev9p client is shared
+// with other Procs' sync ops. A foreign sync reader hands the role on only to a
+// sync op (the async op has no thread to read for it), so it can leave with this
+// ring's reply unread and no reader at all. An ENTER whose pump found the role
+// held therefore also hooks the client's role-waiter list: a handoff that leaves
+// the role free and undesignated wakes it, as does the session's death, and it
+// pumps itself (LOOM.md 8.6 item 2).
 static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
                                       u32 submitted) {
     // Bound the active reader's recv spin so a hostile/buggy server flooding
@@ -2081,6 +2098,9 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     rendez_init(&r);
     struct poll_waiter pw;
     poll_waiter_init(&pw, &r);
+    struct poll_waiter pw_role;
+    poll_waiter_init(&pw_role, &r);
+    struct loom_cqw_role both = { &pw, &pw_role };
 
     for (;;) {
         // SQPOLL ring: the kthread is the SOLE driver (rearm / admit / pump). A
@@ -2158,9 +2178,24 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         if (!cl && inflight) continue;         // raced: the op completed/reaped -> re-check
         bool only_admitting = (cl == NULL);
         int rc = 0;
+        bool role_hooked = false;
         if (cl) {
             rc = p9_client_reader_pump_once(cl);
-            spoor_clunk(cl_pin);               // cl not derefed below -> release the guard now
+            if (rc == 0) {
+                // Another thread holds the role: hook its release too (see
+                // above). The guard ref stays held while the hook is on the
+                // client's list (poll.h, REGISTERED-OBJECT LIFETIME).
+                pw_role.ready = false;   // safe: off all lists here
+                if (p9_client_role_wait_register(cl, &pw_role) != 1) {
+                    // Free again, or the session died: re-pump, which takes
+                    // the role or reports the death.
+                    spoor_clunk(cl_pin);
+                    continue;
+                }
+                role_hooked = true;
+            } else {
+                spoor_clunk(cl_pin);           // cl not derefed below -> release the guard now
+            }
         }
         if (rc == 1) {                         // demuxed a frame
             if (++pumps >= pump_budget) {
@@ -2193,13 +2228,20 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         else
             do_sleep = (loom_cq_ready(l) < min_complete) && (l->async_inflight > 0);
         spin_unlock(&l->lock);
-        if (!do_sleep) { poll_waiter_list_unregister(&pw); continue; }
-        int s = sleep(&r, loom_cqw_cond, &pw);
+        int s = SLEEP_OK;
+        if (do_sleep)
+            s = role_hooked ? sleep(&r, loom_cqw_role_cond, &both)
+                            : sleep(&r, loom_cqw_cond, &pw);
         poll_waiter_list_unregister(&pw);
+        if (role_hooked) {
+            p9_client_role_wait_unregister(cl, &pw_role);
+            spoor_clunk(cl_pin);
+        }
         if (s == SLEEP_INTR) break;            // #811: Proc group-terminating -> unwind
-        // woken by a posted CQE -> loop, re-sample.
+        // woken by a posted CQE or a free role -> loop, re-sample.
     }
-    pw.magic = 0;   // defense-in-depth before the stack frame pops (poll.c idiom)
+    pw.magic      = 0;   // defense-in-depth before the stack frame pops (poll.c idiom)
+    pw_role.magic = 0;
 }
 
 // Consume up to `budget` SQEs from the SQ index ring in SQ-index order, copying

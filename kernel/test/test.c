@@ -1509,7 +1509,8 @@ void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
-void test_9p_client_handoff_skips_debug_stopped_owner(void);
+void test_9p_client_handoff_skips_stop_parked(void);
+void test_9p_client_role_wait_contract(void);
 void test_9p_client_pump_deadline_idle(void);
 void test_9p_client_pump_deadline_data_ready_progresses(void);
 void test_9p_client_pump_deadline_chunked_frame_completes(void);
@@ -1571,6 +1572,12 @@ void test_9p_client_note_flush_handoff_skips_staging(void);
 void test_9p_client_handoff_skips_send_parked(void);
 void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
 void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
+void test_9p_client_stopped_waiter_elects_on_resume(void);
+void test_9p_client_resumed_waiter_is_designated(void);
+void test_9p_client_stop_parked_owner_not_owed(void);
+void test_9p_client_note_flush_stop_parked_staging_not_owed(void);
+void test_9p_client_handoff_skips_restopped_owner(void);
+void test_9p_client_loom_enter_wakes_when_role_frees(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -3679,9 +3686,10 @@ struct test_case g_tests[] = {
     { "9p_client.async_handoff_skips_async",
                                        test_9p_client_async_handoff_skips_async,
                                                                            false, NULL },
-    { "9p_client.handoff_skips_debug_stopped_owner",
-                                       test_9p_client_handoff_skips_debug_stopped_owner,
+    { "9p_client.handoff_skips_stop_parked",
+                                       test_9p_client_handoff_skips_stop_parked,
                                                                            false, NULL },
+    { "9p_client.role_wait_contract",  test_9p_client_role_wait_contract,  false, NULL },
     { "9p_client.pump_deadline_idle",  test_9p_client_pump_deadline_idle,  false, NULL },
     { "9p_client.pump_deadline_data_ready_progresses",
                                        test_9p_client_pump_deadline_data_ready_progresses,
@@ -3784,6 +3792,18 @@ struct test_case g_tests[] = {
                                        test_9p_client_note_flush_staging_waits_for_owed_tag, false, NULL },
     { "9p_client.async_clunk_drain_waits_for_owed_tag",
                                        test_9p_client_async_clunk_drain_waits_for_owed_tag, false, NULL },
+    { "9p_client.stopped_waiter_elects_on_resume",
+                                       test_9p_client_stopped_waiter_elects_on_resume, false, NULL },
+    { "9p_client.resumed_waiter_is_designated",
+                                       test_9p_client_resumed_waiter_is_designated, false, NULL },
+    { "9p_client.stop_parked_owner_not_owed",
+                                       test_9p_client_stop_parked_owner_not_owed, false, NULL },
+    { "9p_client.note_flush_stop_parked_staging_not_owed",
+                                       test_9p_client_note_flush_stop_parked_staging_not_owed, false, NULL },
+    { "9p_client.handoff_skips_restopped_owner",
+                                       test_9p_client_handoff_skips_restopped_owner, false, NULL },
+    { "9p_client.loom_enter_wakes_when_role_frees",
+                                       test_9p_client_loom_enter_wakes_when_role_frees, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",

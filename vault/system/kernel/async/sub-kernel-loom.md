@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -423,6 +423,31 @@ lock. Between the two, a concurrent reaper plus a re-registration could free the
 operation's pinned object and with it the client. So the lookup takes an *extra*
 reference on that object, which the caller releases after the pump. A single
 reaper made this safe once; the poll thread was a second one, and it is not.
+
+**Waiting for the reader role.** The reader role belongs to the 9P client, and a
+dev9p client is shared with other processes' synchronous calls. A synchronous
+reader hands the role on only to another synchronous call, because an async
+operation has no thread to read for it, so it can leave with this ring's reply
+unread and nobody reading. An ENTER whose pump finds the role held therefore
+hooks the client's role-waiter list as well as the completion wait-list, both on
+its one rendezvous, and sleeps until either fires. A handoff that leaves the role
+free with nobody designated wakes the list, and so does the session's death; the
+ENTER then pumps itself. The hook is registered under the client lock against a
+sample of the role taken there, so a release before it is seen and one after it
+finds the hook. The borrow guard's reference is kept while the hook is on the
+client's list and dropped after it comes off (LOOM.md 8.6 item 2;
+`9p_client.loom_enter_wakes_when_role_frees`). `specs/loom_role.tla` models the
+wait, written after the code when the first audit round found it unmodelled on a
+spec-first surface: its `NoMissedRoleWake` fails without the hook, without the
+wake, or with a register that trusts the pump's earlier sample. The one strand it
+leaves is OPEN-BUGS (E): an ENTER that pumps after another reader already read
+its reply blocks in the transport recv with nothing due. The model's spec note
+is `spec-loom-role`. Both the ENTER and the poll thread drive only the client of
+the ring's first in-flight operation (`loom_first_inflight_client`), and the
+model assumes one client per ring. On a ring whose operations span clients,
+another client's reply stays unread while the first client is held or slow.
+That strand predates the role hook and is enqueued in OPEN-BUGS
+(2026-10-05 07:52Z).
 
 **The join.** Teardown stops the poll thread before anything else, because the
 thread is the only other mutator of the in-flight list. It sets the stop flag,

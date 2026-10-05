@@ -212,14 +212,18 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
     // reader-clear signal (e.g. the c2s send-break in client_run) would otherwise
     // leave them parked indefinitely. (mark_dead is the SOLE c->dead setter.)
     if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
+    // And every role waiter: a dead session has no role to take (its
+    // re-register returns -P9_E_IO).
+    if (c->role_waiters) poll_waiter_list_wake(&c->role_waiters_list);
 }
 
 // Hand the reader role to one still-pending op so a survivor keeps reading
 // after the current reader departs (LOAD-BEARING when the departing reader's
 // Proc dies). Picks the first inflight rpc that is not the departing one, not
-// yet done/dead/flagged and not still sending, flags it be_reader + wakes it. If
-// none, no reader is needed (nothing left awaiting a reply), or the only ones
-// left are sending, and those self-elect. c->lock HELD.
+// yet done/dead/flagged, not still sending and not parked for a stop, flags it
+// be_reader + wakes it. If none, no sync op can take the role now: those still
+// sending self-elect, a stop-parked one re-elects on resume, and a role waiter
+// (a Loom ENTER whose async reply is unread) is woken to take it. c->lock HELD.
 static void client_handoff_reader_locked(struct p9_client *c,
                                          struct p9_rpc *departing) {
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
@@ -232,24 +236,16 @@ static void client_handoff_reader_locked(struct p9_client *c,
             // death there would take the role with it. It needs no designation:
             // every departure signals the send list first, and it self-elects.
             !r->sending &&
-            // 8c-3 (#89): skip an op whose owner is being stopped -- by the
-            // debugger OR (PTY-1f) a job-control stop; the gate is
-            // proc_stop_requested's disjunction (round-2 R2-F2: a Ctrl-Z'd
-            // owner parks exactly as a debug-stopped one, so handing it the
-            // role is the same strand). Its thread parks (8c-2) and cannot run
-            // the reader loop, so handing it the role would strand a survivor
-            // whose reply needs reading (the wakeup would land on a
-            // rpc->rendez whose waiter moved to debug_rendez -- a no-op).
-            // Handing to a runnable survivor (or, if none is pending, dropping
-            // the role -- reader_active is already false, so a future survivor
-            // op self-elects) keeps the shared client LIVE across a stop.
-            // `owner` is the submitter's Proc, alive while this rpc is
-            // inflight (this deref is as safe as `r->done` above). Async ops
-            // (on_complete) are skipped first, so `owner` is never read there.
-            // A death (owner group-terminating, not stopped) sets neither stop
-            // flag -> unaffected: the existing F6 bounce handles the
-            // dying-owner case.
-            !(r->owner && proc_stop_requested(r->owner))) {
+            // 8c-3 (#89): a thread parked for a stop (debug or job, PTY-1f)
+            // cannot run the reader loop, and the wake below would land on a
+            // rendez it is not asleep on, so designating it strands every
+            // survivor (DEBUG-FS-DESIGN 5c.6). stop_parked is the thread's own
+            // record, set for exactly the park's span; the Proc's stop flags
+            // are not -- a resume and a re-stop flip them while the thread
+            // never runs. A stopped thread not yet parked may be designated:
+            // client_wait's stop arm hands the role on before it parks, as
+            // its F6 bounce does for a dying designee.
+            !r->stop_parked) {
             // Skip async (POST_CQE) ops: they have no submitter thread to run
             // the reader loop. An async op's reply is demuxed by the
             // SYS_LOOM_ENTER reap / SQPOLL kthread / p9_client_reader_pump_once
@@ -259,6 +255,8 @@ static void client_handoff_reader_locked(struct p9_client *c,
             return;
         }
     }
+    if (!c->reader_active && c->role_waiters)
+        poll_waiter_list_wake(&c->role_waiters_list);
 }
 
 // #349 send flow control. Signal senders parked on c2s back-pressure that a
@@ -591,15 +589,23 @@ static bool client_stop_pending(struct Thread *t) {
 // 8c-3 (#89): park the calling thread on its debug_rendez for a pending stop
 // (either owner), with the reader role ALREADY released. Drops c->lock across
 // the blocking park (proc_stop_sleeper_park sleeps on debug_rendez until BOTH
-// stop owners clear) then re-acquires it. stop_unwinds MUST be false here so
-// this park PARKS (it must not itself unwind). Returns SLEEP_OK on resume, or
-// SLEEP_INTR if the Proc started dying while stopped -> the caller re-loops and
-// client_self_dying() unwinds (DEATH WINS). c->lock HELD on entry + exit.
-static int client_debug_stop_park(struct p9_client *c) {
+// stop owners clear) then re-acquires it. rpc->stop_parked spans the park, so
+// the handoff does not designate me and a drainer does not wait on my stored
+// reply while I cannot run (on a never-inflight token rpc the flag is inert).
+// stop_no_park MUST be clear here, as every caller leaves it: a set one makes
+// sleep()'s death check read this park as a reader mid-frame
+// (thread_reader_blocks_death), which a death does not unwind. stop_unwinds
+// does not matter: the stop detour skips a sleep on debug_rendez. Returns
+// SLEEP_OK on resume, or SLEEP_INTR if the Proc started dying while stopped ->
+// the caller re-loops and client_self_dying() unwinds (DEATH WINS). c->lock
+// HELD on entry + exit.
+static int client_debug_stop_park(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *t = current_thread();
+    rpc->stop_parked = true;
     spin_unlock(&c->lock);
     int drc = proc_stop_sleeper_park(t);
     spin_lock(&c->lock);
+    rpc->stop_parked = false;
     return drc;
 }
 
@@ -638,18 +644,17 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // sharing this client until the resume. Release the role
             // (re-hand-off if I was designated the next reader, mirroring the
             // F6 death case) + park role-free + re-loop on resume to
-            // re-elect. The handoff skips stopped owners, so the role always
-            // lands on a survivor (or is dropped -> a future survivor op
-            // self-elects). This is the top-of-loop guard so a stopped thread
-            // that reaches client_wait fresh (a mid-syscall stop) parks
-            // PROMPTLY instead of electing + reading. The blocked-reader case
-            // (the common one) is handled below via stop_unwinds.
-            // DEBUG-FS-DESIGN 5c.6.
+            // re-elect. The handoff skips a stop-parked op, so the role lands
+            // on a survivor (or is dropped -> a future survivor op or a role
+            // waiter takes it). Every wait below unwinds on a stop and comes
+            // back here -- the reader's recv at a frame boundary, the
+            // non-reader sleep -- so no waiter parks in place, where it would
+            // re-sleep on resume without re-electing. DEBUG-FS-DESIGN 5c.6.
             if (rpc->be_reader) {
                 rpc->be_reader = false;
                 client_handoff_reader_locked(c, rpc);
             }
-            (void)client_debug_stop_park(c);   // drop c->lock, park, re-acquire
+            (void)client_debug_stop_park(c, rpc);   // drop c->lock, park, re-acquire
             continue;                          // resumed (or dying): re-check
         }
         if (!c->reader_active) {
@@ -745,7 +750,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 // re-loop to re-elect on resume. My reply may have been demuxed by
                 // the survivor reader while I was stopped -> the re-loop's
                 // rpc->done check returns CLIENT_WAIT_DONE.
-                (void)client_debug_stop_park(c);
+                (void)client_debug_stop_park(c, rpc);
             }
             // re-loop: done / dead / dying / stop now decides the return.
         } else {
@@ -777,8 +782,16 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // CLIENT_WAIT_NOTEINTR (client_run flushes the op, flush(5)). Once a
             // note has interrupted this op it stays pending, so the flush wait
             // sleeps killable only.
+            //
+            // 8c-3 (#89): a stop unwinds this sleep (SLEEP_INTR) instead of
+            // parking me in place, so the loop top parks me in
+            // client_debug_stop_park and re-runs the election on resume. Parked
+            // in place, I would re-sleep on my unchanged cond after the resume
+            // and never elect, while a departing reader skipped me as stopped.
+            if (t) t->stop_unwinds = true;
             int sr = rpc->noted ? sleep(&rpc->rendez, rpc_wait_cond, rpc)
                                 : sleep_noteintr(&rpc->rendez, rpc_wait_cond, rpc);
+            if (t) { t->stop_unwinds = false; t->stop_unwound = false; }
             spin_lock(&c->lock);
             if (sr == SLEEP_NOTEINTR && !rpc->done && !rpc->dead) {
                 if (rpc->be_reader) {
@@ -808,7 +821,12 @@ static int send_wait_cond(void *arg) {
 // to the now-registered hook -- no lost wake (I-9; the poll.tla
 // register-then-observe). The stack Rendez/hook outlive the sleep (unregistered
 // under c->lock before this frame pops). c->lock HELD on entry + exit.
+//
+// A stop unwinds the sleep instead of parking in place; every caller's loop
+// then parks me in client_debug_stop_park, where stop_parked keeps a drainer
+// from waiting on a reply I cannot dispatch until the resume.
 static void client_park_for_progress_locked(struct p9_client *c) {
+    struct Thread     *t = current_thread();
     struct Rendez      pr;
     struct poll_waiter pw;
     rendez_init(&pr);
@@ -817,7 +835,9 @@ static void client_park_for_progress_locked(struct p9_client *c) {
     poll_waiter_list_register(&c->send_waiters_list, &pw);
     c->send_waiters++;
     spin_unlock(&c->lock);
+    if (t) t->stop_unwinds = true;
     (void)sleep(&pr, send_wait_cond, &w);
+    if (t) { t->stop_unwinds = false; t->stop_unwound = false; }
     spin_lock(&c->lock);
     c->send_waiters--;
     poll_waiter_list_unregister(&pw);
@@ -826,13 +846,14 @@ static void client_park_for_progress_locked(struct p9_client *c) {
 // A tag is owed when a sync op's reply is stored and its owner has yet to run
 // the dispatch that frees the tag and signals send progress -- an event no s2c
 // frame announces, so a tag drainer waits for it parked, not in the transport
-// recv. An owner with a stop pending may park before it dispatches, so its tag
-// is not counted on. c->lock HELD.
+// recv. An owner parked for a stop dispatches only after its resume, so its tag
+// is not counted on. An owner not parked is running or runnable, and a stored
+// reply makes every one of its waits return: it dispatches before any park.
+// c->lock HELD.
 static bool client_tag_owed_locked(struct p9_client *c) {
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
-        if (r && r->done && !r->on_complete &&
-            !(r->owner && proc_stop_requested(r->owner)))
+        if (r && r->done && !r->on_complete && !r->stop_parked)
             return true;
     }
     return false;
@@ -972,7 +993,7 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
                 client_copy(spill, c->out_buf, built_len);
                 frame = spill;
             }
-            (void)client_debug_stop_park(c);
+            (void)client_debug_stop_park(c, rpc);
             continue;
         }
 
@@ -1018,7 +1039,7 @@ static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) 
         // 8c-3 (#89, F2): a debugger stop -- park role-free (no frame built, so
         // no spill). Else a stop-unwound self-pump would spin (drains nothing).
         // Resume re-checks has_free_tag.
-        if (client_stop_pending(self)) { (void)client_debug_stop_park(c); continue; }
+        if (client_stop_pending(self)) { (void)client_debug_stop_park(c, rpc); continue; }
         if (client_tag_owed_locked(c)) client_park_for_progress_locked(c);
         else                           client_pump_or_park_locked(c, rpc);
     }
@@ -1056,7 +1077,7 @@ static int client_flush_wait(struct p9_client *c, struct p9_rpc *rpc,
         // does, but re-check my own reply after each -- a drain loop that waited
         // only for a free tag would keep reading after my answer had come.
         if (client_stop_pending(current_thread())) {
-            (void)client_debug_stop_park(c);
+            (void)client_debug_stop_park(c, rpc);
             continue;
         }
         if (client_tag_owed_locked(c)) client_park_for_progress_locked(c);
@@ -1157,11 +1178,7 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.flushed     = false;
     rpc.honour_rc   = 0;
     rpc.flush_out   = NULL;
-    struct Thread *submitter = current_thread();
-    rpc.owner       = submitter ? submitter->proc : NULL;   // 8c-3 (#89): the
-                                     // handoff skips a stopped owner's op
-                                     // (debug OR job -- PTY-1f);
-                                     // NULL for a kproc client (never stopped)
+    rpc.stop_parked = false;
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
     if (!rpc.reply_buf) {
@@ -1416,9 +1433,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     rpc->be_reader = false;
     rpc->reply_len = 0;
     rpc->reply_buf = NULL;          // async: demux dispatches from recv_buf
-    rpc->owner     = NULL;          // 8c-3 (#89): async ops are skipped in the
-                                    // handoff (on_complete != NULL first), so
-                                    // owner is never read -- keep it non-garbage
+    rpc->stop_parked = false;       // sync-only: kept inert, as below
     rpc->noted     = false;         // flush(5) state is sync-only: kept inert
     rpc->flushing  = false;
     rpc->honoured  = false;
@@ -1567,6 +1582,34 @@ void p9_client_handoff_reader(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return;
     spin_lock(&c->lock);
     client_handoff_reader_locked(c, NULL);
+    spin_unlock(&c->lock);
+}
+
+int p9_client_role_wait_register(struct p9_client *c, struct poll_waiter *pw) {
+    if (!c || c->magic != P9_CLIENT_MAGIC || !pw) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    int rc = 1;
+    if (c->dead)                rc = -P9_E_IO;
+    else if (!c->reader_active) rc = 0;
+    else {
+        // Hooked under c->lock, which every release of the role holds: a
+        // release before this point was seen above, one after it finds the
+        // hook (register-then-observe, I-9).
+        poll_waiter_list_register(&c->role_waiters_list, pw);
+        c->role_waiters++;
+    }
+    spin_unlock(&c->lock);
+    return rc;
+}
+
+void p9_client_role_wait_unregister(struct p9_client *c, struct poll_waiter *pw) {
+    if (!c || !pw) return;
+    spin_lock(&c->lock);
+    // pw->list is written only by its owner's register and unregister.
+    if (pw->list == &c->role_waiters_list) {
+        poll_waiter_list_unregister(pw);
+        c->role_waiters--;
+    }
     spin_unlock(&c->lock);
 }
 
@@ -1721,6 +1764,8 @@ int p9_client_init(struct p9_client *c,
     poll_waiter_list_init(&c->send_waiters_list);   // #349 send-flow-control park (multi-waiter)
     c->send_progress  = 0;
     c->send_waiters   = 0;
+    poll_waiter_list_init(&c->role_waiters_list);
+    c->role_waiters   = 0;
     for (u32 i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) c->inflight[i] = NULL;
     // Fid allocator starts at root_fid + 1; dev9p (and other callers)
     // pull fresh fids monotonically via p9_client_alloc_fid.

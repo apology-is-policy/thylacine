@@ -1267,12 +1267,12 @@ Liveness: TLC-clean (`EventuallyCompletes` + `CqWaiterReturns`, `ALLOW_TEARDOWN 
 | `UserRegister` | **Loom-2a**: `kernel/loom.c::loom_register_handles` + `kernel/syscall.c::sys_loom_register_for_proc` (`SYS_LOOM_REGISTER` LOOM_REGISTER_HANDLES) | install / replace a registered-handle table slot (a clunk + reuse is a replace); the held `spoor_ref` + the rights snapshot are the I-30 pin SUBSTRATE. |
 | `Consume` | **Loom-3**: `kernel/loom.c::loom_submit_one` (SQE consume in `loom_enter` / `SYS_LOOM_ENTER`) | the submit-time snapshot + pin: copy the SQE to a kernel `struct loom_sqe` (ring TOCTOU), validate (opcode / flags / handle_idx), resolve + rights-check the registered handle (RIGHT_WRITE for FSYNC — I-2 / I-6), take an independent `spoor_ref` (the pin), allocate a 9P tag via `p9_client_submit_async` (I-10 bound). |
 | `Dispatch` | **Loom-3**: `kernel/loom.c::loom_build_fsync` (the `build` thunk) + `kernel/9p_client.c::p9_client_submit_async` | issue the 9P Tmsg on the pinned (client, fid) + the snapshot args. The async submit entry (Loom-2b) drives the per-opcode `build`; the op acts on the kernel snapshot, never re-reading the shared SQE (`ArgPinnedToSnapshot`). |
-| `ReplyArrives` | **Loom-2b**: `kernel/9p_client.c::demux_frame_locked` (the async `on_complete != NULL` branch) → **Loom-3** `kernel/loom.c::loom_async_complete` | the #841 elected-reader demux fires the pluggable POST_CQE action (`on_complete` = `loom_async_complete`) instead of WAKE_RENDEZ (docs/LOOM.md §8.4); the reap-side reader is `p9_client_reader_pump_once`, driven by `loom_enter`. |
+| `ReplyArrives` | **Loom-2b**: `kernel/9p_client.c::demux_frame_locked` (the async `on_complete != NULL` branch) → **Loom-3** `kernel/loom.c::loom_async_complete` | the #841 elected-reader demux fires the pluggable POST_CQE action (`on_complete` = `loom_async_complete`) instead of WAKE_RENDEZ (docs/LOOM.md §8.4); the reap-side reader is `p9_client_reader_pump_once`, driven by `loom_enter`. `ReplyArrives`' weak fairness presumes a thread reads the reply; on a shared client the reader role can be another Proc's sync call, and `loom_role.tla` discharges the premise for the ENTER's own pump. |
 | `PostCqe` (+ the Loom-4 wake) | **Loom-2b** (the writer): `kernel/loom.c::loom_post_cqe`; **Loom-3** call site: `loom_async_complete` (async) + `loom_submit_one` (inline error/NOP CQEs); **Loom-4b** the wake: `loom_post_cqe` calls `poll_waiter_list_wake(&l->cq_waiters)` after publishing the CQE + releasing `l->lock` | write the `loom_cqe` (user_data + mapped result) into the CQ ring; back-pressure on a full CQ (`overflow` counter, never overwrite). The op never re-resolves the registered handle at completion (`ObjPinnedToSnapshot`). A successful post wakes the CQ wait-list (a refused full-CQ post does NOT — `CqWaitFlagSound`); the wake is below `l->lock` in the lock order + does not sleep, so it composes with the `c->lock` the async path holds (`CqFlagTracksCq` / `NoMissedCqWake`). |
 | `Reap` | **Loom-3**: userspace CQ-head bump (native API at Loom-6) + the kernel container reclaim `kernel/loom.c::loom_reap_terminal` (run by `loom_enter` after the wait) | userspace consumes a CQE; permitted post-teardown for already-posted CQEs. The kernel reaps terminal-op containers (clunk pin + free) outside `l->lock`. |
 | `Teardown` | **Loom-3**: `kernel/loom.c::loom_free` quiesce → `kernel/9p_client.c::p9_client_abandon_async` (the #845 Tflush-on-abandon, #898); the session-death CQ-waiter wake is realized at **Loom-4b** (`client_mark_dead_locked` posts an error CQE per in-flight async op → `loom_post_cqe` → wake); **Loom-4c** realizes the SQPOLL-kthread teardown: `loom_free` JOINS the kthread FIRST (set `sqpoll_stopping` + wake `sqpoll_park` + spin `sqpoll_exited` + `thread_free`) before the quiesce, then makes the spec's `Teardown`-wakes-the-wait-list action LITERAL via `poll_waiter_list_wake(&l->cq_waiters)` | quiesce every in-flight async op before freeing the ring Burrow: under the client's `c->lock`, clear `inflight[tag]` (no future `on_complete`) + Tflush (a late reply is discarded ownerless); then clunk the pin + free the container; free the loom last (`NoStaleCompletion`). At **Loom-4b/4c** `NoStrandedWaiter` holds **vacuously**: a `loom_enter` caller holds a loom ref for its whole duration, so `loom_free` cannot run while a CQ-waiter sleeps; and `KObj_Loom` is per-Proc + non-transferable, so all concurrent ENTERs are sibling threads that group-terminate together (`SLEEP_INTR`). The SQPOLL kthread holds no loom ref and is joined by the explicit `sqpoll_exited` handshake, not the wait-list. |
 | `CqWaitRegister` / `BuggyCqWaitCheck` / `BuggyCqWaitRegisterLate` | **Loom-4b**: `kernel/loom.c::loom_wait_for_completions` (driven by `loom_enter`) — install a `poll_waiter` on `l->cq_waiters` AND re-sample `loom_cq_ready` in one `l->lock`-held step (register-then-observe), then `sleep(&r, loom_cqw_cond, &pw)` (death-interruptible, #811) | the `ENTER` waiter (`min_complete >= 1`) that finds a sibling holding the reader role blocks for completions; the cross-lock flag is the wait-list hook (`pw->ready`). `BuggyCqWait*` model the check-before-register order (the bug `CqFlagTracksCq` forbids). |
-| `CqWaitCommitOrSleep` | **Loom-4b**: the `loom_cqw_cond` flag read in `sleep()` + the `loom_cq_ready >= min_complete` / `async_inflight == 0` give-up arms in `loom_wait_for_completions` | the evaluate point: flag set -> return; nothing more can complete -> return; else sleep on the CQ wait-list. The wake co-fires with `PostCqe` (`loom_post_cqe` walks the wait-list after publishing) (`NoMissedCqWake`). |
+| `CqWaitCommitOrSleep` | **Loom-4b**: the `loom_cqw_cond` flag read in `sleep()` -- `loom_cqw_role_cond` over the CQ and role hooks when the ENTER's pump found the 9P reader role held (waiters-stops; the role half is `loom_role.tla`) -- + the `loom_cq_ready >= min_complete` / `async_inflight == 0` give-up arms in `loom_wait_for_completions` | the evaluate point: flag set -> return; nothing more can complete -> return; else sleep on the CQ wait-list. The wake co-fires with `PostCqe` (`loom_post_cqe` walks the wait-list after publishing) (`NoMissedCqWake`). |
 | `BuggyDoublePost` / the seven `BUGGY_*` flags | (none — these are the disciplines the impl upholds) | snapshot-not-reread; pin-not-re-resolve-at-completion; one-CQE-per-op; never-post-into-a-full-CQ; quiesce-on-teardown; **register-the-wait-hook-before-sampling-the-CQ**; **wake-the-wait-list-on-every-post-and-on-teardown** (`CqFlagTracksCq` / `NoMissedCqWake` / `NoStrandedWaiter`). |
 
 cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
@@ -1569,6 +1569,85 @@ pre-step-4 behavior masking devgone] / `loom_devgone_buggy_leaks_inflight` [->
 SessionDeathCompletes: an op hangs past removal] / `loom_devgone_buggy_double` [->
 NoDoubleTerminal]) confirmed failing on any change to the death-reason threading,
 the `reader_recv_frame` EOF-vs-error split, or the `loom_async_complete` terminal.
+
+---
+
+## loom_role.tla — waiters-stops (the Loom ENTER waits for the 9P reader role; spec-first re-enabled, written AFTER the impl)
+
+A Loom ENTER waiting for an async op's CQE on a SHARED 9P client: the reader role
+can be held by another Proc's synchronous call, which hands it on only to a
+synchronous waiter. An ENTER whose pump finds the role held hooks the client's
+role-waiter list as well as the CQ list, on one Rendez; a handoff that leaves the
+role free with nobody designated wakes it, and it re-pumps (LOOM.md 8.6 item 2;
+DEBUG-FS-DESIGN 5c.6, the waiters-and-stops amendment). A FOCUSED module:
+`loom.tla`'s `ReplyArrives` (weak fairness) presumes a reader, and this module
+discharges that premise for the ENTER's own pump. It is also the first model of
+the handoff, so it carries the two stop rules the ENTER's wake depends on (the
+`stop_parked` skip and the stopped designee's re-handoff). NOT model-first: the
+impl (`e19ed699`) came first; waiters-stops audit round 1 F1 [P2] caught the gap
+(LOOM.md 8 and AUDIT-TRIGGERS row 103 re-enable spec-first here), and the module
+was written and checked against the as-built code in the round-1 close.
+
+Safety: TLC-clean at `Syncs = {s1, s2}, MAX_STOPS = 1` — 16804 distinct states (TLC 2026.10.04) —
+and at `Syncs = {s1, s2, s3}` — 693366 (`loom_role_wide.cfg`: a two-link designation chain, sync
+against sync for a freed role).
+Liveness: TLC-clean (`EnterReturns`) in both universes, over the complete state graph. Audit round 2
+also checked `MAX_STOPS = 2` (two self-pump or stop cycles per op): clean, 57612 distinct states.
+Every buggy cfg's counterexample was read: each violates through the defect it names.
+With `MAX_STOPS = 0` the pre-fix ENTER, `no_role_wake` and `late_register` still
+violate, through a plain own-reply departure (`ReadFrame`), so the stops are not
+what makes them fail; the clean model stays clean there (1,488 distinct states).
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `loom_role.cfg` | all FALSE | `Invariants` (7) | clean | 16804 |
+| `loom_role_liveness.cfg` | `Spec_Live` | `Invariants` + `EnterReturns` | clean | 16804 |
+| `loom_role_wide.cfg` | `Spec_Live`, `Syncs = {s1, s2, s3}` | `Invariants` + `EnterReturns` | clean | 693366 |
+| `loom_role_buggy_no_role_hook.cfg` | `BUGGY_NO_ROLE_HOOK` (the pre-fix ENTER) | `EnterReturns` alone (proves the liveness check discriminates) | violation | — |
+| `loom_role_buggy_late_register.cfg` | `BUGGY_ROLE_LATE_REGISTER` | `NoMissedRoleWake` | violation | — |
+| `loom_role_buggy_no_role_wake.cfg` | `BUGGY_NO_ROLE_WAKE` | `NoMissedRoleWake` | violation | — |
+| `loom_role_buggy_designates_parked.cfg` | `BUGGY_DESIGNATES_PARKED` | `NoMissedRoleWake` | violation | — |
+| `loom_role_buggy_stop_keeps_designation.cfg` | `BUGGY_STOP_KEEPS_DESIGNATION` | `NoMissedRoleWake` | violation | — |
+| `loom_role_residual_blind.cfg` | all FALSE | `NoBlindRecv` | violation EXPECTED: the OPEN-BUGS (E) blind recv is reachable | — |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Start(s)` / `Elect(s)` | `kernel/9p_client.c::client_wait`: entry clears `sending`; the loop top returns on `done`, elects on `!c->reader_active` (`be_reader = false`), else clears a stale `be_reader` (F7) and sleeps on `rpc->rendez` (`rpc_wait_cond`) | sending is folded into `Start`: the handoff skips a sender, and a sender self-elects on arrival |
+| `ReadFrame(s, o)` | `client_wait`'s reader loop: `reader_recv_frame` + `demux_frame_locked`; its own reply ends the loop, then `reader_active = false` and `client_handoff_reader_locked(c, rpc)` in the same `c->lock` hold | |
+| `StopReader(s)` | the reader's recv unwound at a frame boundary (`stop_unwound`): release, hand off, `client_debug_stop_park` -- one `c->lock` hold | stands for every early departure: a caught note (`noteintr`), a death-interrupted recv (the reader loop's `client_self_dying()` break), the send path's one-frame self-pump (`client_pump_or_park_locked`) |
+| `StopWaiter(s)` / `Resume(s)` | `client_wait`'s stop arm: a designee re-hands off (`be_reader` cleared), then `client_debug_stop_park` sets `rpc->stop_parked` under `c->lock` and clears it when the park returns | the non-reader sleep unwinds on a stop (`stop_unwinds`) to reach the arm. The designee branch also stands for F6 (a dying designee hands the role on at the loop top) and the caught-note bounce after the non-reader sleep: each leaves without parking, which is a park whose resume never comes |
+| `Handoff(...)` | `client_handoff_reader_locked`: designate a not-done, not-designated, sync, not-`sending`, not-`stop_parked` op and wake it; else `if (!c->reader_active && c->role_waiters) poll_waiter_list_wake(&c->role_waiters_list)` | the spec takes ANY candidate (the code: the lowest tag) |
+| `EnterTop` | `kernel/loom.c::loom_wait_for_completions`: the `ready >= min_complete` / `inflight + admitting == 0` sample and `loom_first_inflight_client` | one op in flight: both give-up arms are the CQE being posted |
+| `EnterPump` / `EnterRead(o)` | `p9_client_reader_pump_once`: `reader_active` -> 0; else take the role, one `reader_recv_frame` + demux, release, `client_handoff_reader_locked(c, NULL)` | |
+| `EnterHook` | `p9_client_role_wait_register` (dead -> `-P9_E_IO`, free -> 0 = re-pump, held -> hooked under `c->lock` with `role_waiters++`); `pw_role.ready = false` before it | `BUGGY_ROLE_LATE_REGISTER` = a register that trusts the pump's stale 0 |
+| `EnterCqReg` | `poll_waiter_list_register(&l->cq_waiters, &pw)` + the `do_sleep` sample under `l->lock` (`loom.tla`'s `CqWaitRegister`) | |
+| `EnterSleep` | `sleep(&r, loom_cqw_role_cond, &both)` with the role hooked, else `sleep(&r, loom_cqw_cond, &pw)` | two hooks on one Rendez: poll.c's `poll_cond_any_flagged` shape |
+| `EnterUnhook` | `poll_waiter_list_unregister(&pw)` + `p9_client_role_wait_unregister(cl, &pw_role)` (then the `cl_pin` clunk) | |
+| `ServerReply(o)` | the server's reply reaching the s2c stream | a SET over-approximates the FIFO |
+
+Invariants: NoMissedRoleWake (the headline, I-9 on the role list; stated without
+"hooked", so the pre-fix ENTER violates it too), BlindImpliesCq (the carve-out
+covers only an ENTER whose CQE is posted: (E)'s sample->pump race), NoMissedCqWake,
+RoleConsistent, HooksConsistent, SleepingUnflagged, TypeOK. Only NoMissedRoleWake
+is discriminated by buggy cfgs (four of them), and `EnterReturns` by one; the rest
+hold by construction of the actions and guard the model text. Liveness
+`EnterReturns` is `<>(eph = "returned") \/ <>[]Blind`: the ENTER returns, or ends
+in the OPEN-BUGS (E) blind recv for good. The model has no stop-flag state, so a
+resume-then-re-stop is not representable; `9p_client.handoff_skips_restopped_owner`
+and `.stop_parked_owner_not_owed` cover it in code. WF on `ServerReply` is the
+trusted-server premise `loom.tla` also makes; a deferred-reply server breaks it by
+design. Out of scope: session death (`loom_devgone.tla`; `client_mark_dead_locked`
+also wakes the role list), SQPOLL (its kthread never hooks the role; its
+`P9_PUMP_BUSY` yield-spin is OPEN-BUGS 15:04Z), a stop of the ENTER's own thread,
+the flood budget, a second ENTER, and a ring whose ops span clients (the ENTER and
+the SQPOLL kthread drive only the first in-flight op's client: a pre-existing
+strand, OPEN-BUGS 2026-10-05 07:52Z).
+
+Pre-commit gate: `loom_role.cfg`, `loom_role_liveness.cfg` and `loom_role_wide.cfg` clean, the 5 buggy
+cfgs violating, and `loom_role_residual_blind.cfg` violating until (E) is fixed
+(then drop `Blind` from `EnterReturns` and expect that cfg clean) -- on any change
+to the reader election, the handoff, `client_debug_stop_park`, the role-waiter
+list, or `loom_wait_for_completions`' pump and sleep.
 
 ---
 

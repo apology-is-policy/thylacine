@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -72,7 +72,10 @@ One function per op, `0` on success / `-errno` on failure:
   `p9_client_reader_pump_once_deadline` (the SQPOLL idle pump — deadline
   armed on only the FIRST recv, the frame boundary, so a timeout consumes no
   bytes; returns PROGRESS/IDLE/BUSY/DEAD), `p9_client_handoff_reader`,
-  `p9_client_abandon_async`.
+  `p9_client_abandon_async`, and `p9_client_role_wait_register` /
+  `_unregister` (hook a `poll_waiter` that a free, undesignated reader role or
+  the session's death wakes: the Loom ENTER's wait for the role; dead ->
+  `-EIO`, role free -> 0, hooked -> 1).
 
 Error convention: `-EINVAL` bad args/magic · `-EBUSY` not-OPEN · `-EIO`
 lower-layer failure · `-<ecode>` the server's Rlerror ecode, **bounded to
@@ -94,8 +97,10 @@ by tag to the owning rpc (frame copied to that rpc's `reply_buf`, waker
 wakes its own rendez), and repeats until its own reply lands; everyone else
 sleeps on their OWN rpc rendez. A departing reader hands the role off
 (`client_handoff_reader_locked`) to one still-pending rpc — skipping
-owners with a stop pending (`proc_stop_requested(p9_rpc.owner)`: a debugger
-stop or a job-control stop) so the role lands on a runnable survivor, and skipping an rpc still `sending` (registered, but its
+an rpc whose thread is parked for a stop (`rpc->stop_parked`, which the thread
+sets itself in `client_debug_stop_park` under `c->lock` for exactly the park's
+span; the Proc's stop flags are not read, because a resume-then-re-stop flips
+them while the thread never runs) so the role lands on a runnable survivor, and skipping an rpc still `sending` (registered, but its
 thread is still getting a frame onto the wire: the #349 send park, or a flush's
 staging) — with `be_reader` as a pure advisory wake-hint (election
 is gated solely by `reader_active` under the lock, so two readers are
@@ -209,8 +214,9 @@ progress at a time and re-checks its own reply after each, because this op is
 on the wire and a pump can demux its answer, so `client_drain_until_free_tag`,
 which waits only for a free tag, would read on past it. A unit is a pump
 (`client_pump_or_park_locked`), except while a tag is owed
-(`client_tag_owed_locked`: a sync op's reply is stored and its owner, with no
-stop pending, has yet to run the dispatch that frees the tag): then it parks
+(`client_tag_owed_locked`: a sync op's reply is stored and its owner, not
+parked for a stop (`stop_parked`), has yet to run the dispatch that frees the
+tag): then it parks
 for that dispatch's signal, because no frame announces the freed tag and a
 second pump would wait for an unrelated reply (flush(5) round 3 F3; the async
 clunk's drain does the same). The staged Tflush marks the op `owner_waits` in
@@ -407,7 +413,9 @@ test clients carry the counters unlisted.
 - `struct p9_client` (~36 KiB): embedded session (fid + 64-wide outstanding
   tables), transport vtable, the inline 32 KiB `out_buf`, `c->lock`,
   `inflight[]` (tag-indexed rpc pointers), `reader_active`,
-  `send_progress` + `send_waiters` + `send_waiters_list`, `done_reply_buf`,
+  `send_progress` + `send_waiters` + `send_waiters_list`, `role_waiters` +
+  `role_waiters_list` (threads waiting for the reader role itself, not a
+  reply: the Loom ENTER), `done_reply_buf`,
   `dead`. Magic `P9_CLIENT_MAGIC` (`_Static_assert`-pinned).
 - The per-session policy bits, all stamped on the still-private client
   before the root Spoor publishes and never flipped: `loose` (the B1 I-38
@@ -428,8 +436,8 @@ test clients carry the counters unlisted.
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
   flags, `sending` (registered, not yet waiting in `client_wait`: the
   handoff skips it), its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
-  async seam), `owner` (the submitting Proc — the handoff skip's key; NULL
-  for async), and the flush(5) state of a sync op a caught note interrupted:
+  async seam), `stop_parked` (its thread is parked for a stop inside the
+  client: the handoff and the owed check skip it), and the flush(5) state of a sync op a caught note interrupted:
   `noted` (later waits killable only), `flushing` (its Tflush is on the
   wire), `honoured` + `honour_rc` + `flush_out` (a reply applied by the
   demux), `flushed` (the Rflush came first). Async containers are
@@ -456,6 +464,18 @@ The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
   two pump_once variants) handle a stop-unwound recv without latching the
   session; `client_send_flow` + `client_drain_until_free_tag` park a stopped
   sender at loop-top (spilling first) so a stop can't spin or hang.
+- No client waiter parks in place for a stop (DEBUG-FS 5c.6, the
+  2026-09-30 waiters-and-stops amendment). Every client sleep sets
+  `stop_unwinds` -- the reader recv at a frame boundary, the non-reader rpc
+  sleep, the send/tag progress park -- so a stop returns `SLEEP_INTR` and the
+  caller's loop parks the thread in `client_debug_stop_park`, bracketed by
+  `rpc->stop_parked` under `c->lock`; on resume it re-runs the election. A
+  waiter parked in place re-slept on resume without re-electing, after a
+  departing reader had skipped it as stopped.
+- A handoff that leaves the role free and undesignated wakes
+  `role_waiters_list`, as does the session's death. Its hooks are registered
+  under `c->lock` against a `reader_active` sample taken there, and every
+  release of the role runs the handoff under `c->lock`: register-then-observe.
 - kproc threads (SQPOLL, dev9p_poll pump) are stop-immune not via
   `t->proc == NULL` but because `proc_debug_stop_deliver` rejects kproc —
   `debug_stop_req` is always 0 there.
@@ -561,6 +581,26 @@ this surface):
   would succeed with an empty result, a read's false EOF); a living owner's
   flushed op must count live for the fid exclusion until it has acted, and the
   death-in-flush-wait arm must clear that before the Rflush.
+
+- **Stops vs the reader role and the tag pool** (DEBUG-FS 5c.6, the
+  2026-09-30 waiters-and-stops amendment): a new sleep inside the client must
+  set `stop_unwinds` and return to a loop that parks via
+  `client_debug_stop_park`, or a stopped waiter parks in place and re-sleeps on
+  resume without re-electing. `rpc->stop_parked` is written only by the parked
+  thread under `c->lock`; the handoff and `client_tag_owed_locked` read it and
+  never the Proc's stop flags, and the park clears it when it returns. The park
+  needs `stop_no_park` clear, as every caller leaves it: a set one makes
+  `sleep()`'s death check read the park as a reader mid-frame, which a death does
+  not unwind. Every `reader_active = false` site must run the handoff, whose
+  no-designee exit is the Loom ENTER's only wake when a foreign sync reader
+  leaves its async reply unread. Witnesses:
+  `9p_client.stopped_waiter_elects_on_resume`, `.resumed_waiter_is_designated`,
+  `.stop_parked_owner_not_owed`, `.note_flush_stop_parked_staging_not_owed`,
+  `.handoff_skips_restopped_owner`, `.handoff_skips_stop_parked`,
+  `.role_wait_contract`, `.loom_enter_wakes_when_role_frees`. Model:
+  `specs/loom_role.tla`, the handoff with both stop rules and the role-waiter
+  wake (`NoMissedRoleWake`). Known and tracked: a stop-parked owner holds its
+  tag until resumed (the tag-pool design entry in OPEN-BUGS).
 
 ## Seams
 

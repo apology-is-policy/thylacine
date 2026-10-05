@@ -1840,11 +1840,12 @@ void proc_debug_resume(struct Proc *p);
 // =============================================================================
 
 // The park predicate: is ANY stop owner requesting this Proc parked? The
-// EL0-return tail, the sleep()/tsleep() stop detours, the 9P client's
-// client_stop_pending, and the elected-reader handoff skip ALL read this
-// disjunction (round-2 R2-F2: a flag the audited park machinery does not read
-// re-opens the #89 whole-FS freeze via the job axis). Two ACQUIRE loads off
-// one cache line (job_stop_req occupies debug_stop_req's pad slot).
+// EL0-return tail, the sleep()/tsleep() stop detours and the 9P client's
+// client_stop_pending ALL read this disjunction (round-2 R2-F2: a flag the
+// audited park machinery does not read re-opens the #89 whole-FS freeze via the
+// job axis). The elected-reader handoff reads rpc->stop_parked instead
+// (DEBUG-FS-DESIGN 5c.6). Two ACQUIRE loads off one cache line (job_stop_req
+// occupies debug_stop_req's pad slot).
 static inline bool proc_stop_requested(const struct Proc *p) {
     return (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) |
             __atomic_load_n(&p->job_stop_req,  __ATOMIC_ACQUIRE)) != 0;

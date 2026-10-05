@@ -58,7 +58,8 @@ void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
-void test_9p_client_handoff_skips_debug_stopped_owner(void);
+void test_9p_client_handoff_skips_stop_parked(void);
+void test_9p_client_role_wait_contract(void);
 void test_9p_client_pump_deadline_idle(void);
 void test_9p_client_pump_deadline_data_ready_progresses(void);
 void test_9p_client_pump_deadline_chunked_frame_completes(void);
@@ -1088,15 +1089,12 @@ void test_9p_client_async_handoff_skips_async(void) {
     async_rpc.tag = 30; async_rpc.done = false; async_rpc.dead = false;
     async_rpc.be_reader = false; async_rpc.reply_len = 0; async_rpc.reply_buf = NULL;
     async_rpc.on_complete = test_handoff_async_recorder;   // async -> must be skipped
-    async_rpc.owner = NULL;                           // 8c-3: not debug-stopped
     rendez_init(&async_rpc.rendez);
 
     struct p9_rpc sync_rpc = { 0 };
     sync_rpc.tag = 31; sync_rpc.done = false; sync_rpc.dead = false;
     sync_rpc.be_reader = false; sync_rpc.reply_len = 0; sync_rpc.reply_buf = NULL;
     sync_rpc.on_complete = NULL;                      // sync -> the handoff target
-    sync_rpc.owner = NULL;                            // 8c-3: not debug-stopped (the
-                                                      // handoff's `r->owner &&` skips)
     rendez_init(&sync_rpc.rendez);
 
     spin_lock(&g_client.lock);
@@ -1119,88 +1117,124 @@ void test_9p_client_async_handoff_skips_async(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
-// 8c-3 (#89): the elected-reader handoff MUST skip an op whose owner is being
-// stopped -- by the debugger OR (PTY-1f) a job-control stop; the gate is
-// proc_stop_requested's disjunction. A stopped thread parks (8c-2) and cannot
-// run the reader loop, so handing it the role would strand a survivor whose
-// reply needs reading (the be_reader wakeup lands on a rendez whose waiter
-// has moved to debug_rendez -- a no-op). The role must land on a runnable
-// survivor, or be dropped if none is pending (reader_active is already false
-// -> a future survivor op self-elects). The full reader-election path
-// (client_wait) needs a stoppable EL0 thread the kproc test context cannot
-// provide, so drive the handoff directly over synthetic inflight rpcs with
-// synthetic owner Procs. The job leg is the R2-F2 revert-probe: a handoff
-// reading debug_stop_req ONLY hands the role to a Ctrl-Z'd owner -- the #89
-// freeze re-opened via the job axis.
-void test_9p_client_handoff_skips_debug_stopped_owner(void) {
+// 8c-3 (#89): the elected-reader handoff MUST skip an op whose thread is
+// parked for a stop (DEBUG-FS-DESIGN 5c.6). That thread cannot run the reader
+// loop, and the be_reader wakeup lands on a rendez it is not asleep on, so
+// handing it the role strands every survivor. The role lands on a runnable
+// survivor, or is dropped if none is pending (reader_active is already false
+// -> a future survivor op self-elects). The handoff reads stop_parked, the
+// parked thread's own record, and nothing of its Proc, so synthetic inflight
+// rpcs drive it. The parked op sits at the LOWER tag: a handoff that ignored
+// the flag would pick it.
+void test_9p_client_handoff_skips_stop_parked(void) {
     drive_client_open(&g_client, &g_loopback);
 
-    // Two synthetic owner Procs. The handoff reads ONLY the two stop flags,
-    // so set just those (a full {0} on the ~400-byte struct would emit a
-    // memset the freestanding kernel does not link; every other field is unread).
-    struct Proc owner_stopped;
-    struct Proc owner_survivor;
-    owner_stopped.debug_stop_req  = 1;   // being debug-stopped
-    owner_stopped.job_stop_req    = 0;
-    owner_survivor.debug_stop_req = 0;   // runnable
-    owner_survivor.job_stop_req   = 0;
-
-    // The STOPPED op sits at the LOWER tag: the pre-fix handoff picks the first
-    // eligible inflight, so without the skip it would choose owner_stopped and
-    // set its be_reader -- the revert-probe (this test FAILS on pre-fix code).
     // From zero: the handoff reads fields the assignments below do not name.
-    struct p9_rpc rpc_stopped = { 0 };
-    rpc_stopped.tag = 40; rpc_stopped.done = false; rpc_stopped.dead = false;
-    rpc_stopped.be_reader = false; rpc_stopped.reply_len = 0; rpc_stopped.reply_buf = NULL;
-    rpc_stopped.on_complete = NULL; rpc_stopped.owner = &owner_stopped;
-    rendez_init(&rpc_stopped.rendez);
+    struct p9_rpc rpc_parked = { 0 };
+    rpc_parked.tag = 40;
+    rpc_parked.stop_parked = true;
+    rendez_init(&rpc_parked.rendez);
 
     struct p9_rpc rpc_survivor = { 0 };
-    rpc_survivor.tag = 41; rpc_survivor.done = false; rpc_survivor.dead = false;
-    rpc_survivor.be_reader = false; rpc_survivor.reply_len = 0; rpc_survivor.reply_buf = NULL;
-    rpc_survivor.on_complete = NULL; rpc_survivor.owner = &owner_survivor;
+    rpc_survivor.tag = 41;
     rendez_init(&rpc_survivor.rendez);
 
     spin_lock(&g_client.lock);
-    g_client.inflight[40] = &rpc_stopped;
+    g_client.inflight[40] = &rpc_parked;
     g_client.inflight[41] = &rpc_survivor;
     spin_unlock(&g_client.lock);
 
     p9_client_handoff_reader(&g_client);
+    bool skip_parked = !rpc_parked.be_reader;
+    bool to_survivor = rpc_survivor.be_reader;
 
-    TEST_ASSERT(!rpc_stopped.be_reader,
-                "#89: a debug-stopped owner's op is NOT handed the reader role");
-    TEST_ASSERT(rpc_survivor.be_reader,
-                "#89: the runnable survivor's op IS handed the reader role");
-
-    // The JOB leg (PTY-1f, R2-F2): a job-stopped owner is skipped exactly as
-    // a debug-stopped one. Flip the stopped owner's axis: debug clear, job
-    // set -- a handoff reading only debug_stop_req would now hand it the role
-    // (the revert-probe for the disjunction).
-    rpc_stopped.be_reader  = false;
-    rpc_survivor.be_reader = false;
-    owner_stopped.debug_stop_req = 0;
-    owner_stopped.job_stop_req   = 1;    // Ctrl-Z'd (the everyday fg suspend)
+    // Both parked: no eligible op -> the role is dropped.
+    rpc_survivor.be_reader   = false;
+    rpc_survivor.stop_parked = true;
     p9_client_handoff_reader(&g_client);
-    TEST_ASSERT(!rpc_stopped.be_reader,
-                "PTY-1f: a JOB-stopped owner's op is NOT handed the reader role");
-    TEST_ASSERT(rpc_survivor.be_reader,
-                "PTY-1f: the survivor takes the role past the job-stopped op");
+    bool dropped = !rpc_parked.be_reader && !rpc_survivor.be_reader;
 
-    // Now stop BOTH owners (one per axis): no eligible survivor -> the
-    // handoff drops the role (no be_reader set), leaving a future survivor
-    // op to self-elect.
-    rpc_stopped.be_reader  = false;
-    rpc_survivor.be_reader = false;
-    owner_survivor.debug_stop_req = 1;
+    // The control, one variable away: unparked, the lower tag takes it.
+    rpc_parked.stop_parked = false;
     p9_client_handoff_reader(&g_client);
-    TEST_ASSERT(!rpc_stopped.be_reader && !rpc_survivor.be_reader,
-                "#89: all owners stopped (either axis) -> the role is dropped");
+    bool control = rpc_parked.be_reader && !rpc_survivor.be_reader;
 
     spin_lock(&g_client.lock);
     g_client.inflight[40] = NULL;
     g_client.inflight[41] = NULL;
     spin_unlock(&g_client.lock);
+
+    TEST_ASSERT(skip_parked, "#89: a stop-parked op is NOT handed the reader role");
+    TEST_ASSERT(to_survivor, "#89: the runnable survivor's op IS handed the reader role");
+    TEST_ASSERT(dropped, "#89: every op stop-parked -> the role is dropped");
+    TEST_ASSERT(control, "an unparked op at the lower tag takes the role (the control)");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// The role-waiter hook (LOOM.md 8.6 item 2). A free role registers nothing and
+// a held one registers the hook. A handoff that designates a sync op leaves it
+// quiet (that op will read); one that leaves the role free and undesignated
+// wakes it. A dead session refuses it.
+void test_9p_client_role_wait_contract(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Rendez rr;
+    rendez_init(&rr);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &rr);
+
+    int  free_rc       = p9_client_role_wait_register(&g_client, &pw);
+    bool free_unhooked = (pw.list == NULL);
+
+    spin_lock(&g_client.lock);
+    g_client.reader_active = true;
+    spin_unlock(&g_client.lock);
+    int held_rc = p9_client_role_wait_register(&g_client, &pw);
+    u32 hooked  = g_client.role_waiters;
+
+    struct p9_rpc rpc_sync = { 0 };
+    rpc_sync.tag = 42;
+    rendez_init(&rpc_sync.rendez);
+    spin_lock(&g_client.lock);
+    g_client.inflight[42]  = &rpc_sync;
+    g_client.reader_active = false;
+    spin_unlock(&g_client.lock);
+    p9_client_handoff_reader(&g_client);
+    bool designated = rpc_sync.be_reader;
+    bool quiet      = !pw.ready;
+
+    spin_lock(&g_client.lock);
+    g_client.inflight[42] = NULL;
+    spin_unlock(&g_client.lock);
+    p9_client_handoff_reader(&g_client);
+    bool woken = pw.ready;
+
+    p9_client_role_wait_unregister(&g_client, &pw);
+    u32 after  = g_client.role_waiters;
+    p9_client_role_wait_unregister(&g_client, &pw);
+    u32 after2 = g_client.role_waiters;
+
+    spin_lock(&g_client.lock);
+    g_client.reader_active = true;
+    g_client.dead          = true;
+    spin_unlock(&g_client.lock);
+    pw.ready = false;
+    int  dead_rc       = p9_client_role_wait_register(&g_client, &pw);
+    bool dead_unhooked = (pw.list == NULL);
+    p9_client_role_wait_unregister(&g_client, &pw);
+    spin_lock(&g_client.lock);
+    g_client.reader_active = false;
+    g_client.dead          = false;
+    spin_unlock(&g_client.lock);
+    pw.magic = 0;
+
+    TEST_ASSERT(free_rc == 0 && free_unhooked, "a free role registers nothing (0)");
+    TEST_ASSERT(held_rc == 1 && hooked == 1, "a held role registers the hook (1)");
+    TEST_ASSERT(designated && quiet, "a handoff that designates a sync op leaves the hook quiet");
+    TEST_ASSERT(woken, "a handoff leaving the role free and undesignated wakes the hook");
+    TEST_ASSERT(after == 0 && after2 == 0, "unregister drops the count once");
+    TEST_ASSERT(dead_rc == -P9_E_IO && dead_unhooked, "a dead session refuses the hook");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -4106,6 +4140,11 @@ void test_9p_client_note_flush_handoff_skips_staging(void);
 void test_9p_client_handoff_skips_send_parked(void);
 void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
 void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
+void test_9p_client_stopped_waiter_elects_on_resume(void);
+void test_9p_client_stop_parked_owner_not_owed(void);
+void test_9p_client_note_flush_stop_parked_staging_not_owed(void);
+void test_9p_client_handoff_skips_restopped_owner(void);
+void test_9p_client_loom_enter_wakes_when_role_frees(void);
 
 #define DY_CLUNK_ASYNC  1
 #define DY_CLUNK_SYNC   2
@@ -5281,4 +5320,359 @@ void test_9p_client_async_clunk_drain_waits_for_owed_tag(void) {
     TEST_ASSERT(!dead, "no read past Y's reply: the session stays live");
     TEST_EXPECT_EQ(pc, 1, "the Rclunk drains ownerless");
     TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// =============================================================================
+// 9P waiters and stops (DEBUG-FS-DESIGN 5c.6, the 2026-09-30 amendment). A
+// thread waiting in the client for someone else's reading is stopped the way a
+// debugger or ^Z stops it. Every reply must still get a reader, and neither the
+// reader handoff nor a tag drainer may count on a thread parked for a stop.
+// =============================================================================
+
+// Stop or resume a test thread's Proc through the kernel's own entry points:
+// the debugger's axis, or the job axis (^Z, /proc suspend).
+static void dy_stop(struct test_dying *d, bool job) {
+    irq_state_t s = proc_table_lock_acquire();
+    if (job) (void)proc_job_stop_proc(d->proc);
+    else     proc_debug_stop_deliver(d->proc);
+    proc_table_lock_release(s);
+}
+
+static void dy_resume(struct test_dying *d, bool job) {
+    irq_state_t s = proc_table_lock_acquire();
+    if (job) proc_job_cont_proc(d->proc);
+    else     proc_debug_resume(d->proc);
+    proc_table_lock_release(s);
+}
+
+// Parked for a stop: asleep on its own debug_rendez.
+static bool dy_stop_parked(const struct test_dying *d) {
+    return test_dying_parked(d) &&
+           __atomic_load_n(&d->t->rendez_blocked_on, __ATOMIC_ACQUIRE) == &d->t->debug_rendez;
+}
+
+// A stop that clears and comes back before its thread runs leaves only the
+// flag moving: set it alone, with no wake, and the parked thread stays parked.
+static void dy_stop_flag(struct test_dying *d, bool job, u32 v) {
+    __atomic_store_n(job ? &d->proc->job_stop_req : &d->proc->debug_stop_req, v,
+                     __ATOMIC_RELEASE);
+}
+
+// A third op thread: an async clunk.
+static struct test_dying g_dyz;
+static struct { u32 fid; int rc; } g_dyzop;
+
+static void dyz_run(void *arg) {
+    (void)arg;
+    g_dyzop.rc = p9_client_clunk_async(&g_client, g_dyzop.fid);
+}
+
+static bool dyz_start_clunk(u32 fid) {
+    g_dyzop.fid = fid;
+    g_dyzop.rc  = 0x7fffffff;
+    return test_dying_start(&g_dyz, dyz_run, NULL, /*dead_now=*/false);
+}
+
+// The read X waits behind the held reader with its Rread queued and is stopped
+// there (^Z). The reader departs with nobody to designate, and X resumes. X
+// must then take the role and read its own reply. Parked in place, it re-checked
+// only its own sleep condition and slept on with its answer unread.
+void test_9p_client_stopped_waiter_elects_on_resume(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(146), 1u, "walk binds 146");
+
+    dy_hold_reader(true);
+    bool started = dyx_start(146);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    bool waiting = started && test_dying_parked(&g_dyx) && !test_dying_done(&g_dyx);
+    if (waiting) dy_stop(&g_dyx, /*job=*/true);
+    TEST_YIELD_UNTIL_SOFT(!waiting || dy_stop_parked(&g_dyx));
+    bool stopped = waiting && dy_stop_parked(&g_dyx);
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);                  // as a departing reader does
+    int des = dy_designated_tag();
+    if (started) dy_resume(&g_dyx, /*job=*/true);
+    bool killed = false;
+    if (started) dy_finish_of(&g_dyx, &killed);
+    bool dead = g_client.dead;
+    u64  end  = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_ASSERT(waiting, "the read waits behind the held reader");
+    TEST_ASSERT(stopped, "stopped (^Z), it parks");
+    TEST_EXPECT_EQ((u64)(s64)des, (u64)(s64)-1, "nobody is designated to read");
+    TEST_ASSERT(!killed, "resumed, it takes the role and reads its own reply");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "the read completes with the server's bytes");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// The read X is stopped behind the held reader and resumed while that reader
+// still holds the role, so X sleeps on its rpc again as a plain waiter. When
+// the reader departs, the handoff must designate X. Had the resume left X
+// marked stop-parked, the handoff would skip it and its reply would sit unread.
+void test_9p_client_resumed_waiter_is_designated(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(155), 1u, "walk binds 155");
+
+    dy_hold_reader(true);
+    bool started = dyx_start(155);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    bool waiting = started && test_dying_parked(&g_dyx) && !test_dying_done(&g_dyx);
+    if (waiting) dy_stop(&g_dyx, /*job=*/true);
+    TEST_YIELD_UNTIL_SOFT(!waiting || dy_stop_parked(&g_dyx));
+    bool stopped = waiting && dy_stop_parked(&g_dyx);
+    if (stopped) dy_resume(&g_dyx, /*job=*/true);
+    TEST_YIELD_UNTIL_SOFT(!stopped || test_dying_done(&g_dyx) ||
+                          (test_dying_parked(&g_dyx) && !dy_stop_parked(&g_dyx)));
+    bool resleeps = stopped && test_dying_parked(&g_dyx) && !dy_stop_parked(&g_dyx) &&
+                    !test_dying_done(&g_dyx);
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);                  // as a departing reader does
+    bool killed = false;
+    if (started) dy_finish_of(&g_dyx, &killed);
+    bool dead = g_client.dead;
+    u64  end  = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_ASSERT(waiting, "the read waits behind the held reader");
+    TEST_ASSERT(stopped, "stopped (^Z), it parks");
+    TEST_ASSERT(resleeps, "resumed while the reader still reads, it sleeps on its rpc again");
+    // Nothing else wakes X: nobody reads its reply, and the session stays up.
+    TEST_ASSERT(!killed, "designated, it takes the role and reads its own reply");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "the read completes with the server's bytes");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// A tag drainer must not wait on the dispatch of an owner parked for a stop.
+// The read Y waits behind the held reader and is stopped; its Rread is then read,
+// so Y's tag waits for Y's dispatch. The clunk C takes the last tag, its Rclunk
+// queued. Y's stop clears and comes back before Y runs, and in between the
+// async clunk D finds the pool full with no reader. Reading the flag while it
+// was clear, D counted Y's tag as owed and waited out the second stop; it must
+// read on instead, and C's Rclunk frees a tag.
+void test_9p_client_stop_parked_owner_not_owed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(147) + dy_bind(148) + dy_bind(149), 3u, "walks bind 147..149");
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+
+    dy_hold_reader(true);
+    bool y_started = dyx_start(147);
+    TEST_YIELD_UNTIL_SOFT(!y_started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
+    bool y_waiting = y_started && test_dying_parked(&g_dyx) && !test_dying_done(&g_dyx);
+    if (y_waiting) dy_stop(&g_dyx, /*job=*/false);
+    TEST_YIELD_UNTIL_SOFT(!y_waiting || dy_stop_parked(&g_dyx));
+    bool y_stopped = y_waiting && dy_stop_parked(&g_dyx);
+    dy_hold_reader(false);
+    int  py   = y_stopped ? p9_client_reader_pump_once(&g_client) : 0;   // Y's Rread
+    int  cc   = y_stopped ? p9_client_clunk_async(&g_client, 148) : -1;  // C
+    bool full = !p9_session_has_free_tag(&g_client.session);
+    if (y_started) dy_stop_flag(&g_dyx, /*job=*/false, 0u);              // the stop clears
+    bool started = y_stopped && full && dyz_start_clunk(149);            // D
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dyz) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dyz)));
+    if (y_started) dy_stop_flag(&g_dyx, /*job=*/false, 1u);              // and comes back
+    bool d_killed = false, y_killed = false;
+    if (started) dy_finish_of(&g_dyz, &d_killed);
+    if (y_started) dy_resume(&g_dyx, /*job=*/false);
+    if (y_started) dy_finish_of(&g_dyx, &y_killed);
+    u32  clunks = rec_count(P9_TCLUNK);
+    bool dead   = g_client.dead;
+    int  pd     = (!dead && started && !d_killed) ? p9_client_reader_pump_once(&g_client) : 0;
+    dy_unfill_pool(filled, tags);
+    u64  end    = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_ASSERT(y_waiting, "Y waits behind the held reader");
+    TEST_ASSERT(y_stopped, "stopped, Y parks");
+    TEST_EXPECT_EQ(py, 1, "Y's Rread is read while Y is stopped");
+    TEST_EXPECT_EQ(cc, 0, "C takes the last tag");
+    TEST_ASSERT(full, "the pool is full");
+    TEST_ASSERT(started, "D ran");
+    TEST_ASSERT(!d_killed, "D read on past the stopped owner instead of waiting for it");
+    TEST_EXPECT_EQ((u64)(s64)g_dyzop.rc, (u64)0, "D's Tclunk went out on the tag C freed");
+    TEST_EXPECT_EQ((u64)clunks, (u64)2, "two Tclunks");
+    TEST_ASSERT(!y_killed, "Y completed once resumed");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "Y completes with the server's bytes");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(pd, 1, "D's Rclunk drains ownerless");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// The same for an owner stopped while it stages a flush(5) Tflush: the
+// interrupted read S parks on the send list for a tag (the pool is full, the
+// reader held), is stopped there (^Z), and its own Rread is read. Parked inside
+// the send list's sleep, S was invisible to the client, and a drainer that read
+// S's stop flag while it was clear counted on S's dispatch.
+void test_9p_client_note_flush_stop_parked_staging_not_owed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(150) + dy_bind(151) + dy_bind(152), 3u, "walks bind 150..152");
+    u16 tags[P9_SESSION_MAX_OUTSTANDING];
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+
+    dy_hold_reader(true);
+    bool started = dy_start_noted(DY_READ, 150);                         // S
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1));
+    bool parked = started && test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    int  cc     = parked ? p9_client_clunk_async(&g_client, 151) : -1;   // C
+    bool full   = !p9_session_has_free_tag(&g_client.session);
+    if (parked && full) dy_post_child_exit(g_dy.proc);
+    TEST_YIELD_UNTIL_SOFT(!parked || !full || test_dying_done(&g_dy) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
+    bool staging = parked && full && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
+    if (staging) dy_stop(&g_dy, /*job=*/true);
+    TEST_YIELD_UNTIL_SOFT(!staging || dy_stop_parked(&g_dy));
+    bool s_stopped = staging && dy_stop_parked(&g_dy);
+    dy_hold_reader(false);
+    int  ps = s_stopped ? p9_client_reader_pump_once(&g_client) : 0;     // S's Rread
+    if (started) dy_stop_flag(&g_dy, /*job=*/true, 0u);                  // the stop clears
+    bool d_started = s_stopped && dyz_start_clunk(152);                  // D
+    TEST_YIELD_UNTIL_SOFT(!d_started || test_dying_done(&g_dyz) ||
+                          (g_client.send_waiters == 1 && test_dying_parked(&g_dyz)));
+    if (started) dy_stop_flag(&g_dy, /*job=*/true, 1u);                  // and comes back
+    bool d_killed = false, s_killed = false;
+    if (d_started) dy_finish_of(&g_dyz, &d_killed);
+    if (started) dy_resume(&g_dy, /*job=*/true);
+    if (started) dy_finish(&s_killed);
+    u32  flushes = rec_count(P9_TFLUSH);
+    bool dead    = g_client.dead;
+    int  pd      = (!dead && d_started && !d_killed) ? p9_client_reader_pump_once(&g_client) : 0;
+    dy_unfill_pool(filled, tags);
+    u64  end     = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "S waits behind the held reader");
+    TEST_EXPECT_EQ(cc, 0, "C takes the last tag");
+    TEST_ASSERT(full, "the pool is full");
+    TEST_ASSERT(staging, "interrupted, S parks on the send list to stage its Tflush");
+    TEST_ASSERT(s_stopped, "stopped (^Z) there, S parks");
+    TEST_EXPECT_EQ(ps, 1, "S's Rread is read while S is stopped");
+    TEST_ASSERT(d_started, "D ran");
+    TEST_ASSERT(!d_killed, "D read on past the stopped owner instead of waiting for it");
+    TEST_EXPECT_EQ((u64)(s64)g_dyzop.rc, (u64)0, "D's Tclunk went out on the tag C freed");
+    TEST_ASSERT(!s_killed, "S completed once resumed");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5, "its reply beat the flush: the read's bytes");
+    TEST_EXPECT_EQ((u64)flushes, (u64)0, "no Tflush went out");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(pd, 1, "D's Rclunk drains ownerless");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// The reads Y (lower tag) and X wait behind the held reader, their replies
+// queued. Y is stopped, and its stop clears and comes back without Y running. A
+// departing reader that read Y's flag in between designated Y -- a wake that
+// landed on nothing, since Y sleeps on its debug_rendez -- and X, never
+// designated, slept on with nobody reading.
+void test_9p_client_handoff_skips_restopped_owner(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(153) + dy_bind(154), 2u, "walks bind 153 and 154");
+
+    dy_hold_reader(true);
+    bool y_started = dy_start(DY_READ, 153, /*dying=*/false);            // Y
+    TEST_YIELD_UNTIL_SOFT(!y_started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1));
+    int  y_tag     = dy_registered_tag_above(-1);
+    bool x_started = y_started && dyx_start(154);                        // X
+    TEST_YIELD_UNTIL_SOFT(!x_started ||
+                          (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 2));
+    int  x_tag = dy_registered_tag_above(y_tag);
+    bool both  = x_started && test_dying_parked(&g_dy) && test_dying_parked(&g_dyx) &&
+                 !test_dying_done(&g_dy) && !test_dying_done(&g_dyx);
+    if (both) dy_stop(&g_dy, /*job=*/false);
+    TEST_YIELD_UNTIL_SOFT(!both || dy_stop_parked(&g_dy));
+    bool y_stopped = both && dy_stop_parked(&g_dy);
+    if (y_started) dy_stop_flag(&g_dy, /*job=*/false, 0u);               // the stop clears
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);                  // as a departing reader does
+    int des = dy_designated_tag();
+    if (y_started) dy_stop_flag(&g_dy, /*job=*/false, 1u);               // and comes back
+    bool x_killed = false, y_killed = false;
+    if (x_started) dy_finish_of(&g_dyx, &x_killed);
+    if (y_started) dy_resume(&g_dy, /*job=*/false);
+    if (y_started) dy_finish(&y_killed);
+    bool dead = g_client.dead;
+    u64  end  = p9_session_inflight(&g_client.session);
+    dy_client_close();
+
+    TEST_ASSERT(both, "both reads wait behind the held reader");
+    TEST_ASSERT(y_tag >= 0 && x_tag > y_tag, "Y holds the lower tag");
+    TEST_ASSERT(y_stopped, "stopped, Y parks");
+    // X may take the role and consume its flag before it is read.
+    TEST_ASSERT(des != y_tag, "the parked owner is not designated");
+    TEST_ASSERT(!x_killed, "X took the role and read its reply");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "X completes with the server's bytes");
+    TEST_ASSERT(!y_killed, "Y completed once resumed");
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5, "Y completes with the server's bytes");
+    TEST_ASSERT(!dead, "the session stays live");
+    TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
+}
+
+// A Loom ENTER whose pump finds the reader role held sleeps for a CQE. On a
+// shared client that reader may be another Proc's sync op, which reads only
+// until its own reply and hands the role only to sync ops. The test holds the
+// role while the ENTER submits a READ and sleeps, then leaves the way such a
+// reader does, with the READ's Rread still queued: the ENTER must wake and read
+// it. Before, it slept until unrelated sync traffic happened to read it.
+static struct test_dying g_dle;
+static struct { struct Loom *l; int n; } g_dleop;
+
+static void dle_run(void *arg) {
+    (void)arg;
+    g_dleop.n = loom_enter(g_dleop.l, 1, 1, 0);
+}
+
+void test_9p_client_loom_enter_wakes_when_role_frees(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register the dev9p spoor");
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    for (u32 i = 0; i < 8; i++) bkva[i] = 0xAA;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    cl_stage_rw(l, 0, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/5,
+                /*bidx=*/0, /*buf_off=*/0, 0xFEED000000000005ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    dy_hold_reader(true);                         // a reader that is not the ENTER's
+    g_dleop.l = l;
+    g_dleop.n = -2;
+    bool started = test_dying_start(&g_dle, dle_run, NULL, /*dead_now=*/false);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dle) ||
+                          (test_dying_parked(&g_dle) && rec_count(P9_TREAD) == 1));
+    bool asleep = started && test_dying_parked(&g_dle) && !test_dying_done(&g_dle);
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);          // it leaves; no sync op to designate
+    bool killed = false;
+    if (started) dy_finish_of(&g_dle, &killed);
+    u32  cq   = l->cq_tail;
+    u64  ud   = cqes[0].user_data;
+    s64  res  = (s64)cqes[0].result;
+    bool read = bkva[0] == 'h' && bkva[4] == 'o';
+    bool dead = g_client.dead;
+    burrow_unref(b);
+    loom_unref(l);
+    dy_client_close();
+
+    TEST_ASSERT(asleep, "the ENTER sleeps behind the held reader");
+    TEST_ASSERT(!killed, "the reader's departure woke it");
+    TEST_EXPECT_EQ((u64)(s64)g_dleop.n, (u64)1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)cq, (u64)1, "one CQE posted");
+    TEST_EXPECT_EQ(ud, 0xFEED000000000005ULL, "user_data echoed");
+    TEST_EXPECT_EQ((u64)res, (u64)5, "READ result = 5 bytes read");
+    TEST_ASSERT(read, "the Rread payload reached the registered buffer");
+    TEST_ASSERT(!dead, "the session stays live");
 }

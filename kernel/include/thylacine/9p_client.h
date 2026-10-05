@@ -100,7 +100,6 @@ struct p9_dirfid_cache {
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
 
 struct p9_rpc;   // forward (the completion callback takes one)
-struct Proc;     // forward (p9_rpc.owner -- the submitting Proc, for the #89 handoff skip)
 
 // Pluggable completion front-end (Loom §8.4 / I-29). `on_complete == NULL` is
 // the synchronous WAKE_RENDEZ path: the submitter sleeps on `rendez` and the
@@ -155,13 +154,13 @@ struct p9_rpc {
     u8            *reply_buf;  // SYNC: kmalloc'd recv_cap bytes; ASYNC: NULL
     struct Rendez  rendez;     // SYNC: the submitter sleeps here; reader wakes it
     p9_rpc_complete_fn on_complete;  // NULL = sync WAKE_RENDEZ; set = async POST_CQE
-    struct Proc   *owner;      // 8c-3 (#89): the submitting Proc (sync only). The
-                               // reader-role handoff skips an op whose owner is
-                               // debug-stopped (it would park holding the role,
-                               // freezing survivors). Alive while the rpc is
-                               // inflight (== as safe to deref as `done`). Unused
-                               // for async ops (on_complete != NULL are skipped
-                               // first); may be NULL there.
+    // 8c-3 (#89), sync only, under c->lock: my thread is parked for a stop in
+    // client_debug_stop_park, which sets this before it drops the lock and
+    // clears it on return. The reader-role handoff skips me, and a tag drainer
+    // does not wait on my stored reply. The Proc's stop flags cannot stand in
+    // for it: a resume and a re-stop flip them while the thread never runs
+    // (DEBUG-FS-DESIGN 5c.6).
+    bool           stop_parked;
     // flush(5), sync only; all under c->lock. `noted`: a caught note already
     // interrupted this op and stays pending until the EL0-return tail, so any
     // later wait for it is killable only. `flushing`: its Tflush is on the
@@ -283,6 +282,15 @@ struct p9_client {
     struct poll_waiter_list send_waiters_list;
     u64                  send_progress;
     u32                  send_waiters;
+    // Threads waiting for the reader role itself, not for a reply: a Loom ENTER
+    // whose async reply sits unread while another thread holds the role (LOOM.md
+    // 8.6 item 2). That holder may be a foreign sync op's reader, and the
+    // handoff designates only sync ops, so a handoff that leaves the role free
+    // and undesignated wakes this list, as does the session's death. The same
+    // multi-waiter shape as send_waiters_list; role_waiters counts the hooks.
+    // Under c->lock.
+    struct poll_waiter_list role_waiters_list;
+    u32                  role_waiters;
     // Most-recently-completed op's reply buffer, kept alive past client_run's
     // return. The read/readdir/readlink dispatch results ZERO-COPY ALIAS into
     // it (out->read_data / readdir_data / readlink_target point inside the
@@ -710,6 +718,16 @@ bool p9_client_recv_is_deadline_capable(struct p9_client *c);
 // they have no thread to run the reader loop). Exposed for the handoff-skip
 // regression; the reader loop uses the internal locked form.
 void p9_client_handoff_reader(struct p9_client *c);
+
+// Hook `pw` to learn when the reader role comes free (LOOM.md 8.6 item 2).
+// Returns -P9_E_IO if the session is dead and 0 if the role is free now,
+// registering nothing; otherwise registers `pw` on the role-waiter list and
+// returns 1. A handoff that leaves the role free and undesignated, or the
+// session's death, then sets pw->ready and wakes pw->rendez. After a 1 the
+// caller keeps `c` alive and calls p9_client_role_wait_unregister before `pw`
+// goes out of scope.
+int  p9_client_role_wait_register(struct p9_client *c, struct poll_waiter *pw);
+void p9_client_role_wait_unregister(struct p9_client *c, struct poll_waiter *pw);
 
 // Abandon ONE in-flight async op (Loom ring teardown / #898). The async analog
 // of client_run's CLIENT_WAIT_DIED Tflush-on-abandon (#845): UNDER c->lock, if
