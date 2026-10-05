@@ -600,6 +600,25 @@ expired. Then the audit round: the `kernel/burrow.c` + `burrow.h` row in
 addendum with a PROSECUTE list. Astra holds review; per AGENTS.md's single-agent
 rule Corona does not spawn reviewer subagents.
 
+**Pre-lease syntax check (2026-10-05).** `work/oct5-as-r9/syntax-check.sh`, a
+reproducible `-fsyntax-only` pass over all eight edited files with the toolchain's
+own flags. Not a build: no linking, no artifacts, no mutation of `build/`. Its job
+is to keep the contended lease for real gates rather than spend it on a typo.
+All eight parse. It compares the warning COUNT against the base commit instead of
+requiring zero, because `weft.c` and `syscall.c` carry pre-existing warnings -- a
+matching count is the discriminating result, where "no warnings" would also be
+satisfied by an invocation that never looked: `burrow.c` 0/0, `vma.c` 0/0,
+`loom.c` 0/0, `weft.c` 1/1, `syscall.c` 68/68, and the three test files clean.
+**No warning or error is attributable to this change.** Two findings were
+correctly attributed AWAY from it in the process: `weft.c:550`'s sign-compare and
+`syscall.c`'s 68 missing-prototypes are all pre-existing (verified by running the
+same check against `git show 5ff62b788:`), and a `test_burrow.c:545` implicit
+declaration was an artifact of the ad-hoc invocation, not a defect -- the symbol
+is declared at `burrow.h:987` behind `#ifdef KERNEL_TESTS`, the base file
+reproduces it identically, and line 545 is not in the appended region (the AS-R9
+tests start at line 613). This proves the files PARSE and nothing about
+behaviour; `tools/test.sh` remains owed.
+
 **Two build faults the early run caught**, both of which would otherwise have
 burned contended lease time: llvm@22 defaults to a sysroot that does not exist
 (`MacOSX26.sdk`), fixed with a scoped `-isysroot` -- the same stale-SDK trap the
