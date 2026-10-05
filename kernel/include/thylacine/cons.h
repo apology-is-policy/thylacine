@@ -95,7 +95,10 @@ bool cons_rx_input(u8 byte, bool is_break);
 // single-reader busy-guard bounds the console to one reader across both doors.
 // cons_input_read: blocking RX-ring drain (death-interruptible; -1 on
 // bad-args/reader-busy; >= 1 on data). cons_output_write: forward each byte to
-// the UART (== n at v1.0).
+// the UART -- n, or short on the #67 stalled-consumer drop or a death. Both
+// return -T_E_INTR when a caught note ends a wait before a byte moved (ARCH
+// 8.8.3; a Linux caller in a listed call only), and a write it ends later
+// returns the short count.
 long cons_input_read(void *buf, long n);
 long cons_output_write(const void *buf, long n);
 

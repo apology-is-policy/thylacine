@@ -649,6 +649,17 @@ bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
 // pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
 bool proc_caught_note_eintr_ready(struct Proc *p);
 
+// ARCH 8.8.3: the caught-note unwind decision, all but the wait's own condition
+// (a wake that carries data wins, so a caller tests `!cond` first): `t`'s reader
+// handles EINTR, `t` is not a 9P reader mid-frame (#90: it blocks through to a
+// boundary), and `t` holds or takes the claim -- last, because a claim is taken
+// only by a sleeper that then unwinds. The sleep primitives' four caught arms
+// ask it, and so does a wait loop whose sleep a producer can keep satisfied
+// (poll's verdict), so the rule has one spelling. A caller that sees true
+// RETURNS -T_E_INTR; it never sleeps again in the same call, where its own claim
+// would unwind every sleep at once.
+bool thread_caught_note_unwinds(struct Thread *t);
+
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write
 // path). These wrap notes_post with the appropriate canonical name + arg

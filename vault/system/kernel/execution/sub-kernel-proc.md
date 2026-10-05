@@ -97,7 +97,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
-| `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
+| `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG`; `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux `wait4` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
@@ -203,7 +203,17 @@ exit > continue > stop. Then:
 - `WNOHANG` → `0`, an unambiguous sentinel because pid 0 is never a child;
 - otherwise register a stack `poll_waiter` on `child_waiters` *inside the
   same critical section as the no-zombie scan*, release, and park on the
-  caller's own private rendez.
+  caller's own private rendez (`sleep_noteintr`). `SLEEP_INTR` returns
+  `-1`; `SLEEP_NOTEINTR` returns `WAIT_PID_NOTEINTR`, nothing reaped or
+  reported (ARCH 8.8.3, [[chg-2026-10-05-signal7-list]]). The data wins: a
+  child's exit wakes `child_waiters` (setting `pw->ready`) before it posts
+  `child_exit`, and the caught arm tests the cond first, so a wait the note
+  unwinds found no reportable child. A wake for a sibling's exit is a wake
+  like any other: the re-scan finds the wanted child still alive and
+  re-parks, and the sibling's `child_exit`, if caught, then ends the wait
+  -- a Linux `wait4` for one pid is interrupted by another child's
+  `SIGCHLD` the same way. Only a Linux `wait4` sets `note_interruptible`;
+  a native wait stays death-only.
 
 That last step is the whole of the #344 multi-waiter lift. The predicate
 (`child_wait_ready_cond`) reads **only** `pw->ready` — it touches no lineage
@@ -485,6 +495,9 @@ child cap, narrowed-allowance parent, or any allocation failure.
 `wait_pid_for` returns `-1` for no-match **and** for "this Proc is
 group-terminating" (a `SLEEP_INTR` unwind) — the caller cannot distinguish,
 which is correct because in both cases the right move is to stop waiting.
+`WAIT_PID_NOTEINTR` (-2) is kept distinct because there the right move
+differs: `viv_wait4` answers it with `EINTR`, checked before its `ECHILD`
+line, so the guest retries rather than concluding it has no children.
 The POSIX cores use `-T_E_ACCES` for every EPERM contour (`-T_E_PERM` would
 alias the bare `-1` sentinel), `-T_E_SRCH` for no-such-process,
 `-T_E_INVAL` for a negative pgid.
@@ -595,6 +608,9 @@ creation decision.
 fork+exec work: `rfork_forked_with_caps` (the Linux clone), the PHENO_LINUX
 note-mask inheritance (#127), and Design D's phenotype commit in
 `proc_exec_replace`.
+[[chg-2026-10-05-signal7-list]] made `wait_pid_for`'s park end for a caught
+note to a Linux `wait4` (`WAIT_PID_NOTEINTR`; witness
+`rendez.caught_note_ends_wait4`).
 
 ## proc_free and the phenotype's socket cache (2026-09-29, NP-5)
 

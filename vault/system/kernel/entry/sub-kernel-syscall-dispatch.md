@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1478,3 +1478,14 @@ not always. A caller killed while waiting unwinds (#811), and its own death then
 kills the child through the orphan rule. `sys_spawn_full_argv_debug_for_proc`
 and its budget wrapper are the kernel-test entries, declared where the tests
 call them.
+
+## `viv_wait4` answers a caught note with EINTR (2026-10-05)
+
+`wait_pid_for` returns `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux
+`wait4`'s park ([[sub-kernel-proc]], [[chg-2026-10-05-signal7-list]]).
+`viv_wait4` maps it to `-T_E_INTR` BEFORE the `reaped < 0` line that answers
+`ECHILD`: read as `-1`, the interrupted wait would tell the guest it has no
+children, and a shell would stop waiting for a job that is still running.
+Nothing was reaped, so nothing is written to `wstatus`; the handler runs at the
+call's tail. The native `SYS_WAIT` handler and the kernel's own reaper in
+`joey.c` never see -2: neither runs with `note_interruptible` set.

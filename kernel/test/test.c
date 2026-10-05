@@ -25,10 +25,13 @@
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
+#include <thylacine/notes.h>        // test_caught: the interrupt post
 #include <thylacine/proc.h>         // test_dying: a fresh Proc, freed as a ZOMBIE
 #include <thylacine/rendez.h>       // test_dying_kill: the cascade's wake
 #include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>     // test_caught: a Linux Proc's handler row
+#include "../../mm/slub.h"          // test_caught: the sigtab proc_free frees
 
 // ---------------------------------------------------------------------------
 // Terminal park + reap for in-kernel test kthreads (#108/#109).
@@ -127,6 +130,126 @@ void test_dying_reap(struct test_dying *d) {
     d->proc = NULL;
 }
 
+static const struct viv_ksigaction g_test_caught_hand = {
+    .handler = 0x4000u, .flags = 0, .restorer = 0, .mask = 0 };
+
+struct Proc *test_caught_proc(bool linux_pheno) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->state = PROC_STATE_ALIVE;
+    if (!linux_pheno) {
+        notes_mark_self_managing(p);
+        return p;
+    }
+    // proc_free frees the sigtab.
+    p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    if (!p->sigtab ||
+        !viv_sigtab_set(p->sigtab, VIV_SIGNOTE_INTERRUPT, &g_test_caught_hand)) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        return NULL;
+    }
+    p->phenotype = PHENO_LINUX;
+    return p;
+}
+
+void test_caught_proc_free(struct Proc *p, const struct test_caught_leg *leg) {
+    if (!p || (leg && leg->stranded)) return;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+bool test_caught_post(struct Proc *p) {
+    irq_state_t s = proc_table_lock_acquire();
+    int rc = notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    proc_caught_note_wake(p);
+    proc_table_lock_release(s);
+    return rc == 0 && proc_caught_note_pending(p);
+}
+
+static long         (*g_tc_call)(void *arg);
+static void          *g_tc_arg;
+static volatile u32   g_tc_run;      // 1: in the call; 2: it returned (RELEASE)
+static volatile long  g_tc_rc;
+static volatile bool  g_tc_exited;
+
+static void test_caught_entry(void) {
+    struct Thread *t = current_thread();
+    t->note_interruptible = true;      // the dispatcher, for a listed call
+    __atomic_store_n(&g_tc_run, 1u, __ATOMIC_RELEASE);
+    long rc = g_tc_call(g_tc_arg);
+    t->note_interruptible = false;     // syscall_dispatch, on the way out
+    g_tc_rc = rc;
+    __atomic_store_n(&g_tc_run, 2u, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_tc_exited);
+}
+
+static bool test_caught_returned(void) {
+    return __atomic_load_n(&g_tc_run, __ATOMIC_ACQUIRE) >= 2u;
+}
+
+static bool test_caught_blocked(struct Thread *t) {
+    return __atomic_load_n(&g_tc_run, __ATOMIC_ACQUIRE) == 1u &&
+           __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+}
+
+// Yield until the call returns or the thread sleeps -- with `seen` not 0, a
+// sleep after a switch-in later than `seen`: the thread ran, and rode out what
+// woke it. switched_in_at is stamped at every switch-in, so that is a positive
+// signal, not a quiet interval. Bounded; true iff it slept.
+static bool test_caught_settle(struct Thread *t, u64 seen) {
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!test_caught_returned() && timer_now_ns() < dl) {
+        if (test_caught_blocked(t) &&
+            (seen == 0 ||
+             __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED) != seen))
+            return true;
+        sched();
+    }
+    return false;
+}
+
+struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
+                                       bool (*prep)(void *arg),
+                                       void (*release)(void *arg), void *arg,
+                                       bool pre_post) {
+    struct test_caught_leg leg = { false, false, false, false, false, false,
+                                   false, 0x7fffffff };
+    g_tc_call = call;   g_tc_arg = arg;
+    g_tc_run  = 0;      g_tc_rc  = 0x7fffffff;   g_tc_exited = false;
+    if (!p) return leg;
+    if (pre_post) leg.posted = test_caught_post(p);
+    struct Thread *t = thread_create(p, test_caught_entry);
+    if (!t) return leg;
+    ready(t);
+    leg.parked = test_caught_settle(t, 0);
+    if (pre_post) {
+        leg.prepped  = true;
+        leg.rode_out = leg.parked;
+    } else if (leg.parked) {
+        leg.prepped = !prep || (prep(arg) && test_caught_settle(t, 0));
+        if (leg.prepped) {
+            u64 seen     = __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED);
+            leg.posted   = test_caught_post(p);
+            leg.rode_out = test_caught_settle(t, seen);
+        }
+    }
+    leg.on_post = test_caught_returned();
+    if (!leg.on_post) {
+        if (release) release(arg);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!test_caught_returned() && timer_now_ns() < dl) sched();
+        if (!test_caught_returned()) {   // never free a thread that is still asleep
+            leg.stranded = true;
+            return leg;
+        }
+    }
+    leg.rc = g_tc_rc;
+    test_kthread_join_free(t, &g_tc_exited);
+    leg.joined = __atomic_load_n(&g_tc_exited, __ATOMIC_ACQUIRE);
+    return leg;
+}
+
 // ---------------------------------------------------------------------------
 // Forward declarations of every test. Bodies live in kernel/test/test_*.c.
 // ---------------------------------------------------------------------------
@@ -220,6 +343,7 @@ void test_rendez_caught_wake_orphan_hup_cont(void);
 void test_rendez_caught_note_one_unwind(void);
 void test_rendez_caught_note_tail_discards_and_releases(void);
 void test_rendez_caught_note_release_wakes_peer(void);
+void test_rendez_caught_note_ends_wait4(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_past_deadline_immediate(void);
@@ -666,6 +790,7 @@ void test_torpor_wait_value_mismatch_fast_path(void);
 void test_torpor_wait_timeout_zero_returns_etimedout(void);
 void test_torpor_wait_wake_handoff(void);
 void test_torpor_wake_two_waiters_count_bound(void);
+void test_torpor_caught_note_ends_wait(void);
 void test_loom_create_geometry(void);
 void test_loom_create_rejects_bad_args(void);
 void test_loom_refcount_lifecycle(void);
@@ -844,6 +969,14 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_kernel_writer_bracket(void);              // #152
 void test_cons_tx_room_wait_and_deadline(void);
+void test_cons_caught_note_ends_read(void);
+void test_cons_caught_note_ends_frozen_read(void);
+void test_cons_caught_note_ends_slot_wait(void);
+void test_cons_caught_note_ends_write_waits(void);
+void test_cons_caught_note_ends_room_wait(void);
+void test_cons_short_write_mirrors_what_went_out(void);
+void test_cons_caught_note_frozen_retry_waits(void);
+void test_cons_congested_write_whole_in_drain(void);
 void test_cons_tx_unit_diag_line_atomic(void);
 void test_cons_tx_unit_echo_atomic(void);
 void test_cons_tx_unit_smp_no_tear(void);
@@ -1799,6 +1932,9 @@ void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
 void test_pipe_blocking_multi_readers_share_one_empty_pipe(void);
 void test_pipe_blocking_multi_writers_share_one_full_pipe(void);
+void test_pipe_blocking_caught_note_ends_read(void);
+void test_pipe_blocking_caught_note_ends_write(void);
+void test_pipe_blocking_caught_note_scoped_to_reader_recv(void);
 void test_poll_ready_immediately_pollin(void);
 void test_poll_ready_immediately_pollout(void);
 void test_poll_timeout_zero_not_ready(void);
@@ -1828,6 +1964,10 @@ void test_poll_devsrv_client_kernel_attached_pollnval(void);
 void test_poll_devsrv_client_wakes_on_teardown(void);
 void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_death_ends_a_noise_driven_poll(void);
+void test_poll_caught_note_ends_park(void);
+void test_poll_caught_note_after_readiness_before_deadline(void);
+void test_poll_caught_note_ends_a_noise_driven_poll(void);
+void test_poll_caught_note_ends_pause(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
 void test_thread_kstack_watermark_follows_the_frontier(void);
 void test_poll_noise_keeps_it_looping(void);
@@ -2122,6 +2262,7 @@ struct test_case g_tests[] = {
     { "rendez.caught_note_one_unwind", test_rendez_caught_note_one_unwind, false, NULL },
     { "rendez.caught_note_tail_discards_and_releases", test_rendez_caught_note_tail_discards_and_releases, false, NULL },
     { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
+    { "rendez.caught_note_ends_wait4",         test_rendez_caught_note_ends_wait4,         false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
                                                                            false, NULL },
@@ -2753,6 +2894,7 @@ struct test_case g_tests[] = {
     { "torpor.wait_timeout_zero_returns_etimedout", test_torpor_wait_timeout_zero_returns_etimedout, false, NULL },
     { "torpor.wait_wake_handoff",              test_torpor_wait_wake_handoff,              false, NULL },
     { "torpor.wake_two_waiters_count_bound",   test_torpor_wake_two_waiters_count_bound,   false, NULL },
+    { "torpor.caught_note_ends_wait",          test_torpor_caught_note_ends_wait,          false, NULL },
     { "loom.create_geometry",            test_loom_create_geometry,            false, NULL },
     { "loom.create_rejects_bad_args",    test_loom_create_rejects_bad_args,    false, NULL },
     { "loom.refcount_lifecycle",         test_loom_refcount_lifecycle,         false, NULL },
@@ -2936,6 +3078,14 @@ struct test_case g_tests[] = {
     { "cons.tx_role_serializes_writers", test_cons_tx_role_serializes_writers, false, NULL },
     { "cons.kernel_writer_bracket",    test_cons_kernel_writer_bracket,    false, NULL },
     { "cons.tx_room_wait_and_deadline", test_cons_tx_room_wait_and_deadline, false, NULL },
+    { "cons.caught_note_ends_read",        test_cons_caught_note_ends_read,        false, NULL },
+    { "cons.caught_note_ends_frozen_read", test_cons_caught_note_ends_frozen_read, false, NULL },
+    { "cons.caught_note_ends_slot_wait",   test_cons_caught_note_ends_slot_wait,   false, NULL },
+    { "cons.caught_note_ends_write_waits", test_cons_caught_note_ends_write_waits, false, NULL },
+    { "cons.caught_note_ends_room_wait",   test_cons_caught_note_ends_room_wait,   false, NULL },
+    { "cons.short_write_mirrors_what_went_out", test_cons_short_write_mirrors_what_went_out, false, NULL },
+    { "cons.caught_note_frozen_retry_waits", test_cons_caught_note_frozen_retry_waits, false, NULL },
+    { "cons.congested_write_whole_in_drain", test_cons_congested_write_whole_in_drain, false, NULL },
     { "cons.tx_unit_diag_line_atomic", test_cons_tx_unit_diag_line_atomic, false, NULL },
     { "cons.tx_unit_echo_atomic",      test_cons_tx_unit_echo_atomic,      false, NULL },
     { "cons.tx_unit_smp_no_tear",      test_cons_tx_unit_smp_no_tear,      false, NULL },
@@ -4070,6 +4220,9 @@ struct test_case g_tests[] = {
     { "pipe_blocking.close_read_end_wakes_writer_with_epipe", test_pipe_blocking_close_read_end_wakes_writer_with_epipe, false, NULL },
     { "pipe_blocking.multi_readers_share_one_empty_pipe",  test_pipe_blocking_multi_readers_share_one_empty_pipe,  false, NULL },
     { "pipe_blocking.multi_writers_share_one_full_pipe",   test_pipe_blocking_multi_writers_share_one_full_pipe,   false, NULL },
+    { "pipe_blocking.caught_note_ends_read",              test_pipe_blocking_caught_note_ends_read,              false, NULL },
+    { "pipe_blocking.caught_note_ends_write",             test_pipe_blocking_caught_note_ends_write,             false, NULL },
+    { "pipe_blocking.caught_note_scoped_to_reader_recv",  test_pipe_blocking_caught_note_scoped_to_reader_recv,  false, NULL },
     { "poll.ready_immediately_pollin",          test_poll_ready_immediately_pollin,          false, NULL },
     { "poll.ready_immediately_pollout",         test_poll_ready_immediately_pollout,         false, NULL },
     { "poll.timeout_zero_not_ready",            test_poll_timeout_zero_not_ready,            false, NULL },
@@ -4100,6 +4253,10 @@ struct test_case g_tests[] = {
     { "poll.timeout_survives_a_busy_list", test_poll_timeout_survives_a_busy_list, false, NULL },
     { "poll.death_ends_a_noise_driven_poll", test_poll_death_ends_a_noise_driven_poll, false, NULL },
     { "poll.stop_parks_a_noise_driven_poll", test_poll_stop_parks_a_noise_driven_poll, false, NULL },
+    { "poll.caught_note_ends_park",          test_poll_caught_note_ends_park,          false, NULL },
+    { "poll.caught_note_after_readiness_before_deadline", test_poll_caught_note_after_readiness_before_deadline, false, NULL },
+    { "poll.caught_note_ends_a_noise_driven_poll", test_poll_caught_note_ends_a_noise_driven_poll, false, NULL },
+    { "poll.caught_note_ends_pause",         test_poll_caught_note_ends_pause,         false, NULL },
     { "thread.kstack_watermark_follows_the_frontier", test_thread_kstack_watermark_follows_the_frontier, false, NULL },
     { "poll.noise_keeps_it_looping", test_poll_noise_keeps_it_looping, false, NULL },
     { "poll.noise_keeps_the_deadline", test_poll_noise_keeps_the_deadline, false, NULL },

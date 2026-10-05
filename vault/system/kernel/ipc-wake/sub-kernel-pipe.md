@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-pipe, gate-smp]
 locks: [lock-pipe-ring, lock-poll-list]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -29,18 +29,24 @@ byte-transport under the 9P spoor-transport adapter.
   when empty and `write_eof`; `-EAGAIN` when empty, open, and `CNONBLOCK`
   (placed after the drain and EOF checks, so it converts only the
   would-block case and never registers a hook); -1 on wrong end /
-  `SLEEP_INTR` (#811 death).
-- **write**: appends 1..n (short when the ring fills mid-write);
-  **blocks on the `poll_list`** when full and the read end is open;
-  `-EAGAIN` when full, open, and `CNONBLOCK`; -1 (EPIPE) when `read_eof`
-  — and synthesizes the `pipe` note to the writing Proc (13a; the note is
-  informational, the -1 is the load-bearing EPIPE musl translates).
-- **close**: sets the EOF flag under `r->lock`, drops it, wakes the
-  OPPOSITE rendez, then wakes the poll list — the close is a
-  readiness edge (surviving read end → POLLHUP; write end → POLLERR).
-  Then the atomic ring-ref drop; last one frees.
-- Writes ≤ `PIPE_BUF_SIZE` (4096) fill available space; the POSIX
-  PIPE_BUF framing.
+  `SLEEP_INTR` (#811 death); `-EINTR` when a caught note interrupts a
+  Linux reader's wait (ARCH 8.8.3), nothing read.
+- **write**: a write of n ≤ `PIPE_BUF_SIZE` (4096) proceeds only when
+  all n fit — the POSIX PIPE_BUF atomicity, so two writers sharing a pipe
+  (`make -j | tee`) never interleave mid-write (holotype F4); a larger
+  write fills what room there is and returns short. It **blocks on the
+  `poll_list`** when it cannot proceed and the read end is open;
+  `-EAGAIN` instead when `CNONBLOCK`; `-T_E_PIPE` (EPIPE) when `read_eof`,
+  and it synthesizes the `pipe` note to the writing Proc (13a; the note is
+  informational, and the return is the load-bearing EPIPE, a flat -1 that
+  reached a guest as EIO or EPERM until #100);
+  `-EINTR` when a caught note interrupts a Linux writer's wait. A write
+  blocks only before it moves a byte, so an interrupted write never
+  discards a count.
+- **close**: sets the EOF flag under `r->lock`, drops it, then wakes the
+  poll list once — every hook, pollers and blocked readers and writers
+  alike; the close is a readiness edge (surviving read end → POLLHUP;
+  write end → POLLERR). Then the atomic ring-ref drop; last one frees.
 - `.poll` (`devpipe_poll`): sample + register atomically under
   `r->lock` — the canonical register-then-observe implementation.
   Read end: POLLIN on bytes, POLLHUP on `write_eof`. Write end:
@@ -57,17 +63,37 @@ byte-transport under the 9P spoor-transport adapter.
 
 Read and write are lock→check→act-or-sleep loops. The sleeping arm
 registers a `poll_waiter` on `poll_list` under `r->lock`
-(`pipe_block_locked`), then `sleep(&priv, pipe_waiter_ready, &pw)` drops
-the lock and blocks; on wake it unregisters and reads `sleep`'s verdict
-— `SLEEP_OK` means re-sample (another waiter may have taken the edge, so
-the loop re-checks under the lock), `SLEEP_INTR` means a death-interrupt
-and the op returns -1. The acting arm drops `r->lock` BEFORE
+(`pipe_block_locked`), then sleeps on a private Rendez with
+`pipe_waiter_ready` as the cond, which drops the lock and blocks; on wake
+it unregisters and reads the verdict — `SLEEP_OK` means re-sample
+(another waiter may have taken the edge, so the loop re-checks under the
+lock), `SLEEP_INTR` means a death-interrupt and the op returns -1,
+`SLEEP_NOTEINTR` means a caught note and the op returns `-T_E_INTR`
+without sleeping again (the note's claim lasts until the EL0-return
+tail, so a second sleep would unwind at once and spin). The acting arm
+drops `r->lock` BEFORE
 `poll_waiter_list_wake`, which walks every hook — pollers and blocked I/O
 alike — under the list lock. The cond (`count > 0 || write_eof`; `count
 < CAP || read_eof`) is `pipe_waiter_ready`, evaluated under the list lock
 that orders the producer's mutation before it. The four wakes still map
 one-to-one onto [[spec-pipe]]'s four buggy configs: delete any one and
 its NoStuck invariant produces the counterexample.
+
+**Which waits a caught note may end** (ARCH 8.8.3). `pipe_block_locked`
+sleeps with `sleep_noteintr` unless the caller is an elected 9P reader
+(`stop_no_park`) whose receive its client did not opt in
+(`recv_caught_ok` false): the byte-pipe transport
+([[sub-kernel-ninep-transport]]) receives through this wait, and a
+send-path pump that unwound would drain nothing and spin its retry — the
+rule `srvconn_client_recv` applies to the same reader. Opting in is only
+an offer: `thread_caught_note_unwinds` ends the wait only for a
+Linux-phenotype thread inside a call on signal(7)'s list
+(`note_interruptible`), outside a handler, whose family claim it wins
+([[sub-kernel-notes]]). A native reader — the `ut` shell's `$(cmd)`
+capture, which does not retry EINTR — still rides a caught note out, and
+only death ends its wait. Handles close at exit before the parent's
+`child_exit` note is posted, so a Linux parent reading a pipe sees the
+child's EOF before its SIGCHLD, as on Linux.
 
 Ring ops are two-segment mod-arithmetic copies; `count`/`head`/`tail`
 only ever move under `r->lock`.
@@ -126,38 +152,39 @@ multi-waiter lift: the property it named — never two sleepers on one slot
 
 -1: NULL/corrupt priv (endpoint magic extincts — UAF, not an error),
 wrong end, negative len, `SLEEP_INTR`. `-EAGAIN`: a `CNONBLOCK` read/write
-that would have blocked. 0: EOF (read) or len ≤ 0. Close extincts on ref
-underflow or corrupt ring magic.
+that would have blocked. `-EINTR` (`-T_E_INTR`): a caught note ended a
+Linux caller's wait, nothing moved. 0: EOF (read) or len ≤ 0. Close
+extincts on ref underflow or corrupt ring magic.
 
 ## Performance
 
-O(n) byte copies, mandatory. Two lock pairs per op (ring + the
-opposite wake's rendez) plus the poll-list walk when pollers are
-registered.
+O(n) byte copies, mandatory. One ring-lock pair per op, plus a
+poll-list walk whenever bytes move or an end closes (the list lock, then
+each woken hook's Rendez lock); a blocked op adds its hook's register and
+unregister.
 
 ## Prosecution
 
 - Every mutation that can enable a waiter must keep its wake — the
   four spec buggy configs are the executable list.
-- The close-order (flag under lock → drop → opposite wake → poll
-  wake → ref drop) must hold; waking before the flag is visible loses
-  the edge, dropping the ref before the wakes frees the rendez under
-  the waker.
+- The close-order (flag under lock → drop → poll-list wake → ref
+  drop) must hold; waking before the flag is visible loses the edge,
+  and dropping the ref before the wake frees the ring, and the list
+  embedded in it, under the waker.
+- A blocked op that sees `SLEEP_NOTEINTR` returns; it never re-enters
+  the wait in the same call.
 - `.seekable` must stay false and `size` must stay 0 (#96's two
   pinned properties).
 - The rollback ladder's aux-detach must precede the clunk.
 
 ## Seams
 
-- **A pipe read is not yet caught-note-interruptible (item 11 → 11c).**
-  11b-core landed the caught-note *mechanism*, but a pipe read still uses
-  plain `sleep`, not `sleep_noteintr`: only DEATH interrupts it (the #811
-  die-check; re-looping on a caught note would re-register and re-INTR, a
-  livelock). Opting in is deferred to 11c, which lands it together with
-  native/phenotype EINTR handling — returning EINTR before a native
-  reader (libthyla-rs, not EINTR-aware) can cope would break it, e.g.
-  `ut`'s `$(cmd)` capture read interrupted by the captured child's own
-  `child_exit`. See `design_caught_notes_do_not_interrupt_waits`.
+- **No `SA_RESTART`.** A Linux reader or writer whose handler was
+  installed with `SA_RESTART` gets `-EINTR` where Linux would restart the
+  call — the documented DEGRADED gap (VIVARIUM 6.22). git's
+  `xread`/`xwrite` and busybox's `safe_read`/`safe_write` retry EINTR; an
+  unmodified program that relies on the restart does not. The item-11 seam this section carried (a pipe wait that only death
+  ended) closed with [[chg-2026-10-05-signal7-list]].
 
 The pouch `pipe(2)` translation landed long ago. The "multi-waiter
 direction queues (never needed — poll covers it)" this section once
@@ -169,8 +196,9 @@ and it is now BUILT (the single-waiter lift).
 - `docs/reference/51-pipe.md` (absorbed) shows the pre-blocking
   struct fields, pins the size at 72+4096 in prose, and reports the
   allocation as "order-2 = 16 KiB, 12 KiB waste" — three eras of
-  wrong for a pinned struct (actual 88+4096, order 1, ~4 KiB slack),
-  while `72-poll.md` next door documented 88 correctly. Its
+  wrong for a pinned struct (actual 56+4096 since the multi-waiter
+  lift, 88+4096 before it; order 1, ~4 KiB slack), while `72-poll.md`
+  next door documented the 88 of its day correctly. Its
   Performance section still says "No locking at v1.0 (single-CPU)"
   two screens above the Status row recording the lock. And
   `kernel/include/thylacine/pipe.h`'s OWN header block still
@@ -196,4 +224,6 @@ and it is now BUILT (the single-waiter lift).
 build-storm door) →
 [[chg-2026-09-06-pipe-multiwaiter]] (the single→multi-waiter lift that
 retired the two Rendezes for one `poll_waiter_list`, closing the
-EL0-shared crash; `CNONBLOCK`/EAGAIN; the item-11→11c caught-note seam).
+EL0-shared crash; `CNONBLOCK`/EAGAIN; the item-11→11c caught-note seam) →
+[[chg-2026-10-05-signal7-list]] (the caught-note EINTR for a Linux
+caller, kept off an elected 9P reader's un-opted receive).

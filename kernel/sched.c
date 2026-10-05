@@ -2049,8 +2049,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // The claim goes LAST: it is taken only by a sleeper that then unwinds,
         // so one caught note unwinds one sleeper and its peers re-park (ARCH
         // 8.8.3; the other three arms below share this shape).
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             t->state             = THREAD_RUNNING;
@@ -2104,8 +2103,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // proc_caught_note_wake or a spurious wake), AFTER the die-check so
         // death wins. Same #90 frame-atomic guard: a mid-frame reader loops
         // (block-through) rather than unwind here.
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
             if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
             rc = SLEEP_NOTEINTR;
             break;
@@ -2285,8 +2283,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // + timer-wait) exactly as the die-check does; return TSLEEP_NOTEINTR so
         // the caller LIVES. Same #90 frame-atomic guard (a mid-frame reader
         // blocks through).
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             timerwait_unlink(t);
@@ -2329,8 +2326,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // item 11: the caught-note prompt-path unwind (tsleep), AFTER the
         // die-check so death wins. Same frame-atomic guard; a mid-frame reader
         // loops (block-through) or reaches the loop's timeout check.
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
             if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
             ret = TSLEEP_NOTEINTR;
             break;

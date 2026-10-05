@@ -33,15 +33,22 @@ that are not obvious.
   death always wins -- they may also return `SLEEP_NOTEINTR` /
   `TSLEEP_NOTEINTR`: the caller unwinds with `-T_E_INTR` and LIVES, and the
   caught note delivers at its EL0-return tail. The arm fires only when `cond`
-  is still false (data wins over the note), the Proc is a Linux phenotype, a
-  mid-frame 9P reader is at a frame boundary (the #90 guard), and -- tested
-  LAST -- `thread_caught_note_claim` claims the note's family, which it does
+  is still false (data wins over the note) and the one predicate
+  `thread_caught_note_unwinds` holds, which poll's verdict shares: the Proc is
+  a Linux phenotype, a mid-frame 9P reader is at a frame boundary (the #90
+  guard), and -- tested LAST -- `thread_caught_note_claim` claims the note's
+  family, which it does
   only for a thread whose call is on signal(7)'s list (`note_interruptible`)
   and only once per note: the peers the same wake reached find the family
   claimed and re-park ([[sub-kernel-notes]]). The claim is the claimant's until
   its EL0-return tail, which releases it and, if the note is still queued there,
-  wakes the parked peers again. Only the 9P client's RPC wait
-  and its elected reader's receive opt in today. Witnesses:
+  wakes the parked peers again. Every kernel wait a call on signal(7)'s list
+  can reach opts in since [[chg-2026-10-05-signal7-list]]: the two 9P waits,
+  a pipe's read and write, the console's read and write waits, poll's park
+  and its timeout-only sleep, `wait_pid_for` and the futex wait (ARCH 8.8.3
+  names the three that do not). A caller RETURNS on `*_NOTEINTR`: the claim
+  lasts until its tail, so a second wait in the same call would unwind at
+  once. Witnesses:
   `rendez.caught_note_one_unwind` -- two sleepers of one Linux Proc, one caught
   `child_exit`: exactly one unwinds and the other re-reads its cond and re-parks,
   and a caught note of another family then unwinds the re-parked one;
@@ -51,7 +58,12 @@ that are not obvious.
   `timer_now_ns` timebase. Returns `TSLEEP_AWOKEN` / `TSLEEP_TIMEDOUT` /
   `TSLEEP_INTR`. **`cond` has precedence**: a wait satisfied exactly as
   the deadline lapses reports AWOKEN. `deadline_ns == 0` means "no
-  deadline" and degrades to `sleep`.
+  deadline" and degrades to `sleep`; `tsleep_noteintr` with no deadline
+  degrades to `sleep_noteintr`, carrying the caught-note flag, and maps
+  `SLEEP_NOTEINTR` back to `TSLEEP_NOTEINTR`. Six of the signal(7) waits
+  sleep this way (the futex, three console waits, poll's park and `pause()`
+  with no timeout); dropping the flag in the delegation turns exactly their
+  witnesses red.
 - `sleep_death_only(r, cond, arg)` is `sleep` for the waits a stop or a
   parent suspend must not leave early (DEBUG-FS-DESIGN 5g): the tail's stop
   park, the birth park, the nested stop park, the vfork suspend and the held
@@ -326,6 +338,11 @@ widening rides [[arc-life-support]]; the stop detour and the frame-atomic
 block-through are [[arc-go-ide]] and [[arc-pty]].
 
 Absorbed `docs/reference/16-rendez.md` at [[chg-2026-08-01-sched-sweep]].
+
+**2026-10-05:** [[chg-2026-10-05-signal7-list]] put the four caught arms
+(two in `sleep_common`, two in `tsleep_common`) behind one predicate,
+`thread_caught_note_unwinds`, which poll's verdict also calls; their order and
+meaning are unchanged, and every wait a listed call reaches now opts in.
 
 **2026-08-16: re-verified, no content owed.** `kernel/sched.c` moved ~48
 lines since the last sweep and this dossier was flagged for it, but every

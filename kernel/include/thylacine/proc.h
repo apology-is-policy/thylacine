@@ -2126,6 +2126,10 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 #define WAIT_UNTRACED  2
 #define WAIT_CONTINUED 4
 
+// wait_pid_for's caught-note result (ARCH 8.8.3), distinct from -1 so wait4
+// can answer EINTR rather than ECHILD.
+#define WAIT_PID_NOTEINTR (-2)
+
 // The packed wait-status encoding (ABI; the Linux wait(2) layout so the
 // Pouch boundary-line maps 1:1). In effect ONLY when the caller passed
 // WAIT_UNTRACED and/or WAIT_CONTINUED:
@@ -2173,6 +2177,9 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 //         so it is an unambiguous "not ready" sentinel.
 //   -1  : no matching child (none at all, or none with want_pid), OR the
 //         caller's Proc is group-terminating (#811 SLEEP_INTR).
+//   WAIT_PID_NOTEINTR : a caught note ended the wait (ARCH 8.8.3); nothing
+//         was reaped or reported. Only a Linux thread in a listed call
+//         (wait4) can receive it; a native caller's wait stays death-only.
 //
 // CALLER NOTE (WAIT_WNOHANG progress): a WNOHANG poll loop MUST yield between
 // calls — block on a notes fd (the kernel posts a `child_exit` note on every

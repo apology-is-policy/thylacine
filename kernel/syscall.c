@@ -12825,6 +12825,10 @@ static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
     int status = 0;
     int reaped = wait_pid_for((int)(s32)(u32)pid_u, flags, &status);
 
+    // A caught note ended the wait (ARCH 8.8.3): EINTR, and the handler runs at
+    // this call's tail.
+    if (reaped == WAIT_PID_NOTEINTR) return -(s64)T_E_INTR;
+
     // -1 covers BOTH of wait_pid_for's failure conditions: no matching child,
     // and a #811 death-interrupted sleep. ECHILD for both is exact rather than
     // lossy -- the death path returns through the sync-from-EL0 tail where

@@ -262,17 +262,28 @@ static int pipe_waiter_ready(void *arg) {
 // per Rendez by construction, however many threads share the pipe),
 // unregisters on every exit, and returns sleep()'s verdict: SLEEP_OK means
 // "re-sample" (another waiter may have consumed the edge), SLEEP_INTR means
-// the Proc is group-terminating and the caller unwinds (#811). The list lock
-// nests inside the ring lock (poll.h: object -> list), the Rendez lock inside
-// neither; a hook never outlives the call (NoStaleHook).
+// the Proc is group-terminating and the caller unwinds (#811), SLEEP_NOTEINTR
+// means a caught note interrupted the wait (ARCH 8.8.3) and the caller returns
+// -T_E_INTR, nothing moved. The list lock nests inside the ring lock (poll.h:
+// object -> list), the Rendez lock inside neither; a hook never outlives the
+// call (NoStaleHook).
+//
+// The wait opts in to the caught-note unwind (ARCH 8.8.3) unless the caller is
+// an elected 9P reader (stop_no_park) whose receive its client did not opt in:
+// the byte-pipe transport (9p_spoor_transport.c) receives through this wait,
+// and a send-path pump that unwound would drain nothing and spin its retry.
+// That is srvconn_client_recv's rule, for the same reader.
 static int pipe_block_locked(struct pipe_ring *r) {
+    struct Thread *t = current_thread();
+    bool caught_ok = !(t && t->stop_no_park) || t->recv_caught_ok;
     struct Rendez      priv;
     struct poll_waiter pw;
     rendez_init(&priv);
     poll_waiter_init(&pw, &priv);
     poll_waiter_list_register(&r->poll_list, &pw);
     spin_unlock(&r->lock);
-    int rc = sleep(&priv, pipe_waiter_ready, &pw);
+    int rc = caught_ok ? sleep_noteintr(&priv, pipe_waiter_ready, &pw)
+                       : sleep(&priv, pipe_waiter_ready, &pw);
     poll_waiter_list_unregister(&pw);
     return rc;
 }
@@ -366,17 +377,6 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
             spin_unlock(&r->lock);
             return 0;       // EOF
         }
-        // #811 (ARCH §8.8.1): a death-interrupted sleep means the Proc is
-        // group-terminating -- return so the Thread unwinds to its EL0-return
-        // die-check (re-looping would re-register + re-INTR = livelock).
-        // item 11 note (ARCH §8.8.3): this read is NOT yet caught-note-
-        // interruptible. 11b-core lands the MECHANISM only; opting a read into
-        // sleep_noteintr (returning -T_E_INTR on a queued caught note) is
-        // deferred to 11c, which lands it TOGETHER with the native/phenotype
-        // EINTR handling -- a native reader (libthyla-rs) is not EINTR-aware, so
-        // returning EINTR here before that handling exists breaks it (e.g. the
-        // ut shell's `$(cmd)` capture read, interrupted by the captured child's
-        // own child_exit note). See design_caught_notes_do_not_interrupt_waits.
         // O_NONBLOCK (CNONBLOCK): the pipe is empty and not at EOF -- a blocking
         // read would sleep here, so a non-blocking read returns EAGAIN instead.
         // Placed AFTER the count>0 and write_eof checks so a non-blocking read
@@ -389,8 +389,14 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
             return -T_E_AGAIN;
         }
         // Registered under the lock we still hold; returns with it dropped.
-        if (pipe_block_locked(r) == SLEEP_INTR)
-            return -1;
+        // #811 (ARCH §8.8.1): death -> return so the Thread unwinds to its
+        // EL0-return die-check (re-looping would re-register + re-INTR =
+        // livelock). A caught note (ARCH §8.8.3) returns EINTR, and only to a
+        // Linux reader: a native one's wait stays death-only (the ut shell's
+        // `$(cmd)` capture read would break on an EINTR it does not retry).
+        int rc = pipe_block_locked(r);
+        if (rc == SLEEP_INTR)     return -1;
+        if (rc == SLEEP_NOTEINTR) return -T_E_INTR;
         // Loop: re-sample with the lock held.
     }
 }
@@ -519,9 +525,12 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
         }
         // #811 (ARCH section 8.8.1): death-interrupted -> Proc group-
         // terminating; return so the Thread unwinds to its EL0-return
-        // die-check. Registered under the lock we still hold.
-        if (pipe_block_locked(r) == SLEEP_INTR)
-            return -1;
+        // die-check. A caught note returns EINTR having written nothing: a
+        // write blocks only before it moves a byte. Registered under the lock
+        // we still hold.
+        int rc = pipe_block_locked(r);
+        if (rc == SLEEP_INTR)     return -1;
+        if (rc == SLEEP_NOTEINTR) return -T_E_INTR;
     }
 }
 

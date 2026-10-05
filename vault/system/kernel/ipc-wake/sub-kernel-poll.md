@@ -43,6 +43,22 @@ snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
   audit round 5 F5). A caller kept awake by noise crosses a preemption
   point each re-loop (step 5), where its CPU takes every pending
   interrupt; it adds no latency of its own.
+- **A caught note ends it with `-T_E_INTR`** for a Linux caller of `ppoll`
+  or `pselect6` (ARCH 8.8.3, [[chg-2026-10-05-signal7-list]]): the park
+  is a `noteintr` wait, and each pass's verdict asks for the note too.
+  Readiness the pass found wins, then the note, then the deadline, as in
+  Linux's `do_poll` and `do_select`: a note pending when the timeout
+  lapses, or at timeout 0, returns `-EINTR`, not 0. A native caller, which
+  never sets `note_interruptible`, rides the note out as before.
+- `sys_poll_sleep_for(timeout_ms)` is the call with nothing to watch
+  (`nfds == 0`, every entry inert, a `select` with empty sets): a
+  `tsleep_noteintr` on a Rendez nothing signals, against the same deadline
+  arithmetic. It returns 0 at the deadline, `-T_E_INTR` for a caught note
+  (musl's `pause()` is `ppoll(NULL, 0, NULL, NULL)`, which only death
+  ended before), and 0 on death (immaterial; the thread dies at its tail).
+  Timeout 0 never sleeps; like a lapsed deadline it asks for the note
+  last, so a pending one is `-EINTR`. The callers return a negative result
+  before writing anything back.
 - `sys_poll_for_proc_spoors(p, kfds, nfds, timeout_ms, pre)` (NP-5,
   2026-09-29) is the same poll over entries the caller has already resolved:
   where `pre[i]` is non-NULL, `poll_scan_one` builds the Spoor Handle
@@ -112,17 +128,22 @@ snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
 2. **Settle, collect, verdict** (NP-4c). With any remote fd,
    `poll_settle` waits until every snapshot of the pass is answered, and
    `poll_collect` releases them all and reads the answers (below). Then
-   any ready ⇒ the sweep; `poll_expired` — timeout 0 always, else the
-   clock past the deadline — ⇒ the sweep with 0. Otherwise each remote fd
+   any ready ⇒ the sweep; a caught note this thread unwinds for
+   (`thread_caught_note_unwinds`, which claims it) ⇒ the sweep with
+   `-T_E_INTR`; `poll_expired` — timeout 0 always, else the clock past the
+   deadline — ⇒ the sweep with 0. Otherwise each remote fd
    is ARMED, hook first (`poll_arm_remote`), and if any arm could not be
    sent the park's deadline becomes `min(deadline, now + 10 ms)`.
-3. `tsleep` on the private Rendez with cond `any waiter.ready` — the
+3. `tsleep_noteintr` on the private Rendez with cond `any waiter.ready` — the
    cond reads `pw->ready` without object locks; sound because the
    producer writes it under the list lock and then `wakeup` takes the
    same rendez lock the cond runs under (release/acquire).
 4. `TSLEEP_INTR` (#811 death/terminate) ⇒ skip the re-sample — the
    thread dies at its EL0-return check — but the sweep still runs:
-   the hooks are stack memory and MUST be unlisted.
+   the hooks are stack memory and MUST be unlisted. `TSLEEP_NOTEINTR`
+   (a caught note) ⇒ the sweep with `-T_E_INTR`, no re-sample and no
+   second park: the claim lasts until the EL0-return tail, so a second
+   park would unwind at once.
 5. **The re-arm** (2026-09-21; [[spec-poll]] `Rearm` → `LoopCheck` →
    `Resample` → `EvaluateWake`). A flag is a HINT, not a verdict: one
    hook list serves every poller of an object whatever each asked for (a
@@ -139,7 +160,8 @@ snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
    sleep may be the retry timer's rather than the call's, and whether the
    call has timed out is the clock's answer, never tsleep's (`poll`
    `buggy_retry_is_timeout`). The pass's verdict (step 2) decides: ready
-   ⇒ the sweep; `poll_expired` ⇒ the sweep with 0; otherwise
+   ⇒ the sweep; a caught note ⇒ the sweep with `-T_E_INTR`;
+   `poll_expired` ⇒ the sweep with 0; otherwise
    `sched_yield_hint` (a noise pass bought nothing; queued work on this
    CPU runs first), arm, and park again **against the same absolute
    deadline**. The clock test is load-bearing: `tsleep` prefers a set flag
@@ -166,6 +188,12 @@ snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
    WINS), never for a latch: a latch that lands while the poller is parked
    waits for the stop to clear, and the next pass's check sweeps it
    (DEBUG-FS-DESIGN 5g).
+   *The verdict asks for the caught note itself* (2026-10-05), for the
+   same reason: `tsleep`'s caught arm also sits behind its cond test, so
+   a producer that keeps a flag set would keep a Linux `poll(-1)` from
+   ever seeing the note. The order inside the verdict is Linux's, ready
+   then note then deadline; [[spec-poll]] checks all three orders
+   (`EintrNotOverReady`, `NoZeroOverCaught`, `CaughtTerminates`).
    *The preemption point lived here for part of one day, and is gone*
    (round 5 F1 + round-6 S1; operator decision 2026-09-22; removed by ARCH
    8.12 the same day). Worth keeping the shape, because the DEFECT it
@@ -315,7 +343,9 @@ and `NoSnapshotOutlivesCall`. The list-choosing half of re-registration is
 -1 for `p`/`kfds` NULL, `nfds` 0 or > 64. Per-fd failures are
 `POLLNVAL` in revents, never a call failure. The user-VA wrapper
 (`sys_poll_handler`) validates the whole array range before copy-in
-and scrubs partially-written revents on a writeback fault.
+and scrubs partially-written revents on a writeback fault. `-T_E_INTR`
+when a caught note ends a Linux caller's poll; the hooks, retained refs
+and snapshots are swept as on every other exit.
 
 ## Performance
 
@@ -434,4 +464,11 @@ for the vivarium's readiness cache (witness `poll.pre_resolved_spoor`: an
 fd number the table does not map, paired with a pipe's read Spoor, reports the
 pipe's readiness while its unpaired neighbour reports POLLNVAL; the reference
 count balances at every return, and a parked poll holds exactly one extra
-reference until it wakes).
+reference until it wakes) → [[chg-2026-10-05-signal7-list]] (2026-10-05): a
+caught note ends a Linux caller's `ppoll`/`pselect6`/`pause()` -- the
+`noteintr` park, the verdict's own note check in Linux's order, and
+`sys_poll_sleep_for`; witnesses `poll.caught_note_ends_park`,
+`poll.caught_note_after_readiness_before_deadline` (the order: ready gives 1,
+nothing gives EINTR, timeout 0 gives EINTR), `poll.caught_note_ends_a_noise_driven_poll`
+(with its no-note twin) and `poll.caught_note_ends_pause` (timeout 0, a
+bounded and a `-1` sleep).

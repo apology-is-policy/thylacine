@@ -1,24 +1,23 @@
 // Kernel pipe — connected pair of Spoors sharing a ring buffer (P5-pipe).
 //
 // Per ARCHITECTURE.md §10.3. Plan 9 `pipe(fd[2])` returns a Spoor pair
-// connected by a kernel-internal byte FIFO. The primitive backs:
-//   - The P5-spoor-transport adapter's production byte-pipe Spoor pair
-//     (replacing the test scaffold in test_9p_spoor_transport.c).
-//   - The future P5-stratumd boot path (kernel + stratumd talk through
-//     a pipe pair until vsock or Unix sockets land).
-//   - The eventual shell pipeline primitive (when userspace lands the
-//     pipe(2) syscall).
+// connected by a kernel-internal byte FIFO. It backs SYS_PIPE (shell
+// pipelines, musl's pipe(2)) and the 9P spoor-transport adapter's byte-pipe
+// pair.
 //
-// Semantics at v1.0 (non-blocking):
-//   - read returns bytes available (0..n); 0 if empty.
-//   - write returns bytes accepted (0..n); 0 if full.
-//   - Neither end blocks. The non-blocking discipline is sufficient for
-//     all v1.0 in-kernel uses (single-CPU, synchronous test sequencing,
-//     pre-staged frame writes).
-//   - Blocking semantics (read waits for data; write waits for room)
-//     with rendez integration land at P5-pipe-blocking. That chunk
-//     needs a spec extension (the missed-wakeup hazard, ARCH §28 I-9,
-//     enters scope when wait/wake is wired up).
+// Semantics (specs/pipe.tla for the wait/wake, I-9):
+//   - read drains 1..n bytes, blocks while the ring is empty and the write
+//     end open, and returns 0 at EOF.
+//   - write of n <= PIPE_BUF_SIZE proceeds only when all n fit (POSIX
+//     PIPE_BUF atomicity); a larger write fills what room there is. It
+//     blocks while it cannot proceed and the read end is open, and returns
+//     -T_E_PIPE, posting the `pipe` note, once the read end is closed.
+//   - Any number of readers and writers may block on either end.
+//   - A CNONBLOCK end returns -T_E_AGAIN where it would block; a CNBFRAME
+//     end (the 9P transport's tx) writes whole frames or nothing.
+//   - A blocked wait returns -1 when the Proc is dying, and -T_E_INTR when
+//     a caught note ends a Linux caller's wait (ARCH 8.8.3), having moved
+//     nothing.
 //
 // Lifecycle:
 //   - pipe_create allocates one shared ring + two Spoors. The ring has
