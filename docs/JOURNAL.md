@@ -1,6 +1,6 @@
 # The autonomous-run journal
 
-## 2026-10-05: AS-R9 charge settlement (corona) -- SOURCE ONLY, NOTHING RUN
+## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
 AS-R9 first; that direction supersedes the October 5 park recorded in
@@ -77,6 +77,75 @@ rather than from my tree, so my own repair cannot launder its premise, and it
 carries a positive control -- the identical sequence with no racer, which must
 let the restore COMPLETE -- because without one an extinction() miswired to
 always exit 42 would "reproduce" the bug on any input.
+
+
+
+UPDATE, after a compaction: the disk blocker dissolved under measurement, and
+both halves of what I had written down about it were wrong.
+
+I had stopped with "blocked on main freeing thylacine-s7ci/build (21G)". Two
+errors in one sentence. First, `yip presence` said main's legs had NOT ended --
+"TLC over the touched specs now; then ci-smp-gate (5 rows x 10); then a CI-image
+bake in ~/projects/thylacine-s7ci" -- so the tree I asked them to delete was the
+input to their next gate, not residue. I had read "remove at end of legs" as
+already past. Second, main's reply: that build/ is itself an APFS clone of their
+primary's, so removing it frees only what its bake wrote. I had quoted a `du`
+figure as reclaimable space -- the SAME error I made this morning on aux's three
+trees, was corrected on, and wrote down. It did not fire because I stored it as a
+fact about aux's trees instead of as a rule about clone families. The
+transferable lesson is about storage, not APFS: write down the PREDICATE that
+would have caught it, not the case that taught it. Withdrew the request on 0167
+before main could act on it.
+
+Then the requirement collapsed, which is what actually unblocked the arc. I had
+been sizing a from-zero `build.sh kernel --config ci` at 14-21G against 9.47 GiB
+free. But `git diff --name-only 5ff62b788..HEAD` is kernel/, docs/ and vault/
+ONLY -- zero files under usr/. The kernel ELF is loaded separately from the
+ramfs, so nothing in my change can invalidate a userspace artifact. What I need
+is a kernel build dir (33M on main's tree) plus the two flavours ci-smp-gate
+wants, not a full bake. The blocker was never disk; it is the Mac LEASE, which
+main holds with aux queued ahead of me. Measuring the diff instead of carrying
+forward the figure I had written down is what found that.
+
+One correction given rather than received. main reported ci-smp-gate green --
+five rows 10/10 -- as "0 corruption, no burrow_charge_restore line anywhere".
+I checked before accepting it: there is no kprintf, printk or warn in ANY
+charge-accounting function in burrow.c, so the only output any of them can emit
+is extinction() on the corrupted-magic and re-charge paths. The absence of that
+line is therefore the expected state whether or not the race fired -- a gauge
+reading zero because it never started. Their 50 boots are real evidence against
+the LOUD leg (re-charge-mid-settle does extinct) and no evidence either way on
+the two silent ones: the I-32 under-count, and the UAF read of charge_as_id out
+of a slab slot SLUB does not zero. main accepted it and will not let
+"ci-smp-gate clean" stand for AS-R9 having been exercised. It has not been, by
+anything but my host double.
+
+A self-audit finding on my own witnesses, found by reading them adversarially
+because reading is the only review they can get while the guest is unrun.
+`burrow.settled_drop_exact_payer` was two zero-assertions -- a NULL payer
+settles nothing, a non-payer settles nothing -- and nothing in the fixture
+established a charge was ever there to refuse, so a `burrow_charge_record` that
+recorded nothing would have satisfied both arms. Not actually vacuous (M4
+reddens both refusals in the mutation set, and the retains-nonfinal witness
+claims the record back as 2 pages), but the discrimination lived in a sibling
+test and a fixture, so one deletion from proving nothing. Added a third arm
+differing in exactly one variable -- who makes the final drop -- which must
+refund exactly the recorded pages (2d722647c).
+
+Also enqueued what the closed disk bug does not cover: main landed
+`disk_floor_check` in 1032ac49, so it exists in no worktree whose base predates
+it. This tree greps 0 for it, which means a bake here dies on ENOSPC rather than
+refusing -- the failure mode that broke every agent's shell at 10:46Z -- and the
+asymmetry is invisible from main, where the fix is green. Recorded as a RESIDUAL
+on the closed entry, not a reopen, and I have run no build.sh on this base.
+
+Standing: 5 commits, HEAD 2d722647c, nothing pushed, nothing landed. Mac queued
+position 2. Open decision with Astra on 0169: her build/ sits at my exact base,
+is configuration-equivalent to --config ci (I normalised and diffed the preset
+against her resolved .config -- every one of its 11 symbols matches, and the
+diff has no lines on the preset side), and is warm where it matters, so cloning
+it as an incremental cache would make the guest gates fit. They are her
+artifacts and her handoff fenced them, so it is her ruling, not mine.
 
 
 ## 2026-10-04: explicit protocol-buffer storage
