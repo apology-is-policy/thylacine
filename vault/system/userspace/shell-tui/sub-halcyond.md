@@ -4,6 +4,7 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - tools/interactive/ls-halcyon-modes.exp
   - tools/interactive/ls-halcyon-hidden-storage.exp
   - tools/interactive/ls-halcyon-storage-output.exp
   - usr/halcyond/src/hostbindings.rs
@@ -26,6 +27,7 @@ code:
   - usr/halcyond/src/chromeset.rs
   - usr/halcyond/src/menu.rs
   - usr/halcyond/src/menuset.rs
+  - usr/halcyond/src/modeview.rs
   - usr/halcyond/src/status.rs
   - usr/halcyond/src/statusset.rs
   - usr/halcyond/src/session.rs
@@ -56,8 +58,29 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-10-04
+updated: 2026-10-05
 ---
+## Modal status presentation
+
+`modeview` supplies five labels and opaque Nora-compatible palette roles for
+both legacy and Instrument status painters. Each painter reserves the maximum
+label width across all five modes so mode transitions do not move adjacent
+slots. Context gives way to the chip: long legacy notices are truncated to
+half the bar, Instrument host labels to one third. Labels use contrasting
+black/white ink; this brightness rule is not a measured accessibility guarantee.
+
+The session derives only its existing transcript states from the focused leaf:
+Normal without an anchor is NOR, Normal with an anchor is VIS, otherwise APP.
+No application identity/title or alternate-screen guess produces INS/CMD.
+Application reports, read-only flags and the complete text/caret/clipboard arc
+remain unconnected. Menus preserve the transcript base mode. The existing
+fullscreen and SAK chrome policies are unchanged. Status diagnostics include
+mode/slot coordinates, keyed on actual mode transitions rather than every paint.
+Validation:558 host tests, native CI build/CPU1 boot1830/1830, and
+`ls-halcyon-modes` plus the Lantern graphical regression at1280x800. Host
+painter cases cover both profiles at100/200percent and800/1280pixel widths;
+this is not native800x720 or Pi qualification.
+
 ## Hidden terminal pixel residency (October 4)
 
 Terminal content uses the opt-in TAPESTRY-STORAGE lifecycle. Dormant tiles keep

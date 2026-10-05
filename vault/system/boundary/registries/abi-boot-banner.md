@@ -10,6 +10,7 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/ls-halcyon-modes.exp (EXTINCTION: only — modal status and focus witness)"
   - "tools/interactive/ls-halcyon-hidden-storage.exp"
   - "tools/interactive/ls-halcyon-storage-output.exp"
   - "tools/interactive/ls-halcyon-clipboard-pty-capacity.exp"
@@ -91,7 +92,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 ## The surface
 

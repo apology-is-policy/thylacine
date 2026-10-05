@@ -2171,3 +2171,74 @@ and pool, serialize all pool mutations with the same ring lock and enforce
 request order. Close/exec/reaper, private slot/protocol integration and safe
 owned clients remain. Public feature masks stay disabled; no clipboard, Pi or
 fresh graphical qualification is claimed.
+
+## AS-R9: Burrow settlement races the final reference (open)
+
+Review of private retirement found the existing claim/drop/restore sequence in
+legacy Loom and full eager VMA detach. After a non-final drop returns false,
+another holder may perform the final drop before restore touches the descriptor.
+The Burrow lock protects each operation individually, not the interval. Private
+retirement must not adopt this pattern. Reproduce the precise interleaving, then
+make charge settlement atomic with the drop decision for both refs and mappings.
+No runtime failure is claimed yet; source-level lifetime defect under investigation.
+Owner edits are uncommitted and private setup is disabled; no gate is active.
+
+## Operator pause: kernel lifetime work (October 5)
+
+At the operator's request, leave the just-reviewed kernel lifetime/refund work
+parked and continue independent UI work. AS-R9 remains open, source-level only;
+no reproducer, repair or runtime qualification is claimed. Do not resume it or
+the dependent private-owner activation without a later operator direction.
+The unfinished owner changes are preserved byte-for-byte in
+work/oct4-async-service/owner-integration/paused-owner, with base files, patch
+and pin.json. They are not applied to source. HEAD remains c822021a2. Four
+authority/settings drafts are untouched; no resource lease or job is active.
+Continue the approved modal visuals/status work without enabling private async
+services or the clipboard endpoint.
+
+## Modal status chip pickup (October 5)
+
+With kernel lifetime/refund work explicitly parked, the independent mode chip
+is prepared but unverified. Both status profiles have opaque Nora-role fills,
+contrasting three-letter labels and a fixed label width. Existing focused
+transcript state selects NOR/VIS; unknown application state selects APP. No
+application-report, proportional-caret or clipboard completion is claimed.
+Long legacy notices and Instrument host names give the chip room. Mode changes
+are in the repaint and test-diagnostic keys; content-dependent chip position
+is excluded from the stable geometry key to avoid repeated diagnostic rows.
+
+Tests are written for fallback semantics, theme roles, five-mode rendered
+differences, stable slots, both profiles at 100/200 percent and 800/1280 widths,
+and long context. None has run yet. Mac requests returned WAITING behind Aux;
+Pi tunnel and LAN lookups failed and the Pi lease was released. No Astra job
+or resource lease is active. All seven previous automations remain paused.
+Exact pickup and source manifest: work/oct5-modal-ui/. Do not claim native
+visual qualification or screenshots until this source has actually run.
+
+October 5 verification update: all558 Halcyon host library tests pass, including
+the four modeview tests. Evidence: work/oct5-modal-ui/host-passed.json. Mac was
+released after9seconds; Main acquired it next. Native build and graphical
+mode/focus capture remain pending. Do not repeat host tests without code changes.
+
+## Modal status chip checkpoint (October 5)
+
+The focused transcript now displays an accent-filled NOR/VIS chip in the
+bottom status bar; unknown application state is APP. Both legacy and Instrument
+painters reserve a fixed-width field and keep long context from displacing it.
+Nora-compatible theme roles and text labels distinguish modes. INS/CMD painting
+is prepared, but application mode reporting is not connected. This checkpoint
+does not implement the proportional block caret or activate clipboard work.
+
+Verification:558 host library tests (four modeview tests), native CI build and
+CPU1 boot1830/1830. The isolated mode/focus scenario passed in49.22seconds and
+Lantern in93.78seconds, with matched kernel/ramfs/pool artifacts. APP -> NOR ->
+VIS -> NOR -> APP and switching from NOR to a new APP tile and back all pass.
+Real1280x800 screenshots were inspected: labels fit, chip size stays fixed,
+NOR/VIS follow the focused tile. Host tests cover800/1280 widths and100/200scale
+for both profiles; no new native minimum-display or Pi qualification is claimed.
+Evidence: work/oct5-modal-ui/{host,native,graphics}-passed.json and the
+graphics-1791190348111285000 directory. No kernel/SMP/sanitizer matrix was
+repeated for these userspace presentation changes. Single-agent self-review is
+in HALCYON-MODE-CHIP-SELF-REVIEW.md. Kernel lifetime/refund work stays parked
+under the explicit October5 operator direction; the preserved owner draft is
+unchanged. Four authority/settings drafts retain their original hashes.

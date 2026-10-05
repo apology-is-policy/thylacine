@@ -33416,3 +33416,26 @@ and pool, serialize all pool mutations with the same ring lock and enforce
 request order. Close/exec/reaper, private slot/protocol integration and safe
 owned clients remain. Public feature masks stay disabled; no clipboard, Pi or
 fresh graphical qualification is claimed.
+
+## Modal status chip checkpoint (October 5)
+
+The focused transcript now displays an accent-filled NOR/VIS chip in the
+bottom status bar; unknown application state is APP. Both legacy and Instrument
+painters reserve a fixed-width field and keep long context from displacing it.
+Nora-compatible theme roles and text labels distinguish modes. INS/CMD painting
+is prepared, but application mode reporting is not connected. This checkpoint
+does not implement the proportional block caret or activate clipboard work.
+
+Verification:558 host library tests (four modeview tests), native CI build and
+CPU1 boot1830/1830. The isolated mode/focus scenario passed in49.22seconds and
+Lantern in93.78seconds, with matched kernel/ramfs/pool artifacts. APP -> NOR ->
+VIS -> NOR -> APP and switching from NOR to a new APP tile and back all pass.
+Real1280x800 screenshots were inspected: labels fit, chip size stays fixed,
+NOR/VIS follow the focused tile. Host tests cover800/1280 widths and100/200scale
+for both profiles; no new native minimum-display or Pi qualification is claimed.
+Evidence: work/oct5-modal-ui/{host,native,graphics}-passed.json and the
+graphics-1791190348111285000 directory. No kernel/SMP/sanitizer matrix was
+repeated for these userspace presentation changes. Single-agent self-review is
+in HALCYON-MODE-CHIP-SELF-REVIEW.md. Kernel lifetime/refund work stays parked
+under the explicit October5 operator direction; the preserved owner draft is
+unchanged. Four authority/settings drafts retain their original hashes.

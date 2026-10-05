@@ -429,3 +429,27 @@ and pool, serialize all pool mutations with the same ring lock and enforce
 request order. Close/exec/reaper, private slot/protocol integration and safe
 owned clients remain. Public feature masks stay disabled; no clipboard, Pi or
 fresh graphical qualification is claimed.
+
+## AS-R9: Burrow settlement races the final reference (open)
+
+Review of private retirement found the existing claim/drop/restore sequence in
+legacy Loom and full eager VMA detach. After a non-final drop returns false,
+another holder may perform the final drop before restore touches the descriptor.
+The Burrow lock protects each operation individually, not the interval. Private
+retirement must not adopt this pattern. Reproduce the precise interleaving, then
+make charge settlement atomic with the drop decision for both refs and mappings.
+No runtime failure is claimed yet; source-level lifetime defect under investigation.
+Owner edits are uncommitted and private setup is disabled; no gate is active.
+
+## Operator pause: kernel lifetime work (October 5)
+
+At the operator's request, leave the just-reviewed kernel lifetime/refund work
+parked and continue independent UI work. AS-R9 remains open, source-level only;
+no reproducer, repair or runtime qualification is claimed. Do not resume it or
+the dependent private-owner activation without a later operator direction.
+The unfinished owner changes are preserved byte-for-byte in
+work/oct4-async-service/owner-integration/paused-owner, with base files, patch
+and pin.json. They are not applied to source. HEAD remains c822021a2. Four
+authority/settings drafts are untouched; no resource lease or job is active.
+Continue the approved modal visuals/status work without enabling private async
+services or the clipboard endpoint.

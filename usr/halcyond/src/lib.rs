@@ -31,6 +31,7 @@ pub mod inlinecache;
 pub mod input;
 pub mod layout;
 pub mod menu;
+pub mod modeview;
 pub mod picker;
 pub mod dialog;
 pub mod outline;

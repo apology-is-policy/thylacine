@@ -2670,7 +2670,7 @@ pub fn run(home: Option<String>) -> i64 {
             let running = focused_leaf
                 .and_then(|l| tiles.get(&l))
                 .map_or(false, |t| t.tile.scrollback.running());
-            let sm = statusset::model_from(
+            let mut sm = statusset::model_from(
                 chrome.focused(),
                 focused_leaf,
                 &cwd,
@@ -2682,6 +2682,11 @@ pub fn run(home: Option<String>) -> i64 {
                 chrome.workspaces(),
                 hints.clone(),
             );
+            sm.mode = focused_leaf.and_then(|leaf| tiles.get(&leaf))
+                .map(|t| halcyond::modeview::DisplayMode::transcript(
+                    t.mode == Mode::Normal,
+                    t.sel.as_ref().map_or(false, |s| s.anchor.is_some()),
+                )).unwrap_or_default();
             status.refresh(&sm, &sheet, &mut gs);
             // HALCYON-INSTRUMENT 8.1: the top rail -- the focused tile's
             // directory and name, the theme in force, the minute; its
