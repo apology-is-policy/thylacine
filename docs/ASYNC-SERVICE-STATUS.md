@@ -591,6 +591,23 @@ the single changed variable. It does **not** establish ARM weak-memory behaviour
 real SLUB timing, or that the interleaving is reachable from any particular
 syscall pair. Those need the guest.
 
+**Class sweep (2026-10-05).** Fixing six known sites proves nothing about whether
+the same shape lives elsewhere, so `work/oct5-as-r9/uaf-class-sweep.py` looks for
+AS-R9's CLASS: any use of a Burrow pointer after the reference keeping it alive
+was dropped, across all 211 kernel/mm `.c` files. 318 drop call sites; it refuses
+to report success if it finds zero, since a sweep that never fired would "pass"
+vacuously. It over-reports by design and every hit is triaged by hand.
+**No instance of the class survives in production code.** The first cut reported
+99 mentions, including an alarming-looking `weft.c:312` that unrefs `v` and then
+stores `v` into the global share registry -- a FALSE POSITIVE: the scanner walked
+past a `return`, and those are mutually exclusive branches (the `burrow_ref` is
+taken before the lock; the table-full path unrefs and returns). Teaching it to
+stop at a `return`/`goto`/`break` at or left of the drop's indentation, and at any
+dedent past it, cut the list to 62. What remains is two benign shapes: tests that
+read `burrow_handle_count` after an unref precisely to assert a SURVIVING pin
+still holds the region, and `x->burrow = NULL` stores that clear the container
+field rather than touch the dead object (`vma.c:150`, `vma.c:179`, `weft.c:542`).
+
 **Still owed, all lease-blocked:** `tools/build.sh kernel --config ci`; the four
 new `burrow.*` tests plus the burrow/vma/weft/loom/capacity/resource/addrspace
 suites; the burrow and capacity models; and `tools/ci-smp-gate.sh` -- this is an
