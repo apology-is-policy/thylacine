@@ -1681,6 +1681,7 @@ void test_dev9p_poll_retry_timer_is_a_wake(void);
 void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
 void test_dev9p_poll_cancel_at_close(void);
 bool test_dev9p_np_release(void);
+bool test_9p_client_release(void);
 void test_dev9p_poll_gc_flushes_with_the_unlink(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
@@ -4599,6 +4600,15 @@ void test_run_all(void) {
             uart_puts("NP-FIXTURE ");
             if (!current_test->failed)
                 test_fail("test left the dev9p readiness fixture up (see NP-FIXTURE)");
+        }
+
+        // And the 9P client suite's shared client: a test that fails before its
+        // destroy leaves g_client, its transports and its op threads up, and an
+        // op thread left asleep in the old client wakes into the next test's.
+        if (test_9p_client_release()) {
+            uart_puts("P9-FIXTURE ");
+            if (!current_test->failed)
+                test_fail("test left the 9P client fixture up (see P9-FIXTURE)");
         }
 
         // And a fixture Proc a test linked: one that fails before its unlink

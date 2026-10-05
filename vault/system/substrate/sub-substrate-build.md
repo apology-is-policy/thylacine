@@ -21,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -204,6 +204,33 @@ fatal, with no skip switch. Like the hunk check it refuses rather than warns,
 because the failure it guards against is silent: a copy left behind when the
 kernel record grows passes its own size assertion while the kernel reads past
 it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
+
+**The proc_flags check runs after it (2026-10-05).** `tools/check-proc-flags.py`
+evaluates every `#define PROC_FLAG_*` in `kernel/include/thylacine/proc.h`,
+resolving the header's other macros, and fails when two defines share a bit
+of the `proc_flags` word. A define whose bits are exactly the union of two or
+more other flags is a composite mask (`TERMINATE_PENDING_MASK`) and may
+overlap them; a define that does not evaluate fails too, since an unread flag
+is not a checked one. Each flag's own `_Static_assert` names only the flags its
+author knew, so two branches each took bit 22 and both compiled; the header is
+the one source both must pass through. The success line reads
+`check-proc-flags: 19 defines (1 composite), 30 bits owned, free [30, 31]`.
+It is sub-second and fatal, with no skip switch. Before it was trusted it was
+run red on a bit-22 collision (it names both flags), an undefined macro and an
+empty header.
+
+**A free-space floor refuses before any target writes (2026-10-05).**
+`disk_floor_check` refuses a target, and separately the pool generate, when
+the build volume has less than `THYLACINE_MIN_FREE_GB` free (default 6; `0`
+disables it, and `clean` is never refused, since it frees space). The refusal
+names the stage, the free space, the floor and the override on one line, then
+lists the largest entries under `build/`. The reason is the failure a full
+disk causes elsewhere: a bake took the shared Mac's volume to 121 MB free
+mid-populate, and every agent's shell then failed before it ran, because the
+harness could not create its output file. A refusal while there is still room
+keeps the failure inside this build. `du` counts APFS-cloned blocks in full,
+so in a worktree with a cloned `build/` the list overstates what deleting an
+entry frees; `df` is the measure.
 
 **Both ambush builds pass `-tags thylacine_held` (2026-09-30).** The Go
 fork's `SysProcAttr.DebugHeld` sets the spawn record's `debug_flags`, and

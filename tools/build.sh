@@ -245,6 +245,33 @@ ledger() {
     echo "==> [build.sh] $*"
 }
 
+# disk_floor_check <stage> -- refuse to start <stage> on a nearly full volume.
+# A stage that writes GBs (the usr/Rust builds, a pool generate + populate) does
+# not fail alone when the disk fills: on 2026-10-05 a bake took the shared Mac's
+# volume to 121 MB free mid-populate, and every agent's shell then failed before
+# it ran, because the harness could not create its output file. Refusing while
+# there is room keeps the failure inside this build.
+disk_floor_check() {
+    local stage="$1" floor="${THYLACINE_MIN_FREE_GB:-6}" dir="$BUILD_DIR" free_kb
+    if ! [[ "$floor" =~ ^[0-9]+$ ]]; then
+        echo "==> THYLACINE_MIN_FREE_GB must be a whole number of GB (got '$floor')" >&2
+        exit 1
+    fi
+    (( floor == 0 )) && return 0
+    [[ -d "$dir" ]] || dir="$REPO_ROOT"
+    free_kb="$(df -Pk "$dir" | awk 'NR == 2 { print $4 }')"
+    if ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+        echo "==> disk floor check: cannot read the free space of $dir's volume" >&2
+        exit 1
+    fi
+    (( free_kb >= floor * 1024 * 1024 )) && return 0
+    echo "==> REFUSING $stage: $(( free_kb / 1024 )) MB free on $dir's volume, below the" \
+         "${floor} GB floor -- free space, or set THYLACINE_MIN_FREE_GB=<GB> (0 disables)" >&2
+    echo "    largest entries under $BUILD_DIR (du counts APFS-cloned blocks in full):" >&2
+    { du -sh "$BUILD_DIR"/* 2>/dev/null | sort -h | tail -6 | sed 's/^/      /' >&2; } || true
+    exit 1
+}
+
 # sysroot_is_stale — true (0) iff the pouch POSIX sysroot must be rebuilt: it
 # is MISSING, or any boundary-line patch / the series file is NEWER than the
 # built libc.a (i.e. a pouch patch was edited since the last sysroot build).
@@ -3573,6 +3600,7 @@ build_stratum_pool_fixture() {
             fi
         done
     fi
+    disk_floor_check "the pool generate ($pool_img, size=$pool_size)"
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
@@ -7418,6 +7446,18 @@ GOFORK="$GOFORK" python3 "$REPO_ROOT/tools/check-spawn-args-mirrors.py" \
     || { echo "==> spawn-args mirror check FAILED -- a copy of struct" >&2
          echo "    sys_spawn_args does not match kernel/include/thylacine/syscall.h" >&2
          exit 1; }
+
+# Every PROC_FLAG_ define in proc.h must own its bits of the proc_flags word. A
+# flag's _Static_assert names the flags its author knew, so two branches can take
+# the same free bit and both compile -- it happened, at bit 22. This check
+# derives the set from the header instead. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-proc-flags.py" \
+    || { echo "==> proc_flags check FAILED -- two PROC_FLAG_ defines share a bit" >&2
+         echo "    of the proc_flags word (kernel/include/thylacine/proc.h)" >&2
+         exit 1; }
+
+# The free-space floor, before any target writes; `clean` frees space.
+[[ "$target" == clean ]] || disk_floor_check "target '$target'"
 
 case "$target" in
     kernel)      build_kernel      ;;

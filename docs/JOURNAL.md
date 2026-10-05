@@ -22,6 +22,26 @@ needed the operator.
 
 
 ---
+## 2026-10-05 (main, Opus 5.5, effort max) -- three P3s: a red 9P client test releases its fixture, the proc_flags word gets a derived check, and the build gets a disk floor
+
+**Why these, and why together.** Three P3s were enqueued during the waiters-stops landing (OPEN-BUGS 2026-10-05 08:13Z, 08:32Z, 10:50Z). They share nothing but timing: they were written while aux held the Mac, and they needed one build and four boots between them. A fourth P3 from the same day, the missing vault note for `specs/territory_shed.tla` (07:58Z), landed separately as `7e7bf077`.
+
+**The fixes.**
+- The 9P client fixture (08:13Z). Seventy `test_9p_client.c` tests destroy the shared client on their last lines, which a failing `TEST_ASSERT` never reaches, so a red test left the client and its loopback open and the next test initialised over live state, burying the first failure under noise. The runner now calls `test_9p_client_release()` after every test in the file. It kills and reaps any op thread still up (`g_dy`, `g_dyx`, `g_dyz`, `g_dle`), then destroys `g_client`, `g_loopback` and `g_mq`. A test that passed while leaving the fixture up is turned red, and a `P9-FIXTURE` line names it. This follows the memory rule that a fixture released on a test's last line is released only by a passing test, so the runner owns the release.
+- The `proc_flags` word (08:32Z). aux's stay-stopped and main's VIV-EINTR each took bit 22, and both compiled, because each flag's `_Static_assert` named only the flags its author knew. `tools/check-proc-flags.py` evaluates every `PROC_FLAG_*` define from `proc.h` and fails on a shared bit (composite masks excepted). build.sh runs it before any target.
+- The disk floor (10:50Z). A bake took the shared Mac's volume to 121 MB free, and every agent's shell then failed. build.sh now refuses a target, and the pool generate, below `THYLACINE_MIN_FREE_GB` (default 6).
+
+**Evidence (the Mac, 15:18-15:21Z, on the WIP commit `9b7a5340` that this landing squashes; the code is the same).**
+- Full `tools/build.sh kernel`: rc 0; `check-proc-flags: 19 defines (1 composite), 30 bits owned, free [30, 31]`; no refusal; one pool generate.
+- Clean suite: 1847/1847, no `P9-FIXTURE` line.
+- Sabotage S1 (a passing test leaves the fixture up): 1846/1847. The one FAIL is `clunk_killed_in_tag_drain`, "test left the 9P client fixture up".
+- Sabotage S2 (a test fails with its sender parked in the tag drain): 1846/1847. The FAIL line carries `P9-FIXTURE`, and the next test, `clunk_dying_waiter_sends_no_flush`, passes on the fixture the runner tore down.
+- Each sabotage boot ran all 1847 tests and then stopped with the expected `EXTINCTION: kernel test suite failed`.
+- Rebuilt clean: 1847/1847, and no sabotage marker left in the file.
+- The checker and the floor had been run red before the batch was committed. The checker failed on a bit-22 collision (naming both flags), an undefined macro and an empty header; its first draft failed every input, because it read `0x7f` as an identifier. The floor, given an unreachable value, refused at entry with rc 1 before doing any build work.
+
+**What it cost.** The batch, committed at 11:10Z, waited about four hours for the Mac. aux's lease lapsed while aux was idle; I asked in yip call 0158 at 12:05Z and got no answer. An API outage then ran from 12:36Z to 15:15Z, and at about 15:18Z I took the Mac with `yip steal` and told aux in the same call. I had budgeted about an hour for the run itself; it took three minutes. The build was incremental, and one suite boot takes about 45 seconds.
+
 ## 2026-09-30 .. 10-05 (main, Opus 5.5, effort max) -- a stopped 9P waiter parks inside the client, and a Loom ENTER waits for the reader role
 
 **The defects.** Two OPEN-BUGS P2s, one class: the elected reader's handoff loses the role to a waiter that cannot read.
