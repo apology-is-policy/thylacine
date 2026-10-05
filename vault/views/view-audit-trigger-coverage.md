@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**178 declared surfaces · 174 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
+**179 declared surfaces · 175 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 25 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -51,6 +51,7 @@ changed on main? — is the next increment, tracked as task #169.
 | **HALCYON-INSTRUMENT I-8c-3a: the `motion` verb -- a fifth member of t… | `lib/halcyon` | no such file in the tree |
 | **HALCYON-SCALE: the display scale -- the EDID-derived percent the com… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |
 | **HAUL: the npxf secure channel -- a second implementation of a hand-r… | `lib/bin` | no such file in the tree |
+| **The stay-stopped rule -- a stopped thread keeps its stop when an int… | `specs/check-debug-stop.sh` | **possibly a documented NEGATIVE — read the claim** |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |
 | Initial bringup | `init/init.c` | no such file in the tree |
