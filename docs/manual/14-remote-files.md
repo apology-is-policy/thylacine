@@ -40,6 +40,13 @@ the guest and use that file with Haul's `-t` option. A token holder can access
 the exported tree with the server's permissions; use a separate random token
 for each separately trusted export.
 
+Haul accepts a token shorter than 16 bytes with a warning, `haul: warning: the
+token is only N bytes`. Anyone who can connect to the server can test guesses
+at the token offline: one connection gives them what they need to check each
+guess on their own computer, without contacting the server again, so a short
+or memorable token can be found by trying candidates. The `openssl rand
+-base64 32` command above writes 32 random bytes as 44 characters.
+
 For QEMU user networking on the same host, `10.0.2.2!5640` reaches this
 loopback listener. To serve another machine, bind npxf to the host's reachable
 interface address and use its dotted IPv4 address in Haul. The server requires
@@ -260,6 +267,16 @@ discards them. In the command form, lines
 that begin with `haul:` come from Haul and the command's own output does not
 carry that prefix; when the command exits with a non-zero status, Haul prints
 `haul: the command exited non-zero` and exits with status 1.
+
+A server that sends a reply larger than the message size (msize) agreed for
+the session breaks the session. Haul refuses the reply, reports it in two lines
+such as `haul: 10.0.2.2!5640 sent a 8203-byte reply, over the session's
+4096-byte msize -- refusing it` and `haul: the 9P session with 10.0.2.2!5640
+is broken -- the mount is dead`, and exits with status 1. Pending filesystem
+operations on the mount fail. With the encrypted channel the reply came from
+the server, and the two sizes in the first line identify the fault for its
+maintainer; on a plain connection anything on the network path could have
+sent it.
 
 A remote disconnect fails pending filesystem operations. The relay ends when
 its connection or elevated scope ends. Token retrieval through corvus is not

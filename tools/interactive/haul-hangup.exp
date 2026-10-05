@@ -1,6 +1,8 @@
 #!/usr/bin/expect -f
 # tools/interactive/haul-hangup.exp -- a server that hangs up must make haul
-# FAIL, promptly, rather than hang.
+# FAIL, promptly, rather than hang. (Also here, because they need no real server
+# either: a server that breaks the session's msize, the command form without
+# stdio, and the short-token warning. Each has its own section below.)
 #
 # THE DEFECT. SYS_ATTACH_9P runs Tversion + Tattach synchronously, reading the
 # replies from a pipe that has no deadline. haul's down pump is the only writer
@@ -30,7 +32,11 @@
 #   2. The shell answers the next command, so haul EXITED rather than printing
 #      its error and then hanging.
 #   3. The peer's own log shows it accepted and hung up -- the positive half of
-#      assertion 1's "not a dial failure", from the other side of the wire.
+#      assertion 1's "not a dial failure", from the other side of the wire --
+#      and then that haul's side closed. Its verdict is "the other side closed"
+#      (or "reset") within its drain window, or "STILL OPEN" once the window
+#      passes, and only the first two pass: waiting for the verdict and then
+#      asserting nothing about it would pass a haul that never let go.
 
 set ::env(THYLACINE_ACCEL) hvf
 
@@ -53,6 +59,27 @@ proc wait_log {path pat secs} {
     }
     return $d
 }
+
+# The same, for a regexp: one alternation can wait for every verdict at once.
+proc wait_log_re {path re secs} {
+    set d ""
+    for {set i 0} {$i < $secs * 10} {incr i} {
+        set d [read_file $path]
+        if {[regexp $re $d]} { break }
+        after 100
+    }
+    return $d
+}
+
+# The peer's verdict on haul's side: its drain window is 10 s, so 15 covers it.
+set verdict_re {guest: (the other side (closed|reset)|STILL OPEN)}
+set closed_re {guest: the other side (closed|reset)}
+
+# A host port nothing listens on, for the legs that need only a fast refusal.
+# Port 1 is below the ephemeral range, so no scenario's port-0 peer can be
+# handed it; a released peer port could be, and a dial there would spend that
+# peer's one accept in a scenario running in parallel.
+set refused_port 1
 
 lc_boot
 lc_login cora kora
@@ -84,12 +111,65 @@ lc_run_expect_hardfail_re "haul -v 10.0.2.2!$port /tmp/hang" \
     {haul: (cannot reach|cannot dial|attach \(9P|attach \(the connection)|mounted at}
 lc_run_expect "echo haul-returned | tr a-z A-Z" "HAUL-RETURNED"
 
-set log [wait_log $peerlog "*guest: the other side*" 12]
+set log [wait_log_re $peerlog $verdict_re 15]
 if {![string match "*accepted*" $log] || ![string match "*guest: sent FIN*" $log]} {
     lc_fail "the peer did not accept and hang up as designed -- its log: $log"
 }
+if {![regexp $closed_re $log]} {
+    lc_fail "haul did not close its side after the server hung up -- the peer's log: $log"
+}
 lc_step "peer log: [string map [list "\n" " | "] [string trim $log]]"
 lc_pass "haul-hangup: a server that hangs up before Rversion fails the attach, and haul exits"
+
+# A SERVER THAT BREAKS THE SESSION'S MSIZE. The kernel caps its receive at the
+# msize it proposed in its Tversion, takes the server's lower msize for what a
+# reply may carry, and answers a reply past either by marking the session dead
+# -- after which it reads the reply pipe no more, so a haul that relayed the
+# reply parked on with a dead mount and told no one. haul now holds every reply
+# to that msize (frame::ReplyBound in usr/haul), refuses a larger one, names the
+# server and both sizes, and exits non-zero.
+#
+# The peer serves Tversion and Tattach, answers the first request after them --
+# the -v mount check's -- with a frame of the given size, and keeps the
+# connection open, so its verdict says whether haul closed its own side. One leg
+# per half of the bound, each with the other half out of the way:
+#   1. 4608 bytes against the kernel's own 4096-byte proposal, after an Rversion
+#      claiming 65536 -- more than proposed, which lowers nothing, so only the
+#      Tversion half stops it;
+#   2. 3072 bytes after an Rversion agreeing to 2048: within the kernel's
+#      proposal, so only the Rversion half stops it.
+# A haul without the half a leg exercises relays the reply and parks: its mount
+# check says it CANNOT read (the hard-fail arm), and the verdict is STILL OPEN.
+foreach {leg answer reply bound} {1 65536 4608 4096 2 2048 3072 2048} {
+    set olog /tmp/haul-oversize-$leg-[pid].log
+    file delete -force $olog
+    set opid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+        --port 0 --log $olog --mode oversize-reply --rversion-msize $answer --reply $reply &]
+    set d [wait_log $olog "*listening*" 5]
+    if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> oport]} {
+        lc_fail "the oversize peer never listened -- its log: $d"
+    }
+    lc_send "mkdir -p /tmp/big$leg"
+    lc_run_expect_hardfail_re "haul -v 10.0.2.2!$oport /tmp/big$leg" \
+        "haul: 10.0.2.2!$oport sent a $reply-byte reply, over the session's $bound-byte msize -- refusing it" \
+        {haul: (cannot reach|cannot dial|attach \()|mount check: CANNOT read}
+    lc_expect "haul: the 9P session with 10.0.2.2!$oport is broken -- the mount is dead" \
+        "oversize leg $leg: haul says the mount is dead"
+    lc_run_expect "echo oversize-$leg-returned | tr a-z A-Z" "OVERSIZE-$leg-RETURNED"
+    set od [wait_log_re $olog $verdict_re 15]
+    foreach want [list "we answered $answer" "served Tattach" "sent a $reply-byte reply"] {
+        if {[string first $want $od] < 0} {
+            lc_fail "the oversize peer did not do what leg $leg assumes (no \"$want\") -- its log: $od"
+        }
+    }
+    if {![regexp $closed_re $od]} {
+        lc_fail "haul kept the connection after refusing the reply (leg $leg) -- the peer's log: $od"
+    }
+    lc_step "oversize peer $leg: [string map [list "\n" " | "] [string trim $od]]"
+    lc_pass "haul-hangup: a $reply-byte reply over a $bound-byte msize is refused and named, and haul exits"
+    catch {exec kill $opid}
+    file delete -force $olog
+}
 
 # THE COMMAND FORM WITHOUT STDIO. The kernel hands out the lowest free fd, so a
 # haul started with fds 0-2 closed would put its own connection and pipe fds in
@@ -100,15 +180,33 @@ lc_pass "haul-hangup: a server that hangs up before Rversion fails the attach, a
 # refused), so exec-probe's `stdio-less` launcher closes 0-2 and execs haul in
 # place; it checks its own closes before the exec, so a launcher that failed to
 # close cannot produce this leg's verdict either way. No server is needed: the
-# refusal comes before the dial. A haul that went ahead would dial the exited
-# peer's port and be refused there; the hard-fail arm names that line, and the
-# attach line a pre-fix netd let it reach instead (see assertion 1).
+# refusal comes before the dial. A haul that went ahead would dial port 1 and
+# be refused there; the hard-fail arm names that line, and the attach line a
+# pre-fix netd let it reach instead (see assertion 1).
 lc_send "mkdir -p /tmp/hang2"
-lc_run_expect_hardfail_re "exec-probe stdio-less /bin/haul 10.0.2.2!$port /tmp/hang2 /bin/echo stdio-leg" \
+lc_run_expect_hardfail_re "exec-probe stdio-less /bin/haul 10.0.2.2!$refused_port /tmp/hang2 /bin/echo stdio-leg" \
     "the command form needs stdin, stdout and stderr open" \
     {haul: cannot reach|haul: attach \(|mounted at|exec-probe: FAIL}
 lc_run_expect "echo stdio-leg-returned | tr a-z A-Z" "STDIO-LEG-RETURNED"
 lc_pass "haul-hangup: the command form refuses to start without stdio"
+
+# THE SHORT-TOKEN WARNING (HAUL-DESIGN 5). npxf's server proves possession
+# first, so anyone who can reach it can test token guesses offline, and haul
+# warns when it is handed a token shorter than 16 bytes. The warning comes
+# before the dial, so no server is needed: haul goes on to dial port 1 and is
+# refused there. Fifteen bytes warn; sixteen, one byte away,
+# must not -- the control that keeps a warning printed for EVERY token from
+# passing.
+lc_send "echo 0123456789abcde > short.token; chmod 600 short.token"
+lc_run_expect_hardfail_re "haul -t short.token 10.0.2.2!$refused_port /tmp/hang3" \
+    "haul: warning: the token is only 15 bytes" \
+    {mounted at}
+lc_run_expect "echo short-token-returned | tr a-z A-Z" "SHORT-TOKEN-RETURNED"
+lc_send "echo 0123456789abcdef > long.token; chmod 600 long.token"
+lc_run_expect_hardfail_re "haul -t long.token 10.0.2.2!$refused_port /tmp/hang3; echo long-token-returned | tr a-z A-Z" \
+    "LONG-TOKEN-RETURNED" \
+    {warning: the token is|mounted at}
+lc_pass "haul-hangup: a 15-byte token is warned about and a 16-byte one is not"
 
 catch {exec kill $peer_pid}
 file delete -force $peerlog

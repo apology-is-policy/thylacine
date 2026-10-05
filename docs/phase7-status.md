@@ -1038,6 +1038,31 @@ completes 1797/1798. `tools/test.sh` 1798/1798 on 78b34682 with debug-probe and 
 as claimed (clean 12830 and 17330), pty_stop 4 cfgs as claimed. `tools/ci-smp-gate.sh` on 47cddabb: PASS, 50 boots and
 0 corruption (default at -smp 1, 4 and 8, UBSan at -smp 4 and 8, ten boots each, every boot PASS).
 
+## Haul P3a: replies held to the session's msize, a short-token warning, and hang-up gates that read the verdict — 2026-10-05
+
+The 2026-09-29 Haul Fable pass's F1 (the haul half), F3, F4 and F5 (OPEN-BUGS 2026-09-29 ~14:57Z). Scripture
+eb2377da (HAUL-DESIGN 2.2, 3.1, 4.1, 4.2 and 5; AUDIT-TRIGGERS row 168's P3a addendum). Code *(pending)*.
+
+- **Replies held to the session's msize.** `frame::ReplyBound`: the up pump stores every Tversion's msize before it
+  forwards the frame, the down pump asks only once a whole reply has arrived, and an Rversion lowers the bound and
+  never raises it. Read from the session, not pinned at 4 KiB: a posted service's mount proposes 32 KiB.
+- **The refusal says so, and blames no one.** A reply over the bound ends the down pump with `STOP_REFUSED`, closing
+  the reply pipe as a hang-up does; haul names the server and both sizes, then says the 9P session is broken and the
+  mount dead, and exits non-zero. The posted loop and the `-v` mount check branch on it (round 1 F2).
+- **A warning for a short token.** Below 16 bytes (`npxf::TOKEN_WARN_BELOW`): the server proves first, so the
+  handshake is an offline guessing oracle (HAUL-DESIGN 3.1, 5); a PAKE is a wire change and joins the vote batch.
+- **Hang-up legs read the peer's verdict (F5).** `haul-hangup`, `haul-npxf`'s relay leg and `haul-post`'s remote-FIN
+  arm fail on `STILL OPEN`. Two oversize legs each leave one half of the bound as the only defence (round 1 F1);
+  refusal-only legs dial host port 1 (round 1 F3).
+- **Stale claims corrected (F4).** HAUL-DESIGN 4.1 and 4.2, two comments in `main.rs`, one in `haul-npxf.exp`.
+
+Not covered: a reply the kernel refuses for another reason still kills the session out of haul's sight (P3b, the kernel
+half); npxf's pre-auth slots are P3c, in npxf.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/1/3, clean, all fixed.
+
+Verification: `cargo test -p haul --lib` on the host: 59 passed, 1 ignored (the live-server interop test); frame.rs 7/7. Each frame.rs rule sabotaged on the host fails its own test: fetch_min replaced by a store (the Rversion test), the MSG_MAX ceiling dropped (the ceiling test), the type check dropped (the Twalk test and the Rversion test's wrong-direction leg); restored, 7/7. main 4630aef7 merged into the WIP branch (only the generated view-code-coverage conflicted; re-rendered); the CI-image bake of that tree is clean. tools/test.sh 1847/1847 PASS (banner; 0 FAIL, 0 EXTINCTION, 0 LEAKED-PROC; ambush-probe stage C fired at the entry). haul-hangup (46 s), haul-unreachable (61 s), haul-npxf, haul-post and haul-cape (45 s each) PASS, each on its first attempt, against npxf-server built from the operator's tree (connection-log-default). each its own bake, haul-hangup once (LS_CI_ATTEMPTS=1), restored: S1 without REPLY.up -- oversize leg 1 red ("mount check: CANNOT read" for /tmp/big1), the hang-up leg green; S2 without REPLY.down -- leg 1 green, leg 2 red the same way (/tmp/big2); S3 with the warning below 15 bytes -- the 15-byte leg red (no warning in 90 s); S4 below 17 -- the 16-byte control red (warned). S5 (the peer reports STILL OPEN whatever haul did, no bake): haul-hangup's hang-up leg, haul-npxf's relay leg and haul-post's remote-FIN arm each red ("did not close its side"), every leg before them green, and haul-unreachable and haul-cape, which read no verdict, green. Re-baked clean after.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

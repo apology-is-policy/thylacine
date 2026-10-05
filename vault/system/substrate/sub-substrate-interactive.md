@@ -46,7 +46,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -573,3 +573,21 @@ so it never appears in the typed text), and the status line arriving without it
 is the red arm; `view -- -zq.txt` then shows a file whose name starts with `-`,
 which a cat handed no `--` refuses as an invalid option. `lantern.exp` leg (i)
 refuses `lantern ''` as a usage error.
+
+Haul P3a (2026-10-05, aux): a hang-up leg reads the peer's verdict instead of
+only waiting for it. `haul-hangup-peer.py` logs `guest: the other side closed`,
+`reset`, or `STILL OPEN` when its 10-second drain ends; `haul-hangup`,
+`haul-npxf`'s relay leg and `haul-post`'s remote-FIN arm wait up to 15 seconds
+for any of the three (`wait_log_re`, one alternation) and fail unless it is
+closed or reset, so a haul that keeps its side open fails where it used to
+pass. The peer's `--mode oversize-reply` answers the Tversion with the msize it
+is given (`--rversion-msize`, sent as given, even above the guest's proposal)
+and the Tattach with a directory qid, answers the next request with a frame of
+`--reply` bytes, and keeps the connection open for the verdict. The legs that
+need only a fast refusal (`haul-hangup`'s stdio and token legs,
+`haul-unreachable`'s first) dial host port 1: LS-CI runs scenarios in parallel,
+a port one scenario's port-0 peer released can be handed to another's, and a
+dial there would spend that peer's single accept. With the peer's closed and
+reset lines rewritten to STILL OPEN, each of the three hang-up legs failed and
+every leg before it passed, while `haul-unreachable` and `haul-cape`, which
+read no verdict, passed (2026-10-05).

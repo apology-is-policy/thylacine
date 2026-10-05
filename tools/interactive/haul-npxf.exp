@@ -95,10 +95,11 @@ puts "haul-npxf: npxf server reachable on 127.0.0.1:$hostport"
 lc_boot
 lc_login cora kora
 
-# The token file. `echo` appends a newline and BOTH ends drop exactly one
-# trailing newline before deriving the PSK -- so this also exercises the
-# newline-stripping agreement, which is the likeliest silent way for two
-# correct implementations to derive different keys.
+# The token file. `echo` appends a newline and BOTH ends drop the newlines that
+# end a token file (a run of newline and carriage-return bytes) before deriving
+# the PSK -- so this also exercises the newline-stripping agreement, which is
+# the likeliest silent way for two correct implementations to derive different
+# keys.
 lc_send "echo $token > npxf.token"
 lc_send "mkdir -p /tmp/host"
 lc_send "mkdir -p /tmp/host2"
@@ -227,6 +228,15 @@ proc wait_log {path pat secs} {
     }
     return $d
 }
+proc wait_log_re {path re secs} {
+    set d ""
+    for {set i 0} {$i < $secs * 10} {incr i} {
+        set d [read_file $path]
+        if {[regexp $re $d]} { break }
+        after 100
+    }
+    return $d
+}
 
 # Started only now, after boot: an `exec` before `spawn` is a macOS expect 5.45
 # footgun (lib.exp's header). The relay binds port 0 and logs the port it got,
@@ -249,12 +259,18 @@ lc_run_expect_hardfail_re "haul -v -t npxf.token 10.0.2.2!$rport /tmp/host3" \
     {haul: (connect|handshake|attach \(9P|attach \(the connection)|mounted at}
 lc_run_expect "echo relay-leg-returned | tr a-z A-Z" "RELAY-LEG-RETURNED"
 
-set rl [wait_log $rlog "*guest: the other side*" 12]
+# The relay's verdict on haul's side arrives within its 10 s drain window: the
+# other side closed or reset, or STILL OPEN -- which must fail the leg, not
+# merely end the wait.
+set rl [wait_log_re $rlog {guest: (the other side (closed|reset)|STILL OPEN)} 15]
 foreach want {"relayed flight 1 up: 40 bytes" "relayed flight 2 down: 64 bytes" \
               "relayed flight 3 up: 32 bytes" "guest: sent FIN"} {
     if {[string first $want $rl] < 0} {
         lc_fail "the relay did not do what this leg assumes (no \"$want\") -- its log: $rl"
     }
+}
+if {![regexp {guest: the other side (closed|reset)} $rl]} {
+    lc_fail "haul did not close its side after the server hung up -- the relay's log: $rl"
 }
 lc_step "relay log: [string map [list "\n" " | "] [string trim $rl]]"
 lc_pass "haul-npxf: a server hanging up after an authenticated handshake fails the attach, and haul exits"
