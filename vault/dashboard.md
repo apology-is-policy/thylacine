@@ -134,10 +134,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-10-06 [[chg-2026-10-06-flag-words]] — The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested
 - 2026-10-06 [[chg-2026-10-06-haul-p3b]] — Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
+- 2026-10-06 [[chg-2026-10-06-held-untagged]] — The held launch drops its build tag: every ambush build spawns held
 - 2026-10-06 [[chg-2026-10-06-nanosleep-rows]] — The sleep rows: a Linux guest's nanosleep and clock_nanosleep sleep, and the deadline beats a pending note
 - 2026-10-06 [[chg-2026-10-06-served-link-containment]] — Served links: a link a remote session serves resolves beneath its mount
 - 2026-10-06 [[chg-2026-10-06-tail-order]] — Tail order: the EL0-return tail stops before it delivers notes
 - 2026-10-05 [[chg-2026-10-05-haul-p3a]] — Haul P3a: replies held to the session's msize, a short-token warning, and verdict-checked hang-up legs
 - 2026-10-05 [[chg-2026-10-05-signal7-list]] — signal(7)'s list: every kernel wait a listed Linux call reaches ends for a caught note
-- 2026-10-05 [[chg-2026-10-05-stay-stopped]] — Stay stopped: a stopped thread keeps its stop, and death wins in the exit close
 <!-- generated:end -->

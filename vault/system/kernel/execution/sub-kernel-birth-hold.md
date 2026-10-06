@@ -407,12 +407,13 @@ park.
   spawner alive with a child that might still be loading; the vfork park
   shared the wait, with the parent on a stack its child still borrowed. The
   wait now sleeps death-only, and `birth_wait_survives_latch` is the witness.
-- **The held launch rides a build tag.** The Go fork's
-  `SysProcAttr.DebugHeld` sets the flag, and ambush's `Launch` sets it only
-  when built with `-tags thylacine_held`, which this tree's `tools/build.sh`
-  passes ([[sub-substrate-build]]). A tree whose kernel lacks the hold builds
-  ambush untagged and keeps the old launch, race included, because that kernel
-  refuses the flag. `Launch` writes `exitkill` before `stop`: the stop ends the
+- **The held launch is every build's.** The Go fork's
+  `SysProcAttr.DebugHeld` sets the flag, and ambush's `Launch` sets it. It
+  rode a build tag (`thylacine_held`) while some trees' kernels lacked the hold
+  and refused the flag. Main carries the hold since its aux-3 merge, so since
+  ambush 073faaa an untagged build compiles the held launch. `tools/build.sh` refuses an older
+  fork, whose untagged build would launch running ([[sub-substrate-build]]).
+  `Launch` writes `exitkill` before `stop`: the stop ends the
   orphan rule's cover, so the mark has to be in place first. `/ambush-probe`
   stage C witnesses the held launch: its init script prints `regs` at the launch
   stop, and the PC must be the program's ELF entry. A launch that raced has
@@ -421,8 +422,7 @@ park.
   entry only when an interrupt is already pending at its first eret. A held
   child that dies loading comes back from the spawn already dead, and the kernel
   refuses to kill a dead Proc, so a failed launch reaps it without waiting for a
-  kill; stage D launches such a program and requires the reap. The tag goes once
-  every tree carries the hold.
+  kill; stage D launches such a program and requires the reap.
 
 ## Caveats
 

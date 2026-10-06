@@ -95,42 +95,28 @@ USR_RS_TARGET="aarch64-unknown-none"
 # so build_go_probes skips cleanly when it is missing (the Go boot probe just
 # does not get baked). Override with GOFORK=/path/to/go-thylacine.
 GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
-# Build tags for BOTH ambush builds: build_ambush's ramfs copy (/ambush-probe) and
-# the /goroot/bin copy nora's :debug runs. thylacine_held: this tree's kernel
-# carries the birth hold (SPAWN_DEBUG_HELD), so ambush's Launch spawns its target
-# held and no quick program can outrun the attach. A kernel without the hold
-# refuses the flag, which is why the shared fork makes it a tag and the tree
-# passes it (DELVE-PORT-DESIGN section 7 (b)); it goes when every tree carries
-# the hold.
-AMBUSH_TAGS="thylacine_held"
-# Both ambush builds check both ends of the tag. Go ignores a tag no file
-# mentions, so a fork that predates the held launch, or one whose held file no
-# longer answers to the tag, would build the running-spawn Launch under a log
-# line saying held. ambush_fork_check asks the toolchain which of the pair the
-# tagged build compiles (go list: the build's own file selection) and refuses
-# unless it is held_on_thylacine.go, declaring launchHeld = true.
-# ambush_artifact_check then reads the tags back from the binary itself (go
-# version -m; the build info survives -s -w), so a build that lost the flag stops
-# here instead of shipping the race. Whether Launch still acts on the constant is
-# behaviour, which /ambush-probe stage C checks at the entry. Both capture before
-# they match: under pipefail a `| grep -q` can SIGPIPE the producer and fail a
-# good build.
+# Both ambush builds spawn the launch target held: this tree's kernel carries
+# the birth hold (SPAWN_DEBUG_HELD), so ambush's Launch parks its target in front
+# of the first instruction and no quick program can outrun the attach
+# (DELVE-PORT-DESIGN 8c-4 (b)). The fork made that a build tag while some trees
+# had no hold; since ambush 073faaa an untagged build compiles the held launch,
+# and an older fork built untagged compiles held_off_thylacine.go, the running
+# spawn -- under a log line that says nothing. ambush_fork_check asks the
+# toolchain which of the pair the build compiles (go list: the build's own file
+# selection) and refuses unless it is held_on_thylacine.go, declaring
+# launchHeld = true. Whether Launch still acts on the constant is behaviour,
+# which /ambush-probe stage C checks at the entry. It captures before it
+# matches: under pipefail a `| grep -q` can SIGPIPE the producer and fail a good
+# build.
 ambush_fork_check() {
     local files
     files=$(cd "$1" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$GOFORK/bin/go" list -mod=vendor \
-        -tags "$AMBUSH_TAGS" -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
+        -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
         || { echo "==> Ambush: go list of $1/pkg/proc/native FAILED" >&2; return 1; }
     [[ " $files " == *" held_on_thylacine.go "* && " $files " != *" held_off_thylacine.go "* ]] \
-        || { echo "==> Ambush: -tags $AMBUSH_TAGS does not compile held_on_thylacine.go in $1 (a fork from before the held launch has none) -- update the fork" >&2; return 1; }
+        || { echo "==> Ambush: $1 does not compile held_on_thylacine.go untagged (a fork from before ambush 073faaa launches running) -- update the fork" >&2; return 1; }
     grep -q '^const launchHeld = true$' "$1/pkg/proc/native/held_on_thylacine.go" \
         || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
-}
-ambush_artifact_check() {
-    local info
-    info=$("$GOFORK/bin/go" version -m "$1") \
-        || { echo "==> Ambush: go version -m $1 FAILED" >&2; return 1; }
-    grep -q -- "-tags=$AMBUSH_TAGS\$" <<<"$info" \
-        || { echo "==> Ambush: $1 does not record -tags=$AMBUSH_TAGS" >&2; return 1; }
 }
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
@@ -945,12 +931,11 @@ build_ambush() {
     fi
     mkdir -p "$go_out"
     ambush_fork_check "$ambush_src" || return 1
-    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, -tags $AMBUSH_TAGS, fork=$ambush_src)"
+    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$ambush_src)"
     ( cd "$ambush_src" && \
       GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -mod=vendor \
-        -tags "$AMBUSH_TAGS" -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
+        -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
         || { echo "==> Ambush: go build FAILED" >&2; return 1; }
-    ambush_artifact_check "$go_out/ambush" || return 1
     echo "==> Ambush built: $go_out/ambush"
     ls -la "$go_out/ambush"
     ledger "ambush: Delve port cross-compile (GOOS=thylacine, stripped) -> ramfs (Stage 8c-1 debugger)"
@@ -1077,11 +1062,10 @@ build_go_goroot() {
     local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
     if [[ -d "$ambush_src/cmd/dlv" ]]; then
         ambush_fork_check "$ambush_src" || return 1
-        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, -tags $AMBUSH_TAGS, fork=$ambush_src)"
+        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, fork=$ambush_src)"
         ( cd "$ambush_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
-            "$go_bin" build -mod=vendor -tags "$AMBUSH_TAGS" -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
+            "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
             || { echo "==> Ambush /goroot bake FAILED" >&2; return 1; }
-        ambush_artifact_check "$stage/bin/ambush" || return 1
         echo "==> Ambush (/goroot) built: $stage/bin/ambush ($(du -h "$stage/bin/ambush" | cut -f1 | tr -d ' '))"
         ledger "ambush: Delve port -> /goroot/bin (Stage 8e-3e nora :debug)"
         if [[ -d "$REPO_ROOT/usr/ambush-child" ]]; then

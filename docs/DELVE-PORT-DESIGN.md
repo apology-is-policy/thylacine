@@ -282,16 +282,19 @@ has no "stop at exec/entry" primitive today. Two paths:
   The order is load-bearing. Once `stop` converts the hold the orphan rule no
   longer covers the child, so `exitkill` comes first: a debugger that dies at
   any point of the launch leaves a child that dies with it, never one resumed
-  free. **Until every tree's kernel carries the hold, the held launch is a
-  build choice.** A kernel without it refuses a nonzero `debug_flags` (its
-  validator rejected any nonzero word at 100), so an ambush that always
-  spawned held would fail every launch there. Ambush spawns held only when
-  built with `-tags thylacine_held`, and a tree's `tools/build.sh` passes the
-  tag exactly when its kernel has `SPAWN_DEBUG_HELD`. The build script and the
-  kernel are versioned together, so no runtime probe or fallback decides it,
-  and a held build on a kernel without the hold fails loudly rather than
-  racing quietly. An untagged build keeps path (a)'s launch, race included.
-  The tag goes when every tree carries the hold.
+  free. **The held launch was a build choice until main carried the hold.** A
+  kernel without it refuses a nonzero `debug_flags` (its validator rejected
+  any nonzero word at 100), so an ambush that always spawned held would have
+  failed every launch there. From 2026-09-30 ambush spawned held only when
+  built with `-tags thylacine_held`, and a tree's `tools/build.sh` passed the
+  tag exactly when its kernel had `SPAWN_DEBUG_HELD`: the build script and the
+  kernel are versioned together, so no runtime probe or fallback decided it.
+  Main carries the hold since its aux-3 merge, and since ambush 073faaa
+  (2026-10-06) every build spawns held; `tools/build.sh` refuses an older fork,
+  whose untagged build would keep path (a)'s launch, race included. A kernel
+  without the hold makes a held launch fail loudly rather than race quietly.
+  Once no tree's build script checks the fork for `launchHeld`, the constant
+  and `Launch`'s running-spawn path go.
 
 Path (a) keeps 8c a pure userspace port and delivers both `ambush attach` and
 `ambush exec`.
