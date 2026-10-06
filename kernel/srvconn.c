@@ -368,7 +368,6 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     cn->peer_console       = peer_console;
     cn->server_stripes     = server_stripes;
     cn->client_deadline_ns = 0;
-    cn->client_timed_out   = false;
     /* byte_mode = false by KP_ZERO; srvconn_set_byte_mode flips on after
      * mint if the service is SRV_MODE_BYTE (P6-pouch-sockets). */
     __atomic_store_n(&cn->ref, 1, __ATOMIC_RELAXED);
@@ -555,12 +554,6 @@ void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
         extinction("srvconn_set_client_deadline: NULL or corrupted SrvConn");
     cn->client_deadline_ns = deadline_ns;
-    cn->client_timed_out   = false;
-}
-
-bool srvconn_client_timed_out(const struct SrvConn *cn) {
-    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
-    return cn->client_timed_out;
 }
 
 u32 srvconn_msize(const struct SrvConn *cn) {
@@ -663,10 +656,7 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     // deadline as the data wait below (the WHOLE recv is deadline-bounded);
     // a death-interrupt unwinds it (#811). Released on every exit below.
     int ra = chan_role_acquire(ch, /*writer=*/false, cn->client_deadline_ns);
-    if (ra != 0) {
-        if (ra == TSLEEP_TIMEDOUT) cn->client_timed_out = true;
-        return -1;
-    }
+    if (ra != 0) return -1;
 
     long ret;
     for (;;) {
@@ -708,7 +698,6 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
                      : tsleep(&ch->rendez, chan_cond_readable, ch,
                               cn->client_deadline_ns);
         if (ts == TSLEEP_TIMEDOUT) {
-            cn->client_timed_out = true;
             ret = -1;                         // corvus hung past the deadline
             break;
         }

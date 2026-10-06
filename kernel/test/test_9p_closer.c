@@ -216,14 +216,9 @@ static int stall_close(void *ctx) {
     return st->inner.close(st->inner.ctx);
 }
 
-static void stall_set_recv_deadline(void *ctx, u64 deadline_ns) {
+static bool stall_recv_ready(void *ctx, struct poll_waiter *pw) {
     struct stall_tp *st = (struct stall_tp *)ctx;
-    st->inner.set_recv_deadline(st->inner.ctx, deadline_ns);
-}
-
-static bool stall_recv_timed_out(void *ctx) {
-    struct stall_tp *st = (struct stall_tp *)ctx;
-    return st->inner.recv_timed_out(st->inner.ctx);
+    return st->inner.recv_ready(st->inner.ctx, pw);
 }
 
 static struct p9_transport_ops stall_init(struct stall_tp *st, struct srv_rec *rec) {
@@ -238,8 +233,7 @@ static struct p9_transport_ops stall_init(struct stall_tp *st, struct srv_rec *r
     ops.send              = stall_send;
     ops.recv              = stall_recv;
     ops.close             = stall_close;
-    ops.set_recv_deadline = stall_set_recv_deadline;
-    ops.recv_timed_out    = stall_recv_timed_out;
+    ops.recv_ready        = stall_recv_ready;
     ops.hangup            = NULL;   // the inner's would take the wrapper's ctx
     ops.ctx               = st;
     return ops;
@@ -479,8 +473,8 @@ void test_p9_closer_flushed_walk_fid_clunked(void) {
                    "and was flushed");
 
     // A survivor's reader drains the late Rwalk, then the Rflush.
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(a->client), 1, "the late Rwalk");
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(a->client), 1, "the Rflush");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(a->client), 1, "the late Rwalk");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(a->client), 1, "the Rflush");
     TEST_YIELD_UNTIL(srv_clunked(&g_rec_a, 30));
     TEST_YIELD_UNTIL(closer_quiet());
     struct p9_closer_stats st = closer_now();

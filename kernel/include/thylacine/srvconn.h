@@ -243,10 +243,8 @@ struct SrvConn {
     // Kernel-client-side blocking-recv deadline. Absolute ns on the
     // timer_now_ns timebase; 0 = no deadline (blocks indefinitely,
     // woken only by data or EOF). The op-driving path sets this before
-    // each blocking op; srvconn_set_client_deadline also clears
-    // `client_timed_out` so each op starts from a fresh signal.
+    // each blocking op.
     u64                 client_deadline_ns;
-    bool                client_timed_out;  // last client recv hit the deadline
 
     struct srvconn_chan c2s;               // kernel client → corvus
     struct srvconn_chan s2c;               // corvus → kernel client
@@ -447,17 +445,11 @@ bool srvconn_is_live(const struct SrvConn *cn);
 // =============================================================================
 
 // srvconn_set_client_deadline — set the absolute deadline (timer_now_ns
-// timebase) for the connection's next blocking client recv, and clear
-// the `client_timed_out` signal. `deadline_ns == 0` means no deadline.
-// The op-driving path calls this immediately before each blocking 9P
-// op (a3b). Extincts on a NULL / corrupted conn.
+// timebase) for the connection's next blocking client recv.
+// `deadline_ns == 0` means no deadline. The op-driving path calls this
+// immediately before each blocking 9P op (a3b). Extincts on a NULL /
+// corrupted conn.
 void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns);
-
-// srvconn_client_timed_out — true iff the most recent blocking client
-// recv ended on the deadline rather than on data or EOF. Lets the
-// op-driving path map a transport failure to -ETIMEDOUT (corvus hung)
-// vs -EIO (corvus crashed). Returns false for a NULL / corrupted conn.
-bool srvconn_client_timed_out(const struct SrvConn *cn);
 
 // =============================================================================
 // Peer identity (SYS_SRV_PEER — P5-corvus-srv-impl-a3c).
@@ -516,8 +508,7 @@ long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n);
 // deadline bounds the role wait). Returns:
 //   >0  — bytes read.
 //    0  — EOF: the connection is torn down and no residual bytes remain.
-//   -1  — the deadline passed (then srvconn_client_timed_out is true),
-//         a #811 death-interrupt, or args are bad.
+//   -1  — the deadline passed, a #811 death-interrupt, or args are bad.
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n);
 
 // srvconn_client_send_blocking — the BLOCKING client-side byte write

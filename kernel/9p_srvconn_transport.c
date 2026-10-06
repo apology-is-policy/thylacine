@@ -73,8 +73,7 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     //    0 -- EOF (the SrvConn is torn and no residual bytes remain);
     //          transport core surfaces this as recv-side ERROR. The
     //          p9_client maps "transport EOF mid-handshake" to -P9_E_IO.
-    //   -1 -- deadline lapsed (srvconn_client_timed_out true) or
-    //          bad args. The p9_client maps to -P9_E_IO; SYS_ATTACH_
+    //   -1 -- deadline lapsed (the handshake's) or bad args. The p9_client maps to -P9_E_IO; SYS_ATTACH_
     //          9P_SRV folds that into the syscall's -1 return.
     long n = srvconn_client_recv(st->cn, buf, (long)cap);
     if (n < 0) return -1;

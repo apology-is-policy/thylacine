@@ -386,9 +386,8 @@ fn finish_up(stop: u32) -> ! {
 /// kernel's replies arrive through, and exit the thread.
 ///
 /// THE CLOSE IS WHAT MAKES A DEAD SERVER AN ERROR RATHER THAN A HANG. The kernel
-/// reads replies with no deadline (the Spoor transport's `set_recv_deadline` is
-/// NULL), so while `s2c_wr` is open, a request whose reply can no longer come
-/// waits forever. The main thread bounds that only from a loop that watches
+/// reads replies with no deadline, so while `s2c_wr` is open, a request whose
+/// reply can no longer come waits forever. The main thread bounds that only from a loop that watches
 /// STOPPED, and it is in no such loop while it sits inside a synchronous 9P
 /// call -- `t_attach_9p`, or the `-v` listing. A server that hung up straight
 /// after the handshake used to leave haul inside the attach for good. EOF on

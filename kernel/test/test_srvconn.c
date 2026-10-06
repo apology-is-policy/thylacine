@@ -405,19 +405,10 @@ void test_srvconn_recv_deadline_timeout(void) {
     // deadline_ns == 1 — a timestamp long in the past. The s2c ring is
     // empty, so client_recv must time out at once rather than block.
     srvconn_set_client_deadline(cn, 1);
-    TEST_ASSERT(srvconn_client_timed_out(cn) == false,
-        "setting a deadline clears the timed-out signal");
 
     u8 in[16];
     TEST_EXPECT_EQ(srvconn_client_recv(cn, in, sizeof in), -1L,
         "client_recv past its deadline returns -1");
-    TEST_ASSERT(srvconn_client_timed_out(cn) == true,
-        "the timed-out signal is set after a deadline expiry");
-
-    // A fresh deadline clears the signal again.
-    srvconn_set_client_deadline(cn, 0);
-    TEST_ASSERT(srvconn_client_timed_out(cn) == false,
-        "a fresh deadline clears the timed-out signal");
 
     srvconn_unref(cn);
 }

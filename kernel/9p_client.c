@@ -254,9 +254,9 @@ static void client_handoff_reader_locked(struct p9_client *c,
             // its F6 bounce does for a dying designee.
             !r->stop_parked) {
             // Skip async (POST_CQE) ops: they have no submitter thread to run
-            // the reader loop. An async op's reply is demuxed by the
-            // SYS_LOOM_ENTER reap / SQPOLL kthread / p9_client_reader_pump_once
-            // caller, never by becoming the elected reader (Loom §8.4).
+            // the reader loop. An async op's reply is demuxed by the role
+            // holder or a fan-in waiter's pump, never by becoming the elected
+            // reader (Loom §8.4, §8.6).
             r->be_reader = true;
             wakeup(&r->rendez);
             return;
@@ -285,9 +285,9 @@ static void client_send_progress_signal(struct p9_client *c) {
 //   0    a clean PEER-GONE EOF -- the transport recv returned 0: the server /
 //        driver endpoint torn down (the device/service vanished). The caller
 //        maps this to the device-gone death reason (MENAGERIE.md section 10);
-//   -1   a transport error / idle deadline / malformed-or-oversize frame --
-//        the generic transport death (the caller checks *idle for the idle
-//        case and client_self_dying() for a death-interrupt unwind).
+//   -1   a transport error / malformed-or-oversize frame -- the generic
+//        transport death (the caller checks client_self_dying() for a
+//        death-interrupt unwind).
 // The EOF-vs-error split is exactly the transport recv contract (0 = peer
 // closed, < 0 = error) -- before, both collapsed to -1; preserving it is what
 // lets a device-gone session post -ENODEV instead of a generic -EIO. c->lock
@@ -1365,8 +1365,9 @@ static int client_run(struct p9_client *c, size_t built_len,
 // Asynchronous (Loom) front-end -- the pluggable-completion seam (Loom-2b).
 //
 // submit_async sends an op + registers it WITHOUT blocking; the reply is
-// demuxed later by reader_pump_once / the SYS_LOOM_ENTER reap / the SQPOLL
-// kthread, which invokes rpc->on_complete (the POST_CQE front-end). The
+// demuxed later by the role holder or a fan-in waiter's reader_pump_ready (the
+// ENTER, the SQPOLL kthread, the dev9p poll kthread), which invokes
+// rpc->on_complete (the POST_CQE front-end). The
 // elected-reader / demux machinery is unchanged; only the completion ACTION is
 // pluggable (one engine, two front-ends -- LOOM.md §8.4).
 // =============================================================================
@@ -1724,6 +1725,10 @@ int p9_client_init(struct p9_client *c,
     c->send_waiters   = 0;
     poll_waiter_list_init(&c->role_waiters_list);
     c->role_waiters   = 0;
+    c->poll_next       = NULL;   // the dev9p poll kthread's entry (it inits the hook)
+    c->poll_pin        = NULL;
+    c->poll_listed     = false;
+    c->poll_hook.place = P9_HOOK_NONE;
     for (u32 i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) c->inflight[i] = NULL;
     // Fid allocator starts at root_fid + 1; dev9p (and other callers)
     // pull fresh fids monotonically via p9_client_alloc_fid.

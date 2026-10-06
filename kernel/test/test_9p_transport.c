@@ -17,6 +17,8 @@
 #include <thylacine/9p_transport_loopback.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/poll.h>
+#include <thylacine/rendez.h>
 #include <thylacine/types.h>
 
 void test_9p_transport_init_destroy(void);
@@ -28,7 +30,7 @@ void test_9p_transport_backend_error_transitions_to_error(void);
 void test_9p_transport_close_idempotent(void);
 void test_9p_transport_exchange_drives_session_handshake(void);
 void test_9p_transport_exchange_drives_session_walk(void);
-void test_9p_transport_deadline_idle_vs_eof(void);
+void test_9p_transport_loopback_recv_ready(void);
 
 // 4 KiB transport receive buffer + 4 KiB outbound staging buffer
 // + 4 KiB loopback response staging.
@@ -150,6 +152,10 @@ void test_9p_transport_init_destroy(void) {
     TEST_EXPECT_EQ(rc, -1, "init NULL recv_buf refused");
     rc = p9_transport_init(&t, p9_loopback_ops_for(&lb), g_recv_buf, 3);
     TEST_EXPECT_EQ(rc, -1, "init too-small recv_buf refused");
+    struct p9_transport_ops blind = p9_loopback_ops_for(&lb);
+    blind.recv_ready = NULL;
+    rc = p9_transport_init(&t, blind, g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, -1, "init without recv_ready refused (it is mandatory)");
 
     p9_loopback_destroy(&lb);
 }
@@ -377,41 +383,51 @@ void test_9p_transport_exchange_drives_session_walk(void) {
 }
 
 // =============================================================================
-// 9p_transport.deadline_idle_vs_eof (Loom-4, LOOM.md §8.6)
+// 9p_transport.loopback_recv_ready (LOOM.md 8.6)
 //
-// The NULL-safe deadline shims (p9_transport_set_recv_deadline /
-// p9_transport_recv_timed_out) over the loopback's deadline knob. With a
-// deadline armed and the staged response empty, the loopback MODELS a
-// frame-boundary timeout (-1 + recv_timed_out true); disarmed, the same empty
-// response is a plain EOF (0) and the signal clears. This is exactly the
-// mechanism the deadline-aware reader pump reads to tell IDLE from EOF -- here
-// at the raw recv level the pump uses (it calls ops.recv directly).
+// The loopback's readiness op: a staged reply, the peer's EOF or a close is
+// ready; an empty loopback models a blocking recv and is not. A hook filed with
+// the empty sample is woken by the reply's arrival -- the edge a fan-in waiter
+// sleeps for.
 // =============================================================================
 
-void test_9p_transport_deadline_idle_vs_eof(void) {
+void test_9p_transport_loopback_recv_ready(void) {
     struct p9_loopback lb;
     TEST_EXPECT_EQ(p9_loopback_init(&lb, g_loopback_resp_buf,
                                     sizeof(g_loopback_resp_buf),
-                                    rejector_responder, NULL),
+                                    echo_flip_type_responder, NULL),
                    0, "loopback init");
     struct p9_transport t;
     TEST_EXPECT_EQ(p9_transport_init(&t, p9_loopback_ops_for(&lb),
                                      g_recv_buf, sizeof(g_recv_buf)),
                    0, "transport init");
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
 
-    u8 buf[16];
-    // Armed + empty staged response -> modeled frame-boundary timeout.
-    p9_transport_set_recv_deadline(&t, 1);    // any non-zero arms the knob
-    int n = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, -1, "armed + empty -> -1 (modeled timeout)");
-    TEST_ASSERT(p9_transport_recv_timed_out(&t), "recv_timed_out true after timeout");
+    bool empty  = p9_transport_recv_ready(&t, &pw);
+    bool filed  = (pw.list == &lb.ready_list);
+    bool quiet  = !pw.ready;
+    int total   = p9_build_tclunk(g_send_buf, sizeof(g_send_buf), 0x0042, 7);
+    int sent    = p9_transport_send(&t, g_send_buf, (size_t)total);
+    bool woken  = pw.ready;
+    poll_waiter_list_unregister(&pw);
+    bool staged = p9_transport_recv_ready(&t, NULL);
+    int got     = p9_transport_recv(&t);
+    bool drained = !p9_transport_recv_ready(&t, NULL);
+    p9_loopback_force_eof(&lb);
+    bool eof    = p9_transport_recv_ready(&t, NULL);
+    pw.magic = 0;
 
-    // Disarm -> the empty response is a plain EOF and the signal clears.
-    p9_transport_set_recv_deadline(&t, 0);
-    TEST_ASSERT(!p9_transport_recv_timed_out(&t), "disarm clears recv_timed_out");
-    n = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, 0, "disarmed + empty -> 0 (EOF)");
+    TEST_ASSERT(!empty && filed && quiet, "empty: not ready, the hook filed with the sample");
+    TEST_ASSERT(sent == total && woken, "the staged reply wakes the hook");
+    TEST_ASSERT(staged, "a staged reply is ready");
+    TEST_EXPECT_EQ(got, total, "and the recv reads it");
+    TEST_ASSERT(drained, "drained: not ready again");
+    TEST_ASSERT(eof, "the peer's EOF is ready");
 
     p9_transport_destroy(&t);
+    TEST_ASSERT(p9_transport_recv_ready(&t, NULL), "a destroyed transport reads as ready");
     p9_loopback_destroy(&lb);
 }

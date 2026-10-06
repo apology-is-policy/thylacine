@@ -135,6 +135,7 @@ static int loopback_close(void *ctx) {
     if (!lb) return -1;
     if (lb->magic != P9_LOOPBACK_MAGIC) return -1;
     lb->closed = true;
+    poll_waiter_list_wake(&lb->ready_list);   // closed reads as ready
     return 0;
 }
 

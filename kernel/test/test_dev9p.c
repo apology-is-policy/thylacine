@@ -885,7 +885,7 @@ void test_dev9p_close_clunks_owned_fid(void) {
     size_t after_send = p9_session_inflight(&g_client.session);
     TEST_EXPECT_EQ((u64)after_send, (u64)(before + 1),
                     "async-clunk leaves the Tclunk outstanding (deferred, not synchronous)");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     size_t after_drain = p9_session_inflight(&g_client.session);
     TEST_EXPECT_EQ((u64)after_drain, (u64)before,
                     "the ownerless Rclunk drains via the reader pump (tag freed)");
@@ -1231,11 +1231,11 @@ void test_dev9p_dirfid_create_reuse_drop(void) {
     struct Spoor *opened = dev9p.create(nc2, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
     TEST_ASSERT(opened == nc2, "create");
     TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "create dropped + clunked the parked fid");
-    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+    (void)p9_client_reader_pump_ready(&g_client);   // drain the async Rclunk
 
     g_wga_type_ov = 0; g_wga_path_base = 0x20;
     spoor_clunk(nc2);
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     teardown(root);
 }
 
@@ -1270,7 +1270,7 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
                    "rmdir d");
     TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "rmdir dropped + clunked the parked fid");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     struct t_stat probe; u64 s0 = 0;
     TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x20, &probe, &s0),
                 "the dead object's attr invalidated (the donate-gate event)");
@@ -1287,7 +1287,7 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     spoor_clunk(nc2);   // staled while out -> MUST clunk, never re-park
     TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
                    "a staled checked-out fid is clunked at close");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     g_wga_type_ov = 0;
     teardown(root);
@@ -1322,7 +1322,7 @@ void test_dev9p_dirfid_suspect_not_reparked(void) {
     spoor_clunk(nc1);   // suspect -> clunk, never park
     TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
                    "a suspect fid is clunked at close, not re-parked");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     g_wga_type_ov = 0;
     teardown(root);
@@ -2463,7 +2463,7 @@ void test_dev9p_walk_attrs(void) {
         // async-clunk defers the Rclunk; drain it before the next sub-test's op
         // so the single-slot loopback is not left holding a stale reply (the real
         // system drains it via the next op's reader).
-        (void)p9_client_reader_pump_once(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client);
     }
 
     // BIND form, PARTIAL walk: the responder answers one short; the session
@@ -2851,12 +2851,11 @@ static void co_prime(struct Spoor *root, const char *name, size_t len) {
     TEST_ASSERT(w != NULL && w->spoor == nc, "co_prime bind walk");
     walkqid_free(w);
     // Drain the async Rclunk ONLY if the close actually clunked: a DIR-typed
-    // prime's close DONATES the fid (G2 -- no Tclunk), and a pump with
-    // nothing pending latches the single-slot loopback client dead.
+    // prime's close DONATES the fid (G2 -- no Tclunk).
     u32 pre_clunk = g_clunk_seen;
     spoor_clunk(nc);
     if (g_clunk_seen != pre_clunk)
-        (void)p9_client_reader_pump_once(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client);
 }
 
 void test_dev9p_cached_open(void) {
@@ -3843,7 +3842,7 @@ void test_dev9p_cape(void) {
         TEST_EXPECT_EQ((u64)sts[1].mode, (u64)0100644u, "caped walk: the server's mode");
         walkqid_free(w);
         spoor_clunk(nc);
-        (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+        (void)p9_client_reader_pump_ready(&g_client);   // drain the async Rclunk
     }
     teardown(root);
 

@@ -69,7 +69,7 @@ void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
-void test_9p_srvconn_transport_deadline_vtable_routes(void);
+void test_9p_srvconn_transport_recv_ready_tracks_s2c(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
 void test_9p_srvconn_transport_death_tears_down_the_conn(void);
@@ -415,18 +415,14 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void) {
 }
 
 // =============================================================================
-// 9p_srvconn_transport.deadline_vtable_routes (Loom-4, LOOM.md §8.6)
+// 9p_srvconn_transport.recv_ready_tracks_s2c (LOOM.md 8.6)
 //
-// The NULL-permitted set_recv_deadline / recv_timed_out vtable ops route to
-// srvconn_set_client_deadline / srvconn_client_timed_out. A fresh deadline
-// clears the signal; a PAST deadline makes the very next recv on an empty s2c
-// ring time out promptly (tsleep returns TSLEEP_TIMEDOUT once now >= deadline),
-// and the timed-out signal surfaces back through the recv_timed_out shim -- the
-// mechanism the SQPOLL idle pump reads to tell IDLE from EOF over a real
-// SrvConn-backed client.
+// The production readiness op: an empty s2c is not ready and files the hook on
+// the connection's poll list with the sample; the server's reply wakes it and
+// reads as ready; the teardown's EOF is ready too.
 // =============================================================================
 
-void test_9p_srvconn_transport_deadline_vtable_routes(void) {
+void test_9p_srvconn_transport_recv_ready_tracks_s2c(void) {
     srv_registry_reset();
 
     struct Proc *server = NULL;
@@ -438,25 +434,37 @@ void test_9p_srvconn_transport_deadline_vtable_routes(void) {
     struct p9_srvconn_transport st;
     TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0, "init");
     struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
-    TEST_ASSERT(ops.set_recv_deadline != NULL, "set_recv_deadline wired");
-    TEST_ASSERT(ops.recv_timed_out != NULL, "recv_timed_out wired");
+    TEST_ASSERT(ops.recv_ready != NULL, "recv_ready wired");
 
     u8 rbuf[64];
     struct p9_transport t;
     TEST_EXPECT_EQ(p9_transport_init(&t, ops, rbuf, sizeof(rbuf)), 0, "transport init");
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
 
-    // A fresh (future) deadline routes through + clears the signal.
-    p9_transport_set_recv_deadline(&t, timer_now_ns() + 1000000000ull);
-    TEST_ASSERT(!p9_transport_recv_timed_out(&t), "freshly armed -> not yet timed out");
-
-    // A past deadline + empty s2c -> the recv times out promptly, and the signal
-    // surfaces through the recv_timed_out shim.
-    p9_transport_set_recv_deadline(&t, timer_now_ns());
+    bool empty   = p9_transport_recv_ready(&t, &pw);
+    bool filed   = (pw.list != NULL);
+    bool quiet   = !pw.ready;
+    const u8 frame[P9_HDR_LEN] = { P9_HDR_LEN, 0, 0, 0, P9_RCLUNK, 1, 0 };
+    long sent    = srvconn_server_send(cn, frame, (long)sizeof(frame));
+    bool woken   = pw.ready;
+    poll_waiter_list_unregister(&pw);
+    bool ready   = p9_transport_recv_ready(&t, NULL);
     u8 buf[16];
-    int n = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, -1, "recv on empty s2c past the deadline -> -1");
-    TEST_ASSERT(p9_transport_recv_timed_out(&t),
-                "recv_timed_out routes to srvconn_client_timed_out (true)");
+    int n        = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
+    bool drained = !p9_transport_recv_ready(&t, NULL);
+    srvconn_teardown(cn);
+    bool eof     = p9_transport_recv_ready(&t, NULL);
+    pw.magic = 0;
+
+    TEST_ASSERT(!empty && filed && quiet, "empty s2c: not ready, the hook filed with the sample");
+    TEST_ASSERT(sent == (long)sizeof(frame) && woken, "the server's reply wakes the hook");
+    TEST_ASSERT(ready, "bytes on s2c are ready");
+    TEST_EXPECT_EQ(n, (int)sizeof(frame), "and the recv reads them");
+    TEST_ASSERT(drained, "drained: not ready again");
+    TEST_ASSERT(eof, "the teardown's EOF is ready");
 
     (void)ops.close(ops.ctx);
     p9_transport_destroy(&t);
@@ -693,7 +701,7 @@ void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(vo
 // These two tests prove it END-TO-END over the PRODUCTION p9_srvconn_transport:
 // a real srvconn_teardown (the path a DeviceRemoved drives) latches s2c EOF, so
 // the kernel client's recv returns 0 -> -ENODEV reaches a real Loom consumer,
-// while a real deadline-elapsed recv returns -1 -> -EIO. The load-bearing claim
+// while a transport error (here a malformed frame) is -1 -> -EIO. The load-bearing claim
 // is that the production SrvConn ACTUALLY produces recv-0-on-teardown (not -1),
 // so the device-gone reason reaches the CQE consumer over the wire a driver's
 // Loom rides -- the gap the loopback's synthetic force_eof cannot close.
@@ -811,8 +819,8 @@ void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void) {
     // actually produces it over the wire a driver's Loom rides.
     srvconn_teardown(cn);
 
-    int pumped = p9_client_reader_pump_once(&g_sc_client);
-    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD (a control signal)");
+    int pumped = p9_client_reader_pump_ready(&g_sc_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "pump returns DEAD (a control signal)");
     TEST_ASSERT(g_sc_async.completed, "async op completed on the device-gone EOF");
     TEST_EXPECT_EQ((u64)(s64)g_sc_async.last_result, (u64)(s64)(-P9_E_NODEV),
         "device-gone CQE = -ENODEV (NOT -EIO) over the real srvconn");
@@ -855,15 +863,18 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
     int rc = p9_client_submit_async(&g_sc_client, &g_sc_async.rpc, sc_build_fsync, &fid);
     TEST_EXPECT_EQ(rc, 0, "submit_async(fsync) over srvconn -- op in flight");
 
-    // TRANSPORT ERROR (not device-gone): arm a PAST recv deadline. The next recv
-    // on the empty -- but NOT torn -- s2c times out and returns -1 (an error),
-    // NOT 0 (a clean EOF). The reader classifies this transport, not device-gone
-    // -> the in-flight op gets the generic -EIO. The contrast proves the SrvConn
-    // distinguishes the two reasons: the -ENODEV companion above is not an
-    // accident of the transport always returning 0.
-    srvconn_set_client_deadline(cn, timer_now_ns());   // already elapsed -> -1
-    int pumped = p9_client_reader_pump_once(&g_sc_client);
-    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD");
+    // TRANSPORT ERROR (not device-gone): the server sends a frame whose size is
+    // below the header's, on an s2c that is NOT torn. The stream is ready, the
+    // pump reads it, and the assembler rejects it with -1 (an error), NOT 0 (a
+    // clean EOF). The reader classifies this transport, not device-gone -> the
+    // in-flight op gets the generic -EIO. The contrast proves the reason rides
+    // the real wire: the -ENODEV companion above is not an accident of the
+    // transport always returning 0.
+    const u8 bad[P9_HDR_LEN] = { 3, 0, 0, 0, P9_RFSYNC, 0, 0 };   // size 3 < header
+    TEST_EXPECT_EQ(srvconn_server_send(cn, bad, (long)sizeof(bad)), (long)sizeof(bad),
+                   "the malformed frame is on s2c");
+    int pumped = p9_client_reader_pump_ready(&g_sc_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "pump returns DEAD");
     TEST_ASSERT(g_sc_async.completed, "async op completed on the transport error");
     TEST_EXPECT_EQ((u64)(s64)g_sc_async.last_result, (u64)(s64)(-P9_E_IO),
         "transport-error CQE = -EIO (NOT device-gone) over the real srvconn");
