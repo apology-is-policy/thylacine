@@ -1,0 +1,12 @@
+{
+  "head": "5ff62b78809846af4780ec41f82d1676e7584e80",
+  "index_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sources": {
+    "kernel/burrow.c": "d6b67e735294f5b273d684c4c7cff4d2c88ebb4dcd744c7dac24ec5d4764c0a7",
+    "kernel/vma.c": "6a420aff58ec95c22effd9b91e8effd31c3a83348476b2766bc008a78ecebf6d",
+    "kernel/loom.c": "2cd8d16325fe7bdb74d3c61689bb7ab8ce7cc239ed000906c2dc3668510968ee",
+    "kernel/weft.c": "d95cc227a9426af4682c6e1dd826e125ab574d9bff4f8dd511ed0bc992fccbe6",
+    "kernel/syscall.c": "3530a7e7f30154e8b93fa8688629b0fceab07f552b7a7f84406006815e26c84c",
+    "kernel/include/thylacine/burrow.h": "51f801b00bd0be41ce70ad7df01f2a7a88eafc4478934048794f354726a0350c"
+  }
+}

@@ -1,0 +1,9 @@
+# Build products of the host double -- reproducible from the .c files by
+# reproduce.py, and a committed binary is not evidence of anything.
+asr9-old
+asr9-new
+mut-M*
+!mut-M*.c
+!mut-M*.log
+*.dSYM/
+*-build.log
