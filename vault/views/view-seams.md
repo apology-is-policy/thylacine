@@ -12,6 +12,8 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | seam | status | surface | opened by | tracker |
 |---|---|---|---|---|
+| [[seam-221-idle-pump-wake]] | closed | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
+| [[seam-223-pump-tail-starvation]] | closed | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
 | [[seam-80-pivot-orphan-mounts]] | closed | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
@@ -24,8 +26,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
-| [[seam-221-idle-pump-wake]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
-| [[seam-223-pump-tail-starvation]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
 | [[seam-240-lo-redial]] | open | sub-netd-server | adt-net8d-r1 | task #240 |
 | [[seam-242-selftest-nonfatal]] | open | sub-netd-nic | adt-net8d-r1 | task #242 |
 | [[seam-350-async-eagain]] | open | sub-kernel-ninep-client | chg-2026-06-24-349-flow-control | task #350 |
