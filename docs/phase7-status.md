@@ -1172,8 +1172,8 @@ against npxf b8854ee and npxf-p3c 7064e33, and a flipped vector fails with rc 1.
 
 The operator's votes of 2026-10-06, "Gate CPU time to the owner" and "Restrict it too" (IMPERIUM-DESIGN 11.3 item 10),
 which close the imperium Fable pass's F3: a key typed into the trusted episode wakes its authority, and any counter that
-moves once per wake on a quiet machine publishes the secret's length and cadence. Scripture {SCRIPT}; code, witnesses
-and dossiers in one commit, {CODE}.
+moves once per wake on a quiet machine publishes the secret's length and cadence. Scripture 61ec2488d; code, witnesses
+and dossiers in one commit, 614a94c3b.
 
 - **A Proc's CPU time** (`/ctl/procs`'s `CPU_NS`, `/proc/<pid>/status`'s `cpu_ns`) is shown to its owner or a
   `CAP_HOSTOWNER` holder, the rule `/proc/<pid>/sched` already used (`devproc_owner_or_hostowner`).

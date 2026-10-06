@@ -4,7 +4,7 @@ type: chg
 title: "CPU time goes owner-only, and the scheduler's counters become the system principal's"
 date: 2026-10-06
 arc: arc-identity-detour
-commits: ["*(pending)*"]
+commits: ["61ec2488d", "614a94c3b"]
 touched:
   - sub-kernel-devctl
   - sub-kernel-devproc
