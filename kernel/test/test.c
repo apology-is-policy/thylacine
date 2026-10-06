@@ -1172,6 +1172,8 @@ void test_devctl_walk_to_each_leaf(void);
 void test_devctl_walk_unknown_misses(void);
 void test_devctl_read_procs_format(void);
 void test_devctl_procs_tables_column(void);
+void test_devctl_counters_gated(void);         // IMPERIUM 11.3 item 10: owner/system-only counters
+void test_devctl_procs_rows_whole(void);       // a /ctl/procs row is committed whole
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
@@ -3322,6 +3324,8 @@ struct test_case g_tests[] = {
     { "devctl.walk_unknown_misses",    test_devctl_walk_unknown_misses,    false, NULL },
     { "devctl.read_procs_format",      test_devctl_read_procs_format,      false, NULL },
     { "devctl.procs_tables_column",    test_devctl_procs_tables_column,    false, NULL },
+    { "devctl.counters_gated",         test_devctl_counters_gated,         false, NULL },
+    { "devctl.procs_rows_whole",       test_devctl_procs_rows_whole,       false, NULL },
     { "devctl.cpu_sources_live",       test_devctl_cpu_sources_live,       false, NULL },
     { "devctl.read_memory_format",     test_devctl_read_memory_format,     false, NULL },
     { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },

@@ -33,6 +33,8 @@ void test_devctl_walk_to_each_leaf(void);
 void test_devctl_walk_unknown_misses(void);
 void test_devctl_read_procs_format(void);
 void test_devctl_procs_tables_column(void);
+void test_devctl_counters_gated(void);
+void test_devctl_procs_rows_whole(void);
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
@@ -157,7 +159,8 @@ void test_devctl_read_procs_format(void) {
 }
 
 // prowl-3b: /ctl/cpu -- the per-CPU meter denominator (cpus + per-CPU idle_ns +
-// capacity). All-visible like the other coarse /ctl leaves.
+// capacity). World-readable; idle_ns, ctxt and intr read "-" to a reader that is
+// neither the system principal nor a hostowner (devctl.counters_gated).
 void test_devctl_read_cpu_format(void) {
     struct Spoor *c = open_ctl_leaf("cpu");
     TEST_ASSERT(c != NULL, "open /ctl/cpu");
@@ -409,7 +412,7 @@ void test_devctl_read_kernel_base_format(void) {
 // /ctl is world-reachable, that ONE leaf is gated on CAP_HOSTOWNER -- an
 // unprivileged caller (a logged-in user, stripped of the elevation-only caps
 // at rfork) cannot read it and defeat KASLR. The predicate is leaf-specific;
-// the coarse procs/memory/devices/sched stats stay world-readable.
+// the other leaves stay world-readable, with IMPERIUM 11.3 item 10's field gates.
 // (The format test above passes only because it temporarily elevates the test
 // thread to CAP_HOSTOWNER; kproc's CAP_ALL does NOT include the elevation-only
 // CAP_HOSTOWNER -- caps.h pins CAP_ALL & CAP_ELEVATION_ONLY == 0.)
@@ -619,4 +622,300 @@ void test_devctl_stat_native_shapes(void) {
     TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0400u),
                    "kernel-base = S_IFREG|0400 (the CAP_HOSTOWNER gate, stated)");
     spoor_clunk(kb);
+}
+
+// IMPERIUM-DESIGN 11.3 item 10: CPU time is its owner's and the scheduler's
+// counters the system principal's. The in-kernel runner is kproc, which IS the
+// system principal and the owner of itself, so it can only see the allow side;
+// the deny side needs another reader. A real child of the test's Proc (so
+// /ctl/procs lists it) takes a principal of its own and reads every gated
+// surface through the real read paths -- devctl_read and devproc_read_cb, whose
+// wiring of the reader is what a gate check alone cannot prove -- first as an
+// ordinary reader, then holding CAP_HOSTOWNER. The child exits and is reaped
+// before any assertion, so a red leg leaves nothing behind.
+#define GATE_PRINCIPAL 0xC0FFEEu
+struct gate_read {
+    long          got;
+    int           own_ntok, k_ntok;
+    char          own_cpu[24], k_cpu[24];    // the CPU_NS token of each row
+    bool          cpu_row0_dash3;            // /ctl/cpu row 0: idle_ns ctxt intr all "-"
+    bool          cpu_row0_num3;             // ... all numbers
+    bool          cpu_capacity_num;          // capacity a number either way
+    bool          sched_runnable_dash, sched_runnable_num;
+    bool          sched_wc_dash, sched_wc_num;
+    bool          sched_cpus_num, sched_created_num;
+    bool          st_k_dash, st_k_num, st_own_num;
+};
+static struct gate_read g_gate[2];          // [0] ordinary, [1] CAP_HOSTOWNER
+static int g_gate_self;
+
+// The idx'th space-separated token of the line starting at `line`, NUL-copied.
+static void line_token(const char *line, const char *end, int idx, char *out, size_t cap) {
+    out[0] = '\0';
+    const char *k = line;
+    for (int n = 0; k < end; n++) {
+        while (k < end && *k == ' ') k++;
+        const char *t = k;
+        while (k < end && *k != ' ' && *k != '\n') k++;
+        if (k == t) return;
+        if (n == idx) {
+            size_t len = (size_t)(k - t);
+            if (len >= cap) len = cap - 1;
+            for (size_t i = 0; i < len; i++) out[i] = t[i];
+            out[len] = '\0';
+            return;
+        }
+    }
+}
+static const char *line_after(const char *buf, size_t len, const char *prefix, const char **end) {
+    size_t pl = 0;
+    while (prefix[pl]) pl++;
+    for (size_t i = 0; i < len; ) {
+        size_t e = i;
+        while (e < len && buf[e] != '\n') e++;
+        if (e - i >= pl) {
+            size_t j = 0;
+            while (j < pl && buf[i + j] == prefix[j]) j++;
+            if (j == pl) { *end = buf + e; return buf + i + pl; }
+        }
+        i = e + 1;
+    }
+    *end = NULL;
+    return NULL;
+}
+static bool all_digits(const char *t) {
+    if (!t[0]) return false;
+    for (size_t i = 0; t[i]; i++) if (t[i] < '0' || t[i] > '9') return false;
+    return true;
+}
+static bool is_dash(const char *t) { return t[0] == '-' && t[1] == '\0'; }
+
+// Every key=value token on a line: how many there are, and how many values
+// read "-" and how many are numbers.
+static void kv_values(const char *line, const char *end, int *all, int *dash, int *num) {
+    char tok[40];
+    for (int i = 0; ; i++) {
+        line_token(line, end, i, tok, sizeof tok);
+        if (!tok[0]) return;
+        const char *v = tok;
+        while (*v && *v != '=') v++;
+        if (*v == '=') v++;
+        (*all)++;
+        if (is_dash(v))          (*dash)++;
+        else if (all_digits(v))  (*num)++;
+    }
+}
+
+static long read_status_of(int pid, char *buf, size_t cap) {
+    char name[12];
+    int n = 0;
+    if (pid == 0) name[n++] = '0';
+    else { char tmp[12]; int tn = 0; while (pid > 0) { tmp[tn++] = (char)('0' + pid % 10); pid /= 10; }
+           while (tn > 0) name[n++] = tmp[--tn]; }
+    name[n] = '\0';
+    struct Spoor *root = devproc.attach("");
+    if (!root) return -1;
+    const char *n1[1] = { name };
+    struct Walkqid *wq = devproc.walk(root, NULL, n1, 1);
+    spoor_unref(root);
+    if (!wq) return -1;
+    struct Spoor *piddir = wq->nqid == 1 ? wq->spoor : NULL;
+    if (!piddir) spoor_unref(wq->spoor);
+    walkqid_free(wq);
+    if (!piddir) return -1;
+    const char *n2[1] = { "status" };
+    wq = devproc.walk(piddir, NULL, n2, 1);
+    spoor_unref(piddir);
+    if (!wq) return -1;
+    struct Spoor *st = wq->nqid == 1 ? wq->spoor : NULL;
+    if (!st) spoor_unref(wq->spoor);
+    walkqid_free(wq);
+    if (!st) return -1;
+    if (!devproc.open(st, 0)) { spoor_unref(st); return -1; }
+    long got = devproc.read(st, buf, (long)cap, 0);
+    spoor_clunk(st);
+    return got;
+}
+
+static void gate_read_all(struct gate_read *r, int self) {
+    static char buf[2048];
+    const char *e;
+    char tok[24];
+
+    struct Spoor *c = open_ctl_leaf("procs");
+    r->got = c ? devctl.read(c, buf, sizeof buf, 0) : -1;
+    if (c) spoor_clunk(c);
+    if (r->got > 0) {
+        unsigned long f[9] = { 0 };
+        r->own_ntok = procs_row_of(buf, (size_t)r->got, self, f, 9);
+        r->k_ntok   = procs_row_of(buf, (size_t)r->got, 0, f, 9);
+        // procs_row_of folds a non-number to 0, so take the CPU_NS token as text.
+        for (int which = 0; which < 2; which++) {
+            int pid = which ? 0 : self;
+            char *dst = which ? r->k_cpu : r->own_cpu;
+            dst[0] = '\0';
+            for (size_t i = 0; i < (size_t)r->got; ) {
+                size_t le = i;
+                while (le < (size_t)r->got && buf[le] != '\n') le++;
+                line_token(buf + i, buf + le, 0, tok, sizeof tok);
+                unsigned long v = 0;
+                for (size_t q = 0; tok[q]; q++) v = v * 10u + (unsigned long)(tok[q] - '0');
+                if (all_digits(tok) && v == (unsigned long)pid) {
+                    line_token(buf + i, buf + le, 8, dst, 24);
+                    break;
+                }
+                i = le + 1;
+            }
+        }
+    }
+
+    c = open_ctl_leaf("cpu");
+    long got = c ? devctl.read(c, buf, sizeof buf, 0) : -1;
+    if (c) spoor_clunk(c);
+    if (got > 0) {
+        const char *row = line_after(buf, (size_t)got, "0 ", &e);
+        if (row) {
+            char idle[24], capy[24], ctxt[24], intr[24];
+            line_token(row, e, 0, idle, sizeof idle);
+            line_token(row, e, 1, capy, sizeof capy);
+            line_token(row, e, 2, ctxt, sizeof ctxt);
+            line_token(row, e, 3, intr, sizeof intr);
+            r->cpu_row0_dash3   = is_dash(idle) && is_dash(ctxt) && is_dash(intr);
+            r->cpu_row0_num3    = all_digits(idle) && all_digits(ctxt) && all_digits(intr);
+            r->cpu_capacity_num = all_digits(capy);
+        }
+    }
+
+    c = open_ctl_leaf("sched");
+    got = c ? devctl.read(c, buf, sizeof buf, 0) : -1;
+    if (c) spoor_clunk(c);
+    if (got > 0) {
+        const char *v;
+        if ((v = line_after(buf, (size_t)got, "runnable: ", &e))) {
+            line_token(v, e, 0, tok, sizeof tok);
+            r->sched_runnable_dash = is_dash(tok);
+            r->sched_runnable_num  = all_digits(tok);
+        }
+        // Every value on both lines, so a field that loses its gate is caught; a
+        // new field changes the count of nine and fails until it is judged.
+        int all = 0, dash = 0, num = 0;
+        if ((v = line_after(buf, (size_t)got, "wc: ", &e)))          kv_values(v, e, &all, &dash, &num);
+        if ((v = line_after(buf, (size_t)got, "wc-tickless: ", &e))) kv_values(v, e, &all, &dash, &num);
+        r->sched_wc_dash = all == 9 && dash == 9;
+        r->sched_wc_num  = all == 9 && num == 9;
+        if ((v = line_after(buf, (size_t)got, "cpus: ", &e))) {
+            line_token(v, e, 0, tok, sizeof tok);
+            r->sched_cpus_num = all_digits(tok);
+        }
+        if ((v = line_after(buf, (size_t)got, "created: ", &e))) {
+            line_token(v, e, 0, tok, sizeof tok);
+            r->sched_created_num = all_digits(tok);
+        }
+    }
+
+    got = read_status_of(0, buf, sizeof buf);
+    if (got > 0) {
+        const char *v = line_after(buf, (size_t)got, "cpu_ns:  ", &e);
+        if (v) { line_token(v, e, 0, tok, sizeof tok); r->st_k_dash = is_dash(tok); r->st_k_num = all_digits(tok); }
+    }
+    got = read_status_of(self, buf, sizeof buf);
+    if (got > 0) {
+        const char *v = line_after(buf, (size_t)got, "cpu_ns:  ", &e);
+        if (v) { line_token(v, e, 0, tok, sizeof tok); r->st_own_num = all_digits(tok); }
+    }
+}
+
+static void counters_gated_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    g_gate_self = self->pid;
+    __atomic_store_n(&self->principal_id, GATE_PRINCIPAL, __ATOMIC_RELEASE);
+    u64 caps = __atomic_load_n(&self->caps, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&self->caps, caps & ~CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    gate_read_all(&g_gate[0], self->pid);
+    __atomic_store_n(&self->caps, caps | CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    gate_read_all(&g_gate[1], self->pid);
+    exits("ok");
+}
+
+void test_devctl_counters_gated(void) {
+    extern bool devctl_system_counters_readable(const struct Proc *reader);
+    g_gate[0] = (struct gate_read){ 0 };
+    g_gate[1] = (struct gate_read){ 0 };
+    g_gate_self = 0;
+    int pid = rfork(RFPROC, counters_gated_thunk, NULL);
+    int st = -1;
+    int reaped = (pid > 0) ? wait_pid_for(pid, 0, &st) : -1;
+
+    // The system principal: kproc itself, through the same paths.
+    struct gate_read sysr = { 0 };
+    gate_read_all(&sysr, 0);
+
+    TEST_ASSERT(pid > 0, "rfork the reader child under the test's Proc");
+    TEST_ASSERT(reaped == pid, "reap the reader child");
+    TEST_EXPECT_EQ(g_gate_self, pid, "the child read as itself");
+
+    const struct gate_read *o = &g_gate[0], *h = &g_gate[1];
+    TEST_ASSERT(o->got > 0 && o->own_ntok == 9 && o->k_ntok == 9,
+                "an ordinary reader sees every row, all nine columns");
+    TEST_ASSERT(all_digits(o->own_cpu), "an ordinary reader sees its own CPU_NS");
+    TEST_ASSERT(is_dash(o->k_cpu), "another principal's CPU_NS is '-' (/ctl/procs)");
+    TEST_ASSERT(o->st_own_num, "its own status cpu_ns is a number");
+    TEST_ASSERT(o->st_k_dash, "another principal's status cpu_ns is '-'");
+    TEST_ASSERT(o->cpu_row0_dash3, "/ctl/cpu idle_ns, ctxt and intr are '-' to an ordinary reader");
+    TEST_ASSERT(o->cpu_capacity_num, "the capacity class stays visible");
+    TEST_ASSERT(o->sched_runnable_dash, "/ctl/sched runnable is '-' to an ordinary reader");
+    TEST_ASSERT(o->sched_wc_dash, "the work-conservation counts are '-' to an ordinary reader");
+    TEST_ASSERT(o->sched_cpus_num && o->sched_created_num, "cpus: and created: stay visible");
+
+    TEST_ASSERT(all_digits(h->k_cpu), "a hostowner sees another principal's CPU_NS");
+    TEST_ASSERT(h->st_k_num, "a hostowner sees another principal's status cpu_ns");
+    TEST_ASSERT(h->cpu_row0_num3, "a hostowner sees idle_ns, ctxt and intr");
+    TEST_ASSERT(h->sched_runnable_num && h->sched_wc_num, "a hostowner sees the scheduler counters");
+
+    TEST_ASSERT(all_digits(sysr.k_cpu), "the system principal sees its own CPU_NS");
+    TEST_ASSERT(sysr.cpu_row0_num3, "the system principal sees idle_ns, ctxt and intr");
+    TEST_ASSERT(sysr.sched_runnable_num && sysr.sched_wc_num, "the system principal sees the scheduler counters");
+
+    // The predicate on its own, including the NULL reader: one zeroed Proc,
+    // its principal and caps set per case.
+    struct Proc r;
+    for (size_t i = 0; i < sizeof(r); i++) ((u8 *)&r)[i] = 0;
+    r.principal_id = PRINCIPAL_SYSTEM;
+    bool sys_ok = devctl_system_counters_readable(&r);
+    r.principal_id = GATE_PRINCIPAL;
+    bool user_ok = devctl_system_counters_readable(&r);
+    r.caps = CAP_HOSTOWNER;
+    bool ho_ok = devctl_system_counters_readable(&r);
+    TEST_ASSERT(sys_ok,  "PRINCIPAL_SYSTEM reads the system counters");
+    TEST_ASSERT(ho_ok,   "CAP_HOSTOWNER reads the system counters");
+    TEST_ASSERT(!user_ok, "an ordinary principal does not");
+    TEST_ASSERT(!devctl_system_counters_readable(NULL), "no reader does not");
+}
+
+// A /ctl/procs row is committed whole or not at all. At every buffer size the
+// output is the header and whole rows of nine columns: a row cut mid-number
+// would hand ps and prowl a plausible smaller figure.
+size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
+void test_devctl_procs_rows_whole(void) {
+    static char buf[1024];
+    const struct Proc *self = current_thread()->proc;
+    size_t full = devctl_format_procs_for_test(self, buf, sizeof buf);
+    TEST_ASSERT(full > 0 && buf[full - 1] == '\n', "procs formats into 1 KiB");
+    int cut = 0, short_rows = 0, sized = 0;
+    for (size_t cap = 1; cap <= full; cap++) {
+        size_t got = devctl_format_procs_for_test(self, buf, cap);
+        if (got == 0) continue;                  // the header alone does not fit
+        sized++;
+        if (buf[got - 1] != '\n') { cut++; continue; }
+        size_t ls = got - 1;
+        while (ls > 0 && buf[ls - 1] != '\n') ls--;
+        int ntok = 0;
+        for (size_t i = ls; i < got - 1; i++)
+            if (buf[i] != ' ' && (i == ls || buf[i - 1] == ' ')) ntok++;
+        if (ntok != 9) short_rows++;
+    }
+    TEST_ASSERT(sized > 1, "some sizes fit the header and more");
+    TEST_EXPECT_EQ(cut, 0, "no buffer size leaves a row cut mid-field");
+    TEST_EXPECT_EQ(short_rows, 0, "every last line carries nine columns");
 }

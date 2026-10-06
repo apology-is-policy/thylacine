@@ -14,9 +14,9 @@ validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
 abis: []
-design: ["docs/PROWL-DESIGN.md"]
+design: ["docs/PROWL-DESIGN.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-09-23
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -75,6 +75,18 @@ count, so the multiply stays well inside range.
 idle delta over the wall delta, clamped, so a core that parked the whole
 interval reads zero and a fully busy one reads a hundred. The clamp
 protects against clock-domain skew between the two measurements.
+
+**A withheld counter is absent, not zero (2026-10-06).** To an ordinary
+reader the kernel renders another principal's CPU time, and every CPU's idle
+time, as `-` (IMPERIUM-DESIGN 11.3 item 10, the amendment to PROWL-DESIGN
+3.5): the trusted episode's key cadence would otherwise show in both. The
+sampler parses `-` to `None` and carries it through. That row's %CPU reads
+`-` and sorts below every visible figure. A CPU whose idle time is withheld
+draws a dashed meter. The aggregate meter, drawn when `/ctl/cpu` reads empty,
+sums only the visible rows and, when any row was withheld, is labelled
+`CPU (own)`. A `0` would have been the
+easy rendering and a false one: it reads as an idle process or an idle core.
+The reader's own processes and a hostowner's view are unchanged.
 
 **The cursor tracks a process identifier, not a row index**, so it stays
 on the same process across re-sorts and list churn. Navigation steps the

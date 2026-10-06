@@ -2,17 +2,18 @@
 id: sub-kernel-devctl
 type: sub
 parent: moc-kernel-introspection
-title: "/ctl — machine-wide stats, and the one gated leaf"
+title: "/ctl — machine-wide stats, two gated leaves, and counters with owners"
 code:
   - kernel/devctl.c
+  - kernel/test/test_devctl.c
 audit: light
 guarded-by: []
 validated-by: [prose, gate-smp]
 locks: [lock-proc-table]
 abis: []
-design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
+design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -89,14 +90,71 @@ logged-in user is stripped of the elevation-only capabilities at fork, so it
 cannot read the slide and defeat the mitigation.
 
 Everything else is world-readable Plan 9 introspection: the full process list
-with names, parents, states, thread counts, page counts and CPU time, visible to
-any Proc that can name `/ctl`. That is the deliberate posture, not an oversight —
-but see Caveats for the shape it leaves behind.
+with names, parents, states, thread counts and page counts, visible to any Proc
+that can name `/ctl`. That is the deliberate posture, not an oversight — but see
+Caveats for the shape it leaves behind. CPU time and the scheduler's event
+counters are the exception, and they are gated per field rather than per leaf
+(next section).
 
 The mode reported by `stat_native` follows the gate (0400 for `kernel-base`
 and `kstack`, 0444 elsewhere) so the advertised mode does not lie about a file the caller
 cannot in fact read — but as with `/proc`, `perm_enforced` is false, so that mode
 is documentation and the check at the read site is the enforcement.
+
+### CPU time and the scheduler's counters have owners
+
+Since 2026-10-06 (IMPERIUM-DESIGN 11.3 item 10, [[dec-2026-10-06-cpu-time-gate]])
+three leaves carry fields that render `-` to a reader who does not own them.
+The leaf stays readable and the row keeps its shape; only the number is
+withheld. The reason is the trusted episode. While a user types a secret into
+the attached authority (corvus, during a login), every key wakes that authority:
+it accrues CPU time, a CPU switches context and takes an interrupt, and a CPU
+leaves idle. On a quiet machine each of those counters moves once per key, so a
+reader that polls them recovers the secret's length and the timing of its keys,
+the channel of Peeping Tom (USENIX Security 2009) and of Diao et al. (IEEE S&P
+2016).
+
+There are two owners:
+
+- **A Proc's CPU time is that Proc's.** The trailing `CPU_NS` column of
+  `/ctl/procs` shows the number only when `devproc_owner_or_hostowner(reader,
+  row)` holds. That is the predicate `/proc/<pid>/sched` and the `cpu_ns` line
+  of `/proc/<pid>/status` use ([[sub-kernel-devproc]]), so the two Devs cannot
+  disagree about a row.
+- **The machine-wide counters are the system principal's.** In `/ctl/cpu`, the
+  `idle_ns`, `ctxt` and `intr` columns; in `/ctl/sched`, the `runnable:`,
+  `wc:` and `wc-tickless:` values. They are shown only to a reader whose
+  principal is `PRINCIPAL_SYSTEM` or who holds `CAP_HOSTOWNER`
+  (`devctl_system_counters_readable`). The SYSTEM leg is there because joey's
+  boot benchmarks run as SYSTEM without `CAP_HOSTOWNER`: kproc's `CAP_ALL`
+  excludes the elevation-only set. `cpus:`, `created:`, the capacity class, the
+  cache line and the MIDR stay visible to everyone. No key moves them: they are
+  hardware description or a total that only counts creations.
+
+`devctl_read` resolves the reader once per read, as the calling thread's Proc,
+and every formatter takes it. A leaf that needs no gate says `(void)reader`;
+none lacks the means to ask. The principal and the capabilities are read with
+acquire loads, because other threads write both (`proc_apply_identity`,
+`proc_become_legate`).
+
+A withheld value renders `-`, never `0`. Zero is a plausible reading (an idle
+CPU's interrupt delta, a new Proc's CPU time), so a consumer could not tell it
+from the truth. No counter takes the value `-`, and every consumer learned it
+in the same change: ps, prowl and diorama. A withheld value is not computed
+either. The formatter passes 0 to the emit and skips `sched_wc_stats`
+altogether, so the secret never reaches the render buffer.
+
+The reader is whoever calls `read`, not whoever opened the file. A descriptor
+handed to another Proc reads with that Proc's authority, as with every Plan 9
+file generated at read time. So a SYSTEM service that relays these counters to
+other principals must withhold them itself. The shared instance of
+[[sub-diorama]] does.
+
+`devctl.counters_gated` is the witness. A forked child takes an ordinary
+principal and no `CAP_HOSTOWNER`, reads every gated surface through the real
+read path and requires `-` in each, with its own row's `CPU_NS` a number. It
+then takes `CAP_HOSTOWNER` and requires numbers. The parent reads as SYSTEM,
+and the predicate's legs are checked on their own.
 
 ### Zero means overflow, and an empty string writes zero bytes
 
@@ -141,6 +199,14 @@ this stopped being a formatting nicety: it is what bounds an unprivileged
 tight-loop reader's lock hold to the size of the buffer instead of the size of
 the process table.
 
+A row is committed whole or not at all, in `/ctl/procs` and `/ctl/kstack`
+alike: the callback formats at the buffer's tail and, if any field does not
+fit, rolls the offset back to the row's start before it stops. A row cut
+mid-number would hand `ps` and `prowl` a plausible smaller figure, which is
+worse than a list that ends early. `devctl.procs_rows_whole` formats the list
+into every buffer size from one byte up and requires each result to end on a
+whole row of nine columns.
+
 ### The STATE column shows job-stop, never debug-stop
 
 An ALIVE Proc carrying `job_stop_req` (a `/proc/<pid>/ctl` suspend, or a Ctrl-Z
@@ -178,6 +244,9 @@ per-CPU scheduler meters.
 Only `g_proc_table_lock`, and only for the process list (taken by
 `proc_for_each`; the CPU-time helper walks a Proc's threads under it).
 
+The CPU-time gates read the reader's principal and capabilities with acquire
+loads and take no lock.
+
 Everything else is read without a lock, and each has its own reason: the physical
 counters and scheduler stats are coherent atomic snapshots of a single writer;
 per-CPU capacity, cache-line size and MIDR are boot-static; the Dev registry is
@@ -188,6 +257,9 @@ because a cross-Proc reader holds no per-Proc lock.
 
 **I-16** (the KASLR slide is a secret) — the `kernel-base` gate is one of its two
 enforcement sites, the other being the `/proc` kernel-stack raw/symbolic split.
+
+**I-27** (the trusted path): the CPU-time gates keep the trusted episode's
+key cadence from the counters (IMPERIUM-DESIGN 11.3 item 10).
 
 Composes **I-1**: reachability is namespace visibility.
 
@@ -210,6 +282,15 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   new leaf is *readable by everyone*.
 - **The `kernel-base` gate must stay capability-only.** There is no owner to
   admit.
+- **A counter that moves when another principal's work runs gets a gate.** The
+  question is not whether the number is secret. It is whether the number changes
+  once per event in someone else's Proc, because such a counter publishes the
+  cadence of a secret being typed. A new field of that kind goes through
+  `fmt_gated_udec` with the right owner: the row's Proc for a per-Proc value,
+  the system principal for a machine-wide one.
+- **A withheld field renders `-` and is never computed.** A `0` is a lie no
+  consumer can detect. A value computed and then hidden can reach the buffer
+  by a later edit.
 - **The process-list callback must keep stopping on overflow**, or an
   unprivileged reader re-acquires an unbounded global-lock hold.
 - **Sizes must stay 0** for generated leaves. Reporting a measured length invites
@@ -268,8 +349,8 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   mechanism fired once and landed benignly, which is what a default-allow shape
   does until the one time it does not.
 - **The process list is a full-system disclosure.** Names, parents, states,
-  thread, page and page-table counts and CPU time for every process, to any
-  reader. This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
+  thread, page and page-table counts for every process, to any reader. (CPU
+  time left this list on 2026-10-06 and is owner-only.) This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
   but it is worth
   stating plainly rather than leaving implied: `/ctl/procs` is the broadest
   ambient disclosure either introspection Dev makes.
@@ -280,4 +361,5 @@ the same offset-aware multi-read that `/proc` wants would fix both.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devctl-empty-emit]].
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devctl-empty-emit]],
+[[chg-2026-10-06-cpu-time-gate]].

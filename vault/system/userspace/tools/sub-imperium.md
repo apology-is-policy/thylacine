@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/IMPERIUM-DESIGN.md, docs/TRUSTED-PATH.md]
 created: 2026-09-17
-updated: 2026-09-21
+updated: 2026-10-06
 ---
 ## Halcyon operation
 
@@ -81,6 +81,14 @@ Scope-root death marks all members and prevents late child publication.
 
 Only the trusted reader can render/read the SAK episode; the tool is not the
 authorization display.
+
+The episode's key cadence is kept off the machine's counters (IMPERIUM-DESIGN
+11.3 item 10, 2026-10-06). CPU time is shown only to its owner or a hostowner,
+and the idle, context-switch, interrupt and park counters only to the system
+principal or a hostowner. So a session polling `/ctl` or `/proc` while
+another user types a key into the episode sees nothing move once per key. The
+gate is the kernel's ([[sub-kernel-devctl]], [[sub-kernel-devproc]]); this
+tool adds nothing to it.
 
 ## Error paths
 

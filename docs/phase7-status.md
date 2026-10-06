@@ -1168,6 +1168,46 @@ Verification: the bake prints `check-flag-words: 9 words ok; the self-test caugh
 against npxf b8854ee and npxf-p3c 7064e33, and a flipped vector fails with rc 1. ambush-probe passes stage C
 (`launch_at_entry=1`) and stage D; dap-nora PASS (nora's `:debug` launches its target through `/goroot`'s Ambush). The fork check refuses ce9154d ("does not compile held_on_thylacine.go untagged") and passes 073faaa.
 
+## CPU time and the scheduler's counters have owners — 2026-10-06
+
+The operator's votes of 2026-10-06, "Gate CPU time to the owner" and "Restrict it too" (IMPERIUM-DESIGN 11.3 item 10),
+which close the imperium Fable pass's F3: a key typed into the trusted episode wakes its authority, and any counter that
+moves once per wake on a quiet machine publishes the secret's length and cadence. Scripture {SCRIPT}; code, witnesses
+and dossiers in one commit, {CODE}.
+
+- **A Proc's CPU time** (`/ctl/procs`'s `CPU_NS`, `/proc/<pid>/status`'s `cpu_ns`) is shown to its owner or a
+  `CAP_HOSTOWNER` holder, the rule `/proc/<pid>/sched` already used (`devproc_owner_or_hostowner`).
+- **The machine's counters** -- `/ctl/cpu`'s per-CPU `idle_ns`, `ctxt` and `intr`, and `/ctl/sched`'s `runnable`, `wc:`
+  and `wc-tickless:` -- are shown to `PRINCIPAL_SYSTEM` or a `CAP_HOSTOWNER` holder (`devctl_system_counters_readable`).
+  `devctl_read` resolves the reader once and threads it through every leaf's formatter.
+- **A withheld value renders `-`, never 0.** ps prints `-`, prowl draws the per-CPU bars dashed and totals only the
+  reader's own CPU time, cpubench reports `n/a`. The shared boot diorama runs as the system principal and anyone may
+  mount it, so it serves the counters withheld to every client (VIVARIUM 6.2); in a Linux vivarium `/proc/stat`'s cpu
+  lines carry zeros in their positional columns and the `intr` and `ctxt` lines are omitted (VIVARIUM 6.17, amended).
+- The kernel tests `devctl.counters_gated` (an rfork child under its own principal reads every surface, then as a
+  hostowner; kproc reads as the system principal) and `devctl.procs_rows_whole`; `tools/interactive/cpu-gate.exp`, and
+  a dashed-bar check in `prowl.exp`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, and one self-found P3; clean. F1, the unit
+test checked two of the nine work-conservation values, now checks all nine. F2, a `/ctl/procs` row cut mid-field when
+the buffer filled (pre-existing), is fixed in `/ctl/procs` and `/ctl/kstack` alike: a row is committed whole, and
+`devctl.procs_rows_whole` witnesses it. F3, the owner predicates load the caller's principal with acquire. F4,
+`/ctl/9p-sessions` shows every reader per-message counters, so a secret typed into a pty-served terminal shows its
+cadence; the trusted episode does not cross that leaf, so item 10 holds, and the leaf waits on an operator decision.
+F5, comments true of an older version, reworded. S5, prowl's aggregate meter reads `CPU (own)` when rows are withheld.
+Self-found before the round: the shared diorama as a deputy, a ps leg that could not fail, cpubench's 0, and diorama's
+`intr 0` and `ctxt 0`.
+
+Verification, on aux-3-land ff76575cc + this chunk (a `--config ci` bake): `tools/test.sh` 1887/1887 and boot OK, with
+diorama's selftest and diorama-probe passing; cpu-gate, prowl and idle-probe PASS. Eight kernel sabotages, each red on
+its own assertion alone (1886/1887): the owner check dropped from `/ctl/procs` and from status, the system gate dropped
+from `/ctl/cpu` and from `/ctl/sched`, the system principal's arm and the hostowner's arm removed, one work-conservation
+field ungated, the whole-row rollback removed. With the suite's gate test unregistered, cpu-gate fails on the device at
+the matching assertion for the first four and the ungated field. ps without its `-` case fails cpu-gate at the box
+count; prowl drawing a withheld CPU as an empty meter fails prowl.exp; the shared diorama relaying the kernel's view
+fails diorama-probe and the boot. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
+UBSan at 4 and 8).
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

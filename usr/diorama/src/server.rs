@@ -1095,17 +1095,22 @@ pub fn parse_cpu_cols(text: &[u8], want: u64) -> CpuCols {
 /// widened V-4c-2b row is ~90 B x <= 8 CPUs plus two header lines.
 const CTL_CPU_MAX: usize = 2048;
 
-/// CPU `want`'s cumulative idle-park ns (column 1), or None when the row is
-/// absent, offline, or unparseable -- never 0, which would read as a pegged
-/// 100%-busy core (the prowl-5 F2 hazard, on the other side of the boundary).
-pub fn parse_cpu_idle_ns(text: &[u8], want: u64) -> Option<u64> {
+/// CPU `want`'s cumulative idle-park ns (column 1): Some(Some(ns)) measured,
+/// Some(None) withheld -- the kernel renders "-" to a reader that is neither the
+/// system principal nor a hostowner (IMPERIUM-DESIGN 11.3 item 10) -- and None
+/// when the row is absent, offline, or unparseable. Never 0 for an unknown
+/// value, which would read as a pegged 100%-busy core (the prowl-5 F2 hazard,
+/// on the other side of the boundary).
+pub fn parse_cpu_idle_ns(text: &[u8], want: u64) -> Option<Option<u64>> {
     for line in text.split(|&c| c == b'\n') {
         let mut fields: [&[u8]; 8] = [b""; 8];
         if split_fields(line, &mut fields) < 2 {
             continue;
         }
         match parse_u64(fields[0]) {
-            Some(i) if i == want => return parse_u64(fields[1]),
+            Some(i) if i == want => {
+                return if fields[1] == b"-" { Some(None) } else { parse_u64(fields[1]).map(Some) };
+            }
             _ => continue,
         }
     }
@@ -1191,13 +1196,16 @@ fn native_procs_created() -> u64 {
 
 /// Sum a column across every CPU that reports it. Linux's `ctxt` and `intr` are
 /// system-wide totals; the kernel accounts them per-CPU (as Linux does
-/// internally), so the summation is the translation.
-pub fn sum_cpu_col(text: &[u8], ncpus: u64, pick: fn(&CpuCols) -> Option<u64>) -> u64 {
-    let mut total: u64 = 0;
+/// internally), so the summation is the translation. None when no CPU reports
+/// the column -- the kernel withholds it ("-") from a reader that is neither the
+/// system principal nor a hostowner -- so the caller omits the line rather than
+/// print a total of nothing.
+pub fn sum_cpu_col(text: &[u8], ncpus: u64, pick: fn(&CpuCols) -> Option<u64>) -> Option<u64> {
+    let mut total: Option<u64> = None;
     let mut i = 0u64;
     while i < ncpus && i <= CPU_INDEX_MAX {
         if let Some(v) = pick(&parse_cpu_cols(text, i)) {
-            total = total.saturating_add(v);
+            total = Some(total.unwrap_or(0).saturating_add(v));
         }
         i += 1;
     }
@@ -1822,12 +1830,35 @@ fn push_stat_cpu_line(r: &mut Render, label: &[u8], busy_ns: u64, idle_ns: u64) 
 fn render_stat(r: &mut Render) {
     let mut buf = [0u8; CTL_CPU_MAX];
     let got = read_ctl_cpu(&mut buf);
-    let text = &buf[..got];
-    let ncpus = parse_cpu_count(text);
-
     // Elapsed since boot IS CLOCK_MONOTONIC, and it is the denominator every
     // per-CPU busy figure is derived against.
     let (up_ns, real_ns) = clock_pair_ns();
+    render_stat_from(r, &buf[..got], up_ns, real_ns, native_procs_created(), viv_runner() == 0);
+}
+
+/// The /proc/stat render over its sources, pure so the selftest can drive it.
+///
+/// `shared` is the boot diorama, /srv/diorama: it runs as SYSTEM and serves
+/// clients of any principal. The kernel shows the per-CPU idle time, context
+/// switches and interrupts only to the system principal or a hostowner
+/// (IMPERIUM-DESIGN 11.3 item 10), so serving its own reads would hand an
+/// ordinary client what it is natively denied -- the deputy-as-authority
+/// failure VIVARIUM section 6.2 forbids (render_environ's reasoning). It serves
+/// them as withheld to every client instead. A per-container diorama runs as
+/// its container's principal, so its native reads are already its client's.
+pub fn render_stat_from(
+    r: &mut Render,
+    text: &[u8],
+    up_ns: u64,
+    real_ns: u64,
+    procs_created: u64,
+    shared: bool,
+) {
+    let ncpus = parse_cpu_count(text);
+    let idle_of = |i: u64| -> Option<Option<u64>> {
+        let v = parse_cpu_idle_ns(text, i);
+        if shared { v.map(|_| None) } else { v }
+    };
 
     // The aggregate `cpu` line is the sum over CPUs, exactly as Linux's is --
     // NOT a single-CPU figure scaled up, which would misreport a partly-idle
@@ -1836,7 +1867,7 @@ fn render_stat(r: &mut Render) {
     let mut busy_total: u64 = 0;
     let mut i = 0u64;
     while i < ncpus && i <= CPU_INDEX_MAX {
-        if let Some(idle) = parse_cpu_idle_ns(text, i) {
+        if let Some(Some(idle)) = idle_of(i) {
             idle_total = idle_total.saturating_add(idle);
             busy_total = busy_total.saturating_add(up_ns.saturating_sub(idle));
         }
@@ -1845,16 +1876,23 @@ fn render_stat(r: &mut Render) {
     push_stat_cpu_line(r, b"cpu", busy_total, idle_total);
     i = 0;
     while i < ncpus && i <= CPU_INDEX_MAX {
-        if let Some(idle) = parse_cpu_idle_ns(text, i) {
+        if let Some(idle) = idle_of(i) {
             // Whole LINES here (V-4c-3 SA-3, #72) -- the same commit discipline
             // as cpuinfo's blocks, at this file's unit. A truncated `cpuN` row
             // would hand a jiffies parser a short column count, and the lines
             // after it are what carry intr/ctxt/btime.
+            //
+            // A withheld idle time is a line of zeros: the CPU is there, the
+            // columns are positional, and Linux's format has no "-".
+            let (busy, idle) = match idle {
+                Some(v) => (up_ns.saturating_sub(v), v),
+                None => (0, 0),
+            };
             let mark = r.len();
             let mut label = Render::new();
             label.push(b"cpu");
             label.push_dec(i);
-            push_stat_cpu_line(r, label.bytes(), up_ns.saturating_sub(idle), idle);
+            push_stat_cpu_line(r, label.bytes(), busy, idle);
             if r.len() == RENDER_MAX {
                 r.truncate_to(mark);
                 break;
@@ -1863,19 +1901,27 @@ fn render_stat(r: &mut Render) {
         i += 1;
     }
 
-    r.push(b"intr ");
-    r.push_dec(sum_cpu_col(text, ncpus, |c| c.intr));
-    r.push(b"\nctxt ");
-    r.push_dec(sum_cpu_col(text, ncpus, |c| c.ctxt));
+    // intr and ctxt are whole lines, so a withheld total is omitted, not
+    // zeroed: a 0 would be a plausible count nobody measured (section 6.17).
+    for (label, pick) in [
+        (&b"intr "[..], (|c: &CpuCols| c.intr) as fn(&CpuCols) -> Option<u64>),
+        (b"ctxt ", |c: &CpuCols| c.ctxt),
+    ] {
+        if let Some(v) = if shared { None } else { sum_cpu_col(text, ncpus, pick) } {
+            r.push(label);
+            r.push_dec(v);
+            r.push(b"\n");
+        }
+    }
 
     // btime is the wall-clock second the system booted: REALTIME now minus how
     // long we have been up. Both halves are sourced (LS-K's RTC anchor and the
     // monotonic counter), so this is a derivation, not an invention.
-    r.push(b"\nbtime ");
+    r.push(b"btime ");
     r.push_dec((real_ns.saturating_sub(up_ns)) / 1_000_000_000);
 
     r.push(b"\nprocesses ");
-    r.push_dec(native_procs_created());
+    r.push_dec(procs_created);
     // procs_running/procs_blocked would each need a live state census; they are
     // omitted rather than zeroed, which is the whole-line freedom the jiffies
     // columns above do not have.
@@ -3322,6 +3368,66 @@ pub fn selftest() -> Result<(), &'static str> {
     // An unreadable source renders an EMPTY file rather than a misleading count.
     if parse_cpu_count(b"") != 0 || parse_cpu_count(b"garbage\n") != 0 {
         return Err("cpu count from a bad source");
+    }
+
+    // IMPERIUM-DESIGN 11.3 item 10: /proc/stat over a measured, a withheld and
+    // a shared render. The measured one carries the sums; the withheld one keeps
+    // each online CPU as a line of zeros and omits intr and ctxt; and the shared
+    // boot diorama serves the counters as withheld whatever its own read says,
+    // so a SYSTEM deputy cannot pass them on.
+    {
+        let hdr: &[u8] = b"cpus: 2\nhwcap: 0x0\ncpu idle_ns capacity ctxt intr cacheline midr\n";
+        let mut measured = [0u8; 256];
+        let mut withheld = [0u8; 256];
+        let rows_m: &[u8] = b"0 5000000000 1024 7 11 64 0x410fd083\n1 3000000000 1024 5 13 64 0x410fd083\n";
+        let rows_w: &[u8] = b"0 - 1024 - - 64 0x410fd083\n1 - 1024 - - 64 0x410fd083\n";
+        measured[..hdr.len()].copy_from_slice(hdr);
+        measured[hdr.len()..hdr.len() + rows_m.len()].copy_from_slice(rows_m);
+        withheld[..hdr.len()].copy_from_slice(hdr);
+        withheld[hdr.len()..hdr.len() + rows_w.len()].copy_from_slice(rows_w);
+        let measured = &measured[..hdr.len() + rows_m.len()];
+        let withheld = &withheld[..hdr.len() + rows_w.len()];
+        let up = 10_000_000_000u64;
+
+        let mut r = Render::new();
+        render_stat_from(&mut r, measured, up, 3 * up, 9, false);
+        for k in [
+            &b"cpu 0 0 1200 800 0 0 0 0 0 0\n"[..],
+            b"cpu0 0 0 500 500 0 0 0 0 0 0\n",
+            b"cpu1 0 0 700 300 0 0 0 0 0 0\n",
+            b"intr 24\n",
+            b"ctxt 12\n",
+            b"processes 9\n",
+        ] {
+            if !contains_bytes(r.bytes(), k) {
+                return Err("stat over a measured /ctl/cpu");
+            }
+        }
+        for (text, shared) in [(withheld, false), (measured, true)] {
+            let mut r = Render::new();
+            render_stat_from(&mut r, text, up, 3 * up, 9, shared);
+            for k in [
+                &b"cpu 0 0 0 0 0 0 0 0 0 0\n"[..],
+                b"cpu0 0 0 0 0 0 0 0 0 0 0\n",
+                b"cpu1 0 0 0 0 0 0 0 0 0 0\n",
+                b"processes 9\n",
+            ] {
+                if !contains_bytes(r.bytes(), k) {
+                    return Err(if shared {
+                        "the shared diorama passed on a withheld counter"
+                    } else {
+                        "stat over a withheld /ctl/cpu"
+                    });
+                }
+            }
+            if contains_bytes(r.bytes(), b"intr ") || contains_bytes(r.bytes(), b"ctxt ") {
+                return Err(if shared {
+                    "the shared diorama rendered a withheld total"
+                } else {
+                    "a withheld intr or ctxt rendered as a count"
+                });
+            }
+        }
     }
 
     Ok(())

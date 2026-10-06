@@ -16,6 +16,7 @@ design:
   - "docs/IDENTITY-DESIGN.md section 9.8"
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
+  - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
 created: 2026-08-02
 updated: 2026-10-06
 ---
@@ -101,8 +102,8 @@ composes its owner-or-hostowner gate with the seal in `devproc_extract_authorize
 mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `wait` ask
 too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
 `/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
-keeps its old meaning with NO seal and gates `sched` and `imperium`; `status` is
-ungated. `cmdline` renders no argv yet, and its place in the set seals argv only if
+keeps its old meaning with NO seal and gates `sched`, `imperium` and, since
+2026-10-06, the `cpu_ns` line of `status`; the rest of `status` is ungated. `cmdline` renders no argv yet, and its place in the set seals argv only if
 argv comes from a per-Proc kernel copy, as `environ` does: argv read off the stack would
 read through a vfork child sharing that stack under its own, unsealed Proc, unless
 `cmdline` also joins `mem` and `maps` in the image join (H3+C Fable pass F1; the
@@ -259,7 +260,13 @@ the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
   diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel
   keeps no instantaneous-rate state. It deliberately excludes the running
   thread's in-flight slice since its last switch-in (under one slice, negligible
-  over a poll).
+  over a poll). **It is owner-only since 2026-10-06** (IMPERIUM-DESIGN 11.3
+  item 10): a reader that is neither the Proc's owner nor a `CAP_HOSTOWNER`
+  holder reads `cpu_ns: -`, because the trusted episode's authority accrues CPU
+  time once per key and the number would publish a typed secret's cadence.
+  `format_status` takes the caller to ask `devproc_owner_or_hostowner`, the
+  predicate the `CPU_NS` column of `/ctl/procs` uses too ([[sub-kernel-devctl]]
+  has the reasoning and the system-wide counters).
 - **`name` is unforgeable.** It is the basename of the *resolved* binary path
   (from the Spoor's #66 namespace name via `exec_setup_from_spoor`), never the
   caller-controlled `argv[0]` — so a process cannot spoof its own name in
@@ -785,4 +792,4 @@ performance backlog.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption).
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption) · [[chg-2026-10-06-cpu-time-gate]].

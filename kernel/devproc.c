@@ -227,7 +227,10 @@ static const char *state_name(enum proc_state s) {
 // parity (name + CPU time + parent + owner). PRECONDITION: called under
 // g_proc_table_lock (via proc_for_each -> devproc_read_cb) -- proc_cpu_ns walks
 // p->threads, and p->parent is read here, both stable only under that lock.
-static size_t format_status(struct Proc *p, char *buf, size_t cap) {
+// `caller` is the reading Proc (NULL is no one); cpu_ns is "-" unless it is
+// p's owner or a hostowner.
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
 
@@ -250,10 +253,16 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     // prowl-1: cumulative on-CPU time (ns; the reader diffs it for %CPU) + the
-    // parent pid + the owning principal/gid.
-    u64 cpu_ns = proc_cpu_ns(p);                  // caller holds g_proc_table_lock
+    // parent pid + the owning principal/gid. cpu_ns is the owner's or a
+    // hostowner's (IMPERIUM-DESIGN 11.3 item 10: the trusted episode's authority
+    // accrues it per key); anyone else reads "-".
     n = fmt_str(buf, cap, off, "cpu_ns:  ");      if (!n) return 0; off += n;
-    n = fmt_udec(buf, cap, off, (unsigned long)cpu_ns); if (!n && cpu_ns != 0) return 0; off += n;
+    if (devproc_owner_or_hostowner(caller, p)) {
+        u64 cpu_ns = proc_cpu_ns(p);              // caller holds g_proc_table_lock
+        n = fmt_udec(buf, cap, off, (unsigned long)cpu_ns); if (!n) return 0; off += n;
+    } else {
+        n = fmt_str(buf, cap, off, "-");          if (!n) return 0; off += n;
+    }
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     int ppid = p->parent ? p->parent->pid : 0;
@@ -1057,7 +1066,6 @@ static void devproc_close(struct Spoor *c) {
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
 // Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
 // sits above the definitions.
@@ -1177,7 +1185,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
         return 1;                             // matched + refused -> stop
     }
     switch (r->kind) {
-    case PQS_STATUS:  r->total = format_status(p, r->buf, r->cap);  break;
+    case PQS_STATUS:  r->total = format_status(r->caller, p, r->buf, r->cap); break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
@@ -1302,7 +1310,8 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
     // writer of the target's principal, so a plain load is C11-racy. The owner axis
     // itself stays UNCONDITIONAL (I-26) -- this is load hygiene, not a new condition.
     u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
-    if (caller->principal_id == target_principal)      return true;   // owner-rwx on 0600
+    if (__atomic_load_n(&caller->principal_id, __ATOMIC_ACQUIRE) == target_principal)
+        return true;                                   // owner-rwx on 0600
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of caller->caps since A-4a; a plain load is C11-racy (CAP_KILL is clearance-grantable).
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_KILL))
@@ -1348,13 +1357,15 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (caller == target)                              return true;   // self, always
-    // The target's principal is read with ACQUIRE, not plainly: proc_apply_identity
-    // is a cross-thread RELEASE writer of it, so a plain load is C11-racy exactly as
-    // the caller's caps were before RW-5 F2. That is ALL this load is for. It does
-    // not order the seal: the seal is stamped under g_proc_table_lock (proc_seal),
-    // which every caller of this predicate holds.
+    // Both principals are read with ACQUIRE, not plainly: proc_apply_identity is a
+    // cross-thread RELEASE writer of either (a peer thread of the caller's own Proc
+    // included), so a plain load is C11-racy exactly as the caller's caps were
+    // before RW-5 F2. That is ALL these loads are for. They do not order the seal:
+    // the seal is stamped under g_proc_table_lock (proc_seal), which every caller of
+    // this predicate holds.
     u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
-    if (caller->principal_id == target_principal)      return true;   // owner
+    if (__atomic_load_n(&caller->principal_id, __ATOMIC_ACQUIRE) == target_principal)
+        return true;                                   // owner
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of caller->caps; CAP_HOSTOWNER is clearance-grantable, so a plain load is racy.
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER)
@@ -1533,7 +1544,7 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
         // between them could refuse a Proc access to ITSELF (reachable -- kstack
         // and wait carry no stopped-only requirement). Cannot widen anything.
         axis = true;
-    } else if (caller->principal_id == target_principal) {              // owner-rwx on 0600
+    } else if (__atomic_load_n(&caller->principal_id, __ATOMIC_ACQUIRE) == target_principal) {   // owner-rwx on 0600
         // The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9;
         // Linux's cap_ptrace_access_check): the owner axis admits only when the
         // caller's authority COVERS the target's. A debug attach is TOTAL

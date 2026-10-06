@@ -25,7 +25,8 @@ PID  PPID  NAME  STATE  THR  PAGES  TBL  KIDS  CPU
 
 `PAGES` is the process's charge and `TBL` the page tables inside that charge.
 `KIDS` counts its live children. `CPU` is the time it has spent on a CPU, in
-milliseconds under ten seconds and in seconds above. `STATE` is `ALIVE`,
+milliseconds under ten seconds and in seconds above. Another user's process
+shows `-` under `CPU`, unless the operator holds `CAP_HOSTOWNER`. `STATE` is `ALIVE`,
 `STOPPED`, `ZOMBIE` or `INVALID`. To pass the kernel's own text through for a
 script, with `CPU_NS` in nanoseconds, run `ps --color=never --beacon=never`.
 
@@ -36,7 +37,9 @@ row shows one bar per CPU; the third row is the memory meter, filled to the
 pool's charge, with the charged and pool page counts and the free physical pages
 beside it. The table below lists the processes with their CPU share, their
 charge under `MEM(pg)`, their page tables under `TBL`, their threads and their
-state.
+state. An operator who holds neither `CAP_HOSTOWNER` nor the system's own
+identity sees each CPU bar drawn in dashes and another user's CPU share as `-`;
+the operator's own processes show their share as usual.
 
 The arrow keys, Page Up, Page Down, Home and End move the cursor. `d` opens and
 closes the detail pane. `t` switches between the flat list and the process tree.
@@ -64,7 +67,8 @@ It reports `name`, `pid`, `state`, `threads`, `cpu_ns`, `ppid`, the owning
 `principal` and `gid`, then the memory lines: `pages` (the charge), `tables`,
 `file`, `children`, `peak` and `budget`. A zombie reports its final figures and
 an `exit` line with its exit status. Every process's status file is readable by
-everyone.
+everyone, but `cpu_ns` reads `-` to anyone other than the process's owner and
+the holders of `CAP_HOSTOWNER`.
 
 ### Read the pool
 
@@ -126,6 +130,18 @@ when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
 `prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
 every process. `/proc/<pid>/sched` is readable by the process's owner and by
 holders of `CAP_HOSTOWNER`.
+
+A process's CPU time is shown only to its owner and to holders of
+`CAP_HOSTOWNER`; other readers see `-` in `/ctl/procs` and in the status file.
+The counters in `/ctl/cpu` and `/ctl/sched` that move whenever any process runs
+(each CPU's idle time, context switches and interrupts, the runnable count and
+the park counts) are shown only to the system's own processes and to holders of
+`CAP_HOSTOWNER`. The CPU count, the capacity, cache-line and processor-ID
+columns and the count of processes created are shown to everyone. The counters
+are withheld because each one moves with every key typed at a password prompt:
+a reader that watched them could learn a password's length and the rhythm of
+its keys. A Linux program in a vivarium that reads `/proc/stat` finds every
+CPU time as zero and no interrupt or context-switch totals.
 
 A program built with the C library can load a shared library while it runs.
 The library loader is `/lib/libc.so`, and a library named without a directory

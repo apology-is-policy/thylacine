@@ -14,9 +14,9 @@ validated-by: [prose]
 locks: []
 hazards: []
 abis: []
-design: ["docs/VIVARIUM.md"]
+design: ["docs/VIVARIUM.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-09-07
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -238,6 +238,27 @@ replicating the kernel's owner check against the peer would *work*, and
 was refused because it turns a component whose entire design property is
 having no policy into a policy point, to serve a file no consumer reads.
 
+**The CPU counters are the second case, closed the same way (2026-10-06).**
+Since IMPERIUM-DESIGN 11.3 item 10 the kernel shows per-CPU idle time,
+context switches and interrupts only to the system principal or a hostowner,
+because each moves once per key of a secret typed into the trusted episode
+([[sub-kernel-devctl]]). The boot's shared instance runs as SYSTEM, so the
+kernel gives it the exact figures, and any principal can mount it: passing
+them on would make it the deputy the gate exists to stop. So in shared mode
+(`viv_runner() == 0`) `render_stat_from` withholds them from every client,
+whatever the kernel told it: each `cpu`/`cpuN` line is zeros, and the
+`intr` and `ctxt` lines are left out. A per-container instance runs as its
+container's principal, gets `-` from the kernel for the same fields, and
+renders them the same way. The two differ for the reason above: a whole line
+can be omitted, and a 0 there would be a count nobody measured, but the
+jiffies columns are positional and Linux's format has no dash. A line of
+zeros reads as no time elapsed rather than as a plausible split. As with `environ`, checking the peer and serving exact figures to a
+SYSTEM or hostowner client was rejected: it would make this component a
+policy point, for consumers (`top` in a vivarium) that a hostowner can serve
+natively. The selftest renders a measured, a withheld and a shared
+`/proc/stat`; `diorama-probe` requires the withheld lines from
+`/srv/diorama`.
+
 ## Error paths
 
 Uniformly fail-empty rather than fail-loud, and the distinction between
@@ -303,6 +324,11 @@ position in a list that moves.
 
 - **Message-size arithmetic stays saturating.** See the caveats — this one
   has already been a whole-server abort.
+
+- **The shared instance relays nothing the kernel gates by principal.** It
+  runs as SYSTEM for every client, so a field the kernel shows only to some
+  principals (`environ`, the CPU counters) is absent or withheld here, never
+  read with SYSTEM's authority and passed on.
 
 - **In vivarium mode, a widening is the failure.** Membership may only
   ever narrow under a partial snapshot. Any change that lets a missing row

@@ -136,15 +136,16 @@ fn render_cpubars(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
         }
         x = buf.set_str(x, y, &format!("{}", c.cpu), dim());
         x = buf.set_str(x, y, "[", dim());
-        let filled = (c.util_x10 * bar_w as u64 / 1000) as u16;
+        // A withheld idle time (an ordinary reader) draws a dashed bar, not 0%.
+        let filled = c.util_x10.map(|u| (u * bar_w as u64 / 1000) as u16);
         for i in 0..bar_w {
             if x >= area.right() {
                 break;
             }
-            let (ch, st) = if i < filled {
-                ('\u{2588}', meter_fill()) // █
-            } else {
-                ('\u{2591}', meter_empty()) // ░
+            let (ch, st) = match filled {
+                None => ('-', dim()),
+                Some(f) if i < f => ('\u{2588}', meter_fill()), // █
+                Some(_) => ('\u{2591}', meter_empty()),          // ░
             };
             buf.set_cell(x, y, Cell::new(ch, st));
             x = x.saturating_add(1);
@@ -223,17 +224,21 @@ fn render_detail(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 /// `CPU [████░░░░] 47.3%  total 189.2%` -- the aggregate system meter. Util is
-/// the sum of every proc's %CPU divided by the core count (0..=100%); total is
-/// the raw sum (can exceed 100% across cores).
+/// the sum of every visible proc's %CPU divided by the core count (0..=100%);
+/// total is the raw sum (can exceed 100% across cores). `CPU (own)` when the
+/// kernel withheld any row's CPU time.
 fn render_meter(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let total_x10 = Sampler::total_pct_x10(&app.rows);
     let ncpus = app.ncpus.max(1) as u64;
     let util_x10 = (total_x10 / ncpus).min(1000);
 
+    // With another principal's CPU time withheld the bar and both figures cover
+    // only the reader's own processes, so the meter says so at its head.
+    let label = if Sampler::any_withheld(&app.rows) { "CPU (own) " } else { "CPU " };
     let trailing = format!(" {}%  total {}%", fmt_pct1(util_x10), fmt_pct1(total_x10));
     let trailing_w = trailing.chars().count() as u16;
 
-    let x0 = buf.set_str(area.x, y, "CPU ", dim());
+    let x0 = buf.set_str(area.x, y, label, dim());
     // Reserve "[" + bar + "]" + trailing within the row.
     let avail = area.right().saturating_sub(x0);
     let bar_w = avail.saturating_sub(2 + trailing_w);
@@ -334,7 +339,7 @@ fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
         cells.push([
             r.pid.to_string(),
             name,
-            fmt_pct1(r.cpu_pct_x10),
+            r.cpu_pct_x10.map(fmt_pct1).unwrap_or_else(|| String::from("-")),
             r.pages.to_string(),
             r.tables.to_string(),
             r.threads.to_string(),
