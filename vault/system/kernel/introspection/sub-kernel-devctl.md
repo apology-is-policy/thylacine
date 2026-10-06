@@ -120,7 +120,13 @@ There are two owners:
   `/ctl/procs` shows the number only when `devproc_owner_or_hostowner(reader,
   row)` holds. That is the predicate `/proc/<pid>/sched` and the `cpu_ns` line
   of `/proc/<pid>/status` use ([[sub-kernel-devproc]]), so the two Devs cannot
-  disagree about a row.
+  disagree about a row. A reader running as none sees no row but its own:
+  `format_procs_cb` skips every row `devproc_none_walled` refuses (Plan 9's
+  `nonone`, [[dec-2026-10-06-none-owns-nothing]]), before the row starts, so
+  the rows it does emit stay whole. `/ctl/9p-sessions` shows a none reader no
+  row at all (`ctl_9p_row_hidden`): none is no end, so it owns no row, and a
+  none hostowner counts as `sys`. A reader refused `/ctl/kernel-base` or
+  `/ctl/kstack` reads `EACCES`, not -1.
 - **The machine-wide counters are the system principal's.** In `/ctl/cpu`, the
   `idle_ns`, `ctxt` and `intr` columns; in `/ctl/sched`, the `runnable:`,
   `wc:` and `wc-tickless:` values. They are shown only to a reader whose
@@ -396,7 +402,8 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   is whether a number moves once per event in someone else's Proc.
 - **The process list is a full-system disclosure.** Names, parents, states,
   thread, page and page-table counts for every process, to any reader. (CPU
-  time left this list on 2026-10-06 and is owner-only.) This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
+  time left this list on 2026-10-06 and is owner-only; a reader running as none
+  sees only its own row, also since 2026-10-06.) This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
   but it is worth
   stating plainly rather than leaving implied: `/ctl/procs` is the broadest
   ambient disclosure either introspection Dev makes.

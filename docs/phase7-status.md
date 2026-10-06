@@ -1252,6 +1252,45 @@ re-anchors at the base too; the cleaned lexical store, the behaviour before the 
 leaves the suite green and fails haul-links at leg (f). `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption
 (default at -smp 1, 4 and 8; UBSan at 4 and 8).
 
+## None owns nothing but itself; a /proc refusal answers EACCES — 2026-10-06
+
+Operator vote of 2026-10-06 19:58Z, "Plan 9's nonone" (IDENTITY-DESIGN's reserved ids; ARCH 28 I-26 and I-39 amended).
+It closes the `/proc` owner predicate item the 9P-ends audit enqueued. Scripture 9daf0a50a; code, witnesses and dossiers
+in one commit, *(pending)*.
+
+- **No owner axis admits a `none` caller for any Proc but itself.** `devproc_same_owner` is the one owner relation, and
+  it is false for a none target. Two unrelated Procs running as `none` could kill each other, debug each other whenever
+  their caps covered (two bare none Procs always do), and read each other's `environ`, `sched`, `imperium` and `cpu_ns`.
+  The kill gate gains the self arm its siblings had.
+- **The read wall.** `devproc_none_walled` refuses a none caller every other Proc's `status`, `cmdline`, `ns`, `exe`,
+  `cwd`, `maps` and the read side of `ctl`. `/ctl/procs` lists it only its own row, and `/ctl/9p-sessions` no row at all.
+  `CAP_HOSTOWNER` buys through, as Plan 9's `nonone()` exempts eve; `CAP_KILL` and `CAP_DEBUG` still admit on their own
+  axes. A pid's existence, its stat and `getpgid`/`getsid` stay visible, as in Plan 9.
+- **A refusal answers `EACCES`.** Every `/proc` authority refusal and `/ctl`'s two gated leaves answered a bare -1, which
+  ERRORS.md forbids for a denial and pouch and Go read as `EPERM`. The other failures (no such Proc, not ALIVE, not
+  stopped, a claimed slot, a full table) stay -1, an owned residual. Kill, suspend and attach ask authority before
+  liveness, so a refused caller learns nothing of whether its target is alive.
+- Witnesses: the kernel tests `devproc.none_owns_nothing` and `devproc.none_walled`; new legs in
+  `devctl.read_9p_sessions_format`, `p9_attached.ctl_registry`, `devctl.read_kernel_base_format`,
+  `devctl.kstack_gated`, and three ZOMBIE legs in `test_devproc`; seventeen refusal expectations moved to `-T_E_ACCES`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/1/4; clean. F1 [P2]: no witness had run; the gate
+below closes it. F2: `/ctl/9p-sessions` rows showed a none reader other Procs' connections; hidden. F3: `/ctl`
+`kernel-base` and `kstack` refused with -1; `EACCES`, with a real-path witness each. F4: stale prose in devproc, prowl
+and libthyla-rs. F5: kill, suspend and attach asked liveness first; reordered, with the ZOMBIE legs.
+
+Verification, on hunt, `--config ci` bakes, at b1e18996d (the landing's kernel and userspace trees, plus untag 2a):
+`tools/test.sh` 1903/1903 and boot OK; cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata and dap-nora PASS.
+Nineteen kernel sabotages, each red on exactly its own assertions: the owner relation without its none test, the I-39
+owner axis and the owner-or-hostowner reads comparing principals raw, kill without its self arm, the wall never
+walling, the wall keyed on the target, CAP_HOSTOWNER not buying through it, `/ctl/procs` listing every row to none,
+the read path not asking the wall, a refused read, kill, wait scan, environ read and attach each answering -1,
+`/ctl/9p-sessions` showing none every row, kill, suspend and attach each asking liveness first, and the `/ctl` refusal
+answering -1. The runbook flagged five of them as mismatches: their FAIL lines carry the harness's `LEAKED-PROC(n)`
+prefix (a failing test returns before freeing its fixture), which its matcher did not accept; re-judged from the saved
+boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
+UBSan at 4 and 8).
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

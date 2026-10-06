@@ -22,6 +22,30 @@ needed the operator.
 
 
 ---
+## 2026-10-06 (aux, Opus 5.5 1M, effort xhigh) -- none owns nothing but itself; a /proc refusal answers EACCES
+
+**Why now.** The 9P-ends audit's F1 made a reader running as `none` no end of a `/ctl/9p-sessions` row, and enqueued the `/proc` owner predicate's view of none as its own item (OPEN-BUGS 17:00Z). Reading the whole owner family showed it was wider than enqueued. Every owner axis compared principals, so two unrelated Procs running as `none` were one owner everywhere: kill (I-26), debug whenever the caps covered, which two bare none Procs always do (I-39), and the owner-or-hostowner reads (`environ`, `sched`, `imperium`, `cpu_ns`). No in-tree program runs as none today; the exposure is a future pre-auth or network server.
+
+**The vote.** It changes two section-28 invariants, so it went to the operator with the heritage attached: Bell Labs and 9front `devproc.c` call `nonone()` at the open of every other Proc's state file ("none can't read or write state on other processes ... should they be subverted"), and Linux's shared `nobody` uid is why systemd's DynamicUser and OpenBSD's per-daemon users exist. At 19:58Z the operator chose Plan 9's `nonone` in full, over the owner checks alone, the reads alone, or recording the residual.
+
+**The design** (scripture 9daf0a50a, code *(pending)*). `devproc_same_owner` is the one owner relation, false for a none target. The kill gate gains the self arm its siblings had. `devproc_none_walled` refuses a none caller every other Proc's per-Proc files, and `/ctl/procs` lists it only its own row. The capability axes are unchanged: `CAP_HOSTOWNER` buys through everything, as eve is exempt in Plan 9.
+
+**Found mid-chunk, folded in.** Writing the wall's refusal, I found that every `/proc` authority refusal answered a bare -1. ERRORS.md's binding rule forbids that for a denial, and pouch and Go read -1 as `EPERM`. Under the grant I folded the fix in as a second sub-chunk: each refusal site sets `-T_E_ACCES` and `devproc_walk_fail` passes it through (seventeen test expectations moved). The other failure classes stay -1, and they remain an owned OPEN-BUGS residual.
+
+**Wrong turns, and what caught them.**
+- My own review kept `/ctl/9p-sessions`' rows readable to none, on Plan 9's `/net/*/status` precedent, and I wrote that into the landing draft. The audit's F2 showed the rows name other Procs' connections (peer pid, label, msize, mode, liveness), which is the very thing the vote walled off. I reversed it: a none reader sees no row.
+- I moved the refusal *value* to EACCES without looking at the refusal *order*. Kill, suspend and attach asked whether the target was alive before asking whether the caller could touch it, so a refused caller read -1 for a zombie and EACCES for a live Proc: one bit about a Proc whose status the wall now hides (F5). Authority comes first now, with a ZOMBIE leg for each verb.
+- The gate's first sabotage list had no witness for F3: the kstack test asserted only `denied < 0`, and the kernel-base deny path was tested through the predicate alone, which cannot see whether the gate is wired. Both now read through the real path and assert `-T_E_ACCES` (14ba1d40b).
+- The decision note was committed in a WIP and vault lint R3 then froze its body, so its "a denied read returns -1" bullet stayed wrong on the branch. The landing branch creates the note fresh, with the bullet corrected.
+
+**Merged main.** Main had merged aux-3's previous landing plus its Loom multi-client work (f6f4c0397). I merged that back first (9c080d100), so one gate covers the merge and the chunk. The code merged cleanly. Four doc conflicts were resolved by hand: AUDIT-TRIGGERS, JOURNAL, the srvconn dossier and the dashboard.
+
+**Audit.** Round 1, Fable 5.1 reviewing Opus 5.5: 0 P0, 0 P1, 1 P2, 4 P3; clean. F1 (no witness had run) closes with the gate.
+
+**Verification.** On hunt, `--config ci` bakes, at b1e18996d (the landing's kernel and userspace trees, plus untag 2a): `tools/test.sh` 1903/1903 and boot OK; cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata and dap-nora PASS. Nineteen kernel sabotages, each red on exactly its own assertions: the owner relation without its none test, the I-39 owner axis and the owner-or-hostowner reads comparing principals raw, kill without its self arm, the wall never walling, the wall keyed on the target, CAP_HOSTOWNER not buying through it, `/ctl/procs` listing every row to none, the read path not asking the wall, a refused read, kill, wait scan, environ read and attach each answering -1, `/ctl/9p-sessions` showing none every row, kill, suspend and attach each asking liveness first, and the `/ctl` refusal answering -1. The runbook flagged five of them as mismatches: their FAIL lines carry the harness's `LEAKED-PROC(n)` prefix (a failing test returns before freeing its fixture), which its matcher did not accept; re-judged from the saved boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
+**Still open.** The non-authority -1 classes in devproc (no such Proc, not ALIVE, not stopped, a claimed slot, a full table) still answer a bare -1: OPEN-BUGS 20:20Z, narrowed to them.
+
 ## 2026-10-06 (main, Opus 5.5, effort max) -- waiters fan in: a Loom ring's waiters read every 9P client it has an op on
 
 **Why now.** The arc order after signal7 and nanosleep (operator, 10-05). A Loom

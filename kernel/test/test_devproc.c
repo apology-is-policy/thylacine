@@ -57,6 +57,8 @@ void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 // A-4b: cross-process kill via /proc/<pid>/ctl.
 void test_devproc_kill_authorized_predicate(void);
+void test_devproc_none_owns_nothing(void);    // IDENTITY-DESIGN reserved ids: Plan 9's nonone
+void test_devproc_none_walled(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
@@ -93,6 +95,8 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
+size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
@@ -520,7 +524,7 @@ void test_devproc_write_ctl_rejects(void) {
     TEST_ASSERT(kctl != NULL, "open /proc/0/ctl");
     const char kill_cmd[] = "kill";
     TEST_EXPECT_EQ(devproc.write(kctl, kill_cmd, (long)sizeof(kill_cmd) - 1, 0),
-                   (long)-1, "kill of kproc (pid 0) is refused (-1)");
+                   (long)-T_E_ACCES, "kill of kproc (pid 0) is refused (EACCES)");
     // An unrecognized verb on the same ctl is also -1 (NOT consumed-as-n).
     const char junk[] = "frobnicate";
     TEST_EXPECT_EQ(devproc.write(kctl, junk, (long)sizeof(junk) - 1, 0),
@@ -622,6 +626,186 @@ void test_devproc_kill_authorized_predicate(void) {
     target->state = PROC_STATE_ZOMBIE;
     proc_free(caller);
     proc_free(target);
+}
+
+// IDENTITY-DESIGN's reserved ids (Plan 9's nonone): two Procs running as none are
+// nothing to each other on any owner axis, each still owns itself, and a capability
+// still admits. Every refusal is paired with a control one variable away -- the
+// shared principal a real one instead of none -- so a fixture that admitted nobody
+// could not satisfy the refusals.
+void test_devproc_none_owns_nothing(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    caller->state = PROC_STATE_ALIVE;
+    target->state = PROC_STATE_ALIVE;
+    caller->caps  = 0;
+    target->caps  = 0;
+
+    caller->principal_id = 0xA11CEu;
+    target->principal_id = 0xA11CEu;
+    bool k_real = devproc_kill_authorized(caller, target);
+    bool d_real = devproc_debug_authorized(caller, target);
+    bool o_real = devproc_owner_or_hostowner(caller, target);
+    bool w_real = devproc_none_walled(caller, target);
+
+    caller->principal_id = PRINCIPAL_NONE;
+    target->principal_id = PRINCIPAL_NONE;
+    bool k_none = devproc_kill_authorized(caller, target);
+    bool d_none = devproc_debug_authorized(caller, target);
+    bool o_none = devproc_owner_or_hostowner(caller, target);
+    bool w_none = devproc_none_walled(caller, target);
+    bool k_self = devproc_kill_authorized(caller, caller);
+    bool d_self = devproc_debug_authorized(caller, caller);
+    bool o_self = devproc_owner_or_hostowner(caller, caller);
+    bool w_self = devproc_none_walled(caller, caller);
+    bool w_null = devproc_none_walled(NULL, target);
+
+    // The wall is keyed on the caller: a real reader of a none target is not walled,
+    // and a none reader of a real target is.
+    target->principal_id = 0xA11CEu;
+    bool w_none_real = devproc_none_walled(caller, target);
+    bool w_real_none = devproc_none_walled(target, caller);
+    target->principal_id = PRINCIPAL_NONE;
+
+    // Each capability axis still admits a none caller, as nonone() exempts eve; only
+    // CAP_HOSTOWNER buys through the read wall.
+    caller->caps = CAP_KILL;
+    bool k_cap = devproc_kill_authorized(caller, target);
+    bool w_kill = devproc_none_walled(caller, target);
+    caller->caps = CAP_DEBUG;
+    bool d_cap = devproc_debug_authorized(caller, target);
+    bool w_debug = devproc_none_walled(caller, target);
+    caller->caps = CAP_HOSTOWNER;
+    bool o_cap = devproc_owner_or_hostowner(caller, target);
+    bool w_host = devproc_none_walled(caller, target);
+    caller->caps = 0;
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+
+    TEST_ASSERT(k_real && d_real && o_real, "control: one real principal is one owner on every axis");
+    TEST_ASSERT(!w_real, "control: a real reader is not walled");
+    TEST_ASSERT(!k_none, "a none Proc cannot kill another none Proc (I-26)");
+    TEST_ASSERT(!d_none, "a none Proc cannot debug another none Proc (I-39)");
+    TEST_ASSERT(!o_none, "a none Proc does not own another none Proc's reads");
+    TEST_ASSERT(w_none, "a none reader is walled from another none Proc");
+    TEST_ASSERT(k_self, "a none Proc may kill itself");
+    TEST_ASSERT(d_self && o_self, "a none Proc owns itself for debug and the reads");
+    TEST_ASSERT(!w_self, "a none reader is never walled from itself");
+    TEST_ASSERT(!w_null, "a NULL caller (a kernel read) is not walled");
+    TEST_ASSERT(w_none_real, "a none reader is walled from a real principal's Proc");
+    TEST_ASSERT(!w_real_none, "a real reader of a none Proc is not walled");
+    TEST_ASSERT(k_cap, "CAP_KILL still admits a none caller's kill");
+    TEST_ASSERT(d_cap, "CAP_DEBUG still admits a none caller's debug");
+    TEST_ASSERT(o_cap, "CAP_HOSTOWNER still admits a none caller's reads");
+    TEST_ASSERT(!w_host, "CAP_HOSTOWNER buys through the read wall");
+    TEST_ASSERT(w_kill && w_debug, "CAP_KILL and CAP_DEBUG do not buy through the read wall");
+}
+
+// The wall on the real read paths: devproc_read_cb and /ctl/procs's rows, whose
+// wiring of the reader a predicate test cannot prove. A child reads kproc's files
+// and /ctl/procs three ways, one variable apart each: as none, as a real principal,
+// and as none holding CAP_HOSTOWNER. It exits and is reaped before any assertion.
+#define NONE_WALL_FILES 7
+static const char *const g_none_wall_files[NONE_WALL_FILES] = {
+    "status", "cmdline", "ns", "exe", "cwd", "maps", "ctl",
+};
+static const char *const g_none_wall_refused[NONE_WALL_FILES] = {
+    "a none reader is refused kproc's status",
+    "a none reader is refused kproc's cmdline",
+    "a none reader is refused kproc's ns",
+    "a none reader is refused kproc's exe",
+    "a none reader is refused kproc's cwd",
+    "a none reader is refused kproc's maps",
+    "a none reader is refused kproc's ctl",
+};
+struct none_wall_view {
+    long other[NONE_WALL_FILES];   // kproc's file: -T_E_ACCES refused, >= 0 bytes read
+    long own_status;
+    int  rows;                     // /ctl/procs data rows
+    int  own_rows;                 // ... of which the reader's own
+};
+static struct none_wall_view g_none_wall[3];   // [0] none, [1] real, [2] none + CAP_HOSTOWNER
+static char g_none_wall_buf[4096];
+static int  g_none_wall_self;
+
+static long none_wall_read(int pid, const char *name) {
+    struct Spoor *f = open_pidfile_for(pid, name, 0);
+    if (!f) return -2;                       // a failed open is not a refused read
+    char buf[256];
+    long got = devproc.read(f, buf, (long)sizeof buf, 0);
+    spoor_clunk(f);
+    return got;
+}
+
+static void none_wall_view_take(struct none_wall_view *v, struct Proc *self) {
+    for (int i = 0; i < NONE_WALL_FILES; i++)
+        v->other[i] = none_wall_read(0, g_none_wall_files[i]);
+    v->own_status = none_wall_read(self->pid, "status");
+    size_t len = devctl_format_procs_for_test(self, g_none_wall_buf, sizeof g_none_wall_buf);
+    v->rows = 0;
+    v->own_rows = 0;
+    size_t i = 0;
+    while (i < len && g_none_wall_buf[i] != '\n') i++;   // the header
+    for (i++; i < len; ) {
+        int pid = 0;
+        bool digits = false;
+        while (i < len && g_none_wall_buf[i] >= '0' && g_none_wall_buf[i] <= '9') {
+            pid = pid * 10 + (g_none_wall_buf[i] - '0');
+            digits = true;
+            i++;
+        }
+        if (digits) {
+            v->rows++;
+            if (pid == self->pid) v->own_rows++;
+        }
+        while (i < len && g_none_wall_buf[i] != '\n') i++;
+        i++;
+    }
+}
+
+static void none_wall_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    g_none_wall_self = self->pid;
+    u64 caps = __atomic_load_n(&self->caps, __ATOMIC_ACQUIRE) & ~CAP_HOSTOWNER;
+    __atomic_store_n(&self->caps, caps, __ATOMIC_RELEASE);
+    __atomic_store_n(&self->principal_id, PRINCIPAL_NONE, __ATOMIC_RELEASE);
+    none_wall_view_take(&g_none_wall[0], self);
+    __atomic_store_n(&self->principal_id, 0xC0FFEEu, __ATOMIC_RELEASE);
+    none_wall_view_take(&g_none_wall[1], self);
+    __atomic_store_n(&self->principal_id, PRINCIPAL_NONE, __ATOMIC_RELEASE);
+    __atomic_store_n(&self->caps, caps | CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    none_wall_view_take(&g_none_wall[2], self);
+    exits("ok");
+}
+
+void test_devproc_none_walled(void) {
+    for (int k = 0; k < 3; k++) g_none_wall[k] = (struct none_wall_view){ 0 };
+    g_none_wall_self = 0;
+    int pid = rfork(RFPROC, none_wall_thunk, NULL);
+    int st = -1;
+    int reaped = (pid > 0) ? wait_pid_for(pid, 0, &st) : -1;
+    TEST_ASSERT(pid > 0, "rfork the reader child");
+    TEST_ASSERT(reaped == pid, "reap the reader child");
+    TEST_EXPECT_EQ(g_none_wall_self, pid, "the child read as itself");
+
+    const struct none_wall_view *n = &g_none_wall[0], *r = &g_none_wall[1], *h = &g_none_wall[2];
+    for (int i = 0; i < NONE_WALL_FILES; i++) {
+        TEST_EXPECT_EQ(n->other[i], (long)-T_E_ACCES, g_none_wall_refused[i]);
+        TEST_ASSERT(r->other[i] >= 0, "control: a real reader reads kproc's file");
+        TEST_ASSERT(h->other[i] >= 0, "a none reader holding CAP_HOSTOWNER reads kproc's file");
+    }
+    TEST_ASSERT(n->other[0] == -T_E_ACCES && r->other[0] > 0,
+                "kproc's status: refused to none, a whole render to a real reader");
+    TEST_ASSERT(n->own_status > 0, "a none reader reads its own status");
+    TEST_EXPECT_EQ(n->rows, 1, "a none reader's /ctl/procs has one row");
+    TEST_EXPECT_EQ(n->own_rows, 1, "... and it is the reader's own");
+    TEST_ASSERT(r->rows > 1 && r->own_rows == 1, "control: a real reader sees the tree");
+    TEST_ASSERT(h->rows > 1, "a none reader holding CAP_HOSTOWNER sees the tree");
 }
 
 // prowl-3b: the OQ-4 deep-internals gate for /proc/<pid>/sched -- owner OR
@@ -870,8 +1054,8 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);
     TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
-    TEST_EXPECT_EQ(devproc.write(nctl, kill_cmd, kn, 0), (long)-1,
-                   "non-owner with no cap is denied (-1)");
+    TEST_EXPECT_EQ(devproc.write(nctl, kill_cmd, kn, 0), (long)-T_E_ACCES,
+                   "non-owner with no cap is denied (EACCES)");
     TEST_EXPECT_EQ(other->group_exit_msg, (const char *)NULL,
                    "denied target NOT terminated (group_exit_msg NULL)");
     spoor_clunk(nctl);
@@ -904,6 +1088,12 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     TEST_ASSERT(dctl != NULL, "open zombie-target ctl");
     TEST_EXPECT_EQ(devproc.write(dctl, kill_cmd, kn, 0), (long)-1,
                    "kill of a non-ALIVE target is refused (-1)");
+    // The same zombie under another principal: authority is asked before
+    // liveness, so a refused caller reads EACCES whether the target is ALIVE or
+    // not -- no liveness bit. The owner's -1 above is the control.
+    dead->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    TEST_EXPECT_EQ(devproc.write(dctl, kill_cmd, kn, 0), (long)-T_E_ACCES,
+                   "a non-owner's kill of a ZOMBIE is refused (EACCES), as of an ALIVE target");
     TEST_EXPECT_EQ(dead->group_exit_msg, (const char *)NULL,
                    "non-ALIVE target not terminated");
     spoor_clunk(dctl);
@@ -970,8 +1160,8 @@ void test_devproc_ctl_suspend_resume_dispatch(void) {
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);
     TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
-    TEST_EXPECT_EQ(devproc.write(nctl, suspend_cmd, sn, 0), (long)-1,
-                   "non-owner suspend denied (-1) -- the I-26 gate");
+    TEST_EXPECT_EQ(devproc.write(nctl, suspend_cmd, sn, 0), (long)-T_E_ACCES,
+                   "non-owner suspend denied (EACCES) -- the I-26 gate");
     TEST_EXPECT_EQ((int)other->job_stop_req, 0, "denied target NOT stopped");
     spoor_clunk(nctl);
     proc_test_unlink(other);
@@ -988,6 +1178,10 @@ void test_devproc_ctl_suspend_resume_dispatch(void) {
     TEST_ASSERT(dctl2 != NULL, "open zombie-target ctl");
     TEST_EXPECT_EQ(devproc.write(dctl2, suspend_cmd, sn, 0), (long)-1,
                    "suspend of a non-ALIVE target refused even for the owner");
+    // Authority before liveness, as kill (d): the owner's -1 above is the control.
+    dead2->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    TEST_EXPECT_EQ(devproc.write(dctl2, suspend_cmd, sn, 0), (long)-T_E_ACCES,
+                   "a non-owner's suspend of a ZOMBIE is refused (EACCES), as of an ALIVE target");
     TEST_EXPECT_EQ((int)dead2->job_stop_req, 0, "non-ALIVE target NOT stopped");
     spoor_clunk(dctl2);
     proc_test_unlink(dead2);
@@ -1195,7 +1389,7 @@ void test_devproc_debug_cap_cover_attach(void) {
     TEST_ASSERT(ctl != NULL, "open the elevated target's ctl");
     TEST_EXPECT_EQ(cover_ret, an, "control: a covering owner's attach succeeds");
     TEST_EXPECT_EQ(cover_own, (void *)ctl, "control: the covering attach claimed the slot");
-    TEST_EXPECT_EQ(bare_ret, (long)-1, "an uncovered same-principal attach is refused");
+    TEST_EXPECT_EQ(bare_ret, (long)-T_E_ACCES, "an uncovered same-principal attach is refused (EACCES)");
     TEST_EXPECT_EQ(bare_own, (void *)NULL, "the refused attach claimed no slot");
 }
 
@@ -1377,12 +1571,12 @@ void test_devproc_dump_seal_disclosure(void) {
                 "premise: the runner holds no CAP_HOSTOWNER, so the cross-principal leg means something");
     for (int i = 0; i < NFILES; i++) {
         TEST_ASSERT(before[i] >= 0, files[i].control_msg);
-        if (files[i].image) TEST_ASSERT(after[i] == -1, files[i].sealed_msg);
+        if (files[i].image) TEST_ASSERT(after[i] == -T_E_ACCES, files[i].sealed_msg);
         else                TEST_ASSERT(after[i] >= 0, files[i].sealed_msg);
     }
     TEST_ASSERT(other_maps >= 0, "control: an unsealed cross-principal maps read is ambient");
-    TEST_EXPECT_EQ(other_environ, (long)-1,
-                   "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER");
+    TEST_EXPECT_EQ(other_environ, (long)-T_E_ACCES,
+                   "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER (EACCES)");
 }
 
 // The seal's SCOPE at the predicate level: the extraction gate is sealed and the
@@ -1514,9 +1708,18 @@ void test_devproc_debug_attach_detach_lifecycle(void) {
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);
     TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
-    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-1,
-                   "non-owner without CAP_DEBUG is denied (-1)");
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-T_E_ACCES,
+                   "non-owner without CAP_DEBUG is denied (EACCES)");
     TEST_EXPECT_EQ((void *)other->debug_owner, (void *)NULL, "denied target NOT attached");
+    // Authority before liveness, as kill: the same target as a ZOMBIE answers the
+    // refused caller EACCES again, and its owner -1.
+    other->state = PROC_STATE_ZOMBIE;
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-T_E_ACCES,
+                   "a non-owner's attach of a ZOMBIE is refused (EACCES), as of an ALIVE target");
+    other->principal_id = caller->principal_id;
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-1,
+                   "the owner's attach of a ZOMBIE is refused (-1)");
+    TEST_EXPECT_EQ((void *)other->debug_owner, (void *)NULL, "a ZOMBIE is NOT attached");
     spoor_clunk(nctl);
     proc_test_unlink(other);
     other->state = PROC_STATE_ZOMBIE;
@@ -1525,8 +1728,8 @@ void test_devproc_debug_attach_detach_lifecycle(void) {
     // (d) kproc (pid 0) attach is refused end-to-end (undebuggable kernel).
     struct Spoor *kctl = open_ctl_for_pid(0);
     TEST_ASSERT(kctl != NULL, "open /proc/0/ctl (kproc)");
-    TEST_EXPECT_EQ(devproc.write(kctl, attach_cmd, an, 0), (long)-1,
-                   "attach to kproc is refused (-1)");
+    TEST_EXPECT_EQ(devproc.write(kctl, attach_cmd, an, 0), (long)-T_E_ACCES,
+                   "attach to kproc is refused (EACCES)");
     TEST_EXPECT_EQ((void *)kproc()->debug_owner, (void *)NULL, "kproc slot untouched");
     spoor_clunk(kctl);
 }
@@ -1982,7 +2185,7 @@ void test_devproc_debug_stop_start_resume(void) {
                    "the released slot's verdict ends the step's wait, apart from an exit");
     TEST_EXPECT_EQ(v_gone, 0, "a gone target's verdict ends the wait");
     TEST_EXPECT_EQ(v_stopped, 1, "a stopped target's verdict ends it stopped");
-    TEST_EXPECT_EQ(v_denied, -1, "a denied scan's verdict ends it denied");
+    TEST_EXPECT_EQ(v_denied, -T_E_ACCES, "a denied scan's verdict ends it refused (EACCES)");
     TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1 && v_notyet != v_released,
                 "a live target not yet stopped polls on");
     // And the step write answers each verdict: only a re-stop completes the step.
@@ -1993,7 +2196,7 @@ void test_devproc_debug_stop_start_resume(void) {
                    "a step whose target is gone fails ESRCH");
     TEST_EXPECT_EQ(devproc_step_result_for_test(v_released, 5L), (long)(-T_E_SRCH),
                    "a step whose slot was released fails ESRCH, never success");
-    TEST_EXPECT_EQ(devproc_step_result_for_test(v_denied, 5L), -1L, "a denied step fails");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_denied, 5L), (long)-T_E_ACCES, "a denied step fails (EACCES)");
 
     TEST_ASSERT(dctl != NULL, "open target ctl (dying)");
     TEST_EXPECT_EQ(f_attach, an, "attach returns n (dying)");
@@ -2232,8 +2435,8 @@ void test_devproc_debug_mem(void) {
     TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
                 "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the denied case is meaningful)");
     tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
-    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1,
-                   "mem read by a non-owner (no CAP_DEBUG) is refused (I-39)");
+    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-T_E_ACCES,
+                   "mem read by a non-owner (no CAP_DEBUG) is refused (I-39, EACCES)");
 
     // The dump seal refuses the READ direction only (DEBUG-FS-DESIGN 3.2): reading
     // memory is extraction; writing it is control and answers to NOTRACE. LAST,
@@ -2257,7 +2460,7 @@ void test_devproc_debug_mem(void) {
     proc_free(tgt);
 
     TEST_EXPECT_EQ(nd_control, 64L, "control: the owner's mem read of a stopped target returns the bytes");
-    TEST_EXPECT_EQ(nd_read, (long)-1, "the dump seal refuses a mem READ");
+    TEST_EXPECT_EQ(nd_read, (long)-T_E_ACCES, "the dump seal refuses a mem READ (EACCES)");
     TEST_EXPECT_EQ(nd_write, 64L, "the dump seal does not refuse a mem WRITE -- that is control, NOTRACE's");
     TEST_ASSERT(nd_landed == 0x33, "the mem write to the NODUMP target landed");
     TEST_ASSERT(mem_untainted_before, "premise: the mem target was untainted before the write");
@@ -2440,8 +2643,8 @@ void test_devproc_debug_regs(void) {
                    "regs of an EXITING head thread is refused (HF1 backstop)");
     TEST_EXPECT_EQ(nd_regs_ctl, (long)sizeof(ur), "control: regs reads before the seal");
     TEST_EXPECT_EQ(nd_fp_ctl,   (long)sizeof(uf), "control: fpregs reads before the seal");
-    TEST_EXPECT_EQ(nd_regs_rd,  (long)-1, "the dump seal refuses a regs READ");
-    TEST_EXPECT_EQ(nd_fp_rd,    (long)-1, "the dump seal refuses an fpregs READ");
+    TEST_EXPECT_EQ(nd_regs_rd,  (long)-T_E_ACCES, "the dump seal refuses a regs READ (EACCES)");
+    TEST_EXPECT_EQ(nd_fp_rd,    (long)-T_E_ACCES, "the dump seal refuses an fpregs READ (EACCES)");
     TEST_EXPECT_EQ(nd_regs_wr,  (long)sizeof(wr), "the dump seal does not refuse a regs WRITE (control)");
     TEST_EXPECT_EQ(nd_fp_wr,    (long)sizeof(uf), "the dump seal does not refuse an fpregs WRITE (control)");
 }
@@ -2608,7 +2811,7 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     TEST_EXPECT_EQ(kr_cap.sp,        0xC096ull,           "kregs (CAP tier): sp");
     TEST_EXPECT_EQ(kr_cap.tpidr_el0, 0xC104ull,           "kregs (CAP tier): tpidr_el0");
     TEST_EXPECT_EQ(kregs_wlen,   (long)-1,            "kregs is RO (write refused)");
-    TEST_EXPECT_EQ(nd_kregs, (long)-1, "the dump seal refuses a kregs READ (it carries tpidr_el0)");
+    TEST_EXPECT_EQ(nd_kregs, (long)-T_E_ACCES, "the dump seal refuses a kregs READ (it carries tpidr_el0; EACCES)");
     TEST_ASSERT(nd_kstack > 0, "control: kstack is the kernel's own state -- it still reads when sealed");
 
     // kstack: the symbolized kernel fp-chain walk. Three frames: #0 = ctx.lr
@@ -2627,7 +2830,7 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     // wait: stopped / denied / exited (all level-triggered immediate returns).
     TEST_EXPECT_EQ(wl, 8L, "wait on a stopped target returns 'stopped\\n'");
     TEST_ASSERT(wl == 8 && contains(wbuf, (size_t)wl, "stopped"), "wait status = stopped");
-    TEST_EXPECT_EQ(wl_nonowner, (long)-1, "wait by a non-owner (no CAP_DEBUG) is refused (I-39)");
+    TEST_EXPECT_EQ(wl_nonowner, (long)-T_E_ACCES, "wait by a non-owner (no CAP_DEBUG) is refused (I-39, EACCES)");
     TEST_EXPECT_EQ(el, 7L, "wait on an exiting target returns 'exited\\n'");
     TEST_ASSERT(el == 7 && contains(ebuf, (size_t)el, "exited"), "wait status = exited");
 }
@@ -2746,7 +2949,7 @@ void test_devproc_debug_kstack_settled(void) {
     TEST_ASSERT(slen_running > 0,                             "8b: running head produced text");
     TEST_ASSERT(contains(rbuf, (size_t)slen_running, "running"), "8b: running head reports <running>");
     // I-39 authorization preserved for the inspect tier.
-    TEST_EXPECT_EQ(slen_nonowner, (long)-1, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39)");
+    TEST_EXPECT_EQ(slen_nonowner, (long)-T_E_ACCES, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39, EACCES)");
     // F3: an EXITING head -> empty (the death-adjacent guard; the relaxed gate no
     // longer rejects a dying target, so the format-time EXITING guard is load-bearing).
     TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: EXITING head -> empty read (never walk a dying head)");
@@ -3391,8 +3594,8 @@ void test_devproc_image_seal_join(void) {
     TEST_ASSERT(premise, "premise: the pair shares one space and C carries neither seal bit");
     TEST_ASSERT(before_seal, "control: unsealed, the peer is admitted to C");
     TEST_ASSERT(maps_before >= 0, "control: C's maps reads while the image is unsealed");
-    TEST_EXPECT_EQ(maps_after, (long)-1,
-                   "the join: NODUMP on a SHARER refuses C's maps (it is E's layout)");
+    TEST_EXPECT_EQ(maps_after, (long)-T_E_ACCES,
+                   "the join: NODUMP on a SHARER refuses C's maps (it is E's layout; EACCES)");
     TEST_ASSERT(environ_after >= 0,
                 "control: environ is per-Proc, so a sharer's NODUMP does not seal it");
     TEST_ASSERT(!after_notrace,

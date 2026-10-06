@@ -9,7 +9,8 @@
 // directory walk):
 //
 //   /ctl/procs          — every process: pid, ppid, name, state, threads,
-//                         pages, tables, children, CPU time
+//                         pages, tables, children, CPU time (a none reader:
+//                         its own row only)
 //   /ctl/memory         — physical memory stats (total/free/reserved)
 //   /ctl/devices        — bestiary listing (dc + name per Dev)
 //   /ctl/kernel-base    — KASLR kernel high VA base + offset + seed source
@@ -137,9 +138,12 @@ static size_t fmt_gated_udec(char *buf, size_t cap, size_t off, bool shown, u64 
     return shown ? fmt_udec(buf, cap, off, (unsigned long)v) : fmt_str(buf, cap, off, "-");
 }
 
-// devproc.c: owner (same principal) or CAP_HOSTOWNER; the caller holds
-// g_proc_table_lock, as format_procs_cb does.
+// devproc.c: owner (same principal, never none) or CAP_HOSTOWNER; the caller
+// holds g_proc_table_lock, as format_procs_cb does.
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+// devproc.c: true when a reader running as none may not see target (Plan 9's
+// nonone; IDENTITY-DESIGN's reserved ids).
+bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 
 // IMPERIUM-DESIGN 11.3 item 10: a counter that moves whenever any Proc runs --
 // per-CPU idle time, context switches and interrupts, the runnable count, the
@@ -205,6 +209,7 @@ struct procs_fmt_state {
 
 static int format_procs_cb(struct Proc *p, void *arg) {
     struct procs_fmt_state *s = (struct procs_fmt_state *)arg;
+    if (devproc_none_walled(s->reader, p)) return 0;   // a none reader: its own row only
     size_t row = s->off;   // a row is committed whole or not at all
     size_t n;
 
@@ -754,7 +759,8 @@ static size_t format_cons(const struct Proc *reader, char *buf, size_t cap) {
 //   s2c prod > cons (bytes parked in the ring)      -> reply undrained
 //   sess orphan bumped while the submitter is parked -> misdemux / tag
 //   sess owned advanced + inflight tag done=1 parked -> lost wake (I-9)
-// No addresses, no payload bytes. The rows are world-readable; every counter,
+// No addresses, no payload bytes. The rows are readable to every reader but one
+// running as none (below); every counter,
 // the reader flag, the send waiters and the in-flight tags move once per
 // message, and a pty carries a message per key, so they belong to the row's
 // ends (IMPERIUM-DESIGN 11.3 item 10): a reader whose principal is one of
@@ -778,10 +784,19 @@ static bool ctl_9p_shown(const struct ctl_9p_fmt *f, u32 end_a, u32 end_b) {
     return f->who == end_a || f->who == end_b;
 }
 
+// A reader running as none is no end, so it has no row of its own, and the rows
+// name other Procs' connections (peer pid, label, mode, liveness): Plan 9's
+// nonone() keeps them from none (IDENTITY-DESIGN's reserved ids). A hostowner
+// reader is `sys`, as the wall exempts it.
+static bool ctl_9p_row_hidden(const struct ctl_9p_fmt *f) {
+    return !f->sys && f->who == PRINCIPAL_NONE;
+}
+
 // A row that does not fit is rolled back to its start (`line`), as /ctl/procs's
 // are: the reader gets the rows that fit, each one whole.
 static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
+    if (ctl_9p_row_hidden(f)) return true;
     bool shown = ctl_9p_shown(f, row->peer_principal, row->server_principal);
     size_t line = f->off;
     size_t n;
@@ -826,6 +841,7 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
                               u32 owner, u32 server,
                               const struct p9_client_ctl *snap, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
+    if (ctl_9p_row_hidden(f)) return true;
     bool shown = ctl_9p_shown(f, owner, server);
     size_t line = f->off;
     size_t n;
@@ -1137,7 +1153,7 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Thread *t = current_thread();
     const struct Proc *reader = t ? t->proc : NULL;
     if (kind == CTL_KIND_KERNEL_BASE || kind == CTL_KIND_KSTACK) {
-        if (!devctl_kernel_base_readable(reader)) return -1;
+        if (!devctl_kernel_base_readable(reader)) return -T_E_ACCES;   // a refusal: ERRORS.md
     }
 
     char content[DEVCTL_READ_BUF];

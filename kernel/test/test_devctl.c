@@ -8,6 +8,7 @@
 #include <thylacine/addrspace.h>  // prowl-6: the counters the TABLES column reads
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/page.h>       // prowl-6: PAGE_SIZE
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>     // V-4c-2b: sched_cpu_ctxt
@@ -390,6 +391,15 @@ void test_devctl_read_kernel_base_format(void) {
     // never leave kproc elevated. The deny path is test_devctl_kernel_base_gated.
     struct Thread *t = current_thread();
     u64 saved = __atomic_load_n(&t->proc->caps, __ATOMIC_ACQUIRE);
+
+    // The unelevated read first: the gate as wired, and its refusal's value.
+    struct Spoor *d = open_ctl_leaf("kernel-base");
+    char dbuf[256];
+    long denied = d ? devctl.read(d, dbuf, sizeof dbuf, 0) : 0;
+    if (d) spoor_clunk(d);
+    TEST_EXPECT_EQ(denied, (long)-T_E_ACCES,
+                   "an unprivileged read of /ctl/kernel-base is refused (EACCES)");
+
     __atomic_store_n(&t->proc->caps, saved | CAP_HOSTOWNER, __ATOMIC_RELEASE);
 
     struct Spoor *c = open_ctl_leaf("kernel-base");
@@ -442,7 +452,7 @@ void test_devctl_kernel_base_gated(void) {
 // THE DENY LEG IS THE POINT and it must go through the REAL read path: the
 // predicate is shared with kernel-base, so a predicate-only test would pass
 // whether or not the gate is WIRED for this kind. Pre-fix the unelevated read
-// returns a positive count; post-fix it returns -1.
+// returns a positive count; post-fix it returns -T_E_ACCES (a refusal, ERRORS.md).
 void test_devctl_kstack_gated(void) {
     struct Thread *t = current_thread();
     u64 saved = __atomic_load_n(&t->proc->caps, __ATOMIC_ACQUIRE);
@@ -460,8 +470,8 @@ void test_devctl_kstack_gated(void) {
     long allowed = e ? devctl.read(e, buf, sizeof buf, 0) : -1;
     __atomic_store_n(&t->proc->caps, saved, __ATOMIC_RELEASE);
 
-    TEST_ASSERT(denied < 0,
-                "F2: an unprivileged caller is DENIED /ctl/kstack");
+    TEST_EXPECT_EQ(denied, (long)-T_E_ACCES,
+                   "F2: an unprivileged caller is DENIED /ctl/kstack (EACCES)");
     TEST_ASSERT(e != NULL, "open /ctl/kstack (elevated)");
     TEST_ASSERT(allowed > 0, "kstack read positive (elevated)");
     TEST_ASSERT(contains(buf, (size_t)allowed, "usable:"), "has usable:");
@@ -566,6 +576,15 @@ void test_devctl_read_9p_sessions_format(void) {
         r.principal_id = 0xB0B0u;
         n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(contains(buf, n, "c2s=3/0+3 s2c=0/0+0 sframes=0"), "the server end sees the counters");
+        // A none reader gets no row (Plan 9's nonone); the ordinary reader above is
+        // the control one variable away, and a none hostowner is the wall's exemption.
+        r.principal_id = PRINCIPAL_NONE;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(!contains(buf, n, "conn peer=31337"), "a none reader sees no conn row");
+        r.caps = CAP_HOSTOWNER;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(contains(buf, n, "conn peer=31337 msize="), "a none hostowner sees the conn row");
+        r.caps = 0;
     }
 
     srvconn_teardown(cn);

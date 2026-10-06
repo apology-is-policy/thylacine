@@ -52,7 +52,11 @@ not been elevated is judged by the same bits as anyone else.
 **Owner-first POSIX, with the consequence stated.** An owner is judged on
 owner bits *only*, even where group or other would grant more — sound
 because an owner can always chmod itself the bit. The branch order is
-owner → group → other, exactly one branch taken.
+owner → group → other, exactly one branch taken. A file whose uid is
+`PRINCIPAL_NONE` grants its owner bits to every Proc running as none: a file
+is a shared object, and Plan 9 keeps none's files shared the same way. The
+Proc-to-Proc owner axes in `/proc` are the opposite -- there none owns nothing
+but itself ([[dec-2026-10-06-none-owns-nothing]]).
 
 **Two fail-closed defaults that exist to defend against future callers, not
 present ones.**

@@ -626,13 +626,14 @@ void test_p9_attached_ctl_registry(void) {
         TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-") &&
                     att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx="),
                     "the server end sees the session's counters");
-        // none is nobody: a none end shares nothing with a none reader. The
-        // control one variable away is the other end, which still reads.
+        // none is nobody: a none reader is no end, not even of a none end's
+        // session, and it reads no other Proc's rows at all (Plan 9's nonone).
+        // The control one variable away is the other end, which still reads.
         p9_attached_set_ctl_owners(a, PRINCIPAL_NONE, 0xD00Du);
         r.principal_id = PRINCIPAL_NONE;
         n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
-        TEST_ASSERT(att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-"),
-                    "a none reader is not a none end");
+        TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe"),
+                    "a none reader sees no session row, a none end's included");
         r.principal_id = 0xD00Du;
         n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
         TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-") &&

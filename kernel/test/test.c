@@ -931,6 +931,8 @@ void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
+void test_devproc_none_owns_nothing(void);
+void test_devproc_none_walled(void);
 void test_devproc_sched_gate_predicate(void);       // prowl-3b: OQ-4 sched-view gate
 void test_devproc_sched_read_gated(void);           // prowl-5 F4: OQ-4 deny-wiring revert-probe
 void test_devproc_read_sched_format(void);           // prowl-3b: /proc/<pid>/sched read
@@ -3078,6 +3080,8 @@ struct test_case g_tests[] = {
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
+    { "devproc.none_owns_nothing",     test_devproc_none_owns_nothing,     false, NULL },
+    { "devproc.none_walled",           test_devproc_none_walled,           false, NULL },
     { "devproc.sched_gate_predicate",  test_devproc_sched_gate_predicate,  false, NULL },
     { "devproc.sched_read_gated",      test_devproc_sched_read_gated,      false, NULL },
     { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
