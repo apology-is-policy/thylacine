@@ -4,7 +4,7 @@ type: chg
 title: "chdir stores the name of where the walk landed"
 date: 2026-10-06
 arc: arc-identity-detour
-commits: ["*(pending)*"]
+commits: ["f33605135", "0051c458e"]
 touched:
   - sub-kernel-stalk
   - sub-kernel-territory

@@ -4,7 +4,7 @@ type: chg
 title: "/ctl/9p-sessions shows a row's counters only to its two ends"
 date: 2026-10-06
 arc: arc-identity-detour
-commits: ["*(pending)*"]
+commits: ["f33605135", "0051c458e"]
 touched:
   - sub-kernel-devctl
   - sub-kernel-devsrv

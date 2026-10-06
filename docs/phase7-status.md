@@ -1212,7 +1212,7 @@ UBSan at 4 and 8).
 
 Two operator votes of 2026-10-06. "Per-row owner" for `/ctl/9p-sessions` (IMPERIUM-DESIGN 11.3 item 10; re-asked at
 15:38Z after the first question misstated the cost, superseding "Gate it") closes the CPU-time gate audit's F4.
-"Physical" for chdir (STALK-DESIGN 4.3). Scripture f33605135; code, witnesses and dossiers in one commit, *(pending)*.
+"Physical" for chdir (STALK-DESIGN 4.3). Scripture f33605135; code, witnesses and dossiers in one commit, 0051c458e.
 
 - **A 9P row's counters belong to its two ends.** A connection records the connecting Proc's principal and the
   poster's at the post. A session records its attacher and, over `/srv`, the connection's server. Both are recorded by
