@@ -22,16 +22,16 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="reader_frame:-
-reader_frame_delivery:-
-reader_frame_blockthrough_fair:-"
+CLEAN="reader_frame:39
+reader_frame_delivery:39
+reader_frame_blockthrough_fair:34"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="reader_frame_buggy:NoDesync"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
-TEMPORAL="reader_frame_blockthrough:EventuallyUnwinds:-"
+TEMPORAL="reader_frame_blockthrough:EventuallyUnwinds:34"
 
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"

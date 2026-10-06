@@ -1937,6 +1937,7 @@ again:
     ctx->elr     = handler_va;
     // spsr unchanged but for SS -- the handler runs at EL0 with the same
     // PSTATE the syscall entered with.
+    return false;                   // the handler runs next; the tail ends, as the Linux arm's does
 }
 
 // ARCH 8.8.3: an unwind claim (thread_caught_note_claim) lasts until the

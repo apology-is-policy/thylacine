@@ -1685,6 +1685,45 @@ fan-in waiter's scan, hooks and sleep (`loom_wait_for_completions`,
 
 ---
 
+## reader_frame.tla — the elected 9P reader's recv unwinds at any byte (#90; rewritten for the seam-90 close, 2026-10-06, model-first)
+
+One frame of N chunks, a server with NO fairness in `Spec` (it may stop for good
+mid-frame: any process can serve a mount over pipes), two readers: A holds the
+role and is the one a death, stop or caught note reaches (`interrupted`); B
+waits on the same session. `rx` is the client's resume count (`c->rx_got`),
+`pos` the wire position. ARCH 8.8.1.1; `dec-2026-10-06-seam90-unwind-any-byte`.
+Until 2026-10-06 the module modelled the frame-atomic block-through (one
+reader, a boundary-guarded die-check, a fair server); that rule is now the
+`BUGGY_BLOCK_THROUGH` cfg.
+
+TLC 2026-10-06 (`-workers 1 -deadlock -lncheck final`; `specs/check-reader-frame.sh`
+pins every count), N = 3: `reader_frame.cfg` (Safety + EventuallyUnwinds, no
+server fairness) 39 distinct states; `reader_frame_delivery.cfg` (FairServerSpec:
++ FrameDelivered) 39; `reader_frame_blockthrough_fair.cfg` (the superseded rule
+under a fair server -- the 2026-07-19 model's claim, a control) 34, clean.
+Buggy, each counterexample read: `reader_frame_buggy.cfg` violates `NoDesync`
+(41 states) -- A reads a chunk, unwinds and discards the count, B parses from 0
+with the wire at 1; `reader_frame_blockthrough.cfg` violates `EventuallyUnwinds`
+with Safety intact (34 states) -- A is two chunks into the frame when
+interrupted, the server stops, and the trace stutters with A in its recv (the
+seam-90 hang).
+
+| Spec | Code |
+|---|---|
+| `Read(X)` | `kernel/9p_client.c::do_reader_recv_frame`'s two recv loops, resuming at `c->rx_got`; `rx + 1 = N` is the frame complete (`rx_got = 0`, demux) |
+| `UnwindA` | the die-checks in `kernel/sched.c` `sleep_common`/`tsleep_common` (register-then-observe + prompt), the stop detour's `stop_unwinds` branch (held for the whole recv by `reader_recv_frame`), the four caught arms; `rx' = rx` is `do_reader_recv_frame`'s `incomplete:` exit |
+| `ElectB` | `client_handoff_reader_locked` and every later election (`client_wait`, the send-path self-pump, `p9_client_reader_pump_ready`) |
+| `BUGGY_DISCARD` | a frame-local count (the pre-loom-mc reader) |
+| `BUGGY_BLOCK_THROUGH` | the deleted `thread_reader_blocks_death` guard |
+
+Outside the model: the transport recv (each returns the bytes it copied or
+none -- `srvconn_client_recv`, the pipe read; loopback and mq never sleep),
+the srvconn reading role (released on every recv exit by `chan_role_release`),
+tags and the dying op's flush (`9p_client.tla`, I-10), more than one frame.
+Regressions: `rendez.reader_recv_unwinds_death` / `_death_sleep` /
+`_caught_note`; `9p_srvconn_transport.reader_unwinds_mid_frame_death` /
+`_stop` (a real SrvConn; the server stops 20 bytes into a 160-byte Rgetattr).
+
 ## net_poll.tla — net-6b (the dev9p.poll readiness bridge); rewritten for #98 (the SAMPLE/ARM split, 2026-09-28; spec-first re-enabled, model-first)
 
 Status: **the split was modeled first (NP-2, 2026-09-28) and landed in two

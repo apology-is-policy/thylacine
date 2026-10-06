@@ -51,6 +51,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include "../../arch/arm64/uart.h"
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c).
 extern void srv_registry_reset(void);
@@ -978,7 +979,37 @@ struct mf_rig {
     u8                      reply[256];
     int                     reply_len;
     bool                    open, midframe, tail_sent;
+    u32                     stage;          // setup stages completed (MF_STAGES = all)
+    u32                     d_run, d_state; // the midframe premise's evidence
+    int                     d_rc;
+    bool                    d_active, d_ready, d_on_debug, d_on_any;
 };
+
+#define MF_STAGES 7u
+// The premise each stage establishes, named so a failing setup says which.
+static const char *const mf_premise[MF_STAGES] = {
+    "premise: a byte-mode SrvConn pair",
+    "premise: the client handshakes to OPEN over the real SrvConn",
+    "premise: the reader thread, in a Proc of its own",
+    "premise: the server took the reader's Tgetattr",
+    "premise: the canonical Rgetattr is longer than MF_SPLIT",
+    "premise: the server sent MF_SPLIT bytes of the reply",
+    "premise: the reader slept inside the frame, MF_SPLIT bytes read",
+};
+
+// One line of evidence when the reader was not found asleep mid-frame.
+static void mf_premise_evidence(const struct mf_rig *r) {
+    if (r->stage != MF_STAGES - 1u) return;
+    uart_puts("    [mf] run="); uart_putdec(r->d_run);
+    uart_puts(" rc="); uart_putdec((u64)(s64)r->d_rc);
+    uart_puts(" state="); uart_putdec(r->d_state);
+    uart_puts(" reader_active="); uart_putdec(r->d_active);
+    uart_puts(" recv_ready="); uart_putdec(r->d_ready);
+    uart_puts(" on_debug="); uart_putdec(r->d_on_debug);
+    uart_puts(" on_any="); uart_putdec(r->d_on_any);
+    uart_puts(" dead="); uart_putdec(g_sc_client.dead);
+    uart_puts("\n");
+}
 
 // Take one whole request off c2s, as the server reads it. Returns its length,
 // or -1 if none arrives within the yield budget.
@@ -1026,21 +1057,31 @@ static void mf_setup(struct mf_rig *r) {
     srv_registry_reset();
     r->cn = open_byte_mode_pair(&r->server, &r->client, &r->svc_h, &r->conn_h);
     if (!r->cn) return;
+    r->stage = 1;
     r->open = sc_open_handshaked(r->cn, &r->st, &r->ops) == 0;
     if (!r->open) return;
+    // The handshake's Tversion and Tattach are still in c2s (their replies
+    // were staged ahead): drain them, so the next request read is the reader's.
+    u8 hs[128];
+    while (srvconn_server_recv(r->cn, hs, (long)sizeof(hs)) > 0) {}
+    r->stage = 2;
 
     g_mf_proc = proc_alloc();
     if (!g_mf_proc) return;
     r->reader = thread_create(g_mf_proc, mf_reader_entry);
     if (!r->reader) return;
     ready(r->reader);
+    r->stage = 3;
 
     u8 req[64];
     int len = mf_take_request(r->cn, req, sizeof(req));
     if (len <= 0 || req[4] != P9_TGETATTR) return;
+    r->stage = 4;
     r->reply_len = canonical_responder(NULL, req, (size_t)len, r->reply, sizeof(r->reply));
     if (r->reply_len <= (int)MF_SPLIT) return;
+    r->stage = 5;
     if (srvconn_server_send(r->cn, r->reply, (long)MF_SPLIT) != (long)MF_SPLIT) return;
+    r->stage = 6;
     // c->rx_got is written when the frame reader returns, so mid-frame shows
     // as the reader asleep in the transport with the ring drained.
     TEST_YIELD_UNTIL_SOFT(g_mf_run == 1u &&
@@ -1048,9 +1089,16 @@ static void mf_setup(struct mf_rig *r) {
                           r->reader->rendez_blocked_on != NULL &&
                           r->reader->rendez_blocked_on != &r->reader->debug_rendez &&
                           !p9_transport_recv_ready(&g_sc_client.transport, NULL));
-    r->midframe = g_mf_run == 1u && g_sc_client.reader_active &&
-                  __atomic_load_n(&r->reader->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
-                  !p9_transport_recv_ready(&g_sc_client.transport, NULL);
+    r->d_run      = g_mf_run;
+    r->d_rc       = g_mf_rc;
+    r->d_state    = (u32)__atomic_load_n(&r->reader->state, __ATOMIC_ACQUIRE);
+    r->d_active   = g_sc_client.reader_active;
+    r->d_ready    = p9_transport_recv_ready(&g_sc_client.transport, NULL);
+    r->d_on_debug = r->reader->rendez_blocked_on == &r->reader->debug_rendez;
+    r->d_on_any   = r->reader->rendez_blocked_on != NULL;
+    r->midframe = r->d_run == 1u && r->d_active && r->d_state == THREAD_SLEEPING &&
+                  r->d_on_any && !r->d_on_debug && !r->d_ready;
+    if (r->midframe) r->stage = MF_STAGES;
 }
 
 static void mf_send_tail(struct mf_rig *r) {
@@ -1114,7 +1162,8 @@ static void mf_teardown(struct mf_rig *r) {
 void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void) {
     struct mf_rig r;
     mf_setup(&r);
-    bool premise   = r.open && r.midframe;
+    bool premise   = r.stage == MF_STAGES;
+    mf_premise_evidence(&r);
     bool returned  = false, role_free = false, live = false, fs_done = false;
     int  rc = 0x7fffffff, pump_tail = -99, pump_flush = -99, fs_status = 0x7fffffff;
     int  ftype = -1;
@@ -1154,7 +1203,7 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void) {
     }
     mf_teardown(&r);
 
-    TEST_ASSERT(premise, "premise: the reader slept inside the frame, MF_SPLIT bytes read");
+    TEST_ASSERT(premise, mf_premise[r.stage < MF_STAGES ? r.stage : 0]);
     TEST_ASSERT(returned,
         "a death unwinds a reader whose server stopped inside a frame (ARCH "
         "8.8.1.1) -- it does not wait for the rest of the frame");
@@ -1177,7 +1226,8 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void) {
 void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
     struct mf_rig r;
     mf_setup(&r);
-    bool premise  = r.open && r.midframe;
+    bool premise  = r.stage == MF_STAGES;
+    mf_premise_evidence(&r);
     bool parked   = false, role_free = false, returned = false, live = false;
     int  pump = -99, rc = 0x7fffffff;
     u32  rx_parked = 0xffffffffu, rx_end = 0xffffffffu;
@@ -1208,7 +1258,7 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
     }
     mf_teardown(&r);
 
-    TEST_ASSERT(premise, "premise: the reader slept inside the frame, MF_SPLIT bytes read");
+    TEST_ASSERT(premise, mf_premise[r.stage < MF_STAGES ? r.stage : 0]);
     TEST_ASSERT(parked,
         "a stop unwinds a reader whose server stopped inside a frame and parks "
         "it role-free (ARCH 8.8.1.1) -- it does not wait for the rest of the frame");
