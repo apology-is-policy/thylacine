@@ -803,3 +803,65 @@ is evidence rather than qualification. The confirmation run (pinned Stratum, sam
 AS-R9 source and config, full matching pair, trace comparison, then the SMP gate)
 waits for the next owned lease; aux held the Mac for their served-link close and was
 not displaced for a red that is explained and enqueued.
+
+### October 6, evening: the verification runbook audited as code
+
+No lease was available all evening (main held the Mac for the devno and loom-mc
+gates, with aux ahead in the queue), so this slice is entirely off-lease: nothing
+was built, booted or gated, and no kernel source changed. The work was auditing
+`work/oct5-as-r9/lease-runbook.sh` against the TOOLS it calls instead of against
+the memory of having written it. Thirteen defects, five of them found by Astra
+reviewing it read-only on Yip 0161. The runbook decides whether a scarce lease
+produces evidence or noise, and it had not been audited the way the code it
+verifies is audited.
+
+**What the eventual result will mean, which is what changed.** Three of the
+defects would have produced a MISLEADING verdict rather than a failed run:
+
+- **Stage 5 captured its gate and asserted nothing.** `tools/ci-smp-gate.sh | tee`
+  yields tee's status, so `set -e` was blind and no later line examined it: a RED
+  `ci-smp-gate` would have run through to the script's closing "the qualifying
+  verdict" line, on the one gate AS-R9 is blocked on. The gate's own status now
+  returns through a subshell sentinel, the `ci-smp-gate: PASS` line must be
+  present, and all five matrix rows are enumerated rather than counted.
+- **Five PASS rows are not fifty clean boots.** `tools/smp-multiboot.sh:347`
+  returns `corrupt==0 && extkill==0 && other==0`, so TIMING and INJECT-MISS boots
+  can be nonzero inside a row that PASSES -- and the timing arm is labelled
+  "benign host-fragility" in the tool, which is the non-explanation CLAUDE.md
+  forbids. Stage 5 now requires `pass == N` for every label; because each boot
+  carries exactly one classification, that single check is equivalent to "every
+  other category zero". A narrowed `SMP_GATE_CONFIGS` or an `SMP_GATE_N` below 10
+  is refused outright: narrowing the matrix on an SMP race fix is verifying around
+  the hazard, and the subset still prints a PASS.
+- **The Stratum pin checked the input; nothing checked the output.** `build_stratumd`
+  runs in the all-flow (build.sh:394), copies to `$progs_out` (build.sh:3347) and
+  is installed into the ramfs (build.sh:780-784). This tree held four stale
+  `stratumd` binaries, two of them in those staging paths, which stage 1 did not
+  clear -- so a run that skipped or failed that build would have baked the OLD
+  daemon in while the pin guard reported success. Stage 1 now deletes the staged
+  daemon (a loud absence beats a silent stale binary) and stage 2 asserts both
+  that the stratumd `CMakeCache.txt` NAMES `$STRATUM_SRC` and that each staged
+  binary postdates a pre-build timestamp.
+
+**Two further items of record.** The D7 red-boot exception now requires exit code
+20 exactly -- the *unchanged* known red, byte-identical to the recorded baseline
+-- where `!= 0` had also admitted "changed shape" (a second cause in play),
+"control failed" (a vacuous experiment) and any shell error; code 22 was split out
+for a refusal whose trace differs. And Astra's build-cache clone approval is
+discharged (acknowledged on 0169 t5/t6, confirmed on 0161 t17), so the runbook no
+longer clones her tree on `CLONE_APPROVED=1`: an existing `build/` is used as-is,
+a re-clone requires `CLONE_RECHECKED=1` after a fresh coordination check, and the
+cache invalidation -- which previously sat inside the clone branch and therefore
+never ran on the own-cache path -- is unconditional.
+
+Every stage is now audited against the tool it calls: stage 0 ran on Oct 6,
+stages 1/2/4/5/6 were repaired, and stage 3's denominator control was verified
+against the real ELF (`test.c:2328` registers the literal
+`burrow.refcount_lifecycle`, so the control discriminates instead of aborting
+every run). Every new assertion was exercised BOTH ways before being trusted --
+thirty cases, including control breakers, and for the Stratum check a red arm on
+the live stale `CMakeCache.txt` rather than a synthetic one.
+
+**Posture unchanged: AS-R9 is UNQUALIFIED, because `ci-smp-gate` has never run.**
+None of this brings the gate closer to running; it only makes the run's verdict
+mean what it says.

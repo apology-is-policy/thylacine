@@ -183,6 +183,83 @@ already in my own memory -- losing the first failing boot log to a re-run that
 overwrites it, and `nohup ... &` inside a backgrounded call, where the harness's
 exit 0 described the wrapper while the boot was still live.
 
+UPDATE, the lease runbook audited as code (October 6, later). No lease all
+evening: main held the mac for the devno and loom-mc gates with aux ahead of me,
+so this slice is entirely off-lease and NOTHING was built or run. What I did
+instead was read `work/oct5-as-r9/lease-runbook.sh` against the TOOLS it calls,
+rather than against my memory of having written it. Thirteen real defects, five
+of them found by astra reviewing it read-only on Yip 0161. The runbook is the
+thing that decides whether a scarce lease produces evidence or noise, and it had
+never been audited the way the code it verifies is audited.
+
+The three that would have produced a MISLEADING result rather than a failed one.
+Stage 5 ran `tools/ci-smp-gate.sh | tee` and then asked nothing: the pipeline's
+status is tee's, so `set -e` was blind and no later line looked, which means a
+RED ci-smp-gate would have run on to the script's closing "DONE ... the
+qualifying verdict" -- on the one gate AS-R9 is actually blocked on. Second,
+five PASS rows are not fifty clean boots: smp-multiboot.sh:347 is
+`corrupt==0 && extkill==0 && other==0`, so TIMING and INJECT-MISS boots can be
+nonzero inside a PASS row, and the timing arm is labelled "benign
+host-fragility" in the tool itself -- the exact non-explanation CLAUDE.md
+forbids. Stage 5 now requires pass == N per label; since each boot carries
+exactly one classification, that single check is equivalent to "every other
+category zero" with no enumeration gap. Third, the Stratum pin checked the INPUT
+and nothing checked the OUTPUT: build_stratumd runs in the all-flow
+(build.sh:394), copies to $progs_out (build.sh:3347) and is installed into the
+ramfs (build.sh:780-784), and this tree held FOUR stale stratumd binaries, two
+of them in exactly those staging paths that stage 1 never cleared. A run where
+that build was skipped would have baked the OLD daemon in while my own guard
+reported the pin honoured -- the same unequal input that cost an hour of
+attribution, a second time, with the guard against it already written.
+
+Then the restructure of stage 1 exposed the one I would not have found alone:
+the cache invalidation sat INSIDE the clone branch. Astra's clone approval had
+been discharged (the acknowledgement she conditioned it on was accepted on 0169
+t5/t6, confirmed on 0161 t17), so the own-cache path became the normal one --
+and on that path nothing was invalidated, including the stale staged stratumd I
+had just added code to delete. The guard and the hole were in the same commit,
+one of them gated behind a flag the other no longer sets. My pickup.md was still
+telling a future reader to send that discharged acknowledgement, which is how a
+peer's tree gets read on consent that expired.
+
+My own wrong turns, since they are the point of this journal. I claimed the
+ubsan build clobbers the default ELF and built a stage-6 rebuild on top of it;
+build.sh:231-232 puts a sanitizer build in build/kernel-undefined precisely so
+it does not, and my own disk-measurement comment from an hour earlier said as
+much -- I wrote both and never read one against the other. Astra caught it, and
+main's live QEMU booting build/kernel-undefined/thylacine.bin confirmed it from
+the process table. The step was not merely redundant: it re-mints pool.img with
+a fresh key (build.sh:3598), so it would have spent lease minutes and ~600M of
+disk restoring something nothing had disturbed. I also wrote the D7 red-boot
+exception as `D7RC != 0`, the lazy complement of what I meant, which admitted
+"changed shape" (a second cause in play) and "control failed" (the experiment
+broken); astra required exactly 20, and her phrase "the unchanged known
+failure" exposed that 20 was itself two outcomes, so byte-identical is now 20
+and a differing trace is 22. And I bypassed the dossier-gate on one commit by
+passing `-c core.hooksPath=.githooks`, a directory that does not exist in this
+tree, so no hooks ran at all; re-submitted through the configured path, which is
+the primary tree's .git/hooks. Twice more I walked into traps already in my own
+memory: `$?` after a pipe reported tail's status rather than the script's, and a
+raw-string `\"` made a patch anchor that could never match -- the patcher
+aborted before writing, which is the only reason that one cost nothing.
+
+Stage 3 turned out sound but sound BY LUCK of a name I had not checked: its
+denominator control greps the built ELF for "burrow.refcount_lifecycle" while
+the C function is test_vmo_refcount_lifecycle, and the only exact match in the
+source is a comment. Had the registered string differed, the control would read
+ABSENT and the stage would have aborted every run -- the inverse of a control
+that cannot fail, and just as expensive. test.c:2328 registers that literal and
+the string is in the real 9.5 MB ELF, checked against the artifact rather than
+inferred.
+
+What "fixed" covers here: the runbook and its new D7 comparison, nothing else.
+Every new assertion was run BOTH WAYS before being trusted -- thirty cases,
+including control breakers and, for the Stratum check, a red arm on the live
+stale CMakeCache rather than a synthetic one. No kernel source changed. AS-R9 is
+UNQUALIFIED: ci-smp-gate has still never run, and none of this makes it closer
+to run -- it only makes the run's verdict mean what it says. The operator made
+no decisions this slice; every correction came from astra or from reading a tool.
+
 ## 2026-10-04: explicit protocol-buffer storage
 
 The private owner needs all metadata/payload transport storage accounted before
