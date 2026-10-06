@@ -1755,6 +1755,7 @@ void test_9p_client_handoff_skips_restopped_owner(void);
 void test_9p_client_loom_enter_wakes_when_role_frees(void);
 void test_9p_client_loom_enter_reads_every_client(void);
 void test_9p_client_loom_enter_partial_set_rescans(void);
+void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -1836,6 +1837,7 @@ void test_dev9p_poll_cancel_at_close(void);
 bool test_dev9p_np_release(void);
 bool test_9p_client_release(void);
 void test_dev9p_poll_gc_flushes_with_the_unlink(void);
+void test_dev9p_poll_reads_every_client(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_unlink_rename_errno_propagates(void);
@@ -4048,6 +4050,8 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_enter_reads_every_client, false, NULL },
     { "9p_client.loom_enter_partial_set_rescans",
                                        test_9p_client_loom_enter_partial_set_rescans, false, NULL },
+    { "9p_client.loom_sqpoll_parks_on_a_held_role",
+                                       test_9p_client_loom_sqpoll_parks_on_a_held_role, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
@@ -4141,6 +4145,7 @@ struct test_case g_tests[] = {
     { "dev9p.poll_widen_keeps_the_old_arm_until_replaced", test_dev9p_poll_widen_keeps_the_old_arm_until_replaced, false, NULL },
     { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
     { "dev9p.poll_gc_flushes_with_the_unlink", test_dev9p_poll_gc_flushes_with_the_unlink, false, NULL },
+    { "dev9p.poll_reads_every_client", test_dev9p_poll_reads_every_client, false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.unlink_rename_errno",     test_dev9p_unlink_rename_errno_propagates, false, NULL },

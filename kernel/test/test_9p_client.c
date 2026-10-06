@@ -88,6 +88,9 @@ void test_9p_client_loom_dirmut_sqpoll(void);
 void test_9p_client_loom_create_gid(void);
 void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
+void test_9p_client_loom_enter_reads_every_client(void);
+void test_9p_client_loom_enter_partial_set_rescans(void);
+void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -5865,6 +5868,72 @@ void test_9p_client_loom_enter_partial_set_rescans(void) {
     TEST_EXPECT_EQ(o.ud_first, 0xB0B0000000000002ULL, "client 2's op completed first");
     TEST_EXPECT_EQ((u64)o.cq_end, (u64)2, "client 1's op completed once released");
     TEST_ASSERT(!o.dead1 && !o.dead2, "both sessions stay live");
+}
+
+// An SQPOLL ring's op rides a client whose reader role another thread holds and
+// never reads with. The kthread may not read that reply, so it hooks the role
+// and parks: asleep, never run, for as long as the role stays held. The role's
+// release wakes it to read the reply. Before, the pump reported the role busy
+// and the kthread yielded and pumped again, a CPU spent on a reply it could
+// not read. Everything is observed first and judged after the teardown, so a
+// failure leaves no kthread hooked on the client the runner destroys.
+void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    struct Proc  *p  = sp ? proc_alloc() : NULL;
+    struct loom_params kp;
+    hidx_t fd = -1;
+    struct Handle hh;
+    bool got = p && sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd) == 0 &&
+               handle_get(p, fd, &hh) == 0;
+    struct Loom *l = got ? (struct Loom *)hh.obj : NULL;
+    bool ring_up = l && l->sqpoll;
+    bool parked = false, stayed = false, posted = false;
+    u64  runs = ~0ull;
+    s64  res  = -1;
+    if (ring_up) {
+        loom_install_test_handle(l, 0, sp, RIGHT_READ | RIGHT_WRITE);
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+        struct Thread *kt = l->sqpoll;
+        dy_hold_reader(true);
+        cl_stage_sqe(l, 0, LOOM_OP_FSYNC, /*handle=*/0, /*datasync*/0, 0xC0C0000000000003ULL);
+        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+        (void)sys_loom_enter_for_proc(p, fd, 0, 0, 0);    // wakes the kthread
+        // The Tfsync is out and its reply queued: from here the kthread has
+        // nothing it may read.
+        TEST_YIELD_UNTIL_SOFT(rec_count(P9_TFSYNC) == 1u && g_mq.tail != g_mq.head &&
+                              __atomic_load_n(&kt->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING);
+        parked = rec_count(P9_TFSYNC) == 1u && g_mq.tail != g_mq.head &&
+                 __atomic_load_n(&kt->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+        if (parked) {
+            u64 n0 = __atomic_load_n(&kt->nsched, __ATOMIC_ACQUIRE);
+            u64 t0 = timer_now_ns();
+            TEST_YIELD_UNTIL_SOFT(timer_now_ns() >= t0 + 50ull * 1000ull * 1000ull);
+            runs   = __atomic_load_n(&kt->nsched, __ATOMIC_ACQUIRE) - n0;
+            stayed = __atomic_load_n(&kt->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+                     __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) == 0u;
+        }
+        dy_hold_reader(false);
+        p9_client_handoff_reader(&g_client);              // the role comes free
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u);
+        posted = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u;
+        res    = (s64)cqes[0].result;
+    }
+    if (got) handle_put(&hh);
+    if (p) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);                     // the last handle: loom_free joins the kthread
+    }
+    if (sp) spoor_clunk(sp);
+    dy_client_close();
+
+    TEST_ASSERT(ring_up, "SQPOLL ring with its kthread");
+    TEST_ASSERT(parked, "the kthread parked, the op's client role held");
+    TEST_ASSERT(stayed, "and stayed parked, the reply unread");
+    TEST_EXPECT_EQ(runs, (u64)0, "never ran while the role stayed held");
+    TEST_ASSERT(posted, "the role's release woke it to read the reply");
+    TEST_EXPECT_EQ((u64)res, (u64)0, "fsync success");
 }
 
 // The runner's release, after every test (test.c). A test that fails before its
