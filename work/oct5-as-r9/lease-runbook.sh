@@ -18,6 +18,32 @@ cd "$ROOT"
 FLOOR_GB=${FLOOR_GB:-8}
 
 free_gb() { df -g . | awk 'NR==2 {print $4}'; }
+
+PROV=work/oct5-as-r9/provenance.log
+# astra, 0169 t4 + 0161 t9: retain the exact source/config and PAIRED IMAGE
+# hashes with each result. A verdict without them cannot be attributed to a
+# specific image later, and "I rebuilt it" is not a hash. The pool and the
+# key-bearing ramfs are a CRYPTOGRAPHIC PAIR -- recording both hashes together
+# is what makes "paired" checkable rather than asserted.
+provenance() {
+  {
+    echo "=== $1 -- $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+    echo "my HEAD        : $(git rev-parse HEAD)"
+    echo "my base        : $(git rev-parse 5ff62b788)"
+    echo "astra HEAD     : $(git -C ../thylacine-astra rev-parse HEAD 2>/dev/null || echo n/a)"
+    echo "free GiB       : $(free_gb)"
+    for f in build/.config build/kernel/thylacine.elf build/ramfs.cpio build/fixtures/pool.img; do
+      [ -f "$f" ] && echo "$(shasum -a 256 "$f" | cut -c1-16)  $f" || echo "(absent)          $f"
+    done
+  } >> "$PROV"
+  echo "-- provenance recorded: $1 (-> $PROV)"
+}
+
+# NO BLIND RETRY (astra, 0161 t9: "diagnose any failure before retrying"). A
+# re-run after a red, with nothing changed and nothing understood, converts a
+# finding into a flake -- which is the dismissal this project treats as a bug in
+# itself. Every exit path below is therefore terminal: stop, keep the log, hand
+# the machine back, and diagnose OFF the lease, since reading needs no cores.
 floor() {
   g=$(free_gb)
   [ "$g" -ge "$FLOOR_GB" ] || { echo "REFUSING at stage '$1': ${g} GiB free < ${FLOOR_GB} GiB floor"; exit 1; }
@@ -25,6 +51,7 @@ floor() {
 }
 
 floor start
+provenance "stage-start (nothing built yet)"
 
 # Stage 0 -- THE SPEC OBLIGATION, and it is INDEPENDENT of everything below.
 # CLAUDE.md: any change to a mechanism modelled in specs/ re-runs that spec's
@@ -117,6 +144,7 @@ fi
 # Stage 2 -- MY kernel from MY source. The only thing the cache must not supply.
 tools/build.sh kernel --config ci
 floor post-build
+provenance "post-build (my kernel, paired images)"
 
 # Stage 3 -- verify the image by CONTENT, not by the build's exit code. This is
 # the BAKE-TRAP class: failure looks like absent content plus a green ledger.
@@ -192,6 +220,9 @@ if [ "${PI_AXIS:-1}" = 1 ]; then
   echo "-- then run the SMP boots there under real KVM, A72 weak memory"
 fi
 
+provenance "post-ci-smp-gate (the qualifying verdict)"
 echo "DONE. Report SHAs + evidence to astra on yip 0161 BEFORE any integration."
+echo "OWED THE MOMENT THE CLONE COMPLETED: the cache-copy acknowledgement to astra"
+echo "on 0169 -- she is holding her build/ unchanged until she gets it."
 echo "Report BOTH axes separately: M2/HVF and A72/KVM. A race fix green on one"
 echo "memory model is one reading, not a qualification."
