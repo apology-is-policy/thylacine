@@ -236,7 +236,19 @@ if [ -z "$sh" ]; then
 fi
 git -C "$STRATUM_SRC" merge-base --is-ancestor "$STRATUM_PIN" HEAD 2>/dev/null \
   || { echo "REFUSING: $STRATUM_PIN is not an ancestor of $STRATUM_SRC HEAD."; exit 4; }
-echo "-- stratum pinned: $STRATUM_SRC @ $(git -C "$STRATUM_SRC" rev-parse --short HEAD) (contains $STRATUM_PIN)"
+# A DIRTY external source defeats the pin. The ancestor check proves the COMMIT
+# is in history; it says nothing about what is actually on disk, and build.sh
+# consumes the WORKING TREE. This is the same proxy-for-the-thing error that made
+# D7 unattributable -- a recorded identity standing in for the bytes consumed --
+# so refuse rather than record a pin the build may not have used.
+if [ -n "$(git -C "$STRATUM_SRC" status --porcelain 2>/dev/null)" ]; then
+  echo "REFUSING: $STRATUM_SRC has uncommitted changes. The pin names a commit,"
+  echo "but build.sh consumes the working tree, so the image would not be the"
+  echo "pinned source. Commit, stash, or point STRATUM_SRC at a clean tree."
+  git -C "$STRATUM_SRC" status --porcelain | head -5
+  exit 4
+fi
+echo "-- stratum pinned: $STRATUM_SRC @ $(git -C "$STRATUM_SRC" rev-parse --short HEAD) (contains $STRATUM_PIN, tree CLEAN)"
 tools/build.sh kernel --config ci
 floor post-build
 provenance "post-build (my kernel, paired images)"
