@@ -131,11 +131,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
+- 2026-10-06 [[chg-2026-10-06-devno-u64]] — devno-u64: the kernel's device number is 64 bits and never reused; t_stat.devno carries all of it
 - 2026-10-06 [[chg-2026-10-06-flag-words]] — The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested
 - 2026-10-06 [[chg-2026-10-06-haul-p3b]] — Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
 - 2026-10-06 [[chg-2026-10-06-held-untagged]] — The held launch drops its build tag: every ambush build spawns held
 - 2026-10-06 [[chg-2026-10-06-loom-multiclient]] — Waiters fan in: a Loom ring's waiters read every 9P client it has an op on, over a ready stream only
 - 2026-10-06 [[chg-2026-10-06-nanosleep-rows]] — The sleep rows: a Linux guest's nanosleep and clock_nanosleep sleep, and the deadline beats a pending note
 - 2026-10-06 [[chg-2026-10-06-served-link-containment]] — Served links: a link a remote session serves resolves beneath its mount
-- 2026-10-06 [[chg-2026-10-06-tail-order]] — Tail order: the EL0-return tail stops before it delivers notes
 <!-- generated:end -->

@@ -22,6 +22,65 @@ needed the operator.
 
 
 ---
+## 2026-10-06 (main, Opus 5.5, effort max) -- devno-u64: the kernel's device number is 64 bits and never reused
+
+**Why now.** The arc order: after the multi-client Loom chunk, before B-2. The
+kernel's device number was a `u32` that wrapped with no refusal, and every Env
+and every dev9p / devsrv attach mints one, so an unprivileged fork loop drives
+it past 2^32; three identity keys (the mount key, `MNOEXEC` coverage, the
+REVENANT Image cache) then read devno `d + 2^32` as `d` (OPEN-BUGS, B-1d-v's
+self-audit, 09-28). The operator voted on 09-28 to widen `t_stat.devno` in place
+too (`dec-2026-09-28-t-stat-devno-u64`, committed with this chunk; it had been
+left untracked).
+
+**The build.** A WIP of 09-28 (`85a4000e8`, branch `devno-u64`, left untouched
+for the operator) was cherry-picked onto loom-mc as `devno-land` and rebased onto
+main after the Loom landing (893978036): the minter and every stored copy `u64`,
+each copy pinned by a `_Static_assert` to the Spoor field; the mount entry kept
+at 40 bytes by reordering; libt, libthyla-rs, pouch 0010 / 0019 / 0021 and
+go-thylacine's `Stat_t` in lockstep. On top (824e3111a): two tests that stamped
+values below 2^32 now carry wide ones, and diorama's `/proc/<pid>/maps` device
+column is the glibc/musl split of the devno (it was `00:<devno>`, which
+disagreed with vivarium's `st_dev = devno` for any devno of 256 or more,
+OPEN-BUGS 19:19Z). The build has no narrowing warning, so a clang
+`-Wshorten-64-to-32` pass over all 224 kernel translation units was diffed
+against the base: none new, and a control proves the pass sees a devno narrowed
+on this tree and not on the base.
+
+**Wrong turns, and what caught them.**
+- The headline witness could never have passed. `territory_mount.devno_full_width`
+  mounted `('-', 1, qid 0)` on itself, the I-3 cycle check refuses a self-mount,
+  and the test would have stopped at its first assert. Fable round 1 found it
+  (P2) by replaying three lines; the tree had not been built. Fixed with a source
+  of its own, and two more legs witness the stored mount key and the cycle
+  check's key at run time.
+- My first compile check of the sabotage groups failed every file in every
+  group: the Bash tool runs zsh, which does not word-split an unquoted `$CC`, so
+  clang never ran. "EVERYTHING failed" was the tell; rerun under bash with an
+  unsabotaged control group.
+- A directory-wide `git add` swept two untracked 09-28 record drafts into a
+  commit; caught at the dossier gate's output and unstaged (the pinned lesson:
+  name paths).
+- I wrote two OPEN-BUGS timestamps before reading the clock (19:40Z for 19:19Z,
+  20:44Z for 20:39Z) and corrected both from `date -u`.
+- The RED runs showed a test-hygiene cascade: a failing image test returns with
+  its Burrow refs held, and three later image tests fail on their live counts.
+  The new witness now releases before it asserts; the older tests are queued
+  (OPEN-BUGS 20:39Z).
+
+**The audit.** Round 1, Fable 5.1: 0 P0 / 0 P1 / 1 P2 / 5 P3, all closed
+(8c31e5617, 0abf1af67, 4fddeef4d). Not dirty, so no round 2. One P3 is a
+process point: the maps encoding was a question the survey had reserved for the
+operator, and I changed it as a bug fix; the operator ratified it (21:03Z).
+
+**The gates.** Suite 1902/1902 on the default build. ci-smp-gate N=10 over default-smp1/4/8 and ubsan-smp4/8: 50/50, 0 corruption (22:01Z); ls-ci PASS on a --config ci bake of 0abf1af67 (the tip but for one test-only commit), first attempt. Each of the five sabotage groups turned its target red on the named assertion (and narrowing the stored mount key also failed three older dev9p/devsrv tests: a test boot runs every attach after the minter test on wide devnos).
+
+**What "fixed" covers, and what is open.** Fixed: the devno wrap (OPEN-BUGS,
+09-28) for every kernel key and for `t_stat`, and the maps device column
+(19:19Z). Open: the older image tests' release-on-last-line shape (20:39Z); the
+mount key still carries no generation (a separate lead, unchanged).
+
+---
 ## 2026-10-06 (main, Opus 5.5, effort max) -- waiters fan in: a Loom ring's waiters read every 9P client it has an op on
 
 **Why now.** The arc order after signal7 and nanosleep (operator, 10-05). A Loom
