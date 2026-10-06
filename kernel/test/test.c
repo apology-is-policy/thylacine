@@ -1758,6 +1758,7 @@ void test_9p_client_loom_enter_partial_set_rescans(void);
 void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
 void test_9p_client_loom_enter_sees_a_sibling_submit(void);
 void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
+void test_9p_client_loom_quiesce_drains_the_late_reply(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -4061,6 +4062,8 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_enter_sees_a_sibling_submit, false, NULL },
     { "9p_client.pump_ready_never_waits_inside_a_frame",
                                        test_9p_client_pump_ready_never_waits_inside_a_frame, false, NULL },
+    { "9p_client.loom_quiesce_drains_the_late_reply",
+                                       test_9p_client_loom_quiesce_drains_the_late_reply, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",

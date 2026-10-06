@@ -518,7 +518,7 @@ void test_spoor_transport_end_to_end_handshake(void) {
 // coarser than its read -- so recv_now refuses it outright. This mock has no
 // poll, so a recv_now that trusted one would have read it.
 void test_spoor_transport_recv_now_refuses_a_non_pipe(void) {
-    struct test_pipe p_tx, p_rx;
+    static struct test_pipe p_tx, p_rx;
     struct Spoor *tx = make_test_spoor(&p_tx);
     struct Spoor *rx = make_test_spoor(&p_rx);
     TEST_ASSERT(tx && rx, "two mock spoors");

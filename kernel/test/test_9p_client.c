@@ -93,6 +93,7 @@ void test_9p_client_loom_enter_partial_set_rescans(void);
 void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
 void test_9p_client_loom_enter_sees_a_sibling_submit(void);
 void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
+void test_9p_client_loom_quiesce_drains_the_late_reply(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -1551,11 +1552,12 @@ void test_9p_client_loom_quiesce_abandons_inflight(void) {
     TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1, "loom freed once");
     TEST_EXPECT_EQ(spoor_total_freed() - freed0, (u64)1, "dev9p spoor freed (both refs released)");
 
-    // A late reply (the original Rfsync was staged, then overwritten by the
-    // abandon's Rflush) now arrives. The abandon cleared inflight[tag], so demux
-    // discards it ownerless -- it must NOT touch the freed container. No UAF.
+    // The single-slot loopback still holds the unread Rfsync, so it refuses the
+    // abandon's Tflush and the session latches dead: a pump after the teardown
+    // finds it dead without touching the freed container. The late reply itself
+    // arrives over a FIFO in loom_quiesce_drains_the_late_reply.
     int pumped = p9_client_reader_pump_ready(&g_client);
-    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_PROGRESS, "the late Rflush drained ownerless (no UAF)");
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "the refused Tflush latched the session dead");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -6021,6 +6023,54 @@ void test_9p_client_pump_ready_never_waits_inside_a_frame(void) {
     TEST_ASSERT(g_pump_async_completed && g_pump_async_result < 0,
                 "the op completes with the server's error");
     TEST_EXPECT_EQ((u64)kept_after, 0ULL, "nothing of the frame is left behind");
+    TEST_ASSERT(!dead, "the session lives");
+}
+
+// #898 over a FIFO: a reply that arrived before the teardown but was never read
+// is discarded ownerless once the abandon has cleared its tag -- it must not
+// complete into the freed container -- and the Rflush behind it frees the tag.
+// Over the single-slot loopback the unread reply refuses the Tflush, so
+// loom_quiesce_abandons_inflight never reaches a late reply.
+void test_9p_client_loom_quiesce_drains_the_late_reply(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    struct Loom *l = sp ? loom_create(8, 16, false) : NULL;
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    bool up = l && loom_register_handles(l, &sp, &rt, 1) == 0;
+    int n = -1;
+    u16 tag = 0;
+    if (up) {
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        g_rec_hold = P9_TFSYNC;                     // the server answers it by hand
+        cl_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 0, 0x5252525252525252ULL);
+        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+        n = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
+        tag = g_rec_last_tag;
+        // Its reply arrives, and nothing reads it before the ring goes.
+        const u8 rfsync[7] = { 7, 0, 0, 0, (u8)P9_RFSYNC, (u8)tag, (u8)(tag >> 8) };
+        dy_inject(rfsync, 7u);
+    }
+    u64 destroyed0 = loom_total_destroyed();
+    if (l) loom_unref(l);
+    u64 destroyed = loom_total_destroyed() - destroyed0;
+    u32 flushes = rec_count(P9_TFLUSH);
+    u32 frames = 0;
+    for (u32 i = 0; i < 8u; i++) {
+        if (p9_client_reader_pump_ready(&g_client) != P9_PUMP_PROGRESS) break;
+        frames++;
+    }
+    spin_lock(&g_client.lock);
+    bool tag_held = tag < P9_SESSION_MAX_OUTSTANDING && g_client.session.outstanding[tag].active;
+    spin_unlock(&g_client.lock);
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(up, "an FSYNC ring over the mq client");
+    TEST_EXPECT_EQ((u64)(s64)n, 1ULL, "one SQE submitted");
+    TEST_EXPECT_EQ(destroyed, 1ULL, "the ring freed with the op in flight");
+    TEST_EXPECT_EQ((u64)flushes, 1ULL, "the abandon flushed the op");
+    TEST_ASSERT(frames >= 2u, "the late reply and the Rflush both drained");
+    TEST_ASSERT(!tag_held, "the Rflush freed the tag");
     TEST_ASSERT(!dead, "the session lives");
 }
 

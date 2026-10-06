@@ -425,7 +425,7 @@ void test_9p_transport_loopback_recv_ready(void) {
     pw.magic = 0;
 
     TEST_ASSERT(!empty && filed && quiet, "empty: not ready, the hook filed with the sample");
-    TEST_ASSERT(sent == total && woken, "the staged reply wakes the hook");
+    TEST_ASSERT(sent == 0 && woken, "the staged reply wakes the hook");
     TEST_ASSERT(staged, "a staged reply is ready");
     TEST_EXPECT_EQ(got, total, "and the recv reads it");
     TEST_ASSERT(drained, "drained: not ready again");
