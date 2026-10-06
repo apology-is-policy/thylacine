@@ -608,8 +608,10 @@ void test_territory_mount_devno_full_width(void) {
     TEST_ASSERT(src && src2 && mp_lo && mp_hi, "spoor_alloc");
     // MNOEXEC coverage keys on the SOURCE's (dc, devno), so src carries lo; its
     // own qid keeps it a different identity from its point (no self-mount).
+    // src2 IS (-,1,0): mounted at (-,1+2^32,0) it is a self-mount only to a
+    // cycle check whose key (struct mkey) drops the high half.
     src->devno  = lo; src->qid.path  = 5;
-    src2->devno = 7;  src2->qid.path = 6;
+    src2->devno = lo; src2->qid.path = 0;
     mp_lo->qid.path = 0; mp_lo->devno = lo;
     mp_hi->qid.path = 0; mp_hi->devno = hi;
 
@@ -626,7 +628,8 @@ void test_territory_mount_devno_full_width(void) {
         "device instance 1+2^32 is not covered");
 
     // The STORED key: a mount at (-,1+2^32,0) is an entry of its own, and each
-    // point resolves to its own source. A 32-bit mp_devno stores it as (-,1,0).
+    // point resolves to its own source. A 32-bit mp_devno stores it as (-,1,0);
+    // a 32-bit mkey refuses the mount itself.
     TEST_EXPECT_EQ(mount(p, src2, mp_hi, 0), 0, "mount src2 at (-,1+2^32,0)");
     TEST_EXPECT_EQ(territory_nmounts(p), 2, "two entries, not one");
     struct Spoor *r_lo = mount_lookup(p, mp_lo, NULL);

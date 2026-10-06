@@ -64,6 +64,9 @@
 #include "../mm/phys.h"
 #include "../mm/slub.h"
 
+_Static_assert(sizeof(((struct Burrow *)0)->file_devno) == sizeof(((struct Spoor *)0)->devno),
+               "a FILE Burrow's key copy carries the whole devno");
+
 // B-1a': the pagemap's per-page hooks. A FILE slot's page is the Image cache's
 // alone (a plain free); an ANON_LAZY slot's page may be COW-shared with a
 // fork sibling's Burrow, so it leaves through its share count (the buddy gets
