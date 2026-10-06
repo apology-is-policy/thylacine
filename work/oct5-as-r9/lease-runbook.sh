@@ -95,10 +95,22 @@ floor post-build
 # Stage 3 -- verify the image by CONTENT, not by the build's exit code. This is
 # the BAKE-TRAP class: failure looks like absent content plus a green ledger.
 # A stale or mis-baked kernel cannot make the suite total rise by exactly 4.
+ELF=build/kernel/thylacine.elf
+# THE DENOMINATOR FIRST. If `strings` finds nothing at all -- wrong path, empty
+# or truncated ELF -- every name below reads as ABSENT and the loop would blame
+# my tests for a broken search. So prove the search searched something, using a
+# name that exists at my BASE and that I did not add.
+if ! strings "$ELF" | grep -qF 'burrow.refcount_lifecycle'; then
+  echo "   CONTROL ABSENT: burrow.refcount_lifecycle is not in $ELF."
+  echo "   The SEARCH is broken, not the tests -- check the path and the bake. STOP"
+  exit 1
+fi
+echo "   control present: burrow.refcount_lifecycle (the search works)"
+# grep -F: the '.' in a test name is a literal, not a regex any-char.
 echo "-- the four witnesses must be REGISTERED in the built ELF:"
 for t in settled_drop_retains_nonfinal_charge settled_drop_exact_payer \
          settled_mapping_drop_defers_free unmap_failure_leaves_mapping_attached; do
-  strings build/kernel/thylacine.elf | grep -q "burrow.$t" \
+  strings "$ELF" | grep -qF "burrow.$t" \
     && echo "   present: burrow.$t" \
     || { echo "   ABSENT: burrow.$t -- the ELF does not carry my tests; STOP"; exit 1; }
 done

@@ -114,3 +114,15 @@ request (do not re-queue while blocked on space -- it only blocks aux).
 - Next arc step after AS-R9 qualifies: review the preserved UNBUILT owner draft
   at `thylacine-astra/work/oct4-async-service/owner-integration/paused-owner/`
   (base c822021a2) against the repaired base. Then MM0-MM4.
+
+## THE LEASE WINDOW IS NOW A SCRIPT (2026-10-06)
+
+Run `work/oct5-as-r9/lease-runbook.sh` -- do not re-derive the order from prose.
+It carries all six stages with their discriminating expectations, its own
+free-space floor (this base predates main's disk_floor_check), the TLC jar
+re-fetch (/tmp was cleared by the 10-06 reboot), the paired pool/ramfs trap, and
+a denominator control on the ELF content check. CLONE_APPROVED=1 is required for
+the cache stage -- Astra approved it on yip 0169 turn 2, and she is holding her
+build/ unchanged until I acknowledge the copy, so SEND THAT ACKNOWLEDGEMENT the
+moment the clone completes. Stage 0 (the specs) needs no image and no artifacts,
+so it runs regardless.
