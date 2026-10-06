@@ -22,6 +22,93 @@ needed the operator.
 
 
 ---
+## 2026-10-05 .. 06 (main, Opus 5.5, effort max) -- the sleep rows: a Linux guest's nanosleep and clock_nanosleep sleep
+
+**Why this, now.** The signal7 write-up (2026-10-05 18:32Z) found that a Linux
+guest could not sleep. `nanosleep` (101) and `clock_nanosleep` (115) had no
+vivarium row, so both forwarded, and with no supervisor FORWARD is ENOSYS.
+musl's `sleep()`, `usleep()` and `nanosleep()` all reach 101 on aarch64, so
+`busybox sleep 1` returned at once. It was the arc's next P2 by the operator's
+order. The design needed no vote: Linux's semantics answer every question, and
+the one place to choose (an absolute wall-clock sleep across a clock step) has
+a POSIX answer.
+
+**What landed.** Scripture first, `fa8387d6`: VIVARIUM 6.29, ARCH 8.8.3's sleep
+bullet and ARCH 22.6's step paragraph. Then one code commit, `9f187623`. Both
+rows are Tier-2 shells over one sleep core, and the arguments are judged in
+Linux's order (clock, then copy-in EFAULT, then EINVAL). The clock set is
+derived from `clock_gettime`'s map, which now reads 32 bits. At the deadline
+the expiry wins (Linux's `do_nanosleep`, not `do_poll`). The clock, not tsleep's
+outcome, decides every 0, because tsleep rounds the deadline down to a counter
+value. An absolute `CLOCK_REALTIME` sleep hooks a new step list on the wall
+clock before it reads the offset, and the re-anchor walks the list after it
+publishes. aux-3 `67fa034c` (tail order + Haul P3b, gated on aux-3) is merged
+into the landing, so one gate run judged the combined tree.
+
+**Wrong turns, and what caught each.**
+- *The Mac lost power mid-arc* (the operator's battery, overnight). The session
+  scratchpad went with it: the patch helper and every draft. The branch was
+  safe only because the WIP had been committed at the 400k line. The lesson is
+  already in memory (a draft goes in a WIP commit when written), and it held.
+- *A probe red that could not show its own legs.* R1 (the rows answering
+  ENOSYS) failed V-1b as intended, but joey's marker buffer is 64 bytes and
+  cut the report at `L32`, so L326 and L327 were invisible. Calling the red
+  complete would have been a negative over a set I had not enumerated. The
+  buffer is now 128 bytes, and R1 re-run showed all 13 marks as `s`.
+- *A hypothesis refuted, then confirmed by better instrumentation.* The same R1
+  boot first failed earlier, at the debug-probe caught-step leg merged from
+  aux-3 ("the step did not stop at the handler's first instruction"), a native
+  leg R1 cannot touch. The first theory was that a stop that found the loop at
+  its top took no step, so it stayed parked by the IRQ tail, which delivers no
+  notes (DEBUG-FS-DESIGN 5g). A forced repro that retried stop/start until
+  pc == top never got there in 80 tries, which looked like a refutation. An
+  instrumented replica over 12 children then showed the position is stable
+  per child and bimodal across children: 6 stopped at the top, took no step,
+  and failed with x23 +1 at top+4; 6 stopped at top+4, stepped twice, and
+  passed. The kernel is per scripture; the leg's premise was wrong. It now
+  steps once first and passed 12/12 under a loop. The lesson: a retry loop on
+  one subject samples the subject, not the population.
+- *My own witnesses could turn a stall into a wrong value.* The caught-note
+  legs slept 300 ms, so a stall over 300 ms between the park and the post
+  would let the deadline win. The Linux legs now sleep 1.5 s (still inside the
+  fixture's 2 s release wait, so a missed note returns rather than strands),
+  and `rem` is bounded exactly: the request less at most the leg's own length.
+
+**The audit.** Fable 5.1, one round, 0 P0 / 0 P1 / 1 P2 / 3 P3, a clean close.
+F1 (P2) was real: the verdict mapped tsleep's INTR (death) to 0, but
+`thread_die_pending`'s latch leg is revocable until the thread's tail, so a peer
+that installs a handler or ignores the note leaves the thread alive with a short
+0. A death before the deadline is now `EINTR` with the time left. Looping on INTR
+instead would livelock, because the latch is consumed only at the tail. F2: the
+scripture misattributed the thread clock's EINVAL to Linux's kernel (it is
+musl's and glibc's). F3: `timer_ns_to_counter` wrapped above a 1 GHz counter;
+`timer_ns_to_counter_at` saturates. F4: probe L327's window went from 2 s to 10 s.
+
+**Evidence.** All on the landed tree (`9f187623`'s tree is byte-identical to the
+gated WIP `ddefeead4`; the landing re-stacked it linearly on aux-3):
+- suite 1876/1876 + V-1b (probe L319-L328) + boot OK;
+- with the rows' shells answering ENOSYS (rows kept) the suite stayed green and
+  V-1b failed naming L319..L327, all 13 marks `s`;
+- 13 single kernel sabotages in six builds, each red at its named assertion;
+- `ci-smp-gate` all five rows 10/10 (default-smp1/4/8, ubsan-smp4/8), 0
+  corruption;
+- on a `--config ci` bake in a worktree, `viv-run` and `r5f9-ash` PASS, one
+  attempt each. `r5f9-ash`'s ^C leg now lands on a `sleep 20` that really
+  sleeps; before, the sleep returned at once and the leg proved nothing about
+  a sleep.
+
+The Mac queue. Corona's AS-R9 run (a P1 extinction fix) outranks this landing,
+so the Mac went to corona after the SMP gate. No peer in the queue was in a
+live session, so it idled; the operator approved taking it for the last
+20 minutes, and aux agreed on yip 0173.
+
+**Still open.** `seam-el0-irq-tail-no-notes` is unchanged; the caught-step leg
+now avoids it instead of tripping on it. The reviewer's suggestion of a TLA+
+model for the step list (I-9 by replay today, not by proof) is not taken here.
+`epoll_*`, `flock` and `waitid` remain unserved rows (OPEN-BUGS 18:32Z's
+neighbours).
+
+---
 ## 2026-10-05 .. 06 (aux, Opus 5.5 1M, effort max) -- Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
 
 **Why now.** Work order item 6's kernel half: the 2026-09-29 Haul Fable pass's F1 (OPEN-BUGS 2026-09-29 ~14:57Z). P3a held haul's replies to the session's msize, but any other reply the kernel refuses -- a tag it never issued, a type that does not answer the request -- still killed the session out of haul's sight. The kernel marked the client dead and closed nothing, so the server served a dead mount until the mount's last close, and haul's park form never exited.
