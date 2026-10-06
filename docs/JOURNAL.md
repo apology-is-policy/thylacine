@@ -22,6 +22,86 @@ needed the operator.
 
 
 ---
+## 2026-10-06 (main, Opus 5.5, effort max) -- waiters fan in: a Loom ring's waiters read every 9P client it has an op on
+
+**Why now.** The arc order after signal7 and nanosleep (operator, 10-05). A Loom
+ring may hold registered handles on many 9P sessions, but only the newest op's
+client was ever read: an op on any other client completed only if something else
+read that client (OPEN-BUGS 2026-10-05 07:52Z, P2, from the waiters-stops round
+2). Its siblings: the SQPOLL kthread spun on `sched()` over a held role (09-30
+15:04Z), the dev9p poll kthread starved a seventeenth QTPOLL client
+(seam-223) and re-polled every 20 ms (seam-221), and every pump blocked in a
+recv with nothing due, blind to client-side progress (09-30 11:01Z, the ENTER
+half).
+
+**Heritage and the vote.** Three answers (memory design_loom_multiclient):
+(A) the waiter reads every client, over a ready stream only; (B) a per-client
+async reader kthread, as Linux trans_fd's read worker; (C) one client per ring,
+a restriction io_uring does not have. The operator voted (A) on 2026-10-06
+("Waiters fan in"); scripture 78d6714b9 (LOOM.md 8.6, ARCH 21.10).
+
+**The build** (2faa703ed, 56f9c0270, c6d9c76d4, e1a15a777): a mandatory
+transport op `recv_ready`; `p9_client_reader_pump_ready` and one hook per client
+(role list while held, readiness list while free -- loom_role.tla's
+BUGGY_READY_HOOK_WHEN_HELD shows why never both); a 64-entry fan-in set shared by
+the ENTER and the SQPOLL kthread; `drive_gen`; the dev9p poll kthread over every
+client with no cap; the deadline machinery deleted. loom_role.tla generalised to
+N clients, five new buggy cfgs; the two-client run bounded at 79,010,570 states,
+depth 28.
+
+**Wrong turns, and what caught them.**
+- The round-1 reviewer (Fable 5.1, 0/0/0/3) passed the chunk; the self-audit
+  beside it found three P1s it did not. S-3 is the chunk's own: dropping the
+  deadline gate made pipe-served QTPOLL files remote, so THE dev9p poll kthread
+  read streams any process serves and whose read end it keeps -- a 7-byte
+  header and silence would have hung every /net poller in the system. Round 1
+  had taken "each transport's rx is private" and "the trusted-server bound" as
+  given; neither holds for a pipe. Fix after Plan 9 devmnt's m->q and Linux
+  trans_fd's rc.offset: `recv_now` and the client-owned partial frame.
+- S-5 was in the S-3 fix itself, found before any build: the non-blocking read
+  set the stop-unwind latch and nothing cleared it, so an all-header Rclunk left
+  a pumping thread one ^Z away from an EXTINCTION in a death-only sleep. The
+  lesson's shape is the pinned one: the recovery path of the changed function
+  (the wrapper that used to clear the latch) was the one the change bypassed.
+- S-1: a sibling thread's submit could slip between a waiter's client hooks and
+  its CQ hook. A test knob stalls the waiter in that window.
+- Round 2 (Fable) saw what the S-3 fix had done to a neighbour: with the partial
+  frame kept by the client, an unwind mid-frame no longer desyncs anything, so
+  #90's block-through -- and the comments in 9p_client.c, sched.c and thread.h
+  that justified it by a desync -- now stood on a reason that was gone. The
+  rule stays (it was voted, ARCH 8.8.1.1); what changed is that closing
+  seam-90-hung-server became one rule change instead of a deadline design, and
+  the seam's own risk line ("every 9P server is a trusted local Proc") was
+  false all along: SYS_ATTACH_9P takes any process's pipes. Put to the operator.
+- The first boot of the branch (it had never been built: the Mac was aux's for
+  the whole build) died in my own new test: two 8 KiB mock pipes on the boot
+  stack, in a file whose every other test makes them static. Matching the
+  surrounding idiom would have prevented it. The second boot found two more test
+  defects, one of them old: `loom_quiesce_abandons_inflight` accepted
+  `== 1 || == -P9_E_IO`, and the session death was the only outcome the
+  single-slot loopback can produce (it refuses the abandon's Tflush over the
+  unread reply), so #898's late-reply-after-abandon path had never run. When I
+  moved the test to `pump_ready` I had tightened it to PROGRESS without
+  checking which outcome the fixture produces -- the tightening is what exposed
+  it. It now runs over the mq FIFO.
+
+**The gate.** Suite 1898/1898 on the default build (b10dc12f6). The SMP gate (ci-smp-gate, N=10 each): default-smp1/4/8 and ubsan-smp4/8 all PASS, 50/50 boots, 0 corruption (20:13Z). ls-ci and ls-8c on a --config ci bake in a worktree: PASS, first attempt each (20:22Z, 20:23Z). Spec checks loom-role, tail-order, cow, debug-stop and net-poll: ALL CFGS AS CLAIMED, after a fix to my own checkers (a16215e48): a cfg that violates a temporal property had a pinned TLC state count, but TLC checks liveness at time-triggered points and stops at the first violation, so the count moved between two quiet runs (32,796 and 32,868); `-lncheck final` makes it the whole space. Each of the 18 new witnesses was run RED under a sabotage of the code it guards (eight groups, rebuilt per group). One sabotage, a reader that never resumes a partial frame, left `pump_ready_chunked_frame_completes` green, because that test's frame arrives within one pump; a second (one chunk per pump) turned it red.
+
+**The audit.** Round 1: Fable 5.1, 0/0/0/3 (F1 the fixed 3.6 KiB frame unmeasured
+-> kstack watermark asserts; F2 withdrawn -- the park wakes on cq_head; F3 a doc
+naming deleted pumps). Self-audit: S-1 P1, S-2 P3, S-3 P1, S-5 P1, S-4 withdrawn.
+Dirty (invasive) -> round 2 on 4fbe4caf5 (Fable 5.1): 0/0/0/4 -- a closed
+transport sampled ready while `recv_now` found nothing (a pumper loop, hidden by
+lifetime pins; now DEAD), the spoor `recv_now` read a poll-less non-pipe Dev
+(now refused), the 1 KiB syscall-entry allowance was assumed (measured with
+`-fstack-usage`: 416 B), and the desync rationale above. Clean -> no round 3.
+
+**What "fixed" covers, and what is open.** Fixed: OPEN-BUGS 2026-10-05 07:52Z (an op on any client but the newest completed only if something else read that client), 09-30 15:04Z (the SQPOLL kthread spinning on a held role), item (d) of 09-30 11:01Z (a pump blocking in a recv with nothing due; (a)-(c) stay open), 10-06 16:20Z and 17:20Z (S-3, the shared kthreads on untrusted pipe streams), seam-221 and seam-223. seam-90-hung-server stays open: a
+blocking reader still finishes a frame before a death unwinds it; with the
+partial frame now the client's, closing it means letting a death unwind
+mid-frame, an I-9 text change for the operator.
+
+---
 ## 2026-10-06 (aux, Opus 5.5 1M, effort xhigh) -- CPU time and the scheduler's counters have owners
 
 **Why now.** The imperium Fable pass's F3 (P2, OPEN-BUGS 2026-09-29): a password or an imperium key is typed into an authority, corvus, which runs as the system principal and wakes once per key. Any counter that moves once per wake on a quiet machine publishes the secret's length and its cadence, and every reader could poll three of them: the authority's own `cpu_ns`, the per-CPU `ctxt` and `intr`, and the scheduler's park counts. The operator voted at ~10:05Z for "Gate CPU time to the owner" (over freezing the counters during the episode, or documenting the channel). Reading `sched.c` for the design, I found a fourth: `idle_ns` is written at every idle exit, so each wake is a timestamped change, and a coarser quantum does not help when a key lands every 100 to 300 ms. I asked again; the operator chose "Restrict it too" at ~10:56Z.
