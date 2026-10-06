@@ -381,12 +381,13 @@ static void loom_free(struct Loom *l) {
     // WHAT THIS COSTS, stated rather than elided: the join inherits #68 F1's
     // own residual. A kthread that never reaches its terminal parks the dying
     // Proc unreapably instead of burning a CPU on a yield-loop. That is
-    // strictly the better failure -- and it is REACHABLE, because a recv
-    // inside a frame whose bytes have begun blocks through the body (it must
-    // complete to keep the stream synced, #841), so a Byzantine server
-    // mid-frame delays the stop until the frame finishes or EOFs. The v1.0 servers are trusted and complete promptly; the bound is a
-    // trust assumption, not a mechanism, and it is the SAME one the Tclunk
-    // flush already rests on.
+    // strictly the better failure -- and it is REACHABLE: no death or stop
+    // reaches a kernel thread, so a kthread blocked in a recv (a reap's last
+    // clunk can drain a full tag pool or wait out back-pressure) waits for its
+    // server, at any byte, until it sends or EOFs. A server that stops delays
+    // the stop for as long as it lives; the bound is the server's, not a
+    // mechanism, and it is the SAME one the Tclunk flush already rests on (the
+    // vault's seam-close-flush-unbounded).
     if (l->sqpoll) {
         __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
         wakeup(&l->sqpoll_park);

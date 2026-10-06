@@ -407,7 +407,8 @@ struct Thread {
     bool               debug_ss_armed;
 
     // 8c-3 (#89; docs/DEBUG-FS-DESIGN.md 5c.6): the elected 9P reader sets this
-    // around its blocking recv so a debugger stop UNWINDS the recv (sleep/tsleep
+    // for its whole blocking recv so a stop UNWINDS the recv, at any byte of a
+    // frame (ARCH 8.8.1.1: the client keeps the partial frame) (sleep/tsleep
     // return SLEEP_INTR/TSLEEP_INTR, reusing the death-interrupt propagation the
     // transport recv already tolerates) instead of parking IN PLACE (the 8c-2
     // detour default) -- a reader parked mid-recv holds reader_active and freezes
@@ -415,27 +416,22 @@ struct Thread {
     // recv-return via the STABLE stop_unwound latch (below), NOT by re-reading
     // debug_stop_req (which races an async proc_debug_resume -- the F1 re-audit
     // fix); on a stop-unwind it releases the reader role, hands it to a survivor,
-    // then parks role-free + re-elects on resume. Every
-    // OTHER sleep (clear) parks in place (8c-2, preserves the syscall). Owner-only
-    // access (only the reader thread reads/writes its own flag, in program order
-    // -- no atomic needed); set/cleared within one reader_recv_frame, never
+    // then parks role-free + re-elects on resume. A
+    // sleep with it clear parks in place (8c-2, preserves the syscall); every
+    // wait inside the 9P client sets it (the waiters-and-stops amendment).
+    // Owner-only access (only the thread reads/writes its own flag,
+    // in program order -- no atomic needed); set/cleared around one wait, never
     // persists past it; KP_ZERO inits it false; NOT propagated by rfork. Fits the
     // debug_ss_armed padding -- no struct-size change.
     bool               stop_unwinds;
 
-    // 8c-3 (#89; F1 frame-atomic fix): the elected 9P reader sets this for its
-    // WHOLE recv tenure (reader_recv_frame entry..exit). A stop hitting the recv
-    // MID-FRAME (bytes of the frame already consumed, stop_unwinds false) must
-    // BLOCK THROUGH -- neither unwind (SLEEP_INTR would discard the consumed
-    // partial bytes -> the survivor reads the frame TAIL as a header -> stream
-    // desync = shared-session death / task-#50 corruption) nor park-in-place
-    // (holds reader_active -> freezes survivors AND pins the partial frame). The
-    // detour, when stop_no_park is set + stop_unwinds is false, FALLS THROUGH to
-    // the normal register+sched so the reader finishes the frame (bounded by the
-    // trusted server's delivery), then unwinds at the next frame boundary
-    // (got==0, stop_unwinds true). DEATH still unwinds mid-frame (the die-check
-    // below the detour is unchanged) -- the pre-existing death-mid-frame desync
-    // is task #90 (needs a #811 narrowing; signoff). Same padding, no size change.
+    // 8c-3 (#89): the elected 9P reader sets this for its WHOLE recv tenure
+    // (reader_recv_frame entry..exit), beside stop_unwinds: it marks the sleep
+    // as the reader's recv. The caught arm latches note_unwound for it (so the
+    // client hands the role off), and the pipe read takes it to mean the
+    // client's opt-in, recv_caught_ok, decides. (Until 2026-10-06 it also made
+    // a mid-frame reader block through a stop, a death and a caught note; ARCH
+    // 8.8.1.1.) Same padding, no size change.
     bool               stop_no_park;
 
     // 8c-3 (#89; F1 re-audit fix): the STABLE "my recv was stop-unwound at a
@@ -454,8 +450,8 @@ struct Thread {
     bool               stop_unwound;
 
     // 11b-9p (item 11, ARCH 8.8.3): the caught-note twin of stop_unwound. SET by
-    // the sched caught branch when it unwinds a thread that is inside a
-    // frame-atomic reader recv (stop_no_park set) at a boundary; READ+cleared by
+    // the sched caught branch when it unwinds a thread that is inside the
+    // reader's recv (stop_no_park set), at any byte; READ+cleared by
     // the SAME reader thread at the client_wait classifier. A caught note must
     // unwind the elected 9P reader with a role HANDOFF (not re-block like a stop),
     // so the classifier needs a stable signal disjoint from stop_unwound. Reset
@@ -683,26 +679,6 @@ static inline struct Thread *current_thread(void) {
 
 static inline void set_current_thread(struct Thread *t) {
     __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((u64)(uintptr_t)t) : "memory");
-}
-
-// #90 (ARCH 8.8.1.1): the elected 9P reader recv (reader_recv_frame,
-// kernel/9p_client.c) is frame-atomic w.r.t. an async unwind. A dying reader
-// observed MID-FRAME at a sleep-site die-check -- in a frame-atomic recv
-// (stop_no_park set) with bytes of the current frame already consumed
-// (stop_unwinds clear, i.e. got != 0) -- does NOT unwind. The rule was made
-// when an immediate #811 unwind discarded the consumed partial frame and the
-// survivor read its TAIL as a header (task-#50 corruption); the client now
-// keeps the partial frame (c->rx_got), so it stands as the voted policy, whose
-// cost is the vault's seam-90-hung-server. It BLOCKS THROUGH instead, finishing
-// the frame (bounded by the trusted server's whole-frame delivery, CF-3 B),
-// then unwinds at the next boundary. Reuses the 8c-3 stop latches: stop_no_park
-// = "in a frame-atomic recv", stop_unwinds = "at a boundary (got==0)" -- both
-// already exactly the predicates death needs, so no new field. True iff the
-// die-check must DEFER (block through) rather than unwind. Every non-reader
-// sleeper has stop_no_park clear -> false -> the die-check fires immediately,
-// exactly as before #90.
-static inline bool thread_reader_blocks_death(const struct Thread *t) {
-    return t->stop_no_park && !t->stop_unwinds;
 }
 
 // Bring up the thread subsystem. Allocates the kernel thread (TID 0),

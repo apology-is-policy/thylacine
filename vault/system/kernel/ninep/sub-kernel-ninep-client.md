@@ -336,23 +336,26 @@ and `.note_flush_reply_beats_unsent_flush`, a Tflush parked on a full send ring
 (the ordinary #349 park): each is woken only by the departure of the pump that
 demuxed its op's own reply.
 
-**Frame-atomic recv.** `reader_recv_frame` (thin wrapper over
-`do_reader_recv_frame`) holds `stop_no_park` for the whole recv tenure and
-sets `stop_unwinds = (got == 0)` per-chunk: a death OR a debug/job stop
-unwinds the reader ONLY at a frame boundary and BLOCKS THROUGH mid-frame
-(the die-check sites in `sleep()`/`tsleep()` are guarded by
-`thread_reader_blocks_death`). The rule was made because delivery is CHUNKED
-and a mid-frame unwind then desynced the shared stream
-([[haz-shared-stream-desync]]); since 2026-10-06 the partial frame is the
-client's (`rx_got`), so no unwind can lose it, and the block-through stands as
-ARCH 8.8.1.1's voted policy. Its cost -- a server stopped inside a frame holds
-a dying or stopped reader until the server dies -- is [[seam-90-hung-server]],
-whose close (unwind at any byte) is the operator's decision. A
-boundary stop-unwind is classified via the stable per-Thread `stop_unwound`
-latch (set by the detour, reset at recv entry, read by the same thread) —
-never by re-reading `debug_stop_req`, which an async resume can clear. A
-stop never marks the session dead; death always wins over a stop at every
-branch.
+**The recv unwinds at any byte** (ARCH 8.8.1.1, since 2026-10-06).
+`reader_recv_frame` (thin wrapper over `do_reader_recv_frame`) holds
+`stop_no_park` and `stop_unwinds` for the whole recv tenure, so a death, a
+debug/job stop or a caught note unwinds a blocking reader wherever it is in a
+frame, waiting for the server or not. The frame's bytes are the client's
+(`rx_got`): the departing reader leaves what it read, and the next reader --
+a handed-off waiter, a self-pumping sender, or the waiters' pump -- resumes the
+frame. Each event then takes the path a boundary unwind always took: a death
+the #845 abandon (Tflush, the tag reserved until the Rflush; the op's reply,
+possibly the partial frame itself, drains ownerless), a stop the role-free park
+and re-election, a caught note flush(5). Until 2026-10-06 the reader blocked
+through mid-frame (`thread_reader_blocks_death`), because the bytes were then
+the reader's and an unwind lost them ([[haz-shared-stream-desync]]); a server
+that stopped inside a frame held the reader until it died
+([[seam-90-hung-server]], closed by
+[[dec-2026-10-06-seam90-unwind-any-byte]]). A stop-unwind is classified via
+the stable per-Thread `stop_unwound` latch (set by the detour, reset at recv
+entry, read by the same thread) — never by re-reading `debug_stop_req`, which
+an async resume can clear. A stop never marks the session dead; death always
+wins over a stop at every branch.
 
 **Fail-close.** `client_mark_dead_locked` is the SOLE `c->dead` setter
 (transport EOF/error, or a demux-level protocol violation — malformed
@@ -513,16 +516,16 @@ The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
 - The bytes of a frame being read are the CLIENT's (`rx_got`, written only by
   the role holder), not the reader's -- Plan 9's devmnt keeps them in the
   mount's queue, Linux's `trans_fd` in the connection. Every reader resumes
-  there (`do_reader_recv_frame`); a resumed frame is mid-frame from its first
-  recv, so the blocking readers block through it as through any frame.
-- The reader role is released across a death OR a debug/job stop at a frame
-  boundary only; both blocking `reader_active` sites (election, self-pump)
+  there (`do_reader_recv_frame`), and every exit without a whole frame leaves
+  what it read there, so any reader may depart at any byte.
+- The reader role is released across a death, a debug/job stop or a caught
+  note at any byte; both blocking `reader_active` sites (election, self-pump)
   handle a stop-unwound recv without latching the session, and the third,
   `p9_client_reader_pump_ready`, never sleeps in a recv; `client_send_flow` + `client_drain_until_free_tag` park a stopped
   sender at loop-top (spilling first) so a stop can't spin or hang.
 - No client waiter parks in place for a stop (DEBUG-FS 5c.6, the
   2026-09-30 waiters-and-stops amendment). Every client sleep sets
-  `stop_unwinds` -- the reader recv at a frame boundary, the non-reader rpc
+  `stop_unwinds` -- the reader recv for its whole tenure, the non-reader rpc
   sleep, the send/tag progress park -- so a stop returns `SLEEP_INTR` and the
   caller's loop parks the thread in `client_debug_stop_park`, bracketed by
   `rpc->stop_parked` under `c->lock`; on resume it re-runs the election. A
@@ -612,11 +615,14 @@ this surface):
 - **The spill contract**: no path may re-read `out_buf` after
   `client_pump_or_park_locked` (or any lock drop) has run; a spill must be
   taken BEFORE the first park; spill-OOM fails closed.
-- **Frame-atomicity**: any new interrupt/unwind path out of the reader recv
-  must route through the boundary latches (`stop_unwinds`/`stop_no_park`) —
-  never a fresh flag, never a mid-frame unwind; classification must use the
-  stable `stop_unwound` latch, never a re-read of `debug_stop_req` (an async
-  resume races it); DeathWinsOverStop at every branch.
+- **The partial frame survives every exit**: no exit of the frame reader may
+  reset or lose `rx_got` without a whole frame (`reader_frame_buggy.cfg`, and
+  `9p_srvconn_transport.reader_unwinds_mid_frame_*` RED), and no transport recv
+  may copy bytes and then return an error. Any new interrupt/unwind path out of
+  the reader recv routes through the latches (`stop_unwinds`/`stop_no_park`) —
+  never a fresh flag; classification must use the stable `stop_unwound` latch,
+  never a re-read of `debug_stop_req` (an async resume races it);
+  DeathWinsOverStop at every branch.
 - **Role-release completeness**: all FOUR `reader_active` sites must handle
   stop/death without stranding the role or the session; the handoff must
   skip an rpc parked for a stop (`stop_parked`, set only inside
@@ -657,10 +663,8 @@ this surface):
   `client_debug_stop_park`, or a stopped waiter parks in place and re-sleeps on
   resume without re-electing. `rpc->stop_parked` is written only by the parked
   thread under `c->lock`; the handoff and `client_tag_owed_locked` read it and
-  never the Proc's stop flags, and the park clears it when it returns. The park
-  needs `stop_no_park` clear, as every caller leaves it: a set one makes
-  `sleep()`'s death check read the park as a reader mid-frame, which a death does
-  not unwind. Every `reader_active = false` site must run the handoff, whose
+  never the Proc's stop flags, and the park clears it when it returns. Every
+  `reader_active = false` site must run the handoff, whose
   no-designee exit is the Loom ENTER's only wake when a foreign sync reader
   leaves its async reply unread. Witnesses:
   `9p_client.stopped_waiter_elects_on_resume`, `.resumed_waiter_is_designated`,
@@ -683,9 +687,9 @@ this surface):
 ## Seams
 
 Open: [[seam-841-mi-harness]] · [[seam-350-async-eagain]] ·
-[[seam-845-untrusted-server]] · [[seam-56-netd-cancelled-tag]] ·
-[[seam-90-hung-server]]. Closed, kept for the record:
-[[seam-90-death-half]].
+[[seam-845-untrusted-server]] · [[seam-56-netd-cancelled-tag]]. Closed, kept
+for the record: [[seam-90-death-half]] · [[seam-90-hung-server]] (2026-10-06:
+the reader unwinds at any byte).
 
 ## Caveats
 

@@ -295,9 +295,11 @@ un-opted receive), the console's read and write waits ([[sub-kernel-cons]]),
 `ppoll`/`pselect6`'s park and its timeout-only sleep, which is musl's `pause()`
 ([[sub-kernel-poll]]), `wait4` (`WAIT_PID_NOTEINTR`, [[sub-kernel-proc]]) and
 `futex` (`TORPOR_ERR_EINTR`, [[sub-kernel-torpor]]). One predicate decides,
-`thread_caught_note_unwinds`: a Linux phenotype (`proc_caught_note_eintr_ready`),
-not a 9P reader stopped mid-frame (`thread_reader_blocks_death`), and the claim
-won (`thread_caught_note_claim`, which re-runs the deliverable test above). The
+`thread_caught_note_unwinds`: a Linux phenotype (`proc_caught_note_eintr_ready`)
+and the claim won (`thread_caught_note_claim`, which re-runs the deliverable test
+above). A 9P reader is not excepted: it unwinds at any byte of a frame, the client
+keeping the partial frame (ARCH 8.8.1.1; until 2026-10-06 a reader mid-frame was,
+`thread_reader_blocks_death`). The
 four caught arms in `sleep_common` and `tsleep_common` call it, after the cond
 re-test, the deadline, the stop detour and the die-check, and so does poll's
 loop-level verdict, where readiness wins, then the note, then the deadline, as

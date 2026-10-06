@@ -64,8 +64,8 @@ followed by a re-stop that flips them while the thread never runs is not
 representable. Code witnesses cover that class.
 
 A frame that has only partly arrived. A ready transport is taken to hold a
-whole frame; a reader that meets a partial one blocks through its body, which
-rests on the trusted server, as every reader's frame does.
+whole frame; a reader that meets a partial one leaves it with the client
+(`rx_got`) for the next reader, which [[spec-reader-frame]] models.
 
 Also out of scope: session death (its own sibling module), a stop of the
 waiter's own thread, the flood budget, a second waiter (its own hooks on the

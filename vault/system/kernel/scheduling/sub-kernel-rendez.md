@@ -145,8 +145,9 @@ each tier including the one before it: group death (`SLEEP_UNWIND_DEATH`),
 the terminate latch (`SLEEP_UNWIND_TERMINATE`), a caught note
 (`SLEEP_UNWIND_NOTE`). Both die-checks, the registered one and the prompt one,
 read the predicate the mode names: `thread_group_death_pending` for death
-alone, `thread_die_pending` otherwise. The #90 frame-atomic guard applies in
-every mode. A stop-unwinding 9P reader never waits death-only (its recv is an
+alone, `thread_die_pending` otherwise. Neither reads a reader latch: the
+elected 9P reader unwinds at any byte, like every sleeper (ARCH 8.8.1.1, since
+2026-10-06). A stop-unwinding 9P reader never waits death-only (its recv is an
 ordinary sleep), and `sleep_common` extincts if one reaches the stop detour in
 that mode: its `SLEEP_INTR` would read as group death to a caller like the
 vfork suspend.
@@ -168,21 +169,21 @@ the backref stays valid until it resumes.
   *original* condition. The syscall re-blocks in place: no unwind, no
   restart. Gated `r != &t->debug_rendez` so the nested park cannot
   recurse, and gated on `t->proc` so a kernel thread is skipped.
-- **The frame-atomic exception** (8c-3 / #90). The elected 9P reader is
-  the one sleeper whose unwind is deferred. Mid-frame — `stop_no_park`
-  set, `stop_unwinds` clear, meaning some bytes of the current frame are
-  already consumed — it **blocks through** both a stop and a death. The
-  rule was made when unwinding discarded the partial frame and the survivor
-  that took over the reader role read the frame *tail* as a header,
-  desyncing the shared byte stream; since 2026-10-06 the client keeps the
-  partial frame (`rx_got`), so the rule stands as ARCH 8.8.1.1's voted
-  policy, at the cost [[seam-90-hung-server]] records. At a frame boundary (`got == 0`) it
-  unwinds normally. Between frames the reader also *releases the role*
-  rather than parking in place, because a parked reader freezes every
-  survivor sharing the client.
+- **The 9P client's unwind** (8c-3; ARCH 8.8.1.1). A sleep with
+  `stop_unwinds` set does not park for a stop: the detour returns
+  `SLEEP_INTR` and latches `stop_unwound`, and the client releases the
+  reader role and parks the thread itself. The elected 9P reader holds
+  `stop_unwinds` for its whole recv, because a reader parked in place would
+  hold the role and freeze every survivor sharing the client; every other
+  wait inside the client sets it too. The reader unwinds at any byte of a
+  frame: the client keeps what it has read (`rx_got`) and the next reader
+  resumes it ([[dec-2026-10-06-seam90-unwind-any-byte]]). From 2026-07-19 to
+  2026-10-06 a reader mid-frame blocked through a stop, a death and a caught
+  note (`thread_reader_blocks_death`, #90), because its bytes were then its
+  own and an unwind lost them; a server that stopped inside a frame held it
+  until the server died ([[seam-90-hung-server]]).
 
-  Death still wins over a stop at every branch; both now simply unwind at
-  a boundary rather than immediately.
+  Death still wins over a stop at every branch.
 
 **`tsleep`'s third wake source.** A deadlined sleeper is also linked into
 one global list, `g_timerwait`, and registered atomically with the rendez
@@ -299,9 +300,11 @@ state has been corrupted by someone else.
   *original* deadline on resume, and a deadline that lapsed while stopped
   correctly reports TIMEDOUT — wall-clock advances while a thread is
   stopped, and that is the accepted freeze semantics.
-- **The frame-atomic guard applies on BOTH paths** — the
-  register-then-observe check and the prompt post-resume check. Guarding
-  only the first silently defeats it on the very next wake.
+- **No die-check reads a reader latch**, on either path (the
+  register-then-observe check and the prompt post-resume check). The reader
+  may unwind at any byte because the client keeps the partial frame
+  ([[spec-reader-frame]]); a guard put back on one path is the superseded
+  block-through, and `rendez.reader_recv_unwinds_*` turn RED on it.
 - **`timerwait_tick`'s `on_cpu` pre-filter stays.** Removing it puts an
   unbounded spin inside a timer IRQ handler.
 - **Single-waiter is enforced, not assumed.** Any new caller that could
@@ -343,8 +346,10 @@ state has been corrupted by someone else.
 `tsleep` and the timer-wait list at P5-tsleep
 ([[chg-2026-05-17-p5-tsleep]]). Universal death-interruptibility is
 [[chg-2026-06-01-811-death-interruptible]]; the terminate-`interrupt`
-widening rides [[arc-life-support]]; the stop detour and the frame-atomic
-block-through are [[arc-go-ide]] and [[arc-pty]].
+widening rides [[arc-life-support]]; the stop detour is [[arc-go-ide]] and
+[[arc-pty]]. The reader's block-through came with
+[[chg-2026-07-19-90-death-block-through]] and went with
+[[dec-2026-10-06-seam90-unwind-any-byte]].
 
 Absorbed `docs/reference/16-rendez.md` at [[chg-2026-08-01-sched-sweep]].
 

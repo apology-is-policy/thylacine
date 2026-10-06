@@ -1419,8 +1419,7 @@ bool proc_caught_note_eintr_ready(struct Proc *p) {
 }
 
 bool thread_caught_note_unwinds(struct Thread *t) {
-    return t && proc_caught_note_eintr_ready(t->proc) &&
-           !thread_reader_blocks_death(t) && thread_caught_note_claim(t);
+    return t && proc_caught_note_eintr_ready(t->proc) && thread_caught_note_claim(t);
 }
 
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.

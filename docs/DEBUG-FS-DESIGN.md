@@ -1301,6 +1301,27 @@ and continues from there. Plan 9 has no counterpart because it stops a process
 only at `procctl` points, never inside a kernel sleep; the client's park is the
 nearest thing to one, a point where the client knows the thread is stopped.
 
+**The seam-90 amendment (2026-10-06, as-built; ARCHITECTURE 8.8.1.1).** The
+frame-atomic design above is retired: a stop unwinds the elected reader at any
+byte. The reason it existed is gone. Since `loom-mc` the partial frame is the
+client's (`c->rx_got`), and every exit of the frame reader leaves the bytes it
+has read for the next reader, which resumes there. So the FIRST fix that "Why
+frame-atomic" rejects (set `stop_unwinds` for the whole recv, a plain unwind) is
+now the design: `reader_recv_frame` sets `stop_unwinds` with `stop_no_park` at
+entry and clears both at exit, and `do_reader_recv_frame` no longer touches the
+latch. Mechanism 0's block-through, the detour's fall-through for
+`stop_no_park` with `stop_unwinds` clear, is deleted, and so is
+`thread_reader_blocks_death`, which applied the same rule to death and to a
+caught note. `stop_no_park` keeps one job: it marks the reader's recv, so the
+caught arm latches `note_unwound` for it and the pipe read knows whose wait it
+is. Mechanisms 1 to 3 and the waiters-and-stops amendment are unchanged: a
+mid-frame stop takes exactly the path a boundary stop took, and the reader
+that resumes after it may be the stopped thread itself, a survivor, or the
+waiters' pump. Block-through was bounded only by the server: a reader whose
+server stopped inside a frame kept waiting for the rest, so its Proc never
+finished stopping (a debugger's stop or a `^Z` did not take) until the server
+died (`seam-90-hung-server`, closed).
+
 ### 5c.7 As-built — the #95 focus-thread (multi-M breakpoint inspect)
 
 8c-1 did attach + inspect only; 8c-2 (5c.2) made a multi-M target

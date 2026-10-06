@@ -336,9 +336,9 @@ void test_rendez_latch_wake_skips_stop_park(void);
 void test_rendez_stop_wake_skips_stop_park(void);
 void test_rendez_exit_close_ignores_stop(void);
 void test_rendez_exit_close_park_ends_on_death(void);
-void test_rendez_reader_frame_predicate(void);
-void test_rendez_reader_frame_blocks_death(void);
-void test_rendez_reader_frame_blocks_death_sleep(void);
+void test_rendez_reader_recv_unwinds_death(void);
+void test_rendez_reader_recv_unwinds_death_sleep(void);
+void test_rendez_reader_recv_unwinds_caught_note(void);
 void test_rendez_caught_wake_child_exit(void);
 void test_rendez_caught_wake_tty_susp(void);
 void test_rendez_caught_wake_tty_cont(void);
@@ -1924,6 +1924,8 @@ void test_9p_srvconn_transport_recv_ready_tracks_s2c(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
 void test_9p_srvconn_transport_death_tears_down_the_conn(void);
+void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void);
+void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void);
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
@@ -2290,11 +2292,12 @@ struct test_case g_tests[] = {
                                        test_rendez_exit_close_ignores_stop, false, NULL },
     { "rendez.exit_close_park_ends_on_death",
                                        test_rendez_exit_close_park_ends_on_death, false, NULL },
-    { "rendez.reader_frame_predicate", test_rendez_reader_frame_predicate,  false, NULL },
-    { "rendez.reader_frame_blocks_death",
-                                       test_rendez_reader_frame_blocks_death, false, NULL },
-    { "rendez.reader_frame_blocks_death_sleep",
-                                       test_rendez_reader_frame_blocks_death_sleep, false, NULL },
+    { "rendez.reader_recv_unwinds_death",
+                                       test_rendez_reader_recv_unwinds_death, false, NULL },
+    { "rendez.reader_recv_unwinds_death_sleep",
+                                       test_rendez_reader_recv_unwinds_death_sleep, false, NULL },
+    { "rendez.reader_recv_unwinds_caught_note",
+                                       test_rendez_reader_recv_unwinds_caught_note, false, NULL },
     { "rendez.caught_wake_child_exit", test_rendez_caught_wake_child_exit, false, NULL },
     { "rendez.caught_wake_tty_susp",   test_rendez_caught_wake_tty_susp,   false, NULL },
     { "rendez.caught_wake_tty_cont",   test_rendez_caught_wake_tty_cont,   false, NULL },
@@ -4267,6 +4270,8 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.devgone_posts_nodev_cqe",       test_9p_srvconn_transport_devgone_posts_nodev_cqe,       false, NULL },
     { "9p_srvconn_transport.transport_err_posts_eio_cqe",   test_9p_srvconn_transport_transport_err_posts_eio_cqe,   false, NULL },
     { "9p_srvconn_transport.death_tears_down_the_conn",     test_9p_srvconn_transport_death_tears_down_the_conn,     false, NULL },
+    { "9p_srvconn_transport.reader_unwinds_mid_frame_death", test_9p_srvconn_transport_reader_unwinds_mid_frame_death, false, NULL },
+    { "9p_srvconn_transport.reader_unwinds_mid_frame_stop",  test_9p_srvconn_transport_reader_unwinds_mid_frame_stop,  false, NULL },
     { "9p_srvconn_transport.pts_slave_spoor_classifies_t", test_9p_srvconn_transport_pts_slave_spoor_classifies_t, false, NULL },
     { "pipe.smoke",                                         test_pipe_smoke,                                         false, NULL },
     { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },

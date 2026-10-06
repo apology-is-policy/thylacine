@@ -525,12 +525,13 @@ struct Loom {
     // rewritten while alive. `sqpoll_stopping` / `sqpoll_exited` are the
     // single-writer flags of the join handshake (release/acquire paired). The
     // kthread reads only over a ready stream and parks on readiness hooks
-    // (LOOM.md 8.6), so it never blocks at a frame boundary and the stop's wake
-    // reaches its park. That is not "the join always terminates": a recv inside
-    // a frame whose bytes have begun blocks through the body (the stream would
-    // desync otherwise, #841), so a Byzantine server mid-frame delays the stop
-    // until the frame ends or EOFs. Termination rests on the v1.0 servers being
-    // trusted and prompt -- a trust assumption, not a mechanism.
+    // (LOOM.md 8.6), so its pump never waits in a recv and the stop's wake
+    // reaches its park. That is not "the join always terminates": a reap's last
+    // clunk can drain a full tag pool or wait out back-pressure in a blocking
+    // recv, which nothing interrupts on a kernel thread, so a server that stops
+    // delays the stop for as long as it lives. Termination rests on the server
+    // answering -- a trust assumption, not a mechanism (the vault's
+    // seam-close-flush-unbounded).
     struct Thread          *sqpoll;          // the kthread (NULL = no SQPOLL)
     bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
     bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)

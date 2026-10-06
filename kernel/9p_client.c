@@ -293,28 +293,14 @@ static void client_send_progress_signal(struct p9_client *c) {
 // lets a device-gone session post -ENODEV instead of a generic -EIO. c->lock
 // NOT held (this blocks); the single-reader election guarantees only one thread
 // is here at a time, so the shared recv_buf is safe.
-// 8c-3 (#89, F1): the inner recv. The wrapper (reader_recv_frame) holds
-// stop_no_park for the whole tenure so a mid-frame stop BLOCKS THROUGH; this
-// body sets self->stop_unwinds = (got == 0) before each recv, so a stop
-// (either owner -- the debugger's, or PTY-1f's job stop; the detour gate is
-// proc_stop_requested) UNWINDS the reader ONLY at a frame boundary (no bytes
-// of the frame consumed) and NEVER mid-frame (the policy below). `self` may
-// be a kproc thread (SQPOLL, site 4):
-// kproc is neither debuggable nor job-stoppable (both delivers reject it),
-// so both stop flags are always 0 and the detour never fires -- the sets are
-// harmless.
 //
 // The frame's bytes are the CLIENT's, not the reader's (Plan 9's devmnt keeps
 // them in the mount's queue, Linux's trans_fd in the connection): a reader
 // resumes at c->rx_got and leaves what it has read there when it returns
-// without the whole frame. No exit loses a byte, so an unwind mid-frame would
-// not desync the stream as it once did (task-#50): the block-through is ARCH
-// 8.8.1.1's voted policy -- finish a frame the server is sending -- not what
-// keeps the stream whole, and the vault's seam-90-hung-server records what it
-// costs when the server stops sending. A resumed frame is mid-frame from its
-// first recv, so a blocking reader blocks through it too. `now` reads only
-// what is waiting (recv_now) and returns P9_FRAME_PARTIAL instead of waiting
-// for more.
+// without the whole frame. No exit loses a byte, so a death, a stop or a caught
+// note may unwind a blocking reader at any byte (ARCH 8.8.1.1): the next reader
+// resumes the frame. `now` reads only what is waiting (recv_now) and returns
+// P9_FRAME_PARTIAL instead of waiting for more.
 #define P9_FRAME_PARTIAL (-2)
 
 // One recv into the frame: the bytes taken, 0 at EOF, -1 on an error, or
@@ -330,18 +316,12 @@ static int reader_recv_some(struct p9_transport *t, bool now, u8 *dst, size_t wa
 
 static int do_reader_recv_frame(struct p9_client *c, bool now) {
     struct p9_transport *t = &c->transport;
-    struct Thread *self = current_thread();
     u8 *buf = t->recv_buf;
     size_t cap = t->recv_cap;
     size_t got = c->rx_got;
     int n = 0;
     u32 size; u8 type; u16 tag;
     while (got < P9_HDR_LEN) {
-        // Unwindable-by-stop ONLY at got==0 (a clean frame boundary). `now`
-        // never sleeps, so it leaves the latch alone: sched's stop branch
-        // reads it on ANY sleep of this thread, and one left set would unwind
-        // a later wait that is not a reader's (sleep_death_only extincts).
-        if (self && !now) self->stop_unwinds = (got == 0);
         // A clean EOF (0) is a peer-gone close -> the device/service is gone.
         n = reader_recv_some(t, now, buf + got, P9_HDR_LEN - got);
         if (n <= 0) goto incomplete;
@@ -352,8 +332,6 @@ static int do_reader_recv_frame(struct p9_client *c, bool now) {
     if (size < P9_HDR_LEN) goto incomplete;
     if ((size_t)size > cap) goto incomplete;
     while (got < (size_t)size) {
-        // Mid-frame (got>0): a stop must NOT unwind here -- block through.
-        if (self && !now) self->stop_unwinds = false;
         // An EOF here: the peer vanished mid-reply (device-gone).
         n = reader_recv_some(t, now, buf + got, (size_t)size - got);
         if (n <= 0) goto incomplete;
@@ -366,18 +344,21 @@ incomplete:
     return n;
 }
 
-// 8c-3 (#89, F1): the frame-atomic reader recv. stop_no_park is held for the
-// WHOLE recv so the sched detour blocks a mid-frame stop through (the reader
-// finishes the frame, bounded by the trusted server's delivery -- CF-3 B) and
-// unwinds ONLY at a frame boundary (do_reader_recv_frame sets stop_unwinds).
-// Both flags are cleared on exit so a following client_debug_stop_park PARKS.
-// Centralizing here gives all three reader_active-holding callers (the
-// client_wait election, the client_pump_or_park_locked self-pump, and
-// p9_client_reader_pump_ready) the block-through, closing F2.
+// 8c-3 (#89): the blocking reader recv. stop_unwinds is held for the WHOLE recv,
+// so a stop unwinds it at any byte instead of parking it in place, where it
+// would hold reader_active and freeze every survivor; a death or a caught note
+// unwinds it at any byte too (ARCH 8.8.1.1). stop_no_park marks the recv as the
+// reader's (the caught arm latches note_unwound for it; the pipe read reads its
+// opt-in). Both are cleared on exit so a following client_debug_stop_park
+// PARKS. The two blocking callers holding reader_active go through here: the
+// client_wait election and the client_pump_or_park_locked self-pump; the
+// waiters' pump (p9_client_reader_pump_ready) never sleeps and never sets them.
+// `self` may be a kproc thread (a Loom SQPOLL reap's clunk): kproc is neither
+// stoppable nor killable, so the latches are inert there.
 static int reader_recv_frame(struct p9_client *c, bool caught_ok) {
     struct Thread *self = current_thread();
     // Reset stop_unwound + note_unwound at ENTRY (per-recv). The detour /
-    // caught branch SET them if this recv unwinds at a boundary; the client
+    // caught branch SET them if this recv unwinds; the client
     // classifier READS+clears them after we return (F1 re-audit -- a STABLE
     // signal vs a racy re-read). Deliberately NOT cleared at exit (they must
     // survive to the classifier).
@@ -387,8 +368,9 @@ static int reader_recv_frame(struct p9_client *c, bool caught_ok) {
     // the Loom and poll-pump waiters pass false: a caught-unwind there drains nothing, so
     // the send retry would spin (the survey's livelock). recv_caught_ok routes
     // it into srvconn_client_recv's tsleep_noteintr vs tsleep choice.
-    if (self) { self->stop_no_park = true; self->stop_unwound = false;
-                self->note_unwound = false; self->recv_caught_ok = caught_ok; }
+    if (self) { self->stop_no_park = true; self->stop_unwinds = true;
+                self->stop_unwound = false; self->note_unwound = false;
+                self->recv_caught_ok = caught_ok; }
     int r = do_reader_recv_frame(c, /*now=*/false);
     if (self) { self->stop_no_park = false; self->stop_unwinds = false;
                 self->recv_caught_ok = false; }
@@ -608,10 +590,8 @@ static bool client_stop_pending(struct Thread *t) {
 // stop owners clear) then re-acquires it. rpc->stop_parked spans the park, so
 // the handoff does not designate me and a drainer does not wait on my stored
 // reply while I cannot run (on a never-inflight token rpc the flag is inert).
-// stop_no_park MUST be clear here, as every caller leaves it: a set one makes
-// sleep()'s death check read this park as a reader mid-frame
-// (thread_reader_blocks_death), which a death does not unwind. stop_unwinds
-// does not matter: the stop detour skips a sleep on debug_rendez. Returns
+// Neither stop latch matters here: the stop detour skips a sleep on
+// debug_rendez, and the park takes no caught note. Returns
 // SLEEP_OK on resume, or SLEEP_INTR if the Proc's group started dying while
 // stopped (the park sleeps death-only: a terminate latch waits for the
 // resume) -> the caller re-loops and client_self_dying() unwinds (DEATH WINS).
@@ -664,7 +644,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // re-elect. The handoff skips a stop-parked op, so the role lands
             // on a survivor (or is dropped -> a future survivor op or a role
             // waiter takes it). Every wait below unwinds on a stop and comes
-            // back here -- the reader's recv at a frame boundary, the
+            // back here -- the reader's recv at any byte, the
             // non-reader sleep -- so no waiter parks in place, where it would
             // re-sleep on resume without re-electing. DEBUG-FS-DESIGN 5c.6.
             if (rpc->be_reader) {
@@ -679,12 +659,12 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // lands, the session dies, or I'm dying.
             c->reader_active = true;
             rpc->be_reader   = false;
-            // 8c-3 (#89, F1): reader_recv_frame manages stop_no_park/stop_unwinds
-            // (frame-atomic -- a mid-frame stop blocks through, a boundary stop
-            // unwinds the recv). On a boundary unwind the recv returns <= 0 with
-            // client_stop_pending true -> `stopped` -> release + hand off the
-            // role + park role-free below (the wrapper cleared both flags, so the
-            // park PARKS), then re-elect on resume.
+            // 8c-3 (#89): reader_recv_frame manages stop_no_park/stop_unwinds,
+            // so a stop unwinds the recv at any byte (the client keeps the
+            // partial frame, ARCH 8.8.1.1): the recv returns <= 0 with
+            // stop_unwound latched -> `stopped` -> release + hand off the role +
+            // park role-free below (the wrapper cleared both flags, so the park
+            // PARKS), then re-elect on resume.
             bool stopped     = false;
             bool noteintr    = false;
             for (;;) {
@@ -700,15 +680,15 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                     client_send_progress_signal(c);     // #349: a c2s slot freed
                 } else if (client_self_dying()) {
                     // death-interrupt: unwind. Clear a possibly-set stop_unwound
-                    // (a stop+death at the same boundary sets it) so no branch
+                    // (a stop+death in the same sleep sets it) so no branch
                     // leaves the latch set -- symmetric with the arms below (the
                     // reader_recv_frame entry reset already guards a later read;
                     // this is defense-in-depth on the dying path).
                     if (t) { t->stop_unwound = false; t->note_unwound = false; }
                     break;
                 } else if (t && t->stop_unwound) {
-                    // 8c-3 (#89): my recv was stop-unwound at a frame boundary (the
-                    // detour's stop_unwinds branch). F1 re-audit: read the STABLE
+                    // 8c-3 (#89): my recv was stop-unwound, wherever it was in the
+                    // frame (the detour's stop_unwinds branch). F1 re-audit: read the STABLE
                     // stop_unwound latch, NOT client_stop_pending (which re-reads
                     // the stop flags -- each cleared asynchronously by ITS resume:
                     // debug_stop_req by proc_debug_resume on a debugger
@@ -721,9 +701,8 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                     stopped = true;
                     break;
                 } else if (t && t->note_unwound) {
-                    // 11b-9p: a CAUGHT note unwound my recv at a frame boundary
-                    // (the sched caught branch, frame-atomic via the #90 guard --
-                    // mid-frame it blocks through). Unlike a stop (which re-blocks
+                    // 11b-9p: a CAUGHT note unwound my recv, wherever it was in
+                    // the frame (the sched caught branch). Unlike a stop (which re-blocks
                     // on resume), a caught note must UNWIND to the EL0-return tail
                     // so the handler runs: hand off the reader role + return
                     // CLIENT_WAIT_NOTEINTR (NOT re-loop). Survivors never freeze --
@@ -928,7 +907,7 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
             bool unwound = self && self->stop_unwound;   // F1 re-audit: stable latch
             if (unwound) self->stop_unwound = false;     // read+clear (owner-only)
             if (!client_self_dying() && !unwound) {
-                // rr <= 0, not self-dying, not a boundary stop-unwind -> a real
+                // rr <= 0, not self-dying, not a stop-unwind -> a real
                 // transport break; latch the shared session dead (#841 fail-close).
                 // A stop-unwind (8c-3 F2) skips this -- the role is released below,
                 // and client_send_flow / client_drain_until_free_tag parks me at
@@ -998,7 +977,7 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
 
         // 8c-3 (#89, F2): a debugger stop is pending -- park role-free instead
         // of retrying/self-pumping. A stop-unwound self-pump drains nothing (it
-        // unwinds at the frame boundary), so retrying would SPIN: c2s never
+        // unwinds before a whole frame), so retrying would SPIN: c2s never
         // frees -> every send EAGAINs -> the Proc never fully-stops -> the
         // debugger's stop HANGS. Spill out_buf FIRST -- client_debug_stop_park
         // drops c->lock, opening the #375 out_buf-clobber window; on resume the

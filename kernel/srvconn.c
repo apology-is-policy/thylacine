@@ -707,12 +707,13 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
             ret = -1;
             break;
         }
-        // 11b-9p: a CAUGHT note unwound this recv at a frame boundary (the sched
-        // caught branch set note_unwound for the client_wait classifier). Map to
-        // -1 exactly as the death-interrupt -- reader_recv_frame returns, the
-        // client reads note_unwound + hands off the reader role + returns
-        // CLIENT_WAIT_NOTEINTR. No bytes consumed at a boundary -> the stream
-        // stays synced, the transport reusable.
+        // 11b-9p: a CAUGHT note unwound this recv (the sched caught branch set
+        // note_unwound for the client_wait classifier). Map to -1 exactly as
+        // the death-interrupt -- reader_recv_frame returns, the client reads
+        // note_unwound + hands off the reader role + returns
+        // CLIENT_WAIT_NOTEINTR. This call copied nothing, and the client keeps
+        // what earlier calls copied of the frame (ARCH 8.8.1.1), so the stream
+        // stays synced and the transport reusable.
         if (ts == TSLEEP_NOTEINTR) {
             ret = -1;
             break;

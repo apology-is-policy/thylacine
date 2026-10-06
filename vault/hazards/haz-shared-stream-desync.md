@@ -27,17 +27,19 @@ wrong-reply/poisoned-dentry corruption class).
 
 ## The countermeasure
 
-Frame-atomicity as a DESIGNED property: unwind only at `got == 0`
-(`stop_unwinds`), BLOCK THROUGH mid-frame (`stop_no_park` +
-`thread_reader_blocks_death`), bounded by the trusted server's whole-frame
-delivery. Modeled by [[spec-reader-frame]]; the stop half shares the
-mechanism. Any interruption a future change adds to the reader recv must
-route through the same boundary latch, not a new flag.
+The partial frame belongs to the CLIENT, not the reader (`c->rx_got`, as Plan 9
+devmnt's `m->q` and Linux trans_fd's `rc.offset`; since
+[[chg-2026-10-06-loom-multiclient]]): every exit of the frame reader leaves the
+bytes it read for the next reader, which resumes there. So the reader may
+unwind at any byte for a death, a stop or a caught note, and since
+[[dec-2026-10-06-seam90-unwind-any-byte]] it does. [[spec-reader-frame]] models
+it (`NoDesync`, `ResumePoint`; `reader_frame_buggy.cfg` is the discard). A NEW
+shared-stream reader that keeps its partial frame on its own stack reopens the
+hazard, and so does a transport recv that copies bytes and then returns an
+error.
 
-Since 2026-10-06 ([[chg-2026-10-06-loom-multiclient]]) the partial frame is
-the client's (`c->rx_got`, as Plan 9 devmnt's `m->q` and Linux trans_fd's
-`rc.offset`): every exit of the frame reader leaves the bytes it read for the
-next reader, which resumes there, so no unwind of the 9P reader reaches this
-hazard. The block-through stays as ARCH 8.8.1.1's voted policy;
-[[seam-90-hung-server]] is its cost. A NEW shared-stream reader that keeps its
-partial frame on its own stack reopens the hazard.
+From 2026-07-19 to 2026-10-06 the countermeasure was frame-atomicity instead:
+unwind only at `got == 0`, block through mid-frame (`stop_no_park` +
+`thread_reader_blocks_death`), bounded only by the server's delivery. Its cost
+was [[seam-90-hung-server]]: a server that stopped inside a frame held the
+reader until it died.
