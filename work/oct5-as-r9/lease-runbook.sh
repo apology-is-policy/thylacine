@@ -386,14 +386,27 @@ echo "-- test.sh exit status: $test_rc; boot log PRESERVED at $BOOTLOG"
 # proves the tests are COMPILED IN; only the boot log proves they RAN. The suite
 # prints "    [test] <name> ... " per test, so require a PASS record for each of
 # the four BY NAME -- that is the witness, and the total alone is not.
+# THE ORACLE IS THE BOOT LOG, NOT test.sh's STDOUT. This check asserted against
+# guest-test.log and therefore FAILED ON BOTH RUNS SO FAR (10-06 and 10-07),
+# each time with "absent from the log entirely" -- on 10-07 against a GREEN boot
+# whose four PASS records were sitting in the boot log all along. test.sh prints
+# a summary plus a ~20-line log TAIL; the suite's 1835 `[test]` lines live only
+# in build/test-boot.log, preserved above as $BOOTLOG. The stage's own comment
+# said "only the boot log proves they RAN" while the code read the other file --
+# a comment true about the wrong thing, and it is why ci-smp-gate has never run.
+# DENOMINATOR FIRST, so the mirror-image failure cannot happen either: if the
+# oracle carries no [test] lines at all, the SEARCH is broken, not the tests.
+ntest=$(grep -c '\[test\] ' "$BOOTLOG" || true)
+echo "-- witness oracle: $BOOTLOG carries $ntest [test] lines"
+[ "$ntest" -gt 0 ] || { echo "   NO [test] LINES IN THE ORACLE -- the suite output is not here; STOP"; exit 1; }
 echo "-- EXECUTION witness: each of the four must have its own PASS record:"
 for t in settled_drop_retains_nonfinal_charge settled_drop_exact_payer \
          settled_mapping_drop_defers_free unmap_failure_leaves_mapping_attached; do
-  if grep -E "\[test\] burrow\.$t \.\.\..*(PASS|ok)" work/oct5-as-r9/guest-test.log >/dev/null; then
+  if grep -E "\[test\] burrow\.$t \.\.\..*(PASS|ok)" "$BOOTLOG" >/dev/null; then
     echo "   RAN+PASSED: burrow.$t"
   else
     echo "   NO PASS RECORD: burrow.$t -- compiled in is not run; show its line:"
-    grep -F "burrow.$t" work/oct5-as-r9/guest-test.log || echo "     (absent from the log entirely)"
+    grep -F "burrow.$t" "$BOOTLOG" || echo "     (absent from the oracle entirely)"
     exit 1
   fi
 done
@@ -402,7 +415,7 @@ echo "   probe tests pass when their initrd file is missing):"
 # ASSERTED, not merely printed (astra, note 8): a `|| true` on the tally is a
 # number nobody checks.
 EXPECT_TESTS="${EXPECT_TESTS:-1834}"
-tally=$(grep -E '  tests: [0-9]+/[0-9]+' work/oct5-as-r9/guest-test.log | tail -1)
+tally=$(grep -E '  tests: [0-9]+/[0-9]+' "$BOOTLOG" | tail -1)
 [ -n "$tally" ] || { echo "   NO SUITE TALLY AT ALL -- the suite never reported; STOP"; exit 1; }
 echo "  $tally"
 ran=$(echo "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+).*#\1#')
@@ -412,7 +425,7 @@ tot=$(echo "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+).*#\2#')
   echo "   total $tot != expected $EXPECT_TESTS (base 1830 + my 4)."
   echo "   A total that MOVED means the test SET changed: account for it, do not"
   echo "   adjust the expectation to match the observation."; exit 1; }
-nskip=$(grep -c '\[skip\]' work/oct5-as-r9/guest-test.log || true)
+nskip=$(grep -c '\[skip\]' "$BOOTLOG" || true)
 echo "   [skip] lines: $nskip (must be 0 on the gate image)"
 [ "$nskip" = 0 ] || { echo "   A SKIP IS NOT COVERAGE; STOP"; exit 1; }
 
