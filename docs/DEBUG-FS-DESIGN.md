@@ -92,8 +92,10 @@ loop with no blockers:
 
 > **I-39 (debug authority bounded, never bypasses memory-safety).** A Proc may
 > debug a target iff it can *name* `/proc/<pid>` in its namespace AND passes the
-> two-axis gate (**owner-covers-target** — same `principal_id` on the `0600` ctl
-> **AND** the target's capability set a subset of the caller's — **OR** the
+> two-axis gate (**owner-covers-target** — same `principal_id` on the `0600` ctl,
+> never `PRINCIPAL_NONE`, which owns no Proc but itself (IDENTITY-DESIGN's reserved
+> ids; Plan 9's `nonone`, operator vote 2026-10-06), **AND** the target's capability
+> set a subset of the caller's — **OR** the
 > capability axis `CAP_HOSTOWNER`/`CAP_DEBUG`), the I-26-analog (owner OR the host
 > owner OR the domain cap, as the kill gate is owner OR
 > `CAP_HOSTOWNER`/`CAP_KILL`) **with the owner axis narrowed by the
@@ -118,7 +120,12 @@ loop with no blockers:
 
 Enforcement: the two-axis gate at each debug read/write site (the
 `devctl_kernel_base_readable` pattern — atomic-load `caller->caps`, check owner
-OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); the stopped-only guard on mem/reg access; HW
+OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); every `/proc` authority refusal --
+this gate, kproc, either seal, the I-26 kill gate, the owner-or-hostowner reads and
+the none wall -- answers `EACCES`, as `/ctl/kernel-base` and `/ctl/kstack` do, ERRORS.md's binding rule for a permission denial
+(2026-10-06; it answered a bare -1 before, which pouch and Go read as `EPERM`), while
+a target that is gone, not ALIVE, not stopped, or held by another ctl stays the
+generic -1; the stopped-only guard on mem/reg access; HW
 breakpoints (never software `BRK`) preserving I-12/I-36; the cross-Proc VA->PA
 walk confined to the target `pgtable_root` under the target `vma_lock`; the
 handle-lifetime-tied stop ownership. Validation: `specs/debug_stop.tla` (the

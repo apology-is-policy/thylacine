@@ -624,7 +624,8 @@ can veto any of them:**
    only under `hidepid` and leaves `/proc/stat` world-readable, and Android
    restricts `/proc/interrupts` by policy). A Proc's `cpu_ns` is now shown
    exactly to its owner or a `CAP_HOSTOWNER` holder, as `sched` already was,
-   and as `-` to anyone else. The system-wide counters belong to the system principal: a reader
+   and as `-` to anyone else; a reader running as `none` owns no Proc but
+   itself (IDENTITY-DESIGN, the reserved ids). The system-wide counters belong to the system principal: a reader
    that is neither `PRINCIPAL_SYSTEM` nor a `CAP_HOSTOWNER` holder reads `-`
    for each of them. Rounding was rejected, because `idle_ns` changes at each
    wake, so a key every 100-300 ms crosses any 10 ms step it is rounded to.
@@ -634,6 +635,26 @@ can veto any of them:**
    when it is preempted, a residual every general-purpose kernel shares; the
    Proc-level state column carries no run/sleep bit (ALIVE, STOPPED, ZOMBIE),
    and the per-thread run states are in the gated `sched`.
+   `/ctl/9p-sessions` (operator vote 2026-10-06): a connection's and a 9P
+   session's counters (the ring byte counts, the server's frame count, the demux
+   counters, the reader flag, the send waiters and the in-flight tags) move once
+   per message, and a pty-served terminal carries one message per key. A row's
+   counters are shown to the principals at its two ends and to a
+   `PRINCIPAL_SYSTEM` or `CAP_HOSTOWNER` reader; anyone else reads `-`. A
+   connection's ends are the connecting Proc's principal at the connect and the
+   poster's at the post; a session's are its attaching Proc and, over a `/srv`
+   connection, that connection's server. Both are recorded by value when the
+   connection or session is made, as its `SO_PEERCRED` identity is. An end
+   already sees every message, so its counts tell it nothing new, and an
+   ordinary user keeps the counters of their own connections, which the `#210`
+   wedge autopsy reads. An end the kernel does not know (the server behind a
+   caller-supplied transport) matches no reader, and neither does a reader
+   running as `none`: Procs that run as none are unrelated (a pre-auth server
+   runs as none, one per remote client), so none is nobody's end -- the rule
+   IDENTITY-DESIGN's reserved ids state for every per-Proc surface. The rows
+   themselves, with the
+   peer pid, label, msize, mode and state, stay readable to every reader but
+   one running as none, which sees none of them.
 
 ### 11.4 The propagating legate scope -- kernel, I-25 STRENGTHENED, spec-first (IM-2)
 

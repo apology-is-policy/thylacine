@@ -1208,6 +1208,95 @@ count; prowl drawing a withheld CPU as an empty meter fails prowl.exp; the share
 fails diorama-probe and the boot. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
 UBSan at 4 and 8).
 
+## 9P counters belong to a row's two ends; chdir stores where the walk landed — 2026-10-06
+
+Two operator votes of 2026-10-06. "Per-row owner" for `/ctl/9p-sessions` (IMPERIUM-DESIGN 11.3 item 10; re-asked at
+15:38Z after the first question misstated the cost, superseding "Gate it") closes the CPU-time gate audit's F4.
+"Physical" for chdir (STALK-DESIGN 4.3). Scripture f33605135; code, witnesses and dossiers in one commit, 0051c458e.
+
+- **A 9P row's counters belong to its two ends.** A connection records the connecting Proc's principal and the
+  poster's at the post. A session records its attacher and, over `/srv`, the connection's server. Both are recorded by
+  value when the row is made. `ctl_9p_shown` shows the counters to either end, the system principal or a hostowner;
+  everyone else reads `-`. An end the kernel does not know matches no reader, and a reader running as `none` is no end.
+  A user keeps the counters of the sessions that serve them: the login's home proxy is a server end.
+- **chdir stores the name of where the walk landed.** stalk builds the name alongside its trail and never reads it or
+  a Path (I-33). `stalk_landed` then walks the name once more and requires the same node: a served link resolved from
+  a union member past the first can land on a node an earlier member shadows, and such a node has no name. The
+  lexical canonicalizer is deleted. ut's `cd` and builtin `pwd` stay logical in the shell; `/bin/pwd` asks the kernel.
+- Witnesses: the kernel tests `devsrv.conn_ends`, `stalk.landed_name` (22 legs), `stalk.landed_roots`,
+  `stalk.landed_identity`, and new legs in `devctl.read_9p_sessions_format` and `p9_attached.ctl_registry`; four
+  `/ctl/9p-sessions` legs in `tools/interactive/cpu-gate.exp`; leg (f) of `haul-links.exp`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, and one self-found before the gate; clean.
+S0, the union-shadow case, found in review before the gate, is fixed by the second walk. F1: a `none` reader matched a
+`none` end; none is now no end, and the `/proc` owner predicate's view of none is enqueued separately. F2: two stale
+comments. F3: no leg had a Path to read back, and `stalk.landed_roots` chroots below a Path-seeded attach. F4: the
+second walk's Dev and devno terms had no witness, and `stalk.landed_identity` mounts a same-qid replacement mid-walk.
+F5: a served Territory root, a mount over the root and two absolute served targets now have legs. The base-cross push
+cannot be shown red: `end[]` starts zeroed.
+
+Verification, on hunt, `--config ci` bakes. At 0c3eab1e7, before the audit fixes: `tools/test.sh` 1888/1888 and boot OK;
+cpu-gate, haul-links, prowl and idle-probe PASS. Twelve kernel sabotages, each red on exactly its own assertions: no
+principal end matching (three tests), the unknown-end guard dropped, the connection row's server end dropped (two),
+the post's poster principal dropped, every reader shown every row (three), a `..` pop leaving the name, a served
+re-anchor not re-basing it, a crossing's name not taken, a union point's name not taken, the second walk ignored, an
+absolute link not re-basing to the root. With the suite's tests unregistered, cpu-gate fails on the device at its
+counted connection leg (no end matches) and at its withheld leg (every row shown), and haul-links at leg (f) (a
+served re-anchor not re-basing). A `/srv` session's server end dropped leaves the suite green and fails cpu-gate's
+counted session leg: michael is that session's server end, through the home proxy. Storing the raw join is caught
+at boot by joey's probe83 (the cwd stays canonical). At the final tree e9204e086: 1890/1890 and boot OK, the four
+legs PASS; a `none` reader matching a `none` end, the second walk without its devno term, without its Dev term, and
+the name read back from the Path are each red on their own assertion; a no-crossing anchor's name taken from the
+current length is red on `stalk.landed_roots` and on `landed_name`'s `/smnt/d/n1`, whose second served link
+re-anchors at the base too; the cleaned lexical store, the behaviour before the vote and one probe83 accepts,
+leaves the suite green and fails haul-links at leg (f). `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption
+(default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
+## None owns nothing but itself; a /proc refusal answers EACCES — 2026-10-06
+
+Operator vote of 2026-10-06 19:58Z, "Plan 9's nonone" (IDENTITY-DESIGN's reserved ids; ARCH 28 I-26 and I-39 amended).
+It closes the `/proc` owner predicate item the 9P-ends audit enqueued. Scripture 9daf0a50a; code, witnesses and dossiers
+in one commit, ed65c9a86.
+
+- **No owner axis admits a `none` caller for any Proc but itself.** `devproc_same_owner` is the one owner relation, and
+  it is false for a none target. Two unrelated Procs running as `none` could kill each other, debug each other whenever
+  their caps covered (two bare none Procs always do), and read each other's `environ`, `sched`, `imperium` and `cpu_ns`.
+  The kill gate gains the self arm its siblings had.
+- **The read wall.** `devproc_none_walled` refuses a none caller every other Proc's `status`, `cmdline`, `ns`, `exe`,
+  `cwd`, `maps` and the read side of `ctl`. `/ctl/procs` lists it only its own row, and `/ctl/9p-sessions` no row at all.
+  `CAP_HOSTOWNER` buys through, as Plan 9's `nonone()` exempts eve; `CAP_KILL` and `CAP_DEBUG` still admit on their own
+  axes. A pid's existence, its stat and `getpgid`/`getsid` stay visible, as in Plan 9.
+- **A refusal answers `EACCES`.** Every `/proc` authority refusal and `/ctl`'s two gated leaves answered a bare -1, which
+  ERRORS.md forbids for a denial and pouch and Go read as `EPERM`. The other failures (no such Proc, not ALIVE, not
+  stopped, a claimed slot, a full table) stay -1, an owned residual. Kill, suspend and attach ask authority before
+  liveness, so a refused caller learns nothing of whether its target is alive.
+- Witnesses: the kernel tests `devproc.none_owns_nothing` and `devproc.none_walled`; new legs in
+  `devctl.read_9p_sessions_format`, `p9_attached.ctl_registry`, `devctl.read_kernel_base_format`,
+  `devctl.kstack_gated`, and three ZOMBIE legs in `test_devproc`; seventeen refusal expectations moved to `-T_E_ACCES`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/1/4; clean. F1 [P2]: no witness had run; the gate
+below closes it. F2: `/ctl/9p-sessions` rows showed a none reader other Procs' connections; hidden. F3: `/ctl`
+`kernel-base` and `kstack` refused with -1; `EACCES`, with a real-path witness each. F4: stale prose in devproc, prowl
+and libthyla-rs. F5: kill, suspend and attach asked liveness first; reordered, with the ZOMBIE legs.
+
+Verification, on hunt, `--config ci` bakes, at b1e18996d (the landing's kernel and userspace trees, plus untag 2a):
+`tools/test.sh` 1903/1903 and boot OK; cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata and dap-nora PASS.
+Nineteen kernel sabotages, each red on exactly its own assertions: the owner relation without its none test, the I-39
+owner axis and the owner-or-hostowner reads comparing principals raw, kill without its self arm, the wall never
+walling, the wall keyed on the target, CAP_HOSTOWNER not buying through it, `/ctl/procs` listing every row to none,
+the read path not asking the wall, a refused read, kill, wait scan, environ read and attach each answering -1,
+`/ctl/9p-sessions` showing none every row, kill, suspend and attach each asking liveness first, and the `/ctl` refusal
+answering -1. The runbook flagged five of them as mismatches: their FAIL lines carry the harness's `LEAKED-PROC(n)`
+prefix (a failing test returns before freeing its fixture), which its matcher did not accept; re-judged from the saved
+boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
+UBSan at 4 and 8).
+
+Landed beside it: **untag step 2a** (cf296caa1). `tools/build.sh`'s `ambush_fork_check` accepts a fork without
+`launchHeld`: it still refuses `held_off_thylacine.go` and still asks `held_on_thylacine.go` for `launchHeld = true`,
+and a fork with neither must name `launchHeld` nowhere and set `DebugHeld` in `Launch`. Controls on fork snapshots:
+accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half step; the gate's bake ran it against
+073faaa. Main agreed on yip 0177; step 2b, the shared fork's commit, waits for main's merge and word.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

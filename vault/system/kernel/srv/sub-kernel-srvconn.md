@@ -55,8 +55,8 @@ both consumers block instead of failing.
 
 Declarations in `kernel/include/thylacine/srvconn.h`.
 
-**Lifecycle** — `srvconn_create(peer_stripes, peer_pid, peer_console,
-server_stripes, msize)` (born LIVE, ref 1; rejects any msize outside the
+**Lifecycle** — `srvconn_create(peer_stripes, peer_pid, peer_principal,
+peer_console, server_stripes, server_principal, msize)` (born LIVE, ref 1; rejects any msize outside the
 two-point class set `{SRVCONN_MSIZE, SRVCONN_BULK_MSIZE}`; NULL on OOM
 with no partial state) · `srvconn_ref`/`srvconn_unref` (atomic; last
 unref = teardown + magic-clobber + free the rings + the struct; extincts
@@ -310,7 +310,11 @@ whole lifetime argument: `srvconn_ctl_iterate` holds
 `g_srvconn_ctl_lock` across its entire walk, so it can never reach a
 conn whose free has begun. Order is **registry → `ch->lock`**, and the
 unlink path takes only the registry lock, so there is no inversion to
-find. Surfaced at `/ctl/9p-sessions`.
+find. Surfaced at `/ctl/9p-sessions`, where a row's counters are shown only
+to its two ends, the system principal and a hostowner
+([[dec-2026-10-06-9p-sessions-ends]]): the walk copies `peer_principal` and
+`server_principal` into each `srvconn_ctl_row` beside the counters, and
+[[sub-kernel-devctl]] decides.
 
 **What the counters are FOR is the part worth keeping**: they exist to
 tell three indistinguishable failures apart — a reply that was never
@@ -327,9 +331,12 @@ prove rather than suggest. Pinned by `srvconn.ctl_counters`
 — the first-u64 discriminator the KObj_Srv release path and
 `devsrv_conn_of` read; cleared at free as UAF defense) · atomic `ref`
 (W1.5 LSE-patchable `t_atomic_*` ops) · `lock` + `state` (LIVE/TORN,
-one-way) · the by-value identity four (`peer_stripes`, `peer_pid`,
-`peer_console`, `server_stripes` — no raw `Proc *`/`SrvService *`, so a
-peer exit or a tombstone-rebind never turns a read into a UAF) · `msize`
+one-way) · the by-value identity six (`peer_stripes`, `peer_pid`,
+`peer_principal`, `peer_console`, `server_stripes`, `server_principal` —
+no raw `Proc *`/`SrvService *`, so a peer exit or a tombstone-rebind never
+turns a read into a UAF; the two principals are the conn's ends in
+`/ctl/9p-sessions`, the connector's at the connect and the poster's at the
+post) · `msize`
 (immutable class) · `client_deadline_ns` · two
 `struct srvconn_chan` (`c2s`, `s2c`) · the conn-wide `poll_list` ·
 `byte_mode` (release/acquire) · `kernel_attached` (release/acquire) ·

@@ -90,6 +90,11 @@ another user types a key into the episode sees nothing move once per key. The
 gate is the kernel's ([[sub-kernel-devctl]], [[sub-kernel-devproc]]); this
 tool adds nothing to it.
 
+The episode never crosses `/ctl/9p-sessions`: corvus reads the serial handle,
+and the seat is a bare syscall. A secret typed into a pty-served terminal
+does cross it, one message per key, so that file shows a row's counters only
+to the principals at its two ends ([[dec-2026-10-06-9p-sessions-ends]]).
+
 ## Error paths
 
 Wrong keys, ineligible users, stale requesters, nesting, non-tty invocation,

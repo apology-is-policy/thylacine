@@ -1442,7 +1442,7 @@ static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_re
     if (!client) return r;
     client->principal_id = 0x1234u;
     client->primary_gid  = 0x5678u;
-    struct SrvConn *cn = srvconn_create(0, client->pid, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0, client->pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     if (cn) {
         if (mark_cape)   srvconn_set_cape(cn);
         if (mark_remote) srvconn_set_remote(cn);

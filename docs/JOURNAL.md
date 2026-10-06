@@ -22,6 +22,34 @@ needed the operator.
 
 
 ---
+## 2026-10-06 (aux, Opus 5.5 1M, effort xhigh) -- none owns nothing but itself; a /proc refusal answers EACCES
+
+**Why now.** The 9P-ends audit's F1 made a reader running as `none` no end of a `/ctl/9p-sessions` row, and enqueued the `/proc` owner predicate's view of none as its own item (OPEN-BUGS 17:00Z). Reading the whole owner family showed it was wider than enqueued. Every owner axis compared principals, so two unrelated Procs running as `none` were one owner everywhere: kill (I-26), debug whenever the caps covered, which two bare none Procs always do (I-39), and the owner-or-hostowner reads (`environ`, `sched`, `imperium`, `cpu_ns`). No in-tree program runs as none today; the exposure is a future pre-auth or network server.
+
+**The vote.** It changes two section-28 invariants, so it went to the operator with the heritage attached: Bell Labs and 9front `devproc.c` call `nonone()` at the open of every other Proc's state file ("none can't read or write state on other processes ... should they be subverted"), and Linux's shared `nobody` uid is why systemd's DynamicUser and OpenBSD's per-daemon users exist. At 19:58Z the operator chose Plan 9's `nonone` in full, over the owner checks alone, the reads alone, or recording the residual.
+
+**The design** (scripture 9daf0a50a, code ed65c9a86). `devproc_same_owner` is the one owner relation, false for a none target. The kill gate gains the self arm its siblings had. `devproc_none_walled` refuses a none caller every other Proc's per-Proc files, and `/ctl/procs` lists it only its own row. The capability axes are unchanged: `CAP_HOSTOWNER` buys through everything, as eve is exempt in Plan 9.
+
+**Found mid-chunk, folded in.** Writing the wall's refusal, I found that every `/proc` authority refusal answered a bare -1. ERRORS.md's binding rule forbids that for a denial, and pouch and Go read -1 as `EPERM`. Under the grant I folded the fix in as a second sub-chunk: each refusal site sets `-T_E_ACCES` and `devproc_walk_fail` passes it through (seventeen test expectations moved). The other failure classes stay -1, and they remain an owned OPEN-BUGS residual.
+
+**Wrong turns, and what caught them.**
+- My own review kept `/ctl/9p-sessions`' rows readable to none, on Plan 9's `/net/*/status` precedent, and I wrote that into the landing draft. The audit's F2 showed the rows name other Procs' connections (peer pid, label, msize, mode, liveness), which is the very thing the vote walled off. I reversed it: a none reader sees no row.
+- I moved the refusal *value* to EACCES without looking at the refusal *order*. Kill, suspend and attach asked whether the target was alive before asking whether the caller could touch it, so a refused caller read -1 for a zombie and EACCES for a live Proc: one bit about a Proc whose status the wall now hides (F5). Authority comes first now, with a ZOMBIE leg for each verb.
+- The gate's first sabotage list had no witness for F3: the kstack test asserted only `denied < 0`, and the kernel-base deny path was tested through the predicate alone, which cannot see whether the gate is wired. Both now read through the real path and assert `-T_E_ACCES` (14ba1d40b).
+- The decision note was committed in a WIP and vault lint R3 then froze its body, so its "a denied read returns -1" bullet stayed wrong on the branch. The landing branch creates the note fresh, with the bullet corrected.
+
+**Merged main.** Main had merged aux-3's previous landing plus its Loom multi-client work (f6f4c0397). I merged that back first (9c080d100), so one gate covers the merge and the chunk. The code merged cleanly. Four doc conflicts were resolved by hand: AUDIT-TRIGGERS, JOURNAL, the srvconn dossier and the dashboard.
+
+**Audit.** Round 1, Fable 5.1 reviewing Opus 5.5: 0 P0, 0 P1, 1 P2, 4 P3; clean. F1 (no witness had run) closes with the gate.
+
+**Verification.** On hunt, `--config ci` bakes, at b1e18996d (the landing's kernel and userspace trees, plus untag 2a): `tools/test.sh` 1903/1903 and boot OK; cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata and dap-nora PASS. Nineteen kernel sabotages, each red on exactly its own assertions: the owner relation without its none test, the I-39 owner axis and the owner-or-hostowner reads comparing principals raw, kill without its self arm, the wall never walling, the wall keyed on the target, CAP_HOSTOWNER not buying through it, `/ctl/procs` listing every row to none, the read path not asking the wall, a refused read, kill, wait scan, environ read and attach each answering -1, `/ctl/9p-sessions` showing none every row, kill, suspend and attach each asking liveness first, and the `/ctl` refusal answering -1. The runbook flagged five of them as mismatches: their FAIL lines carry the harness's `LEAKED-PROC(n)` prefix (a failing test returns before freeing its fixture), which its matcher did not accept; re-judged from the saved boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
+**Landed beside it.** Untag step 2a (cf296caa1): `build.sh`'s ambush check accepts a fork without `launchHeld`, so the shared fork can drop the constant once main merges this; main agreed on yip 0177, and the fork commit (2b) waits for main's word. Controls on five fork snapshots: only the simulated step-2 fork changed verdict.
+
+**Still open.** The non-authority -1 classes in devproc (no such Proc, not ALIVE, not stopped, a claimed slot, a full table) still answer a bare -1: OPEN-BUGS 20:20Z, narrowed to them.
+
+---
+
 ## 2026-10-06 (main, Opus 5.5, effort max) -- devno-u64: the kernel's device number is 64 bits and never reused
 
 **Why now.** The arc order: after the multi-client Loom chunk, before B-2. The
@@ -81,6 +109,7 @@ operator, and I changed it as a bug fix; the operator ratified it (21:03Z).
 mount key still carries no generation (a separate lead, unchanged).
 
 ---
+
 ## 2026-10-06 (main, Opus 5.5, effort max) -- waiters fan in: a Loom ring's waiters read every 9P client it has an op on
 
 **Why now.** The arc order after signal7 and nanosleep (operator, 10-05). A Loom
@@ -161,6 +190,31 @@ partial frame now the client's, closing it means letting a death unwind
 mid-frame, an I-9 text change for the operator.
 
 ---
+
+## 2026-10-06 (aux, Opus 5.5 1M, effort xhigh) -- 9P counters belong to a row's two ends; chdir stores where the walk landed
+
+**Why now.** Two items the CPU-time gate left. Its audit's F4: `/ctl/9p-sessions` showed every reader each connection's per-message counters, so a secret typed into a pty-served terminal showed its length and cadence. And a design question raised while researching the spawn cwd field: `SYS_CHDIR` validated one directory and stored the name of another whenever a link stood in the path (`cd link/..`), and `getcwd` returned link components.
+
+**The votes, and one I asked wrong.** The operator voted at 15:21Z: chdir stores the physical name; `/ctl/9p-sessions` gated to the system principal or a hostowner. While drafting, I found that question had misstated the cost. It said the wedge-autopsy probe would "elevate first", but `CAP_HOSTOWNER` is elevation-only and no login session can hold it, so "Gate it" would have taken every user's view of their own connections. I re-asked with the cost stated plainly, and at 15:38Z the operator chose the per-row owner. The question had also misdated the Linux precedent as 2009; it is CVE-2011-2495 (`/proc/<pid>/io`), corrected in the decision note.
+
+**The design** (scripture f33605135, code 0051c458e). A row's ends are recorded by value when the row is made: a connection's are the connecting Proc's principal and the poster's at the post; a session's are the attacher and, over `/srv`, the connection's server. `ctl_9p_shown` shows the counters to either end, the system principal or a hostowner. For chdir, stalk builds the name of where a walk lands alongside its trail (push appends, `..` truncates, a restart re-bases), never from a Path (I-33), and `stalk_landed` returns it.
+
+**Wrong turns, and what caught them.**
+- The decision note claimed the stored name is what was validated "by construction". My review before the gate found the exception: a served link resolved from a union member past the first re-anchors at that member, so it can land on a node an earlier member shadows, and the trail-built name then walks to the earlier member's node. `stalk_landed` now walks the name once more and requires the same node (80dba017d). Four union legs witness it, among them the refusal and its local control.
+- The restart's re-base to the root (an absolute local link) had no leg: every absolute link in the battery was reached with the base already at the root. A leg now reaches one below a served anchor (28926817b).
+- My first gate run stopped at sabotage C, which did not compile: the sabotage wrote `PRINCIPAL_INVALID` into `srvconn.c`, which does not see it. The runbook stopped as designed and the cleanup left hunt clean. I fixed the sabotage, syntax-checked every key applied, and reran.
+- The vault lint refused my appends to the two decision notes on the WIP branch: R3 holds the Record plane append-only once committed. The appends waited for the landing, which creates both notes fresh.
+
+**The gate.** Two runs on hunt, `--config ci` bakes, and the Mac held for 1.9 hours. The first, at 0c3eab1e7, passed every clean phase and twelve of thirteen sabotages exactly; the device legs confirmed what I had only inferred from code, that michael is the server end of the session login attaches through his home proxy (with the server stamp sabotaged, cpu-gate's counted session leg goes red). Its thirteenth, storing the raw join, was caught a step earlier than my runbook expected: joey's probe83 extincts the boot because the cwd is not canonical, so the device leg never ran. The witness that leg (f) needed was the behaviour before the vote, a cleaned lexical store that probe83 accepts; the second run added it as Q2, and leg (f) went red. The audit's fixes changed the tree, so I stopped the first run's SMP phase as it began rather than gate a stale tree, and the second run, at e9204e086, ran the four device legs, six new sabotages and the SMP gate (50 boots, 0 corruption). One sabotage there, a no-crossing anchor's name taken from the current length, turned two legs red where I expected one: `landed_name`'s `/smnt/d/n1` takes the same arm, because after the first served link re-anchors, the second link's trail has no crossing. The reviewer had called that arm unwitnessed in the fixture; the served chain already witnessed it.
+
+**The audit.** Round 1, Fable 5.1 reviewing Opus 5.5: 0/0/0/5 P3; clean. F1, a reader running as `none` matched a `none` end. Decided under the grant: none is no end, since Procs that run as none are unrelated (a pre-auth server runs as none, one per remote client). The `/proc` owner predicate still treats none as one owner; that is enqueued on its own, because it touches the extraction gate. F2, two stale comments. F3, nothing showed the name is not read back from a Path. The reviewer's premise was half wrong: fixture Paths are NULL, so a Path read already failed every leg. But the realistic case, a Path carrying a chroot's outer prefix, had no leg, and `stalk.landed_roots` now has one. F4, the second walk's Dev and devno terms had no witness. `stalk.landed_identity` builds the reviewer's construction: the mount is replaced while the walk follows a served link. F5, three name arms had no witness. A served Territory root and a mount over the root now have legs, and absolute served targets have two. The base-cross push stays unwitnessable, since `end[]` starts zeroed, and the dossier says so.
+
+**What "fixed" covers.** Per-message counters on `/ctl/9p-sessions` for every reader at neither end. The rows themselves (peer pid, label, msize, state) stay world-readable. The cwd that `SYS_CHDIR` stores names the directory the walk validated, or the call fails. ut's `cd` and builtin `pwd` stay logical by design. Not covered: a directory renamed above the cwd still moves it (the cwd is a name), and `none` under `/proc` is enqueued.
+
+**The user's decisions.** "Physical (Recommended)" for chdir (15:21Z). "Per-row owner (Recommended)" for `/ctl/9p-sessions` (15:38Z, re-asked; supersedes "Gate it"). Decided under the grant: the second walk, `none` as no end, and an unknown end matching no reader.
+
+---
+
 ## 2026-10-06 (aux, Opus 5.5 1M, effort xhigh) -- CPU time and the scheduler's counters have owners
 
 **Why now.** The imperium Fable pass's F3 (P2, OPEN-BUGS 2026-09-29): a password or an imperium key is typed into an authority, corvus, which runs as the system principal and wakes once per key. Any counter that moves once per wake on a quiet machine publishes the secret's length and its cadence, and every reader could poll three of them: the authority's own `cpu_ns`, the per-CPU `ctxt` and `intr`, and the scheduler's park counts. The operator voted at ~10:05Z for "Gate CPU time to the owner" (over freezing the counters during the episode, or documenting the channel). Reading `sched.c` for the design, I found a fourth: `idle_ns` is written at every idle exit, so each wake is a timestamped change, and a coarser quantum does not help when a key lands every 100 to 300 ms. I asked again; the operator chose "Restrict it too" at ~10:56Z.

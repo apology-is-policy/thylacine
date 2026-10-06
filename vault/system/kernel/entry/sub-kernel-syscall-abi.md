@@ -818,3 +818,21 @@ they mint by the file its session came over, for `/proc/<pid>/ns` alone.
 name. No argument, flag or return changed; where each inner stamps is
 [[sub-kernel-syscall-dispatch]]'s, what the root carries
 [[sub-kernel-ninep-dev9p]]'s.
+
+## SYS_CHDIR's stored name; SYS_ATTACH_9P's ends (2026-10-06)
+
+No number, register or record changed; two operator votes changed what the
+calls mean ([[dec-2026-10-06-chdir-physical]],
+[[dec-2026-10-06-9p-sessions-ends]]).
+
+- `SYS_CHDIR` stores the name of where the walk landed, so `SYS_GETCWD`
+  returns a name with no `.`, `..` or link component (POSIX `getcwd`), and
+  `cd link/..` lands where `ls link/..` reads. A directory whose name does not
+  walk back to it -- a node a union member shadows, reached through a served
+  link in a later member -- fails the call, as a name past the buffer does
+  ([[sub-kernel-syscall-dispatch]], [[sub-kernel-stalk]]).
+- A session made by `SYS_ATTACH_9P` records the caller as its attaching end
+  and an unknown server, so its `/ctl/9p-sessions` counters read as numbers
+  only to the caller, the system principal and a hostowner; one made over
+  `/srv` (`SYS_ATTACH_9P_SRV`) also shows them to the connection's server
+  ([[sub-kernel-ninep-attach]], [[sub-kernel-devctl]]).

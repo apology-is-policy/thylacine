@@ -586,8 +586,9 @@ impl Child {
     /// (atomic, #160) then cascades the death-wake, so a child blocked in a
     /// death-interruptible wait (`Irq::wait`, poll, ...) unwinds cleanly at its
     /// EL0-return checkpoint rather than hanging. Authorized by owner identity
-    /// (same `principal_id` -- a parent terminating its own same-identity child)
-    /// OR `CAP_KILL` / `CAP_HOSTOWNER`.
+    /// (same `principal_id` -- a parent terminating its own same-identity child;
+    /// never when both run as none, which owns nothing but itself) OR `CAP_KILL` /
+    /// `CAP_HOSTOWNER`. A refusal is `EACCES`.
     ///
     /// Does NOT reap -- call `wait()` afterwards to collect the zombie. Returns
     /// `Err` if the target is already gone (no ALIVE Proc at this pid) or the

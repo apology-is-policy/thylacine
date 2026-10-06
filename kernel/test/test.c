@@ -448,7 +448,6 @@ void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
 void test_territory_clone_copies_root_pheno(void);   // Design D F2/SA-1
 void test_territory_render_root_pheno(void);         // Design D audit F6
-void test_territory_cwd_lexical(void);
 void test_territory_cwd_join(void);
 void test_territory_cwd_dot(void);
 void test_territory_mount_smoke(void);
@@ -935,6 +934,8 @@ void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
+void test_devproc_none_owns_nothing(void);
+void test_devproc_none_walled(void);
 void test_devproc_sched_gate_predicate(void);       // prowl-3b: OQ-4 sched-view gate
 void test_devproc_sched_read_gated(void);           // prowl-5 F4: OQ-4 deny-wiring revert-probe
 void test_devproc_read_sched_format(void);           // prowl-3b: /proc/<pid>/sched read
@@ -1391,6 +1392,9 @@ void test_stalk_symlink_nofollow(void);
 void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
+void test_stalk_landed_name(void);
+void test_stalk_landed_roots(void);
+void test_stalk_landed_identity(void);
 void test_stalk_served_contain(void);
 void test_stalk_served_contain_nowa(void);
 void test_stalk_served_union(void);
@@ -1466,6 +1470,7 @@ void test_srvconn_client_send_blocking_backpressure(void);
 void test_srvconn_client_send_blocking_poll_edge(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
+void test_devsrv_conn_ends(void);              // IMPERIUM 11.3 item 10: a conn's two ends
 void test_devsrv_srv_connect_gate_decides(void);
 void test_devsrv_srv_connect_gate(void);
 void test_devsrv_kernel_attached_io_refused(void);
@@ -2471,7 +2476,6 @@ struct test_case g_tests[] = {
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
     { "territory.clone_copies_root_pheno", test_territory_clone_copies_root_pheno, false, NULL },
     { "territory.render_root_pheno", test_territory_render_root_pheno, false, NULL },
-    { "territory.cwd_lexical",         test_territory_cwd_lexical,         false, NULL },
     { "territory.cwd_join",            test_territory_cwd_join,            false, NULL },
     { "territory.cwd_dot",             test_territory_cwd_dot,             false, NULL },
     { "territory_mount.smoke",                            test_territory_mount_smoke,                            false, NULL },
@@ -3086,6 +3090,8 @@ struct test_case g_tests[] = {
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
+    { "devproc.none_owns_nothing",     test_devproc_none_owns_nothing,     false, NULL },
+    { "devproc.none_walled",           test_devproc_none_walled,           false, NULL },
     { "devproc.sched_gate_predicate",  test_devproc_sched_gate_predicate,  false, NULL },
     { "devproc.sched_read_gated",      test_devproc_sched_read_gated,      false, NULL },
     { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
@@ -3551,6 +3557,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "devsrv.walk_service",           test_devsrv_walk_service,           false, NULL },
     { "devsrv.open_connect_byte",      test_devsrv_open_connect_byte,      false, NULL },
+    { "devsrv.conn_ends",              test_devsrv_conn_ends,              false, NULL },
     { "devsrv.srv_connect_gate_decides", test_devsrv_srv_connect_gate_decides, false, NULL },
     { "devsrv.srv_connect_gate",       test_devsrv_srv_connect_gate,       false, NULL },
     { "devsrv.kernel_attached_io_refused",
@@ -4687,6 +4694,9 @@ struct test_case g_tests[] = {
     { "stalk.symlink_stat_vs_lstat",   test_stalk_symlink_stat_vs_lstat,   false, NULL },
     { "stalk.symlink_pounce_split",    test_stalk_symlink_pounce_split,    false, NULL },
     { "stalk.symlink_lifetime",        test_stalk_symlink_lifetime,        false, NULL },
+    { "stalk.landed_name",             test_stalk_landed_name,             false, NULL },
+    { "stalk.landed_roots",            test_stalk_landed_roots,            false, NULL },
+    { "stalk.landed_identity",         test_stalk_landed_identity,         false, NULL },
     { "stalk.served_contain",          test_stalk_served_contain,          false, NULL },
     { "stalk.served_contain_nowa",     test_stalk_served_contain_nowa,     false, NULL },
     { "stalk.served_union",            test_stalk_served_union,            false, NULL },

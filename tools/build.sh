@@ -102,21 +102,34 @@ GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
 # had no hold; since ambush 073faaa an untagged build compiles the held launch,
 # and an older fork built untagged compiles held_off_thylacine.go, the running
 # spawn -- under a log line that says nothing. ambush_fork_check asks the
-# toolchain which of the pair the build compiles (go list: the build's own file
-# selection) and refuses unless it is held_on_thylacine.go, declaring
-# launchHeld = true. Whether Launch still acts on the constant is behaviour,
-# which /ambush-probe stage C checks at the entry. It captures before it
-# matches: under pipefail a `| grep -q` can SIGPIPE the producer and fail a good
-# build.
+# toolchain which files the build compiles (go list: the build's own file
+# selection). It refuses held_off_thylacine.go; held_on_thylacine.go must declare
+# launchHeld = true (073faaa); with neither, as once the constant is deleted, no
+# compiled file may name launchHeld and Launch must set DebugHeld, which a fork
+# from before the held launch does not. Whether Launch spawns held is
+# behaviour, which /ambush-probe stage C checks at the entry. It captures before
+# it matches: under pipefail a `| grep -q` can SIGPIPE the producer and fail a
+# good build.
 ambush_fork_check() {
     local files
     files=$(cd "$1" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$GOFORK/bin/go" list -mod=vendor \
         -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
         || { echo "==> Ambush: go list of $1/pkg/proc/native FAILED" >&2; return 1; }
-    [[ " $files " == *" held_on_thylacine.go "* && " $files " != *" held_off_thylacine.go "* ]] \
-        || { echo "==> Ambush: $1 does not compile held_on_thylacine.go untagged (a fork from before ambush 073faaa launches running) -- update the fork" >&2; return 1; }
-    grep -q '^const launchHeld = true$' "$1/pkg/proc/native/held_on_thylacine.go" \
-        || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
+    local dir="$1/pkg/proc/native" f named=""
+    [[ " $files " != *" held_off_thylacine.go "* ]] \
+        || { echo "==> Ambush: $1 compiles held_off_thylacine.go untagged (a fork from before ambush 073faaa launches running) -- update the fork" >&2; return 1; }
+    if [[ " $files " == *" held_on_thylacine.go "* ]]; then
+        grep -q '^const launchHeld = true$' "$dir/held_on_thylacine.go" \
+            || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
+        return 0
+    fi
+    for f in $files; do
+        if grep -q 'launchHeld' "$dir/$f"; then named="$named $f"; fi
+    done
+    [[ -z $named ]] \
+        || { echo "==> Ambush: $1 names launchHeld in$named without held_on_thylacine.go -- update the fork" >&2; return 1; }
+    [[ " $files " == *" proc_thylacine.go "* ]] && grep -q 'SysProcAttr{DebugHeld: true}' "$dir/proc_thylacine.go" \
+        || { echo "==> Ambush: $1's Launch does not spawn held (a fork from before ambush 69e94cd launches running) -- update the fork" >&2; return 1; }
 }
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.

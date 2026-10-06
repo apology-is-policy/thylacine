@@ -331,7 +331,8 @@ long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
 // =============================================================================
 
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console, u64 server_stripes,
+                               u32 peer_principal, bool peer_console,
+                               u64 server_stripes, u32 server_principal,
                                u32 msize) {
     // Exactly two ring classes at v1.0 (CF-3 B): the default and the
     // DMSRVBULK bulk class. Rejecting everything else keeps the ring
@@ -365,8 +366,10 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     cn->state              = SRVCONN_STATE_LIVE;
     cn->peer_stripes       = peer_stripes;
     cn->peer_pid           = peer_pid;
+    cn->peer_principal     = peer_principal;
     cn->peer_console       = peer_console;
     cn->server_stripes     = server_stripes;
+    cn->server_principal   = server_principal;
     cn->client_deadline_ns = 0;
     /* byte_mode = false by KP_ZERO; srvconn_set_byte_mode flips on after
      * mint if the service is SRV_MODE_BYTE (P6-pouch-sockets). */
@@ -1100,6 +1103,8 @@ void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
     for (struct SrvConn *cn = g_srvconn_ctl_head; cn; cn = cn->ctl_next) {
         struct srvconn_ctl_row row;
         row.peer_pid        = cn->peer_pid;
+        row.peer_principal  = cn->peer_principal;
+        row.server_principal = cn->server_principal;
         row.msize           = cn->msize;
         row.state           = (u8)cn->state;
         row.byte_mode       = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);

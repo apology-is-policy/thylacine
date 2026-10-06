@@ -117,6 +117,11 @@ struct p9_attached {
     struct p9_attached          *ctl_next;
     char                         ctl_label[12];
     int                          ctl_id;       // peer pid for /srv conns; -1 else
+    // The session's two ends, who may read its counters (IMPERIUM-DESIGN 11.3
+    // item 10): the attacher, and the server when the kernel knows it (a /srv
+    // conn's poster). PRINCIPAL_INVALID until stamped, and for an unknown end.
+    u32                          ctl_owner;
+    u32                          ctl_server;
     // The closer (docs/FID-LIFECYCLE-DESIGN.md section 9): this session's
     // deferred Tclunks, oldest first, each entry holding one ref on this
     // struct. closer_queued = waiting on the closers' run-queue; closer_busy =
@@ -260,11 +265,18 @@ bool p9_closer_spawn_held_for_test(void);
 void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
                                int id);
 
+// Stamp the session's ends for /ctl/9p-sessions: `attacher` is the attaching
+// Proc's principal, `server` the server's when the kernel knows it, else
+// PRINCIPAL_INVALID. Until stamped the row's counters read "-" to every reader
+// but the system principal and a hostowner.
+void p9_attached_set_ctl_owners(struct p9_attached *a, u32 attacher, u32 server);
+
 // #210: walk every live attached session for /ctl/9p-sessions. cb gets
 // the label/id/msize plus a consistent client snapshot; the registry lock
 // is held across the walk, so cb must not block or attach/destroy.
 struct p9_client_ctl;
 typedef bool (*p9_attached_ctl_cb)(const char *label, int id, u32 msize,
+                                   u32 owner, u32 server,
                                    const struct p9_client_ctl *snap,
                                    void *arg);
 void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg);

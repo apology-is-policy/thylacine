@@ -9,7 +9,8 @@
 // directory walk):
 //
 //   /ctl/procs          — every process: pid, ppid, name, state, threads,
-//                         pages, tables, children, CPU time
+//                         pages, tables, children, CPU time (a none reader:
+//                         its own row only)
 //   /ctl/memory         — physical memory stats (total/free/reserved)
 //   /ctl/devices        — bestiary listing (dc + name per Dev)
 //   /ctl/kernel-base    — KASLR kernel high VA base + offset + seed source
@@ -137,9 +138,12 @@ static size_t fmt_gated_udec(char *buf, size_t cap, size_t off, bool shown, u64 
     return shown ? fmt_udec(buf, cap, off, (unsigned long)v) : fmt_str(buf, cap, off, "-");
 }
 
-// devproc.c: owner (same principal) or CAP_HOSTOWNER; the caller holds
-// g_proc_table_lock, as format_procs_cb does.
+// devproc.c: owner (same principal, never none) or CAP_HOSTOWNER; the caller
+// holds g_proc_table_lock, as format_procs_cb does.
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+// devproc.c: true when a reader running as none may not see target (Plan 9's
+// nonone; IDENTITY-DESIGN's reserved ids).
+bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 
 // IMPERIUM-DESIGN 11.3 item 10: a counter that moves whenever any Proc runs --
 // per-CPU idle time, context switches and interrupts, the runnable count, the
@@ -205,6 +209,7 @@ struct procs_fmt_state {
 
 static int format_procs_cb(struct Proc *p, void *arg) {
     struct procs_fmt_state *s = (struct procs_fmt_state *)arg;
+    if (devproc_none_walled(s->reader, p)) return 0;   // a none reader: its own row only
     size_t row = s->off;   // a row is committed whole or not at all
     size_t n;
 
@@ -754,46 +759,91 @@ static size_t format_cons(const struct Proc *reader, char *buf, size_t cap) {
 //   s2c prod > cons (bytes parked in the ring)      -> reply undrained
 //   sess orphan bumped while the submitter is parked -> misdemux / tag
 //   sess owned advanced + inflight tag done=1 parked -> lost wake (I-9)
-// World-readable: counters + tags only — no addresses, no payload bytes.
+// No addresses, no payload bytes. The rows are readable to every reader but one
+// running as none (below); every counter,
+// the reader flag, the send waiters and the in-flight tags move once per
+// message, and a pty carries a message per key, so they belong to the row's
+// ends (IMPERIUM-DESIGN 11.3 item 10): a reader whose principal is one of
+// them, the system principal or a hostowner. Anyone else reads "-". An end
+// already sees every message, so showing it the counts discloses nothing.
 struct ctl_9p_fmt {
     char  *buf;
     size_t cap;
     size_t off;
     bool   full;
+    bool   sys;      // devctl_system_counters_readable(reader): every row
+    u32    who;      // the reader's principal
 };
 
+// PRINCIPAL_INVALID marks an end the kernel does not know and matches no reader.
+// PRINCIPAL_NONE is nobody: Procs that run as none are unrelated (a pre-auth
+// server runs as none, one per remote client), so a none reader is no end.
+static bool ctl_9p_shown(const struct ctl_9p_fmt *f, u32 end_a, u32 end_b) {
+    if (f->sys) return true;
+    if (f->who == PRINCIPAL_INVALID || f->who == PRINCIPAL_NONE) return false;
+    return f->who == end_a || f->who == end_b;
+}
+
+// A reader running as none is no end, so it has no row of its own, and the rows
+// name other Procs' connections (peer pid, label, mode, liveness): Plan 9's
+// nonone() keeps them from none (IDENTITY-DESIGN's reserved ids). A hostowner
+// reader is `sys`, as the wall exempts it.
+static bool ctl_9p_row_hidden(const struct ctl_9p_fmt *f) {
+    return !f->sys && f->who == PRINCIPAL_NONE;
+}
+
+// A row that does not fit is rolled back to its start (`line`), as /ctl/procs's
+// are: the reader gets the rows that fit, each one whole.
 static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
+    if (ctl_9p_row_hidden(f)) return true;
+    bool shown = ctl_9p_shown(f, row->peer_principal, row->server_principal);
+    size_t line = f->off;
     size_t n;
 #define EMIT_STR(s) do { n = fmt_str(f->buf, f->cap, f->off, (s)); \
-        if (!n) { f->full = true; return false; } f->off += n; } while (0)
+        if (!n) { f->off = line; f->full = true; return false; } f->off += n; } while (0)
 #define EMIT_DEC(v) do { n = fmt_udec(f->buf, f->cap, f->off, (unsigned long)(v)); \
-        if (!n) { f->full = true; return false; } f->off += n; } while (0)
+        if (!n) { f->off = line; f->full = true; return false; } f->off += n; } while (0)
+#define EMIT_GDEC(v) do { if (shown) EMIT_DEC(v); else EMIT_STR("-"); } while (0)
     EMIT_STR("conn peer=");   EMIT_DEC(row->peer_pid);
     EMIT_STR(" msize=");      EMIT_DEC(row->msize);
     EMIT_STR(row->byte_mode ? " byte" : " 9p");
     EMIT_STR(row->kernel_attached ? " ka" : " -");
     EMIT_STR(row->state == 1 ? " live" : " torn");
-    EMIT_STR(" c2s=");        EMIT_DEC(row->c2s_produced);
-    EMIT_STR("/");            EMIT_DEC(row->c2s_consumed);
-    EMIT_STR("+");            EMIT_DEC(row->c2s_buffered);
+    EMIT_STR(" c2s=");
+    if (shown) {
+        EMIT_DEC(row->c2s_produced);
+        EMIT_STR("/");        EMIT_DEC(row->c2s_consumed);
+        EMIT_STR("+");        EMIT_DEC(row->c2s_buffered);
+    } else {
+        EMIT_STR("-");
+    }
     // NEVER route "" through EMIT_STR: fmt_str returns bytes written, so
     // an empty string returns 0 == the overflow sentinel and would abort
     // the whole format at the first non-EOF chan (the wedge run 1 lesson:
     // every read truncated deterministically right here).
     if (row->c2s_eof) EMIT_STR("E");
-    EMIT_STR(" s2c=");        EMIT_DEC(row->s2c_produced);
-    EMIT_STR("/");            EMIT_DEC(row->s2c_consumed);
-    EMIT_STR("+");            EMIT_DEC(row->s2c_buffered);
+    EMIT_STR(" s2c=");
+    if (shown) {
+        EMIT_DEC(row->s2c_produced);
+        EMIT_STR("/");        EMIT_DEC(row->s2c_consumed);
+        EMIT_STR("+");        EMIT_DEC(row->s2c_buffered);
+    } else {
+        EMIT_STR("-");
+    }
     if (row->s2c_eof) EMIT_STR("E");
-    EMIT_STR(" sframes=");    EMIT_DEC(row->s2c_frames);
+    EMIT_STR(" sframes=");    EMIT_GDEC(row->s2c_frames);
     EMIT_STR("\n");
     return true;
 }
 
 static bool format_9p_sess_cb(const char *label, int id, u32 msize,
+                              u32 owner, u32 server,
                               const struct p9_client_ctl *snap, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
+    if (ctl_9p_row_hidden(f)) return true;
+    bool shown = ctl_9p_shown(f, owner, server);
+    size_t line = f->off;
     size_t n;
     // Belt to the F6 setter guard: a computed-empty label would read as
     // the overflow sentinel and abort the remaining listing.
@@ -802,20 +852,20 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
     EMIT_STR(" id=");
     if (id < 0) EMIT_STR("-"); else EMIT_DEC(id);
     EMIT_STR(" msize=");      EMIT_DEC(msize);
-    EMIT_STR(" rx=");         EMIT_DEC(snap->frames_rx);
-    EMIT_STR(" own=");        EMIT_DEC(snap->demux_owned);
-    EMIT_STR(" orph=");       EMIT_DEC(snap->demux_orphan);
-    EMIT_STR(" orphc=");      EMIT_DEC(snap->demux_orphan_clunk);
-    EMIT_STR(" orphf=");      EMIT_DEC(snap->demux_orphan_flush);
-    EMIT_STR(" orphl=");      EMIT_DEC(snap->demux_orphan_late);
-    EMIT_STR(" wake=");       EMIT_DEC(snap->demux_wakes);
-    EMIT_STR(" ops=");        EMIT_DEC(snap->total_ops);
-    EMIT_STR(" err=");        EMIT_DEC(snap->total_errors);
-    EMIT_STR(snap->reader_active ? " rd" : " -");
+    EMIT_STR(" rx=");         EMIT_GDEC(snap->frames_rx);
+    EMIT_STR(" own=");        EMIT_GDEC(snap->demux_owned);
+    EMIT_STR(" orph=");       EMIT_GDEC(snap->demux_orphan);
+    EMIT_STR(" orphc=");      EMIT_GDEC(snap->demux_orphan_clunk);
+    EMIT_STR(" orphf=");      EMIT_GDEC(snap->demux_orphan_flush);
+    EMIT_STR(" orphl=");      EMIT_GDEC(snap->demux_orphan_late);
+    EMIT_STR(" wake=");       EMIT_GDEC(snap->demux_wakes);
+    EMIT_STR(" ops=");        EMIT_GDEC(snap->total_ops);
+    EMIT_STR(" err=");        EMIT_GDEC(snap->total_errors);
+    EMIT_STR(shown && snap->reader_active ? " rd" : " -");
     EMIT_STR(snap->dead ? " dead" : " live");
-    EMIT_STR(" sw=");         EMIT_DEC(snap->send_waiters);
-    EMIT_STR(" infl=");       EMIT_DEC(snap->n_inflight);
-    for (u32 i = 0; i < snap->n_inflight && i < P9_CTL_INFLIGHT_MAX; i++) {
+    EMIT_STR(" sw=");         EMIT_GDEC(snap->send_waiters);
+    EMIT_STR(" infl=");       EMIT_GDEC(snap->n_inflight);
+    for (u32 i = 0; shown && i < snap->n_inflight && i < P9_CTL_INFLIGHT_MAX; i++) {
         EMIT_STR(" t");       EMIT_DEC(snap->tags[i].tag);
         EMIT_STR(snap->tags[i].done ? "d" : "w");
         if (snap->tags[i].async) EMIT_STR("a");   // "" == overflow sentinel
@@ -826,14 +876,21 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
     return true;
 #undef EMIT_STR
 #undef EMIT_DEC
+#undef EMIT_GDEC
 }
 
 static size_t format_9p_sessions(const struct Proc *reader, char *buf, size_t cap) {
-    (void)reader;
-    struct ctl_9p_fmt f = { buf, cap, 0, false };
+    struct ctl_9p_fmt f = { buf, cap, 0, false, devctl_system_counters_readable(reader),
+        reader ? __atomic_load_n(&reader->principal_id, __ATOMIC_ACQUIRE) : PRINCIPAL_INVALID };
     srvconn_ctl_iterate(format_9p_conn_cb, &f);
     if (!f.full) p9_attached_ctl_iterate(format_9p_sess_cb, &f);
     return f.off;
+}
+
+// Test hook (the *_for_test convention): /ctl/9p-sessions as `reader` sees it.
+size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
+size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap) {
+    return format_9p_sessions(reader, buf, cap);
 }
 
 // =============================================================================
@@ -874,8 +931,8 @@ static const struct ctl_leaf *leaf_for_kind(u32 kind) {
 // CAP_HOSTOWNER (the unified admin authority; a logged-in user is stripped of
 // the elevation-only caps at rfork, so it cannot read the slide and defeat
 // KASLR). The other leaves stay world-readable (Plan 9 introspection); procs,
-// cpu and sched render the fields IMPERIUM-DESIGN 11.3 item 10 withholds as
-// "-" per reader.
+// cpu, sched and 9p-sessions render the fields IMPERIUM-DESIGN 11.3 item 10
+// withholds as "-" per reader.
 // Non-static so the deny/allow regression test can drive it with synthetic
 // callers (devctl.perm_enforced is false -- the gate is at the read site, the
 // devproc kill-gate idiom). `caller` is the reading Proc; NULL -> deny.
@@ -1081,7 +1138,7 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     // CAP_HOSTOWNER now that /ctl is world-reachable (see devctl_kernel_base_-
     // readable). The other leaves stay world-readable Plan 9 introspection, with
     // the per-reader gates inside their formatters (format_procs, format_sched,
-    // format_cpu).
+    // format_cpu, format_9p_sessions).
     //
     // ARCH 8.12 audit F2: /ctl/kstack joins it, for a DIFFERENT reason. It
     // discloses no address, so I-16 is not the issue here -- the cost is. Its
@@ -1096,7 +1153,7 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Thread *t = current_thread();
     const struct Proc *reader = t ? t->proc : NULL;
     if (kind == CTL_KIND_KERNEL_BASE || kind == CTL_KIND_KSTACK) {
-        if (!devctl_kernel_base_readable(reader)) return -1;
+        if (!devctl_kernel_base_readable(reader)) return -T_E_ACCES;   // a refusal: ERRORS.md
     }
 
     char content[DEVCTL_READ_BUF];

@@ -208,6 +208,9 @@ struct SrvService {
     char           name[SRV_NAME_MAX];
     u64            poster_stripes;   // poster Proc's stripes tag (by value)
     int            poster_pid;       // poster Proc's PID (by value; diagnostics)
+    u32            poster_principal; // poster Proc's principal at the post (by
+                                     // value): a conn's server end in
+                                     // /ctl/9p-sessions (IMPERIUM 11.3 item 10)
     enum srv_mode  mode;             // transport: 9P (default) or byte stream
                                      // (P6-pouch-sockets, sub-chunk 12). Set at
                                      // srv_reserve, immutable through LIVE.

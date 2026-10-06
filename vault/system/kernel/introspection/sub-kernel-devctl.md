@@ -120,7 +120,13 @@ There are two owners:
   `/ctl/procs` shows the number only when `devproc_owner_or_hostowner(reader,
   row)` holds. That is the predicate `/proc/<pid>/sched` and the `cpu_ns` line
   of `/proc/<pid>/status` use ([[sub-kernel-devproc]]), so the two Devs cannot
-  disagree about a row.
+  disagree about a row. A reader running as none sees no row but its own:
+  `format_procs_cb` skips every row `devproc_none_walled` refuses (Plan 9's
+  `nonone`, [[dec-2026-10-06-none-owns-nothing]]), before the row starts, so
+  the rows it does emit stay whole. `/ctl/9p-sessions` shows a none reader no
+  row at all (`ctl_9p_row_hidden`): none is no end, so it owns no row, and a
+  none hostowner counts as `sys`. A reader refused `/ctl/kernel-base` or
+  `/ctl/kstack` reads `EACCES`, not -1.
 - **The machine-wide counters are the system principal's.** In `/ctl/cpu`, the
   `idle_ns`, `ctxt` and `intr` columns; in `/ctl/sched`, the `runnable:`,
   `wc:` and `wc-tickless:` values. They are shown only to a reader whose
@@ -155,6 +161,46 @@ principal and no `CAP_HOSTOWNER`, reads every gated surface through the real
 read path and requires `-` in each, with its own row's `CPU_NS` a number. It
 then takes `CAP_HOSTOWNER` and requires numbers. The parent reads as SYSTEM,
 and the predicate's legs are checked on their own.
+
+### A 9P connection's counters belong to its two ends
+
+`/ctl/9p-sessions` (#210's loss discriminator) renders one `conn` row per live
+`/srv` connection and one `sess` row per attached 9P session. Since 2026-10-06
+([[dec-2026-10-06-9p-sessions-ends]], IMPERIUM-DESIGN 11.3 item 10) a row's
+counters are shown only to the principals at its two ends, to the system
+principal and to a hostowner. The counters are the ring byte counts, the
+server's frame count, the demux counters, the reader flag, the send waiters
+and the in-flight tags. Each moves once per message, and a pty-served terminal
+carries a message per key. Everyone else reads `-`. The row itself stays
+world-readable: peer pid, label, msize, mode and state.
+
+The ends travel with the row. A `conn` row carries the connecting Proc's
+principal and the poster's, both stored in the `SrvConn` by value at the
+connect ([[sub-kernel-srvconn]], [[sub-kernel-devsrv]]). A `sess` row carries
+its attaching Proc and, over a `/srv` connection, that connection's server
+([[sub-kernel-ninep-attach]]). `ctl_9p_shown` compares the reader's principal,
+loaded once per read with acquire, against the two. `PRINCIPAL_INVALID` marks
+an end the kernel does not know, such as the server behind a caller-supplied
+transport or a session not yet stamped, and it matches no reader, not even
+one whose own principal is unset. A reader running as `none`
+(`PRINCIPAL_NONE`) matches no end either: Procs that run as none are
+unrelated (a pre-auth server runs as none, one per remote client), so none is
+nobody's end. The `/proc` owner predicate still treats none as one owner; that
+question is enqueued on its own. An end already sees every message on its
+row, so the rule discloses nothing new to it. It keeps a user's view of their
+own connections, which the wedge autopsy (`tools/warp/glq-wedge-probe.exp`,
+run as michael) reads.
+
+A row that does not fit the buffer is rolled back to its start, as
+`/ctl/procs` rows are, so a reader gets whole rows.
+
+`devctl.read_9p_sessions_format` and `p9_attached.ctl_registry` check each
+reader class against a synthetic row through `devctl_format_9p_sessions_for_test`:
+an unrelated principal, either end, an unset principal against an unknown end,
+the system principal and a hostowner. `devsrv.conn_ends` checks the ends a real
+post and connect record, and that a poster's later identity is not one of
+them. `cpu-gate.exp` reads the file as michael and requires one withheld row
+and one counted row of each kind. The counted ones are michael's home proxy's.
 
 ### Zero means overflow, and an empty string writes zero bytes
 
@@ -259,7 +305,8 @@ because a cross-Proc reader holds no per-Proc lock.
 enforcement sites, the other being the `/proc` kernel-stack raw/symbolic split.
 
 **I-27** (the trusted path): the CPU-time gates keep the trusted episode's
-key cadence from the counters (IMPERIUM-DESIGN 11.3 item 10).
+key cadence from the counters (IMPERIUM-DESIGN 11.3 item 10); the 9P
+sessions' ends rule keeps a pty-typed secret's cadence from other principals.
 
 Composes **I-1**: reachability is namespace visibility.
 
@@ -288,6 +335,10 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   cadence of a secret being typed. A new field of that kind goes through
   `fmt_gated_udec` with the right owner: the row's Proc for a per-Proc value,
   the system principal for a machine-wide one.
+- **A per-connection counter goes to the connection's ends.** A new
+  `/ctl/9p-sessions` field that moves per message is emitted under the row's
+  `shown`, never under a reader-wide flag. An end the kernel cannot name stays
+  `PRINCIPAL_INVALID`, never a guess.
 - **A withheld field renders `-` and is never computed.** A `0` is a lie no
   consumer can detect. A value computed and then hidden can reach the buffer
   by a later edit.
@@ -340,17 +391,19 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   failure loses a field, the invented failure loses the rest of the file. Having
   enumerated one direction made the write-up read as though the hazard had been
   covered.
-- **The default-allow read gate has now been exercised, and the default was
-  right.** A new leaf landed and is world-readable, which is exactly the shape
-  the caveat below predicts. Its content — peer identifiers, buffer counters,
-  frame counts — is ordinary introspection and narrower than the process list
-  already beside it, so nothing was disclosed that should not have been. Worth
-  recording as evidence about the *rate* rather than as a refutation: the
-  mechanism fired once and landed benignly, which is what a default-allow shape
-  does until the one time it does not.
+- **The default-allow read gate has been exercised, and the first verdict on
+  it was wrong.** When `/ctl/9p-sessions` landed world-readable, this caveat
+  judged its content to be ordinary introspection: peer identifiers, buffer
+  counters, frame counts. It was not. The buffer and frame counters move once
+  per message, and a pty carries a message per key, so another principal could
+  time a secret typed into a terminal. The CPU-time gate's audit found it
+  (round 1 F4), and the counters now belong to each row's ends. The judgement
+  asked whether the numbers were secret. The question that catches this class
+  is whether a number moves once per event in someone else's Proc.
 - **The process list is a full-system disclosure.** Names, parents, states,
   thread, page and page-table counts for every process, to any reader. (CPU
-  time left this list on 2026-10-06 and is owner-only.) This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
+  time left this list on 2026-10-06 and is owner-only; a reader running as none
+  sees only its own row, also since 2026-10-06.) This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
   but it is worth
   stating plainly rather than leaving implied: `/ctl/procs` is the broadest
   ambient disclosure either introspection Dev makes.
@@ -362,4 +415,4 @@ the same offset-aware multi-read that `/proc` wants would fix both.
 ## Provenance
 
 [[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devctl-empty-emit]],
-[[chg-2026-10-06-cpu-time-gate]].
+[[chg-2026-10-06-cpu-time-gate]], [[chg-2026-10-06-9p-sessions-ends]].

@@ -471,7 +471,7 @@ fn read_ctl_file(path: &str) -> String {
 /// Write a control verb to /proc/<pid>/ctl. The kernel enforces authority: kill /
 /// killgrp AND suspend / resume all take the SAME I-26 two-axis gate (owner OR
 /// CAP_HOSTOWNER/CAP_KILL -- stopping is strictly weaker than killing); a denied
-/// write returns -1 -> Err -> false. prowl confers no authority of its own -- a
+/// write returns -T_E_ACCES -> Err -> false. prowl confers no authority of its own -- a
 /// confined user acts only on processes it already may kill.
 fn ctl_write(pid: i64, cmd: &[u8]) -> bool {
     let path = format!("/proc/{}/ctl", pid);

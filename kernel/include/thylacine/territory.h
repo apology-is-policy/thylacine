@@ -335,8 +335,9 @@ void territory_ref(struct Territory *p);
 void territory_unref(struct Territory *p);
 
 // =============================================================================
-// Per-Proc cwd ("dot") -- LS-4. Name-based: a cleaned absolute path string,
-// NULL == "/". All three take dot_lock internally where they touch dot_path
+// Per-Proc cwd ("dot") -- LS-4. Name-based: a cleaned absolute path string
+// with no link component -- the name of where the last chdir landed
+// (stalk_landed) -- NULL == "/". All three take dot_lock internally where they touch dot_path
 // (the leaf lock). See LIFE-SUPPORT.md LS-4 + STALK-DESIGN.md 4.3.
 // =============================================================================
 
@@ -376,20 +377,6 @@ int territory_setdot(struct Territory *p, const char *cleaned);
 // territory_join_cwd. `dot` is the cwd string (NULL or "/" == root).
 int cwd_join(const char *dot, const char *input, u64 inlen,
              char *out, u64 outcap);
-
-// Pure lexical resolver (no locks, no allocation): join + collapse "." / ".."
-// + drop a trailing separator, yielding a CANONICAL absolute path.
-//
-// #83 narrowed this to ONE production role -- computing the string SYS_CHDIR
-// stores in dot_path (getcwd's answer, and the seed for the next join). It is
-// NOT a resolution primitive: it pops components lexically, without proving
-// they exist or are directories. SYS_CHDIR calls it on the ALREADY-STALKED
-// absolute join (dot == NULL), so every component it pops was physically
-// walked first; with no symlinks (G11) the lexical pop and stalk's trail pop
-// consume the same component sequence, so the canonical string names exactly
-// what stalk landed on.
-int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
-                        char *out, u64 outcap);
 
 // =============================================================================
 // Bind (path-to-path).

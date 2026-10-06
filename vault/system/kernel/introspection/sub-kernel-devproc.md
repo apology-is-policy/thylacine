@@ -17,6 +17,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
+  - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
 updated: 2026-10-06
 ---
@@ -33,6 +34,23 @@ The largest single file in the kernel tree. Its size is almost entirely the debu
 surface: the original P4-C Dev was `status`/`cmdline`/`ctl`/`ns`.
 
 ## Contract
+
+**none owns nothing but itself (2026-10-06, operator vote "Plan 9's nonone";
+[[dec-2026-10-06-none-owns-nothing]]).** Every owner axis asks
+`devproc_same_owner`: the same principal, false whenever the target runs as
+`PRINCIPAL_NONE`. So two Procs running as none are nothing to each other on the
+kill gate, the I-39 owner axis and `devproc_owner_or_hostowner` (environ, sched,
+imperium, status's `cpu_ns`). Self is each predicate's own arm, keyed on the
+Proc; the kill gate gained the self arm its two siblings already had, so a none
+Proc still kills itself through its own `ctl`. `devproc_none_walled` (the
+caller runs as none, is not the target, holds no `CAP_HOSTOWNER`) refuses every
+kind `devproc_read_cb` serves -- status, cmdline, ns, exe, cwd, maps, ctl's read
+side, and sched and imperium, which the owner gate refuses as well -- and
+devctl asks it for each `/ctl/procs` row. The wall is keyed on the CALLER: a
+real reader of a none Proc sees it like any other. The capability axes are
+unchanged (`CAP_HOSTOWNER` everywhere, `CAP_KILL` on kill, `CAP_DEBUG` on
+debug), as Plan 9's `nonone()` exempts eve. What stays visible is Plan 9's set:
+the pid under `/proc` and its stat.
 
 
 **The debug predicate's read order is for legibility, not safety ((U) F1 round 2, 2026-09-23; superseded by the seal's lock, 2026-09-24).**
@@ -647,7 +665,9 @@ and its ctl-fd close then resumes the target.
 ## Invariants enforced
 
 [[inv-i26]] (cross-process control is explicitly two-axis) — enforced here and
-nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`.
+nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`;
+its owner axis is the caller itself or `devproc_same_owner`, which never pairs
+two none Procs.
 
 [[inv-i39]] (debug authority is namespace-plus-two-axis -- the owner half
 capability-COVERED since 2026-09-24, and every image guard JOINED over the
@@ -671,12 +691,17 @@ short-circuits and the capability axes stay separable per gate.
 
 ## Error paths
 
-Everything is `-1`. There is no errno on this surface: a denial, a
-not-found, a not-stopped target, a malformed verb and an unknown file all return
-the same value, and the debugger distinguishes them by which operation it
-attempted. The blocking verbs return `-1` only when the *caller* was
-death-interrupted — a target that exits or releases the slot ends the wait
-successfully.
+An authority refusal answers `-T_E_ACCES` (2026-10-06; ERRORS.md's binding rule
+for a permission denial -- before it answered `-1`, which pouch and Go read as
+`EPERM`). That covers every refusal site: the I-39 gate, kproc, either seal, the
+kill and job gates, the owner-or-hostowner reads and the none wall. Each walk
+context carries the refusal as its result and `devproc_walk_fail` passes it on,
+so a refusal stays distinguishable from every other failure, which is still the
+generic `-1`: a target that is gone or not ALIVE, a target not stopped, a ctl
+that does not hold the debug slot, a full breakpoint table, a malformed verb, an
+unknown file. A step whose target is gone answers `-T_E_SRCH`. The blocking
+verbs return `-1` only when the *caller* was death-interrupted — a target that
+exits or releases the slot ends the wait successfully.
 
 A denial formats **nothing** — the gated reads return zero bytes rather than a
 truncated render, so there is no partial-disclosure path.
@@ -700,6 +725,12 @@ performance backlog.
 
 ## Prosecution
 
+- **none owns nothing on any owner axis, and the wall is the caller's.** A new
+  owner predicate, or a new caller comparing principals directly, must go
+  through `devproc_same_owner`; a new per-Proc read path must either sit behind
+  an owner-axis predicate or ask `devproc_none_walled`. Keying the wall on the
+  target, or the self arm on the principal, is the bug. A new refusal must set
+  `-T_E_ACCES`, never `-1`.
 - **The four gates must not converge.** Each near-miss is a decision:
   `CAP_DAC_OVERRIDE` on none, `CAP_KILL` on kill only, `CAP_DEBUG` on debug only,
   slot ownership stricter than I-39. Widening any gate to "reuse" another is the

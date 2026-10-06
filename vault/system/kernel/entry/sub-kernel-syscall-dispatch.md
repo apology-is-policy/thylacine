@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -411,6 +411,22 @@ inert — the live identity channel is `SO_PEERCRED` ([[sub-pouch-net]]) — so
 peer-cred, gated behind a recorded trust-stamp seam
 ([[seam-nuname-trust-stamp]]). Under the identity cape the attach asserts no
 identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
+
+The pipe attach also stamps the session's ends for `/ctl/9p-sessions`
+([[dec-2026-10-06-9p-sessions-ends]]): the attaching Proc's principal,
+loaded with acquire, and `PRINCIPAL_INVALID` for the server, which the kernel
+cannot name behind a caller-supplied transport. The `/srv` attach stamps both
+ends inside the shared helper ([[sub-kernel-ninep-attach]]).
+
+**`SYS_CHDIR` stores where the walk landed** (2026-10-06,
+[[dec-2026-10-06-chdir-physical]]). It joins the argument to the cwd verbatim,
+resolves the join from the Territory root with `stalk_landed`, X-checks the
+directory, and stores the name the resolver reports ([[sub-kernel-stalk]]); a
+name that does not walk back to the same node fails the call. The
+name lands in the argument's own scratch buffer, which is free after the join,
+so the handler's frame does not grow. Until then the handler stored a lexically
+cleaned copy of the join, which named a different directory from the one
+validated whenever a link stood in the path.
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 

@@ -255,10 +255,12 @@ Main carries the hold since its aux-3 merge, and so does every tree built from
 main since, so ambush 073faaa compiles the held launch untagged. A tree whose
 kernel predates the hold gets an ambush whose launches fail loudly, since its
 kernel refuses the flag. `ambush_fork_check` guards the fork's age: it asks
-`go list` which of `held_on_thylacine.go` / `held_off_thylacine.go` the build
-compiles, and refuses unless it is the held one, declaring
-`launchHeld = true` -- an older fork built untagged compiles `held_off`, the
-running spawn, under a log line that says nothing. The check and the build run
+`go list` which files the build compiles. It refuses `held_off_thylacine.go`,
+the running spawn an older fork compiles untagged under a log line that says
+nothing. `held_on_thylacine.go` must declare `launchHeld = true`. A fork with
+neither file, as once the constant is deleted, must name `launchHeld` in no
+compiled file, and its `Launch` must set `DebugHeld`; a fork from before the
+held launch does not, and is refused. The check and the build run
 the same toolchain (`$GOFORK/bin/go`) with the same environment, so the file
 selection cannot change between them and the artifact needs no check of its
 own. Whether `Launch` still acts on the constant is
