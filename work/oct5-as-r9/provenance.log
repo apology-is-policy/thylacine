@@ -1,0 +1,63 @@
+=== stage-start (nothing built yet) -- 2026-10-06T11:08:53Z ===
+my HEAD        : fc102004833720d6c6c1199f72cf1714f5500546
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 13
+(absent)          build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/ramfs.cpio
+(absent)          build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-06T11:09:57Z ===
+my HEAD        : fc102004833720d6c6c1199f72cf1714f5500546
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 13
+(absent)          build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/ramfs.cpio
+(absent)          build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-06T11:10:20Z ===
+my HEAD        : fc102004833720d6c6c1199f72cf1714f5500546
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 13
+(absent)          build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/ramfs.cpio
+(absent)          build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-06T11:12:09Z ===
+my HEAD        : fc102004833720d6c6c1199f72cf1714f5500546
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 13
+(absent)          build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/ramfs.cpio
+(absent)          build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-06T11:12:35Z ===
+my HEAD        : fc102004833720d6c6c1199f72cf1714f5500546
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 13
+(absent)          build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/ramfs.cpio
+(absent)          build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-06T11:13:45Z ===
+my HEAD        : 21e7fec85af40f3c23c358a63dc2145d39fced9b
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 13
+(absent)          build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/ramfs.cpio
+(absent)          build/fixtures/pool.img
+=== post-build (my kernel, paired images) -- 2026-10-06T11:19:17Z ===
+my HEAD        : 21e7fec85af40f3c23c358a63dc2145d39fced9b
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 12
+4fcc788d6be38b80  build/.config
+1fe1ba3a46219dc1  build/kernel/thylacine.elf
+817320cea4ccd9b6  build/ramfs.cpio
+a3ae8a265b3355e4  build/fixtures/pool.img

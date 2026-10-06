@@ -1,0 +1,3540 @@
+==> run-vm: pool /Users/northkillpd/projects/thylacine-corona/build/fixtures/pool.img (2684354560 bytes)
+==> qemu: accel=hvf cpu=host gic=v2 smp=4 its=auto
+Thylacine v0.1.0-dev booting...
+  arch: arm64
+  el-entry: EL1 (direct)
+  cpus: 4 (DTB-reported; secondaries bring up at smp_init)
+  mem:  2048 MiB at 0x0000000040000000
+  dtb:  0x000000004dc00000 (parsed)
+  uart: 0xffff800000000000 (DTB-driven)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)
+  features: PAC,LSE,CRC32 (CPU-implemented)
+  canary: initialized (fold 0x0000000000000a2d)
+  kernel base: 0xffffa00289880000 (KASLR offset 0x0000000289800000, seed: DTB /chosen/kaslr-seed)
+  ram: 2048 MiB total, 1921 MiB free, 125136 KiB reserved (kernel + struct_page + DTB)
+  directmap: page-mapped to L3 (4096 KiB tables; no runtime BBM -- #808)
+  gic:  v2 dist PA=0x0000000008000000 KVA=0xffff800000001000 cpuif PA=0x0000000008010000 KVA=0xffff800000011000
+  timer: 24000 kHz freq, 1000 Hz tick (virtual timer, PPI 11 / INTID 27)
+kobj_mmio: claims=32 slots
+kobj_dma: max=0x0000000000100000 bytes (order 8 pages)
+  random: chacha20 CSPRNG primed from DTB+cntpct; awaiting virtio-rng reseed
+  ramfs: 232 files, 2 dirs loaded from initrd (96137888 bytes)
+  dev:  16 registered (none, cons, null, zero, full, random, notes, proc, ctl, ramfs, srv, cap, dev, hw, pci, env)
+  virtio: 32 MMIO slots probed (6 with attached devices, 0 skipped due to magic mismatch or cap)
+  random: virtio-rng reseed OK (40 bytes mixed, polled 3 iters)
+irqfwd: reserved kernel INTIDs 0,27,33
+  kobj_mmio: reserved kernel range gic-v2 dist PA=0x0000000008000000 size=0x0000000000010000
+  kobj_mmio: reserved kernel range gic-v2 cpu-iface PA=0x0000000008010000 size=0x0000000000010000
+  kobj_mmio: reserved kernel range GICv2m PA=0x0000000008020000 size=0x0000000000001000
+  kobj_mmio: reserved kernel range arm,pl011 PA=0x0000000009000000 size=0x0000000000001000
+  kobj_mmio: reserved kernel range arm,pl031 PA=0x0000000009010000 size=0x0000000000001000
+  kobj_mmio: reserved kernel range pci-host-ecam-generic PA=0x000000003f000000 size=0x0000000001000000
+  virtio_pci: ECAM at PA 0x000000003f000000 size 0x0000000001000000 (8 VirtIO devices on bus 0, 32 functions probed)
+kobj_pci: claims=8 slots
+gic-msi: v2m first=80 count=64
+  smp:  4/4 cpus online (boot + 3 secondaries via PSCI HVC)
+  exception: uniform EL1h (SPSel=1; exception frames on the per-thread kernel stack)
+  ipi:  GICv2 SGIs live (IPI_RESCHED=SGI 0 via GICD_SGIR; banked SGI/PPI + IRQ unmask on secondaries)
+  kproc:   pid=0 threads=4
+  kthread: tid=0 state=RUNNING (current_thread = kthread)
+  sched:   topology homogeneous caps=[1024 1024 1024 1024] (scale=1024; HMP placement inert when homogeneous)
+  cons:  UART RX live (INTID 33); console_mgr kthread up
+  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=4 (counts console_mgr work; per-CPU idles are BAND_IDLE, excluded)
+  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)
+  tests:
+    [test] kaslr.mix64_avalanche ... PASS
+    [test] dtb.chosen_kaslr_seed_present ... PASS
+    [test] mmio.kernel_reservation_union ... PASS
+    [test] dtb.msi_map_bounds ... PASS
+    [test] dtb.pci_msi_route ... PASS
+    [test] dtb.pci_intx_route ... PASS
+    [test] dtb.pci_intid_is_level ... PASS
+    [test] dtb.pci_mem_window ... PASS
+    [test] dtb.pci_mem_window64 ... PASS
+    [test] phys.alloc_smoke ... PASS
+    [test] phys.leak_10k ... PASS
+    [test] slub.kmem_smoke ... PASS
+    [test] slub.leak_10k ... PASS
+    [test] slub.kmalloc_overflow_guard ... PASS
+    [test] slub.cache_destroy_guards ... PASS
+    [test] gic.its_commands ... PASS
+    [test] gic.irq_barrier ... PASS
+    [test] gic.init_smoke ... PASS
+    [test] gic.cpu_irq_counter_geometry ... PASS
+    [test] timer.tick_increments ... PASS
+    [test] timer.oneshot_tval_clamps ... PASS
+    [test] timer.arm_oneshot_restores ... PASS
+    [test] extinction.claim_word_exactly_one_winner ... PASS
+    [test] extinction.console_unclaimed_on_clean_boot ... PASS
+    [test] clock.monotonic_advances ... PASS
+    [test] clock.realtime_anchored ... PASS
+    [test] clock.wallclock_offset_math ... PASS
+    [test] clock.identity_syscalls ... PASS
+    [test] clock.gettime_errors ... PASS
+    [test] clock.settime_reanchors ... PASS
+    [test] clock.settime_cap_gate ... PASS
+    [test] hardening.detect_smoke ... PASS
+    [test] alternatives.patch_applied ... PASS
+    [test] alternatives.atomics_correct ... PASS
+    [test] context.create_destroy ... PASS
+    [test] context.round_trip ... PASS
+    [test] context.switch_irq_safe ... PASS
+    [test] fp.cpacr_enabled ... PASS
+    [test] fp.round_trip_v_regs_fpsr_fpcr ... PASS
+    [test] fp.note_area_round_trip ... PASS
+    [test] scheduler.dispatch_smoke ... PASS
+    [test] scheduler.runnable_count ... PASS
+    [test] scheduler.runnable_count_excludes_idle ... PASS
+    [test] scheduler.preemption_smoke ... PASS
+    [test] scheduler.idle_in_wfi_observability ... PASS
+    [test] scheduler.notify_idle_peer_smoke ... PASS
+    [test] scheduler.notify_disabled_no_ipi ... PASS
+    [test] scheduler.capacity_normalize_synthetic_dtb ... PASS
+    [test] scheduler.place_by_capacity_synthetic_dtb ... PASS
+    [test] scheduler.select_target_cpu_homogeneous_is_prev ... PASS
+    [test] scheduler.ready_on_cross_cpu_enqueue ... PASS
+    [test] scheduler.cpu_surplus_for_kick ... PASS
+    [test] scheduler.yield_fast_path_no_work ... PASS
+    [test] scheduler.yield_dispatches_queued_work ... PASS
+    [test] scheduler.ready_on_clamps_stale_vd ... PASS
+    [test] scheduler.wake_preempts_policy ... PASS
+    [test] scheduler.wake_preempt_same_cpu ... PASS
+    [test] spinlock.preempt_count_balance ... PASS
+    [test] scheduler.preempt_gate_defers_while_locked ... PASS
+    [test] rendez.sleep_immediate_cond_true ... PASS
+    [test] rendez.basic_handoff ... PASS
+    [test] rendez.death_interrupts_sleep ... PASS
+    [test] rendez.wakeup_no_waiter ... PASS
+    [test] rendez.intr_terminate_interrupts_sleep ... PASS
+    [test] rendez.intr_terminate_register_observe ... PASS
+    [test] rendez.intr_terminate_masked_sleeps_through ... PASS
+    [test] rendez.intr_terminate_interrupts_tsleep ... PASS
+    [test] rendez.reader_frame_predicate ... PASS
+    [test] rendez.reader_frame_blocks_death ... PASS
+    [test] rendez.reader_frame_blocks_death_sleep ... PASS
+    [test] rendez.caught_wake_child_exit ... PASS
+    [test] rendez.caught_wake_tty_susp ... PASS
+    [test] rendez.caught_wake_tty_cont ... PASS
+    [test] rendez.caught_wake_orphan_hup_cont ... PASS
+    [test] rendez.caught_note_one_unwind ... PASS
+    [test] rendez.caught_note_tail_discards_and_releases ... PASS
+    [test] rendez.caught_note_release_wakes_peer ... PASS
+    [test] tsleep.fast_path_cond_true ... PASS
+    [test] tsleep.no_deadline_degrades ... PASS
+    [test] tsleep.past_deadline_immediate ... PASS
+    [test] tsleep.woken_before_deadline ... PASS
+    [test] tsleep.timeout_via_tick ... PASS
+    [test] tsleep.herd_timeout ... PASS
+    [test] timerwait.earliest_deadline ... PASS
+    [test] tickless.target_cnt ... PASS
+    [test] smp.bringup_smoke ... PASS
+    [test] smp.exception_stack_smoke ... PASS
+    [test] smp.per_cpu_idle_smoke ... PASS
+    [test] smp.ipi_resched_smoke ... PASS
+    [test] smp.work_stealing_smoke ... PASS
+    [test] smp.secondary_stack_guard_layout ... PASS
+    [test] proc.rfork_basic_smoke ... PASS
+    [test] proc.rfork_exits_status ... PASS
+    [test] proc.rfork_stress_1000 ... PASS
+    [test] proc.cascading_rfork_wait_smoke ... PASS
+    [test] proc.cascading_rfork_stress ... PASS
+    [test] proc.orphan_reparent_smoke ... proc: orphan pid=1224 name="" (parent pid=1223 name="" exiting) -> adopted by pid=0
+PASS
+    [test] proc.orphan_diag_uses_cons_path ... proc: orphan pid=1226 name="" (parent pid=1225 name="" exiting) -> adopted by pid=0
+PASS
+    [test] proc.orphan_reparent_to_init ... proc: orphan pid=1229 name="" (parent pid=1228 name="" exiting) -> adopted by pid=1227
+PASS
+    [test] proc.orphan_reparent_zombie_to_init ... proc: orphan pid=1232 name="" (parent pid=1231 name="" exiting) -> adopted by pid=1230
+PASS
+    [test] proc.console_attached_smoke ... PASS
+    [test] proc.stripes_smoke ... PASS
+    [test] proc.group_terminate_smoke ... PASS
+    [test] proc.legate_scope_teardown ... PASS
+    [test] proc.legate_teardown_except_and_zero ... PASS
+    [test] pgrp.defaults_and_inherit ... PASS
+    [test] pgrp.setsid_semantics ... PASS
+    [test] pgrp.setpgid_rule_matrix ... PASS
+    [test] pgrp.zombie_reads_alive_mutations ... PASS
+    [test] tty.note_post_gate ... PASS
+    [test] tty.pgrp_fanout_exactly_once ... PASS
+    [test] tty.terminate_class_gate ... PASS
+    [test] pts.mint_bind_resolve_free ... PASS
+    [test] pts.gen_guard_stale_id ... PASS
+    [test] pts.authority_minting_server_only ... PASS
+    [test] pts.binding_dedup_bounds_uniqueness ... PASS
+    [test] pts.full_registry_torn_conn_gc ... PASS
+    [test] pts.syscall_gates ... PASS
+    [test] pts.tty_acquire_matrix ... PASS
+    [test] pts.tty_set_get_fg_matrix ... PASS
+    [test] pts.tty_signal_routing ... pts: carrier loss pts_id=1179648 ct_sid=1289 fg=1290 -> tty:hup posted to 2
+pts: carrier loss pts_id=1179648 ct_sid=1289 fg=1289 -> tty:hup posted to 1
+PASS
+    [test] pts.tty_tstp_stop_cont_seam ... PASS
+    [test] pts.teardown_hup_cont ... PASS
+    [test] proc.legate_teardown_from_zombie_chokepoint ... PASS
+    [test] proc.rfork_refused_while_terminating ... PASS
+    [test] proc.walk_deep_chain ... PASS
+    [test] proc.walk_preorder_and_early_exit ... PASS
+    [test] proc.wait_pid_for_no_match ... PASS
+    [test] proc.wait_pid_for_wnohang_alive_then_reap ... PASS
+    [test] proc.wait_pid_for_selects_target ... PASS
+    [test] proc.wait_pid_for_skips_adopted_orphan_zombie ... proc: orphan pid=3365 name="" (parent pid=3364 name="" exiting) -> adopted by pid=0
+PASS
+    [test] proc.wait_pid_for_pgrp_selectors ... PASS
+    [test] proc.wait_pid_for_report_not_reap ... PASS
+    [test] proc.wait_pid_syscall_untraced_flag ... PASS
+    [test] proc.job_stop_owner_algebra ... PASS
+    [test] proc.job_stop_park_report_cont_live ... PASS
+    [test] proc.job_stop_recycle ... PASS
+    [test] proc.job_stop_preserves_torpor_wait ... PASS
+    [test] proc.job_stop_orphan_rule ... proc: orphan pid=3380 name="" (parent pid=3378 name="" exiting) -> adopted by pid=0
+proc: orphan pid=3379 name="" (parent pid=3378 name="" exiting) -> adopted by pid=0
+PASS
+    [test] proc.exec_reset_dispositions ... PASS
+    [test] proc.exec_drops_image_note_state ... PASS
+    [test] resource.exempt_only_system ... PASS
+    [test] resource.page_charge_caps ... PASS
+    [test] resource.page_peak_high_water ... PASS
+    [test] resource.spawn_budget_resolve ... PASS
+    [test] resource.measured_compile_needs_raise ... PASS
+    [test] resource.thread_cap_ok ... PASS
+    [test] resource.child_cap_ok ... PASS
+    [test] resource.child_count_tracks_list ... PASS
+    [test] resource.child_count_rfork_reap ... PASS
+    [test] exec_ns.resolve_absolute_ok ... PASS
+    [test] exec_ns.resolve_relative_ok ... PASS
+    [test] exec_ns.miss_returns_null ... PASS
+    [test] exec_ns.non_executable_denied ... PASS
+    [test] exec_ns.noexec_mount_denied ... PASS
+    [test] exec_ns.pheno_mount_crossing ... PASS
+    [test] mmap_file.noexec_mount_denied ... PASS
+    [test] mmap_file.devenv_never_exec_backs ... PASS
+    [test] map_file.native_arms ... PASS
+    [test] map_file.native_refusals ... PASS
+    [test] map_file.native_noexec_denied ... PASS
+    [test] namespace_layout.proc_ctl_cross ... PASS
+    [test] resource.page_cap_attach_enforced ... PASS
+    [test] resource.vma_cap ... PASS
+    [test] resource.attach_charges_buddy_rounded ... PASS
+    [test] resource.detach_shared_in_keeps_page_count ... PASS
+    [test] resource.detach_retained_handle_keeps_page_count ... PASS
+    [test] burrow.backing_pages_matches_alloc ... PASS
+    [test] proc_identity.kproc_is_system ... PASS
+    [test] proc_identity.rfork_inherits ... PASS
+    [test] proc_identity.apply_sets_fields ... PASS
+    [test] proc_identity.spawn_set_rejected_without_cap ... PASS
+    [test] proc_identity.spawn_set_accepted_with_cap ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] proc_identity.set_rejects_reserved ... PASS
+    [test] proc_identity.set_rejects_system_supp_gid ... PASS
+    [test] proc_identity.peer_snapshot_by_stripes ... PASS
+    [test] proc_identity.peer_snapshot_console_owner ... PASS
+    [test] territory.bind_smoke ... PASS
+    [test] territory.cycle_rejected ... PASS
+    [test] territory.fork_isolated ... PASS
+    [test] territory.clone_copies_root_pheno ... PASS
+    [test] territory.render_root_pheno ... PASS
+    [test] territory.cwd_lexical ... PASS
+    [test] territory.cwd_join ... PASS
+    [test] territory.cwd_dot ... PASS
+    [test] territory_mount.smoke ... PASS
+    [test] territory_mount.idempotent_same_source ... PASS
+    [test] territory_mount.idempotent_converges_flags ... PASS
+    [test] territory_mount.mrepl_replaces ... PASS
+    [test] territory_mount.mrepl_existing_replaces_group ... PASS
+    [test] territory_mount.mbefore_moves_existing ... PASS
+    [test] territory_mount.unmount_missing_returns_error ... PASS
+    [test] territory_mount.table_full ... PASS
+    [test] territory_mount.clone_bumps_refs ... PASS
+    [test] territory_mount.destroy_drops_all_refs ... PASS
+    [test] territory_mount.devno_disambiguates ... PASS
+    [test] territory_mount.noexec_covers ... PASS
+    [test] territory_mount.rejects_cycle ... PASS
+    [test] territory_mount.mp_path_lifecycle ... PASS
+    [test] territory_mount.format_ns ... PASS
+    [test] territory_mount.lookup_ref_survives_unmount ... PASS
+    [test] territory_mount.union_keeps_covered ... PASS
+    [test] territory_mount.no_covered_unless_fresh ... PASS
+    [test] territory_mount.covered_file_point_stays_plain ... PASS
+    [test] territory_mount.covered_reposition ... PASS
+    [test] territory_mount.covered_leaves_with_last ... PASS
+    [test] territory_mount.covered_needs_two_slots ... PASS
+    [test] territory_mount.covered_self_mount_refused ... PASS
+    [test] territory_mount.covered_clone ... PASS
+    [test] territory_mount.covered_noexec_scoped ... PASS
+    [test] territory_mount.covered_format_ns ... PASS
+    [test] territory_mount.root_ref_survives_pivot ... PASS
+    [test] territory.chroot_smoke ... PASS
+    [test] territory.chroot_idempotent_same_spoor ... PASS
+    [test] territory.chroot_replace_clunks_old ... PASS
+    [test] territory.chroot_clone_bumps_ref ... PASS
+    [test] territory.chroot_destroy_drops_ref ... PASS
+    [test] territory.chroot_null_returns_error ... PASS
+    [test] territory.pivot_root_smoke ... PASS
+    [test] territory.pivot_root_rejects_no_initial_root ... PASS
+    [test] territory.pivot_root_idempotent_same_spoor ... PASS
+    [test] territory.pivot_root_null_source_rejected ... PASS
+    [test] territory.pivot_root_keeps_reachable_mount ... PASS
+    [test] territory.shed_pivot_drops_unreachable ... PASS
+    [test] territory.shed_chroot_drops_unreachable ... PASS
+    [test] territory.shed_keeps_transitive ... PASS
+    [test] territory.shed_per_walker_dev_matched_on_dc ... PASS
+    [test] territory.shed_same_root_is_a_noop ... PASS
+    [test] territory.shed_preserves_union_order ... PASS
+    [test] territory.shed_clone_before_pivot_unaffected ... PASS
+    [test] territory.shed_union_root_keeps_point_entries ... PASS
+    [test] territory.shed_drops_nested_orphan ... PASS
+    [test] territory.shed_full_table_boundary ... PASS
+    [test] territory.shed_releases_mp_path_once ... PASS
+    [test] territory.shed_initial_chroot_and_root_as_source ... PASS
+    [test] territory.shed_covered_shares_fate ... PASS
+    [test] handles.alloc_close_smoke ... PASS
+    [test] handles.rights_monotonic ... PASS
+    [test] handles.dup_lifecycle ... PASS
+    [test] handles.full_table_oom ... PASS
+    [test] handles.kind_classifiers ... PASS
+    [test] handles.srv_kind ... PASS
+    [test] handles.replace ... PASS
+    [test] handles.cloexec_lifecycle ... PASS
+    [test] handles.cloexec_exec_sweep ... PASS
+    [test] handles.cloexec_fork_preserves ... PASS
+    [test] handles.dup_posix ... PASS
+    [test] handles.dup_to ... PASS
+    [test] burrow.create_close_round_trip ... PASS
+    [test] burrow.refcount_lifecycle ... PASS
+    [test] burrow.map_unmap_lifecycle ... PASS
+    [test] burrow.handles_x_mappings_matrix ... PASS
+    [test] burrow.via_handle_table ... PASS
+    [test] burrow.handle_table_orphan_cleanup ... PASS
+    [test] burrow.size_overflow_rejected ... PASS
+    [test] burrow.settled_drop_retains_nonfinal_charge ... PASS
+    [test] burrow.settled_drop_exact_payer ... PASS
+    [test] burrow.settled_mapping_drop_defers_free ... PASS
+    [test] burrow.unmap_failure_leaves_mapping_attached ... PASS
+    [test] jit.create_requires_cap ... PASS
+    [test] jit.create_rejects_bad_args ... PASS
+    [test] jit.dual_alias_pte_wx_clean ... PASS
+    [test] jit.charges_once_per_region ... PASS
+    [test] jit.destroy_tears_down_both ... PASS
+    [test] jit.destroy_rejects_non_writer ... PASS
+    [test] jit.alias_not_detachable ... PASS
+    [test] jit.icache_sync_gate ... PASS
+    [test] jit.write_visible_at_exec_alias ... PASS
+    [test] burrow.dup_oom_rollback ... PASS
+    [test] burrow.file_create_close_round_trip ... PASS
+    [test] burrow.file_create_failure_retains_spoor ... PASS
+    [test] burrow.file_map_unmap_lifecycle ... PASS
+    [test] burrow.file_resident_pages_freed ... PASS
+    [test] image.miss_then_hit_shares ... PASS
+    [test] image.distinct_qid_distinct_entry ... PASS
+    [test] image.qid_vers_bump_new_entry ... PASS
+    [test] image.distinct_offset_distinct_entry ... PASS
+    [test] image.exec_discriminates_key ... PASS
+    [test] image.eviction_bounds_cache ... PASS
+    [test] image.bad_arg_retains_spoor ... PASS
+    [test] asid.width_valid ... PASS
+    [test] asid.resolve_reuse ... PASS
+    [test] asid.distinct_active ... PASS
+    [test] asid.rollover_preserves ... PASS
+    [test] proc.pgtable_alloc_smoke ... PASS
+    [test] proc.pgtable_lifecycle_stress ... PASS
+    [test] proc.ttbr0_swap_smoke ... PASS
+    [test] proc.pgtable_destroy_walk_releases_subtables ... PASS
+    [test] burrow.map_proc_smoke ... PASS
+    [test] burrow.map_proc_constraints ... PASS
+    [test] burrow.map_proc_overlap_rejected ... PASS
+    [test] burrow.map_proc_user_va_top_boundary ... PASS
+    [test] burrow.unmap_proc_smoke ... PASS
+    [test] burrow.unmap_proc_no_match ... PASS
+    [test] burrow.share_into_cross_proc ... PASS
+    [test] burrow.share_into_alive_while_either_maps ... PASS
+    [test] burrow.share_into_frees_on_last_drop ... PASS
+    [test] burrow.share_into_constraints ... PASS
+    [test] weft.ring_basic ... PASS
+    [test] weft.ring_toctou_snapshot ... PASS
+    [test] weft.ring_bounds_reject ... PASS
+    [test] weft.binding_validate_rw ... PASS
+    [test] weft.ring_multi_split ... PASS
+    [test] weft.should_ring_threshold ... PASS
+    [test] weft.ring_layout_constraints ... PASS
+    [test] weft.ready_signal_observe ... PASS
+    [test] weft.ready_park_handshake ... PASS
+    [test] weft.ready_arm_park_sees_race ... PASS
+    [test] weft.notif_terminal_release ... PASS
+    [test] weft.notif_premature_blocked ... PASS
+    [test] weft.notif_copied_immediate ... PASS
+    [test] weft.share_register_claim ... PASS
+    [test] weft.share_full ... PASS
+    [test] weft.share_owner_gc ... PASS
+    [test] weft.hostmem_share ... PASS
+    [test] weft.hostmem_refcount ... PASS
+    [test] weft.hostmem_resolve ... PASS
+    [test] weft.syscall_share ... PASS
+    [test] weft.map_binding_lifetime ... PASS
+    [test] weft.share_cap_gate ... PASS
+    [test] weft.share_rejects_plain_dma ... PASS
+    [test] weft.weave_share_and_claim ... PASS
+    [test] weft.gpu_bo_share_and_claim ... PASS
+    [test] weft.unshare_disarm ... PASS
+    [test] weft.shared_map_budget_cap ... PASS
+    [test] weft.weave_clunk_unmap_guard ... PASS
+    [test] weft.sharer_charge_released_at_detach ... PASS
+    [test] weft.reap_kproc_pid_survives_walk ... PASS
+    [test] weft.reap_orphan_reclaimed ... PASS
+    [test] weft.reap_live_session_untouched ... PASS
+    [test] weft.reap_close_unregisters ... PASS
+    [test] pgtable.install_user_pte_smoke ... PASS
+    [test] pgtable.install_user_pte_constraints ... PASS
+    [test] pgtable.install_user_pte_attr_index ... PASS
+    [test] pgtable.install_user_pte_idempotent ... PASS
+    [test] demand_page.smoke ... PASS
+    [test] demand_page.no_vma ... PASS
+    [test] demand_page.permission_denied ... PASS
+    [test] demand_page.lifecycle_round_trip ... PASS
+    [test] demand_page.file_smoke ... PASS
+    [test] demand_page.file_pagein_not_note_interruptible ... PASS
+    [test] demand_page.file_pages_charge_the_holder ... PASS
+    [test] demand_page.idle_image_reclaimed_under_pressure ... PASS
+    [test] demand_page.reclaim_asks_for_the_shortfall ... PASS
+    [test] demand_page.alignment_abort_is_bus_not_handled ... PASS
+    [test] demand_page.file_rodata_prot ... PASS
+    [test] demand_page.file_geometry_shift_bails ... PASS
+    [test] demand_page.file_geometry_shift_bails_single ... PASS
+    [test] demand_page.file_read_error_snare_bus ... PASS
+    [test] demand_page.file_multi_page ... PASS
+    [test] demand_page.file_short_read_fills_page ... PASS
+    [test] demand_page.file_cluster_short_read ... PASS
+    [test] demand_page.file_eof_tail_zero ... PASS
+    [test] demand_page.file_past_limit_bus ... PASS
+    [test] demand_page.file_partial_page_zero_with_limit ... PASS
+    [test] demand_page.file_cluster_clamps_at_limit ... PASS
+    [test] demand_page.lazy_zero_fill ... PASS
+    [test] demand_page.lazy_decommit_refault ... PASS
+    [test] demand_page.lazy_charge_on_fault_oom ... PASS
+    [test] demand_page.lazy_detach_uncharges_resident ... PASS
+    [test] vdso.page_populated ... PASS
+    [test] vdso.publish_updates ... PASS
+    [test] vdso.mono_matches_timer ... PASS
+    [test] vdso.maps_ro_read ... PASS
+    [test] vdso.maps_ro_write_faults ... PASS
+    [test] exec.setup_smoke ... PASS
+    [test] exec.interp_argv_shape ... PASS
+    [test] exec.from_spoor_rodata_dispatch ... PASS
+    [test] exec.unaligned_segment_loads ... PASS
+    [test] exec.unaligned_lazy_segment_loads ... PASS
+    [test] exec.shared_page_segments_refused ... PASS
+    [test] exec.unaligned_stays_off_image_cache ... PASS
+    [test] exec.from_spoor_aliased_window_distinct ... PASS
+    [test] exec.setup_segment_data_copied ... PASS
+    [test] exec.setup_constraints ... PASS
+    [test] execve.load_into_detached ... PASS
+    [test] execve.load_into_rejects_dirty ... PASS
+    [test] execve.load_refuses_nomem_at_the_pool_edge ... exec: eager PT_LOAD map failed at vaddr 0x0000000000020000
+PASS
+    [test] execve.load_refuses_nomem_on_the_frame ... PASS
+    [test] execve.failed_load_leaves_target_drainable ... exec: PT_LOAD shares a page with an earlier segment (I-12 forbids the W+X union) at vaddr 0x0000000000010800
+PASS
+    [test] exec.native_rejects_dynamic_linux ... exec: dynamic Linux binary rejected -- its interpreter lives in a PHENO_LINUX vivarium's namespace, not this one (DISTRO section 7.1)
+exec: elf_load refused this binary -- negated ELF_LOAD code 0x000000000000000f
+PASS
+    [test] exec.load_failure_leaves_phenotype ... exec: PT_INTERP rewrite needs the program's own name and this exec entry threaded none -- refusing 0x0000000000000000
+exec: dynamic Linux binary rejected -- its interpreter lives in a PHENO_LINUX vivarium's namespace, not this one (DISTRO section 7.1)
+exec: elf_load refused this binary -- negated ELF_LOAD code 0x000000000000000f
+exec: PT_INTERP rewrite needs the program's own name and this exec entry threaded none -- refusing 0x0000000000000000
+exec: dynamic Linux binary rejected -- its interpreter lives in a PHENO_LINUX vivarium's namespace, not this one (DISTRO section 7.1)
+exec: elf_load refused this binary -- negated ELF_LOAD code 0x000000000000000f
+PASS
+    [test] exec.reset_follows_decided_phenotype ... PASS
+    [test] exec.interp_dispatch_every_phenotype ... exec: elf_load refused this binary -- negated ELF_LOAD code 0x000000000000000f
+PASS
+    [test] exec.setup_multi_segment ... PASS
+    [test] exec.setup_lifecycle_round_trip ... PASS
+    [test] exec.user_stack_guard ... PASS
+    [test] exec.setup_auxv ... PASS
+    [test] exec.setup_auxv_no_phdr_segment ... PASS
+    [test] exec.setup_bss_tail_icache_synced ... PASS
+    [test] exec.from_spoor_bss_only_text_icache_synced ... PASS
+    [test] exec.setup_env_frame ... PASS
+    [test] exec.stage_env_bounds ... PASS
+    [test] exec.writable_segment_is_sparse ... PASS
+    [test] exec.stack_is_sparse ... PASS
+    [test] syscall.dispatch_unknown ... PASS
+    [test] syscall.dispatch_puts_smoke ... PASS
+    [test] syscall.dispatch_exits_ok ... PASS
+    [test] syscall.dispatch_exits_fail ... PASS
+    [test] syscall.dispatch_exit_group_code ... PASS
+    [test] syscall.dispatch_args_in_x0_to_x5 ... PASS
+    [test] syscall.dispatch_set_tid_address ... PASS
+    [test] syscall.opath_walkonly_no_byte_io ... PASS
+    [test] uaccess.fixup_table_well_formed ... PASS
+    [test] uaccess.fixup_lookup_known ... PASS
+    [test] uaccess.fixup_lookup_unknown_returns_zero ... PASS
+    [test] uaccess.load_u8_unmapped_user_va_returns_minus1 ... PASS
+    [test] uaccess.copy_out_unmapped_faults_all_arms ... PASS
+    [test] uaccess.copy_in_unmapped_faults_all_arms ... PASS
+    [test] uaccess.copy_fixup_entries_present ... PASS
+    [test] fault.decode_kernel_data_translation_l2 ... PASS
+    [test] fault.decode_kernel_data_permission_write ... PASS
+    [test] fault.decode_user_data_translation ... PASS
+    [test] fault.decode_user_instruction_fetch ... PASS
+    [test] fault.decode_access_flag ... PASS
+    [test] halls.fp_sane_accepts_valid ... PASS
+    [test] halls.fp_sane_rejects_misaligned ... PASS
+    [test] halls.fp_sane_rejects_non_increasing ... PASS
+    [test] halls.fp_sane_rejects_out_of_range ... PASS
+    [test] halls.link_addr_removes_slide ... PASS
+    [test] halls.link_addr_underflow_guarded ... PASS
+    [test] halls.frame_enter_leave_nesting ... PASS
+    [test] halls.frame_is_live_gate ... PASS
+    [test] halls.symbolize_table ... PASS
+    [test] cow.set_sole_never_inherits ... PASS
+    [test] cow.get_put_reports_last_holder ... PASS
+    [test] cow.break_decide_is_sole ... PASS
+    [test] burrow.lazy_free_is_conditional_on_share ... PASS
+    [test] cow.burrow_clone_shares_resident_pages ... PASS
+    [test] cow.addrspace_clone_shares_and_writeprotects ... PASS
+    [test] cow.addrspace_clone_refuses_and_leaves_parent_intact ... PASS
+    [test] cow.clone_shares_readonly_eager_anon ... PASS
+    [test] cow.break_read_then_write_copies ... PASS
+    [test] cow.break_sole_holder_takes_in_place ... PASS
+    [test] cow.break_copy_pins_the_original_until_replaced ... PASS
+    [test] cow.read_queued_behind_break_is_handled ... PASS
+    [test] cow.break_copy_releases_the_share_on_a_failed_replace ... PASS
+    [test] cow.break_copy_last_share_frees_after_the_replace ... PASS
+    [test] addrspace.alloc_shape ... PASS
+    [test] addrspace.refcount ... PASS
+    [test] addrspace.kproc_has_none ... PASS
+    [test] addrspace.charge_helpers_refuse_without_as ... PASS
+    [test] addrspace.share_drains_at_last_ref ... PASS
+    [test] addrspace.proc_alloc_in_shares ... PASS
+    [test] proc.rfork_rfmem_refuses_without_addrspace ... PASS
+    [test] fork.frame_init ... PASS
+    [test] fork.rfork_arg_rejection ... PASS
+    [test] fork.table_copy ... PASS
+    [test] fork.vfork_release ... PASS
+    [test] vma.alloc_free_smoke ... PASS
+    [test] vma.alloc_constraints ... PASS
+    [test] vma.insert_lookup_smoke ... PASS
+    [test] vma.insert_overlap_rejected ... PASS
+    [test] vma.insert_sorted_invariant ... PASS
+    [test] vma.drain_releases_all ... PASS
+    [test] vma.find_gap_smoke ... PASS
+    [test] vma.find_gap_no_fit ... PASS
+    [test] vma.find_gap_constraints ... PASS
+    [test] vma.find_gap_straddle ... PASS
+    [test] sys_burrow.attach_returns_window_va ... PASS
+    [test] sys_burrow.attach_detach_round_trip ... PASS
+    [test] sys_burrow.attach_distinct ... PASS
+    [test] sys_burrow.attach_rounds_up ... PASS
+    [test] sys_burrow.attach_rejects_bad_length ... PASS
+    [test] sys_burrow.detach_rejects ... PASS
+    [test] sys_burrow.detach_window_confined ... PASS
+    [test] sys_burrow.detach_dma_map_by_identity ... PASS
+    [test] sys_burrow.detach_mmio_map_by_identity ... PASS
+    [test] sys_burrow.attach_lazy_window_va ... PASS
+    [test] sys_burrow.attach_lazy_large ... PASS
+    [test] sys_burrow.lazy_len_from_args ... PASS
+    [test] protect.reserve_mints_exactly ... PASS
+    [test] protect.reserve_refusals ... PASS
+    [test] protect.raise_and_write_keeps_contents ... PASS
+    [test] protect.x_refused_before_lookup ... PASS
+    [test] protect.ceiling_bounds_raise ... PASS
+    [test] protect.seal_lowers_ceiling ... PASS
+    [test] protect.split_three_way_then_merge ... PASS
+    [test] protect.grow_ladder_stays_two_vmas ... PASS
+    [test] protect.refusals_change_nothing ... PASS
+    [test] protect.multi_vma_and_hole ... PASS
+    [test] protect.pte_uninstalled_then_reinstalled_at_prot ... PASS
+    [test] protect.cow_split_then_break ... PASS
+    [test] cow.clone_dedupes_split_pieces ... PASS
+    [test] cow.clone_refuses_eager_anon_with_writable_ceiling ... PASS
+    [test] sys_burrow.detach_piece_frees_only_its_pages ... PASS
+    [test] protect.range_walk_is_linear ... PASS
+    [test] protect.uninstall_range_skips_absent_subtrees ... PASS
+    [test] protect.noop_protect_needs_no_headroom ... PASS
+    [test] sys_mmap.fixed_anon_w_alone_maps_rw ... PASS
+    [test] protect.file_pagein_racing_protect_bails_single ... PASS
+    [test] protect.file_pagein_racing_protect_bails_cluster ... PASS
+    [test] burrow.map_fixed_split_left ... PASS
+    [test] burrow.map_fixed_split_right ... PASS
+    [test] burrow.map_fixed_split_three_way ... PASS
+    [test] burrow.map_fixed_exact_cover ... PASS
+    [test] burrow.map_fixed_carries_offset ... PASS
+    [test] burrow.map_fixed_refusals ... PASS
+    [test] burrow.map_fixed_successive ... PASS
+    [test] burrow.map_fixed_into_free_space ... PASS
+    [test] burrow.munmap_range_tiled ... PASS
+    [test] burrow.munmap_range_partial_trims ... PASS
+    [test] burrow.munmap_range_empty_ok ... PASS
+    [test] burrow.detach_file_frees_outside_lock ... PASS
+    [test] burrow.munmap_range_file_frees_outside_lock ... PASS
+    [test] burrow.map_fixed_replace_file_frees_outside_lock ... PASS
+    [test] burrow.map_fixed_refuses_code_alias ... PASS
+    [test] detach.range_trims_left_right_middle ... PASS
+    [test] detach.range_across_burrows_and_holes ... PASS
+    [test] detach.range_refusals_change_nothing ... PASS
+    [test] detach.eager_pages_go_with_the_last_piece ... PASS
+    [test] detach.lazy_over_256mib_detaches ... PASS
+    [test] detach.four_gib_reservation_round_trips ... PASS
+    [test] capacity.window_sized_reservation_releases_in_bounded_steps ... PASS
+    [test] capacity.replace_window_releases_orphans ... PASS
+    [test] capacity.pagemap_nodes_charged_and_reclaimed ... PASS
+    [test] capacity.default_is_ram_minus_reserve ... PASS
+    [test] capacity.pool_refuses_users_keeps_tcb ... PASS
+    [test] capacity.death_returns_charges_to_pool ... PASS
+    [test] capacity.fork_clone_charges_pages_and_nodes ... PASS
+    [test] capacity.page_tables_charged_and_reclaimed ... PASS
+    [test] capacity.memory_bomb_leaves_the_reserve ... PASS
+    [test] capacity.fork_costs_the_pool_only_its_nodes ... PASS
+    [test] vma.range_is_mapped ... PASS
+    [test] demand_page.eager_copy_charge_pairing ... PASS
+    [test] torpor.wait_rejects_bad_args ... PASS
+    [test] torpor.wait_rejects_unmapped_va ... PASS
+    [test] torpor.wake_rejects_bad_args ... PASS
+    [test] torpor.wake_empty_bucket_returns_zero ... PASS
+    [test] torpor.wait_value_mismatch_fast_path ... PASS
+    [test] torpor.wait_timeout_zero_returns_etimedout ... PASS
+    [test] torpor.wait_wake_handoff ... PASS
+    [test] torpor.wake_two_waiters_count_bound ... PASS
+    [test] loom.create_geometry ... PASS
+    [test] loom.create_rejects_bad_args ... PASS
+    [test] loom.refcount_lifecycle ... PASS
+    [test] loom.setup_via_proc ... PASS
+    [test] loom.setup_rejects ... PASS
+    [test] loom.register_handles ... PASS
+    [test] loom.register_rejects ... PASS
+    [test] loom.register_replaces ... PASS
+    [test] loom.register_buffers ... PASS
+    [test] loom.register_buffers_rejects ... PASS
+    [test] loom.register_buffers_replace ... PASS
+    [test] loom.ring_charge_balance ... PASS
+    [test] loom.regbuf_charge_balance ... PASS
+    [test] loom.regbuf_foreign_charge_not_refunded ... PASS
+    [test] loom.post_cqe_back_pressure ... PASS
+    [test] loom.post_cqe_ignores_hostile_header ... PASS
+    [test] loom.dup_rejected ... PASS
+    [test] loom.enter_nop ... PASS
+    [test] loom.enter_submit_rejects ... PASS
+    [test] loom.enter_flags_and_bad_index ... PASS
+    [test] loom.enter_cq_admission_backpressure ... PASS
+    [test] loom.admission_counts_admitting ... PASS
+    [test] loom.wait_counts_admitting ... PASS
+    [test] loom.drain_waits_for_admitting ... PASS
+    [test] loom.cq_waiter_wake ... PASS
+    [test] loom.poll ... PASS
+    [test] loom.cq_waiter_no_spurious_wake_on_full ... PASS
+    [test] loom.enter_inline_min_complete ... PASS
+    [test] loom.enter_min_complete_no_inflight ... PASS
+    [test] loom.sqpoll_setup_and_teardown ... PASS
+    [test] loom.sqpoll_drains_sq ... PASS
+    [test] loom.sqpoll_parks_on_cq_full ... PASS
+    [test] loom.sqpoll_charges_thread_budget ... PASS
+    [test] thread.create_user_ctx_layout ... PASS
+    [test] thread.exit_self_marks_exiting ... PASS
+    [test] thread.exit_self_last_thread_zombies ... PASS
+    [test] proc.multi_thread_reap ... PASS
+    [test] proc.wait_pid_concurrent_waiters_both_reap ... PASS
+    [test] notes.queue_alloc_free_smoke ... PASS
+    [test] notes.post_dequeue_smoke ... PASS
+    [test] notes.post_ordering ... PASS
+    [test] notes.linux_sigign_discard ... PASS
+    [test] notes.unknown_name_rejected ... PASS
+    [test] notes.snare_forge_rejected ... PASS
+    [test] notes.queue_full_returns_minus1 ... PASS
+    [test] notes.coalesce_synthetic ... PASS
+    [test] notes.mask_defers ... PASS
+    [test] notes.kill_dequeue_smoke ... PASS
+    [test] notes.kill_bypasses_mask ... PASS
+    [test] notes.reenqueue_head_smoke ... PASS
+    [test] notes.fd_read_skips_kill ... PASS
+    [test] notes.fd_peek_skips_kill ... PASS
+    [test] notes.post_child_exit_helper ... PASS
+    [test] notes.post_pipe_helper ... PASS
+    [test] notes.proc_lifecycle ... PASS
+    [test] notes.peek_does_not_pop ... PASS
+    [test] notes.interrupt_terminate_gate ... PASS
+    [test] notes.default_action_table ... PASS
+    [test] notes.ndflt_dispatch ... PASS
+    [test] notes.kill_terminates_single_thread ... PASS
+    [test] notes.self_kill_through_full_ring ... PASS
+    [test] notes.ndflt_stop_discarded_after_cont ... PASS
+    [test] notes.susp_gate_reads_phenotype_sigtab ... PASS
+    [test] notes.masked_susp_stops_at_delivery ... PASS
+    [test] notes.stop_dequeue_picks_its_own_note ... PASS
+    [test] notes.class_scans_read_phenotype_sigtab ... PASS
+    [test] notes.discard_name_purges_pending ... PASS
+    [test] notes.phenotype_sigreturn_restores_mask ... PASS
+    [test] notes.self_managing_flag ... PASS
+    [test] notes.intr_latch_lifecycle ... PASS
+    [test] notes.die_pending_predicate ... PASS
+    [test] notes.pipe_die_pending ... PASS
+    [test] notes.caught_note_latch_lifecycle ... PASS
+    [test] notes.caught_note_deliverable_predicate ... PASS
+    [test] notes.caught_note_claim_once ... PASS
+    [test] notes.handler_escape_predicate ... PASS
+    [test] notes.caught_note_stop_dequeue_drains ... PASS
+    [test] notes.fstat_reports_chr ... PASS
+    [test] directmap.kva_round_trip ... PASS
+    [test] directmap.alloc_through_directmap ... PASS
+    [test] directmap.vmalloc_mmio_smoke ... PASS
+    [test] directmap.pagemapped_808 ... PASS
+    [test] elf.parse_minimal_ok ... PASS
+    [test] elf.parse_multi_segment_ok ... PASS
+    [test] elf.header_rejection ... PASS
+    [test] elf.rwx_rejected ... PASS
+    [test] elf.bounds_rejection ... PASS
+    [test] elf.policy_rejection ... PASS
+    [test] elf.brand_hint ... PASS
+    [test] elf.read_interp ... PASS
+    [test] elf.pie_load_bias ... PASS
+    [test] dev.boot_registration_smoke ... PASS
+    [test] dev.lookup_unknown ... PASS
+    [test] dev.devnone_ops_smoke ... PASS
+    [test] dev.vtable_slot_coverage ... PASS
+    [test] spoor.alloc_unref_round_trip ... PASS
+    [test] spoor.ref_lifecycle ... PASS
+    [test] spoor.clone_lifecycle ... PASS
+    [test] spoor.clone_copies_state ... PASS
+    [test] spoor.clunk_dispatches_close ... PASS
+    [test] spoor.alloc_10k_no_leak ... PASS
+    [test] trivial_devs.bestiary_smoke ... PASS
+    [test] null.attach_open_close ... PASS
+    [test] null.read_returns_eof ... PASS
+    [test] null.write_consumes ... PASS
+    [test] zero.read_fills_zeroes ... PASS
+    [test] zero.write_consumes ... PASS
+    [test] full.attach_open_close ... PASS
+    [test] full.read_fills_zeroes ... PASS
+    [test] full.write_returns_minus1 ... PASS
+    [test] random.rndr_available ... PASS
+    [test] random.read_produces_nonzero ... PASS
+    [test] random.read_varies ... PASS
+    [test] cons.write_advances ... [test_cons_write_advances]PASS
+    [test] trivial_devs.devnull_10k_no_leak ... PASS
+    [test] devproc.bestiary_smoke ... PASS
+    [test] devproc.attach_returns_dir ... PASS
+    [test] devproc.walk_root_to_kproc_dir ... PASS
+    [test] devproc.walk_unknown_pid_misses ... PASS
+    [test] devproc.walk_to_status_file ... PASS
+    [test] devproc.walk_dotdot_to_root ... PASS
+    [test] devproc.read_status_format ... PASS
+    [test] devproc.imperium_read_gated ... PASS
+    [test] devproc.read_imperium_format ... PASS
+    [test] proc.cpu_ns_accounting ... PASS
+    [test] scheduler.prowl_counters ... PASS
+    [test] devproc.read_cmdline_kproc ... PASS
+    [test] devproc.read_ns_format ... PASS
+    [test] devproc.read_exe ... PASS
+    [test] devproc.read_cwd ... PASS
+    [test] devproc.maps ... PASS
+    [test] devproc.environ ... PASS
+    [test] devproc.read_ctl_returns_zero ... PASS
+    [test] devproc.write_ctl_rejects ... PASS
+    [test] devproc.read_dir_returns_neg1 ... PASS
+    [test] devproc.read_partial_offset ... PASS
+    [test] devproc.kill_authorized_predicate ... PASS
+    [test] devproc.sched_gate_predicate ... PASS
+    [test] devproc.sched_read_gated ... PASS
+    [test] devproc.read_sched_format ... PASS
+    [test] devproc.park_state_settled ... PASS
+    [test] devproc.stat_native_ctl_owner ... PASS
+    [test] devproc.write_ctl_kill_dispatch ... PASS
+    [test] devproc.ctl_suspend_resume_dispatch ... PASS
+    [test] devproc.debug_authorized_predicate ... PASS
+    [test] devproc.debug_cap_cover_predicate ... PASS
+    [test] devproc.debug_cap_cover_attach ... PASS
+    [test] devproc.dump_seal_predicate ... PASS
+    [test] devproc.dump_seal_disclosure ... PASS
+    [test] devproc.image_cover_join ... PASS
+    [test] devproc.image_seal_join ... PASS
+    [test] proc.seal_stamps_the_image ... PASS
+    [test] proc.elevation_ignores_a_zombie_sharer ... PASS
+    [test] proc.debug_taint_refuses_elevation ... PASS
+    [test] proc.debug_taint_crosses_fork ... PASS
+    [test] devproc.dump_seal_scope ... PASS
+    [test] devproc.debug_attach_detach_lifecycle ... PASS
+    [test] devproc.debug_exitkill_terminates_on_close ... PASS
+    [test] devproc.debug_birth_hold_ctl ... PASS
+    [test] devproc.debug_stop_start_resume ... PASS
+    [test] devproc.debug_mem ... PASS
+    [test] devproc.debug_regs ... PASS
+    [test] devproc.debug_kregs_kstack_wait ... PASS
+    [test] devproc.debug_kstack_settled ... PASS
+    [test] devproc.debug_step_cancel_on_stop ... PASS
+    [test] hwdebug.dfr0_enumerate ... PASS
+    [test] hwdebug.arm_disarm_roundtrip ... PASS
+    [test] hwdebug.bp_table ... PASS
+    [test] hwdebug.singlestep_benign ... PASS
+    [test] hwdebug.wp_table ... PASS
+    [test] hwdebug.wp_encode ... PASS
+    [test] cons.blocking_read_wakeup ... PASS
+    [test] cons.tx_role_serializes_writers ... PASS
+    [test] cons.kernel_writer_bracket ... PASS
+    [test] cons.tx_room_wait_and_deadline ...    PASS
+    [test] cons.tx_unit_diag_line_atomic ... PASS
+    [test] cons.tx_unit_echo_atomic ... PASS
+    [test] cons.tx_unit_smp_no_tear ... PASS
+    [test] cons.ring_claim_core_returns_holding ... PASS
+    [test] cons.ring_claim_core_bounded_when_held ... PASS
+    [test] cons.ring_unclaimed_on_clean_boot ... PASS
+    [test] cons.ring_fill_drain ... PASS
+    [test] cons.ring_full_refuses ... PASS
+    [test] cons.rx_can_accept_boundary ... PASS
+    [test] cons.full_line_fits_ring ... PASS
+    [test] cons.full_ring_never_blocks_sak ... PASS
+    [test] cons.feed_write_short_on_full ... PASS
+    [test] cons.refused_byte_is_not_echoed ... PASS
+    [test] cons.serial_silent_gate ... PASS
+    [test] cons.serial_silent_sak_restores ... cons: SAK (no trusted proc)
+PASS
+    [test] cons.rx_holdback_reoffer ... PASS
+    [test] cons.rx_holdback_not_stranded ... PASS
+    [test] cons.rx_drop_counters ... PASS
+    [test] cons.ctrlc_consumed ... PASS
+    [test] cons.break_sets_sak ... PASS
+    [test] cons.read_busy_guard ... PASS
+    [test] cons.read_bad_args ... PASS
+    [test] cons.console_owner_intr ... PASS
+    [test] proc.revoke_console_attached ... PASS
+    [test] cons.sak_revoke_regrant ... cons: SAK (unarmed)
+PASS
+    [test] cons.sak_failsafe_revoke_only ... cons: SAK (no trusted proc)
+PASS
+    [test] cons.sak_idempotent_flood ... cons: SAK (unarmed)
+cons: SAK (unarmed)
+PASS
+    [test] cons.sak_via_console_mgr ... cons: SAK (unarmed)
+PASS
+    [test] cons.sak_does_not_terminate_trusted ... cons: SAK (unarmed)
+PASS
+    [test] cons.sak_attaches_from_relinquished_state ... cons: SAK (unarmed)
+PASS
+    [test] cons.episode_requires_arm ... cons: SAK (unarmed)
+PASS
+    [test] cons.episode_begins_on_sak ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_discards_pending_input ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_freezes_nonattached_reader ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_freezes_nonattached_writer ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_freezes_feed_consctl_poll ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_frozen_poller_follows_end ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_prior_poller_not_woken_by_keys ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_end_restores ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_repeat_sak_idempotent ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: SAK (active)
+cons: SAK (active)
+cons: trusted episode END
+PASS
+    [test] cons.graphical_seat_gate ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.graphical_seat_grant_and_failure ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.graphical_seat_deadline_and_death ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.graphical_seat_service_death ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_gate ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_relinquish_ends ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_trusted_death_ends ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_saved_owner_death ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode END
+PASS
+    [test] cons.episode_mode_write_straddling_begin ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_feed_straddling_begin ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: trusted episode ABANDONED (trusted proc gone)
+PASS
+    [test] cons.episode_repeat_sak_keeps_saved_owner ... cons: trusted episode BEGIN (SAK)
+cons: SAK (episode)
+cons: SAK (active)
+cons: trusted episode END
+PASS
+    [test] cons.episode_fixture_fails_clean ... PASS
+    [test] proc.console_relinquish ... PASS
+    [test] proc.console_relinquish_other ... PASS
+    [test] cons.console_open ... PASS
+    [test] uart.rx_path_enabled ... PASS
+    [test] uart.putc_tx_bounded ... PASS
+    [test] cons.poll_readiness ... PASS
+    [test] cons.poll_deferred_wake ... PASS
+    [test] cons.mgr_hold_defers_consumption ... PASS
+    [test] cons.termios_default ... PASS
+    [test] cons.cook_canonical_line ... PASS
+    [test] cons.cook_echo_off_no_output ... PASS
+    [test] cons.cook_isig_toggle ... PASS
+    [test] cons.cook_icrnl ... PASS
+    [test] cons.cook_onlcr_output ... PASS
+    [test] cons.consctl_parse ... PASS
+    [test] cons.consctl_render ... PASS
+    [test] cons.winsize_roundtrip ... PASS
+    [test] cons.beacon_roundtrip ... PASS
+    [test] cons.winsize_winch_iff_changed ... PASS
+    [test] cons.stat_native_qid_contract ... PASS
+    [test] cons.cook_line_overflow ... PASS
+    [test] cons.cook_mode_flip_delivers ... PASS
+    [test] cons.cook_isig_discards_pending_line ... PASS
+    [test] cons.cook_canonical_poll_edge ... PASS
+    [test] cons.drain_tap_mirrors_output ... PASS
+    [test] cons.sys_puts_uses_shared_console_path ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] vivarium.t1_renumbers ... PASS
+    [test] vivarium.rejects_are_deliberate ... PASS
+    [test] vivarium.unknown_forwards ... PASS
+    [test] vivarium.git_chunk_rows ... PASS
+    [test] vivarium.faccessat_gate ... PASS
+    [test] vivarium.fails_closed ... PASS
+    [test] vivarium.no_wide_alias ... PASS
+    [test] vivarium.openat_domain ... PASS
+    [test] vivarium.openat_at_fdcwd ... PASS
+    [test] vivarium.openat_build ... PASS
+    [test] vivarium.stat_to_linux ... PASS
+    [test] vivarium.fstatat_domain ... PASS
+    [test] vivarium.mmap_domain ... PASS
+    [test] vivarium.mmap_file_domain ... PASS
+    [test] vivarium.mmap_fixed_domain ... PASS
+    [test] vivarium.mprotect_domain ... PASS
+    [test] vivarium.madvise_domain ... PASS
+    [test] vivarium.mmap_arms_disjoint ... PASS
+    [test] vivarium.clone_domain ... PASS
+    [test] vivarium.futex_decide ... PASS
+    [test] vivarium.wait4_domain ... PASS
+    [test] vivarium.startup_batch_rows ... PASS
+    [test] vivarium.writev_domain ... PASS
+    [test] vivarium.fcntl_domain ... PASS
+    [test] vivarium.fcntl_dupfd_errnos ... PASS
+    [test] vivarium.fcntl_nonblock_roundtrip ... PASS
+    [test] vivarium.ioctl_decide ... PASS
+    [test] vivarium.dup_arm ... PASS
+    [test] vivarium.exec_drops_cloexec_sockets ... PASS
+    [test] vivarium.exec_sweep_prevents_fd_reuse_misroute ... PASS
+    [test] vivarium.sigtab_fork_exec_rule ... PASS
+    [test] vivarium.dup3_domain ... PASS
+    [test] vivarium.pipe2_domain ... PASS
+    [test] vivarium.uname_fill ... PASS
+    [test] vivarium.identity_map ... PASS
+    [test] vivarium.signal_map ... PASS
+    [test] vivarium.sigaction_domain ... PASS
+    [test] vivarium.sigset_to_notemask ... PASS
+    [test] vivarium.handler_mask ... PASS
+    [test] vivarium.signal_exclusivity ... PASS
+    [test] vivarium.signote_deliverable ... PASS
+    [test] vivarium.sigtab ... PASS
+    [test] vivarium.notemask_to_sigset ... PASS
+    [test] vivarium.signote_reverse ... PASS
+    [test] vivarium.sigframe ... PASS
+    [test] vivarium.socket_domain ... PASS
+    [test] vivarium.getsockopt_domain ... PASS
+    [test] vivarium.getsockopt_shell_guards_uaccess ... PASS
+    [test] vivarium.sendrecv_domain ... PASS
+    [test] vivarium.openat_create_domain ... PASS
+    [test] vivarium.mkdirat_domain ... PASS
+    [test] vivarium.unlinkat_domain ... PASS
+    [test] vivarium.renameat_domain ... PASS
+    [test] vivarium.dirent64_encode ... PASS
+    [test] vivarium.getdents64_guards_uaccess ... PASS
+    [test] vivarium.readv_writev_guard_iovec_array ... PASS
+    [test] vivarium.intr_class ... PASS
+    [test] vivarium.fd_is_slow_cached ... PASS
+    [test] vivarium.ioctl_termios_map ... PASS
+    [test] vivarium.ioctl_grammar_roundtrip ... PASS
+    [test] vivarium.ioctl_dispatch_ebadf ... PASS
+    [test] vivarium.session_errno_remap ... PASS
+    [test] vivarium.ioctl_cons_identity_and_gate ... PASS
+    [test] vivarium.phenotype_decide ... PASS
+    [test] vivarium.sockaddr ... PASS
+    [test] vivarium.net_cmd ... PASS
+    [test] vivarium.conn_n ... PASS
+    [test] vivarium.socktab ... PASS
+    [test] vivarium.socktab_close_hook ... PASS
+    [test] vivarium.socktab_bind_fields ... PASS
+    [test] vivarium.socktab_keyed_write_identity ... PASS
+    [test] vivarium.socktab_connecting ... PASS
+    [test] vivsock.accept_wait_is_over ... PASS
+    [test] vivsock.connect_tcp_holds_the_dial ... PASS
+    [test] vivsock.connect_udp_never_waits ... PASS
+    [test] vivsock.connect_eintr_then_retry ... PASS
+    [test] vivsock.connect_connecting_resumes ... PASS
+    [test] vivsock.connect_failure_verdicts ... PASS
+    [test] vivsock.send_recv_finish_connect ... PASS
+    [test] vivsock.read_write_finish_connect ... PASS
+    [test] vivsock.so_error_reports_the_dial ... PASS
+    [test] vivsock.positioned_io_finishes_connect ... PASS
+    [test] vivsock.so_error_needs_no_descriptor ... PASS
+    [test] vivarium.socktab_reset ... PASS
+    [test] vivarium.socktab_clone_into ... PASS
+    [test] vivarium.socktab_alias ... PASS
+    [test] vivarium.socktab_ready_cache ... PASS
+    [test] vivarium.socktab_ready_release_paths ... PASS
+    [test] vivarium.dup3_alias ... PASS
+    [test] vivarium.socktab_arm_refusals ... PASS
+    [test] vivarium.listen_decide ... PASS
+    [test] vivarium.timespec_to_ms ... PASS
+    [test] vivarium.ppoll_decide ... PASS
+    [test] vivarium.pselect6_decide ... PASS
+    [test] vivarium.fdset_bytes ... PASS
+    [test] vivarium.fdset_to_pollfds ... PASS
+    [test] vivarium.pollfds_to_fdset ... PASS
+    [test] vivarium.fd_freeing_rows ... PASS
+    [test] vivarium.announce_cmd ... PASS
+    [test] vivarium.parse_ipport ... PASS
+    [test] vivarium.sockaddr_build ... PASS
+    [test] vivarium.sockaddr_parse_any ... PASS
+    [test] cons.drain_feed_runs_discipline ... PASS
+    [test] cons.drain_overflow_drops_oldest ... PASS
+    [test] cons.drain_close_and_reopen_epoch ... PASS
+    [test] cons.drain_poll_deferred_wake ... PASS
+    [test] devctl.bestiary_smoke ... PASS
+    [test] devctl.attach_returns_dir ... PASS
+    [test] devctl.walk_to_each_leaf ... PASS
+    [test] devctl.walk_unknown_misses ... PASS
+    [test] devctl.read_procs_format ... PASS
+    [test] devctl.procs_tables_column ... PASS
+    [test] devctl.cpu_sources_live ... PASS
+    [test] devctl.read_memory_format ... PASS
+    [test] devctl.read_devices_format ... PASS
+    [test] devctl.read_kernel_base_format ... PASS
+    [test] devctl.kernel_base_gated ... PASS
+    [test] devctl.kstack_gated ... PASS
+    [test] devctl.read_sched_format ... PASS
+    [test] devctl.read_cons_format ... PASS
+    [test] devctl.read_cpu_format ... PASS
+    [test] devctl.write_rejected ... PASS
+    [test] devctl.read_dir_returns_neg1 ... PASS
+    [test] devctl.stat_native_shapes ... PASS
+    [test] devctl.read_9p_sessions_format ... PASS
+    [test] devdev.bestiary_smoke ... PASS
+    [test] devdev.attach_returns_dir ... PASS
+    [test] devdev.walk_to_each_leaf ... PASS
+    [test] devdev.walk_unknown_misses ... PASS
+    [test] devdev.walk_pts_dir ... PASS
+    [test] devdev.trivial_leaves ... PASS
+    [test] devdev.stat_native_leaves ... PASS
+    [test] devdev.cons_gate ... PASS
+    [test] devdev.renderer_gate ... PASS
+    [test] devdev.drain_opath_clone_no_disarm ... PASS
+    [test] devdev.drain_walk_off_opened_dev_no_disarm ... PASS
+    [test] devdev.spawn_unbump_runs_close ... PASS
+    [test] devdev.consctl_renderer_mint ... PASS
+    [test] devdev.winsize_leaf ... PASS
+    [test] devdev.fd_devclass ... PASS
+    [test] devdev.beacon_leaf ... PASS
+    [test] devhw.bestiary_smoke ... PASS
+    [test] devhw.attach_returns_root ... PASS
+    [test] devhw.walk_node_and_prop ... PASS
+    [test] devhw.walk_deep_and_dotdot ... PASS
+    [test] devhw.walk_miss ... PASS
+    [test] devhw.walk_reuse_nc ... PASS
+    [test] devhw.prop_read ... PASS
+    [test] devhw.stat_native ... PASS
+    [test] devhw.readdir_cookie_contract ... PASS
+    [test] devhw.iter_api ... PASS
+    [test] devhw.synth_pci_child ... PASS
+    [test] devpci.bestiary_smoke ... PASS
+    [test] devpci.attach_root ... PASS
+    [test] devpci.walk_read_ctl ... PASS
+    [test] devpci.readonly ... PASS
+    [test] devpci.readdir ... PASS
+    [test] devpci.walk_reuse_nc ... PASS
+    [test] env.set_get ... PASS
+    [test] env.create_idempotent ... PASS
+    [test] env.overwrite_truncate ... PASS
+    [test] env.unset_monotonic ... PASS
+    [test] env.iter_order ... PASS
+    [test] env.bounds ... PASS
+    [test] env.render_environ ... PASS
+    [test] env.render_environ_eq_in_name ... PASS
+    [test] env.clone_deep_independent ... PASS
+    [test] env.free_null_tolerant ... PASS
+    [test] devenv.bestiary ... PASS
+    [test] devenv.walk_reuse_nc ... PASS
+    [test] devenv.walk_read ... PASS
+    [test] devenv.stat_native_shapes ... PASS
+    [test] allowance.null_is_broad ... PASS
+    [test] allowance.mmio_containment ... PASS
+    [test] allowance.irq_membership ... PASS
+    [test] allowance.dma_cap ... PASS
+    [test] allowance.revoked_permits_nothing ... PASS
+    [test] allowance.confer_rejects_overcap ... PASS
+    [test] allowance.handle_alloc_broad ... PASS
+    [test] allowance.handle_alloc_revoked_aborts ... PASS
+    [test] allowance.clone_inherit ... PASS
+    [test] allowance.free_null_tolerant ... PASS
+    [test] allowance.pci_membership ... PASS
+    [test] allowance.pci_claim_handler_gate ... PASS
+    [test] allowance.confer_within_parent ... PASS
+    [test] allowance.revoke_on_group_terminate ... PASS
+    [test] allowance.narrowed_proc_cannot_spawn ... PASS
+    [test] cpio.is_valid_recognizes_magic ... PASS
+    [test] cpio.iter_empty_archive ... PASS
+    [test] cpio.iter_single_entry ... PASS
+    [test] cpio.iter_two_entries ... PASS
+    [test] cpio.iter_rejects_truncated ... PASS
+    [test] cpio.iter_rejects_bad_magic ... PASS
+    [test] cpio.count_matches ... PASS
+    [test] devramfs.bestiary_smoke ... PASS
+    [test] devramfs.initialized_with_files ... PASS
+    [test] devramfs.attach_returns_dir ... PASS
+    [test] devramfs.walk_to_welcome ... PASS
+    [test] devramfs.walk_unknown_misses ... PASS
+    [test] devramfs.read_welcome ... PASS
+    [test] devramfs.read_version ... PASS
+    [test] devramfs.read_partial_offset ... PASS
+    [test] devramfs.read_dir_returns_neg1 ... PASS
+    [test] devramfs.stat_native_system_owned ... PASS
+    [test] spoor.stat_native_stamps_devno ... PASS
+    [test] devramfs.write_rejected ... PASS
+    [test] devramfs.readdir_enumerates_root ... PASS
+    [test] devramfs.readdir_file_returns_neg1 ... PASS
+    [test] devramfs.readdir_buffer_too_small_errs ... PASS
+    [test] devramfs.readdir_synth_dir_empty ... PASS
+    [test] devramfs.walk_attrs ... PASS
+    [test] devramfs.readdir_paginates_no_dup_no_skip ... PASS
+    [test] devramfs.tree_walk_and_dotdot ... PASS
+    [test] devramfs.tree_readdir_per_directory ... PASS
+    [test] devramfs.tree_stat_read_lookup ... PASS
+    [test] devramfs.tree_load_refusals ... PASS
+    [test] devramfs.tree_truncates_at_cap ... PASS
+    [test] devramfs.load_complete ... PASS
+    [test] devramfs.live_lib_when_prover_ships ... PASS
+    [test] devramfs.live_bin_holds_the_programs ... PASS
+    [test] devsrv.registered ... PASS
+    [test] devsrv.open_root_dir ... PASS
+    [test] devsrv.stat_native_root ... PASS
+    [test] devsrv.post_gate ... PASS
+    [test] devsrv.cap_post_bounds ... PASS
+    [test] devsrv.accept_lifetime ... PASS
+    [test] devsrv.post_basic ... PASS
+    [test] devsrv.tombstone ... PASS
+    [test] devsrv.registry_full ... PASS
+    [test] devsrv.registry_full_tombstone_rebinds ... PASS
+    [test] devsrv.post_rollback ... PASS
+    [test] devsrv.registry_lifecycle ... PASS
+    [test] devsrv.svc_ref_holds_registry ... PASS
+    [test] devsrv.post_listener ... PASS
+    [test] devsrv.service_keys_distinct ... PASS
+    [test] devcap.registered ... PASS
+    [test] devcap.walk_grant_use ... PASS
+    [test] devcap.walk_unknown ... PASS
+    [test] devcap.open_writeonly ... PASS
+    [test] devcap.grant_gate_no_cap ... PASS
+    [test] devcap.grant_gate_bad_args ... PASS
+    [test] devcap.grant_replace ... PASS
+    [test] devcap.grant_table_full ... PASS
+    [test] devcap.use_gate_no_console ... PASS
+    [test] devcap.use_no_pending ... PASS
+    [test] devcap.use_basic ... PASS
+    [test] devcap.taint_refuses_hostowner_redeem ... PASS
+    [test] devcap.use_one_shot ... PASS
+    [test] devcap.use_mismatched_cap ... PASS
+    [test] devcap.exit_clears_grant ... PASS
+    [test] devcap.clearance_grant_gate_no_cap ... PASS
+    [test] devcap.clearance_grant_bad_args ... PASS
+    [test] devcap.clearance_redeem_basic ... PASS
+    [test] devcap.imperium_grant_gate_and_bounds ... PASS
+    [test] devcap.imperium_redeem_propagating ... PASS
+    [test] devcap.imperium_nest_refused ... PASS
+    [test] devcap.further_redeem_keeps_scope ... PASS
+    [test] devcap.clearance_self_restriction ... PASS
+    [test] devcap.clearance_redeem_beyond_grant ... PASS
+    [test] devcap.clearance_one_shot ... PASS
+    [test] devcap.clearance_cross_stripes ... PASS
+    [test] devcap.clearance_valid_until ... PASS
+    [test] devcap.clearance_kind_isolation ... PASS
+    [test] srvconn.create_destroy ... PASS
+    [test] srvconn.roundtrip ... PASS
+    [test] srvconn.nonblocking_backpressure ... PASS
+    [test] srvconn.ring_capacity ... PASS
+    [test] srvconn.recv_blocks_then_wakes ... PASS
+    [test] srvconn.server_send_blocks_then_drain_wakes ... PASS
+    [test] srvconn.bulk_ring_class ... PASS
+    [test] srvconn.ctl_counters ... PASS
+    [test] srvconn.role_park_second_writer ... PASS
+    [test] srvconn.role_park_second_reader ... PASS
+    [test] srvconn.client_send_blocking_backpressure ... PASS
+    [test] srvconn.client_send_blocking_poll_edge ... PASS
+    [test] srvconn.recv_deadline_timeout ... PASS
+    [test] srvconn.teardown_eofs ... PASS
+    [test] srvconn.teardown_wakes_blocked ... PASS
+    [test] devsrv.walk_service ... PASS
+    [test] devsrv.open_connect_byte ... PASS
+    [test] devsrv.srv_connect_gate_decides ... PASS
+    [test] devsrv.srv_connect_gate ... PASS
+    [test] devsrv.kernel_attached_io_refused ... PASS
+    [test] devsrv.kernel_attached_server_close_eofs ... PASS
+    [test] devsrv.accept_immediate ... PASS
+    [test] devsrv.accept_blocks_then_wakes ... PASS
+    [test] devsrv.conn_io ... PASS
+    [test] devsrv.conn_release ... PASS
+    [test] devsrv.poster_exit_drains_backlog ... PASS
+    [test] devsrv.srv_peer_identity ... PASS
+    [test] devsrv.srv_peer_dead_peer ... PASS
+    [test] devsrv.srv_peer_renderer_flag ... PASS
+    [test] devsrv.srv_peer_gate ... PASS
+    [test] devsrv.srv_peer_bad_args ... PASS
+    [test] devsrv.seat_import_gates ... PASS
+    [test] srv_client.no_per_proc_cap ... PASS
+    [test] srv_client.byte_mode_propagates_to_conn ... PASS
+    [test] srv_client.byte_mode_conn_dispatch ... PASS
+    [test] srv_client.byte_mode_mode_change_rebind_refused ... PASS
+    [test] srv_client.byte_mode_server_recv_blocking_eof ... PASS
+    [test] srv_client.cape_post ... PASS
+    [test] srv_client.cape_admission ... PASS
+    [test] srv_client.cape_post_syscall ... PASS
+    [test] srv_client.remote_admission ... PASS
+    [test] srv_client.remote_post ... PASS
+    [test] srv_client.remote_recycle ... PASS
+    [test] srv_client.remote_post_syscall ... PASS
+    [test] virtio.mmio_probe ... PASS
+    [test] virtio.magic_value ... PASS
+    [test] virtio.version_modern ... PASS
+    [test] virtio.rng_present ... PASS
+    [test] virtio.negotiate_features_smoke ... PASS
+    [test] virtio.virtqueue_alloc_destroy ... PASS
+    [test] virtio.find_by_device_id ... PASS
+    [test] virtio.reset_in_range_no_match ... PASS
+    [test] virtio.vq_size_for ... PASS
+    [test] virtio.proc_death_quiesces_device ... PASS
+    [test] virtio.proc_death_quiesces_vma_only_device ... [AS-2a] pinned last-owner VMA-only device quiescence exercised
+PASS
+    [test] irqfwd.create_destroy ... PASS
+    [test] irqfwd.refcount_lifecycle ... PASS
+    [test] irqfwd.wait_wakes_on_sgi ... PASS
+    [test] irqfwd.collapses_concurrent_fires ... PASS
+    [test] irqfwd.second_waiter_refused ... PASS
+    [test] irqfwd.detached_dispatch ... PASS
+    [test] irqfwd.level_mask_ack ... PASS
+    [test] irqfwd.wait_timeout ... PASS
+    [test] virtio_pci.init_called ... PASS
+    [test] virtio_pci.count_within_bound ... PASS
+    [test] virtio_pci.devices_have_vendor ... PASS
+    [test] virtio_pci.devices_have_cfg ... PASS
+    [test] virtio_pci.find_rng ... PASS
+    [test] virtio_pci.find_unknown_returns_null ... PASS
+    [test] virtio_pci.cfg_read_bounds ... PASS
+    [test] virtio_pci.cfg_write_bounds ... PASS
+    [test] pci.bar_decode_size ... PASS
+    [test] pci.walk_caps_hostile ... PASS
+    [test] pci.mapping_holds_function ... PASS
+    [test] pci.msix_failures ... PASS
+    [test] pci.msix_rng ... PASS
+    [test] pci.restart_placement ... PASS
+    [test] pci.msi_allocator ... PASS
+    [test] pci.intx_recovery ... PASS
+    [test] pci.intx_close_dispatch ... PASS
+    [test] pci.shared_irq_tickets ... PASS
+    [test] pci.msix_windows ... PASS
+    [test] pci.walk_caps_shm ... PASS
+    [test] pci.claim_rng ... PASS
+    [test] pci.claim_unknown ... PASS
+    [test] pci.claim_exclusive ... PASS
+    [test] pci.unref_releases_bars ... PASS
+    [test] pci.live_count_balances ... PASS
+    [test] pci.syscall_reject ... PASS
+    [test] pci.syscall_claim_info ... PASS
+    [test] pci.claim_nth ... PASS
+    [test] userspace.first_iteration ...     [iteration 1] exec_thunk: pid=4162 context_id=0x000000000000061c pgtable_root=0x0000000041e70000 cpu=0x0000000000000000
+    [iteration 1] about to userland_enter entry=0x0000000000010000 sp=0x000000007fffff20
+    [iteration 1] TTBR0_EL1 live=0x001c000041e70000
+    [iteration 1] L0[0]=0x0000000000000000
+    [iteration 1] about to call userland_enter
+    [iteration 1] reaped pid=4162 status=0
+PASS
+    [test] userspace.second_iteration ...     [iteration 2] exec_thunk: pid=4163 context_id=0x000000000000061d pgtable_root=0x0000000044a45000 cpu=0x0000000000000000
+    [iteration 2] about to userland_enter entry=0x0000000000010000 sp=0x000000007fffff20
+    [iteration 2] TTBR0_EL1 live=0x001d000044a45000
+    [iteration 2] L0[0]=0x0000000000000000
+    [iteration 2] about to call userland_enter
+    [iteration 2] reaped pid=4163 status=0
+PASS
+    [test] userspace.ramfs_hello ...     /bin/hello cpio=0xffff00004bb85ca8 → aligned=0xffffa00289bf63e0 size=14496 bytes
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 → userland_enter
+hello from /hello (built via tools/build.sh userspace)
+    /bin/hello reaped pid=4164 status=0 (build path verified)
+PASS
+    [test] userspace.ramfs_hello_rs ...     /bin/hello-rs cpio=0xffff00004bb895c4 → aligned=0xffffa00289bf63e0 size=12344 bytes
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 → userland_enter
+hello from /hello-rs (Rust no_std, built via cargo)
+    /bin/hello-rs reaped pid=4165 status=0 (build path verified)
+PASS
+    [test] userspace.mmio_probe_rfork_with_caps ...     /mmio-probe size=13016 bytes → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+mmio-probe: starting (P4-Ic5a; U-2h-hardware typed API)
+mmio-probe: Mmio::new ok (create + map combined)
+mmio-probe: gpiodata=0x00000000 periphid0=0x00000061
+mmio-probe: PASS
+    /mmio-probe reaped pid=4166 status=0 — SVC path verified end-to-end
+PASS
+    [test] userspace.irq_probe_rfork_with_caps ...     /irq-probe size=13200 bytes → pre-pend SPI 287 + rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff00 caps=0x0x0000000000000001 → userland_enter
+irq-probe: starting (P4-Ic5-IRQ-probe)
+irq-probe: Irq::new ok
+irq-probe: Irq::wait entering...
+irq-probe: Irq::wait returned
+irq-probe: PASS
+    /irq-probe reaped pid=4167 status=0 — IRQ SVC path verified end-to-end
+PASS
+    [test] userspace.virtio_blk_probe_rfork_with_caps ...     /virtio-blk-probe size=14000 bytes; blk_dev pa=0x000000000a003c00 → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-blk-probe: PASS — slot=30 intid=78 sig=THYLACINE-DISK-1
+    /virtio-blk-probe reaped pid=4168 status=0 — full driver SVC path verified end-to-end
+PASS
+    [test] userspace.virtio_blk_rw_rfork_with_caps ...     /virtio-blk-rw size=18600 bytes; blk_dev pa=0x000000000a003c00 → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-blk-rw: slot=30 intid=78 capacity_sectors=32768 → per-pass=7340032 bytes (7 requests × 1 MiB)
+virtio-blk-rw: pass A read+verify(A) — sectors=[1..14337) = 7340032 bytes
+virtio-blk-rw: pass A read+verify(A) OK
+virtio-blk-rw: pass B write(B) — sectors=[14337..28673) = 7340032 bytes
+virtio-blk-rw: pass B write(B) OK
+virtio-blk-rw: pass C read+verify(B) — sectors=[14337..28673) = 7340032 bytes
+virtio-blk-rw: pass C read+verify(B) OK
+virtio-blk-rw: PASS — read(A)+write(B)+readback(B) over 7340032 bytes per pass × 3 passes (READ region [1..14337), WRITE region [14337..28673))
+    /virtio-blk-rw reaped pid=4169 status=0 — multi-sector r/w verified end-to-end
+PASS
+    [test] userspace.virtio_net_probe_rfork_with_caps ...     /virtio-net-probe size=13872 bytes; net_dev pa=0x000000000a003a00 → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-net-probe: slot=29 intid=77 mac=52:54:00:12:34:56 link=1
+virtio-net-probe: PASS — broadcast ARP TX completed (slot=29 intid=77)
+    /virtio-net-probe reaped pid=4170 status=0 — TX virtqueue + ARP frame end-to-end
+PASS
+    [test] userspace.virtio_net_arp_rfork_with_caps ...     /virtio-net-arp size=19352 bytes; net_dev pa=0x000000000a003a00 → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-net-arp: slot=29 intid=77 mac=52:54:00:12:34:56 link=1
+virtio-net-arp: rx_reply sender_mac=52:55:0a:00:02:02 sender_ip=10.0.2.2 target_ip=10.0.2.15
+virtio-net-arp: PASS — full ARP request/reply round-trip (slot=29 intid=77)
+    /virtio-net-arp reaped pid=4171 status=0 — TX + RX virtqueue + slirp ARP reply end-to-end
+PASS
+    [test] userspace.virtio_net_loop_rfork_with_caps ...     /virtio-net-loop size=18232 bytes; net_dev pa=0x000000000a003a00 → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-net-loop: slot=29 intid=77 mac=52:54:00:12:34:56 link=1 target=24
+virtio-net-loop: PASS — 24/24 ARP replies validated; tx_completed=24; RX desc recycled past QUEUE_SIZE (slot=29 intid=77)
+    /virtio-net-loop reaped pid=4172 status=0 — steady-state RX recycle + TX reuse past QUEUE_SIZE
+PASS
+    [test] userspace.virtio_input_probe_rfork_with_caps ...     /virtio-input size=18440 bytes; input_dev pa=0x000000000a003800 slot=28 intid=76 → pre-pend SPI + rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-input: slot=28 intid=76 name="QEMU Virtio Keyboard" name_len=21 key_bits=29 rel_bits=0
+virtio-input: AWAITING_QMP_KEY
+virtio-input: event type=1 code=30 value=1
+virtio-input: event type=0 code=0 value=0
+virtio-input: saw target key (EV_KEY code=30 value=1)
+virtio-input: PASS — event consumption end-to-end (slot=28 intid=76 events=2)
+    /virtio-input reaped pid=4173 status=0 — config-space + eventq init + IRQ wake + bounded poll for QMP-injected key
+PASS
+    [test] userspace.virtio_gpu_probe_rfork_with_caps ...     /virtio-gpu size=19544 bytes; gpu_dev pa=0x000000000a003600 → rfork_with_caps(CAP_HW_CREATE)
+    exec_setup ok entry=0x0000000000400000 sp=0x000000007fffff20 caps=0x0x0000000000000001 → userland_enter
+virtio-gpu: display_info slot=27 intid=75 num_scanouts=1 num_capsets=0 pmodes[0]=1280x800 enabled=1
+virtio-gpu: PASS — scanout pipeline (CREATE_2D + ATTACH_BACKING + SET_SCANOUT + TRANSFER + FLUSH) on 128x128 B8G8R8A8 framebuffer; slot=27 intid=75 cmds=6
+    /virtio-gpu reaped pid=4174 status=0 — full 2D scanout pipeline end-to-end (6 controlq commands)
+PASS
+    [test] userspace.driver_crash_recovery ...     crash-recovery: target pa=0x000000000a003c00 slot=30 intid=78
+    crash-recovery: spawning A child
+virtio-blk-probe: PASS — slot=30 intid=78 sig=THYLACINE-DISK-1
+    crash-recovery: A reaped pid=4175 status=0
+    crash-recovery: release verified — both claims free
+    crash-recovery: spawning B child
+virtio-blk-probe: PASS — slot=30 intid=78 sig=THYLACINE-DISK-1
+    crash-recovery: B reaped pid=4176 status=0
+    crash-recovery: PASS — full A→B sequential claim over same hardware
+PASS
+    [test] 9p_wire.primitives_round_trip ... PASS
+    [test] 9p_wire.primitives_overflow ... PASS
+    [test] 9p_wire.str_round_trip ... PASS
+    [test] 9p_wire.pack_str_overflow ... PASS
+    [test] 9p_wire.qid_round_trip ... PASS
+    [test] 9p_wire.header_peek ... PASS
+    [test] 9p_wire.tversion_round_trip ... PASS
+    [test] 9p_wire.tattach_round_trip ... PASS
+    [test] 9p_wire.twalk_round_trip ... PASS
+    [test] 9p_wire.twalk_zero_names_clone ... PASS
+    [test] 9p_wire.tclunk_round_trip ... PASS
+    [test] 9p_wire.tflush_round_trip ... PASS
+    [test] 9p_wire.tweft_round_trip ... PASS
+    [test] 9p_wire.tweftio_round_trip ... PASS
+    [test] 9p_wire.twalkgetattr_round_trip ... PASS
+    [test] 9p_wire.rlerror_parse ... PASS
+    [test] 9p_wire.rmsg_size_mismatch_rejected ... PASS
+    [test] 9p_wire.rmsg_wrong_type_rejected ... PASS
+    [test] 9p_wire.rwalk_count_cap_enforced ... PASS
+    [test] 9p_wire.tlopen_round_trip ... PASS
+    [test] 9p_wire.tlcreate_round_trip ... PASS
+    [test] 9p_wire.tread_round_trip ... PASS
+    [test] 9p_wire.twrite_round_trip ... PASS
+    [test] 9p_wire.rread_data_cap_enforced ... PASS
+    [test] 9p_wire.rread_size_mismatch_rejected ... PASS
+    [test] 9p_wire.rlopen_vs_rlcreate_type_strict ... PASS
+    [test] 9p_wire.tgetattr_round_trip ... PASS
+    [test] 9p_wire.tsetattr_round_trip ... PASS
+    [test] 9p_wire.treaddir_round_trip ... PASS
+    [test] 9p_wire.dirent_unpack ... PASS
+    [test] 9p_wire.tstatfs_round_trip ... PASS
+    [test] 9p_wire.tfsync_round_trip ... PASS
+    [test] 9p_wire.rreaddir_data_cap_enforced ... PASS
+    [test] 9p_wire.tsymlink_round_trip ... PASS
+    [test] 9p_wire.tmknod_round_trip ... PASS
+    [test] 9p_wire.trename_round_trip ... PASS
+    [test] 9p_wire.treadlink_round_trip ... PASS
+    [test] 9p_wire.tlink_round_trip ... PASS
+    [test] 9p_wire.tmkdir_round_trip ... PASS
+    [test] 9p_wire.trenameat_round_trip ... PASS
+    [test] 9p_wire.tunlinkat_round_trip ... PASS
+    [test] 9p_session.init_destroy ... PASS
+    [test] 9p_session.version_handshake ... PASS
+    [test] 9p_session.attach_handshake ... PASS
+    [test] 9p_session.walk_round_trip ... PASS
+    [test] 9p_session.walk_fid_full_no_latch ... PASS
+    [test] 9p_session.clunk_retract_after_peer_fill ... PASS
+    [test] 9p_session.flushed_walk_late_reply_binds ... PASS
+    [test] 9p_session.flushed_reply_honoured_for_waiting_owner ... PASS
+    [test] 9p_session.flush_retract_restores_live_op ... PASS
+    [test] 9p_session.flush_owner_waits_keeps_fid_live ... PASS
+    [test] 9p_session.flush_names_no_fid ... PASS
+    [test] 9p_session.clunk_round_trip ... PASS
+    [test] 9p_session.clunk_send_time_unbinds ... PASS
+    [test] 9p_session.dispatch_rlerror ... PASS
+    [test] 9p_session.walk_to_root_refused ... PASS
+    [test] 9p_session.walk_to_bound_fid_refused ... PASS
+    [test] 9p_session.walk_from_unbound_fid_refused ... PASS
+    [test] 9p_session.clunk_root_refused ... PASS
+    [test] 9p_session.clunk_with_inflight_on_fid_refused ... PASS
+    [test] 9p_session.fid_after_clunk_refused ... PASS
+    [test] 9p_session.dispatch_wrong_tag_rejected ... PASS
+    [test] 9p_session.dispatch_wrong_type_rejected ... PASS
+    [test] 9p_session.close_with_inflight_refused ... PASS
+    [test] 9p_session.state_gate_send_walk_before_open ... PASS
+    [test] 9p_session.lopen_round_trip ... PASS
+    [test] 9p_session.lcreate_round_trip ... PASS
+    [test] 9p_session.read_round_trip ... PASS
+    [test] 9p_session.write_round_trip ... PASS
+    [test] 9p_session.lopen_with_inflight_on_fid_refused ... PASS
+    [test] 9p_session.read_permits_concurrent ... PASS
+    [test] 9p_session.io_from_unbound_fid_refused ... PASS
+    [test] 9p_session.io_before_open_refused ... PASS
+    [test] 9p_session.getattr_round_trip ... PASS
+    [test] 9p_session.setattr_round_trip ... PASS
+    [test] 9p_session.readdir_round_trip ... PASS
+    [test] 9p_session.statfs_round_trip ... PASS
+    [test] 9p_session.weft_round_trip ... PASS
+    [test] 9p_session.weftio_round_trip ... PASS
+    [test] 9p_session.fsync_round_trip ... PASS
+    [test] 9p_session.setattr_with_inflight_on_fid_refused ... PASS
+    [test] 9p_session.getattr_permits_concurrent ... PASS
+    [test] 9p_session.meta_from_unbound_fid_refused ... PASS
+    [test] 9p_session.symlink_round_trip ... PASS
+    [test] 9p_session.mknod_round_trip ... PASS
+    [test] 9p_session.rename_round_trip ... PASS
+    [test] 9p_session.readlink_round_trip ... PASS
+    [test] 9p_session.link_round_trip ... PASS
+    [test] 9p_session.mkdir_round_trip ... PASS
+    [test] 9p_session.renameat_round_trip ... PASS
+    [test] 9p_session.unlinkat_round_trip ... PASS
+    [test] 9p_session.rename_with_inflight_on_fid_refused ... PASS
+    [test] 9p_session.unlinkat_permits_concurrent ... PASS
+    [test] 9p_session.mutation_from_unbound_fid_refused ... PASS
+    [test] 9p_session.flush_reclaims_both ... PASS
+    [test] 9p_session.late_reply_does_not_free_awaiting_flush ... PASS
+    [test] 9p_session.abort_unsent_reclaims_tag ... PASS
+    [test] 9p_session.flush_rollback_restores_victim ... PASS
+    [test] 9p_transport.init_destroy ... PASS
+    [test] 9p_transport.round_trip ... PASS
+    [test] 9p_transport.send_frame_size_mismatch_rejected ... PASS
+    [test] 9p_transport.recv_frame_too_large_rejected ... PASS
+    [test] 9p_transport.partial_read_aggregation ... PASS
+    [test] 9p_transport.backend_error_transitions_to_error ... PASS
+    [test] 9p_transport.close_idempotent ... PASS
+    [test] 9p_transport.exchange_drives_session_handshake ... PASS
+    [test] 9p_transport.exchange_drives_session_walk ... PASS
+    [test] 9p_transport.deadline_idle_vs_eof ... PASS
+    [test] 9p_client.init_destroy ... PASS
+    [test] 9p_client.handshake ... PASS
+    [test] 9p_client.walk_and_clunk ... PASS
+    [test] 9p_client.walkgetattr ... PASS
+    [test] 9p_client.lopen_read ... PASS
+    [test] 9p_client.write ... PASS
+    [test] 9p_client.bulk_write_clamps_short ... PASS
+    [test] 9p_client.getattr ... PASS
+    [test] 9p_client.readdir ... PASS
+    [test] 9p_client.statfs ... PASS
+    [test] 9p_client.weft ... PASS
+    [test] larder.install_serve ... PASS
+    [test] larder.serve_miss ... PASS
+    [test] larder.invalidate ... PASS
+    [test] larder.gen_guard ... PASS
+    [test] larder.root_qid_zero ... PASS
+    [test] larder.overwrite_wins ... PASS
+    [test] larder.eviction_bounded ... PASS
+    [test] larder.dentry_serve ... PASS
+    [test] larder.dentry_serve_miss ... PASS
+    [test] larder.dentry_negative ... PASS
+    [test] larder.dentry_multi_hop ... PASS
+    [test] larder.dentry_partial_chain_bails ... PASS
+    [test] larder.dentry_attr_miss_bails ... PASS
+    [test] larder.dentry_invalidate_name ... PASS
+    [test] larder.dentry_gen_guard ... PASS
+    [test] larder.dentry_name_too_long ... PASS
+    [test] larder.dentry_bounded ... PASS
+    [test] larder.page_serve ... PASS
+    [test] larder.page_serve_miss ... PASS
+    [test] larder.page_offset ... PASS
+    [test] larder.page_cvers_mismatch ... PASS
+    [test] larder.page_partial ... PASS
+    [test] larder.page_invalidate ... PASS
+    [test] larder.page_invalidate_multifile ... PASS
+    [test] larder.page_gen_guard ... PASS
+    [test] larder.pages_snapshot_gen_witness ... PASS
+    [test] larder.page_overwrite ... PASS
+    [test] larder.page_bounded ... PASS
+    [test] larder.page_destroy_frees ... PASS
+    [test] larder.attr_downgrade_perm_only ... PASS
+    [test] larder.downgrade_guards_raced_populate ... PASS
+    [test] larder.gen_scope_qid ... PASS
+    [test] 9p_client.weftio ... PASS
+    [test] 9p_client.mkdir ... PASS
+    [test] 9p_client.unlinkat ... PASS
+    [test] 9p_client.readlink ... PASS
+    [test] 9p_client.rlerror_propagates_to_negative_errno ... PASS
+    [test] 9p_client.rlerror_hostile_ecode_bounded ... PASS
+    [test] 9p_client.op_before_handshake_returns_ebusy ... PASS
+    [test] 9p_client.lock_released_between_ops ... PASS
+    [test] 9p_client.async_op_posts_cqe ... PASS
+    [test] 9p_client.async_session_death_posts_error_cqe ... PASS
+    [test] 9p_client.async_peer_gone_posts_nodev_cqe ... PASS
+    [test] 9p_client.async_mark_devgone_posts_nodev_cqe ... PASS
+    [test] 9p_client.async_handoff_skips_async ... PASS
+    [test] 9p_client.handoff_skips_debug_stopped_owner ... PASS
+    [test] 9p_client.pump_deadline_idle ... PASS
+    [test] 9p_client.pump_deadline_data_ready_progresses ... PASS
+    [test] 9p_client.pump_deadline_chunked_frame_completes ... PASS
+    [test] 9p_client.pump_deadline_busy_when_reader_active ... PASS
+    [test] 9p_client.loom_fsync_e2e ... PASS
+    [test] 9p_client.loom_rights_deny ... PASS
+    [test] 9p_client.loom_quiesce_abandons_inflight ... PASS
+    [test] 9p_client.loom_multishot_stream ... PASS
+    [test] 9p_client.loom_multishot_backpressure ... PASS
+    [test] 9p_client.loom_link_cancel_cascade ... PASS
+    [test] 9p_client.loom_link_success_ordering ... PASS
+    [test] 9p_client.loom_drain_barrier ... PASS
+    [test] 9p_client.loom_independent_past_held ... PASS
+    [test] 9p_client.loom_drain_waits_for_rearm_pending ... PASS
+    [test] 9p_client.loom_read_e2e ... PASS
+    [test] 9p_client.loom_write_e2e ... PASS
+    [test] 9p_client.loom_weft_read_e2e ... PASS
+    [test] 9p_client.loom_weft_write_e2e ... PASS
+    [test] 9p_client.loom_weft_hybrid_fallback ... PASS
+    [test] 9p_client.loom_weft_oob_rejected ... PASS
+    [test] 9p_client.loom_rw_rejects ... PASS
+    [test] 9p_client.loom_readdir_e2e ... PASS
+    [test] 9p_client.loom_readlink_e2e ... PASS
+    [test] 9p_client.loom_getattr_e2e ... PASS
+    [test] 9p_client.loom_statfs_e2e ... PASS
+    [test] 9p_client.loom_metaread_rejects ... PASS
+    [test] 9p_client.loom_mkdir_e2e ... PASS
+    [test] 9p_client.loom_setattr_e2e ... PASS
+    [test] 9p_client.loom_renameat_e2e ... PASS
+    [test] 9p_client.loom_mutation_rejects ... PASS
+    [test] 9p_client.loom_dirmut_dac ... PASS
+    [test] 9p_client.loom_dirmut_sqpoll ... PASS
+    [test] 9p_client.loom_create_gid ... PASS
+    [test] 9p_client.loom_cape ... PASS
+    [test] 9p_client.loom_dirmut_names ... PASS
+    [test] 9p_client.async_clunk_burst_no_fid_leak ... PASS
+    [test] 9p_client.clunk_dying_keeps_fid_bound ... PASS
+    [test] 9p_client.clunk_killed_while_parked ... PASS
+    [test] 9p_client.clunk_killed_in_tag_drain ... PASS
+    [test] 9p_client.clunk_dying_waiter_sends_no_flush ... PASS
+    [test] 9p_client.flushed_walk_late_reply_to_sink ... 9p: op abandoned (tag 0, death, flush sent)
+PASS
+    [test] 9p_client.abandoned_walk_late_reply_kept ... 9p: op abandoned (tag 0, death, flush rolled back)
+PASS
+    [test] 9p_client.abandoned_async_clunk_not_flushed ... PASS
+    [test] 9p_client.clunk_rlerror_drains_as_clunk ... PASS
+    [test] 9p_client.clunk_malformed_reply_fails_closed ... PASS
+    [test] 9p_client.abandoned_walk_malformed_late_reply_fails_closed ... 9p: op abandoned (tag 0, death, flush rolled back)
+PASS
+    [test] 9p_client.flush_malformed_reply_fails_closed ... 9p: op abandoned (tag 0, death, flush sent)
+PASS
+    [test] 9p_client.note_flush_honours_late_read ... PASS
+    [test] 9p_client.note_flush_rflush_first_cancels ... PASS
+    [test] 9p_client.note_flush_death_abandons ... 9p: op abandoned (tag 0, death, in its flush wait)
+PASS
+    [test] 9p_client.note_flush_reader_honours_walk ... PASS
+    [test] 9p_client.note_flush_full_pool_own_reply ... PASS
+    [test] 9p_client.note_flush_pump_wakes_parked_flush ... PASS
+    [test] 9p_client.note_flush_reader_rflush_first ... PASS
+    [test] 9p_client.note_flush_reply_beats_unsent_flush ... PASS
+    [test] 9p_client.note_flush_handoff_skips_staging ... PASS
+    [test] 9p_client.handoff_skips_send_parked ... PASS
+    [test] 9p_client.note_flush_staging_waits_for_owed_tag ... PASS
+    [test] 9p_client.async_clunk_drain_waits_for_owed_tag ... PASS
+    [test] 9p_client.loom_multi_inflight_e2e ... PASS
+    [test] 9p_client.loom_multi_inflight_read_e2e ... PASS
+    [test] 9p_client.send_backpressure_self_pump ... PASS
+    [test] 9p_client.send_backpressure_multi_waiter ... PASS
+    [test] 9p_client.send_backpressure_spill_survives_outbuf_reuse ... PASS
+    [test] 9p_client.abandon_async_eagain_keeps_session_alive ... PASS
+    [test] 9p_client.async_send_eagain_keeps_session_alive ... PASS
+    [test] 9p_client.async_full_tag_pool_is_eagain ... PASS
+    [test] dev9p.registered ... PASS
+    [test] dev9p.attach_client_root_spoor ... PASS
+    [test] dev9p.walk_one_component ... PASS
+    [test] dev9p.walk_clone ... PASS
+    [test] dev9p.open_lopens_fid ... PASS
+    [test] dev9p.open_errno ... PASS
+    [test] dev9p.stalk_open_errno ... PASS
+    [test] dev9p.read_routes_through_client ... PASS
+    [test] dev9p.write_routes_through_client ... PASS
+    [test] dev9p.write_read_propagate_errno ... PASS
+    [test] dev9p.close_clunks_owned_fid ... PASS
+    [test] dev9p.close_does_not_clunk_root_fid ... PASS
+    [test] dev9p.create_file ... PASS
+    [test] dev9p.create_errno_propagates_eexist ... PASS
+    [test] dev9p.create_invalidates_reused_child ... PASS
+    [test] dev9p.create_invalidates_reused_child_pages ... PASS
+    [test] dev9p.open_create_noent_then_create ... PASS
+    [test] dev9p.open_create_exists_race_retries_open ... PASS
+    [test] dev9p.open_create_excl_eexist_exact ... PASS
+    [test] dev9p.create_downgrades_parent_attr ... PASS
+    [test] dev9p.dirfid_consume_and_recycle ... PASS
+    [test] dev9p.dirfid_perm_only_leaf_consume ... PASS
+    [test] dev9p.dirfid_create_reuse_drop ... PASS
+    [test] dev9p.dirfid_rmdir_drop_and_no_stale_repark ... PASS
+    [test] dev9p.dirfid_suspect_not_reparked ... PASS
+    [test] dev9p.create_invalidates_negative_dentry ... PASS
+    [test] dev9p.create_dir ... PASS
+    [test] dev9p.fsync ... PASS
+    [test] dev9p.readdir ... PASS
+    [test] dev9p.readdir_cookie_high_bit ... PASS
+    [test] dev9p.poll_regular_file_always_ready ... PASS
+    [test] dev9p.poll_snapshot_answers_at_zero_timeout ... PASS
+    [test] dev9p.poll_local_and_remote_both_reported ... PASS
+    [test] dev9p.poll_snapshot_shortage_is_resent ... PASS
+    [test] dev9p.poll_unanswered_snapshot_fails_safe ... PASS
+    [test] dev9p.poll_arm_wakes_the_parked_poller ... PASS
+    [test] dev9p.poll_retry_timer_is_a_wake ... PASS
+    [test] dev9p.poll_widen_keeps_the_old_arm_until_replaced ... PASS
+    [test] dev9p.poll_cancel_at_close ... PASS
+    [test] dev9p.poll_gc_flushes_with_the_unlink ... PASS
+    [test] dev9p.rename ... PASS
+    [test] dev9p.unlink ... PASS
+    [test] dev9p.unlink_rename_errno ... PASS
+    [test] dev9p.stat_native_maps_getattr ... PASS
+    [test] dev9p.wstat_native_drives_setattr ... PASS
+    [test] dev9p.prw_wire_offset_and_cursor ... PASS
+    [test] dev9p.wstat_readonly_fd ... PASS
+    [test] dev9p.wstat_size ... PASS
+    [test] dev9p.cape ... PASS
+    [test] dev9p.path_create_refuses_dmsrvcape ... PASS
+    [test] dev9p.walk_create_refuses_dmsrv_bits ... PASS
+    [test] dev9p.remote_format_ns ... PASS
+    [test] dev9p.origin_format_ns ... PASS
+    [test] dev9p.walk_attrs ... PASS
+    [test] dev9p.wga_unsupported_by_errno ... PASS
+    [test] dev9p.page_cache_serve_and_gate ... PASS
+    [test] dev9p.read_align_heals_partial ... PASS
+    [test] dev9p.read_align_short_not_eof ... PASS
+    [test] dev9p.open_trunc_invalidates ... PASS
+    [test] dev9p.read_eof_attr_served ... PASS
+    [test] dev9p.cached_open ... PASS
+    [test] dev9p.cached_open_fallbacks ... PASS
+    [test] dev9p.cached_open_loose ... PASS
+    [test] dev9p.wb_coalesce_one_twrite ... PASS
+    [test] dev9p.wb_overlay_read ... PASS
+    [test] dev9p.wb_flush_at_close ... PASS
+    [test] dev9p.wb_fsync_flush_and_error ... PASS
+    [test] dev9p.wb_nonappend_writethrough ... PASS
+    [test] dev9p.wb_fstat_staged_size ... PASS
+    [test] dev9p.wb_cap_flush ... PASS
+    [test] dev9p.wb_budget_fallback ... PASS
+    [test] dev9p.wb_populate_readback ... PASS
+    [test] dev9p.wb_populate_append_chain ... PASS
+    [test] dev9p.wb_populate_failed_flush ... PASS
+    [test] dev9p.wb_writethrough_range ... PASS
+    [test] dev9p.perm_enforced_deny_allow ... PASS
+    [test] p9_attached.create_destroy ... PASS
+    [test] p9_attached.handshake_failure_returns_null ... PASS
+    [test] p9_attached.handshake_rlerror_ecode_overflow_clamped ... PASS
+    [test] p9_attached.root_spoor_walk_read ... PASS
+    [test] p9_attached.query_helpers ... PASS
+    [test] p9_attached.walked_outlives_root_no_uaf ... PASS
+    [test] p9_attached.ctl_registry ... PASS
+    [test] p9_closer.dying_close_delivers_tclunk ... PASS
+    [test] p9_closer.stalled_session_holds_one_closer ... PASS
+    [test] p9_closer.flushed_walk_fid_clunked ... 9p: op abandoned (tag 0, death, flush sent)
+PASS
+    [test] p9_closer.failed_spawn_retried_by_hand_off ... PASS
+    [test] p9_closer.hand_off_inside_failed_spawn_retried ... PASS
+    [test] p9_closer.hand_off_inside_spawn_no_duplicate ... PASS
+    [test] p9_closer.clunk_killed_while_self_pumping ... PASS
+    [test] p9_closer.orphan_oom_on_dead_session_quiet ... PASS
+    [test] sys_walk_open.max_length_name_nul_terminated ... PASS
+    [test] spoor_transport.init_destroy ... PASS
+    [test] spoor_transport.init_null_rejected ... PASS
+    [test] spoor_transport.send_routes_to_tx_dev_write ... PASS
+    [test] spoor_transport.recv_routes_to_rx_dev_read ... PASS
+    [test] spoor_transport.recv_empty_returns_zero ... PASS
+    [test] spoor_transport.close_clunks_when_owned ... PASS
+    [test] spoor_transport.close_preserves_when_unowned ... PASS
+    [test] spoor_transport.transport_core_round_trip ... PASS
+    [test] spoor_transport.end_to_end_handshake ... PASS
+    [test] 9p_srvconn_transport.init_destroy ... PASS
+    [test] 9p_srvconn_transport.init_null_rejected ... PASS
+    [test] 9p_srvconn_transport.send_routes_to_c2s_ring ... PASS
+    [test] 9p_srvconn_transport.recv_routes_from_s2c_ring ... PASS
+    [test] 9p_srvconn_transport.large_frame_roundtrip ... PASS
+    [test] 9p_srvconn_transport.cape_attach ... PASS
+    [test] 9p_srvconn_transport.cape_attach_srv ... PASS
+    [test] 9p_srvconn_transport.srv_attach_names_root ... PASS
+    [test] 9p_srvconn_transport.remote_attach ... PASS
+    [test] 9p_srvconn_transport.remote_attach_srv ... PASS
+    [test] 9p_srvconn_transport.close_drops_srvconn_ref ... PASS
+    [test] 9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close ... PASS
+    [test] 9p_srvconn_transport.send_preserves_caller_deadline ... PASS
+    [test] 9p_srvconn_transport.deadline_vtable_routes ... PASS
+    [test] 9p_srvconn_transport.devgone_posts_nodev_cqe ... PASS
+    [test] 9p_srvconn_transport.transport_err_posts_eio_cqe ... PASS
+    [test] 9p_srvconn_transport.pts_slave_spoor_classifies_t ... PASS
+    [test] pipe.smoke ... PASS
+    [test] pipe.read_on_empty_returns_zero ... PASS
+    [test] pipe.write_to_full_returns_zero ... PASS
+    [test] pipe.write_short_when_partially_full ... PASS
+    [test] pipe.nonblock_returns_eagain ... PASS
+    [test] pipe.wraparound ... PASS
+    [test] pipe.read_on_write_end_rejected ... PASS
+    [test] pipe.write_on_read_end_rejected ... PASS
+    [test] pipe.close_one_end_keeps_other_alive ... PASS
+    [test] pipe.close_both_ends_frees_ring ... PASS
+    [test] pipe.compose_with_spoor_transport ... PASS
+    [test] pipe.cnbframe_atomic_nonblocking ... PASS
+    [test] pipe.attach_9p_admits_pipes_only ... PASS
+    [test] pipe.fstat_reports_fifo ... PASS
+    [test] pipe_blocking.write_wakes_sleeping_reader ... PASS
+    [test] pipe_blocking.read_wakes_sleeping_writer ... PASS
+    [test] pipe_blocking.close_write_end_wakes_reader_with_eof ... PASS
+    [test] pipe_blocking.close_read_end_wakes_writer_with_epipe ... PASS
+    [test] pipe_blocking.multi_readers_share_one_empty_pipe ... PASS
+    [test] pipe_blocking.multi_writers_share_one_full_pipe ... PASS
+    [test] poll.ready_immediately_pollin ... PASS
+    [test] poll.ready_immediately_pollout ... PASS
+    [test] poll.timeout_zero_not_ready ... PASS
+    [test] poll.timeout_positive_fires ... PASS
+    [test] poll.block_then_wake_pollin ... PASS
+    [test] poll.pollhup_on_close_write_end ... PASS
+    [test] poll.cons_deferred_block_then_wake ... PASS
+    [test] poll.multi_fd_one_ready ... PASS
+    [test] poll.bad_fd_revents_pollnval ... PASS
+    [test] poll.bad_args_rejected ... PASS
+    [test] poll.always_ready_null_dev_poll ... PASS
+    [test] poll.pollerr_on_write_after_read_close ... PASS
+    [test] poll.unregister_after_fast_path ... PASS
+    [test] poll.devsrv_listener_immediate_pollin ... PASS
+    [test] poll.devsrv_listener_empty_not_ready ... PASS
+    [test] poll.devsrv_listener_block_then_wake ... PASS
+    [test] poll.devsrv_listener_pollhup_on_tombstone ... PASS
+    [test] poll.devsrv_conn_pollin_on_send ... PASS
+    [test] poll.devsrv_conn_pollout_immediate ... PASS
+    [test] poll.devsrv_conn_pollhup_on_teardown ... PASS
+    [test] poll.devsrv_conn_block_then_wake_pollin ... PASS
+    [test] poll.devsrv_client_row ... PASS
+    [test] poll.devsrv_client_wakes_on_reply_only ... PASS
+    [test] poll.devsrv_server_pollout_wakes_on_client_drain ... PASS
+    [test] poll.devsrv_client_pollout_wakes_on_server_blocking_drain ... PASS
+    [test] poll.devsrv_client_kernel_attached_pollnval ... PASS
+    [test] poll.devsrv_client_wakes_on_teardown ... PASS
+    [test] poll.timeout_survives_a_busy_list ... PASS
+    [test] poll.death_ends_a_noise_driven_poll ... PASS
+    [test] poll.stop_parks_a_noise_driven_poll ... PASS
+    [test] thread.kstack_watermark_follows_the_frontier ... PASS
+    [test] poll.noise_keeps_it_looping ... PASS
+    [test] poll.noise_keeps_the_deadline ... PASS
+    [test] poll.null_obj_spoor_pollnval ... PASS
+    [test] poll.mixed_spoor_and_srv ... PASS
+    [test] poll.max_nfds ... PASS
+    [test] poll.pre_resolved_spoor ... PASS
+    [test] poll.sleep_for_waits ... PASS
+    [test] sys_pipe.allocates_two_distinct_spoor_handles ... PASS
+    [test] sys_pipe.proc_free_releases_handles ... PASS
+    [test] sys_pipe.handle_close_releases_one_end ... PASS
+    [test] sys_pipe.fstat_reports_fifo ... PASS
+    [test] sys_rw.write_then_read_round_trip ... PASS
+    [test] sys_rw.rights_check ... PASS
+    [test] sys_rw.zero_length_validates_fd ... PASS
+    [test] sys_rw.read_after_close_returns_eof ... PASS
+    [test] sys_rw.write_after_read_close_returns_epipe ... PASS
+    [test] sys_prw.pipe_not_seekable ... PASS
+    [test] sys_prw.pread_devramfs_offset_and_cursor ... PASS
+    [test] sys_prw.rights_and_walkonly ... PASS
+    [test] sys_pipe.dup_spoor_handle_acquires_ref ... PASS
+    [test] userspace.pipe_probe_round_trip ...     /pipe-probe size=18528 bytes → rfork + exec
+pipe-probe: PASS
+    /pipe-probe reaped pid=4382 status=0 — full byte-I/O syscall surface verified end-to-end
+PASS
+    [test] sys_attach_9p.rejection_paths ... PASS
+    [test] sys_attach_9p.names_root_by_its_pipe ... PASS
+    [test] sys_attach_9p.declarations ... PASS
+    [test] sys_mount.happy_path_grafts_pipe_spoor ... PASS
+    [test] sys_mount.idempotent_on_duplicate ... PASS
+    [test] sys_mount.rejects_bad_fd ... PASS
+    [test] sys_mount.rejects_missing_right_read ... PASS
+    [test] sys_mount.rejects_invalid_flags ... PASS
+    [test] sys_mount.rejects_null_territory ... PASS
+    [test] sys_unmount.removes_entry_and_drops_ref ... PASS
+    [test] sys_unmount.rejects_nonexistent_target ... PASS
+    [test] sys_mount.caller_close_keeps_mount_alive ... PASS
+    [test] sys_mount.refuses_a_type_mismatch ... PASS
+    [test] sys_mount.refuses_all_but_mrepl_at_a_file ... PASS
+    [test] sys_mount.type_check_reads_only_qtdir ... PASS
+    [test] sys_mount.accepts_an_ordered_mount_at_a_directory ... PASS
+    [test] userspace.attach_probe_round_trip ...     /attach-probe size=18832 bytes → setting up responder + rfork + exec
+attach-probe: PASS
+    /attach-probe reaped pid=4412 status=0 responder_msgs=3 — SYS_ATTACH_9P + SYS_MOUNT + SYS_UNMOUNT verified end-to-end
+PASS
+    [test] sys_mlockall.cap_gate ... PASS
+    [test] sys_set_dumpable.one_way_to_zero ... PASS
+    [test] sys_set_traceable.one_way_to_zero ... PASS
+    [test] sys_corvus_caps.kproc_has_new_caps ... PASS
+    [test] kern_random.seeded_returns_true_on_qemu ... PASS
+    [test] kern_random.bytes_produces_nonzero ... PASS
+    [test] chacha20.block_vector ... PASS
+    [test] chacha20.keystream_continuity ... PASS
+    [test] kern_random.two_reads_differ ... PASS
+    [test] kern_random.large_read_nonzero ... PASS
+    [test] kern_random.virtio_reseed ... PASS
+    [test] kern_random.virtio_deadline_ticks ... PASS
+    [test] sys_spawn.happy_path ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn.rejects_null_name ... PASS
+    [test] sys_spawn.rejects_zero_len ... PASS
+    [test] sys_spawn.rejects_oversize_name ... PASS
+    [test] sys_spawn.rejects_missing_binary ... PASS
+    [test] sys_spawn.rejects_embedded_nul ... PASS
+    [test] sys_wait_pid.no_children_returns_neg1 ... PASS
+    [test] sys_spawn_with_fds.rejects_oversize_fd_count ... PASS
+    [test] sys_spawn_with_fds.rejects_bad_fd ... PASS
+    [test] sys_spawn_with_fds.rejects_non_spoor_fd ... PASS
+    [test] sys_spawn_with_fds.rejects_missing_binary ... PASS
+    [test] sys_spawn_with_fds.zero_count_succeeds ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_with_fds.child_rights_subset_of_parent ... PASS
+    [test] sys_spawn.killed_child_delivers_pipe_eof_before_reap ... PASS
+    [test] sys_spawn.joined_multithread_child_delivers_pipe_eof_before_reap ... thread-probe: ok (spawn + tid_address + exit + join + #112 ptid publish/gate verified)
+PASS
+    [test] sys_spawn_with_caps.happy_path_zero_mask ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_with_caps.happy_path_subset_of_parent ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_with_caps.clamps_to_parent ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_with_caps.rejects_missing_binary ... PASS
+    [test] sys_spawn_with_caps.rejects_oversize_name ... PASS
+    [test] sys_spawn_full.happy_path_fds_and_caps ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_full.zero_count_zero_mask_succeeds ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_full.rejects_oversize_fd_count ... PASS
+    [test] sys_spawn_full.rejects_bad_fd ... PASS
+    [test] sys_spawn_full.rejects_missing_binary ... PASS
+    [test] sys_spawn_with_perms.zero_perm_is_spawn_full ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_with_perms.console_attached_grants_may_post ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_with_perms.rejects_non_console_attached_parent ... PASS
+    [test] sys_spawn_with_perms.rejects_unknown_perm_bits ... PASS
+    [test] sys_spawn_with_perms.holder_delegates_may_post ... PASS
+    [test] sys_spawn_with_perms.console_trusted_not_delegable ... PASS
+    [test] sys_spawn_with_perms.console_owner_grant_gate ... PASS
+    [test] sys_spawn_with_perms.console_owner_set_wiring ... PASS
+    [test] sys_spawn_with_perms.seat_roles ... PASS
+    [test] sys_spawn_with_perms.renderer_gate ... PASS
+    [test] sys_spawn_with_perms.seal_blocks_debug_and_dump ... PASS
+    [test] sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_full_argv.golden_argc4 ... hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] sys_spawn_full_argv.rejects_argc_over_max ... PASS
+    [test] sys_spawn_full_argv.rejects_data_len_over_max ... PASS
+    [test] sys_spawn_full_argv.rejects_missing_trailing_nul ... PASS
+    [test] sys_spawn_full_argv.rejects_nul_count_mismatch ... PASS
+    [test] sys_spawn_full_argv.rejects_argc_with_zero_data_len ... PASS
+    [test] sys_spawn_full_argv.rejects_zero_argc_with_nonzero_data ... PASS
+    [test] sys_spawn_full_argv.rejects_non_console_attached_perm_flags ... PASS
+    [test] sys_spawn_full_argv.validate_req_golden ... PASS
+    [test] sys_spawn_full_argv.validate_req_rejects_pad_envp ... PASS
+    [test] sys_spawn_full_argv.validate_req_rejects_unknown_perm_bits ... PASS
+    [test] sys_spawn_full_argv.validate_req_pheno_flags ... PASS
+    [test] sys_spawn_full_argv.validate_req_rejects_oversize_fields ... PASS
+    [test] birth_hold.validate_req ... PASS
+    [test] birth_hold.publication_mark ... PASS
+    [test] birth_hold.released_predicate ... PASS
+    [test] birth_hold.parked_wakes_birth_wait ... PASS
+    [test] birth_hold.orphan_rule ... proc: orphan pid=4457 name="" (parent pid=4456 name="" exiting) -> adopted by pid=0
+proc: orphan pid=4459 name="" (parent pid=4458 name="" exiting) -> adopted by pid=0
+PASS
+    [test] birth_hold.held_spawn_parks ... hello from /hello (built via tools/build.sh userspace)
+hello from /hello (built via tools/build.sh userspace)
+PASS
+    [test] birth_hold.held_spawn_death_wins ... PASS
+    [test] userspace.stratumd_stub_round_trip ...     /stratumd-stub size=29792 + /attach-probe size=18832 — wiring 2 userspace Procs via 2 pipes
+stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+attach-probe: PASS
+stratumd-stub: EOF on rx; exit 0
+    stratumd-stub pid=4465 status=0 + attach-probe pid=4466 status=0 — userspace 9P server end-to-end verified
+PASS
+    [test] userspace.stratumd_stub_fs_round_trip ...     /stratumd-stub size=29792 + /stub-fs-probe size=28424 — wiring 2 userspace Procs for walk/open/read
+stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+stub-fs-probe: serving on fd 0 (tx) + fd 1 (rx)
+stub-fs-probe: PASS
+stratumd-stub: EOF on rx; exit 0
+    stratumd-stub pid=4467 status=0 + stub-fs-probe pid=4468 status=0 — synthetic FS walk + open + read end-to-end verified
+PASS
+    [test] userspace.stratumd_stub_walk_round_trip ...     /stratumd-stub size=29792 + /stub-walk-probe size=16336 — wiring 2 userspace Procs for t_attach_9p + t_walk_open + t_read
+stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+stub-walk-probe: t_attach_9p + t_walk_open + t_read + t_chroot on fds 0/1
+stub-walk-probe: PASS
+stratumd-stub: write_all failed (client gone?); exit 0
+    stratumd-stub pid=4469 status=0 + stub-walk-probe pid=4470 status=0 — walk-through-mount via SYS_WALK_OPEN end-to-end verified
+PASS
+    [test] userspace.stub_driver_round_trip ...     /stub-driver size=19344 → exec; driver orchestrates stratumd-stub itself
+stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+stratumd-stub: EOF on rx; exit 0
+stub-driver: PASS
+    /stub-driver reaped pid=4471 status=0 — SYS_SPAWN_WITH_FDS production-shape orchestration verified end-to-end
+PASS
+    [test] userspace.irq_latency_bench_failure ...     /irq-bench size=12616 bytes; N_ITER=128
+PASS
+    [test] userspace.irq_latency_bench ...     /irq-bench size=12616 bytes; N_ITER=128
+irq-bench: starting (P4-Ic-latency)
+irq-bench: PASS
+    irq-bench: N=127 cntfrq=24000000 p50=8125ns p99=8708ns max=14583ns (bare-metal-target p99<5000ns; CI-sanity p99<50000000ns)
+PASS
+    [test] caps.kproc_has_all ... PASS
+    [test] caps.kproc_has_hw_create ... PASS
+    [test] caps.rfork_child_has_none ... PASS
+    [test] caps.rfork_with_caps_grants_subset ... PASS
+    [test] caps.rfork_with_caps_clamps_to_parent ... PASS
+    [test] caps.rfork_with_caps_zero_mask ... PASS
+    [test] caps.rfork_strips_elevation_only ... PASS
+    [test] caps.rfork_inherits_legate_scope ... PASS
+    [test] caps.rfork_flows_under_propagating_scope ... PASS
+    [test] caps.rfork_no_flow_without_propagating ... PASS
+    [test] caps.rfork_flow_bounded_by_mask ... PASS
+    [test] mmio_handle.create_basic ... PASS
+    [test] mmio_handle.create_misaligned_rejected ... PASS
+    [test] mmio_handle.create_zero_size_rejected ... PASS
+    [test] mmio_handle.create_overflow_rejected ... PASS
+    [test] mmio_handle.create_overlap_rejected ... PASS
+    [test] mmio_handle.create_adjacent_ok ... PASS
+    [test] mmio_handle.create_unref_releases_slot ... PASS
+    [test] mmio_handle.live_count_round_trip ... PASS
+    [test] mmio_handle.kernel_reserved_rejected ... PASS
+    [test] mmio_handle.virtio_mmio_claimable ... PASS
+    [test] mmio_handle.out_of_ips_rejected ... PASS
+    [test] handle_hw.mmio_dup_rejected ... PASS
+    [test] handle_hw.irq_dup_rejected ... PASS
+    [test] handle_hw.mmio_close_releases_claim ... PASS
+    [test] handle_hw.irq_close_releases_intid ... PASS
+    [test] handle_hw.irq_kernel_reserved_rejected ... PASS
+    [test] handle_hw.irq_out_of_range_rejected ... PASS
+    [test] burrow_mmio.create_basic ... PASS
+    [test] burrow_mmio.create_null_rejected ... PASS
+    [test] burrow_mmio.create_holds_kobj_ref ... PASS
+    [test] burrow_mmio.unref_releases_kobj_ref ... PASS
+    [test] burrow_mmio.acquire_mapping_works ... PASS
+    [test] burrow_mmio.lifecycle_round_trip ... PASS
+    [test] mmio_map.install_vma ... PASS
+    [test] mmio_map.overlap_rejected ... PASS
+    [test] mmio_map.proc_free_releases_kobj ... PASS
+    [test] dma_handle.create_basic ... PASS
+    [test] dma_handle.zero_size_rejected ... PASS
+    [test] dma_handle.oversize_rejected ... PASS
+    [test] dma_handle.round_up_to_page ... PASS
+    [test] dma_handle.distinct_pa ... PASS
+    [test] dma_handle.unref_releases_chunk ... PASS
+    [test] dma_handle.zero_init ... PASS
+    [test] burrow_dma.create_basic ... PASS
+    [test] burrow_dma.create_null_rejected ... PASS
+    [test] burrow_dma.holds_kobj_ref ... PASS
+    [test] burrow_dma.lifecycle_round_trip ... PASS
+    [test] dma_map.install_vma ... PASS
+    [test] dma_map.proc_free_releases_kobj ... PASS
+    [test] skein.blocks_tile_the_buffer ... PASS
+    [test] skein.offset_resolution ... PASS
+    [test] skein.small_weave_stays_one_block ... PASS
+    [test] skein.scope_plain_never_scatters ... PASS
+    [test] skein.gpu_bo_scatters ... PASS
+    [test] skein.full_envelope_weave ... PASS
+    [test] skein.zero_init_across_blocks ... PASS
+    [test] skein.one_block_resolves_throughout ... PASS
+    [test] skein.stride_is_the_objects_not_the_constant ... PASS
+    [test] dma_segments.refuses_not_truncates ... PASS
+    [test] perm.check_owner_group_other ... PASS
+    [test] perm.check_owner_first ... PASS
+    [test] perm.check_hostowner_override ... PASS
+    [test] perm.in_group ... PASS
+    [test] perm.want_for_omode ... PASS
+    [test] perm.rights_for_omode ... PASS
+    [test] perm.oexec_no_read_leak ... PASS
+    [test] perm.wstat_policy ... PASS
+    [test] perm.devramfs_enforced_real_metadata ... PASS
+    [test] perm.dev_flags ... PASS
+    [test] perm.check_dac_override_cap ... PASS
+    [test] perm.wstat_chown_cap ... PASS
+    [test] perm.check_want_zero_denied ... PASS
+    [test] perm.wstat_rejects_unknown_valid_bit ... PASS
+    [test] path.make_root ... PASS
+    [test] path.addelem_forms ... PASS
+    [test] path.parent_forms ... PASS
+    [test] path.addelem_overflow_null ... PASS
+    [test] path.ref_balance ... PASS
+    [test] path.spoor_clone_shares ... PASS
+    [test] path.spoor_extend ... PASS
+    [test] path.spoor_transplant ... PASS
+    [test] stalk.resolve_multi ... PASS
+    [test] stalk.resolve_deep ... PASS
+    [test] stalk.leading_and_double_slash ... PASS
+    [test] stalk.dot_noop ... PASS
+    [test] stalk.dotdot_pop ... PASS
+    [test] stalk.dotdot_containment ... PASS
+    [test] stalk.xsearch_deny ... PASS
+    [test] stalk.missing_component ... PASS
+    [test] stalk.err_codes ... PASS
+    [test] stalk.notdir ... PASS
+    [test] stalk.dot_notdir ... PASS
+    [test] stalk.dot_notdir_mount ... PASS
+    [test] stalk.dot_xsearch ... PASS
+    [test] stalk.trailing_slash ... PASS
+    [test] stalk.trailing_slash_mount ... PASS
+    [test] stalk.opath_no_open ... PASS
+    [test] stalk.open_root ... PASS
+    [test] stalk.open_replace ... PASS
+    [test] stalk.depth_cap ... PASS
+    [test] stalk.lifetime_no_leak ... PASS
+    [test] stalk.long_component_bound ... PASS
+    [test] stalk.cross_mount ... PASS
+    [test] stalk.cross_mount_final_quarry ... PASS
+    [test] stalk.cross_mount_xsearch_deny ... PASS
+    [test] stalk.mount_amode_no_cross ... PASS
+    [test] stalk.cross_mount_chain ... PASS
+    [test] stalk.cross_mount_no_leak ... PASS
+    [test] stalk.union_walk ... PASS
+    [test] stalk.union_order ... PASS
+    [test] stalk.union_xskip ... PASS
+    [test] stalk.union_readdir ... PASS
+    [test] stalk.union_readdir_paginate ... PASS
+    [test] stalk.union_readdir_nontagged ... PASS
+    [test] stalk.union_create ... PASS
+    [test] stalk.union_create_first_wins ... PASS
+    [test] stalk.union_create_no_target ... PASS
+    [test] stalk.union_one_member_creates_alike ... PASS
+    [test] stalk.union_member_holding ... PASS
+    [test] stalk.union_remove_uncrossed ... PASS
+    [test] stalk.union_fd_base ... PASS
+    [test] stalk.union_opath_base ... PASS
+    [test] stalk.union_zero_component ... PASS
+    [test] stalk.union_dissolved_degrades ... PASS
+    [test] stalk.dotdot_crossed_base_floor ... PASS
+    [test] stalk.union_live_dotdot_walks_unopened ... PASS
+    [test] stalk.union_dissolved_point_unreachable ... PASS
+    [test] stalk.remove_parent_reports_union_point ... PASS
+    [test] stalk.mount_names_crossed_base ... PASS
+    [test] stalk.mount_names_crossed_union_base ... PASS
+    [test] stalk.union_dissolved_helper ... PASS
+    [test] stalk.union_covered_walk ... PASS
+    [test] stalk.union_covered_after ... PASS
+    [test] stalk.union_covered_readdir ... PASS
+    [test] stalk.union_covered_create ... PASS
+    [test] stalk.union_covered_unmount ... PASS
+    [test] stalk.union_covered_dissolved ... PASS
+    [test] stalk.union_covered_holder ... PASS
+    [test] stalk.pheno_symlink_reanchor ... PASS
+    [test] stalk.path_accumulate ... PASS
+    [test] stalk.path_dotdot ... PASS
+    [test] stalk.path_cross_transplant ... PASS
+    [test] stalk.path_adopt_transplant ... PASS
+    [test] stalk.pounce_engaged ... PASS
+    [test] stalk.pounce_acces_masks_noent ... PASS
+    [test] stalk.pounce_parity_nowa ... PASS
+    [test] stalk.pounce_full_walk_past_mount ... PASS
+    [test] stalk.stat_query ... PASS
+    [test] stalk.stat_mount_leaf ... PASS
+    [test] sys_stat.for_proc ... PASS
+    [test] stalk.pounce_unsupported_fallback ... PASS
+    [test] stalk.cached_open_arm ... PASS
+    [test] stalk.cached_open_denials ... PASS
+    [test] stalk.cached_open_mount_fallback ... PASS
+    [test] stalk.symlink_follow ... PASS
+    [test] stalk.symlink_bounds ... PASS
+    [test] stalk.symlink_nofollow ... PASS
+    [test] stalk.symlink_stat_vs_lstat ... PASS
+    [test] stalk.symlink_pounce_split ... PASS
+    [test] stalk.symlink_lifetime ... PASS
+    [test] stalk.open_create_cwd_parity ... PASS
+    [test] stalk.open_create_open_if_present ... PASS
+    [test] stalk.open_create_mkdir_and_nest ... PASS
+    [test] stalk.open_create_leaf_rows ... PASS
+    [test] stalk.open_create_containment_and_denials ... PASS
+    [test] yield-waits: 724 invoked, 275 actually waited, 13 needed >1 yield, 0 child-Proc expiries
+  tests: 1834/1834 PASS
+  boot-stack high-water: 8432 / 16384 B used, margin 7952 B to guard; deepest SP 0xffffa00289d81f10
+  ticks: 6490 (kernel breathing)
+  boot-time: 6730.0 ms (target < 500 ms per VISION §4)
+  phase: P3-F
+  joey: /srv mounted (namespace-resident service registry)
+  joey: /proc + /ctl mounted (kernel introspection Devs)
+  joey: /dev mounted (kernel char devices)
+  joey: /hw mounted (DTB hardware inventory)
+  joey: /hw/pci mounted (mediated PCI topology)
+  joey: /env mounted (per-Proc environment)
+  joey: rforking child for /bin/joey (821704 byte ELF from initrd)
+  joey: init blob released (821704 bytes, exec-window transient)
+joey: hello from /bin/joey (real userspace binary, loaded from ramfs)
+joey: #80 daemon-registry selftest PASS (record + lookup + miss + overflow latch)
+hello from /hello (built via tools/build.sh userspace)
+joey: /hello reaped status=0; orchestration verified
+alloc-smoke: outline atomics OK (#71: FEAT_LSE arm, agrees with AT_HWCAP)
+alloc-smoke: Box + Vec + String + small-alloc loop OK
+alloc-smoke: Path + PathBuf + Components OK
+alloc-smoke: Cursor + File + Read + Seek OK
+alloc-smoke: Metadata + OpenOptions + free fns OK
+hello from /hello-rs (Rust no_std, built via cargo)
+alloc-smoke: pipe + Command + Child OK
+alloc-smoke: Notes + Mask + PollSet OK
+alloc-smoke: Territory + Cap OK
+alloc-smoke: Torpor + Time + Rand + Thread OK
+alloc-smoke: sync::Mutex (try_lock + contended mutual-exclusion) OK
+alloc-smoke: NineP codec OK
+alloc-smoke: Mmio + Irq + Dma cap-missing reject OK
+joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified
+protect-probe: reserve-raise-write OK
+protect-probe: relro-read-only-keeps-bytes OK
+protect-probe: grow-shrink-grow-keeps-contents OK
+protect-probe: seal OK
+protect-probe: x-never-a-target OK
+protect-probe: refusals OK
+protect-probe: aligned-reserve OK
+protect-probe: piece-detach OK
+protect-probe: ALL OK
+joey: /protect-probe reaped status=0; reserve/protect/seal/X-refusal verified from EL0
+user fault: pid=4508 reason="snare:segv" addr=0x0000000100000000 pc=0x00000000004000c4 lr=0x0000000000400010 -- terminating Proc
+protect-guard-child: touching the guard
+joey: /protect-guard-child ok (a write through a sealed-none page died via snare:segv)
+user fault: pid=4509 reason="snare:bus" addr=0x000000010000000e pc=0x0000000000400060 lr=0x0000000000400010 -- terminating Proc
+bus-probe-child: misaligned load-exclusive across a 16-byte boundary
+joey: /bus-probe-child ok (a misaligned load-exclusive died via snare:bus)
+capacity-probe: reserve-4gib-touch-census OK
+capacity-probe: protect-middle-r OK
+capacity-probe: range-detach-across-pieces OK
+capacity-probe: footprint-shrinks-to-start OK
+capacity-probe: lazy-over-256mib-detaches OK
+capacity-probe: eager-pages-go-with-the-last-piece OK
+capacity-probe: refusals OK
+capacity-probe: ALL OK
+joey: /capacity-probe reaped status=0; 4 GiB reserve / range detach / census round-trip verified from EL0
+heap-probe: small-blocks-rise OK (16432 pages over the base, 64 MiB in blocks under 256 KiB)
+heap-probe: small-blocks-fall OK (13 pages over the base, no trim asked)
+heap-probe: time small-alloc-and-touch 1103 ns per page (allocated, then faulted in)
+heap-probe: time small-free 204 ns per page (freed, trimmed and decommitted)
+heap-probe: trim-returns-the-rest OK (243 pages kept by the frees, returned by the trim)
+heap-probe: large-block-rise OK (8209 pages over the base, one 32 MiB block and a small one)
+heap-probe: large-block-returns-under-a-live-block OK (0 pages over the base)
+heap-probe: time large-touch 848 ns per page (reserved, then faulted in)
+heap-probe: time large-free 215 ns per page (detached)
+heap-probe: reservation-switch OK (66272 pages carved across two reservations, the first released)
+heap-probe: time churn-4mib 778 ns per page per cycle (decommitted and faulted in again)
+heap-probe: time churn-1.5mib 33 ns per page per cycle (kept, under the trim threshold)
+heap-probe: ALL OK
+joey: /heap-probe reaped status=0; the heap grows past 4 MiB and gives back on free (small blocks, a large block, a reservation) verified from EL0
+burrow-torture: start (kernel burrow attach/detach/re-attach stress; EBADTAG DFS)
+burrow-torture: ==> size=0x0000000000020000
+  phase1 OK (tight attach/zero/write/verify/detach)
+  phase2 OK (holders + churn, no stale, no cross-corruption)
+  phase3 OK (VA/PA decoupling, no stale, no writeback mismatch)
+burrow-torture: ==> size=0x0000000000021000
+  phase1 OK (tight attach/zero/write/verify/detach)
+  phase2 OK (holders + churn, no stale, no cross-corruption)
+  phase3 OK (VA/PA decoupling, no stale, no writeback mismatch)
+burrow-torture: ==> size=0x0000000000040000
+  phase1 OK (tight attach/zero/write/verify/detach)
+  phase2 OK (holders + churn, no stale, no cross-corruption)
+  phase3 OK (VA/PA decoupling, no stale, no writeback mismatch)
+burrow-torture: ==> phase4 multi-threaded SMP stress
+  threads=0x0000000000000003
+  iters_each=0x0000000000000060
+  size=0x0000000000020000
+  phase4 OK (multi-threaded, no SMP burrow corruption)
+burrow-torture: ALL OK (single-threaded x3 sizes + multi-threaded SMP)
+joey: /burrow-torture reaped status=0 (kernel burrow path clean: single-threaded x3 sizes + multi-threaded SMP)
+loom-smoke: starting (Loom-6d-1 native ring API)
+loom-smoke: NOP round-trip ok
+loom-smoke: registered 1 buffer + 1 handle
+loom-smoke: payload op on non-9P handle cleanly rejected
+loom-smoke: KObj_Loom.poll ok (idle=not-ready; SQPOLL NOP -> poll POLLIN -> reap)
+loom-smoke: PASS
+joey: /loom-smoke reaped status=0; native loom ring API verified
+parley-probe: starting (8e-1c transport E2E)
+parley-probe: PASS
+joey: /parley-probe reaped status=0; parley transport (8e-1c) verified
+debug-probe: starting (8a-1c debug-fs E2E)
+debug-probe: regs ok (x20 sentinel, EL0t frame)
+debug-probe: mem read ok (cross-Proc SENTINEL_MEM)
+debug-probe: kregs ok (owner axis: no kernel frame)
+debug-probe: kstack ok (unified-stack kernel half)
+debug-probe: wait ok (stopped)
+debug-probe: hwbreak ok (cross-Proc bp fired; pc == landmark)
+debug-probe: multi-bp ok (5 concurrent HW breakpoints via ctl)
+debug-probe: step ok (single-step + step-over; pc advanced 4B/instr x3)
+debug-probe: hwwatch ok (cross-Proc wp fired on store)
+debug-probe: held ok (late attach, entry breakpoint fired)
+debug-probe: held ok (attach+exitkill+stop at once)
+debug-probe: held ok (a close without detach kept the hold)
+debug-probe: PASS
+joey: /debug-probe reaped status=0; debug-fs stop/inspect/resume verified
+stack-probe: starting (8b settled-thread kstack inspect)
+stack-probe: /proc/<pid>/kstack of a torpor-blocked child (NO debug-stop):
+#0  sched+0x2e0
+#1  sleep_common+0x298
+#2  tsleep_common+0x89c
+#3  sys_torpor_wait_for_proc+0x260
+#4  syscall_dispatch+0x9c8
+#5  exception_sync_lower_el+0x104
+#6  _exception_vectors+0x468
+stack-probe: PASS (blocked-in-syscall kernel stack read without a debug-stop)
+joey: /stack-probe reaped status=0; settled-thread kstack inspect verified
+hwbp-verify: starting (8a-2a HW-debug delivery check)
+hwbp-verify: PASS -- guest EL0 hardware breakpoint delivered EC 0x30 to EL1
+joey: /hwbp-verify PASS (HW breakpoint delivers EC 0x30; 8a-2 HW-debug enabled)
+ambush-probe: starting (Ambush E2E: A version + B attach + C launch + D dap)
+ambush-probe: ambush version output follows:
+Delve Debugger
+Version: 1.25.2
+Build: ce9154d4f235e5aab42ff023eef64f80c10efb82
+ambush-probe: stage A PASS (ambush runs; version banner ok)
+ambush-probe: stage B -- ambush-child pid 4526
+ambush-probe: stage B -- ambush attach exited status 2
+ambush-probe: === ambush attach STDOUT ===
+Unable to open history file: create .dlv/.dbg_history: no such file or directory. History will not be saved for this session.Unable to read history file .dlv/.dbg_history: invalid argument
+Type 'help' for list of commands.
+  Goroutine 1 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/time.go:363 time.Sleep (0x70d20) [sync.Cond.Wait]
+  Goroutine 2 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [force gc (idle)]
+  Goroutine 3 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [GC sweep wait]
+  Goroutine 4 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [GC scavenge wait]
+  Goroutine 17 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [semacquire]
+[5 goroutines]
+0  0x0000000000075594 in [1mruntime.torpor_wait[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1msys_thylacine_arm64.s:155[0m
+1  0x0000000000040784 in [1mruntime.futexsleep[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mos_thylacine.go:95[0m
+2  0x000000000001cd50 in [1mruntime.notetsleep_internal[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mlock_futex.go:89[0m
+3  0x000000000001ce44 in [1mruntime.notetsleep[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mlock_futex.go:112[0m
+4  0x00000000000406d0 in [1mruntime.netpoll[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mnetpoll_stub.go:51[0m
+5  0x000000000004bcc8 in [1mruntime.findRunnable[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mproc.go:3742[0m
+6  0x000000000004d4f0 in [1mruntime.schedule[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mproc.go:4152[0m
+7  0x000000000004d9cc in [1mruntime.park_m[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mproc.go:4280[0m
+8  0x0000000000072464 in [1mruntime.mcall[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1masm_arm64.s:241[0m
+768901734683508737
+(dlv) exit
+Would you like to kill the process? [Y/n] EOF
+ambush-probe: === ambush attach STDERR ===
+
+ambush-probe: stage B markers -- output=1 goroutine=1 bt=1 sentinel=1
+ambush-probe: stage C -- ambush exec exited status 0
+ambush-probe: === ambush exec STDOUT ===
+Unable to open history file: create .dlv/.dbg_history: no such file or directory. History will not be saved for this session.Unable to read history file .dlv/.dbg_history: invalid argument
+Type 'help' for list of commands.
+ PC = 0x0000000000075440
+ SP = 0x000000007fffff00
+ X0 = 0x0000000000000000
+ X1 = 0x0000000000000000
+ X2 = 0x0000000000000000
+ X3 = 0x0000000000000000
+ X4 = 0x0000000000000000
+ X5 = 0x0000000000000000
+ X6 = 0x0000000000000000
+ X7 = 0x0000000000000000
+ X8 = 0x0000000000000000
+ X9 = 0x0000000000000000
+X10 = 0x0000000000000000
+X11 = 0x0000000000000000
+X12 = 0x0000000000000000
+X13 = 0x0000000000000000
+X14 = 0x0000000000000000
+X15 = 0x0000000000000000
+X16 = 0x0000000000000000
+X17 = 0x0000000000000000
+X18 = 0x0000000000000000
+X19 = 0x0000000000000000
+X20 = 0x0000000000000000
+X21 = 0x0000000000000000
+X22 = 0x0000000000000000
+X23 = 0x0000000000000000
+X24 = 0x0000000000000000
+X25 = 0x0000000000000000
+X26 = 0x0000000000000000
+X27 = 0x0000000000000000
+X28 = 0x0000000000000000
+X29 = 0x0000000000000000
+X30 = 0x0000000000000000
+
+Breakpoint 1 set at 0x7ba3c for main.parkLoop() /Users/northkillpd/projects/thylacine-corona/usr/ambush-child/child.go:37
+> [Breakpoint 1] main.parkLoop() /Users/northkillpd/projects/thylacine-corona/usr/ambush-child/child.go:37 (hits goroutine(1):1 total:1) (PC: 0x7ba3c)
+Warning: debugging optimized function
+* Goroutine 1 - User: /Users/northkillpd/projects/thylacine-corona/usr/ambush-child/child.go:37 main.parkLoop (0x7ba3c) (thread 4529)
+  Goroutine 2 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [force gc (idle)]
+  Goroutine 3 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [GC sweep wait]
+  Goroutine 4 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [GC scavenge wait]
+  Goroutine 17 - User: /Users/northkillpd/projects/go-thylacine/src/runtime/proc.go:461 runtime.gopark (0x6ec90) [semacquire]
+[5 goroutines]
+0  0x000000000007ba3c in [1mmain.parkLoop[0m
+   at /Users/northkillpd/projects/thylacine-corona/usr/ambush-child/[1mchild.go:37[0m
+1  0x000000000007baac in [1mmain.main[0m
+   at /Users/northkillpd/projects/thylacine-corona/usr/ambush-child/[1mchild.go:53[0m
+2  0x0000000000045874 in [1mruntime.main[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1mproc.go:285[0m
+3  0x0000000000074814 in [1mruntime.goexit[0m
+   at /Users/northkillpd/projects/go-thylacine/src/runtime/[1masm_arm64.s:1268[0m
+768901734683508737
+(dlv) exit
+ambush-probe: === ambush exec STDERR ===
+
+ambush-probe: stage C markers -- launch_at_entry=1 (entry 0x75440, pc 0x75440) bp_set=1 bt=1 parkloop=1 sentinel=1
+exec: load failed, terminating pid 0x00000000000011b3
+ambush-probe: stage D -- dap-selftest exited status 0
+ambush-probe: === dap-selftest STDOUT ===
+dap: abandoned launch reaped (ambush launch: attach pid 4531: write /proc/4531/ctl: operation not permitted)
+dap: killed target reaped (pid 4532)
+dap: <- *dap.InitializeResponse
+dap: initialized
+dap: <- *dap.ProcessEvent
+dap: <- *dap.InitializedEvent
+dap: <- *dap.LaunchResponse
+dap: <- *dap.SetFunctionBreakpointsResponse
+dap: bp main.parkLoop
+dap: <- *dap.StoppedEvent
+dap: stopped entry tid=1
+dap: <- *dap.OutputEvent
+dap: <- *dap.ConfigurationDoneResponse
+dap: <- *dap.ContinueResponse
+dap: <- *dap.StoppedEvent
+dap: stopped "function breakpoint" tid=1
+dap: <- *dap.StackTraceResponse
+dap: frame main.parkLoop
+dap: frame main.main
+dap: frame runtime.main
+dap: frame runtime.goexit
+dap: stopped breakpoint
+dap: stack parkLoop
+dap: <- *dap.ScopesResponse
+dap: <- *dap.VariablesResponse
+dap: variables ok
+dap: <- *dap.EvaluateResponse
+dap: sentinel 768901734683508737
+dap: <- *dap.OutputEvent
+dap: <- *dap.DisconnectResponse
+dap-selftest: PASS
+ambush-probe: === dap-selftest STDERR ===
+
+ambush-probe: stage D markers -- reaped=1 killed=1 init=1 bp=1 stop=1 stack=1 sentinel=1 pass=1 code_ok=1
+ambush-probe: PASS (stage A: ambush runs; stage B: multi-thread Go attach + goroutines + bt + print; stage C: held launch at the entry + HW breakpoint + continue + bt + print; stage D: in-process DAP round-trip -- initialize/launch/breakpoint/continue/stackTrace/variables/evaluate)
+joey: /ambush-probe reaped status=0; Ambush debugger runs (or fork-absent SKIP)
+dap-probe: starting (8e-3 live ambush DAP round-trip)
+dap-probe: initialize OK -- ambush accepted our capabilities
+dap-probe: ack launch
+dap-probe: breakpoints set -- verified=1
+dap-probe: stopped reason="entry" tid=1
+dap-probe: [child console] Type 'dlv help' for list of commands.
+dap-probe: ack configurationDone
+dap-probe: ack continue
+dap-probe: stopped reason="function breakpoint" tid=1
+dap-probe: frame main.parkLoop
+dap-probe: frame main.main
+dap-probe: frame runtime.main
+dap-probe: frame runtime.goexit
+dap-probe: variables ok
+dap-probe: evaluate main.Sentinel -> 768901734683508737
+dap-probe: PASS -- ambush DAP launch + breakpoint + inspect (42ms)
+proc: orphan pid=4536 name="ambush-child" (parent pid=4535 name="ambush" exiting) -> adopted by pid=4503
+joey: /dap-probe reaped status=0; parley DAP client drives ambush (or fork-absent SKIP)
+go-hello: hello from a GOOS=thylacine Go binary
+go-hello: sum(1..100) = 5050
+joey: go-hello reaped status=0 -- GOOS=thylacine Stage 1 RUNS in-VM
+go-env: GOENVTEST="stage4a-ok" GOENVNUM="42"; os.Environ() has 2 vars
+go-env: STAGE 4a OK (per-Proc /env device: goenvs + inheritance + os.Getenv)
+joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM
+pouch-hello-env: PGENV1=clade-cl1b PGENVNUM=1729 -- ENV OK
+joey: /pouch-hello-env PASS; CL-1b-0 pouch-env verified
+pouch-hello-spawn: pipe+spawn+wait ok; WEXITSTATUS ok=0 fail=3 -- ALL SPAWN TESTS PASS
+joey: /pouch-hello-spawn PASS; CL-1b posix_spawn/wait4/pipe2/dup2 verified
+GNU Make 4.4.1
+Built for aarch64-thylacine
+Copyright (C) 1988-2023 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+joey: /make --version PASS; CL-1c-1 GNU make 4.4.1 runs on Thylacine
+go-goroutines: workers = 8  GOMAXPROCS = 4
+go-goroutines: allocOps = 16000  want = 16000
+go-goroutines: NumGC = 3  HeapAlloc = 79352  bytes
+go-goroutines: fan-in total = 1056640
+go-goroutines: STAGE 2 OK (goroutines + channels + GC)
+joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM
+mallocng-torture: start (128 KiB malloc/free corruption repro; sc=63 mmap path)
+mallocng-torture: single-threaded OK (24 iters)
+mallocng-torture: multi-threaded OK (4 threads x 24 iters)
+mallocng-torture: ALL OK
+u-test: starting (U-2-test; U-2 uplift arc integration smoke)
+u-test: alloc + fs + io OK
+hello from /hello-rs (Rust no_std, built via cargo)
+u-test: process + pipe OK
+u-test: notes + poll + time OK
+u-test: thread + torpor + time OK
+u-test: ninep codec OK
+u-test: hardware + cap OK
+u-test: line editor OK
+u-test: parser lexer OK
+u-test: parser core OK
+u-test: parser expr OK
+u-test: parser full OK
+u-test: eval expr OK
+u-test: eval stmt OK
+hello from /hello-rs (Rust no_std, built via cargo)
++ hello-rs
+hello from /hello-rs (Rust no_std, built via cargo)
+[1] 4552
+hello from /hello-rs (Rust no_std, built via cargo)
+u-test: eval exec OK
+hello from /hello-rs (Rust no_std, built via cargo)
+hello from /hello-rs (Rust no_std, built via cargo)
+hello from /hello-rs (Rust no_std, built via cargo)
+hello from /hello-rs (Rust no_std, built via cargo)
+hello from /hello-rs (Rust no_std, built via cargo)
+hello from /hello-rs (Rust no_std, built via cargo)
+[1] 4563
+hello from /hello-rs (Rust no_std, built via cargo)
+hello from /hello-rs (Rust no_std, built via cargo)
+u-test: eval pipe OK
+u-test: eval redirect OK
+u-test: bufreader_error_leg OK
+u-test: all OK
+joey: /u-test reaped status=0; U-2 arc integration verified
+/srv
+cd is a shell builtin
+u-builtin-test: all OK
+joey: /u-builtin-test reaped status=0; U-6e-a builtins verified
+u-readdir-test: all OK
+joey: /u-readdir-test reaped status=0; U-6e-b-1 readdir verified
+u-glob-test: all OK
+joey: /u-glob-test reaped status=0; U-6e-b-2 glob verified
+u-subst-test: all OK
+joey: /u-subst-test reaped status=0; U-6f command substitution verified
+u-repl-test: D4 menu completion OK
+u-repl-test: beacon zones OK
+u-repl-test: AND-OR (&& / ||) short-circuit OK
+u-repl-test: = in argument position parses OK
+u-repl-test: echo'd C-source one-liner parses OK
+u-repl-test: winsize / line-wrap OK
+u-repl-test: all OK
+joey: /u-repl-test reaped status=0; U-6g REPL main loop verified
+u-6-test: subst + for + case + arith OK
+u-6-test: glob + spawn + subst capture OK
+u-6-test: var + pipeline + subst capture OK
+u-6-test: builtin + special-vars + if + Dq OK
+u-6-test: tilde (~) command-word expansion OK
+u-6-test: var + heredoc + redirect + spawn OK
+u-6-test: REPL session (var + subst + pipe + Dq + exit) OK
+u-6-test: REPL error-survival + subst OK
+u-6-test: ut SCRIPT mode (positional + script-mode + exit + cwd) OK
+u-6-test: kernel cwd adopted (cwd + relative glob + relative cd) OK
+u-6-test: all OK
+joey: /u-6-test reaped status=0; U-6 evaluator arc integration verified
+[1] 4602
+[2] 4604
+[1] 4605
+[1] 4606
+[1] 4608
+[1]+ Done  echo hi
+[1] 4609
+[1]+  Done     echo hi
+[1] 4610
+[2] 4611
+[1] 4612
+echo hi
+[1] 4613
+bg: job [1] already running in background
+u-job-test: all OK
+joey: /u-job-test reaped status=0; U-7a background jobs verified
+[1] 4620
+[2] 4621
+[1]-  Done     echo one
+[2]+  Done     echo two
+u-7-test: bg demux survives fg + wait/jobs drain OK
+u-7-test: interrupt forward (fg) vs handle (prompt) OK
+[1] 4624
+[1]+  Done     echo bgm
+u-7-test: mask-note body reaps a job mid-defer OK
+[1] 4625
+[1]+ Done  echo capjob
+u-7-test: integrated Repl (note delivery + bg reap + exit) OK
+[1] 4626
+u-7-test: blocked `sleep 3600` interrupted + reaped OK (LS-5c)
+u-7-test: all OK
+joey: /u-7-test reaped status=0; U-7 job-control arc integration verified
+[38;2;224;120;64m⊢[0m ut v0.9-dev -- [38;2;154;143;138mThylacine textual shell[0m
+joey: /ut reaped status=0; Utopia shell REPL verified
+pouch-hello: hello from a POSIX C program (pouch libc)
+pouch-hello: sentinel ok - chdir wired (/ ok; bogus fails, not ENOSYS)
+pouch-hello: open -> ENOENT (16b-gamma openat live)
+pouch-hello: pread/pwrite seam ok (#37: cursor untouched, wired to 85/86)
+pouch-hello: sched_yield ok (#33: wired to 87)
+pouch-hello: stat(path) ok (0019: SYS_STAT=88, fields == fstat, miss -> ENOENT)
+pouch-hello: clock_gettime ok (wired to 75: MONOTONIC advances, REALTIME > 2020)
+pouch-hello: outline atomics ok (#71: FEAT_LSE arm, agrees with AT_HWCAP)
+pouch-hello: exit 0
+joey: pouch-hello smoke ok (write(2) seam + 0xFFFF sentinel both paths + stat(path) via 0019/SYS_STAT)
+pouch-hello-stdio: hello via buffered stdio (puts)
+pouch-hello-stdio: a second line via fwrite
+pouch-hello-stdio: buffer drains at exit
+joey: pouch-hello-stdio smoke ok (buffered stdio + patched __stdio_write)
+pouch-hello-printf: hello via printf(3) (pouch libc + compiler-rt)
+pouch-hello-printf: int ok - snprintf gave "1936"
+pouch-hello-printf: float ok - snprintf gave "3.14" (binary128 soft-float)
+pouch-hello-printf: exit 0
+joey: pouch-hello-printf smoke ok (printf + compiler-rt binary128 soft-float)
+pouch-hello-malloc: heap exercise (mallocng over SYS_BURROW_ATTACH)
+pouch-hello-malloc: sysconf phys=524288 avail=478166 pages == /ctl/memory ok
+pouch-hello-malloc: no-kernel-side calls honest; getdtablesize=1024 == measured ok
+pouch-hello-malloc: small malloc/free ok
+pouch-hello-malloc: calloc zeroing ok
+pouch-hello-malloc: realloc-grow (small slot) ok
+pouch-hello-malloc: large malloc/free ok (> MMAP_THRESHOLD)
+pouch-hello-malloc: realloc-grow large ok (mremap ENOSYS -> malloc+memcpy+free)
+pouch-hello-malloc: legs=heap,physpages,nprocs,sentinel-wrappers,ualarm,dtablesize: exit 0
+joey: pouch-hello-malloc smoke ok (mallocng over SYS_BURROW_ATTACH / DETACH)
+pouch-hello-mem: prot-ladder ok
+pouch-hello-mem: x-refused ok
+pouch-hello-mem: prot-errnos ok
+pouch-hello-mem: madvise-dontneed pages before=10 touched=1038 released=11
+pouch-hello-mem: madvise-dontneed ok
+pouch-hello-mem: madvise-free pages before=11 touched=1038 released=11
+pouch-hello-mem: madvise-free ok
+pouch-hello-mem: madvise-hint ok
+pouch-hello-mem: madvise-errnos ok
+pouch-hello-mem: partial-munmap ok
+pouch-hello-mem: aligned-reserve ok
+pouch-hello-mem: map-fixed ok
+pouch-hello-mem: mallocng-trim pages before=11 full=4263 half-freed=2339 all-freed=11
+pouch-hello-mem: mallocng-trim ok
+pouch-hello-mem: tls ok
+pouch-hello-mem: legs=prot-ladder,x-refused,prot-errnos,madvise-dontneed,madvise-free,madvise-hint,madvise-errnos,partial-munmap,aligned-reserve,map-fixed,mallocng-trim,tls: exit 0
+joey: pouch-hello-mem smoke ok (mprotect / madvise / MAP_FIXED / partial munmap over RESERVE / PROTECT / DECOMMIT / DETACH; mallocng returns pages)
+pouch-hello-threads: 5 threads, 1000 iters each
+pouch-hello-threads: main stack [0x7f800000, 0x80000000) size=8388608 == kernel maps row OK
+pouch-hello-threads: a 4 MiB frame touched at both ends OK
+pouch-hello-threads: counter = 5000 (expected 5000)
+pouch-hello-threads: 5/5 workers found their ---p guard row in /proc/4633/maps
+pouch-hello-threads: ok (5 workers, mutex-protected counter, joined)
+pouch-hello-threads: legs=pthread,mutex,main-stack-maps-row,main-stack-8mib,deep-frame,guard-vma: exit 0
+joey: pouch-hello-threads smoke ok (pthread + mutex over SYS_THREAD_* / SYS_TORPOR_*)
+pouch-hello-exitgroup: 2 live un-joined workers (1 cond-wait, 1 spin); calling exit_group(42)
+joey: pouch-hello-exitgroup smoke ok (exit_group live-peer cascade + #91 cross-thread exit code 42 -- SYS_EXIT_GROUP)
+pouch-hello-poll: pipe rd=2 wr=3
+pouch-hello-poll: poll empty -> 0 (ok)
+pouch-hello-poll: poll with byte -> 1 POLLIN (ok)
+pouch-hello-poll: select with byte -> 1 rfds (ok)
+pouch-hello-poll: select(0,...) zero-tv -> 0 (ok)
+pouch-hello-poll: huge ppoll -> 1 (ok)
+pouch-hello-poll: huge select -> 1 (ok)
+pouch-hello-poll: huge pselect -> 1 (ok)
+pouch-hello-poll: exit 0
+joey: pouch-hello-poll smoke ok (poll + select over SYS_POLL via devpipe)
+pouch-hello-identity: getpid -> 4636
+pouch-hello-identity: /proc says principal:4294967294 gid:4294967294
+pouch-hello-identity: getuid/geteuid -> 4294967294/4294967294 (ok, agrees with /proc)
+pouch-hello-identity: getgid/getegid -> 4294967294/4294967294 (ok, agrees with /proc)
+pouch-hello-identity: not the 0xFFFFFFDA ENOSYS sentinel (ok)
+pouch-hello-identity: legs=getpid,proc-status,uid-agrees,gid-agrees,not-sentinel: exit 0
+joey: pouch-hello-identity smoke ok (A-6: getuid/getgid agree with /proc; not the ENOSYS sentinel)
+pouch-hello-getrandom: getrandom(32) -> 32 (ok)
+pouch-hello-getrandom: nonzero entropy observed (ok)
+pouch-hello-getrandom: two reads differ (ok)
+pouch-hello-getrandom: exit 0
+joey: pouch-hello-getrandom smoke ok (musl getrandom(2) over SYS_GETRANDOM with CAP_CSPRNG_READ)
+pouch-hello-sockets: AF_UNIX SOCK_STREAM byte-mode /srv
+xproc-child: EACCES on the TCB service ok
+xproc-child: ECONNREFUSED on an absent name ok (causes distinct)
+test: socket(AF_INET6) refused EAFNOSUPPORT ok
+test: socket(SOCK_DGRAM) refused EPROTONOSUPPORT ok
+test: socket(protocol=42) refused EPROTONOSUPPORT ok
+test: bind(/usr/foo) rejected EINVAL ok (path outside /srv/)
+test: connect(/srv/pouch-sock-nonex) refused ECONNREFUSED ok
+test: close(fresh slot) ok
+server: bind+listen ok at /srv/pouch-sock-demo
+client: server ready, connecting
+client: connect ok at /srv/pouch-sock-demo, conn fd=0x40000001
+client: write PING ok
+server: accept ok, conn fd=4
+server: read PING (5 bytes byte-accurate) ok
+server: write PONG ok
+server: SO_PEERCRED pid=4639 uid=4294967294 gid=4294967294
+client: read PONG (5 bytes byte-accurate) ok
+client: SO_PEERCRED client-side returns ENOTSOCK at v1.0 ok
+client: stdio over socket (fputs/ppoll/fscanf/fgets/ppoll-eof/fclose) ok
+test: socket slots 8 free before == 8 after ok
+xproc: bind+listen ok
+xproc: poster dials its own service ok (self-post exemption)
+xproc: 2nd Proc refused on the service the poster just dialled ok
+test: FD_SET(socket fd) stops the program (abort) ok
+pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,ppoll-eof,slots,xproc-gate,fdset-guard: exit 0
+joey: pouch-hello-sockets smoke ok (AF_UNIX SOCK_STREAM over /srv with SO_PEERCRED)
+pouch-hello-signals: install handler
+pouch-hello-signals: raise SIGINT
+pouch-hello-signals: handler ran (count=1)
+pouch-hello-signals: #96 FP/SIMD preserved across handler (V0-V31)
+pouch-hello-signals: install SIG_IGN
+pouch-hello-signals: raise SIGINT (ignored)
+pouch-hello-signals: count unchanged (count=2)
+pouch-hello-signals: unsupported sigaction returns EINVAL
+pouch-hello-signals: exit 0
+joey: pouch-hello-signals smoke ok (sigaction + raise via SYS_NOTIFY/POSTNOTE/NOTED)
+N3-ENTER
+N3-STILL-IN
+N3-LEAVE
+N3-SECOND
+N3-DONE
+N3-PASS
+joey: pouch-hello-reentry smoke ok (N-3 DEFERS a note posted inside a handler)
+pouch-hello-sodium: sodium_init -> 0 (ok, version 1.0.20)
+pouch-hello-sodium: sha256("abc") KAT ok
+pouch-hello-sodium: blake2b-256 round-trip ok
+pouch-hello-sodium: xchacha20-poly1305 round-trip ok
+pouch-hello-sodium: ed25519 sign + verify + reject-tampered ok
+pouch-hello-sodium: armcrypto gate ok (AT_HWCAP=0x3201fb, aes=1 -> HARDWARE AEGIS)
+pouch-hello-sodium: exit 0
+joey: pouch-hello-sodium smoke ok (libsodium KATs + AEAD + ed25519)
+pouch-hello-argv: argc=4
+pouch-hello-argv: argv[0]=pouch-hello-argv
+pouch-hello-argv: argv[1]=alpha
+pouch-hello-argv: argv[2]=beta
+pouch-hello-argv: argv[3]=gamma
+pouch-hello-argv: argv[argc] NULL terminator ok
+pouch-hello-argv: exit 0
+joey: pouch-hello-argv smoke ok (argv pass-through via SYS_SPAWN_FULL_ARGV)
+user fault: pid=4645 reason="snare:segv" addr=0x0000000000000000 pc=0x0000000000201064 lr=0x0000000000201060 -- terminating Proc
+pouch-hello-fault: about to fault
+joey: pouch-hello-fault smoke ok (EL0 NULL deref terminated cleanly via snare:segv; kernel did NOT extinct)
+user fault: pid=4646 reason="snare:segv" addr=0x0000000100003fff pc=0x000000000020217c lr=0x000000000020216c -- terminating Proc
+pouch-hello-guard: guard 2000 bytes below 0x100004000; touching
+joey: pouch-hello-guard smoke ok (a write into a pthread's guard page died of snare:segv)
+user fault: pid=4651 reason="snare:segv" addr=0x0000000100008000 pc=0x0000000100001450 lr=0x0000000100001444 -- terminating Proc
+pouch-hello-dlopen: interp ok
+pouch-hello-dlopen: noexec ok
+pouch-hello-dlopen: confined ok
+pouch-hello-dlopen: load ok
+pouch-hello-dlopen: segments ok
+pouch-hello-dlopen: relro-data ok
+pouch-hello-dlopen: relro ok
+pouch-hello-dlopen: legs=interp,noexec,confined,load,segments,relro-data,relro: exit 0
+joey: pouch-hello-dlopen smoke ok (a Pouch .so loaded through /lib/libc.so; MNOEXEC and out-of-namespace refused; RELRO holds)
+argv-smoke: argc=3
+argv-smoke: argv[0]=argv-smoke
+argv-smoke: argv[1]=alpha
+argv-smoke: argv[2]=beta-2
+argv-smoke: native argv OK
+joey: argv-smoke ok (native env::args + io::stdout; first native-argv exercise)
+exec-probe: leg A ok (failed execve returned; caller alive)
+exec-probe: leg A2 ok (heap + identity intact)
+exec-probe: leg B ok (argument validation)
+exec-probe: leg C ok (multi-thread execve refused)
+exec-probe: L-2 execve E2E PASS (image replaced in place)
+joey: exec-probe ok (LINEAGE L-2: execve replaced a live image in place)
+user fault: pid=4660 reason="snare:segv" addr=0x00000000004005c8 pc=0x0000000000400f24 lr=0x0000000000400b00 -- terminating Proc
+fork-probe: PASS (resumed at the parent's PC, x0 = 0, own stack, shared address space, distinct reapable pid, inherited fds, parent suspended until the child exited AND until it exec'd, and RFPROC alone forks with a private copy-on-write image)
+joey: fork-probe ok (LINEAGE L-3b: a forked child resumed its parent's frame on its own stack)
+coreutil-smoke: the capture carries more than a pipe holds ok
+coreutil-smoke: the capture ends a tool that never does ok
+coreutil-smoke: echo ok
+coreutil-smoke: echo -n ok
+coreutil-smoke: seq N ok
+coreutil-smoke: seq F I L ok
+coreutil-smoke: true ok
+coreutil-smoke: false ok
+coreutil-smoke: basename ok
+coreutil-smoke: basename suf ok
+coreutil-smoke: dirname ok
+coreutil-smoke: pwd ok
+coreutil-smoke: cat stdin ok
+coreutil-smoke: wc -c ok
+coreutil-smoke: wc -l ok
+coreutil-smoke: wc default ok
+coreutil-smoke: head -n ok
+coreutil-smoke: head - and banners ok
+coreutil-smoke: tail - and banners ok
+coreutil-smoke: tail -n ok
+coreutil-smoke: sort ok
+coreutil-smoke: sort -n ok
+coreutil-smoke: uniq ok
+coreutil-smoke: tr upper ok
+coreutil-smoke: tr -d ok
+coreutil-smoke: tr class reject ok
+coreutil-smoke: cut -f ok
+coreutil-smoke: cut -c ok
+coreutil-smoke: grep match ok
+coreutil-smoke: grep no-match ok
+coreutil-smoke: grep -c ok
+coreutil-smoke: grep -c long line ok
+coreutil-smoke: grep -n last line ok
+coreutil-smoke: grep empty input ok
+coreutil-smoke: grep -c empty input ok
+coreutil-smoke: grep -l stdin ok
+coreutil-smoke: wc -w long word ok
+coreutil-smoke: wc long input ok
+coreutil-smoke: cut empty input ok
+coreutil-smoke: cut long line ok
+coreutil-smoke: uniq empty input ok
+coreutil-smoke: tail -n window ok
+coreutil-smoke: tail -c window ok
+coreutil-smoke: tail last line ok
+coreutil-smoke: grep a line past LINE_MAX ok
+coreutil-smoke: tail a line past LINE_MAX ok
+coreutil-smoke: tail -n 0 reads nothing ok
+coreutil-smoke: tail -n +N from line N ok
+coreutil-smoke: tail -n +0 is everything ok
+coreutil-smoke: tail -c +N from byte N ok
+coreutil-smoke: tail -n -1 is the last line ok
+coreutil-smoke: tail -- ends its options ok
+coreutil-smoke: head -- ends its options ok
+coreutil-smoke: head refuses a count it cannot hold ok
+coreutil-smoke: grep -o every match of a line ok
+coreutil-smoke: cut -f fields of a line ok
+coreutil-smoke: cat -n numbers every line ok
+coreutil-smoke: cat -b numbers nonblank lines ok
+coreutil-smoke: cat -s squeezes blank runs ok
+coreutil-smoke: cat -A shows everything ok
+coreutil-smoke: grep stops when its reader leaves ok
+coreutil-smoke: cut stops when its reader leaves ok
+coreutil-smoke: cat stops when its reader leaves ok
+coreutil-smoke: tee stops when its reader leaves ok
+coreutil-smoke: uniq stops when its reader leaves ok
+coreutil-smoke: tail -n +1 streams and stops when its reader leaves ok
+coreutil-smoke: uniq shows a line as its run begins ok
+coreutil-smoke: cat -v streams a line with no end ok
+coreutil-smoke: tail stops at a banner with no reader ok
+coreutil-smoke: grep -c counts every operand ok
+coreutil-smoke: grep -c finds its verdict with no reader ok
+coreutil-smoke: head reports a banner it could not write ok
+coreutil-smoke: tail reports a banner it could not write ok
+coreutil-smoke: ns reports raw text it could not write ok
+coreutil-smoke: uname ok
+coreutil-smoke: uname -m ok
+coreutil-smoke: uname -a ok
+coreutil-smoke: env bare name ok
+coreutil-smoke: realpath abs ok
+coreutil-smoke: realpath rel ok
+coreutil-smoke: sleep 0 ok
+coreutil-smoke: hexdump hex ok
+coreutil-smoke: hexdump ascii ok
+coreutil-smoke: which miss ok
+coreutil-smoke: which path ok
+coreutil-smoke: cmp equal ok
+coreutil-smoke: cmp equal large ok
+coreutil-smoke: cmp differ ok
+coreutil-smoke: cat FILE ok
+coreutil-smoke: wc FILE ok
+coreutil-smoke: whoami SYSTEM ok
+coreutil-smoke: id -u SYSTEM ok
+coreutil-smoke: id SYSTEM ok
+coreutil-smoke: date UTC ok
+coreutil-smoke: ls auto pipe clean ok
+coreutil-smoke: ls -l auto pipe clean ok
+coreutil-smoke: ps auto pipe clean ok
+coreutil-smoke: ps raw header ok
+coreutil-smoke: ps raw joey ok
+coreutil-smoke: env BEACON=rich exported ok
+coreutil-smoke: ls rich strips to plain ok
+coreutil-smoke: grep rich strips to plain ok
+coreutil-smoke: grep -o rich strips to plain ok
+coreutil-smoke: stat rich strips to plain ok
+coreutil-smoke: ps rich table + obj pid ok
+coreutil-smoke: ls -l rich pre-box (PL-5) ok
+coreutil-smoke: all OK (106 checks)
+joey: coreutil-smoke ok (native coreutils spawned + I/O-verified via the shell's process surface)
+joey: torpor SVC-dispatch ok (wait→EFAULT, wake→0 on empty bucket)
+joey: thread-spawn SVC-dispatch ok (null/misaligned entry / misaligned sp / OOB entry rejected)
+thread-probe: ok (spawn + tid_address + exit + join + #112 ptid publish/gate verified)
+joey: /thread-probe reaped status=0; SYS_THREAD_SPAWN/EXIT verified
+thread-fault-probe: about to fault in a multi-thread Proc
+user fault: pid=4780 reason="snare:segv" addr=0x0000000000000010 pc=0x0000000000400070 lr=0x0000000000400018 -- terminating Proc
+joey: thread-fault-probe ok (multi-thread Proc fault terminated cleanly; kernel did NOT extinct)
+warden: bind database 6 manifests (4 production + fixtures)
+warden: /hw discovered 45 device nodes
+warden: virtio-mmio bank 0xa000000/0x4000 (32 slots) -> spawning bus source
+virtio-mmio-source: virtio_mmio@a003400 -> virtio:4 (reg=0xa003400 intid=[74])
+virtio-mmio-source: virtio_mmio@a003600 -> virtio:16 (reg=0xa003600 intid=[75])
+virtio-mmio-source: virtio_mmio@a003800 -> virtio:18 (reg=0xa003800 intid=[76])
+virtio-mmio-source: virtio_mmio@a003a00 -> virtio:1 (reg=0xa003a00 intid=[77])
+virtio-mmio-source: virtio_mmio@a003c00 -> virtio:2 (reg=0xa003c00 intid=[78])
+virtio-mmio-source: virtio_mmio@a003e00 -> virtio:2 (reg=0xa003e00 intid=[79])
+virtio-mmio-source: reported 6 populated slot(s) of 32 virtio-mmio slots
+warden: virtio-mmio source reported 6 typed node(s)
+warden: discovered virtio:4 (virtio_mmio@a003400)
+warden: discovered virtio:16 (virtio_mmio@a003600)
+warden: discovered virtio:18 (virtio_mmio@a003800)
+warden: discovered virtio:1 (virtio_mmio@a003a00)
+warden: discovered virtio:2 (virtio_mmio@a003c00)
+warden: discovered virtio:2 (virtio_mmio@a003e00)
+warden: /hw/pci discovered 8 PCI function(s)
+warden: discovered virtio-pci:1 (0.1.0)
+warden: discovered virtio-pci:18 (0.2.0)
+warden: discovered virtio-pci:18 (0.3.0)
+warden: discovered virtio-pci:16 (0.4.0)
+warden: discovered virtio-pci:4 (0.5.0)
+warden: discovered virtio-pci:25 (0.6.0)
+warden: discovered virtio-pci:18 (0.7.0)
+warden: discovered virtio-pci:9 (0.8.0)
+warden: bind arm,pl061 (pl061@9030000) -> menagerie-probe inst=0 [mmio=1 irq=1 dma=0x10000 pci=None] restart=OnCrash
+menagerie-probe: grant compat=arm,pl061 serve=/dev/gpio/0 mmio=1 irq=1 dma=0x10000
+menagerie-probe: mapped granted MMIO 0x9030000/0x1000 OK (4096 bytes)
+menagerie-probe: out-of-grant MMIO create rejected OK (allowance enforced)
+menagerie-probe: PASS (grant verified + allowance enforced)
+warden: menagerie-probe pid=4783 exited code=Some(0)
+warden: bind virtio:1 (virtio_mmio@a003a00) -> netdev-driver inst=0 [mmio=1 irq=1 dma=0x10000 pci=None] restart=OnCrash
+netdev-driver: grant compat=virtio:1 slot=0xa003a00 intid=77 dma=0x10000
+netdev-driver: up mac=[52, 54, 00, 12, 34, 56] link=true -- ARP round-trip x24
+netdev-driver: PASS -- 24/24 ARP replies via VirtioNet (grant-driven open_slot)
+netdev-driver: serving (long-lived; awaiting DeviceRemoved)
+warden: netdev-driver pid=4784 up (READY) -> DeviceRemoved (revoke + terminate)
+warden: netdev-driver pid=4784 torn down (status=Some(1))
+warden: bind virtio-pci:1 (0.1.0) -> netd inst=0 [mmio=0 irq=0 dma=0x10000 pci=Some((0, 1, 0))] restart=OnCrash
+netd: grant compat=virtio-pci:1 pci=Some((0, 1, 0)) irq=0 dma=0x10000
+netd: PCI IRQ mode=Msix
+netd: up mac=[52, 54, 00, 12, 34, 57] link=true mtu=1500 -- bringing the link up (DHCP)
+netd: DHCP lease addr=10.0.2.15/24 router=Some(10.0.2.2) dns=1 ip-mtu=1500
+netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)
+netd: net-3b UDP round-trip OK (DNS resp 61 bytes, ancount=2)
+netd: net-3c ICMP round-trip best-effort: no echo reply (slirp host-ping?) -- /net/icmp machinery proven via joey
+netd: net-4b DNS live query OK (example.com -> 104.20.23.154)
+netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)
+netd: net-8a resident lo E2E PASS (127.x migrate + accept + close-drain + slot reuse + Weft detach + no-leak)
+netd: TCP retirement PASS (admission bound, queued data retained, deadline, handshake close, TIME-WAIT yields and nothing else does)
+netd: net-6a recv-blocking E2E PASS (WouldBlock/Data/Eof, in-guest 127.0.0.1)
+netd: net-6a-3 echo E2E PASS (2 concurrent accept + bidirectional echo, in-guest)
+netd: net-6b ready E2E PASS (POLLOUT/POLLIN/EOF-readable, in-guest 127.0.0.1)
+netd: net-4c ipifc E2E PASS (add/remove static + status + ndb, in-guest)
+netd: #293 connect-sweep selftest PASS (stuck dial socket removed)
+netd: dial-verdict selftest PASS (refused before the open + swept timeout + never-dialed + established)
+netd: net-4d proto selftest PASS (cs/dns/ndb/mask parsers)
+netd: net-4d dns defer-guard PASS (no lost held-Rread on a 2nd read)
+netd: net-4d dns loopback E2E PASS (deferred resolve in-guest 127.0.0.1)
+netd: serving /net (9P over /srv/net)
+warden: netd pid=4785 up (READY) -> serving (persistent; left running)
+warden: bind virtio-pci:25 (0.6.0) -> nocturned inst=0 [mmio=0 irq=0 dma=0x40000 pci=Some((0, 6, 0))] restart=OnCrash
+nocturned: grant compat=virtio-pci:25 pci=Some((0, 6, 0)) irq=0 dma=0x40000
+nocturned: sound PCI IRQ mode=Msix vector=0
+nocturned: virtio-snd features lo=0x79000000 hi=0x00000101 jacks=0 streams=1 chmaps=0 irq=PCI-INTx
+nocturned: device offers 1 stream(s); capture disabled (playback-only)
+nocturned: stream 0: dir=0 ch=1..2 features=0x0 formats=0xe0078 rates=0x3fff
+nocturned: serving /srv/nocturne (playback) + /srv/nocturne-ctl (sink authority); s16c2r48000 period 2048 B x 4
+warden: nocturned pid=4786 up (READY) -> serving (persistent; left running)
+warden: bind restart-test (synthetic-restart-demo) -> crash-probe inst=0 [mmio=0 irq=0 dma=0x0 pci=None] restart=OnCrash
+crash-probe: grant compat=restart-test mmio=0 irq=0 dma=0x0 -> failing probe (supervision demo)
+warden: crash-probe pid=4787 exited code=Some(72)
+warden: crash-probe crashed -> restart 1/3 after 50ms
+crash-probe: grant compat=restart-test mmio=0 irq=0 dma=0x0 -> failing probe (supervision demo)
+warden: crash-probe pid=4788 exited code=Some(72)
+warden: crash-probe crashed -> restart 2/3 after 100ms
+crash-probe: grant compat=restart-test mmio=0 irq=0 dma=0x0 -> failing probe (supervision demo)
+warden: crash-probe pid=4789 exited code=Some(72)
+warden: crash-probe crashed -> restart 3/3 after 200ms
+crash-probe: grant compat=restart-test mmio=0 irq=0 dma=0x0 -> failing probe (supervision demo)
+warden: crash-probe pid=4790 exited code=Some(72)
+warden: crash-probe gave up after 3 restart(s) -- device unavailable (soft)
+warden: bind virtio-pci:18 (0.2.0) -> lictor inst=0 [mmio=0 irq=0 dma=0x4000000 pci=Some((0, 2, 0))] restart=OnCrash
+warden: lictor caps +0x4 (manifest)
+tapestryd: gpu PCI IRQ mode=Msix vector=0
+tapestryd: gpu features lo=0x30000002 (virgl=0 edid=1 uuid=0 blob=0 ctxinit=0) hi=0x00000101
+tapestryd: gpu pair slot armed (batched sync chain live)
+tapestryd: edid 325x203 mm for 1280x800 px
+tapestryd: gpu up -- 1280x800, pci intid=35, virgl=0 capsets=0
+tapestryd: input[0] up (poll-mode eventq)
+tapestryd: input[1] up (poll-mode eventq)
+tapestryd: input[2] up (poll-mode eventq)
+lictor: broker posted
+warden: lictor pid=4791 up (READY) -> serving (persistent; left running)
+tapestryd: grant compat=virtio-pci:18 pci=None irq=0 dma=0x4000000
+lictor: accepted compositor peer
+lictor: accepted compositor peer
+tapestryd: input[0] is the keyboard
+lictor: accepted compositor peer
+tapestryd: input[1] is the tablet
+lictor: accepted compositor peer
+tapestryd: input[2] is the mouse
+tapestryd: profile built-in (no /lib/halcyon/profile)
+tapestryd: theme built-in (no /lib/halcyon/theme.toml)
+tapestryd: theme built-in (BuiltIn, Legacy); profile legacy (BuiltIn)
+tapestryd: scale 100 (edid)
+tapestryd: warp host3d-ring skipped (blob feature not offered)
+tapestryd: warp scanout-blob probe skipped (blob feature not offered)
+tapestryd: warp presentable self-test skipped (blob feature not offered)
+lictor: accepted compositor peer
+tapestryd: composed path = CPU (virgl=0); comp-attach: skipped (no compositor ctx)
+warden: Tapestry pid=4792 READY with DMA-only allowance
+tapestryd: composed pixels = CPU (no compositor ctx)
+warden: 6 bound, 5 up, 1 gave up, 0 failed
+tapestryd: serving /srv/tapestry + /srv/warp (1280x800)
+proc: orphan pid=4792 name="tapestryd" (parent pid=4781 name="warden" exiting) -> adopted by pid=4503
+proc: orphan pid=4791 name="lictor" (parent pid=4781 name="warden" exiting) -> adopted by pid=4503
+proc: orphan pid=4786 name="nocturned" (parent pid=4781 name="warden" exiting) -> adopted by pid=4503
+proc: orphan pid=4785 name="netd" (parent pid=4781 name="warden" exiting) -> adopted by pid=4503
+joey: warden ok (Menagerie bind-loop: discover -> grant -> spawn narrowed)
+joey: spawn thylacine-venus-prove FAILED (absent from this image, or refused)
+joey: venus-prove absent-or-failed (V-3b-3b; non-fatal -- a 2D/venus-off host, or a bring-up regression)
+joey: spawn thylacine-vk-sdl-prove FAILED (absent from this image, or refused)
+joey: vk-sdl-prove absent-or-failed (W-3e; non-fatal -- no display/venus, or a glue regression)
+joey: probe /bin/system.key fstat OK size=3656 mode=0o100400
+joey: probe SYS_STAT OK (attrs match fstat; miss -> -ENOENT)
+joey: probe /bin/system.key lseek SEEK_END/SEEK_SET OK
+joey: probe A-2a owner=system + SYS_WSTAT reject paths OK
+joey: probe #81 T_OPATH-read of /bin/system.key DENIED (EBADF) OK
+joey: probe #66 fd2path / + /srv (cross-transplant) OK
+joey: probe H1 fd_devclass cons/null/pipe/ramfs/closed OK
+joey: probe #66b /proc/0/ns mount-list OK
+pouch-hello: hello from a POSIX C program (pouch libc)
+pouch-hello: sentinel ok - chdir wired (/ ok; bogus fails, not ENOSYS)
+pouch-hello: open -> ENOENT (16b-gamma openat live)
+pouch-hello: pread/pwrite seam ok (#37: cursor untouched, wired to 85/86)
+pouch-hello: sched_yield ok (#33: wired to 87)
+pouch-hello: stat(path) ok (0019: SYS_STAT=88, fields == fstat, miss -> ENOENT)
+pouch-hello: clock_gettime ok (wired to 75: MONOTONIC advances, REALTIME > 2020)
+pouch-hello: outline atomics ok (#71: FEAT_LSE arm, agrees with AT_HWCAP)
+pouch-hello: exit 0
+joey: CL-5 page-budget probe OK (reduce accepted + stamped; unauthorized raise and over-hard-cap both refused)
+joey: probe devhw /hw/cpus/cpu@0/reg OK (DTB inventory walkable)
+stratumd: serving /dev/virtio-blk on /srv/stratum-fs (backlog=16, msize=8388608, ds=1, ro=0)
+stratumd: /ctl/ on /srv/stratum-ctl
+stratumd: bound and ready (serving /srv/stratum-fs)
+joey: stratumd-boot /srv/stratum-fs bound + ready (deterministic readiness handshake)
+joey: stratumd stderr drainer up (#370)
+joey: stratumd-boot t_attach_9p_srv OK; attach_fd=2
+joey: stratumd-boot pre-pivot /thylacine-version OK (69 bytes)
+joey: B-1d /lib union mount OK (initrd lib/ before the disk's /lib)
+joey: UM-6 /bin/sh shim SKIPPED (no /lib/shcompat)
+joey: Go-4b post-pivot /env re-graft OK
+joey: section-13 /viv/bin SKIPPED (no /vivarium/viv-bin -- no static-git tarball)
+joey: section-13 /viv/abin SKIPPED (no /vivarium/viv-abin -- no busybox tarball)
+joey: CL-1c-2 running `make -f /tmp/mkt/Makefile -j3` (3 parallel cp compiles + a dependent link)
+/bin/cp /tmp/mkt/a.c /tmp/mkt/a.o
+/bin/cp /tmp/mkt/b.c /tmp/mkt/b.o
+/bin/cp /tmp/mkt/c.c /tmp/mkt/c.o
+/bin/cp /tmp/mkt/a.o /tmp/mkt/prog
+joey: CL-1c-2 make -j3 reaped status=0
+joey: /make -j3 PASS; CL-1c-2 GNU make drives CL-1b posix_spawn/wait4 under -j parallelism
+go version go1.25.3 thylacine/arm64
+joey: go4c TIMING version=52ms
+/goroot
+/go-cache
+go1.25.3
+
+v8.0
+0
+off
+
+joey: go4c TIMING bisect-compile=78ms
+joey: Go-4c BISECT x.a[0..220] <<<
+!<arch>
+__.PKGDEF       0           0     0     644     238       `
+go object thylacine arm64 go1.25.3 GOARM64=v8.0 X:regabiwrappers,regabiargs,aliastypeparams,swissmap,synchashtriemap,dwarf5
+main
+
+
+$$B
+u................
+>>> end x.a head
+joey: Go-4c BISECT COMPILE-EMITS-MAIN=yes -- archive GOOD; 'not package main' is a LINK-side bug
+joey: probe46 pre OK (write-only fstat sees the unfsynced size)
+WORK=/tmp/go-build2438099771
+joey: go4c TIMING build=472ms
+go-4c on-device build OK: 0,1,2,3,4,5,6,7,8,9
+joey: go4c TIMING run=5ms
+WORK=/tmp/go-build3974635424
+joey: go4c TIMING build2-warm=62ms
+joey: probe46 post OK (write-only fstat sees the unfsynced size)
+joey: go8d running `gopls check /tmp/gp/check.go`
+tapestryd: idle-throttle 60 -> 15 Hz (quiet_ms=1009 animating=false dyn=false)
+/tmp/gp/check.go:7:9-23: undefined: undefinedIdent
+joey: go8d gopls check reaped status=0
+/tmp/gp/check.go:3:6-12: defined here as func Target() int
+joey: go8d gopls definition reaped status=0
+joey: go8e-2 running /bin/lsp-probe (live LSP round-trip, one session per baked server)
+lsp-probe: starting (live LSP round-trip, one session per server)
+lsp-probe: [gopls] session starting
+lsp-probe: [gopls] initialize OK -- server accepted our capabilities
+lsp-probe: [gopls] diagnostic OK -- "undefined: lspProbeUndefined7431" at line 3
+lsp-probe: [gopls] hover OK -- "func Probe() int"
+lsp-probe: [gopls] definition OK -> file:///tmp/lspp/main.go:2
+lsp-probe: [gopls] OK -- handshake + didOpen + publishDiagnostics (102ms, publishes=1, auto-replies=0, peak=115MiB/1792MiB)
+lsp-probe: clangd absent (/clade/bin/clangd) -- skipping
+lsp-probe: clangd+headers absent (/clade/bin/clangd) -- skipping
+lsp-probe: PASS -- 1 server session(s) completed
+joey: go8e-2 lsp-probe reaped status=0
+joey: go8d OK -- gopls (GOOS=thylacine) type-checks + resolves a definition on-device
+joey: go8e-2 OK -- parley::lsp drives a real gopls: initialize -> didOpen -> publishDiagnostics
+joey: Go-4c reaped status=0 -- the GOOS=thylacine toolchain BUILT + RAN a program ON-DEVICE
+joey: net-2c-1 /net mounted (netd 9P server)
+joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+reuses 0)
+joey: net-3a PROBE OK (announce *!7777 -> Listen; listen file + readdir; listen gated on announce)
+joey: net-3b PROBE OK (udp clone->0, connect 10.0.2.3!53, remote readback, no listen, frees+reuses 0)
+joey: net-3c PROBE OK (icmp clone->0, connect 10.0.2.2, remote readback, no listen, frees+reuses 0)
+joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + net!localhost!http -> /net/tcp/clone 127.0.0.1!80; unresolved -> empty; /lib/ndb/local readable)
+joey: net-4b PROBE OK (dns 10.0.2.2 -> 10.0.2.2; localhost ip -> 127.0.0.1; aaaa -> empty)
+joey: net-4c PROBE OK (ipifc status addr=10.0.2.15 dhcp gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; ctl rejects malformed)
+pouch-hello-net: control surface OK (socket/reject/setsockopt/bind/listen/getsockname/shutdown/sendto/recvfrom/poll/nonblock/close)
+pouch-hello-net: live round-trip OK (63 bytes: HTTP/1.1 301 Moved Permanently)
+pouch-hello-net: exit 0
+joey: net-5/6a-2 PROBE OK (pouch AF_INET socket-compat over /net: socket/reject/setsockopt/bind/listen/getsockname/shutdown/sendto/recvfrom/close)
+net-echo: net-8b loopback E2E PASS (bind+connect+accept+echo over /net)
+net-echo: weft-6b MAP E2E PASS (Tweft -> netd ring register -> mapped ring visible)
+net-echo: weft-6b TX E2E PASS (ring write -> Tweftio -> netd in-place -> verified)
+net-echo: weft-6b RX E2E PASS (Tweftio READ -> netd recv-in-place -> ring verified)
+net-echo: weft-6c async E2E PASS (WeftFlow push/pop/wait -> Tweftio over Loom + readiness edge)
+net-echo: net-8c-1 soak PASS (8x echo over /net; tcp active returns to baseline)
+net-echo: net-8c-2 TLS-over-/net E2E PASS (handshake + cert verify + echo over the live mount)
+net-echo: starting (net-6a-3 native net + Loom async witness)
+net-echo: PROBE OK (native net bind/announce/local + Loom async /net read composes)
+joey: net-8 PROBE OK (live over-/net echo + soak + TLS-over-/net E2E; net-6a-3 net + Loom async)
+netperf: NET-PERF NP-1 -- loopback micro-bench (M1 rtt / M2 throughput / M3 connect)
+netperf M1 rtt: 100 round-trips over lo; mean 190.318 us / min 120.583 us / max 300.250 us (1B ping-pong, 4 ops/rt)
+netperf M2 throughput: 256 KiB over lo in 13.080 ms; 19571 KiB/s (4 KiB window, POLLOUT-paced)
+netperf M2 byte-copy breakdown (#290): 17 ops, 1 stalls; data-move 1386 us (81 us/op); readiness-stall 11392 us (transport-independent)
+netperf M3 connect: 50 dials over lo; mean 1286.663 us / min 881.041 us / max 1876.416 us
+netperf MW weft-throughput: 256 KiB over lo in 25.466 ms; 10052 KiB/s (zero-copy push, 254 KiB ring; #221-fixed ~6x; residual stall is the loopback window-update round-trip; byte-copy is also SYS_RW_MAX=4KiB/op-capped while weft bypasses it -- the zero-copy data-move is ~2x faster, see breakdown)
+netperf MW weft breakdown (#290): 18 ops, 2 stalls; data-move 1446 us (80 us/op); readiness-stall 23674 us (transport-independent)
+netperf: NP-1 OK (M1+M2+M3+MW[weft] over the resident lo stack)
+joey: NET-PERF NP-1 OK (netperf M1+M2+M3 over the resident lo stack)
+cpubench: TI-4e scheduler probe (cpus=4) -- single/scale/yield/storm/pingpong/idle ('cpubench all' = the full bench)
+atomics: 1000000 uncontended fetch_add -- LL/SC 4.446 ns/op, native 3.909 ns/op
+atomics: FEAT_LSE arm active (#71 W1u-b) -- 1.13x vs LL/SC
+single: 66 Mops in 120 ms -> 551 Mops/s (1 thread, no contention)
+scale: T1=36 ms Tn=38 ms (n=4) -> efficiency 0.9x of ideal; per-worker 38..38 ms
+yield: 160 sleeps over 4 threads in 22 ms -> 7250 sleeps/s; fairness 0.9 (1.0=ideal, sleep=500us)
+storm: 32 thread spawn+join in 0 ms -> 33042 threads/s (30 us/thread, n=4 x 8 rounds)
+pingpong: 3000 round-trips; mean 1.207 p50 0.125 p99 31.792 p99.9 57.792 max 76.417 us (cross-CPU futex wake)
+  kernel wc-delta: tickless parks=206 starved=83 starved_us=2965 max_starved_us=5997
+idle: 200 ms quiet window -> 11745 parks (58725 parks/s; high = tickful re-poll, low = tickless deep-park = the #299 axis)
+cpubench: full-run kernel work-conservation:
+  kernel wc-delta: tickless parks=61509 starved=289 starved_us=69933 max_starved_us=6025
+cpubench: PROBE OK
+joey: TI-4e cpubench PROBE OK (scheduler single/scale/yield/storm/pingpong/idle; 'cpubench all' = the full 13-mode bench)
+fsbench: FS throughput probe -- seqwrite/seqread/reread + create + fsync ('fsbench all' = the full bench)
+seqwrite: 8 MiB in 50 ms -> 158.57 MiB/s (write+fsync, 256 KiB chunks)
+seqread:  8 MiB in 12 ms -> 634.98 MiB/s (cold -- decrypt path)
+reread:   8 MiB in 1 ms -> 5936.73 MiB/s (warm -- #343 dcache; 9.3x vs cold)
+create:   200 files x 4096 B in 40 ms -> 4959 files/s, 19.37 MiB/s (all OK)
+fsync:    50 files x 4096 B (write+fsync each) in 400 ms -> 124 files/s (8007 us/durable-file)
+fsbench: COHERENCE no-fsync sz=3000 fstat_size=3000 read=3000 first_bad=None -> PASS
+fsbench: COHERENCE no-fsync sz=70000 fstat_size=70000 read=70000 first_bad=None -> PASS
+fsbench: COHERENCE fsync    sz=70000 fstat_size=70000 read=70000 first_bad=None -> PASS
+fsbench: ARPATCH sz=12000 fstat=12000 read=12000 patch=ok tail_bad=None -> PASS
+fsbench: ARPATCH sz=200000 fstat=200000 read=200000 patch=ok tail_bad=None -> PASS
+fsbench: ARWRITE read=1992 magic=true sz0=Some(86)/86 sz1=Some(1777)/1777 body0=ok body1=ok main_line=true -> PASS
+fsbench: PROBE OK
+joey: fsbench PROBE OK (in-guest FS throughput seqwrite/seqread/reread/create/fsync; 'fsbench all' = the full bench)
+tlsperf: NET-PERF NP-2 -- TLS handshake (M4) + crypto micro-bench (M5)
+tlsperf M4 handshake: 10 TLS 1.3 handshakes over lo; mean 2916.699 us / min 2554.916 us / max 3635.250 us (cert verify incl.)
+tlsperf: M5 crypto micro-bench (RustCrypto software primitives)
+tlsperf M5 aes128gcm-seal-1KiB: 64236 ops/s (15.567 us/op, 500 iters)
+tlsperf M5 aes128gcm-open-1KiB: 64488 ops/s (15.506 us/op, 500 iters)
+tlsperf M5 sha256-1KiB: 199332 ops/s (5.016 us/op, 1000 iters)
+tlsperf M5 x25519-agree: 18949 ops/s (52.770 us/op, 50 iters)
+tlsperf M5 ecdsa-p256-verify: 2590 ops/s (386.030 us/op, 50 iters)
+tlsperf: NP-2 OK (M4+M5 over the resident lo stack + RustCrypto)
+joey: NET-PERF NP-2 OK (tlsperf M4 handshake + M5 crypto over the resident lo stack)
+netperf: NET-PERF NP-3 -- NIC path (M6 rtt / connect / throughput)
+netperf M6 SKIP: no host server reachable at 10.0.2.100:7820 over the NIC (guestfwd inert; standard boot)
+netperf: NP-3 OK (M6 over the NIC, or a best-effort SKIP)
+joey: NET-PERF NP-3 OK (netperf M6 NIC path; numbers under np3-bench, else a fast SKIP)
+sntp: SELFTEST OK (NTPv4 build/parse/validate + 1900->Unix + offset + EACCES gate)
+joey: net-7a-2 PROBE OK (native sntp NTPv4 selftest + EACCES clock-step gate)
+interfaces
+device ether0
+mac 52:54:00:12:34:57
+mtu 1500
+addr 10.0.2.15/24
+gw 10.0.2.2
+dns 10.0.2.3
+mode dhcp
+stats
+tcp
+  active 0
+  opened 182
+  transports 61
+  retiring 61
+  close-timeouts 0
+  timewait-yielded 82
+udp
+  active 0
+  opened 7
+icmp
+  active 0
+  opened 3
+
+┌─ connections ──────────────────────────────────────── 0 conns ─┐
+│ proto conn  local                 remote                status │
+└────────────────────────────────────────────────────────────────┘
+joey: net-7b PROBE OK (netstat walk + /net/summary rollup)
+┌─ lookup ───────────┐
+│ Name:    localhost │
+│ Address: 127.0.0.1 │
+└────────────────────┘
+joey: net-util PROBE OK (nslookup localhost -> 127.0.0.1 via /net/cs)
+PING 127.0.0.1 (127.0.0.1): 56 data bytes
+56 bytes from 127.0.0.1: icmp_seq=0 time=0.209 ms
+┌─ ping statistics ────── 127.0.0.1 ─┐
+│ 1 transmitted, 1 received, 0% loss │
+└────────────────────────────────────┘
+joey: net-util PROBE OK (ping 127.0.0.1 -> EchoReply via /net/icmp loopback)
+curl: SELFTEST OK (6 URL cases, request build, response split [CRLF + LF])
+joey: net-util PROBE OK (curl --selftest -> URL/HTTP parser battery)
+wget: SELFTEST OK (6 URL cases, basename, request build, response split)
+joey: net-util PROBE OK (wget --selftest -> URL/HTTP + basename battery)
+tls-smoke: ClientHello OK
+tls-smoke: loopback E2E PASS (handshake + cert verify + app-data round-trip)
+tls-smoke: untrusted-cert REJECTED (verifier validates the chain)
+tls-smoke: coalesced-close PASS (Finished+close, bytewise, early-close refusal)
+joey: net-7c PROBE OK (native rustls: ClientHello + loopback E2E [handshake + cert verify + round-trip] + untrusted-cert rejected)
+https: SELFTEST OK (baked CA bundle: 193 trust anchors, client config built)
+joey: net-7c-2 PROBE OK (https baked CA bundle parsed + client config built)
+joey: net-6b PROBE OK (ready: snapshot at once, 0 included, undefined bits refused, reply cut; dev9p.poll: udp ready POLLOUT-ready + POLLIN-times-out, no hang)
+joey: stratumd-boot post-pivot /thylacine-version OK (69 bytes); root now disk-backed Stratum FS
+joey: fs-mut create/persist + read-back OK
+joey: fs-mut mkdir+readdir OK (d1=51 bytes)
+joey: probe46 root OK (write-only fstat sees the unfsynced size)
+joey: probe79 OK (through a file -> ENOTDIR; absent + miss-under-a-dir -> ENOENT)
+joey: probe80 OK (unlink-a-dir=-21 rmdir-non-empty=-39 [both: specific, not -1] absent=-2 badfd=-9 dotdot=-22)
+joey: probe100 OK (close=-9 read=-9 write=-9 lseek-badfd=-9 whence=-22 negoff=-22 hiwhence=0 hibad=-22 wfault=-14 rfault=-14 seed=16 rew=0)
+joey: probe81 OK ('.'/'..' out of a file -> ENOTDIR, incl. a file dirfd + the single-hop walk/create; a real dir + the root clamp still resolve)
+joey: probe82 OK (a trailing '/' on a file -> ENOTDIR, open + stat; a real dir, "/", and a genuine miss are unaffected)
+joey: probe83 OK (a cwd-relative path resolves like its absolute spelling: f/.. f/. f/ -> ENOTDIR, nope/.. -> ENOENT; chdir gated + cwd stays canonical)
+joey: cf3-bulk OK (160 KiB round-trip on the 128 KiB-msize mount; first write 131049 first read 131061 bytes; clamp short, bytes verified)
+loom-stress: starting (Loom-6d-2 concurrent + cross-Proc-death)
+loom-stress: phase1 dev9p READ/WRITE/FSYNC round-trip ok
+loom-stress: phase2 concurrent two-thread FSYNC stress ok (every op completed once)
+loom-stress: PASS
+joey: /loom-stress reaped status=0; concurrent + cross-Proc-death loom stress verified
+loom-bench: starting (Loom-6d-3 trap-amortization)
+loom-bench: NOP trap-amortization (n=64) syscall-per-op=125 ns, loom-batched=41 ns (speedup x10=30)
+loom-bench: FSYNC per-op syscall-per-op=3028208 ns, loom-batched=3001000 ns (n=8, speedup x10=10)
+loom-bench: present-proxy WRITE round-trip = 33125 ns
+loom-bench: PASS
+joey: /loom-bench reaped status=0; loom latency bench ran
+joey: stalk-1 multi-component SYS_OPEN E2E OK (stalk-e2e-dir/leaf)
+joey: stalk-2 cross-mount E2E OK (stalk-x-mnt/xleaf -> stalk-x-src/xleaf)
+joey: fs-gamma rename(atomic-replace) + unlink OK
+joey: fs-gamma rmdir(REMOVEDIR) OK
+u-redir-test: all OK
+joey: /u-redir-test reaped status=0; U-6d-b redirects verified
+fs-mut-smoke: create_dir root ok
+fs-mut-smoke: create_dir sub (depth 2) ok
+fs-mut-smoke: set_current_dir(ROOT) ok
+fs-mut-smoke: current_dir == ROOT ok
+fs-mut-smoke: File::create relative + write ok
+fs-mut-smoke: relative read-back matches ok
+fs-mut-smoke: relative create landed at /fs-mut-smoke/rel.txt ok
+fs-mut-smoke: set_current_dir(SUB) ok
+fs-mut-smoke: File::create ../rel2.txt + write ok
+fs-mut-smoke: dotdot-relative landed at /fs-mut-smoke/rel2.txt ok
+fs-mut-smoke: 87 chdir ROOT ok
+fs-mut-smoke: 87 mkdir d87 ok
+fs-mut-smoke: 87 create f87.txt ok
+fs-mut-smoke: 87 remove_file(f87.txt/) -> NotADirectory ok
+fs-mut-smoke: 87 f87.txt SURVIVES its slash-unlink ok
+fs-mut-smoke: 87 remove_file(d87/) -> IsADirectory ok
+fs-mut-smoke: 87 remove_file(nope87/) -> NotFound ok
+fs-mut-smoke: 87 remove_file(d87/..) -> IsADirectory ok
+fs-mut-smoke: 87 remove_file(d87/.) -> IsADirectory ok
+fs-mut-smoke: 87 remove_file(f87.txt/..) -> NotADirectory ok
+fs-mut-smoke: 87 remove_file(nope87/../f87.txt) -> NotFound ok
+fs-mut-smoke: 87 f87.txt SURVIVES the phantom-dir unlink ok
+fs-mut-smoke: 87 create_dir(d87/../d87b) ok
+fs-mut-smoke: 87 d87b landed beside d87 ok
+fs-mut-smoke: 87 absolute open through .. ok
+fs-mut-smoke: 87 File::open(f87.txt/) -> NotADirectory ok
+fs-mut-smoke: 87 File::create(f87.txt/) -> IsADirectory ok
+fs-mut-smoke: 87 File::create(d87/.) -> IsADirectory ok
+fs-mut-smoke: 87 f87.txt intact after the create rows ok
+fs-mut-smoke: 87 create_dir(d87c/) ok
+fs-mut-smoke: 87 d87c exists ok
+fs-mut-smoke: 87 remove_dir(f87.txt/) -> NotADirectory ok
+fs-mut-smoke: 87 remove_dir(.) -> InvalidArgument ok
+fs-mut-smoke: 87 remove_dir(d87/..) -> DirectoryNotEmpty ok
+fs-mut-smoke: 87 remove_dir(d87c/) ok
+fs-mut-smoke: 87 rename(f87.txt/, x87) -> NotADirectory ok
+fs-mut-smoke: 87 rename(f87.txt, gone87/) -> NotADirectory ok
+fs-mut-smoke: 87 rename(nope87/, x87) -> NotFound ok
+fs-mut-smoke: 87 rename(d87/., z87) -> Busy ok
+fs-mut-smoke: 87 rename(d87b/, d87y) dir-source slash ok
+fs-mut-smoke: 87 d87y exists ok
+fs-mut-smoke: 87 remove_dir(d87y) ok
+fs-mut-smoke: 87 remove_file(f87.txt) ok
+fs-mut-smoke: 87 remove_dir(d87) ok
+fs-mut-smoke: create_dir existing -> err ok
+fs-mut-smoke: File::create depth 3 + write ok
+fs-mut-smoke: read-back matches ok
+fs-mut-smoke: rename ok
+fs-mut-smoke: renamed content intact ok
+fs-mut-smoke: rename source gone ok
+fs-mut-smoke: remove_file ok
+fs-mut-smoke: removed file gone ok
+fs-mut-smoke: remove_dir sub ok
+fs-mut-smoke: remove_dir root ok
+fs-mut-smoke: remove_dir absent -> err ok
+fs-mut-smoke: all OK (55 checks)
+joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified
+symlink-probe: starting (DISTRO D-1 gate; live FS)
+symlink-probe: 7 links minted via LOOM_OP_SYMLINK
+symlink-probe: A follow ok
+symlink-probe: B chain ok
+symlink-probe: C mid-path ok
+symlink-probe: D loop ok
+symlink-probe: E dangling ok
+symlink-probe: F stat follows ok
+symlink-probe: F stat size ok
+symlink-probe: F lstat is a link ok
+symlink-probe: F lstat size ok
+symlink-probe: F distinct qids ok
+symlink-probe: G nofollow on a link ok
+symlink-probe: H nofollow on a non-link ok
+symlink-probe: I slash on link-to-dir ok
+symlink-probe: I slash on link-to-file ok
+symlink-probe: I slash overrides nofollow ok
+symlink-probe: J unlink the link ok
+symlink-probe: J target survives ok
+symlink-probe: J link is gone ok
+symlink-probe: M twin refuses a link ok
+symlink-probe: M twin O_PATH returns the link ok
+symlink-probe: L dirfd-based open re-anchors ok
+symlink-probe: K before: l_abs resolves ok
+symlink-probe: K before: l_root does not ok
+symlink-probe: K gate: chroot onto a file is refused ok
+symlink-probe: K gate: pivot_root onto a file is refused ok
+symlink-probe: K gate: the namespace is intact afterwards ok
+symlink-probe: N append: fixture + append-after-seek write ok
+symlink-probe: N append: the write landed at END despite the seek (T_OAPPEND) ok
+symlink-probe: O dac: chmod 0555 ok
+symlink-probe: O dac: a link into the 0555 directory is refused ok
+symlink-probe: O dac: chmod 0755 ok
+symlink-probe: O dac: a link into the 0755 directory lands ok
+symlink-probe: O dac: the link's group is the creator's primary group ok
+symlink-probe: U control: a devproc name resolves through the union ok
+symlink-probe: U control: a devctl-only name resolves through the union ok
+symlink-probe: U control: the covered marker is hidden by the union ok
+symlink-probe: U-a: member[0]'s name resolves under the union root ok
+symlink-probe: U-a: member[1]'s name resolves under the union root (the seed) ok
+symlink-probe: U-a: both members unmounted ok
+symlink-probe: U-a dissolved: "/" is NOT the covered directory ok
+symlink-probe: U-a dissolved: "/" is member[0] ok
+symlink-probe: U-a dissolved: member[0]'s name resolves off the root ok
+symlink-probe: U-a dissolved: member[1]'s name is gone ok
+symlink-probe: union-a 10 checks, 0 failures
+symlink-probe: union-a: the child stage passed ok
+symlink-probe: U control: a devproc name resolves through the union ok
+symlink-probe: U control: a devctl-only name resolves through the union ok
+symlink-probe: U control: the covered marker is hidden by the union ok
+symlink-probe: U-b shed: member[1]'s name is gone off the dirfd ok
+symlink-probe: U-b shed: member[0]'s name resolves off the dirfd ok
+symlink-probe: U-b: "." of the union dirfd opens after the shed ok
+symlink-probe: U-b shed: "." is NOT the covered directory ok
+symlink-probe: U-b shed: "." is member[0] ok
+symlink-probe: union-b 8 checks, 0 failures
+symlink-probe: union-b: the child stage passed ok
+symlink-probe: U-c control: member[0]'s name resolves through the union ok
+symlink-probe: U-c control: member[1]'s name resolves through the union ok
+symlink-probe: U-c control: the covered marker is hidden by the union ok
+symlink-probe: U-c live: member[1]'s name off the OPENED dirfd ok
+symlink-probe: U-c live: back at the base, member[0] is walked unopened ok
+symlink-probe: U-c: all three members unmounted ok
+symlink-probe: U-c dissolved: "." of the OPENED dirfd opens ok
+symlink-probe: U-c dissolved: "." is NOT the covered directory ok
+symlink-probe: U-c dissolved: "." is member[0] ok
+symlink-probe: U-c dissolved: member[0]'s name off the dirfd ok
+symlink-probe: U-c dissolved: member[1]'s name is gone ok
+symlink-probe: U-c dissolved: the covered marker never answers ok
+symlink-probe: U-c dissolved: SYS_WALK_CREATE off the dirfd succeeds ok
+symlink-probe: U-c dissolved: the create landed in member[0] ok
+symlink-probe: U-c dissolved: the create did NOT land in the covered directory ok
+symlink-probe: U-c dissolved: SYS_UNLINK off the dirfd succeeds ok
+symlink-probe: U-c dissolved: the unlink removed member[0]'s file ok
+symlink-probe: U-c dissolved: SYS_RENAME between the two dirfds succeeds ok
+symlink-probe: U-c dissolved: the rename landed in the DESTINATION handle's member[0] ok
+symlink-probe: U-c dissolved: ... not in the source handle's member[0] ok
+symlink-probe: U-c dissolved: the source left member[0] ok
+symlink-probe: union-c 21 checks, 0 failures
+symlink-probe: union-c: the child stage passed ok
+symlink-probe: K after: l_abs no longer resolves ok
+symlink-probe: K after: l_root resolves ok
+symlink-probe: K after: content is the caller's own target ok
+symlink-probe: 39 checks, 0 failures
+symlink-probe: PASS
+joey: /symlink-probe reaped status=0; D-1 symlink resolution verified
+pouch-hello-fs: pid=4869 cwd0=/ -- ALL WIRES PASS
+joey: /pouch-hello-fs PASS; CL-1a FS/process wires verified
+pouch-hello-cxx: iostream ok (42)
+pouch-hello-cxx: ALL C++ WIRES PASS
+joey: /pouch-hello-cxx PASS; CL-2 C++ runtime (EH/RTTI/threads/TLS-dtors/filesystem) verified
+go-fs: wrote+read 25 bytes; stat size=25; seek+readdir+rename+remove OK; NumCPU=4
+go-fs: STAGE 3a OK (fs file I/O: create/write/read/stat/seek/readdir/rename/remove)
+joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM
+go-exec: captured "go exec stage 3b" via os/exec + pipe; /bin/false exit code 1
+go-exec: STAGE 3b OK (os/exec: spawn /bin coreutil + capture stdout + wait + exit-status)
+joey: go-exec reaped status=0 -- GOOS=thylacine Stage 3b (os/exec) RUNS in-VM
+go-net: listening on 127.0.0.1:9099
+go-net: dialed 127.0.0.1:9099 -> 127.0.0.1:9099 (local 127.0.0.1:49239)
+go-net: round-trip OK ("go net stage 3c over /net")
+go-net: STAGE 3c OK
+joey: go-net reaped status=0 -- GOOS=thylacine Stage 3c (net over /net) RUNS in-VM
+joey: spawned /sbin/corvus pid=corvus: starting (P5-corvus-srv-impl-b3b)
+4876corvus: ready (hardening applied; serving /srv/corvus)
+
+corvus: storage capability OK (confined; /thylacine-version unreachable)
+corvus: recovery self-test OK (bip39 + keyslot)
+corvus: system identity loaded (system-wrap + recovery)
+corvus: identity.db loaded (3 users)
+corvus: clearance.db loaded (4 eligibility records, 1 key records)
+corvus: jit eligibility backfilled for 1 user(s)
+corvus: trusted-episode consumer ARMED (imperium)
+joey: connected /srv/corvus/ctl fd=5
+joey: USER_CREATE michael already provisioned (persistent pool)
+joey: AUTH(wrong pass) returned BadAuth (expected)
+joey: AUTH ok (token=s9f63867...)
+joey: GROUP_CREATE wheel refused pre-elevate PermissionDenied (gate verified)
+joey: ADMIN_ELEVATE ok
+joey: t_cap_use(CAP_HOSTOWNER) ok (joey now hostowner)
+joey: net-7a SYS_CLOCK_SETTIME round-trip OK
+joey: RECOVER(system) E2E skipped (persistent pool; baked wrap already rolled)
+joey: USER_CREATE susan already provisioned (persistent pool)
+joey: USER_CREATE cora already provisioned (persistent pool)
+joey: USER_CREATE "system" rejected BadFormat (reserved AD subject; F1 verified)
+joey: GROUP_CREATE wheel already exists (persistent pool)
+joey: RESOLVE_NAME michael -> {1000,1000} ok
+joey: RESOLVE_NAME susan -> 1001 ok
+joey: RESOLVE_ID 1001 -> susan {gid 1001, supp [100,200]} ok
+joey: RESOLVE_NAME ghost -> NotFound (expected)
+joey: RESOLVE_ID 9999 -> NotFound (expected)
+joey: WRAP users/michael ok (envelope 1217 B)
+joey: UNWRAP users/michael ok (DEK round-trip verified)
+joey: UNWRAP users/susan refused PermissionDenied (C-7 verified)
+joey: UNWRAP users/ghost refused NotFound (expected)
+joey: UNWRAP wrong key_id refused InternalError (key_id AAD bind verified)
+joey: UNWRAP malformed envelope refused BadFormat (expected)
+joey: CLEARANCE_GRANT michael fs-admin ok (eligibility recorded)
+joey: CLEARANCE_GRANT michael jit ok (eligibility recorded)
+joey: CLEARANCE_GRANT michael imperium ok (eligibility + key verifier recorded)
+joey: IM-3 deny-path probes ok (key-tail shape x3 refused; verb 19 refused twice, no slot taken)
+joey: IM-4 deny-path probe ok (CLEARANCE_LIST_SELF refused for PRINCIPAL_SYSTEM)
+joey: IM-4 CLEARANCE_LIST_SELF payload-shape probe ok (junk -> BadFormat)
+joey: #163 susan jit seed verified + consumed (backfill restores it next boot)
+joey: SESSION_CLOSE ok
+joey: Q11-negative refused BadFormat + tore down conn (expected)
+joey: reconnect AUTH + SESSION_CLOSE ok (Q11 recovery verified)
+joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)
+legate-prover: starting (A-4a-3 legate E2E)
+legate-prover: CLEARANCE_LIST shows fs-admin eligibility
+legate-prover: CLEARANCE_ACTIVATE ok (fs-admin granted)
+legate-prover: redeemed clearance -- now a legate root
+legate-prover: legate E2E OK (fs-admin activated+redeemed; now a legate root; exiting)
+joey: /legate-prover reaped status=0; legate E2E verified
+jit-prover: starting (CL-7k I-42 E2E)
+jit-prover: ungated create REFUSED (no CAP_JIT) -- correct
+jit-prover: CAP_JIT acquired (bearer) via the jit clearance
+jit-prover: JITed fn(35,100) = 142 -- emitted, published, EXECUTED
+jit-prover: re-emitted fn returns 99 -- icache invalidate is live
+jit-prover: PASS (CL-7k I-42 end-to-end)
+joey: /jit-prover reaped status=0; I-42 JIT E2E verified
+joey: login !recover E2E skipped (persistent pool; phrase not captured this boot)
+login: consctl ok (line discipline via inherited fd)
+login: michael uid=1000 gid=1000
+login: dek michael ds=2 home provisioned + unlocked
+stratumd: --role client: proxy on /srv/home-michael → /srv/stratum-fs (backlog=16, msize=8388608, allowed=1 pattern(s))
+login: home michael bound at /home/michael
+ut: consctl ok (console line discipline via inherited fd)
+ut: beacon none exported
+ut: tmp bound (per-user /tmp from the home)
+login: session ended (code 0)
+login: logout: home unmounted; reaping the home proxy
+login: logout: home proxy reaped
+login: logout: dek evicted
+login: logout: session closed
+joey: /sbin/login E2E OK for michael (authed; home bound; ut spawned stamped + reaped; session closed)
+login: consctl ok (line discipline via inherited fd)
+login: cora uid=1002 gid=1002
+login: dek cora ds=3 home provisioned + unlocked
+stratumd: --role client: proxy on /srv/home-cora → /srv/stratum-fs (backlog=16, msize=8388608, allowed=1 pattern(s))
+login: home cora bound at /home/cora
+ut: consctl ok (console line discipline via inherited fd)
+ut: beacon none exported
+ut: tmp bound (per-user /tmp from the home)
+login: session ended (code 0)
+login: logout: home unmounted; reaping the home proxy
+login: logout: home proxy reaped
+login: logout: dek evicted
+login: logout: session closed
+joey: /sbin/login E2E OK for cora (authed; home bound; ut spawned stamped + reaped; session closed)
+login: michael uid=1000 gid=1000
+login: dek michael ds=2 home provisioned + unlocked
+stratumd: --role client: proxy on /srv/home-michael → /srv/stratum-fs (backlog=16, msize=8388608, allowed=1 pattern(s))
+login: home michael bound at /home/michael
+ut: tmp bound (per-user /tmp from the home)
+login: cora uid=1002 gid=1002
+login: dek cora ds=3 home provisioned + unlocked
+stratumd: --role client: proxy on /srv/home-cora → /srv/stratum-fs (backlog=16, msize=8388608, allowed=1 pattern(s))
+login: home cora bound at /home/cora
+ut: tmp bound (per-user /tmp from the home)
+login: susan uid=1001 gid=1001
+login: dek susan ds=4 home provisioned + unlocked
+stratumd: --role client: proxy on /srv/home-susan → /srv/stratum-fs (backlog=16, msize=8388608, allowed=1 pattern(s))
+login: home susan bound at /home/susan
+ut: tmp bound (per-user /tmp from the home)
+joey: D7 three distinct login sessions simultaneously ready
+login: michael uid=1000 gid=1000
+login: home key install failed
+login: /ctl/events tail:
+=3 result=ok
+1791285825.085248708 evict-dek uid=4294967294 dataset=3 result=ok
+1791285825.110830167 provision-dek uid=4294967294 result=ok
+1791285825.113257500 install-dek uid=4294967294 dataset=2 result=ok
+1791285825.142487833 provision-dek uid=4294967294 result=ok
+1791285825.145047333 install-dek uid=4294967294 dataset=3 result=ok
+1791285825.173901333 provision-dek uid=4294967294 result=ok
+1791285825.177014958 install-dek uid=4294967294 dataset=4 result=ok
+1791285825.206523875 provision-dek uid=4294967294 result=ok
+1791285825.208411167 install-dek uid=4294967294 dataset=2 result=err:eaccess
+
+login: /ctl/events end
+D7 probe: read EOF/error
+login: session ended (code 0)
+login: logout: home unmounted; reaping the home proxy
+login: logout: home proxy reaped
+login: logout: dek evicted
+login: logout: session closed
+login: session ended (code 0)
+login: logout: home unmounted; reaping the home proxy
+login: logout: home proxy reaped
+login: logout: dek evicted
+login: logout: session closed
+login: session ended (code 0)
+login: logout: home unmounted; reaping the home proxy
+login: logout: home proxy reaped
+login: logout: dek evicted
+login: logout: session closed
+joey: D7 overlapping login probe FAILED
+proc: orphan pid=4876 name="corvus" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+proc: orphan pid=4794 name="stratumd" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+proc: orphan pid=4785 name="netd" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+proc: orphan pid=4786 name="nocturned" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+proc: orphan pid=4791 name="lictor" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+proc: orphan pid=4792 name="tapestryd" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+proc: orphan pid=4536 name="ambush-child" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+
+EXTINCTION: joey: bin/joey exited non-zero 0x0000000000000001
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS: cpu 2  source: bare extinction (no exception frame)
+HALLS: ELR  (stale) 0xffffa0028988a2a4  link 0xffffa0000008a2a4  wait_pid_for+0x1e8
+HALLS: ESR  0x0000000056000000  FAR  0x000000010000ffb8  SPSR 0x0000000060000345
+HALLS: SP   0xffffa00289d83d50
+HALLS: LR   0xffffa00289881314  link 0xffffa00000081314  extinction_with_addr+0xa4
+HALLS: FP   0xffffa00289d83e80
+HALLS:  x0..x28 not captured (bare extinction; fp/lr/sp above)
+HALLS: KASLR offset 0x0000000289800000  kbase 0xffffa00289880000
+HALLS: backtrace (fp-chain; link addrs for addr2line):
+HALLS:   #0  0xffffa0028988a2a4  link 0xffffa0000008a2a4  wait_pid_for+0x1e8
+HALLS:   #1  0xffffa00289881314  link 0xffffa00000081314  extinction_with_addr+0xa4
+HALLS:   #2  0xffffa002898d4ddc  link 0xffffa000000d4ddc  joey_run+0x420
+HALLS:   #3  0xffffa00289880e7c  link 0xffffa00000080e7c  boot_main+0xaac
+HALLS:   #4  0x0000000040080158  link 0x0000000040080158
+HALLS: stack @0xffffa00289d83d50 (256 bytes, ascending):
+HALLS:   0xffffa00289d83d50: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83d60: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83d70: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83d80: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83d90: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83da0: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83db0: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83dc0: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83dd0: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83de0: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83df0: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83e00: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83e10: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83e20: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83e30: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffffa00289d83e40: 0xffffa00289d83e80 0xffffa00289881314
+HALLS: --- end ---
+  console-ring: held by the dumping cpu (banner serialized against peers)
