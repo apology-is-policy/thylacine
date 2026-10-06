@@ -1465,11 +1465,12 @@ fn render_cwd(pid: u32, r: &mut Render) {
 //
 // Six fixed columns in, six out. The interesting translations:
 //
-//   dev    Thylacine's devno is a FLAT namespace with no major/minor split, so
-//          it renders as minor under major 00. That is not a fabrication: Linux
-//          itself uses 00:xx for every filesystem with no backing block device
-//          (tmpfs, and 9P mounts specifically), which is exactly what a Stratum
-//          mount is. An anonymous mapping is 00:00 with inode 0, as on Linux.
+//   dev    vivarium reports st_dev = devno, so the column is major(devno):
+//          minor(devno) as glibc and musl split a dev_t: on Linux it is always
+//          the MAJOR:MINOR of the device whose encoding stat returns, and a
+//          reader compares makedev(maj, min) with st_dev. A devno below 256 is
+//          00:xx, as Linux shows a filesystem with no block device (tmpfs, 9P).
+//          An anonymous mapping is 00:00 with inode 0, as on Linux.
 //   path   a FILE-backed mapping renders the executable's path. PREMISE: at
 //          v1.0 the only FILE Burrows in an address space are the exec'd
 //          binary's segments -- burrow_create_file has exactly one caller
@@ -1484,6 +1485,14 @@ fn render_cwd(pid: u32, r: &mut Render) {
 //          real reserved address space, and dropping it would make the map
 //          claim the range is free.
 // ---------------------------------------------------------------------------
+
+/// gnu_dev_major / gnu_dev_minor (musl's major() / minor()): the inverse of
+/// makedev over a 64-bit dev_t, so makedev(dev_split(d)) == d for every d.
+fn dev_split(dev: u64) -> (u64, u64) {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    (major, minor)
+}
 
 /// Substring search over bytes -- selftest-only, so a render can be checked for
 /// a fragment without pinning the whole (padded) row.
@@ -1572,14 +1581,13 @@ fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
     r.push(b" ");
     r.push_hex(off, 8);
     r.push(b" ");
-    // <major>:<minor> identifies the DEVICE and is independent of the inode.
-    // Thylacine's devno is flat, so it is the minor under a 00 major -- the way
-    // Linux renders every filesystem with no backing block device. Folding any
-    // part of the inode in here would make two files on the SAME filesystem
-    // report different devices, breaking the st_dev comparison this column
-    // exists for.
-    r.push(b"00:");
-    r.push_hex(devno, 2);
+    // <major>:<minor> identifies the DEVICE and is independent of the inode,
+    // so no part of the inode is folded in: two files on one filesystem must
+    // report one device.
+    let (major, minor) = dev_split(devno);
+    r.push_hex(major, 2);
+    r.push(b":");
+    r.push_hex(minor, 2);
     r.push(b" ");
     r.push_dec(inode);
 
@@ -3161,8 +3169,8 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("maps_row anon shape");
     }
 
-    // A file-backed mapping takes the exe path, and the devno lands in the
-    // major-0 column the way Linux renders a device-less filesystem.
+    // A file-backed mapping takes the exe path; a devno below 256 is 00:xx,
+    // the way Linux renders a device-less filesystem.
     let mut mf = Render::new();
     let mut fr: [&[u8]; 6] = [b""; 6];
     split_fields(b"0x400000-0x452000 r-xp 0x0 file 0x3:0x12 -", &mut fr);
@@ -3173,6 +3181,28 @@ pub fn selftest() -> Result<(), &'static str> {
         || !contains_bytes(mf.bytes(), b"/bin/diorama")
     {
         return Err("maps_row file shape");
+    }
+
+    // A devno past one byte, and one past 2^32, split the way stat's st_dev
+    // does: makedev(0x12, 0x34) == 0x1234, makedev(0, 0x100005) == 2^32 + 5.
+    for (line, want) in [
+        (&b"0x400000-0x452000 r-xp 0x0 file 0x1234:0x12 -"[..], &b" 12:34 18"[..]),
+        (&b"0x400000-0x452000 r-xp 0x0 file 0x100000005:0x12 -"[..], &b" 00:100005 18"[..]),
+    ] {
+        let mut mw = Render::new();
+        let mut wr: [&[u8]; 6] = [b""; 6];
+        split_fields(line, &mut wr);
+        if !maps_row(&wr, b"/bin/diorama", &mut mw) || !contains_bytes(mw.bytes(), want) {
+            return Err("maps_row dev split");
+        }
+    }
+    for d in [0u64, 0xff, 0x100, 0xfff_ffff, 0x1_0000_0005, u64::MAX] {
+        let (ma, mi) = dev_split(d);
+        let back = ((ma & 0xffff_f000) << 32) | ((ma & 0xfff) << 8)
+            | ((mi & 0xffff_ff00) << 12) | (mi & 0xff);
+        if back != d {
+            return Err("dev_split is not makedev's inverse");
+        }
     }
 
     // The role column becomes Linux's bracket tag.

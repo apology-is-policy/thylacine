@@ -617,14 +617,14 @@ void test_vivarium_stat_to_linux(void) {
     in.blocks    = 9;
     in.uid       = 1001;
     in.gid       = 1002;
-    in.devno     = 42;
+    in.devno     = (1ull << 32) + 42u;   // above 2^32: the whole 64-bit devno
 
     vivarium_stat_to_linux(&in, &out);
 
     // (devno, qid.path) IS Thylacine's file identity (#100) and is already the
     // pair userspace maps onto (st_dev, st_ino) -- pouch patch 0010 does exactly
     // this. The correspondence is inherited, not invented here.
-    TEST_EXPECT_EQ(out.st_dev, (u64)42,     "st_dev <- t_stat.devno (#100)");
+    TEST_EXPECT_EQ(out.st_dev, (1ull << 32) + 42u, "st_dev <- all 64 bits of t_stat.devno");
     TEST_EXPECT_EQ(out.st_ino, (u64)0x2222, "st_ino <- t_stat.qid_path");
 
     TEST_EXPECT_EQ((u64)out.st_mode,  (u64)0100644u, "st_mode carries");

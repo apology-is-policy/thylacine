@@ -2982,11 +2982,12 @@ _Static_assert(sizeof(struct srv_peer_info) == 40,
 // timestamps) so pouch's fstat() implementation can fill musl's
 // arch-specific `struct stat` from this without a Linux-shaped intermediate.
 //
-// 80 bytes, naturally aligned; the _Static_asserts pin every field offset
+// 88 bytes, naturally aligned; the _Static_asserts pin every field offset
 // so a userspace consumer (libt, pouch's fstat patch, libthyla-rs) decodes a
 // fixed record. A-2a (IDENTITY-DESIGN.md §9.5) appended uid + gid AFTER the
 // 72-byte 16b-gamma tail (existing offsets unchanged), the durable owner +
-// group the kernel rwx layer (A-2d) reads. There is no reserved tail today; a
+// group the kernel rwx layer (A-2d) reads; #100 appended devno at 80. There is
+// no reserved tail today; a
 // further field add extends the record again (every consumer rebuilds in
 // lockstep -- no persistent on-disk consumer of this ABI exists). devramfs
 // reports PRINCIPAL_SYSTEM / GID_SYSTEM (the boot FS is system-owned); dev9p

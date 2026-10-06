@@ -120,10 +120,13 @@ ends where a parser expects.
 
 **The `/proc/*/maps` translation is where reformatting is most visible.**
 Six native columns become six Linux ones, and the interesting parts are
-where the systems genuinely differ: Thylacine's device number is flat
-with no major/minor split, so it renders as a minor under major zero —
-which is exactly how Linux renders any filesystem with no backing block
-device, so the shape is honest rather than approximated. A protection-none
+where the systems genuinely differ: Thylacine's device number is flat,
+and vivarium reports it whole as `st_dev`, so the device column is
+`major(devno):minor(devno)` as glibc and musl split a `dev_t`. On Linux the
+column is always the device whose encoding `stat` returns, and a reader
+compares `makedev(maj, min)` with `st_dev`; until 2026-10-06 the column was
+`00:<devno>`, which agreed only below 256. A devno below 256 still reads
+`00:xx`, as Linux shows a filesystem with no block device. A protection-none
 guard VMA renders `---p` with no pathname and is *emitted*, because
 dropping it would make the map claim the range is free.
 

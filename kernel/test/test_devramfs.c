@@ -292,6 +292,10 @@ void test_spoor_stat_native_stamps_devno(void) {
     TEST_EXPECT_EQ((u64)spoor_stat_native(root, &st), (u64)0, "re-stat -> 0");
     TEST_EXPECT_EQ((u64)st.devno, (u64)0xABCD1234u,
                     "t_stat.devno reflects the Spoor's session id (#100)");
+    root->devno = (1ull << 32) | 0x1234u;   // a minted devno past 2^32
+    TEST_EXPECT_EQ((u64)spoor_stat_native(root, &st), (u64)0, "re-stat wide -> 0");
+    TEST_EXPECT_EQ((u64)st.devno, (1ull << 32) | 0x1234u,
+                    "all 64 bits of the Spoor's devno reach t_stat");
     root->devno = 0;
 
     spoor_unref(root);
