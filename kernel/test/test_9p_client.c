@@ -60,11 +60,12 @@ void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
 void test_9p_client_death_hangs_up_once(void);
 void test_9p_client_handoff_skips_stop_parked(void);
-void test_9p_client_role_wait_contract(void);
-void test_9p_client_pump_deadline_idle(void);
-void test_9p_client_pump_deadline_data_ready_progresses(void);
-void test_9p_client_pump_deadline_chunked_frame_completes(void);
-void test_9p_client_pump_deadline_busy_when_reader_active(void);
+void test_9p_client_reader_hook_contract(void);
+void test_9p_client_pump_ready_idle(void);
+void test_9p_client_pump_ready_data_progresses(void);
+void test_9p_client_pump_ready_chunked_frame_completes(void);
+void test_9p_client_pump_ready_busy_when_reader_active(void);
+void test_9p_client_pump_ready_eof_is_dead(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
@@ -87,6 +88,12 @@ void test_9p_client_loom_dirmut_sqpoll(void);
 void test_9p_client_loom_create_gid(void);
 void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
+void test_9p_client_loom_enter_reads_every_client(void);
+void test_9p_client_loom_enter_partial_set_rescans(void);
+void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
+void test_9p_client_loom_enter_sees_a_sibling_submit(void);
+void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
+void test_9p_client_loom_quiesce_drains_the_late_reply(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -862,7 +869,7 @@ void test_9p_client_lock_released_between_ops(void) {
 // submitter on it -- when the reply is demuxed (or the session dies) the engine
 // invokes on_complete, which posts a CQE into a Loom's CQ ring. These tests
 // exercise the seam end-to-end over the loopback: submit_async (no wait) ->
-// reader_pump_once (demux) -> on_complete -> loom_post_cqe.
+// reader_pump_ready (demux) -> on_complete -> loom_post_cqe.
 //
 // The test OWNS the Loom ref for the whole test (so the callback's lifetime is
 // trivial: post + record, never loom_unref). The production async-op container
@@ -938,7 +945,7 @@ void test_9p_client_async_op_posts_cqe(void) {
     TEST_ASSERT(!g_async_op.completed, "not completed before the reader pumps");
     TEST_EXPECT_EQ((u64)h->cq_tail, (u64)0, "no CQE before pump");
 
-    int pumped = p9_client_reader_pump_once(&g_client);   // recv Rclunk + demux
+    int pumped = p9_client_reader_pump_ready(&g_client);   // recv Rclunk + demux
     TEST_EXPECT_EQ(pumped, 1, "pump demuxed one frame");
     TEST_ASSERT(g_async_op.completed, "on_complete fired");
     TEST_EXPECT_EQ(g_async_op.last_result, 0, "clunk success -> result 0");
@@ -979,8 +986,8 @@ void test_9p_client_async_session_death_posts_error_cqe(void) {
     // async op completes with the generic -EIO. (The device-gone leg, a clean
     // peer-gone EOF, is the two tests below; they yield -ENODEV.)
     p9_loopback_destroy(&g_loopback);
-    int pumped = p9_client_reader_pump_once(&g_client);
-    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump sees the dead transport");
+    int pumped = p9_client_reader_pump_ready(&g_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "pump sees the dead transport");
     TEST_ASSERT(g_async_op.completed, "async op completed on session death");
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)(-P9_E_IO),
                     "transport-error CQE result = -EIO (not device-gone)");
@@ -1019,8 +1026,8 @@ void test_9p_client_async_peer_gone_posts_nodev_cqe(void) {
     // recv returns 0 (a clean EOF = peer gone), NOT -1 (an error). The reader
     // classifies this device-gone -> the op gets a -ENODEV CQE.
     p9_loopback_force_eof(&g_loopback);
-    int pumped = p9_client_reader_pump_once(&g_client);
-    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD (a control signal)");
+    int pumped = p9_client_reader_pump_ready(&g_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "pump returns DEAD (a control signal)");
     TEST_ASSERT(g_async_op.completed, "async op completed on the peer-gone EOF");
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)(-P9_E_NODEV),
                     "device-gone CQE result = -ENODEV (not -EIO)");
@@ -1206,81 +1213,6 @@ void test_9p_client_handoff_skips_stop_parked(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
-// The role-waiter hook (LOOM.md 8.6 item 2). A free role registers nothing and
-// a held one registers the hook. A handoff that designates a sync op leaves it
-// quiet (that op will read); one that leaves the role free and undesignated
-// wakes it. A dead session refuses it.
-void test_9p_client_role_wait_contract(void) {
-    drive_client_open(&g_client, &g_loopback);
-    struct Rendez rr;
-    rendez_init(&rr);
-    struct poll_waiter pw;
-    poll_waiter_init(&pw, &rr);
-
-    int  free_rc       = p9_client_role_wait_register(&g_client, &pw);
-    bool free_unhooked = (pw.list == NULL);
-
-    spin_lock(&g_client.lock);
-    g_client.reader_active = true;
-    spin_unlock(&g_client.lock);
-    int held_rc = p9_client_role_wait_register(&g_client, &pw);
-    u32 hooked  = g_client.role_waiters;
-
-    struct p9_rpc rpc_sync = { 0 };
-    rpc_sync.tag = 42;
-    rendez_init(&rpc_sync.rendez);
-    spin_lock(&g_client.lock);
-    g_client.inflight[42]  = &rpc_sync;
-    g_client.reader_active = false;
-    spin_unlock(&g_client.lock);
-    p9_client_handoff_reader(&g_client);
-    bool designated = rpc_sync.be_reader;
-    bool quiet      = !pw.ready;
-
-    spin_lock(&g_client.lock);
-    g_client.inflight[42] = NULL;
-    spin_unlock(&g_client.lock);
-    p9_client_handoff_reader(&g_client);
-    bool woken = pw.ready;
-
-    p9_client_role_wait_unregister(&g_client, &pw);
-    u32 after  = g_client.role_waiters;
-    p9_client_role_wait_unregister(&g_client, &pw);
-    u32 after2 = g_client.role_waiters;
-
-    spin_lock(&g_client.lock);
-    g_client.reader_active = true;
-    g_client.dead          = true;
-    spin_unlock(&g_client.lock);
-    pw.ready = false;
-    int  dead_rc       = p9_client_role_wait_register(&g_client, &pw);
-    bool dead_unhooked = (pw.list == NULL);
-    p9_client_role_wait_unregister(&g_client, &pw);
-    spin_lock(&g_client.lock);
-    g_client.reader_active = false;
-    g_client.dead          = false;
-    spin_unlock(&g_client.lock);
-    pw.magic = 0;
-
-    TEST_ASSERT(free_rc == 0 && free_unhooked, "a free role registers nothing (0)");
-    TEST_ASSERT(held_rc == 1 && hooked == 1, "a held role registers the hook (1)");
-    TEST_ASSERT(designated && quiet, "a handoff that designates a sync op leaves the hook quiet");
-    TEST_ASSERT(woken, "a handoff leaving the role free and undesignated wakes the hook");
-    TEST_ASSERT(after == 0 && after2 == 0, "unregister drops the count once");
-    TEST_ASSERT(dead_rc == -P9_E_IO && dead_unhooked, "a dead session refuses the hook");
-
-    p9_client_destroy(&g_client);
-    p9_loopback_destroy(&g_loopback);
-}
-
-// =============================================================================
-// Loom-4 (LOOM.md §8.6): the deadline-aware reader pump. The loopback models a
-// frame-boundary deadline (an armed deadline + an empty staged response returns
-// -1 + recv_timed_out, instead of 0 = EOF), so the IDLE / PROGRESS / atomicity
-// paths are driven deterministically without real time. `deadline_ns` is opaque
-// to the loopback -- any non-zero value arms its knob.
-// =============================================================================
-
 static bool g_pump_async_completed;
 static s32  g_pump_async_result;
 static struct p9_rpc g_pump_rpc;
@@ -1292,19 +1224,115 @@ static void pump_async_on_complete(struct p9_rpc *rpc, int status,
     g_pump_async_completed = true;
 }
 
-// The idle deadline lapses at a frame boundary (empty stream): the pump returns
-// P9_PUMP_IDLE, the session stays alive + synced, and a subsequent op succeeds.
-void test_9p_client_pump_deadline_idle(void) {
+// A fan-in waiter's hook on one client (LOOM.md 8.6). A free role over an empty
+// stream files it on the transport's readiness list, and the reply's arrival
+// wakes it; a free role over a staged frame files nothing (pump now). A held
+// role files it on the role-waiter list only: a handoff that designates a sync
+// op leaves it quiet (that op will read), one that leaves the role free and
+// undesignated wakes it. A dead session refuses it. The unhook is idempotent.
+void test_9p_client_reader_hook_contract(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 32, (const u8 *)"f", 1, NULL);   // bind fid 32
+    struct Rendez rr;
+    rendez_init(&rr);
+    struct p9_reader_hook h;
+    poll_waiter_init(&h.pw, &rr);
+
+    // Free role, empty stream: the readiness list.
+    int  idle_rc     = p9_client_reader_hook(&g_client, &h);
+    bool idle_place  = (h.place == P9_HOOK_READY) && (h.pw.list == &g_loopback.ready_list);
+    bool idle_quiet  = !h.pw.ready;
+    g_pump_rpc.on_complete = pump_async_on_complete;
+    g_pump_async_completed = false;
+    u32 fid = 32;
+    int  sub_rc      = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_clunk, &fid);
+    bool arrived     = h.pw.ready;   // the staged Rclunk walked the list
+    p9_client_reader_unhook(&g_client, &h);
+    bool idle_off    = (h.pw.list == NULL) && (h.place == P9_HOOK_NONE);
+
+    // Free role, a frame staged: nothing filed, pump now.
+    int  ready_rc    = p9_client_reader_hook(&g_client, &h);
+    bool ready_none  = (h.pw.list == NULL) && (h.place == P9_HOOK_NONE);
+    int  pumped      = p9_client_reader_pump_ready(&g_client);
+
+    // Held role: the role-waiter list only.
+    spin_lock(&g_client.lock);
+    g_client.reader_active = true;
+    spin_unlock(&g_client.lock);
+    int  held_rc     = p9_client_reader_hook(&g_client, &h);
+    bool held_place  = (h.place == P9_HOOK_ROLE) && (h.pw.list == &g_client.role_waiters_list);
+    u32  hooked      = g_client.role_waiters;
+
+    struct p9_rpc rpc_sync = { 0 };
+    rpc_sync.tag = 42;
+    rendez_init(&rpc_sync.rendez);
+    spin_lock(&g_client.lock);
+    g_client.inflight[42]  = &rpc_sync;
+    g_client.reader_active = false;
+    spin_unlock(&g_client.lock);
+    p9_client_handoff_reader(&g_client);
+    bool designated  = rpc_sync.be_reader;
+    bool held_quiet  = !h.pw.ready;
+
+    spin_lock(&g_client.lock);
+    g_client.inflight[42] = NULL;
+    spin_unlock(&g_client.lock);
+    p9_client_handoff_reader(&g_client);
+    bool woken       = h.pw.ready;
+
+    p9_client_reader_unhook(&g_client, &h);
+    u32  after       = g_client.role_waiters;
+    p9_client_reader_unhook(&g_client, &h);
+    u32  after2      = g_client.role_waiters;
+
+    // Dead: refused, nothing filed.
+    spin_lock(&g_client.lock);
+    g_client.dead = true;
+    spin_unlock(&g_client.lock);
+    int  dead_rc     = p9_client_reader_hook(&g_client, &h);
+    bool dead_none   = (h.pw.list == NULL) && (h.place == P9_HOOK_NONE);
+    p9_client_reader_unhook(&g_client, &h);
+    spin_lock(&g_client.lock);
+    g_client.dead = false;
+    spin_unlock(&g_client.lock);
+    h.pw.magic = 0;
+
+    TEST_ASSERT(idle_rc == 1 && idle_place && idle_quiet,
+                "a free role over an empty stream hooks readiness (1)");
+    TEST_ASSERT(sub_rc == 0 && arrived, "the reply's arrival wakes the readiness hook");
+    TEST_ASSERT(idle_off, "the unhook takes it off the backend's list");
+    TEST_ASSERT(ready_rc == 0 && ready_none, "a free role over a staged frame files nothing (0)");
+    TEST_ASSERT(pumped == (int)P9_PUMP_PROGRESS && g_pump_async_completed,
+                "and the pump reads it");
+    TEST_ASSERT(held_rc == 1 && held_place && hooked == 1,
+                "a held role hooks the role list only (1)");
+    TEST_ASSERT(designated && held_quiet, "a handoff that designates a sync op leaves the hook quiet");
+    TEST_ASSERT(woken, "a handoff leaving the role free and undesignated wakes the hook");
+    TEST_ASSERT(after == 0 && after2 == 0, "the unhook drops the count once");
+    TEST_ASSERT(dead_rc == -P9_E_IO && dead_none, "a dead session refuses the hook");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// The readiness-gated reader pump (LOOM.md 8.6). It reads only over a ready
+// stream -- bytes or the EOF at a frame boundary -- so it never blocks there;
+// an empty loopback models a blocking recv and is not ready.
+// =============================================================================
+
+// Nothing to read: IDLE, the stream untouched, the session alive and usable.
+// The pre-10-06 pump read blind here, and an empty loopback's recv is the EOF
+// that latches the session dead.
+void test_9p_client_pump_ready_idle(void) {
     drive_client_open(&g_client, &g_loopback);   // handshake drains the loopback
 
-    const u64 deadline = 1;   // any non-zero value arms the loopback's knob
-    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
-    TEST_EXPECT_EQ(r, (int)P9_PUMP_IDLE, "empty stream + armed deadline -> IDLE");
+    int r = p9_client_reader_pump_ready(&g_client);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_IDLE, "empty stream -> IDLE");
     TEST_ASSERT(!g_client.dead, "IDLE must NOT mark the session dead");
+    TEST_ASSERT(!g_client.reader_active, "IDLE leaves the role free");
     TEST_ASSERT(p9_client_is_open(&g_client), "session still open after IDLE");
 
-    // The stream stayed synced: a normal op still works (the IDLE consumed no
-    // bytes, so the next reply is not mis-framed).
     int wrc = p9_client_walk_one(&g_client, 0, 31, (const u8 *)"f", 1, NULL);
     TEST_EXPECT_EQ(wrc, 0, "walk succeeds after IDLE (session reusable)");
 
@@ -1312,9 +1340,8 @@ void test_9p_client_pump_deadline_idle(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
-// A reply already on the wire beats the deadline: the first recv returns bytes
-// (never a timeout), so the pump demuxes the frame -> P9_PUMP_PROGRESS.
-void test_9p_client_pump_deadline_data_ready_progresses(void) {
+// A reply on the wire: the pump demuxes it -> PROGRESS.
+void test_9p_client_pump_ready_data_progresses(void) {
     drive_client_open(&g_client, &g_loopback);
     p9_client_walk_one(&g_client, 0, 32, (const u8 *)"f", 1, NULL);   // bind fid 32
 
@@ -1325,21 +1352,25 @@ void test_9p_client_pump_deadline_data_ready_progresses(void) {
     int rc = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_clunk, &fid);
     TEST_EXPECT_EQ(rc, 0, "submit_async stages an Rclunk on the wire");
 
-    const u64 deadline = 1;
-    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
-    TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "data ready -> PROGRESS (not IDLE)");
+    int r = p9_client_reader_pump_ready(&g_client);
+    bool latch = current_thread() && current_thread()->stop_unwinds;
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "data ready -> PROGRESS");
     TEST_ASSERT(g_pump_async_completed, "on_complete fired");
     TEST_EXPECT_EQ(g_pump_async_result, 0, "clunk success -> result 0");
+    // The pump never sleeps, so it leaves the reader's stop-unwind latch alone.
+    // An Rclunk is all header, after which a blocking reader's latch reads "at
+    // a frame boundary"; left set, sched's stop branch would unwind this
+    // thread's next sleep whatever it waits for.
+    TEST_ASSERT(!latch, "the pump left the stop-unwind latch clear");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), (int)P9_PUMP_IDLE,
+                   "and the drained stream is IDLE again");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }
 
-// Frame atomicity: with the frame delivered in sub-header chunks AND a deadline
-// armed, the deadline is disarmed after the FIRST recv (one byte in hand = mid-
-// frame), so aggregation completes and the whole frame demuxes -> PROGRESS. The
-// deadline never fires mid-frame.
-void test_9p_client_pump_deadline_chunked_frame_completes(void) {
+// Frame atomicity: a frame delivered in sub-header chunks is assembled whole.
+void test_9p_client_pump_ready_chunked_frame_completes(void) {
     drive_client_open(&g_client, &g_loopback);
     p9_client_walk_one(&g_client, 0, 33, (const u8 *)"f", 1, NULL);
 
@@ -1351,9 +1382,8 @@ void test_9p_client_pump_deadline_chunked_frame_completes(void) {
     int rc = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_clunk, &fid);
     TEST_EXPECT_EQ(rc, 0, "submit_async stages a chunked Rclunk");
 
-    const u64 deadline = 1;
-    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
-    TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "chunked frame under a deadline -> PROGRESS");
+    int r = p9_client_reader_pump_ready(&g_client);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "chunked frame -> PROGRESS");
     TEST_ASSERT(g_pump_async_completed, "on_complete fired for the aggregated frame");
 
     p9_loopback_set_chunk_size(&g_loopback, 0);
@@ -1363,15 +1393,29 @@ void test_9p_client_pump_deadline_chunked_frame_completes(void) {
 
 // Another thread already holds the reader role: the pump defers (P9_PUMP_BUSY)
 // without touching the stream. White-box: set reader_active directly.
-void test_9p_client_pump_deadline_busy_when_reader_active(void) {
+void test_9p_client_pump_ready_busy_when_reader_active(void) {
     drive_client_open(&g_client, &g_loopback);
 
     g_client.reader_active = true;     // simulate a concurrent elected reader
-    const u64 deadline = 1;
-    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
+    int r = p9_client_reader_pump_ready(&g_client);
     TEST_EXPECT_EQ(r, (int)P9_PUMP_BUSY, "reader already active -> BUSY (no-op)");
     TEST_ASSERT(!g_client.dead, "BUSY must not mark the session dead");
     g_client.reader_active = false;    // release so destroy is clean
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// The peer's EOF is readiness too: the pump reads it, and the session dies.
+void test_9p_client_pump_ready_eof_is_dead(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    p9_loopback_force_eof(&g_loopback);
+    int r = p9_client_reader_pump_ready(&g_client);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_DEAD, "the EOF -> DEAD");
+    TEST_ASSERT(g_client.dead, "the EOF marks the session dead");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), (int)P9_PUMP_DEAD,
+                   "and a dead session stays DEAD");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -1508,11 +1552,12 @@ void test_9p_client_loom_quiesce_abandons_inflight(void) {
     TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1, "loom freed once");
     TEST_EXPECT_EQ(spoor_total_freed() - freed0, (u64)1, "dev9p spoor freed (both refs released)");
 
-    // A late reply (the original Rfsync was staged, then overwritten by the
-    // abandon's Rflush) now arrives. The abandon cleared inflight[tag], so demux
-    // discards it ownerless -- it must NOT touch the freed container. No UAF.
-    int pumped = p9_client_reader_pump_once(&g_client);
-    TEST_ASSERT(pumped == 1 || pumped == -P9_E_IO, "late reply drained ownerless (no UAF)");
+    // The single-slot loopback still holds the unread Rfsync, so it refuses the
+    // abandon's Tflush and the session latches dead: a pump after the teardown
+    // finds it dead without touching the freed container. The late reply itself
+    // arrives over a FIFO in loom_quiesce_drains_the_late_reply.
+    int pumped = p9_client_reader_pump_ready(&g_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "the refused Tflush latched the session dead");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -3538,8 +3583,8 @@ void test_9p_client_loom_mutation_rejects(void) {
 // Loom audits carried since #841). The queueing p9_mq_loopback (a byte FIFO that
 // stages N replies) closes it: these tests submit N async ops that ALL go in
 // flight at once, then complete them all -- driving the multi-entry inflight_ops
-// list, async_inflight > 1, the loom_first_inflight_client borrow-guard across a
-// real pump, and the multi-entry loom_reap_terminal. The borrow-guard balance is
+// list, async_inflight > 1, the fan-in waiter's borrow-guard across a real
+// pump, and the multi-entry loom_reap_terminal. The borrow-guard balance is
 // asserted deterministically by "the registered Spoor frees exactly once" -- a
 // missing guard clunk would leak it (delta 0), a double would have freed it early.
 // (The CONCURRENT two-thread reap-vs-pump race + cross-Proc death is the Loom-6d
@@ -4039,7 +4084,7 @@ void test_9p_client_async_send_eagain_keeps_session_alive(void) {
     g_async_op.completed   = false;
     rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
     TEST_EXPECT_EQ(rc, 0, "resubmitted, the same op goes out");
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "its reply is demuxed");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "its reply is demuxed");
     TEST_ASSERT(g_async_op.completed, "the resubmitted op completed");
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0, "with success");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)idle,
@@ -4111,7 +4156,7 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
     TEST_EXPECT_EQ(g_mq.sends, sends, "nothing was sent");
     TEST_ASSERT(!g_client.dead, "the session stays LIVE");
 
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "one staged reply is demuxed");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "one staged reply is demuxed");
     TEST_ASSERT(p9_session_has_free_tag(&g_client.session), "its tag is free again");
     g_async_op.last_result = 0x7fffffff;
     g_async_op.completed   = false;
@@ -4120,7 +4165,7 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
     TEST_EXPECT_EQ(rc, 0, "with a tag free, the same op goes out");
 
     for (u32 i = 0; i < N; i++)
-        TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "drain a staged reply");
+        TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "drain a staged reply");
     u32 ok = 0;
     for (u32 i = 0; i < N; i++)
         if (g_pool_ops[i].completed && g_pool_ops[i].last_result == 0) ok++;
@@ -4259,6 +4304,7 @@ static u8   g_rec_type[DY_REC_MAX];
 static bool g_rec_clunk_err;
 static u8   g_rec_bad_reply_to;
 static u8   g_rec_hold;         // a T-type the server holds unanswered (until flushed)
+static u16  g_rec_last_tag;     // the tag of the last request it received
 
 static int recording_responder(void *ctx, const u8 *req, size_t req_len,
                                u8 *resp, size_t resp_cap) {
@@ -4266,6 +4312,7 @@ static int recording_responder(void *ctx, const u8 *req, size_t req_len,
     if (p9_peek_header(req, req_len, &size, &type, &tag) != 0)
         return canonical_responder(ctx, req, req_len, resp, resp_cap);
     if (g_rec_n < DY_REC_MAX) g_rec_type[g_rec_n++] = type;
+    g_rec_last_tag = tag;
     if (g_rec_hold != 0 && type == g_rec_hold) return 0;   // no reply queued
     if (g_rec_bad_reply_to != 0 && type == g_rec_bad_reply_to) {
         // Two body bytes: an Rlerror carries four, an Rflush none, and an
@@ -4453,7 +4500,7 @@ void test_9p_client_clunk_dying_waiter_sends_no_flush(void) {
 
     dy_hold_reader(false);
     u64 oc = g_client.demux_orphan_clunk;
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rclunk drains");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the Rclunk drains");
     TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "as an ownerless Rclunk");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
     TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
@@ -4494,8 +4541,8 @@ void test_9p_client_flushed_walk_late_reply_to_sink(void) {
     TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 60), "its Rwalk is still queued");
 
     dy_hold_reader(false);
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the late Rwalk");
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rflush");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rwalk");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the Rflush");
     TEST_ASSERT(p9_session_fid_bound(&g_client.session, 60),
                 "the late Rwalk is honoured: fid 60 bound");
     TEST_EXPECT_EQ((u64)g_sink_n, (u64)1, "the fid went to the orphan sink");
@@ -4533,7 +4580,7 @@ void test_9p_client_abandoned_walk_late_reply_kept(void) {
     TEST_EXPECT_EQ((u64)abandoned, (u64)1, "the walk is abandoned");
 
     dy_hold_reader(false);
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the late Rwalk");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rwalk");
     TEST_ASSERT(p9_session_fid_bound(&g_client.session, 70), "the late Rwalk bound fid 70");
     TEST_EXPECT_EQ(g_client.orphan_kept, (u64)1, "with no sink the fid is kept");
     TEST_EXPECT_EQ(g_client.orphan_handed, (u64)0, "and not handed");
@@ -4575,7 +4622,7 @@ void test_9p_client_abandoned_async_clunk_not_flushed(void) {
     TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 80), "unbound at the build");
 
     u64 oc = g_client.demux_orphan_clunk;
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rclunk drains");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the Rclunk drains");
     TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "as an ownerless Rclunk");
     TEST_ASSERT(!g_dy_fired, "the abandoned op completes nothing");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
@@ -4598,7 +4645,7 @@ void test_9p_client_clunk_rlerror_drains_as_clunk(void) {
                    "it keeps its slot until the reply");
 
     u64 oc = g_client.demux_orphan_clunk;
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the Rlerror drains");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the Rlerror drains");
     TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "as the clunk's reply");
     TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "not as an unexplained frame");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0, "tag freed");
@@ -4620,7 +4667,7 @@ void test_9p_client_clunk_malformed_reply_fails_closed(void) {
     TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100), 0, "an async Tclunk");
 
     u64 oc = g_client.demux_orphan_clunk;
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the malformed Rlerror");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the malformed Rlerror");
     TEST_EXPECT_EQ(g_client.demux_orphan_clunk, oc + 1, "reached the clunk's arm");
     TEST_ASSERT(g_client.dead, "the session failed closed");
     TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
@@ -4646,7 +4693,7 @@ void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void) {
 
     dy_hold_reader(false);
     u64 ol = g_client.demux_orphan_late;
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the malformed late Rwalk");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the malformed late Rwalk");
     TEST_EXPECT_EQ(g_client.demux_orphan_late, ol + 1, "reached the late arm");
     TEST_ASSERT(g_client.dead, "the session failed closed");
     TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 110), "it bound nothing");
@@ -4671,10 +4718,10 @@ void test_9p_client_flush_malformed_reply_fails_closed(void) {
     TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)1, "the walk was flushed");
 
     dy_hold_reader(false);
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the late Rwalk");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rwalk");
     TEST_ASSERT(!g_client.dead, "a well-formed late reply is absorbed");
     u64 of = g_client.demux_orphan_flush;
-    TEST_EXPECT_EQ(p9_client_reader_pump_once(&g_client), 1, "the malformed Rflush");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the malformed Rflush");
     TEST_EXPECT_EQ(g_client.demux_orphan_flush, of + 1, "reached the flush's arm");
     TEST_ASSERT(g_client.dead, "the session failed closed");
     TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
@@ -4748,12 +4795,12 @@ void test_9p_client_note_flush_honours_late_read(void) {
     bool parked;
     bool waited = dy_note_and_flush(P9_TREAD, &parked);
     dy_hold_reader(false);
-    int  pr = p9_client_reader_pump_once(&g_client);          // the Rread
+    int  pr = p9_client_reader_pump_ready(&g_client);          // the Rread
     bool killed;
     dy_finish(&killed);
     u64  mid      = p9_session_inflight(&g_client.session);
     u64  late     = g_client.demux_orphan_late;
-    int  pf       = p9_client_reader_pump_once(&g_client);    // the Rflush
+    int  pf       = p9_client_reader_pump_ready(&g_client);    // the Rflush
     u64  end      = p9_session_inflight(&g_client.session);
     u64  honoured = g_client.flush_honoured;
     u64  cancel   = g_client.flush_cancelled;
@@ -4795,12 +4842,12 @@ void test_9p_client_note_flush_rflush_first_cancels(void) {
     int  ck_wait = waited ? p9_client_clunk_async(&g_client, 131) : 0;
     bool kept    = p9_session_fid_bound(&g_client.session, 131);
     dy_hold_reader(false);
-    int  pf = p9_client_reader_pump_once(&g_client);          // the Rflush
+    int  pf = p9_client_reader_pump_ready(&g_client);          // the Rflush
     bool killed;
     dy_finish(&killed);
     u64  end      = p9_session_inflight(&g_client.session);
     int  ck_done  = p9_client_clunk_async(&g_client, 131);
-    int  pc       = ck_done == 0 ? p9_client_reader_pump_once(&g_client) : 0;  // the Rclunk
+    int  pc       = ck_done == 0 ? p9_client_reader_pump_ready(&g_client) : 0;  // the Rclunk
     u64  after    = p9_session_inflight(&g_client.session);
     u64  honoured = g_client.flush_honoured;
     u64  cancel   = g_client.flush_cancelled;
@@ -4847,8 +4894,8 @@ void test_9p_client_note_flush_death_abandons(void) {
     int  ck     = died ? p9_client_clunk_async(&g_client, 132) : -1;
     dy_hold_reader(false);
     u64  of     = g_client.demux_orphan_flush;
-    int  pf     = p9_client_reader_pump_once(&g_client);      // the Rflush
-    int  pc     = p9_client_reader_pump_once(&g_client);      // the Rclunk
+    int  pf     = p9_client_reader_pump_ready(&g_client);      // the Rflush
+    int  pc     = p9_client_reader_pump_ready(&g_client);      // the Rclunk
     bool killed;
     dy_finish(&killed);
     u64  flushed = g_client.demux_orphan_flush - of;
@@ -4894,7 +4941,7 @@ void test_9p_client_note_flush_reader_honours_walk(void) {
     bool bound    = p9_session_fid_bound(&g_client.session, 133);
     u64  mid      = p9_session_inflight(&g_client.session);
     u64  honoured = g_client.flush_honoured;
-    int  pf       = p9_client_reader_pump_once(&g_client);    // the Rflush
+    int  pf       = p9_client_reader_pump_ready(&g_client);    // the Rflush
     u64  end      = p9_session_inflight(&g_client.session);
     u32  sink_n   = g_sink_n;
     u64  orphan   = g_client.demux_orphan;
@@ -5037,7 +5084,7 @@ void test_9p_client_note_flush_reply_beats_unsent_flush(void) {
     bool on_list = parked && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
     u32  unfired = g_mq.eagain_budget;
     dy_hold_reader(false);
-    int  pr = on_list ? p9_client_reader_pump_once(&g_client) : 0;   // the Rread
+    int  pr = on_list ? p9_client_reader_pump_ready(&g_client) : 0;   // the Rread
     bool killed = false;
     if (started) dy_finish(&killed);
     g_mq.eagain_budget = 0;
@@ -5069,7 +5116,7 @@ void test_9p_client_note_flush_reply_beats_unsent_flush(void) {
 }
 
 // A full tag pool and a busy reader: the interrupted read parks for progress.
-// The reader is a pump (p9_client_reader_pump_once, as the SQPOLL and
+// The reader is a pump (p9_client_reader_pump_ready, as the SQPOLL and
 // dev9p-poll kthreads run it) and the frame it demuxes is the read's own Rread,
 // which wakes only the read's rendez -- not the send list the read sleeps on.
 // The pump must signal progress when it departs, or the read sleeps on with its
@@ -5090,7 +5137,7 @@ void test_9p_client_note_flush_pump_wakes_parked_flush(void) {
                           (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
     bool on_list = parked && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
     dy_hold_reader(false);
-    int  pr = on_list ? p9_client_reader_pump_once(&g_client) : 0;   // the Rread
+    int  pr = on_list ? p9_client_reader_pump_ready(&g_client) : 0;   // the Rread
     bool killed = false;
     if (started) dy_finish(&killed);
     u32  flushes = rec_count(P9_TFLUSH);
@@ -5335,7 +5382,7 @@ void test_9p_client_async_clunk_drain_waits_for_owed_tag(void) {
     u32  clunks = rec_count(P9_TCLUNK);
     bool bound  = p9_session_fid_bound(&g_client.session, 145);
     bool dead   = g_client.dead;
-    int  pc     = dead ? 0 : p9_client_reader_pump_once(&g_client);   // the Rclunk
+    int  pc     = dead ? 0 : p9_client_reader_pump_ready(&g_client);   // the Rclunk
     dy_unfill_pool(filled, tags);
     u64  end    = p9_session_inflight(&g_client.session);
     dy_client_close();
@@ -5502,7 +5549,7 @@ void test_9p_client_stop_parked_owner_not_owed(void) {
     TEST_YIELD_UNTIL_SOFT(!y_waiting || dy_stop_parked(&g_dyx));
     bool y_stopped = y_waiting && dy_stop_parked(&g_dyx);
     dy_hold_reader(false);
-    int  py   = y_stopped ? p9_client_reader_pump_once(&g_client) : 0;   // Y's Rread
+    int  py   = y_stopped ? p9_client_reader_pump_ready(&g_client) : 0;   // Y's Rread
     int  cc   = y_stopped ? p9_client_clunk_async(&g_client, 148) : -1;  // C
     bool full = !p9_session_has_free_tag(&g_client.session);
     if (y_started) dy_stop_flag(&g_dyx, /*job=*/false, 0u);              // the stop clears
@@ -5516,7 +5563,7 @@ void test_9p_client_stop_parked_owner_not_owed(void) {
     if (y_started) dy_finish_of(&g_dyx, &y_killed);
     u32  clunks = rec_count(P9_TCLUNK);
     bool dead   = g_client.dead;
-    int  pd     = (!dead && started && !d_killed) ? p9_client_reader_pump_once(&g_client) : 0;
+    int  pd     = (!dead && started && !d_killed) ? p9_client_reader_pump_ready(&g_client) : 0;
     dy_unfill_pool(filled, tags);
     u64  end    = p9_session_inflight(&g_client.session);
     dy_client_close();
@@ -5564,7 +5611,7 @@ void test_9p_client_note_flush_stop_parked_staging_not_owed(void) {
     TEST_YIELD_UNTIL_SOFT(!staging || dy_stop_parked(&g_dy));
     bool s_stopped = staging && dy_stop_parked(&g_dy);
     dy_hold_reader(false);
-    int  ps = s_stopped ? p9_client_reader_pump_once(&g_client) : 0;     // S's Rread
+    int  ps = s_stopped ? p9_client_reader_pump_ready(&g_client) : 0;     // S's Rread
     if (started) dy_stop_flag(&g_dy, /*job=*/true, 0u);                  // the stop clears
     bool d_started = s_stopped && dyz_start_clunk(152);                  // D
     TEST_YIELD_UNTIL_SOFT(!d_started || test_dying_done(&g_dyz) ||
@@ -5576,7 +5623,7 @@ void test_9p_client_note_flush_stop_parked_staging_not_owed(void) {
     if (started) dy_finish(&s_killed);
     u32  flushes = rec_count(P9_TFLUSH);
     bool dead    = g_client.dead;
-    int  pd      = (!dead && d_started && !d_killed) ? p9_client_reader_pump_once(&g_client) : 0;
+    int  pd      = (!dead && d_started && !d_killed) ? p9_client_reader_pump_ready(&g_client) : 0;
     dy_unfill_pool(filled, tags);
     u64  end     = p9_session_inflight(&g_client.session);
     dy_client_close();
@@ -5710,6 +5757,393 @@ void test_9p_client_loom_enter_wakes_when_role_frees(void) {
     TEST_ASSERT(!dead, "the session stays live");
 }
 
+// Two clients behind one ring (LOOM.md 8.6, the 2026-10-06 amendment). The
+// ring's newest op rides a client whose reader role another thread holds and
+// never reads with; an older op rides a second client whose reply is already
+// queued. The ENTER reads for every client it waits on, so it reads the second
+// client's reply and returns while the first stays held. Before, it pumped only
+// the newest op's client, slept on that client's role, and the second client's
+// reply stayed unread for as long as the role was held.
+static struct p9_client      g_client2;
+static struct p9_mq_loopback g_mq2;
+static u8                    g_recv_buf2[8192];
+static struct test_dying     g_dle2;
+static struct { struct Loom *l; int n; } g_dle2op;
+
+static void dle2_run(void *arg) {
+    (void)arg;
+    g_dle2op.n = loom_enter(g_dle2op.l, 2, 1, 0);
+}
+
+static int cl2_open(void) {
+    if (p9_mq_loopback_init(&g_mq2, canonical_responder, NULL) != 0) return -1;
+    if (p9_client_init(&g_client2, /*root_fid=*/0, /*msize=*/8192,
+                       p9_mq_loopback_ops_for(&g_mq2),
+                       g_recv_buf2, sizeof(g_recv_buf2)) != 0) return -1;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    return p9_client_handshake(&g_client2, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+}
+
+static void cl2_close(void) {
+    p9_client_destroy(&g_client2);
+    p9_mq_loopback_destroy(&g_mq2);
+}
+
+// One leg: client 1 (g_client) held, its op newest; client 2's reply queued.
+// `cap` is the fan-in test cap (0 = the full set). Returns through *out.
+// A fan-in waiter keeps its whole set on the stack (LOOM_FANIN_MAX entries,
+// whatever the number of clients), so its depth is measured, not argued: the
+// waiter thread's watermark after it ran, plus what an IRQ adds to a syscall
+// stack (ARCH 8.12 "The kernel stack: MEASURED", 1728 B) and an allowance for
+// the syscall entry frames a test thread does not carry, must fit THREAD_KSTACK_SIZE.
+// The allowance is measured by ARCH 8.12's method (-fstack-usage, the kernel's
+// own flags): exception_sync_lower_el 112 + syscall_dispatch 144 +
+// sys_loom_enter_handler 80 + sys_loom_enter_for_proc 80 = 416 B, the 288 B SVC
+// context being already in the IRQ figure.
+#define LOOM_KSTACK_IRQ    1728u
+#define LOOM_KSTACK_ENTRY  1024u
+
+struct two_client_out {
+    bool started, returned, killed, dead1, dead2;
+    u32  kstack;                  // the ENTER thread's watermark
+    int  n;
+    u32  cq_first;
+    u64  ud_first;
+    s64  res_first;
+    u32  cq_end;
+};
+static void two_client_leg(u32 cap, struct two_client_out *o) {
+    *o = (struct two_client_out){0};
+    struct Spoor *sp1 = dev9p_attach_client(&g_client, 0);
+    struct Spoor *sp2 = dev9p_attach_client(&g_client2, 0);
+    struct Loom *l = (sp1 && sp2) ? loom_create(8, 16, false) : NULL;
+    struct Spoor *sps[2] = { sp2, sp1 };
+    rights_t rts[2] = { RIGHT_READ | RIGHT_WRITE, RIGHT_READ | RIGHT_WRITE };
+    if (!l || loom_register_handles(l, sps, rts, 2) != 0) {
+        if (l) loom_unref(l);
+        return;
+    }
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    // SQE 0 -> client 2 (the older op); SQE 1 -> client 1 (the newest, the
+    // in-flight list's head).
+    cl_stage_sqe(l, 0, LOOM_OP_FSYNC, /*handle=*/0, /*datasync*/0, 0xB0B0000000000002ULL);
+    cl_stage_sqe(l, 1, LOOM_OP_FSYNC, /*handle=*/1, /*datasync*/0, 0xA0A0000000000001ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+
+    __atomic_store_n(&g_loom_fanin_test_cap, cap, __ATOMIC_RELEASE);
+    dy_hold_reader(true);                         // client 1: held, never read
+    g_dle2op.l = l;
+    g_dle2op.n = -2;
+    o->started = test_dying_start(&g_dle2, dle2_run, NULL, /*dead_now=*/false);
+    TEST_YIELD_UNTIL_SOFT(!o->started || test_dying_done(&g_dle2));
+    o->returned  = o->started && test_dying_done(&g_dle2);
+    o->kstack    = o->returned ? thread_kstack_used(g_dle2.t, NULL) : 0u;
+    o->cq_first  = l->cq_tail;
+    o->ud_first  = cqes[0].user_data;
+    o->res_first = (s64)cqes[0].result;
+    // Let client 1 go and drain its reply, then end the thread either way.
+    dy_hold_reader(false);
+    p9_client_handoff_reader(&g_client);
+    if (o->started) dy_finish_of(&g_dle2, &o->killed);
+    __atomic_store_n(&g_loom_fanin_test_cap, 0u, __ATOMIC_RELEASE);
+    o->n = g_dle2op.n;
+    (void)p9_client_reader_pump_ready(&g_client);   // client 1's Rfsync, if unread
+    o->cq_end = l->cq_tail;
+    o->dead1  = g_client.dead;
+    o->dead2  = g_client2.dead;
+    loom_unref(l);
+}
+
+void test_9p_client_loom_enter_reads_every_client(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client 1 over mq");
+    TEST_EXPECT_EQ(cl2_open(), 0, "client 2 over mq");
+    struct two_client_out o;
+    two_client_leg(0, &o);
+    cl2_close();
+    dy_client_close();
+
+    TEST_ASSERT(o.started, "the ENTER thread started");
+    TEST_ASSERT(o.returned, "the ENTER returned while client 1's role stayed held");
+    TEST_ASSERT(!o.killed, "nothing had to kill it");
+    TEST_EXPECT_EQ((u64)(s64)o.n, (u64)2, "both SQEs consumed");
+    TEST_EXPECT_EQ((u64)o.cq_first, (u64)1, "one CQE when it returned");
+    TEST_EXPECT_EQ(o.ud_first, 0xB0B0000000000002ULL, "client 2's op completed first");
+    TEST_EXPECT_EQ((u64)o.res_first, (u64)0, "fsync success");
+    TEST_EXPECT_EQ((u64)o.cq_end, (u64)2, "client 1's op completed once released");
+    TEST_ASSERT(!o.dead1 && !o.dead2, "both sessions stay live");
+    TEST_ASSERT(o.kstack > 0u &&
+                o.kstack + LOOM_KSTACK_IRQ + LOOM_KSTACK_ENTRY <= THREAD_KSTACK_SIZE,
+                "the ENTER's stack fits with a syscall entry and an IRQ on top");
+}
+
+// More clients in flight than the fan-in set holds (a re-register with ops in
+// flight): the set is partial, so the waiter rescans on a timer from a rotating
+// cursor. The cap of 1 leaves client 2 out of the first set -- its reply has no
+// hook to wake the ENTER -- and the rescan must still find it.
+void test_9p_client_loom_enter_partial_set_rescans(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client 1 over mq");
+    TEST_EXPECT_EQ(cl2_open(), 0, "client 2 over mq");
+    struct two_client_out o;
+    two_client_leg(1, &o);
+    cl2_close();
+    dy_client_close();
+
+    TEST_ASSERT(o.started, "the ENTER thread started");
+    TEST_ASSERT(o.returned, "the rescan found client 2's reply");
+    TEST_ASSERT(!o.killed, "nothing had to kill it");
+    TEST_EXPECT_EQ(o.ud_first, 0xB0B0000000000002ULL, "client 2's op completed first");
+    TEST_EXPECT_EQ((u64)o.cq_end, (u64)2, "client 1's op completed once released");
+    TEST_ASSERT(!o.dead1 && !o.dead2, "both sessions stay live");
+    TEST_ASSERT(o.kstack > 0u &&
+                o.kstack + LOOM_KSTACK_IRQ + LOOM_KSTACK_ENTRY <= THREAD_KSTACK_SIZE,
+                "the ENTER's stack, through its timed rescan, fits with an entry and an IRQ");
+}
+
+// A sibling's submit lands between the waiter's client hooks and its CQ hook,
+// the window two threads of the ring's Proc can fill. The waiter has hooked
+// only client 1, whose role is held; the sibling's op rides client 2, whose
+// reply is queued at once, and the sibling does not wait. The waiter must see
+// the new op and read it. Before, a submit moved nothing the waiter
+// re-samples, so it slept hooked on client 1 alone with client 2's reply
+// unread. Observed first, judged after the teardown.
+static void dle1_run(void *arg) {
+    (void)arg;
+    g_dle2op.n = loom_enter(g_dle2op.l, 1, 1, 0);
+}
+
+void test_9p_client_loom_enter_sees_a_sibling_submit(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client 1 over mq");
+    TEST_EXPECT_EQ(cl2_open(), 0, "client 2 over mq");
+    struct Spoor *sp1 = dev9p_attach_client(&g_client, 0);
+    struct Spoor *sp2 = dev9p_attach_client(&g_client2, 0);
+    struct Loom *l = (sp1 && sp2) ? loom_create(8, 16, false) : NULL;
+    struct Spoor *sps[2] = { sp2, sp1 };
+    rights_t rts[2] = { RIGHT_READ | RIGHT_WRITE, RIGHT_READ | RIGHT_WRITE };
+    bool up = l && loom_register_handles(l, sps, rts, 2) == 0;
+    bool started = false, stalled = false, returned = false, killed = false;
+    int  sib = -1;
+    u32  cq_first = 0, cq_end = 0;
+    u64  ud_first = 0;
+    if (up) {
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+        cl_stage_sqe(l, 0, LOOM_OP_FSYNC, /*handle=*/1, /*datasync*/0, 0xA0A0000000000001ULL);
+        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+        dy_hold_reader(true);                         // client 1: held, never read
+        __atomic_store_n(&g_loom_fanin_test_stall, 1u, __ATOMIC_RELEASE);
+        g_dle2op.l = l;
+        g_dle2op.n = -2;
+        started = test_dying_start(&g_dle2, dle1_run, NULL, /*dead_now=*/false);
+        TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dle2) ||
+                              __atomic_load_n(&g_loom_fanin_test_stalled, __ATOMIC_ACQUIRE));
+        stalled = __atomic_load_n(&g_loom_fanin_test_stalled, __ATOMIC_ACQUIRE) != 0u;
+        // The sibling: client 2's op, submitted without waiting.
+        cl_stage_sqe(l, 1, LOOM_OP_FSYNC, /*handle=*/0, /*datasync*/0, 0xB0B0000000000002ULL);
+        __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+        sib = loom_enter(l, 1, 0, 0);
+        __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
+        TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dle2));
+        returned = started && test_dying_done(&g_dle2);
+        cq_first = l->cq_tail;
+        ud_first = cqes[0].user_data;
+        // Let client 1 go and drain its reply, then end the thread either way.
+        dy_hold_reader(false);
+        p9_client_handoff_reader(&g_client);
+        if (started) dy_finish_of(&g_dle2, &killed);
+        (void)p9_client_reader_pump_ready(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client2);
+        cq_end = l->cq_tail;
+    }
+    __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
+    if (l) loom_unref(l);
+    else {
+        if (sp1) spoor_clunk(sp1);
+        if (sp2) spoor_clunk(sp2);
+    }
+    cl2_close();
+    dy_client_close();
+
+    TEST_ASSERT(up, "two clients registered on one ring");
+    TEST_ASSERT(started, "the ENTER thread started");
+    TEST_ASSERT(stalled, "the ENTER stopped between its client hooks and its CQ hook");
+    TEST_EXPECT_EQ((u64)(s64)sib, (u64)1, "the sibling submitted one SQE");
+    TEST_ASSERT(returned, "the ENTER read the sibling's op while client 1 stayed held");
+    TEST_ASSERT(!killed, "nothing had to kill it");
+    TEST_EXPECT_EQ((u64)cq_first, (u64)1, "one CQE when it returned");
+    TEST_EXPECT_EQ(ud_first, 0xB0B0000000000002ULL, "the sibling's op completed first");
+    TEST_EXPECT_EQ((u64)cq_end, (u64)2, "client 1's op completed once released");
+}
+
+// A pump reads only what is waiting. One kthread pumps every QTPOLL session in
+// the system, and any process can serve a 9P mount over pipes, so a server
+// that sends a reply's header and stops must not hold the pump inside the
+// frame: the pump returns, the header stays with the client, and the next
+// pump finishes the frame when the rest arrives. Before, the pump read on
+// into the body; over this FIFO an empty read is an EOF, so it killed the
+// session (over a pipe it slept, pipe.transport_reads_now_without_sleeping).
+static void dy_inject(const u8 *b, u32 n) {
+    spin_lock(&g_mq.lock);
+    for (u32 i = 0; i < n; i++) g_mq.ring[g_mq.tail + i] = b[i];
+    g_mq.tail += n;
+    spin_unlock(&g_mq.lock);
+    poll_waiter_list_wake(&g_mq.ready_list);
+}
+
+void test_9p_client_pump_ready_never_waits_inside_a_frame(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    p9_client_walk_one(&g_client, 0, 33, (const u8 *)"f", 1, NULL);
+    g_rec_hold = P9_TGETATTR;                       // the server answers by hand
+    g_pump_rpc.on_complete = pump_async_on_complete;
+    g_pump_async_completed = false;
+    u32 fid = 33;
+    int sub = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_getattr, &fid);
+    // Its answer, an Rlerror: 11 bytes, the 7-byte header first.
+    u8 frame[11] = { 11, 0, 0, 0, (u8)P9_RLERROR,
+                     (u8)g_rec_last_tag, (u8)(g_rec_last_tag >> 8), 2, 0, 0, 0 };
+    dy_inject(frame, 7u);
+    int first = p9_client_reader_pump_ready(&g_client);
+    u32 kept = g_client.rx_got;
+    bool done_early = g_pump_async_completed;
+    dy_inject(frame + 7, 4u);
+    int second = p9_client_reader_pump_ready(&g_client);
+    u32 kept_after = g_client.rx_got;
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)(s64)sub, 0ULL, "a Tgetattr went out, held by the server");
+    TEST_EXPECT_EQ((u64)(s64)first, (u64)(s64)P9_PUMP_IDLE,
+                   "the pump came back with nothing demuxed yet");
+    TEST_EXPECT_EQ((u64)kept, 7ULL, "the header stays with the client");
+    TEST_ASSERT(!done_early, "the op waits for the rest of its reply");
+    TEST_EXPECT_EQ((u64)(s64)second, (u64)(s64)P9_PUMP_PROGRESS,
+                   "the next pump finishes the frame");
+    TEST_ASSERT(g_pump_async_completed && g_pump_async_result < 0,
+                "the op completes with the server's error");
+    TEST_EXPECT_EQ((u64)kept_after, 0ULL, "nothing of the frame is left behind");
+    TEST_ASSERT(!dead, "the session lives");
+}
+
+// #898 over a FIFO: a reply that arrived before the teardown but was never read
+// is discarded ownerless once the abandon has cleared its tag -- it must not
+// complete into the freed container -- and the Rflush behind it frees the tag.
+// Over the single-slot loopback the unread reply refuses the Tflush, so
+// loom_quiesce_abandons_inflight never reaches a late reply.
+void test_9p_client_loom_quiesce_drains_the_late_reply(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    struct Loom *l = sp ? loom_create(8, 16, false) : NULL;
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    bool up = l && loom_register_handles(l, &sp, &rt, 1) == 0;
+    int n = -1;
+    u16 tag = 0;
+    if (up) {
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        g_rec_hold = P9_TFSYNC;                     // the server answers it by hand
+        cl_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 0, 0x5252525252525252ULL);
+        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+        n = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
+        tag = g_rec_last_tag;
+        // Its reply arrives, and nothing reads it before the ring goes.
+        const u8 rfsync[7] = { 7, 0, 0, 0, (u8)P9_RFSYNC, (u8)tag, (u8)(tag >> 8) };
+        dy_inject(rfsync, 7u);
+    }
+    u64 destroyed0 = loom_total_destroyed();
+    if (l) loom_unref(l);
+    u64 destroyed = loom_total_destroyed() - destroyed0;
+    u32 flushes = rec_count(P9_TFLUSH);
+    u32 frames = 0;
+    for (u32 i = 0; i < 8u; i++) {
+        if (p9_client_reader_pump_ready(&g_client) != P9_PUMP_PROGRESS) break;
+        frames++;
+    }
+    spin_lock(&g_client.lock);
+    bool tag_held = tag < P9_SESSION_MAX_OUTSTANDING && g_client.session.outstanding[tag].active;
+    spin_unlock(&g_client.lock);
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(up, "an FSYNC ring over the mq client");
+    TEST_EXPECT_EQ((u64)(s64)n, 1ULL, "one SQE submitted");
+    TEST_EXPECT_EQ(destroyed, 1ULL, "the ring freed with the op in flight");
+    TEST_EXPECT_EQ((u64)flushes, 1ULL, "the abandon flushed the op");
+    TEST_ASSERT(frames >= 2u, "the late reply and the Rflush both drained");
+    TEST_ASSERT(!tag_held, "the Rflush freed the tag");
+    TEST_ASSERT(!dead, "the session lives");
+}
+
+// An SQPOLL ring's op rides a client whose reader role another thread holds and
+// never reads with. The kthread may not read that reply, so it hooks the role
+// and parks: asleep, never run, for as long as the role stays held. The role's
+// release wakes it to read the reply. Before, the pump reported the role busy
+// and the kthread yielded and pumped again, a CPU spent on a reply it could
+// not read. Everything is observed first and judged after the teardown, so a
+// failure leaves no kthread hooked on the client the runner destroys.
+void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    struct Proc  *p  = sp ? proc_alloc() : NULL;
+    struct loom_params kp;
+    hidx_t fd = -1;
+    struct Handle hh;
+    bool got = p && sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd) == 0 &&
+               handle_get(p, fd, &hh) == 0;
+    struct Loom *l = got ? (struct Loom *)hh.obj : NULL;
+    bool ring_up = l && l->sqpoll;
+    bool parked = false, stayed = false, posted = false;
+    u64  runs = ~0ull;
+    s64  res  = -1;
+    u32  kdepth = 0;
+    if (ring_up) {
+        loom_install_test_handle(l, 0, sp, RIGHT_READ | RIGHT_WRITE);
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+        struct Thread *kt = l->sqpoll;
+        dy_hold_reader(true);
+        cl_stage_sqe(l, 0, LOOM_OP_FSYNC, /*handle=*/0, /*datasync*/0, 0xC0C0000000000003ULL);
+        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+        (void)sys_loom_enter_for_proc(p, fd, 0, 0, 0);    // wakes the kthread
+        // The Tfsync is out and its reply queued: from here the kthread has
+        // nothing it may read.
+        TEST_YIELD_UNTIL_SOFT(rec_count(P9_TFSYNC) == 1u && g_mq.tail != g_mq.head &&
+                              __atomic_load_n(&kt->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING);
+        parked = rec_count(P9_TFSYNC) == 1u && g_mq.tail != g_mq.head &&
+                 __atomic_load_n(&kt->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+        if (parked) {
+            u64 n0 = __atomic_load_n(&kt->nsched, __ATOMIC_ACQUIRE);
+            u64 t0 = timer_now_ns();
+            TEST_YIELD_UNTIL_SOFT(timer_now_ns() >= t0 + 50ull * 1000ull * 1000ull);
+            runs   = __atomic_load_n(&kt->nsched, __ATOMIC_ACQUIRE) - n0;
+            stayed = __atomic_load_n(&kt->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+                     __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) == 0u;
+        }
+        dy_hold_reader(false);
+        p9_client_handoff_reader(&g_client);              // the role comes free
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u);
+        posted = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u;
+        res    = (s64)cqes[0].result;
+        kdepth = thread_kstack_used(kt, NULL);            // parked, hooked, then read
+    }
+    if (got) handle_put(&hh);
+    if (p) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);                     // the last handle: loom_free joins the kthread
+    }
+    if (sp) spoor_clunk(sp);
+    dy_client_close();
+
+    TEST_ASSERT(ring_up, "SQPOLL ring with its kthread");
+    TEST_ASSERT(parked, "the kthread parked, the op's client role held");
+    TEST_ASSERT(stayed, "and stayed parked, the reply unread");
+    TEST_EXPECT_EQ(runs, (u64)0, "never ran while the role stayed held");
+    TEST_ASSERT(posted, "the role's release woke it to read the reply");
+    TEST_EXPECT_EQ((u64)res, (u64)0, "fsync success");
+    TEST_ASSERT(kdepth > 0u && kdepth + LOOM_KSTACK_IRQ <= THREAD_KSTACK_SIZE,
+                "the kthread's stack fits with an IRQ on top");
+}
+
 // The runner's release, after every test (test.c). A test that fails before its
 // last lines leaves its op threads asleep in g_client, and the client and its
 // transports open. The next test's open re-inits the transport under such a
@@ -5720,7 +6154,9 @@ void test_9p_client_loom_enter_wakes_when_role_frees(void) {
 // verdicts. Returns whether anything was left up.
 bool test_9p_client_release(void);
 bool test_9p_client_release(void) {
-    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle };
+    __atomic_store_n(&g_loom_fanin_test_cap, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
+    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle, &g_dle2 };
     bool left = false;
     for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         struct test_dying *d = ops[i];
@@ -5741,6 +6177,14 @@ bool test_9p_client_release(void) {
     if (g_mq.magic == P9_MQ_LOOPBACK_MAGIC) {
         left = true;
         p9_mq_loopback_destroy(&g_mq);
+    }
+    if (g_client2.magic == P9_CLIENT_MAGIC) {
+        left = true;
+        p9_client_destroy(&g_client2);
+    }
+    if (g_mq2.magic == P9_MQ_LOOPBACK_MAGIC) {
+        left = true;
+        p9_mq_loopback_destroy(&g_mq2);
     }
     return left;
 }

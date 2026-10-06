@@ -33,3 +33,11 @@ Frame-atomicity as a DESIGNED property: unwind only at `got == 0`
 delivery. Modeled by [[spec-reader-frame]]; the stop half shares the
 mechanism. Any interruption a future change adds to the reader recv must
 route through the same boundary latch, not a new flag.
+
+Since 2026-10-06 ([[chg-2026-10-06-loom-multiclient]]) the partial frame is
+the client's (`c->rx_got`, as Plan 9 devmnt's `m->q` and Linux trans_fd's
+`rc.offset`): every exit of the frame reader leaves the bytes it read for the
+next reader, which resumes there, so no unwind of the 9P reader reaches this
+hazard. The block-through stays as ARCH 8.8.1.1's voted policy;
+[[seam-90-hung-server]] is its cost. A NEW shared-stream reader that keeps its
+partial frame on its own stack reopens the hazard.

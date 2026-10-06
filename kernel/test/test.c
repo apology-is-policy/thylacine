@@ -1660,7 +1660,7 @@ void test_9p_transport_backend_error_transitions_to_error(void);
 void test_9p_transport_close_idempotent(void);
 void test_9p_transport_exchange_drives_session_handshake(void);
 void test_9p_transport_exchange_drives_session_walk(void);
-void test_9p_transport_deadline_idle_vs_eof(void);
+void test_9p_transport_loopback_recv_ready(void);
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
@@ -1687,11 +1687,12 @@ void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
 void test_9p_client_death_hangs_up_once(void);
 void test_9p_client_handoff_skips_stop_parked(void);
-void test_9p_client_role_wait_contract(void);
-void test_9p_client_pump_deadline_idle(void);
-void test_9p_client_pump_deadline_data_ready_progresses(void);
-void test_9p_client_pump_deadline_chunked_frame_completes(void);
-void test_9p_client_pump_deadline_busy_when_reader_active(void);
+void test_9p_client_reader_hook_contract(void);
+void test_9p_client_pump_ready_idle(void);
+void test_9p_client_pump_ready_data_progresses(void);
+void test_9p_client_pump_ready_chunked_frame_completes(void);
+void test_9p_client_pump_ready_busy_when_reader_active(void);
+void test_9p_client_pump_ready_eof_is_dead(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
@@ -1755,6 +1756,12 @@ void test_9p_client_stop_parked_owner_not_owed(void);
 void test_9p_client_note_flush_stop_parked_staging_not_owed(void);
 void test_9p_client_handoff_skips_restopped_owner(void);
 void test_9p_client_loom_enter_wakes_when_role_frees(void);
+void test_9p_client_loom_enter_reads_every_client(void);
+void test_9p_client_loom_enter_partial_set_rescans(void);
+void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
+void test_9p_client_loom_enter_sees_a_sibling_submit(void);
+void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
+void test_9p_client_loom_quiesce_drains_the_late_reply(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -1836,6 +1843,7 @@ void test_dev9p_poll_cancel_at_close(void);
 bool test_dev9p_np_release(void);
 bool test_9p_client_release(void);
 void test_dev9p_poll_gc_flushes_with_the_unlink(void);
+void test_dev9p_poll_reads_every_client(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_unlink_rename_errno_propagates(void);
@@ -1897,6 +1905,7 @@ void test_spoor_transport_close_clunks_when_owned(void);
 void test_spoor_transport_close_preserves_when_unowned(void);
 void test_spoor_transport_transport_core_round_trip(void);
 void test_spoor_transport_end_to_end_handshake(void);
+void test_spoor_transport_recv_now_refuses_a_non_pipe(void);
 void test_9p_srvconn_transport_init_destroy(void);
 void test_9p_srvconn_transport_init_null_rejected(void);
 void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
@@ -1910,7 +1919,7 @@ void test_9p_srvconn_transport_remote_attach_srv(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
-void test_9p_srvconn_transport_deadline_vtable_routes(void);
+void test_9p_srvconn_transport_recv_ready_tracks_s2c(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
 void test_9p_srvconn_transport_death_tears_down_the_conn(void);
@@ -1948,6 +1957,8 @@ void test_pipe_cnbframe_atomic_nonblocking(void);
 void test_pipe_hangup_write_ends_the_stream(void);
 void test_pipe_cnbframe_refusal_posts_no_note(void);
 void test_pipe_client_death_hangs_up_the_tx_pipe(void);
+void test_pipe_transport_reads_now_without_sleeping(void);
+void test_pipe_pump_treats_a_closed_transport_as_dead(void);
 void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
@@ -3843,8 +3854,8 @@ struct test_case g_tests[] = {
     { "9p_transport.exchange_drives_session_walk",
                                        test_9p_transport_exchange_drives_session_walk,
                                                                            false, NULL },
-    { "9p_transport.deadline_idle_vs_eof",
-                                       test_9p_transport_deadline_idle_vs_eof,
+    { "9p_transport.loopback_recv_ready",
+                                       test_9p_transport_loopback_recv_ready,
                                                                            false, NULL },
     { "9p_client.init_destroy",        test_9p_client_init_destroy,        false, NULL },
     { "9p_client.handshake",           test_9p_client_handshake,           false, NULL },
@@ -3928,17 +3939,18 @@ struct test_case g_tests[] = {
     { "9p_client.handoff_skips_stop_parked",
                                        test_9p_client_handoff_skips_stop_parked,
                                                                            false, NULL },
-    { "9p_client.role_wait_contract",  test_9p_client_role_wait_contract,  false, NULL },
-    { "9p_client.pump_deadline_idle",  test_9p_client_pump_deadline_idle,  false, NULL },
-    { "9p_client.pump_deadline_data_ready_progresses",
-                                       test_9p_client_pump_deadline_data_ready_progresses,
+    { "9p_client.reader_hook_contract", test_9p_client_reader_hook_contract, false, NULL },
+    { "9p_client.pump_ready_idle",     test_9p_client_pump_ready_idle,     false, NULL },
+    { "9p_client.pump_ready_data_progresses",
+                                       test_9p_client_pump_ready_data_progresses,
                                                                            false, NULL },
-    { "9p_client.pump_deadline_chunked_frame_completes",
-                                       test_9p_client_pump_deadline_chunked_frame_completes,
+    { "9p_client.pump_ready_chunked_frame_completes",
+                                       test_9p_client_pump_ready_chunked_frame_completes,
                                                                            false, NULL },
-    { "9p_client.pump_deadline_busy_when_reader_active",
-                                       test_9p_client_pump_deadline_busy_when_reader_active,
+    { "9p_client.pump_ready_busy_when_reader_active",
+                                       test_9p_client_pump_ready_busy_when_reader_active,
                                                                            false, NULL },
+    { "9p_client.pump_ready_eof_is_dead", test_9p_client_pump_ready_eof_is_dead, false, NULL },
     { "9p_client.loom_fsync_e2e",      test_9p_client_loom_fsync_e2e,      false, NULL },
     { "9p_client.loom_rights_deny",    test_9p_client_loom_rights_deny,    false, NULL },
     { "9p_client.loom_quiesce_abandons_inflight",
@@ -4043,6 +4055,18 @@ struct test_case g_tests[] = {
                                        test_9p_client_handoff_skips_restopped_owner, false, NULL },
     { "9p_client.loom_enter_wakes_when_role_frees",
                                        test_9p_client_loom_enter_wakes_when_role_frees, false, NULL },
+    { "9p_client.loom_enter_reads_every_client",
+                                       test_9p_client_loom_enter_reads_every_client, false, NULL },
+    { "9p_client.loom_enter_partial_set_rescans",
+                                       test_9p_client_loom_enter_partial_set_rescans, false, NULL },
+    { "9p_client.loom_sqpoll_parks_on_a_held_role",
+                                       test_9p_client_loom_sqpoll_parks_on_a_held_role, false, NULL },
+    { "9p_client.loom_enter_sees_a_sibling_submit",
+                                       test_9p_client_loom_enter_sees_a_sibling_submit, false, NULL },
+    { "9p_client.pump_ready_never_waits_inside_a_frame",
+                                       test_9p_client_pump_ready_never_waits_inside_a_frame, false, NULL },
+    { "9p_client.loom_quiesce_drains_the_late_reply",
+                                       test_9p_client_loom_quiesce_drains_the_late_reply, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
@@ -4136,6 +4160,7 @@ struct test_case g_tests[] = {
     { "dev9p.poll_widen_keeps_the_old_arm_until_replaced", test_dev9p_poll_widen_keeps_the_old_arm_until_replaced, false, NULL },
     { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
     { "dev9p.poll_gc_flushes_with_the_unlink", test_dev9p_poll_gc_flushes_with_the_unlink, false, NULL },
+    { "dev9p.poll_reads_every_client", test_dev9p_poll_reads_every_client, false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.unlink_rename_errno",     test_dev9p_unlink_rename_errno_propagates, false, NULL },
@@ -4219,6 +4244,7 @@ struct test_case g_tests[] = {
     { "spoor_transport.close_preserves_when_unowned",       test_spoor_transport_close_preserves_when_unowned,       false, NULL },
     { "spoor_transport.transport_core_round_trip",          test_spoor_transport_transport_core_round_trip,          false, NULL },
     { "spoor_transport.end_to_end_handshake",               test_spoor_transport_end_to_end_handshake,               false, NULL },
+    { "spoor_transport.recv_now_refuses_a_non_pipe",        test_spoor_transport_recv_now_refuses_a_non_pipe,        false, NULL },
     { "9p_srvconn_transport.init_destroy",                  test_9p_srvconn_transport_init_destroy,                  false, NULL },
     { "9p_srvconn_transport.init_null_rejected",            test_9p_srvconn_transport_init_null_rejected,            false, NULL },
     { "9p_srvconn_transport.send_routes_to_c2s_ring",       test_9p_srvconn_transport_send_routes_to_c2s_ring,       false, NULL },
@@ -4232,7 +4258,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },
-    { "9p_srvconn_transport.deadline_vtable_routes",        test_9p_srvconn_transport_deadline_vtable_routes,        false, NULL },
+    { "9p_srvconn_transport.recv_ready_tracks_s2c",         test_9p_srvconn_transport_recv_ready_tracks_s2c,         false, NULL },
     { "9p_srvconn_transport.devgone_posts_nodev_cqe",       test_9p_srvconn_transport_devgone_posts_nodev_cqe,       false, NULL },
     { "9p_srvconn_transport.transport_err_posts_eio_cqe",   test_9p_srvconn_transport_transport_err_posts_eio_cqe,   false, NULL },
     { "9p_srvconn_transport.death_tears_down_the_conn",     test_9p_srvconn_transport_death_tears_down_the_conn,     false, NULL },
@@ -4249,6 +4275,8 @@ struct test_case g_tests[] = {
     { "pipe.close_both_ends_frees_ring",                    test_pipe_close_both_ends_frees_ring,                    false, NULL },
     { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
     { "pipe.client_death_hangs_up_the_tx_pipe",             test_pipe_client_death_hangs_up_the_tx_pipe,             false, NULL },
+    { "pipe.transport_reads_now_without_sleeping",          test_pipe_transport_reads_now_without_sleeping,          false, NULL },
+    { "pipe.pump_treats_a_closed_transport_as_dead",        test_pipe_pump_treats_a_closed_transport_as_dead,        false, NULL },
     { "pipe.cnbframe_atomic_nonblocking",                   test_pipe_cnbframe_atomic_nonblocking,                   false, NULL },
     { "pipe.hangup_write_ends_the_stream",                  test_pipe_hangup_write_ends_the_stream,                  false, NULL },
     { "pipe.cnbframe_refusal_posts_no_note",                test_pipe_cnbframe_refusal_posts_no_note,                false, NULL },

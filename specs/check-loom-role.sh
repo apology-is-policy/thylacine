@@ -1,22 +1,18 @@
 #!/bin/sh
-# Verify every debug_stop cfg reports the verdict its header claims.
+# Verify every loom_role cfg reports the verdict its header claims.
 #
-# The shape is specs/check-cow.sh's: a CLEAN cfg explores the whole state
-# space, so its distinct-state count is a deterministic fingerprint (a change
-# means the MODEL changed); a BUGGY cfg halts at the first violation, so it is
-# judged on its verdict -- the exit status plus the NAME of the property that
-# fired. Four families: invariants, action properties (NoEretIntoDeath,
-# ParkEndsOnlyInDeath), and temporal properties, whose cfgs explore the whole
-# space before liveness is judged, so their counts are pinned too.
-#
-# Every run is `-workers 1`, so each printed count is the one
-# specs/SPEC-TO-CODE.md records: a multi-worker run stops a safety violation
-# at a scheduling-dependent count.
+# The shape is specs/check-tail-order.sh's: a CLEAN cfg explores the whole
+# state space, so its distinct-state count is a deterministic fingerprint (a
+# change means the MODEL changed); a BUGGY cfg halts at the first violation, so
+# it is judged on its verdict -- the exit status plus the NAME of the property
+# that fired. A temporal cfg explores the whole space before liveness is
+# judged (`-lncheck final`), so its count is pinned too. Every run is `-workers 1`, so each count
+# is the one specs/SPEC-TO-CODE.md records.
 #
 # What this script CANNOT see, said so the green reads no larger: the model
-# has no note delivery, so what a Thread does with its latch once it runs
-# again is not checked here -- the kernel tests and /debug-probe's interrupt
-# leg are its witness (DEBUG-FS-DESIGN 5g).
+# takes a ready transport to hold a whole frame and leaves out session death
+# and the waiter's own stop; the kernel tests 9p_client.loom_enter_* and
+# loom.* hold the code to it.
 set -u
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
@@ -26,32 +22,25 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="debug_stop:12830
-debug_stop_held:17330"
+CLEAN="loom_role:32296
+loom_role_liveness:32296
+loom_role_wide:1297291
+loom_role_multi:118774"
 
 # buggy: cfg, invariant that must be the one reported
-BUGGY="debug_stop_buggy_lost_stop:NoLostStop
-debug_stop_buggy_double_wake:ExactlyOnceResume
-debug_stop_buggy_fault_stop_ungated:StopImpliesOwned
-debug_stop_buggy_held_runs_free:NoEL0WhileHeld
-debug_stop_buggy_convert_clears_first:NoEL0WhileHeld
-debug_stop_buggy_no_death_recheck:NoEL0WhileHeld
-debug_stop_buggy_birth_latch_erets:NoEL0WhileHeld
-debug_stop_buggy_tail_latch_erets:NoLostStop
-debug_stop_buggy_spawner_latch_returns:SpawnReturnsAfterBirth"
-
-# action: cfg, the action property that must be the one reported
-ACTION="debug_stop_buggy_no_death_recheck_tail:NoEretIntoDeath
-debug_stop_buggy_latch_ends_stop:ParkEndsOnlyInDeath"
+BUGGY="loom_role_buggy_unready_pump:NoBlindRecv
+loom_role_buggy_late_register:NoMissedWake
+loom_role_buggy_no_role_wake:NoMissedWake
+loom_role_buggy_designates_parked:NoMissedWake
+loom_role_buggy_stop_keeps_designation:NoMissedWake
+loom_role_buggy_no_ready_hook:NoMissedWake
+loom_role_buggy_ready_late_register:NoMissedWake
+loom_role_buggy_ready_hook_when_held:NoMissedWake"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
-TEMPORAL="debug_stop_buggy_park_before_die:EventuallyAllDead:1480
-debug_stop_buggy_strand_on_debugger_death:EventuallyResumed:1338
-debug_stop_buggy_exitkill_ignored:EventuallyLaunchedDies:1516
-debug_stop_buggy_stop_skips_sleeper:EventuallyStopSettles:12830
-debug_stop_buggy_orphan_hold_strands:EventuallyHoldResolved:17872
-debug_stop_buggy_birth_wait_unwoken:BirthWaitReleases:19678"
+TEMPORAL="loom_role_buggy_no_role_hook:EnterReturns:34870
+loom_role_buggy_first_client_only:EnterReturns:33864"
 
 # Every temporal run is `-lncheck final`: liveness is judged once the whole
 # space is explored. Without it TLC checks liveness at TIME-triggered points
@@ -61,9 +50,10 @@ debug_stop_buggy_birth_wait_unwoken:BirthWaitReleases:19678"
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"
     java -cp "$JAR" tlc2.TLC -workers 1 -deadlock -lncheck final -metadir "$TMP/$1.meta" \
-        -config "$1.cfg" debug_stop.tla > "$LOG" 2>&1
+        -config "$1.cfg" loom_role.tla > "$LOG" 2>&1
     RC=$?
     GOT=$(grep -o '[0-9]* distinct states found' "$LOG" | tail -1 | awk '{print $1}')
+    [ -n "${KEEP_LOGS:-}" ] && cp "$LOG" "$KEEP_LOGS/"
 }
 
 fail() { echo "$1"; echo fail > "$TMP/failed"; }
@@ -92,18 +82,6 @@ echo "$BUGGY" | while IFS=: read -r cfg want; do
     fi
 done
 
-echo "== action (must violate, and violate the NAMED action property) =="
-echo "$ACTION" | while IFS=: read -r cfg want; do
-    run "$cfg"
-    if [ "$RC" -eq 0 ]; then
-        fail "FAIL $cfg: rc=0 -- the counterexample did NOT fire; $want is unguarded"
-    elif ! grep -q "Action property $want is violated" "$LOG"; then
-        fail "FAIL $cfg: rc=$RC but not via $want -- got: $(grep -o -E '(Invariant|property) [A-Za-z]* (is|was) violated' "$LOG" | head -1)"
-    else
-        echo "ok   $cfg: rc=$RC, $want violated as claimed ($GOT distinct states)"
-    fi
-done
-
 echo "== temporal (the liveness property must fail) =="
 echo "$TEMPORAL" | while IFS=: read -r cfg prop want; do
     run "$cfg"
@@ -121,10 +99,10 @@ done
 # A violation drops a <module>_TTrace_<epoch>.{tla,bin} pair beside the spec.
 # They are gitignored, but quaestor's spec census counts files: sweep the ones
 # THIS run made, and only those.
-find . -maxdepth 1 -name 'debug_stop_TTrace_*' -newer "$STAMP" -exec rm -f {} +
+find . -maxdepth 1 -name 'loom_role_TTrace_*' -newer "$STAMP" -exec rm -f {} +
 
 status=0
 [ -f "$TMP/failed" ] && status=1
 echo
-if [ "$status" -eq 0 ]; then echo "debug_stop: ALL CFGS AS CLAIMED"; else echo "debug_stop: FAILURES ABOVE"; fi
+if [ "$status" -eq 0 ]; then echo "loom_role: ALL CFGS AS CLAIMED"; else echo "loom_role: FAILURES ABOVE"; fi
 exit $status

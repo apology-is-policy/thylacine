@@ -38,11 +38,9 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 89
+## Open seams: 87
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
-- [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
-- [[seam-223-pump-tail-starvation]] (sub-kernel-ninep-dev9p-poll)
 - [[seam-240-lo-redial]] (sub-netd-server)
 - [[seam-242-selftest-nonfatal]] (sub-netd-nic)
 - [[seam-350-async-eagain]] (sub-kernel-ninep-client)
@@ -138,6 +136,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-06 [[chg-2026-10-06-flag-words]] — The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested
 - 2026-10-06 [[chg-2026-10-06-haul-p3b]] — Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
 - 2026-10-06 [[chg-2026-10-06-held-untagged]] — The held launch drops its build tag: every ambush build spawns held
+- 2026-10-06 [[chg-2026-10-06-loom-multiclient]] — Waiters fan in: a Loom ring's waiters read every 9P client it has an op on, over a ready stream only
 - 2026-10-06 [[chg-2026-10-06-nanosleep-rows]] — The sleep rows: a Linux guest's nanosleep and clock_nanosleep sleep, and the deadline beats a pending note
-- 2026-10-06 [[chg-2026-10-06-served-link-containment]] — Served links: a link a remote session serves resolves beneath its mount
 <!-- generated:end -->

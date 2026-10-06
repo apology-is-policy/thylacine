@@ -1,44 +1,63 @@
 ---- MODULE loom_role ----
 (***************************************************************************)
-(* Thylacine Loom -- an ENTER waits for the 9P READER ROLE (LOOM.md 8.6     *)
-(* item 2; DEBUG-FS-DESIGN 5c.6; OPEN-BUGS 2026-09-30 11:01Z).              *)
+(* Thylacine Loom -- a waiter reads for every 9P client it waits on        *)
+(* (LOOM.md 8.6 item 2; DEBUG-FS-DESIGN 5c.6; OPEN-BUGS 2026-09-30 11:01Z, *)
+(* 2026-10-05 07:52Z and 18:56Z).                                          *)
 (*                                                                         *)
-(* A thread in SYS_LOOM_ENTER (min_complete >= 1) waits for the CQE of an  *)
-(* async op in flight on a 9P client. Only the thread holding the client's *)
-(* READER ROLE reads replies (ARCH 21.10, the #841 elected reader), and a  *)
-(* dev9p client is SHARED, so the role can be held by another Proc's       *)
-(* synchronous call. The ENTER's pump (p9_client_reader_pump_once) takes   *)
-(* the role when it is free and demuxes ONE frame; when the role is held   *)
-(* it returns 0 and the ENTER sleeps.                                      *)
+(* A thread in SYS_LOOM_ENTER (min_complete = 1) waits for the CQE of any  *)
+(* of its ring's async ops, which may be in flight on several 9P clients.  *)
+(* Only the thread holding a client's READER ROLE reads that client's      *)
+(* replies (ARCH 21.10, the #841 elected reader), and a dev9p client is    *)
+(* SHARED, so the role can be held by another Proc's synchronous call.     *)
+(* Nobody reads for an async op: its reply is read by whoever holds the    *)
+(* role when it arrives, or by the waiter.                                 *)
 (*                                                                         *)
-(* THE DEFECT (pre-fix; BUGGY_NO_ROLE_HOOK). The ENTER slept on the ring's *)
-(* CQ wait-list only. A synchronous reader departs once its own reply      *)
-(* lands, and its handoff designates only a synchronous waiter (an async   *)
-(* op has no thread to read for it). With none waiting it left the role    *)
-(* free, nobody read the ENTER's reply, and the ENTER slept forever.       *)
+(* THE MECHANISM (the operator's vote 2026-10-06: waiters fan in). The     *)
+(* waiter scans every client with an op in flight and pumps one whose role *)
+(* is free AND whose transport is ready -- bytes, or the EOF, at a frame   *)
+(* boundary (p9_client_reader_pump_ready). It never takes a role over an   *)
+(* empty stream, so it never blocks in a recv with nothing due. With       *)
+(* nothing to pump it hooks each client under c->lock                      *)
+(* (p9_client_reader_hook): a HELD role -> the client's role-waiter list,  *)
+(* which the handoff wakes when it leaves the role free and undesignated;  *)
+(* a FREE role with nothing to read -> the transport's readiness list,     *)
+(* which every arrival wakes; a free role with a frame waiting -> unhook   *)
+(* all and scan again. Then the CQ hook, and one sleep over all the hooks  *)
+(* (one Rendez, one flag per hook: poll.c's poll_cond_any_flagged).        *)
 (*                                                                         *)
-(* THE MECHANISM. An ENTER whose pump finds the role held also hooks the   *)
-(* client's role-waiter list, under c->lock with the role re-sampled       *)
-(* (p9_client_role_wait_register: free -> re-pump; held -> hooked), then   *)
-(* hooks the CQ list as before and sleeps on one Rendez with both hooks    *)
-(* (loom_cqw_role_cond). A handoff that leaves the role free with nobody   *)
-(* designated wakes the role list (client_handoff_reader_locked's exit),   *)
-(* and the woken ENTER re-pumps.                                           *)
+(* The ENTER here stands for all three fan-in waiters: the non-SQPOLL      *)
+(* ENTER, the SQPOLL kthread and the dev9p poll kthread run the same scan, *)
+(* hook and sleep, and differ only in what ends the wait. A kthread takes  *)
+(* no stop and no death, which removes behaviours, never adds them.        *)
+(*                                                                         *)
+(* HISTORY. Before 2026-09-30 an ENTER whose pump found the role held      *)
+(* slept on the CQ list alone (BUGGY_NO_ROLE_HOOK): a synchronous reader   *)
+(* departs once its own reply lands, its handoff designates only a         *)
+(* synchronous waiter, and the async reply after it went unread. The fix   *)
+(* hooked the role list -- for ONE client, the ring's first in-flight op's *)
+(* (BUGGY_FIRST_CLIENT_ONLY), whose pump blocked in the recv whether or    *)
+(* not anything was due (BUGGY_UNREADY_PUMP): another client's reply was   *)
+(* never read while the first was held or slow, and a pump after another   *)
+(* reader took its reply blocked blind (the old (E) residual).             *)
 (*                                                                         *)
 (* WHY A FOCUSED MODULE. loom.tla's ReplyArrives is enabled for any op in  *)
 (* flight, under weak fairness: its liveness PRESUMES that some thread     *)
 (* reads the reply. That thread is the 9P client's reader, which loom.tla  *)
-(* does not model. This module discharges the premise for the ENTER's own  *)
-(* pump and leaves loom.tla and its cfgs untouched (the loom_multishot /   *)
-(* loom_order / loom_devgone precedent). It is also the first model of the *)
-(* handoff itself, so it carries the two stop rules the ENTER's wake       *)
-(* depends on: the handoff skips a thread parked for a stop (stop_parked), *)
-(* and a stopped designee hands the role on before it parks.               *)
+(* does not model. This module discharges the premise and leaves loom.tla  *)
+(* and its cfgs untouched (the loom_multishot / loom_order / loom_devgone  *)
+(* precedent). It is also the model of the handoff, so it carries the two  *)
+(* stop rules the waiter's wake depends on: the handoff skips a thread     *)
+(* parked for a stop (stop_parked), and a stopped designee hands the role  *)
+(* on before it parks.                                                     *)
 (*                                                                         *)
 (* THE ACTORS                                                               *)
 (*                                                                         *)
-(*   The role: holder = NONE (c->reader_active false), ENTER, or a sync op. *)
-(*   Each sync op s in Syncs (client_wait; sph[s]):                         *)
+(*   Ops == Clients \X 0..NSYNC. <<c, 0>> is the ring's async op on client *)
+(*   c (on_complete set: no thread reads for it); <<c, i>>, i >= 1, is a   *)
+(*   foreign synchronous call on c.                                         *)
+(*   Per client c: holder[c] = NONE (c->reader_active false), ENTER or a   *)
+(*   sync op of c; cq[c] = c's async CQE is posted.                         *)
+(*   Each sync op s (client_wait; sph[s]):                                  *)
 (*     "idle"     -- not yet in client_wait (also: still sending, which the *)
 (*                   handoff skips and which self-elects on arrival);       *)
 (*     "wait"     -- runnable at client_wait's loop top;                    *)
@@ -49,171 +68,222 @@
 (*                   never come;                                            *)
 (*     "done"     -- returned.                                              *)
 (*   sbe[s] = rpc->be_reader (designated), sdone[s] = rpc->done.            *)
-(*   The ENTER (loom_wait_for_completions, a non-SQPOLL ring; eph):         *)
-(*     "top"      -- the CQ sample: the CQE posted -> "returned";           *)
-(*     "pump"     -- pump_once under c->lock: free -> take it ("reading");  *)
-(*                   held -> rc 0 ("hook");                                 *)
-(*     "hook"     -- p9_client_role_wait_register under c->lock: free ->    *)
-(*                   "top" (re-pump); held -> hooked, flag cleared;         *)
+(*   The ENTER (loom_wait_for_completions; eph):                            *)
+(*     "top"      -- the CQ sample: a CQE posted -> "returned";             *)
+(*     "scan"     -- pump_ready on each client in `todo`, one per step,     *)
+(*                   each under its c->lock: free and ready -> take the     *)
+(*                   role ("reading" on ecl); else pass it over;            *)
+(*     "hook"     -- p9_client_reader_hook on each client in `todo`;        *)
 (*     "cqreg"    -- CqWaitRegister: hook the CQ list and sample the CQ     *)
 (*                   under l->lock (posted -> skip the sleep);              *)
 (*     "sleep"    -- the sleep's cond under the ENTER's Rendez lock: a      *)
 (*                   flag set -> "unhook", else block;                      *)
 (*     "sleeping" -- blocked; a waker sets a flag and makes it runnable;    *)
-(*     "unhook"   -- both hooks off, then "top";                            *)
-(*     "reading"  -- holds the role: one frame, then the handoff;           *)
+(*     "unhook"   -- every hook off, then "top";                            *)
+(*     "reading"  -- holds ecl's role: one frame, then the handoff;         *)
 (*     "returned".                                                          *)
-(*   The server replies to each sent request once (replied, wire).          *)
+(*   hk[c] = where the ENTER's hook for c is ("none", "role", "ready"),    *)
+(*   hf[c] = its flag. The server replies to each sent request once         *)
+(*   (replied, wire); a client in Deferred may hold its async op's reply    *)
+(*   forever (a parked socket read, a QTPOLL arm).                          *)
 (*                                                                         *)
-(* EVERY RELEASE OF THE ROLE RUNS THE HANDOFF. The four sites that clear   *)
+(* EVERY RELEASE OF A ROLE RUNS THE HANDOFF. The sites that clear          *)
 (* c->reader_active (client_wait's reader loop, client_pump_or_park_locked *)
-(* -- the send path's one-frame self-pump --, pump_once, pump_once_deadline*)
-(* ) each call client_handoff_reader_locked in the same c->lock hold.      *)
-(* Here a sync reader departs on its own reply (ReadFrame) or at a frame   *)
-(* boundary on a stop (StopReader, which also stands for every other early *)
-(* departure: a caught note, a death and the send path's self-pump all     *)
-(* hand off without the reader's own reply); the ENTER departs after its   *)
-(* one frame (EnterRead).                                                   *)
+(* -- the send path's one-frame self-pump --, pump_ready) each call        *)
+(* client_handoff_reader_locked in the same c->lock hold. A sync reader    *)
+(* departs on its own reply (ReadFrame) or at a frame boundary on a stop   *)
+(* (StopReader, which also stands for every other early departure: a      *)
+(* caught note, a death and the send path's self-pump all hand off without *)
+(* the reader's own reply); the ENTER departs after its one frame          *)
+(* (EnterRead).                                                             *)
 (*                                                                         *)
-(* ABSTRACTIONS. The wire is a SET: the server orders its replies freely,  *)
-(* so reading any sent reply over-approximates the FIFO. The handoff picks *)
-(* ANY designable op (the code: the lowest tag). A frame is atomic (a stop *)
-(* mid-frame blocks through to the boundary; reader_frame.tla). The        *)
-(* ENTER's sample, its client pick and its pump are two steps, top and     *)
-(* pump, which keeps the window between them.                              *)
+(* EVERY ARRIVAL WAKES THE READINESS LIST. srvconn walks cn->poll_list     *)
+(* after every s2c fill and a pipe walks its list after every write; the   *)
+(* register and its sample share the backend's lock, nested under c->lock, *)
+(* so the hook step is atomic against both a role change and an arrival.  *)
+(*                                                                         *)
+(* ABSTRACTIONS. A client's wire is a SET: the server orders its replies   *)
+(* freely, so reading any sent reply over-approximates the FIFO. The       *)
+(* handoff picks ANY designable op (the code: the lowest tag). The scan    *)
+(* and the hook take the clients in ANY order (the code: a rotating        *)
+(* cursor). A frame is atomic (a stop mid-frame blocks through to the      *)
+(* boundary; reader_frame.tla), and a ready transport holds a whole frame: *)
+(* a frame whose bytes have only started blocks the pump through the body, *)
+(* bounded by the trusted server as every reader is (CF-3 B).              *)
 (*                                                                         *)
 (* OUT OF SCOPE. Session death: client_mark_dead_locked completes the      *)
-(* async op with an error CQE (loom_devgone.tla) and wakes both lists, and *)
-(* a dead client's register returns -P9_E_IO. SQPOLL: its kthread is the   *)
-(* ring's sole driver and never hooks the role. A stop of the ENTER's own  *)
-(* thread (its pump unwinds with -P9_E_IO; its sleep parks in place and    *)
-(* keeps its flags). The flood budget. A second ENTER: each has its own    *)
-(* hooks on the same lists, woken independently (poll.tla's argument).     *)
-(* ONE CLIENT PER RING: the ENTER pumps and hooks the client of the ring's *)
-(* first in-flight op (loom_first_inflight_client), and the one ASYNC op   *)
-(* here lives on that client. A ring whose ops span clients is a separate, *)
-(* pre-existing strand (OPEN-BUGS 2026-10-05 07:52Z): another client's     *)
-(* reply is never read while the first client is held or slow.             *)
-(*                                                                         *)
-(* THE KNOWN RESIDUAL (OPEN-BUGS (E), P3). An ENTER that pumps after       *)
-(* another reader already read its op's reply blocks in the transport recv *)
-(* with nothing due: a reader in the recv is blind to progress made        *)
-(* elsewhere. EnterReturns excepts exactly that state (Blind), and         *)
-(* loom_role_residual_blind.cfg shows it is reachable; when (E) is fixed,  *)
-(* the exception goes and that cfg turns clean. BlindImpliesCq pins the    *)
-(* exception to (E)'s sample->pump race: a blind ENTER's CQE is posted.    *)
+(* client's async ops with error CQEs (loom_devgone.tla) and wakes both    *)
+(* lists, and a dead client's hook returns -P9_E_IO, which ends nothing    *)
+(* but that client's part of the scan. A stop of the ENTER's own thread    *)
+(* (it parks in place and keeps its flags). The flood budget. A second     *)
+(* waiter: each has its own hooks on the same lists, woken independently   *)
+(* (poll.tla's argument). An EL0 holder of a pipe transport's read end     *)
+(* that steals the ready bytes (it desyncs its own mount's stream).        *)
 (*                                                                         *)
 (* PROPERTIES                                                               *)
-(*   NoMissedRoleWake (the headline, I-9 on the role list): the ENTER never *)
-(*     sleeps while the role is free and no sync op is designated to take   *)
-(*     it -- nobody else would read its reply. Stated without "hooked", so *)
-(*     the pre-fix ENTER violates it too.                                   *)
-(*   NoMissedCqWake: the ENTER never sleeps past its own CQE.               *)
-(*   BlindImpliesCq: the (E) carve-out covers only a posted CQE.            *)
-(*   EnterReturns (liveness): the ENTER returns, or ends Blind for good.    *)
+(*   NoMissedWake (the headline, I-9 over the role and readiness lists):   *)
+(*     the ENTER never sleeps while some client has a frame waiting, a     *)
+(*     free role and no sync op designated to take it -- nobody else would  *)
+(*     read it. Stated without the hooks, so every buggy ENTER can          *)
+(*     violate it.                                                          *)
+(*   NoBlindRecv: the ENTER holds a role only over a waiting frame.         *)
+(*   NoMissedCqWake: the ENTER never sleeps past a posted CQE.              *)
+(*   EnterReturns (liveness): the ENTER returns when some client's reply   *)
+(*     is not deferred, however the deferred ones and the sync traffic     *)
+(*     behave.                                                              *)
 (*                                                                         *)
 (* BUGGY CONFIGS                                                            *)
-(*   BUGGY_NO_ROLE_HOOK           the pre-fix ENTER; EnterReturns violated  *)
-(*                                (its cfg checks only the property, which  *)
+(*   BUGGY_NO_ROLE_HOOK           a held role is not hooked (the pre-       *)
+(*                                09-30 ENTER); EnterReturns violated (its  *)
+(*                                cfg checks only the property, which      *)
 (*                                proves the liveness check discriminates). *)
-(*   BUGGY_ROLE_LATE_REGISTER     the hook trusts the pump's stale sample:  *)
-(*                                a release between them is missed.         *)
+(*   BUGGY_FIRST_CLIENT_ONLY      the scan and the hooks see one client,    *)
+(*                                the first in flight (the pre-10-06       *)
+(*                                pick); EnterReturns violated.            *)
+(*   BUGGY_UNREADY_PUMP           the pump takes a free role whatever the   *)
+(*                                stream holds (the pre-10-06 pump_once);  *)
+(*                                NoBlindRecv violated.                    *)
+(*   BUGGY_ROLE_LATE_REGISTER     the hook files a client on the role list  *)
+(*                                without re-sampling the role.            *)
 (*   BUGGY_NO_ROLE_WAKE           the no-designee exit wakes nobody.        *)
 (*   BUGGY_DESIGNATES_PARKED      the handoff designates a parked thread.   *)
 (*   BUGGY_STOP_KEEPS_DESIGNATION a stopped designee parks without handing  *)
 (*                                the role on.                              *)
-(*   The last four violate NoMissedRoleWake.                                *)
+(*   BUGGY_NO_READY_HOOK          a free role with nothing to read is not   *)
+(*                                hooked at all.                           *)
+(*   BUGGY_READY_LATE_REGISTER    the readiness hook trusts the scan's      *)
+(*                                stale sample: a frame that arrived       *)
+(*                                between them is missed.                  *)
+(*   BUGGY_READY_HOOK_WHEN_HELD   a held role hooks the readiness list:     *)
+(*                                the holder departs leaving a frame, and  *)
+(*                                nothing arrives to wake the hook.        *)
+(*   The last seven violate NoMissedWake.                                   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
-    Syncs,                         \* foreign synchronous calls on the shared client
-    MAX_STOPS,                     \* stops each may take (job or debug)
+    Clients,                       \* the 9P clients the ring has async ops on
+    NSYNC,                         \* foreign synchronous calls per client
+    Deferred,                      \* clients whose async reply may never come
+    MAX_STOPS,                     \* stops each sync op may take (job or debug)
     BUGGY_NO_ROLE_HOOK,
+    BUGGY_FIRST_CLIENT_ONLY,
+    BUGGY_UNREADY_PUMP,
     BUGGY_ROLE_LATE_REGISTER,
     BUGGY_NO_ROLE_WAKE,
     BUGGY_DESIGNATES_PARKED,
-    BUGGY_STOP_KEEPS_DESIGNATION
+    BUGGY_STOP_KEEPS_DESIGNATION,
+    BUGGY_NO_READY_HOOK,
+    BUGGY_READY_LATE_REGISTER,
+    BUGGY_READY_HOOK_WHEN_HELD
 
-ASSUME Syncs # {}
+ASSUME Clients # {}
+ASSUME NSYNC \in Nat
+ASSUME Deferred \subseteq Clients
 ASSUME MAX_STOPS \in Nat
 ASSUME BUGGY_NO_ROLE_HOOK           \in BOOLEAN
+ASSUME BUGGY_FIRST_CLIENT_ONLY      \in BOOLEAN
+ASSUME BUGGY_UNREADY_PUMP           \in BOOLEAN
 ASSUME BUGGY_ROLE_LATE_REGISTER     \in BOOLEAN
 ASSUME BUGGY_NO_ROLE_WAKE           \in BOOLEAN
 ASSUME BUGGY_DESIGNATES_PARKED      \in BOOLEAN
 ASSUME BUGGY_STOP_KEEPS_DESIGNATION \in BOOLEAN
+ASSUME BUGGY_NO_READY_HOOK          \in BOOLEAN
+ASSUME BUGGY_READY_LATE_REGISTER    \in BOOLEAN
+ASSUME BUGGY_READY_HOOK_WHEN_HELD   \in BOOLEAN
 
-NONE  == "none"      \* the role is free
-ENTER == "enter"     \* the ENTER holds the role
-ASYNC == "async"     \* the ENTER's op (on_complete set: no thread reads for it)
-Ops   == Syncs \cup {ASYNC}
+\* One-element tuples, so a holder compares with a sync op (a pair) by length.
+NONE  == <<"none">>     \* the role is free
+ENTER == <<"enter">>    \* the ENTER holds the role
+
+Ops       == Clients \X (0..NSYNC)
+Syncs     == Clients \X (1..NSYNC)
+Home(o)   == o[1]
+IsAsync(o) == o[2] = 0
+
+\* The pre-10-06 pick: one client, the deferred one when there is one.
+FirstClient == IF Deferred # {} THEN CHOOSE c \in Deferred : TRUE
+                                ELSE CHOOSE c \in Clients : TRUE
+Scanned == IF BUGGY_FIRST_CLIENT_ONLY THEN {FirstClient} ELSE Clients
 
 SyncPhases  == {"idle", "wait", "reading", "sleeping", "parked", "done"}
-EnterPhases == {"top", "pump", "hook", "cqreg", "sleep", "sleeping",
+EnterPhases == {"top", "scan", "hook", "cqreg", "sleep", "sleeping",
                 "unhook", "reading", "returned"}
+HookPlaces  == {"none", "role", "ready"}
 
 VARIABLES
-    holder,    \* NONE, ENTER or a sync op: who holds the reader role
+    holder,    \* [Clients -> Syncs \cup {NONE, ENTER}]: who holds each role
     sph,       \* [Syncs -> SyncPhases]
     sbe,       \* [Syncs -> BOOLEAN]: rpc->be_reader
     sdone,     \* [Syncs -> BOOLEAN]: rpc->done (the reply is demuxed)
     stops,     \* [Syncs -> 0..MAX_STOPS]: stops still to come
     replied,   \* the ops whose reply the server has sent
-    wire,      \* sent replies not yet read
-    cq,        \* the ENTER's CQE is posted
+    wire,      \* sent replies not yet read (each on its op's client)
+    cq,        \* [Clients -> BOOLEAN]: the client's async CQE is posted
     eph,       \* EnterPhases
+    ecl,       \* the client whose role the ENTER holds ("reading"), else NONE
+    todo,      \* the clients the scan or the hook has still to visit
     cqhook,    \* pw is on l->cq_waiters
     cqflag,    \* pw.ready
-    rhook,     \* pw_role is on c->role_waiters_list
-    rflag      \* pw_role.ready
+    hk,        \* [Clients -> HookPlaces]: where the ENTER's hook for c is
+    hf         \* [Clients -> BOOLEAN]: that hook's ready flag
 
-vars == <<holder, sph, sbe, sdone, stops, replied, wire, cq, eph,
-          cqhook, cqflag, rhook, rflag>>
+vars == <<holder, sph, sbe, sdone, stops, replied, wire, cq, eph, ecl, todo,
+          cqhook, cqflag, hk, hf>>
 
 \* A request is on its way to the server once its op is in client_wait; the
-\* ENTER's op was submitted before the wait began. (An IF, not a disjunction:
-\* TLC splits an action-level \/ into branches and would apply sph to ASYNC.)
-Sent(o) == IF o = ASYNC THEN TRUE ELSE sph[o] # "idle"
+\* ring's ops were submitted before the wait began. (An IF, not a disjunction:
+\* TLC splits an action-level \/ into branches and would apply sph to an async.)
+Sent(o) == IF IsAsync(o) THEN TRUE ELSE sph[o] # "idle"
+
+WireOf(c) == {o \in wire : Home(o) = c}
+
+Wake(ep) == IF ep = "sleeping" THEN "sleep" ELSE ep
 
 TypeOK ==
-    /\ holder  \in Syncs \cup {NONE, ENTER}
+    /\ holder  \in [Clients -> Syncs \cup {NONE, ENTER}]
+    /\ \A c \in Clients : holder[c] \in Syncs => Home(holder[c]) = c
     /\ sph     \in [Syncs -> SyncPhases]
     /\ sbe     \in [Syncs -> BOOLEAN]
     /\ sdone   \in [Syncs -> BOOLEAN]
     /\ stops   \in [Syncs -> 0..MAX_STOPS]
     /\ replied \subseteq Ops
     /\ wire    \subseteq replied
-    /\ cq      \in BOOLEAN
+    /\ cq      \in [Clients -> BOOLEAN]
     /\ eph     \in EnterPhases
+    /\ ecl     \in Clients \cup {NONE}
+    /\ todo    \subseteq Clients
     /\ cqhook  \in BOOLEAN
     /\ cqflag  \in BOOLEAN
-    /\ rhook   \in BOOLEAN
-    /\ rflag   \in BOOLEAN
+    /\ hk      \in [Clients -> HookPlaces]
+    /\ hf      \in [Clients -> BOOLEAN]
 
 Init ==
-    /\ holder  = NONE
+    /\ holder  = [c \in Clients |-> NONE]
     /\ sph     = [s \in Syncs |-> "idle"]
     /\ sbe     = [s \in Syncs |-> FALSE]
     /\ sdone   = [s \in Syncs |-> FALSE]
     /\ stops   = [s \in Syncs |-> MAX_STOPS]
     /\ replied = {}
     /\ wire    = {}
-    /\ cq      = FALSE
+    /\ cq      = [c \in Clients |-> FALSE]
     /\ eph     = "top"
+    /\ ecl     = NONE
+    /\ todo    = {}
     /\ cqhook  = FALSE
     /\ cqflag  = FALSE
-    /\ rhook   = FALSE
-    /\ rflag   = FALSE
+    /\ hk      = [c \in Clients |-> "none"]
+    /\ hf      = [c \in Clients |-> FALSE]
 
 (***************************************************************************)
-(* The handoff (client_handoff_reader_locked, c->lock held). Designate one *)
-(* sync op that is not the departing one, not done, not yet designated, in *)
-(* client_wait (not sending) and not parked for a stop; the active reader  *)
-(* qualifies when another thread runs the handoff (the designation then    *)
-(* lands on nothing). A sleeping designee wakes. With nobody to designate, *)
-(* a FREE role wakes the role list. Applied to the intermediate state      *)
-(* (ph, be, dn, ep) a step has already produced; `hold` is the holder      *)
-(* after the step. Sets sph', sbe', eph', rflag'.                          *)
+(* The handoff on client c (client_handoff_reader_locked, c->lock held).   *)
+(* Designate one of c's sync ops that is not the departing one, not done,  *)
+(* not yet designated, in client_wait (not sending) and not parked for a   *)
+(* stop; the active reader qualifies when another thread runs the handoff  *)
+(* (the designation then lands on nothing). A sleeping designee wakes.     *)
+(* With nobody to designate, a FREE role wakes the role list. Applied to   *)
+(* the intermediate state (ph, be, dn, ep, f) a step has already produced; *)
+(* `hold` is c's holder after the step. Sets sph', sbe', eph', hf'.        *)
 (***************************************************************************)
 DesignablePhases ==
     {"wait", "sleeping", "reading"}
@@ -225,46 +295,50 @@ Designable(d, departing, ph, be, dn) ==
     /\ ~dn[d]
     /\ ~be[d]
 
-Handoff(departing, hold, ph, be, dn, ep) ==
-    LET cands == {d \in Syncs : Designable(d, departing, ph, be, dn)}
+Handoff(c, departing, hold, ph, be, dn, ep, f) ==
+    LET cands == {d \in Syncs : Home(d) = c /\ Designable(d, departing, ph, be, dn)}
     IN  IF cands # {}
         THEN \E d \in cands :
-               /\ sbe'   = [be EXCEPT ![d] = TRUE]
-               /\ sph'   = IF ph[d] = "sleeping" THEN [ph EXCEPT ![d] = "wait"]
-                                                 ELSE ph
-               /\ eph'   = ep
-               /\ rflag' = rflag
+               /\ sbe' = [be EXCEPT ![d] = TRUE]
+               /\ sph' = IF ph[d] = "sleeping" THEN [ph EXCEPT ![d] = "wait"]
+                                               ELSE ph
+               /\ eph' = ep
+               /\ hf'  = f
         ELSE /\ sbe' = be
              /\ sph' = ph
-             /\ IF hold = NONE /\ rhook /\ ~BUGGY_NO_ROLE_WAKE
-                THEN /\ rflag' = TRUE
-                     /\ eph'   = IF ep = "sleeping" THEN "sleep" ELSE ep
-                ELSE /\ rflag' = rflag
-                     /\ eph'   = ep
+             /\ IF hold = NONE /\ hk[c] = "role" /\ ~BUGGY_NO_ROLE_WAKE
+                THEN /\ hf'  = [f EXCEPT ![c] = TRUE]
+                     /\ eph' = Wake(ep)
+                ELSE /\ hf'  = f
+                     /\ eph' = ep
 
 (***************************************************************************)
 (* The demux of o's reply (demux_frame_locked): a sync reply is stored and *)
-(* wakes its sleeping owner; the async reply fires on_complete ->          *)
+(* wakes its sleeping owner; an async reply fires on_complete ->           *)
 (* loom_post_cqe, which posts the CQE and wakes the CQ list (loom.tla's    *)
 (* PostCqe).                                                                *)
 (***************************************************************************)
-DemuxPh(o, ph)  == IF o # ASYNC /\ ph[o] = "sleeping" THEN [ph EXCEPT ![o] = "wait"]
-                                                    ELSE ph
-DemuxDn(o, dn)  == IF o # ASYNC THEN [dn EXCEPT ![o] = TRUE] ELSE dn
-DemuxCq(o)      == cq \/ o = ASYNC
-DemuxCqflag(o)  == IF o = ASYNC /\ cqhook THEN TRUE ELSE cqflag
-DemuxEph(o, ep) == IF o = ASYNC /\ cqhook /\ ep = "sleeping" THEN "sleep" ELSE ep
+DemuxPh(o, ph)  == IF ~IsAsync(o) /\ ph[o] = "sleeping" THEN [ph EXCEPT ![o] = "wait"]
+                                                       ELSE ph
+DemuxDn(o, dn)  == IF ~IsAsync(o) THEN [dn EXCEPT ![o] = TRUE] ELSE dn
+DemuxCq(o)      == IF IsAsync(o) THEN [cq EXCEPT ![Home(o)] = TRUE] ELSE cq
+DemuxCqflag(o)  == IF IsAsync(o) /\ cqhook THEN TRUE ELSE cqflag
+DemuxEph(o, ep) == IF IsAsync(o) /\ cqhook THEN Wake(ep) ELSE ep
 
 (***************************************************************************)
-(* The server.                                                              *)
+(* The server. An arrival walks the client's readiness list.               *)
 (***************************************************************************)
 ServerReply(o) ==
     /\ Sent(o)
     /\ o \notin replied
     /\ replied' = replied \cup {o}
     /\ wire'    = wire \cup {o}
-    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, cq, eph,
-                   cqhook, cqflag, rhook, rflag>>
+    /\ IF hk[Home(o)] = "ready"
+       THEN /\ hf'  = [hf EXCEPT ![Home(o)] = TRUE]
+            /\ eph' = Wake(eph)
+       ELSE UNCHANGED <<hf, eph>>
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, cq, ecl, todo,
+                   cqhook, cqflag, hk>>
 
 (***************************************************************************)
 (* The sync ops.                                                            *)
@@ -274,8 +348,8 @@ ServerReply(o) ==
 Start(s) ==
     /\ sph[s] = "idle"
     /\ sph' = [sph EXCEPT ![s] = "wait"]
-    /\ UNCHANGED <<holder, sbe, sdone, stops, replied, wire, cq, eph,
-                   cqhook, cqflag, rhook, rflag>>
+    /\ UNCHANGED <<holder, sbe, sdone, stops, replied, wire, cq, eph, ecl, todo,
+                   cqhook, cqflag, hk, hf>>
 
 \* client_wait's loop top with no stop pending: the reply stored -> return;
 \* the role free -> become the reader; held -> clear a stale designation (F7)
@@ -286,43 +360,46 @@ Elect(s) ==
     /\ IF sdone[s]
        THEN /\ sph' = [sph EXCEPT ![s] = "done"]
             /\ UNCHANGED <<holder, sbe>>
-       ELSE IF holder = NONE
-       THEN /\ holder' = s
+       ELSE IF holder[Home(s)] = NONE
+       THEN /\ holder' = [holder EXCEPT ![Home(s)] = s]
             /\ sph'    = [sph EXCEPT ![s] = "reading"]
             /\ sbe'    = [sbe EXCEPT ![s] = FALSE]
        ELSE /\ sph'    = [sph EXCEPT ![s] = "sleeping"]
             /\ sbe'    = [sbe EXCEPT ![s] = FALSE]
             /\ UNCHANGED holder
-    /\ UNCHANGED <<sdone, stops, replied, wire, cq, eph,
-                   cqhook, cqflag, rhook, rflag>>
+    /\ UNCHANGED <<sdone, stops, replied, wire, cq, eph, ecl, todo,
+                   cqhook, cqflag, hk, hf>>
 
-\* The sync reader reads a frame and demuxes it. Its own reply ends the loop
-\* in the same c->lock hold: release the role, hand it off, return.
+\* The sync reader reads a frame of its client and demuxes it. Its own reply
+\* ends the loop in the same c->lock hold: release the role, hand it off,
+\* return.
 ReadFrame(s, o) ==
-    /\ holder = s
+    /\ holder[Home(s)] = s
     /\ o \in wire
+    /\ Home(o) = Home(s)
     /\ wire'   = wire \ {o}
     /\ sdone'  = DemuxDn(o, sdone)
     /\ cq'     = DemuxCq(o)
     /\ cqflag' = DemuxCqflag(o)
     /\ IF o = s
-       THEN /\ holder' = NONE
-            /\ Handoff(s, NONE, [DemuxPh(o, sph) EXCEPT ![s] = "done"], sbe,
-                       DemuxDn(o, sdone), DemuxEph(o, eph))
+       THEN /\ holder' = [holder EXCEPT ![Home(s)] = NONE]
+            /\ Handoff(Home(s), s, NONE, [DemuxPh(o, sph) EXCEPT ![s] = "done"],
+                       sbe, DemuxDn(o, sdone), DemuxEph(o, eph), hf)
        ELSE /\ sph' = DemuxPh(o, sph)
             /\ eph' = DemuxEph(o, eph)
-            /\ UNCHANGED <<holder, sbe, rflag>>
-    /\ UNCHANGED <<stops, replied, cqhook, rhook>>
+            /\ UNCHANGED <<holder, sbe, hf>>
+    /\ UNCHANGED <<stops, replied, ecl, todo, cqhook, hk>>
 
 \* A stop unwinds the reader's recv at a frame boundary: release, hand off
 \* (skipping myself), park role-free -- one c->lock hold.
 StopReader(s) ==
-    /\ holder = s
+    /\ holder[Home(s)] = s
     /\ stops[s] > 0
     /\ stops'  = [stops EXCEPT ![s] = @ - 1]
-    /\ holder' = NONE
-    /\ Handoff(s, NONE, [sph EXCEPT ![s] = "parked"], sbe, sdone, eph)
-    /\ UNCHANGED <<sdone, replied, wire, cq, cqhook, cqflag, rhook>>
+    /\ holder' = [holder EXCEPT ![Home(s)] = NONE]
+    /\ Handoff(Home(s), s, NONE, [sph EXCEPT ![s] = "parked"], sbe, sdone,
+               eph, hf)
+    /\ UNCHANGED <<sdone, replied, wire, cq, ecl, todo, cqhook, cqflag, hk>>
 
 \* A stop reaches a non-reader: a sleeper unwinds (stop_unwinds) to the loop
 \* top, where a stored reply would return first. A designee hands the role on
@@ -334,95 +411,141 @@ StopWaiter(s) ==
     /\ stops[s] > 0
     /\ stops' = [stops EXCEPT ![s] = @ - 1]
     /\ IF sbe[s] /\ ~BUGGY_STOP_KEEPS_DESIGNATION
-       THEN Handoff(s, holder, [sph EXCEPT ![s] = "parked"],
-                    [sbe EXCEPT ![s] = FALSE], sdone, eph)
+       THEN Handoff(Home(s), s, holder[Home(s)], [sph EXCEPT ![s] = "parked"],
+                    [sbe EXCEPT ![s] = FALSE], sdone, eph, hf)
        ELSE /\ sph' = [sph EXCEPT ![s] = "parked"]
-            /\ UNCHANGED <<sbe, eph, rflag>>
-    /\ UNCHANGED <<holder, sdone, replied, wire, cq, cqhook, cqflag, rhook>>
+            /\ UNCHANGED <<sbe, eph, hf>>
+    /\ UNCHANGED <<holder, sdone, replied, wire, cq, ecl, todo,
+                   cqhook, cqflag, hk>>
 
 \* The resume: stop_parked cleared under c->lock, then the loop top re-elects.
 Resume(s) ==
     /\ sph[s] = "parked"
     /\ sph' = [sph EXCEPT ![s] = "wait"]
-    /\ UNCHANGED <<holder, sbe, sdone, stops, replied, wire, cq, eph,
-                   cqhook, cqflag, rhook, rflag>>
+    /\ UNCHANGED <<holder, sbe, sdone, stops, replied, wire, cq, eph, ecl, todo,
+                   cqhook, cqflag, hk, hf>>
 
 (***************************************************************************)
 (* The ENTER.                                                               *)
 (***************************************************************************)
-\* The give-up sample: with one op in flight, "ready" and "nothing in flight"
-\* are both the CQE being posted.
+\* The give-up sample: min_complete is one, and every op is in flight until
+\* its CQE posts, so "ready" and "nothing in flight" both read a posted CQE.
 EnterTop ==
     /\ eph = "top"
-    /\ eph' = IF cq THEN "returned" ELSE "pump"
-    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq,
-                   cqhook, cqflag, rhook, rflag>>
+    /\ IF \E c \in Clients : cq[c]
+       THEN /\ eph' = "returned"
+            /\ UNCHANGED todo
+       ELSE /\ eph'  = "scan"
+            /\ todo' = Scanned
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl,
+                   cqhook, cqflag, hk, hf>>
 
-\* p9_client_reader_pump_once's entry, under c->lock.
-EnterPump ==
-    /\ eph = "pump"
-    /\ IF holder = NONE
-       THEN /\ holder' = ENTER
+\* p9_client_reader_pump_ready under c->lock: the role free and a frame
+\* waiting -> take the role; anything else passes the client over.
+EnterScan(c) ==
+    /\ eph = "scan"
+    /\ c \in todo
+    /\ IF holder[c] = NONE /\ (WireOf(c) # {} \/ BUGGY_UNREADY_PUMP)
+       THEN /\ holder' = [holder EXCEPT ![c] = ENTER]
             /\ eph'    = "reading"
-       ELSE /\ eph'    = "hook"
-            /\ UNCHANGED holder
+            /\ ecl'    = c
+            /\ todo'   = {}
+       ELSE /\ todo'   = todo \ {c}
+            /\ UNCHANGED <<holder, eph, ecl>>
     /\ UNCHANGED <<sph, sbe, sdone, stops, replied, wire, cq,
-                   cqhook, cqflag, rhook, rflag>>
+                   cqhook, cqflag, hk, hf>>
 
-\* p9_client_role_wait_register, under c->lock: the role re-sampled with the
-\* hook, so a release before it is seen and one after it finds the hook.
-EnterHook ==
+\* Nothing was pumpable: hook every client.
+EnterScanned ==
+    /\ eph  = "scan"
+    /\ todo = {}
+    /\ eph'  = "hook"
+    /\ todo' = Scanned
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl,
+                   cqhook, cqflag, hk, hf>>
+
+\* p9_client_reader_hook under c->lock, the readiness register and its sample
+\* under the backend's lock inside it: a held role -> the role list; a free
+\* role with nothing to read -> the readiness list; a free role with a frame
+\* waiting -> drop every hook and scan again.
+EnterHook(c) ==
     /\ eph = "hook"
-    /\ IF BUGGY_NO_ROLE_HOOK
-       THEN /\ eph' = "cqreg"
-            /\ UNCHANGED <<rhook, rflag>>
-       ELSE IF holder = NONE /\ ~BUGGY_ROLE_LATE_REGISTER
-       THEN /\ eph' = "top"
-            /\ UNCHANGED <<rhook, rflag>>
-       ELSE /\ rhook' = TRUE
-            /\ rflag' = FALSE
-            /\ eph'   = "cqreg"
-    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq,
+    /\ c \in todo
+    /\ IF holder[c] # NONE
+       THEN IF BUGGY_NO_ROLE_HOOK
+            THEN /\ todo' = todo \ {c}
+                 /\ UNCHANGED <<eph, hk, hf>>
+            ELSE /\ hk'   = [hk EXCEPT ![c] = IF BUGGY_READY_HOOK_WHEN_HELD
+                                               THEN "ready" ELSE "role"]
+                 /\ hf'   = [hf EXCEPT ![c] = FALSE]
+                 /\ todo' = todo \ {c}
+                 /\ UNCHANGED eph
+       ELSE IF BUGGY_ROLE_LATE_REGISTER
+       THEN /\ hk'   = [hk EXCEPT ![c] = "role"]
+            /\ hf'   = [hf EXCEPT ![c] = FALSE]
+            /\ todo' = todo \ {c}
+            /\ UNCHANGED eph
+       ELSE IF WireOf(c) # {} /\ ~BUGGY_READY_LATE_REGISTER
+       THEN /\ eph'  = "unhook"
+            /\ todo' = {}
+            /\ UNCHANGED <<hk, hf>>
+       ELSE IF BUGGY_NO_READY_HOOK
+       THEN /\ todo' = todo \ {c}
+            /\ UNCHANGED <<eph, hk, hf>>
+       ELSE /\ hk'   = [hk EXCEPT ![c] = "ready"]
+            /\ hf'   = [hf EXCEPT ![c] = FALSE]
+            /\ todo' = todo \ {c}
+            /\ UNCHANGED eph
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl,
                    cqhook, cqflag>>
+
+EnterHooked ==
+    /\ eph  = "hook"
+    /\ todo = {}
+    /\ eph' = "cqreg"
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl, todo,
+                   cqhook, cqflag, hk, hf>>
 
 \* CqWaitRegister: hook l->cq_waiters and sample the CQ under l->lock.
 EnterCqReg ==
     /\ eph = "cqreg"
     /\ cqhook' = TRUE
     /\ cqflag' = FALSE
-    /\ eph'    = IF cq THEN "unhook" ELSE "sleep"
-    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq,
-                   rhook, rflag>>
+    /\ eph'    = IF \E c \in Clients : cq[c] THEN "unhook" ELSE "sleep"
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl, todo,
+                   hk, hf>>
 
-\* The sleep's cond under the ENTER's Rendez lock: loom_cqw_role_cond when the
-\* role is hooked, loom_cqw_cond when it is not (rflag is set only on a hook).
+\* The sleep's cond under the ENTER's Rendez lock: any hook's flag.
 EnterSleep ==
     /\ eph = "sleep"
-    /\ eph' = IF cqflag \/ (rhook /\ rflag) THEN "unhook" ELSE "sleeping"
-    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq,
-                   cqhook, cqflag, rhook, rflag>>
+    /\ eph' = IF cqflag \/ \E c \in Clients : hk[c] # "none" /\ hf[c]
+              THEN "unhook" ELSE "sleeping"
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl, todo,
+                   cqhook, cqflag, hk, hf>>
 
-\* poll_waiter_list_unregister + p9_client_role_wait_unregister; a flag set
-\* after is stale, and the next register clears it.
+\* Every hook off; a flag set after is stale, and the next register clears it.
 EnterUnhook ==
     /\ eph = "unhook"
     /\ cqhook' = FALSE
-    /\ rhook'  = FALSE
+    /\ hk'     = [c \in Clients |-> "none"]
     /\ eph'    = "top"
-    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq,
-                   cqflag, rflag>>
+    /\ UNCHANGED <<holder, sph, sbe, sdone, stops, replied, wire, cq, ecl, todo,
+                   cqflag, hf>>
 
-\* The ENTER holds the role: it reads one frame, demuxes it and departs
-\* through the handoff (pump_once is one-shot). Its hooks are off here.
+\* The ENTER holds ecl's role: it reads one frame, demuxes it and departs
+\* through the handoff (pump_ready is one-shot). Its hooks are off here.
 EnterRead(o) ==
     /\ eph = "reading"
     /\ o \in wire
+    /\ Home(o) = ecl
     /\ wire'   = wire \ {o}
     /\ sdone'  = DemuxDn(o, sdone)
     /\ cq'     = DemuxCq(o)
-    /\ holder' = NONE
-    /\ Handoff(ENTER, NONE, DemuxPh(o, sph), sbe, DemuxDn(o, sdone), "top")
-    /\ UNCHANGED <<stops, replied, cqhook, cqflag, rhook>>
+    /\ holder' = [holder EXCEPT ![ecl] = NONE]
+    /\ ecl'    = NONE
+    /\ Handoff(ecl, ENTER, NONE, DemuxPh(o, sph), sbe, DemuxDn(o, sdone),
+               "top", hf)
+    /\ UNCHANGED <<stops, replied, todo, cqhook, cqflag, hk>>
 
 Next ==
     \/ \E o \in Ops : ServerReply(o)
@@ -433,8 +556,10 @@ Next ==
     \/ \E s \in Syncs : StopWaiter(s)
     \/ \E s \in Syncs : Resume(s)
     \/ EnterTop
-    \/ EnterPump
-    \/ EnterHook
+    \/ \E c \in Clients : EnterScan(c)
+    \/ EnterScanned
+    \/ \E c \in Clients : EnterHook(c)
+    \/ EnterHooked
     \/ EnterCqReg
     \/ EnterSleep
     \/ EnterUnhook
@@ -446,39 +571,39 @@ Spec == Init /\ [][Next]_vars
 (* ============================== INVARIANTS ============================== *)
 (***************************************************************************)
 
-\* The role has one holder, and the holder is the thread in the recv.
+\* Each role has one holder, and the holder is the thread in the recv.
 RoleConsistent ==
-    /\ \A s \in Syncs : (sph[s] = "reading") <=> (holder = s)
-    /\ (eph = "reading") <=> (holder = ENTER)
+    /\ \A s \in Syncs : (sph[s] = "reading") <=> (holder[Home(s)] = s)
+    /\ \A c \in Clients : (holder[c] = ENTER) <=> (eph = "reading" /\ ecl = c)
 
 \* The ENTER's hooks are on their lists only while it waits.
 HooksConsistent ==
     /\ cqhook => eph \in {"sleep", "sleeping", "unhook"}
-    /\ rhook  => eph \in {"cqreg", "sleep", "sleeping", "unhook"}
+    /\ \A c \in Clients :
+           hk[c] # "none" => eph \in {"hook", "cqreg", "sleep", "sleeping", "unhook"}
 
 \* Blocked, the ENTER holds no unconsumed wake: every waker made it runnable.
-SleepingUnflagged == eph = "sleeping" => (~cqflag /\ ~(rhook /\ rflag))
+SleepingUnflagged ==
+    eph = "sleeping" => (~cqflag /\ \A c \in Clients : ~(hk[c] # "none" /\ hf[c]))
 
-\* The ENTER never sleeps past its own CQE (loom.tla's NoMissedCqWake, here).
-NoMissedCqWake == ~(eph = "sleeping" /\ cq)
+\* The ENTER never sleeps past a posted CQE (loom.tla's NoMissedCqWake, here).
+NoMissedCqWake == ~(eph = "sleeping" /\ \E c \in Clients : cq[c])
 
-\* A designee that will run the election, or hand the role on before it parks.
-Designated == \E s \in Syncs : sbe[s] /\ sph[s] = "wait" /\ ~sdone[s]
+\* A designee of c that will run the election, or hand the role on before it
+\* parks.
+Designated(c) == \E s \in Syncs : Home(s) = c /\ sbe[s] /\ sph[s] = "wait" /\ ~sdone[s]
 
-\* THE HEADLINE (I-9 on the role list): the ENTER never sleeps while the role
-\* is free and no sync op is designated to take it.
-NoMissedRoleWake == ~(eph = "sleeping" /\ holder = NONE /\ ~Designated)
+\* THE HEADLINE (I-9 over the role and readiness lists): the ENTER never sleeps
+\* while some client has a frame waiting, a free role and no designee.
+NoMissedWake ==
+    ~(eph = "sleeping" /\ \E c \in Clients : /\ holder[c] = NONE
+                                              /\ ~Designated(c)
+                                              /\ WireOf(c) # {})
 
-\* The (E) residual: the ENTER blocked in the recv with nothing on the wire and
-\* nothing more due from any sent request.
-Blind ==
-    /\ eph = "reading"
-    /\ wire = {}
-    /\ \A o \in Ops : Sent(o) => o \in replied
-
-\* The carve-out is exactly (E)'s sample->pump race: another reader posted the
-\* CQE after the ENTER sampled, and the ENTER then took the free role.
-BlindImpliesCq == Blind => cq
+\* The ENTER holds a role only over a frame it can read: it never blocks in a
+\* recv with nothing on the stream (the old (E) residual, closed by the
+\* readiness gate).
+NoBlindRecv == eph = "reading" => WireOf(ecl) # {}
 
 Invariants ==
     /\ TypeOK
@@ -486,31 +611,33 @@ Invariants ==
     /\ HooksConsistent
     /\ SleepingUnflagged
     /\ NoMissedCqWake
-    /\ NoMissedRoleWake
-    /\ BlindImpliesCq
-
-\* Expected VIOLATED (loom_role_residual_blind.cfg): Blind is reachable.
-NoBlindRecv == ~Blind
+    /\ NoMissedWake
+    /\ NoBlindRecv
 
 (***************************************************************************)
 (* ============================== LIVENESS ================================ *)
 (*                                                                         *)
-(* Weak fairness on the server, the sync ops' election and reads, and      *)
-(* every ENTER step. WF on ServerReply is the trusted-server premise       *)
-(* loom.tla also makes: every sent request is answered. A deferred-reply   *)
-(* server (a parked socket read) breaks it by design, and EnterReturns is  *)
-(* not claimed there. NONE on Start, the stops or the resume: a sync op may *)
-(* never start, and a stopped one may stay stopped -- the ENTER must not   *)
-(* depend on another Proc's resume. Stops are finite (MAX_STOPS), so the   *)
-(* role is taken finitely often by sync ops.                               *)
+(* Weak fairness on the server's answer to every request that is not a     *)
+(* deferred client's async op, the sync ops' election and reads, and every *)
+(* ENTER step. WF on ServerReply is the trusted-server premise loom.tla    *)
+(* also makes; a Deferred client is the server that holds a read (a parked *)
+(* socket read, a QTPOLL arm), and the ENTER must not depend on it. NONE   *)
+(* on Start, the stops or the resume: a sync op may never start, and a     *)
+(* stopped one may stay stopped -- the ENTER must not depend on another    *)
+(* Proc's resume. Stops are finite (MAX_STOPS), so a role is taken         *)
+(* finitely often by sync ops.                                             *)
 (***************************************************************************)
+Answered == {o \in Ops : ~(IsAsync(o) /\ Home(o) \in Deferred)}
+
 Liveness ==
-    /\ \A o \in Ops : WF_vars(ServerReply(o))
+    /\ \A o \in Answered : WF_vars(ServerReply(o))
     /\ \A s \in Syncs : WF_vars(Elect(s))
     /\ \A s \in Syncs, o \in Ops : WF_vars(ReadFrame(s, o))
     /\ WF_vars(EnterTop)
-    /\ WF_vars(EnterPump)
-    /\ WF_vars(EnterHook)
+    /\ \A c \in Clients : WF_vars(EnterScan(c))
+    /\ WF_vars(EnterScanned)
+    /\ \A c \in Clients : WF_vars(EnterHook(c))
+    /\ WF_vars(EnterHooked)
     /\ WF_vars(EnterCqReg)
     /\ WF_vars(EnterSleep)
     /\ WF_vars(EnterUnhook)
@@ -518,8 +645,7 @@ Liveness ==
 
 Spec_Live == Init /\ [][Next]_vars /\ Liveness
 
-\* The ENTER returns, or ends in the (E) blind recv for good: a Blind state
-\* passed through on the way to some other strand does not satisfy it.
-EnterReturns == <>(eph = "returned") \/ <>[]Blind
+\* Claimed only when some client's async reply is answered (Clients # Deferred).
+EnterReturns == <>(eph = "returned")
 
 ====

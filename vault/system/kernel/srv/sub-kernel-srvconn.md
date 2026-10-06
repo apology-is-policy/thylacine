@@ -90,13 +90,21 @@ publication, RELEASE; read with ACQUIRE, false on a NULL or corrupted conn;
 marking a NULL, corrupted or kernel-attached conn extincts. The helper
 stamps it on the session in either mode, because it is a label).
 
-**Deadline** — `srvconn_set_client_deadline(cn, abs_ns)` (0 = none;
-clears `client_timed_out`) · `srvconn_client_timed_out` (distinguishes
--ETIMEDOUT "server hung" from -EIO "server died"). The deadline bounds
-the WHOLE client recv, role wait included. Callers arm it per-op
-(handshake: `SRVCONN_HANDSHAKE_DEADLINE_NS` = 5 s); the steady-state
+**Deadline** — `srvconn_set_client_deadline(cn, abs_ns)` (0 = none). The
+deadline bounds the WHOLE client recv, role wait included. Callers arm it
+per-op (handshake: `SRVCONN_HANDSHAKE_DEADLINE_NS` = 5 s); the steady-state
 kernel client deliberately runs deadline-0 (block until reply/EOF/death
-— the #841 posture; see [[sub-kernel-ninep-transport]]).
+— the #841 posture; see [[sub-kernel-ninep-transport]]). The
+`client_timed_out` flag and its accessor `srvconn_client_timed_out`, which
+told a lapse from an error, went 2026-10-06 with their only reader, the
+transport's `recv_timed_out` op; a lapse is now a plain `-1`.
+
+**Readiness** — the 9P transport's mandatory `recv_ready` op is
+`srvconn_poll(cn, /*client=*/true, POLLIN, pw)`: s2c bytes or the torn
+conn's HUP/ERR, with the hook filed on `poll_list` under both chan locks
+([[sub-kernel-ninep-transport]]). It is called under the 9P client's
+`c->lock`, so `c->lock` ranks above `c2s.lock`; every s2c fill already
+walks `poll_list`, so no new wake site was needed.
 
 **Transport calls** (sentinel returns, not -EXXX):
 
@@ -105,7 +113,8 @@ kernel client deliberately runs deadline-0 (block until reply/EOF/death
 | `srvconn_client_send` | no | bytes accepted | ring full | torn / bad args |
 | `srvconn_client_send_frame` | no | whole frame written | no room (all-or-nothing back-pressure) | torn / bad args / frame > ring (framing bug) |
 | `srvconn_client_send_blocking` | yes (c2s room) | whole n, or partial-then-EOF | — | EOF before any byte / bad args / death |
-| `srvconn_client_recv` | yes (s2c data) | bytes read | EOF (torn + drained) | deadline (`client_timed_out` set) / death / bad args |
+| `srvconn_client_recv` | yes (s2c data) | bytes read | EOF (torn + drained) | deadline / death / bad args |
+| `srvconn_client_recv_now` | no (2026-10-06, the 9P `recv_now`) | bytes read | EOF (torn + drained) | bad args; `-T_E_AGAIN` when s2c is empty or another reader holds the role |
 | `srvconn_server_send` | no | bytes accepted | ring full | torn / bad args |
 | `srvconn_server_send_blocking` | yes (s2c room) | whole n, or partial-then-EOF | — | EOF before any byte / bad args / death |
 | `srvconn_server_recv` | no | bytes read | empty-but-live (poll again) | EOF |
@@ -253,7 +262,7 @@ must never return 0 on a live connection):
 
 **The two blocking consumers**: `srvconn_client_recv` (role → loop:
 drain [+ wrendez drain-wake] / EOF → 0 / tsleep on `rendez` bounded by
-`client_deadline_ns`; TIMEDOUT sets `client_timed_out`) and
+`client_deadline_ns`; TIMEDOUT returns -1) and
 `srvconn_server_recv_blocking` (the c2s twin, deadline 0 — added at
 P6-pouch-sockets F1: the non-blocking read's 0 was a spurious EOF to a
 POSIX server racing the client's first write across CPUs).
@@ -328,7 +337,7 @@ no raw `Proc *`/`SrvService *`, so a peer exit or a tombstone-rebind never
 turns a read into a UAF; the two principals are the conn's ends in
 `/ctl/9p-sessions`, the connector's at the connect and the poster's at the
 post) · `msize`
-(immutable class) · `client_deadline_ns` + `client_timed_out` · two
+(immutable class) · `client_deadline_ns` · two
 `struct srvconn_chan` (`c2s`, `s2c`) · the conn-wide `poll_list` ·
 `byte_mode` (release/acquire) · `kernel_attached` (release/acquire) ·
 `cape` (release/acquire; one-way, set at mint).
@@ -388,7 +397,7 @@ blocking client send.
 The sentinel table under Contract is exhaustive; beyond it: `srvconn_create`
 returns NULL on OOM (struct or either ring — partial allocations freed)
 or a non-class msize; `srvconn_ref`/`unref`/`teardown`/`set_*` extinct
-on a NULL/corrupted conn (accessors and `is_live`/`timed_out`/`msize`
+on a NULL/corrupted conn (accessors and `is_live`/`msize`
 fail-close instead — queries degrade, mutations trap).
 
 ## Performance
@@ -417,8 +426,8 @@ What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed):
   chan conds must KEEP their `|| eof` (removing it strands a producer at
   teardown).
 - **Role/deadline composition**: the client recv's role wait honors
-  `client_deadline_ns` and sets `client_timed_out` on the deadline path
-  ONLY (INTR must not — the caller maps TIMEDOUT to -ETIMEDOUT).
+  `client_deadline_ns`; a lapse there and a lapse in the data wait both
+  release the role and return -1.
 - **Frame atomicity**: the writing role spans the whole delivery; the
   all-or-nothing `send_frame` must never partial-write (desync) and its
   free-space bound must read `ch->cap`, never a compile-time constant
@@ -469,8 +478,7 @@ this surface's blast radius but live there.
   code; arming a real deadline there requires a caller-visible
   `server_timed_out` analog or `write_full` just re-parks
   ([[fnd-348-r1-f4]]).
-- `client_timed_out` is sticky until the next `set_client_deadline`;
-  the deadline field is read locklessly — the set-before-op discipline
+- The deadline field is read locklessly — the set-before-op discipline
   (one serialized op-driving thread) is the soundness argument.
 - The non-blocking `srvconn_client_send` / `srvconn_server_send` have
   ZERO production callers post-CF-3B (devsrv routes both endpoints to

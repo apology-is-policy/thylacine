@@ -1233,11 +1233,13 @@ mechanisms:
    #375 discipline, since `client_debug_stop_park` drops `c->lock`) +
    `client_drain_until_free_tag` PARK a stopped sender at their loop top — WITHOUT
    this a stop-unwound self-pump drains nothing, so `c2s` never frees, every send
-   EAGAINs, the Proc never fully-stops, and the debugger's stop HANGS; and
-   `p9_client_reader_pump_once` skips mark_dead on a stop. Only
-   `p9_client_reader_pump_once_deadline` has no guard, justified kproc-only (its
-   sole callers — `dev9p_poll.c` + `loom.c` SQPOLL — have `t->proc == NULL`, so
-   the detour is immune).
+   EAGAINs, the Proc never fully-stops, and the debugger's stop HANGS. The
+   fourth site is the waiters' pump, `p9_client_reader_pump_ready` (LOOM.md 8.6,
+   as built 2026-10-06; it replaced `pump_once` and the kproc-only
+   `pump_once_deadline`), which serves EL0 and kproc callers alike. It reads
+   only what is waiting and never sleeps in a recv, so no stop or death unwinds
+   it, and it leaves the stop latches alone: one left set would unwind the
+   thread's next sleep, whatever that sleep waits for.
 
 **Why frame-atomic (the 8c-3 holotype F1 [P1]).** The FIRST fix (set `stop_unwinds`
 for the whole recv, a plain unwind) was WRONG: delivery is CHUNKED, so a stop can

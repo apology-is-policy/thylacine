@@ -179,6 +179,18 @@ struct p9_rpc {
 // must not sleep. Returns 0 when it took the fid, -1 when the fid stays bound.
 typedef int (*p9_orphan_sink_fn)(void *arg, u32 fid);
 
+// A fan-in waiter's hook on one client (LOOM.md 8.6): on the role-waiter list
+// while another thread holds the role, else on the transport's readiness list,
+// never both. The holder reads what arrives, and one that leaves over a frame
+// already arrived walks only the role list (loom_role.tla).
+enum p9_hook_place { P9_HOOK_NONE = 0, P9_HOOK_ROLE = 1, P9_HOOK_READY = 2 };
+struct p9_reader_hook {
+    struct poll_waiter pw;      // poll_waiter_init()ed onto the waiter's Rendez
+    u8                 place;   // enum p9_hook_place
+};
+
+struct p9_attached;
+
 struct p9_client {
     u32                  magic;
     // Per-client lock. Protects session.outstanding[], session.bound_fids[],
@@ -219,6 +231,10 @@ struct p9_client {
     struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
     bool                 reader_active;
     bool                 dead;
+    // Bytes of the frame being read already in transport.recv_buf. They stay
+    // across readers: a pump that finds the rest not yet sent returns and the
+    // next reader resumes (LOOM.md 8.6). Written only by the role holder.
+    u32                  rx_got;
     // #210 loss discriminator (all under c->lock; demux_frame_locked is the
     // sole mutation site). frames_rx counts every steady-state frame that
     // reached the demux; owned/orphan split it by whether inflight[tag]
@@ -282,15 +298,24 @@ struct p9_client {
     struct poll_waiter_list send_waiters_list;
     u64                  send_progress;
     u32                  send_waiters;
-    // Threads waiting for the reader role itself, not for a reply: a Loom ENTER
-    // whose async reply sits unread while another thread holds the role (LOOM.md
-    // 8.6 item 2). That holder may be a foreign sync op's reader, and the
-    // handoff designates only sync ops, so a handoff that leaves the role free
-    // and undesignated wakes this list, as does the session's death. The same
+    // Threads waiting for the reader role itself, not for a reply: a fan-in
+    // waiter (a Loom ENTER or SQPOLL kthread, the dev9p poll kthread) whose
+    // async reply sits unread while another thread holds the role (LOOM.md
+    // 8.6). That holder may be a foreign sync op's reader, and the handoff
+    // designates only sync ops, so a handoff that leaves the role free and
+    // undesignated wakes this list, as does the session's death. The same
     // multi-waiter shape as send_waiters_list; role_waiters counts the hooks.
     // Under c->lock.
     struct poll_waiter_list role_waiters_list;
     u32                  role_waiters;
+    // The dev9p poll kthread's fan-in entry for this client (dev9p_poll.c).
+    // One kthread, so one entry per client and no cap; written by that thread
+    // alone, so no lock. poll_pin is the session ref it holds across the pump
+    // and the hook; poll_listed marks the client on its collect list.
+    struct p9_client       *poll_next;
+    struct p9_attached     *poll_pin;
+    struct p9_reader_hook   poll_hook;
+    bool                    poll_listed;
     // Most-recently-completed op's reply buffer, kept alive past client_run's
     // return. The read/readdir/readlink dispatch results ZERO-COPY ALIAS into
     // it (out->read_data / readdir_data / readlink_target point inside the
@@ -643,9 +668,9 @@ size_t p9_client_inflight(const struct p9_client *c);
 //
 // The synchronous p9_client_* ops above block their caller until the reply.
 // The async surface submits an op WITHOUT blocking: the reply is demuxed later
-// by whichever thread drives the reader (SYS_LOOM_ENTER's reap, the SQPOLL
-// kthread, or p9_client_reader_pump_once), which invokes rpc->on_complete to
-// post a CQE. One engine (the #841 elected reader), two completion front-ends.
+// by whichever thread drives the reader (a fan-in waiter's
+// p9_client_reader_pump_ready, or the role holder), which invokes
+// rpc->on_complete to post a CQE. One engine (the #841 elected reader), two completion front-ends.
 // =============================================================================
 
 // A Tmsg builder: call exactly one p9_session_send_* into `out` (cap bytes),
@@ -671,65 +696,41 @@ typedef int (*p9_session_build_fn)(struct p9_session *s, u8 *out, size_t cap,
 int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
                            p9_session_build_fn build, void *build_ctx);
 
-// Drive the elected reader for ONE frame, then release the reader role. For
-// async ops there is no blocked submitter, so completions are pumped by the
-// reap caller. Becomes the reader (if none is active), recv's one frame (lock
-// dropped), demuxes it (posting any async CQE / waking any sync owner), clears
-// the reader role + hands it on. Returns 1 (one frame demuxed), 0 (a reader is
-// already active -- nothing done), -P9_E_IO (session dead / recv error), or
-// -P9_E_INVAL. PRECONDITION: a reply is expected (>=1 in-flight op) -- on a
-// real transport recv blocks for a frame; on a synchronous test loopback the
-// frame must already be staged (else recv's EOF latches the session dead).
-int p9_client_reader_pump_once(struct p9_client *c);
-
-// Result of p9_client_reader_pump_once_deadline (a SIGNED enum: DEAD is the
-// only negative; the caller backs off on IDLE/BUSY and stops on DEAD).
+// The result of p9_client_reader_pump_ready (a SIGNED enum).
 enum p9_pump_result {
-    P9_PUMP_DEAD     = -1,  // session error / EOF (marked dead) OR death-interrupt
-    P9_PUMP_IDLE     =  0,  // the idle deadline lapsed at a frame boundary
+    P9_PUMP_DEAD     = -1,  // the session is dead (its ops have their errors)
+                            // or its transport closed
+    P9_PUMP_IDLE     =  0,  // the role is free and nothing waits to be read
     P9_PUMP_PROGRESS =  1,  // demuxed exactly one reply frame
-    P9_PUMP_BUSY     =  2,  // another thread holds the reader role; caller defers
+    P9_PUMP_BUSY     =  2,  // another thread holds the reader role
 };
 
-// The deadline-aware reader pump (Loom-4 SQPOLL; LOOM.md §8.6). Like
-// p9_client_reader_pump_once, but arms `deadline_ns` (absolute ns; 0 = no
-// deadline) on ONLY the FIRST recv of the frame -- the frame boundary, where a
-// timeout consumes no bytes and the shared byte stream stays synced (#841). The
-// rest of the frame blocks unconditionally (a mid-frame timeout would desync).
-// On a backend with no set_recv_deadline (NULL vtable op) the deadline is inert
-// and the recv blocks like the plain pump. Returns enum p9_pump_result:
-//   P9_PUMP_PROGRESS -- demuxed one frame (the SQPOLL kthread pumps again);
-//   P9_PUMP_IDLE     -- the deadline lapsed at the frame boundary, nothing
-//                       arrived, the stream is synced + the session is NOT
-//                       marked dead (the kthread parks + retries);
-//   P9_PUMP_BUSY     -- another thread is the reader (the caller defers);
-//   P9_PUMP_DEAD     -- a genuine EOF / recv error (session marked dead) or a
-//                       death-interrupt unwind (session left for survivors).
-int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns);
-
-// Whether this client's transport implements set_recv_deadline (a frame-boundary
-// recv timeout). The Loom SQPOLL kthread (Loom-4c) block-recvs in process context
-// with no death-interrupt (kproc never group-terminates), so it relies on the
-// idle-deadline to re-check its stop flag -- a NULL-deadline transport (the spoor
-// pipe-pair backend, SYS_ATTACH_9P) would block it un-interruptibly, hanging
-// teardown. Used to gate registering such a handle into an SQPOLL ring
-// (loom_register_handles). srvconn + the loopback test backend are deadline-capable.
-bool p9_client_recv_is_deadline_capable(struct p9_client *c);
+// Drive the elected reader for ONE frame, over a ready stream only (LOOM.md
+// 8.6). Under c->lock: a dead session is DEAD, a held role BUSY, a transport
+// with nothing to read IDLE. Otherwise take the role, read and demux one frame
+// (posting any async completion, waking any sync owner), then release the role
+// and hand it on. Only the role holder consumes the stream, so the recv never
+// blocks at a frame boundary; it blocks only inside a frame whose bytes have
+// begun to arrive, which the trusted server bounds. Async ops have no thread of
+// their own, so their replies are read here by a fan-in waiter (the ENTER, the
+// SQPOLL kthread, the dev9p poll kthread) or by whoever holds the role.
+int p9_client_reader_pump_ready(struct p9_client *c);
 
 // Hand the elected-reader role to a pending SYNC op (async ops are skipped --
 // they have no thread to run the reader loop). Exposed for the handoff-skip
 // regression; the reader loop uses the internal locked form.
 void p9_client_handoff_reader(struct p9_client *c);
 
-// Hook `pw` to learn when the reader role comes free (LOOM.md 8.6 item 2).
-// Returns -P9_E_IO if the session is dead and 0 if the role is free now,
-// registering nothing; otherwise registers `pw` on the role-waiter list and
-// returns 1. A handoff that leaves the role free and undesignated, or the
-// session's death, then sets pw->ready and wakes pw->rendez. After a 1 the
-// caller keeps `c` alive and calls p9_client_role_wait_unregister before `pw`
-// goes out of scope.
-int  p9_client_role_wait_register(struct p9_client *c, struct poll_waiter *pw);
-void p9_client_role_wait_unregister(struct p9_client *c, struct poll_waiter *pw);
+// Hook `h` to learn when pumping `c` could make progress. Returns -P9_E_IO if
+// the session is dead or its transport closed, and 0 if a frame waits on a
+// free role (pump now), filing nothing; otherwise files h->pw and returns 1. A release of the role with no
+// designee, an arrival on the transport, or (on the role list) the session's
+// death then sets h->pw.ready and wakes its Rendez; a death seen through the
+// readiness list arrives as the EOF or error that killed the session. After a 1
+// the caller keeps `c` alive and calls p9_client_reader_unhook before `h` goes
+// out of scope. The unhook is a no-op on a hook that was never filed.
+int  p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h);
+void p9_client_reader_unhook(struct p9_client *c, struct p9_reader_hook *h);
 
 // Abandon ONE in-flight async op (Loom ring teardown / #898). The async analog
 // of client_run's CLIENT_WAIT_DIED Tflush-on-abandon (#845): UNDER c->lock, if

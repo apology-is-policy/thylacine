@@ -21,8 +21,7 @@ int p9_mq_loopback_init(struct p9_mq_loopback *mq,
     mq->tail           = 0;
     mq->sends          = 0;
     mq->recvs          = 0;
-    mq->deadline_armed = false;
-    mq->timed_out      = false;
+    poll_waiter_list_init(&mq->ready_list);
     mq->eagain_budget  = 0;
     mq->scribble_buf   = NULL;
     mq->scribble_len   = 0;
@@ -36,6 +35,7 @@ void p9_mq_loopback_destroy(struct p9_mq_loopback *mq) {
     mq->head   = 0;
     mq->tail   = 0;
     mq->closed = true;
+    poll_waiter_list_wake(&mq->ready_list);
 }
 
 // send: synthesize the reply (into scratch, under the lock -- the responder is
@@ -63,15 +63,16 @@ static int mq_send(void *ctx, const u8 *buf, size_t len) {
     mq->tail += (u32)n;
     mq->sends++;
     spin_unlock(&mq->lock);
+    if (n > 0) poll_waiter_list_wake(&mq->ready_list);
     return (int)len;
 }
 
 // recv: drain up to `cap` bytes from the FIFO front (a contiguous run -- the ring
 // is linear, [head,tail) is always contiguous; the client's frame assembler
 // loops). On a fully-drained ring reset head/tail to 0 so submit/drain cycles
-// never run off the end. Empty: an armed deadline returns -1 + timed_out (the
-// frame-boundary-timeout model); otherwise 0 (EOF), matching p9_loopback so a
-// test that completes exactly N never over-pumps into a spurious death.
+// never run off the end. Empty: 0 (EOF), matching p9_loopback; a readiness-
+// gated pump never reads an empty FIFO (mq_recv_ready), so a test that
+// completes exactly N never over-pumps into a spurious death.
 static int mq_recv(void *ctx, u8 *buf, size_t cap) {
     struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
@@ -86,7 +87,6 @@ static int mq_recv(void *ctx, u8 *buf, size_t cap) {
     }
     u32 avail = mq->tail - mq->head;
     if (avail == 0) {
-        if (mq->deadline_armed) { mq->timed_out = true; spin_unlock(&mq->lock); return -1; }
         spin_unlock(&mq->lock);
         return 0;                       // EOF
     }
@@ -99,28 +99,38 @@ static int mq_recv(void *ctx, u8 *buf, size_t cap) {
     return (int)to_copy;
 }
 
+// An empty FIFO is nothing yet here, where mq_recv reads it as EOF.
+static int mq_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
+    spin_lock(&mq->lock);
+    bool empty = !mq->closed && mq->tail == mq->head;
+    spin_unlock(&mq->lock);
+    // Only the role holder consumes, so a FIFO seen non-empty stays so.
+    if (empty) return P9_TRANSPORT_EAGAIN;
+    return mq_recv(ctx, buf, cap);
+}
+
 static int mq_close(void *ctx) {
     struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
     spin_lock(&mq->lock);
     mq->closed = true;
     spin_unlock(&mq->lock);
+    poll_waiter_list_wake(&mq->ready_list);
     return 0;
 }
 
-static void mq_set_recv_deadline(void *ctx, u64 deadline_ns) {
+// The hook goes on with the sample, under mq->lock, which every append and the
+// close hold while they change what the sample reads.
+static bool mq_recv_ready(void *ctx, struct poll_waiter *pw) {
     struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
-    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return;
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return true;
     spin_lock(&mq->lock);
-    mq->deadline_armed = (deadline_ns != 0);
-    mq->timed_out      = false;
+    if (pw) poll_waiter_list_register(&mq->ready_list, pw);
+    bool ready = mq->closed || mq->tail != mq->head;
     spin_unlock(&mq->lock);
-}
-
-static bool mq_recv_timed_out(void *ctx) {
-    struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
-    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return false;
-    return mq->timed_out;
+    return ready;
 }
 
 struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq) {
@@ -128,8 +138,8 @@ struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq) {
     ops.send              = mq_send;
     ops.recv              = mq_recv;
     ops.close             = mq_close;
-    ops.set_recv_deadline = mq_set_recv_deadline;
-    ops.recv_timed_out    = mq_recv_timed_out;
+    ops.recv_ready        = mq_recv_ready;
+    ops.recv_now          = mq_recv_now;
     ops.hangup            = NULL;
     ops.ctx               = mq;
     return ops;

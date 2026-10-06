@@ -371,7 +371,6 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     cn->server_stripes     = server_stripes;
     cn->server_principal   = server_principal;
     cn->client_deadline_ns = 0;
-    cn->client_timed_out   = false;
     /* byte_mode = false by KP_ZERO; srvconn_set_byte_mode flips on after
      * mint if the service is SRV_MODE_BYTE (P6-pouch-sockets). */
     __atomic_store_n(&cn->ref, 1, __ATOMIC_RELAXED);
@@ -558,12 +557,6 @@ void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
         extinction("srvconn_set_client_deadline: NULL or corrupted SrvConn");
     cn->client_deadline_ns = deadline_ns;
-    cn->client_timed_out   = false;
-}
-
-bool srvconn_client_timed_out(const struct SrvConn *cn) {
-    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
-    return cn->client_timed_out;
 }
 
 u32 srvconn_msize(const struct SrvConn *cn) {
@@ -666,10 +659,7 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     // deadline as the data wait below (the WHOLE recv is deadline-bounded);
     // a death-interrupt unwinds it (#811). Released on every exit below.
     int ra = chan_role_acquire(ch, /*writer=*/false, cn->client_deadline_ns);
-    if (ra != 0) {
-        if (ra == TSLEEP_TIMEDOUT) cn->client_timed_out = true;
-        return -1;
-    }
+    if (ra != 0) return -1;
 
     long ret;
     for (;;) {
@@ -711,7 +701,6 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
                      : tsleep(&ch->rendez, chan_cond_readable, ch,
                               cn->client_deadline_ns);
         if (ts == TSLEEP_TIMEDOUT) {
-            cn->client_timed_out = true;
             ret = -1;                         // corvus hung past the deadline
             break;
         }
@@ -735,6 +724,28 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     }
 
     chan_role_release(ch, /*writer=*/false);
+    return ret;
+}
+
+long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
+    if (!buf || n < 0) return -1;
+    if (n == 0) return 0;
+
+    struct srvconn_chan *ch = &cn->s2c;
+    long ret;
+    spin_lock(&ch->lock);
+    // A role holder may be mid-read; reading around it would split its bytes.
+    if (ch->reading)        ret = -(long)T_E_AGAIN;
+    else if (ch->count > 0) ret = chan_ring_read(ch, buf, n);
+    else                    ret = ch->eof ? 0 : -(long)T_E_AGAIN;
+    spin_unlock(&ch->lock);
+    if (ret > 0) {
+        // As srvconn_client_recv: room for a parked server send, and the
+        // server endpoint's POLLOUT edge. Outside ch->lock.
+        wakeup(&ch->wrendez);
+        poll_waiter_list_wake(&cn->poll_list);
+    }
     return ret;
 }
 

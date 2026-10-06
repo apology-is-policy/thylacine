@@ -2,12 +2,13 @@
 id: seam-221-idle-pump-wake
 type: seam
 title: "dev9p.poll pump: 20 ms idle re-poll while a probe is parked"
-status: open
+status: closed
 surface: [sub-kernel-ninep-dev9p-poll]
 opened-by: fnd-net6b-r1-f3
 tracker: "task #221"
 created: 2026-07-31
 updated: 2026-07-31
+closed-by: chg-2026-10-06-loom-multiclient
 ---
 **Owed**: a transport wake-on-write so the poll-pump kthread parks fully
 while a readiness probe is outstanding, instead of re-polling the elected

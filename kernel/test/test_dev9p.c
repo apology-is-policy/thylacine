@@ -61,6 +61,7 @@ void test_dev9p_poll_retry_timer_is_a_wake(void);
 void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
 void test_dev9p_poll_cancel_at_close(void);
 void test_dev9p_poll_gc_flushes_with_the_unlink(void);
+void test_dev9p_poll_reads_every_client(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
@@ -885,7 +886,7 @@ void test_dev9p_close_clunks_owned_fid(void) {
     size_t after_send = p9_session_inflight(&g_client.session);
     TEST_EXPECT_EQ((u64)after_send, (u64)(before + 1),
                     "async-clunk leaves the Tclunk outstanding (deferred, not synchronous)");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     size_t after_drain = p9_session_inflight(&g_client.session);
     TEST_EXPECT_EQ((u64)after_drain, (u64)before,
                     "the ownerless Rclunk drains via the reader pump (tag freed)");
@@ -1231,11 +1232,11 @@ void test_dev9p_dirfid_create_reuse_drop(void) {
     struct Spoor *opened = dev9p.create(nc2, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
     TEST_ASSERT(opened == nc2, "create");
     TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "create dropped + clunked the parked fid");
-    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+    (void)p9_client_reader_pump_ready(&g_client);   // drain the async Rclunk
 
     g_wga_type_ov = 0; g_wga_path_base = 0x20;
     spoor_clunk(nc2);
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     teardown(root);
 }
 
@@ -1270,7 +1271,7 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
                    "rmdir d");
     TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "rmdir dropped + clunked the parked fid");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     struct t_stat probe; u64 s0 = 0;
     TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x20, &probe, &s0),
                 "the dead object's attr invalidated (the donate-gate event)");
@@ -1287,7 +1288,7 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     spoor_clunk(nc2);   // staled while out -> MUST clunk, never re-park
     TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
                    "a staled checked-out fid is clunked at close");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     g_wga_type_ov = 0;
     teardown(root);
@@ -1322,7 +1323,7 @@ void test_dev9p_dirfid_suspect_not_reparked(void) {
     spoor_clunk(nc1);   // suspect -> clunk, never park
     TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
                    "a suspect fid is clunked at close, not re-parked");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     g_wga_type_ov = 0;
     teardown(root);
@@ -1738,13 +1739,20 @@ static int np_responder(void *ctx, const u8 *req, size_t req_len,
 }
 
 // Hand the kthread a reply the server "sends" later: the answer to a held arm.
-static void np_inject_rread(u16 tag, u16 revents) {
+// The kthread reads only over a ready stream, so the append walks the mq's
+// readiness hooks as mq_send's does.
+static void mq_inject_rread(struct p9_mq_loopback *mq, u16 tag, u16 revents) {
     u8 frame[P9_HDR_LEN + 8];
     int n = np_rread(frame, sizeof(frame), tag, revents);
-    spin_lock(&g_np_mq.lock);
-    for (int i = 0; i < n; i++) g_np_mq.ring[g_np_mq.tail + (u32)i] = frame[i];
-    g_np_mq.tail += (u32)n;
-    spin_unlock(&g_np_mq.lock);
+    spin_lock(&mq->lock);
+    for (int i = 0; i < n; i++) mq->ring[mq->tail + (u32)i] = frame[i];
+    mq->tail += (u32)n;
+    spin_unlock(&mq->lock);
+    poll_waiter_list_wake(&mq->ready_list);
+}
+
+static void np_inject_rread(u16 tag, u16 revents) {
+    mq_inject_rread(&g_np_mq, tag, revents);
 }
 
 // The one message-queue fixture, and everything a test hangs on it, live in
@@ -1870,12 +1878,131 @@ static void np_teardown(struct np_fixture *f) {
     g_np_live = false;
 }
 
+// More readiness clients than the poll kthread once read for: seventeen
+// sessions, each with its own server and one QTPOLL file. A client is 41 KiB
+// and its transport 9 KiB, so each slot is allocated, and the runner's release
+// takes down what a failed test left (test_dev9p_np_release).
+#define NPF_CLIENTS 17
+struct npf_slot {
+    struct p9_client      client;
+    struct p9_mq_loopback mq;
+    u8                    recv_buf[8192];
+    struct Spoor         *root;
+    struct Spoor         *ready;        // the walked QTPOLL file, the slot's own
+    bool                  mq_up, client_up;
+    struct Rendez         r;
+    struct poll_waiter    pw;
+    volatile u32          arms;
+    volatile u16          arm_tag;
+};
+static struct npf_slot *g_npf[NPF_CLIENTS];
+static bool             g_npf_live;
+static u32              g_npf_ops0;
+
+// The slot's server: the handshake as np_handshake, every arm held for the test
+// to answer, a snapshot answered not-ready, flushes and clunks answered.
+static int npf_responder(void *ctx, const u8 *req, size_t req_len,
+                         u8 *resp, size_t resp_cap) {
+    struct npf_slot *s = (struct npf_slot *)ctx;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if (type == P9_TVERSION || type == P9_TATTACH || type == P9_TWALK)
+        return np_handshake(req, req_len, type, tag, resp, resp_cap);
+    if (type == P9_TREAD) {
+        if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
+        if (le64_at(req + 11) & P9_POLL_SNAPSHOT) return np_rread(resp, resp_cap, tag, 0);
+        s->arms++;
+        s->arm_tag = tag;
+        return 0;
+    }
+    if (type == P9_TFLUSH) return np_rhdr(resp, resp_cap, P9_RFLUSH, tag);
+    if (type == P9_TCLUNK) return np_rhdr(resp, resp_cap, P9_RCLUNK, tag);
+    return -1;
+}
+
+static bool npf_slot_up(u32 i) {
+    struct npf_slot *s = kmalloc(sizeof(*s), KP_ZERO);
+    if (!s) return false;
+    g_npf[i] = s;
+    rendez_init(&s->r);
+    poll_waiter_init(&s->pw, &s->r);
+    if (p9_mq_loopback_init(&s->mq, npf_responder, s) != 0) return false;
+    s->mq_up = true;
+    if (p9_client_init(&s->client, /*root_fid=*/0, 8192, p9_mq_loopback_ops_for(&s->mq),
+                       s->recv_buf, sizeof(s->recv_buf)) != 0) return false;
+    s->client_up = true;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    if (p9_client_handshake(&s->client, uname, sizeof(uname), aname, sizeof(aname), 0) != 0)
+        return false;
+    s->root = dev9p_attach_client(&s->client, /*root_fid=*/0);
+    if (!s->root) return false;
+    s->ready = spoor_clone(s->root);
+    if (!s->ready) return false;
+    const char *name = "ready";
+    struct Walkqid *w = dev9p.walk(s->root, s->ready, &name, 1);
+    if (!w || w->spoor != s->ready) {
+        if (w) walkqid_free(w);
+        return false;
+    }
+    walkqid_free(w);
+    return (s->ready->qid.type & QTPOLL) != 0;
+}
+
+static bool npf_setup(void) {
+    if (g_npf_live) return false;
+    g_npf_live = true;               // from here the teardown owns what is set up
+    g_npf_ops0 = dev9p_poll_op_count_for_test();
+    for (u32 i = 0; i < NPF_CLIENTS; i++)
+        if (!npf_slot_up(i)) return false;
+    return true;
+}
+
+// The hooks off, every file closed (its arm cancelled, which kicks the kthread
+// off its hooks on that client), the kthread parked with nothing out -- so it
+// holds no hook on any slot's lists -- and only then the clients.
+static void npf_teardown(void) {
+    for (u32 i = 0; i < NPF_CLIENTS; i++)
+        if (g_npf[i]) poll_waiter_list_unregister(&g_npf[i]->pw);
+    for (u32 i = 0; i < NPF_CLIENTS; i++) {
+        struct npf_slot *s = g_npf[i];
+        if (!s) continue;
+        if (s->ready) {
+            spoor_clunk(s->ready);
+            s->ready = NULL;
+        }
+        if (s->root) {
+            spoor_clunk(s->root);
+            s->root = NULL;
+        }
+    }
+    TEST_YIELD_UNTIL(dev9p_poll_snap_count_for_test() == 0 &&
+                     dev9p_poll_op_count_for_test() == g_npf_ops0 &&
+                     dev9p_poll_parked_for_test());
+    for (u32 i = 0; i < NPF_CLIENTS; i++) {
+        struct npf_slot *s = g_npf[i];
+        if (!s) continue;
+        if (s->client_up) p9_client_destroy(&s->client);
+        if (s->mq_up) p9_mq_loopback_destroy(&s->mq);
+        kfree(s);
+        g_npf[i] = NULL;
+    }
+    g_npf_live = false;
+}
+
 // The runner's release, after every test (test.c): a fixture a failed test left
 // up is taken down before the next test sets up. Returns whether one was.
 bool test_dev9p_np_release(void) {
-    if (!g_np_live) return false;
-    np_teardown(&g_np);
-    return true;
+    bool left = false;
+    if (g_np_live) {
+        np_teardown(&g_np);
+        left = true;
+    }
+    if (g_npf_live) {
+        npf_teardown();
+        left = true;
+    }
+    return left;
 }
 
 // A file with no readiness server (no QTPOLL; the root is QTDIR) is POSIX
@@ -2201,6 +2328,40 @@ void test_dev9p_poll_gc_flushes_with_the_unlink(void) {
     np_teardown(f);
 }
 
+// The kthread reads for every client with a read out. Seventeen arms are held,
+// one per session; the registry is LIFO, so the first armed is the oldest. Its
+// server answers, and the kthread must read that answer and wake its poller.
+// Before, the kthread pumped at most sixteen clients from the newest down: the
+// oldest was never read, and its poller slept to its own timeout. The newest
+// answers first, as a control on the fixture, and is armed again so seventeen
+// are out when the oldest answers.
+void test_dev9p_poll_reads_every_client(void) {
+    TEST_ASSERT(npf_setup(), "seventeen readiness sessions");
+    for (u32 i = 0; i < NPF_CLIENTS; i++) {
+        struct npf_slot *s = g_npf[i];
+        TEST_EXPECT_EQ((s64)dev9p_poll_arm(s->ready, (short)POLLIN, &s->pw), 1L, "armed");
+        TEST_EXPECT_EQ((u64)s->arms, (u64)1, "its arm held at the server");
+    }
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)(g_npf_ops0 + NPF_CLIENTS),
+                   "seventeen arms linked");
+
+    struct npf_slot *newest = g_npf[NPF_CLIENTS - 1], *oldest = g_npf[0];
+    mq_inject_rread(&newest->mq, newest->arm_tag, POLLIN);
+    TEST_YIELD_UNTIL(newest->pw.ready);
+    poll_waiter_list_unregister(&newest->pw);
+    poll_waiter_init(&newest->pw, &newest->r);
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(newest->ready, (short)POLLIN, &newest->pw), 1L,
+                   "the newest armed again");
+    TEST_EXPECT_EQ((u64)newest->arms, (u64)2, "a fresh arm went out");
+    TEST_YIELD_UNTIL(dev9p_poll_op_count_for_test() == g_npf_ops0 + NPF_CLIENTS);
+
+    mq_inject_rread(&oldest->mq, oldest->arm_tag, POLLIN);
+    TEST_YIELD_UNTIL(oldest->pw.ready);
+    for (u32 i = 1; i < NPF_CLIENTS - 1; i++)
+        TEST_ASSERT(!g_npf[i]->pw.ready, "no poller whose server stayed quiet was woken");
+    npf_teardown();
+}
+
 // =============================================================================
 // SYS_PREAD / SYS_PWRITE (#37) + SYS_WSTAT kind-gate (#47) — syscall-layer
 // tests against the loopback client (the wire-visible halves).
@@ -2463,7 +2624,7 @@ void test_dev9p_walk_attrs(void) {
         // async-clunk defers the Rclunk; drain it before the next sub-test's op
         // so the single-slot loopback is not left holding a stale reply (the real
         // system drains it via the next op's reader).
-        (void)p9_client_reader_pump_once(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client);
     }
 
     // BIND form, PARTIAL walk: the responder answers one short; the session
@@ -2851,12 +3012,11 @@ static void co_prime(struct Spoor *root, const char *name, size_t len) {
     TEST_ASSERT(w != NULL && w->spoor == nc, "co_prime bind walk");
     walkqid_free(w);
     // Drain the async Rclunk ONLY if the close actually clunked: a DIR-typed
-    // prime's close DONATES the fid (G2 -- no Tclunk), and a pump with
-    // nothing pending latches the single-slot loopback client dead.
+    // prime's close DONATES the fid (G2 -- no Tclunk).
     u32 pre_clunk = g_clunk_seen;
     spoor_clunk(nc);
     if (g_clunk_seen != pre_clunk)
-        (void)p9_client_reader_pump_once(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client);
 }
 
 void test_dev9p_cached_open(void) {
@@ -3843,7 +4003,7 @@ void test_dev9p_cape(void) {
         TEST_EXPECT_EQ((u64)sts[1].mode, (u64)0100644u, "caped walk: the server's mode");
         walkqid_free(w);
         spoor_clunk(nc);
-        (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+        (void)p9_client_reader_pump_ready(&g_client);   // drain the async Rclunk
     }
     teardown(root);
 

@@ -147,6 +147,7 @@ void test_spoor_transport_close_clunks_when_owned(void);
 void test_spoor_transport_close_preserves_when_unowned(void);
 void test_spoor_transport_transport_core_round_trip(void);
 void test_spoor_transport_end_to_end_handshake(void);
+void test_spoor_transport_recv_now_refuses_a_non_pipe(void);
 
 // =============================================================================
 // Tests.
@@ -510,4 +511,33 @@ void test_spoor_transport_end_to_end_handshake(void) {
     p9_spoor_transport_destroy(&st);
     spoor_clunk(tx);
     spoor_clunk(rx);
+}
+
+// recv_now promises never to sleep, and only a pipe's read can be asked not
+// to. Any other Dev's read may sleep -- its poll, when it has one, may be
+// coarser than its read -- so recv_now refuses it outright. This mock has no
+// poll, so a recv_now that trusted one would have read it.
+void test_spoor_transport_recv_now_refuses_a_non_pipe(void) {
+    static struct test_pipe p_tx, p_rx;
+    struct Spoor *tx = make_test_spoor(&p_tx);
+    struct Spoor *rx = make_test_spoor(&p_rx);
+    TEST_ASSERT(tx && rx, "two mock spoors");
+    static const u8 three[3] = { 1, 2, 3 };
+    long put = test_pipe_write(rx, three, 3L, 0);
+    struct p9_spoor_transport st;
+    int init = p9_spoor_transport_init(&st, tx, rx, false);
+    struct p9_transport_ops ops = p9_spoor_transport_ops(&st);
+    u8 b[4];
+    int now = ops.recv_now(ops.ctx, b, sizeof(b));
+    size_t taken = p_rx.read_pos;
+    int blocking = ops.recv(ops.ctx, b, sizeof(b));
+    p9_spoor_transport_destroy(&st);
+    spoor_clunk(tx);
+    spoor_clunk(rx);
+
+    TEST_EXPECT_EQ(init, 0, "adapter over two mock spoors");
+    TEST_EXPECT_EQ((u64)put, 3ULL, "three bytes waiting");
+    TEST_EXPECT_EQ((u64)(s64)now, (u64)(s64)-1, "recv_now refuses a non-pipe rx");
+    TEST_EXPECT_EQ((u64)taken, 0ULL, "without calling its read");
+    TEST_EXPECT_EQ((u64)(s64)blocking, 3ULL, "control: recv reads the same bytes");
 }

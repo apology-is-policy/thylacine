@@ -56,6 +56,12 @@
 (* EventuallyUnwinds -- just at the next boundary), so I-9's                 *)
 (* no-lost-death-wake for this sleeper is preserved; only its TIMING is      *)
 (* deferred to a boundary.                                                   *)
+(*                                                                           *)
+(* AS BUILT since 2026-10-06 (loom-mc): the client keeps the partial frame   *)
+(* (c->rx_got) and the next reader resumes it, so the code discards it on no *)
+(* exit; `desynced` now models a reader WITHOUT that persistence. The        *)
+(* block-through stays the voted policy (ARCH 8.8.1.1); the vault's          *)
+(* seam-90-hung-server records its liveness cost.                            *)
 (***************************************************************************)
 EXTENDS Naturals
 
