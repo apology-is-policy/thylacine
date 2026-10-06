@@ -4,7 +4,7 @@ type: chg
 title: "Tail order: the EL0-return tail stops before it delivers notes"
 date: 2026-10-06
 arc: arc-go-ide
-commits: ["*(pending)*"]
+commits: ["bbc7ab90"]
 touched:
   - sub-kernel-exception
   - moc-kernel-entry

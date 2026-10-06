@@ -1066,7 +1066,7 @@ Verification: `cargo test -p haul --lib` on the host: 59 passed, 1 ignored (the 
 ## Tail order: the EL0-return tail stops before it delivers notes — 2026-10-05
 
 The operator's vote of 2026-10-05 ("Stop before notes"; OPEN-BUGS 2026-09-30 10:05Z). Scripture, code, witnesses,
-model and dossiers in one commit *(pending)*, the squash of `aux-3-tail-order`.
+model and dossiers in one commit bbc7ab90, the squash of `aux-3-tail-order`.
 
 - **die -> stop -> notes.** `.Lel0_sync_return` and the birth tail (`userland_enter_held`) run the stop leg before
   the notes leg (DEBUG-FS-DESIGN 4.2), as Plan 9's `notify` runs `procctl` first and Linux's signal-delivery-stop
@@ -1092,12 +1092,12 @@ Verification: `tools/test.sh` 1865/1865 with debug-probe's resume, death-step an
 (resume), the native builder keeping SS (caught-step), the stop arm returning false (the kernel test), a gone target
 read as success (death-step), a released slot read as success (devproc leg (g)), a witness that never continues the
 job (named by the leak check, no extinction). `specs/check-tail-order.sh` ALL CFGS AS CLAIMED; debug_stop 19 cfgs,
-debug_step 3 and death_wake 2 as claimed. `tools/ci-smp-gate.sh` *(pending)*.
+debug_step 3 and death_wake 2 as claimed. `tools/ci-smp-gate.sh` on fa526f09 (with Haul P3b): PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8, UBSan at 4 and 8). `tools/test.sh` on fa526f09: 1872/1872.
 
 ## Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine — 2026-10-05
 
 The 2026-09-29 Haul Fable pass's F1, the kernel half (OPEN-BUGS 2026-09-29 ~14:57Z), after P3a's haul half. Scripture,
-code, witnesses, model and dossiers in one commit *(pending)*, the squash of `aux-3-p3b`.
+code, witnesses, model and dossiers in one commit fa526f09, the squash of `aux-3-p3b`.
 
 - **A death hangs up** (ARCH 21.10). `client_mark_dead_locked` calls the transport's new `hangup` op once, on the
   edge of the session's death, under `c->lock`: `pipe_hangup_write` on a pipe's tx, `srvconn_teardown` on a srvconn,
@@ -1118,7 +1118,7 @@ legs).
 Verification: `tools/test.sh` 1871/1871 before and after round 1; every haul leg PASS on the first attempt. Sabotages,
 one bake each, each red exactly on its designed tests (SA-SF); the hangup removed on a `TESTS=n` image turns the
 stray-reply and stray-attach legs red, and haul asking after its close turns the refuse-attach leg red, 3 attempts of
-3 each. TLC pipe: 2 clean and 7 buggy cfgs as claimed. `tools/ci-smp-gate.sh` *(pending)*.
+3 each. TLC pipe: 2 clean and 7 buggy cfgs as claimed. `tools/ci-smp-gate.sh` on fa526f09 (with the tail order): PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8, UBSan at 4 and 8). On fa526f09: `tools/test.sh` 1872/1872 and the five haul legs PASS on the first attempt.
 
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
