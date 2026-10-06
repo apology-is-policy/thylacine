@@ -1291,6 +1291,12 @@ prefix (a failing test returns before freeing its fixture), which its matcher di
 boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
 UBSan at 4 and 8).
 
+Landed beside it: **untag step 2a** (*(pending)*). `tools/build.sh`'s `ambush_fork_check` accepts a fork without
+`launchHeld`: it still refuses `held_off_thylacine.go` and still asks `held_on_thylacine.go` for `launchHeld = true`,
+and a fork with neither must name `launchHeld` nowhere and set `DebugHeld` in `Launch`. Controls on fork snapshots:
+accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half step; the gate's bake ran it against
+073faaa. Main agreed on yip 0177; step 2b, the shared fork's commit, waits for main's merge and word.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

@@ -293,8 +293,10 @@ has no "stop at exec/entry" primitive today. Two paths:
   (2026-10-06) every build spawns held; `tools/build.sh` refuses an older fork,
   whose untagged build would keep path (a)'s launch, race included. A kernel
   without the hold makes a held launch fail loudly rather than race quietly.
-  Once no tree's build script checks the fork for `launchHeld`, the constant
-  and `Launch`'s running-spawn path go.
+  `tools/build.sh` also accepts a fork without the constant: it refuses the
+  running spawn's file, a constant other than true, and a `Launch` that does
+  not set `DebugHeld`. Once every tree carries that check, the constant and
+  `Launch`'s running-spawn path go.
 
 Path (a) keeps 8c a pure userspace port and delivers both `ambush attach` and
 `ambush exec`.
