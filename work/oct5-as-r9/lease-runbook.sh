@@ -227,8 +227,10 @@ STRATUM_PIN="${STRATUM_PIN:-61dde37}"
 # AND NOTE WHICH HALF ACTUALLY DISCRIMINATES: `rev-parse 61dde37` SUCCEEDS even
 # in the shared tree, because that tree has the OBJECT (fetched) without the
 # commit being in its history. So rev-parse alone is a check that cannot fail --
-# it only proves the sha is spellable. The `merge-base --is-ancestor` below is
-# the load-bearing half; verified both ways against both trees.
+# it only proves the sha is spellable. The HEAD-EQUALITY check below is the
+# load-bearing half; verified both ways (stratum-astra accepted, the shared
+# tree refused). There is deliberately NO ancestry test here any more -- see
+# the next block for why one would not pin a controlled run.
 sh=$(git -C "$STRATUM_SRC" rev-parse --short "$STRATUM_PIN" 2>/dev/null || true)
 if [ -z "$sh" ]; then
   echo "REFUSING: $STRATUM_SRC does not contain $STRATUM_PIN."
@@ -249,8 +251,8 @@ if [ "$shead" != "$STRATUM_PIN_FULL" ]; then
   echo "An ancestry test would have accepted a descendant; this run needs THE pin."
   exit 4
 fi
-# A DIRTY external source defeats the pin. The ancestor check proves the COMMIT
-# is in history; it says nothing about what is actually on disk, and build.sh
+# A DIRTY external source defeats the pin. The equality check proves which
+# commit HEAD NAMES; it says nothing about what is on disk, and build.sh
 # consumes the WORKING TREE. This is the same proxy-for-the-thing error that made
 # D7 unattributable -- a recorded identity standing in for the bytes consumed --
 # so refuse rather than record a pin the build may not have used.
@@ -391,6 +393,13 @@ if [ "${PI_AXIS:-1}" = 1 ]; then
   # would ship a sanitizer kernel and report it as the plain second axis --
   # mislabelled evidence, and for a RACE the instrumentation perturbs the very
   # timing this axis exists to probe. Rebuild default; pair pool+ramfs from it.
+  #
+  # AND THIS BUILD IS DELIBERATELY BARE, not `--config ci` like stage 2. The
+  # project rule "a bare build.sh is not the gate image" is about the gate
+  # fleet that asserts on a post-login shell; this axis is the SMP one, and
+  # ci-smp-gate itself builds BARE (ci-smp-gate.sh:140). Matching stage 5's
+  # default rows is what makes the two silicons comparable, so do NOT "fix"
+  # this to --config ci: that would silently change what the axis measures.
   tools/build.sh kernel
   provenance "stage-6 pre-sync (default kernel rebuilt after the ubsan gate)"
   echo "-- second axis: syncing this tree's kernel + PAIRED pool/ramfs to thyla-pi"
