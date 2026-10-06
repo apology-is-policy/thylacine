@@ -121,11 +121,17 @@ Run `work/oct5-as-r9/lease-runbook.sh` -- do not re-derive the order from prose.
 It carries all six stages with their discriminating expectations, its own
 free-space floor (this base predates main's disk_floor_check), the TLC jar
 re-fetch (/tmp was cleared by the 10-06 reboot), the paired pool/ramfs trap, and
-a denominator control on the ELF content check. CLONE_APPROVED=1 is required for
-the cache stage -- Astra approved it on yip 0169 turn 2, and she is holding her
-build/ unchanged until I acknowledge the copy, so SEND THAT ACKNOWLEDGEMENT the
-moment the clone completes. Stage 0 (the specs) needs no image and no artifacts,
-so it runs regardless.
+a denominator control on the ELF content check. Stage 0 (the specs) needs no
+image and no artifacts, so it runs regardless.
+
+THE CLONE APPROVAL IS SPENT, and the acknowledgement is DISCHARGED (corrected
+2026-10-06 from yip 0161 t17). The cache-copy acknowledgement Astra conditioned
+her approval on was received and accepted on 0169 t5/t6 -- do NOT send it again
+-- and her build/ is no longer held stable for me. She asked for a NEW
+coordination check before any re-clone, since her tree may have moved. So
+CLONE_APPROVED=1 is obsolete and no longer does anything: the runbook uses MY
+OWN build/ cache, and re-reading her tree requires CLONE_RECHECKED=1 set by hand
+AFTER asking her. A discharged approval is not a standing one.
 
 ## MERGE-TIME OBLIGATION (recorded 2026-10-06, from main on yip 0176)
 

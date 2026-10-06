@@ -183,49 +183,65 @@ if [ "${SPECS:-1}" = 1 ]; then
 fi
 floor post-specs
 
-# Stage 1 -- the warm cache. ONLY with astra's ruling on yip 0169; her tree is
-# at our shared base 5ff62b788 and config-equivalent to --config ci. Drop every
-# CMake tree whose cache names HER path, per reference-ci-image-worktree-recipe.
-if [ "${CLONE_APPROVED:-0}" = 1 ]; then
-  [ -d build ] || cp -Rc ../thylacine-astra/build build
-  # The STAGED daemon goes too, not just its CMake tree: build_ramfs installs
-  # build/pouch/progs/stratumd into the ramfs (build.sh:780-784), so a binary
-  # left there from an earlier build would be baked in even if this run never
-  # rebuilt it. Deleting it converts a SILENT stale daemon into a LOUD absence.
-  rm -rf build/kernel build/usr build/pouch/stratumd-cmake build/kernel-undefined build/host-stratum
-  rm -f build/pouch/progs/stratumd build/ramfs-src/bin/stratumd
+# Stage 1 -- the warm cache.
+#
+# ASTRA'S CLONE APPROVAL IS SPENT (0161 t17). The cache-copy acknowledgement she
+# conditioned it on was received and accepted (0169 t5/t6), her build/ is NO
+# LONGER held stable for me, and she asked for a NEW coordination check before
+# any re-clone because her tree may have moved since. So CLONE_APPROVED=1 is no
+# longer authority to read her tree: a discharged approval is not a standing one.
+# The normal path is MY OWN cache, which this tree has.
+if [ -d build ]; then
+  echo "-- cache: using MY OWN build/ (no clone -- astra's approval is spent)"
+elif [ "${CLONE_RECHECKED:-0}" = 1 ]; then
+  echo "-- cache: re-cloning astra's build/ under a FRESH coordination check"
+  cp -Rc ../thylacine-astra/build build
   rsync -a --ignore-existing ../thylacine-astra/third_party/rust/ third_party/rust/ 2>/dev/null || true
-
-  # CACHE INVALIDATION BY SOURCE DIFFERENCE, not by path-boundness. Astra raised
-  # this and she is right: our HEADs are equal, but her WORKING TREE is dirty, so
-  # HEAD equality does not make her objects equivalent to mine. Her dirty files
-  # ARE the source delta between us. An object she compiled from her uncommitted
-  # usr/halcyond/src/layout.rs could be judged fresh against my committed copy
-  # (older mtime) and never rebuild -- putting HER unreviewed code in MY image and
-  # making any failure of mine unattributable. Derive the set, never hardcode it.
-  echo "-- invalidating cache entries whose SOURCE differs from mine:"
-  git -C ../thylacine-astra status --porcelain \
-    | awk '{print $2}' | grep -E '^(usr|lib)/' > /tmp/astra-dirty-src.txt || true
-  if [ -s /tmp/astra-dirty-src.txt ]; then
-    while IFS= read -r f; do
-      if [ -e "$f" ]; then
-        touch "$f"            # newer than her object -> cargo/ninja MUST rebuild it
-        echo "   invalidated: $f (dirty in her tree; rebuilding from MY source)"
-      else
-        echo "   NOTE: $f dirty in her tree but absent in mine -- inspect before trusting the cache"
-      fi
-    done < /tmp/astra-dirty-src.txt
-  else
-    echo "   none -- no uncommitted usr/ or lib/ source in her tree"
-  fi
-  # And prove the only deltas are her dirty files: identical HEAD + her status.
-  git -C ../thylacine-astra rev-parse HEAD > /tmp/astra-head.txt
-  echo "   her HEAD: $(cat /tmp/astra-head.txt)  my base: $(git rev-parse 5ff62b788)"
-  floor post-clone
 else
-  echo "CLONE_APPROVED!=1 -- not cloning astra's build/. Her artifacts, her ruling (yip 0169)."
-  exit 2
+  echo "REFUSING: this tree has no build/, and astra's clone approval is SPENT"
+  echo "   (0161 t17 -- her tree may have changed and is not held stable for me)."
+  echo "   Ask her on yip, then set CLONE_RECHECKED=1. Re-reading a peer's tree"
+  echo "   on an approval that has already been discharged is not consent."
+  exit 4
 fi
+
+# INVALIDATION RUNS UNCONDITIONALLY. It used to sit inside the clone branch, so
+# the own-cache path -- now the NORMAL one -- invalidated nothing and would have
+# reused a stale kernel tree, stale CMake caches and the stale staged daemon.
+# What must be rebuilt does not depend on how build/ arrived.
+# The STAGED daemon goes too, not just its CMake tree: build_ramfs installs
+# build/pouch/progs/stratumd into the ramfs (build.sh:780-784), so a binary left
+# there from an earlier build would be baked in even if this run never rebuilt
+# it. Deleting it converts a SILENT stale daemon into a LOUD absence.
+rm -rf build/kernel build/usr build/pouch/stratumd-cmake build/kernel-undefined build/host-stratum
+rm -f build/pouch/progs/stratumd build/ramfs-src/bin/stratumd
+
+# CACHE INVALIDATION BY SOURCE DIFFERENCE, not by path-boundness. Astra raised
+# this and she is right: our HEADs are equal, but her WORKING TREE is dirty, so
+# HEAD equality does not make her objects equivalent to mine. Her dirty files
+# ARE the source delta between us. An object she compiled from her uncommitted
+# usr/halcyond/src/layout.rs could be judged fresh against my committed copy
+# (older mtime) and never rebuild -- putting HER unreviewed code in MY image and
+# making any failure of mine unattributable. Derive the set, never hardcode it.
+echo "-- invalidating cache entries whose SOURCE differs from mine:"
+git -C ../thylacine-astra status --porcelain \
+  | awk '{print $2}' | grep -E '^(usr|lib)/' > /tmp/astra-dirty-src.txt || true
+if [ -s /tmp/astra-dirty-src.txt ]; then
+  while IFS= read -r f; do
+    if [ -e "$f" ]; then
+      touch "$f"            # newer than her object -> cargo/ninja MUST rebuild it
+      echo "   invalidated: $f (dirty in her tree; rebuilding from MY source)"
+    else
+      echo "   NOTE: $f dirty in her tree but absent in mine -- inspect before trusting the cache"
+    fi
+  done < /tmp/astra-dirty-src.txt
+else
+  echo "   none -- no uncommitted usr/ or lib/ source in her tree"
+fi
+# And prove the only deltas are her dirty files: identical HEAD + her status.
+git -C ../thylacine-astra rev-parse HEAD > /tmp/astra-head.txt
+echo "   her HEAD: $(cat /tmp/astra-head.txt)  my base: $(git rev-parse 5ff62b788)"
+floor post-clone
 
 # Stage 2 -- MY kernel from MY source. The only thing the cache must not supply.
 #
