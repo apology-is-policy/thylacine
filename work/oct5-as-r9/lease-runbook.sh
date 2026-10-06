@@ -188,7 +188,12 @@ floor post-specs
 # CMake tree whose cache names HER path, per reference-ci-image-worktree-recipe.
 if [ "${CLONE_APPROVED:-0}" = 1 ]; then
   [ -d build ] || cp -Rc ../thylacine-astra/build build
+  # The STAGED daemon goes too, not just its CMake tree: build_ramfs installs
+  # build/pouch/progs/stratumd into the ramfs (build.sh:780-784), so a binary
+  # left there from an earlier build would be baked in even if this run never
+  # rebuilt it. Deleting it converts a SILENT stale daemon into a LOUD absence.
   rm -rf build/kernel build/usr build/pouch/stratumd-cmake build/kernel-undefined build/host-stratum
+  rm -f build/pouch/progs/stratumd build/ramfs-src/bin/stratumd
   rsync -a --ignore-existing ../thylacine-astra/third_party/rust/ third_party/rust/ 2>/dev/null || true
 
   # CACHE INVALIDATION BY SOURCE DIFFERENCE, not by path-boundness. Astra raised
@@ -276,8 +281,47 @@ if [ -n "$(git -C "$STRATUM_SRC" status --porcelain 2>/dev/null)" ]; then
   exit 4
 fi
 echo "-- stratum pinned: $STRATUM_SRC @ $(git -C "$STRATUM_SRC" rev-parse --short HEAD) (contains $STRATUM_PIN, tree CLEAN)"
+# A timestamp taken BEFORE the build: `-nt` against it proves an artifact was
+# written by THIS run rather than inherited from a previous one.
+STAMP=$(mktemp)
 tools/build.sh kernel --config ci
 floor post-build
+
+# VERIFY THE PIN IN THE OUTPUT, NOT ONLY IN THE INPUT. The HEAD equality above
+# proves which source I SELECTED; it says nothing about what the build
+# CONSUMED. build.sh calls build_stratumd in the all-flow (build.sh:394) and
+# copies the result to $progs_out (build.sh:3347), whence build_ramfs installs
+# it (build.sh:780-784) -- but if that step is skipped or fails, a previously
+# staged binary is baked in and this script would report the pin honoured while
+# the image ran the OLD Stratum. That is the same unequal input that cost an
+# hour of attribution, so the check has to close on the artifact.
+# CMakeCache is the file astra read by hand to find the mismatch; assert on it.
+CC=build/pouch/stratumd-cmake/CMakeCache.txt
+if [ ! -f "$CC" ]; then
+  echo "REFUSING: $CC absent -- stratumd never configured, so the ramfs daemon"
+  echo "          cannot be attributed to the pinned source."
+  exit 4
+fi
+if ! grep -qF -- "$STRATUM_SRC" "$CC"; then
+  echo "REFUSING: $CC does not name $STRATUM_SRC -- the configure consumed a"
+  echo "          different tree than the pin selected:"
+  grep -E 'SOURCE_DIR' "$CC" | head -5
+  exit 4
+fi
+for b in build/pouch/progs/stratumd build/ramfs-src/bin/stratumd; do
+  if [ ! -f "$b" ]; then
+    echo "REFUSING: $b missing after the build -- the daemon did not reach the"
+    echo "          ramfs staging, so the guest would run without it."
+    exit 4
+  fi
+  if [ ! "$b" -nt "$STAMP" ]; then
+    echo "REFUSING: $b is OLDER than this run -- a stale daemon survived and"
+    echo "          would be baked in under the pinned source's name."
+    exit 4
+  fi
+  echo "-- fresh from this run: $(shasum -a 256 "$b" | cut -c1-16)  $b"
+done
+echo "-- pin VERIFIED IN THE OUTPUT: stratumd configured from $STRATUM_SRC"
 provenance "post-build (my kernel, paired images)"
 
 # Stage 3 -- verify the image by CONTENT, not by the build's exit code. This is
