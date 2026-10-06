@@ -461,7 +461,7 @@ is recorded for history; it no longer governs. The preserved owner draft is
 still unapplied, and private async, the replacement accounting and the clipboard
 all remain gated on their own qualification.
 
-## Corona AS-R9: charge settlement inside the drop (October 5 -- SOURCE COMPLETE, UNRUN)
+## Corona AS-R9: charge settlement inside the drop (October 5-6 -- SOURCE COMPLETE, GUEST UNRUN)
 
 Corona checkout `/Users/northkillpd/projects/thylacine-corona`, branch
 `corona/async-memory`, base `5ff62b78809846af4780ec41f82d1676e7584e80` (verified
@@ -648,3 +648,98 @@ mutation, not of the repair.
 contract), `sub-kernel-vma`, `sub-kernel-loom`, `sub-kernel-weft`. `quaestor lint`
 reports 0 failures; its 2 warnings (`sub-kernel-loom-pools` section order, 47
 stale dossiers) are pre-existing and not introduced here.
+
+### October 6: the blocker was mis-measured, and the requirement collapsed
+
+Superseding, not rewriting, the October 5 record above. Everything it states about
+the defect and the repair still holds; two things it states about the OBSTACLE were
+wrong, and the measured corrections change the plan.
+
+**The 21G reclaim was wrong twice over.** The October 5 posture was "blocked until
+Main frees `thylacine-s7ci/build` (21G)". Both halves failed on measurement. Main's
+declared work showed their legs had NOT ended -- that worktree was the input to the
+next step of their landing, not residue -- so the request was withdrawn before they
+acted on it. And the tree is itself an APFS clone of their primary's `build/`, so
+removing it frees only what its bake wrote, never 21G. That is the same clone-
+accounting error made earlier the same day on another peer's trees and already
+written down; it recurred because it had been stored as a fact about those trees
+instead of as a rule about clone families. On this volume no `du` figure is
+reclaimable space: only what a tree UNIQUELY wrote is, and `du` cannot show that.
+
+**The requirement collapsed from 14-21G to a kernel build.** `git diff --name-only
+5ff62b788..HEAD` touches `kernel/`, `docs/` and `vault/` ONLY -- zero files under
+`usr/`. The kernel ELF is loaded separately from the ramfs, so nothing in this
+change can invalidate a userspace artifact, and a from-zero `--config ci` bake was
+never the requirement. The binding constraint was always the Mac LEASE, not disk.
+
+**Astra approved an incremental cache (Yip 0169) under provenance conditions**, and
+one of those conditions found something this write-up had missed. Her caveat was
+that unchanged `usr/` does not by itself prove unchanged generated headers or ABI
+dependencies. Checked rather than re-asserted: `kernel/include/thylacine/vma.h` IS
+in the diff and three files under `usr/` reference it -- but all three are COMMENTS,
+and an anchored grep for a real `#include` directive across `usr/` and `lib/`
+returns nothing, so no userspace translation unit compiles against it. The change
+to that header is a single added declaration (`vma_free_settled_deferred`) with no
+struct, constant or enum touched, and `burrow.h` is referenced by zero userspace
+files. The only generated header is `corvus_system_recovery_phrase.h`, which no
+kernel header feeds. The inherited objects are therefore sound as a CACHE, and are
+treated as cache only -- never as evidence.
+
+**That check produced a finding worth more than itself.** The three references are a
+hand-maintained MIRROR: `VMA_PROT_READ/WRITE/EXEC` (`vma.h:31-33`) are duplicated as
+`T_PROT_READ/WRITE/EXEC` (`libt/include/thyla/syscall.h:602-604`) and restated in
+libthyla-rs, each under a comment reading "MUST mirror" -- and that comment is the
+whole enforcement. No `_Static_assert` ties the two sets and no `tools/` script
+compares them. The values agree today, so there is no live defect; a drift would make
+userspace and the kernel disagree SILENTLY about memory-protection bits, which is
+W^X-adjacent (I-12). Enqueued as a P3 hazard, pre-existing and not introduced here;
+the fix is a derived check, because userspace cannot include the kernel header and a
+name-pinned guard is re-pointed by hand.
+
+**Three further commits, all host-free.** `burrow.settled_drop_exact_payer` was given
+a positive control it lacked: both its arms were zero-assertions (a NULL payer settles
+nothing; a non-payer settles nothing) and nothing in the fixture established that a
+charge was ever present to refuse, so a `burrow_charge_record` that recorded nothing
+would have satisfied both. The mutation set and a sibling witness caught that case
+anyway, so the suite was never vacuous -- but a test whose discrimination lives in a
+sibling is one deletion from proving nothing. `burrow_is_shared_out` was deleted after
+establishing that THIS repair removed its last caller (the eager-ANON arm of
+`vma_detach_range_in` at base), making it the repair's own residue and the same drift
+hazard the earlier self-audit removed one layer down. And the host double is now
+committed as evidence rather than left untracked, since it is the only thing that
+reproduces AS-R9 and it is cited in the queue, the dossier and three peer calls.
+
+**A flaw in the verification harness, recorded because it bears on the figures above.**
+The pre-lease syntax check extracted base `.c` files but compiled them with
+`-I kernel/include` -- the CURRENT tree's headers. Deleting a declaration from
+`burrow.h` therefore moved the BASE count from 0 to 1 and the check reported
+REGRESSED on a change that REMOVES a warning. A baseline that moves when the thing
+under test changes is not a baseline. It now extracts the whole base tree with
+`git archive` and compiles against the base's own headers, and a count below base
+reports IMPROVED rather than failing. Under the corrected baseline the other four
+files' counts are byte-identical, so every figure recorded in the October 5 section
+stands.
+
+**Exact-current guest verdict: there is none.** No build, no boot, no native test, no
+model, no SMP gate, on any host, ever. The four new `burrow.*` tests are registered
+and have never executed. The only evidence is the off-guest host double, whose stated
+boundary establishes nothing about ARM weak memory, real SLUB timing, or syscall
+reachability.
+
+**The lease window is a prepared script**, `work/oct5-as-r9/lease-runbook.sh`, so a
+contended resource is spent executing rather than exploring. Stage 0 re-runs the spec
+obligation -- `burrow.tla`'s three buggy cfgs must still violate `NoUseAfterFree`, and
+`capacity.tla`'s two must violate `NoOrphan` with `ChargeConserved` holding ahead of
+it, `capacity_buggy_detach_no_refund` being literally AS-R9's second arm -- and needs
+no image or artifacts at all, so it runs regardless of the cache. Stage 3 verifies the
+image by CONTENT, since the bake-trap class fails as absent content behind a green
+ledger: the suite total must rise by exactly 4 and the four witness names must appear
+in the ELF, gated behind a denominator control (a base-era test name) so a broken
+search cannot be misread as missing tests. Stage 5 is `ci-smp-gate`, required because
+this is an SMP race fix and a single-CPU green proves little. Stage 6 is a
+second-silicon pass on thyla-pi, the only non-Apple ARM64 in the loop, because a race
+fix green on one memory model is one reading and only a second axis separates two
+causes. The runbook carries its own free-space floor, set at Main's 6 GiB plus the
+expected delta, because this base predates `disk_floor_check` and an unguarded bake
+here dies on ENOSPC instead of refusing -- the failure mode that broke every agent's
+shell on October 5.
