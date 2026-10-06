@@ -40,9 +40,38 @@ floor start
 # they are the first thing to do when the lease lands.
 # TRAP: ~/tla2tools.jar is STALE -- use the jar SPEC-POLICY.md names.
 if [ "${SPECS:-1}" = 1 ]; then
-  echo "-- stage 0: re-run burrow.tla + capacity.tla buggy cfgs (see docs/agent/SPEC-POLICY.md)"
-  echo "   a buggy cfg that now PASSES is a finding, not a convenience: it means"
-  echo "   the spec no longer constrains what it was written to catch."
+  # The jar lives in /tmp, which the 2026-10-06 reboot CLEARED -- and
+  # ~/tla2tools.jar is STALE (it reports violated temporal properties
+  # differently). Fetch SPEC-POLICY's pinned release, then PRINT the version,
+  # because the whole point of pinning it is that the output format differs.
+  JAR=/tmp/tla2tools.jar
+  [ -f "$JAR" ] || curl -sL -o "$JAR" \
+    https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+  java -cp "$JAR" tlc2.TLC 2>&1 | grep -m1 'TLC2 Version' || true
+
+  # CLEAN-cfg runs are SUSPENDED (SPEC-POLICY, since 2026-05-21). The binding
+  # obligation is the BUGGY cfgs: each must STILL produce its counterexample.
+  # A buggy cfg that now PASSES is a FINDING, not a convenience -- it means the
+  # spec stopped constraining the thing it was written to catch, which is
+  # exactly how a repair can silently void its own proof.
+  cd specs
+  # burrow.tla -- I-7, the dual-refcount lifecycle whose {0,0} decision this
+  # repair RELOCATED into the settled drops. Each must violate NoUseAfterFree.
+  for c in burrow_buggy_free_on_close burrow_buggy_free_on_unmap burrow_buggy_never_free; do
+    echo "-- $c (expect: NoUseAfterFree VIOLATED)"
+    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" burrow.tla 2>&1 | tail -4
+  done
+  # capacity.tla -- the I-32 charge accounting itself. detach_no_refund is
+  # literally AS-R9's second arm: the holder that frees finds the record
+  # cleared and refunds nothing. DISCRIMINATING form: each must violate
+  # NoOrphan *with ChargeConserved listed ahead of it and HOLDING*. A run that
+  # reported the COUNTER violated instead would mean the model no longer says
+  # the counter is blind -- a different finding, not a pass.
+  for c in capacity_buggy_detach_no_refund capacity_buggy_replace_orphans; do
+    echo "-- $c (expect: NoOrphan VIOLATED, ChargeConserved HOLDING)"
+    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" capacity.tla 2>&1 | tail -6
+  done
+  cd "$ROOT"
 fi
 floor post-specs
 
