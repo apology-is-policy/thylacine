@@ -4427,6 +4427,128 @@ unsafe fn run_linux() -> ! {
         bad[nbad - 1] = b'\n';
     }
     leg!(rep, nbad == 0, &bad[..nbad]); // L318: every leg above, by name
+
+    // --- L319-L328 (VIVARIUM 6.29): the sleep rows. Before them nanosleep
+    // and clock_nanosleep FORWARDed to ENOSYS, so musl's sleep(), usleep() and
+    // nanosleep() returned at once. Like L311-L318 the legs all run and report
+    // together, so a kernel without the rows names every leg it breaks. A
+    // failure appends "<mark><n> " -- n: s ENOSYS, z 0, i EINTR, v EINVAL,
+    // o EOPNOTSUPP, f EFAULT, e another error, k the expected answer with the
+    // clock or the time left wrong.
+    const NR_NANOSLEEP: u64 = 101;
+    const NR_CLOCK_NANOSLEEP: u64 = 115;
+    const TIMER_ABSTIME: u64 = 1;
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const NEG_EOPNOTSUPP: i64 = -95;
+    const MS: u64 = 1_000_000;
+    const SEC: u64 = 1_000_000_000;
+    unsafe fn clock_ns(clk: u64) -> u64 {
+        let mut t = [0u64; 2];
+        let _ = svc3(NR_CLOCK_GETTIME, clk, t.as_mut_ptr() as u64, 0);
+        t[0] * SEC + t[1]
+    }
+    fn ns_leg(bad: &mut [u8; 96], nbad: &mut usize, mark: &[u8; 4], n: i64, want: i64,
+              also: bool) {
+        if n == want && also {
+            return;
+        }
+        let c = if n == want {
+            b'k'
+        } else {
+            match n {
+                NEG_ENOSYS => b's',
+                0 => b'z',
+                NEG_EINTR => b'i',
+                NEG_EINVAL => b'v',
+                NEG_EOPNOTSUPP => b'o',
+                NEG_EFAULT => b'f',
+                _ => b'e',
+            }
+        };
+        if *nbad + 6 <= bad.len() {
+            bad[*nbad..*nbad + 4].copy_from_slice(mark);
+            bad[*nbad + 4] = c;
+            bad[*nbad + 5] = b' ';
+            *nbad += 6;
+        }
+    }
+    let mut sbad = [0u8; 96];
+    let mut nsb = 0usize;
+    let req: [i64; 2] = [0, (20 * MS) as i64];
+
+    // L319: nanosleep(20 ms) lasts at least 20 ms on CLOCK_MONOTONIC.
+    let t0 = clock_ns(CLOCK_MONOTONIC);
+    let n = svc3(NR_NANOSLEEP, req.as_ptr() as u64, 0, 0);
+    let slept = clock_ns(CLOCK_MONOTONIC) - t0;
+    ns_leg(&mut sbad, &mut nsb, b"L319", n, 0, slept >= 20 * MS);
+
+    // L320: a relative clock_nanosleep on CLOCK_REALTIME, the same.
+    let t0 = clock_ns(CLOCK_MONOTONIC);
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_REALTIME, 0, req.as_ptr() as u64, 0);
+    let slept = clock_ns(CLOCK_MONOTONIC) - t0;
+    ns_leg(&mut sbad, &mut nsb, b"L320", n, 0, slept >= 20 * MS);
+
+    // L321: an absolute CLOCK_MONOTONIC sleep returns once the clock reads it.
+    let target = clock_ns(CLOCK_MONOTONIC) + 20 * MS;
+    let at: [i64; 2] = [(target / SEC) as i64, (target % SEC) as i64];
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_MONOTONIC, TIMER_ABSTIME, at.as_ptr() as u64, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L321", n, 0, clock_ns(CLOCK_MONOTONIC) >= target);
+
+    // L322: and an absolute CLOCK_REALTIME one, on the wall clock.
+    let target = clock_ns(CLOCK_REALTIME) + 20 * MS;
+    let at: [i64; 2] = [(target / SEC) as i64, (target % SEC) as i64];
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_REALTIME, TIMER_ABSTIME, at.as_ptr() as u64, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L322", n, 0, clock_ns(CLOCK_REALTIME) >= target);
+
+    // L323: a tv_nsec of 1e9, on both rows, and a negative tv_sec are EINVAL.
+    let big: [i64; 2] = [0, SEC as i64];
+    let neg: [i64; 2] = [-1, 0];
+    let n = svc3(NR_NANOSLEEP, big.as_ptr() as u64, 0, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L323", n, NEG_EINVAL, true);
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_MONOTONIC, 0, big.as_ptr() as u64, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L323", n, NEG_EINVAL, true);
+    let n = svc3(NR_NANOSLEEP, neg.as_ptr() as u64, 0, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L323", n, NEG_EINVAL, true);
+
+    // L324: an unmapped request is EFAULT.
+    let n = svc3(NR_NANOSLEEP, UNMAPPED_USER_VA, 0, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L324", n, NEG_EFAULT, true);
+
+    // L325: the clocks Linux reads but keeps no sleep for are EOPNOTSUPP, judged
+    // before the request is read; a clock clock_gettime refuses is EINVAL.
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_MONOTONIC_COARSE, 0, req.as_ptr() as u64, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L325", n, NEG_EOPNOTSUPP, true);
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_MONOTONIC_RAW, 0, UNMAPPED_USER_VA, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L325", n, NEG_EOPNOTSUPP, true);
+    let n = svc4(NR_CLOCK_NANOSLEEP, CLOCK_PROCESS_CPUTIME_ID, 0, req.as_ptr() as u64, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L325", n, NEG_EINVAL, true);
+
+    // L326: a zero sleep returns 0.
+    let zero: [i64; 2] = [0, 0];
+    let n = svc3(NR_NANOSLEEP, zero.as_ptr() as u64, 0, 0);
+    ns_leg(&mut sbad, &mut nsb, b"L326", n, 0, true);
+
+    // L327: a child's SIGCHLD mid-sleep ends nanosleep with EINTR once the
+    // handler has run, and rem holds what was left: more than 0, less than the
+    // 10 s asked. The child exits after 1 s; the 10 s window (L313-L317's) keeps
+    // a slow host from letting the deadline win first.
+    let ten: [i64; 2] = [10, 0];
+    let mut rem: [i64; 2] = [-1, -1];
+    let f_pre = sig_fired();
+    let int = fork_interrupter(1);
+    let f0 = sig_fired();
+    let n = svc3(NR_NANOSLEEP, ten.as_ptr() as u64, rem.as_mut_ptr() as u64, 0);
+    let ran = sig_fired() > f0 && f0 == f_pre;
+    let left = rem[0].wrapping_mul(SEC as i64).wrapping_add(rem[1]);
+    ns_leg(&mut sbad, &mut nsb, b"L327", n, NEG_EINTR,
+           ran && (0..SEC as i64).contains(&rem[1]) && left > 0 && left < 10 * SEC as i64);
+    leg!(rep, int > 0 && reap(int), b"L327b\n");
+
+    if nsb > 0 {
+        sbad[nsb - 1] = b'\n';
+    }
+    leg!(rep, nsb == 0, &sbad[..nsb]); // L328: every sleep leg above, by name
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
 

@@ -18,7 +18,7 @@ design:
   - "docs/PORTABILITY.md section 5"
   - "docs/TICKLESS-IDLE.md"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -37,6 +37,16 @@ bring-up has enabled that. The periodic interrupt is per-CPU: every CPU must arm
 its own, and does so in its own handler on every fire. Two derived clocks are
 published — one that only ever moves forward, and one that a privileged caller
 may step.
+
+**A step reaches the sleepers that count on the wall clock.** Every wait in the
+kernel counts on the monotonic counter, so a sleep whose deadline is an instant
+on the wall clock (the Linux phenotype's absolute `clock_nanosleep` on
+`CLOCK_REALTIME`, [[sub-kernel-vivarium]]) holds a monotonic deadline derived
+through the offset. Such a sleeper hooks itself on the wall clock's step list
+(`timer_wallclock_step_register`) before it reads the offset, and the runtime
+setter walks the list after it publishes a new offset, so every sleeper derives
+its deadline again (VIVARIUM 6.29). The boot anchor does not walk it: no process
+can sleep on the wall clock that early.
 
 **Which timer.** The architecture provides two, and this uses the *virtual*
 one. Not a preference: under the hypervisor this is developed on, the physical
@@ -128,16 +138,19 @@ userspace agree to use the virtual one.
 
 ## Data structures
 
-Four file-scope values, no structures. The frequency and the reload count are
+Four file-scope values and one list. The frequency and the reload count are
 written once on the boot CPU before any secondary exists, and read
 unsynchronized everywhere after — safe because the bring-up barrier orders the
 writes before any secondary's first read. The tick counter is `volatile` and
 boot-CPU-only. The wall-clock offset is a single aligned machine word accessed
-with atomic load and store.
+with atomic load and store. The step list (`g_wallclock_step_waiters`) is a
+`poll_waiter_list` of hooks that live on their sleepers' stacks
+([[sub-kernel-poll]]).
 
 ## Concurrency
 
-No locks anywhere. Three different justifications, each stated at its site:
+No locks for the clocks themselves. Three different justifications, each
+stated at its site:
 
 - Frequency and reload: written once before secondaries exist; ordered by the
   bring-up barrier. A future dynamic reprogrammer would need to add ordering.
@@ -147,6 +160,15 @@ No locks anywhere. Three different justifications, each stated at its site:
 
 The countdown and control registers are banked per-CPU, so every arm is local
 by construction.
+
+The step list has the one lock, internal to the list. Its correctness is an
+order, the one poll's producers keep: the setter stores the offset, then walks
+the list; a sleeper hooks itself, then reads the offset. A step whose walk
+precedes the hook released the list lock after its store, so the sleeper's read,
+which follows its own acquire of that lock, sees the new offset; a walk that
+follows the hook finds it and wakes the sleeper (I-9). A sleeper unhooks before
+its frame dies, and the walk holds the list lock across each wakeup, so no walk
+touches a dead hook.
 
 ## Invariants enforced
 
@@ -187,8 +209,15 @@ the hypervisor from a third of a CPU spent on nothing to approximately none.
   reintroduces a read-modify-write race and changes its rate.
 - The wall-clock offset must stay one word. A second field makes the lock-free
   read wrong, and the runtime setter is what makes that reachable.
+- The runtime setter walks the step list after it publishes, never before; a
+  walk first can wake a sleeper that then reads the old offset and sleeps on
+  toward the instant's old place. Any new path that changes the offset at
+  runtime must walk the list too.
 - The nanosecond conversions must keep the split form; a flat multiply overflows
-  within minutes.
+  within minutes. The conversion to a counter value saturates
+  (`timer_ns_to_counter_at`): above a 1 GHz counter, which a 32-bit CNTFRQ
+  allows, a far deadline would otherwise wrap to a near one, and a saturated
+  sleep request would spin.
 - The clamp bounds are a public contract; the single-shot arm relies on them.
 - The plausibility window needs both sides — the ceiling is the one that is easy
   to drop and hard to notice missing.

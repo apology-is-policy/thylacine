@@ -1489,3 +1489,19 @@ children, and a shell would stop waiting for a job that is still running.
 Nothing was reaped, so nothing is written to `wstatus`; the handler runs at the
 call's tail. The native `SYS_WAIT` handler and the kernel's own reaper in
 `joey.c` never see -2: neither runs with `note_interruptible` set.
+
+## The sleep rows' shells (2026-10-05, VIVARIUM 6.29)
+
+`viv_nanosleep(req, rem)` and `viv_clock_nanosleep(clk, flags, req, rem)` are
+the uaccess half of the sleep rows; the sleep itself is `vivarium_clock_sleep`
+([[sub-kernel-vivarium]]). The order is Linux's: `clock_nanosleep` judges the
+clock (`vivarium_clock_nanosleep_decide`) before it touches `req`; then
+`viv_sleep_req` validates and copies the request in (EFAULT) and judges it
+(EINVAL); then `viv_sleep` sleeps. `struct t_timespec` is Linux's timespec
+field for field, so the copy is a copy. `rem` is written only for a relative
+sleep that a caught note ended, with what was left, and through
+`uaccess_copy_out`, which takes any alignment; a faulting `rem` turns the
+`EINTR` into `EFAULT`, as Linux's copy-out does. An absolute sleep never writes
+`rem`, and a completed sleep never touches it. Both dispatch arms return the
+shell's s64 straight into `x0`, so 101 and 115 never reach the native
+`SYS_JIT_CREATE` and `SYS_PCI_IRQ_CREATE` arms for a Linux caller.

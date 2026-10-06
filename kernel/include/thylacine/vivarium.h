@@ -351,6 +351,24 @@ enum {
     VIV_LINUX_CLOCK_GETTIME   = 113,
     VIV_LINUX_GETTIMEOFDAY    = 169,
 
+    // The sleep rows (VIVARIUM.md section 6.29). BOTH ARE BELOW THE NATIVE
+    // CEILING, so each owes the per-number collision paragraph. The first half
+    // is shared: a PHENO_LINUX Proc cannot reach a native number at all. The
+    // second half -- what a NATIVE program MIS-DECLARED as PHENO_LINUX now
+    // reaches -- is the same for both: a validated 16-byte copy-in from the
+    // caller's own memory, a sleep of its own thread, and on EINTR at most a
+    // validated 16-byte write into its own address space. Neither shell
+    // consults a capability or creates an object.
+    //
+    //   101 vs SYS_JIT_CREATE(length, out_va). nanosleep reads args[0] as the
+    //       request and args[1] as rem. No code region is made and CAP_JIT is
+    //       never asked.
+    //   115 vs SYS_PCI_IRQ_CREATE(handle, mode, ordinal). clock_nanosleep reads
+    //       args[0] as a clock id and args[1] as flags; no handle is looked
+    //       up and no IRQ object is made.
+    VIV_LINUX_NANOSLEEP       = 101,
+    VIV_LINUX_CLOCK_NANOSLEEP = 115,
+
     // The path-mutation family (#50; VIVARIUM.md section 6.24). Three of the
     // four are BELOW the native ceiling, so each owes the per-number collision
     // paragraph the startup-batch block above demands. The shared first half
@@ -3009,7 +3027,38 @@ bool vivarium_setid_is_noop(u32 requested, u32 current_mapped);
 // native T_CLOCK_* and nothing else -- the timespec is byte-identical, so the
 // number map is the whole translation. Returns false for a clk_id with no
 // Thylacine clock (the shell answers -EINVAL). See the impl for the per-id claims.
+// clockid_t is an int: only the low 32 bits are read, as Linux reads them.
 bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out);
+
+// clock_nanosleep(clk, flags, req, rem) (VIVARIUM.md section 6.29): the clock,
+// judged first, as Linux judges it. Returns 0 with the native clock and
+// whether the request is an instant (TIMER_ABSTIME, the one flag Linux reads),
+// or the errno: EINVAL for a clock clock_gettime's map does not know,
+// EOPNOTSUPP for one it reads but Linux keeps no sleep for. Derived from that
+// map, so the two calls agree on which clocks exist.
+s32 vivarium_clock_nanosleep_decide(u64 linux_clk_id, u64 flags,
+                                    u64 *thyla_clk_id_out, bool *abstime_out);
+
+// A sleep's request (both sleep rows): false -- EINVAL -- unless tv_sec >= 0
+// and 0 <= tv_nsec < 1e9 (Linux's timespec64_valid). Otherwise *ns_out is its
+// length in ns, saturated at U64_MAX.
+bool vivarium_sleep_req_ns(s64 tv_sec, s64 tv_nsec, u64 *ns_out);
+
+// What ended a sleep's wait means, in Linux's do_nanosleep order: `ts` is the
+// TSLEEP_* outcome; `deadline` and `now` are on one clock. 0 once now has
+// reached the deadline, whatever ended the wait -- the expiry wins over a
+// note; 0 for death; -T_E_INTR for a caught note before the deadline, with what
+// was left in *rem_ns when rem_ns is not NULL; 1 to sleep again.
+s64 vivarium_sleep_verdict(int ts, u64 deadline, u64 now, u64 *rem_ns);
+
+// The sleep under both rows (the shells in syscall.c do the uaccess). `wall`
+// picks CLOCK_REALTIME, which matters only to an absolute sleep: a relative one
+// counts on the monotonic clock whatever its clock (POSIX; Linux turns a
+// relative REALTIME timer into a MONOTONIC one). `req_ns` is a length, or with
+// `abstime` an instant on the clock. Returns 0 once the time has come (or for
+// death), -T_E_INTR for a caught note before it -- a relative sleep then
+// reports what was left in *rem_ns. Sleeps on the calling thread.
+s64 vivarium_clock_sleep(bool wall, bool abstime, u64 req_ns, u64 *rem_ns);
 
 // -----------------------------------------------------------------------------
 // pipe2 (#155, LINEAGE L-6c). A shell cannot build a pipeline without it, and on

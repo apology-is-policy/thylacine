@@ -733,6 +733,13 @@ fn step_meets_death(child: &Child) -> Result<(), &'static str> {
 // first instruction, the only write to x23: the step that meets the note must
 // report at the handler with x23 unchanged (the note came before the stepped
 // instruction) and the handler not yet run.
+//
+// The loop makes no syscall, so the stop that finds it parks in the IRQ tail,
+// which delivers no notes (DEBUG-FS-DESIGN 5g; seam-el0-irq-tail-no-notes). A
+// step from there runs its instruction before the note. So the leg always steps
+// once before it seeks the top: every step parks the child in the synchronous
+// tail, whose resume meets the note. A child that stopped at the top already
+// would otherwise take no step, and about half the children do.
 fn step_meets_handler(child: &Child) -> Result<(), &'static str> {
     let pid = child.pid();
     let mut s = stop_in_loop(pid, in_caught_loop)?;
@@ -742,14 +749,15 @@ fn step_meets_handler(child: &Child) -> Result<(), &'static str> {
     if handler == 0 || handler >= USER_VA_LIMIT || region == 0 || region >= USER_VA_LIMIT {
         return Err("debug-probe: FAIL -- caught-step: regs x21/x22 not EL0 VAs\n");
     }
-    for _ in 0..4 {
+    step_regs(&mut s, "debug-probe: FAIL -- caught-step: the first step\n")?;
+    for _ in 0..3 {
         if u64_le(&s.regs, R_PC) == top {
             break;
         }
         step_regs(&mut s, "debug-probe: FAIL -- caught-step: step to the loop's top\n")?;
     }
     if u64_le(&s.regs, R_PC) != top {
-        return Err("debug-probe: FAIL -- caught-step: three steps never reached the loop's top\n");
+        return Err("debug-probe: FAIL -- caught-step: four steps never reached the loop's top\n");
     }
     let x23 = u64_le(&s.regs, R_X23);
     notes::send(NoteTarget::Pid(pid), "interrupt")

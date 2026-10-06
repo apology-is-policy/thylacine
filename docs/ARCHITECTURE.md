@@ -1684,8 +1684,8 @@ reach has opted in, and each unwinds with nothing consumed and returns
   next waiter.
 - **The sleep under `nanosleep` and `clock_nanosleep`** (VIVARIUM 6.29). Here
   the deadline wins, as in Linux's `do_nanosleep`: a sleep whose deadline has
-  passed returns 0 even with a note pending, and only a note before the
-  deadline returns `EINTR`, with the time left.
+  passed returns 0 even with a note pending, and only a note or a death
+  before the deadline returns `EINTR`, with the time left.
 
 Three waits a listed call can reach do not opt in. The 9P client's send side is
 the first: a back-pressured sender's park and its own pump. An unwind there

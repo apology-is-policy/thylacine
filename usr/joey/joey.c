@@ -11199,8 +11199,9 @@ int main(void) {
                 // names the failing property, and a wedged/killed container
                 // still leaves whatever it managed to write. Room for a report
                 // that names several legs (the probe's L311-L318 report
-                // together), not only the first.
-                char hmark[64];
+                // together; L319-L328 name up to 13 marks of 6 bytes), not
+                // only the first.
+                char hmark[128];
                 for (unsigned i = 0; i < sizeof(hmark); i++) hmark[i] = 0;
                 long rfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
                                   T_OREAD);

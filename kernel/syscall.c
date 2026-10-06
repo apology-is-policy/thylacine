@@ -13213,6 +13213,61 @@ static s64 viv_gettimeofday_write(u64 tv_va, u64 tz_va) {
     return 0;
 }
 
+// =============================================================================
+// The sleep rows (VIVARIUM.md section 6.29): nanosleep (101), clock_nanosleep
+// (115). The shells do the uaccess; the sleep is vivarium_clock_sleep.
+// =============================================================================
+
+// Copy a sleep's request in and judge it: EFAULT, then EINVAL, Linux's order.
+// struct t_timespec is Linux's struct timespec field for field.
+static s64 viv_sleep_req(u64 req_va, u64 *ns_out) {
+    struct t_timespec ts;
+    if (!sys_validate_user_buf(req_va, sizeof(ts)) ||
+        uaccess_copy_in(&ts, req_va, sizeof(ts)) != 0)
+        return -(s64)T_E_FAULT;
+    if (!vivarium_sleep_req_ns(ts.tv_sec, ts.tv_nsec, ns_out))
+        return -(s64)T_E_INVAL;
+    return 0;
+}
+
+// Sleep, then write what was left of an interrupted relative sleep to `rem`.
+// Linux writes `rem` for nothing else, and a write that faults turns the EINTR
+// into EFAULT, as its copy-out does.
+static s64 viv_sleep(bool wall, bool abstime, u64 req_ns, u64 rem_va) {
+    u64 left = 0;
+    s64 rc = vivarium_clock_sleep(wall, abstime, req_ns, &left);
+    if (rc != -(s64)T_E_INTR || abstime || rem_va == 0) return rc;
+    struct t_timespec rem = {
+        .tv_sec  = (s64)(left / 1000000000ull),
+        .tv_nsec = (s64)(left % 1000000000ull),
+    };
+    if (!sys_validate_user_buf(rem_va, sizeof(rem)) ||
+        uaccess_copy_out(rem_va, &rem, sizeof(rem)) != 0)
+        return -(s64)T_E_FAULT;
+    return rc;
+}
+
+// nanosleep(req, rem): a relative sleep on CLOCK_MONOTONIC.
+static s64 viv_nanosleep(u64 req_va, u64 rem_va) {
+    u64 ns;
+    s64 rc = viv_sleep_req(req_va, &ns);
+    if (rc != 0) return rc;
+    return viv_sleep(false, false, ns, rem_va);
+}
+
+// clock_nanosleep(clk, flags, req, rem): the clock is judged before the request
+// is read, Linux's order.
+static s64 viv_clock_nanosleep(u64 clk, u64 flags, u64 req_va, u64 rem_va) {
+    u64  tclk;
+    bool abstime;
+    s32  err = vivarium_clock_nanosleep_decide(clk, flags, &tclk, &abstime);
+    if (err != 0) return -(s64)err;
+    u64 ns;
+    s64 rc = viv_sleep_req(req_va, &ns);
+    if (rc != 0) return rc;
+    return viv_sleep(tclk == T_CLOCK_REALTIME, abstime, ns, rem_va);
+}
+
 // The 9P-dirent -> linux_dirent64 re-encode (the getdents64 chunk; VIVARIUM.md
 // section 6.25). PURE kernel-buffer transform -- no uaccess, no Proc -- so the
 // format row is unit-testable with byte arrays. Source: the spoor_readdir_run
@@ -14699,6 +14754,14 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // microsecond timeval, so the shell reads the clock and writes the
         // converted struct itself. See viv_gettimeofday_write.
         return viv_gettimeofday_write(args[0], args[1]);
+
+    case VIV_LINUX_NANOSLEEP:
+        // nanosleep(req, rem): x0 req, x1 rem.
+        return viv_nanosleep(args[0], args[1]);
+
+    case VIV_LINUX_CLOCK_NANOSLEEP:
+        // clock_nanosleep(clk, flags, req, rem): x0..x3.
+        return viv_clock_nanosleep(args[0], args[1], args[2], args[3]);
 
     case VIV_LINUX_SETUID:
         // setuid(uid): x0. Identity is set once at spawn and immutable on a

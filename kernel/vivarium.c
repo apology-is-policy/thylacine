@@ -11,10 +11,12 @@
 #include <thylacine/page.h>             // D-3: PAGE_SIZE bounds the FILE arm's offset
 #include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
 #include <thylacine/proc.h>             // #150: PRINCIPAL_SYSTEM / GID_SYSTEM
+#include <thylacine/rendez.h>           // the TSLEEP_* outcomes a sleep row judges
 #include <thylacine/spoor.h>            // NP-5: the socktab's readiness cache
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"       // the sleep rows: both clocks + the step list
 #include "../mm/slub.h"              // the fork-time sigtab clone (kzalloc)
 
 // The native ceiling, pinned. vivarium.h cannot see syscall.h (the dependency is
@@ -531,6 +533,11 @@ static const struct viv_reject g_viv_rejects[] = {
     // nanoseconds -- a real struct conversion. Both shells land in this commit.
     { VIV_LINUX_CLOCK_GETTIME,   VIV_TIER2 },  // clk_id map -> SYS_CLOCK_GETTIME
     { VIV_LINUX_GETTIMEOFDAY,    VIV_TIER2 },  // realtime ns -> timeval {sec,usec}
+    // The sleep rows (VIVARIUM.md section 6.29): shells over one sleep core, not
+    // over the zero-fd ppoll sleep, because Linux's order at the deadline is not
+    // poll's -- here the expiry wins over a pending note.
+    { VIV_LINUX_NANOSLEEP,       VIV_TIER2 },  // relative, CLOCK_MONOTONIC
+    { VIV_LINUX_CLOCK_NANOSLEEP, VIV_TIER2 },  // the clock map + TIMER_ABSTIME
 
     // The git chunk (VIVARIUM.md section 6.26). faccessat is a real translation
     // (stat + perm_check); geteuid/getegid are the one-principal twins of
@@ -595,6 +602,8 @@ enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args) {
     case VIV_LINUX_PPOLL:
     case VIV_LINUX_PSELECT6:
     case VIV_LINUX_FUTEX:
+    case VIV_LINUX_NANOSLEEP:
+    case VIV_LINUX_CLOCK_NANOSLEEP:
     case VIV_LINUX_RT_SIGSUSPEND:
     case VIV_LINUX_RT_SIGTIMEDWAIT:
         return VIV_INTR_ALWAYS;
@@ -3516,6 +3525,9 @@ enum {
     VIV_CLOCK_BOOTTIME           = 7,
 };
 
+// clock_nanosleep's one flag. Linux reads no other bit of `flags`.
+enum { VIV_TIMER_ABSTIME = 1 };
+
 // clock_gettime(clk_id, tp): the clk_id map. PURE -- it maps the Linux clock id
 // onto one of Thylacine's two clocks and nothing else; the shell in syscall.c
 // does the validated write through the native SYS_CLOCK_GETTIME handler, whose
@@ -3549,9 +3561,14 @@ enum {
 //   per-thread CPU time, which Thylacine does not expose. EINVAL is honest, and
 //   a program that probes clock support tolerates it. Any other id is unknown
 //   to both sides and is EINVAL on both.
+//
+// clockid_t is an int, and Linux reads the low 32 bits of the register, so a
+// clock id with a stray high word names the same clock here. clock_nanosleep's
+// map below is derived from this one: a clock added here becomes one a guest
+// can sleep on, unless that map lists it among the clocks with no sleep.
 bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out) {
     if (!thyla_clk_id_out) return false;
-    switch (linux_clk_id) {
+    switch ((u32)linux_clk_id) {
     case VIV_CLOCK_REALTIME:
     case VIV_CLOCK_REALTIME_COARSE:
         *thyla_clk_id_out = T_CLOCK_REALTIME;
@@ -3565,4 +3582,136 @@ bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out) {
     default:
         return false;
     }
+}
+
+// clock_nanosleep's clock, in Linux's order: a clock the kernel does not know
+// is EINVAL (`clockid_to_kclock` finds nothing), and a known clock whose
+// k_clock keeps no `nsleep` is EOPNOTSUPP. "Known" is clock_gettime's map, so
+// the two calls cannot disagree about which clocks exist. MONOTONIC_RAW and the
+// two COARSE clocks are the ones Linux reads and will not sleep on. The flags
+// are judged after the clock, as Linux judges them, and only TIMER_ABSTIME is
+// read; Linux ignores the other bits.
+s32 vivarium_clock_nanosleep_decide(u64 linux_clk_id, u64 flags,
+                                    u64 *thyla_clk_id_out, bool *abstime_out) {
+    if (!thyla_clk_id_out || !abstime_out) return T_E_INVAL;
+    u64 clk;
+    if (!vivarium_clock_gettime_map(linux_clk_id, &clk)) return T_E_INVAL;
+    switch ((u32)linux_clk_id) {
+    case VIV_CLOCK_MONOTONIC_RAW:
+    case VIV_CLOCK_REALTIME_COARSE:
+    case VIV_CLOCK_MONOTONIC_COARSE:
+        return T_E_OPNOTSUPP;
+    default:
+        break;
+    }
+    *thyla_clk_id_out = clk;
+    *abstime_out = ((u32)flags & VIV_TIMER_ABSTIME) != 0;
+    return 0;
+}
+
+// Linux's timespec64_valid: a negative tv_sec, and a tv_nsec outside [0, 1e9)
+// -- a negative one included -- are EINVAL. The length saturates rather than
+// wraps: a wrapped sum would be a short sleep, and Linux's own conversion
+// saturates too (at KTIME_MAX).
+bool vivarium_sleep_req_ns(s64 tv_sec, s64 tv_nsec, u64 *ns_out) {
+    if (!ns_out) return false;
+    if (tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1000000000) return false;
+    u64 sec = (u64)tv_sec;
+    if (sec > (~0ull - (u64)tv_nsec) / 1000000000ull) {
+        *ns_out = ~0ull;
+        return true;
+    }
+    *ns_out = sec * 1000000000ull + (u64)tv_nsec;
+    return true;
+}
+
+// Linux's do_nanosleep returns 0 once its timer has fired, whatever else is
+// pending, so the clock is asked first. tsleep's outcome only says why the
+// wait ended. Before the deadline a caught note and a death both unwind with
+// EINTR and the time left. A death's value is immaterial when the thread dies
+// at its tail, but a terminate latch can still be revoked before the tail (a
+// peer installs a handler for the note, or ignores it), and then the thread
+// lives on and must not read a short sleep as a full one. A timeout that
+// arrives with the clock still short of the deadline (tsleep rounds the
+// deadline down to a counter value) or a wall-clock step means sleep again.
+s64 vivarium_sleep_verdict(int ts, u64 deadline, u64 now, u64 *rem_ns) {
+    if (deadline <= now) return 0;
+    if (ts == TSLEEP_NOTEINTR || ts == TSLEEP_INTR) {
+        if (rem_ns) *rem_ns = deadline - now;
+        return -(s64)T_E_INTR;
+    }
+    return 1;
+}
+
+// Nothing signals a relative or monotonic sleep's Rendez, so its wait ends on
+// the deadline, a stop's resume, a caught note or death.
+static int clock_sleep_never(void *arg) {
+    (void)arg;
+    return 0;
+}
+
+// A wall-clock sleep's wait also ends when a step walks its hook. The step list
+// sets `ready` under its own lock before the walk's wakeup takes the Rendez
+// lock, and this reads it under the Rendez lock: poll's chain.
+static int clock_sleep_stepped(void *arg) {
+    return ((const struct poll_waiter *)arg)->ready;
+}
+
+// A wrapped deadline would be a short sleep.
+static u64 clock_sleep_add(u64 a, u64 b) {
+    u64 s = a + b;
+    return (s < a) ? ~0ull : s;
+}
+
+// Sleep until timer_now_ns reaches `deadline`. A deadline already past returns
+// 0 before any wait, even with a note pending, and a deadline of 0 -- tsleep's
+// no-deadline sentinel -- never reaches tsleep. After each wait the clock
+// decides (vivarium_sleep_verdict), not tsleep's outcome.
+static s64 clock_sleep_until_mono(u64 deadline, u64 *rem_ns) {
+    struct Rendez r;
+    rendez_init(&r);
+    if (deadline <= timer_now_ns()) return 0;
+    for (;;) {
+        int ts = tsleep_noteintr(&r, clock_sleep_never, NULL, deadline);
+        s64 v = vivarium_sleep_verdict(ts, deadline, timer_now_ns(), rem_ns);
+        if (v <= 0) return v;
+    }
+}
+
+// Sleep until the wall clock reads `instant` (TIMER_ABSTIME on CLOCK_REALTIME).
+// The instant's place on the monotonic timebase moves with every step of the
+// wall clock, so the sleeper hooks the step list BEFORE it reads the offset: a
+// step either published first, and this read sees it, or walks the list after
+// the hook went on, and wakes the sleeper (register-then-observe, I-9). A woken
+// sleeper derives the deadline again. The expiry is judged on the wall clock.
+static s64 clock_sleep_until_wall(u64 instant) {
+    struct Rendez r;
+    rendez_init(&r);
+    for (;;) {
+        struct poll_waiter pw;
+        poll_waiter_init(&pw, &r);
+        timer_wallclock_step_register(&pw);
+        u64 off = timer_wallclock_offset_ns_now();
+        if (instant <= clock_sleep_add(timer_now_ns(), off)) {
+            poll_waiter_list_unregister(&pw);
+            return 0;
+        }
+        // instant > now + off, so the deadline lies ahead of now and is never
+        // the no-deadline 0.
+        int ts = tsleep_noteintr(&r, clock_sleep_stepped, &pw, instant - off);
+        poll_waiter_list_unregister(&pw);
+        s64 v = vivarium_sleep_verdict(ts, instant, timer_realtime_ns(), NULL);
+        if (v <= 0) return v;
+    }
+}
+
+// The sleep both rows share; see vivarium.h. There is no sleep syscall: the
+// sleep is tsleep with nothing to wait for but the deadline. Not
+// sys_poll_sleep_for, whose order at the deadline is poll's.
+s64 vivarium_clock_sleep(bool wall, bool abstime, u64 req_ns, u64 *rem_ns) {
+    if (!abstime)
+        return clock_sleep_until_mono(clock_sleep_add(timer_now_ns(), req_ns), rem_ns);
+    if (wall)
+        return clock_sleep_until_wall(req_ns);
+    return clock_sleep_until_mono(req_ns, NULL);
 }

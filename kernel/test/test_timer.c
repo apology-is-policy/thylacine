@@ -34,6 +34,27 @@ void test_timer_tick_increments(void) {
 // helper is the testable core of timer_arm_oneshot_cnt -- the CNTV_TVAL reload
 // (target - now) bounded to [TIMER_MIN_RELOAD, TIMER_MAX_RELOAD]. Pure, no live
 // timer touched: an arbitrary counter base drives every clamp boundary.
+// The ns -> counter conversion is exact while the counter value fits, and
+// saturates past it: a counter above 1 GHz (CNTFRQ is 32 bits) must not wrap a
+// far deadline to a near one.
+void test_timer_ns_to_counter_saturates(void);
+void test_timer_ns_to_counter_saturates(void) {
+    const u64 max = ~0ull;
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(1000000000ull, 62500000ull), 62500000ull,
+                   "one second at 62.5 MHz");
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(12345ull, 1000000000ull), 12345ull,
+                   "at 1 GHz a count is a nanosecond");
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(max, 1000000000ull), max,
+                   "and the whole range fits");
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(max / 4, 4000000000ull), 18446744073709551612ull,
+                   "at 4 GHz the last value that fits is exact");
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(max / 4 + 1, 4000000000ull), max,
+                   "and the first past it saturates");
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(max, 4000000000ull), max,
+                   "a saturated sleep request stays the farthest deadline, never a near one");
+    TEST_EXPECT_EQ(timer_ns_to_counter_at(max, 0), 0ull, "no counter yet");
+}
+
 void test_timer_oneshot_tval_clamps(void) {
     u64 now = 1000000;
 

@@ -125,11 +125,15 @@ u64 timer_now_ns(void);
 // scheduler-tick scan compares raw counter values (no per-tick
 // division). Returns 0 before timer_init runs.
 //
-// Exact while (ns / 1e9) * CNTFRQ stays within u64 — at a 62.5 MHz
-// counter that is the entire u64 ns range; only a hypothetical counter
-// above ~1 GHz could overflow for a near-UINT64_MAX ns and wrap. v1.0
-// targets (QEMU virt, Pi 5) stay well within range.
+// Exact while the counter value fits in u64, which at 1 GHz or below is the
+// whole ns range. CNTFRQ is a 32-bit field, so a faster counter is admissible;
+// there a value past the top saturates at UINT64_MAX, a deadline never
+// reached, instead of wrapping to a near one.
 u64 timer_ns_to_counter(u64 ns);
+
+// The conversion at a given frequency; timer_ns_to_counter is it at CNTFRQ.
+// Pure, so a test can drive any frequency.
+u64 timer_ns_to_counter_at(u64 ns, u64 freq_hz);
 
 // Spin-wait until at least N ticks have elapsed. Used at boot to
 // observe the timer firing before printing the tick count. WFI inside
@@ -167,6 +171,14 @@ void timer_set_wallclock_anchor(u64 epoch_seconds);
 // enforces the CAP_HOSTOWNER gate + clk_id == REALTIME + bounds epoch_ns so the
 // seconds*1e9 + nsec composition cannot overflow.
 void timer_reset_wallclock_anchor_ns(u64 epoch_ns);
+
+// Hook `pw` on the wall clock's step list, which every runtime re-anchor wakes
+// after it publishes the new offset. For a sleeper whose deadline is an instant
+// on CLOCK_REALTIME: hook, then read the offset, so no step is missed (I-9).
+// The caller unhooks with poll_waiter_list_unregister before `pw` goes out of
+// scope.
+struct poll_waiter;
+void timer_wallclock_step_register(struct poll_waiter *pw);
 
 // Current CLOCK_REALTIME in nanoseconds since the Unix epoch:
 // timer_now_ns() + the wall-clock offset. Before timer_set_wallclock_anchor (or

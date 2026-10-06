@@ -274,6 +274,7 @@ void test_gic_its_commands(void);
 void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
+void test_timer_ns_to_counter_saturates(void);
 void test_timer_arm_oneshot_restores(void);
 void test_extinction_claim_word_exactly_one_winner(void);
 void test_extinction_console_unclaimed_on_clean_boot(void);
@@ -284,6 +285,8 @@ void test_clock_identity_syscalls(void);
 void test_clock_gettime_errors(void);
 void test_clock_settime_reanchors(void);
 void test_clock_settime_cap_gate(void);
+void test_clock_nanosleep_caught_note(void);           // VIVARIUM 6.29
+void test_clock_nanosleep_wall_step(void);             // VIVARIUM 6.29
 void test_hardening_detect_smoke(void);
 void test_hwdebug_dfr0_enumerate(void);
 void test_hwdebug_arm_disarm_roundtrip(void);
@@ -1074,6 +1077,7 @@ void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
 void test_vivarium_mprotect_domain(void);                // B-1a
 void test_vivarium_madvise_domain(void);                 // B-1b
+void test_vivarium_nanosleep_domain(void);               // VIVARIUM 6.29
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d + N-3
 void test_vivarium_futex_decide(void);                   // N-3
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
@@ -2173,6 +2177,7 @@ struct test_case g_tests[] = {
     { "gic.cpu_irq_counter_geometry",  test_gic_cpu_irq_counter_geometry,  false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
+    { "timer.ns_to_counter_saturates", test_timer_ns_to_counter_saturates, false, NULL },
     { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
     { "extinction.claim_word_exactly_one_winner", test_extinction_claim_word_exactly_one_winner, false, NULL },
     { "extinction.console_unclaimed_on_clean_boot", test_extinction_console_unclaimed_on_clean_boot, false, NULL },
@@ -2183,6 +2188,8 @@ struct test_case g_tests[] = {
     { "clock.gettime_errors",          test_clock_gettime_errors,          false, NULL },
     { "clock.settime_reanchors",       test_clock_settime_reanchors,       false, NULL },
     { "clock.settime_cap_gate",        test_clock_settime_cap_gate,        false, NULL },
+    { "clock.nanosleep_caught_note",   test_clock_nanosleep_caught_note,   false, NULL },
+    { "clock.nanosleep_wall_step",     test_clock_nanosleep_wall_step,     false, NULL },
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
     { "alternatives.patch_applied",    test_alternatives_patch_applied,    false, NULL },
     { "alternatives.atomics_correct",  test_alternatives_atomics_correct,  false, NULL },
@@ -3206,6 +3213,7 @@ struct test_case g_tests[] = {
     { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
     { "vivarium.mprotect_domain",        test_vivarium_mprotect_domain,        false, NULL },
     { "vivarium.madvise_domain",         test_vivarium_madvise_domain,         false, NULL },
+    { "vivarium.nanosleep_domain",       test_vivarium_nanosleep_domain,       false, NULL },
     { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.futex_decide",           test_vivarium_futex_decide,           false, NULL },

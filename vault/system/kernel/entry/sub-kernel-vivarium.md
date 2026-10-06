@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -58,6 +58,9 @@ touches EL0.
 | `vivarium_mprotect_decide` | verdict | B-1a: the prot word alone; `addr` / `len` are the shell's (a zero length succeeds, an unaligned address is EINVAL) |
 | `vivarium_madvise_decide` | verdict + kind | B-1b: the advice word alone -- RELEASE (`DONTNEED` / `FREE`) over the decommit core, HINT (twelve) answers 0 / ENOMEM and changes nothing, everything else declines; `addr` / `len` are the shell's |
 | `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths) |
+| `vivarium_clock_nanosleep_decide` | errno + clock + abstime | 6.29: EINVAL exactly where the gettime map refuses (derived), EOPNOTSUPP for MONOTONIC_RAW and both COARSE clocks; only `TIMER_ABSTIME` is read |
+| `vivarium_sleep_req_ns`, `vivarium_sleep_verdict` | bool / verdict | 6.29: the request's validity and saturation; at the deadline the clock beats every wait outcome |
+| `vivarium_clock_sleep` | 0 / `-EINTR` | 6.29: the one entry here that sleeps; a relative sleep counts on the monotonic clock, an absolute `CLOCK_REALTIME` one hooks the step list |
 | `vivarium_{recvfrom,recvmsg,sendto}_decide` | bool + errno | V-5 socket data path |
 | `vivarium_{faccessat,ioctl,futex,getsockopt}_decide` | verdict | the 6.26 git batch + misc |
 | `vivarium_stat_to_linux`, `vivarium_build_sigframe`, `vivarium_uname_fill` | void | fully write `out`, pads included |
@@ -909,3 +912,61 @@ kernel all seven fail. The same handler now interrupts the probe's own blocking
 `wait4` calls when ANOTHER child exits first, which is Linux's behaviour too, so
 every one of them goes through `wait4_r`, a bounded retry on `EINTR`; a probe
 that called `wait4` once would read a sibling's exit as a failure of the leg.
+
+## The sleep rows (2026-10-05, VIVARIUM 6.29)
+
+`{ VIV_LINUX_NANOSLEEP, VIV_TIER2 }` (101) and `{ VIV_LINUX_CLOCK_NANOSLEEP,
+VIV_TIER2 }` (115) land with their shells ([[sub-kernel-syscall-dispatch]]).
+Until them both numbers FORWARDed to ENOSYS, and musl's `sleep()`, `usleep()`
+and `nanosleep()` -- all three reach 101 on aarch64, and none checks the error
+-- returned at once: `busybox sleep 1` did not sleep. Both numbers are below the
+native ceiling (101 is `SYS_JIT_CREATE`, 115 `SYS_PCI_IRQ_CREATE`), so
+`vivarium.h` carries their per-number collision paragraph.
+
+The pure half. `vivarium_clock_nanosleep_decide(clk, flags, &clk_out, &abs)`
+judges the clock in Linux's order: EINVAL for a clock
+`vivarium_clock_gettime_map` refuses -- derived from that map, so the two calls
+cannot disagree about which clocks exist -- and EOPNOTSUPP for MONOTONIC_RAW and
+both COARSE clocks, which Linux reads but keeps no sleep for. Only
+`TIMER_ABSTIME` is read from `flags`. The gettime map now reads the clock id's
+low 32 bits (`clockid_t` is an int, and Linux reads it so), and the sleep's
+decide inherits that. `vivarium_sleep_req_ns` is Linux's `timespec64_valid`
+plus a length that saturates rather than wraps short.
+`vivarium_sleep_verdict(ts, deadline, now, &rem)` is the deadline rule: the
+clock first -- once `now` has reached the deadline the answer is 0, whatever
+ended the wait -- then tsleep's outcome: a caught note before the deadline is
+EINTR with what was left, and so is a death: its terminate latch can be revoked
+before the thread's tail (a peer installs a handler or ignores the note), and a
+thread that survives must not read a short sleep as a full one. Anything else
+sleeps again. It is pure so
+that the race a running kernel cannot be made to hit on demand, a note that
+lands after the deadline and before the sleeper runs, is decided where a unit
+test reaches it.
+
+`vivarium_clock_sleep(wall, abstime, req_ns, &rem)` is the sleep, on the
+calling thread -- the one entry in this file that sleeps. A relative sleep
+counts on the monotonic clock whatever its clock: tsleep with a condition that
+is never true, toward now plus the request. A deadline already past returns 0
+before any wait, even with a note pending -- the opposite of
+`sys_poll_sleep_for`, which `ppoll` with no fds reaches and which answers a
+pending note with EINTR -- and a deadline of 0, tsleep's no-deadline sentinel,
+never reaches tsleep. Every 0 for a deadline is the clock's verdict after the
+wait, not tsleep's TIMEDOUT, because tsleep rounds the deadline down to a
+counter value. An absolute sleep on `CLOCK_REALTIME` hooks the wall clock's
+step list ([[sub-kernel-timer]]) before it reads the offset, sleeps toward the
+derived monotonic deadline or a step (the condition is the hook's `ready`),
+unhooks, and asks the verdict on the wall clock; a step wakes it to derive
+again, so a step past the instant ends the sleep and a step back lengthens it.
+Both rows join `vivarium_intr_class`'s ALWAYS arm. signal(7) lists the sleep
+interfaces among the calls never restarted, so the missing kernel-side
+`SA_RESTART` (the DEGRADED row of 6.22) costs them nothing.
+
+Witnesses: `vivarium.nanosleep_domain` (the clock verdicts against the gettime
+map over 21 ids, the narrowing on both maps, the flag, the request's validity
+and saturation, the verdict for every outcome), the tier asserts and
+`vivarium.intr_class`, `clock.nanosleep_caught_note` (EINTR with the time left;
+the native control rides the note out; a zero sleep with a note pending is 0;
+an absolute deadline of 0 is not slept on), `clock.nanosleep_wall_step` (a step
+past the instant ends the sleep, a step back does not, a relative sleep ignores
+both), and viv-pheno-probe L319-L328, which report together: on a kernel
+without the rows every leg reads ENOSYS.

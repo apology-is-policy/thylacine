@@ -3201,10 +3201,12 @@ family), so the two calls agree on which clocks exist:
   `clock_gettime` reads those clocks, but their `k_clock`s keep no sleep.
 - A clock `clock_gettime` does not know is EINVAL here too:
   `CLOCK_PROCESS_CPUTIME_ID` (2), `CLOCK_THREAD_CPUTIME_ID` (3), `CLOCK_TAI`,
-  the alarm clocks, and the negative per-process and fd clocks. Linux answers
-  EINVAL for the thread clock as well. It can sleep on the process CPU clock and
-  on TAI, and the row cannot, because Thylacine keeps neither clock: a recorded
-  divergence, the one `clock_gettime` already makes.
+  the alarm clocks, and the negative per-process and fd clocks. For the thread
+  clock a guest sees EINVAL on Linux too, but from its libc: musl and glibc
+  refuse it before the syscall, and Linux's kernel answers EOPNOTSUPP (that
+  clock's `k_clock` keeps no sleep). Linux can sleep on the process CPU clock
+  and on TAI, and the row cannot, because Thylacine keeps neither clock: a
+  recorded divergence, the one `clock_gettime` already makes.
 
 Of the flags only `TIMER_ABSTIME` (1) counts. Linux ignores the other bits, and
 so does the row.
@@ -3233,8 +3235,12 @@ with EINTR"), so the vivarium's lack of a kernel-side `SA_RESTART` (§6.22) cost
 them nothing.
 
 A stop parks inside the wait and resumes against the same deadline, which is
-what Linux's restart after a stop does. Death ends the sleep, and its result is
-immaterial. The deadline is observed at the scheduler tick's granularity, so a
+what Linux's restart after a stop does. Death before the deadline ends the
+sleep with `EINTR` and the time left, like a note. The value is immaterial when
+the thread dies at its tail, but the terminate latch that wakes it can still be
+revoked before the tail: a peer thread installs a handler for the note, or
+ignores it. The thread then lives on, and a 0 would tell it a short sleep was a
+full one. The deadline is observed at the scheduler tick's granularity, so a
 sleep can run up to a tick (1 ms) long. It never ends short: before the core
 returns 0 for a deadline, it reads the clock rather than trust the wait's
 outcome.
