@@ -153,3 +153,29 @@ re-samples loom_cq_ready under l->lock when registering its CQ hook, and the
 post wakes cq_waiters after) -- but it is a property of the current caller set,
 not an invariant, which is the reason to add the unconditional bump rather than
 to skip it.
+
+### The sibling set is COMPLETE -- enumerated, not assumed (main on 0176 t3, verified here)
+
+main gave the provenance and the full set, and I re-derived both rather than
+take them:
+
+- `loom_post_pool_cqe` arrived on Astra's line in **c822021a2** (2026-10-04,
+  "Pair Loom completions with explicit payload receipts"). It is NOT on main
+  (merge-base 8746a8a2), so it is an obligation for whoever integrates
+  codex/astra -- me for this branch. main is putting the site and its author
+  into handoff 046 so Astra sees it too.
+- EVERY writer of `l->cq_tail` in this tree, measured:
+    :245  loom_create_layout      -- init to 0, NOT a publish path
+    :726  loom_post_cqe           -- a COMMENT, not a write
+    :760  loom_post_cqe           -- real publish; takes the bump from loom-mc
+    :808  loom_post_pool_cqe      -- real publish; THE ONE SITE I MUST FIX
+  (main cited 762/810; I measure 760/808 -- a two-line offset from my own edits
+  above them, same functions.)
+
+So the merge obligation is exactly ONE site, and that is an enumerated claim
+rather than a guess about a set nobody counted.
+
+Also from main, for the integration order: devno-u64 (t_stat.devno widened in
+place to 64 bits) lands on main next; its trial merge into corona/async-memory
+conflicts in the same 26 files main already does and ADDS NONE. Rules in
+handoff 046.
