@@ -190,6 +190,22 @@ instrument's purpose and worth stating as a coverage property rather than
 leaving implicit: a bug visible only in the registry's output is a bug no test
 can currently observe.
 
+### Each session carries its two ends
+
+The registry's counters move once per message, and a pty carries a message
+per key, so [[sub-kernel-devctl]] shows a session's counters only to the
+principals at its two ends, the system principal and a hostowner
+([[dec-2026-10-06-9p-sessions-ends]]). The ends live on the session as
+`ctl_owner` (the attaching Proc) and `ctl_server`. Both start as
+`PRINCIPAL_INVALID` at the link, which matches no reader, and
+`p9_attached_set_ctl_owners` stamps them under the registry lock, so the
+walker never reads a torn pair. `srvconn_attach_dev9p_root` stamps the
+attaching Proc and the conn's `server_principal`. `SYS_ATTACH_9P` stamps the
+attaching Proc and leaves the server unknown: the kernel cannot name whoever
+holds the other end of a caller-supplied transport. Between the link and the
+stamp the row reads `-` to everyone but the system principal and a hostowner,
+which fails closed.
+
 ### The label is sanitized because an empty string is a sentinel elsewhere
 
 Session labels default to the attach name, truncated to a small fixed field,
@@ -284,7 +300,9 @@ cfg.
 installed `adapter`/`transport_tx`/`transport_rx`, and the closer's queue:
 `closer_head`/`closer_tail` (the session's deferred fids),
 `closer_next`/`closer_queued` (its run-queue link), `closer_busy` (a closer
-has it). The ref uses RELAXED add / ACQ_REL sub, and `attached_tryref` a CAS
+has it). The registry fields: `ctl_next`, `ctl_label`, `ctl_id`, and the
+session's ends `ctl_owner`/`ctl_server` (principals; `PRINCIPAL_INVALID` =
+unknown). The ref uses RELAXED add / ACQ_REL sub, and `attached_tryref` a CAS
 loop that refuses at 0. The pool: `struct p9_closer` (thread, a Rendez only
 it sleeps on, the `kicked` flag, `exited`, `started`), `g_closer_idle` (at
 most one),

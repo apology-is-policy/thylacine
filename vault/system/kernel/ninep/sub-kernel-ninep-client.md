@@ -429,6 +429,9 @@ parked op is identified by **what it waits on**, not by which thread
 holds it, because the thread is the thing you cannot see from `/ctl`.
 Only `p9_attached` sessions are listed (the sole production funnel); raw
 test clients carry the counters unlisted.
+Since 2026-10-06 a listed session's counters and tags read as numbers only to
+the principals at its two ends, the system principal and a hostowner
+([[sub-kernel-devctl]], [[dec-2026-10-06-9p-sessions-ends]]).
 
 ## Data structures
 

@@ -1208,6 +1208,50 @@ count; prowl drawing a withheld CPU as an empty meter fails prowl.exp; the share
 fails diorama-probe and the boot. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
 UBSan at 4 and 8).
 
+## 9P counters belong to a row's two ends; chdir stores where the walk landed — 2026-10-06
+
+Two operator votes of 2026-10-06. "Per-row owner" for `/ctl/9p-sessions` (IMPERIUM-DESIGN 11.3 item 10; re-asked at
+15:38Z after the first question misstated the cost, superseding "Gate it") closes the CPU-time gate audit's F4.
+"Physical" for chdir (STALK-DESIGN 4.3). Scripture f33605135; code, witnesses and dossiers in one commit, *(pending)*.
+
+- **A 9P row's counters belong to its two ends.** A connection records the connecting Proc's principal and the
+  poster's at the post. A session records its attacher and, over `/srv`, the connection's server. Both are recorded by
+  value when the row is made. `ctl_9p_shown` shows the counters to either end, the system principal or a hostowner;
+  everyone else reads `-`. An end the kernel does not know matches no reader, and a reader running as `none` is no end.
+  A user keeps the counters of the sessions that serve them: the login's home proxy is a server end.
+- **chdir stores the name of where the walk landed.** stalk builds the name alongside its trail and never reads it or
+  a Path (I-33). `stalk_landed` then walks the name once more and requires the same node: a served link resolved from
+  a union member past the first can land on a node an earlier member shadows, and such a node has no name. The
+  lexical canonicalizer is deleted. ut's `cd` and builtin `pwd` stay logical in the shell; `/bin/pwd` asks the kernel.
+- Witnesses: the kernel tests `devsrv.conn_ends`, `stalk.landed_name` (22 legs), `stalk.landed_roots`,
+  `stalk.landed_identity`, and new legs in `devctl.read_9p_sessions_format` and `p9_attached.ctl_registry`; four
+  `/ctl/9p-sessions` legs in `tools/interactive/cpu-gate.exp`; leg (f) of `haul-links.exp`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, and one self-found before the gate; clean.
+S0, the union-shadow case, found in review before the gate, is fixed by the second walk. F1: a `none` reader matched a
+`none` end; none is now no end, and the `/proc` owner predicate's view of none is enqueued separately. F2: two stale
+comments. F3: no leg had a Path to read back, and `stalk.landed_roots` chroots below a Path-seeded attach. F4: the
+second walk's Dev and devno terms had no witness, and `stalk.landed_identity` mounts a same-qid replacement mid-walk.
+F5: a served Territory root, a mount over the root and two absolute served targets now have legs. The base-cross push
+cannot be shown red: `end[]` starts zeroed.
+
+Verification, on hunt, `--config ci` bakes. At 0c3eab1e7, before the audit fixes: `tools/test.sh` 1888/1888 and boot OK;
+cpu-gate, haul-links, prowl and idle-probe PASS. Twelve kernel sabotages, each red on exactly its own assertions: no
+principal end matching (three tests), the unknown-end guard dropped, the connection row's server end dropped (two),
+the post's poster principal dropped, every reader shown every row (three), a `..` pop leaving the name, a served
+re-anchor not re-basing it, a crossing's name not taken, a union point's name not taken, the second walk ignored, an
+absolute link not re-basing to the root. With the suite's tests unregistered, cpu-gate fails on the device at its
+counted connection leg (no end matches) and at its withheld leg (every row shown), and haul-links at leg (f) (a
+served re-anchor not re-basing). A `/srv` session's server end dropped leaves the suite green and fails cpu-gate's
+counted session leg: michael is that session's server end, through the home proxy. Storing the raw join is caught
+at boot by joey's probe83 (the cwd stays canonical). At the final tree e9204e086: 1890/1890 and boot OK, the four
+legs PASS; a `none` reader matching a `none` end, the second walk without its devno term, without its Dev term, and
+the name read back from the Path are each red on their own assertion; a no-crossing anchor's name taken from the
+current length is red on `stalk.landed_roots` and on `landed_name`'s `/smnt/d/n1`, whose second served link
+re-anchors at the base too; the cleaned lexical store, the behaviour before the vote and one probe83 accepts,
+leaves the suite green and fails haul-links at leg (f). `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption
+(default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

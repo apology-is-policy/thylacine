@@ -286,20 +286,14 @@ void territory_unref(struct Territory *p) {
 
 // =============================================================================
 // Per-Proc cwd ("dot") -- LS-4. See <thylacine/territory.h> + LIFE-SUPPORT.md
-// LS-4 + STALK-DESIGN.md 4.3. Name-based: dot_path is a cleaned absolute path
-// string, NULL == "/". Two distinct jobs, deliberately separated at #83:
-//
-//   cwd_join            RESOLUTION. Verbatim -- "."/".."/a trailing separator
-//                       reach stalk, which interprets them with the SAME gates
-//                       an absolute path gets. I-28 containment is stalk's
-//                       ".."-clamp at root_spoor, never this function's.
-//   cwd_lexical_resolve CANONICALIZATION. Collapses the dots. Its ONLY
-//                       production role is computing the string SYS_CHDIR
-//                       stores in dot_path, and it runs there on an
-//                       already-stalked path (see sys_chdir_handler).
-//
-// Collapsing dots on the resolution path was #83: it popped components that
-// were never walked, so a cwd-relative `nonexistent/..` opened successfully.
+// LS-4 + STALK-DESIGN.md 4.3. Name-based: dot_path is an absolute path string
+// with no ".", ".." or link component, NULL == "/" -- the name stalk reports
+// for where a chdir LANDED (stalk_landed). cwd_join is the RESOLUTION join:
+// verbatim, so "."/".."/a trailing separator reach stalk, which interprets
+// them with the SAME gates an absolute path gets; I-28 containment is stalk's
+// ".."-clamp at root_spoor, never this function's. Collapsing dots on the
+// resolution path was #83: it popped components that were never walked, so a
+// cwd-relative `nonexistent/..` opened successfully.
 // =============================================================================
 
 // cwd_join -- the RESOLUTION join (#83). Emits `dot` + '/' + `input` with the
@@ -324,10 +318,10 @@ int cwd_join(const char *dot, const char *input, u64 inlen,
 
     int absolute = (inlen > 0 && input[0] == '/');
     if (!absolute && dot && dot[0] == '/') {
-        // The cwd is a cleaned absolute path by construction: territory_setdot
-        // is handed either a cwd_lexical_resolve output (SYS_CHDIR) or the
-        // boot's literal "/bin" (joey_root_kproc_at_devramfs), and
-        // territory_clone copies that string.
+        // The cwd is a clean absolute path by construction: territory_setdot
+        // is handed either stalk_landed's name (SYS_CHDIR) or the boot's
+        // literal "/bin" (joey_root_kproc_at_devramfs), and territory_clone
+        // copies that string.
         while (dot[olen] != '\0') {
             if (olen + 1 >= outcap) return -1;
             out[olen] = dot[olen];
@@ -354,59 +348,6 @@ int cwd_join(const char *dot, const char *input, u64 inlen,
     // a well-formed absolute path rather than "".
     if (olen == 0) out[olen++] = '/';
     out[olen] = '\0';
-    return (int)olen;
-}
-
-int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
-                        char *out, u64 outcap) {
-    if (!input || !out || outcap < 2) return -1;
-
-    u64 olen = 0;       // length of the absolute path built so far; 0 == "/"
-    out[0] = '\0';
-
-    // A relative input is seeded with the cwd's components; an absolute input
-    // ignores the cwd. `dot` is already a cleaned absolute path (or NULL/"/").
-    int absolute = (inlen > 0 && input[0] == '/');
-    if (!absolute && dot && dot[0] == '/') {
-        u64 i = 0;
-        while (dot[i] != '\0') {
-            while (dot[i] == '/') i++;
-            if (dot[i] == '\0') break;
-            u64 s = i;
-            while (dot[i] != '\0' && dot[i] != '/') i++;
-            u64 clen = i - s;
-            // dot is pre-cleaned: every component is real. Append "/comp".
-            if (olen + 1 + clen + 1 > outcap) return -1;
-            out[olen++] = '/';
-            for (u64 k = 0; k < clen; k++) out[olen++] = dot[s + k];
-            out[olen] = '\0';
-        }
-    }
-
-    // Process the input's components, resolving "." / ".." lexically.
-    u64 i = 0;
-    while (i < inlen) {
-        while (i < inlen && input[i] == '/') i++;
-        if (i >= inlen) break;
-        u64 s = i;
-        while (i < inlen && input[i] != '/') i++;
-        u64 clen = i - s;
-
-        if (clen == 1 && input[s] == '.') continue;                  // "."
-        if (clen == 2 && input[s] == '.' && input[s + 1] == '.') {   // ".."
-            // Pop the last component; clamped at root (olen never goes < 0).
-            while (olen > 0 && out[olen - 1] != '/') olen--;
-            if (olen > 0) olen--;            // drop the separating '/'
-            out[olen] = '\0';
-            continue;
-        }
-        if (olen + 1 + clen + 1 > outcap) return -1;                 // "/comp\0"
-        out[olen++] = '/';
-        for (u64 k = 0; k < clen; k++) out[olen++] = input[s + k];
-        out[olen] = '\0';
-    }
-
-    if (olen == 0) { out[0] = '/'; out[1] = '\0'; olen = 1; }        // "/" root
     return (int)olen;
 }
 

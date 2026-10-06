@@ -522,8 +522,9 @@ void test_devctl_read_cons_format(void) {
 // #210: /ctl/9p-sessions end to end through the Dev vtable -- a live conn
 // with known counters must render as a `conn` row, and the row must be
 // gone after the last unref (nothing stale in the registry).
+size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 void test_devctl_read_9p_sessions_format(void) {
-    struct SrvConn *cn = srvconn_create(0xBBBBu, 31337, false, 0,
+    struct SrvConn *cn = srvconn_create(0xBBBBu, 31337, 0xA11CEu, false, 0, 0xB0B0u,
                                         SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
     const u8 bytes[3] = { 9, 9, 9 };
@@ -544,6 +545,28 @@ void test_devctl_read_9p_sessions_format(void) {
                 "c2s=3/0+3 s2c=0/0+0 sframes=0"),
                 "the full conn row renders through its tail");
     spoor_clunk(c);
+
+    // IMPERIUM-DESIGN 11.3 item 10: the ring counters are the conn's ends', the
+    // system principal's or a hostowner's. Any other reader sees the row with "-".
+    {
+        struct Proc r;
+        for (size_t i = 0; i < sizeof(r); i++) ((u8 *)&r)[i] = 0;
+        r.principal_id = 0xC0FFEEu;
+        size_t n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(contains(buf, n, "conn peer=31337 msize="), "an ordinary reader sees the conn row");
+        TEST_ASSERT(contains(buf, n, " c2s=- s2c=- sframes=-\n"), "an ordinary reader sees its counters as '-'");
+        TEST_ASSERT(!contains(buf, n, "c2s=3/0+3"), "an ordinary reader does not see the byte counts");
+        r.caps = CAP_HOSTOWNER;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(contains(buf, n, "c2s=3/0+3 s2c=0/0+0 sframes=0"), "a hostowner sees the counters");
+        r.caps = 0;
+        r.principal_id = 0xA11CEu;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(contains(buf, n, "c2s=3/0+3 s2c=0/0+0 sframes=0"), "the client end sees the counters");
+        r.principal_id = 0xB0B0u;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(contains(buf, n, "c2s=3/0+3 s2c=0/0+0 sframes=0"), "the server end sees the counters");
+    }
 
     srvconn_teardown(cn);
     srvconn_unref(cn);

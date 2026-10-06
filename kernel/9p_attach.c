@@ -76,6 +76,8 @@ static void attached_ctl_link(struct p9_attached *a,
     a->ctl_label[n] = 0;
     if (n == 0) { a->ctl_label[0] = '-'; a->ctl_label[1] = 0; }
     a->ctl_id = -1;
+    a->ctl_owner  = PRINCIPAL_INVALID;
+    a->ctl_server = PRINCIPAL_INVALID;
     spin_lock(&g_p9_ctl_lock);
     a->ctl_next   = g_p9_ctl_head;
     g_p9_ctl_head = a;
@@ -111,13 +113,22 @@ void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
     spin_unlock(&g_p9_ctl_lock);
 }
 
+void p9_attached_set_ctl_owners(struct p9_attached *a, u32 attacher, u32 server) {
+    if (!a || a->magic != P9_ATTACHED_MAGIC) return;
+    spin_lock(&g_p9_ctl_lock);
+    a->ctl_owner  = attacher;
+    a->ctl_server = server;
+    spin_unlock(&g_p9_ctl_lock);
+}
+
 void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg) {
     if (!cb) return;
     spin_lock(&g_p9_ctl_lock);
     for (struct p9_attached *a = g_p9_ctl_head; a; a = a->ctl_next) {
         struct p9_client_ctl snap;
         p9_client_ctl_snapshot(a->client, &snap);
-        if (!cb(a->ctl_label, a->ctl_id, a->msize, &snap, arg)) break;
+        if (!cb(a->ctl_label, a->ctl_id, a->msize, a->ctl_owner, a->ctl_server,
+                &snap, arg)) break;
     }
     spin_unlock(&g_p9_ctl_lock);
 }
@@ -412,6 +423,9 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // #210: attribute this session in /ctl/9p-sessions by the CONNECTING
     // peer's pid (aname is often empty on the /srv path).
     p9_attached_set_ctl_ident(att, "srv", cn->peer_pid);
+    // Its ends: the attaching Proc and the conn's server.
+    p9_attached_set_ctl_owners(att, __atomic_load_n(&who->principal_id, __ATOMIC_ACQUIRE),
+                               cn->server_principal);
 
     // B1 per-attach loose mode (I-38 opt-in), the identity cape and the remote
     // declaration: stamped on the still-private client BEFORE the root Spoor

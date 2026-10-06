@@ -225,12 +225,14 @@ struct SrvConn {
     // Peer identity — CORVUS-DESIGN §6.3, captured BY VALUE at create.
     u64                 peer_stripes;      // the peer Proc's stripes tag
     int                 peer_pid;          // the peer Proc's pid (diagnostics)
+    u32                 peer_principal;    // the peer Proc's principal at mint
     bool                peer_console;      // peer's console-attachment bit
 
     // Server identity — the service poster's (corvus's) stripes tag at
     // mint, by value. SYS_SRV_PEER's poster gate compares it against the
     // caller's stripes (CORVUS-DESIGN §6.3).
     u64                 server_stripes;
+    u32                 server_principal;  // the poster's principal at its post
 
     // The conn's 9P msize class (CF-3 B), captured from the SERVICE at
     // mint (SRVCONN_MSIZE default; SRVCONN_BULK_MSIZE for a DMSRVBULK
@@ -351,9 +353,10 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // =============================================================================
 
 // srvconn_create — mint a connection. `peer_stripes` / `peer_pid` /
-// `peer_console` are the opening client Proc's kernel-stamped identity;
-// `server_stripes` is the service poster's (corvus's) stripes tag. All
-// four are captured by value. `msize` is the conn's 9P msize class
+// `peer_principal` / `peer_console` are the opening client Proc's kernel-stamped
+// identity; `server_stripes` / `server_principal` are the service poster's. All
+// six are captured by value; the two principals are the conn's ends in
+// /ctl/9p-sessions (IMPERIUM-DESIGN 11.3 item 10). `msize` is the conn's 9P msize class
 // (SRVCONN_MSIZE or SRVCONN_BULK_MSIZE, from the service's ring class --
 // CF-3 B; any other value is rejected NULL); each ring is heap-allocated
 // at 2x msize. Allocates the SrvConn + initializes its byte transport
@@ -364,7 +367,8 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console, u64 server_stripes,
+                               u32 peer_principal, bool peer_console,
+                               u64 server_stripes, u32 server_principal,
                                u32 msize);
 
 // srvconn_msize — the conn's 9P msize class (set at mint from the
@@ -616,6 +620,8 @@ u64 srvconn_total_freed(void);
 // the reply-undrained arm of the loss discriminator.
 struct srvconn_ctl_row {
     int  peer_pid;
+    u32  peer_principal;   // the conn's two ends: who may read its counters
+    u32  server_principal;
     u32  msize;
     u8   state;            // enum srvconn_state
     bool byte_mode;

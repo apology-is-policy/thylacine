@@ -13,7 +13,8 @@
 # What it asserts, against a server this scenario starts itself:
 #   1. The direct mount (SYS_ATTACH_9P_REMOTE): an absolute served link (a), a
 #      '..'-bearing one (b), and the caller's own '..' after a relative one (c)
-#      all stay in the export; an internal link still resolves (d).
+#      all stay in the export; an internal link still resolves (d); a cwd
+#      entered through a link is stored as the directory it landed on (f).
 #   2. The posted service (--post, DMSRVREMOTE): a plain `mount /srv/NAME` in
 #      the shell contains an absolute served link with no option (e).
 #
@@ -172,6 +173,8 @@ foreach line [list \
     "cat /tmp/links/d/up | tr a-z A-Z" \
     "cat /tmp/links/rel/../../links-decoy-c | tr a-z A-Z" \
     "cat /tmp/links/latest | tr a-z A-Z" \
+    "cd /tmp/links/rel" \
+    "/bin/pwd | tr a-z A-Z" \
     "echo links-script-done | tr a-z A-Z"] {
     lc_send "echo '$line' >> /tmp/links.ut"
 }
@@ -180,6 +183,10 @@ expect_side "EXPORT SIDE A" A "(a) an absolute served link resolves from the mou
 expect_side "EXPORT SIDE B" B "(b) a '..' served target climbs to the mount and no further"
 expect_side "EXPORT SIDE C" C "(c) the caller's own '..' after a served link stops at the mount"
 expect_side "INTERNAL LINK D" D "(d) an internal relative link still resolves"
+# (f) chdir stores where the walk LANDED (STALK-DESIGN 4.3): ut cleans `cd`'s
+# argument itself and its own pwd prints that, but /bin/pwd asks the kernel,
+# whose cwd holds no link component -- rel -> d, so the export's d.
+lc_expect_re {/TMP/LINKS/D\r?\n} "(f) a cwd entered through a served link is the directory it landed on"
 lc_expect "LINKS-SCRIPT-DONE" "the links script ran to its end"
 
 # Leg 2: the posted service. Posting needs the post capability (imperium).

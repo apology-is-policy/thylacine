@@ -2606,6 +2606,11 @@ s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
     // From here on, FAILURE paths just unref `att`. The attached's
     // last-ref destroy handles adapter + transport cleanup.
 
+    // The server behind a caller-supplied transport is not known to the kernel:
+    // the attacher is the session's one recorded end (/ctl/9p-sessions).
+    p9_attached_set_ctl_owners(att, __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE),
+                               PRINCIPAL_INVALID);
+
     // The identity cape and the remote declaration: stamped on the still-private
     // client before the root Spoor exists (the handle publication below orders
     // them, as for `loose`).
@@ -3316,36 +3321,30 @@ static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
     if (jl < 0)                                      return -1;
 
     // (2) Resolve the joined absolute path from the Territory root to verify it
-    // exists, is a directory, and the caller holds X (search). stalk borrows
+    // exists, is a directory, and the caller holds X (search), and take the
+    // name of where the walk LANDED for the store (STALK-DESIGN 4.3, the
+    // operator's vote of 2026-10-06: chdir stores the physical name). That name
+    // has no "." or ".." component and no link component: a followed link
+    // contributes its target, and a ".." climbs out of where the walk stands,
+    // as stalk's own trail pop does -- so `cd link/..` lands where `ls link/..`
+    // reads. stalk_landed walks the name once more and refuses one that lands
+    // elsewhere, so what is stored is what was validated. It is relative to
+    // the root stalk started from, as dot_path is. stalk borrows
     // root (never refs/clunks it); RW-4 SA-F1: territory_root_ref takes the ref
     // ATOMICALLY under ns_lock (a plain read-then-ref raced a concurrent
-    // pivot_root's swap+clunk-to-zero). Released at the uniform exit clunk below.
+    // pivot_root's swap+clunk-to-zero).
+    //
+    // The name REUSES path_scratch, whose last read was the join in (1), so
+    // this step adds no stack (the handler already carries two
+    // SYS_OPEN_PATH_MAX buffers, above a stalk() that nests its own trail).
     struct Spoor *root = territory_root_ref(p->territory);
     if (!root)                                       return -1;
-    struct Spoor *q = stalk(p, root, joined, (u64)jl, STALK_WALK, 0);
+    u32 nl = 0;
+    struct Spoor *q = stalk_landed(p, root, joined, (u64)jl, NULL,
+                                   path_scratch, sizeof(path_scratch), &nl);
     spoor_clunk(root);
     if (!q)                                          return -1;
-
-    // (3) CANONICALIZE for storage -- dot_path is getcwd's answer and the seed
-    // for the next join, so it must stay clean (else `cd ..` would grow the
-    // string without bound). Run on `joined`, which is already absolute, so
-    // dot == NULL and dot_path is NOT re-read: a peer thread's concurrent
-    // chdir cannot make the stored string disagree with the path stalk just
-    // validated. Every component this pops was physically walked in (2), and
-    // with no symlinks (G11) the lexical pop and stalk's trail pop consume the
-    // same component sequence -- so `cleaned` names exactly what stalk landed
-    // on. Computed before the perm gate below so a failure costs nothing.
-    //
-    // The output REUSES path_scratch, whose last read was the join in (1) --
-    // so this step adds no stack (the handler already carries two
-    // SYS_OPEN_PATH_MAX buffers, and a third would be ~19% of the 16 KiB
-    // kernel stack in one frame, above a stalk() that nests its own trail).
-    // The two buffers do not alias, and the cleaned form is never longer than
-    // its input.
-    char *cleaned = path_scratch;
-    int cl = cwd_lexical_resolve((const char *)0, joined, (u64)jl,
-                                 cleaned, sizeof(path_scratch));
-    if (cl < 0)                                      { spoor_clunk(q); return -1; }
+    if (nl == 0) { path_scratch[0] = '/'; path_scratch[1] = '\0'; }   // the root
 
     s64 rc = -1;
     if (q->qid.type & QTDIR) {
@@ -3356,7 +3355,7 @@ static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
             struct t_stat st;
             ok = (spoor_stat_native(q, &st) == 0 && perm_check(p, &st, PERM_X) == 0);
         }
-        if (ok) rc = territory_setdot(p->territory, cleaned);
+        if (ok) rc = territory_setdot(p->territory, path_scratch);
     }
     spoor_clunk(q);
     return rc;

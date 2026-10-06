@@ -138,6 +138,7 @@ void test_stalk_symlink_nofollow(void);
 void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
+void test_stalk_landed_name(void);             // STALK-DESIGN 4.3: chdir's physical name
 
 // DISTRO 4.6: a served link resolves beneath the mount that served it.
 void test_stalk_served_contain(void);
@@ -289,10 +290,16 @@ static const struct fixnode g_fix[] = {
     { 61, 48, "lnout",  QTSYMLINK, 0777u, "/uonly" },
     { 62, 57, "uonly",  QTFILE,    0644u, NULL },
     { 63,  0, "uonly",  QTFILE,    0644u, NULL },
+    // Served links in uR whose targets no other member holds, so their landed
+    // name walks back to them (stalk.landed_name's union legs).
+    { 64, 48, "lnsub",  QTSYMLINK, 0777u, "sub" },
+    { 65, 51, "ln3",    QTSYMLINK, 0777u, "../sub" },
 };
 #define FIX_SRV_LO 37u
 #define FIX_SRV_HI 53u
 #define FIX_SRV_LNOUT 61u
+#define FIX_SRV2_LO 64u
+#define FIX_SRV2_HI 65u
 #define FIX_LOOP_PATH 7u
 // The first symlink qid -- the boundary the fixture walk uses to answer
 // readlink and that the tests reference by name.
@@ -572,7 +579,8 @@ static bool g_fix_remote_on;
 static bool fix_remote(struct Spoor *c) {
     return g_fix_remote_on && c &&
            ((c->qid.path >= FIX_SRV_LO && c->qid.path <= FIX_SRV_HI) ||
-            c->qid.path == FIX_SRV_LNOUT);
+            c->qid.path == FIX_SRV_LNOUT ||
+            (c->qid.path >= FIX_SRV2_LO && c->qid.path <= FIX_SRV2_HI));
 }
 
 // FID-LIFECYCLE cached-open fixture slot. Controllable: g_fix_co_enable false
@@ -4804,4 +4812,282 @@ void test_stalk_open_create_containment_and_denials(void) {
     TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)made_before,
                    "neither symlink row created anything");
     ocp_teardown(p);
+}
+
+// =============================================================================
+// stalk_landed (STALK-DESIGN 4.3): SYS_CHDIR's store, the name of where a walk
+// LANDED, built from the components it consumed. Each leg names its landing.
+// A followed link contributes its target, a '..' climbs out of where the walk
+// stands (lndir/.. is /a, where `ls lndir/..` reads -- the lexical answer is
+// /), a restart re-bases the name, a mount crossing keeps the mount point's
+// name, and a served link's name starts at its anchor. The served legs run
+// remote; /smnt/d/up runs once local as the control one variable away, where
+// the same link climbs out of the mount and the name says so. Through the
+// union [uL, uR] at supt a served link's name starts at the union point; one
+// that lands on a node uL shadows has no name and is refused (want NULL), while
+// the same link resolved locally searches uL first and is named.
+// =============================================================================
+struct landed_leg { const char *path; bool remote; const char *want; };
+static const struct landed_leg g_landed_legs[] = {
+    { "/",             false, "" },
+    { "/a/deep",       false, "/a/deep" },
+    { "/a/deep/..",    false, "/a" },
+    { "/a/./deep/",    false, "/a/deep" },
+    { "/lndir",        false, "/a/deep" },      // in-place splice
+    { "/lndir/..",     false, "/a" },           // the physical '..'
+    { "/lnabs",        false, "/a/b" },         // absolute: re-anchor at the root
+    { "/a/deep/lnup",  false, "/a/b" },         // '..'-bearing: the rebuild restart
+    { "/lnchain",      false, "/a/b" },         // two expansions
+    { "/loop/deep",    false, "/loop/deep" },   // a crossing keeps the point's name
+    { "/loop/deep/..", false, "/loop" },
+    { "/smnt/rel",     true,  "/smnt/d" },      // a served link names from its anchor
+    { "/smnt/d/up",    true,  "/smnt/xfile" },  // ...and its '..' stops there
+    { "/smnt/d/n1",    true,  "/smnt/xfile" },  // a served chain's rebuild
+    { "/smnt/abs",     true,  "/smnt/xfile" },  // an absolute served target
+    { "/smnt/d/abs",   true,  "/smnt/xfile" },  // ...one level below the crossing
+    { "/smnt/d/up",    false, "/xfile" },       // control: a local link climbs out
+    { "/supt/lnsub",   true,  "/supt/sub" },    // a union child's anchor: its point
+    { "/supt/sub/ln3", true,  "/supt/sub" },    // ...one level below the member
+    { "/supt/ln",      true,  NULL },           // lands on uR's secret, uL's shadows it
+    { "/supt/ln",      false, "/supt/secret" }, // control: the union finds uL's first
+};
+#define LANDED_NLEG (sizeof(g_landed_legs) / sizeof(g_landed_legs[0]))
+
+static bool landed_eq(const char *a, u32 alen, const char *b) {
+    u32 i = 0;
+    for (; i < alen && b[i] != '\0'; i++) if (a[i] != b[i]) return false;
+    return i == alen && b[i] == '\0' && a[alen] == '\0';
+}
+
+void test_stalk_landed_name(void) {
+    bool ok[LANDED_NLEG];
+    struct Proc p;
+    struct Spoor *root = served_setup(&p, false);
+    struct Spoor *asrc = root ? stalk(&p, root, "a", 1, STALK_WALK, 0) : NULL;
+    struct Spoor *loop = root ? stalk(&p, root, "loop", 4, STALK_MOUNT, 0) : NULL;
+    struct Spoor *ssrc = root ? stalk(&p, root, "srv", 3, STALK_WALK, 0) : NULL;
+    struct Spoor *smnt = root ? stalk(&p, root, "smnt", 4, STALK_MOUNT, 0) : NULL;
+    struct Spoor *ul   = root ? stalk(&p, root, "uL", 2, STALK_WALK, 0) : NULL;
+    struct Spoor *ur   = root ? stalk(&p, root, "uR", 2, STALK_WALK, 0) : NULL;
+    struct Spoor *supt = root ? stalk(&p, root, "supt", 4, STALK_MOUNT, 0) : NULL;
+    int m1 = (asrc && loop) ? mount(p.territory, asrc, loop, MREPL) : -1;
+    int m2 = (ssrc && smnt) ? mount(p.territory, ssrc, smnt, MREPL) : -1;
+    int m3 = (ul && ur && supt && mount(p.territory, ul, supt, MBEFORE) == 0)
+           ? mount(p.territory, ur, supt, MAFTER) : -1;
+    char name[SYS_OPEN_PATH_MAX + 1];
+    for (u32 k = 0; k < LANDED_NLEG; k++) {
+        g_fix_remote_on = g_landed_legs[k].remote;
+        u32 nl = 0xFFFFu;
+        int e = 0;
+        const char *path = g_landed_legs[k].path;
+        struct Spoor *q = (m1 == 0 && m2 == 0 && m3 == 0)
+            ? stalk_landed(&p, root, path, served_len(path), &e, name, sizeof name, &nl)
+            : NULL;
+        ok[k] = g_landed_legs[k].want ? q && landed_eq(name, nl, g_landed_legs[k].want)
+                                      : !q && e == T_E_INVAL && m3 == 0;
+        if (q) spoor_clunk(q);
+    }
+    g_fix_remote_on = false;
+    // An absolute local link reached below a served anchor re-bases the name at
+    // the root: phx (local) mounted over the export's d2, after the legs above
+    // (d2's n2 is theirs).
+    struct Spoor *phx = root ? stalk(&p, root, "phx", 3, STALK_WALK, 0) : NULL;
+    struct Spoor *sd2 = (m2 == 0) ? stalk(&p, root, "smnt/d2", 7, STALK_MOUNT, 0) : NULL;
+    int m4 = (phx && sd2) ? mount(p.territory, phx, sd2, MREPL) : -1;
+    const char *apath = "/smnt/rel/../d2/lnaway";
+    u32 al = 0xFFFFu;
+    int ae = 0;
+    g_fix_remote_on = true;
+    struct Spoor *aq = (m4 == 0)
+        ? stalk_landed(&p, root, apath, served_len(apath), &ae, name, sizeof name, &al)
+        : NULL;
+    g_fix_remote_on = false;
+    bool abs_ok = aq && landed_eq(name, al, "/xfile");
+    if (aq) spoor_clunk(aq);
+    // A name that outgrows the buffer fails the walk, never truncates.
+    char tiny[5];
+    u32 tl = 0;
+    int te = 0;
+    struct Spoor *tq = root ? stalk_landed(&p, root, "/a/deep", 7, &te, tiny, sizeof tiny, &tl)
+                            : NULL;
+    if (tq) spoor_clunk(tq);
+    if (p.territory) territory_unref(p.territory);
+    if (asrc) spoor_clunk(asrc);
+    if (loop) spoor_clunk(loop);
+    if (ssrc) spoor_clunk(ssrc);
+    if (smnt) spoor_clunk(smnt);
+    if (ul) spoor_clunk(ul);
+    if (ur) spoor_clunk(ur);
+    if (supt) spoor_clunk(supt);
+    if (phx) spoor_clunk(phx);
+    if (sd2) spoor_clunk(sd2);
+    if (root) spoor_unref(root);
+
+    TEST_EXPECT_EQ(m1, 0, "mount a at loop");
+    TEST_EXPECT_EQ(m2, 0, "mount srv at smnt");
+    TEST_EXPECT_EQ(m3, 0, "union [uL, uR] at supt");
+    for (u32 k = 0; k < LANDED_NLEG; k++)
+        TEST_ASSERT(ok[k], g_landed_legs[k].path);
+    TEST_ASSERT(tq == NULL && te == T_E_INVAL, "a name past the buffer fails with EINVAL");
+    TEST_EXPECT_EQ(m4, 0, "mount phx over the export's d2");
+    TEST_ASSERT(abs_ok, "an absolute link below a served anchor re-bases the name at the root");
+}
+
+// stalk_landed from roots the battery above does not stand on.
+// (a) A Territory chrooted below an attach whose root names itself "/": every
+//     Spoor's Path carries the outer prefix there, so a name read back from a
+//     Path (I-33 forbids it) would say /a/deep where the landed name is /deep.
+// (b) A served Territory root: a served link with no crossing on its trail
+//     re-anchors at the base, whose name is "".
+// (c) A mount over the Territory root itself, which the walk crosses at its
+//     base without a component.
+static struct Spoor *landed_chroot(struct Proc *p, struct Spoor *at) {
+    mkproc_system(p);
+    p->territory = territory_alloc();
+    return (p->territory && at && territory_chroot(p->territory, at) == 0) ? at : NULL;
+}
+
+static bool landed_is(struct Proc *p, struct Spoor *start, const char *path,
+                      const char *want, char *name, u32 cap) {
+    u32 nl = 0xFFFFu;
+    int e = 0;
+    struct Spoor *q = start ? stalk_landed(p, start, path, served_len(path), &e,
+                                           name, cap, &nl)
+                            : NULL;
+    bool ok = q && landed_eq(name, nl, want);
+    if (q) spoor_clunk(q);
+    return ok;
+}
+
+void test_stalk_landed_roots(void) {
+    char name[SYS_OPEN_PATH_MAX + 1];
+    struct Proc po, pa, pc, pd;
+    struct Spoor *outer = fix_root();
+    if (outer) outer->path = path_make_root();
+    struct Spoor *ob   = landed_chroot(&po, outer);
+    struct Spoor *adir = ob ? stalk(&po, ob, "a", 1, STALK_WALK, 0) : NULL;
+    struct Spoor *sdir = ob ? stalk(&po, ob, "srv", 3, STALK_WALK, 0) : NULL;
+
+    // (a)
+    struct Spoor *ab = landed_chroot(&pa, adir);
+    struct Spoor *aq = ab ? stalk(&pa, ab, "deep", 4, STALK_WALK, 0) : NULL;
+    bool a_premise = aq && aq->path && fix_streq(aq->path->s, "/a/deep");
+    if (aq) spoor_clunk(aq);
+    bool a_deep  = landed_is(&pa, ab, "/deep", "/deep", name, sizeof name);
+    bool a_lnup  = landed_is(&pa, ab, "/deep/lnup", "/b", name, sizeof name);
+
+    // (b)
+    struct Spoor *cb = landed_chroot(&pc, sdir);
+    g_fix_remote_on = true;
+    bool b_rel = landed_is(&pc, cb, "/rel", "/d", name, sizeof name);
+    bool b_up  = landed_is(&pc, cb, "/d/up", "/xfile", name, sizeof name);
+    g_fix_remote_on = false;
+
+    // (c)
+    struct Spoor *droot = fix_root();
+    struct Spoor *db    = landed_chroot(&pd, droot);
+    struct Spoor *dsrc  = db ? stalk(&pd, db, "a", 1, STALK_WALK, 0) : NULL;
+    int dm = dsrc ? mount(pd.territory, dsrc, db, MREPL) : -1;
+    bool c_deep = dm == 0 && landed_is(&pd, db, "/deep", "/deep", name, sizeof name);
+    bool c_up   = dm == 0 && landed_is(&pd, db, "/deep/..", "", name, sizeof name);
+
+    if (pd.territory) territory_unref(pd.territory);
+    if (pc.territory) territory_unref(pc.territory);
+    if (pa.territory) territory_unref(pa.territory);
+    if (po.territory) territory_unref(po.territory);
+    if (dsrc)  spoor_clunk(dsrc);
+    if (sdir)  spoor_clunk(sdir);
+    if (adir)  spoor_clunk(adir);
+    if (droot) spoor_unref(droot);
+    if (outer) spoor_unref(outer);
+
+    TEST_ASSERT(ob && ab && cb && db, "fixture: the outer root, a, srv and a fresh root as Territory roots");
+    TEST_ASSERT(a_premise, "premise: below the chroot a Path carries the outer prefix (/a/deep)");
+    TEST_ASSERT(a_deep, "a chrooted Territory's landed name starts at its own root, not the Path's");
+    TEST_ASSERT(a_lnup, "...and through a '..'-bearing link's rebuild");
+    TEST_ASSERT(b_rel, "a served link on a served root names from the base");
+    TEST_ASSERT(b_up, "...and its '..' stops at the base");
+    TEST_EXPECT_EQ(dm, 0, "mount a over the Territory root");
+    TEST_ASSERT(c_deep, "a mount over the root is crossed at the base without a component");
+    TEST_ASSERT(c_up, "...and a '..' back to it names the root");
+}
+
+// stalk_landed's second walk compares the Dev and its instance as well as the
+// qid path. supt holds uR alone (a crossing, not a union); while the walk
+// follows uR's served `ln`, a readlink hook replaces the mount, but the walk
+// goes on from the crossing it holds and lands on uR's secret (49). The name,
+// /supt/secret, then walks into the replacement: the same uR again (the
+// control), uR on another Dev, or uR from another attach (its own devno) --
+// each with secret at qid path 49.
+static struct Spoor *g_lid_x;
+static int  g_lid_rc;
+static bool g_lid_done;
+
+static void landed_swap_mount(struct Spoor *c) {
+    if (g_lid_done || !c || c->qid.path != 50) return;
+    g_lid_done = true;
+    served_unmount_all(g_swap_t, g_swap_pt);
+    g_lid_rc = mount(g_swap_t, g_lid_x, g_swap_pt, MREPL);
+}
+
+void test_stalk_landed_identity(void) {
+    char name[SYS_OPEN_PATH_MAX + 1];
+    struct Proc p;
+    struct Spoor *root  = served_setup(&p, false);
+    struct Spoor *nroot = fix_root_nowa();
+    struct Spoor *sroot = fix_root();
+    if (sroot) sroot->devno = spoor_next_devno();   // as dev9p's attach mints one
+    struct Spoor *ur  = root  ? stalk(&p, root,  "uR", 2, STALK_WALK, 0)   : NULL;
+    struct Spoor *nur = nroot ? stalk(&p, nroot, "uR", 2, STALK_WALK, 0)   : NULL;
+    struct Spoor *sur = sroot ? stalk(&p, sroot, "uR", 2, STALK_WALK, 0)   : NULL;
+    struct Spoor *pt  = root  ? stalk(&p, root,  "supt", 4, STALK_MOUNT, 0) : NULL;
+    bool ok = ur && nur && sur && pt;
+    bool dc_only    = ok && nur->dc != ur->dc && nur->devno == ur->devno;
+    bool devno_only = ok && sur->dc == ur->dc && sur->devno != ur->devno;
+    struct Spoor *xs[3] = { ur, nur, sur };
+    bool named[3] = { false, false, false }, refused[3] = { false, false, false };
+    bool swapped[3] = { false, false, false };
+    int mrc[3] = { -1, -1, -1 }, src[3] = { -1, -1, -1 };
+    g_fix_remote_on = true;
+    for (int leg = 0; ok && leg < 3; leg++) {
+        mrc[leg]    = mount(p.territory, ur, pt, MREPL);
+        g_swap_t    = p.territory;
+        g_swap_pt   = pt;
+        g_lid_x     = xs[leg];
+        g_lid_rc    = -1;
+        g_lid_done  = false;
+        g_fix_readlink_hook = landed_swap_mount;
+        u32 nl = 0xFFFFu;
+        int e = 0;
+        struct Spoor *q = stalk_landed(&p, root, "/supt/ln", 8, &e, name, sizeof name, &nl);
+        g_fix_readlink_hook = NULL;
+        swapped[leg] = g_lid_done;
+        src[leg]     = g_lid_rc;
+        named[leg]   = q && q->qid.path == 49 && landed_eq(name, nl, "/supt/secret");
+        refused[leg] = !q && e == T_E_INVAL;
+        if (q) spoor_clunk(q);
+        served_unmount_all(p.territory, pt);
+    }
+    g_fix_remote_on = false;
+    g_lid_x = NULL;
+    if (p.territory) territory_unref(p.territory);
+    if (ur)  spoor_clunk(ur);
+    if (nur) spoor_clunk(nur);
+    if (sur) spoor_clunk(sur);
+    if (pt)  spoor_clunk(pt);
+    if (sroot) spoor_unref(sroot);
+    if (nroot) spoor_unref(nroot);
+    if (root)  spoor_unref(root);
+
+    TEST_ASSERT(ok, "fixture: uR, the twin's uR, a second attach's uR, supt");
+    TEST_ASSERT(dc_only && devno_only,
+        "premise: the twin's uR differs from uR in its Dev alone, the second "
+        "attach's in its devno alone");
+    TEST_ASSERT(mrc[0] == 0 && mrc[1] == 0 && mrc[2] == 0, "uR at supt, each leg");
+    TEST_ASSERT(swapped[0] && swapped[1] && swapped[2] &&
+                src[0] == 0 && src[1] == 0 && src[2] == 0,
+                "the hook replaced the mount during every readlink");
+    TEST_ASSERT(named[0], "control: the same uR again -- the name walks back to secret");
+    TEST_ASSERT(refused[1], "the name walks into another Dev's secret (same qid path): refused");
+    TEST_ASSERT(refused[2], "the name walks into another attach's secret (same Dev, qid path): refused");
 }

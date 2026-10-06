@@ -577,6 +577,49 @@ static void stalk_anchor_clear(struct stalk_anchors *a, int d) {
     a->pmask &= keep;
 }
 
+// stalk_name -- the name of where a resolution stands, relative to its start,
+// for stalk_landed (SYS_CHDIR stores it; STALK-DESIGN section 4.3).
+// It is BUILT the way the trail is -- a push appends the components its entry
+// consumed, a '..' pop truncates to the entry below, a restart truncates to
+// the new base's name -- and never read from a Spoor's Path (I-33). Nothing in
+// the resolver consults it. end[d] is the length once trail[d] stands; `base`
+// is the name of the current base. A name that outgrows the buffer latches
+// `overflow` and the caller fails, even if a later '..' would shorten it.
+struct stalk_name {
+    char *buf;
+    u32   cap;
+    u32   len;
+    u32   base;
+    bool  overflow;
+    u16   end[STALK_MAX_DEPTH];
+};
+_Static_assert(SYS_OPEN_PATH_MAX + 1 <= 0xFFFF, "a name length fits a u16");
+
+static void stalk_name_append(struct stalk_name *nm, const char *c, u64 clen) {
+    if (nm->overflow || nm->len + 1 + clen >= nm->cap) { nm->overflow = true; return; }
+    nm->buf[nm->len++] = '/';
+    for (u64 k = 0; k < clen; k++) nm->buf[nm->len++] = c[k];
+}
+
+// trail[d] is about to stand, having consumed names[0..n).
+static void stalk_name_push(struct stalk_name *nm, int d,
+                            const char *const *names, const size_t *lens, int n) {
+    if (!nm) return;
+    for (int j = 0; j < n; j++) stalk_name_append(nm, names[j], lens[j]);
+    nm->end[d] = (u16)nm->len;
+}
+
+static void stalk_name_push1(struct stalk_name *nm, int d, const char *c, u64 clen) {
+    if (!nm) return;
+    stalk_name_append(nm, c, clen);
+    nm->end[d] = (u16)nm->len;
+}
+
+// The trail is `depth` deep after a pop or an unwind: stand on its tip's name.
+static void stalk_name_settle(struct stalk_name *nm, int depth) {
+    if (nm) nm->len = depth > 0 ? nm->end[depth - 1] : nm->base;
+}
+
 // stalk_expand_link -- read `link`'s target and splice it into the component
 // stream. Caller: the per-component arm, on a walked QTSYMLINK Spoor whose
 // Dev has a readlink slot and whose disposition says FOLLOW; the caller
@@ -611,7 +654,8 @@ static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
                                u64 tlen, bool tgt_abs, struct Spoor **basep,
                                struct Spoor *const *trail, int depth,
                                const struct stalk_anchors *an,
-                               bool from_union, bool pheno, int *errp);
+                               bool from_union, bool pheno,
+                               struct stalk_name *nm, int *errp);
 
 static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
                              struct Spoor *link,
@@ -619,7 +663,8 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
                              struct Spoor **basep,
                              struct Spoor *const *trail, int depth,
                              const struct stalk_anchors *an,
-                             bool from_union, bool pheno, int *errp) {
+                             bool from_union, bool pheno,
+                             struct stalk_name *nm, int *errp) {
     struct stalk_expand *ex = *exp;
     if (!ex) {
         ex = kmalloc(sizeof(*ex), 0);
@@ -660,7 +705,7 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
     if (link->dev->remote && link->dev->remote(link))
         return stalk_expand_served(p, ex, link, path, pathlen, s, i, (u64)tlen,
                                    tgt_abs, basep, trail, depth, an,
-                                   from_union, pheno, errp);
+                                   from_union, pheno, nm, errp);
 
     bool  tgt_dd  = path_has_dotdot(ex->tgt, (u64)tlen);
     char *nb      = ex->buf[ex->cur ^ 1];
@@ -680,6 +725,7 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
             if (!ex->owned_base) { *errp = T_E_IO; return -1; }
         }
         *basep = ex->owned_base;
+        if (nm) nm->base = 0;          // the Territory root names itself ""
         ex->consumed_len = 0;
         if ((u64)tlen + rem > SYS_OPEN_PATH_MAX) { *errp = T_E_INVAL; return -1; }
         sx_copy(nb, ex->tgt, (u64)tlen);
@@ -740,7 +786,8 @@ static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
                                u64 tlen, bool tgt_abs, struct Spoor **basep,
                                struct Spoor *const *trail, int depth,
                                const struct stalk_anchors *an,
-                               bool from_union, bool pheno, int *errp) {
+                               bool from_union, bool pheno,
+                               struct stalk_name *nm, int *errp) {
     u64  lb     = ex->consumed_len;
     u64  from   = lb + s;              // stream offset of the below-anchor text
     bool apheno = false;
@@ -748,6 +795,7 @@ static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
     struct Spoor *anchor = NULL;
 
     int d = -1;                        // the innermost marked trail entry
+    u32 aname = nm ? nm->base : 0;     // the anchor's name; a crossing's below
     if (!from_union)
         for (int k = depth - 1; k >= 0; k--)
             if (an->mask & (1ull << k)) { d = k; break; }
@@ -779,9 +827,11 @@ static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
             anchor = stalk_union_member_holding(p, point, name, &uerr);
         if (!from_union) from = an->loff[d];
         apheno = from_union ? pheno : ((an->pmask >> d) & 1) != 0;
+        if (nm && ci > 0) aname = nm->end[ci - 1];   // the union point's
     } else if (d >= 0) {
         anchor = trail[d];
         spoor_ref(anchor);
+        if (nm) aname = nm->end[d];    // the crossing stands at its mount point
         from   = an->loff[d];
         apheno = ((an->pmask >> d) & 1) != 0;
     } else {
@@ -834,6 +884,7 @@ static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
     ex->owned_anchor  = anchor;
     ex->anchor_pheno  = apheno;
     *basep            = anchor;
+    if (nm) nm->base  = aname;
     if (old) spoor_clunk(old);
     ex->consumed_len  = 0;
     ex->cur          ^= 1;
@@ -992,7 +1043,8 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                                 const char *path, u64 pathlen,
                                 int amode, u32 omode, int *errp,
                                 struct t_stat *stat_out, bool *stat_done,
-                                bool *crossed_pheno, bool *union_point_out) {
+                                bool *crossed_pheno, bool *union_point_out,
+                                struct stalk_name *nm) {
     if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
     // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; D-1
@@ -1078,6 +1130,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // rebuilt buffer and `base` possibly re-anchored. All path-derived state
     // recomputes from the new buffer; trail/depth were reset by the jumper.
 restart:
+    stalk_name_settle(nm, 0);
     pounce_ok       = !path_has_dotdot(path, pathlen);
     carried_valid   = false;
     logical_depth   = 0;
@@ -1140,6 +1193,7 @@ restart:
         if (crossed) {
             stalk_anchor_set(&an, depth, stalk_lbase(ex), false,
                              crossed_pheno && *crossed_pheno);
+            stalk_name_push(nm, depth, NULL, NULL, 0);   // a cross keeps the name
             trail[depth++] = crossed;
         }
     }
@@ -1246,6 +1300,7 @@ restart:
             if (depth > floor_depth) {
                 stalk_anchor_clear(&an, depth - 1);
                 spoor_clunk(trail[--depth]);
+                stalk_name_settle(nm, depth);
             }
             carried_valid = false;   // hygiene; unreachable while pounce_ok
             continue;
@@ -1638,6 +1693,7 @@ restart:
                 // (non-load-bearing, I-33).
                 for (int j = 0; j <= split_at; j++)
                     spoor_path_extend(mc, names[j], lens[j]);
+                stalk_name_push(nm, depth, names, lens, split_at + 1);
                 trail[depth++] = mc;
                 logical_depth += split_at + 1;
                 carried_valid = false;   // the tip is a mount point; the
@@ -1717,6 +1773,7 @@ restart:
                     // (non-load-bearing, I-33).
                     for (int j = 0; j < link_at; j++)
                         spoor_path_extend(lc, names[j], lens[j]);
+                    stalk_name_push(nm, depth, names, lens, link_at);
                     trail[depth++] = lc;
                     logical_depth += link_at;
                 }
@@ -1787,6 +1844,7 @@ restart:
             // Spoor carries the whole run; intermediates never materialize).
             for (int j = 0; j < nrun; j++)
                 spoor_path_extend(nc, names[j], lens[j]);
+            stalk_name_push(nm, depth, names, lens, nrun);
             trail[depth++] = nc;
             logical_depth += nrun;
             carried = sts[nrun - 1];   // the new tip's walk-fused record seeds
@@ -1926,7 +1984,7 @@ per_component:
                 int xrc = stalk_expand_link(p, &ex, nc, path, pathlen, s, i,
                                             &base, trail, depth, &an, nc_union,
                                             crossed_pheno && *crossed_pheno,
-                                            &err);
+                                            nm, &err);
                 spoor_clunk(nc);   // the link fid is spent either way
                 if (xrc < 0) goto fail;
                 path    = ex->buf[ex->cur];
@@ -1968,6 +2026,7 @@ per_component:
         if (nc_union)
             stalk_anchor_set(&an, depth, stalk_lbase(ex) + s, true,
                              crossed_pheno && *crossed_pheno);
+        stalk_name_push1(nm, depth, namebuf, clen);
         trail[depth++] = nc;   // owned (own fid post-walk for dev9p)
         logical_depth++;       // (only consumed while pounce_ok)
         carried_valid = false; // a plain walk fetches no attrs for the new tip
@@ -1993,6 +2052,7 @@ per_component:
     if (amode == STALK_MOUNT && floor_depth > 0 && depth == floor_depth) {
         stalk_unwind(trail, depth);
         depth = 0;
+        stalk_name_settle(nm, 0);
         carried_valid = false;
         mount_names_base = true;
     }
@@ -2240,14 +2300,46 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp) {
     return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL, NULL,
-                      NULL);
+                      NULL, NULL);
+}
+
+struct Spoor *stalk_landed(struct Proc *p, struct Spoor *start,
+                           const char *path, u64 pathlen, int *errp,
+                           char *name, u32 cap, u32 *name_len) {
+    if (!name || cap < 2 || cap > SYS_OPEN_PATH_MAX + 1 || !name_len)
+        { if (errp) *errp = T_E_INVAL; return NULL; }
+    struct stalk_name nm = { .buf = name, .cap = cap };
+    struct Spoor *q = stalk_core(p, start, path, pathlen, STALK_WALK, 0, errp,
+                                 NULL, NULL, NULL, NULL, &nm);
+    if (q && nm.overflow) {
+        spoor_clunk(q);
+        if (errp) *errp = T_E_INVAL;
+        return NULL;
+    }
+    if (!q) return NULL;
+    name[nm.len] = '\0';
+    // The name must walk back to q. A served link resolved from a union member
+    // past the first can land on a node an earlier member shadows, and that
+    // node has no name in the caller's namespace.
+    struct Spoor *chk = stalk_core(p, start, nm.len ? name : "/", nm.len ? nm.len : 1,
+                                   STALK_WALK, 0, NULL, NULL, NULL, NULL, NULL, NULL);
+    bool same = chk && chk->dc == q->dc && chk->devno == q->devno &&
+                chk->qid.path == q->qid.path;
+    if (chk) spoor_clunk(chk);
+    if (!same) {
+        spoor_clunk(q);
+        if (errp) *errp = T_E_INVAL;
+        return NULL;
+    }
+    *name_len = nm.len;
+    return q;
 }
 
 struct Spoor *stalk_remove_parent(struct Proc *p, struct Spoor *start,
                                   const char *path, u64 pathlen, int *errp,
                                   bool *union_point) {
     return stalk_core(p, start, path, pathlen, STALK_REMOVE, 0, errp, NULL, NULL,
-                      NULL, union_point);
+                      NULL, union_point, NULL);
 }
 
 // stalk_exec (VIVARIUM section 13) -- the exec-resolution variant: identical to
@@ -2266,7 +2358,7 @@ struct Spoor *stalk_exec(struct Proc *p, struct Spoor *start,
                          const char *path, u64 pathlen, int amode, u32 omode,
                          int *errp, bool *crossed_pheno) {
     return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL,
-                      crossed_pheno, NULL);
+                      crossed_pheno, NULL, NULL);
 }
 
 int stalk_stat(struct Proc *p, struct Spoor *start,
@@ -2279,7 +2371,7 @@ int stalk_stat(struct Proc *p, struct Spoor *start,
     bool done = false;
     struct Spoor *q = stalk_core(p, start, path, pathlen,
                                  STALK_STAT | (int)flags, 0,
-                                 errp, out, &done, NULL, NULL);
+                                 errp, out, &done, NULL, NULL, NULL);
     if (done) return 0;   // the walk-query fast path filled *out; no Spoor existed
     if (!q)   return -1;  // *errp carries the cause
     // Fallback quarry (walk_attrs-less final Dev / leaf mount point crossed to

@@ -245,7 +245,6 @@ static int cwd_streq(const char *a, const char *b) {
     return a[i] == b[i];
 }
 
-void test_territory_cwd_lexical(void);
 void test_territory_cwd_dot(void);
 void test_territory_cwd_join(void);
 
@@ -308,66 +307,6 @@ void test_territory_cwd_join(void) {
     // lexical resolve for '..'-bearing paths, so this bound matters more now.
     char tiny[4];
     r = cwd_join("/aaaa", "bbbb", 4, tiny, sizeof(tiny));
-    TEST_ASSERT(r == -1, "over-capacity result rejected");
-
-    // The SYS_CHDIR step-3 contract: canonicalization runs on the ALREADY
-    // absolute join with dot == NULL, so dot_path is not re-read and cannot
-    // race a peer thread's chdir.
-    r = cwd_lexical_resolve((const char *)0, "/a/b/..", 7, out, sizeof(out));
-    TEST_ASSERT(r == 2 && cwd_streq(out, "/a"),
-        "canonicalizing an absolute join collapses '..'");
-    r = cwd_lexical_resolve((const char *)0, "/etc/", 5, out, sizeof(out));
-    TEST_ASSERT(r == 4 && cwd_streq(out, "/etc"),
-        "canonicalizing drops a trailing separator (dot_path stays canonical)");
-    r = cwd_lexical_resolve((const char *)0, "/..", 3, out, sizeof(out));
-    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
-        "canonicalizing clamps '..' at root (cd .. from / stores /)");
-}
-
-// territory.cwd_lexical -- the pure canonicalizer (cwd_lexical_resolve). Since
-// #83 its ONLY production role is computing the string SYS_CHDIR stores in
-// dot_path; it is NOT the resolution path (see test_territory_cwd_join).
-void test_territory_cwd_lexical(void) {
-    char out[256];
-    int r;
-
-    r = cwd_lexical_resolve("/home/michael", "foo.txt", 7, out, sizeof(out));
-    TEST_ASSERT(r > 0 && cwd_streq(out, "/home/michael/foo.txt"),
-        "relative join against cwd");
-
-    r = cwd_lexical_resolve("/home/michael", "/etc/passwd", 11, out, sizeof(out));
-    TEST_ASSERT(r > 0 && cwd_streq(out, "/etc/passwd"),
-        "absolute path ignores cwd");
-
-    r = cwd_lexical_resolve("/a", "./b//c", 6, out, sizeof(out));
-    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/b/c"),
-        "dot skipped + double-slash collapsed");
-
-    r = cwd_lexical_resolve("/a/b/c", "../x", 4, out, sizeof(out));
-    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/b/x"),
-        "dotdot pops one component");
-
-    // ".." can never escape above "/" (the I-28-adjacent lexical clamp; stalk
-    // ALSO re-clamps at root_spoor, so this is belt-and-suspenders).
-    r = cwd_lexical_resolve("/a", "../../../etc", 12, out, sizeof(out));
-    TEST_ASSERT(r > 0 && cwd_streq(out, "/etc"),
-        "dotdot clamped at root");
-
-    r = cwd_lexical_resolve((const char *)0, "foo", 3, out, sizeof(out));
-    TEST_ASSERT(r > 0 && cwd_streq(out, "/foo"),
-        "NULL cwd treated as root");
-
-    r = cwd_lexical_resolve("/a", "..", 2, out, sizeof(out));
-    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
-        "dotdot from /a nets back to /");
-
-    r = cwd_lexical_resolve("/home", "/", 1, out, sizeof(out));
-    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
-        "absolute / yields /");
-
-    // A result that does not fit the output buffer is rejected (no overflow).
-    char tiny[4];
-    r = cwd_lexical_resolve("/aaaa", "bbbb", 4, tiny, sizeof(tiny));
     TEST_ASSERT(r == -1, "over-capacity result rejected");
 }
 

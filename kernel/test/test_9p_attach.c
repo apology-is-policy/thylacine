@@ -11,9 +11,11 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
+#include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -499,8 +501,9 @@ struct att_ctl_probe {
     u64         demux_orphan;
 };
 
-static bool att_ctl_cb(const char *label, int id, u32 msize,
+static bool att_ctl_cb(const char *label, int id, u32 msize, u32 owner, u32 server,
                        const struct p9_client_ctl *snap, void *arg) {
+    (void)owner; (void)server;
     struct att_ctl_probe *p = (struct att_ctl_probe *)arg;
     int i = 0;
     while (p->want[i] && label[i] == p->want[i]) i++;
@@ -514,6 +517,18 @@ static bool att_ctl_cb(const char *label, int id, u32 msize,
     return false;
 }
 
+static bool att_contains(const char *h, size_t hl, const char *needle) {
+    size_t nl = 0;
+    while (needle[nl]) nl++;
+    for (size_t i = 0; i + nl <= hl; i++) {
+        size_t j = 0;
+        while (j < nl && h[i + j] == needle[j]) j++;
+        if (j == nl) return true;
+    }
+    return false;
+}
+
+size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 void test_p9_attached_ctl_registry(void) {
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
                                 sizeof(g_loopback_resp),
@@ -564,6 +579,65 @@ void test_p9_attached_ctl_registry(void) {
         }
         TEST_ASSERT(seen, "the live session's sess row renders via the Dev vtable");
         spoor_unref(leaf);
+    }
+
+    // IMPERIUM-DESIGN 11.3 item 10: the demux counters, the reader flag, the
+    // send waiters and the in-flight tags move once per message (a pty carries
+    // one per key), so they are the session's ends' (stamped below; unstamped,
+    // an end is PRINCIPAL_INVALID, which matches no reader), the system
+    // principal's and a hostowner's. Anyone else sees "-" (the Rattach made rx
+    // at least 1).
+    {
+        char buf[2048];
+        struct Proc r;
+        for (size_t i = 0; i < sizeof(r); i++) ((u8 *)&r)[i] = 0;
+        r.principal_id = 0xC0FFEEu;
+        size_t n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=- own=- orph=- orphc=- orphf=- "
+                                         "orphl=- wake=- ops=- err=- - live sw=- infl=-\n"),
+                    "an ordinary reader sees the session's counters as '-'");
+        r.caps = CAP_HOSTOWNER;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=") &&
+                    !att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-"),
+                    "a hostowner sees the session's counters");
+        r.caps = 0;
+        r.principal_id = PRINCIPAL_SYSTEM;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-") &&
+                    att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx="),
+                    "the system principal sees the session's counters");
+        r.principal_id = PRINCIPAL_INVALID;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-"),
+                    "an unknown end matches no reader, not even an unset principal");
+        p9_attached_set_ctl_owners(a, 0xC0FFEEu, PRINCIPAL_INVALID);
+        r.principal_id = 0xC0FFEEu;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-") &&
+                    att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx="),
+                    "the attacher sees its session's counters");
+        r.principal_id = 0xD00Du;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-"),
+                    "a principal at neither end sees '-'");
+        p9_attached_set_ctl_owners(a, 0x1u, 0xD00Du);
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-") &&
+                    att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx="),
+                    "the server end sees the session's counters");
+        // none is nobody: a none end shares nothing with a none reader. The
+        // control one variable away is the other end, which still reads.
+        p9_attached_set_ctl_owners(a, PRINCIPAL_NONE, 0xD00Du);
+        r.principal_id = PRINCIPAL_NONE;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-"),
+                    "a none reader is not a none end");
+        r.principal_id = 0xD00Du;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        TEST_ASSERT(!att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx=-") &&
+                    att_contains(buf, n, "sess ctlprobe id=- msize=8192 rx="),
+                    "control: the session's other end still reads its counters");
     }
 
     p9_attached_set_ctl_ident(a, "relabeled", 42);

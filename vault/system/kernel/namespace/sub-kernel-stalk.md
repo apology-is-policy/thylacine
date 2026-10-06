@@ -488,6 +488,69 @@ program that re-resolves that text itself (musl's `realpath(3)` runs its own
 readlink loop) gets the Linux answer, an absolute target from the caller's
 root.
 
+### The landed name (`stalk_landed`, SYS_CHDIR's store)
+
+Since 2026-10-06 ([[dec-2026-10-06-chdir-physical]]; STALK-DESIGN 4.3)
+`stalk_landed` reports the name of where a `STALK_WALK` landed, relative to
+its start: `""` for the start itself, else `/c1/.../cn`. Change-directory
+stores it ([[sub-kernel-territory]]), so the cwd holds no `.`, `..` or link
+component, and `cd link/..` lands where `ls link/..` reads.
+
+The name is built the way the trail is, in a `struct stalk_name` that
+`stalk_core` takes as an optional argument (NULL for every other caller):
+- a push appends the components its entry consumed, the same names the
+  entry's `Path` gets: one for a per-component hop, the whole run for a
+  pounced or split run, none for a base cross;
+- a `..` pop truncates to the entry below;
+- a crossing in place keeps the name, because a mount point's namespace name is
+  the mounted root's;
+- a restart truncates to the new base's name: the root's (`""`) for an
+  absolute target, unchanged for a `..`-rebuild, and for a served link the
+  anchor's, which is the name of the crossing entry it stands on or of the
+  union point its member covers.
+
+`end[d]` records the length once `trail[d]` stands, and `base` the current
+base's length. Nothing in the resolver reads the name. It is never taken from a
+Spoor's `Path` either: I-33 makes a Path non-load-bearing, a Path may be
+absent, and under a chroot a Path carries the outer prefix. A name that
+outgrows the caller's buffer latches `overflow` and the walk fails with
+`T_E_INVAL`, even if a later `..` would have shortened it.
+
+The name is then walked once more from the same start, and the result must be
+the same node (Dev class, instance and qid path, the mount table's identity) or
+the call fails with `T_E_INVAL`. Building the name alongside the trail makes it
+the name of the landed node everywhere but one place: a served link resolved
+from a union member re-anchors at that member, so it can land on a node that an
+earlier member shadows at the same name, and such a node has no name in the
+caller's namespace. The check also makes `start` a contract: an absolute link
+re-bases the name at the Territory root, so a start other than the root fails
+it.
+
+`stalk.landed_name` names each landing: plain, `.`, a trailing separator,
+`..`, an in-place splice, the absolute and `..`-rebuild restarts, a chain, a
+mount crossing, three served links (contained at the anchor), and the same
+`d/up` link run local as the control that climbs out. Through the union
+`[uL, uR]` two served links in `uR` are named from the union point, at the top
+level and one level down, and a served link that lands on a node `uL` shadows
+is refused, while the same link run local is named. An absolute local link
+reached below a served anchor (`phx` mounted over the export's `d2`) re-bases
+the name at the root, and absolute served targets are named from the
+crossing. A buffer overflow fails with EINVAL.
+
+`stalk.landed_roots` stands on roots the battery does not: a Territory
+chrooted below an attach whose root names itself `/`, where every Path
+carries the outer prefix (`/a/deep`) and the landed name must not (the I-33
+negative); a served Territory root, where a served link with no crossing on
+its trail names from the base; and a mount over the Territory root, crossed
+at the base. `stalk.landed_identity` replaces a crossing's mount while the
+walk follows a served link in it, so the name walks into the replacement:
+the same source again is named, while one on another Dev or from another
+attach, each holding the same qid path, is refused. The base-cross push
+(`stalk_name_push` with no components) has no witness that can turn red:
+`end[]` starts zeroed, which is the base's length on a first pass, so only a
+base cross after a served re-anchor (an anchor that is itself a mount point)
+could tell, and no fixture builds one.
+
 ### The phenotype accumulator (Design D)
 
 `crossed_pheno` is a **set-only** boolean the exec resolver threads through the
@@ -626,7 +689,9 @@ pointers), `char namebuf[SYS_WALK_OPEN_NAME_MAX + 1]` per component, and
 the POUNCE run arrays (`names`/`lens`/`ends[16]` + `struct t_stat sts[16]`
 ≈ 1.6 KiB), and `struct stalk_anchors` (three `u64` masks + 40 `u16`
 logical offsets = 104 B, the served-link anchor record) — all on the 16 KiB
-kernel stack. Symlink expansion allocates a
+kernel stack. `stalk_landed` adds a `struct stalk_name` on its own frame (40
+`u16` ends + the caller's buffer pointer, ~104 B); the name buffer is the
+caller's. Symlink expansion allocates a
 `struct stalk_expand` on demand (`kmalloc`; the double path buffer it flips
 between, a target scratch, a consumed-prefix record, the follow counter, the
 ref-held `owned_base` re-anchor root, and the ref-held `owned_anchor` served
@@ -733,6 +798,13 @@ resolve locally.
 Standing obligations for any change (the ARCH §25.4 POUNCE row is the
 authoritative audit-trigger copy):
 
+- **Every trail push, pop and restart moves the landed name with it.** A new
+  push site without `stalk_name_push`, or a new re-anchor without setting
+  `nm->base`, stores a cwd that names a different directory from the one the
+  walk validated. The name is write-only inside the resolver; nothing may
+  branch on it. `stalk_landed`'s second walk is the backstop, so a change that
+  weakens it (a looser identity, a skipped walk for some case) reopens the
+  union-shadow case.
 - **The fail-ordering invariant**: an X-denial at component k masks
   everything past k including a deeper miss — ACCES never NOENT. Pinned
   by `stalk.pounce_acces_masks_noent`.
