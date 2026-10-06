@@ -14,6 +14,7 @@ code:
   - tools/test-build-config.sh
   - tools/configure.sh
   - tools/test-configure.sh
+  - tools/check-flag-words.py
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -21,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -205,19 +206,30 @@ because the failure it guards against is silent: a copy left behind when the
 kernel record grows passes its own size assertion while the kernel reads past
 it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
 
-**The proc_flags check runs after it (2026-10-05).** `tools/check-proc-flags.py`
-evaluates every `#define PROC_FLAG_*` in `kernel/include/thylacine/proc.h`,
-resolving the header's other macros, and fails when two defines share a bit
-of the `proc_flags` word. A define whose bits are exactly the union of two or
-more other flags is a composite mask (`TERMINATE_PENDING_MASK`) and may
-overlap them; a define that does not evaluate fails too, since an unread flag
-is not a checked one. Each flag's own `_Static_assert` names only the flags its
-author knew, so two branches each took bit 22 and both compiled; the header is
-the one source both must pass through. The success line reads
-`check-proc-flags: 19 defines (1 composite), 30 bits owned, free [30, 31]`.
-It is sub-second and fatal, with no skip switch. Before it was trusted it was
-run red on a bit-22 collision (it names both flags), an undefined macro and an
-empty header.
+**The flag-word check runs after it (2026-10-05; nine words since
+2026-10-06).** `tools/check-flag-words.py` holds a table of flag words -- the
+header, the pattern a member's name matches, the width: `proc_flags`, the
+spawn permission word and the four one-bit spawn words, the walk-create mode
+word (`SYS_WALK_CREATE_*`, with DMDIR and the DMSRV bits), the 9P attach flags
+and the mount flags. It evaluates every member, resolving the header's other
+macros, and fails when two members share a bit. A member owns the bits its own
+literals contribute; a reference to another member contributes nothing, so a
+mask built from members (`TERMINATE_PENDING_MASK`, `SPAWN_PERM_ALL`) overlaps
+them freely, while the mode bits `SYS_WALK_CREATE_PERM_VALID` adds by literal
+are its own. A member that uses another other than as an operand of `|` (a
+shift, an `&`) cannot be classified and fails, and so do a member that does not
+evaluate, one outside its word, and a word with no member: an unread flag is not
+a checked one. Each flag's own `_Static_assert` names only the flags its author
+knew, so two branches each took bit 22 of `proc_flags` and both compiled; the
+header is the one source both must pass through. A passing check then proves it
+can fail: each word's header is mutated in memory (a new member on an owned bit,
+a member shifted from another, an undefined macro, a member outside the word,
+every member renamed away), and a mutation the check does not report by the rule
+it targets stops the build. It prints one line per word, then
+`check-flag-words: 9 words ok; the self-test caught all 45 mutations`. It is
+sub-second and fatal, with no skip switch. It replaced `tools/check-proc-flags.py`,
+main's single-word check, whose rule let a literal mask equal to a union of
+flags overlap them; the literal rule is stricter.
 
 **A free-space floor refuses before any target writes (2026-10-05).**
 `disk_floor_check` refuses a target, and separately the pool generate, when

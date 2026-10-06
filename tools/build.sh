@@ -7447,13 +7447,15 @@ GOFORK="$GOFORK" python3 "$REPO_ROOT/tools/check-spawn-args-mirrors.py" \
          echo "    sys_spawn_args does not match kernel/include/thylacine/syscall.h" >&2
          exit 1; }
 
-# Every PROC_FLAG_ define in proc.h must own its bits of the proc_flags word. A
-# flag's _Static_assert names the flags its author knew, so two branches can take
-# the same free bit and both compile -- it happened, at bit 22. This check
-# derives the set from the header instead. Sub-second, fatal, no skip switch.
-python3 "$REPO_ROOT/tools/check-proc-flags.py" \
-    || { echo "==> proc_flags check FAILED -- two PROC_FLAG_ defines share a bit" >&2
-         echo "    of the proc_flags word (kernel/include/thylacine/proc.h)" >&2
+# Every member of a flag word (proc_flags, the spawn words, the walk-create
+# mode word, the 9P attach flags, the mount flags) must own its bits. A flag's
+# _Static_assert names the flags its author knew, so two branches can take the
+# same free bit and both compile -- it happened in proc_flags, at bit 22. This
+# check derives each set from its header instead, and proves it can fail before
+# it passes. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-flag-words.py" \
+    || { echo "==> flag-word check FAILED -- two defines share a bit of one flag" >&2
+         echo "    word, or the check could not verify itself (see above)" >&2
          exit 1; }
 
 # The free-space floor, before any target writes; `clean` frees space.
