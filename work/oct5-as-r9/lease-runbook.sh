@@ -51,7 +51,11 @@ provenance() {
     _ss="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
     echo "stratum HEAD   : $(git -C "$_ss" rev-parse HEAD 2>/dev/null || echo n/a)"
     echo "stratum dirty  : $([ -z "$(git -C "$_ss" status --porcelain 2>/dev/null)" ] && echo no || echo YES)"
-    for f in build/.config build/kernel/thylacine.elf build/ramfs.cpio build/fixtures/pool.img; do
+    # The SANITIZER elf is hashed too: ci-smp-gate boots it for 2 of its 5
+    # rows, so a provenance record naming only the default kernel describes
+    # less than half the gate (astra, 0161 note 8).
+    for f in build/.config build/kernel/thylacine.elf build/kernel-undefined/thylacine.elf \
+             build/ramfs.cpio build/fixtures/pool.img; do
       [ -f "$f" ] && echo "$(shasum -a 256 "$f" | cut -c1-16)  $f" || echo "(absent)          $f"
     done
   } >> "$PROV"
@@ -302,13 +306,22 @@ done
 # Stage 4 -- the suite. The 4 new tests execute for the FIRST time here. A
 # failing suite extincts the boot (main.c: extinction("kernel test suite
 # failed")), so a red is loud, not silent.
-# THE PIPELINE IS LOAD-BEARING. `| tee` makes this line's status tee's, so a
-# D7 extinction does NOT abort before stage 5 -- and D7 boots in the SAME run
-# as the suite (the 11:23:59Z log carries both "tests: 1834/1834 PASS" and the
-# joey EXTINCTION). The per-witness checks below are this stage's real verdict.
-# Adding `set -o pipefail` would silently convert a D7 red into "the SMP gate
-# never ran", which is the one gate AS-R9 is blocked on.
-tools/test.sh 2>&1 | tee work/oct5-as-r9/guest-test.log
+# CAPTURE THE STATUS, AND PRESERVE THE LOG BEFORE ANY ASSERTION CAN EXIT.
+# A blanket `| tee` hides EVERY boot failure behind tee's exit 0, not just
+# D7's (astra, 0161 note 8) -- and the first thing a failing assertion does is
+# exit, which is exactly how I lost the first failing boot log. So: the real
+# status through a sentinel, the log copied immediately, assertions after.
+TESTRC=$(mktemp)
+( set +e; tools/test.sh 2>&1; echo $? > "$TESTRC" ) | tee work/oct5-as-r9/guest-test.log
+test_rc=$(cat "$TESTRC")
+mkdir -p work/oct5-as-r9/boot-logs
+BOOTLOG=work/oct5-as-r9/boot-logs/boot-confirm-$(date -u '+%H%M%SZ').log
+if [ -f build/test-boot.log ]; then
+  cp build/test-boot.log "$BOOTLOG"
+else
+  cp work/oct5-as-r9/guest-test.log "$BOOTLOG"
+fi
+echo "-- test.sh exit status: $test_rc; boot log PRESERVED at $BOOTLOG"
 # AN ELF NAME IS NOT AN EXECUTION WITNESS (astra, 0169 turn 4). The stage-3 grep
 # proves the tests are COMPILED IN; only the boot log proves they RAN. The suite
 # prints "    [test] <name> ... " per test, so require a PASS record for each of
@@ -326,30 +339,52 @@ for t in settled_drop_retains_nonfinal_charge settled_drop_exact_payer \
 done
 echo "-- suite total must be base+4; a skip is NOT coverage (OPEN-BUGS: 17 ramfs"
 echo "   probe tests pass when their initrd file is missing):"
-grep -E '  tests: [0-9]+/[0-9]+' work/oct5-as-r9/guest-test.log || true
-echo "   [skip] lines (must be 0 on the gate image, which always carries the probe set):"
-grep -c '\[skip\]' work/oct5-as-r9/guest-test.log || true
+# ASSERTED, not merely printed (astra, note 8): a `|| true` on the tally is a
+# number nobody checks.
+EXPECT_TESTS="${EXPECT_TESTS:-1834}"
+tally=$(grep -E '  tests: [0-9]+/[0-9]+' work/oct5-as-r9/guest-test.log | tail -1)
+[ -n "$tally" ] || { echo "   NO SUITE TALLY AT ALL -- the suite never reported; STOP"; exit 1; }
+echo "  $tally"
+ran=$(echo "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+).*#\1#')
+tot=$(echo "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+).*#\2#')
+[ "$ran" = "$tot" ] || { echo "   only $ran of $tot passed; STOP"; exit 1; }
+[ "$tot" = "$EXPECT_TESTS" ] || {
+  echo "   total $tot != expected $EXPECT_TESTS (base 1830 + my 4)."
+  echo "   A total that MOVED means the test SET changed: account for it, do not"
+  echo "   adjust the expectation to match the observation."; exit 1; }
+nskip=$(grep -c '\[skip\]' work/oct5-as-r9/guest-test.log || true)
+echo "   [skip] lines: $nskip (must be 0 on the gate image)"
+[ "$nskip" = 0 ] || { echo "   A SKIP IS NOT COVERAGE; STOP"; exit 1; }
 
 # Stage 4b -- D7 on its OWN axis. Agreed with astra (0161): the controlled
 # rebuild re-equalises the Stratum input, so whatever D7 does is evidence about
 # THAT input, never about the charge-settlement repair. NON-FATAL by design --
 # stage 5 must run whatever happens here.
-# COPY FIRST: test.sh overwrites build/test-boot.log, and I have already lost
-# one failing boot log by re-running before copying it.
-mkdir -p work/oct5-as-r9/boot-logs
-D7LOG=work/oct5-as-r9/boot-logs/boot-confirm-$(date -u '+%H%M%SZ').log
-if [ -f build/test-boot.log ]; then
-  cp build/test-boot.log "$D7LOG"
-else
-  cp work/oct5-as-r9/guest-test.log "$D7LOG"
-fi
-echo "-- D7 axis (separate verdict, non-fatal to this run): $D7LOG"
+echo "-- D7 axis (separate verdict): $BOOTLOG"
 set +e
-sh work/oct5-as-r9/d7-compare.sh "$D7LOG"
+sh work/oct5-as-r9/d7-compare.sh "$BOOTLOG"
 D7RC=$?
 set -e
 echo "-- D7 verdict code: $D7RC (0 cured / 20 still red / 21 changed shape / 4 control failed)"
 echo "   This is NOT the AS-R9 verdict -- stage 5 decides that one."
+# D7 IS THE ONLY TOLERATED RED BOOT, and only because its cause is an external
+# input this run deliberately re-equalises. Every OTHER boot failure stays an
+# explicit failure (astra, note 8): collecting later evidence is not
+# qualification of a red boot. So a nonzero test.sh passes here ONLY when the
+# log's extinctions are joey's and nothing else.
+if [ "$test_rc" != 0 ]; then
+  n_ext=$(grep -c 'EXTINCTION' "$BOOTLOG" || true)
+  n_joey=$(grep -c 'EXTINCTION: joey' "$BOOTLOG" || true)
+  echo "-- test.sh RED: $n_ext extinction(s) in the log, of which joey: $n_joey"
+  if [ "$n_joey" -gt 0 ] && [ "$n_ext" = "$n_joey" ] && [ "$D7RC" != 0 ]; then
+    echo "   TOLERATED as the known D7 signature -- continuing to the SMP gate,"
+    echo "   which is what AS-R9 is blocked on. NOT a qualification of a red boot."
+  else
+    echo "   FATAL: a red boot that is NOT the known D7 signature. STOP."
+    grep 'EXTINCTION' "$BOOTLOG" | sed 's/^/     /' || true
+    exit 1
+  fi
+fi
 
 
 # Stage 5 -- the one that matters. AS-R9 is an SMP race: a single-CPU green
@@ -379,6 +414,31 @@ for lbl in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
     && echo "   row PASS: $lbl" \
     || { echo "   ROW MISSING OR RED: $lbl -- the matrix did not run in full"; exit 1; }
 done
+# FIVE PASS ROWS ARE THE SCRIPT'S ACCEPTANCE, NOT 50 CLEAN BOOTS (astra, 0161
+# note 8). smp-multiboot's own verdict is `corrupt==0 && extkill==0 &&
+# other==0` (smp-multiboot.sh:347), so a row can PASS with nonzero TIMING or
+# INJECT-MISS boots. For a race fix that is the signal, not the noise: a
+# "timing (benign host-fragility)" boot is a boot that did not come up clean,
+# and host-fragility is the non-explanation this project forbids me to accept.
+# Every boot carries exactly one classification, so pass == N is precisely
+# "all six other categories are zero" -- one check, no enumeration gap.
+echo "-- per-label tallies, every category (the row verdict is not enough):"
+SMP_N="${SMP_GATE_N:-10}"
+unclean=0
+for lbl in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
+  line=$(grep -E "^== $lbl: [0-9]+ PASS / " work/oct5-as-r9/guest-smp.log | tail -1)
+  [ -n "$line" ] || { echo "   NO TALLY LINE for $lbl -- it never reported; STOP"; exit 1; }
+  echo "   $line"
+  p=$(echo "$line" | sed -E 's/^== [^:]+: ([0-9]+) PASS .*/\1/')
+  [ "$p" = "$SMP_N" ] || { echo "     ^^ only $p of $SMP_N boots CLEAN"; unclean=1; }
+done
+if [ "$unclean" != 0 ]; then
+  echo "   NOT A CLEAN QUALIFICATION: a label passed its row verdict with fewer"
+  echo "   than $SMP_N clean boots. timing/inject-miss are tolerated by the gate,"
+  echo "   not by me. Diagnose them -- build/multiboot-fails/ has each log."
+  exit 1
+fi
+echo "   all five labels: $SMP_N/$SMP_N CLEAN boots"
 
 # Stage 6 -- THE SECOND AXIS, and for a race fix it is not optional padding.
 # Everything above runs on one memory model (Apple M2 under HVF). AS-R9 is an
@@ -396,20 +456,38 @@ done
 # NOT re-bake either one on the far side.
 # 4 GB RAM: ONE 2048 MiB guest at a time.
 if [ "${PI_AXIS:-1}" = 1 ]; then
-  # AFTER STAGE 5 build/ HOLDS THE UBSAN KERNEL: ci-smp-gate builds default
-  # then ubsan (ci-smp-gate.sh:139-144), so the last build wins. Syncing now
-  # would ship a sanitizer kernel and report it as the plain second axis --
-  # mislabelled evidence, and for a RACE the instrumentation perturbs the very
-  # timing this axis exists to probe. Rebuild default; pair pool+ramfs from it.
+  # I CLAIMED THE UBSAN BUILD CLOBBERS THE DEFAULT ELF. THAT WAS WRONG, and
+  # astra caught it (0161 note 8) against build.sh:231-232: a sanitizer build
+  # goes to build/kernel-${san} -- build/kernel-undefined -- for exactly the
+  # stated reason that it must not clobber the production build. So
+  # build/kernel/thylacine.elf is STILL the default kernel after the gate, and
+  # the rebuild I had put here was not merely unnecessary: it re-mints pool.img
+  # with a fresh key (build.sh:3598), spending lease minutes and ~600M of disk
+  # to restore something that was never disturbed.
   #
-  # AND THIS BUILD IS DELIBERATELY BARE, not `--config ci` like stage 2. The
-  # project rule "a bare build.sh is not the gate image" is about the gate
-  # fleet that asserts on a post-login shell; this axis is the SMP one, and
-  # ci-smp-gate itself builds BARE (ci-smp-gate.sh:140). Matching stage 5's
-  # default rows is what makes the two silicons comparable, so do NOT "fix"
-  # this to --config ci: that would silently change what the axis measures.
-  tools/build.sh kernel
-  provenance "stage-6 pre-sync (default kernel rebuilt after the ubsan gate)"
+  # What IS shared and therefore last-writer-wins: build/ramfs.cpio and
+  # build/fixtures/ are NOT sanitizer-scoped, so the pair on disk is whatever
+  # the gate's final bake produced. That pair is internally consistent, and the
+  # kernel carries no key, so sync it as found -- but NAME what is synced
+  # rather than assume it.
+  echo "-- kernel flavours present (the synced axis is named, not assumed):"
+  for k in build/kernel/thylacine.elf build/kernel-undefined/thylacine.elf; do
+    [ -f "$k" ] && echo "   $(shasum -a 256 "$k" | cut -c1-16)  $k"
+  done
+  # A yip PI LEASE IS REQUIRED, and FREE IS NOT REACHABILITY (astra, note 8;
+  # the operator last reported pi offline). My earlier claim that pi has no
+  # reservation protocol is stale -- `yip resources` lists it. Acquire the
+  # lease yourself and release it in a finally; this script will not take a
+  # lease on your behalf, because a script with many exit paths leaks one.
+  if [ "${PI_LEASE_OK:-0}" != 1 ]; then
+    echo "   REFUSING the pi sync: set PI_LEASE_OK=1 only while you HOLD the yip"
+    echo "   pi lease. PI_AXIS=0 skips the second axis deliberately and says so."
+    exit 6
+  fi
+  ssh -o ConnectTimeout=10 -o BatchMode=yes thyla-pi true 2>/dev/null \
+    || { echo "   REFUSING: thyla-pi unreachable. FREE in yip is a lease state,"
+         echo "   not a reachability measurement."; exit 6; }
+  provenance "stage-6 pre-sync (no rebuild -- flavours recorded as found)"
   echo "-- second axis: syncing this tree's kernel + PAIRED pool/ramfs to thyla-pi"
   WARP_HOST=thyla-pi tools/warp-host.sh sync
   echo "-- then run the SMP boots there under real KVM, A72 weak memory"
