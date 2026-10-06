@@ -1898,6 +1898,21 @@ different searches, and finding the first is what makes you stop doing the secon
 The comment naming `proc_total_created` was sitting nine lines above the
 `g_next_pid` line that got read.
 
+**Amended 2026-10-06: three of the sources are withheld from most readers**
+(IMPERIUM-DESIGN 11.3 item 10, `dec-2026-10-06-cpu-time-gate`). The per-CPU
+`idle_ns`, `ctxt` and `intr` columns of `/ctl/cpu` move once per key typed into
+the trusted episode, so the kernel renders them `-` to a reader that is neither
+the system principal nor a hostowner. This section's rule decides what the
+diorama does with a withheld source. `intr` and `ctxt` are whole lines, so they
+are omitted rather than given a plausible 0. The `cpu`/`cpuN` jiffies columns
+are positional and cannot be omitted, so each line reads zeros: no time
+elapsed, rather than a fabricated split. The boot's shared diorama runs as
+SYSTEM for clients of any principal, so it renders every client the withheld
+form whatever its own read returned (the deputy rule of 6.2, as with
+`environ`). A per-container diorama runs as its container's principal and
+receives `-` from the kernel already. The operator accepted the cost when voting
+the restriction: `top` in a vivarium reads zeros.
+
 ---
 
 ### 6.18 The translation table, tier by tier (V-2a, as-built)

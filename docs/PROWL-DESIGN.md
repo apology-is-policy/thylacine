@@ -213,6 +213,20 @@ operator's tool; a confined user still sees the overview + full detail on its ow
 processes). This composes I-1 (isolation) + the existing `/ctl` posture; it adds
 no new §28 invariant.
 
+**Amended 2026-10-06: %CPU left the all-visible summary** (operator votes "Gate
+CPU time to the owner" and "Restrict it too"; `dec-2026-10-06-cpu-time-gate`).
+A counter that grows with each key the trusted episode's authority handles
+publishes the secret's length and cadence (IMPERIUM-DESIGN 11.3 item 10). A
+Proc's `cpu_ns`, in `/proc/<pid>/status` and `/ctl/procs`, is shown exactly to
+its owner or a `CAP_HOSTOWNER` holder and as `-` to anyone else. The
+system-wide counters belong to the system principal: `/ctl/cpu`'s `idle_ns`,
+`ctxt` and `intr`, and `/ctl/sched`'s `runnable:` and work-conservation lines,
+read as `-` to a reader that is neither `PRINCIPAL_SYSTEM` nor a
+`CAP_HOSTOWNER` holder. `cpus:`, `created:`, the capacity class and every
+Proc's name, state and memory stay all-visible. `ps` and `prowl` show `-`
+where the kernel does, and `prowl`'s per-CPU meters show `-` to an ordinary
+user, who still sees %CPU for their own processes.
+
 ---
 
 ## 4. The tool — `prowl`

@@ -610,6 +610,30 @@ can veto any of them:**
    pre-SAK: the echo of a feed byte accepted before it (at most
    `CONS_ECHO_MAX` bytes, emitted after the lock drops, while the byte itself
    is discarded), the same class as the in-flight first chunk of a write.
+10. **The episode's cadence is not published by the scheduler's counters
+   either** (2026-10-06; the IM Fable pass F3; operator votes "Gate CPU time
+   to the owner" and "Restrict it too", `dec-2026-10-06-cpu-time-gate`).
+   Item 7 kept the secret's length and cadence off the poll path, but every
+   counter that moves when the authority handles a key carried them too: its
+   `cpu_ns` in `/proc/<pid>/status` and `/ctl/procs` grows by each key's work,
+   and on a quiet machine each key is a wake, so the per-CPU `idle_ns`,
+   `ctxt` and `intr` in `/ctl/cpu` and `/ctl/sched`'s `runnable:` and park
+   counts each change once per key, timestamped by whoever polls them (the
+   class of Peeping Tom, USENIX Security 2009, and of the `/proc/interrupts`
+   keystroke attack, IEEE S&P 2016; Linux hides another user's per-Proc files
+   only under `hidepid` and leaves `/proc/stat` world-readable, and Android
+   restricts `/proc/interrupts` by policy). A Proc's `cpu_ns` is now shown
+   exactly to its owner or a `CAP_HOSTOWNER` holder, as `sched` already was,
+   and as `-` to anyone else. The system-wide counters belong to the system principal: a reader
+   that is neither `PRINCIPAL_SYSTEM` nor a `CAP_HOSTOWNER` holder reads `-`
+   for each of them. Rounding was rejected, because `idle_ns` changes at each
+   wake, so a key every 100-300 ms crosses any 10 ms step it is rounded to.
+   corvus runs as `PRINCIPAL_SYSTEM` (joey's child) and no login session does,
+   and `CAP_ALL` excludes `CAP_HOSTOWNER`, so the gate reaches every session.
+   What no file gate closes is a Proc that times its own execution and sees
+   when it is preempted, a residual every general-purpose kernel shares; the
+   Proc-level state column carries no run/sleep bit (ALIVE, STOPPED, ZOMBIE),
+   and the per-thread run states are in the gated `sched`.
 
 ### 11.4 The propagating legate scope -- kernel, I-25 STRENGTHENED, spec-first (IM-2)
 
