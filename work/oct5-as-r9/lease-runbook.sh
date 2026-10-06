@@ -365,7 +365,8 @@ set +e
 sh work/oct5-as-r9/d7-compare.sh "$BOOTLOG"
 D7RC=$?
 set -e
-echo "-- D7 verdict code: $D7RC (0 cured / 20 still red / 21 changed shape / 4 control failed)"
+echo "-- D7 verdict code: $D7RC  (0 cured / 20 UNCHANGED known red / 22 refused but"
+echo "   trace DIFFERS / 21 changed shape / 4 control failed)"
 echo "   This is NOT the AS-R9 verdict -- stage 5 decides that one."
 # D7 IS THE ONLY TOLERATED RED BOOT, and only because its cause is an external
 # input this run deliberately re-equalises. Every OTHER boot failure stays an
@@ -376,9 +377,16 @@ if [ "$test_rc" != 0 ]; then
   n_ext=$(grep -c 'EXTINCTION' "$BOOTLOG" || true)
   n_joey=$(grep -c 'EXTINCTION: joey' "$BOOTLOG" || true)
   echo "-- test.sh RED: $n_ext extinction(s) in the log, of which joey: $n_joey"
-  if [ "$n_joey" -gt 0 ] && [ "$n_ext" = "$n_joey" ] && [ "$D7RC" != 0 ]; then
-    echo "   TOLERATED as the known D7 signature -- continuing to the SMP gate,"
-    echo "   which is what AS-R9 is blocked on. NOT a qualification of a red boot."
+  # EXACTLY 20, never "nonzero" (astra, 0161 note 10 -- and she is right). The
+  # exception exists for the UNCHANGED KNOWN red and nothing else, but `!= 0`
+  # also admitted 21 (changed shape -- a second cause in play), 4 (controls
+  # failed -- the experiment is broken), 22 (refused with a DIFFERENT trace) and
+  # any shell error. None of those establishes the understood failure, so none
+  # of them earns a red boot a pass to the next stage.
+  if [ "$n_joey" -gt 0 ] && [ "$n_ext" = "$n_joey" ] && [ "$D7RC" = 20 ]; then
+    echo "   TOLERATED as the UNCHANGED known D7 signature (code 20, trace"
+    echo "   byte-identical to the baseline) -- continuing to the SMP gate, which"
+    echo "   is what AS-R9 is blocked on. NOT a qualification of a red boot."
   else
     echo "   FATAL: a red boot that is NOT the known D7 signature. STOP."
     grep 'EXTINCTION' "$BOOTLOG" | sed 's/^/     /' || true

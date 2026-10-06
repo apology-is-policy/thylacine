@@ -72,11 +72,13 @@ if [ "$n_err" -gt 0 ]; then
   if printf '%s\n' "$T" | diff -q "$BASE" - >/dev/null 2>&1; then
     echo "  Trace is BYTE-IDENTICAL to the red baseline: the SAME failure, so the"
     echo "  Stratum pin did not change the outcome and the attribution is WRONG."
-  else
-    echo "  Trace DIFFERS from the baseline -- a different failure, not the known one:"
-    printf '%s\n' "$T" | diff "$BASE" - | sed 's/^/    /'
+    echo "  This, and ONLY this, is the UNCHANGED KNOWN RED (20)."
+    exit 20
   fi
-  exit 20
+  echo "  Trace DIFFERS from the baseline -- an install-dek refusal, but NOT the"
+  echo "  known one. Do not treat it as the understood failure (22):"
+  printf '%s\n' "$T" | diff "$BASE" - | sed 's/^/    /'
+  exit 22
 fi
 echo "D7: CHANGED SHAPE -- no install-dek error, but joey still extincted."
 echo "  Do NOT read this as cured; a second cause is in play."
