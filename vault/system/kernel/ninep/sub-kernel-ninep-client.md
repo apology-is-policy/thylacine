@@ -70,8 +70,11 @@ One function per op, `0` on success / `-errno` on failure:
 - **Async front-end** (the Loom completion seam): `p9_client_submit_async`
   (`p9_rpc.on_complete` = WAKE_RENDEZ vs POST_CQE),
   `p9_client_reader_pump_ready` (LOOM.md 8.6, 2026-10-06: read ONE frame,
-  over a ready stream only -- under `c->lock` a dead session is DEAD, a held
-  role BUSY, a transport whose `recv_ready` says no IDLE; otherwise take the
+  over a ready stream only -- under `c->lock` a dead session, or one whose
+  transport is closed, is DEAD (a closed transport samples ready while a
+  backend that does not own its ends still reads the live stream, where
+  `recv_now` finds nothing: a pumper would loop; round 2, P3-3, and the hook
+  refuses both with `-P9_E_IO`), a held role BUSY, a transport whose `recv_ready` says no IDLE; otherwise take the
   role, read what is waiting with the transport's `recv_now` (never sleeping),
   demux a whole frame (PROGRESS), release and hand on. A frame found in part
   stays with the client and the pump is IDLE (2026-10-06, the self-audit's
@@ -338,8 +341,13 @@ demuxed its op's own reply.
 sets `stop_unwinds = (got == 0)` per-chunk: a death OR a debug/job stop
 unwinds the reader ONLY at a frame boundary and BLOCKS THROUGH mid-frame
 (the die-check sites in `sleep()`/`tsleep()` are guarded by
-`thread_reader_blocks_death`), because delivery is CHUNKED and a mid-frame
-unwind desyncs the shared stream ([[haz-shared-stream-desync]]). A
+`thread_reader_blocks_death`). The rule was made because delivery is CHUNKED
+and a mid-frame unwind then desynced the shared stream
+([[haz-shared-stream-desync]]); since 2026-10-06 the partial frame is the
+client's (`rx_got`), so no unwind can lose it, and the block-through stands as
+ARCH 8.8.1.1's voted policy. Its cost -- a server stopped inside a frame holds
+a dying or stopped reader until the server dies -- is [[seam-90-hung-server]],
+whose close (unwind at any byte) is the operator's decision. A
 boundary stop-unwind is classified via the stable per-Thread `stop_unwound`
 latch (set by the detour, reset at recv entry, read by the same thread) —
 never by re-reading `debug_stop_req`, which an async resume can clear. A

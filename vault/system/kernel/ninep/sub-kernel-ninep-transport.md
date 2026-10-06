@@ -68,8 +68,10 @@ struct p9_transport_ops {
   that takes the bytes a readiness sample saw, can hold a waiter in a recv.
   srvconn: `srvconn_client_recv_now` (s2c without its parks; EAGAIN also while
   another reader holds the role). Spoor: `pipe_read_now` on a pipe (the read
-  end's `O_NONBLOCK` is EL0's, left alone); any other Dev (kernel-internal) only
-  when its poll says ready. Loopback / mq: an empty stage or FIFO is EAGAIN
+  end's `O_NONBLOCK` is EL0's, left alone); any other Dev is refused (`-1`):
+  its read may sleep, and its poll, absent or coarser than the read, cannot
+  promise otherwise (round 2, P3-2; such a transport is kernel-internal and
+  reads with `recv`). Loopback / mq: an empty stage or FIFO is EAGAIN
   where their `recv` reads it as EOF. `p9_transport_init` refuses an ops table
   without it.
 - `hangup` (ARCH 21.10, "A death hangs up", 2026-10-05): hang up the

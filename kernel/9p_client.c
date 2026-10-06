@@ -298,9 +298,8 @@ static void client_send_progress_signal(struct p9_client *c) {
 // body sets self->stop_unwinds = (got == 0) before each recv, so a stop
 // (either owner -- the debugger's, or PTY-1f's job stop; the detour gate is
 // proc_stop_requested) UNWINDS the reader ONLY at a frame boundary (no bytes
-// of the frame consumed) and NEVER mid-frame (unwinding mid-frame discards
-// the consumed partial bytes -> the survivor reader reads the frame TAIL as
-// a header -> stream desync). `self` may be a kproc thread (SQPOLL, site 4):
+// of the frame consumed) and NEVER mid-frame (the policy below). `self` may
+// be a kproc thread (SQPOLL, site 4):
 // kproc is neither debuggable nor job-stoppable (both delivers reject it),
 // so both stop flags are always 0 and the detour never fires -- the sets are
 // harmless.
@@ -308,9 +307,14 @@ static void client_send_progress_signal(struct p9_client *c) {
 // The frame's bytes are the CLIENT's, not the reader's (Plan 9's devmnt keeps
 // them in the mount's queue, Linux's trans_fd in the connection): a reader
 // resumes at c->rx_got and leaves what it has read there when it returns
-// without the whole frame. A resumed frame is mid-frame from its first recv,
-// so a blocking reader blocks through it as above. `now` reads only what is
-// waiting (recv_now) and returns P9_FRAME_PARTIAL instead of waiting for more.
+// without the whole frame. No exit loses a byte, so an unwind mid-frame would
+// not desync the stream as it once did (task-#50): the block-through is ARCH
+// 8.8.1.1's voted policy -- finish a frame the server is sending -- not what
+// keeps the stream whole, and the vault's seam-90-hung-server records what it
+// costs when the server stops sending. A resumed frame is mid-frame from its
+// first recv, so a blocking reader blocks through it too. `now` reads only
+// what is waiting (recv_now) and returns P9_FRAME_PARTIAL instead of waiting
+// for more.
 #define P9_FRAME_PARTIAL (-2)
 
 // One recv into the frame: the bytes taken, 0 at EOF, -1 on an error, or
@@ -1485,11 +1489,18 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     return 0;
 }
 
+// A closed transport samples as ready (a recv on it fails at once), but a
+// backend that does not own its ends still reads the live stream, where
+// recv_now finds nothing: a pumper would loop between the two forever.
+static bool client_unreadable_locked(const struct p9_client *c) {
+    return c->dead || c->transport.state == P9_TRANS_CLOSED;
+}
+
 int p9_client_reader_pump_ready(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return P9_PUMP_DEAD;
     spin_lock(&c->lock);
-    if (c->dead)          { spin_unlock(&c->lock); return P9_PUMP_DEAD; }
-    if (c->reader_active) { spin_unlock(&c->lock); return P9_PUMP_BUSY; }
+    if (client_unreadable_locked(c)) { spin_unlock(&c->lock); return P9_PUMP_DEAD; }
+    if (c->reader_active)            { spin_unlock(&c->lock); return P9_PUMP_BUSY; }
     if (!p9_transport_recv_ready(&c->transport, NULL)) {
         spin_unlock(&c->lock);
         return P9_PUMP_IDLE;
@@ -1540,7 +1551,7 @@ int p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h) {
     h->place    = P9_HOOK_NONE;
     spin_lock(&c->lock);
     int rc = 1;
-    if (c->dead) {
+    if (client_unreadable_locked(c)) {
         rc = -P9_E_IO;
     } else if (c->reader_active) {
         // Hooked under c->lock, which every release of the role holds: a

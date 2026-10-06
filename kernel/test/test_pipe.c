@@ -65,6 +65,7 @@
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
+#include <thylacine/rendez.h>
 #include <thylacine/sched.h>     // sched(): TEST_YIELD_UNTIL_SOFT
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>   // #96: struct t_stat + T_S_IFIFO
@@ -88,6 +89,7 @@ void test_pipe_hangup_write_ends_the_stream(void);
 void test_pipe_cnbframe_refusal_posts_no_note(void);
 void test_pipe_client_death_hangs_up_the_tx_pipe(void);
 void test_pipe_transport_reads_now_without_sleeping(void);
+void test_pipe_pump_treats_a_closed_transport_as_dead(void);
 
 // =============================================================================
 // Helpers.
@@ -740,6 +742,51 @@ void test_pipe_transport_reads_now_without_sleeping(void) {
     TEST_EXPECT_EQ((u64)(s64)some, 3ULL, "then the bytes written");
     TEST_EXPECT_EQ((u64)(s64)eof, 0ULL, "then EOF once the server hangs up");
     TEST_EXPECT_EQ((u64)flag_after, (u64)flag_before, "the read end's O_NONBLOCK untouched");
+}
+
+// A closed transport samples as ready -- a recv on it fails at once -- but one
+// that does not own its ends leaves the pipe live, where recv_now finds
+// nothing. A pumper (the dev9p poll kthread, a Loom waiter) that trusted the
+// sample would pump IDLE, hook, find it ready again and loop without
+// sleeping; to both, a closed transport is a dead one.
+void test_pipe_pump_treats_a_closed_transport_as_dead(void) {
+    struct Spoor *rd1 = NULL, *wr1 = NULL, *rd2 = NULL, *wr2 = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd1, &wr1), 0, "client->server pipe");
+    TEST_EXPECT_EQ(pipe_create(&rd2, &wr2), 0, "server->client pipe");
+    struct p9_spoor_transport st;
+    TEST_EXPECT_EQ(p9_spoor_transport_init(&st, wr1, rd2, false), 0,
+        "adapter init: tx=wr1, rx=rd2, owns=false");
+    TEST_EXPECT_EQ(p9_client_init(&g_pd_client, /*root_fid=*/1, /*msize=*/8192,
+                                  p9_spoor_transport_ops(&st),
+                                  g_pd_recv, sizeof(g_pd_recv)), 0,
+        "client init over the pipes");
+    struct Rendez rr;
+    rendez_init(&rr);
+    struct p9_reader_hook h;
+    poll_waiter_init(&h.pw, &rr);
+
+    int open_pump = p9_client_reader_pump_ready(&g_pd_client);
+    int open_hook = p9_client_reader_hook(&g_pd_client, &h);
+    p9_client_reader_unhook(&g_pd_client, &h);
+    (void)p9_client_close(&g_pd_client);
+    int closed_pump = p9_client_reader_pump_ready(&g_pd_client);
+    int closed_hook = p9_client_reader_hook(&g_pd_client, &h);
+    p9_client_reader_unhook(&g_pd_client, &h);
+
+    p9_client_destroy(&g_pd_client);
+    p9_spoor_transport_destroy(&st);
+    spoor_clunk(rd1);
+    spoor_clunk(wr1);
+    spoor_clunk(rd2);
+    spoor_clunk(wr2);
+
+    TEST_EXPECT_EQ((u64)(s64)open_pump, (u64)(s64)P9_PUMP_IDLE,
+        "control: an open, empty session pumps IDLE");
+    TEST_EXPECT_EQ((u64)(s64)open_hook, 1ULL, "control: and hooks its readiness");
+    TEST_EXPECT_EQ((u64)(s64)closed_pump, (u64)(s64)P9_PUMP_DEAD,
+        "a closed transport pumps DEAD, not IDLE");
+    TEST_EXPECT_EQ((u64)(s64)closed_hook, (u64)(s64)(-P9_E_IO),
+        "and refuses a hook rather than report a frame waiting");
 }
 
 void test_pipe_client_death_hangs_up_the_tx_pipe(void) {

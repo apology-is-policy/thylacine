@@ -116,8 +116,10 @@ static bool spoor_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
 }
 
 // A pipe -- the only rx EL0 can attach, an end it may also hold -- reads
-// without sleeping. Any other Dev comes from a kernel-internal caller and is
-// read only when its poll says the read would not block.
+// without sleeping. Any other Dev's read may sleep and nothing can ask it not
+// to (its poll may be absent, or coarser than its read), so recv_now refuses
+// it rather than break the op's promise; such a transport is kernel-internal
+// and reads with recv.
 static int spoor_transport_recv_now(void *ctx, u8 *buf, size_t cap) {
     struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
     if (!st)                                   return -1;
@@ -126,13 +128,8 @@ static int spoor_transport_recv_now(void *ctx, u8 *buf, size_t cap) {
     if (!st->rx_spoor->dev->read)              return -1;
     if (!buf || cap == 0)                      return -1;
     struct Spoor *rx = st->rx_spoor;
-    long n;
-    if (rx->dev == &devpipe) {
-        n = pipe_read_now(rx, buf, (long)cap);
-    } else {
-        if (!spoor_transport_recv_ready(ctx, NULL)) return P9_TRANSPORT_EAGAIN;
-        n = rx->dev->read(rx, buf, (long)cap, 0);
-    }
+    if (rx->dev != &devpipe) return -1;
+    long n = pipe_read_now(rx, buf, (long)cap);
     if (n == -(long)T_E_AGAIN) return P9_TRANSPORT_EAGAIN;
     if (n < 0) return -1;
     return (int)n;

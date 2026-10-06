@@ -171,10 +171,12 @@ the backref stays valid until it resumes.
 - **The frame-atomic exception** (8c-3 / #90). The elected 9P reader is
   the one sleeper whose unwind is deferred. Mid-frame — `stop_no_park`
   set, `stop_unwinds` clear, meaning some bytes of the current frame are
-  already consumed — it **blocks through** both a stop and a death:
-  unwinding would discard the partial frame, and the survivor that takes
-  over the reader role would then read the frame *tail* as a header and
-  desync the shared byte stream. At a frame boundary (`got == 0`) it
+  already consumed — it **blocks through** both a stop and a death. The
+  rule was made when unwinding discarded the partial frame and the survivor
+  that took over the reader role read the frame *tail* as a header,
+  desyncing the shared byte stream; since 2026-10-06 the client keeps the
+  partial frame (`rx_got`), so the rule stands as ARCH 8.8.1.1's voted
+  policy, at the cost [[seam-90-hung-server]] records. At a frame boundary (`got == 0`) it
   unwinds normally. Between frames the reader also *releases the role*
   rather than parking in place, because a parked reader freezes every
   survivor sharing the client.

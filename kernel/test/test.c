@@ -1901,6 +1901,7 @@ void test_spoor_transport_close_clunks_when_owned(void);
 void test_spoor_transport_close_preserves_when_unowned(void);
 void test_spoor_transport_transport_core_round_trip(void);
 void test_spoor_transport_end_to_end_handshake(void);
+void test_spoor_transport_recv_now_refuses_a_non_pipe(void);
 void test_9p_srvconn_transport_init_destroy(void);
 void test_9p_srvconn_transport_init_null_rejected(void);
 void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
@@ -1953,6 +1954,7 @@ void test_pipe_hangup_write_ends_the_stream(void);
 void test_pipe_cnbframe_refusal_posts_no_note(void);
 void test_pipe_client_death_hangs_up_the_tx_pipe(void);
 void test_pipe_transport_reads_now_without_sleeping(void);
+void test_pipe_pump_treats_a_closed_transport_as_dead(void);
 void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
@@ -4236,6 +4238,7 @@ struct test_case g_tests[] = {
     { "spoor_transport.close_preserves_when_unowned",       test_spoor_transport_close_preserves_when_unowned,       false, NULL },
     { "spoor_transport.transport_core_round_trip",          test_spoor_transport_transport_core_round_trip,          false, NULL },
     { "spoor_transport.end_to_end_handshake",               test_spoor_transport_end_to_end_handshake,               false, NULL },
+    { "spoor_transport.recv_now_refuses_a_non_pipe",        test_spoor_transport_recv_now_refuses_a_non_pipe,        false, NULL },
     { "9p_srvconn_transport.init_destroy",                  test_9p_srvconn_transport_init_destroy,                  false, NULL },
     { "9p_srvconn_transport.init_null_rejected",            test_9p_srvconn_transport_init_null_rejected,            false, NULL },
     { "9p_srvconn_transport.send_routes_to_c2s_ring",       test_9p_srvconn_transport_send_routes_to_c2s_ring,       false, NULL },
@@ -4267,6 +4270,7 @@ struct test_case g_tests[] = {
     { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
     { "pipe.client_death_hangs_up_the_tx_pipe",             test_pipe_client_death_hangs_up_the_tx_pipe,             false, NULL },
     { "pipe.transport_reads_now_without_sleeping",          test_pipe_transport_reads_now_without_sleeping,          false, NULL },
+    { "pipe.pump_treats_a_closed_transport_as_dead",        test_pipe_pump_treats_a_closed_transport_as_dead,        false, NULL },
     { "pipe.cnbframe_atomic_nonblocking",                   test_pipe_cnbframe_atomic_nonblocking,                   false, NULL },
     { "pipe.hangup_write_ends_the_stream",                  test_pipe_hangup_write_ends_the_stream,                  false, NULL },
     { "pipe.cnbframe_refusal_posts_no_note",                test_pipe_cnbframe_refusal_posts_no_note,                false, NULL },

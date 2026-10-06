@@ -5796,6 +5796,10 @@ static void cl2_close(void) {
 // waiter thread's watermark after it ran, plus what an IRQ adds to a syscall
 // stack (ARCH 8.12 "The kernel stack: MEASURED", 1728 B) and an allowance for
 // the syscall entry frames a test thread does not carry, must fit THREAD_KSTACK_SIZE.
+// The allowance is measured by ARCH 8.12's method (-fstack-usage, the kernel's
+// own flags): exception_sync_lower_el 112 + syscall_dispatch 144 +
+// sys_loom_enter_handler 80 + sys_loom_enter_for_proc 80 = 416 B, the 288 B SVC
+// context being already in the IRQ figure.
 #define LOOM_KSTACK_IRQ    1728u
 #define LOOM_KSTACK_ENTRY  1024u
 

@@ -689,10 +689,11 @@ static inline void set_current_thread(struct Thread *t) {
 // kernel/9p_client.c) is frame-atomic w.r.t. an async unwind. A dying reader
 // observed MID-FRAME at a sleep-site die-check -- in a frame-atomic recv
 // (stop_no_park set) with bytes of the current frame already consumed
-// (stop_unwinds clear, i.e. got != 0) -- must NOT unwind: an immediate #811
-// unwind would discard the consumed partial frame, and the survivor that takes
-// over the reader role would read the frame TAIL as a header -> the shared byte
-// stream desyncs (task-#50 corruption). It BLOCKS THROUGH instead, finishing
+// (stop_unwinds clear, i.e. got != 0) -- does NOT unwind. The rule was made
+// when an immediate #811 unwind discarded the consumed partial frame and the
+// survivor read its TAIL as a header (task-#50 corruption); the client now
+// keeps the partial frame (c->rx_got), so it stands as the voted policy, whose
+// cost is the vault's seam-90-hung-server. It BLOCKS THROUGH instead, finishing
 // the frame (bounded by the trusted server's whole-frame delivery, CF-3 B),
 // then unwinds at the next boundary. Reuses the 8c-3 stop latches: stop_no_park
 // = "in a frame-atomic recv", stop_unwinds = "at a boundary (got==0)" -- both

@@ -1961,15 +1961,16 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
             }
             // 8c-3 (#89, F1 frame-atomic): the elected reader MID-FRAME
             // (stop_no_park set, stop_unwinds false -- some bytes of the frame
-            // already consumed) must BLOCK THROUGH the stop: neither unwind
-            // (SLEEP_INTR would discard the partial frame -> the survivor reads
-            // the tail as a header -> stream desync) nor park in place (holds
-            // reader_active -> freezes survivors AND pins the partial frame).
+            // already consumed) BLOCKS THROUGH the stop, ARCH 8.8.1.1's voted
+            // policy. Parking in place would hold reader_active and freeze
+            // every survivor. Unwinding would no longer desync the stream --
+            // the client keeps the partial frame (c->rx_got) for the next
+            // reader -- but the policy finishes the frame first; the vault's
+            // seam-90-hung-server records its cost.
             // Fall through to the normal register+sched below so the reader
             // finishes the frame (bounded by the trusted server's delivery),
             // then unwinds at the next frame boundary (got==0 -> stop_unwinds).
-            // DEATH still unwinds mid-frame -- the die-check below is UNCHANGED
-            // (the pre-existing death-mid-frame desync is task #90).
+            // Death defers the same way (thread_reader_blocks_death, below).
             if (!t->stop_no_park) {
                 spin_unlock(&r->lock);
                 spin_unlock_irqrestore(&t->wait_lock, s);
@@ -2013,10 +2014,12 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // #90 (ARCH 8.8.1.1) frame-atomic exception: a dying ELECTED 9P READER
         // observed MID-FRAME (thread_reader_blocks_death: in reader_recv_frame,
         // stop_no_park set + stop_unwinds clear -- some bytes of the current
-        // frame already consumed) must NOT unwind here. An immediate #811
-        // unwind discards the partial frame; the survivor that takes over the
-        // reader role then reads the frame TAIL as a header -> the shared byte
-        // stream desyncs (task-#50). It BLOCKS THROUGH instead: fall to the
+        // frame already consumed) does NOT unwind here. The rule was made when
+        // an immediate #811 unwind discarded the partial frame and the
+        // survivor read its TAIL as a header (task-#50); the client now keeps
+        // the partial frame (c->rx_got), so the rule stands as ARCH 8.8.1.1's
+        // voted policy, whose cost is the vault's seam-90-hung-server. It
+        // BLOCKS THROUGH instead: fall to the
         // sched() below (already registered), finish the frame (bounded by the
         // trusted server's whole-frame delivery, CF-3 B), then unwind at the
         // next boundary where stop_unwinds is set. This narrows #811 for the

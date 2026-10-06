@@ -698,7 +698,8 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
 
 // The result of p9_client_reader_pump_ready (a SIGNED enum).
 enum p9_pump_result {
-    P9_PUMP_DEAD     = -1,  // the session is dead: its ops have their errors
+    P9_PUMP_DEAD     = -1,  // the session is dead (its ops have their errors)
+                            // or its transport closed
     P9_PUMP_IDLE     =  0,  // the role is free and nothing waits to be read
     P9_PUMP_PROGRESS =  1,  // demuxed exactly one reply frame
     P9_PUMP_BUSY     =  2,  // another thread holds the reader role
@@ -721,8 +722,8 @@ int p9_client_reader_pump_ready(struct p9_client *c);
 void p9_client_handoff_reader(struct p9_client *c);
 
 // Hook `h` to learn when pumping `c` could make progress. Returns -P9_E_IO if
-// the session is dead and 0 if a frame waits on a free role (pump now), filing
-// nothing; otherwise files h->pw and returns 1. A release of the role with no
+// the session is dead or its transport closed, and 0 if a frame waits on a
+// free role (pump now), filing nothing; otherwise files h->pw and returns 1. A release of the role with no
 // designee, an arrival on the transport, or (on the role list) the session's
 // death then sets h->pw.ready and wakes its Rendez; a death seen through the
 // readiness list arrives as the EOF or error that killed the session. After a 1
