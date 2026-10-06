@@ -797,13 +797,17 @@ caller changes behaviour.
   union (ARCH 9.5) never carries it: nobody mounted that entry, it is the
   directory underneath, and its line already names the directory.
 
-**Display only.** `territory_format_ns` is the only kernel reader. The
-resolver, the permission checks, the Larder, exec vouching (`MNOEXEC`,
-`Dev.may_back_exec`) and the phenotype stamp never consult it; this is I-33's
-rule for namespace names applied to a declaration. Any program that attaches a
-session may declare it remote or not, and a false declaration misleads a
-listing without granting anything. Haul's declaration is truthful because Haul
-holds the TCP connection.
+**A label, and one narrowing.** `territory_format_ns` reads it for the
+listings below. Since the served-link vote (operator, 2026-10-05; DISTRO 4.6)
+the resolver reads it for one more thing: a symlink whose Spoor belongs to a
+remote session is a served link, and following one re-anchors the resolution
+beneath the mount that served it. Nothing else consults it -- not the
+permission checks, the Larder, exec vouching (`MNOEXEC`, `Dev.may_back_exec`)
+or the phenotype stamp. The resolver's use can only narrow a resolution, so
+the declaration still grants nothing: any program that attaches a session may
+declare it remote or not, and a false declaration misleads a listing or
+confines resolutions through its own session. Haul's declaration is truthful
+because Haul holds the TCP connection.
 
 **Where it shows.**
 

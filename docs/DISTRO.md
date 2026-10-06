@@ -245,6 +245,8 @@ not answers.
   construction, not by auditing call sites (contrast the Linux CVE history).
 - A RELATIVE target splices at the link's PARENT (the current trail
   position); `..` keeps the trail-floor clamp exactly as today.
+- A SERVED link -- one that a remote 9P session serves -- is contained
+  beneath the mount that served it, not at the caller's root: section 4.6.
 - Bound: **40 total follows per resolution** (Linux parity; POSIX floor is
   8), exceeded -> `T_E_LOOP`. **T_E_LOOP = 40 (POSIX ELOOP) is a NEW errno
   registration — ERRORS.md is ABI-bearing, so D-1 carries a signoff item.**
@@ -287,6 +289,100 @@ absolute-target re-anchor under a chroot, ELOOP at the bound, stat-vs-lstat
 divergence, trailing-slash-on-link-to-dir, unlink-removes-the-link-not-the-
 target. Each leg revert-probed (the #79-#84 battery discipline). Focused
 audit round (I-28 surface).
+
+### 4.6 Served links -- contained beneath their mount (VOTED 2026-10-05)
+
+**STATUS: DESIGNED** (scripture first; the kernel lands with the containment
+chunk). Operator vote 2026-10-05, "Contain beneath mount";
+`dec-2026-10-05-served-link-containment`.
+
+**The gap.** Section 4.2 contains a link at the CALLER's root. That is the
+right boundary for a link the caller's own system wrote (`/bin/sh ->
+/bin/busybox` inside a container) and the wrong one for a link a remote server
+wrote: an export whose author serves `talks -> /home/u` or
+`deck -> ../../../etc` steers every guest resolution that crosses the link
+into the guest's own files. `lantern` refuses a link AT a deck file
+(`T_ONOFOLLOW`) but not one in a directory above it -- the IMG-SLIDE F6
+finding (OPEN-BUGS 2026-09-29).
+
+**The rule.** A symlink whose Spoor belongs to a 9P session declared remote
+(HAUL-DESIGN 4.8: `SYS_ATTACH_9P_REMOTE` on a pipe attach, `DMSRVREMOTE` on a
+/srv post) is a **served link**. Following one **re-anchors the resolution at
+the link's anchor**, the root of the mount that served it:
+
+- an ABSOLUTE target resolves from the anchor -- `/home/u` names the export's
+  own `/home/u`, never the caller's;
+- a RELATIVE target resolves from the link's directory, re-reached from the
+  anchor, so its `..` can climb to the anchor and no further;
+- the rest of the caller's path resolves from wherever the target landed, and
+  its `..` stops at the anchor too. The anchor is the resolution's base from
+  the served link on (Linux `RESOLVE_IN_ROOT`, keyed by the mount instead of
+  by the caller), until a later ABSOLUTE link re-anchors it.
+
+**The anchor** is the root of the innermost mount crossed on the way to the
+link; it is the mount the link was reached THROUGH. At the top level of a
+union it is the root of the member that holds the link, never the union point:
+a relative target resolved at the point would search the union's other
+members, so a served `notes -> .ssh/id` in `bind -a /n/haul $home` would find
+the caller's own key. A resolution base inside a remote tree (an explicit
+dirfd) with no crossing on its trail anchors at the base, where section 4.2
+already clamps `..`. A served link whose anchor is not itself remote, or that
+finds no anchor, is refused with `T_E_ACCES`: a check that cannot place the
+boundary fails closed.
+
+**Mechanism.** The resolver records, for each trail entry that a mount
+crossing (base or descent) or a union member produced, where in the path that
+mount was entered. The position is LOGICAL -- an offset into the consumed
+record followed by the current buffer (section 4.1's splice state) -- because
+an in-place splice moves the text but never moves a consumed component. On a
+served link it takes a reference on the anchor, rebuilds the path as the
+components walked below the anchor, then the target (an absolute target drops
+those components), then the rest, unwinds the trail and restarts from the
+anchor. Every expansion counts toward the 40-follow bound. A served
+relative target that has no `..` is re-anchored too, rather than spliced in
+place, so that every later restart -- a local link's `..` rebuild included --
+begins at the anchor and cannot fall back below it.
+
+**Why the remote declaration, and not a new mount flag.** It already sits
+exactly where the threat is: Haul declares it in both forms, and any later
+off-machine transport has to. It is per session and travels with a /srv post,
+so the posted form mounted by `ut`'s `mount` is covered without the shell
+knowing what it mounts. And it needs no new syscall bit. The declaration stops
+being display-only: the resolver consults it, and only to NARROW a resolution,
+so it still grants nothing. A false declaration, by an attacher about its own
+session or by a poster about its own service, can only confine resolutions
+through it.
+
+**Why not every 9P mount.** The boot's own pool mounts carry absolute links
+that must resolve at the caller's root: build.sh bakes `sh -> /viv/abin/sh`
+into one. A local session is the caller's own system; a remote export is not.
+A diorama is local too: viv mounts it inside the container's namespace, and
+its server is the system's `/bin/diorama`, not anything the container wrote.
+
+**Why contain and not refuse.** An export's internal links keep working:
+`latest -> v3`, and an absolute `-> /talks/x` meaning the export's own
+`/talks/x`. Linux's `nosymfollow` (and FreeBSD's) refuses every link on the
+mount, which would break those.
+
+**Heritage and SOTA.** Plan 9 never met the question: 9P2000 has no symlinks.
+Linux has `nosymfollow` (per mount, refuse), `openat2`'s `RESOLVE_BENEATH`
+(per call, refuse an escape) and `RESOLVE_IN_ROOT` (per call, contain at the
+dirfd). This rule is `RESOLVE_IN_ROOT` keyed by the mount's declaration.
+
+**Edges, recorded.**
+
+- The anchor is the mount the link was reached through. The same served link
+  read through a local bind of part of the export (`bind /n/haul/talks /t`)
+  anchors at `/t`, narrower than the export. Like `MPHENO_LINUX`, it is a
+  property of how the file was named.
+- A local bind beneath a remote mount is not remote, and a link in it is not
+  served. An ABSOLUTE local link that a served target leads to re-anchors at
+  the caller's root, as section 4.2 says, because it is the caller's own link;
+  a relative one restarts from the base it finds, which is the anchor.
+- `/n/haul/deck/../..` with `deck` served stops at `/n/haul`, where the same
+  spelling without a link would climb out. Deliberate: the depth the caller's
+  `..` climbs from was chosen by the server's target, so the remainder is
+  contained as a whole.
 
 ---
 
