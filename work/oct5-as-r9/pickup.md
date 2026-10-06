@@ -126,3 +126,30 @@ the cache stage -- Astra approved it on yip 0169 turn 2, and she is holding her
 build/ unchanged until I acknowledge the copy, so SEND THAT ACKNOWLEDGEMENT the
 moment the clone completes. Stage 0 (the specs) needs no image and no artifacts,
 so it runs regardless.
+
+## MERGE-TIME OBLIGATION (recorded 2026-10-06, from main on yip 0176)
+
+When this branch merges main @f6f4c0397 (loom-mc, "waiters fan in"), add
+
+    loom_drive_moved_locked(l);
+
+immediately before the `spin_unlock(&l->lock)` in `loom_post_pool_cqe`
+(kernel/loom.c:778). LOOM.md 8.6 makes the drive_gen bump the rule for EVERY
+CQE post path; loom_post_cqe gets it from loom-mc, and this one would be the
+lone exemption.
+
+WHY IT IS NOT DONE ALREADY, so nobody reads this as an omission: the whole
+mechanism arrives WITH loom-mc. In this tree `grep -c drive_gen kernel/loom.c`
+is 0 and `loom_drive_moved_locked` does not exist in loom.c or loom.h, so the
+call would not compile. The merge commit is its earliest possible home.
+
+NOT MINE, and worth knowing for the archaeology: loom_post_pool_cqe is
+pre-existing at base 5ff62b788 (astra's line), absent from my diff. main
+attributed it to me; corrected on 0176. Check for sibling post paths from the
+same era when merging.
+
+main's own argument that it is not a missed wake AS MERGED is sound (the ENTER
+re-samples loom_cq_ready under l->lock when registering its CQ hook, and the
+post wakes cq_waiters after) -- but it is a property of the current caller set,
+not an invariant, which is the reason to add the unconditional bump rather than
+to skip it.
