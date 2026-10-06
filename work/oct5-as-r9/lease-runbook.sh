@@ -82,6 +82,32 @@ if [ "${CLONE_APPROVED:-0}" = 1 ]; then
   [ -d build ] || cp -Rc ../thylacine-astra/build build
   rm -rf build/kernel build/usr build/pouch/stratumd-cmake build/kernel-undefined build/host-stratum
   rsync -a --ignore-existing ../thylacine-astra/third_party/rust/ third_party/rust/ 2>/dev/null || true
+
+  # CACHE INVALIDATION BY SOURCE DIFFERENCE, not by path-boundness. Astra raised
+  # this and she is right: our HEADs are equal, but her WORKING TREE is dirty, so
+  # HEAD equality does not make her objects equivalent to mine. Her dirty files
+  # ARE the source delta between us. An object she compiled from her uncommitted
+  # usr/halcyond/src/layout.rs could be judged fresh against my committed copy
+  # (older mtime) and never rebuild -- putting HER unreviewed code in MY image and
+  # making any failure of mine unattributable. Derive the set, never hardcode it.
+  echo "-- invalidating cache entries whose SOURCE differs from mine:"
+  git -C ../thylacine-astra status --porcelain \
+    | awk '{print $2}' | grep -E '^(usr|lib)/' > /tmp/astra-dirty-src.txt || true
+  if [ -s /tmp/astra-dirty-src.txt ]; then
+    while IFS= read -r f; do
+      if [ -e "$f" ]; then
+        touch "$f"            # newer than her object -> cargo/ninja MUST rebuild it
+        echo "   invalidated: $f (dirty in her tree; rebuilding from MY source)"
+      else
+        echo "   NOTE: $f dirty in her tree but absent in mine -- inspect before trusting the cache"
+      fi
+    done < /tmp/astra-dirty-src.txt
+  else
+    echo "   none -- no uncommitted usr/ or lib/ source in her tree"
+  fi
+  # And prove the only deltas are her dirty files: identical HEAD + her status.
+  git -C ../thylacine-astra rev-parse HEAD > /tmp/astra-head.txt
+  echo "   her HEAD: $(cat /tmp/astra-head.txt)  my base: $(git rev-parse 5ff62b788)"
   floor post-clone
 else
   echo "CLONE_APPROVED!=1 -- not cloning astra's build/. Her artifacts, her ruling (yip 0169)."
@@ -119,9 +145,25 @@ done
 # failing suite extincts the boot (main.c: extinction("kernel test suite
 # failed")), so a red is loud, not silent.
 tools/test.sh 2>&1 | tee work/oct5-as-r9/guest-test.log
+# AN ELF NAME IS NOT AN EXECUTION WITNESS (astra, 0169 turn 4). The stage-3 grep
+# proves the tests are COMPILED IN; only the boot log proves they RAN. The suite
+# prints "    [test] <name> ... " per test, so require a PASS record for each of
+# the four BY NAME -- that is the witness, and the total alone is not.
+echo "-- EXECUTION witness: each of the four must have its own PASS record:"
+for t in settled_drop_retains_nonfinal_charge settled_drop_exact_payer \
+         settled_mapping_drop_defers_free unmap_failure_leaves_mapping_attached; do
+  if grep -E "\[test\] burrow\.$t \.\.\..*(PASS|ok)" work/oct5-as-r9/guest-test.log >/dev/null; then
+    echo "   RAN+PASSED: burrow.$t"
+  else
+    echo "   NO PASS RECORD: burrow.$t -- compiled in is not run; show its line:"
+    grep -F "burrow.$t" work/oct5-as-r9/guest-test.log || echo "     (absent from the log entirely)"
+    exit 1
+  fi
+done
 echo "-- suite total must be base+4; a skip is NOT coverage (OPEN-BUGS: 17 ramfs"
 echo "   probe tests pass when their initrd file is missing):"
 grep -E '  tests: [0-9]+/[0-9]+' work/oct5-as-r9/guest-test.log || true
+echo "   [skip] lines (must be 0 on the gate image, which always carries the probe set):"
 grep -c '\[skip\]' work/oct5-as-r9/guest-test.log || true
 
 # Stage 5 -- the one that matters. AS-R9 is an SMP race: a single-CPU green
