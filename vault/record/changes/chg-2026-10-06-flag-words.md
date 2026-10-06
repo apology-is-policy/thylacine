@@ -4,7 +4,7 @@ type: chg
 title: "The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested"
 date: 2026-10-06
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["a711116f6"]
 touched:
   - sub-substrate-build
 established: []

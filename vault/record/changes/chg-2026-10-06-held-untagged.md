@@ -4,7 +4,7 @@ type: chg
 title: "The held launch drops its build tag: every ambush build spawns held"
 date: 2026-10-06
 arc: arc-go-ide
-commits: ["*(pending)*"]
+commits: ["16348c645"]
 touched:
   - sub-substrate-build
   - sub-kernel-birth-hold

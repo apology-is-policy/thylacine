@@ -292,7 +292,7 @@ audit round (I-28 surface).
 
 ### 4.6 Served links -- contained beneath their mount (VOTED 2026-10-05)
 
-**STATUS: AS-BUILT** (2026-10-06, aux-3 *(pending)*; the four refinements
+**STATUS: AS-BUILT** (2026-10-06, aux-3 1434415da; the four refinements
 under "As built" below). Operator vote 2026-10-05, "Contain beneath mount";
 `dec-2026-10-05-served-link-containment`.
 

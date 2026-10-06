@@ -4,7 +4,7 @@ type: chg
 title: "Served links: a link a remote session serves resolves beneath its mount"
 date: 2026-10-06
 arc: arc-net
-commits: ["*(pending)*"]
+commits: ["a24b0212b", "1434415da"]
 touched:
   - sub-kernel-stalk
   - sub-kernel-dev

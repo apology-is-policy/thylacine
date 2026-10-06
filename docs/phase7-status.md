@@ -1123,7 +1123,7 @@ stray-reply and stray-attach legs red, and haul asking after its close turns the
 ## Served links: a link a remote session serves resolves beneath its mount — 2026-10-06
 
 The operator's vote of 2026-10-05, "Contain beneath mount" (DISTRO 4.6), which closes lantern's IMG-SLIDE F6. Scripture
-b4351869f; code, witnesses and dossiers in one commit *(pending)*, the squash of `aux-3-contain`.
+a24b0212b; code, witnesses and dossiers in one commit, 1434415da, the squash of `aux-3-contain`.
 
 - **A served link** is one whose Dev answers the new NULL-permitted `remote` slot. dev9p fills it with
   `dev9p_spoor_remote`, which reads the declaration Haul makes on both paths (`SYS_ATTACH_9P_REMOTE`, `DMSRVREMOTE`).
@@ -1142,7 +1142,31 @@ half untested, is fixed by `served_same_session`'s third leg (the same Dev, its 
 round: a union-handle anchor's failed clone answered `T_E_ACCES` (now `T_E_IO`), and three arms no test reached (three
 tests); during it, S1, a comment rewrapped.
 
-{VERIFICATION}
+Verification, on the landing tree (main 9dc80bb37 + the squash; a `--config ci` bake with ambush 073faaa): `tools/test.sh`
+1885/1885 and boot OK. Sabotages: the same-session check's devno clause dropped turns only `served_same_session`'s
+same-Dev leg red, and its dc clause dropped only its other-Dev leg (1884/1885 each). haul-links, haul-hangup,
+haul-unreachable, haul-cape, haul-npxf and haul-post PASS on the first attempt, the last two against an npxf-p3c server.
+dev9p's `remote` slot removed (a kernel-only rebuild): haul-links reports legs A, B, C and E escaped and fails, and
+leg D still resolves. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
+## Flag words, the KAT gate and the untagged held launch — 2026-10-06
+
+Three small changes land with the served links.
+
+- **`tools/check-flag-words.py`** replaces main's `check-proc-flags.py`. It derives nine bit-allocated words from their
+  headers (proc_flags, the five spawn words, the walk-create mode word, the 9P attach flags and the mount flags). A
+  member owns the bits its own literals add, and 45 in-memory mutations prove the check can fail before it reports a
+  pass. Commit a711116f6; `chg-2026-10-06-flag-words`.
+- **The KAT gate** (`make test-haul-kat`) builds against OpenSSL-based npxf again: libcrypto's flags come from
+  pkg-config, and a present npxf without libcrypto fails rather than skips. Commit ff819d5bb.
+- **The held launch needs no build tag.** Ambush 073faaa compiles it untagged, and build.sh's fork check asks the
+  untagged file list, refusing an older fork. Step 1 of 2; step 2 deletes `launchHeld` after main merges this.
+  Commit 16348c645; `chg-2026-10-06-held-untagged`.
+- Decision notes for the other four votes of 2026-10-05. Commit 535833ee5.
+
+Verification: the bake prints `check-flag-words: 9 words ok; the self-test caught all 45 mutations`. The KAT passes
+against npxf b8854ee and npxf-p3c 7064e33, and a flipped vector fails with rc 1. ambush-probe passes stage C
+(`launch_at_entry=1`) and stage D; dap-nora PASS (nora's `:debug` launches its target through `/goroot`'s Ambush). The fork check refuses ce9154d ("does not compile held_on_thylacine.go untagged") and passes 073faaa.
 
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
