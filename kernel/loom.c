@@ -681,6 +681,12 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     return 0;
 }
 
+// Something a ring's driver must act on moved: a CQE, a completion's re-arm or
+// chain result, an op gone in flight. Under l->lock (struct Loom, drive_gen).
+static void loom_drive_moved_locked(struct Loom *l) {
+    __atomic_store_n(&l->drive_gen, l->drive_gen + 1u, __ATOMIC_RELEASE);
+}
+
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
 
@@ -719,7 +725,7 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     // slot). The mirror also overwrites any hostile value userspace wrote.
     l->cq_tail = tail + 1u;
     __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
-    __atomic_store_n(&l->drive_gen, l->drive_gen + 1u, __ATOMIC_RELEASE);
+    loom_drive_moved_locked(l);
     spin_unlock(&l->lock);
 
     // Loom-4 (specs/loom.tla PostCqe-wake): the CQ is now non-empty -- wake any
@@ -920,7 +926,7 @@ static void loom_async_complete(struct p9_rpc *rpc, int status,
     spin_lock(&l->lock);
     // The CQE above already woke the CQ wait-list: a waiter it woke may re-drive
     // before this section runs, so this moves drive_gen too (LOOM.md 8.6).
-    __atomic_store_n(&l->drive_gen, l->drive_gen + 1u, __ATOMIC_RELEASE);
+    loom_drive_moved_locked(l);
     if (l->async_inflight > 0) l->async_inflight--;
     if (!term && posted == 0) {
         op->shots++;
@@ -1482,6 +1488,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     op->next = l->inflight_ops;
     l->inflight_ops = op;
     l->async_inflight++;
+    loom_drive_moved_locked(l);           // a client a waiter may not have hooked
     spin_unlock(&l->lock);
     (void)p9_client_submit_async(cl, &op->rpc, op->build, op);
     return;
@@ -1618,6 +1625,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         op->next = l->inflight_ops;
         l->inflight_ops = op;
         l->async_inflight++;
+        loom_drive_moved_locked(l);       // a client a waiter may not have hooked
         spin_unlock(&l->lock);
         // Hands ownership of &op->rpc to the engine: exactly one on_complete will
         // fire (now, on failure, or later at demux). No further touch of `op`
@@ -1794,6 +1802,7 @@ static void loom_rearm_pending(struct Loom *l) {
             o->rearm = false;
             __atomic_fetch_sub(&l->rearm_pending, 1u, __ATOMIC_RELEASE);  // claimed for re-arm
             l->async_inflight++;        // reserve the next shot's CQE slot
+            loom_drive_moved_locked(l); // in flight again: a waiter re-collects it
             op = o;
             break;
         }
@@ -2026,6 +2035,17 @@ static int loom_cqw_cond(void *arg) {
 #define LOOM_FANIN_RESCAN_NS  (10ull * 1000ull * 1000ull)   // 10 ms
 
 u32 g_loom_fanin_test_cap;
+volatile u32 g_loom_fanin_test_stall;
+volatile u32 g_loom_fanin_test_stalled;
+
+// The test's window between an ENTER's client hooks and its CQ register
+// (g_loom_fanin_test_stall). A voluntary yield, so a test on one CPU runs.
+static void loom_fanin_test_stall_point(void) {
+    if (!__atomic_load_n(&g_loom_fanin_test_stall, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&g_loom_fanin_test_stalled, 1u, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&g_loom_fanin_test_stall, __ATOMIC_ACQUIRE)) sched();
+    __atomic_store_n(&g_loom_fanin_test_stalled, 0u, __ATOMIC_RELEASE);
+}
 
 struct loom_fanin_ent {
     struct p9_client      *cl;
@@ -2096,17 +2116,13 @@ static void loom_fanin_collect(struct Loom *l, struct loom_fanin *fs) {
     spin_unlock(&l->lock);
 }
 
-// Pump each client of the set once. Returns the frames demuxed, or -1 when the
-// caller's own death or stop unwound a recv (the session is intact; the caller
-// returns). A dead session ends nothing: its death posted an error CQE for each
-// of its ops.
-static int loom_fanin_pump(struct loom_fanin *fs) {
-    int frames = 0;
-    for (u32 i = 0; i < fs->n; i++) {
-        int rc = p9_client_reader_pump_ready(fs->ent[i].cl);
-        if (rc == P9_PUMP_PROGRESS)     frames++;
-        else if (rc == P9_PUMP_UNWOUND) return -1;
-    }
+// Pump each client of the set once; the frames demuxed. A pump never sleeps,
+// so the caller's death waits for its sleep. A dead session ends nothing: its
+// death posted an error CQE for each of its ops.
+static u32 loom_fanin_pump(struct loom_fanin *fs) {
+    u32 frames = 0;
+    for (u32 i = 0; i < fs->n; i++)
+        if (p9_client_reader_pump_ready(fs->ent[i].cl) == P9_PUMP_PROGRESS) frames++;
     return frames;
 }
 
@@ -2182,8 +2198,9 @@ static int loom_fanin_cond(void *arg) {
 // reply has no reader of its own. So on a non-SQPOLL ring this waiter reads for
 // every client the ring has an op in flight on (the fan-in above). A completion
 // another thread reads posts its CQE before it records a re-arm or a chain
-// result, so the sleep also holds only while drive_gen has not moved since the
-// loop top -- else the loop re-drives what that completion changed.
+// result, and a sibling's submit can put an op on a client this waiter has not
+// hooked, so the sleep also holds only while drive_gen has not moved since the
+// loop top -- else the loop re-drives what moved.
 static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
                                       u32 submitted) {
     // Bound the active reader's recv spin so a hostile/buggy server flooding
@@ -2275,14 +2292,10 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         if (inflight) {
             loom_fanin_collect(l, &fs);
             if (fs.n == 0) continue;           // raced: the ops completed -> re-check
-            int frames = loom_fanin_pump(&fs);
-            if (frames < 0) {                  // own death or stop -> unwind
-                loom_fanin_release(&fs);
-                break;
-            }
+            u32 frames = loom_fanin_pump(&fs);
             if (frames > 0) {
                 loom_fanin_release(&fs);
-                pumps += (u32)frames;
+                pumps += frames;
                 if (pumps >= pump_budget) {
                     // Flood budget hit. Hand the reader baton to any sleeping
                     // sibling (so it retries instead of stranding), then return
@@ -2297,6 +2310,7 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
                 loom_fanin_release(&fs);
                 continue;
             }
+            loom_fanin_test_stall_point();
         }
 
         // Sleep on the CQ wait-list and every client hook until a CQE posts, a
@@ -2318,7 +2332,8 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
             do_sleep = (loom_cq_ready(l) < min_complete) &&
                        (l->async_inflight > 0) && l->drive_gen == gen0;
         spin_unlock(&l->lock);
-        int s = do_sleep ? loom_fanin_sleep(&r, loom_fanin_cond, &both, fs.partial)
+        int s = do_sleep ? loom_fanin_sleep(&r, loom_fanin_cond, &both,
+                                            inflight && fs.partial)
                          : SLEEP_OK;
         poll_waiter_list_unregister(&pw);
         loom_fanin_release(&fs);
@@ -2644,7 +2659,7 @@ void loom_sqpoll_main(void *arg) {
             // Read for every client with an op in flight, over a ready stream
             // only; each frame read posts its CQE and wakes the CQ wait-list (a
             // min_complete ENTER caller). With nothing to read, park on hooks
-            // on every client. A kproc caller never unwinds (-1 is unreachable).
+            // on every client.
             loom_fanin_collect(l, &fs);
             if (fs.n > 0 && loom_fanin_pump(&fs) == 0 && loom_fanin_hook(&fs))
                 loom_sqpoll_fanin_park(&w, gen0);

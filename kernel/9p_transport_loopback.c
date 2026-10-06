@@ -130,6 +130,15 @@ static int loopback_recv(void *ctx, u8 *buf, size_t cap) {
     return (int)to_copy;
 }
 
+// The stage drained and the stream not ended: nothing waits yet.
+static int loopback_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct p9_loopback *lb = (struct p9_loopback *)ctx;
+    if (!lb || lb->magic != P9_LOOPBACK_MAGIC || lb->closed) return -1;
+    if (lb->response_pos >= lb->response_len)
+        return lb->eof ? 0 : P9_TRANSPORT_EAGAIN;
+    return loopback_recv(ctx, buf, cap);
+}
+
 static int loopback_close(void *ctx) {
     struct p9_loopback *lb = (struct p9_loopback *)ctx;
     if (!lb) return -1;
@@ -160,6 +169,7 @@ struct p9_transport_ops p9_loopback_ops_for(struct p9_loopback *lb) {
     ops.recv              = loopback_recv;
     ops.close             = loopback_close;
     ops.recv_ready        = loopback_recv_ready;
+    ops.recv_now          = loopback_recv_now;
     ops.hangup            = loopback_hangup;
     ops.ctx               = lb;
     return ops;

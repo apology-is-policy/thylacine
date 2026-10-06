@@ -500,9 +500,25 @@ registered on the backend's readiness list in the same critical section as
 the sample when it is non-NULL (srvconn: `s2c` bytes or EOF, its `poll_list`;
 the pipe transport: the rx pipe's poll; the loopback test transports: a list
 woken where a reply is queued). It is called under `c->lock`, which already
-orders before every backend lock (the death hangup runs there). A frame whose
-bytes have only started still blocks the reader through its body -- the
-trusted-server bound every reader rests on (CF-3 B).
+orders before every backend lock (the death hangup runs there).
+
+*Amended 2026-10-06 (the loom-mc self-audit, S-3):* the pump reads with a
+second mandatory op, `recv_now(ctx, buf, cap)` -- what is waiting, never
+sleeping, `P9_TRANSPORT_EAGAIN` when nothing is (srvconn: `s2c` without its
+parks; the pipe transport: `pipe_read_now`, the read end's `O_NONBLOCK` left
+to EL0; the test transports: an empty queue). The bytes of a frame being read
+belong to the CLIENT (`rx_got`), as Plan 9's devmnt keeps them in the mount's
+queue and Linux's `trans_fd` in the connection: a pump that finds only part of
+a frame leaves it there and returns IDLE, and the next reader resumes. So no
+pump ever waits on a server. This was owed the moment the deadline gate went:
+the one dev9p poll kthread now reads every QTPOLL session, pipe-served ones
+included, and any process can serve a 9P mount over pipes and keep the read
+end -- a server that stopped inside a frame, or a holder that took the bytes a
+readiness sample saw, would have held that kthread, and with it every poller
+in the system. The blocking readers (a sync op's election, the send path's
+self-pump) still finish a frame they are inside before a stop or a death
+unwinds them (#90, I-9), resumed frames included; that bound stays the
+trusted-server one (the vault's `seam-90-hung-server`).
 
 *Superseded 2026-10-06:* the NULL-permitted `set_recv_deadline` /
 `recv_timed_out` ops and the deadline-aware pump
@@ -551,20 +567,22 @@ does not spin.
 posts its CQE before it records what the completion changes for the ring's
 driver: a multishot op's re-arm, a chain successor's gate. A waiter woken by
 that CQE can re-check before the record, find nothing to re-arm or admit, and
-sleep with nothing left to wake it. Each ring keeps a generation, `drive_gen`,
-bumped under `l->lock` by the CQE post and again by the completion's state
-update. The `ENTER`'s sleep and the kthread's in-flight park sample it at the
+sleep with nothing left to wake it. A sibling thread's submit can likewise put
+an op on a client the waiter collected before it, between the waiter's client
+hooks and its CQ hook. Each ring keeps a generation, `drive_gen`, bumped under
+`l->lock` by the CQE post, by the completion's state update, and by every op
+that goes in flight (a submit's link, a re-arm claimed). The `ENTER`'s sleep and the kthread's in-flight park sample it at the
 loop top and sleep only if it has not moved, re-reading it under `l->lock`
 after the CQ hook is filed: a completion after that read flags the hook. The
-defect predates the fan-in (OPEN-BUGS 2026-10-06 16:20Z); the window needs a
-completer on another CPU between its post and its record, and no test
-reproduces it deterministically.
+completion half predates the fan-in (OPEN-BUGS 2026-10-06 16:20Z); its window
+needs a completer on another CPU between its post and its record, and no test
+reproduces it deterministically. The submit half is the fan-in's own, and a
+test stalls the waiter in that window (`9p_client.loom_enter_sees_a_sibling_submit`).
 
 **Lifetime.** The Loom owns the kthread; `loom_free` sets `stopping`, wakes the
 park Rendez, and **joins** the kthread before freeing the ring (the kthread only
-ever touches the still-allocated `struct Loom`). The kthread never blocks at a
-frame boundary, so the wake reaches it unless it is mid-frame, where the
-trusted-server bound above applies. A CQ waiter holds a loom ref for its
+ever touches the still-allocated `struct Loom`). The kthread never sleeps in a
+recv (it reads with `recv_now`), so the wake always reaches it. A CQ waiter holds a loom ref for its
 `ENTER`, so the ring cannot free under a live waiter; teardown / session death
 wakes the wait-list so no waiter strands.
 

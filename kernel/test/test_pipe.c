@@ -65,6 +65,7 @@
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>     // sched(): TEST_YIELD_UNTIL_SOFT
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>   // #96: struct t_stat + T_S_IFIFO
 #include <thylacine/types.h>
@@ -86,6 +87,7 @@ void test_pipe_compose_with_spoor_transport(void);
 void test_pipe_hangup_write_ends_the_stream(void);
 void test_pipe_cnbframe_refusal_posts_no_note(void);
 void test_pipe_client_death_hangs_up_the_tx_pipe(void);
+void test_pipe_transport_reads_now_without_sleeping(void);
 
 // =============================================================================
 // Helpers.
@@ -676,6 +678,69 @@ void test_pipe_compose_with_spoor_transport(void) {
 // was closed and no ring freed. The control is the same end before the death.
 static struct p9_client g_pd_client;
 static u8               g_pd_recv[8192];
+
+// The 9P transport reads a pipe without sleeping when asked to (recv_now): a
+// pump reading for replies not its own must not wait on a server, and EL0 can
+// hold the same read end and take the bytes a readiness sample saw. The read
+// end's own O_NONBLOCK is EL0's and stays as it was. The reader runs on a
+// thread of its own, so a read that sleeps is seen, then freed by a write.
+static struct test_dying g_rn_thr;
+static struct p9_spoor_transport g_rn_st;
+static volatile int g_rn_rc;
+
+static void rn_read(void *arg) {
+    (void)arg;
+    struct p9_transport_ops ops = p9_spoor_transport_ops(&g_rn_st);
+    u8 b[4];
+    g_rn_rc = ops.recv_now(ops.ctx, b, sizeof(b));
+}
+
+void test_pipe_transport_reads_now_without_sleeping(void) {
+    struct Spoor *crd = NULL, *cwr = NULL, *srd = NULL, *swr = NULL;
+    bool up = pipe_create(&crd, &cwr) == 0 && pipe_create(&srd, &swr) == 0 &&
+              p9_spoor_transport_init(&g_rn_st, cwr, srd, false) == 0;
+    bool started = false, returned = false, killed = false;
+    int  empty = -99, some = -99, eof = -99;
+    u32  flag_before = 0, flag_after = 1;
+    if (up) {
+        flag_before = spoor_flag_get(srd) & CNONBLOCK;
+        g_rn_rc = -99;
+        started = test_dying_start(&g_rn_thr, rn_read, NULL, /*dead_now=*/false);
+        TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_rn_thr));
+        returned = started && test_dying_done(&g_rn_thr);
+        empty = g_rn_rc;
+        static const u8 three[3] = { 1, 2, 3 };
+        (void)dev_write(swr, three, 3L);            // also frees a read that slept
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_rn_thr));
+            killed = !test_dying_done(&g_rn_thr);
+            if (killed) {
+                test_dying_kill(&g_rn_thr);
+                TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_rn_thr));
+            }
+            test_dying_reap(&g_rn_thr);
+        }
+        struct p9_transport_ops ops = p9_spoor_transport_ops(&g_rn_st);
+        u8 b[4];
+        some = returned ? ops.recv_now(ops.ctx, b, sizeof(b)) : -98;
+        (void)pipe_hangup_write(swr);
+        eof = ops.recv_now(ops.ctx, b, sizeof(b));
+        flag_after = spoor_flag_get(srd) & CNONBLOCK;
+        p9_spoor_transport_destroy(&g_rn_st);
+    }
+    if (crd) spoor_clunk(crd);
+    if (cwr) spoor_clunk(cwr);
+    if (srd) spoor_clunk(srd);
+    if (swr) spoor_clunk(swr);
+
+    TEST_ASSERT(up, "a transport over two pipes");
+    TEST_ASSERT(returned, "a read of the empty pipe came back without sleeping");
+    TEST_ASSERT(!killed, "nothing had to kill it");
+    TEST_EXPECT_EQ((u64)(s64)empty, (u64)(s64)P9_TRANSPORT_EAGAIN, "nothing yet");
+    TEST_EXPECT_EQ((u64)(s64)some, 3ULL, "then the bytes written");
+    TEST_EXPECT_EQ((u64)(s64)eof, 0ULL, "then EOF once the server hangs up");
+    TEST_EXPECT_EQ((u64)flag_after, (u64)flag_before, "the read end's O_NONBLOCK untouched");
+}
 
 void test_pipe_client_death_hangs_up_the_tx_pipe(void) {
     struct Spoor *rd1 = NULL, *wr1 = NULL, *rd2 = NULL, *wr2 = NULL;

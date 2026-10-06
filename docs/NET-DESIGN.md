@@ -693,6 +693,12 @@ cycle sampled the generation, or any hook flagged", read under the Rendez lock;
 the generation is sampled before the collect, so a kick anywhere in the cycle
 ends its park. A pump that finds a client dead moves nothing: the death already
 completed every read out on it (arms terminal, snapshots answered `POLLERR`).
+Dropping the deadline gate made pipe-served QTPOLL files remote, so this one
+kthread now reads sessions any process can serve and whose read end it can
+keep. A pump therefore reads only what is waiting (`recv_now`) and leaves a
+frame it finds in part with the client for the next reader (LOOM.md 8.6, the
+S-3 amendment): no server, and no other holder of the read end, can hold the
+kthread inside a recv.
 
 **Amendment (#98, 2026-09-28; operator vote, `dec-2026-09-28-poll-sample-arm-split`):
 the SAMPLE/ARM split.** The bridge above sent one message to do two jobs. The

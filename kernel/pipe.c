@@ -349,8 +349,7 @@ bool pipe_hangup_write(struct Spoor *c) {
     return true;
 }
 
-static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
-    (void)off;
+static long pipe_read_common(struct Spoor *c, void *buf, long n, bool now) {
     struct pipe_endpoint *p = priv_of(c);
     // #100 (ER-3): see the devpipe_write twin for why `!p` stays a flat -1.
     if (!p)                      return -1;
@@ -398,7 +397,7 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         // ONLY the would-block case. It never registers a hook, so the I-9
         // wait/wake protocol (pipe.tla NoStuckReader) is untouched. `flag` is
         // an atomic read -- it is RMW'd from other lock domains (see spoor.h).
-        if (spoor_flag_get(c) & CNONBLOCK) {
+        if (now || (spoor_flag_get(c) & CNONBLOCK)) {
             spin_unlock(&r->lock);
             return -T_E_AGAIN;
         }
@@ -413,6 +412,16 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (rc == SLEEP_NOTEINTR) return -T_E_INTR;
         // Loop: re-sample with the lock held.
     }
+}
+
+static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)off;
+    return pipe_read_common(c, buf, n, false);
+}
+
+long pipe_read_now(struct Spoor *c, void *buf, long n) {
+    if (!c || c->dev != &devpipe) return -T_E_BADF;
+    return pipe_read_common(c, buf, n, true);
 }
 
 static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {

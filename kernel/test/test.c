@@ -1756,6 +1756,8 @@ void test_9p_client_loom_enter_wakes_when_role_frees(void);
 void test_9p_client_loom_enter_reads_every_client(void);
 void test_9p_client_loom_enter_partial_set_rescans(void);
 void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
+void test_9p_client_loom_enter_sees_a_sibling_submit(void);
+void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
@@ -1950,6 +1952,7 @@ void test_pipe_cnbframe_atomic_nonblocking(void);
 void test_pipe_hangup_write_ends_the_stream(void);
 void test_pipe_cnbframe_refusal_posts_no_note(void);
 void test_pipe_client_death_hangs_up_the_tx_pipe(void);
+void test_pipe_transport_reads_now_without_sleeping(void);
 void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
@@ -4052,6 +4055,10 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_enter_partial_set_rescans, false, NULL },
     { "9p_client.loom_sqpoll_parks_on_a_held_role",
                                        test_9p_client_loom_sqpoll_parks_on_a_held_role, false, NULL },
+    { "9p_client.loom_enter_sees_a_sibling_submit",
+                                       test_9p_client_loom_enter_sees_a_sibling_submit, false, NULL },
+    { "9p_client.pump_ready_never_waits_inside_a_frame",
+                                       test_9p_client_pump_ready_never_waits_inside_a_frame, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
@@ -4259,6 +4266,7 @@ struct test_case g_tests[] = {
     { "pipe.close_both_ends_frees_ring",                    test_pipe_close_both_ends_frees_ring,                    false, NULL },
     { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
     { "pipe.client_death_hangs_up_the_tx_pipe",             test_pipe_client_death_hangs_up_the_tx_pipe,             false, NULL },
+    { "pipe.transport_reads_now_without_sleeping",          test_pipe_transport_reads_now_without_sleeping,          false, NULL },
     { "pipe.cnbframe_atomic_nonblocking",                   test_pipe_cnbframe_atomic_nonblocking,                   false, NULL },
     { "pipe.hangup_write_ends_the_stream",                  test_pipe_hangup_write_ends_the_stream,                  false, NULL },
     { "pipe.cnbframe_refusal_posts_no_note",                test_pipe_cnbframe_refusal_posts_no_note,                false, NULL },

@@ -114,6 +114,7 @@ walks `poll_list`, so no new wake site was needed.
 | `srvconn_client_send_frame` | no | whole frame written | no room (all-or-nothing back-pressure) | torn / bad args / frame > ring (framing bug) |
 | `srvconn_client_send_blocking` | yes (c2s room) | whole n, or partial-then-EOF | — | EOF before any byte / bad args / death |
 | `srvconn_client_recv` | yes (s2c data) | bytes read | EOF (torn + drained) | deadline / death / bad args |
+| `srvconn_client_recv_now` | no (2026-10-06, the 9P `recv_now`) | bytes read | EOF (torn + drained) | bad args; `-T_E_AGAIN` when s2c is empty or another reader holds the role |
 | `srvconn_server_send` | no | bytes accepted | ring full | torn / bad args |
 | `srvconn_server_send_blocking` | yes (s2c room) | whole n, or partial-then-EOF | — | EOF before any byte / bad args / death |
 | `srvconn_server_recv` | no | bytes read | empty-but-live (poll again) | EOF |

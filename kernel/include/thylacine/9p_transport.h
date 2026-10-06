@@ -115,6 +115,15 @@ struct p9_transport_ops {
     // a waiter with no reply of its own reads only over a ready stream.
     bool (*recv_ready)(void *ctx, struct poll_waiter *pw);
 
+    // Read what is waiting, never sleeping: 1..cap bytes, 0 on EOF, -1 on an
+    // error, or P9_TRANSPORT_EAGAIN when nothing is waiting now. MANDATORY.
+    // A waiter reading for replies not its own reads with this alone (LOOM.md
+    // 8.6), so a server that stops inside a frame, or another reader of the
+    // backend that takes the bytes a readiness sample saw, cannot hold it --
+    // one kthread reads for every QTPOLL session in the system. Called with
+    // the 9P client's c->lock dropped, by the reader role's holder.
+    int (*recv_now)(void *ctx, u8 *buf, size_t cap);
+
     // Hang up the client->server direction of a session that has died
     // (ARCH 21.10, "A death hangs up"): the server reads EOF once it has
     // drained what was sent. NULL-permitted. Called under the 9P client's

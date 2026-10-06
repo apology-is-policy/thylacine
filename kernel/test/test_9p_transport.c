@@ -156,6 +156,10 @@ void test_9p_transport_init_destroy(void) {
     blind.recv_ready = NULL;
     rc = p9_transport_init(&t, blind, g_recv_buf, sizeof(g_recv_buf));
     TEST_EXPECT_EQ(rc, -1, "init without recv_ready refused (it is mandatory)");
+    struct p9_transport_ops waits = p9_loopback_ops_for(&lb);
+    waits.recv_now = NULL;
+    rc = p9_transport_init(&t, waits, g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, -1, "init without recv_now refused (it is mandatory)");
 
     p9_loopback_destroy(&lb);
 }

@@ -31,6 +31,11 @@ byte-transport under the 9P spoor-transport adapter.
   would-block case and never registers a hook); -1 on wrong end /
   `SLEEP_INTR` (#811 death); `-EINTR` when a caught note interrupts a
   Linux reader's wait (ARCH 8.8.3), nothing read.
+- **`pipe_read_now`** (2026-10-06, LOOM.md 8.6 S-3): the same read that
+  never sleeps, whatever the end's `CNONBLOCK` -- `-EAGAIN` when empty and
+  open. For the 9P transport's `recv_now`: EL0 attaches the rx pipe and may
+  keep the end, so its `O_NONBLOCK` is EL0's and the kernel does not set it.
+  `-T_E_BADF` for anything but a pipe.
 - **write**: a write of n ≤ `PIPE_BUF_SIZE` (4096) proceeds only when
   all n fit — the POSIX PIPE_BUF atomicity, so two writers sharing a pipe
   (`make -j | tee`) never interleave mid-write (holotype F4); a larger

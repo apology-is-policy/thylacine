@@ -724,6 +724,28 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     return ret;
 }
 
+long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
+    if (!buf || n < 0) return -1;
+    if (n == 0) return 0;
+
+    struct srvconn_chan *ch = &cn->s2c;
+    long ret;
+    spin_lock(&ch->lock);
+    // A role holder may be mid-read; reading around it would split its bytes.
+    if (ch->reading)        ret = -(long)T_E_AGAIN;
+    else if (ch->count > 0) ret = chan_ring_read(ch, buf, n);
+    else                    ret = ch->eof ? 0 : -(long)T_E_AGAIN;
+    spin_unlock(&ch->lock);
+    if (ret > 0) {
+        // As srvconn_client_recv: room for a parked server send, and the
+        // server endpoint's POLLOUT edge. Outside ch->lock.
+        wakeup(&ch->wrendez);
+        poll_waiter_list_wake(&cn->poll_list);
+    }
+    return ret;
+}
+
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;

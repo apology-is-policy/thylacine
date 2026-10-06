@@ -304,37 +304,62 @@ static void client_send_progress_signal(struct p9_client *c) {
 // kproc is neither debuggable nor job-stoppable (both delivers reject it),
 // so both stop flags are always 0 and the detour never fires -- the sets are
 // harmless.
-static int do_reader_recv_frame(struct p9_client *c) {
+//
+// The frame's bytes are the CLIENT's, not the reader's (Plan 9's devmnt keeps
+// them in the mount's queue, Linux's trans_fd in the connection): a reader
+// resumes at c->rx_got and leaves what it has read there when it returns
+// without the whole frame. A resumed frame is mid-frame from its first recv,
+// so a blocking reader blocks through it as above. `now` reads only what is
+// waiting (recv_now) and returns P9_FRAME_PARTIAL instead of waiting for more.
+#define P9_FRAME_PARTIAL (-2)
+
+// One recv into the frame: the bytes taken, 0 at EOF, -1 on an error, or
+// P9_FRAME_PARTIAL when `now` finds nothing waiting.
+static int reader_recv_some(struct p9_transport *t, bool now, u8 *dst, size_t want) {
+    int n = now ? t->ops.recv_now(t->ops.ctx, dst, want)
+                : t->ops.recv(t->ops.ctx, dst, want);
+    if (now && n == P9_TRANSPORT_EAGAIN) return P9_FRAME_PARTIAL;
+    if (n < 0) return -1;
+    if ((size_t)n > want) return -1;
+    return n;
+}
+
+static int do_reader_recv_frame(struct p9_client *c, bool now) {
     struct p9_transport *t = &c->transport;
     struct Thread *self = current_thread();
     u8 *buf = t->recv_buf;
     size_t cap = t->recv_cap;
-    size_t got = 0;
+    size_t got = c->rx_got;
+    int n = 0;
+    u32 size; u8 type; u16 tag;
     while (got < P9_HDR_LEN) {
-        // Unwindable-by-stop ONLY at got==0 (a clean frame boundary).
-        if (self) self->stop_unwinds = (got == 0);
-        int n = t->ops.recv(t->ops.ctx, buf + got, P9_HDR_LEN - got);
-        // A clean EOF (recv 0) is a peer-gone close -> the device/service is
-        // gone; a recv error is < 0.
-        if (n == 0) return 0;              // peer gone (device-gone reason)
-        if (n < 0)  return -1;             // transport error
-        if ((size_t)n > P9_HDR_LEN - got) return -1;
+        // Unwindable-by-stop ONLY at got==0 (a clean frame boundary). `now`
+        // never sleeps, so it leaves the latch alone: sched's stop branch
+        // reads it on ANY sleep of this thread, and one left set would unwind
+        // a later wait that is not a reader's (sleep_death_only extincts).
+        if (self && !now) self->stop_unwinds = (got == 0);
+        // A clean EOF (0) is a peer-gone close -> the device/service is gone.
+        n = reader_recv_some(t, now, buf + got, P9_HDR_LEN - got);
+        if (n <= 0) goto incomplete;
         got += (size_t)n;
     }
-    u32 size; u8 type; u16 tag;
-    if (p9_peek_header(buf, got, &size, &type, &tag) < 0) return -1;
-    if (size < P9_HDR_LEN) return -1;
-    if ((size_t)size > cap) return -1;
+    n = -1;
+    if (p9_peek_header(buf, got, &size, &type, &tag) < 0) goto incomplete;
+    if (size < P9_HDR_LEN) goto incomplete;
+    if ((size_t)size > cap) goto incomplete;
     while (got < (size_t)size) {
         // Mid-frame (got>0): a stop must NOT unwind here -- block through.
-        if (self) self->stop_unwinds = false;
-        int n = t->ops.recv(t->ops.ctx, buf + got, (size_t)size - got);
-        if (n == 0) return 0;              // mid-frame EOF: peer vanished mid-reply (device-gone)
-        if (n < 0)  return -1;             // transport error
-        if ((size_t)n > (size_t)size - got) return -1;
+        if (self && !now) self->stop_unwinds = false;
+        // An EOF here: the peer vanished mid-reply (device-gone).
+        n = reader_recv_some(t, now, buf + got, (size_t)size - got);
+        if (n <= 0) goto incomplete;
         got += (size_t)n;
     }
+    c->rx_got = 0;
     return (int)got;
+incomplete:
+    c->rx_got = (u32)got;
+    return n;
 }
 
 // 8c-3 (#89, F1): the frame-atomic reader recv. stop_no_park is held for the
@@ -360,7 +385,7 @@ static int reader_recv_frame(struct p9_client *c, bool caught_ok) {
     // it into srvconn_client_recv's tsleep_noteintr vs tsleep choice.
     if (self) { self->stop_no_park = true; self->stop_unwound = false;
                 self->note_unwound = false; self->recv_caught_ok = caught_ok; }
-    int r = do_reader_recv_frame(c);
+    int r = do_reader_recv_frame(c, /*now=*/false);
     if (self) { self->stop_no_park = false; self->stop_unwinds = false;
                 self->recv_caught_ok = false; }
     return r;
@@ -1465,10 +1490,6 @@ int p9_client_reader_pump_ready(struct p9_client *c) {
     spin_lock(&c->lock);
     if (c->dead)          { spin_unlock(&c->lock); return P9_PUMP_DEAD; }
     if (c->reader_active) { spin_unlock(&c->lock); return P9_PUMP_BUSY; }
-    // Only the role holder consumes the stream, so the bytes (or the EOF) seen
-    // here are still there when this thread reads: the recv below never blocks
-    // at the frame boundary (LOOM.md 8.6). It can block only inside a frame
-    // whose bytes have only started to arrive.
     if (!p9_transport_recv_ready(&c->transport, NULL)) {
         spin_unlock(&c->lock);
         return P9_PUMP_IDLE;
@@ -1476,28 +1497,19 @@ int p9_client_reader_pump_ready(struct p9_client *c) {
     c->reader_active = true;
     spin_unlock(&c->lock);
 
-    int rr = reader_recv_frame(c, /*caught_ok=*/false); // c->lock dropped (single reader)
+    // Reads only what is waiting, so it never sleeps: a server that stops
+    // inside a frame, or another reader of the backend that took the bytes
+    // sampled above, leaves the frame's bytes with the client for the next
+    // reader (LOOM.md 8.6). c->lock dropped (single reader).
+    int rr = do_reader_recv_frame(c, /*now=*/true);
 
     spin_lock(&c->lock);
     int ret;
     if (rr > 0) {
         demux_frame_locked(c, (size_t)rr);
         ret = P9_PUMP_PROGRESS;
-    } else if (client_self_dying()) {
-        // Death-interrupt: the caller's Proc is dying. Do NOT mark the shared
-        // session dead (it serves survivors). Unwind after handing the role on.
-        ret = P9_PUMP_UNWOUND;
-    } else if (current_thread() && current_thread()->stop_unwound) {
-        // 8c-3 (#89, F2 + F1 re-audit): a stop unwound the recv at a FRAME
-        // BOUNDARY (frame-atomic -- no bytes lost). NOT a break: do NOT latch
-        // the shared session dead. Hand the role off below; this thread parks
-        // at its EL0-return tail. Reachable only if the ready bytes went to
-        // another reader of the backend (an EL0 holder of a pipe's read end).
-        // Read the STABLE stop_unwound latch, NOT client_stop_pending (which
-        // races an async proc_debug_resume). Read+clear (owner-only). A kproc
-        // caller never sets it (the detour never fires for a kthread).
-        current_thread()->stop_unwound = false;
-        ret = P9_PUMP_UNWOUND;
+    } else if (rr == P9_FRAME_PARTIAL) {
+        ret = P9_PUMP_IDLE;
     } else {
         // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
         // (-P9_E_NODEV CQEs); rr < 0 (recv error) -> transport (-P9_E_IO).
@@ -1710,6 +1722,7 @@ int p9_client_init(struct p9_client *c,
     c->recv_cap       = recv_cap;
     c->reader_active  = false;
     c->dead           = false;
+    c->rx_got         = 0;
     c->done_reply_buf = NULL;
     c->frames_rx          = 0;     // #210 demux counters (explicit for the
     c->demux_owned        = 0;     // destroy->init recycled-client shape,

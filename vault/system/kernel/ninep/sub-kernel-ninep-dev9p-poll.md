@@ -134,7 +134,9 @@ the poller looks, so the woken poller samples again.
   client and no cap), taking a session ref on each (`poll_pin`, NULL for a
   test client with no attach session). It pumps each once with
   `p9_client_reader_pump_ready`, which reads only over a ready stream and
-  never blocks at a frame boundary. A frame read anywhere ends the cycle (an
+  only what is waiting (`recv_now`): no server -- pipe-served sessions are
+  remote now, and any process can serve one and keep its read end -- can hold
+  the kthread in a recv; a frame found in part stays with the client. A frame read anywhere ends the cycle (an
   answer may have landed). Otherwise it hooks every client
   (`p9_client_reader_hook` into `poll_hook`: a held role on the role-waiter
   list, a free one on the transport's readiness list) and parks. Any client

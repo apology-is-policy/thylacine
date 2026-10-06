@@ -489,13 +489,22 @@ while its only client's role is held).
 it records what the completion changes for the ring's driver: a multishot
 operation's re-arm, or a chain successor's gate. A waiter woken by that CQE
 could re-check before the record, find nothing to re-arm or admit, and sleep
-again with nothing left to wake it. Each ring keeps a generation, bumped under
-the ring lock by the post and again by the completion's state update. The
+again with nothing left to wake it. And a sibling thread's submit can put an
+operation on a client the waiter collected before it, between its client hooks
+and its completion hook. Each ring keeps a generation, bumped under the ring
+lock (`loom_drive_moved_locked`) by the post, by the completion's state update,
+and by every operation that goes in flight: a submit's link, a re-arm claimed.
+The
 enter's sleep and the poll thread's in-flight park sample it at the top of the
 loop and sleep only if it has not moved, re-reading it under the ring lock after
 the completion hook is filed, so a completion after that read flags the hook.
-The window needs a completion on another CPU between its post and its record,
-and no test reproduces it deterministically (OPEN-BUGS 2026-10-06 16:20Z).
+The completion window needs a completion on another CPU between its post and
+its record, and no test reproduces it deterministically (OPEN-BUGS 2026-10-06
+16:20Z). The submit window is the fan-in's own, found by its self-audit; a test
+knob (`g_loom_fanin_test_stall`) parks the waiter inside it while a sibling
+submits (`9p_client.loom_enter_sees_a_sibling_submit`). A pump never sleeps in a
+receive (the transport's `recv_now`), so a waiter's death or stop always finds
+it in its sleep; a frame found in part stays with the client.
 
 `specs/loom_role.tla` models the wait over any number of clients, its spec note
 `spec-loom-role`: `NoMissedWake` (never asleep over a readable frame on a free,

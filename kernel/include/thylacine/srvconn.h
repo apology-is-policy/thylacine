@@ -511,6 +511,10 @@ long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n);
 //   -1  — the deadline passed, a #811 death-interrupt, or args are bad.
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n);
 
+// srvconn_client_recv without its parks: what s2c holds now, 0 at its EOF, or
+// -T_E_AGAIN when it is empty or another reader holds the role.
+long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n);
+
 // srvconn_client_send_blocking — the BLOCKING client-side byte write
 // (CF-3 B; the c2s twin of #348's srvconn_server_send_blocking). The
 // non-blocking srvconn_client_send above short-writes (or returns 0) on

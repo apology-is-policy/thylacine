@@ -216,6 +216,12 @@ static int stall_close(void *ctx) {
     return st->inner.close(st->inner.ctx);
 }
 
+static int stall_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct stall_tp *st = (struct stall_tp *)ctx;
+    if (__atomic_load_n(&st->stalled, __ATOMIC_ACQUIRE)) return P9_TRANSPORT_EAGAIN;
+    return st->inner.recv_now(st->inner.ctx, buf, cap);
+}
+
 static bool stall_recv_ready(void *ctx, struct poll_waiter *pw) {
     struct stall_tp *st = (struct stall_tp *)ctx;
     return st->inner.recv_ready(st->inner.ctx, pw);
@@ -234,6 +240,7 @@ static struct p9_transport_ops stall_init(struct stall_tp *st, struct srv_rec *r
     ops.recv              = stall_recv;
     ops.close             = stall_close;
     ops.recv_ready        = stall_recv_ready;
+    ops.recv_now          = stall_recv_now;
     ops.hangup            = NULL;   // the inner's would take the wrapper's ctx
     ops.ctx               = st;
     return ops;

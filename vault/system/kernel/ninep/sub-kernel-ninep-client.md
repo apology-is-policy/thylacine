@@ -72,10 +72,13 @@ One function per op, `0` on success / `-errno` on failure:
   `p9_client_reader_pump_ready` (LOOM.md 8.6, 2026-10-06: read ONE frame,
   over a ready stream only -- under `c->lock` a dead session is DEAD, a held
   role BUSY, a transport whose `recv_ready` says no IDLE; otherwise take the
-  role, read and demux one frame (PROGRESS), release and hand on. Only the
-  role holder consumes the stream, so the recv never blocks at a frame
-  boundary. UNWOUND when the caller's own death or stop unwound the recv, the
-  session intact), `p9_client_reader_hook` / `_unhook` (file ONE
+  role, read what is waiting with the transport's `recv_now` (never sleeping),
+  demux a whole frame (PROGRESS), release and hand on. A frame found in part
+  stays with the client and the pump is IDLE (2026-10-06, the self-audit's
+  S-3): the one dev9p poll kthread reads pipe-served sessions too, whose
+  server or another holder of the read end must not be able to hold it. No
+  stop or death unwinds it, and it leaves the stop latches alone),
+  `p9_client_reader_hook` / `_unhook` (file ONE
   `struct p9_reader_hook` to learn when pumping could progress: a HELD role
   on `role_waiters_list`, a FREE role with nothing to read on the transport's
   readiness list, never both; dead -> `-EIO`, a frame on a free role -> 0 and
@@ -499,10 +502,15 @@ The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
   (the poll.tla shape). No lost wake — [[inv-i9]].
 - `out_buf` is never re-read after a lock drop (the spill contract); the
   sole exception is the NOTAG handshake on a still-private client.
+- The bytes of a frame being read are the CLIENT's (`rx_got`, written only by
+  the role holder), not the reader's -- Plan 9's devmnt keeps them in the
+  mount's queue, Linux's `trans_fd` in the connection. Every reader resumes
+  there (`do_reader_recv_frame`); a resumed frame is mid-frame from its first
+  recv, so the blocking readers block through it as through any frame.
 - The reader role is released across a death OR a debug/job stop at a frame
-  boundary only; all THREE `reader_active` sites (election, self-pump,
-  `p9_client_reader_pump_ready`) handle a stop-unwound recv without latching
-  the session; `client_send_flow` + `client_drain_until_free_tag` park a stopped
+  boundary only; both blocking `reader_active` sites (election, self-pump)
+  handle a stop-unwound recv without latching the session, and the third,
+  `p9_client_reader_pump_ready`, never sleeps in a recv; `client_send_flow` + `client_drain_until_free_tag` park a stopped
   sender at loop-top (spilling first) so a stop can't spin or hang.
 - No client waiter parks in place for a stop (DEBUG-FS 5c.6, the
   2026-09-30 waiters-and-stops amendment). Every client sleep sets
@@ -653,8 +661,12 @@ this surface):
   `.reader_hook_contract`, `.loom_enter_wakes_when_role_frees`; the
   readiness-gated pump `.pump_ready_idle`, `.pump_ready_data_progresses`,
   `.pump_ready_chunked_frame_completes`, `.pump_ready_busy_when_reader_active`,
-  `.pump_ready_eof_is_dead`; the fan-in `.loom_enter_reads_every_client`,
-  `.loom_enter_partial_set_rescans`, `.loom_sqpoll_parks_on_a_held_role`. Model:
+  `.pump_ready_eof_is_dead`, `.pump_ready_never_waits_inside_a_frame`; the
+  fan-in `.loom_enter_reads_every_client`, `.loom_enter_partial_set_rescans`,
+  `.loom_sqpoll_parks_on_a_held_role`, `.loom_enter_sees_a_sibling_submit`
+  (`.loom_enter_reads_every_client`, `.loom_enter_partial_set_rescans` and
+  `.loom_sqpoll_parks_on_a_held_role` also bound the waiter's kstack
+  watermark, the fan-in set being a fixed ~3.6 KiB frame). Model:
   `specs/loom_role.tla`, the handoff with both stop rules and the role-waiter
   wake, generalised 2026-10-06 to N clients and the readiness hook
   (`NoMissedWake`, `NoBlindRecv`, `EnterReturns`). Known and tracked: a stop-parked owner holds its

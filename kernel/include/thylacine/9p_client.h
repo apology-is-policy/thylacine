@@ -231,6 +231,10 @@ struct p9_client {
     struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
     bool                 reader_active;
     bool                 dead;
+    // Bytes of the frame being read already in transport.recv_buf. They stay
+    // across readers: a pump that finds the rest not yet sent returns and the
+    // next reader resumes (LOOM.md 8.6). Written only by the role holder.
+    u32                  rx_got;
     // #210 loss discriminator (all under c->lock; demux_frame_locked is the
     // sole mutation site). frames_rx counts every steady-state frame that
     // reached the demux; owned/orphan split it by whether inflight[tag]
@@ -694,8 +698,6 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
 
 // The result of p9_client_reader_pump_ready (a SIGNED enum).
 enum p9_pump_result {
-    P9_PUMP_UNWOUND  = -2,  // the caller's own death or stop unwound the recv;
-                            // the session is intact
     P9_PUMP_DEAD     = -1,  // the session is dead: its ops have their errors
     P9_PUMP_IDLE     =  0,  // the role is free and nothing waits to be read
     P9_PUMP_PROGRESS =  1,  // demuxed exactly one reply frame

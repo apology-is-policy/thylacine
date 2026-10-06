@@ -72,6 +72,12 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end);
 // c->lock. False -- and nothing done -- for anything but a pipe's write end.
 bool pipe_hangup_write(struct Spoor *write_end);
 
+// Read a pipe's read end without sleeping, whatever its O_NONBLOCK: what it
+// holds, 0 at EOF, -T_E_AGAIN when it is empty. For the kernel's own reads of
+// an end it shares with EL0 (the 9P transport), where the shared flag is not
+// the kernel's to set. -T_E_BADF for anything but a pipe's read end.
+long pipe_read_now(struct Spoor *read_end, void *buf, long n);
+
 // Diagnostic counters (ring-level; one ring per pipe pair).
 u64 pipe_total_allocated(void);
 u64 pipe_total_freed(void);

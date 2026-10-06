@@ -35,6 +35,7 @@ struct p9_transport_ops {
     int  (*recv)(void *ctx, u8 *buf, size_t cap);
     int  (*close)(void *ctx);
     bool (*recv_ready)(void *ctx, struct poll_waiter *pw);  // MANDATORY
+    int  (*recv_now)(void *ctx, u8 *buf, size_t cap);       // MANDATORY
     void (*hangup)(void *ctx);                              // NULL-permitted
     void *ctx;
 };
@@ -60,6 +61,17 @@ struct p9_transport_ops {
   [[sub-kernel-ninep-dev9p-poll]] kthread) pump a client only when it says
   ready and otherwise sleep on the hook. `p9_transport_init` refuses an ops
   table without it; `p9_transport_recv_ready` is the core's forwarder.
+- `recv_now` (LOOM.md 8.6, the 2026-10-06 S-3 amendment): read what is
+  waiting, never sleeping -- `1..cap`, `0` EOF, `-1` error, or
+  `P9_TRANSPORT_EAGAIN` when nothing is. The pump reads with it alone, so no
+  server that stops inside a frame, and no other holder of a pipe's read end
+  that takes the bytes a readiness sample saw, can hold a waiter in a recv.
+  srvconn: `srvconn_client_recv_now` (s2c without its parks; EAGAIN also while
+  another reader holds the role). Spoor: `pipe_read_now` on a pipe (the read
+  end's `O_NONBLOCK` is EL0's, left alone); any other Dev (kernel-internal) only
+  when its poll says ready. Loopback / mq: an empty stage or FIFO is EAGAIN
+  where their `recv` reads it as EOF. `p9_transport_init` refuses an ops table
+  without it.
 - `hangup` (ARCH 21.10, "A death hangs up", 2026-10-05): hang up the
   client-to-server direction of a session that has died, so the server reads
   EOF once it has drained what was sent. The 9P client calls it once, on the

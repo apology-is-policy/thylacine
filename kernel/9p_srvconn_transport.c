@@ -11,6 +11,7 @@
 
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/errno.h>
 #include <thylacine/poll.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
@@ -88,6 +89,18 @@ static bool srvconn_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
     if (!st || st->magic != P9_SRVCONN_TRANSPORT_MAGIC || !st->cn) return true;
     short rev = srvconn_poll(st->cn, /*client=*/true, POLLIN, pw);
     return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
+static int srvconn_transport_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
+    if (!st)                                     return -1;
+    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return -1;
+    if (!st->cn)                                 return -1;
+    if (!buf || cap == 0)                        return -1;
+    long n = srvconn_client_recv_now(st->cn, buf, (long)cap);
+    if (n == -(long)T_E_AGAIN) return P9_TRANSPORT_EAGAIN;
+    if (n < 0) return -1;
+    return (int)n;
 }
 
 static int srvconn_transport_close(void *ctx) {
@@ -169,6 +182,7 @@ struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st
     ops.recv              = srvconn_transport_recv;
     ops.close             = srvconn_transport_close;
     ops.recv_ready        = srvconn_transport_recv_ready;
+    ops.recv_now          = srvconn_transport_recv_now;
     ops.hangup            = srvconn_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;

@@ -91,6 +91,8 @@ void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_enter_reads_every_client(void);
 void test_9p_client_loom_enter_partial_set_rescans(void);
 void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
+void test_9p_client_loom_enter_sees_a_sibling_submit(void);
+void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -1350,9 +1352,15 @@ void test_9p_client_pump_ready_data_progresses(void) {
     TEST_EXPECT_EQ(rc, 0, "submit_async stages an Rclunk on the wire");
 
     int r = p9_client_reader_pump_ready(&g_client);
+    bool latch = current_thread() && current_thread()->stop_unwinds;
     TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "data ready -> PROGRESS");
     TEST_ASSERT(g_pump_async_completed, "on_complete fired");
     TEST_EXPECT_EQ(g_pump_async_result, 0, "clunk success -> result 0");
+    // The pump never sleeps, so it leaves the reader's stop-unwind latch alone.
+    // An Rclunk is all header, after which a blocking reader's latch reads "at
+    // a frame boundary"; left set, sched's stop branch would unwind this
+    // thread's next sleep whatever it waits for.
+    TEST_ASSERT(!latch, "the pump left the stop-unwind latch clear");
     TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), (int)P9_PUMP_IDLE,
                    "and the drained stream is IDLE again");
 
@@ -4294,6 +4302,7 @@ static u8   g_rec_type[DY_REC_MAX];
 static bool g_rec_clunk_err;
 static u8   g_rec_bad_reply_to;
 static u8   g_rec_hold;         // a T-type the server holds unanswered (until flushed)
+static u16  g_rec_last_tag;     // the tag of the last request it received
 
 static int recording_responder(void *ctx, const u8 *req, size_t req_len,
                                u8 *resp, size_t resp_cap) {
@@ -4301,6 +4310,7 @@ static int recording_responder(void *ctx, const u8 *req, size_t req_len,
     if (p9_peek_header(req, req_len, &size, &type, &tag) != 0)
         return canonical_responder(ctx, req, req_len, resp, resp_cap);
     if (g_rec_n < DY_REC_MAX) g_rec_type[g_rec_n++] = type;
+    g_rec_last_tag = tag;
     if (g_rec_hold != 0 && type == g_rec_hold) return 0;   // no reply queued
     if (g_rec_bad_reply_to != 0 && type == g_rec_bad_reply_to) {
         // Two body bytes: an Rlerror carries four, an Rflush none, and an
@@ -5781,8 +5791,17 @@ static void cl2_close(void) {
 
 // One leg: client 1 (g_client) held, its op newest; client 2's reply queued.
 // `cap` is the fan-in test cap (0 = the full set). Returns through *out.
+// A fan-in waiter keeps its whole set on the stack (LOOM_FANIN_MAX entries,
+// whatever the number of clients), so its depth is measured, not argued: the
+// waiter thread's watermark after it ran, plus what an IRQ adds to a syscall
+// stack (ARCH 8.12 "The kernel stack: MEASURED", 1728 B) and an allowance for
+// the syscall entry frames a test thread does not carry, must fit THREAD_KSTACK_SIZE.
+#define LOOM_KSTACK_IRQ    1728u
+#define LOOM_KSTACK_ENTRY  1024u
+
 struct two_client_out {
     bool started, returned, killed, dead1, dead2;
+    u32  kstack;                  // the ENTER thread's watermark
     int  n;
     u32  cq_first;
     u64  ud_first;
@@ -5815,6 +5834,7 @@ static void two_client_leg(u32 cap, struct two_client_out *o) {
     o->started = test_dying_start(&g_dle2, dle2_run, NULL, /*dead_now=*/false);
     TEST_YIELD_UNTIL_SOFT(!o->started || test_dying_done(&g_dle2));
     o->returned  = o->started && test_dying_done(&g_dle2);
+    o->kstack    = o->returned ? thread_kstack_used(g_dle2.t, NULL) : 0u;
     o->cq_first  = l->cq_tail;
     o->ud_first  = cqes[0].user_data;
     o->res_first = (s64)cqes[0].result;
@@ -5848,6 +5868,9 @@ void test_9p_client_loom_enter_reads_every_client(void) {
     TEST_EXPECT_EQ((u64)o.res_first, (u64)0, "fsync success");
     TEST_EXPECT_EQ((u64)o.cq_end, (u64)2, "client 1's op completed once released");
     TEST_ASSERT(!o.dead1 && !o.dead2, "both sessions stay live");
+    TEST_ASSERT(o.kstack > 0u &&
+                o.kstack + LOOM_KSTACK_IRQ + LOOM_KSTACK_ENTRY <= THREAD_KSTACK_SIZE,
+                "the ENTER's stack fits with a syscall entry and an IRQ on top");
 }
 
 // More clients in flight than the fan-in set holds (a re-register with ops in
@@ -5868,6 +5891,133 @@ void test_9p_client_loom_enter_partial_set_rescans(void) {
     TEST_EXPECT_EQ(o.ud_first, 0xB0B0000000000002ULL, "client 2's op completed first");
     TEST_EXPECT_EQ((u64)o.cq_end, (u64)2, "client 1's op completed once released");
     TEST_ASSERT(!o.dead1 && !o.dead2, "both sessions stay live");
+    TEST_ASSERT(o.kstack > 0u &&
+                o.kstack + LOOM_KSTACK_IRQ + LOOM_KSTACK_ENTRY <= THREAD_KSTACK_SIZE,
+                "the ENTER's stack, through its timed rescan, fits with an entry and an IRQ");
+}
+
+// A sibling's submit lands between the waiter's client hooks and its CQ hook,
+// the window two threads of the ring's Proc can fill. The waiter has hooked
+// only client 1, whose role is held; the sibling's op rides client 2, whose
+// reply is queued at once, and the sibling does not wait. The waiter must see
+// the new op and read it. Before, a submit moved nothing the waiter
+// re-samples, so it slept hooked on client 1 alone with client 2's reply
+// unread. Observed first, judged after the teardown.
+static void dle1_run(void *arg) {
+    (void)arg;
+    g_dle2op.n = loom_enter(g_dle2op.l, 1, 1, 0);
+}
+
+void test_9p_client_loom_enter_sees_a_sibling_submit(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client 1 over mq");
+    TEST_EXPECT_EQ(cl2_open(), 0, "client 2 over mq");
+    struct Spoor *sp1 = dev9p_attach_client(&g_client, 0);
+    struct Spoor *sp2 = dev9p_attach_client(&g_client2, 0);
+    struct Loom *l = (sp1 && sp2) ? loom_create(8, 16, false) : NULL;
+    struct Spoor *sps[2] = { sp2, sp1 };
+    rights_t rts[2] = { RIGHT_READ | RIGHT_WRITE, RIGHT_READ | RIGHT_WRITE };
+    bool up = l && loom_register_handles(l, sps, rts, 2) == 0;
+    bool started = false, stalled = false, returned = false, killed = false;
+    int  sib = -1;
+    u32  cq_first = 0, cq_end = 0;
+    u64  ud_first = 0;
+    if (up) {
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+        cl_stage_sqe(l, 0, LOOM_OP_FSYNC, /*handle=*/1, /*datasync*/0, 0xA0A0000000000001ULL);
+        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+        dy_hold_reader(true);                         // client 1: held, never read
+        __atomic_store_n(&g_loom_fanin_test_stall, 1u, __ATOMIC_RELEASE);
+        g_dle2op.l = l;
+        g_dle2op.n = -2;
+        started = test_dying_start(&g_dle2, dle1_run, NULL, /*dead_now=*/false);
+        TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dle2) ||
+                              __atomic_load_n(&g_loom_fanin_test_stalled, __ATOMIC_ACQUIRE));
+        stalled = __atomic_load_n(&g_loom_fanin_test_stalled, __ATOMIC_ACQUIRE) != 0u;
+        // The sibling: client 2's op, submitted without waiting.
+        cl_stage_sqe(l, 1, LOOM_OP_FSYNC, /*handle=*/0, /*datasync*/0, 0xB0B0000000000002ULL);
+        __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+        sib = loom_enter(l, 1, 0, 0);
+        __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
+        TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dle2));
+        returned = started && test_dying_done(&g_dle2);
+        cq_first = l->cq_tail;
+        ud_first = cqes[0].user_data;
+        // Let client 1 go and drain its reply, then end the thread either way.
+        dy_hold_reader(false);
+        p9_client_handoff_reader(&g_client);
+        if (started) dy_finish_of(&g_dle2, &killed);
+        (void)p9_client_reader_pump_ready(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client2);
+        cq_end = l->cq_tail;
+    }
+    __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
+    if (l) loom_unref(l);
+    else {
+        if (sp1) spoor_clunk(sp1);
+        if (sp2) spoor_clunk(sp2);
+    }
+    cl2_close();
+    dy_client_close();
+
+    TEST_ASSERT(up, "two clients registered on one ring");
+    TEST_ASSERT(started, "the ENTER thread started");
+    TEST_ASSERT(stalled, "the ENTER stopped between its client hooks and its CQ hook");
+    TEST_EXPECT_EQ((u64)(s64)sib, (u64)1, "the sibling submitted one SQE");
+    TEST_ASSERT(returned, "the ENTER read the sibling's op while client 1 stayed held");
+    TEST_ASSERT(!killed, "nothing had to kill it");
+    TEST_EXPECT_EQ((u64)cq_first, (u64)1, "one CQE when it returned");
+    TEST_EXPECT_EQ(ud_first, 0xB0B0000000000002ULL, "the sibling's op completed first");
+    TEST_EXPECT_EQ((u64)cq_end, (u64)2, "client 1's op completed once released");
+}
+
+// A pump reads only what is waiting. One kthread pumps every QTPOLL session in
+// the system, and any process can serve a 9P mount over pipes, so a server
+// that sends a reply's header and stops must not hold the pump inside the
+// frame: the pump returns, the header stays with the client, and the next
+// pump finishes the frame when the rest arrives. Before, the pump read on
+// into the body; over this FIFO an empty read is an EOF, so it killed the
+// session (over a pipe it slept, pipe.transport_reads_now_without_sleeping).
+static void dy_inject(const u8 *b, u32 n) {
+    spin_lock(&g_mq.lock);
+    for (u32 i = 0; i < n; i++) g_mq.ring[g_mq.tail + i] = b[i];
+    g_mq.tail += n;
+    spin_unlock(&g_mq.lock);
+    poll_waiter_list_wake(&g_mq.ready_list);
+}
+
+void test_9p_client_pump_ready_never_waits_inside_a_frame(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    p9_client_walk_one(&g_client, 0, 33, (const u8 *)"f", 1, NULL);
+    g_rec_hold = P9_TGETATTR;                       // the server answers by hand
+    g_pump_rpc.on_complete = pump_async_on_complete;
+    g_pump_async_completed = false;
+    u32 fid = 33;
+    int sub = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_getattr, &fid);
+    // Its answer, an Rlerror: 11 bytes, the 7-byte header first.
+    u8 frame[11] = { 11, 0, 0, 0, (u8)P9_RLERROR,
+                     (u8)g_rec_last_tag, (u8)(g_rec_last_tag >> 8), 2, 0, 0, 0 };
+    dy_inject(frame, 7u);
+    int first = p9_client_reader_pump_ready(&g_client);
+    u32 kept = g_client.rx_got;
+    bool done_early = g_pump_async_completed;
+    dy_inject(frame + 7, 4u);
+    int second = p9_client_reader_pump_ready(&g_client);
+    u32 kept_after = g_client.rx_got;
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)(s64)sub, 0ULL, "a Tgetattr went out, held by the server");
+    TEST_EXPECT_EQ((u64)(s64)first, (u64)(s64)P9_PUMP_IDLE,
+                   "the pump came back with nothing demuxed yet");
+    TEST_EXPECT_EQ((u64)kept, 7ULL, "the header stays with the client");
+    TEST_ASSERT(!done_early, "the op waits for the rest of its reply");
+    TEST_EXPECT_EQ((u64)(s64)second, (u64)(s64)P9_PUMP_PROGRESS,
+                   "the next pump finishes the frame");
+    TEST_ASSERT(g_pump_async_completed && g_pump_async_result < 0,
+                "the op completes with the server's error");
+    TEST_EXPECT_EQ((u64)kept_after, 0ULL, "nothing of the frame is left behind");
+    TEST_ASSERT(!dead, "the session lives");
 }
 
 // An SQPOLL ring's op rides a client whose reader role another thread holds and
@@ -5891,6 +6041,7 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
     bool parked = false, stayed = false, posted = false;
     u64  runs = ~0ull;
     s64  res  = -1;
+    u32  kdepth = 0;
     if (ring_up) {
         loom_install_test_handle(l, 0, sp, RIGHT_READ | RIGHT_WRITE);
         struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
@@ -5919,6 +6070,7 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
         TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u);
         posted = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u;
         res    = (s64)cqes[0].result;
+        kdepth = thread_kstack_used(kt, NULL);            // parked, hooked, then read
     }
     if (got) handle_put(&hh);
     if (p) {
@@ -5934,6 +6086,8 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
     TEST_EXPECT_EQ(runs, (u64)0, "never ran while the role stayed held");
     TEST_ASSERT(posted, "the role's release woke it to read the reply");
     TEST_EXPECT_EQ((u64)res, (u64)0, "fsync success");
+    TEST_ASSERT(kdepth > 0u && kdepth + LOOM_KSTACK_IRQ <= THREAD_KSTACK_SIZE,
+                "the kthread's stack fits with an IRQ on top");
 }
 
 // The runner's release, after every test (test.c). A test that fails before its
@@ -5947,6 +6101,7 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
 bool test_9p_client_release(void);
 bool test_9p_client_release(void) {
     __atomic_store_n(&g_loom_fanin_test_cap, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
     struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle, &g_dle2 };
     bool left = false;
     for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {

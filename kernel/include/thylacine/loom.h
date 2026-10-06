@@ -440,12 +440,14 @@ struct Loom {
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
     // from the shared header (which userspace can corrupt -> an OOB kernel write).
     u32 cq_tail;
-    // Bumped under `lock` by every CQE post and by every completion's state
-    // update (a re-arm flagged, a chain result, an op terminal). A waiter that
-    // read it before driving the ring and finds it moved when it would sleep
-    // re-drives instead: a completion read by another thread posts its CQE
-    // before it records the re-arm or the chain result (LOOM.md 8.6). Read
-    // lock-free (acquire) at a waiter's loop top.
+    // Bumped under `lock` (loom_drive_moved_locked) by every CQE post, every
+    // completion's state update (a re-arm flagged, a chain result, an op
+    // terminal) and every op that goes in flight (a submit's link, a re-arm
+    // claimed). A waiter that read it before driving the ring and finds it
+    // moved when it would sleep re-drives instead: a completion read by another
+    // thread posts its CQE before it records the re-arm or the chain result,
+    // and a sibling's submit can put an op on a client the waiter has not
+    // hooked (LOOM.md 8.6). Read lock-free (acquire) at a waiter's loop top.
     u32 drive_gen;
     // Loom-3. Kernel-PRIVATE authoritative submission-queue head (under `lock`):
     // the SQ-index ring slot the kernel consumes next. The shared
@@ -646,6 +648,12 @@ int  loom_start_sqpoll(struct Loom *l);
 // LOOM_MAX_REG_HANDLES, so a test can drive the partial set's timed rescan
 // with two clients. 0 in production.
 extern u32 g_loom_fanin_test_cap;
+
+// Test knob: while nonzero, a fan-in ENTER that has hooked its clients stops
+// before it hooks the CQ, raising g_loom_fanin_test_stalled, so a test can put
+// a sibling's submit in that window. 0 in production.
+extern volatile u32 g_loom_fanin_test_stall;
+extern volatile u32 g_loom_fanin_test_stalled;
 
 // Testable setup inner (the spoor_stat_native pattern -- fills a KERNEL
 // loom_params; the SVC handler does the user copy-in/out). Creates the Loom,

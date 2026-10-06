@@ -22,7 +22,8 @@ int p9_transport_init(struct p9_transport *t,
                        struct p9_transport_ops ops,
                        u8 *recv_buf, size_t recv_cap) {
     if (!t) return -1;
-    if (!ops.send || !ops.recv || !ops.close || !ops.recv_ready) return -1;
+    if (!ops.send || !ops.recv || !ops.close || !ops.recv_ready || !ops.recv_now)
+        return -1;
     if (!recv_buf) return -1;
     if (recv_cap < P9_HDR_LEN) return -1;  // need room for at least a header
     t->magic         = P9_TRANSPORT_MAGIC;

@@ -10,6 +10,7 @@
 
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/spoor.h>
@@ -114,6 +115,29 @@ static bool spoor_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
     return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
+// A pipe -- the only rx EL0 can attach, an end it may also hold -- reads
+// without sleeping. Any other Dev comes from a kernel-internal caller and is
+// read only when its poll says the read would not block.
+static int spoor_transport_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
+    if (!st)                                   return -1;
+    if (st->magic != P9_SPOOR_TRANSPORT_MAGIC) return -1;
+    if (!st->rx_spoor || !st->rx_spoor->dev)   return -1;
+    if (!st->rx_spoor->dev->read)              return -1;
+    if (!buf || cap == 0)                      return -1;
+    struct Spoor *rx = st->rx_spoor;
+    long n;
+    if (rx->dev == &devpipe) {
+        n = pipe_read_now(rx, buf, (long)cap);
+    } else {
+        if (!spoor_transport_recv_ready(ctx, NULL)) return P9_TRANSPORT_EAGAIN;
+        n = rx->dev->read(rx, buf, (long)cap, 0);
+    }
+    if (n == -(long)T_E_AGAIN) return P9_TRANSPORT_EAGAIN;
+    if (n < 0) return -1;
+    return (int)n;
+}
+
 // The server's reader drains what the client sent and then reads EOF. Only a
 // pipe can be hung up without closing it; any other tx (the tests' mock) is
 // left alone, and its server learns of the death at the close.
@@ -165,10 +189,8 @@ struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st) {
     ops.send  = spoor_transport_send;
     ops.recv  = spoor_transport_recv;
     ops.close = spoor_transport_close;
-    // No deadline mechanism: a Spoor read blocks until data / EOF. The
-    // deadline-aware reader pump (Loom SQPOLL) over a Spoor-backed client
-    // simply blocks (never observes the idle return). NULL-permitted.
     ops.recv_ready        = spoor_transport_recv_ready;
+    ops.recv_now          = spoor_transport_recv_now;
     ops.hangup            = spoor_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;

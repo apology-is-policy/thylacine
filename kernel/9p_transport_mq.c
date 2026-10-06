@@ -99,6 +99,18 @@ static int mq_recv(void *ctx, u8 *buf, size_t cap) {
     return (int)to_copy;
 }
 
+// An empty FIFO is nothing yet here, where mq_recv reads it as EOF.
+static int mq_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
+    spin_lock(&mq->lock);
+    bool empty = !mq->closed && mq->tail == mq->head;
+    spin_unlock(&mq->lock);
+    // Only the role holder consumes, so a FIFO seen non-empty stays so.
+    if (empty) return P9_TRANSPORT_EAGAIN;
+    return mq_recv(ctx, buf, cap);
+}
+
 static int mq_close(void *ctx) {
     struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
@@ -127,6 +139,7 @@ struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq) {
     ops.recv              = mq_recv;
     ops.close             = mq_close;
     ops.recv_ready        = mq_recv_ready;
+    ops.recv_now          = mq_recv_now;
     ops.hangup            = NULL;
     ops.ctx               = mq;
     return ops;
