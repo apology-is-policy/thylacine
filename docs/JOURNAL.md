@@ -148,6 +148,41 @@ it as an incremental cache would make the guest gates fit. They are her
 artifacts and her handoff fenced them, so it is her ruling, not mine.
 
 
+
+UPDATE, the first guest run (October 6). The four witnesses ran for the first time
+and PASSED, suite 1834/1834 against the base's 1830 -- read from the boot log, since
+an ELF name shows inclusion and not execution. Then the boot extincted on joey's D7
+overlapping-login probe, deterministically, 2/2 on one image.
+
+The hour that followed is the part worth recording, because almost every step of my
+own reasoning was wrong before it was right. I guessed the pool/ramfs key-pairing
+trap: wrong, no STM_EBADTAG anywhere. I guessed my base predated a login-path fix:
+dead, because astra's tree at the SAME base with a config identical by hash boots D7
+PASS. I asked aux to run the discriminating leg: a null BY CONSTRUCTION, since
+`git grep "overlapping login"` finds the probe only on this base line, so no tree they
+build runs that ladder. Astra found it by reading two CMakeCache.txt files: my
+stratumd was built from the SHARED stratum tree (ac519fc), hers from stratum-astra
+(61dde37, the session-DEK leases), and SRV-SESSION-REGISTRY-DESIGN.md:285-290 says
+D7's same-user overlap requires exactly those leases.
+
+The lesson is not about Stratum. I recorded four artifact hashes plus an identical
+.config hash and called that provenance, while the input most likely to differ
+between two agents -- a sibling directory that build.sh consumes read-only and
+records nowhere -- was invisible in every number I had. Four matching hashes stood in
+for equal inputs. That is the same error as quoting du for reclaimable space, one
+layer out: a proxy accepted in place of the thing it stands for. Enqueued as a
+tooling item; pinned in my own runbook meanwhile, with the discriminating half of the
+guard noted because `rev-parse` on the pin SUCCEEDS even in the tree that lacks it.
+
+Three of my own harness defects surfaced the same day, all by running it rather than
+reading it: a missing java reported nothing and the stage continued; `set -e` killed
+the run on TLC's exit 12, which is the EXPECTED outcome for a buggy cfg; and my
+assertion grepped for NoUseAfterFree when burrow's cfgs declare a single `Invariants`
+conjunction, so it would have FAILED A CORRECT RUN. I also walked into two traps
+already in my own memory -- losing the first failing boot log to a re-run that
+overwrites it, and `nohup ... &` inside a backgrounded call, where the harness's
+exit 0 described the wrapper while the boot was still live.
+
 ## 2026-10-04: explicit protocol-buffer storage
 
 The private owner needs all metadata/payload transport storage accounted before

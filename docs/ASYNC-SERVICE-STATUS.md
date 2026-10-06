@@ -743,3 +743,63 @@ causes. The runbook carries its own free-space floor, set at Main's 6 GiB plus t
 expected delta, because this base predates `disk_floor_check` and an unguarded bake
 here dies on ENOSPC instead of refusing -- the failure mode that broke every agent's
 shell on October 5.
+
+### October 6, later: the first guest run, and D7's cause
+
+**The repair's witnesses executed for the first time and PASSED.** `tests: 1834/1834`
+against the base tree's `1830/1830` -- exactly +4 -- with a PASS record for each of
+the four by name, read from the boot log rather than `test.sh`'s stdout, because an
+ELF name shows inclusion and not execution. Stable across two boots. Stage 0's five
+buggy cfgs all still violate (`burrow_*` x3 report `Invariant Invariants`;
+`capacity_buggy_detach_no_refund` and `replace_orphans` report `NoOrphan` violated
+with `ChargeConserved` HOLDING -- the first of those being AS-R9's second arm in
+model form).
+
+Paired-image hashes at post-build: `.config 4fcc788d6be38b80` (identical by hash to
+the cache source's), `thylacine.elf 1fe1ba3a46219dc1`, `ramfs.cpio 817320cea4ccd9b6`,
+`pool.img a3ae8a265b3355e4`. Disk 13 GiB before the clone, 12 after the full rebuild
+and re-bake -- about 1 GiB of real growth against the 14-21G a from-zero bake costs.
+
+**The boot then extincted, and it was not the tests.** `joey: D7 overlapping login
+probe FAILED` -> `EXTINCTION: joey exited non-zero 1`, proximate cause
+`install-dek uid=4294967294 dataset=2 result=err:eaccess` under three simultaneous
+sessions -- after that same dataset installed `result=ok` earlier in the same boot.
+Deterministic, 2/2 on the identical image, re-run deliberately to test determinism.
+
+**The cause is an unequal EXTERNAL input, not the repair.** Found by Astra on
+read-only inspection and verified here against primary sources:
+`build/pouch/stratumd-cmake/CMakeCache.txt` names `stratum-v2_SOURCE_DIR` as the
+SHARED `projects/stratum/v2` (HEAD `ac519fc`) in this tree and
+`projects/stratum-astra/v2` in hers, whose HEAD is `61dde37` ("Support independently
+proven session leases for home keys", directly on `ac519fc`);
+`merge-base --is-ancestor 61dde37 HEAD` is FALSE in the shared tree.
+`SRV-SESSION-REGISTRY-DESIGN.md:285-290` states the requirement outright -- one
+authenticated DEK lease per connection/dataset pair, each new connection proving
+UNWRAP even when another session has installed the key, implementation isolated in
+`stratum-astra`. Without it the overlapping session cannot prove UNWRAP, which is
+exactly the observed refusal and exactly the tell (ok first, refused on the overlap).
+
+The runbook now pins `STRATUM_SRC` to `stratum-astra` and ASSERTS
+`STRATUM_PIN=61dde37` before building. Which half of that guard discriminates is
+recorded in the script: `git rev-parse 61dde37` SUCCEEDS in the shared tree, because
+the object is present there without the commit being in its history, so only
+`merge-base --is-ancestor` can refuse. Verified both ways against both trees.
+
+**The generalisable failure, enqueued as a tooling item rather than fixed in this
+slice.** The two images shared an identical `.config` hash and base commit, and four
+recorded artifact hashes matched -- yet differed in the one input that decided the
+outcome, because `build.sh` consumes `$STRATUM_SRC` (build.sh:301, :3281) read-only,
+bakes the result into the ramfs, and records its identity in no ledger, no config and
+no hash. Four matching hashes stood in for equal inputs, which is the same shape as
+quoting `du` for reclaimable space: a proxy accepted in place of the thing. The probe
+compounds it -- `git grep "overlapping login"` finds `usr/joey/joey.c` on this base
+line and NOTHING on `main` or `9dc80bb37`, so the D7 ladder and its Stratum support
+are both Astra-line features split across two repositories, and the handoff pinned
+one tree and not the other.
+
+**Still owed, unchanged: `ci-smp-gate` has never run.** This is an SMP race fix, so
+that is the gate that matters most, and four witnesses passing on a single 4-CPU boot
+is evidence rather than qualification. The confirmation run (pinned Stratum, same
+AS-R9 source and config, full matching pair, trace comparison, then the SMP gate)
+waits for the next owned lease; aux held the Mac for their served-link close and was
+not displaced for a red that is explained and enqueued.
