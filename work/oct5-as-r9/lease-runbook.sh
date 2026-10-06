@@ -292,6 +292,12 @@ done
 # Stage 4 -- the suite. The 4 new tests execute for the FIRST time here. A
 # failing suite extincts the boot (main.c: extinction("kernel test suite
 # failed")), so a red is loud, not silent.
+# THE PIPELINE IS LOAD-BEARING. `| tee` makes this line's status tee's, so a
+# D7 extinction does NOT abort before stage 5 -- and D7 boots in the SAME run
+# as the suite (the 11:23:59Z log carries both "tests: 1834/1834 PASS" and the
+# joey EXTINCTION). The per-witness checks below are this stage's real verdict.
+# Adding `set -o pipefail` would silently convert a D7 red into "the SMP gate
+# never ran", which is the one gate AS-R9 is blocked on.
 tools/test.sh 2>&1 | tee work/oct5-as-r9/guest-test.log
 # AN ELF NAME IS NOT AN EXECUTION WITNESS (astra, 0169 turn 4). The stage-3 grep
 # proves the tests are COMPILED IN; only the boot log proves they RAN. The suite
@@ -314,10 +320,55 @@ grep -E '  tests: [0-9]+/[0-9]+' work/oct5-as-r9/guest-test.log || true
 echo "   [skip] lines (must be 0 on the gate image, which always carries the probe set):"
 grep -c '\[skip\]' work/oct5-as-r9/guest-test.log || true
 
+# Stage 4b -- D7 on its OWN axis. Agreed with astra (0161): the controlled
+# rebuild re-equalises the Stratum input, so whatever D7 does is evidence about
+# THAT input, never about the charge-settlement repair. NON-FATAL by design --
+# stage 5 must run whatever happens here.
+# COPY FIRST: test.sh overwrites build/test-boot.log, and I have already lost
+# one failing boot log by re-running before copying it.
+mkdir -p work/oct5-as-r9/boot-logs
+D7LOG=work/oct5-as-r9/boot-logs/boot-confirm-$(date -u '+%H%M%SZ').log
+if [ -f build/test-boot.log ]; then
+  cp build/test-boot.log "$D7LOG"
+else
+  cp work/oct5-as-r9/guest-test.log "$D7LOG"
+fi
+echo "-- D7 axis (separate verdict, non-fatal to this run): $D7LOG"
+set +e
+sh work/oct5-as-r9/d7-compare.sh "$D7LOG"
+D7RC=$?
+set -e
+echo "-- D7 verdict code: $D7RC (0 cured / 20 still red / 21 changed shape / 4 control failed)"
+echo "   This is NOT the AS-R9 verdict -- stage 5 decides that one."
+
+
 # Stage 5 -- the one that matters. AS-R9 is an SMP race: a single-CPU green
 # proves little, and the Oct 1-2 single-boot waiver has expired.
 floor pre-smp
-tools/ci-smp-gate.sh 2>&1 | tee work/oct5-as-r9/guest-smp.log
+# NARROWING THE MATRIX IS VERIFYING AROUND THE HAZARD (CLAUDE.md): a subset
+# still prints a PASS, and AS-R9 is precisely an SMP race.
+if [ -n "${SMP_GATE_CONFIGS:-}" ]; then
+  echo "REFUSING: SMP_GATE_CONFIGS='$SMP_GATE_CONFIGS' narrows the 5-row matrix"; exit 5
+fi
+if [ "${SMP_GATE_N:-10}" -lt 10 ]; then
+  echo "REFUSING: SMP_GATE_N=${SMP_GATE_N:-10} < 10 -- a race needs the full N"; exit 5
+fi
+SMPRC=$(mktemp)
+( set +e; tools/ci-smp-gate.sh 2>&1; echo $? > "$SMPRC" ) | tee work/oct5-as-r9/guest-smp.log
+smp_rc=$(cat "$SMPRC")
+# A GATE HAS TWO HALVES -- VERDICT AND CAPTURE. The tee is capture only: the
+# pipeline's status is tee's, so set -e cannot see this gate fail. Assert it.
+echo "-- ci-smp-gate exit status: $smp_rc (0 = every config passed)"
+[ "$smp_rc" = 0 ] || { echo "   SMP GATE RED. Logs: build/multiboot-fails/. STOP, do not retry blind."; exit 1; }
+grep -q 'ci-smp-gate: PASS' work/oct5-as-r9/guest-smp.log \
+  || { echo "   exit 0 but NO PASS line -- the gate never reached its verdict"; exit 1; }
+# ENUMERATE the rows, never count them: a count the remaining rows satisfy
+# cannot see a missing row. Format is `  PASS  <label>` (ci-smp-gate.sh:181).
+for lbl in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
+  grep -qE "^  PASS  $lbl *$" work/oct5-as-r9/guest-smp.log \
+    && echo "   row PASS: $lbl" \
+    || { echo "   ROW MISSING OR RED: $lbl -- the matrix did not run in full"; exit 1; }
+done
 
 # Stage 6 -- THE SECOND AXIS, and for a race fix it is not optional padding.
 # Everything above runs on one memory model (Apple M2 under HVF). AS-R9 is an
@@ -335,6 +386,13 @@ tools/ci-smp-gate.sh 2>&1 | tee work/oct5-as-r9/guest-smp.log
 # NOT re-bake either one on the far side.
 # 4 GB RAM: ONE 2048 MiB guest at a time.
 if [ "${PI_AXIS:-1}" = 1 ]; then
+  # AFTER STAGE 5 build/ HOLDS THE UBSAN KERNEL: ci-smp-gate builds default
+  # then ubsan (ci-smp-gate.sh:139-144), so the last build wins. Syncing now
+  # would ship a sanitizer kernel and report it as the plain second axis --
+  # mislabelled evidence, and for a RACE the instrumentation perturbs the very
+  # timing this axis exists to probe. Rebuild default; pair pool+ramfs from it.
+  tools/build.sh kernel
+  provenance "stage-6 pre-sync (default kernel rebuilt after the ubsan gate)"
   echo "-- second axis: syncing this tree's kernel + PAIRED pool/ramfs to thyla-pi"
   WARP_HOST=thyla-pi tools/warp-host.sh sync
   echo "-- then run the SMP boots there under real KVM, A72 weak memory"
