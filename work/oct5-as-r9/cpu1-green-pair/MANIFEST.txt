@@ -1,0 +1,9 @@
+# The CPU1/D7-GREEN pair, preserved 2026-10-07 before the SMP gate rebuilds artifacts
+# (astra, yip 0161 t21). Boot evidence: boot-logs/boot-confirm-232503Z.log
+# pool.img and ramfs.cpio are a CRYPTOGRAPHIC PAIR -- they travel together or not at all.
+my HEAD : c68cc162f5f1ea69444264a78820a9a0530bf985
+f01c00189218b9e0  pool.img
+cf650c39d99b8716  ramfs.cpio
+1fe1ba3a46219dc1  thylacine.elf
+4fcc788d6be38b80  .config
+258fbd6350445c6f  system.key
