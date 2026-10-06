@@ -27,8 +27,8 @@ int p9_loopback_init(struct p9_loopback *lb,
     lb->dropped_rclunks = 0;
     lb->hangups         = 0;
     lb->closed          = false;
-    lb->deadline_armed = false;
-    lb->timed_out      = false;
+    lb->eof             = false;
+    poll_waiter_list_init(&lb->ready_list);
     return 0;
 }
 
@@ -41,6 +41,7 @@ void p9_loopback_destroy(struct p9_loopback *lb) {
     lb->response_len = 0;
     lb->response_pos = 0;
     lb->closed       = true;
+    poll_waiter_list_wake(&lb->ready_list);   // a closed recv fails at once
 }
 
 void p9_loopback_set_chunk_size(struct p9_loopback *lb, size_t chunk_size) {
@@ -56,6 +57,8 @@ void p9_loopback_force_eof(struct p9_loopback *lb) {
     // (a clean EOF = peer gone). NOT closed -> recv returns 0, not -1.
     lb->response_len = 0;
     lb->response_pos = 0;
+    lb->eof          = true;
+    poll_waiter_list_wake(&lb->ready_list);
 }
 
 // =============================================================================
@@ -104,6 +107,7 @@ static int loopback_send(void *ctx, const u8 *buf, size_t len) {
     lb->response_len = (size_t)n;
     lb->response_pos = 0;
     lb->sends++;
+    if (n > 0) poll_waiter_list_wake(&lb->ready_list);
     return (int)len;
 }
 
@@ -113,13 +117,7 @@ static int loopback_recv(void *ctx, u8 *buf, size_t cap) {
     if (lb->magic != P9_LOOPBACK_MAGIC) return -1;
     if (lb->closed) return -1;
     size_t available = lb->response_len - lb->response_pos;
-    if (available == 0) {
-        // Nothing staged. With a deadline armed, MODEL a frame-boundary
-        // timeout (-1 + timed_out) so the deadline-aware reader pump can be
-        // driven to its IDLE return deterministically; otherwise EOF.
-        if (lb->deadline_armed) { lb->timed_out = true; return -1; }
-        return 0;                       // EOF (the responder produced nothing)
-    }
+    if (available == 0) return 0;       // EOF (the responder produced nothing)
     size_t to_copy = (available < cap) ? available : cap;
     if (lb->chunk_size > 0 && to_copy > lb->chunk_size) {
         to_copy = lb->chunk_size;
@@ -140,12 +138,14 @@ static int loopback_close(void *ctx) {
     return 0;
 }
 
-static void loopback_set_recv_deadline(void *ctx, u64 deadline_ns) {
+// Hook first, then sample: a send stages its reply and then walks the list,
+// so a reply staged after the sample finds the hook, and one staged before it
+// is seen (the list lock orders the two).
+static bool loopback_recv_ready(void *ctx, struct poll_waiter *pw) {
     struct p9_loopback *lb = (struct p9_loopback *)ctx;
-    if (!lb) return;
-    if (lb->magic != P9_LOOPBACK_MAGIC) return;
-    lb->deadline_armed = (deadline_ns != 0);
-    lb->timed_out      = false;          // arming/disarming clears the signal
+    if (!lb || lb->magic != P9_LOOPBACK_MAGIC) return true;
+    if (pw) poll_waiter_list_register(&lb->ready_list, pw);
+    return lb->closed || lb->eof || lb->response_pos < lb->response_len;
 }
 
 static void loopback_hangup(void *ctx) {
@@ -153,20 +153,12 @@ static void loopback_hangup(void *ctx) {
     if (lb && lb->magic == P9_LOOPBACK_MAGIC) lb->hangups++;
 }
 
-static bool loopback_recv_timed_out(void *ctx) {
-    struct p9_loopback *lb = (struct p9_loopback *)ctx;
-    if (!lb) return false;
-    if (lb->magic != P9_LOOPBACK_MAGIC) return false;
-    return lb->timed_out;
-}
-
 struct p9_transport_ops p9_loopback_ops_for(struct p9_loopback *lb) {
     struct p9_transport_ops ops;
     ops.send              = loopback_send;
     ops.recv              = loopback_recv;
     ops.close             = loopback_close;
-    ops.set_recv_deadline = loopback_set_recv_deadline;
-    ops.recv_timed_out    = loopback_recv_timed_out;
+    ops.recv_ready        = loopback_recv_ready;
     ops.hangup            = loopback_hangup;
     ops.ctx               = lb;
     return ops;

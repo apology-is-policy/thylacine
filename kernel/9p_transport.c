@@ -22,7 +22,7 @@ int p9_transport_init(struct p9_transport *t,
                        struct p9_transport_ops ops,
                        u8 *recv_buf, size_t recv_cap) {
     if (!t) return -1;
-    if (!ops.send || !ops.recv || !ops.close) return -1;
+    if (!ops.send || !ops.recv || !ops.close || !ops.recv_ready) return -1;
     if (!recv_buf) return -1;
     if (recv_cap < P9_HDR_LEN) return -1;  // need room for at least a header
     t->magic         = P9_TRANSPORT_MAGIC;
@@ -236,17 +236,10 @@ size_t p9_transport_last_recv_len(const struct p9_transport *t) {
     return t->last_recv_len;
 }
 
-void p9_transport_set_recv_deadline(struct p9_transport *t, u64 deadline_ns) {
-    if (!t || t->magic != P9_TRANSPORT_MAGIC) return;
-    if (t->ops.set_recv_deadline)
-        t->ops.set_recv_deadline(t->ops.ctx, deadline_ns);
-}
-
-bool p9_transport_recv_timed_out(const struct p9_transport *t) {
-    if (!t || t->magic != P9_TRANSPORT_MAGIC) return false;
-    if (t->ops.recv_timed_out)
-        return t->ops.recv_timed_out(t->ops.ctx);
-    return false;
+bool p9_transport_recv_ready(struct p9_transport *t, struct poll_waiter *pw) {
+    if (!t || t->magic != P9_TRANSPORT_MAGIC) return true;
+    if (t->state == P9_TRANS_CLOSED) return true;
+    return t->ops.recv_ready(t->ops.ctx, pw);
 }
 
 void p9_transport_hangup(struct p9_transport *t) {

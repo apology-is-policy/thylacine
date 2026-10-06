@@ -64,6 +64,7 @@
 
 struct p9_session;
 struct p9_dispatch_result;
+struct poll_waiter;
 
 // =============================================================================
 // State machine.
@@ -102,21 +103,17 @@ struct p9_transport_ops {
     // the transport has transitioned to CLOSED.
     int (*close)(void *ctx);
 
-    // Arm or disarm a deadline for the NEXT blocking recv (absolute ns;
-    // 0 = no deadline = block indefinitely). NULL-permitted: a backend
-    // with no deadline mechanism leaves this NULL, and the deadline-aware
-    // reader pump simply blocks (it never observes the idle return).
-    // Arming also clears the recv_timed_out signal (mirrors
-    // srvconn_set_client_deadline). Loom-4 (SQPOLL) uses this to make the
-    // poll-thread's reader recv frame-boundary-interruptible without
-    // desyncing the byte stream (LOOM.md §8.6).
-    void (*set_recv_deadline)(void *ctx, u64 deadline_ns);
-
-    // True iff the MOST RECENT recv returned <= 0 because the armed
-    // deadline lapsed (vs EOF / error / death-interrupt). NULL-permitted
-    // (treated as false). Read it BEFORE the next set_recv_deadline --
-    // arming resets the signal.
-    bool (*recv_timed_out)(void *ctx);
+    // Whether a recv now would not block: bytes are waiting, or the next
+    // recv returns at once with an EOF or an error (a torn or closed
+    // backend). With `pw` non-NULL, `pw` goes on the backend's readiness
+    // list in the same critical section as the sample, so a byte that
+    // arrives after the sample walks the list and finds it (register-then-
+    // observe, I-9); every arrival walks the list. The caller unregisters
+    // `pw` (poll_waiter_list_unregister) before the backend is freed.
+    // MANDATORY. Called under the 9P client's c->lock, so it must not sleep
+    // and may take only locks ordered after it (as hangup). LOOM.md 8.6:
+    // a waiter with no reply of its own reads only over a ready stream.
+    bool (*recv_ready)(void *ctx, struct poll_waiter *pw);
 
     // Hang up the client->server direction of a session that has died
     // (ARCH 21.10, "A death hangs up"): the server reads EOF once it has
@@ -195,13 +192,10 @@ int  p9_transport_send(struct p9_transport *t,
 // to ERROR on backend failure.
 int  p9_transport_recv(struct p9_transport *t);
 
-// NULL-safe shims over the optional deadline vtable ops. A backend that
-// leaves set_recv_deadline / recv_timed_out NULL gets the no-deadline
-// behavior (arming is a no-op; timed_out is always false). Neither shim
-// touches the transport state machine -- they are safe to call from the
-// frame-aware reader that bypasses p9_transport_recv's ERROR latch.
-void p9_transport_set_recv_deadline(struct p9_transport *t, u64 deadline_ns);
-bool p9_transport_recv_timed_out(const struct p9_transport *t);
+// The backend's recv_ready. A CLOSED transport is ready: its next recv fails
+// at once. Touches no state machine, so the frame-aware reader that bypasses
+// p9_transport_recv's ERROR latch may use it.
+bool p9_transport_recv_ready(struct p9_transport *t, struct poll_waiter *pw);
 
 // The backend's hangup, unless the transport is CLOSED: a closed backend has
 // already let go of what it would hang up. p9_client_close closes under the

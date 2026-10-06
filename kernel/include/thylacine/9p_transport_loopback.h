@@ -26,6 +26,7 @@
 #define THYLACINE_9P_TRANSPORT_LOOPBACK_H
 
 #include <thylacine/9p_transport.h>
+#include <thylacine/poll.h>
 #include <thylacine/types.h>
 
 #define P9_LOOPBACK_MAGIC    0x4C424B30u   // "LBK0" little-endian
@@ -63,14 +64,13 @@ struct p9_loopback {
     // paths find the session dead.
     u32                    hangups;
     bool                   closed;
-    // Deadline test knob (Loom-4). A real transport blocks recv on an
-    // empty pipe until data / the deadline; the synchronous loopback has
-    // no blocking, so it MODELS a frame-boundary deadline: when a deadline
-    // is armed AND the staged response is empty, recv returns -1 + sets
-    // `timed_out` (instead of 0 = EOF). Lets the deadline-aware reader-pump
-    // tests drive the IDLE return deterministically without real time.
-    bool                   deadline_armed;
-    bool                   timed_out;       // last recv hit the armed deadline
+    // The peer is gone (p9_loopback_force_eof): readiness reports the EOF a
+    // recv on the empty staging area returns.
+    bool                   eof;
+    // recv_ready's hooks. A staged reply, a forced EOF and the destroy walk
+    // it: the loopback is synchronous, so an empty one models a real
+    // transport's blocking recv, and recv_ready reports it not ready.
+    struct poll_waiter_list ready_list;
 };
 
 // Initialize a loopback. `response_buf` / `response_cap` is the

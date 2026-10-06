@@ -11,6 +11,7 @@
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/dev.h>
 #include <thylacine/pipe.h>
+#include <thylacine/poll.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -102,6 +103,20 @@ static int spoor_transport_close(void *ctx) {
 // The server's reader drains what the client sent and then reads EOF. Only a
 // pipe can be hung up without closing it; any other tx (the tests' mock) is
 // left alone, and its server learns of the death at the close.
+// The rx Spoor's own poll: POLLIN, or the HUP/ERR of a closed writer (whose
+// recv returns EOF at once). EL0 attaches pipes only (sys_attach_9p_ends_are_
+// pipes), whose poll registers the hook with its sample under the ring lock.
+// A Dev with no poll cannot say, so it reads as ready and the pump blocks in
+// its recv as an unconditional reader does.
+static bool spoor_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
+    struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
+    if (!st || st->magic != P9_SPOOR_TRANSPORT_MAGIC) return true;
+    struct Spoor *rx = st->rx_spoor;
+    if (!rx || !rx->dev || !rx->dev->poll) return true;
+    short rev = rx->dev->poll(rx, POLLIN, pw);
+    return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
 static void spoor_transport_hangup(void *ctx) {
     struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
     if (!st)                                   return;
@@ -153,8 +168,7 @@ struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st) {
     // No deadline mechanism: a Spoor read blocks until data / EOF. The
     // deadline-aware reader pump (Loom SQPOLL) over a Spoor-backed client
     // simply blocks (never observes the idle return). NULL-permitted.
-    ops.set_recv_deadline = NULL;
-    ops.recv_timed_out    = NULL;
+    ops.recv_ready        = spoor_transport_recv_ready;
     ops.hangup            = spoor_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;

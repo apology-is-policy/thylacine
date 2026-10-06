@@ -293,16 +293,6 @@ static void client_send_progress_signal(struct p9_client *c) {
 // lets a device-gone session post -ENODEV instead of a generic -EIO. c->lock
 // NOT held (this blocks); the single-reader election guarantees only one thread
 // is here at a time, so the shared recv_buf is safe.
-//
-// Loom-4 (LOOM.md §8.6): when `deadline_ns != 0`, the FIRST recv (the frame
-// boundary, got==0) is deadline-bounded; a timeout THERE consumes no bytes, so
-// the shared stream stays synced (#841) and *idle (if non-NULL) is set so the
-// caller can distinguish the idle case from EOF/error (both return -1). The
-// deadline is disarmed for the rest of the frame -- once any byte of the frame
-// is in hand, a mid-frame timeout would desync the stream, so the body blocks
-// unconditionally. `deadline_ns == 0` + `idle == NULL` is the original
-// unbounded behavior. A backend with no set_recv_deadline op (NULL) ignores the
-// deadline entirely (the recv just blocks).
 // 8c-3 (#89, F1): the inner recv. The wrapper (reader_recv_frame) holds
 // stop_no_park for the whole tenure so a mid-frame stop BLOCKS THROUGH; this
 // body sets self->stop_unwinds = (got == 0) before each recv, so a stop
@@ -314,31 +304,20 @@ static void client_send_progress_signal(struct p9_client *c) {
 // kproc is neither debuggable nor job-stoppable (both delivers reject it),
 // so both stop flags are always 0 and the detour never fires -- the sets are
 // harmless.
-static int do_reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
+static int do_reader_recv_frame(struct p9_client *c) {
     struct p9_transport *t = &c->transport;
     struct Thread *self = current_thread();
     u8 *buf = t->recv_buf;
     size_t cap = t->recv_cap;
     size_t got = 0;
-    if (idle) *idle = false;
     while (got < P9_HDR_LEN) {
-        if (got == 0 && deadline_ns)
-            p9_transport_set_recv_deadline(t, deadline_ns);
         // Unwindable-by-stop ONLY at got==0 (a clean frame boundary).
         if (self) self->stop_unwinds = (got == 0);
         int n = t->ops.recv(t->ops.ctx, buf + got, P9_HDR_LEN - got);
-        if (got == 0 && deadline_ns) {
-            // Read the timeout signal BEFORE disarming (disarm resets it),
-            // then disarm so the rest of THIS frame blocks indefinitely.
-            if (n <= 0 && idle && p9_transport_recv_timed_out(t)) *idle = true;
-            p9_transport_set_recv_deadline(t, 0);
-        }
         // A clean EOF (recv 0) is a peer-gone close -> the device/service is
-        // gone; a recv error / armed-deadline timeout is < 0. The idle case is
-        // < 0 + *idle set (the backends return -1 + timed_out, never 0, on a
-        // deadline), so 0 is unambiguously the peer-gone EOF.
+        // gone; a recv error is < 0.
         if (n == 0) return 0;              // peer gone (device-gone reason)
-        if (n < 0)  return -1;             // transport error / idle deadline
+        if (n < 0)  return -1;             // transport error
         if ((size_t)n > P9_HDR_LEN - got) return -1;
         got += (size_t)n;
     }
@@ -363,11 +342,10 @@ static int do_reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle
 // finishes the frame, bounded by the trusted server's delivery -- CF-3 B) and
 // unwinds ONLY at a frame boundary (do_reader_recv_frame sets stop_unwinds).
 // Both flags are cleared on exit so a following client_debug_stop_park PARKS.
-// Centralizing here gives all four reader_active-holding callers (the
-// client_wait election, the client_pump_or_park_locked self-pump, and both
-// p9_client_reader_pump_once variants) the block-through, closing F2.
-static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle,
-                             bool caught_ok) {
+// Centralizing here gives all three reader_active-holding callers (the
+// client_wait election, the client_pump_or_park_locked self-pump, and
+// p9_client_reader_pump_ready) the block-through, closing F2.
+static int reader_recv_frame(struct p9_client *c, bool caught_ok) {
     struct Thread *self = current_thread();
     // Reset stop_unwound + note_unwound at ENTRY (per-recv). The detour /
     // caught branch SET them if this recv unwinds at a boundary; the client
@@ -377,12 +355,12 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle,
     //
     // 11b-9p: caught_ok scopes the caught-note recv interrupt to the WAIT-path
     // election (client_wait passes true). The send-path self-pump / drain and
-    // the SQPOLL/Loom pumps pass false: a caught-unwind there drains nothing, so
+    // the Loom and poll-pump waiters pass false: a caught-unwind there drains nothing, so
     // the send retry would spin (the survey's livelock). recv_caught_ok routes
     // it into srvconn_client_recv's tsleep_noteintr vs tsleep choice.
     if (self) { self->stop_no_park = true; self->stop_unwound = false;
                 self->note_unwound = false; self->recv_caught_ok = caught_ok; }
-    int r = do_reader_recv_frame(c, deadline_ns, idle);
+    int r = do_reader_recv_frame(c);
     if (self) { self->stop_no_park = false; self->stop_unwinds = false;
                 self->recv_caught_ok = false; }
     return r;
@@ -686,7 +664,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 spin_unlock(&c->lock);
                 // A caught note that already interrupted this op is still
                 // pending: a later wait for it (the flush wait) is killable only.
-                int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/!rpc->noted);
+                int rr = reader_recv_frame(c, /*caught_ok=*/!rpc->noted);
                 spin_lock(&c->lock);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
@@ -912,7 +890,7 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
         // (it drains OTHER ops' replies to free a c2s slot for MY send; a caught
         // unwind here drains nothing -> the send retry spins). A caught note on a
         // back-pressured sender delivers at its EL0-return tail, as pre-item-11.
-        int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/false);
+        int rr = reader_recv_frame(c, /*caught_ok=*/false);
         spin_lock(&c->lock);
         struct Thread *self = current_thread();
         if (rr > 0) {
@@ -1481,99 +1459,47 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     return 0;
 }
 
-int p9_client_reader_pump_once(struct p9_client *c) {
-    if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
-    if (c->dead)          { spin_unlock(&c->lock); return -P9_E_IO; }
-    if (c->reader_active) { spin_unlock(&c->lock); return 0; }   // another reader
-    c->reader_active = true;
-    spin_unlock(&c->lock);
-
-    int rr = reader_recv_frame(c, 0, NULL, /*caught_ok=*/false); // blocks; c->lock dropped (single reader)
-
-    spin_lock(&c->lock);
-    int ret;
-    if (rr > 0) {
-        demux_frame_locked(c, (size_t)rr);
-        ret = 1;
-    } else if (client_self_dying()) {
-        // Death-interrupt: the caller's Proc is dying. Do NOT mark the shared
-        // session dead (it serves survivors). Unwind after handing the role on.
-        ret = -P9_E_IO;
-    } else if (current_thread() && current_thread()->stop_unwound) {
-        // 8c-3 (#89, F2 + F1 re-audit): a debugger stop unwound the recv at a
-        // FRAME BOUNDARY (frame-atomic -- no bytes lost). NOT a break: do NOT
-        // latch the shared session dead. Hand the role off below; this thread
-        // parks at its EL0-return tail (pump_once is one-shot). Read the STABLE
-        // stop_unwound latch, NOT client_stop_pending (which races an async
-        // proc_debug_resume -> would misclassify a stop-unwind as a real break ->
-        // spuriously mark the SHARED session dead). Read+clear (owner-only). A
-        // kproc caller never sets it (the detour never fires for a kthread).
-        current_thread()->stop_unwound = false;
-        ret = -P9_E_IO;
-    } else {
-        // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
-        // (-P9_E_NODEV CQEs); rr < 0 (recv error) -> transport (-P9_E_IO).
-        client_mark_dead_locked(c, rr == 0);
-        ret = -P9_E_IO;
-    }
-    c->reader_active = false;
-    // As client_wait's reader does on departure: a sender parked for progress
-    // (back-pressure, or a full tag pool) wakes, and may now self-pump. Without
-    // it, a sender that parked because a pump held the role slept on after the
-    // pump left: the handoff below never designates a sender.
-    client_send_progress_signal(c);
-    client_handoff_reader_locked(c, NULL);
-    spin_unlock(&c->lock);
-    return ret;
-}
-
-bool p9_client_recv_is_deadline_capable(struct p9_client *c) {
-    if (!c || c->magic != P9_CLIENT_MAGIC) return false;
-    // The transport ops are immutable post-init, so this is a stable property of
-    // the client (no lock needed). NULL => the recv blocks unbounded at a frame
-    // boundary (the spoor pipe-pair transport, SYS_ATTACH_9P); non-NULL => an armed
-    // deadline lets a boundary recv return (srvconn -> client_deadline_ns; the
-    // loopback test backend also models the deadline).
-    return c->transport.ops.set_recv_deadline != NULL;
-}
-
-int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
-    if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+int p9_client_reader_pump_ready(struct p9_client *c) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return P9_PUMP_DEAD;
     spin_lock(&c->lock);
     if (c->dead)          { spin_unlock(&c->lock); return P9_PUMP_DEAD; }
     if (c->reader_active) { spin_unlock(&c->lock); return P9_PUMP_BUSY; }
+    // Only the role holder consumes the stream, so the bytes (or the EOF) seen
+    // here are still there when this thread reads: the recv below never blocks
+    // at the frame boundary (LOOM.md 8.6). It can block only inside a frame
+    // whose bytes have only started to arrive.
+    if (!p9_transport_recv_ready(&c->transport, NULL)) {
+        spin_unlock(&c->lock);
+        return P9_PUMP_IDLE;
+    }
     c->reader_active = true;
     spin_unlock(&c->lock);
 
-    bool idle = false;
-    int rr = reader_recv_frame(c, deadline_ns, &idle, /*caught_ok=*/false); // blocks; c->lock dropped
+    int rr = reader_recv_frame(c, /*caught_ok=*/false); // c->lock dropped (single reader)
 
     spin_lock(&c->lock);
     int ret;
     if (rr > 0) {
         demux_frame_locked(c, (size_t)rr);
         ret = P9_PUMP_PROGRESS;
-    } else if (idle) {
-        // The idle deadline lapsed at the frame boundary: no bytes consumed, the
-        // byte stream stays synced. NOT an error -- leave the session alive; the
-        // SQPOLL kthread parks + retries (LOOM.md §8.6).
-        ret = P9_PUMP_IDLE;
     } else if (client_self_dying()) {
         // Death-interrupt: the caller's Proc is dying. Do NOT mark the shared
         // session dead (it serves survivors). Unwind after handing the role on.
-        ret = P9_PUMP_DEAD;
+        ret = P9_PUMP_UNWOUND;
+    } else if (current_thread() && current_thread()->stop_unwound) {
+        // 8c-3 (#89, F2 + F1 re-audit): a stop unwound the recv at a FRAME
+        // BOUNDARY (frame-atomic -- no bytes lost). NOT a break: do NOT latch
+        // the shared session dead. Hand the role off below; this thread parks
+        // at its EL0-return tail. Reachable only if the ready bytes went to
+        // another reader of the backend (an EL0 holder of a pipe's read end).
+        // Read the STABLE stop_unwound latch, NOT client_stop_pending (which
+        // races an async proc_debug_resume). Read+clear (owner-only). A kproc
+        // caller never sets it (the detour never fires for a kthread).
+        current_thread()->stop_unwound = false;
+        ret = P9_PUMP_UNWOUND;
     } else {
         // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
         // (-P9_E_NODEV CQEs); rr < 0 (recv error) -> transport (-P9_E_IO).
-        // 8c-3 (#89, F2 + F1 re-audit): NO stop_unwound arm here (unlike
-        // pump_once) -- the deadline variant is called ONLY by the SQPOLL /
-        // dev9p-poll-pump KPROC kthreads (dev9p_poll.c, loom.c). Their t->proc is
-        // kproc() (NON-NULL), but kproc is neither debuggable nor job-stoppable
-        // (both delivers reject it -- PTY-1f), so both stop flags stay 0, the
-        // detour never fires, and stop_unwound is never set -> a stop can never unwind this
-        // recv. If an EL0 thread is ever added as a caller, add the stop_unwound
-        // arm like pump_once.
         client_mark_dead_locked(c, rr == 0);
         ret = P9_PUMP_DEAD;
     }
@@ -1595,32 +1521,54 @@ void p9_client_handoff_reader(struct p9_client *c) {
     spin_unlock(&c->lock);
 }
 
-int p9_client_role_wait_register(struct p9_client *c, struct poll_waiter *pw) {
-    if (!c || c->magic != P9_CLIENT_MAGIC || !pw) return -P9_E_INVAL;
+int p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h) {
+    if (!c || c->magic != P9_CLIENT_MAGIC || !h) return -P9_E_INVAL;
+    h->pw.ready = false;   // off every list: only its owner touches it
+    h->place    = P9_HOOK_NONE;
     spin_lock(&c->lock);
     int rc = 1;
-    if (c->dead)                rc = -P9_E_IO;
-    else if (!c->reader_active) rc = 0;
-    else {
+    if (c->dead) {
+        rc = -P9_E_IO;
+    } else if (c->reader_active) {
         // Hooked under c->lock, which every release of the role holds: a
         // release before this point was seen above, one after it finds the
-        // hook (register-then-observe, I-9).
-        poll_waiter_list_register(&c->role_waiters_list, pw);
+        // hook (register-then-observe, I-9). The holder reads whatever arrives
+        // meanwhile, so the readiness list is not needed -- and would be wrong
+        // alone: a holder that leaves over a frame already arrived walks no
+        // readiness list (loom_role.tla BUGGY_READY_HOOK_WHEN_HELD).
+        poll_waiter_list_register(&c->role_waiters_list, &h->pw);
         c->role_waiters++;
+        h->place = P9_HOOK_ROLE;
+    } else if (p9_transport_recv_ready(&c->transport, &h->pw)) {
+        // A frame waits on a free role: nothing to sleep for. The backend may
+        // have filed the hook with its sample; take it back off.
+        poll_waiter_list_unregister(&h->pw);
+        rc = 0;
+    } else {
+        // The backend filed the hook with its sample, so an arrival after the
+        // sample walks the list and finds it. A sync op that takes the role
+        // meanwhile reads what arrives, and the arrival still wakes us.
+        h->place = P9_HOOK_READY;
     }
     spin_unlock(&c->lock);
     return rc;
 }
 
-void p9_client_role_wait_unregister(struct p9_client *c, struct poll_waiter *pw) {
-    if (!c || !pw) return;
-    spin_lock(&c->lock);
-    // pw->list is written only by its owner's register and unregister.
-    if (pw->list == &c->role_waiters_list) {
-        poll_waiter_list_unregister(pw);
-        c->role_waiters--;
+void p9_client_reader_unhook(struct p9_client *c, struct p9_reader_hook *h) {
+    if (!c || !h) return;
+    if (h->place == P9_HOOK_ROLE) {
+        spin_lock(&c->lock);
+        // pw->list is written only by its owner's register and unregister.
+        if (h->pw.list == &c->role_waiters_list) {
+            poll_waiter_list_unregister(&h->pw);
+            c->role_waiters--;
+        }
+        spin_unlock(&c->lock);
+    } else if (h->place == P9_HOOK_READY) {
+        // The backend's own list and lock; the caller's pin keeps the backend.
+        poll_waiter_list_unregister(&h->pw);
     }
-    spin_unlock(&c->lock);
+    h->place = P9_HOOK_NONE;
 }
 
 void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {

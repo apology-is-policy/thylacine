@@ -11,6 +11,7 @@
 
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/poll.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 
@@ -80,25 +81,14 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     return (int)n;
 }
 
-// #841 + Loom-4: the steady-state deadline is caller-set, NOT auto-armed (see
-// srvconn_transport_recv). These NULL-permitted ops let the Loom SQPOLL reader
-// arm a frame-boundary idle deadline (LOOM.md §8.6): the deadline-aware pump
-// arms before the FIRST recv of a frame (a timeout there consumes no bytes ->
-// no desync) and disarms for the rest of the frame.
-static void srvconn_transport_set_recv_deadline(void *ctx, u64 deadline_ns) {
+// s2c bytes, or its EOF: a torn connection's recv returns at once. The hook
+// goes on cn->poll_list, which every ring mutation walks (srvconn_poll), so an
+// s2c fill reaches it.
+static bool srvconn_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
     struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
-    if (!st)                                     return;
-    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return;
-    if (!st->cn)                                 return;
-    srvconn_set_client_deadline(st->cn, deadline_ns);
-}
-
-static bool srvconn_transport_recv_timed_out(void *ctx) {
-    struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
-    if (!st)                                     return false;
-    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return false;
-    if (!st->cn)                                 return false;
-    return srvconn_client_timed_out(st->cn);
+    if (!st || st->magic != P9_SRVCONN_TRANSPORT_MAGIC || !st->cn) return true;
+    short rev = srvconn_poll(st->cn, /*client=*/true, POLLIN, pw);
+    return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
 static int srvconn_transport_close(void *ctx) {
@@ -179,8 +169,7 @@ struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st
     ops.send              = srvconn_transport_send;
     ops.recv              = srvconn_transport_recv;
     ops.close             = srvconn_transport_close;
-    ops.set_recv_deadline = srvconn_transport_set_recv_deadline;
-    ops.recv_timed_out    = srvconn_transport_recv_timed_out;
+    ops.recv_ready        = srvconn_transport_recv_ready;
     ops.hangup            = srvconn_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;
