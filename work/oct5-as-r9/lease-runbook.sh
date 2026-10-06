@@ -32,6 +32,15 @@ provenance() {
     echo "my base        : $(git rev-parse 5ff62b788)"
     echo "astra HEAD     : $(git -C ../thylacine-astra rev-parse HEAD 2>/dev/null || echo n/a)"
     echo "free GiB       : $(free_gb)"
+    # THE EXTERNAL STRATUM PIN. build.sh consumes $STRATUM_SRC (default
+    # ~/projects/stratum/v2) read-only, and NOTHING recorded which tree or which
+    # commit went into stratumd. That omission is precisely why D7 cost an hour
+    # of attribution: astra's image was built from stratum-astra @61dde37 (the
+    # session-DEK leases D7's same-user overlap requires) and mine from the
+    # shared tree @ac519fc, which lacks them -- an unequal input invisible in
+    # every hash I recorded.
+    echo "STRATUM_SRC    : ${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    echo "stratum HEAD   : $(git -C "${STRATUM_SRC:-$HOME/projects/stratum/v2}" rev-parse --short HEAD 2>/dev/null || echo n/a)"
     for f in build/.config build/kernel/thylacine.elf build/ramfs.cpio build/fixtures/pool.img; do
       [ -f "$f" ] && echo "$(shasum -a 256 "$f" | cut -c1-16)  $f" || echo "(absent)          $f"
     done
@@ -200,6 +209,34 @@ else
 fi
 
 # Stage 2 -- MY kernel from MY source. The only thing the cache must not supply.
+#
+# THE EXTERNAL STRATUM PIN, which the original handoff did not state and this
+# runbook did not set -- the cause of the D7 red. docs/SRV-SESSION-REGISTRY-DESIGN.md
+# 285-290: "The same-user acceptance also requires Stratum to retain one
+# authenticated DEK lease per connection/dataset pair. Each new connection proves
+# UNWRAP even if another session has installed the key... Implementation is
+# isolated in `stratum-astra`." Without it, the overlapping same-user session
+# cannot prove UNWRAP and install-dek returns eaccess -- exactly the observed red.
+export STRATUM_SRC="${STRATUM_SRC:-$HOME/projects/stratum-astra/v2}"
+STRATUM_PIN="${STRATUM_PIN:-61dde37}"
+# ASSERT the pin; never infer it from the path. A directory named stratum-astra
+# is not evidence that it is AT the commit D7 needs.
+#
+# AND NOTE WHICH HALF ACTUALLY DISCRIMINATES: `rev-parse 61dde37` SUCCEEDS even
+# in the shared tree, because that tree has the OBJECT (fetched) without the
+# commit being in its history. So rev-parse alone is a check that cannot fail --
+# it only proves the sha is spellable. The `merge-base --is-ancestor` below is
+# the load-bearing half; verified both ways against both trees.
+sh=$(git -C "$STRATUM_SRC" rev-parse --short "$STRATUM_PIN" 2>/dev/null || true)
+if [ -z "$sh" ]; then
+  echo "REFUSING: $STRATUM_SRC does not contain $STRATUM_PIN."
+  echo "D7's same-user overlap needs the session-DEK leases from that commit;"
+  echo "building without it reproduces the eaccess red by construction."
+  exit 4
+fi
+git -C "$STRATUM_SRC" merge-base --is-ancestor "$STRATUM_PIN" HEAD 2>/dev/null \
+  || { echo "REFUSING: $STRATUM_PIN is not an ancestor of $STRATUM_SRC HEAD."; exit 4; }
+echo "-- stratum pinned: $STRATUM_SRC @ $(git -C "$STRATUM_SRC" rev-parse --short HEAD) (contains $STRATUM_PIN)"
 tools/build.sh kernel --config ci
 floor post-build
 provenance "post-build (my kernel, paired images)"
