@@ -243,7 +243,7 @@ Depends on: 0001 (the seam), 0010 (fstat + the translation precedent).
 +	st->st_mtim.tv_sec  = (time_t)t.mtime_sec;
 +	st->st_ctim.tv_sec  = (time_t)t.ctime_sec;
 +	/* tv_nsec stays zero -- the v1.0 kernel does not track sub-second
-+	 * times. st_dev/st_rdev stay zero (no device-number surface). */
++	 * times. st_rdev stays zero (no device-number surface). */
  
  	return 0;
  }

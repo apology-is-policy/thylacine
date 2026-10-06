@@ -65,6 +65,7 @@ pub struct Metadata {
 // without extending Metadata, this assertion fires -- and since the kernel
 // writes sizeof(t_stat) bytes into this buffer, a stale size would corrupt.
 const _: () = assert!(core::mem::size_of::<Metadata>() == 88);
+const _: () = assert!(core::mem::offset_of!(Metadata, dev) == 80);
 
 impl Metadata {
     /// File size in bytes.

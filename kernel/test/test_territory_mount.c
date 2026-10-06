@@ -602,12 +602,16 @@ void test_territory_mount_devno_full_width(void) {
     struct Territory *p = territory_alloc();
     TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
     struct Spoor *src   = spoor_alloc(&devnone);
+    struct Spoor *src2  = spoor_alloc(&devnone);
     struct Spoor *mp_lo = spoor_alloc(&devnone);
     struct Spoor *mp_hi = spoor_alloc(&devnone);
-    TEST_ASSERT(src && mp_lo && mp_hi, "spoor_alloc");
-    src->devno = lo;
+    TEST_ASSERT(src && src2 && mp_lo && mp_hi, "spoor_alloc");
+    // MNOEXEC coverage keys on the SOURCE's (dc, devno), so src carries lo; its
+    // own qid keeps it a different identity from its point (no self-mount).
+    src->devno  = lo; src->qid.path  = 5;
+    src2->devno = 7;  src2->qid.path = 6;
     mp_lo->qid.path = 0; mp_lo->devno = lo;
-    mp_hi->qid.path = 0; mp_hi->devno = hi;   // never mounted
+    mp_hi->qid.path = 0; mp_hi->devno = hi;
 
     TEST_EXPECT_EQ(mount(p, src, mp_lo, MNOEXEC), 0, "MNOEXEC mount at (-,1,0)");
     TEST_ASSERT(mount_is_point_id(p, '-', lo, 0),
@@ -621,8 +625,20 @@ void test_territory_mount_devno_full_width(void) {
     TEST_ASSERT(!mount_noexec_covers(p, '-', hi),
         "device instance 1+2^32 is not covered");
 
+    // The STORED key: a mount at (-,1+2^32,0) is an entry of its own, and each
+    // point resolves to its own source. A 32-bit mp_devno stores it as (-,1,0).
+    TEST_EXPECT_EQ(mount(p, src2, mp_hi, 0), 0, "mount src2 at (-,1+2^32,0)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "two entries, not one");
+    struct Spoor *r_lo = mount_lookup(p, mp_lo, NULL);
+    TEST_ASSERT(r_lo == src, "lookup (-,1,0) -> src");
+    if (r_lo) spoor_clunk(r_lo);
+    struct Spoor *r_hi = mount_lookup(p, mp_hi, NULL);
+    TEST_ASSERT(r_hi == src2, "lookup (-,1+2^32,0) -> src2");
+    if (r_hi) spoor_clunk(r_hi);
+
     territory_unref(p);
     spoor_unref(src);
+    spoor_unref(src2);
     spoor_unref(mp_lo);
     spoor_unref(mp_hi);
 }

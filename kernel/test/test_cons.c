@@ -1859,7 +1859,7 @@ void test_cons_stat_native_qid_contract(void) {
 
 // devno-u64: t_stat.devno is 64 bits (widened in place over the old _pad_dev),
 // so the stamp spoor_stat_native applies after a clean fill carries a devno
-// above 2^32 whole. Poisoned first: a 32-bit store would leave 0xAA above it.
+// above 2^32 whole: a 32-bit field cannot hold `wide`.
 void test_cons_stat_devno_full_width(void) {
     struct Spoor *cs = devcons.attach(NULL);
     TEST_ASSERT(cs != NULL, "devcons attach");

@@ -95,12 +95,12 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 + * 0xFFFF ENOSYS sentinels under the seam. We bypass the entire
 + * upstream fstat plumbing and call the Thylacine-native SYS_fstat
 + * directly. The kernel returns 0 on success and populates the
-+ * 80-byte t_stat; we fill struct stat from those fields.
++ * 88-byte t_stat; we fill struct stat from those fields.
 + *
 + * The translation is straight-line: every t_stat field maps to
 + * exactly one struct stat field. uid/gid map to st_uid/st_gid (A-2a);
-+ * v1.0 always-zero fields (timestamps, st_dev, st_rdev) translate to
-+ * zero on the userspace side too. The struct stat layout for aarch64 is:
++ * st_dev is the whole 64-bit devno (#100); st_rdev and the tv_nsec
++ * halves stay zero (no source). The struct stat layout for aarch64 is:
 + *   st_dev / st_ino / st_mode / st_nlink / st_uid / st_gid / st_rdev /
 + *   pad / st_size / st_blksize / pad2 / st_blocks / st_atim / st_mtim /
 + *   st_ctim / pad[2]
