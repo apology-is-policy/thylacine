@@ -711,8 +711,8 @@ C, user-voted. The capability is holding the namespace-gated flow fid
 Frontmatter as §5.1 (audit: hard; guarded-by I-9/I-10/I-11; validated-by
 spec-9p-client [clean + 5 buggy cfgs], gate-smp; hazards
 single-waiter-rendez, shared-stream-desync). Body carries the present-tense
-mechanism (elected reader, tag demux, flow control with spill, frame-atomic
-recv) and the Prosecution section absorbed from today's CLAUDE.md row — while
+mechanism (elected reader, tag demux, flow control with spill, a partial
+frame kept by the client) and the Prosecution section absorbed from today's CLAUDE.md row — while
 the #841→#845→#349→#375→#52/#53→#89/#90 saga lives entirely in `record/` and
 `lin-9p-client`, reachable from the generated Provenance section. This split
 is the schema's acid test: today that row interleaves both planes in one

@@ -623,7 +623,8 @@ this surface):
   never a fresh flag; classification must use the stable `stop_unwound` latch,
   never a re-read of `debug_stop_req` (an async resume races it);
   DeathWinsOverStop at every branch.
-- **Role-release completeness**: all FOUR `reader_active` sites must handle
+- **Role-release completeness**: all three `reader_active` sites (the
+  election, the self-pump, `p9_client_reader_pump_ready`) must handle
   stop/death without stranding the role or the session; the handoff must
   skip an rpc parked for a stop (`stop_parked`, set only inside
   `client_debug_stop_park`; a dying thread never parks, and

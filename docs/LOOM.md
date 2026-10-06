@@ -419,8 +419,10 @@ them. The two SQPOLL forks the design conversation resolved:
 
 1. **The poll-thread's recv-wake + lifetime.** The kthread must drive the elected
    reader (recv → demux → CQE) so async completions appear without an `ENTER`
-   syscall — but the reader's recv is a *blocking, frame-atomic byte stream*, and
-   #841 proved a deadline that fires **mid-frame** desyncs it. Option 1: the
+   syscall — but the reader's recv is a *blocking byte stream*, and #841 proved
+   a deadline that fires **mid-frame** desynced it (the reader's count was its
+   own until 2026-10-06; the client keeps it now, but a recv that times out
+   still reads as a broken transport and kills the shared session). Option 1: the
    kthread is a `kproc()` thread (the `console_mgr` precedent), `cpu_pinned`-able,
    woken at idle/teardown by a **frame-boundary idle-deadline** — armed only when
    the recv is at a frame boundary (no bytes buffered for the current frame, where

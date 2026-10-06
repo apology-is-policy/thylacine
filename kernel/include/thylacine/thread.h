@@ -434,8 +434,8 @@ struct Thread {
     // 8.8.1.1.) Same padding, no size change.
     bool               stop_no_park;
 
-    // 8c-3 (#89; F1 re-audit fix): the STABLE "my recv was stop-unwound at a
-    // boundary" latch. The sched detour's stop_unwinds branch returns SLEEP_INTR
+    // 8c-3 (#89; F1 re-audit fix): the STABLE "my recv was stop-unwound" latch
+    // (at any byte). The sched detour's stop_unwinds branch returns SLEEP_INTR
     // -- byte-identical to a death-interrupt AND a transport error -> the client
     // classifier cannot tell them apart by return value. It USED to re-derive the
     // stop case by re-reading debug_stop_req (client_stop_pending), but that flag

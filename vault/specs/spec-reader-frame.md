@@ -31,7 +31,10 @@ server delivery fair).
 Deliberately outside: the transport recv itself (taken to return the bytes it
 copied or none -- each sleeps only before it copies); tags and the dying op's
 flush ([[spec-9p-client]], I-10); more than one frame; what A does after it
-leaves (dies, parks and re-elects, or flushes).
+leaves (dies, parks and re-elects, or flushes); and the srvconn reading role
+(`ch->reading`), taken to be released on every recv exit
+(`chan_role_release`) -- one left held would strand the next reader in
+`chan_role_acquire`, which `ElectB` cannot show.
 
 ## Action-site map
 

@@ -539,12 +539,13 @@ clear would re-arm the death legs for every later descriptor in the table.
 
 That inherits the flag's own residual rather than escaping it: a poll thread
 that never reaches its terminal parks the dying process unreapably instead of
-burning a CPU. It is the better failure, and it is reachable — the
-thread never blocks at a frame boundary, but a receive that has started a
-frame must finish it or the shared stream desyncs, so a stalled server
-mid-frame delays the stop until the frame ends. Termination rests on the servers being
-trusted and prompt. That is a trust assumption, not a mechanism, and it is the
-same one the clunk flush already rests on.
+burning a CPU. It is the better failure, and it is reachable. The thread's
+pumps never wait inside a frame (a frame found in part stays with the client),
+but a reap's last clunk can wait for a free tag or for room in a full request
+ring, and nothing interrupts a kernel thread, so a server that stops answering
+holds the stop until the server dies. Any process can serve a mount, so this is
+not bounded by trust: it is [[seam-close-flush-unbounded]], the seam the at-exit
+close sits on too.
 
 **Quiescing.** Each surviving operation is abandoned through the engine under
 the client's lock, which makes it mutually exclusive with a demultiplex that

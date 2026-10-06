@@ -52,6 +52,9 @@
 (* srvconn_client_recv, the pipe read); tags and the dying op's flush       *)
 (* (9p_client.tla, I-10); more than one frame (a frame boundary resets the  *)
 (* count, and the next frame is this one again).                            *)
+(* The srvconn reading role (ch->reading) is taken to be released on every  *)
+(* recv exit (chan_role_release): one left held would strand the next       *)
+(* reader in chan_role_acquire, a hang ElectB cannot show.                  *)
 (***************************************************************************)
 EXTENDS Naturals
 
