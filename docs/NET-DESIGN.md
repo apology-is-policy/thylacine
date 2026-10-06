@@ -663,6 +663,25 @@ poll-state-lock (walk/reap) **separately**, never nested. The spec
 action↔impl map (`PollerRegister` / `NetdReplyDemux` / `KthreadWalk`) is in
 `specs/SPEC-TO-CODE.md`.
 
+**Amendment (2026-10-06, operator vote "waiters fan in"; OPEN-BUGS 2026-10-05
+18:56Z): the pump reads only over a ready stream and sleeps on every client.**
+The cycle above pumped at most `DEV9P_POLL_MAX_PUMP` (16) clients, collected
+from the head of a LIFO registry with no rotation, each with a 20 ms
+frame-boundary deadline. A seventeenth client with an arm out was never pumped:
+its reply was never read and its pollers hung, not merely late; and an idle
+cycle cost up to 20 ms per client. The kthread now runs the Loom waiters' fan-in
+(LOOM.md 8.6, the 2026-10-06 amendment): it pumps a client only when its role is
+free and its transport is ready (`p9_client_reader_pump_ready`), and with
+nothing to read it hooks EVERY client with a read out -- a held role on the
+client's role-waiter list, a free one on the transport's readiness list -- and
+parks on one Rendez over the hooks and its own registry wake. One kthread needs
+one hook per client, so the hook lives in the client and no cap remains. One
+timer survives, and it is not a pump: while a non-terminal arm is linked the
+park is bounded by the collector's sweep (20 ms), because a poller's departure
+signals nothing -- the core unhooks it without telling the Dev -- and only the
+sweep finds an arm whose pollers have all gone (the stranded-arm GC above).
+Making that departure an event is a separate change to the poll core.
+
 **Amendment (#98, 2026-09-28; operator vote, `dec-2026-09-28-poll-sample-arm-split`):
 the SAMPLE/ARM split.** The bridge above sent one message to do two jobs. The
 deferred readiness `Tread` was the *sample* a poll's verdict rests on, and it was

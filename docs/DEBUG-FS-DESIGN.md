@@ -1237,7 +1237,9 @@ mechanisms:
    `p9_client_reader_pump_once` skips mark_dead on a stop. Only
    `p9_client_reader_pump_once_deadline` has no guard, justified kproc-only (its
    sole callers — `dev9p_poll.c` + `loom.c` SQPOLL — have `t->proc == NULL`, so
-   the detour is immune).
+   the detour is immune). (2026-10-06: both pumps gave way to
+   `p9_client_reader_pump_ready`, LOOM.md 8.6's readiness-gated pump. It serves
+   EL0 and kproc callers alike and keeps `pump_once`'s stop arm.)
 
 **Why frame-atomic (the 8c-3 holotype F1 [P1]).** The FIRST fix (set `stop_unwinds`
 for the whole recv, a plain unwind) was WRONG: delivery is CHUNKED, so a stop can

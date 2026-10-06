@@ -424,7 +424,10 @@ them. The two SQPOLL forks the design conversation resolved:
    kthread is a `kproc()` thread (the `console_mgr` precedent), `cpu_pinned`-able,
    woken at idle/teardown by a **frame-boundary idle-deadline** — armed only when
    the recv is at a frame boundary (no bytes buffered for the current frame, where
-   a timeout consumes nothing = #841-safe) and disarmed once mid-frame. This keeps
+   a timeout consumes nothing = #841-safe) and disarmed once mid-frame (since
+   2026-10-06 the kthread instead reads only over a ready stream and parks on
+   readiness hooks, which never block at a boundary: the amendment under
+   item 2). This keeps
    the kthread lifetime simple (a stop-flag + join, **no Proc-lifecycle
    entanglement**) — rejected: an owning-Proc member thread (io_uring-faithful but
    new kernel-thread-reaping territory on the deepest-stakes surface) and a
@@ -450,15 +453,64 @@ them. The two SQPOLL forks the design conversation resolved:
    the woken `ENTER` pumps again. The SQPOLL kthread and the dev9p poll pump do
    not sleep on a busy role: they yield and retry, so they cannot strand.
 
-**The new primitive.** A NULL-permitted transport-vtable op
-`set_recv_deadline(ctx, deadline_ns)` (srvconn → `client_deadline_ns`; the
-loopback test transport → no-op) + a deadline-aware reader pump
-(`p9_client_reader_pump_once_deadline`) that arms the deadline at the frame
-boundary and returns a distinct **idle** code (no bytes consumed, stream still
-synced) when it fires there — vs the EOF/error code that latches the session
-dead. Teardown reuses `set_recv_deadline(now)` to force the recv to return
-(mid-frame abandonment is sound here — the ring is dying and #898 quiesces every
-in-flight op).
+   **Amendment (2026-10-06, operator vote "waiters fan in"; OPEN-BUGS
+   2026-10-05 07:52Z + 18:56Z).** The fix above hooked ONE client: the client
+   of the ring's newest in-flight op (`loom_first_inflight_client`). A ring's
+   ops can span 9P clients -- an event loop over a socket and files is the
+   canonical use -- and nothing reads a client's replies but its role holder, so
+   a reply on any other client stayed unread while the picked one was held or
+   slow (a parked socket read never answers). The picked client's pump also
+   blocked in the recv whether or not anything was due, so an `ENTER` that
+   pumped after another reader took its reply blocked blind. A waiter now
+   **reads for every client it waits on, and only over a ready stream**:
+
+   - It **scans** every client with an op in flight, from a rotating start,
+     and pumps one whose role is free AND whose transport is **ready** -- bytes,
+     or the EOF, at a frame boundary (`p9_client_reader_pump_ready`). Only the
+     role holder consumes the stream, so the bytes it saw stay until it reads
+     them: a waiter never blocks in a recv with nothing due.
+   - With nothing to pump it **hooks** every such client, under `c->lock`
+     (`p9_client_reader_hook`): a HELD role on the client's role-waiter list
+     (the holder reads whatever arrives; its handoff wakes the list when it
+     leaves the role free and undesignated); a FREE role with nothing to read
+     on the transport's **readiness list** (every arrival wakes it); a free role
+     over ready bytes ends the hooking and the scan runs again. One hook per
+     client, never both lists: a held role hooked on readiness would miss the
+     holder departing over a frame that has already arrived.
+   - It hooks the CQ list as before and sleeps on one Rendez over all the
+     hooks, `poll.c`'s one-flag-per-hook shape. A dead client ends nothing but
+     its own part of the scan: its death posted error CQEs for its ops. Only
+     the waiter's own death ends the wait.
+
+   The three waiters run the same fan-in -- the non-SQPOLL `ENTER`, the SQPOLL
+   kthread and the dev9p poll pump (NET-DESIGN 12.2) -- and differ only in what
+   ends the wait. Precedent: Plan 9's `devmnt` (whoever waits reads), Fuchsia's
+   port (a waiter fans in object readiness), io_uring's `DEFER_TASKRUN` (the
+   completion work runs when the task waits). Rejected: a per-client async
+   reader kthread (Linux `trans_fd`'s read worker), a new kthread lifecycle on
+   the deepest surface for completions this design does not promise without an
+   `ENTER`; and one client per ring, a restriction io_uring does not have.
+   Modeled in `specs/loom_role.tla` (generalised to N clients; `NoMissedWake`,
+   `NoBlindRecv`, `EnterReturns` with a deferred client).
+
+**The new primitive.** A mandatory transport-vtable op `recv_ready(ctx, pw)`:
+"a recv would not block at a frame boundary" (bytes, or the EOF), with `pw`
+registered on the backend's readiness list in the same critical section as
+the sample when it is non-NULL (srvconn: `s2c` bytes or EOF, its `poll_list`;
+the pipe transport: the rx pipe's poll; the loopback test transports: a list
+woken where a reply is queued). It is called under `c->lock`, which already
+orders before every backend lock (the death hangup runs there). A frame whose
+bytes have only started still blocks the reader through its body -- the
+trusted-server bound every reader rests on (CF-3 B).
+
+*Superseded 2026-10-06:* the NULL-permitted `set_recv_deadline` /
+`recv_timed_out` ops and the deadline-aware pump
+(`p9_client_reader_pump_once_deadline`) that woke the kthread at a frame
+boundary every 10 ms (the dev9p poll pump every 20 ms per client), and the
+register gate that refused an SQPOLL ring a transport without a deadline. A
+waiter that reads only over a ready stream never blocks at a boundary, so the
+deadline has nothing left to bound and is deleted; a pipe-attached mount
+(`SYS_ATTACH_9P`) may now back an SQPOLL ring.
 
 **The poll-thread loop** (`loom_sqpoll_main`):
 
@@ -466,23 +518,25 @@ in-flight op).
 loop:
   drain SQ -> loom_submit_one      (zero-syscall submit; NOP inline, FSYNC async)
   if async_inflight > 0:
-     arm the frame-boundary idle deadline
-     rc = reader_pump_once_deadline(cl)
-     rc > 0   -> demuxed a frame; loom_async_complete posted a CQE + woke the
-                 CQ wait-list; re-check the SQ
-     rc IDLE  -> deadline fired at a boundary; re-check `stopping` + the SQ
-     rc < 0   -> session dead/dying; stop
+     scan: pump_ready each in-flight client
+       a frame read  -> loom_async_complete posted a CQE + woke the CQ
+                        wait-list; re-check the SQ
+       nothing ready -> hook every client (role or readiness) and park on the
+                        kthread's Rendez with the SQ wake (an ENTER wake-up,
+                        stop)
   else if SQ idle:
      set LOOM_RING_SQ_NEED_WAKEUP; park on the kthread's Rendez
        (woken by an ENTER wake-up or by stop)
-  if stopping: mark the session dead, exit
+  if stopping: exit
 ```
 
-**Lifetime.** The Loom owns the kthread; `loom_free` sets `stopping`, arms the
-deadline + wakes the park Rendez, and **joins** the kthread before freeing the
-ring (the kthread only ever touches the still-allocated `struct Loom`). A CQ
-waiter holds a loom ref for its `ENTER`, so the ring cannot free under a live
-waiter; teardown / session death wakes the wait-list so no waiter strands.
+**Lifetime.** The Loom owns the kthread; `loom_free` sets `stopping`, wakes the
+park Rendez, and **joins** the kthread before freeing the ring (the kthread only
+ever touches the still-allocated `struct Loom`). The kthread never blocks at a
+frame boundary, so the wake reaches it unless it is mid-frame, where the
+trusted-server bound above applies. A CQ waiter holds a loom ref for its
+`ENTER`, so the ring cannot free under a live waiter; teardown / session death
+wakes the wait-list so no waiter strands.
 
 **`SYS_LOOM_ENTER` on an SQPOLL ring** does **not** submit (the kthread owns
 submission); it wakes the idled kthread (clearing `LOOM_RING_SQ_NEED_WAKEUP`) and,
