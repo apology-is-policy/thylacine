@@ -450,8 +450,9 @@ them. The two SQPOLL forks the design conversation resolved:
    registers on the client's **role-waiter list** (register-then-observe under
    `c->lock`), sharing its sleep's Rendez with the CQ hook. A handoff that leaves
    the role free and undesignated wakes that list, as does session death, and
-   the woken `ENTER` pumps again. The SQPOLL kthread and the dev9p poll pump do
-   not sleep on a busy role: they yield and retry, so they cannot strand.
+   the woken `ENTER` pumps again. The SQPOLL kthread and the dev9p poll pump did
+   not sleep on a busy role: they yielded and retried (until the amendment
+   below, which gives all three waiters the same hooks).
 
    **Amendment (2026-10-06, operator vote "waiters fan in"; OPEN-BUGS
    2026-10-05 07:52Z + 18:56Z).** The fix above hooked ONE client: the client
@@ -516,19 +517,48 @@ deadline has nothing left to bound and is deleted; a pipe-attached mount
 
 ```
 loop:
+  if stopping: exit
+  sample sq_tail, cq_head, drive_gen  (what the in-flight park must notice)
   drain SQ -> loom_submit_one      (zero-syscall submit; NOP inline, FSYNC async)
+  re-arm MORE-pending multishot ops; admit unblocked chain ops
   if async_inflight > 0:
      scan: pump_ready each in-flight client
        a frame read  -> loom_async_complete posted a CQE + woke the CQ
-                        wait-list; re-check the SQ
-       nothing ready -> hook every client (role or readiness) and park on the
-                        kthread's Rendez with the SQ wake (an ENTER wake-up,
-                        stop)
-  else if SQ idle:
-     set LOOM_RING_SQ_NEED_WAKEUP; park on the kthread's Rendez
-       (woken by an ENTER wake-up or by stop)
-  if stopping: exit
+                        wait-list; loop
+       nothing ready -> hook every client (role or readiness) and the CQ
+                        list; if drive_gen is unmoved and ops are still in
+                        flight, set LOOM_RING_SQ_NEED_WAKEUP and park on the
+                        kthread's Rendez until a hook flag, the CQ flag,
+                        sq_tail or cq_head moved since the sample, or stop
+  else:
+     set LOOM_RING_SQ_NEED_WAKEUP; park on the kthread's Rendez until work
+       the CQ has room for (an SQE, a held re-arm or chain op), or stop (an
+       ENTER wake-up re-checks)
 ```
+
+**Two parks, two conditions (as built 2026-10-06).** The idle park's condition
+reads the CQ without the ring lock and admits an SQE when the posted CQEs
+leave room. Both hold only while nothing is in flight: with ops in flight a
+completion on another CPU posts concurrently, and the CQ slots reserved for
+ops in flight can refuse an SQE that a posted-only count admits, so the
+kthread would wake, fail to admit, and wake again. The in-flight park wakes
+instead on what moves: a hook flag (a client can be pumped), the CQ flag (a
+completion another thread read), an SQE produced or a CQE reaped since the
+loop top, or stop. Each is somebody's event, so a ring whose CQ cannot admit
+does not spin.
+
+**`drive_gen` (as built 2026-10-06).** A completion that another thread reads
+posts its CQE before it records what the completion changes for the ring's
+driver: a multishot op's re-arm, a chain successor's gate. A waiter woken by
+that CQE can re-check before the record, find nothing to re-arm or admit, and
+sleep with nothing left to wake it. Each ring keeps a generation, `drive_gen`,
+bumped under `l->lock` by the CQE post and again by the completion's state
+update. The `ENTER`'s sleep and the kthread's in-flight park sample it at the
+loop top and sleep only if it has not moved, re-reading it under `l->lock`
+after the CQ hook is filed: a completion after that read flags the hook. The
+defect predates the fan-in (OPEN-BUGS 2026-10-06 16:20Z); the window needs a
+completer on another CPU between its post and its record, and no test
+reproduces it deterministically.
 
 **Lifetime.** The Loom owns the kthread; `loom_free` sets `stopping`, wakes the
 park Rendez, and **joins** the kthread before freeing the ring (the kthread only

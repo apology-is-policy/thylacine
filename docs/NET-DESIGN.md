@@ -682,6 +682,18 @@ signals nothing -- the core unhooks it without telling the Dev -- and only the
 sweep finds an arm whose pollers have all gone (the stranded-arm GC above).
 Making that departure an event is a separate change to the poll core.
 
+*As built (2026-10-06).* The kthread holds a session ref on each client it
+collects, from the collect across its pumps, its hooks and the park, until it
+releases them after the park. So the park must end whenever a read leaves:
+otherwise a ref and a hook would outlive the reads that named the client. Every
+change to the set of reads out KICKS the kthread -- a generation bump and a
+wake of its Rendez -- at an arm sent or answered, a snapshot sent or released,
+and an arm cancelled at close. The park's condition is "a kick since this
+cycle sampled the generation, or any hook flagged", read under the Rendez lock;
+the generation is sampled before the collect, so a kick anywhere in the cycle
+ends its park. A pump that finds a client dead moves nothing: the death already
+completed every read out on it (arms terminal, snapshots answered `POLLERR`).
+
 **Amendment (#98, 2026-09-28; operator vote, `dec-2026-09-28-poll-sample-arm-split`):
 the SAMPLE/ARM split.** The bridge above sent one message to do two jobs. The
 deferred readiness `Tread` was the *sample* a poll's verdict rests on, and it was

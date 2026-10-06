@@ -100,9 +100,6 @@ static int spoor_transport_close(void *ctx) {
     return 0;
 }
 
-// The server's reader drains what the client sent and then reads EOF. Only a
-// pipe can be hung up without closing it; any other tx (the tests' mock) is
-// left alone, and its server learns of the death at the close.
 // The rx Spoor's own poll: POLLIN, or the HUP/ERR of a closed writer (whose
 // recv returns EOF at once). EL0 attaches pipes only (sys_attach_9p_ends_are_
 // pipes), whose poll registers the hook with its sample under the ring lock.
@@ -117,6 +114,9 @@ static bool spoor_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
     return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
+// The server's reader drains what the client sent and then reads EOF. Only a
+// pipe can be hung up without closing it; any other tx (the tests' mock) is
+// left alone, and its server learns of the death at the close.
 static void spoor_transport_hangup(void *ctx) {
     struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
     if (!st)                                   return;

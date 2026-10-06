@@ -72,6 +72,12 @@ waiter's own thread, the flood budget, a second waiter (its own hooks on the
 same lists), and a user-space holder of a pipe transport's read end that
 steals the waiting bytes, which desyncs its own mount anyway.
 
+The ring's generation. A completion read by another thread posts its CQE
+before it records a multishot re-arm or a chain gate, and the waiter sleeps
+only while the ring's `drive_gen` has not moved since its loop top. The model
+has no re-arm and no chain, so it cannot see that window; prose and the audit
+carry it (LOOM.md 8.6, OPEN-BUGS 2026-10-06 16:20Z).
+
 ## Binding
 
 `specs/SPEC-TO-CODE.md::loom_role.tla`. The handoff maps to the client's

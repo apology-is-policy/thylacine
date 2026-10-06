@@ -68,14 +68,22 @@ One function per op, `0` on success / `-errno` on failure:
 - **Weft**: `p9_client_weft` (Tweft → share_id + ring geometry) /
   `p9_client_weftio` (the zero-copy data drive).
 - **Async front-end** (the Loom completion seam): `p9_client_submit_async`
-  (`p9_rpc.on_complete` = WAKE_RENDEZ vs POST_CQE), `p9_client_reader_pump_once`,
-  `p9_client_reader_pump_once_deadline` (the SQPOLL idle pump — deadline
-  armed on only the FIRST recv, the frame boundary, so a timeout consumes no
-  bytes; returns PROGRESS/IDLE/BUSY/DEAD), `p9_client_handoff_reader`,
-  `p9_client_abandon_async`, and `p9_client_role_wait_register` /
-  `_unregister` (hook a `poll_waiter` that a free, undesignated reader role or
-  the session's death wakes: the Loom ENTER's wait for the role; dead ->
-  `-EIO`, role free -> 0, hooked -> 1).
+  (`p9_rpc.on_complete` = WAKE_RENDEZ vs POST_CQE),
+  `p9_client_reader_pump_ready` (LOOM.md 8.6, 2026-10-06: read ONE frame,
+  over a ready stream only -- under `c->lock` a dead session is DEAD, a held
+  role BUSY, a transport whose `recv_ready` says no IDLE; otherwise take the
+  role, read and demux one frame (PROGRESS), release and hand on. Only the
+  role holder consumes the stream, so the recv never blocks at a frame
+  boundary. UNWOUND when the caller's own death or stop unwound the recv, the
+  session intact), `p9_client_reader_hook` / `_unhook` (file ONE
+  `struct p9_reader_hook` to learn when pumping could progress: a HELD role
+  on `role_waiters_list`, a FREE role with nothing to read on the transport's
+  readiness list, never both; dead -> `-EIO`, a frame on a free role -> 0 and
+  nothing filed, hooked -> 1), `p9_client_handoff_reader`, and
+  `p9_client_abandon_async`. The fan-in waiters -- the Loom `ENTER`, the
+  SQPOLL kthread ([[sub-kernel-loom]]) and the dev9p poll kthread
+  ([[sub-kernel-ninep-dev9p-poll]]) -- pump and hook every client they wait
+  on through these two.
 
 Error convention: `-EINVAL` bad args/magic · `-EBUSY` not-OPEN · `-EIO`
 lower-layer failure · `-<ecode>` the server's Rlerror ecode, **bounded to
@@ -307,7 +315,8 @@ owner's DONE dispatch, a never-sent take-back, a Tflush roll-back (the death
 abandon's or `p9_client_abandon_async`'s) or retract, or an async retract woke
 no drainer, and a drainer parked on a full pool could
 sleep on with a free tag in the table. Worse, `p9_client_reader_pump_once` and
-`_deadline` (the SQPOLL and dev9p-poll kthreads) departed without signalling,
+`_deadline` (the SQPOLL and dev9p-poll kthreads' pumps then; both are
+`p9_client_reader_pump_ready` since 2026-10-06) departed without signalling,
 so every sender that parked while a pump held the role slept until an
 unrelated op arrived. Each of those sites now signals:
 `client_take_back_unsent_locked` holds the never-sent reclaims (both
@@ -359,11 +368,11 @@ hangup).
 
 **The device-gone death reason ([[inv-i29]] device-gone extension, Menagerie
 step 4).** `client_mark_dead_locked(c, bool devgone)` takes a reason, and the
-three reader sites (`client_wait`'s elected-reader loop and the two
-`p9_client_reader_pump_once*`) pass `rr == 0`: a **clean EOF** (`recv` returned
+three reader sites (`client_wait`'s elected-reader loop, the self-pump and
+`p9_client_reader_pump_ready`) pass `rr == 0`: a **clean EOF** (`recv` returned
 0 — the server/driver endpoint torn down) maps a dying session's async ops to
-the device-gone `-T_E_NODEV` (ENODEV), while a `recv` error / armed-deadline /
-malformed frame (`-1`) keeps the transport `-T_E_IO`. Before step 4 both
+the device-gone `-T_E_NODEV` (ENODEV), while a `recv` error / malformed frame
+(`-1`) keeps the transport `-T_E_IO`. Before step 4 both
 collapsed to `-1`. So a driver group-terminated by a `DeviceRemoved` tears down
 its served endpoint → the consumer's rings EOF → its reader sees `recv 0` → its
 in-flight Loom ops complete `-ENODEV`, the whole chain automatic with **no
@@ -436,9 +445,17 @@ test clients carry the counters unlisted.
   tables), transport vtable, the inline 32 KiB `out_buf`, `c->lock`,
   `inflight[]` (tag-indexed rpc pointers), `reader_active`,
   `send_progress` + `send_waiters` + `send_waiters_list`, `role_waiters` +
-  `role_waiters_list` (threads waiting for the reader role itself, not a
-  reply: the Loom ENTER), `done_reply_buf`,
+  `role_waiters_list` (hooks waiting for the reader role itself, not a
+  reply: the fan-in waiters' role hooks), `done_reply_buf`,
   `dead`. Magic `P9_CLIENT_MAGIC` (`_Static_assert`-pinned).
+- The dev9p poll kthread's intrusive collect entry in each client:
+  `poll_next`, `poll_pin` (the session ref the kthread holds across its pump,
+  hook and park), `poll_hook`, `poll_listed`. One kthread needs one hook per
+  client, so the entry lives here and the kthread collects with no cap and no
+  allocation; its fields are the kthread's alone (no lock).
+- `struct p9_reader_hook`: a `poll_waiter` plus `place` (NONE / ROLE /
+  READY), which list the hook went on, so the unhook takes the right lock:
+  `c->lock` for the role list, the backend's own for readiness.
 - The per-session policy bits, all stamped on the still-private client
   before the root Spoor publishes and never flipped: `loose` (the B1 I-38
   opt-in) and the identity cape `cape` / `cape_uid` / `cape_gid`
@@ -483,9 +500,9 @@ The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
 - `out_buf` is never re-read after a lock drop (the spill contract); the
   sole exception is the NOTAG handshake on a still-private client.
 - The reader role is released across a death OR a debug/job stop at a frame
-  boundary only; all FOUR `reader_active` sites (election, self-pump, the
-  two pump_once variants) handle a stop-unwound recv without latching the
-  session; `client_send_flow` + `client_drain_until_free_tag` park a stopped
+  boundary only; all THREE `reader_active` sites (election, self-pump,
+  `p9_client_reader_pump_ready`) handle a stop-unwound recv without latching
+  the session; `client_send_flow` + `client_drain_until_free_tag` park a stopped
   sender at loop-top (spilling first) so a stop can't spin or hang.
 - No client waiter parks in place for a stop (DEBUG-FS 5c.6, the
   2026-09-30 waiters-and-stops amendment). Every client sleep sets
@@ -499,6 +516,11 @@ The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
   `role_waiters_list`, as does the session's death. Its hooks are registered
   under `c->lock` against a `reader_active` sample taken there, and every
   release of the role runs the handoff under `c->lock`: register-then-observe.
+  A hook on a FREE role goes on the transport's readiness list instead, filed
+  by `recv_ready` with its sample (still under `c->lock`, the backend lock
+  nested inside): an arrival after the sample walks that list. ONE list per
+  hook: a held role hooked on readiness would miss its holder leaving over a
+  frame that had already arrived (`loom_role.tla` BUGGY_READY_HOOK_WHEN_HELD).
 - kproc threads (SQPOLL, dev9p_poll pump) are stop-immune not via
   `t->proc == NULL` but because `proc_debug_stop_deliver` rejects kproc —
   `debug_stop_req` is always 0 there.
@@ -628,9 +650,14 @@ this surface):
   `9p_client.stopped_waiter_elects_on_resume`, `.resumed_waiter_is_designated`,
   `.stop_parked_owner_not_owed`, `.note_flush_stop_parked_staging_not_owed`,
   `.handoff_skips_restopped_owner`, `.handoff_skips_stop_parked`,
-  `.role_wait_contract`, `.loom_enter_wakes_when_role_frees`. Model:
+  `.reader_hook_contract`, `.loom_enter_wakes_when_role_frees`; the
+  readiness-gated pump `.pump_ready_idle`, `.pump_ready_data_progresses`,
+  `.pump_ready_chunked_frame_completes`, `.pump_ready_busy_when_reader_active`,
+  `.pump_ready_eof_is_dead`; the fan-in `.loom_enter_reads_every_client`,
+  `.loom_enter_partial_set_rescans`, `.loom_sqpoll_parks_on_a_held_role`. Model:
   `specs/loom_role.tla`, the handoff with both stop rules and the role-waiter
-  wake (`NoMissedRoleWake`). Known and tracked: a stop-parked owner holds its
+  wake, generalised 2026-10-06 to N clients and the readiness hook
+  (`NoMissedWake`, `NoBlindRecv`, `EnterReturns`). Known and tracked: a stop-parked owner holds its
   tag until resumed (the tag-pool design entry in OPEN-BUGS).
 
 ## Seams
