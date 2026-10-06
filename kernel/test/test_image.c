@@ -145,15 +145,19 @@ void test_image_devno_full_width_distinct_entry(void) {
     u64 hits0 = image_cache_hits_for_test();
     struct Burrow *b1 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, lo), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
     struct Burrow *b2 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
-    TEST_ASSERT(b1 != b2, "devno 1 and 1+2^32 -> distinct Burrows");
-    TEST_EXPECT_EQ(image_cache_hits_for_test() - hits0, 0, "no hit across the 2^32 gap");
+    u64 gap_hits = image_cache_hits_for_test() - hits0;
     struct Burrow *b3 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    TEST_ASSERT(b3 == b2, "CONTROL: the same wide devno HITS its own entry");
-    burrow_unref(b1);
-    burrow_unref(b2);
-    burrow_unref(b3);
+    bool created = b1 != NULL && b2 != NULL, distinct = b1 != b2, control = b3 == b2;
+    // Every lookup took a ref; drop them BEFORE asserting, so a failure here
+    // cannot leave live entries behind for the next test's counts.
+    if (b1) burrow_unref(b1);
+    if (b2) burrow_unref(b2);
+    if (b3) burrow_unref(b3);
     image_cache_evict_idle_for_test();
+    TEST_ASSERT(created, "both created");
+    TEST_ASSERT(distinct, "devno 1 and 1+2^32 -> distinct Burrows");
+    TEST_EXPECT_EQ(gap_hits, 0, "no hit across the 2^32 gap");
+    TEST_ASSERT(control, "CONTROL: the same wide devno HITS its own entry");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
 }
 
