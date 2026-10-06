@@ -235,12 +235,25 @@ return quarry
   component without proving it exists — and this paragraph's own containment
   argument is what makes the verbatim form safe: it is precisely the "hostile
   un-cleaned join" the `..` rule already covers.
-  `SYS_CHDIR` resolves + X-checks the target directory and swaps `dot_path`
-  under the territory lock; `SYS_GETCWD` returns it. **Name-based for v1.0**; a
-  handle-based `dot` Spoor that starts the walk mid-tree — the rename-robust
-  Plan 9/Linux form — is the v1.x upgrade, landing *with* symlinks (which force
-  it, since it would require `..` to become a device parent-walk rather than the
-  trail-pop above).
+  `SYS_CHDIR` resolves + X-checks the target directory and stores, under the
+  territory lock, the name of where the walk LANDED (`stalk_landed`; operator
+  vote 2026-10-06, `dec-2026-10-06-chdir-physical`): the components the trail
+  consumed, so a followed link contributes its target's components and a `..`
+  removes the one it climbs out of. The cwd therefore holds no `.`, `..` or link
+  component (POSIX `getcwd`), what is stored is what was validated, and
+  `cd link/..` lands where `ls link/..` reads -- the trail pop above has been
+  physical since symlinks landed. The name is walked once more before it is
+  stored and must land on the same node: a served link resolved from a union
+  member past the first can land on a node an earlier member shadows, which has
+  no name in the caller's namespace, so it cannot be the cwd (`T_E_INVAL`, as
+  for a name past the buffer). The name is built by the resolver, never read
+  back from a Spoor's `Path` (I-33: a Path may be absent, and under a chroot it
+  carries the outer prefix). A shell that wants a logical `cd` cleans its
+  argument before the call, as ut does (bash's `cd -L`). `SYS_GETCWD` returns
+  the stored name. **Still name-based**: a retargeted link no longer moves a cwd
+  entered through it, but renaming a directory above the cwd does; a
+  handle-based `dot` Spoor -- the rename-robust Plan 9/Linux form -- remains the
+  upgrade.
 
 ### 4.4 Name retention along the trail (Spoor.path — #66)
 
