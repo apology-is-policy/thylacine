@@ -1633,8 +1633,8 @@ a role wake and a readiness wake each reach the sleeping ENTER.
 | `loom_role_liveness.cfg` | `Spec_Live` | `Invariants` + `EnterReturns` | clean | 32296 |
 | `loom_role_wide.cfg` | `Spec_Live`, `NSYNC = 3` | `Invariants` + `EnterReturns` | clean | 1297291 |
 | `loom_role_multi.cfg` | `Spec_Live`, `Clients = {c1, c2}`, `NSYNC = 1`, `Deferred = {c1}` | `Invariants` + `EnterReturns` | clean | 118774 |
-| `loom_role_buggy_no_role_hook.cfg` | `BUGGY_NO_ROLE_HOOK` (the pre-09-30 ENTER) | `EnterReturns` alone (proves the liveness check discriminates) | violation | 32760 |
-| `loom_role_buggy_first_client_only.cfg` | `BUGGY_FIRST_CLIENT_ONLY` (the pre-10-06 pick), multi universe | `EnterReturns` alone | violation | 28976 |
+| `loom_role_buggy_no_role_hook.cfg` | `BUGGY_NO_ROLE_HOOK` (the pre-09-30 ENTER) | `EnterReturns` alone (proves the liveness check discriminates) | violation | 34870 |
+| `loom_role_buggy_first_client_only.cfg` | `BUGGY_FIRST_CLIENT_ONLY` (the pre-10-06 pick), multi universe | `EnterReturns` alone | violation | 33864 |
 | `loom_role_buggy_unready_pump.cfg` | `BUGGY_UNREADY_PUMP` (the pre-10-06 `pump_once`) | `NoBlindRecv` | violation | — |
 | `loom_role_buggy_late_register.cfg` | `BUGGY_ROLE_LATE_REGISTER` | `NoMissedWake` | violation | — |
 | `loom_role_buggy_no_role_wake.cfg` | `BUGGY_NO_ROLE_WAKE` | `NoMissedWake` | violation | — |

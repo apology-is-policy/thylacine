@@ -6,7 +6,7 @@
 # change means the MODEL changed); a BUGGY cfg halts at the first violation, so
 # it is judged on its verdict -- the exit status plus the NAME of the property
 # that fired. The temporal cfg explores the whole space before liveness is
-# judged, so its count is pinned too. Every run is `-workers 1`, so each count
+# judged (`-lncheck final`), so its count is pinned too. Every run is `-workers 1`, so each count
 # is the one specs/SPEC-TO-CODE.md records.
 #
 # What this script CANNOT see, said so the green reads no larger: the model
@@ -35,9 +35,14 @@ tail_order_buggy_budget_first:NoEretUnderOwnStop"
 # states ("-" = do not pin)
 TEMPORAL="tail_order_buggy_no_budget:TailEnds:9022"
 
+# Every temporal run is `-lncheck final`: liveness is judged once the whole
+# space is explored. Without it TLC checks liveness at TIME-triggered points
+# mid-run and stops at the first violation, so the count depended on how fast
+# the host ran (measured 2026-10-06: 32796 vs 32868 on two quiet runs of
+# loom_role_buggy_no_role_hook; 28333 under load). A pin needs a fixed count.
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"
-    java -cp "$JAR" tlc2.TLC -workers 1 -deadlock -metadir "$TMP/$1.meta" \
+    java -cp "$JAR" tlc2.TLC -workers 1 -deadlock -lncheck final -metadir "$TMP/$1.meta" \
         -config "$1.cfg" tail_order.tla > "$LOG" 2>&1
     RC=$?
     GOT=$(grep -o '[0-9]* distinct states found' "$LOG" | tail -1 | awk '{print $1}')
