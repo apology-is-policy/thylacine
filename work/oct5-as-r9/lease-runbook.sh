@@ -40,7 +40,9 @@ provenance() {
     # shared tree @ac519fc, which lacks them -- an unequal input invisible in
     # every hash I recorded.
     echo "STRATUM_SRC    : ${STRATUM_SRC:-$HOME/projects/stratum/v2}"
-    echo "stratum HEAD   : $(git -C "${STRATUM_SRC:-$HOME/projects/stratum/v2}" rev-parse --short HEAD 2>/dev/null || echo n/a)"
+    _ss="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    echo "stratum HEAD   : $(git -C "$_ss" rev-parse HEAD 2>/dev/null || echo n/a)"
+    echo "stratum dirty  : $([ -z "$(git -C "$_ss" status --porcelain 2>/dev/null)" ] && echo no || echo YES)"
     for f in build/.config build/kernel/thylacine.elf build/ramfs.cpio build/fixtures/pool.img; do
       [ -f "$f" ] && echo "$(shasum -a 256 "$f" | cut -c1-16)  $f" || echo "(absent)          $f"
     done
@@ -234,8 +236,19 @@ if [ -z "$sh" ]; then
   echo "building without it reproduces the eaccess red by construction."
   exit 4
 fi
-git -C "$STRATUM_SRC" merge-base --is-ancestor "$STRATUM_PIN" HEAD 2>/dev/null \
-  || { echo "REFUSING: $STRATUM_PIN is not an ancestor of $STRATUM_SRC HEAD."; exit 4; }
+# EXACT EQUALITY, not ancestry (astra, 0161 t13 -- and she is right). An
+# ancestry test PASSES for every later descendant, so it cannot enforce a
+# CONTROLLED experimental pin: if stratum-astra advances, the guard would
+# silently accept a different source than the one the experiment names. Require
+# HEAD to EQUAL the full commit resolved from the pin.
+STRATUM_PIN_FULL="61dde3727921e70e2c72fbd3c9e2044a192f4a54"
+shead=$(git -C "$STRATUM_SRC" rev-parse HEAD 2>/dev/null || true)
+if [ "$shead" != "$STRATUM_PIN_FULL" ]; then
+  echo "REFUSING: $STRATUM_SRC HEAD is $shead"
+  echo "          the controlled run requires exactly $STRATUM_PIN_FULL"
+  echo "An ancestry test would have accepted a descendant; this run needs THE pin."
+  exit 4
+fi
 # A DIRTY external source defeats the pin. The ancestor check proves the COMMIT
 # is in history; it says nothing about what is actually on disk, and build.sh
 # consumes the WORKING TREE. This is the same proxy-for-the-thing error that made
