@@ -11,10 +11,18 @@ cd "$ROOT"
 # The floor is not here to protect ME -- it is here to stop my bake pushing the
 # shared volume below MAIN's floor (THYLACINE_MIN_FREE_GB=6), which would make
 # THEIR build.sh refuse mid-landing. So: 6 (their floor) + ~1 GB (my expected
-# delta: two kernel flavours ~70M, a pool+ramfs re-bake ~200M, cargo deltas ~0
-# because no userspace source changed) + margin. Measured 7.4 GiB free at
-# 21:0xZ while main's CI legs ran, down from 9.47 at 20:49Z -- the volume is
-# TIGHTENING, so re-read it at every stage rather than once at the start.
+# delta) + margin. THE DELTA, RE-MEASURED rather than recalled: a sanitizer
+# build goes to its OWN directory (build.sh:232 -> build/kernel-undefined), so
+# ci-smp-gate's second flavour is ADDITIVE -- but build/kernel is only 33M, so
+# both flavours together are ~70-100M. The real consumer is the pool, and it is
+# smaller than it looks: pool.img is SPARSE (2684354560 bytes logical, 315M on
+# disk), so a re-mint materialises only the blocks it writes, plus the
+# .baked-snapshot twins the bake refreshes -- call it ~600M, not the ~200M
+# first estimated here. Free was 7.4 GiB at 21:0xZ and 9 GiB at 22:3xZ: the
+# volume moves by whole GiB on main's activity, so re-read it at EVERY stage.
+# A `floor` refusal is a CORRECT outcome, not an obstacle -- lowering FLOOR_GB
+# to get a run is exactly how the shared volume reaches main's own 6 GiB floor
+# and breaks THEIR build mid-landing.
 FLOOR_GB=${FLOOR_GB:-8}
 
 free_gb() { df -g . | awk 'NR==2 {print $4}'; }
