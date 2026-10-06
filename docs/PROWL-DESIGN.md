@@ -201,7 +201,9 @@ is a legitimate call — surfaced as the fork.
 ### 3.5 The visibility gate
 
 `OQ-4` — **who may read what.** Today `/ctl/procs` lists *every* pid's state
-(Plan 9 all-pids-visible; visibility-not-authority; #57a). Extending it with
+(Plan 9 all-pids-visible; visibility-not-authority; #57a) -- to every reader but
+one running as `none`, which Plan 9 also walls off and which sees only its own row
+(IDENTITY-DESIGN's reserved ids, operator vote 2026-10-06). Extending it with
 name + %CPU keeps that posture — coarse metadata stays all-visible, which is what
 a whole-system monitor needs. The **deep** per-process view (`/proc/<pid>/sched`,
 per-thread internals, another proc's `cpu_ns` detail) is the question: Plan 9

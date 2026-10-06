@@ -1012,7 +1012,31 @@ layouts here are the contract; the implementation's `_Static_assert`s must match
 - `PRINCIPAL_SYSTEM = 0xFFFFFFFE` — the boot/kernel-proc identity (kproc, joey,
   pre-login). Holds caps via the boot chain, NOT via identity.
 - `PRINCIPAL_NONE = 0xFFFFFFFF` — unauthenticated / "nobody" (Plan 9 `none`); lowest
-  baseline.
+  baseline. **none owns nothing but itself** (operator vote 2026-10-06, Plan 9's
+  `nonone`). Procs that run as none are unrelated -- Plan 9 runs a pre-auth server as
+  none, one per remote client -- so a shared principal is not a shared owner:
+  - no owner axis admits a none caller for any Proc but itself: kill (I-26), debug
+    (I-39), and the owner-or-hostowner reads (`environ`, `sched`, `imperium`, and the
+    `cpu_ns` of `/proc/<pid>/status` and `/ctl/procs`);
+  - the per-Proc files every other reader may read (`status`, `cmdline`, `ns`, `exe`,
+    `cwd`, `maps`, and the read side of `ctl`) refuse a none caller for any Proc but
+    itself; `/ctl/procs` lists it only its own row, and `/ctl/9p-sessions` no
+    row at all (none is no end, so it has no row of its own);
+  - a capability axis still admits it, as Plan 9 exempts eve: `CAP_HOSTOWNER` for
+    every surface above, `CAP_KILL` for kill, `CAP_DEBUG` for debug;
+  - a none parent keeps `SYS_POSTNOTE` to its own children, which is a parent test,
+    never an owner test;
+  - a refusal answers `EACCES`, as every `/proc` and `/ctl` authority refusal
+    does (DEBUG-FS-DESIGN 3).
+  What stays visible is what Plan 9 leaves visible: a pid's existence under `/proc`
+  and its stat (owner, mode), plus the POSIX job-control ids (`getpgid`, `getsid`),
+  which name a group and carry no state. Heritage: Bell Labs and 9front
+  `port/devproc.c`, `nonone()` -- "none can't read or write state on other processes.
+  This is to contain access of servers running as none should they be subverted by,
+  for example, a stack attack." `/ctl/9p-sessions` applies the same rule to its row
+  ends (IMPERIUM-DESIGN 11.3 item 10). A kill, suspend or debug attach asks the
+  caller's authority before the target's liveness, so a refused caller reads
+  `EACCES` for a dying target as for a live one.
 - Real users/roles: corvus-assigned in `[1, 0xFFFFFFFD]` (corvus policy, e.g.
   >= 1000). Same reserved scheme for gids (`GID_SYSTEM` / `GID_NONE`).
 - `proc_alloc` defaults a new Proc's identity to **inherit the parent's**; the boot
@@ -1957,7 +1981,9 @@ two-axis fusion.**
 - *Two-axis authority* (the A-2d pattern -- the capability axis AND the identity axis,
   orthogonal -- generalized to kill): a `kill`/`killgrp` write is authorized iff the caller
   is the target's OWNER (owner-rwx on the `0600` ctl file -- the owner always holds the
-  w-bit, so this reduces to "same `principal_id` as the target"; covers killing your own
+  w-bit, so this reduces to "same `principal_id` as the target", except that a caller
+  running as `none` owns no Proc but itself -- the reserved ids, operator vote 2026-10-06;
+  covers killing your own
   processes/subtree, and the parent-of-same-identity-child case §7.6.3 is now expressible as
   ownership, not a special case) OR the caller holds `CAP_HOSTOWNER` (the unified admin) OR
   `CAP_KILL` (the cross-identity override for a debugger/supervisor that is neither owner nor
