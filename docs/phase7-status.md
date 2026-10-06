@@ -1256,7 +1256,7 @@ leaves the suite green and fails haul-links at leg (f). `tools/ci-smp-gate.sh` P
 
 Operator vote of 2026-10-06 19:58Z, "Plan 9's nonone" (IDENTITY-DESIGN's reserved ids; ARCH 28 I-26 and I-39 amended).
 It closes the `/proc` owner predicate item the 9P-ends audit enqueued. Scripture 9daf0a50a; code, witnesses and dossiers
-in one commit, *(pending)*.
+in one commit, ed65c9a86.
 
 - **No owner axis admits a `none` caller for any Proc but itself.** `devproc_same_owner` is the one owner relation, and
   it is false for a none target. Two unrelated Procs running as `none` could kill each other, debug each other whenever
@@ -1291,7 +1291,7 @@ prefix (a failing test returns before freeing its fixture), which its matcher di
 boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
 UBSan at 4 and 8).
 
-Landed beside it: **untag step 2a** (*(pending)*). `tools/build.sh`'s `ambush_fork_check` accepts a fork without
+Landed beside it: **untag step 2a** (cf296caa1). `tools/build.sh`'s `ambush_fork_check` accepts a fork without
 `launchHeld`: it still refuses `held_off_thylacine.go` and still asks `held_on_thylacine.go` for `launchHeld = true`,
 and a fork with neither must name `launchHeld` nowhere and set `DebugHeld` in `Launch`. Controls on fork snapshots:
 accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half step; the gate's bake ran it against

@@ -4,7 +4,7 @@ type: chg
 title: "A Proc running as none reaches no other Proc's state; a /proc refusal answers EACCES"
 date: 2026-10-06
 arc: arc-identity-detour
-commits: *(pending)*
+commits: ["9daf0a50a", "ed65c9a86"]
 touched:
   - sub-kernel-devproc
   - sub-kernel-devctl

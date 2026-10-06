@@ -4,7 +4,7 @@ type: chg
 title: "The ambush fork check accepts a fork without launchHeld"
 date: 2026-10-06
 arc: arc-identity-detour
-commits: *(pending)*
+commits: ["cf296caa1"]
 touched:
   - sub-substrate-build
 established: []
