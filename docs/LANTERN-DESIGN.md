@@ -277,10 +277,12 @@ content there. A deck someone else wrote could otherwise hold `photo.png ->
 file on the projector. A picture reaches `view` as that already-opened file, so
 what was checked and what is shown are one file, not two lookups of one name.
 The deck directory itself is resolved as the presenter names it, links
-included. On a Haul mount a link in that path is set by the export's author,
-and a served link expands in the guest's namespace, so it could lead to another
-of the presenter's decks; `lantern` cannot tell that link from the presenter's
-own, and containing a served link belongs to the mount (audit IMG-SLIDE F6).
+included. On a Haul mount a link in that path is set by the export's author.
+Such a served link resolves beneath the mount it was reached through (DISTRO
+4.6), so it can lead elsewhere in the export but never to one of the
+presenter's own decks outside it. `lantern` adds no check of its own: it cannot
+tell a served link from the presenter's own, and the containment belongs to the
+mount (audit IMG-SLIDE F6, closed by DISTRO 4.6 on 2026-10-06).
 
 Memory is one slide, whatever the deck's size: each slide is dropped after
 validation and re-read when it is shown, so the working set is `manual`'s own

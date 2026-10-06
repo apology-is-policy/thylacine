@@ -1120,6 +1120,30 @@ one bake each, each red exactly on its designed tests (SA-SF); the hangup remove
 stray-reply and stray-attach legs red, and haul asking after its close turns the refuse-attach leg red, 3 attempts of
 3 each. TLC pipe: 2 clean and 7 buggy cfgs as claimed. `tools/ci-smp-gate.sh` on fa526f09 (with the tail order): PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8, UBSan at 4 and 8). On fa526f09: `tools/test.sh` 1872/1872 and the five haul legs PASS on the first attempt.
 
+## Served links: a link a remote session serves resolves beneath its mount — 2026-10-06
+
+The operator's vote of 2026-10-05, "Contain beneath mount" (DISTRO 4.6), which closes lantern's IMG-SLIDE F6. Scripture
+b4351869f; code, witnesses and dossiers in one commit *(pending)*, the squash of `aux-3-contain`.
+
+- **A served link** is one whose Dev answers the new NULL-permitted `remote` slot. dev9p fills it with
+  `dev9p_spoor_remote`, which reads the declaration Haul makes on both paths (`SYS_ATTACH_9P_REMOTE`, `DMSRVREMOTE`).
+- **The anchor** is the root of the innermost mount crossed on the way to the link: `struct stalk_anchors` keeps a bit
+  per crossing beside the trail, with its logical offset and phenotype. Through a union it is the member holding the
+  link, found again by name; with no crossing it is the base, a union handle in its walkable form. It must answer remote
+  and be on the link's own session (its Dev and `devno`), or the link is refused `T_E_ACCES`.
+- **The restart** rebuilds the path as the components walked below the anchor (none for an absolute target), the
+  target and the rest, and resolves from the anchor. Every served link restarts, so no later `..` falls back below the
+  anchor; the phenotype carries.
+- Nine `stalk.served_*` kernel tests; `tools/interactive/haul-links.exp` on the device (an npxf export's links over
+  both Haul forms, a guest decoy at every path a link names).
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/1 P3, clean. F1, the same-session check's `devno`
+half untested, is fixed by `served_same_session`'s third leg (the same Dev, its own `devno`). Self-found before the
+round: a union-handle anchor's failed clone answered `T_E_ACCES` (now `T_E_IO`), and three arms no test reached (three
+tests); during it, S1, a comment rewrapped.
+
+{VERIFICATION}
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

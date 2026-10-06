@@ -144,9 +144,9 @@ post. The declaration rides the session, not the mount call, so the shell's
 plain `mount /srv/NAME` over a posted service is marked too, though the
 shell never learns what is behind the service. `ls -l` and `stat` then show
 `remote` at the mount point, `realm` prints `remote`, and `ns` ends the line
-in `remote`. The declaration is a label: it grants nothing, and the kernel
-reads it only to render `/proc/<pid>/ns`. That line names the session by the
-file it came over (operator vote 2026-09-28): the shell's mount of a posted
+in `remote`. The declaration grants nothing: the kernel reads it to render
+`/proc/<pid>/ns` and to contain the links the export serves (below), which
+only narrows. The ns line names the session by the file it came over (operator vote 2026-09-28): the shell's mount of a posted
 service reads `mount /tmp/NAME /srv/NAME remote`, and `run`'s private form,
 whose session rides pipes, `mount PATH #| remote`. `haul-npxf` (the
 child's `ls -l` and `ns`, with the shell's unmounted view of the same
@@ -157,6 +157,19 @@ failed at its first LR-1 leg (2026-09-28). Their `ns` legs assert the file's
 name too; with the kernel's two stamps removed (and the two kernel tests that
 catch that unregistered, so the boot reaches a login), each gate passed every
 earlier leg and failed there, its line reading `/` (2026-09-29).
+
+**The export's links resolve inside the export** (DISTRO 4.6, operator vote
+2026-10-05, built 2026-10-06). The kernel resolves a link whose session is
+declared remote beneath the mount it was reached through
+([[sub-kernel-stalk]]): an absolute target names a path from the mount's root,
+and no `..` climbs above it. Haul needs no code for it beyond the declaration
+it already makes on both paths. npxf serves a link's target text unchanged, so
+a host link to a path outside the export names the same path inside the export
+when the guest follows it. `haul-links` holds the rule on the device: it starts
+its own npxf export holding links, plants a guest decoy at every path a link
+names, and reads through the direct mount (an absolute link, a `..` target, the
+caller's `..` after a link, an internal link) and through a plain `mount` of a
+posted service; an escaped leg reads the guest's decoy.
 
 ## Data structures
 

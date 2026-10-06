@@ -451,10 +451,11 @@ test clients carry the counters unlisted.
   ([[sub-kernel-ninep-dev9p]], [[sub-kernel-loom]]). The remote declaration
   `remote` (LR-1, HAUL-DESIGN 4.8) is a fourth, under the same rule:
   `p9_client_set_remote(c)` is its one stamp, made by either attach path
-  before the root publishes, and `p9_client_init` resets it. It is DISPLAY
-  ONLY: its one reader is `territory_format_ns`, through
-  `dev9p_spoor_remote`, and nothing that resolves, checks permission,
-  caches or vouches for exec consults it.
+  before the root publishes, and `p9_client_init` resets it. It only
+  NARROWS: `dev9p_spoor_remote` reads it for `territory_format_ns` and, as
+  dev9p's `remote` slot, for the resolver, which contains a link the session
+  serves beneath its mount (DISTRO 4.6, [[sub-kernel-stalk]]); nothing that
+  checks permission, caches or vouches for exec consults it.
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
   flags, `sending` (registered, not yet waiting in `client_wait`: the
   handoff skips it), its OWN single-waiter rendez, `reply_buf`, `on_complete` (the

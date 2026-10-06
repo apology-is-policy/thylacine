@@ -748,8 +748,9 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 // primary group as group, the server's mode kept, and chown/chgrp are
 // refused; for a server whose ids are not Thylacine principals -- and
 // T_ATTACH_9P_REMOTE -- the session's transport leaves the machine
-// (HAUL-DESIGN 4.8): /proc/<pid>/ns marks every mount from it ` remote`;
-// a label, it grants nothing. Unknown bits reject.
+// (HAUL-DESIGN 4.8): /proc/<pid>/ns marks every mount from it ` remote`,
+// and the resolver contains a link the session serves beneath its mount
+// (DISTRO 4.6); it only narrows, so it grants nothing. Unknown bits reject.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid tx_fd / rx_fd or missing R/W rights

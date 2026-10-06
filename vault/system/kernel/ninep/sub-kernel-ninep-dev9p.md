@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -377,7 +377,7 @@ victims MUST be clunked — a fresh walk re-resolving a reused qid.path must
 never be served a fid for the dead object). All returns are clunked by the
 CALLER outside the leaf lock.
 
-### The remote declaration's one reader, and the name a session root's mount carries (LR-1 2026-09-28; the origin 2026-09-29)
+### The remote declaration's two readers, and the name a session root's mount carries (LR-1 2026-09-28; the origin 2026-09-29; served links 2026-10-06)
 
 `dev9p_spoor_remote(c)` answers whether `c` belongs to a session declared
 remote at its attach or its /srv post (HAUL-DESIGN 4.8). It reads the
@@ -385,9 +385,12 @@ client's `remote` flag through `priv_of`, so it is false for NULL, for a
 Spoor of another Dev, for a dev9p Spoor with no priv, and for a priv that
 does not carry `DEV9P_PRIV_MAGIC`. The read is lock-free: the flag is
 stamped before the session's root publishes and never flips, and the
-caller's reference on `c` keeps the priv and the client alive. Its one
-caller is `territory_format_ns` ([[sub-kernel-territory]]); nothing in this
-Dev consults the flag.
+caller's reference on `c` keeps the priv and the client alive. It has two
+callers: `territory_format_ns` ([[sub-kernel-territory]]), which renders the
+` remote` suffix, and, as this Dev's `remote` slot (`.remote =
+dev9p_spoor_remote`, 2026-10-06), the resolver, which contains a link the
+session serves beneath the mount it was reached through ([[sub-kernel-stalk]],
+DISTRO 4.6) and so only narrows. Nothing else in this Dev consults the flag.
 
 Every session root is born named "/" (`dev9p_attach_client`) and keeps that
 name: it is the namespace root's name when joey pivots to one, and a pivot
@@ -415,6 +418,9 @@ rows of `dev9p.walk_create_refuses_dmsrv_bits` and
 `dev9p.path_create_refuses_dmsrvcape` keep the bit out of a Tlcreate perm.
 The LR-1 sabotage boots turned `remote_format_ns` red both when the function
 answered for every dev9p Spoor and when it read a priv without its magic.
+The slot itself is held on the device by `haul-links`, which follows a real
+npxf export's links over both Haul forms: with the `.remote` line deleted from
+the vtable, its first leg read the guest's own decoy (2026-10-06).
 `dev9p.origin_format_ns` pins the origin: the accessor's negatives (NULL,
 another Dev, a bare dev9p Spoor), an unstamped root's `/`, the stamp sharing
 the name (its count rises by one) and refusing a second stamp, the rendered

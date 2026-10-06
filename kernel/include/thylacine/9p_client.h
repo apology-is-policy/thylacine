@@ -345,10 +345,12 @@ struct p9_client {
     u32                  cape_uid;
     u32                  cape_gid;
     // LR-1 (HAUL-DESIGN 4.8): the attacher or the /srv poster declared that this
-    // session's transport leaves the machine. DISPLAY ONLY -- its one reader is
-    // territory_format_ns (via dev9p_spoor_remote); nothing that resolves,
-    // checks permission, caches or vouches for exec consults it. Stamped once by
-    // the attach path before the root Spoor publishes, like `cape`, never flipped.
+    // session's transport leaves the machine. Read (via dev9p_spoor_remote) by
+    // territory_format_ns, the label, and by the resolver, which contains a
+    // symlink the session serves beneath the mount it was reached through
+    // (DISTRO 4.6) -- it only narrows a resolution, and nothing that checks
+    // permission, caches or vouches for exec consults it. Stamped once by the
+    // attach path before the root Spoor publishes, like `cape`, never flipped.
     bool                 remote;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its

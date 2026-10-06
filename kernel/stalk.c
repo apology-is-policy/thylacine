@@ -523,12 +523,58 @@ struct stalk_expand {
     int  cur;                    // which buf[] the resolver's `path` aliases
     int  follows;                // expansions so far (bound: STALK_MAX_FOLLOWS)
     struct Spoor *owned_base;    // absolute re-anchor: ref-held Territory root
+    struct Spoor *owned_anchor;  // served re-anchor (DISTRO 4.6): ref-held
+                                 // anchor -- the base while base == it
+    bool anchor_pheno;           // the phenotype crossed on the way to
+                                 // owned_anchor (it carries while it is the base)
 };
 
 static void stalk_expand_free(struct stalk_expand *ex) {
     if (!ex) return;
-    if (ex->owned_base) spoor_clunk(ex->owned_base);
+    if (ex->owned_base)   spoor_clunk(ex->owned_base);
+    if (ex->owned_anchor) spoor_clunk(ex->owned_anchor);
     kfree(ex);
+}
+
+// The logical offset of the current buffer's first byte: the consumed record
+// precedes it (section 4.1's splice state).
+static u64 stalk_lbase(const struct stalk_expand *ex) {
+    return ex ? ex->consumed_len : 0;
+}
+
+// stalk_anchors -- the mount crossings standing on the trail, for the
+// served-link anchor (DISTRO 4.6). Bit d of `mask`: trail[d] is a root that a
+// mount crossing produced (the base cross or a descent cross) -- or, with the
+// same bit in `umask`, a union child, whose member root is not on the trail.
+// loff[d] is the LOGICAL offset (stalk_lbase) where the components walked
+// below that root begin; a splice never moves a consumed component, so the
+// offset survives one. `pmask` bit d: the phenotype accumulated by that
+// crossing. No bit is ever set at or above `depth`: a pop clears its bit and
+// a restart clears them all.
+struct stalk_anchors {
+    u64 mask;
+    u64 umask;
+    u64 pmask;
+    u16 loff[STALK_MAX_DEPTH];
+};
+_Static_assert(STALK_MAX_DEPTH <= 64, "one anchor bit per trail entry");
+_Static_assert(2 * SYS_OPEN_PATH_MAX <= 0xFFFF,
+               "a logical offset (consumed record + buffer) fits a u16");
+
+static void stalk_anchor_set(struct stalk_anchors *a, int d, u64 loff,
+                             bool via_union, bool pheno) {
+    u64 bit = 1ull << d;
+    a->mask |= bit;
+    a->umask = via_union ? (a->umask | bit) : (a->umask & ~bit);
+    a->pmask = pheno     ? (a->pmask | bit) : (a->pmask & ~bit);
+    a->loff[d] = (u16)loff;
+}
+
+static void stalk_anchor_clear(struct stalk_anchors *a, int d) {
+    u64 keep = ~(1ull << d);
+    a->mask  &= keep;
+    a->umask &= keep;
+    a->pmask &= keep;
 }
 
 // stalk_expand_link -- read `link`'s target and splice it into the component
@@ -553,10 +599,27 @@ static void stalk_expand_free(struct stalk_expand *ex) {
 //        trail is 1:1; the soundness argument lives at the '..' arm).
 //   -1 : failure; *errp set (T_E_LOOP at the bound, T_E_NOMEM, T_E_INVAL on
 //        overflow / a NUL-bearing target, a propagated readlink errno).
+//
+// A SERVED link -- one whose Dev answers remote (DISTRO 4.6) -- always takes
+// the RESTART, from its anchor rather than from *basep: stalk_expand_served.
+// `trail`/`depth`/`an` are the resolution's position, `from_union` says the
+// link was walked through the union at the trail tip (it is not on the trail
+// yet), and `pheno` is the phenotype accumulated so far.
+static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
+                               struct Spoor *link,
+                               const char *path, u64 pathlen, u64 s, u64 i,
+                               u64 tlen, bool tgt_abs, struct Spoor **basep,
+                               struct Spoor *const *trail, int depth,
+                               const struct stalk_anchors *an,
+                               bool from_union, bool pheno, int *errp);
+
 static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
                              struct Spoor *link,
                              const char *path, u64 pathlen, u64 s, u64 i,
-                             struct Spoor **basep, int *errp) {
+                             struct Spoor **basep,
+                             struct Spoor *const *trail, int depth,
+                             const struct stalk_anchors *an,
+                             bool from_union, bool pheno, int *errp) {
     struct stalk_expand *ex = *exp;
     if (!ex) {
         ex = kmalloc(sizeof(*ex), 0);
@@ -566,6 +629,8 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
         ex->cur          = 0;
         ex->follows      = 0;
         ex->owned_base   = NULL;
+        ex->owned_anchor = NULL;
+        ex->anchor_pheno = false;
         *exp = ex;
     }
     if (++ex->follows > STALK_MAX_FOLLOWS) { *errp = T_E_LOOP; return -1; }
@@ -592,6 +657,11 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
         if (ex->tgt[b] == '\0') { *errp = T_E_INVAL; return -1; }
 
     bool  tgt_abs = (ex->tgt[0] == '/');
+    if (link->dev->remote && link->dev->remote(link))
+        return stalk_expand_served(p, ex, link, path, pathlen, s, i, (u64)tlen,
+                                   tgt_abs, basep, trail, depth, an,
+                                   from_union, pheno, errp);
+
     bool  tgt_dd  = path_has_dotdot(ex->tgt, (u64)tlen);
     char *nb      = ex->buf[ex->cur ^ 1];
     u64   rem     = pathlen - i;         // unconsumed tail, incl. leading '/'
@@ -646,6 +716,129 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
     ex->cur   ^= 1;
     ex->buflen = (u64)tlen + rem;
     return 0;
+}
+
+// stalk_expand_served -- re-anchor a SERVED link's resolution at its anchor and
+// restart (DISTRO 4.6). The anchor is the root of the innermost mount crossed
+// on the way to the link: the highest trail entry `an` marks, or -- for a union
+// child, whose member root never stands on the trail -- the member that holds
+// the child's name, found the way a remove finds it (stalk_union_member_
+// holding). With no crossing on the trail it is the base itself (a dirfd
+// inside the served tree). The rebuilt path is the components walked below the
+// anchor (none for an absolute target), then the target, then the rest, and it
+// resolves FROM the anchor -- so no `..` rises above it, the target's or the
+// caller's. Every served link takes this arm, a '..'-free relative target too,
+// so that every later restart (a local link's '..' rebuild included) begins at
+// the anchor and never falls back to an earlier base.
+//
+// Fail-closed: no anchor, an anchor that is not remote, or one that is not on
+// the link's own session (a union member found again after the namespace
+// changed under the walk) refuses the link with T_E_ACCES.
+static int stalk_expand_served(struct Proc *p, struct stalk_expand *ex,
+                               struct Spoor *link,
+                               const char *path, u64 pathlen, u64 s, u64 i,
+                               u64 tlen, bool tgt_abs, struct Spoor **basep,
+                               struct Spoor *const *trail, int depth,
+                               const struct stalk_anchors *an,
+                               bool from_union, bool pheno, int *errp) {
+    u64  lb     = ex->consumed_len;
+    u64  from   = lb + s;              // stream offset of the below-anchor text
+    bool apheno = false;
+    int  uerr   = 0;
+    struct Spoor *anchor = NULL;
+
+    int d = -1;                        // the innermost marked trail entry
+    if (!from_union)
+        for (int k = depth - 1; k >= 0; k--)
+            if (an->mask & (1ull << k)) { d = k; break; }
+
+    if (from_union || (d >= 0 && (an->umask & (1ull << d)))) {
+        // A union child: the link itself (index `depth`, walked through the
+        // union at the tip) or entry d. Its union point is the entry below it,
+        // or at index 0 the point a union dirfd base retains.
+        int ci = from_union ? depth : d;
+        struct Spoor *point = (ci > 0) ? trail[ci - 1]
+                            : ((*basep)->union_snap ? (*basep)->union_snap->point
+                                                    : NULL);
+        // The child's name, read from the logical stream: the consumed record,
+        // then the current buffer. A component never straddles the two.
+        u64 at = from_union ? lb + s : an->loff[d];
+        const char *seg;
+        u64 seglen;
+        if (at < lb) { seg = ex->consumed + at; seglen = lb - at; }
+        else         { seg = path + (at - lb);  seglen = pathlen - (at - lb); }
+        char name[SYS_WALK_OPEN_NAME_MAX + 1];
+        u64  n = 0;
+        while (n < seglen && seg[n] != '/') {
+            if (n >= SYS_WALK_OPEN_NAME_MAX) { *errp = T_E_INVAL; return -1; }
+            name[n] = seg[n];
+            n++;
+        }
+        name[n] = '\0';
+        if (point && n > 0)
+            anchor = stalk_union_member_holding(p, point, name, &uerr);
+        if (!from_union) from = an->loff[d];
+        apheno = from_union ? pheno : ((an->pmask >> d) & 1) != 0;
+    } else if (d >= 0) {
+        anchor = trail[d];
+        spoor_ref(anchor);
+        from   = an->loff[d];
+        apheno = ((an->pmask >> d) & 1) != 0;
+    } else {
+        // A union handle anchors at its walkable form, never with its union: a
+        // restart from the handle would search the union's other members.
+        struct Spoor *b = *basep;
+        if (b->union_snap) {
+            anchor = clone_walk_zero(stalk_union_handle_walkable(b));
+            if (!anchor) uerr = T_E_IO;   // a mint failure, as at a crossing
+        } else {
+            anchor = b;
+            spoor_ref(anchor);
+        }
+        from   = 0;
+        apheno = (b == ex->owned_anchor) && ex->anchor_pheno;
+    }
+
+    if (!anchor) { *errp = uerr ? uerr : T_E_ACCES; return -1; }
+    if (!anchor->dev || !anchor->dev->remote || !anchor->dev->remote(anchor) ||
+        anchor->dc != link->dc || anchor->devno != link->devno ||
+        from > lb + s) {
+        spoor_clunk(anchor);
+        *errp = T_E_ACCES;
+        return -1;
+    }
+
+    u64 blen = tgt_abs ? 0 : (lb + s) - from;
+    u64 rem  = pathlen - i;            // unconsumed tail, incl. leading '/'
+    if (blen + tlen + rem > SYS_OPEN_PATH_MAX) {
+        spoor_clunk(anchor);
+        *errp = T_E_INVAL;
+        return -1;
+    }
+    char *nb = ex->buf[ex->cur ^ 1];
+    if (blen) {
+        if (from < lb) {
+            u64 c1 = lb - from;
+            sx_copy(nb, ex->consumed + from, c1);
+            sx_copy(nb + c1, path, s);
+        } else {
+            sx_copy(nb, path + (from - lb), blen);
+        }
+    }
+    sx_copy(nb + blen, ex->tgt, tlen);
+    sx_copy(nb + blen + tlen, path + i, rem);
+
+    // The new anchor is referenced before the old one is let go: they may be
+    // the same Spoor (a second served link with no crossing since the first).
+    struct Spoor *old = ex->owned_anchor;
+    ex->owned_anchor  = anchor;
+    ex->anchor_pheno  = apheno;
+    *basep            = anchor;
+    if (old) spoor_clunk(old);
+    ex->consumed_len  = 0;
+    ex->cur          ^= 1;
+    ex->buflen        = blen + tlen + rem;
+    return 1;
 }
 
 // stalk() -- the errp==NULL convenience wrapper (the common, errno-agnostic
@@ -821,6 +1014,9 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     struct Spoor *trail[STALK_MAX_DEPTH];
     int           depth  = 0;
     struct Spoor *quarry = NULL;
+    // DISTRO 4.6: which trail entries a mount crossing produced, for a served
+    // link's anchor. Cleared at `restart`, with the trail.
+    struct stalk_anchors an;
     // Errno-rollout: the cause of a NULL return, written to *errp at `fail`.
     // Set precisely before each `goto fail` (T_E_NOENT walk-miss, T_E_ACCES
     // perm denial, T_E_INVAL structural, propagated for a stat/open failure);
@@ -885,6 +1081,7 @@ restart:
     pounce_ok       = !path_has_dotdot(path, pathlen);
     carried_valid   = false;
     logical_depth   = 0;
+    an.mask = an.umask = an.pmask = 0;
     // D-1: the pounce resumes ONE component per-component after a symlink
     // split (the split's resumed component must not re-gather -- it would
     // re-walk the same run and split again, forever). Set only by the two
@@ -923,7 +1120,14 @@ restart:
     // native. Both outcomes are preserved: in the user namespace (seed false)
     // the /viv/bin/helper -> /bin/ut case above still lands native; in a
     // container (seed true) it stays Linux.
-    if (crossed_pheno) *crossed_pheno = territory_root_pheno(p ? p->territory : NULL);
+    //
+    // A served re-anchor (DISTRO 4.6) is not a departure: the resolution stays
+    // beneath the anchor, so the mounts crossed to REACH the anchor still
+    // stand above the final location. Their phenotype carries in the seed for
+    // as long as the anchor is the base.
+    if (crossed_pheno)
+        *crossed_pheno = territory_root_pheno(p ? p->territory : NULL) ||
+                         (ex && base == ex->owned_anchor && ex->anchor_pheno);
 
     // Cross the BASE: `base` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
@@ -933,7 +1137,11 @@ restart:
     {
         struct Spoor *crossed = NULL;
         if (stalk_cross_mounts(p, base, &crossed, crossed_pheno) < 0) goto fail;
-        if (crossed) trail[depth++] = crossed;
+        if (crossed) {
+            stalk_anchor_set(&an, depth, stalk_lbase(ex), false,
+                             crossed_pheno && *crossed_pheno);
+            trail[depth++] = crossed;
+        }
     }
     floor_depth = depth;
     // Where a depth-0 component is walked FROM. A union handle is walked in its
@@ -1035,7 +1243,10 @@ restart:
             int se = stalk_tip_may_search(p, trail, depth, base,
                                           &carried, carried_valid);
             if (se != 0)                         { err = se;         goto fail; }
-            if (depth > floor_depth) spoor_clunk(trail[--depth]);
+            if (depth > floor_depth) {
+                stalk_anchor_clear(&an, depth - 1);
+                spoor_clunk(trail[--depth]);
+            }
             carried_valid = false;   // hygiene; unreachable while pounce_ok
             continue;
         }
@@ -1082,6 +1293,8 @@ restart:
                     carried_valid = false;   // the tip changed; the record
                                              // described the mount point, not
                                              // the mounted root
+                    stalk_anchor_set(&an, depth - 1, stalk_lbase(ex) + s, false,
+                                     crossed_pheno && *crossed_pheno);
                 }
             }
             parent = trail[depth - 1];
@@ -1600,6 +1813,7 @@ per_component:
         namebuf[clen] = '\0';
 
         struct Spoor *nc;
+        bool          nc_union = false;   // walked through the union at the tip
         if (union_base) {
             // UM: the parent is a UNION mount point (>= 2 members). Search the
             // members in declared order (each: cross -> per-member X-search ->
@@ -1617,6 +1831,7 @@ per_component:
             nc = stalk_union_child(p, union_base, namebuf, crossed_pheno, &uerr);
             spoor_clunk(union_base); union_base = NULL;   // consumed
             if (!nc) { err = uerr ? uerr : T_E_NOENT; goto fail; }
+            nc_union = true;
         } else {
             if (parent->dev && parent->dev->perm_enforced) {
                 struct t_stat st;
@@ -1709,14 +1924,17 @@ per_component:
             if ((!is_final || !nofollow_final) &&
                 nc->dev && nc->dev->readlink) {
                 int xrc = stalk_expand_link(p, &ex, nc, path, pathlen, s, i,
-                                            &base, &err);
+                                            &base, trail, depth, &an, nc_union,
+                                            crossed_pheno && *crossed_pheno,
+                                            &err);
                 spoor_clunk(nc);   // the link fid is spent either way
                 if (xrc < 0) goto fail;
                 path    = ex->buf[ex->cur];
                 pathlen = ex->buflen;
                 if (xrc == 1) {
-                    // Restart: absolute re-anchor, or a '..'-bearing target
-                    // (the 1:1-pop requirement -- see the '..' arm).
+                    // Restart: absolute re-anchor, a '..'-bearing target (the
+                    // 1:1-pop requirement -- see the '..' arm), or a served
+                    // link re-anchored at its mount (DISTRO 4.6).
                     stalk_unwind(trail, depth);
                     depth = 0;
                     goto restart;
@@ -1745,6 +1963,11 @@ per_component:
 
         // Push UN-crossed. The cross happens lazily when nc later becomes a
         // parent (cross-on-descent above) or, for the quarry, at the end below.
+        // A union child marks its entry: its member's root is the anchor for a
+        // served link below it (DISTRO 4.6), and that root is not on the trail.
+        if (nc_union)
+            stalk_anchor_set(&an, depth, stalk_lbase(ex) + s, true,
+                             crossed_pheno && *crossed_pheno);
         trail[depth++] = nc;   // owned (own fid post-walk for dev9p)
         logical_depth++;       // (only consumed while pounce_ok)
         carried_valid = false; // a plain walk fetches no attrs for the new tip

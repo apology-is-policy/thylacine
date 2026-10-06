@@ -22,6 +22,40 @@ needed the operator.
 
 
 ---
+## 2026-10-06 (aux, Opus 5.5 1M, effort max then xhigh) -- served links: a link a remote session serves resolves beneath its mount
+
+**Why now.** The fourth of the operator's five votes of 2026-10-05, "Contain beneath mount" (its options were "Contain beneath mount (Recommended)", "No-follow on Haul mounts" and "Leave documented"). Section 4.2's rule contained a link at the CALLER's root, which is right for the caller's own links and wrong for a server's: an export serving `deck -> /home/u/private` steered every guest resolution that crossed it into the guest's files. lantern refused a link AT a deck file but not one above it (audit IMG-SLIDE F6, OPEN-BUGS 2026-09-29).
+
+**Heritage.** Plan 9 never met the question: 9P2000 has no symlinks. Linux offers `nosymfollow` (per mount, refuse every link), `openat2`'s `RESOLVE_BENEATH` (per call, refuse an escape) and `RESOLVE_IN_ROOT` (per call, contain at the dirfd). The rule is `RESOLVE_IN_ROOT` keyed by the mount's remote declaration, which Haul already makes on both paths (HAUL-DESIGN 4.8); refusing would have broken an export's own links (`latest -> v3`).
+
+**The design, and the trap the design pass found.** Scripture first (b4351869f: DISTRO 4.6, ARCH I-28, HAUL-DESIGN 4.8, AUDIT-TRIGGERS row 104, `dec-2026-10-05-served-link-containment`). The first sketch restarted a `..`-bearing served target from the original base behind a text-offset floor. The nested case broke it: a second served link's rebuild re-walks the first target's `..` (`n1 -> ../d2/n2`), and no text offset survives nested rebuilds. So EVERY served expansion re-anchors and restarts from the anchor, a `..`-free relative target included, and every later restart (a local link's `..` rebuild too) begins there.
+
+**What the build added beyond the design.** Four refinements, each now in DISTRO 4.6's "As built": the anchor must be on the link's own session (`dc` + `devno`, one devno per dev9p session); a union member's root never stands on the trail, so it is found again by name with the remove path's first-hit selection; a no-crossing union-handle base anchors at its walkable form; and the phenotype carries across the restart -- without it a relative served link in a Linux-declared export lost the phenotype the walk to it had (`stalk.served_pheno`'s relative leg kept it before containment and is the regression guard).
+
+**Wrong turns, and what caught them.**
+- The first haul-links run failed 3 of 3 on my scenario, not the kernel: `lc_send` consumes nothing, so the tool-error pattern `ut: ` took the login shell's own `ut: consctl ok` line. A `LINKS-SETUP-DONE` marker now reads past the banner, as haul-cape does with `id`.
+- The E2E red could not come from the resolver sabotage: the kernel suite's own failing served tests extinct the boot before login. It came from deleting `.remote` from dev9p's vtable, which the fixture-driven suite cannot see.
+- The scenario failed at its first escape, so its red only ever showed leg A. It now records every escaped leg and fails after the last.
+- My self-review before the formal round found three arms no test exercised (a union handle's index-0 point; the walkable-form anchor; the same-session check) and one errno: a union-handle anchor clone that failed read `T_E_ACCES`, the refusal, instead of `T_E_IO`, the failure a crossing reports. Three tests, each red alone under its own sabotage.
+- The walkable-form arm looked unwitnessable: in every shape I tried, the contained and uncontained answers agreed, because the walk's first component consumes the union. The discriminating shape is the security case itself -- an ABSOLUTE served target (nothing below the anchor to re-walk) naming a file only the LOCAL member holds, which a restart from the handle with its union finds.
+- My same-session witness proved only half the check, and the round caught it (below): its "other session" was another fixture Dev, so its refusal fired on `dc`, while every real pair of dev9p sessions shares a Dev and differs only in `devno`. A witness for a two-part check has to differ from its control on one part at a time.
+- Writing DISTRO, I checked who else reads link text: musl's `realpath(3)` runs its own readlink loop (third_party/musl/src/misc/realpath.c:95), so a ported program that canonicalizes gets the Linux answer. Recorded as an edge; rewriting the text at `readlink` was rejected (it bakes one mount point into every copied link). The native `realpath` is lexical (usr/coreutils/src/bin/realpath.rs:1) and lantern never re-resolves.
+- The vault's inv-i28 note never received D-1's symlink clause (2026-08-05); it now carries both.
+
+**An interruption.** The Mac lost power overnight in the middle of the close's bake (the operator's battery). My lease expired while it was down, and main took the Mac on its return, as it should. The reboot also emptied `/private/tmp`, and with it every scratchpad draft: this entry, the phase7 section, the row-104 addendum, the squash message, four decision notes and the KAT fix. Each was re-created from the session's context and went straight into a WIP commit; a draft that matters now lives in a commit from the moment it exists.
+
+**Side work this stretch.** The KAT regeneration gate could not build against current npxf (OPEN-BUGS 2026-10-06 00:26Z: `regen.sh` compiles npxf's OpenSSL-based crypto.cpp with no OpenSSL flags). Validated on a scratch copy: libcrypto flags from pkg-config -> PASS, 23 vectors against npxf b8854ee and npxf-p3c 7064e33 (so npxf's OpenSSL migration moved no derived byte); a flipped `k_c2s` nibble -> FAIL; no pkg-config -> FAIL. It lands as its own commit. The PAKE research memo (design_npxf_pake_v2.md) recommends CPace on ristretto255 as npxf wire v2; npxf gaining libsodium is the operator's call. Decision notes for the other four 2026-10-05 votes were still missing from the vault; they land beside it.
+
+**Round 1** (Fable 5.1 reviewing Opus 5.5, MODEL start == end, read-only, 35 tool calls): 0 P0 / 0 P1 / 0 P2 / 1 P3, clean, so no round 2. F1: the same-session check's `devno` half had no witness. Every fixture Spoor has devno 0 (`dev_simple_attach` mints none), so replacing the comparison with a false one left all nine served tests green -- yet it is the half that fires in production, because every dev9p Spoor shares one Dev and only the devno minted per attach (dev9p.c:619) tells two sessions apart. Fixed with a third leg in `served_same_session`: a second attach of the same fixture Dev with a devno from `spoor_next_devno`, and a premise assert that each refusal leg differs from the control on exactly one axis. Self-found while the round ran (S1): the DMSRVREMOTE comment in syscall.h ran to 120 columns after my edit; rewrapped. The round re-derived, and confirmed, what my self-audit had argued: the three set sites and two clear sites of the anchor bits, the logical offsets across in-place splices, `owned_anchor` released on every exit, the follow bound, and no authority refusal collapsed into a transient errno.
+
+{EVIDENCE}
+
+**What "fixed" covers.** F1 adds a witness; the check it pins was already correct, so no behaviour changed. S1 is a comment. The containment itself is the kernel resolver's: `readlink` returns the server's text, and a program that resolves that text on its own (musl's `realpath(3)`) is outside it, as DISTRO 4.6 records.
+
+**The user's decisions.** The 2026-10-05 vote, "Contain beneath mount". Decided on the operator's "your guts" grant: `readlink` stays verbatim (the realpath edge above). Main, on yip 0172: aux generalises `tools/check-proc-flags.py` to the other bit-allocated words, and drops the `-tags thylacine_held` build flag on aux-3.
+
+---
+
 ## 2026-10-05 .. 06 (main, Opus 5.5, effort max) -- the sleep rows: a Linux guest's nanosleep and clock_nanosleep sleep
 
 **Why this, now.** The signal7 write-up (2026-10-05 18:32Z) found that a Linux
@@ -109,6 +143,7 @@ model for the step list (I-9 by replay today, not by proof) is not taken here.
 neighbours).
 
 ---
+
 ## 2026-10-05 .. 06 (aux, Opus 5.5 1M, effort max) -- Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
 
 **Why now.** Work order item 6's kernel half: the 2026-09-29 Haul Fable pass's F1 (OPEN-BUGS 2026-09-29 ~14:57Z). P3a held haul's replies to the session's msize, but any other reply the kernel refuses -- a tag it never issued, a type that does not answer the request -- still killed the session out of haul's sight. The kernel marked the client dead and closed nothing, so the server served a dead mount until the mount's last close, and haul's park form never exited.

@@ -3186,9 +3186,11 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // SYS_ATTACH_9P (x5): the remote declaration (LR-1, HAUL-DESIGN 4.8; operator
 // vote 2026-09-24). The attacher states that the session's transport leaves
 // the machine, and /proc/<pid>/ns ends the line of every mount sourced from the
-// session in " remote". A label: it grants nothing and no lookup, check, cache
-// or exec decision consults it. SYS_ATTACH_9P_SRV refuses the bit: over /srv
-// the poster declares (DMSRVREMOTE), as with the cape.
+// session in " remote". It grants nothing. The one decision that reads it
+// narrows: the resolver contains a symlink the session serves beneath the
+// mount it was reached through (DISTRO 4.6); no check, cache or exec decision
+// consults it. SYS_ATTACH_9P_SRV refuses the bit: over /srv the poster
+// declares (DMSRVREMOTE), as with the cape.
 #define SYS_ATTACH_9P_REMOTE  0x4u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
@@ -3393,11 +3395,11 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // and every attach over the service -- SYS_ATTACH_9P_SRV on a byte conn, or
 // devsrv's own attach for a 9P-mode opener -- marks its session remote, as
 // SYS_ATTACH_9P_REMOTE does a pipe attach. Either mode admits it: DMSRVCAPE's
-// byte-mode rule rests on what the attacher could already do, and a label
-// grants nothing to restrict. Part of the service IDENTITY on a tombstone
-// rebind, like the mode, the ring class and the cape. Bit 22 is the next free
-// bit below DMSRVCAPE. Meaningful ONLY on the devsrv-post branch; a regular
-// create rejects it.
+// byte-mode rule rests on what the attacher could already do, and a
+// declaration that only narrows (DISTRO 4.6) grants nothing to restrict. Part
+// of the service IDENTITY on a tombstone rebind, like the mode, the ring class
+// and the cape. Bit 22 is the next free bit below DMSRVCAPE. Meaningful ONLY on
+// the devsrv-post branch; a regular create rejects it.
 #define SYS_WALK_CREATE_DMSRVREMOTE 0x00400000u
 // Every service-post bit: the one set a regular create refuses, so a new
 // DMSRV bit joins every refusal by joining this.

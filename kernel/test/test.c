@@ -1385,6 +1385,15 @@ void test_stalk_symlink_nofollow(void);
 void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
+void test_stalk_served_contain(void);
+void test_stalk_served_contain_nowa(void);
+void test_stalk_served_union(void);
+void test_stalk_served_dirfd_and_refusal(void);
+void test_stalk_served_pheno(void);
+void test_stalk_served_lifetime(void);
+void test_stalk_served_handle_base(void);
+void test_stalk_served_handle_popped(void);
+void test_stalk_served_same_session(void);
 void test_stalk_open_create_cwd_parity(void);
 void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
@@ -4633,6 +4642,15 @@ struct test_case g_tests[] = {
     { "stalk.symlink_stat_vs_lstat",   test_stalk_symlink_stat_vs_lstat,   false, NULL },
     { "stalk.symlink_pounce_split",    test_stalk_symlink_pounce_split,    false, NULL },
     { "stalk.symlink_lifetime",        test_stalk_symlink_lifetime,        false, NULL },
+    { "stalk.served_contain",          test_stalk_served_contain,          false, NULL },
+    { "stalk.served_contain_nowa",     test_stalk_served_contain_nowa,     false, NULL },
+    { "stalk.served_union",            test_stalk_served_union,            false, NULL },
+    { "stalk.served_dirfd_and_refusal", test_stalk_served_dirfd_and_refusal, false, NULL },
+    { "stalk.served_pheno",            test_stalk_served_pheno,            false, NULL },
+    { "stalk.served_lifetime",         test_stalk_served_lifetime,         false, NULL },
+    { "stalk.served_handle_base",      test_stalk_served_handle_base,      false, NULL },
+    { "stalk.served_handle_popped",    test_stalk_served_handle_popped,    false, NULL },
+    { "stalk.served_same_session",     test_stalk_served_same_session,     false, NULL },
     { "stalk.open_create_cwd_parity",  test_stalk_open_create_cwd_parity,  false, NULL },
     { "stalk.open_create_open_if_present", test_stalk_open_create_open_if_present, false, NULL },
     { "stalk.open_create_mkdir_and_nest", test_stalk_open_create_mkdir_and_nest, false, NULL },

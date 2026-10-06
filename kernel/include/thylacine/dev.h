@@ -328,6 +328,13 @@ struct Dev {
     // only dev9p mints QTSYMLINK at v1.0, and it implements the slot.
     long           (*readlink)(struct Spoor *c, char *buf, long n);
 
+    // remote(c) -- does c belong to a session whose transport leaves the
+    // machine (the remote declaration, HAUL-DESIGN 4.8)? The resolver contains
+    // a symlink such a session serves beneath the mount it was reached through
+    // (DISTRO 4.6). Read lock-free, so the answer must be fixed before c's
+    // session published. NULL-permitted: a NULL slot is never remote.
+    bool           (*remote)(struct Spoor *c);
+
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)
     //     Returns the subset of `events` currently ready on c. If `pw`

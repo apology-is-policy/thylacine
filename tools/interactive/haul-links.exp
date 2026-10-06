@@ -1,0 +1,209 @@
+#!/usr/bin/expect -f
+# tools/interactive/haul-links.exp -- a link a Haul export serves resolves
+# inside the export (DISTRO 4.6; operator vote 2026-10-05).
+#
+# Before containment an export's author steered every guest resolution that
+# crossed one of its links: `abs -> /tmp/links-decoy-a` named the GUEST's file,
+# and `up -> ../../../../tmp/links-decoy-b` climbed out of the mount. Here the
+# guest plants its own decoys at those paths and the export holds one at the
+# same place inside itself, so every leg reads which side it landed on:
+# "export side" is contained, "guest side" escaped. Each leg has its own
+# letter, so no leg can pass on another's line.
+#
+# What it asserts, against a server this scenario starts itself:
+#   1. The direct mount (SYS_ATTACH_9P_REMOTE): an absolute served link (a), a
+#      '..'-bearing one (b), and the caller's own '..' after a relative one (c)
+#      all stay in the export; an internal link still resolves (d).
+#   2. The posted service (--post, DMSRVREMOTE): a plain `mount /srv/NAME` in
+#      the shell contains an absolute served link with no option (e).
+#
+# The kernel suite (stalk.served_*) carries the controls one variable away and
+# the union, dirfd, refusal and phenotype arms; this is the wire half -- links
+# a real server serves, QTSYMLINK off dev9p's decode, over a session Haul
+# declared remote.
+#
+# Needs a built npxf-server: NPXF_SERVER, else
+# ~/projects/npxf/build/release/npxf-server (https://github.com/apology-is-policy/npxf).
+# Without one this SKIPs (exit 77): an absent fixture is neither a regression
+# nor coverage. Uses the --config ci image (a serial-console login).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set npxf [expr {[info exists ::env(NPXF_SERVER)] \
+    ? $::env(NPXF_SERVER) : "$::env(HOME)/projects/npxf/build/release/npxf-server"}]
+if {![file executable $npxf]} {
+    puts "LS-CI SKIP: no npxf-server at $npxf -- build npxf or set NPXF_SERVER (see this file's header)"
+    exit 77
+}
+# Not 5640 (an operator's own server), 5641 (lantern-haul) nor 5642 (haul-cape).
+set port [expr {[info exists ::env(HAUL_LINKS_PORT)] ? $::env(HAUL_LINKS_PORT) : 5643}]
+if {![lc_port_bindable $port]} {
+    lc_fail "127.0.0.1:$port is already in use -- set HAUL_LINKS_PORT"
+}
+
+# The export. npxf serves a link as a link (it never follows one), so the
+# targets below are text the guest's resolver reads: an absolute one names the
+# export's own /tmp only if the resolver contains it.
+set work [exec mktemp -d -t thyla-haul-links]
+set export $work/export
+file mkdir $export/d $export/tmp
+set token "thylacine-haul-links-token"
+proc write_file {path text} {
+    set fh [open $path w]
+    puts -nonewline $fh $text
+    close $fh
+}
+write_file $work/token "$token\n"
+file attributes $work/token -permissions 00600
+write_file $export/tmp/links-decoy-a "export side a\n"
+write_file $export/tmp/links-decoy-b "export side b\n"
+write_file $export/links-decoy-c     "export side c\n"
+write_file $export/d/inner.txt       "internal link d\n"
+write_file $export/tmp/links-decoy-e "export side e\n"
+# `file link` insists the target exist; these targets are relative to the
+# GUEST's view, so make them with ln.
+exec ln -s /tmp/links-decoy-a           $export/abs
+exec ln -s ../../../../tmp/links-decoy-b $export/d/up
+exec ln -s d                            $export/rel
+exec ln -s d/inner.txt                  $export/latest
+exec ln -s /tmp/links-decoy-e           $export/abs-e
+set srvlog $lc_repo/build/haul-links-npxf.log
+
+set npxf_pid [exec $npxf -r $export -t $work/token -l 127.0.0.1:$port -R -v >& $srvlog &]
+exit -onexit {
+    catch {exec kill $::npxf_pid}
+    catch {file delete -force $::work}
+}
+set up 0
+for {set i 0} {$i < 50} {incr i} {
+    if {![catch {set probe [socket 127.0.0.1 $port]}]} {
+        close $probe
+        set up 1
+        break
+    }
+    after 100
+}
+if {!$up} {
+    lc_fail "npxf-server did not start listening on 127.0.0.1:$port (log: $srvlog)"
+}
+lc_step "npxf-server (pid $npxf_pid) serving $export read-only on 127.0.0.1:$port"
+
+# A guest-side decoy read is an escape. It is recorded, naming the leg, and
+# the scenario runs on, so one red run shows every leg that escaped; it fails
+# after the last leg (escapes_fail). Each leg prints its own letter, so a leg
+# can only be answered by its own line. The output is upper-cased so the
+# echoed command line can never match. A tool error fails at once; the line
+# end anchors the match so the failure names the reason (see haul-cape.exp).
+set escaped {}
+proc expect_side {want leg phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $want { lc_step "saw: $phase" }
+        -re {GUEST SIDE ([A-Z])} {
+            set got $expect_out(1,string)
+            if {$got ne $leg} {
+                lc_fail "leg $got answered while waiting for leg $leg ($phase)"
+            }
+            lappend ::escaped $leg
+            lc_step "ESCAPED: leg $leg read the guest's own decoy ($phase)"
+        }
+        -re {(cat|mount|ut): [^\r\n]+[\r\n]} {
+            lc_fail "tool error \[[string trimright $expect_out(0,string)]\] while waiting for \[$want\] ($phase)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$want\] during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+proc escapes_fail {} {
+    if {[llength $::escaped]} {
+        lc_fail "leg(s) [join $::escaped {, }] ESCAPED the export: each read the guest's own decoy"
+    }
+}
+
+# The SAK dance for `imperium post`, as haul-post.exp does it.
+proc sak_witness_within {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {cons: SAK \(([a-z ]+)\)} {
+            set d $expect_out(1,string)
+            lc_step "saw: cons: SAK ($d) during '$phase'"
+            return $d
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { return "" }
+    }
+}
+proc press_sak {phase} {
+    lc_raw_send "\001b" "monitor BREAK ($phase)"
+    set d [sak_witness_within 10 "the SAK witness ($phase)"]
+    if {$d eq ""} {
+        lc_fail "no `cons: SAK (...)` line within 10s of Ctrl-A b ($phase)"
+    }
+    if {$d ne "episode"} {
+        lc_fail "SAK decision was '$d', expected 'episode' ($phase) -- corvus not ARMED, or an episode already open"
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "echo $token > npxf.token"
+lc_send "chmod 600 npxf.token"
+lc_send "mkdir -p /tmp/links /tmp/links-post"
+# The guest's own decoys, at the paths the served links name.
+foreach leg {a b c e} {
+    lc_send "echo guest side $leg > /tmp/links-decoy-$leg"
+}
+# lc_send consumes nothing, so the login shell's own `ut: ...` banner lines are
+# still unread here, and expect_side's tool-error pattern would take the first
+# of them. Read past them to a marker first (haul-cape.exp does it with `id`).
+lc_send "echo links-setup-done | tr a-z A-Z"
+lc_expect "LINKS-SETUP-DONE" "the token, the mount points and the guest's decoys"
+
+# Leg 1: the direct mount. A mount lands in haul's own namespace, so the reads
+# run as ONE script in a ut that haul spawns beneath it.
+foreach line [list \
+    "cat /tmp/links/abs | tr a-z A-Z" \
+    "cat /tmp/links/d/up | tr a-z A-Z" \
+    "cat /tmp/links/rel/../../links-decoy-c | tr a-z A-Z" \
+    "cat /tmp/links/latest | tr a-z A-Z" \
+    "echo links-script-done | tr a-z A-Z"] {
+    lc_send "echo '$line' >> /tmp/links.ut"
+}
+lc_send "haul -t npxf.token 10.0.2.2!$port /tmp/links /bin/ut /tmp/links.ut"
+expect_side "EXPORT SIDE A" A "(a) an absolute served link resolves from the mount, not the guest's root"
+expect_side "EXPORT SIDE B" B "(b) a '..' served target climbs to the mount and no further"
+expect_side "EXPORT SIDE C" C "(c) the caller's own '..' after a served link stops at the mount"
+expect_side "INTERNAL LINK D" D "(d) an internal relative link still resolves"
+lc_expect "LINKS-SCRIPT-DONE" "the links script ran to its end"
+
+# Leg 2: the posted service. Posting needs the post capability (imperium).
+lc_send "imperium post"
+lc_expect "as pid" "post request"
+press_sak "post"
+lc_expect "CONFERRING IMPERIUM" "trusted provincia"
+lc_expect "imperium key: " "trusted key prompt"
+lc_raw_send "imperium-key-michael-v1\r" "fixture key"
+lc_expect "imperium: conferred" "post capability conferred"
+lc_send "haul --post haul-links -t npxf.token 10.0.2.2!$port &"
+lc_expect "/srv/haul-links posted" "the service posted"
+lc_send "mount /srv/haul-links /tmp/links-post /"
+lc_expect "/srv/haul-links serving one mount" "a plain mount of the posted service"
+lc_send "cat /tmp/links-post/abs-e | tr a-z A-Z"
+expect_side "EXPORT SIDE E" E "(e) a plain mount of a posted remote service contains its links"
+lc_send "unmount /tmp/links-post"
+lc_send "wait; echo links-post-reaped | tr a-z A-Z"
+lc_expect "LINKS-POST-REAPED" "unmount closed the transport and haul exited"
+lc_send "abdicate"
+lc_expect "imperium: relinquished" "scope teardown"
+escapes_fail
+lc_pass "haul-links: links a Haul export serves resolve inside the export, direct (a-d) and posted (e)"
+
+lc_quit
+lc_pass "haul-links: served links stay beneath the mount, direct and posted"
+exit 0

@@ -23,7 +23,7 @@ hazards: []
 abis: []
 design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3", "docs/HALCYON.md section 14.7"]
 created: 2026-09-22
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -247,10 +247,13 @@ deck; this keeps the CONTENT there, because a deck someone else wrote -- a Haul
 mount above all -- could otherwise link a slide to one of the presenter's own
 files and put it on the projector. Intermediate components still expand, so the
 deck directory itself may be reached through a link. On a local path that link
-is the presenter's; on a Haul mount it may be the export author's, and a served
-link expands in the guest's namespace, so the author could point the deck path
-at another of the presenter's decks (audit IMG-SLIDE F6). `lantern` cannot tell
-the two apart; containing a served link beneath its mount is a Haul design item.
+is the presenter's; on a Haul mount it may be the export author's. Since
+2026-10-06 the kernel resolves such a served link beneath the mount it was
+reached through (DISTRO 4.6, [[sub-kernel-stalk]]), so the author can point
+the deck path elsewhere in the export but not at another of the presenter's
+decks (audit IMG-SLIDE F6, closed). `lantern` adds no check of its own: it
+cannot tell the two kinds of link apart, and it resolves the deck path through
+the kernel, never by reading link text itself.
 
 `lantern.exp` covers the plain half on the CI image: (a) `4 slides, all valid`,
 the picture through `view --check`; (b) the cat posture's stand-in

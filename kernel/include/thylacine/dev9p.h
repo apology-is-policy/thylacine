@@ -280,7 +280,9 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
 // /srv poster declared it remote? A lock-free read of a flag stamped before the
 // session's root published; the caller's reference on `c` keeps its priv and
 // client alive. False for anything that is not a dev9p Spoor with a valid priv.
-// Its one caller is territory_format_ns: the declaration is display only.
+// Read by territory_format_ns (the label) and, as dev9p's Dev.remote, by the
+// resolver, which contains a link the session serves beneath the mount it was
+// reached through (DISTRO 4.6) -- a narrowing; the declaration grants nothing.
 bool dev9p_spoor_remote(struct Spoor *c);
 
 // Name a session ROOT by the file its session came over (operator vote

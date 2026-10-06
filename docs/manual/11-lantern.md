@@ -244,7 +244,9 @@ lantern: /tmp/talk/notes.md: a link; a deck's files are files in its directory
 
 The deck's directory, and each directory above it, is used as named, links
 included. On a Haul mount, a link in that path is set by the machine that
-serves it and can lead to another directory on this one.
+serves it, and Thylacine resolves such a link within the mount through which
+it is reached: it can lead to another directory of the export, and it cannot
+lead to a directory outside the mount. See Remote files with Haul.
 
 ## Technical Details
 

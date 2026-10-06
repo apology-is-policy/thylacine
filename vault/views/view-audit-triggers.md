@@ -79,7 +79,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S | inv-i21, inv-i18, inv-i8, inv-i9 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
 | [[sub-kernel-spoor]] | kernel/spoor.c, kernel/include/thylacine/spoor.h | inv-i33 | - **The refcount balances on every path.** `spoor_total_allocated` / |
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
-| [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
+| [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h, kernel/test/test_stalk.c | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
 | [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
 | [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |
 | [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h, kernel/test/test_territory_pivot_root.c, kernel/test/test_sys_mount.c, usr/symlink-probe/src/main.rs | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |

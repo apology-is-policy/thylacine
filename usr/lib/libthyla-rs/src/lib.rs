@@ -429,7 +429,9 @@ pub const T_WALK_CREATE_DMSRVCAPE: u32 = 0x0080_0000;
 // DMSRVREMOTE (HAUL-DESIGN 4.8): on a /srv service post in either mode, every
 // attach over the service is declared remote -- what T_ATTACH_9P_REMOTE does
 // to a pipe attach -- and /proc/<pid>/ns marks each mount from it ` remote`.
-// A label: it grants nothing. Mirrors SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
+// It grants nothing: the resolver reads it only to narrow, containing a link
+// the session serves beneath its mount (DISTRO 4.6). Mirrors
+// SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
 pub const T_WALK_CREATE_DMSRVREMOTE: u32 = 0x0040_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
@@ -1796,7 +1798,8 @@ pub const T_ATTACH_9P_CAPE: u64 = 0x2;
 /// SYS_ATTACH_9P flags: the remote declaration (HAUL-DESIGN 4.8). The attacher
 /// declares that the session's transport leaves the machine; `/proc/<pid>/ns`
 /// marks every mount whose source comes from the session ` remote`, and `ls`,
-/// `stat`, `realm` and `ns` read it. A label: nothing else consults it.
+/// `stat`, `realm` and `ns` read it. The resolver reads it only to narrow: a
+/// link the session serves resolves beneath its mount (DISTRO 4.6).
 /// SYS_ATTACH_9P_SRV refuses it: over /srv the poster declares
 /// ([`T_WALK_CREATE_DMSRVREMOTE`]).
 pub const T_ATTACH_9P_REMOTE: u64 = 0x4;

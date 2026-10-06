@@ -17,6 +17,7 @@ code:
   - tools/interactive/gfx_media.py
   - tools/interactive/gfx_shift.py
   - tools/interactive/haul-npxf.exp
+  - tools/interactive/haul-links.exp
   - tools/interactive/ls-gfx-dosbox-conf.exp
   - tools/interactive/ls-gfx-dosbox-duke3d.exp
   - tools/interactive/ls-gfx-dosbox-dynarec.exp
@@ -46,7 +47,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -554,6 +555,22 @@ pipes, and `haul-post`'s `MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE`.
 With the kernel's two stamps removed (and the two kernel tests that catch that
 unregistered, so the boot reaches a login), each gate passed every earlier leg
 and failed there, its line reading `/` (2026-09-29).
+
+`haul-links` (2026-10-06, DISTRO 4.6) is the device witness for served-link
+containment. It provisions everything itself: an npxf server on 127.0.0.1:5643
+(`HAUL_LINKS_PORT`; `NPXF_SERVER` names the binary, absent means SKIP 77)
+exporting a read-only tree that holds links, and guest decoys at the guest
+paths those links would name if they escaped. Every line is piped through
+`tr a-z A-Z`, so an echo cannot satisfy a token, and each leg prints its own
+letter, so only its own line can answer it. Legs a-d read through the direct
+mount, leg e through a plain `mount` of a posted service. An escape is
+recorded and the scenario runs on, failing after leg e with every escaped leg
+named. The first run failed on the scenario itself: `lc_send` consumes
+nothing, so the tool-error pattern (`ut: ...`) took the login shell's own
+`ut: consctl ok` line; a `LINKS-SETUP-DONE` marker now reads past the login
+banner before the first leg, as `haul-cape` does with `id`. With dev9p's
+`.remote` line deleted (the kernel suite drives a fixture Dev, so the boot
+still reaches a login), leg A read the guest's decoy.
 
 The image slide (2026-09-29, aux (d2)): `ls-gfx-inline-view` and
 `ls-gfx-session-image` each end with a fit leg, `view /test-large.png`: the

@@ -68,7 +68,9 @@
 // connection, so Haul is the program that knows the session leaves the
 // machine: the direct mount adds T_ATTACH_9P_REMOTE and --post adds
 // DMSRVREMOTE, and `ls -l`, `stat`, `realm` and `ns` then show the mount as
-// `remote`, whichever program mounts it.
+// `remote`, whichever program mounts it. The kernel also resolves a link the
+// export serves beneath the mount it was reached through (DISTRO 4.6), so an
+// export's absolute link names a path in the export.
 
 #![no_std]
 #![no_main]

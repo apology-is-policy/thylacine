@@ -7,7 +7,7 @@ guards: [sub-kernel-stalk, sub-pouch-fs, sub-pouch-net, sub-kernel-content]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-06
 ---
 ## Statement
 
@@ -28,6 +28,13 @@ per component:
   `(dc, devno, qid.path)` and grants nothing: the MOUNTED root's
   permissions govern traversal into a crossed tree, and reaching a mount
   requires X-searching the path to it.
+- Symlinks are contained by the same machinery (DISTRO 4, D-1): expansion
+  produces components, which re-enter the same loop and its gates, and an
+  absolute target re-anchors at the caller's CURRENT `root_spoor`. A link a
+  remote session serves (the Dev's `remote` slot; DISTRO 4.6, 2026-10-06)
+  re-anchors instead at the root of the mount it was reached through, so its
+  target and every later `..` stay beneath that mount; with no such anchor on
+  the link's own session it is refused (`T_E_ACCES`).
 
 ## Enforcement
 
@@ -50,7 +57,10 @@ single-hop twin — source + result crosses since #957, same X ordering);
 `exec_load_from_namespace` (#58 — every spawn resolves through stalk with
 the OEXEC gate; no flat-table fallback survives on the EL0 path);
 `territory_resolve_cwd` (the LS-4 join stays lexical — it can only produce
-an absolute path the resolver then contains). The territory half (the
+an absolute path the resolver then contains); `stalk_expand_link` (the splice,
+the absolute re-anchor at `root_spoor`, the 40-follow bound) and
+`stalk_expand_served` (the served-link anchor, from the crossings
+`struct stalk_anchors` records beside the trail — [[sub-kernel-stalk]]). The territory half (the
 mount-table serialization + `root_spoor` swap under `ns_lock`) and the
 exec/spawn half gain their `guards` edges at those surfaces' sweeps — the
 backfill-hook pattern.
@@ -69,11 +79,16 @@ the resolver's guarantees missing.
 
 Prose + the kernel battery (`stalk.dotdot_containment`,
 `stalk.xsearch_deny`, `stalk.cross_mount_xsearch_deny`,
-`stalk.pounce_acces_masks_noent`, `exec_ns.*`) + the boot E2Es (the joey
-stalk-1/stalk-2 dev9p resolutions) + [[gate-smp]] for the concurrent
-mount-table legs. **blind-to:** TOCTOU between the X-search snapshot and
+`stalk.pounce_acces_masks_noent`, `exec_ns.*`, the `stalk.symlink_*` and
+nine `stalk.served_*` tests) + the boot E2Es (the joey stalk-1/stalk-2 dev9p
+resolutions; the boot-fatal `/symlink-probe` over a live dev9p tree) +
+`haul-links` (a real npxf export's links over both Haul forms) +
+[[gate-smp]] for the concurrent mount-table legs. **blind-to:** TOCTOU between the X-search snapshot and
 later byte I/O (the A-3 open-time-snapshot model — deliberate); the POSIX
 pathname-FORM gaps tracked at [[seam-posix-pathname-form-gates]] (a
 non-directory mid-path reports NOENT rather than ENOTDIR — a lie about
 WHY, never a containment breach); single-hop handler arms that no kernel
-test drives (the user-VA harness gap — covered E2E by boot probes).
+test drives (the user-VA harness gap — covered E2E by boot probes); a
+program that reads a link's text with `readlink` and resolves it itself (musl's
+`realpath(3)`) — containment is the resolver's, and the text is returned
+verbatim.

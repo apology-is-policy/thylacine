@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -798,8 +798,11 @@ session, in the cape's shape (HAUL-DESIGN 4.8,
   all three refusals follow without an edit, which is what the derived mask
   was built for. A static assert pins that bit 22 collides with no other perm
   bit, and `srv_client.remote_admission` pins both values.
-- A label, not an authority: nothing that resolves a path, checks permission,
-  caches or vouches for exec consults it, and the wrappers' comments say so.
+- It grants nothing. Besides the label, one decision reads it, and only to
+  narrow: the resolver contains a link the session serves beneath its mount
+  (DISTRO 4.6, 2026-10-06; [[sub-kernel-stalk]]). Nothing that checks
+  permission, caches or vouches for exec consults it, and the comments on both
+  bits, in the kernel header and in both libraries, say so.
 - Callers: Haul, on both paths ([[sub-haul]]), and `/attach-probe`, whose
   real attach now passes CAPE|REMOTE. Its unknown-bit probe moved from 0x4,
   now admitted, to 0x8. Every other in-tree `t_attach_9p` caller passes 0.

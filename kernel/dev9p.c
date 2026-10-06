@@ -2392,6 +2392,7 @@ struct Dev dev9p = {
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,
     .readlink = dev9p_readlink,   // D-1: Treadlink (the resolver's expansion RPC)
+    .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

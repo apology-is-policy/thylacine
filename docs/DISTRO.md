@@ -292,8 +292,8 @@ audit round (I-28 surface).
 
 ### 4.6 Served links -- contained beneath their mount (VOTED 2026-10-05)
 
-**STATUS: DESIGNED** (scripture first; the kernel lands with the containment
-chunk). Operator vote 2026-10-05, "Contain beneath mount";
+**STATUS: AS-BUILT** (2026-10-06, aux-3 *(pending)*; the four refinements
+under "As built" below). Operator vote 2026-10-05, "Contain beneath mount";
 `dec-2026-10-05-served-link-containment`.
 
 **The gap.** Section 4.2 contains a link at the CALLER's root. That is the
@@ -343,6 +343,46 @@ relative target that has no `..` is re-anchored too, rather than spliced in
 place, so that every later restart -- a local link's `..` rebuild included --
 begins at the anchor and cannot fall back below it.
 
+**As built** (2026-10-06). The served test is a new NULL-permitted Dev slot,
+`remote(c)`, which dev9p fills with `dev9p_spoor_remote`; the resolver asks it
+of the link's own Spoor. Four refinements beyond the design above:
+
+- **The anchor is on the link's own session.** Besides answering remote, the
+  anchor must have the link's Dev instance and `devno` (one `devno` per dev9p
+  session), or the link is refused `T_E_ACCES`. A union member's root is found
+  again at the expansion (next item), and a namespace change between the walk
+  and the expansion could otherwise hand back a different mount, local or
+  remote.
+- **A union member's root is found again by name.** The member root never
+  stands on the trail: the union child does. The resolver records the child's
+  logical offset and, at the expansion, asks which member holds that name, with
+  the first-hit selection a remove uses (`stalk_union_member_holding`). The
+  union point is the trail entry below the child, or, for a child of a union
+  dirfd base, the point that base retains.
+- **A union-handle base anchors at its walkable form.** A base with no crossing
+  on its trail anchors at itself, and a base that is a union handle anchors at a
+  fresh clone of its own member's walkable form, without the union: a restart
+  from the handle would route the target's first component through the union's
+  other members. The no-crossing case arises once a `..` has taken the walk
+  back to the handle, which then walks its own member. A clone that fails is
+  `T_E_IO`, as a failed crossing is.
+- **The phenotype carries across the restart.** A restart re-derives the
+  phenotype from its base, and an anchor is a mount's root already crossed, so
+  the restarted walk never re-crosses the mount whose `MPHENO_LINUX` it carries.
+  The resolver records the accumulated phenotype with each crossing and seeds
+  the restart with the anchor's. Without it a relative served link in a
+  Linux-declared export would lose the phenotype the walk to it had.
+
+Validation: nine `stalk.served_*` kernel tests drive a fixture Dev whose
+`remote` answers per qid -- containment on the pounce and per-component paths,
+a union's members at both depths, a union-handle base at index 0 and after a
+`..`, a dirfd base, both refusals, the phenotype carry, lifetime on every exit,
+and a readlink hook that changes the namespace mid-walk (the same-session
+check, refused on the Dev alone and on the `devno` alone) or kills the
+anchor's clone -- and `tools/interactive/haul-links.exp`
+follows the links of a real npxf export through both Haul forms, with a guest
+decoy at every path a link names (red when dev9p's slot is removed).
+
 **Why the remote declaration, and not a new mount flag.** It already sits
 exactly where the threat is: Haul declares it in both forms, and any later
 off-machine transport has to. It is per session and travels with a /srv post,
@@ -383,6 +423,14 @@ dirfd). This rule is `RESOLVE_IN_ROOT` keyed by the mount's declaration.
   spelling without a link would climb out. Deliberate: the depth the caller's
   `..` climbs from was chosen by the server's target, so the remainder is
   contained as a whole.
+- Containment is the kernel resolver's. `readlink` returns the server's text
+  verbatim, so an archive or a copy keeps the link's meaning in the export. A
+  program that resolves that text itself, as musl's `realpath(3)` does with
+  its own readlink loop, gets the answer Linux would give: an absolute target
+  names a path from the caller's root. Rewriting the text at `readlink` was
+  rejected: it would bake one mount point into every copied link. Thylacine's
+  native tools do not re-resolve link text (`realpath` there is lexical), and
+  `lantern` resolves its deck path through the kernel.
 
 ---
 
