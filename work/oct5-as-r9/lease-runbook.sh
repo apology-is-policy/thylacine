@@ -72,21 +72,66 @@ if [ "${SPECS:-1}" = 1 ]; then
   # differently). Fetch SPEC-POLICY's pinned release, then PRINT the version,
   # because the whole point of pinning it is that the output format differs.
   JAR=/tmp/tla2tools.jar
-  [ -f "$JAR" ] || curl -sL -o "$JAR" \
-    https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-  java -cp "$JAR" tlc2.TLC 2>&1 | grep -m1 'TLC2 Version' || true
+  # FAIL LOUDLY IF THE TOOL IS ABSENT. First run of this stage printed "Unable to
+  # locate a Java Runtime" five times and CONTINUED, reporting no verdict at all
+  # -- a stage that cannot run must not look like a stage that passed. That is the
+  # gauge-reading-zero trap inside my own harness, and it would have let me report
+  # "specs re-run" on a run where TLC never started.
+  # /usr/bin/java on macOS is a STUB that reports "Unable to locate a Java
+  # Runtime" even when a JDK is installed -- brew's openjdk is not linked into
+  # /usr/libexec, so java_home does not see it either. Prefer the brew JDK
+  # explicitly; derive the path, never assume PATH has been fixed.
+  for cand in /opt/homebrew/opt/openjdk/bin/java \
+              /opt/homebrew/opt/openjdk@21/bin/java \
+              /opt/homebrew/opt/openjdk@17/bin/java; do
+    [ -x "$cand" ] && { JAVA="$cand"; break; }
+  done
+  JAVA="${JAVA:-java}"
+  echo "   java: $JAVA"
+  if ! "$JAVA" -version >/dev/null 2>&1; then
+    echo "   STAGE 0 BLOCKED: no working Java runtime (/usr/bin/java is the macOS"
+    echo "   stub; /usr/libexec/java_home reports none). TLC cannot run, so the"
+    echo "   burrow.tla + capacity.tla obligation is UNDISCHARGED -- not passed."
+    echo "   This needs no lease to fix; do it off-lease and re-run SPECS=1."
+    [ "${SPECS_MAY_BLOCK:-0}" = 1 ] || exit 3
+    echo "   SPECS_MAY_BLOCK=1 -- continuing to the guest stages with the spec"
+    echo "   obligation RECORDED AS OUTSTANDING. It is not satisfied."
+  else
+    # SSL_CERT_FILE: a stale one makes curl fail with (77). /tmp is wiped on reboot.
+    [ -f "$JAR" ] || SSL_CERT_FILE=/etc/ssl/cert.pem curl -sL -o "$JAR" \
+      https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+    # Print the version: a pinned tool whose version goes unprinted is not pinned,
+    # and ~/tla2tools.jar is a stale 2.19 that reports temporal violations WITHOUT
+    # the property name, which breaks every by-name verdict.
+    "$JAVA" -cp "$JAR" tlc2.TLC 2>&1 | grep -m1 'TLC2 Version' || true
+    SPECS_RAN=1
+  fi
 
   # CLEAN-cfg runs are SUSPENDED (SPEC-POLICY, since 2026-05-21). The binding
   # obligation is the BUGGY cfgs: each must STILL produce its counterexample.
   # A buggy cfg that now PASSES is a FINDING, not a convenience -- it means the
   # spec stopped constraining the thing it was written to catch, which is
   # exactly how a repair can silently void its own proof.
+  if [ "${SPECS_RAN:-0}" = 1 ]; then
   cd specs
   # burrow.tla -- I-7, the dual-refcount lifecycle whose {0,0} decision this
   # repair RELOCATED into the settled drops. Each must violate NoUseAfterFree.
   for c in burrow_buggy_free_on_close burrow_buggy_free_on_unmap burrow_buggy_never_free; do
     echo "-- $c (expect: NoUseAfterFree VIOLATED)"
-    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" burrow.tla 2>&1 | tail -4
+    # TLC EXITS 12 ON A VIOLATION -- the EXPECTED result here. Under `set -e`
+    # that aborted the stage silently after printing only the header, so capture
+    # with || true and judge by CONTENT.
+    out=$("$JAVA" -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" burrow.tla 2>&1 || true)
+    echo "$out" | grep -E 'is violated|states generated|Model checking completed' | head -3
+    # burrow's cfgs declare `INVARIANTS Invariants` -- ONE CONJUNCTION (TypeOk
+    # /\ RefcountConsistent /\ NoUseAfterFree) -- so TLC names the CONJUNCTION,
+    # never the member. Grepping for NoUseAfterFree FAILS A CORRECT RUN, which is
+    # what my first version did. Assert what TLC actually emits.
+    echo "$out" | grep -q 'Invariant Invariants is violated' \
+      || { echo "   FAIL: $c produced NO violation. A buggy cfg that no longer"; \
+           echo "   violates is a FINDING -- the spec stopped constraining what it"; \
+           echo "   was written to catch. Diagnose; do not retry."; exit 3; }
+    echo "   OK: violation reported"
   done
   # capacity.tla -- the I-32 charge accounting itself. detach_no_refund is
   # literally AS-R9's second arm: the holder that frees finds the record
@@ -96,9 +141,22 @@ if [ "${SPECS:-1}" = 1 ]; then
   # the counter is blind -- a different finding, not a pass.
   for c in capacity_buggy_detach_no_refund capacity_buggy_replace_orphans; do
     echo "-- $c (expect: NoOrphan VIOLATED, ChargeConserved HOLDING)"
-    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" capacity.tla 2>&1 | tail -6
+    out=$("$JAVA" -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" capacity.tla 2>&1 || true)
+    echo "$out" | grep -E 'is violated|states generated|Model checking completed' | head -3
+    # capacity's cfgs declare TypeOk, ChargeConserved and NoOrphan SEPARATELY, so
+    # TLC DOES name the specific one -- which is why SPEC-TO-CODE requires NoOrphan
+    # violated with ChargeConserved ahead of it and HOLDING. Both halves checkable.
+    echo "$out" | grep -q 'Invariant NoOrphan is violated' \
+      || { echo "   FAIL: $c did not violate NoOrphan. Diagnose; do not retry."; exit 3; }
+    if echo "$out" | grep -q 'Invariant ChargeConserved is violated'; then
+      echo "   FAIL: $c reported ChargeConserved instead. The model no longer says"
+      echo "   the counter is blind -- a DIFFERENT finding, not a pass. Diagnose."
+      exit 3
+    fi
+    echo "   OK: NoOrphan violated, ChargeConserved holding"
   done
   cd "$ROOT"
+  fi
 fi
 floor post-specs
 
