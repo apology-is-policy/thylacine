@@ -7480,6 +7480,21 @@ python3 "$REPO_ROOT/tools/check-flag-words.py" \
 # The free-space floor, before any target writes; `clean` frees space.
 [[ "$target" == clean ]] || disk_floor_check "target '$target'"
 
+# The memory-protection bits cross the syscall boundary as raw values, and each
+# userspace mirror pins its own literals rather than deriving them: a bit added
+# kernel-side without its mirror leaves the two sides silently disagreeing. This
+# tree has already had two branches' flag _Static_asserts each miss the other's
+# bit, which is why the check DERIVES both sides from the headers instead of
+# matching a name list -- a guard pinned to a name is re-pointed by hand and goes
+# stale; a derived one cannot. --expect-unmirrored pins today's deliberate
+# absences (the VMA_PROT_RW and VMA_PROT_RX composites in both mirrors, and
+# BURROW_PROT_EXEC in libthyla-rs) so a NEW absence fails instead of quietly
+# joining them. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-prot-mirror.py" --expect-unmirrored 5 \
+    || { echo "==> prot-mirror check FAILED -- a kernel prot bit and its" >&2
+         echo "    userspace mirror disagree, or a new kernel bit has no mirror" >&2
+         exit 1; }
+
 case "$target" in
     kernel)      build_kernel      ;;
     ramfs)       build_ramfs       ;;
