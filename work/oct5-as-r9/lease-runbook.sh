@@ -27,6 +27,8 @@ FLOOR_GB=${FLOOR_GB:-8}
 
 free_gb() { df -g . | awk 'NR==2 {print $4}'; }
 
+# Overridable only so the HEAD-equality refusal below has a testable arm.
+ASTRA_TREE=${ASTRA_TREE:-../thylacine-astra}
 PROV=work/oct5-as-r9/provenance.log
 # astra, 0169 t4 + 0161 t9: retain the exact source/config and PAIRED IMAGE
 # hashes with each result. A verdict without them cannot be attributed to a
@@ -239,8 +241,32 @@ else
   echo "   none -- no uncommitted usr/ or lib/ source in her tree"
 fi
 # And prove the only deltas are her dirty files: identical HEAD + her status.
-git -C ../thylacine-astra rev-parse HEAD > /tmp/astra-head.txt
-echo "   her HEAD: $(cat /tmp/astra-head.txt)  my base: $(git rev-parse 5ff62b788)"
+aHEAD=$(git -C "$ASTRA_TREE" rev-parse HEAD 2>/dev/null || echo unknown)
+myBASE=$(git rev-parse 5ff62b788)
+echo "   her HEAD: $aHEAD  my base: $myBASE"
+# ASSERTED, not merely printed -- the third time that distinction has caught
+# something here. The dirty-file invalidation above rests on a premise: that her
+# objects differ from mine ONLY by her uncommitted files. That premise is FALSE
+# the moment her HEAD moves off my base, because an object she compiled from a
+# commit I do not have never appears in her `status` output, so the invalidation
+# cannot see it and her unreviewed source rides into my image -- which is
+# exactly what makes a failure of mine unattributable. The printed pair sat here
+# for two runs with nothing comparing it.
+if [ "$aHEAD" != "$myBASE" ]; then
+  if [ "${ASTRA_HEAD_MOVED_OK:-0}" = 1 ]; then
+    echo "   her HEAD has MOVED off my base -- continuing on ASTRA_HEAD_MOVED_OK=1"
+  elif [ "$aHEAD" = unknown ]; then
+    echo "   REFUSING: could not read a HEAD from $ASTRA_TREE at all, so nothing"
+    echo "   below can claim her dirty files are the whole delta."
+    exit 4
+  else
+    echo "   REFUSING: her HEAD has MOVED off my base, so her dirty-file set is no"
+    echo "   longer the whole delta between our trees -- an object built from a"
+    echo "   commit I do not have is invisible to it. Coordinate with her, then"
+    echo "   set ASTRA_HEAD_MOVED_OK=1 if the cache is still safe to inherit."
+    exit 4
+  fi
+fi
 floor post-clone
 
 # Stage 2 -- MY kernel from MY source. The only thing the cache must not supply.
