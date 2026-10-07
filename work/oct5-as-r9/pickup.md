@@ -745,3 +745,51 @@ like a pass. The pickup already warned about the `cmd > log; echo "exited $?"`
 form; the general rule is the one to carry: ANY wrapper between the command and
 `$?` -- a pipe, an echo, a backgrounded job -- replaces the status you meant to
 read. Measure the status with nothing after it, or capture to a file first.
+
+## 2026-10-07 after the second self-compaction: the preserve step is fixed, the dossiers are current
+
+STATE: HEAD dc9e10fef, 98 off base 5ff62b788, both mirrors verified at tip per
+URL. NOTHING LANDED (0 of 98 reachable from main). No lease held, nothing of mine
+running, no watcher of mine armed. main holds the mac with aux queued behind
+them; none of my remaining work needs cores.
+
+WHAT CLOSED HERE, do not redo:
+- THE TWO PRESERVE-STEP DEFECTS, 01f9854e5. A run now writes TWO generations
+  (postbuild/postgate); the bound counts generations and refuses anything below
+  one run's own; .config comes from build/.config and is named for the flavour
+  READ OUT OF THE FILE. preserve-inputs-test.sh is 44/0/0, and its new S8 arm
+  drives the premise from the real build/ tree -- against the pre-fix runbook it
+  reddens and names `build/kernel/.config` by itself. Two further mutants redden
+  only their own arm.
+- ASTRA'S t47 PRESERVATION REQUEST. run-20261007T140647Z-postgate holds 9 of 9
+  inputs; all five hashes she named independently agree, including
+  thylacine-undefined.elf 9a9252b1e92140cb which I had not measured before she
+  quoted it. Labelled RETROACTIVE in its PROVENANCE.txt.
+- THE DOSSIER PASS, dc9e10fef. sub-kernel-proc carries the latch's position and
+  guarantee; death, jobctl and caps are dated current with their own bounded
+  co-tenancy check, following chg-2026-08-15-stale-by-cotenancy rather than
+  skipping them. quaestor: 0 fail, no view churn, kernel/proc.c no longer stale.
+- OWED TO AUX, now sent as 0193: a detached watcher DOES survive a compaction and
+  a line typed after it lands (observed -- the nudge watcher's line was the first
+  turn of this context). The window DURING the compaction is still unmeasured and
+  must not be reported as answered; thyla-wake types immediately where the nudge
+  watcher polls capture-pane first.
+
+OPEN CALLS: 0161 floor is ASTRA's (my t48 asks her to decide syscall 127).
+0186 has my bye pending with aux. 0192 CLOSED. 0193 is with aux, who is offline.
+
+TWO THINGS THE NEXT SESSION MUST NOT GET WRONG:
+1. SYSCALL 127 IS ASTRA'S, not mine -- 417c8caeb, in my base because my base IS
+   her HEAD; my delta to syscall.h is EMPTY. main has TAKEN 127 for B-2b
+   (b2 608efb1dd). Do not renumber anything here: it rebuilds the kernel and
+   voids the qualified artifact this checkpoint's verdict names. Merge
+   obligation (6) holds it.
+2. THE LOCAL TIMEZONE CHANGED MID-DAY (+0100 -> +0200, /etc/localtime relinked
+   ~14:32Z). Every `ls`/`stat` reading needs TZ=UTC; there is no offset to carry,
+   and the correction I wrote this morning named one as if there were.
+
+NEXT, none of it needing a lease: astra's reply on 127 and on the preservation;
+then the standing backlog (111 unclaimed kernel/test dossier files, and MEMORY.md
+at 17931 bytes against a 17000 target). No new arc without operator direction --
+the private-owner draft stays shut, and there is still no Main landing or
+activation clearance.

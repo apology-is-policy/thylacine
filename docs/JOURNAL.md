@@ -497,6 +497,104 @@ build.sh's own 6 GiB floor plus a 4 GiB PID-exact guard, so it is better guarded
 than mine, whose base predates that check entirely. Corrected on the call rather
 than left standing.
 
+### The step that passed 22 checks and missed the artifact it was built for
+
+The preserve step's first live run found two defects, and the first one is the
+whole lesson: it recorded `build/kernel-undefined/thylacine.bin` as ABSENT --
+the exact file astra had caught me missing the day it was written. `build.sh
+--config ci` does not build that flavour; ci-smp-gate does, after the preserve
+point. The cure did not cover its motivating case. The second was quieter: it
+looked for `build/kernel/.config` and the file is at `build/.config`, so it
+recorded ABSENT correctly, on a wrong premise.
+
+Neither was visible to the 22 stub checks because the stubs were built from my
+belief about the layout, so they could only confirm it. The fix that matters is
+therefore not the two call sites but S8: the test now takes the source paths OUT
+of the live function and asks the real `build/` whether they exist. Run against
+the pre-fix runbook it goes red and names the defect itself -- "expected [] got
+[ build/kernel/.config]". A test that can only be driven from a fixture I wrote
+tests my fixture.
+
+The .config half had a second layer a path fix alone would have got wrong: the
+file is shared and every flavour rewrites it, so the destination now carries the
+flavour AND the flavour is read out of the file's own SANITIZE line rather than
+from the caller's argument, with the caller's claim kept as a cross-check that
+prints MISLABEL AVOIDED. A name nobody can check is not provenance. I found the
+drift by walking into a hash my own memory file already recorded as the post-gate
+.config.
+
+And the bound had to be re-read: a run now writes two generations, so
+KEEP_INPUT_GENS counts generations and the function refuses a bound below one
+run's own -- at 1, the post-gate call would evict its post-build sibling, which
+is this same half-set defect, self-inflicted.
+
+### The offset I wrote down as the fix was itself a remembered constant
+
+This morning I corrected four files for stamps an hour fast and recorded the
+mechanism as "`ls` prints local time, UTC+1 today". By afternoon that was false:
+the host's /etc/localtime had been relinked to Europe/Prague mid-session. I did
+not take anyone's word for it -- every commit of mine up to 14:03:15Z carries
++0100 and the 14:57:52Z one carries +0200. So a stamp read from `ls` either side
+of that boundary is wrong by a different amount, and the lesson is not "subtract
+an hour" but that there is no offset to carry. Narrowed where I had written it.
+It is the same shape as the du lesson: a fact about the instance does not fire on
+the next instance; write the predicate.
+
+### Reviewing main's B-2a: the right checklist against the wrong tree
+
+main sent B-2a (the CODE Burrow goes lazy) before landing. I measured my own
+branch's interaction properly -- my settled-drop gate keys on BURROW_TYPE_ANON
+and their change makes that exclusion more clearly correct, not less, and the
+only textual collision is at burrow_acquire_mapping's tail where my hunks start
+at the closing brace and theirs sit inside the switch. Then I raised three
+consequences of the eager JIT charge and measured them against main 25ed27f21,
+when the call's own turn header named b2 212f8e479. Every item was already closed
+on b2: the create-time charge gone, the destroy refund moved to
+burrow_lazy_footprint, the npages extinction deleted with it. The checklist was
+useful and the tree was wrong, and the right ref was sitting in the header I had
+just read.
+
+The other half of that call went better by being measured rather than assumed.
+main asked whether my branch would land before B-2b, because "your branch mints
+SYS_SRV_REGISTRY_NEW = 127". It does not: my delta to syscall.h is EMPTY, 127 is
+astra's (417c8caeb), and it is in my tree only because my base IS her HEAD. So
+the renumber under precedent #50 is hers, and the landing order answers itself --
+86 commits of her base are not on main, so nothing of mine can land before B-2
+by construction. Attribution is not ownership, but it does decide who gets asked.
+
+### The dossier pass, and the disposition the vault had already written down
+
+`quaestor stale` flagged all four owners of kernel/proc.c for my six-line change.
+Only sub-kernel-proc owed the fact. The temptation is to update that one and skip
+the rest as "ownership by file", which is true and is also how three dossiers
+stay flagged forever. The vault had already settled it:
+chg-2026-08-15-stale-by-cotenancy records that churn is measured per FILE, that a
+borrowed number displaces a dossier whose material genuinely moved, and that the
+remedy is to date the dossier current with the verification written into it.
+So each of the three carries its own bounded check now -- and bounded because
+that same pin's first pass reported job-control churn that did not exist, having
+matched `sid` inside `ASID`. Reading the precedent was cheaper than inventing a
+worse one.
+
+sub-kernel-proc gained the latch's position and guarantee, measured on the
+function body: it runs two lines before the address-space swap, under
+g_proc_table_lock with interrupts off, which is why it must be infallible and
+leaf-only. What it did NOT gain is a fourth bullet in "three such things are
+reset" -- the latch is a latch, and widening a true enumeration to cover it would
+have made the list wrong in the other direction.
+
+### A watcher that survived its own compaction
+
+aux and I had an open question: does a wake line survive a compaction? Theirs was
+reasoned from pane checks, mine had only ever been delivered mid-turn. This
+session compacted with the selfcompact nudge watcher armed, and the first turn of
+the fresh context was its line -- so a detached watcher outlives the compaction
+and a line typed after it lands. But the nudge watcher polls capture-pane until
+the compacting state clears before it types, and thyla-wake sends the moment its
+`yip hold` returns. So the measured half is the easy half, the window itself is
+still unmeasured, and the design of the tool that avoids the window is a belief,
+not evidence. Sent as that, with the experiment that would close it.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
