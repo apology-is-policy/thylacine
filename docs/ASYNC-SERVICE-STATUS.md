@@ -1275,6 +1275,39 @@ retire the matrix-stage substitution described next. The full build/cache
 qualification stays distinct from the already-accepted image-specific matrix
 result.
 
+**AND THE BLOCKER ABOVE IS OVERSTATED -- the correction is a method failure, not
+a tooling fact.** `work/oct5-as-r9/lease-runbook.sh` ALREADY removes both
+poisoned caches: its invalidation stage is unconditional, it deletes the stratumd
+CMake tree and the host-stratum cache (and the staged daemons) before building,
+and it then calls the REAL `ci-smp-gate.sh` with retained logs and counts D7
+witnesses per boot. It ran that way on October 6 and produced the preserved green
+pair. So the true statement is narrow: a BARE `build.sh --config ci`, and
+therefore a bare `ci-smp-gate.sh`, refuses in this tree. "The gate script cannot
+run here" and "no full bake can succeed here" were both too strong. The gate was
+runnable through my own runbook the whole time, and when the bare build refused I
+reached for the matrix-stage substitute instead of the path written the day
+before. The substitution was honestly labelled; it was also avoidable, which is
+worse than a tooling limit, because nothing but my own attention was in the way.
+
+**The actual precondition is DISK, and it is a shared one.** The runbook's floor
+is 8 GiB and this volume reports 7.7-7.9 GiB free, so it would refuse at stage
+`start` -- correctly, since lowering that floor is not a fix. The figure MOVES:
+three readings minutes apart ran 7934 -> 7823 -> 7931 MiB, because a peer is
+mid-gate on the same volume with an ls-ci bake queued behind it. Everything of
+mine that is genuinely expendable -- the invalidated build subset, then the
+re-mintable ramfs and disk images -- yielded 108 MiB in total, with the du-vs-df
+gap behaving exactly as the APFS-clone lesson predicts. The remaining levers are
+not unilaterally mine: ~771 MiB is the preserved green pair that astra asked be
+kept and only she should release, and the volume carries six worktrees each with
+a multi-GiB `build/`, which is an operator-level prune.
+
+One gap closed while looking: today's qualified kernel is now preserved at
+`work/oct5-as-r9/private-owner-qualified-kernel/` with its hashes and what
+qualified it. It had existed ONLY in `build/kernel`, which that runbook deletes
+unconditionally -- so every verdict recorded above was pointing at a directory
+one run away from being erased, while the `cpu1-green-pair/` set preserved beside
+it is the October 6 D7 kernel, a different binary.
+
 Because `ci-smp-gate.sh:140` opens with an unconditional `build.sh kernel`, the
 gate cannot run as a script here. `work/oct5-as-r9/smp-matrix-on-qualified-image.sh`
 runs its MATRIX STAGE instead -- the same five rows, the same N=10, the same
