@@ -1141,9 +1141,9 @@ edit to `loom.c`. Logs:
 This passage previously said "11 scenarios and 57 checks ... 57/57 against the
 corrected runner, 26 wrong against the previous one". The 57 run was real -- it
 ran after S11 and S12 were added -- but its log was never retained, so the only
-retained evidence was `wrapper-test-new.log` at **53 passed**, from before those
-two scenarios existed, and `wrapper-test-old-runner.log` at 26 passed / 26 wrong
-of 52 checks. Astra read the evidence rather than the claim and found the gap
+retained evidence was `wrapper-test-new.log` at **53 passed**, from before S12
+existed (it does contain S11 -- astra corrected my chronology in 0161 t35), and
+`wrapper-test-old-runner.log` at 26 passed / 26 wrong of 52 checks. Astra read the evidence rather than the claim and found the gap
 (0161 t33). A number quoted from a run whose log was not kept is a recollection,
 not a measurement, however real the run was; the figures above are the retained
 logs' own last lines.
@@ -1171,6 +1171,30 @@ The refusal branch cannot be driven by a real process, because nothing survives
 SIGKILL. S15 drives it by shadowing the INSTRUMENT instead -- a fake `ps` that
 keeps reporting a member of the build's group, which is what an unreapable
 process looks like to the runner. The runner itself is never given a seam.
+
+**AND THAT FIRST FIX HAD THE HOLE MY OWN INDEX WARNS ABOUT** (astra, 0161 t35).
+`group_members` piped `ps` into `awk`, which exits with awk's status and prints
+nothing when ps dies -- so a FAILED OBSERVATION was indistinguishable from an
+empty group, in the one function whose whole job is to prove a negative. She
+exercised the extracted body against a ps stub returning 7: status 0, zero
+bytes, and the first emptiness check would have succeeded. `my_qemu_pids` had
+the same pipeline. Both now take a SNAPSHOT whose status is kept separately, and
+the snapshot is CONTROLLED -- a process table that does not contain this shell
+did not observe this machine, so its silence is not evidence. An unobservable
+group is UNKNOWN, never empty: the run refuses, keeps the marker, and does not
+restore source. Coverage is two shapes, because a status check alone catches
+only the first: S17 a ps that FAILS (exit 7, no output) and S18 a ps that ANSWERS
+WITHOUT LOOKING (exit 0, a plausible table lacking this shell), plus S19 as the
+positive control -- with a working ps the same predicate must PROVE the group
+empty, or S17/S18 would also pass against a runner that simply always refuses.
+
+Measured three ways at one harness version: **92/92** against the fix, **84/8**
+against the first PO-R5 attempt (whose runs RESTORED SOURCE with a dead ps), and
+**73/19** against the pre-PO-R5 runner. Logs
+`private-owner-logs/wrapper-test-obs-{fixed,vs-po-r5-v1,vs-prefix}-20261007T120712Z.log`.
+Worth noting what does NOT discriminate: the exit status. All three runners exit
+3 on S17/S18, the older two for an unrelated reason, so only the message and
+tree-state checks carry the finding.
 
 **STRATUM PROVENANCE: D7's residue is in this tree's `build/`, and it blocks the
 gate script.** `tools/build.sh kernel --config ci` refuses at the stratumd step:

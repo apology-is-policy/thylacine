@@ -181,6 +181,30 @@ run_runner() { # run_runner <tree> -> status in RC, output in $tree/run.out
 
 alive() { kill -0 "$1" 2>/dev/null && echo alive || echo dead; }
 
+# A ps that FAILS, and a ps that LIES. Observation failure is the half that a
+# pipeline hides: `ps | awk` exits with awk's status, so a dead ps prints
+# nothing and reads as an empty group.
+break_ps() { # break_ps <tree> <fail|liar>
+  mkdir -p "$1/fakebin"
+  if [ "$2" = fail ]; then
+    cat > "$1/fakebin/ps" <<'FPS'
+#!/bin/sh
+# dies with no output on stdout, exactly like a ps that cannot run
+echo "ps: cannot read process table" >&2
+exit 7
+FPS
+  else
+    cat > "$1/fakebin/ps" <<'FPS'
+#!/bin/sh
+# exits 0 with a plausible-looking table that does NOT contain the caller: the
+# instrument answered, but it did not observe this machine
+printf '11111 11111\n22222 22222\n'
+exit 0
+FPS
+  fi
+  chmod 755 "$1/fakebin/ps"
+}
+
 fake_ps() { # fake_ps <tree> -- passes real ps through, plus one synthetic member
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/ps" <<'FPS'
@@ -455,6 +479,46 @@ check_has "S16 catches the moved HEAD" "$T/run.out" "HEAD MOVED during the run"
 check "S16 marker KEPT although the suite was green" "$([ -f "$T/build/MUTANT-UNQUALIFIED" ] && echo present || echo absent)" present
 check_has "S16 marker says why it was kept" "$T/build/MUTANT-UNQUALIFIED" "not attributable"
 check "S16 exit status is not success" "$([ "$RC" -ne 0 ] && echo nonzero || echo zero)" nonzero
+
+# ---- S17/S18 observation failure is UNKNOWN, not "empty" (astra, PO-R5 t35)
+# The hole these close: group_members piped ps into awk, so a ps that died with
+# no output satisfied the emptiness check and quiescence was "proven" by a gauge
+# that never started. Two shapes -- the instrument FAILING and the instrument
+# ANSWERING WITHOUT HAVING LOOKED -- because only the second is caught by a
+# status check alone.
+for shape in fail liar; do
+  printf '\n-- S1%s ps %s: quiescence is UNKNOWN and the run must fail closed\n' \
+    "$([ "$shape" = fail ] && echo 7 || echo 8)" \
+    "$([ "$shape" = fail ] && echo 'exits 7 with no output' || echo 'exits 0 with a table lacking this shell')"
+  n=$([ "$shape" = fail ] && echo S17 || echo S18)
+  T=$(new_tree "s_$shape")
+  break_ps "$T" "$shape"
+  cat > "$T/stub-plan" <<'P'
+SUITE_1_MODE=red1; SUITE_1_RC=1
+P
+  QUIESCE_GRACE=2 QUIESCE_KILL_GRACE=2 run_runner "$T"
+  check "$n refuses" "$RC" 3
+  check_has "$n names the observation failure" "$T/run.out" "CANNOT OBSERVE PROCESSES"
+  check_lacks "$n does not claim the group was empty" "$T/run.out" "source restored and verified"
+  check "$n leaves the mutant rather than restoring on an unproven quiescence" "$(src_intact "$T")" no
+  check "$n marker present" "$([ -f "$T/build/MUTANT-UNQUALIFIED" ] && echo present || echo absent)" present
+  check_has "$n marker records the unproven quiescence" "$T/build/MUTANT-UNQUALIFIED" "quiesced      : 0"
+done
+
+# The positive control for the pair above: the SAME predicate, with a working ps,
+# must prove an empty group -- otherwise S17/S18 would pass against a runner that
+# simply always refuses.
+printf '\n-- S19 positive control: with a working ps the same predicate PROVES the group empty\n'
+T=$(new_tree s19)
+cat > "$T/stub-plan" <<'P'
+SUITE_1_MODE=red1; SUITE_1_RC=1
+SUITE_2_MODE=red2; SUITE_2_RC=1
+SUITE_3_MODE=green; SUITE_3_RC=0
+P
+run_runner "$T"
+check "S19 the run completes" "$RC" 0
+check_lacks "S19 no observation failure on a healthy host" "$T/run.out" "CANNOT OBSERVE PROCESSES"
+check_has "S19 and it did restore and verify" "$T/run.out" "source restored and verified"
 
 printf '\n== %s passed, %s wrong (scratch kept at %s)\n' "$PASS" "$FAIL" "$WORK"
 [ "$FAIL" -eq 0 ] || exit 1

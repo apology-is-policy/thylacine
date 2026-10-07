@@ -457,7 +457,8 @@ main is queue head behind me and I release the moment the matrix ends.
    CORRECTION, and keep it: an earlier version of this line said "57-check,
    11-scenario ... 57/57 vs 26 WRONG". The 57 run was real but its log was never
    retained, so the retained `wrapper-test-new.log` read 53 and astra caught the
-   mismatch (0161 t33). Quote retained logs, not runs.
+   mismatch (0161 t33). Quote retained logs, not runs. That 53 log contains S11
+   but not S12 (astra, t35), so "before S11 and S12" was also wrong.
 5. **The parser was rewritten** after the first real run refused: a verdict is a
    STATE in the log, not a line. `test.c` prints the name before running the
    test, `sched_dump_runnable()` lands between name and verdict, 87 of 1836

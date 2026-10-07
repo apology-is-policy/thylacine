@@ -114,11 +114,27 @@ run_owned() { # run_owned <logfile> <cmd> [args...]
   fi
 }
 
-# Members of one process group, by pgid. Ancestry cannot be used: a grandchild
-# is reparented to init the moment its parent exits, which is exactly the case
-# that matters.
-group_members() { # group_members <pgid>
-  ps -Ao pid=,pgid= 2>/dev/null | awk -v g="$1" '$2 == g { print $1 }'
+# OBSERVATION IS AN ACT THAT CAN FAIL, and a pipeline hides that: `ps | awk`
+# exits with awk's status and prints nothing when ps dies, so a failed
+# observation is indistinguishable from an empty group -- the gauge that reads
+# zero because it never started, asked here about the one thing this script must
+# prove a negative about. So the snapshot is taken first, its status kept, and
+# it is CONTROLLED: a process table that does not contain THIS shell did not
+# observe this machine, and its silence is not evidence. An unobservable group
+# is UNKNOWN, never empty.
+PS_SNAP=
+snap_pids() { # 0 = PS_SNAP is trustworthy; nonzero = we cannot see the machine
+  PS_SNAP=$(ps -Ao pid=,pgid= 2>/dev/null) || return 1
+  [ -n "$PS_SNAP" ] || return 1
+  printf '%s\n' "$PS_SNAP" | awk -v me="$$" '$1 == me { f = 1 } END { exit f ? 0 : 1 }' || return 1
+  return 0
+}
+
+# Members of one process group, read from the VALIDATED snapshot. Ancestry
+# cannot be used: a grandchild is reparented to init the moment its parent
+# exits, which is exactly the case that matters.
+group_members() { # group_members <pgid> -- requires a successful snap_pids
+  printf '%s\n' "$PS_SNAP" | awk -v g="$1" '$2 == g { print $1 }'
 }
 
 # Stop one owned group and PROVE it empty. Returns nonzero when it cannot be
@@ -129,28 +145,47 @@ group_members() { # group_members <pgid>
 # setting can turn an unproven quiescence into a pass.
 QUIESCE_GRACE=${QUIESCE_GRACE:-30}
 QUIESCE_KILL_GRACE=${QUIESCE_KILL_GRACE:-10}
-quiesce_group() { # quiesce_group <pgid>
+quiesce_group() { # quiesce_group <pgid> -> 0 PROVEN empty, nonzero NOT PROVEN
   g=$1
   [ -n "$g" ] || return 0
+  snap_pids || { echo "CANNOT OBSERVE PROCESSES (ps failed, or its table does not contain this shell $$) -- quiescence UNKNOWN for group $g"; return 1; }
   [ -n "$(group_members "$g")" ] || return 0
   echo "group $g still has members ($(group_members "$g" | tr '\n' ' ')); stopping it"
   kill -TERM -"$g" 2>/dev/null
   i=0
-  while [ -n "$(group_members "$g")" ] && [ "$i" -lt "$QUIESCE_GRACE" ]; do sleep 1; i=$((i + 1)); done
+  while [ "$i" -lt "$QUIESCE_GRACE" ]; do
+    snap_pids || { echo "CANNOT OBSERVE PROCESSES while waiting on group $g -- quiescence UNKNOWN"; return 1; }
+    [ -n "$(group_members "$g")" ] || break
+    sleep 1; i=$((i + 1))
+  done
+  snap_pids || { echo "CANNOT OBSERVE PROCESSES after the TERM grace -- quiescence UNKNOWN for group $g"; return 1; }
   if [ -n "$(group_members "$g")" ]; then
     echo "group $g ignored TERM; sending KILL"
     kill -KILL -"$g" 2>/dev/null
     i=0
-    while [ -n "$(group_members "$g")" ] && [ "$i" -lt "$QUIESCE_KILL_GRACE" ]; do sleep 1; i=$((i + 1)); done
+    while [ "$i" -lt "$QUIESCE_KILL_GRACE" ]; do
+      snap_pids || { echo "CANNOT OBSERVE PROCESSES after KILL -- quiescence UNKNOWN for group $g"; return 1; }
+      [ -n "$(group_members "$g")" ] || break
+      sleep 1; i=$((i + 1))
+    done
   fi
+  snap_pids || { echo "CANNOT OBSERVE PROCESSES at the final check -- quiescence UNKNOWN for group $g"; return 1; }
   [ -z "$(group_members "$g")" ]
 }
 
 # QEMUs belonging to THIS tree only, identified by this ROOT's build/ path in
 # the command line. A peer's guest boots a different tree and is never matched,
 # never signalled, never waited on.
-my_qemu_pids() {
-  ps -Ao pid=,comm=,command= 2>/dev/null \
+QEMU_SNAP=
+snap_qemu() { # 0 = QEMU_SNAP is trustworthy; nonzero = we cannot see the machine
+  QEMU_SNAP=$(ps -Ao pid=,comm=,command= 2>/dev/null) || return 1
+  [ -n "$QEMU_SNAP" ] || return 1
+  printf '%s\n' "$QEMU_SNAP" | awk -v me="$$" '$1 == me { f = 1 } END { exit f ? 0 : 1 }' || return 1
+  return 0
+}
+
+my_qemu_pids() { # requires a successful snap_qemu
+  printf '%s\n' "$QEMU_SNAP" \
     | awk -v r="$ROOT/build" '$2 ~ /qemu-system-aarch64$/ && index($0, r) { print $1 }'
 }
 
@@ -172,19 +207,33 @@ reap_owned() {
     quiesce_group "$g" || { QUIESCED=0; echo "*** group $g NOT PROVEN EMPTY: $(group_members "$g" | tr '\n' ' ')"; }
   done
 
-  pids=$(my_qemu_pids)
+  if ! snap_qemu; then
+    QUIESCED=0
+    echo "*** CANNOT OBSERVE PROCESSES -- whether this tree still has a QEMU up is UNKNOWN, which is not the same as no"
+    pids=
+  else
+    pids=$(my_qemu_pids)
+  fi
   if [ -n "$pids" ]; then
     echo "this tree's QEMU still up ($(printf '%s' "$pids" | tr '\n' ' ')); stopping it before restoring source"
     for q in $pids; do kill -TERM "$q" 2>/dev/null; done
     i=0
-    while [ -n "$(my_qemu_pids)" ] && [ "$i" -lt 60 ]; do sleep 1; i=$((i + 1)); done
+    while [ "$i" -lt 60 ]; do
+      snap_qemu || { QUIESCED=0; echo "*** CANNOT OBSERVE PROCESSES while waiting on QEMU -- UNKNOWN"; break; }
+      [ -n "$(my_qemu_pids)" ] || break
+      sleep 1; i=$((i + 1))
+    done
+    snap_qemu || { QUIESCED=0; echo "*** CANNOT OBSERVE PROCESSES after the QEMU TERM grace -- UNKNOWN"; }
     rest=$(my_qemu_pids)
     if [ -n "$rest" ]; then
       for q in $rest; do kill -KILL "$q" 2>/dev/null; done
       sleep 1
     fi
   fi
-  if [ -n "$(my_qemu_pids)" ]; then
+  if ! snap_qemu; then
+    QUIESCED=0
+    echo "*** CANNOT OBSERVE PROCESSES at the final QEMU check -- UNKNOWN, so quiescence is not proven"
+  elif [ -n "$(my_qemu_pids)" ]; then
     QUIESCED=0
     echo "*** this tree still has a QEMU up after KILL ($(my_qemu_pids | tr '\n' ' '))"
   fi
