@@ -7,14 +7,14 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    0e3a06c6178834852fa8a21f62322e5432e2c5e6  (the commit this manifest was GENERATED AGAINST; the
+- tip:    aa2fa27aa759ad94f37daccecd9980b465b9bb70  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 83
+- commits in range: 85
 - codeberg.org: branch pushed and at this tip
-- codeberg.org: main at cb7194c10ad6; nothing of this branch is landed there
+- codeberg.org: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 85 in range reachable from main)
 - github.com: branch pushed and at this tip
-- github.com: main at cb7194c10ad6; nothing of this branch is landed there
+- github.com: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 85 in range reachable from main)
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
 
@@ -38,7 +38,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..0e3a06c6178834852fa8a21f62322e5432e2c5e6 -- .claude/
+    $ git log --oneline 5ff62b788..aa2fa27aa759ad94f37daccecd9980b465b9bb70 -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -86,7 +86,7 @@ regions is hers to resolve in her tree, and I have not pre-empted it.
     vault dossiers                 : 10 file(s)
     docs                           : 4 file(s)
     specs                          : 0 file(s)
-    work/ evidence + runbooks      : 116 file(s)
+    work/ evidence + runbooks      : 118 file(s)
 
 The tools/ files are a shared surface main and aux also bake from. The one
 behavioural change there is smp-multiboot.sh's SMP_KEEP_LOGS retention, which is
@@ -122,6 +122,30 @@ run. Recovered from git and moved here, where no script rewrites them.
 Add obligations HERE. Each one names what must be done at merge, against which
 of main's commits, and how it was verified -- never "see the call", because a
 call transcript is not in the delivery.
+
+## STATUS 2026-10-07 ~14:3xZ: ALL FOUR NOW TARGET CODE ON MAIN
+
+main moved from cb7194c10 to **25ed27f21** (18 commits) while this branch sat.
+Every commit the obligations below are written against is now an ancestor of
+main, tested one by one with `git merge-base --is-ancestor` rather than read off
+a log:
+
+    ON MAIN  f6f4c0397  loom-mc                      -> obligation (1)
+    ON MAIN  cb7194c10  tag pool: land               -> obligation (2)
+    ON MAIN  d8b177156  loomwb r1 close (the loom.h contract text) -> obligation (3)
+    ON MAIN  ef64e4b3a  loomwb r2 close              -> obligation (3)
+    ON MAIN  25ed27f21  exit close: land             -> obligation (4)
+
+So obligations (3) and (4), recorded when they were still main's side branches,
+are no longer anticipating anything: they are reconciliation work against
+main's own history. NOTHING IS APPLIED and main is NOT merged -- that constraint
+stands, and the loom.h contract text below is still taken AT MERGE, not now.
+Obligation (4)'s anchor report was measured against the exit-close BRANCH; the
+landed commit may differ from what was reviewed there, so re-measure the anchors
+against 25ed27f21 at merge rather than inherit the branch's numbers.
+
+VERIFIED SEPARATELY, because "main moved" and "something of mine landed" are
+different claims: 0 of this branch's 85 commits are reachable from main.
 
 - MERGE-TIME OBLIGATIONS against main, which this base cannot carry: (1) merging
   main f6f4c0397 (loom-mc) requires `loom_drive_moved_locked(l);` before the

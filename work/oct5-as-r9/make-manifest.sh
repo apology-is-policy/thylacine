@@ -57,7 +57,28 @@ for _u in $(git remote get-url --push --all origin 2>/dev/null); do
     printf -- '- %s: branch pushed at %s, NOT this tip\n' "$_host" "$(printf '%s' "$_r" | cut -c1-12)"
   fi
   _m=$(SSL_CERT_FILE=/etc/ssl/cert.pem git ls-remote "$_u" refs/heads/main 2>/dev/null | cut -f1)
-  printf -- '- %s: main at %s; nothing of this branch is landed there\n' "$_host" "$(printf '%s' "${_m:-NOT CHECKED}" | cut -c1-12)"
+  # "NOTHING OF MINE IS LANDED" IS MEASURED, NOT ASSERTED. This line used to
+  # print that sentence unconditionally, beside a main tip that WAS derived --
+  # so the delivery's most load-bearing claim would have read exactly the same
+  # if a commit of mine had landed. It is the same stale-assertion class as the
+  # push-state line above, and in the more dangerous place.
+  # The object must be present locally to answer at all: ls-remote yields a SHA,
+  # not a commit. An unfetched main is NOT CHECKED, never the safer-sounding no.
+  _tot=$(git rev-list --count "$BASE".."$TIP")
+  if [ -z "$_m" ]; then
+    _landed="landed-state NOT CHECKED (no ls-remote answer for main)"
+  elif ! git cat-file -e "${_m}^{commit}" 2>/dev/null; then
+    _landed="landed-state NOT CHECKED locally -- main object absent here; \
+run: git fetch $_u refs/heads/main"
+  else
+    _un=$(git rev-list --count "$BASE".."$TIP" --not "$_m")
+    if [ "$_un" = "$_tot" ]; then
+      _landed="nothing of this branch is landed there (measured: 0 of $_tot in range reachable from main)"
+    else
+      _landed="WARNING -- $(( _tot - _un )) of $_tot commit(s) in range ARE reachable from main; the delivery is NOT unlanded"
+    fi
+  fi
+  printf -- '- %s: main at %s; %s\n' "$_host" "$(printf '%s' "${_m:-NOT CHECKED}" | cut -c1-12)" "$_landed"
 done
 printf -- '\n'
 printf '## EXCLUDED FROM DELIVERY -- local configuration, not implementation\n\n'

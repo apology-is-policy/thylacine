@@ -11,6 +11,30 @@ Add obligations HERE. Each one names what must be done at merge, against which
 of main's commits, and how it was verified -- never "see the call", because a
 call transcript is not in the delivery.
 
+## STATUS 2026-10-07 ~14:3xZ: ALL FOUR NOW TARGET CODE ON MAIN
+
+main moved from cb7194c10 to **25ed27f21** (18 commits) while this branch sat.
+Every commit the obligations below are written against is now an ancestor of
+main, tested one by one with `git merge-base --is-ancestor` rather than read off
+a log:
+
+    ON MAIN  f6f4c0397  loom-mc                      -> obligation (1)
+    ON MAIN  cb7194c10  tag pool: land               -> obligation (2)
+    ON MAIN  d8b177156  loomwb r1 close (the loom.h contract text) -> obligation (3)
+    ON MAIN  ef64e4b3a  loomwb r2 close              -> obligation (3)
+    ON MAIN  25ed27f21  exit close: land             -> obligation (4)
+
+So obligations (3) and (4), recorded when they were still main's side branches,
+are no longer anticipating anything: they are reconciliation work against
+main's own history. NOTHING IS APPLIED and main is NOT merged -- that constraint
+stands, and the loom.h contract text below is still taken AT MERGE, not now.
+Obligation (4)'s anchor report was measured against the exit-close BRANCH; the
+landed commit may differ from what was reviewed there, so re-measure the anchors
+against 25ed27f21 at merge rather than inherit the branch's numbers.
+
+VERIFIED SEPARATELY, because "main moved" and "something of mine landed" are
+different claims: 0 of this branch's 85 commits are reachable from main.
+
 - MERGE-TIME OBLIGATIONS against main, which this base cannot carry: (1) merging
   main f6f4c0397 (loom-mc) requires `loom_drive_moved_locked(l);` before the
   spin_unlock in loom_post_pool_cqe; (2) main's tag-pool changes loom.c's CQ pump
