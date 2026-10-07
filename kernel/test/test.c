@@ -945,6 +945,9 @@ void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_maps_code_visible(void);     // B-2b audit F2
+void test_devproc_maps_code_redacted(void);    // B-2b audit F2
+void test_devproc_maps_code_truncated(void);   // B-2b audit F2
 void test_devproc_environ(void);               // VIVARIUM V-4b-6
 void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_rejects(void);
@@ -3142,6 +3145,9 @@ struct test_case g_tests[] = {
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },
+    { "devproc.maps_code_visible",    test_devproc_maps_code_visible,     false, NULL },
+    { "devproc.maps_code_redacted",   test_devproc_maps_code_redacted,    false, NULL },
+    { "devproc.maps_code_truncated",  test_devproc_maps_code_truncated,   false, NULL },
     { "devproc.environ",              test_devproc_environ,               false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
     { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },

@@ -991,36 +991,63 @@ void test_jit_xonly_promoted_off_code(void) {
     jit_drop_proc(p);
 }
 
-// The fill's failure path refunds exactly what the fill charged. The budget is
-// narrowed to one page and its slot-table nodes -- measured from a one-page
-// sealed region, not assumed -- so a two-page create is refused at its second
-// page with the first page and the nodes already charged, and the count, the
-// pool and the address space must all come back to where they were.
+// The fill's failure path refunds exactly what the fill charged: its committed
+// pages AND the slot table's nodes. A region of PAGEMAP_INLINE_MAX pages or fewer
+// keeps its slots in an uncharged inline leaf, so the region here is one slot
+// past that -- the size at which a node is charged at all. The budget is then
+// narrowed to one page plus those nodes (measured, not assumed), so the create
+// is refused at its second page with both kinds already charged, and the count,
+// the pool and the address space must all come back to where they were.
 void test_jit_sealed_fill_failure_refunds(void) {
-    sealed_src_fill();
+    const u64 pages = (u64)PAGEMAP_INLINE_MAX + 1u;
+    const u64 len   = pages * ONE_PAGE;
+    const unsigned order = 6;                   // 64 pages: room for the source
+    TEST_ASSERT(pages <= (1ull << order) && len <= JIT_SEALED_MAX,
+        "the source block and the sealed bound both cover the region");
+    struct page *srcpg = alloc_pages(order, KP_ZERO);
+    TEST_ASSERT(srcpg != NULL, "alloc the source block");
+    const u8 *src = (const u8 *)pa_to_kva(page_to_pa(srcpg));
+
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
-    TEST_ASSERT(p != NULL, "proc_alloc failed");
-    p->principal_id = 1000u;                    // a user: the budget binds
-    TEST_ASSERT(!proc_resource_exempt(p), "a non-exempt Proc");
-    u32 c0    = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
-    u32 pool0 = jit_pool(p);
+    bool premise = p != NULL;
+    u32 c0 = 0, pool0 = 0, fp = 0, footprint = 0, after_destroy = 0;
+    s64 rc1 = -1, rc2 = 0, rcd = -1;
+    u64 xva = 0, xva2 = 0;
+    u32 c_end = 0, pool_end = 0;
+    bool unmapped = false;
+    if (premise) {
+        p->principal_id = 1000u;                // a user: the budget binds
+        premise = !proc_resource_exempt(p);
+    }
+    if (premise) {
+        c0    = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
+        pool0 = jit_pool(p);
+        rc1 = sys_jit_create_sealed_region(p, src, 0, len, &xva);
+        struct Vma *v = rc1 == 0 ? vma_lookup(p, xva) : NULL;
+        fp = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) - c0;
+        footprint = v ? burrow_lazy_footprint(v->burrow) : 0;
+        rcd = rc1 == 0 ? sys_jit_destroy_for_proc(p, xva) : -1;
+        after_destroy = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
 
-    u64 xva = 0;
-    TEST_EXPECT_EQ(sys_jit_create_sealed_region(p, g_sealed_src, 0, 12, &xva), 0,
-        "a one-page sealed region");
-    u32 fp1 = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) - c0;
-    TEST_ASSERT(fp1 >= 2u, "it charged its page and at least one slot-table node");
-    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, xva), 0, "destroyed");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), c0, "and refunded");
-
-    __atomic_store_n(&p->as->page_budget, c0 + fp1, __ATOMIC_RELEASE);
-    xva = 0;
-    TEST_EXPECT_EQ(sys_jit_create_sealed_region(p, g_sealed_src, 0, sizeof g_sealed_src, &xva),
-        -T_E_NOMEM, "a two-page sealed region is refused at its second page");
-    TEST_EXPECT_EQ(xva, 0ull, "and returns no VA");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), c0,
-        "the first page and the nodes are refunded");
-    TEST_EXPECT_EQ(jit_pool(p), pool0, "and given back to the pool");
-    TEST_ASSERT(p->as->vmas == NULL, "and nothing is mapped");
+        __atomic_store_n(&p->as->page_budget, c0 + 1u + (fp - (u32)pages), __ATOMIC_RELEASE);
+        rc2 = sys_jit_create_sealed_region(p, src, 0, len, &xva2);
+        c_end    = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
+        pool_end = jit_pool(p);
+        unmapped = p->as->vmas == NULL;
+    }
+    // Released before any assert can return, so a failing assert strands nothing.
+    free_pages(srcpg, order);
     jit_drop_proc(p);
+
+    TEST_ASSERT(premise, "a non-exempt Proc with CAP_JIT");
+    TEST_EXPECT_EQ(rc1, 0, "a sealed region one slot past the inline leaf");
+    TEST_EXPECT_EQ(fp, footprint, "the create charged exactly its footprint");
+    TEST_ASSERT(fp > (u32)pages, "and the footprint holds a slot-table node beyond its pages");
+    TEST_EXPECT_EQ(rcd, 0, "destroyed");
+    TEST_EXPECT_EQ(after_destroy, c0, "and refunded");
+    TEST_EXPECT_EQ(rc2, -T_E_NOMEM, "with room for one page and the nodes, the create is refused");
+    TEST_EXPECT_EQ(xva2, 0ull, "and returns no VA");
+    TEST_EXPECT_EQ(c_end, c0, "the first page and the nodes are refunded");
+    TEST_EXPECT_EQ(pool_end, pool0, "and given back to the pool");
+    TEST_ASSERT(unmapped, "and nothing is mapped");
 }

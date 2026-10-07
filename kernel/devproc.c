@@ -518,13 +518,20 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //
 // Posture: 0444 and all-pids-visible for an UNSEALED Proc (devproc.perm_enforced
 // == false, Plan 9), refused for a dump-SEALED one (devproc_kind_is_image). The
-// ambient half is sound TODAY because Thylacine has no USER-space ASLR: every VA
-// here is either an exec.h constant or an ELF link address, so the layout is not a
-// secret. None of these are kernel VAs, so I-16 (the KASLR slide) is not
-// engaged -- unlike /proc/<pid>/kstack, which had to gate its raw addresses for
-// exactly that reason (8b-1d F1). FORWARD OBLIGATION: if user ASLR ever lands,
-// this posture must be revisited in the same chunk -- maps would then leak the
-// randomized layout, which is the whole point of the mitigation.
+// ambient half is sound only while the layout is not a secret: every VA here is an
+// exec.h constant, an ELF link address or a first-fit placement -- EXCEPT a code
+// alias's. B-2b places every alias of a code region (writer, exec, sealed) at its
+// own random address (jit_place_locked), so the writer's address is a secret, and
+// a code row's addresses go only to a reader that may see them
+// (devproc_maps_code_visible_locked: the target itself, or debug authority over it,
+// I-39). Any other reader gets each code row with both addresses and the offset as
+// 0x0 and the role "-" -- a function of its prot and share flag alone -- after every
+// other row, ordered by that class and never by address: a zeroed row left in
+// address order would still say which mappings its alias lies between, and which
+// alias of a region is the lower. None of these are kernel VAs, so I-16 (the KASLR
+// slide) is not engaged -- unlike /proc/<pid>/kstack, which had to gate its raw
+// addresses for exactly that reason (8b-1d F1). A NEW source of randomness in a
+// user layout must be weighed here in the same chunk: maps would leak it.
 static const char *maps_type_name(const struct Vma *v) {
     if (!v->burrow) return "none";           // guard VMA -- no backing object
     switch (v->burrow->type) {
@@ -553,16 +560,106 @@ static const char *maps_role_name(const struct Vma *v) {
     return "-";
 }
 
-static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
+// One row, committed to *off only once it wholly fits (the format_sched idiom).
+// `file` is the FILE Burrow whose identity fills the file column, or NULL for "-".
+static bool maps_put_row(char *buf, size_t cap, size_t *off, u64 start, u64 end,
+                         const char *perms, u64 boff, const char *type,
+                         const struct Burrow *file, const char *role) {
+    size_t row = *off, n;
+    n = fmt_hex(buf, cap, row, start);                    if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, "-");                      if (!n) return false; row += n;
+    n = fmt_hex(buf, cap, row, end);                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, perms);                    if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_hex(buf, cap, row, boff);                     if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, type);                     if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    if (file) {
+        n = fmt_hex(buf, cap, row, (u64)file->file_devno); if (!n) return false; row += n;
+        n = fmt_str(buf, cap, row, ":");                   if (!n) return false; row += n;
+        n = fmt_hex(buf, cap, row, file->file_qid_path);   if (!n) return false; row += n;
+    } else {
+        n = fmt_str(buf, cap, row, "-");                   if (!n) return false; row += n;
+    }
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, role);                     if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, "\n");                     if (!n) return false; row += n;
+    *off = row;
+    return true;
+}
+
+static bool maps_is_code(const struct Vma *v) {
+    return v->burrow && v->burrow->type == BURROW_TYPE_CODE;
+}
+
+// A row's permission class: r, w, x and the share flag as four bits, so the
+// class names the perms column exactly and nothing else about the row.
+enum { MAPS_CLASSES = 16 };
+static u32 maps_class(const struct Vma *v) {
+    return ((v->prot & VMA_PROT_READ)  ? 1u : 0u) |
+           ((v->prot & VMA_PROT_WRITE) ? 2u : 0u) |
+           ((v->prot & VMA_PROT_EXEC)  ? 4u : 0u) |
+           ((v->flags & VMA_FLAG_SHARED_IN) ? 8u : 0u);
+}
+
+static void maps_class_perms(u32 cls, char perms[5]) {
+    perms[0] = (cls & 1u) ? 'r' : '-';
+    perms[1] = (cls & 2u) ? 'w' : '-';
+    perms[2] = (cls & 4u) ? 'x' : '-';
+    perms[3] = (cls & 8u) ? 's' : 'p';
+    perms[4] = '\0';
+}
+
+static bool maps_put_vma(const struct Vma *v, char *buf, size_t cap, size_t *off) {
+    char perms[5];
+    maps_class_perms(maps_class(v), perms);
+    const struct Burrow *file =
+        (v->burrow && v->burrow->type == BURROW_TYPE_FILE) ? v->burrow : NULL;
+    return maps_put_row(buf, cap, off, v->vaddr_start, v->vaddr_end, perms,
+                        v->burrow_offset, maps_type_name(v), file, maps_role_name(v));
+}
+
+// A code row as a reader without the right to its addresses sees it.
+static bool maps_put_redacted(u32 cls, char *buf, size_t cap, size_t *off) {
+    char perms[5];
+    maps_class_perms(cls, perms);
+    return maps_put_row(buf, cap, off, 0, 0, perms, 0, "code", NULL, "-");
+}
+
+// `show_code` false withholds the code rows from the walk and prints them,
+// redacted, after it (the posture note above). They are printed only when the
+// walk reached the end of the list: a truncated listing stops at some address,
+// and printing the code rows found below it would say which aliases lie below
+// that address. A withheld row takes no buffer, so the walk counts it against a
+// budget of as many redacted rows as the buffer holds, which keeps the lock hold
+// bounded by the buffer (twice over) as above. Spending the budget stops the
+// walk, and that stop is the one place the aliases' positions can still show:
+// it takes more code aliases below the last row printed than the buffer holds
+// rows, and an address space that holds that many prints no code rows at all.
+static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap) {
     size_t off = 0, n;
     n = fmt_str(buf, cap, off, "start-end perms off type file role\n");
     if (!n) return 0;
     off += n;
+    const size_t head = off;
 
     // LINEAGE L-1: a kernel-only Proc (kproc, which the /proc walk reaches) has
     // no address space and so no mappings -- the header alone, which is exactly
     // what an empty VMA list produced before the extraction.
     if (!p->as) return off;
+
+    // Every redacted row has the same length; take it from the formatter itself.
+    char probe[64];
+    size_t rlen = 0;
+    if (!maps_put_redacted(0, probe, sizeof probe, &rlen)) return off;
+    const size_t budget = (cap - head) / rlen;
+
+    u32    withheld[MAPS_CLASSES];
+    size_t nwithheld = 0;
+    bool   complete  = true;
+    for (u32 c = 0; c < MAPS_CLASSES; c++) withheld[c] = 0;
 
     irq_state_t vs = spin_lock_irqsave(&p->as->lock);
     for (struct Vma *v = p->as->vmas; v; v = v->next) {
@@ -573,38 +670,27 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
         // copy freed slab bytes into a file EL0 reads -- an I-13 leak. Loud is
         // the correct failure for a corrupted list.
         if (v->magic != VMA_MAGIC) extinction("format_maps: corrupted VMA list entry");
-        size_t row = off;                    // scratch: commit only a whole row
-        n = fmt_hex(buf, cap, row, v->vaddr_start);      if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, "-");                 if (!n) break; row += n;
-        n = fmt_hex(buf, cap, row, v->vaddr_end);        if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-
-        char perms[5];
-        perms[0] = (v->prot & VMA_PROT_READ)  ? 'r' : '-';
-        perms[1] = (v->prot & VMA_PROT_WRITE) ? 'w' : '-';
-        perms[2] = (v->prot & VMA_PROT_EXEC)  ? 'x' : '-';
-        perms[3] = (v->flags & VMA_FLAG_SHARED_IN) ? 's' : 'p';
-        perms[4] = '\0';
-        n = fmt_str(buf, cap, row, perms);               if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-        n = fmt_hex(buf, cap, row, v->burrow_offset);    if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, maps_type_name(v));   if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-
-        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE) {
-            n = fmt_hex(buf, cap, row, (u64)v->burrow->file_devno);   if (!n) break; row += n;
-            n = fmt_str(buf, cap, row, ":");                          if (!n) break; row += n;
-            n = fmt_hex(buf, cap, row, v->burrow->file_qid_path);     if (!n) break; row += n;
-        } else {
-            n = fmt_str(buf, cap, row, "-");                          if (!n) break; row += n;
+        if (!show_code && maps_is_code(v)) {
+            if (nwithheld == budget) { complete = false; break; }
+            withheld[maps_class(v)]++;
+            nwithheld++;
+            continue;
         }
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, maps_role_name(v));   if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, "\n");                if (!n) break; row += n;
-        off = row;                           // commit the complete row
+        if (!maps_put_vma(v, buf, cap, &off)) { complete = false; break; }
     }
     spin_unlock_irqrestore(&p->as->lock, vs);
+
+    if (nwithheld == 0 || !complete) return off;
+    // Room for the withheld rows comes from dropping whole rows off the end.
+    // nwithheld <= budget, so dropping every walked row always makes enough.
+    while (off + nwithheld * rlen > cap) {
+        size_t i = off - 1;                 // buf[off - 1] is the last row's '\n'
+        while (i > head && buf[i - 1] != '\n') i--;
+        off = i;
+    }
+    for (u32 c = 0; c < MAPS_CLASSES; c++)
+        for (u32 k = 0; k < withheld[c]; k++)
+            if (!maps_put_redacted(c, buf, cap, &off)) return off;
     return off;
 }
 
@@ -1073,6 +1159,8 @@ bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 // Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
 // sits above the definitions.
 static bool devproc_kind_is_image(u32 kind);
+static bool devproc_maps_code_visible_locked(const struct Proc *caller,
+                                             const struct Proc *target);
 static bool devproc_dump_sealed_against(const struct Proc *caller,
                                         const struct Proc *target);
 static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
@@ -1199,7 +1287,10 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
-    case PQS_MAPS:    r->total = format_maps(p, r->buf, r->cap);    break;  // V-4b-2
+    case PQS_MAPS:                             // V-4b-2; B-2b: the code rows' addresses
+        r->total = format_maps(p, devproc_maps_code_visible_locked(r->caller, p),
+                               r->buf, r->cap);
+        break;
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
@@ -1623,6 +1714,25 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     irq_state_t s = proc_table_lock_acquire();
     bool ok = devproc_debug_authorized_locked(caller, target);
+    proc_table_lock_release(s);
+    return ok;
+}
+
+// May `caller` see where `target`'s code aliases lie (format_maps)? Debug
+// authority over it, or the target itself: the reflexive case is stated rather
+// than left to the I-39 predicate, which refuses a NOTRACE Proc even to itself,
+// and a Proc reading its own layout discloses it to no one.
+// PRECONDITION: g_proc_table_lock is held (the image join).
+static bool devproc_maps_code_visible_locked(const struct Proc *caller,
+                                             const struct Proc *target) {
+    if (!caller || !target) return false;
+    return caller == target || devproc_debug_authorized_locked(caller, target);
+}
+
+// The kernel tests' entry: takes the lock the image join needs.
+bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool ok = devproc_maps_code_visible_locked(caller, target);
     proc_table_lock_release(s);
     return ok;
 }

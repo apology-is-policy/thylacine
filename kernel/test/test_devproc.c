@@ -95,6 +95,7 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target);
 bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
@@ -3134,6 +3135,253 @@ void test_devproc_maps(void) {
     long stack_at = index_of(buf, (size_t)n, " stack\n");
     TEST_ASSERT(guard_at >= 0 && stack_at >= 0 && guard_at < stack_at,
                 "V-4b-2: rows are emitted in ascending-VA order");
+}
+
+// B-2b: who may see where a Proc's code aliases lie. Driven with synthetic
+// (caller, target) pairs, the prowl-5-F4 precedent; the read path that consults it
+// is pinned end to end by test_devproc_maps_code_redacted.
+void test_devproc_maps_code_visible(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+    target->caps         = 0;
+
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    bool foreign = devproc_maps_code_visible(caller, target);
+    caller->principal_id = 0xA11CEu;
+    bool owner = devproc_maps_code_visible(caller, target);
+    target->caps = CAP_JIT;                          // a cap the owner lacks
+    bool uncovered = devproc_maps_code_visible(caller, target);
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_DEBUG;
+    bool debug = devproc_maps_code_visible(caller, target);
+    target->proc_flags |= PROC_FLAG_NOTRACE;
+    bool debug_notrace = devproc_maps_code_visible(caller, target);
+    bool self_notrace  = devproc_maps_code_visible(target, target);
+    bool self_debug    = devproc_debug_authorized(target, target);
+    bool nobody        = devproc_maps_code_visible(NULL, target);
+
+    caller->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(target);
+
+    TEST_ASSERT(!foreign, "B-2b: a non-owner without caps does not see code addresses");
+    TEST_ASSERT(owner, "B-2b: the owner whose caps cover the target does");
+    TEST_ASSERT(!uncovered, "B-2b: an owner lacking one of the target's caps does not");
+    TEST_ASSERT(debug, "B-2b: CAP_DEBUG does");
+    TEST_ASSERT(!debug_notrace, "B-2b: nobody else does once the target is NOTRACE");
+    TEST_ASSERT(!self_debug, "B-2b: (control) I-39 refuses a NOTRACE Proc even to itself");
+    TEST_ASSERT(self_notrace, "B-2b: but a Proc always sees its own code addresses");
+    TEST_ASSERT(!nobody, "B-2b: a reader with no Proc sees none");
+}
+
+s64 sys_jit_create_region(struct Proc *p, u64 length_raw, u64 *out_w, u64 *out_x);
+s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+                                 u64 length_raw, u64 *out_exec);
+s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
+
+// "0x<hex>-": how a maps row starting at `va` begins (fmt_hex's format).
+static void maps_va_prefix(u64 va, char out[24]) {
+    char d[16];
+    int m = 0, n = 0;
+    out[n++] = '0'; out[n++] = 'x';
+    if (va == 0) d[m++] = '0';
+    while (va) { u64 x = va & 0xfu; d[m++] = (char)(x < 10u ? '0' + x : 'a' + (x - 10u)); va >>= 4; }
+    while (m) out[n++] = d[--m];
+    out[n++] = '-';
+    out[n] = '\0';
+}
+
+static long maps_count(const char *buf, size_t n, const char *needle) {
+    long c = 0;
+    size_t k = 0;
+    while (needle[k]) k++;
+    for (size_t i = 0; k && i + k <= n; i++) {
+        size_t j = 0;
+        while (j < k && buf[i + j] == needle[j]) j++;
+        if (j == k) c++;
+    }
+    return c;
+}
+
+static long maps_read(int pid, char *buf, long cap) {
+    long n = -2;
+    struct Spoor *c = open_pidfile_for(pid, "maps", 0);
+    if (c) { n = devproc.read(c, buf, cap - 1, 0); spoor_clunk(c); }
+    buf[n > 0 ? n : 0] = '\0';
+    return n;
+}
+
+static u8 g_maps_thunk[12] = { 0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 };
+
+// B-2b audit F2: /proc/<pid>/maps of a Proc holding code regions. A reader without
+// debug authority gets every code row with zeroed addresses, after every other row
+// and grouped by permission, so its listing is the SAME bytes whichever addresses
+// the aliases drew; the owner (one variable away: the target's principal) gets
+// the real addresses. The anon page at the window's top is above every alias, so
+// a zeroed row left in address order would precede it.
+void test_devproc_maps_code_redacted(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    const u32 self_principal = th->proc->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    const u64 low_va = 0x0000000010000000ull;
+    const u64 top_va = EXEC_USER_BURROW_TOP - PAGE_SIZE;
+    const u64 jit_len = 2ull * PAGE_SIZE;
+
+    static char a1[2048], a2[2048], b1[2048], b2[2048];
+    long na1 = -2, na2 = -2, nb1 = -2, nb2 = -2;
+    int  rc_low = -1, rc_top = -1;
+    s64  rc_c1 = -1, rc_s1 = -1, rc_c2 = -1, rc_s2 = -1, rc_d1 = -1, rc_e1 = -1;
+    u64  w1 = 0, x1 = 0, s1 = 0, w2 = 0, x2 = 0, s2 = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    tgt->caps  = CAP_JIT;
+    proc_test_link(tgt);
+
+    struct Burrow *bl = burrow_create_anon(PAGE_SIZE, false);
+    rc_low = bl ? burrow_map(tgt, bl, low_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bl) burrow_unref(bl);
+    struct Burrow *bt = burrow_create_anon(PAGE_SIZE, false);
+    rc_top = bt ? burrow_map(tgt, bt, top_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bt) burrow_unref(bt);
+
+    tgt->caps = CAP_JIT;
+    rc_c1 = sys_jit_create_region(tgt, jit_len, &w1, &x1);
+    rc_s1 = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s1);
+    tgt->caps = 0;                                   // so the owner's caps cover it
+    tgt->principal_id = foreign;
+    na1 = maps_read(tgt->pid, a1, (long)sizeof a1);
+    tgt->principal_id = self_principal;
+    nb1 = maps_read(tgt->pid, b1, (long)sizeof b1);
+
+    // The same shapes again, at whatever addresses the aliases draw this time.
+    rc_d1 = rc_c1 == 0 ? sys_jit_destroy_for_proc(tgt, w1) : -1;
+    rc_e1 = rc_s1 == 0 ? sys_jit_destroy_for_proc(tgt, s1) : -1;
+    tgt->caps = CAP_JIT;
+    rc_c2 = sys_jit_create_region(tgt, jit_len, &w2, &x2);
+    rc_s2 = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s2);
+    tgt->caps = 0;
+    tgt->principal_id = foreign;
+    na2 = maps_read(tgt->pid, a2, (long)sizeof a2);
+    tgt->principal_id = self_principal;
+    nb2 = maps_read(tgt->pid, b2, (long)sizeof b2);
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)rc_low, 0L, "mapped the low anon page");
+    TEST_EXPECT_EQ((long)rc_top, 0L, "mapped the anon page at the window's top");
+    TEST_EXPECT_EQ(rc_c1, 0, "created a writer/exec region");
+    TEST_EXPECT_EQ(rc_s1, 0, "created a sealed region");
+    TEST_EXPECT_EQ(rc_d1, 0, "destroyed the region");
+    TEST_EXPECT_EQ(rc_e1, 0, "destroyed the sealed region");
+    TEST_EXPECT_EQ(rc_c2, 0, "created the region again");
+    TEST_EXPECT_EQ(rc_s2, 0, "created the sealed region again");
+    TEST_ASSERT(na1 > 0 && na2 > 0 && nb1 > 0 && nb2 > 0, "all four reads returned rows");
+
+    char pw[24], px[24], ps[24], ptop[24];
+    maps_va_prefix(w1, pw); maps_va_prefix(x1, px); maps_va_prefix(s1, ps);
+    maps_va_prefix(top_va, ptop);
+
+    // The owner: real addresses (the positive control for every negative below).
+    TEST_ASSERT(contains(b1, (size_t)nb1, pw) && contains(b1, (size_t)nb1, px) &&
+                contains(b1, (size_t)nb1, ps),
+                "B-2b: the owner reads every code alias's address");
+
+    // The foreign reader: none of them.
+    TEST_ASSERT(!contains(a1, (size_t)na1, pw), "B-2b: a foreign reader does not see the writer's address");
+    TEST_ASSERT(!contains(a1, (size_t)na1, px), "B-2b: nor the exec alias's");
+    TEST_ASSERT(!contains(a1, (size_t)na1, ps), "B-2b: nor the sealed alias's");
+    TEST_ASSERT(contains(a1, (size_t)na1, "0x10000000-0x10001000 rw-p 0x0 anon - -\n"),
+                "B-2b: the other rows keep their addresses");
+    TEST_EXPECT_EQ(maps_count(a1, (size_t)na1, "0x0-0x0 rw-p 0x0 code - -\n"), 1L,
+                   "B-2b: one zeroed writer row");
+    TEST_EXPECT_EQ(maps_count(a1, (size_t)na1, "0x0-0x0 r-xp 0x0 code - -\n"), 1L,
+                   "B-2b: one zeroed exec row");
+    TEST_EXPECT_EQ(maps_count(a1, (size_t)na1, "0x0-0x0 --xp 0x0 code - -\n"), 1L,
+                   "B-2b: one zeroed execute-only row");
+
+    // Placement: after every other row, grouped by permission class.
+    long top_at = index_of(a1, (size_t)na1, ptop);
+    long rw_at  = index_of(a1, (size_t)na1, "0x0-0x0 rw-p");
+    long xo_at  = index_of(a1, (size_t)na1, "0x0-0x0 --xp");
+    long rx_at  = index_of(a1, (size_t)na1, "0x0-0x0 r-xp");
+    TEST_ASSERT(top_at >= 0 && rw_at > top_at && xo_at > top_at && rx_at > top_at,
+                "B-2b: the zeroed rows follow the highest other row");
+    TEST_ASSERT(rw_at < xo_at && xo_at < rx_at, "B-2b: in permission-class order");
+
+    // Independence: new addresses, the same bytes for the foreign reader -- while
+    // the owner's listing changed, so the addresses really did move.
+    bool same_a = na1 == na2;
+    for (long i = 0; same_a && i < na1; i++) if (a1[i] != a2[i]) same_a = false;
+    bool same_b = nb1 == nb2;
+    for (long i = 0; same_b && i < nb1; i++) if (b1[i] != b2[i]) same_b = false;
+    TEST_ASSERT(!same_b, "B-2b: (control) the owner's listing changed with the addresses");
+    TEST_ASSERT(same_a, "B-2b: the foreign reader's listing did not");
+}
+
+// B-2b audit F2: a listing the buffer truncates prints no code rows to a reader
+// without debug authority. A cluster of anon pages at the window's top -- more
+// rows than the buffer holds -- puts the truncation above every alias, so the
+// walk has counted the code rows by the time it stops; printing them would say
+// they lie below the cut. The owner's listing, which shows the aliases in place,
+// is the control that they really are below it.
+void test_devproc_maps_code_truncated(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    const u32 self_principal = th->proc->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    enum { CLUSTER = 64 };                            // > 2048 / ~48-byte rows
+    const u64 cluster_va = EXEC_USER_BURROW_TOP - 2ull * CLUSTER * PAGE_SIZE;
+
+    static char fa[2048], ow[2048];
+    long nf = -2, no = -2;
+    int mapped = 0;
+    s64 rc = -1;
+    u64 w = 0, x = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+    for (int i = 0; i < CLUSTER; i++) {              // a page, then a hole: no two adjacent
+        struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
+        if (b && burrow_map(tgt, b, cluster_va + 2ull * (u64)i * PAGE_SIZE, PAGE_SIZE,
+                            VMA_PROT_RW) == 0)
+            mapped++;
+        if (b) burrow_unref(b);
+    }
+    tgt->caps = CAP_JIT;
+    rc = sys_jit_create_region(tgt, 2ull * PAGE_SIZE, &w, &x);
+    tgt->caps = 0;
+    tgt->principal_id = foreign;
+    nf = maps_read(tgt->pid, fa, (long)sizeof fa);
+    tgt->principal_id = self_principal;
+    no = maps_read(tgt->pid, ow, (long)sizeof ow);
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)mapped, (long)CLUSTER, "mapped the cluster");
+    TEST_EXPECT_EQ(rc, 0, "created a writer/exec region below it");
+    TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
+    char last[24];
+    maps_va_prefix(cluster_va + 2ull * (CLUSTER - 1) * PAGE_SIZE, last);
+    TEST_ASSERT(!contains(ow, (size_t)no, last) && !contains(fa, (size_t)nf, last),
+                "B-2b: (premise) the buffer truncates both listings inside the cluster");
+    TEST_EXPECT_EQ(maps_count(ow, (size_t)no, " code - -\n"), 2L,
+                   "B-2b: (control) the owner sees both aliases, below the cut");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, " code - -\n"), 0L,
+                   "B-2b: a foreign reader's truncated listing prints no code row");
+    TEST_ASSERT(fa[nf - 1] == '\n', "B-2b: and ends on a whole row");
 }
 
 // VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,

@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -794,9 +794,13 @@ performance backlog.
   itself — which cuts both ways, and the dangerous direction is a system-principal
   proxy handing a system Proc's environment to a client of any principal. Until
   the mandate mechanism exists, a proxy must serve only its own peer.
-- **`maps` is ungated on the argument that Thylacine has no userspace ASLR.**
-  If user ASLR ever lands, this posture must be revisited in the same chunk —
-  the file would then disclose exactly what the mitigation randomizes.
+- **`maps` is ambient because nothing in it but a code alias is random.** Every
+  other address is an `exec.h` constant, an ELF link address or a first-fit
+  placement. A new source of randomness in a user layout has to be weighed here
+  in the same chunk, as B-2b's random code aliases were (below).
+- **A truncated `maps` shows a reader without debug authority no code rows at
+  all.** A listing the buffer cut short cannot say which aliases lie below the
+  cut, so it prints none of them; the owner still sees them in place.
 
 ## Caveats
 
@@ -834,3 +838,41 @@ difference is a target already terminating: there the kill sets
 on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
 B, [[sub-kernel-death]]). The debugger-exited and launcher-exited (`exitkill`)
 terminations keep the wrapper: only an explicit kill forces.
+
+## `maps` withholds where the code aliases lie (2026-10-07; B-2b audit F2)
+
+B-2b places every alias of a code region -- writer, exec, sealed -- at its own
+random address, so the writer's address is a secret and `maps`, ambient to every
+Proc, would hand it out ([[dec-2026-10-07-maps-code-redaction]]).
+`devproc_maps_code_visible_locked` decides who may see it: the target itself, or a
+reader with debug authority over it (the I-39 predicate, image join included). The
+reflexive case is written out because I-39 refuses a NOTRACE Proc even to itself,
+and a Proc reading its own layout tells no one else anything.
+
+`format_maps(p, show_code, ...)` prints the table exactly as before when it may.
+Otherwise a code row takes no buffer during the walk: it is counted by permission
+class (r, w, x and the share flag, `maps_class`) and printed after the walk as
+`0x0-0x0 <perms> 0x0 code - -`, grouped by class. Each such row is a function of
+its class alone, so the listing holds the same bytes whichever addresses the
+aliases drew. Its place is never its address order, which would say which
+mappings an alias lies between and which alias of a region is the lower.
+
+Two rules keep a truncated listing from placing the aliases. The zeroed rows are
+printed only when the walk reached the end of the list, because a listing cut at
+some address would otherwise say which aliases lie below the cut. And a withheld
+row is counted against a budget of as many zeroed rows as the buffer holds, which
+keeps the lock hold bounded by the buffer, at most twice over. Running out of
+budget stops the walk; that is the one place left where the aliases' positions
+can show. It takes more code aliases below the last printed row than the buffer
+holds rows, and such an address space prints no code rows. When the zeroed rows
+do not fit after a complete walk, whole rows are dropped from the end to make
+room: how much is dropped depends on the count alone.
+
+Witnesses: `devproc.maps_code_visible` (the predicate's axes, the NOTRACE self
+case against I-39's own refusal as control), `devproc.maps_code_redacted` (owner
+sees every alias's address; a foreign reader sees none, gets one zeroed row per
+alias after an anon page at the window's top, in class order, and the SAME bytes
+after the region is recreated at new addresses while the owner's listing
+changes), `devproc.maps_code_truncated` (a cluster of rows above the aliases
+truncates both listings; the owner sees both aliases below the cut, the foreign
+reader no code row).
