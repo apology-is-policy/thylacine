@@ -949,3 +949,52 @@ was the only route. A background retry reconciled it at 17:01:56Z with NOTHING
 changed on my side, which is what proves it was the remote and not the content.
 The discipline that caught it: verify per URL with ls-remote, never read "pushed
 to both mirrors" off one push's output.
+
+## 2026-10-07 ~18:1xZ: the drain finding CORRECTED, then measured
+
+READ THIS BEFORE TOUCHING THE DRAIN ITEM. My earlier entry called
+magazines_drain_all's cross-CPU walk an UNDOCUMENTED hazard. It is documented:
+vault/system/kernel/memory/sub-kernel-mm-phys.md:113 ("quiescent-only ... walks
+peer CPUs' sets with no coordination; test-harness and shutdown use only") and
+its Prosecution section at :336 ("any path that touches g_percpu without [the
+mask] (or from a peer CPU, as magazines_drain_all does) must prove quiescence").
+Source corroboration: my_cpu()'s #807 note and mag_alloc's "#807 regression
+guard". Do not re-report the mechanism as a finding.
+
+WHAT WAS OPEN AND IS NOW MEASURED (operator-directed, off-lease, commit
+ce5b13334, write-up work/oct5-as-r9/mag-double/FINDING.md): the #807 guard does
+NOT cover this class. Under TSan with the eight REAL bodies extracted from
+mm/magazines.c and each asserted verbatim, the faithful leg produced 7575 silent
+double allocations with the guard firing ZERO times (count never leaves range).
+Conflicting production lines: magazines_drain_all mm/magazines.c:159-160 vs
+mag_alloc:113 and mag_free:144. Attribution control (lock both sides) = 0/0.
+FIX CANDIDATE VALIDATED: per-CPU self-drain = 0 races, 0 corruption.
+Reproduce: sh work/oct5-as-r9/mag-double/run.sh
+
+TRAPS THAT RUN CAUGHT, worth inheriting:
+  - A LEG LABELLED "CONTROL" CAME BACK WORST (2177 double-allocs where I
+    predicted 0) because it locked the owner but not the drainer, and
+    magazines_drain_all takes no lock at all. A control must be checked for
+    being a control; structurally, a control cannot be worse than the faithful
+    configuration.
+  - A SINGLE LEG'S ZERO IS A FALSE NEGATIVE: the tight-loop leg said 0 where
+    another schedule on identical code said 7575.
+  - A bare grep for the conflicting statement hands you mag_drain's copy: the
+    same text appears in three bodies. Disambiguate by enclosing function.
+
+STILL OPEN, needs the GUEST: whether the suite's 24 call sites satisfy the
+quiescence their sanctioned use requires. Not reachable by reading.
+
+DISK, corrected by main: swap (grown to 3072M) shares this APFS container, so
+free space falls with NO builder running -- the 8.2 -> 6.7 GiB drop was swap, an
+hour before main's build started. A figure in a lease line carries the time it
+was MEASURED, not posted. My FLOOR_GB=8 can be crossed by swap alone, so a
+refusal of mine is not evidence that a peer is consuming the volume.
+
+WAKE WATCHER HAZARD (aux, 0193, cause CONFIRMED by capture-pane): thyla-wake
+reads Claude Code's dim "keep going" suggestion as typed text, so it can acquire
+the mac, fail to deliver the wake line, give up and EXIT WITH THE LEASE HELD --
+it cost main and me 2.6h today. My watcher 29516 is aux's tree's copy and has
+the bug. Mitigation running: a background poll that exits the moment the mac
+reads HELD-by-you, bounding a silent hold to ~2 minutes. aux will announce a
+fixed commit to re-arm from; do not re-arm from the old copy after that.

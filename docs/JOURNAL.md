@@ -744,6 +744,81 @@ summary of the day's last stretch: two defects in my own unrun work, found by a
 peer reading it and by a harness driven backwards, fixed before a single core was
 spent on them.
 
+The last stretch was four corrections, three of them to things I had already
+told other people, which is the honest shape of a day spent on unrun work.
+
+I had enqueued a drain hazard in mm/magazines.c and sent main and aux fix
+candidates for it, one of which was "say so in its contract". Then I went
+looking for the prior audit the source comments mentioned (#807) and found the
+contract already written, in the dossier that owns the layer:
+sub-kernel-mm-phys.md:113 says `magazines_drain_all` is quiescent-only,
+"test-harness and shutdown use only", and its Prosecution section at :336
+already requires any peer-CPU toucher of `g_percpu` to prove quiescence. I had
+derived from the code what scripture states, then reported it as a discovery.
+The tell was available earlier and I walked past it: astra's t55 phrase was
+"magazines_drain_all's quiescent-only contract" -- a CITATION, which I read as a
+description of the code. My own memory has the rule for this ("for 'is X
+allowed', read the BINDING DOC"), filed from a previous instance of the same
+error. Corrected the queue entry in place with citations and sent all three
+peers the correction, including the retraction of a fix candidate that asked for
+something that exists.
+
+What survived was narrower and better: the dossier does not settle SEVERITY, and
+`mag_alloc`'s #807 guard has a comment claiming it trips "LOUDLY instead of
+silently double-allocating". The prediction was that it cannot see this class
+because the count stays in range. The operator directed a host double when I put
+the options to them, and a double answers that question without the guest.
+
+Two instrument decisions did the work. First, ThreadSanitizer rather than a
+hand-modelled schedule: the race is INSIDE one statement
+(`m->entries[m->count++] = p`), so interleaving at lock boundaries cannot
+express it and a cooperative double would have been me asserting my own
+interleaving. TSan reports unsynchronised accesses without my choosing the
+schedule. Second, the real bodies: eight functions extracted from
+mm/magazines.c, each asserted a verbatim substring of it, with a refusal if a
+signature moved -- and a check that the binary carries __tsan_ symbols, since an
+uninstrumented binary reporting nothing looks exactly like a clean one.
+
+The result: 7575 pages handed to a caller while still on the buddy free list,
+with the guard firing zero times. The guard is not the loud backstop its comment
+advertises. Locking both sides takes races and corruption to zero with
+everything else identical, which is what attaches the finding to the missing
+cross-CPU exclusion rather than to my harness, and each CPU draining its own set
+does the same work cleanly -- so the fix candidate is validated before anyone
+writes it.
+
+AND THE LEG LABELLED "CONTROL" CAME BACK WORST. My first attribution control set
+the owner's mask to a real lock and left the drainer unlocked -- and
+`magazines_drain_all` takes no lock at all, so the flag only slowed the owner.
+It reported 2177 double allocations where I had predicted zero. Had I reported
+that as a kernel result it would have been a fabricated finding, which outranks
+a missed one. The tell was structural rather than numerical: a control cannot be
+worse than the faithful configuration, so the control was wrong. A control must
+itself be checked for being a control -- the same lesson as the throwaway
+verifier that false-alarms, met from the other side.
+
+One more number was a false negative and nearly the published one: the first
+faithful leg reported 0 corruption, and only a second schedule on identical code
+reported 7575. Any future test of this class needs more than one schedule before
+it may report safety.
+
+The peers corrected me twice more, both times with measurement I had not taken.
+main showed that the 1.5 GiB disk drop I had attributed to their build happened
+an hour before their build started, and that SWAP -- grown to 3072M, sharing
+this APFS container -- was the consumer. I had differenced their lease line's
+"df first (8.2 GiB)" against my own reading twelve minutes later and inferred a
+rate; the 8.2 had been measured an hour earlier. A figure in a status line
+carries the time it was MEASURED, not the time it was POSTED, and I have now
+sent two peers a falling-disk rate with a bake attached as its cause. aux
+confirmed by capture-pane that their eaten wake line was Claude Code's own dim
+"keep going" suggestion read as typed text, and warned that my watcher runs
+their tree's copy with the same bug -- so I added a detector that exits the
+moment the mac reads HELD-by-me, bounding a silent idle hold to minutes instead
+of the hour it cost them.
+
+Nothing ran in the guest in any of this. The reap leg is still UNRUN, the lease
+is main's until after their RED campaign, and disk is under my floor regardless.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
