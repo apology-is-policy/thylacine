@@ -390,6 +390,107 @@ withdrawn claim as fact, so a reader going top-down met the correction first and
 the error last. Narrowed in place with the reading order called out, not deleted:
 a status document that edits its own history stops being evidence.
 
+### What checking "main moved" turned up, one line from the morning's fix
+
+Pushing found main at 25ed27f21 where my notes said cb7194c10 -- 18 commits,
+exit-close landed. Two different claims hide in "main moved", so I measured them
+separately: 0 of my commits are reachable from main (nothing of mine landed),
+and all four of my merge obligations now target code that IS on main, each
+tested with merge-base --is-ancestor rather than read off a log. Obligations (3)
+and (4) were written when those were main's side branches and are no longer
+anticipating anything; (4)'s anchor report was measured against the exit-close
+BRANCH, so its anchors get re-measured at merge instead of inherited.
+
+Regenerating the manifest for the new tip exposed a defect one line from the one
+I had fixed hours earlier. make-manifest.sh DERIVED the remote main tip with
+ls-remote and then printed "nothing of this branch is landed there" as an
+unconditional string. That is the delivery's most load-bearing claim, sitting
+beside a number that was measured, and it would have read exactly the same if a
+commit of mine had landed. The morning's fix had taught me to distrust the
+push-state line and I had walked straight past its neighbour. Now derived, with
+three arms, and the warning arm driven red on real objects by walking BASE back
+past the merge-base: "19 of 190 ARE reachable". A guard whose failure arm has
+never fired is not a guard.
+
+### The fix that introduced a path to the bug it fixed
+
+Self-reviewing preserve_boot_inputs before it ever ran, I found I had put the
+call immediately after the build and BEFORE the post-build Stratum pin
+assertion. So a run about to be REJECTED for wrong provenance would still take a
+generation slot -- and against the deliberately bounded two-generation history,
+two rejected runs would evict both genuinely qualified sets. The cure for losing
+a verdict's inputs had grown its own way of losing a verdict's inputs. Moved
+past the pin check; the placement is load-bearing in the other direction too,
+since preserving only after the suite or the gate would mean a RED run preserves
+nothing, and a failing run's inputs are what diagnosis needs. A sweep for other
+stale figures then caught stage 4 still PRINTING "suite total must be base+4"
+into the gate log, wrong on this branch and wrong in kind now that the
+expectation is derived.
+
+### A silent arm in a shared file, and why the refusal needed no marker
+
+Establishing which pool the 50 matrix boots consumed led into tools/, where
+pool_restore -- the first statement of the per-boot loop, the thing that makes N
+boots N INDEPENDENT boots -- returned success mutely when the snapshot was
+missing. A row could stop being independent with nothing in the log. What makes
+that an oversight rather than a design choice is the sibling arm one line below:
+a mismatched system.key already prints "stale twins?". The author had already
+decided this class of skip must be visible; one arm was left mute, and it is the
+arm that fires from ordinary cleanup.
+
+Raised with main rather than patched -- shared file, their gates ride on it, and
+I am its most recent editor. They chose print-everywhere plus refuse-for-the-gate
+and checked their own last row rather than taking my scope claim (snapshot
+written by that gate's own bake, unchanged since: unaffected). Implementing it
+produced the better finding: no gate marker was needed and ci-smp-gate.sh went
+untouched, because the source guard at :198 returns BEFORE pool_restore is
+defined. test-smp-classify.sh sources the file for its classifier and never has
+the function; test-interactive.sh only names it in comments. Everything that
+reaches the code is already a multi-boot run wanting independent boots. main's
+worry about breaking those two callers was answered by a guard that was already
+there.
+
+Applied by atomic rename, not in-place rewrite: bash reads a script
+incrementally, so truncating the inode under a peer mid-run can make them
+execute garbage. Nothing was running it; the rename makes that irrelevant.
+
+The test discriminates 14/0 against 8/6 on the pre-patch version, and the line
+worth keeping is that arms D and E pass IDENTICALLY on both -- that is the
+evidence the change is surgical, where a green-only result would have shown
+nothing. Its own denominator control needed recalibrating once: tuned to the
+current 20-line function, it refused to run against the legitimate 9-line
+predecessor. A control sized to the thing under test cannot compare it with what
+it is meant to discriminate from.
+
+### Three slips of mine, and the third is the one with a mechanism
+
+I inferred "only 3 floor checks in the run" from a match list my own `head -20`
+had truncated -- the file has five. The sweep I had just written a lesson about.
+
+I nearly reported the preservation manifest as naming an absent .config; it is a
+dotfile and my `ls` had no -a.
+
+And four committed files carried stamps an hour fast: 14:1xZ for events at
+13:1xZ. Not a guess this time but a mechanism, which is why it is worth the
+line -- `ls` prints LOCAL time, UTC+1 today, and I transcribed those mtimes with
+a Z. Third timestamp slip today and the first to reach provenance files, which
+is exactly where a wrong stamp does damage, because a preservation manifest is
+read later by someone reconstructing an order of events.
+
+### Two measurements that dissolved questions instead of answering them
+
+I was composing an escalation to astra about whether preserving the pool was
+worth 2.5 GiB against a floor I was already under. du said 283 MiB: the files
+are sparse and ls had been showing logical size. The clone then cost 0 MiB at df
+granularity. Measure first; the question was never needed.
+
+And I opened a call warning aux that two --config ci bakes might not fit in
+7.4 GiB. The rate was worth sending and they said so. The inference on top of it
+was wrong -- both bakes overwrite one build/ in place, and their tree carries
+build.sh's own 6 GiB floor plus a 4 GiB PID-exact guard, so it is better guarded
+than mine, whose base predates that check entirely. Corrected on the call rather
+than left standing.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
