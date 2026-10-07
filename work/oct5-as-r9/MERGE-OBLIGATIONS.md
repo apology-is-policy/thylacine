@@ -137,3 +137,59 @@ OWNERSHIP: this is ASTRA'S merge obligation. It is recorded on my list only
 because my base IS her HEAD, so my delivery carries 417c8caeb and an integrator
 reading this file would otherwise meet the collision with no pointer to its
 owner. It is not new kernel scope here and it is not a landing authorization.
+
+## ADDED 2026-10-07 ~21:0xZ, from main's call 0200 (B-2 LANDED on main 4b48cb0f6)
+
+### 5. THE AddrSpace SIZE ASSERT COLLIDES. Both sides grew the struct and both
+###    carry a drift alarm, with DIFFERENT expected values.
+
+MINE (kernel/include/thylacine/addrspace.h:163, :166):
+    u32            private_rings;
+    _Static_assert(sizeof(struct AddrSpace) == 80,
+                   "AddrSpace: existing layout plus owner/private-ring counts; "
+                   "internal drift alarm, not a userspace ABI.");
+
+MAIN @4b48cb0f6 (:153, :163):
+    u32            code_vmas;
+    u64            id;
+    _Static_assert(sizeof(struct AddrSpace) == 72,
+                   "AddrSpace is 72 bytes: ref+lock (8) + pgtable_root (8) + "
+                   "context_id (8) + vmas (8) + the three I-32 u32 axes + "
+                   "page_budget + page_peak + pgtable_pages + file_pages + "
+                   "code_vmas (32) + id (8). "
+                   "Growth is fine -- this assert is a drift alarm, not an ABI.");
+
+main kept 72 by spending the FORMER PADDING on code_vmas; my branch grew to 80
+for the owner/private-ring counts. So the merge inherits both new fields and two
+asserts that cannot both be true.
+
+AT MERGE, in this order:
+  a. Keep ONE assert. Two will conflict textually; one kept blindly will be
+     wrong whichever survives, and the wrong one fails the build LOUDLY, which
+     is the good case -- the bad case is resolving the conflict by deleting the
+     assert to make the build pass. Do not do that: it is the drift alarm for
+     both features.
+  b. DERIVE the merged number, never add it up by hand. Compile and read what
+     sizeof reports (a one-file _Static_assert with a deliberately wrong value
+     prints the actual size in the diagnostic). My own recorded lesson: a
+     hand-counted 27-byte row was 26, and two hand counts are one reading.
+  c. EXTEND main's enumeration rather than replacing it with a bare number.
+     Their message names every field; the merged one must name private_rings
+     and the owners count too, or the next person inherits a number with no
+     derivation attached.
+
+### 6. EVERY VMA RELINK MUST GO THROUGH vma_insert_in / vma_remove_in.
+main's landing makes those two the only places code-Burrow aliases are counted
+(code_vmas, under as->lock), and vma_remove_in EXTINCTS on underflow. At merge,
+re-walk my branch for any VMA list manipulation that does not pass through them
+-- the fixture's settling-detach path goes through the burrow/vma APIs, but that
+is a claim to re-check against their final shape, not an assurance.
+
+### 7. MY ENQUEUED vma_remove_in HARDENING ITEM MAY HAVE CHANGED SHAPE.
+I enqueued a double-call head-wipe hazard in vma_remove_in (no reachable path;
+main agreed on 0198). main's landing adds an EXTINCTION ON UNDERFLOW to that
+same function. A second call would now trip that extinction rather than wiping
+silently -- which, if it covers the hazard, turns a silent-corruption item into
+a loud-failure one, and if it does not, leaves the item open with a new
+neighbour. RE-EXAMINE against their landed code before touching it; do NOT
+assume either way, and do not close the item on the strength of this note.
