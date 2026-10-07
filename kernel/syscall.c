@@ -43,6 +43,7 @@
 #include <thylacine/joey.h>     // boot_mark_complete (SYS_BOOT_COMPLETE)
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
+#include <thylacine/cow.h>          // B-2b: cow_page_set_sole for a sealed region's pages
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
@@ -60,6 +61,7 @@
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/timer.h"
 #include "../arch/arm64/uaccess.h"
+#include "../mm/phys.h"             // B-2b: alloc_user_pages / free_pages for a sealed region
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
@@ -6994,6 +6996,44 @@ static bool jit_vma_is_writer(const struct Vma *v) {
            (v->prot & VMA_PROT_EXEC) == 0;
 }
 
+// Is `v` a SEALED code region's one alias? It is execute-only: EXEC without
+// READ exists only over a code Burrow (vma_alloc promotes it elsewhere), and
+// only SYS_JIT_CREATE_SEALED maps one.
+static bool jit_vma_is_sealed(const struct Vma *v) {
+    return v && v->burrow &&
+           v->burrow->magic == VMO_MAGIC &&
+           v->burrow->type == BURROW_TYPE_CODE &&
+           v->prot == VMA_PROT_EXEC;
+}
+
+// B-2b: where a code alias goes. Every alias of a code region -- writer, exec,
+// sealed -- gets its own random address, so no alias's VA tells an attacker
+// another's: the writer is the one mapping an exploit wants, and first-fit
+// put it directly below the exec alias that every return address names. A
+// random page of the window is the starting point and the first gap at or
+// above it wins, wrapping to the window's base when nothing above fits. The
+// window spans about 2^34 pages, so the start cannot be guessed even though
+// the choice is not uniform over gaps. `rnd` is drawn by the caller BEFORE
+// as->lock: the CSPRNG may pull fresh entropy, which is no work for under a
+// spinlock.
+//
+// PRECONDITION: caller holds p->as->lock.
+static int jit_place_locked(struct Proc *p, u64 length, u64 rnd, u64 *out) {
+    const u64 lo = EXEC_USER_BURROW_BASE, hi = EXEC_USER_BURROW_TOP;
+    if (length == 0 || length > hi - lo)             return -1;
+    u64 starts = (hi - lo - length) / PAGE_SIZE + 1;
+    u64 start  = lo + (rnd % starts) * PAGE_SIZE;
+    if (vma_find_gap(p, length, start, hi, out) == 0) return 0;
+    return vma_find_gap(p, length, lo, hi, out);
+}
+
+// Draw `n` placement words. Fails while the CSPRNG is unseeded: placement
+// fails closed rather than fall back to a predictable address.
+static int jit_draw(u64 *rnd, long n) {
+    long want = n * (long)sizeof(u64);
+    return kern_random_bytes(rnd, want) == want ? 0 : -1;
+}
+
 // The MECHANISM behind SYS_JIT_CREATE: mint a code region and install BOTH of
 // its aliases, returning the pair through kernel pointers.
 //
@@ -7027,6 +7067,10 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // and the addition cannot overflow.
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
+    // One independent draw per alias (B-2b), before the lock.
+    u64 rnd[2];
+    if (jit_draw(rnd, 2) != 0)                       return -T_E_AGAIN;
+
     spin_lock(&p->as->lock);
 
     // B-2a: a code region is a RESERVATION. Nothing is allocated or charged
@@ -7044,17 +7088,16 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // Both gaps are found and both VMAs installed under ONE lock hold, so a
     // sibling thread cannot claim either gap between them and no observer ever
     // sees a half-installed region. The writer alias is inserted BEFORE the
-    // second gap search, so vma_find_gap cannot hand back the range we just
-    // took -- the two aliases are necessarily disjoint.
+    // second gap search, so the search cannot hand back the range we just
+    // took -- the two aliases are necessarily disjoint. Each is placed at its
+    // own random address (jit_place_locked).
     u64 wva = 0, xva = 0;
-    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
-                     EXEC_USER_BURROW_TOP, &wva) != 0)
+    if (jit_place_locked(p, length, rnd[0], &wva) != 0)
         goto fail_unref;
     if (burrow_map(p, b, wva, length, VMA_PROT_RW) != 0)
         goto fail_unref;
 
-    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
-                     EXEC_USER_BURROW_TOP, &xva) != 0)
+    if (jit_place_locked(p, length, rnd[1], &xva) != 0)
         goto fail_unmap_writer;
     // VMA_PROT_RX: readable + executable, NOT writable. vma_alloc rejects W|X
     // outright, so this prot could never carry a write bit even by mistake --
@@ -7126,6 +7169,132 @@ static s64 sys_jit_create_handler(u64 length_raw, u64 out_va) {
     return sys_jit_create_for_proc(t->proc, length_raw, out_va);
 }
 
+// The MECHANISM behind SYS_JIT_CREATE_SEALED (B-2b;
+// dec-2026-10-07-jit-sealed-thunk): a code region born sealed. Exactly one of
+// `ksrc` (a kernel buffer, for the kernel tests) and `usrc` (the caller's VA,
+// read with the unprivileged user copy) names the bytes.
+//
+// Every page is committed, filled, I-cache-invalidated and installed in the
+// slot table BEFORE any mapping of the region exists, and without as->lock:
+// the copy-in can fault, and the fault path takes as->lock. Nothing else can
+// reach the Burrow meanwhile (no handle, no mapping), and the charges are
+// CAS-safe without the lock (proc_page_charge). Only then is the one alias
+// mapped, execute-only, under as->lock -- so no state of the region ever has
+// a writer, or a readable view of its bytes in EL0. Its pages are already
+// resident, so the first fetch maps a leaf and needs no sync (the CODE fault
+// arm's resident hit).
+s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+                                 u64 length_raw, u64 *out_exec) {
+    if (!p || !out_exec)                             return -T_E_INVAL;
+    // CAP_JIT first, before any argument is judged (the SYS_JIT_CREATE order).
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
+        return -T_E_ACCES;
+    if (length_raw == 0 || length_raw > JIT_SEALED_MAX) return -T_E_INVAL;
+    if ((ksrc != NULL) == (usrc != 0))               return -T_E_INVAL;
+
+    // JIT_SEALED_MAX is page-aligned, so the rounding cannot overflow.
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    u64 rnd;
+    if (jit_draw(&rnd, 1) != 0)                      return -T_E_AGAIN;
+
+    struct Burrow *b = burrow_create_code(length);
+    if (!b)                                          return -T_E_NOMEM;
+
+    bool exempt = proc_resource_exempt(p);
+    s64 rc = -T_E_NOMEM;
+    for (u64 off = 0; off < length; off += PAGE_SIZE) {
+        if (!proc_page_charge(p, 1))                 goto fail;
+        struct page *pg = alloc_user_pages(0, KP_ZERO, exempt);
+        if (!pg) {
+            proc_page_uncharge(p, 1);
+            goto fail;
+        }
+        // The same entry as the fault path's demand-zero commit: a page fresh
+        // from the buddy carries its previous owner's count.
+        cow_page_set_sole(pg);
+        u8 *kva = (u8 *)pa_to_kva(page_to_pa(pg));
+        if (off < length_raw) {
+            u64 n = length_raw - off;
+            if (n > PAGE_SIZE) n = PAGE_SIZE;
+            if (ksrc) {
+                for (u64 i = 0; i < n; i++) kva[i] = ksrc[off + i];
+            } else if (uaccess_copy_in(kva, usrc + off, (size_t)n) != 0) {
+                free_pages(pg, 0);
+                proc_page_uncharge(p, 1);
+                rc = -T_E_FAULT;
+                goto fail;
+            }
+        }
+        // Publish the bytes and drop any line a previous owner left (CL-7k-3
+        // F1): no leaf names this page yet, so this is the only sync it needs.
+        arch_icache_sync_range(kva, PAGE_SIZE);
+        struct page *winner = NULL;
+        if (pagemap_install(&b->pm, &b->lock, (size_t)(off / PAGE_SIZE), pg,
+                            p->as, exempt, &winner) != 0) {
+            // A node OOM or a cap hit (the Burrow is private, so no slot is
+            // ever lost to a sibling: the install returns 0 or < 0 here).
+            free_pages(pg, 0);
+            proc_page_uncharge(p, 1);
+            goto fail;
+        }
+    }
+
+    spin_lock(&p->as->lock);
+    u64 xva = 0;
+    if (jit_place_locked(p, length, rnd, &xva) != 0 ||
+        burrow_map(p, b, xva, length, VMA_PROT_EXEC) != 0) {
+        spin_unlock(&p->as->lock);
+        goto fail;
+    }
+    // The mapping owns the Burrow now (handle_count 0, mapping_count 1).
+    burrow_unref(b);
+    spin_unlock(&p->as->lock);
+
+    *out_exec = xva;
+    return 0;
+
+fail:
+    // What the fill charged is the footprint -- its committed pages plus the
+    // slot table's nodes -- and burrow_free_internal cannot refund, so it is
+    // read here and returned after the free.
+    {
+        u32 paid = burrow_lazy_footprint(b);
+        burrow_unref(b);
+        if (paid) proc_page_uncharge(p, paid);
+    }
+    return rc;
+}
+
+// SYS_JIT_CREATE_SEALED: the mechanism above, plus the copy-out of the VA.
+s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+                                   u64 out_va) {
+    if (!p)                                          return -T_E_INVAL;
+    // The cap before either buffer check, as SYS_JIT_CREATE does.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
+        return -T_E_ACCES;
+    if (length_raw == 0 || length_raw > JIT_SEALED_MAX) return -T_E_INVAL;
+    if (src_va == 0 || !sys_validate_user_buf(src_va, length_raw))
+        return -T_E_FAULT;
+    if (!sys_validate_user_buf(out_va, sizeof(u64))) return -T_E_FAULT;
+
+    u64 xva = 0;
+    s64 rc = sys_jit_create_sealed_region(p, NULL, src_va, length_raw, &xva);
+    if (rc != 0) return rc;
+
+    // With no lock held (the R-5-F1 rule, as for SYS_JIT_CREATE).
+    if (uaccess_copy_out(out_va, &xva, sizeof(xva)) != 0) {
+        (void)sys_jit_destroy_for_proc(p, xva);
+        return -T_E_FAULT;
+    }
+    return 0;
+}
+
+static s64 sys_jit_create_sealed_handler(u64 src_va, u64 length_raw, u64 out_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -T_E_INVAL;
+    return sys_jit_create_sealed_for_proc(t->proc, src_va, length_raw, out_va);
+}
+
 // SYS_JIT_DESTROY: tear down BOTH aliases of the region whose writer alias
 // starts at writer_va, and free the backing pages.
 //
@@ -7142,9 +7311,26 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     spin_lock(&p->as->lock);
 
     struct Vma *w = vma_lookup(p, writer_va);
-    // Must be the BASE of the writer alias, not merely a VA inside it -- a
-    // partial teardown has no meaning for a code region.
-    if (!w || w->vaddr_start != writer_va || !jit_vma_is_writer(w)) {
+    // Must be the BASE of the alias, not merely a VA inside it -- a partial
+    // teardown has no meaning for a code region.
+    if (!w || w->vaddr_start != writer_va) {
+        spin_unlock(&p->as->lock);
+        return -T_E_INVAL;
+    }
+
+    // B-2b: a sealed region has ONE alias, execute-only, and is named by it.
+    if (jit_vma_is_sealed(w)) {
+        u64 slen = w->vaddr_end - w->vaddr_start;
+        // Read before the unmap frees the Burrow, as for a pair below.
+        u32 paid = burrow_lazy_footprint(w->burrow);
+        int rc = burrow_unmap(p, writer_va, slen);
+        if (rc == 0 && paid)
+            proc_page_uncharge(p, paid);
+        spin_unlock(&p->as->lock);
+        return rc == 0 ? 0 : -T_E_INVAL;
+    }
+
+    if (!jit_vma_is_writer(w)) {
         spin_unlock(&p->as->lock);
         return -T_E_INVAL;
     }
@@ -15822,6 +16008,12 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
 
     case SYS_ICACHE_SYNC:
         ctx->regs[0] = (u64)sys_icache_sync_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_JIT_CREATE_SEALED:
+        ctx->regs[0] = (u64)sys_jit_create_sealed_handler(ctx->regs[0],
+                                                          ctx->regs[1],
+                                                          ctx->regs[2]);
         return;
 
     case SYS_WALK_CREATE:

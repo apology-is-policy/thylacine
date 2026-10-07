@@ -821,9 +821,10 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
 // precheck admits FILE; a protect to none, sealed or not, is a guard), and the
 // re-lookup below proves only that the GEOMETRY still matches: the same
 // Burrow at the same slot answers yes for a piece protected to none.
-// Installing at the CURRENT vma->prot would then encode none as a
-// user-READABLE RO leaf (make_user_pte_l3 has no "no access" encoding), so
-// the guard would not guard and no fault would ever run step 2 again. Re-run
+// Installing at the CURRENT vma->prot would then put a leaf where a guard
+// stands (before B-2b the encoder even read none as a user-READABLE RO
+// leaf), and a fetch from a page lowered to R would get one it may not use,
+// so no fault would ever run step 2 for it again. Re-run
 // the admission for the recorded fault type against the prot as it reads NOW;
 // a refusal installs nothing and returns FAULT_UNHANDLED_USER, exactly what
 // the retry would answer (a read of a none page; an instruction fetch from a

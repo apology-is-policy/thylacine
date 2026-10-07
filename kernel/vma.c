@@ -69,6 +69,15 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     // syscalls already guard. Reject it here so the VMA prot matches the PTE.
     if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return NULL;
 
+    // B-2b: execute-only exists only over a code Burrow (a sealed region,
+    // SYS_JIT_CREATE_SEALED). Any other X-without-R -- a Linux PROT_EXEC mmap
+    // through Vivarium, an ELF segment flagged PF_X alone -- maps R+X, as it
+    // always has and as Linux does: those callers never asked for a page their
+    // own loads would fault on.
+    if ((prot & VMA_PROT_EXEC) && !(prot & VMA_PROT_READ) &&
+        burrow->type != BURROW_TYPE_CODE)
+        prot |= VMA_PROT_READ;
+
     // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
     // Burrow's end would name slots its pagemap does not have, and the range
     // release walks the mapping's own slot bound -- refused here, at the one

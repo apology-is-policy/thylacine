@@ -1964,7 +1964,9 @@ enum {
     //   page traps rather than running residue.
     //
     //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX),
-    //   -ENOMEM (the VMA cap, no VA gap, or the allocator), -EFAULT (out_va
+    //   -ENOMEM (the VMA cap, no VA gap, or the allocator), -EAGAIN (the
+    //   kernel CSPRNG is not yet seeded, so no address can be drawn: B-2b
+    //   places each alias at an independent random address), -EFAULT (out_va
     //   not writable by the caller).
     //
     //   The denial is -T_E_ACCES (13), NOT -T_E_PERM: errno.h forbids a
@@ -2427,6 +2429,30 @@ enum {
     //   cap (-ENOMEM).
     SYS_BURROW_MAP_FILE = 126,  // arg: fd (x0), offset (x1), length (x2), prot (x3), flags (x4), addr (x5)
 
+    // SYS_JIT_CREATE_SEALED(src_va, length, out_va) -> 0 / -errno. CAP_JIT-gated.
+    //   B-2b (dec-2026-10-07-jit-sealed-thunk): a code region BORN sealed. The
+    //   kernel copies `length` bytes from src_va into a fresh code region,
+    //   commits and charges its pages (I-32), invalidates the I-cache over
+    //   them, and maps ONE alias, EXECUTE-ONLY (AP[2:1]=10, UXN=0, PXN): EL0
+    //   may fetch it and may neither load nor store it. No writer alias ever
+    //   exists. Writes the alias's VA as a u64 to out_va. The tail of the last
+    //   page past `length` is zero (UDF #0). The region is placed at a random
+    //   address, as SYS_JIT_CREATE's aliases are.
+    //
+    //   It holds code whose bytes must not be readable -- JavaScriptCore's
+    //   write thunk carries the writer alias's base as immediates. Every
+    //   kernel read on EL0's behalf is unprivileged (uaccess.S LDTR/STTR), so
+    //   a syscall cannot read the page for its caller either; /proc/<pid>/mem
+    //   refuses it. SYS_JIT_DESTROY(exec_va) releases it and refunds its
+    //   charge; SYS_ICACHE_SYNC over it is accepted and has nothing to do.
+    //
+    //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_SEALED_MAX),
+    //   -EFAULT (src_va unreadable by the caller, or out_va unwritable),
+    //   -EAGAIN (the kernel CSPRNG is not yet seeded, so no address can be
+    //   drawn), -ENOMEM (the page budget, the VMA cap, no VA gap, or the
+    //   allocator). A failure leaves nothing mapped and nothing charged.
+    SYS_JIT_CREATE_SEALED = 127,  // arg: src_va (x0), length (x1), out_va (x2)
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2507,6 +2533,12 @@ _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_r
 // so the bound is on address space; the pages a JIT touches are charged one at
 // a time against the I-32 page budget, as SYS_BURROW_ATTACH_LAZY's are.
 #define JIT_REGION_MAX  (64u * 1024u * 1024u)
+
+// Largest sealed region (SYS_JIT_CREATE_SEALED). A sealed region holds a
+// thunk or a few trampolines, and the create commits and copies every page of
+// it before returning, so the bound is on that per-call work: 1 MiB is 256
+// pages, far above any thunk and far below the budget.
+#define JIT_SEALED_MAX  (1u * 1024u * 1024u)
 
 // SYS_PTY_REGISTER ops.
 #define PTY_REG_MINT   0u
