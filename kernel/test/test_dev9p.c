@@ -78,6 +78,7 @@ void test_dev9p_wb_fsync_flush_and_error(void);
 void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_dying_wstat_keeps_staging(void);
+void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3611,6 +3612,35 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void) {
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
 }
 
+// A metadata write stops staging but keeps the error latch reporting: a flush
+// the server refused dropped the run, and every later write and fsync -- not
+// only the last close -- must go on saying so (the NFS model). The latch is
+// read only on an eligible priv, so stopping staging must not clear that.
+void test_dev9p_wb_wstat_keeps_the_latch(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
+    long fe0 = dev9p.fsync(f, 0);
+    int  wrc = dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0);
+    long we  = dev9p.write(f, chunk, 256, 256);
+    long fe1 = dev9p.fsync(f, 0);
+    int  crc = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
+    TEST_EXPECT_EQ((u64)(s64)wrc, 0ull, "the wstat itself succeeds");
+    TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
+    TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28, "and the last close");
+}
+
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
 // FIRST, then writes through -- two Twrites in old-bytes-first order. A wstat
 // on the staging fd also flushes first and stops staging.
@@ -3640,7 +3670,7 @@ void test_dev9p_wb_nonappend_writethrough(void) {
                    "wstat ok");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
     struct dev9p_priv *fp = dev9p_priv_of(f);
-    TEST_ASSERT(fp != NULL && !fp->wb_eligible, "wstat stops staging");
+    TEST_ASSERT(fp != NULL && !fp->wb_known, "wstat stops staging (no append anchor)");
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 1500), 100ull, "post-wstat write");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…goes straight through");

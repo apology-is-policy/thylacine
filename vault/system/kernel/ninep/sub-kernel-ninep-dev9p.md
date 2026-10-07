@@ -267,11 +267,12 @@ after the run is gone) — then Tfsync with real-errno propagation.
 `_Static_assert`s): a caped session refuses UID/GID before anything else
 (the cape, below); cached-open fails LOUD ([[seam-co-fidless-wstat]]);
 write-behind: flush first (a truncate must land after the staged bytes)
-then de-eligibilize (a size change destroys the append anchor) -- only once
-the run is gone: a flush a death ended keeps the run, and a priv that stopped
-staging would no longer overlay it on read, flush it on fsync or order a
-write-through after it, for another Proc sharing the fd too (witness
-`dev9p.wb_dying_wstat_keeps_staging`); on success
+then stop staging by clearing the append anchor (`wb_known`; a size change
+destroys it) -- never the eligibility flag, which gates the read overlay,
+fsync's flush and the write ordering of a run a death kept, and the latch's
+report on every write and fsync, for another Proc sharing the fd too
+(witnesses `dev9p.wb_dying_wstat_keeps_staging`,
+`dev9p.wb_wstat_keeps_the_latch`); on success
 attr invalidate (CRITICAL — the base X-check perm_checks the cached mode,
 so the invalidate keeps the guest's own chmod window at zero) + whole-file
 page invalidate when SIZE changed.
