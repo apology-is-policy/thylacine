@@ -1,6 +1,6 @@
 # The autonomous-run journal
 
-## 2026-10-07: the private-owner port (corona) -- SETTLED RETIREMENT, GUEST UNRUN
+## 2026-10-07: the private-owner port (corona) -- QUALIFIED ON ONE AXIS
 
 Resumed from a self-compaction with AS-R9 qualified (50/50 clean boots) and
 Astra's scoped review closed at ba0c8f60f. Two calls rested with their owners,
@@ -102,6 +102,128 @@ the dossier pass is deliberately last: writing it now would record charge
 arithmetic in the vault that the guest has not confirmed. The pi axis was
 re-measured today and is still unreachable by both routes, so AS-R9's second axis
 remains the named residual.
+
+### The lease landed at 09:46Z, and the first thing it found was not in the kernel
+
+The port's first whole-kernel compile produced zero errors -- and then the BUILD
+died, in stratumd, which is how a provenance defect in my own `build/` surfaced.
+Two CMake caches there name a PEER's Stratum tree: D7's residue, inherited
+through the APFS clone of her `build/` that her now-spent approval covered.
+`tools/ci-smp-gate.sh:140` opens with an unconditional full build, so the GATE
+SCRIPT cannot run in this tree at all. I ran its matrix STAGE instead, with the
+five rows and N=10 DERIVED out of the gate script rather than retyped, on the
+image the suite and both legs had already qualified, and said so everywhere --
+the runner prints the disclaimer into its own log. For a kernel change that is
+arguably the better experiment: the kernel is then the single variable across
+all three bodies of evidence. It is NOT ci-smp-gate.sh passing, and I have not
+written that anywhere.
+
+The deeper half is worse and is enqueued: `build/pouch/stratumd-cmake` is the
+GUEST stratumd baked into the ramfs, so the AS-R9 green image's stratumd came
+from a peer's working tree. The kernel verdict stands -- the ELF was the
+controlled variable, byte-identical across the red/green pair -- but the IMAGE
+is not reproducible from canonical Stratum, which is weaker than I had been
+claiming to both peers. Two claims I had attached to it are WITHDRAWN, one of
+which main had already repeated back to me as established: that a canonical
+rebuild would bake "54 peer-uncommitted files" (all 54 are .md or .tla, none a
+build input), and that canonical "lacks the session-DEK lease work"
+(`install-dek` appears in 3 files in BOTH trees, so that grep establishes no
+difference). D7's cure WAS a peer stratumd -- measured -- but the mechanism I
+attached to it was not.
+
+### The gates, and the wrong turn that cost the first attempt
+
+Suite 1836/1836, 0 FAIL, 0 skip, 0 extinction, banner present, with 1836 DERIVED
+from test.c's registration table before the boot and the kernel's own tally
+equalling it -- two routes to one number. Both RED legs credited, each fixture
+reddening on its own mutant for the assertion that mutant targets, as the ONLY
+failure, with the kernel's own 1835/1836 tally agreeing both times; leg 2 mutates
+the SHIPPED `loom_private_destroy`, which closes Astra's PO-R2. Green control
+1836/1836 on a kernel byte-identical to the pre-legs one (`5ced18c43ae8302a`).
+Matrix 5/5 rows, 50/50 boots, every non-PASS category zero. D7 witnessed 50/50
+by counting per-boot PASS lines in the retained logs, which is the close
+condition Astra set in place of my assumption that the matrix "exercises D7".
+
+The first legs run REFUSED, and it was right to: it reported the reddened test
+as ABSENT. The fixture and the mutation were both fine; MY PARSER was wrong.
+`test.c` prints `[test] NAME ... ` BEFORE running the test, so anything the test
+prints lands between the name and its verdict, and on failure `test_fail()` calls
+`sched_dump_runnable()` -- so `FAIL: <msg>` arrives two lines later. Not a
+failure-path curiosity: 87 of the 1836 PASSING verdicts are split the same way by
+ordinary kernel output, and the serial log is CRLF, so every `$`-anchored pattern
+failed silently. A single-line regex read 1749 of 1836, and the green control's
+"no failing test" check had been blind to 87 tests all along -- it only looked
+sound because the tally check sat beside it. A verdict is a STATE in the log, not
+a line in it. One normalisation pass now, validated against two REAL logs before
+being trusted, refusing below 1000 resolved verdicts or on any unresolved one.
+53 green checks against stubs I had written did not touch it, because a stub
+encodes what I already believe the format to be.
+
+Two of my own beliefs died here. "A kernel test FAIL extincts the boot, so a red
+leg carries no tally" was in a script header and two handoff notes, had never
+been measured, and is false -- the suite runs every test, prints 1835/1836 FAIL,
+and `boot_main` extincts on the SUMMARY. And I shipped the very defect I had
+just fixed: the matrix runner's row loop was `printf | while read`, whose
+subshell loses every status, written under a comment acknowledging the subshell.
+Caught before it ran, which is luck rather than method.
+
+### Astra read the evidence rather than the claim
+
+Her review close (0161 t33) accepted the matrix-stage qualification as stated,
+closed PO-R2/R4/R6, and asked one question I could not answer from memory: the
+retained `wrapper-test-new.log` reads 53 passed, where I had reported 57. Both
+numbers were real. The 57 run happened after S11 and S12 were added; its log was
+never retained, so the only retained evidence was the earlier 53-check run. A
+number quoted from a run whose log was not kept is a recollection, not a
+measurement, however real the run was. Corrected in the two places it was
+written, and both logs are retained now: 77/77 against the fixed runner, 66
+passed / 11 wrong against the pre-fix one.
+
+Her remaining item, PO-R5, was three real defects in the reusable wrapper, now
+at `5674f059c`. `reap_owned` waited on the immediate build child, but a build's
+real descendants are its COMPILERS, and they outlive the shell that launched
+them -- so source restoration could race a live writer. Ancestry cannot find
+them, because a grandchild is reparented to init the moment its parent exits,
+which is exactly the case that matters; so every owned command now runs as its
+own process group and a group is reaped and then PROVEN empty by pgid. I verified
+that mechanism on a fixture before writing it in, rather than assuming `set -m`
+behaves that way in this host's `sh`. A surviving QEMU after KILL used to print
+`WARNING`; unproven quiescence now refuses the restore, names the live pids and
+the pristine originals, and exits nonzero. And the unqualified marker was being
+removed whenever the suite was green, even when the run's final source/HEAD
+checks had failed -- so a tree whose evidence was not attributable could be left
+looking qualified, with only the exit status to say otherwise. It takes both
+halves now, because the marker is the durable artifact a later session reads.
+
+The refusal branch cannot be driven by a real process, since nothing survives
+SIGKILL. S15 drives it by shadowing the INSTRUMENT instead -- a fake `ps` that
+keeps reporting a member of the build's group, which is what an unreapable
+process looks like to the runner. The runner still has no command-override seam:
+a switch that can swap the build or the suite is a switch that can fake a gate.
+
+### The instrument was lying, and yesterday's refusal to record it was correct
+
+A census of test names through my own `grep` returned 757 of 1836 with exit 0 and
+no stderr. I hypothesised a cause, failed to reproduce it minimally, and declined
+to write a lesson on an unreproduced hypothesis. Today it reproduces in six
+lines: six IDENTICAL registration rows, pattern
+`^[[:space:]]*\{[[:space:]]*"[^"]+"`, /usr/bin/grep says 6, the embedded ugrep
+7.8.4 says 3 and reports lines 2, 4 and 6. Not `-o`, not the injected `-G`, not
+`[[:space:]]` and not `^` alone: it needs a quantified NEGATED class followed by
+the character it excludes. Removing the anchor gives 0 matches -- a strictly more
+permissive pattern matching LESS, which no correct engine can do. ugrep's `-P`
+engine gives 6, so the fault is in its own DFA matcher. The `grep` an agent runs
+here is that wrapper, in the interactive shell and in the Bash tool, while a
+script run as `sh x.sh` gets /usr/bin/grep -- so the same pattern gives two
+different answers depending on who runs it, and a count is evidence in nearly
+every write-up in this repo. Enqueued and owned, with the predicate recorded
+rather than the instance: count with /usr/bin/grep when the COUNT is the
+evidence, and give every census a control. This one was caught only because a
+pinned denominator disagreed with the tool.
+
+The operator's decision, which I have not re-asked: the mac gate alone, with the
+pi A72/KVM axis recorded as an owned residual. So this is a ONE-AXIS
+qualification, and nothing here is pushed, landed, or activated.
 
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
