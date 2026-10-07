@@ -859,10 +859,22 @@ orders the frees. Every path that takes the guard releases it exactly once.
 What that argument is blind to is the residue worth carrying. It shows the code
 CONTAINS a release on every path and says nothing about one having EXECUTED. A
 ring whose refcount never reaches zero never enqueues, so a reference leak would
-strand the guard with this pairing fully intact. A retirer that never runs, or a
-queue that never drains, strands it SILENTLY -- the list has no bound and no
-timeout, and the fixture's `lp_wait` rests on that liveness rather than on the
-pairing. The page-accounting release is a separate claim: the uncharge arithmetic
+strand the guard with this pairing fully intact -- and that reduces to ONE named
+dependency rather than an open worry: the private path adds no ref-taker of its
+own, `loom_ref` having exactly one production call site, inside
+`handle_acquire_obj`, paired with `handle_release_obj`'s drop. Guard release
+therefore inherits the handle layer's get/put balance, a separately owned
+invariant, and nothing more. The consumer side is narrower still than it reads:
+the retirer thread is created UNCONDITIONALLY at boot (the braces around it are a
+bare scope, not a condition) and an allocation failure extincts, after
+`loom_retire_init` and before the suite runs -- so "no consumer" is unreachable
+and what remains is I-8 liveness, not a private-ring premise. The admission gate
+is worth one caution: `service_retire_ready` is set by the queue's init, which
+attests the queue's FIELDS and not the consumer's existence. Today the window
+between the two is empty, so nothing can be admitted into it; if private
+admission ever moves earlier than the thread -- the syscall enabling is where
+that would happen -- the gate has to cover both halves or a ring will enqueue to
+a list nobody drains. The page-accounting release is a separate claim: the uncharge arithmetic
 in the destroy is not covered by any of this. And the two `extinction()` arms in
 the destroy precede the release, so a private ring in legacy state dies LOUDLY
 rather than leaking -- those arms are not leak paths.
