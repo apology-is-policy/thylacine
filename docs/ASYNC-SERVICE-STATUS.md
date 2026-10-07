@@ -906,3 +906,31 @@ and stage 5 counts per label how many boots reached the overlapping-login ladder
 and how many reported PASS, refusing when a label's retained-log count is not N.
 
 **Posture unchanged: AS-R9 is UNQUALIFIED, because `ci-smp-gate` has never run.**
+
+### October 7: the second axis is unavailable, and the residual is recorded rather than silent
+
+thyla-pi cannot be reached by either route, measured on both rather than inferred
+from a status line: `ssh thyla-pi` fails to resolve `thyla-pi.local` (its ssh
+config's HostName is an mDNS name), and `ssh thyla-pi-cf`, whose ProxyCommand is
+`cloudflared access ssh --hostname thyla-pi-ssh.treeso.net`, answers `websocket:
+bad handshake` with no local `cloudflared` process either -- so the far end of the
+tunnel is down. Meanwhile `yip resources` lists `pi FREE`, which is a LEASE state
+and never a reachability measurement; stage 6 of the lease runbook says exactly
+that in a comment (Astra, 0161 note 8) and now has the measurement behind it.
+
+This matters because AS-R9 is an SMP race fix, and thyla-pi (4x Cortex-A72, real
+KVM) is the only non-Apple memory model in the fleet -- the axis that separates
+two causes sharing one reading, and the host #214 was closed on. With it down,
+every SMP result in flight rests on Apple M2 under HVF alone.
+
+**Operator decision, 2026-10-07 (do not re-ask): the mac gate alone, with this
+residual recorded.** AS-R9 qualifies on M2/HVF from the 50-boot `ci-smp-gate`
+matrix plus the per-boot D7 witnesses the retained logs now carry, and the
+missing A72/KVM axis stays an explicit, owned, queued residual -- named in the
+review rather than absent from it -- with the pi leg to run when the host comes
+back. `PI_AXIS=0` is therefore the correct setting for this run, not a dodge, and
+stage 6 refuses out loud if anyone sets it otherwise without the lease.
+
+What this does NOT license: reading the mac gate's green as a two-axis
+qualification, or closing the residual by argument. The residual is owned in
+OPEN-BUGS by the thyla-pi entry, which also carries the vote.

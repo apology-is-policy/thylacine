@@ -363,6 +363,33 @@ the await's state source. No kernel source changed. AS-R9 is still UNQUALIFIED -
 in this slice; Astra's preservation instruction is what produced the stronger
 attribution, and every other correction came from reading a tool.
 
+### UPDATE, the lease landed at 06:15Z and the second axis did not (October 7)
+
+The await expired on its own budget while the mac was still main's, and by the
+time I looked the machine had been free long enough for me to be 6.7 hours into
+the queue with aux 2.5 hours behind me. Held it at 06:15Z and started the run
+inside the offer window; it is building from my pinned source as I write this,
+and the HEAD-equality guard added an hour earlier passed without comment, which
+is what a guard should do on a day when nothing has drifted.
+
+The second axis is gone for now, and I measured it rather than inferring it from
+`yip`: `ssh thyla-pi` cannot resolve its mDNS HostName, and the tunnel route
+answers `websocket: bad handshake` with no local `cloudflared` running, so the
+far end is down. `pi FREE` in the relay is a lease state and never a reachability
+measurement -- the runbook already said so in a comment, and now there is a
+measurement behind the comment. That removes the only non-Apple memory model from
+the fleet, which for a RACE fix is not a convenience: a green on one memory model
+is one reading, and two causes can share one reading.
+
+So I put it to the operator as a decision rather than leaving it in a summary,
+and the decision is **the mac gate alone, with the residual recorded**: AS-R9
+qualifies on M2/HVF from the 50-boot matrix plus the per-boot D7 witnesses, and
+the missing A72/KVM axis stays an explicit, owned, queued residual that Astra
+reviews by name. It does not license reading the mac green as a two-axis
+qualification, and the residual cannot be closed by argument -- only by the pi
+booting the repair. Recorded in ASYNC-SERVICE-STATUS.md and owned by the thyla-pi
+entry in OPEN-BUGS, which carries the vote so nobody re-asks it.
+
 ## 2026-10-04: explicit protocol-buffer storage
 
 The private owner needs all metadata/payload transport storage accounted before
