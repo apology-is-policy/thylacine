@@ -3364,6 +3364,28 @@ build_stratumd() {
     cp "$binary" "$progs_out/stratumd"
     echo "==> stratumd built: $progs_out/stratumd ($(wc -c < "$progs_out/stratumd" | tr -d ' ') bytes, ET_EXEC, static)"
     ledger "stratumd: BUILT (links the pouch libc -- a stale sysroot would ship a stale ABI here)"
+    # The external Stratum source is the one build input no artifact hash
+    # enumerates, so two images can ship different stratumd while every
+    # recorded hash matches. Observed 2026-10-06: two trees with an IDENTICAL
+    # .config (4fcc788d6be38b80) and the same base commit, where one image's
+    # stratumd lacked the session-DEK leases -- which failed joey's D7
+    # overlapping-login probe with `install-dek ... result=err:eaccess` and was
+    # found only by reading both CMakeCache.txt files by hand. Recording only:
+    # the pin travels with the build instead of needing archaeology. Artifact
+    # hashes identify OUTPUTS; they do not enumerate external INPUTS.
+    local stratum_head stratum_dirty
+    if stratum_head="$(git -C "$stratum_src" rev-parse --short HEAD 2>/dev/null)"; then
+        if [[ -n "$(git -C "$stratum_src" status --porcelain 2>/dev/null)" ]]; then
+            stratum_dirty=YES
+        else
+            stratum_dirty=no
+        fi
+        ledger "stratumd: built from $stratum_src @$stratum_head (dirty: $stratum_dirty)"
+    else
+        # An ABSENT line would read as "no external input", which is the wrong
+        # reading -- say the commit could not be identified instead.
+        ledger "stratumd: built from $stratum_src (NOT A GIT REPO -- commit unidentifiable)"
+    fi
 }
 
 build_stratum_host_tools() {
