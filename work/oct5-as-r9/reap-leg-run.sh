@@ -97,6 +97,37 @@ EXPECT_TESTS=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/t
   echo "REFUSING: derived only $EXPECT_TESTS registrations from kernel/test/test.c"
   echo "   -- the DERIVATION is broken, not the suite."; exit 3; }
 echo "-- expectation DERIVED from kernel/test/test.c: $EXPECT_TESTS registrations"
+# THE EXTERNAL STRATUM PIN, ADOPTED BY EXTRACTION rather than duplicated. The
+# qualified image was built with STRATUM_SRC pointed at the pinned tree; this
+# script left that lever UNSET, so build.sh fell back to its default
+# ~/projects/stratum/v2 and would have produced a control image built from a
+# DIFFERENT Stratum than the one the leg was qualified against.
+#
+# It was not caught by reasoning: the first real run of this script died inside
+# build.sh with "CMake Error: the source ... does not match the source ... used
+# to generate cache", because build/'s stratumd cache was configured from the
+# pinned tree at 14:09:56Z today and the default source disagrees with it. That
+# refusal is the build protecting the experiment -- without the cache to
+# disagree with, the run would have built quietly against the wrong source.
+#
+# EXTRACTED, never copied, for the same reason preserve_boot_inputs is: a
+# duplicated pin drifts from the procedure it is supposed to mirror, and this
+# one carries three refusals (contains-the-commit, HEAD-EQUALS-the-commit, and
+# a clean worktree) whose load-bearing half is the equality.
+awk '/^# THE EXTERNAL STRATUM PIN, which the original handoff did not state and this$/,/^echo "-- stratum pinned: /' work/oct5-as-r9/lease-runbook.sh > "$OUT/stratum-pin.sh"
+_pl=$(wc -l < "$OUT/stratum-pin.sh" | tr -d ' ')
+[ "${_pl:-0}" -ge 40 ] || {
+  echo "REFUSING: the stratum pin block extracted only ${_pl:-0} lines -- the"
+  echo "   EXTRACTION is broken, not the runbook."; exit 3; }
+# A denominator control on the extraction: the equality check is the half that
+# discriminates (rev-parse alone succeeds in any tree holding the object), so
+# an extraction that lost it would pass vacuously.
+/usr/bin/grep -q 'STRATUM_PIN_FULL=' "$OUT/stratum-pin.sh" || {
+  echo "REFUSING: the extracted block has no HEAD-equality pin -- it would"
+  echo "   accept any tree that merely contains the object."; exit 3; }
+. "$OUT/stratum-pin.sh"
+echo "-- stratum lever SET for every build below: STRATUM_SRC=$STRATUM_SRC"
+
 floor "stage 0"
 
 # THE PRISTINE COPY AND THE RECOVERY PATH, before anything can mutate.
