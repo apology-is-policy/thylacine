@@ -1,5 +1,108 @@
 # The autonomous-run journal
 
+## 2026-10-07: the private-owner port (corona) -- SETTLED RETIREMENT, GUEST UNRUN
+
+Resumed from a self-compaction with AS-R9 qualified (50/50 clean boots) and
+Astra's scoped review closed at ba0c8f60f. Two calls rested with their owners,
+so the session opened by reading them rather than guessing: main parked 0181 and
+will report the land, and Astra's turn 29 cleared obligation 1's shape and
+prescribed the exact retirement form. That unblocked the arc.
+
+Started with the one item I owned alone -- the three unprobed unmap refusals --
+and the first finding was that my own framing of it was wrong. I had told Astra
+three branches were uncovered. Writing the probes showed that two of them cannot
+be covered in the sense I meant: vma_lookup null-guards its own Proc, and no VMA
+can be installed spanning a range whose end wraps, so deleting EITHER guard still
+refuses, at the no-VMA miss, with an identical observable. Neither can be made
+load-bearing through that API. So those two assertions are BEHAVIOUR pins and the
+test now says so, instead of claiming the guard named beside them is the one that
+fired. The third was the real one, and it was also the only load-bearing one: a
+tail-aligned interior page whose want_end equals the VMA's own end, so the
+end-mismatch check passes too and the start check is the only thing standing
+between that call and tearing down a whole two-page VMA on a one-page request.
+The lesson is the old one from the other direction -- I nearly shipped three
+assertions advertised as covering three guards, which would have been a control
+that proves detection and not discrimination.
+
+The vault corrected me on the same commit. My first dossier draft cited
+burrow.c:1240-:1254 and vma.c:275, and quaestor's R4 rule rejects file:line
+citations on the Present plane. It is right, and for the reason I had just
+written into the test: a line citation is re-pointed by hand on the next edit and
+silently wrong until someone notices. Both the test and the dossier now name
+guards by predicate.
+
+Then the port. The draft's loom_private_destroy wrote claim / drop / restore on
+l->ring -- the shape AS-R9 removed -- on a path absent from both its base and my
+repaired HEAD, with hunks disjoint from mine. So the failure mode was never a
+conflict; it was a CLEAN rebase that fixes two sites and leaves the newest one
+defective. Astra's prescribed form replaced it, and I checked the result rather
+than assuming it: zero claim/restore sequences in loom.c, three settled sites.
+
+Three defects in the draft, all one class -- something true about the wrong
+subject. main.c moved the "vdso_init (the clock vDSO page)" comment off weft.h
+onto the new loom.h include, where it is false; checking it, vdso_init is
+declared in vdso.h, so that comment was already one line low in my tree and the
+draft propagated it onto a third header. The retirer block landed between the
+G-3 weave-reaper comment and the weft code that comment describes. And the
+fixture rode on test_loom_create_geometry, so a lifecycle failure would have
+reported under a ring-layout name.
+
+WRONG TURN, caught by a symbol I had just edited. I checked thirteen helpers
+with `grep -rq "$s" <paths> 2>/dev/null` and every one came back ABSENT --
+including handle_close_on_exec, a function I had edited minutes earlier. One of
+the paths in the list did not exist, so grep failed for all thirteen and 2>/dev/null
+ate the warning. A search that finds nothing must prove it searched something;
+re-running it with the denominator printed showed all thirteen present. The
+absent path also taught me something real: the draft's fixture includes
+"../../arch/arm64/timer.h", and arch/ sits at the repo root, not under kernel/ --
+test.h already declares timer_now_ns, so my fixture needs no arch include at all.
+
+WRONG TURN, a question routed to the wrong owner. I asked main whether their
+tag-pool added a Loom admission path needing a private refusal. It does not, and
+could not: their tag-pool is the 9P TAG pool (P9_TAG_LIMIT); the machinery I was
+worried about is my own branch's Loom SERVICE pool. One git ls-tree settled it --
+loom_service_pool.h does not exist on tagpool at all. Two subsystems sharing a
+word was enough to send the question to the wrong agent. Withdrawn, and answered
+on my own tree: no loom_pool function takes a Loom; exactly one function
+anywhere does, loom_post_pool_cqe, and it is a result-commit path with ZERO
+callers. That surfaced a latent obligation rather than a live defect -- it never
+consults service_closing, while the draft's own field comment asserts the two are
+"serialized with result commit by lock". The serialization exists; the check does
+not. Enqueued against the engine chunk, not fixed, because it is unreachable
+today and I measured that rather than assuming it.
+
+THE PART I AM MOST GLAD I DID NOT LEAVE AS PROSE. Astra had asked for final AND
+nonfinal ring-drop cases "so an unconditional-refund implementation fails". The
+gap was bigger than a missing case: EVERY retirement in the draft's fixture ends
+the ring's occupancy, so all 96 lines of it are satisfied by an implementation
+that refunds unconditionally -- neither her conditional nor my refund was
+exercised by any of it. I added the nonfinal leg, and then, rather than commit an
+assertion no machine had ever evaluated, built a host double that runs off-lease
+(the class the operator ruled may). It extracts the three settlement functions
+VERBATIM from burrow.c by brace matching, each asserted a substring of its
+source, and doubles only the environment. Five rows as predicted. The row that
+carries the argument is the one requiring the MUTANT TO PASS the final leg: that
+demonstrates the draft fixture's blindness instead of asserting it, and the
+nonfinal leg then fails it at the exact predicted code with the mechanism
+captured -- "page_count 0, want 3", over-refunding by precisely the ring's pages
+while those pages still carry a mapping.
+
+Two smaller catches. The *.log gitignore trap fired again on the evidence, and
+the staged list rather than the commit's success is what showed it. And my first
+background watcher was launched with nohup + &, so the harness tracked the
+LAUNCHER, which exited 0 immediately -- the actual requeue loop was an orphan
+whose exit would never have re-invoked me. Killed and relaunched as a tracked
+task; it is holding my FIFO place by re-issuing every eight minutes, with a
+5-second wait rather than a long blocking hold, because the yip server is serial
+and a nine-minute hold would stall peers mid-gate.
+
+NOT BUILT, NOT BOOTED. Main holds the mac for the tag-pool gate. The native
+fixture, ci-smp-gate, both RED legs and the five dossiers' pass are all owed, and
+the dossier pass is deliberately last: writing it now would record charge
+arithmetic in the vault that the guest has not confirmed. The pi axis was
+re-measured today and is still unreachable by both routes, so AS-R9's second axis
+remains the named residual.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,

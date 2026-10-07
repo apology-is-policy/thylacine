@@ -976,3 +976,88 @@ the pi booting this repair closes it. Astra reviews with the residual named.
 Nothing pushed, nothing landed on main. The 128 MiB protection, private async and
 clipboard are unchanged; the paused private-owner draft stays shut until Astra's
 review.
+
+### October 7, later still: the private-owner port, with the retirement settled
+
+Astra closed the scoped AS-R9 review at `ba0c8f60f` and cleared obligation 1's
+shape on yip 0161 turn 29, prescribing the exact retirement form. The approved
+empty-private-owner infrastructure is now authored into this checkout against
+the repaired base: `213b695f8` (the port) and `f05aefbff` (its off-lease
+evidence).
+
+**The correction the port exists to make.** The draft's `loom_private_destroy`
+settled its ring charge with claim / drop / restore -- the shape AS-R9 removed,
+written anew on a path that postdates the repair, and absent from both the
+draft's base and this branch's repaired HEAD. A textual rebase would have
+conflicted on nothing and left exactly that site defective while fixing the two
+around it. It is replaced by the settled form: one
+`burrow_unref_settled_in(l->ring, as, &refund)`, one uncharge of
+`metadata + refund` under `as->lock`, and `addrspace_private_end` LAST, because
+it may drop the final lifetime reference and free the descriptor. `as` and
+`metadata` are snapshotted above the `kfree`. Verified after the port:
+`kernel/loom.c` holds zero claim/restore sequences and three settled sites.
+
+**Reachability is not claimed.** The window needs two holders of one Burrow, and
+the retirement guards may exclude that by construction. The settled form costs
+nothing here, so soundness does not rest on an exclusivity argument nobody has
+verified.
+
+**The fixture gap was larger than a missing case.** Every retirement in the
+draft's fixture ends the ring's occupancy, so all of them refund the whole
+charge -- an implementation that refunded UNCONDITIONALLY satisfies all 96 lines
+of it, which means neither the draft's conditional nor the new `refund` was
+exercised by it. The added leg maps the ring into the creator image so the
+handle drop is NONFINAL: the refund must be zero, only the metadata may come
+back, and the mapping teardown settles the rest. Its baseline is measured after
+the map rather than predicted.
+
+**That assertion is no longer a prediction.** A host double
+(`work/oct5-as-r9/private-retire-fixture.py`) extracts
+`burrow_charge_claim_locked`, `burrow_unref_settled_in` and
+`burrow_release_mapping_settled_deferred` VERBATIM from `kernel/burrow.c` by
+brace matching, each asserted a substring of its source, and doubles only the
+environment. Five rows, all as predicted
+(`work/oct5-as-r9/private-owner-logs/private-retire-matrix.log`):
+
+| impl | leg | rc | want | |
+|---|---|---|---|---|
+| settled | final | 0 | 0 | refunds metadata + ring |
+| settled | nonfinal | 0 | 0 | metadata only; tail settles the ring |
+| settled | exact-payer | 0 | 0 | another image's record is not refunded here |
+| unconditional | final | 0 | 0 | **BLIND SPOT** demonstrated, not asserted |
+| unconditional | nonfinal | 11 | 11 | **DISCRIMINATION**, `page_count 0, want 3` |
+
+Requiring the mutant to PASS the final leg is the row that carries the argument:
+it shows directly why none of the draft's legs could have caught it.
+
+Boundary, as the AS-R9 double stated it: this is the charge ARITHMETIC under a
+forced single-threaded schedule. Nothing about ARM weak memory, real locking,
+SLUB timing, or syscall reachability. The interleaving is fixture-forced and
+labelled as such. It does not replace the native fixture or the SMP matrix.
+
+**Three defects in the draft fixed in passing**, all one class -- something true
+about the wrong subject: `main.c` moved the `vdso_init` comment onto the new
+`loom.h` include where it is false (it belongs on `vdso.h`, where that function
+is declared); the retirer block landed between the G-3 weave-reaper comment and
+the weft code that comment describes; and the fixture rode on
+`test_loom_create_geometry`, so a lifecycle failure would have reported under a
+ring-layout name. It is registered as `loom.private_owner_lifecycle`.
+
+**Reviewed as code, not waved through on an unchanged base.** The release
+wrapper covers four of six `handle_release_obj` sites; the two it leaves alone
+are correct, because `handle_put` returns a BORROWED reference while the handle
+still exists and the dup-rollback site releases an acquire that never became a
+handle. Latching either would mark a live ring closing on a mere borrow.
+
+**NOT BUILT, NOT BOOTED.** No kernel compile, no boot, no native test: the mac
+is held by main for the tag-pool gate and this branch is queue-head behind it.
+The native leg and `ci-smp-gate` are owed, and the interior-unmap and
+nonfinal-retirement fixtures must each be shown RED against their mutants before
+they count as witnesses. Also owed: the five owning dossiers' pass, deliberately
+deferred because writing it now would record charge arithmetic in the vault that
+the guest has not yet confirmed.
+
+Gates unchanged: 128 MiB protection retained; private async, replacement memory
+accounting and clipboard all non-default; no syscall reaches
+`loom_create_private`. The pi A72/KVM axis remains the named unrun residual --
+re-measured today, unreachable by both routes. Nothing pushed, nothing landed.

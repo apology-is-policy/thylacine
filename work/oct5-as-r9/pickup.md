@@ -348,3 +348,80 @@ NEXT: astra closes review (hers), main confirms the land (hours away). Then, pos
 --expect-unmirrored 5 into build.sh at the next bake, and the STRATUM_SRC ledger
 gap (ledger/manifest recording only, astra t13). Do NOT open the paused
 private-owner draft before her review.
+
+---
+
+## 2026-10-07 09:5xZ: AS-R9 QUALIFIED, review CLOSED, private-owner port LANDED ON BRANCH
+
+HEAD `f05aefbff` on `corona/async-memory`, 57 commits off base. Tree clean apart
+from the untracked `cpu1-green-pair/` artifacts. **Nothing pushed, nothing landed.**
+
+The lines above about "HEAD is still the base" and "nothing committed" are the
+October 5 record and are long superseded; read them as history.
+
+### Done and NOT to be redone
+
+- AS-R9 qualified on the mac axis 2026-10-07 06:58Z: `ci-smp-gate` PASS, 50/50
+  clean boots, D7 50/50, suite 1834/1834. Run log `run-1007T061510Z.log`.
+- Astra's scoped review CLOSED at `ba0c8f60f`, no blocking defect.
+- Main holds both build.sh patches on `tagpool` (`6be56e59a`, `a61898766`) and
+  re-measured `--expect-unmirrored 5` on their tree. They land with tag-pool and
+  main will say so on 0181. ONLY THEN close the two OPEN-BUGS entries. Do NOT
+  re-deliver the patches.
+- The three unmap refusal assertions are WRITTEN (`df2856ca8`) and UNRUN. Two of
+  the three turned out to be undiscriminatable through that API and are labelled
+  BEHAVIOUR pins; the third, `burrow.unmap_interior_start_refused`, is the only
+  load-bearing one and is covered with the geometry that makes it so.
+- The private-owner port is authored (`213b695f8`) with the retirement in the
+  settled form Astra prescribed, plus its off-lease evidence (`f05aefbff`).
+  Verified: `kernel/loom.c` has ZERO claim/restore sequences and three settled
+  sites. Do not re-derive the finding; `private-owner-reconciliation.md` holds it.
+- The retirement double's 5-row matrix passes, including the row that matters --
+  an unconditional refund PASSES the all-final legs and FAILS the nonfinal one.
+  `private-owner-logs/private-retire-matrix.log`.
+
+### NEXT, in order, when the mac lease lands
+
+A background watcher holds the FIFO place by re-issuing `yip hold` every ~8 min
+with a 5s wait (NEVER a long blocking hold -- the yip server is serial). It exits
+when the mac is mine and the harness re-invokes.
+
+1. `tools/build.sh kernel --config ci`, then the suite. Expect 1836 (1834 + the
+   two new tests). The private-owner port has NEVER COMPILED -- expect to fix
+   build errors before anything else is meaningful.
+2. Both RED legs, each of which must be shown red before it is a witness:
+   - delete `vma->vaddr_start != vaddr` in `burrow_unmap_reporting` ->
+     `burrow.unmap_interior_start_refused` must FAIL.
+   - make `loom_private_destroy` uncharge `metadata + backing` unconditionally ->
+     the nonfinal leg of `loom.private_owner_lifecycle` must FAIL.
+   After each sabotage run, REBUILD from clean source: a sabotage run leaves its
+   kernel in `build/` and `test.sh` boots THAT.
+3. `tools/ci-smp-gate.sh` -- the retirement is an I-32 settlement path, so it
+   needs the multi-boot matrix for the same reason AS-R9 did.
+4. The five owning dossiers' pass (`sub-kernel-loom`, `-handle`,
+   `-boot-sequence`, `-death`, `-jobctl`), deferred on purpose until the guest
+   confirms the arithmetic. `No-dossier-change` trailers on the two port commits
+   carry the reason.
+5. Regenerate `INTEGRATION-MANIFEST.md` (`sh work/oct5-as-r9/make-manifest.sh`).
+
+### Open and mine
+
+- The pi A72/KVM residual: re-measured 2026-10-07, unreachable by BOTH routes
+  (`thyla-pi.local` does not resolve; the cloudflared tunnel gives
+  `websocket: bad handshake`). Operator vote stands, NEVER re-ask: "mac gate
+  alone, residual recorded". Only the pi booting this repair closes it.
+- `loom_post_pool_cqe` never consults `service_closing` -- latent, not live
+  (ZERO callers, measured), enqueued against the engine chunk.
+- Merge obligations, both carried forward: main `f6f4c0397` loom-mc needs
+  `loom_drive_moved_locked(l)` before the `spin_unlock` in `loom_post_pool_cqe`;
+  main's tag-pool `loom.c:2210` pump budget is reconciliation only (verified: no
+  settlement path, no `v->lock`).
+
+### Constraints, unchanged
+
+128 MiB protection retained; private async, replacement memory accounting and
+clipboard non-default; NO reviewer subagents (Astra reviews); never touch a
+peer's lease, jobs, checkout or artifacts; Astra's four protected drafts
+untouched and her tree unmodified (the port was authored here, not copied); do
+NOT merge main; `.claude/settings.json` (`55cfdb54c`) is EXCLUDED from delivery,
+not reverted.
