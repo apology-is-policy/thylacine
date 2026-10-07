@@ -182,8 +182,8 @@ is the same principal"). Concretely, before this rule:
   owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
   the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
   `cwd` and `maps` are mode 0444 — none of them weighs caps, except that `maps`
-  prints a code row's addresses only for a reader that passes the debug gate
-  (B-2b, `JIT-ON-WX-DESIGN.md` item 3). So an unelevated peer
+  prints a code row's addresses only for the target itself or a reader that
+  passes the debug gate (B-2b, `JIT-ON-WX-DESIGN.md` item 3). So an unelevated peer
   still READS an elevated same-principal target — `environ` being the one that
   matters, since it is where secrets live by convention. This rule governs
   *control*, not *disclosure*; disclosure is the seal's axis, and 3.2 below says
@@ -408,7 +408,7 @@ formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
 all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
 posture — and hand out nothing for a sealed one. (One later carve-out: since the code
 aliases are placed at random, `maps` zeroes a code row's addresses for a reader without
-debug authority over the target; `JIT-ON-WX-DESIGN.md` item 3.) `environ`, the one image file with an
+debug authority over the target, other than the target itself; `JIT-ON-WX-DESIGN.md` item 3.) `environ`, the one image file with an
 owner gate of its own, composes the two in `devproc_extract_authorized`. The mem and
 regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
 meaning and no seal, and gates `sched` and `imperium`.
@@ -592,6 +592,19 @@ accident. The taint is the opposite case and must cross: after the child execs
 there is no sharing left for the join to read, so only a copied bit still carries
 the history.
 
+**A code alias carries `CAP_JIT` in the join (B-2b audit r2, 2026-10-07).** A code
+region is the authority `CAP_JIT` confers, held by the image rather than by a Proc:
+`rfork(RFPROC|RFMEM)` hands it to a child born without the cap (I-2), and the child
+keeps it once its creator is reaped. From then on no mapper's `caps` word names it, so
+a capless same-principal peer would cover the child, take total control of a
+writer/exec pair (I-42) and see where it lies (`maps`). So the join ORs `CAP_JIT` into
+its caps while the address space holds any code alias (`AddrSpace.code_vmas`, kept by
+the VMA list's own insert and remove), sole mapper or not. The count has to be right
+only once the creator is gone, and the reap takes the lock the join runs under; until
+then the creator, which passed the `CAP_JIT` gate, is a mapper the cover already
+weighs. A fork refuses a code region outright (the clone classifier), so `RFMEM` is
+the only way to inherit one.
+
 **What this does NOT close.**
 
 - **Sealing is image-wide, and `set_dumpable`/`set_traceable` are UNGATED
@@ -609,7 +622,8 @@ the history.
 - **The non-capability authority axes.** The join unions `proc_flags` but reads
   only the seal and taint bits from it, so §3.1's third bullet stands unchanged:
   cover still weighs one `caps` word and not the spawn perms, the I-34 allowance,
-  or the handle table.
+  or the handle table. (A code alias is the one such authority it does weigh, as
+  `CAP_JIT`: above.)
 
 ## 4. 8a-1 — the software-checkpoint tier
 

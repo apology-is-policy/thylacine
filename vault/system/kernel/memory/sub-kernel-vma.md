@@ -749,6 +749,15 @@ first and refunds itself when the leaf was already there, and no other path
 clears a FILE leaf (the fork's keep-tables clear covers COW mappings, which
 are lazy-anonymous only). Witness: `demand_page.file_pages_charge_the_holder`.
 
+## The list primitives count code aliases (2026-10-07; B-2b audit r2)
+
+`vma_insert_in` and `vma_remove_in` keep `AddrSpace.code_vmas`, the number of
+listed VMAs whose Burrow is CODE. Every link and unlink of the list goes through
+them -- the merge, the range detach and the drain included -- so no other path
+can drift the count, and a removal that finds it at zero extincts. The image
+join reads it to give a space holding code the authority of `CAP_JIT`
+([[sub-kernel-proc]]).
+
 ## Referenced by
 
 [[moc-kernel-memory]] · [[sub-kernel-fault]] · [[sub-kernel-mmu]] ·

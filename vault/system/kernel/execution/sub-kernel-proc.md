@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-07
 ---
 ## Graphical seat incarnations
 
@@ -250,6 +250,17 @@ protecting. The join reads the union over every live mapper; the stamp writes a
 restriction to all of them. Both walk the table and so require
 `g_proc_table_lock`, and both skip the walk when `addrspace_ref_count == 1`,
 which is the ordinary case.
+
+**The image carries `CAP_JIT` while it holds a code alias (2026-10-07; B-2b audit
+r2).** A code region is that cap's authority, and it belongs to the image: an
+RFMEM child, born without the cap, keeps the aliases once their creator is
+reaped, and from then on no mapper's `caps` names them. So the join ORs `CAP_JIT`
+in whenever `AddrSpace.code_vmas` is nonzero, before the sole-mapper fast path
+([[sub-kernel-addrspace]]). A stale zero read beside a create is harmless -- the
+creator passed the `CAP_JIT` gate and is a live mapper -- and the count matters
+only once that creator is gone, which the reap publishes under the lock the join
+runs under. The caps union has one consumer, the debug cover rule
+([[sub-kernel-devproc]]); a new one inherits a cap no mapper may hold.
 
 `shared` is **references minus the zombies the traversal saw**, and each half of
 that earns its place. It asks whether another Proc could still *use* the image,

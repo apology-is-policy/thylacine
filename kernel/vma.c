@@ -248,6 +248,10 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     else      as->vmas   = v;
     if (cur)  cur->prev  = v;
 
+    if (v->burrow && v->burrow->type == BURROW_TYPE_CODE)
+        __atomic_store_n(&as->code_vmas,
+                         __atomic_load_n(&as->code_vmas, __ATOMIC_RELAXED) + 1u,
+                         __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -266,6 +270,12 @@ void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
 
     v->next = NULL;
     v->prev = NULL;
+
+    if (v->burrow && v->burrow->type == BURROW_TYPE_CODE) {
+        u32 nc = __atomic_load_n(&as->code_vmas, __ATOMIC_RELAXED);
+        if (nc == 0) extinction("vma_remove_in: code alias count underflow");
+        __atomic_store_n(&as->code_vmas, nc - 1u, __ATOMIC_RELAXED);
+    }
 
     // I-32: a removed VMA frees its slab slot -> uncharge the live-VMA count (pairs
     // with the charge in vma_insert_in). Under as->lock (every vma_remove caller

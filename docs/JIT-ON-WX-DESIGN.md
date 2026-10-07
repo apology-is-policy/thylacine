@@ -222,8 +222,9 @@ the shape on 2026-09-28; three things change.
    listing is also ambient here -- every Proc may read an unsealed Proc's
    `maps`, Plan 9's posture, sound only while no user address was random --
    so the addresses of its code rows go only to a reader with debug authority
-   over the target: the I-39 predicate, which admits a Proc reading itself
-   unless it is NOTRACE. Any other reader still sees each code row's
+   over the target (the I-39 predicate) and to the target itself, which I-39
+   refuses when the target is NOTRACE but whose own layout tells no one else
+   anything. Any other reader still sees each code row's
    permissions and type, with its addresses and offset printed as zero,
    listed after the other rows and grouped by permission, so the listing's
    order does not place them in the address space either (voted 2026-10-07,
@@ -231,6 +232,13 @@ the shape on 2026-09-28; three things change.
    the code addresses in `/proc/<pid>/stat` for a reader without it; the rest
    of Thylacine's `maps` stays ambient, because nothing else in it is random
    and the diorama reads a Linux guest's map as itself.
+   Debug authority over an image holding a code alias needs `CAP_JIT` even
+   when no mapper holds it -- an `RFMEM` child keeps the aliases after their
+   creator is reaped (DEBUG-FS-DESIGN 3.3; B-2b audit r2) -- so a reader
+   holding no elevation-only cap is never shown a code address. That is what
+   keeps the diorama, which reads every pid's `maps` as itself for clients of
+   any principal, from becoming a deputy: it refuses to serve while it holds
+   one.
 
 ## Status / handoff
 

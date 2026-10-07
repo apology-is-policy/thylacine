@@ -2574,6 +2574,8 @@ struct ProcImageJoin {
     // The union over every OTHER Proc in the table mapping this address space,
     // ZOMBIES INCLUDED: a zombie holds its reference until it is reaped, so its
     // bytes are still in the image and a seal it took must still refuse a read.
+    // Plus CAP_JIT while the space holds a code alias, whoever maps it: the
+    // aliases are that cap's authority, and they outlive the Proc that held it.
     caps_t caps;
     u32    flags;
     // Whether another Proc could still USE this image -- which is the one

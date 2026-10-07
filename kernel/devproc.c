@@ -651,9 +651,12 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
     if (!p->as) return off;
 
     // Every redacted row has the same length; take it from the formatter itself.
+    // Asked of every read, whoever reads, so a row that outgrew the probe would
+    // otherwise empty every listing quietly.
     char probe[64];
     size_t rlen = 0;
-    if (!maps_put_redacted(0, probe, sizeof probe, &rlen)) return off;
+    if (!maps_put_redacted(0, probe, sizeof probe, &rlen))
+        extinction("format_maps: a redacted row outgrew its probe");
     const size_t budget = (cap - head) / rlen;
 
     u32    withheld[MAPS_CLASSES];
@@ -682,8 +685,10 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
 
     if (nwithheld == 0 || !complete) return off;
     // Room for the withheld rows comes from dropping whole rows off the end.
-    // nwithheld <= budget, so dropping every walked row always makes enough.
+    // nwithheld <= budget, so dropping every walked row always makes enough;
+    // running out of rows means the budget no longer bounds the walk.
     while (off + nwithheld * rlen > cap) {
+        if (off == head) extinction("format_maps: withheld rows exceed the budget");
         size_t i = off - 1;                 // buf[off - 1] is the last row's '\n'
         while (i > head && buf[i - 1] != '\n') i--;
         off = i;
@@ -1691,7 +1696,9 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
         // those bytes are somebody else's too -- a Proc whose caps the I-2 carve
         // stripped is a LOWER-authority door to a HIGHER-authority image, which
         // is precisely the shape musl's posix_spawn creates on every call. So
-        // the caller must cover every mapper, not merely the one it named.
+        // the caller must cover every mapper, not merely the one it named --
+        // and the image's own code aliases, which the join counts as CAP_JIT
+        // because they outlive the Proc that held it (proc_image_join_locked).
         caps_t target_caps = __atomic_load_n(&target->caps, __ATOMIC_ACQUIRE);
         axis = ((target_caps | image.caps) & ~caller_caps) == 0;
     }

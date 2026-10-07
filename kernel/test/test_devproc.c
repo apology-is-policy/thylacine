@@ -3222,10 +3222,13 @@ static u8 g_maps_thunk[12] = { 0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 };
 // and grouped by permission, so its listing is the SAME bytes whichever addresses
 // the aliases drew; the owner (one variable away: the target's principal) gets
 // the real addresses. The anon page at the window's top is above every alias, so
-// a zeroed row left in address order would precede it.
+// a zeroed row left in address order would precede it. The target is a live JIT
+// holder and the reader holds CAP_JIT for both reads, so the owner's caps cover it.
 void test_devproc_maps_code_redacted(void) {
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
     const u32 self_principal = th->proc->principal_id;
     const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
     const u64 low_va = 0x0000000010000000ull;
@@ -3251,10 +3254,9 @@ void test_devproc_maps_code_redacted(void) {
     rc_top = bt ? burrow_map(tgt, bt, top_va, PAGE_SIZE, VMA_PROT_RW) : -1;
     if (bt) burrow_unref(bt);
 
-    tgt->caps = CAP_JIT;
     rc_c1 = sys_jit_create_region(tgt, jit_len, &w1, &x1);
     rc_s1 = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s1);
-    tgt->caps = 0;                                   // so the owner's caps cover it
+    rp->caps |= CAP_JIT;
     tgt->principal_id = foreign;
     na1 = maps_read(tgt->pid, a1, (long)sizeof a1);
     tgt->principal_id = self_principal;
@@ -3263,14 +3265,13 @@ void test_devproc_maps_code_redacted(void) {
     // The same shapes again, at whatever addresses the aliases draw this time.
     rc_d1 = rc_c1 == 0 ? sys_jit_destroy_for_proc(tgt, w1) : -1;
     rc_e1 = rc_s1 == 0 ? sys_jit_destroy_for_proc(tgt, s1) : -1;
-    tgt->caps = CAP_JIT;
     rc_c2 = sys_jit_create_region(tgt, jit_len, &w2, &x2);
     rc_s2 = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s2);
-    tgt->caps = 0;
     tgt->principal_id = foreign;
     na2 = maps_read(tgt->pid, a2, (long)sizeof a2);
     tgt->principal_id = self_principal;
     nb2 = maps_read(tgt->pid, b2, (long)sizeof b2);
+    rp->caps = rp_caps;
 
     proc_test_unlink(tgt);
     tgt->state = PROC_STATE_ZOMBIE;
@@ -3336,6 +3337,8 @@ void test_devproc_maps_code_redacted(void) {
 void test_devproc_maps_code_truncated(void) {
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
     const u32 self_principal = th->proc->principal_id;
     const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
     enum { CLUSTER = 64 };                            // > 2048 / ~48-byte rows
@@ -3360,11 +3363,12 @@ void test_devproc_maps_code_truncated(void) {
     }
     tgt->caps = CAP_JIT;
     rc = sys_jit_create_region(tgt, 2ull * PAGE_SIZE, &w, &x);
-    tgt->caps = 0;
+    rp->caps |= CAP_JIT;
     tgt->principal_id = foreign;
     nf = maps_read(tgt->pid, fa, (long)sizeof fa);
     tgt->principal_id = self_principal;
     no = maps_read(tgt->pid, ow, (long)sizeof ow);
+    rp->caps = rp_caps;
 
     proc_test_unlink(tgt);
     tgt->state = PROC_STATE_ZOMBIE;
@@ -3382,6 +3386,184 @@ void test_devproc_maps_code_truncated(void) {
     TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, " code - -\n"), 0L,
                    "B-2b: a foreign reader's truncated listing prints no code row");
     TEST_ASSERT(fa[nf - 1] == '\n', "B-2b: and ends on a whole row");
+}
+
+// B-2b audit r2: the zeroed rows of a complete listing take their room from the
+// end -- whole rows dropped until they fit. Fifty 40-byte anon rows below the
+// window fill 2035 of 2048 bytes, and three zeroed rows need 81: the foreign
+// reader's listing loses the last two anon rows and carries all three zeroed
+// ones. The owner's, which prints the aliases in place above the anon rows, keeps
+// all fifty -- the premise that they fit.
+void test_devproc_maps_code_trimmed(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
+    const u32 self_principal = rp->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    enum { ROWS = 50 };
+    const u64 base_va = 0x0000000010000000ull;
+
+    static char fa[2048], ow[2048];
+    long nf = -2, no = -2;
+    int mapped = 0;
+    s64 rc_c = -1, rc_s = -1;
+    u64 w = 0, x = 0, s = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    tgt->caps  = CAP_JIT;
+    proc_test_link(tgt);
+    for (int i = 0; i < ROWS; i++) {                 // a page, then a hole: no two adjacent
+        struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
+        if (b && burrow_map(tgt, b, base_va + 2ull * (u64)i * PAGE_SIZE, PAGE_SIZE,
+                            VMA_PROT_RW) == 0)
+            mapped++;
+        if (b) burrow_unref(b);
+    }
+    rc_c = sys_jit_create_region(tgt, 2ull * PAGE_SIZE, &w, &x);
+    rc_s = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s);
+    rp->caps |= CAP_JIT;
+    tgt->principal_id = foreign;
+    nf = maps_read(tgt->pid, fa, (long)sizeof fa);
+    tgt->principal_id = self_principal;
+    no = maps_read(tgt->pid, ow, (long)sizeof ow);
+    rp->caps = rp_caps;
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)mapped, (long)ROWS, "mapped the anon rows");
+    TEST_EXPECT_EQ(rc_c, 0, "created a writer/exec region");
+    TEST_EXPECT_EQ(rc_s, 0, "created a sealed region");
+    TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
+    char kept[24], dropped[24], last[24];
+    maps_va_prefix(base_va + 2ull * (ROWS - 3) * PAGE_SIZE, kept);
+    maps_va_prefix(base_va + 2ull * (ROWS - 2) * PAGE_SIZE, dropped);
+    maps_va_prefix(base_va + 2ull * (ROWS - 1) * PAGE_SIZE, last);
+    TEST_EXPECT_EQ(maps_count(ow, (size_t)no, " rw-p 0x0 anon - -\n"), (long)ROWS,
+                   "B-2b: (premise) every anon row fits the owner's listing");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, "0x0-0x0 rw-p 0x0 code - -\n"), 1L,
+                   "B-2b: the trimmed listing carries the zeroed writer row");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, "0x0-0x0 r-xp 0x0 code - -\n"), 1L,
+                   "B-2b: and the zeroed exec row");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, "0x0-0x0 --xp 0x0 code - -\n"), 1L,
+                   "B-2b: and the zeroed execute-only row");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, " rw-p 0x0 anon - -\n"), (long)(ROWS - 2),
+                   "B-2b: room for them came from the last two anon rows");
+    TEST_ASSERT(contains(fa, (size_t)nf, kept) && !contains(fa, (size_t)nf, dropped) &&
+                !contains(fa, (size_t)nf, last),
+                "B-2b: the rows dropped are the highest ones, whole");
+    TEST_ASSERT(fa[nf - 1] == '\n', "B-2b: and the listing ends on a whole row");
+}
+
+// B-2b audit r2: the walk's budget. A withheld row takes no buffer, so the walk
+// counts it against as many zeroed rows as the buffer holds -- (2048 - 35) / 27 =
+// 74 -- and stops past that; a stopped walk prints no zeroed row. 38 regions are
+// 76 aliases, all below the anon page at the window's top, so the foreign reader
+// gets the header and nothing else. The owner, whose rows show the aliases in
+// place, gets a listing the buffer truncates among them: the control that they
+// are there and lie below the top row.
+void test_devproc_maps_code_budget_stop(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
+    const u32 self_principal = rp->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    enum { REGIONS = 38 };
+    const u64 top_va = EXEC_USER_BURROW_TOP - PAGE_SIZE;
+    static const char header[] = "start-end perms off type file role\n";
+
+    static char fa[2048], ow[2048];
+    long nf = -2, no = -2;
+    int rc_top = -1, made = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    tgt->caps  = CAP_JIT;
+    proc_test_link(tgt);
+    struct Burrow *bt = burrow_create_anon(PAGE_SIZE, false);
+    rc_top = bt ? burrow_map(tgt, bt, top_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bt) burrow_unref(bt);
+    for (int i = 0; i < REGIONS; i++) {
+        u64 w = 0, x = 0;
+        if (sys_jit_create_region(tgt, PAGE_SIZE, &w, &x) == 0) made++;
+    }
+    rp->caps |= CAP_JIT;
+    tgt->principal_id = foreign;
+    nf = maps_read(tgt->pid, fa, (long)sizeof fa);
+    tgt->principal_id = self_principal;
+    no = maps_read(tgt->pid, ow, (long)sizeof ow);
+    rp->caps = rp_caps;
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)rc_top, 0L, "mapped the anon page at the window's top");
+    TEST_EXPECT_EQ((long)made, (long)REGIONS, "created every region");
+    TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
+    char ptop[24];
+    maps_va_prefix(top_va, ptop);
+    TEST_ASSERT(maps_count(ow, (size_t)no, " code - -\n") > 0 && !contains(ow, (size_t)no, ptop),
+                "B-2b: (control) the owner's listing shows aliases, cut below the top row");
+    TEST_EXPECT_EQ(nf, (long)(sizeof header - 1),
+                   "B-2b: past the budget the foreign reader gets the header alone");
+    TEST_ASSERT(contains(fa, (size_t)nf, header), "B-2b: (and it is the header)");
+}
+
+// B-2b audit r2: a code region is CAP_JIT's authority held by the IMAGE, and it
+// outlives the Proc that held the cap -- an RFMEM child, born without it, keeps
+// the aliases once their creator is reaped. Driven as that shape: a second Proc
+// sharing the creator's space, the creator then freed. The cover must still ask
+// for CAP_JIT, or an owner without the cap takes total control of a writer/exec
+// pair, and sees where it lies. Controls one variable away: the same orphan
+// before the region and after it is destroyed, and a caller holding CAP_JIT.
+void test_devproc_debug_cover_counts_code(void) {
+    struct Proc *maker  = proc_alloc();
+    struct Proc *orphan = maker ? proc_alloc_in(maker->as, proc_default_page_budget()) : NULL;
+    struct Proc *caller = proc_alloc();
+    const bool built = maker && orphan && caller;
+    bool bare = false, orphaned = false, orphaned_maps = false, with_jit = false, after = false;
+    s64 rc = -1, rd = -1;
+    u64 w = 0, x = 0;
+
+    if (built) {
+        maker->principal_id  = 0xA11CEu;
+        orphan->principal_id = 0xA11CEu;
+        caller->principal_id = 0xA11CEu;
+        maker->caps  = CAP_JIT;
+        orphan->caps = 0;
+        caller->caps = 0;
+        bare = devproc_debug_authorized(caller, orphan);
+        rc = sys_jit_create_region(maker, 2ull * PAGE_SIZE, &w, &x);
+        maker->state = PROC_STATE_ZOMBIE;            // reaped: the aliases stay
+        proc_free(maker);
+        maker = NULL;
+        orphaned      = devproc_debug_authorized(caller, orphan);
+        orphaned_maps = devproc_maps_code_visible(caller, orphan);
+        caller->caps  = CAP_JIT;
+        with_jit      = devproc_debug_authorized(caller, orphan);
+        caller->caps  = 0;
+        rd    = rc == 0 ? sys_jit_destroy_for_proc(orphan, w) : -1;
+        after = devproc_debug_authorized(caller, orphan);
+    }
+    if (maker)  { maker->state  = PROC_STATE_ZOMBIE; proc_free(maker); }
+    if (orphan) { orphan->state = PROC_STATE_ZOMBIE; proc_free(orphan); }
+    if (caller) { caller->state = PROC_STATE_ZOMBIE; proc_free(caller); }
+
+    TEST_ASSERT(built, "proc_alloc the creator, its RFMEM child and the caller");
+    TEST_EXPECT_EQ(rc, 0, "the creator made a writer/exec region");
+    TEST_EXPECT_EQ(rd, 0, "the orphan destroyed it");
+    TEST_ASSERT(bare, "B-2b: (control) a capless owner covers the capless child before the region");
+    TEST_ASSERT(!orphaned, "B-2b: not once the child holds code aliases without CAP_JIT");
+    TEST_ASSERT(!orphaned_maps, "B-2b: nor sees where they lie");
+    TEST_ASSERT(with_jit, "B-2b: (control) an owner holding CAP_JIT does");
+    TEST_ASSERT(after, "B-2b: (control) and the capless owner again once the aliases are gone");
 }
 
 // VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,

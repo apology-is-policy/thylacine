@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/VIVARIUM.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -235,6 +235,19 @@ So `environ` exists under `self` only — where the target is the caller's
 own process and the kernel's own answer is the client's own answer — and
 the per-pid absence is asserted by the selftest with a failure string
 naming what it is protecting.
+
+`maps` is the second, and is handled by holding no authority rather than by
+absence (2026-10-07; B-2b audit r2). A code row's addresses go only to the
+target itself or to a reader with debug authority over it
+([[sub-kernel-devproc]]), and over an image holding a code alias that authority
+needs `CAP_JIT`, `CAP_HOSTOWNER` or `CAP_DEBUG` -- all elevation-only -- because
+the kernel's image join counts the aliases as `CAP_JIT` even when no mapper holds
+it. Both instances are spawned with no caps, so the kernel zeroes every foreign
+code row before this server sees it; `deputy_check`, run in `main` after the
+selftest, reads `/proc/<own pid>/imperium` and refuses to serve unless its
+`caps` field is zero, so the property is checked rather than inherited from two
+spawn masks. The cost lands on `/self` alone: a peer holding code sees its own
+code rows zeroed here, and no Linux guest can hold one.
 
 The rejected alternative is recorded and the reasoning is worth keeping:
 replicating the kernel's owner check against the peer would *work*, and

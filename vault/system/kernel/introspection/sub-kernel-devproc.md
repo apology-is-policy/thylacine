@@ -876,3 +876,33 @@ after the region is recreated at new addresses while the owner's listing
 changes), `devproc.maps_code_truncated` (a cluster of rows above the aliases
 truncates both listings; the owner sees both aliases below the cut, the foreign
 reader no code row).
+
+**Round 2 (2026-10-07).** Two silent failures now extinct: the probe that
+measures a zeroed row, if the row ever outgrows it (every reader's listing would
+otherwise empty quietly), and the trim loop, if it runs out of rows (what a
+broken budget looks like; it would otherwise scan below the buffer). And the
+cover sees an orphaned region: the image join counts a code alias as `CAP_JIT`
+([[sub-kernel-proc]]), so an RFMEM child that kept its creator's aliases is not
+covered by a capless owner. That is also what bounds the diorama, which reads
+every pid's `maps` as itself for clients of any principal: holding no
+elevation-only cap, it is shown every foreign code row zeroed, and it checks
+that before it serves ([[sub-diorama]]). The two end-to-end witnesses above now
+read with `CAP_JIT` held, the target a live holder. New witnesses:
+`devproc.maps_code_trimmed` (fifty anon rows leave 13 bytes; the foreign listing
+drops the top two whole and carries all three zeroed rows),
+`devproc.maps_code_budget_stop` (76 aliases below the top row: the foreign
+reader gets the header alone, the owner a listing cut among the aliases),
+`devproc.debug_cover_counts_code` (the orphan, with the before-the-region,
+after-the-destroy and `CAP_JIT`-caller controls).
+
+**A residual this section does not close.** `status` prints `tables:` (and
+`pages:`, which includes them), and the `/ctl/procs` table carries the same
+count, ambient to every reader. A page table is allocated per 512 GiB, 1 GiB
+and 2 MiB of address space actually mapped, so the count tells a reader how
+many of those spans the aliases occupy -- whether two aliases, or an alias and
+another mapping, share one -- and never where a span lies. The one case that
+places an alias is a shared top-level table with the low mappings below the
+window: an alias in the window's first 508 GiB (about 0.8% of placements)
+saves a table, and that says which 512 GiB it is in, about 7 of its 34 bits.
+Linux's world-readable `VmPTE` is the same channel. Stated rather than closed
+(B-2b audit r2, self-found SF-1).
