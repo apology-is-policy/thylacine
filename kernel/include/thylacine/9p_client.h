@@ -144,7 +144,7 @@ typedef void (*p9_rpc_complete_fn)(struct p9_rpc *rpc, int status,
 // the transport recv buffer at demux + hands the result to `on_complete`).
 struct p9_rpc {
     u16            tag;        // 9P tag (0..P9_SESSION_MAX_OUTSTANDING-1)
-    bool           done;       // reply copied into reply_buf (reply_len valid)
+    bool           done;       // reply read into reply_buf and applied (reply_len valid)
     bool           dead;       // session torn down under me -> -P9_E_IO
     bool           be_reader;  // a departing reader handed me the reader role
     bool           sending;    // registered, but still getting a frame onto the
@@ -156,23 +156,24 @@ struct p9_rpc {
     p9_rpc_complete_fn on_complete;  // NULL = sync WAKE_RENDEZ; set = async POST_CQE
     // 8c-3 (#89), sync only, under c->lock: my thread is parked for a stop in
     // client_debug_stop_park, which sets this before it drops the lock and
-    // clears it on return. The reader-role handoff skips me, and a tag drainer
-    // does not wait on my stored reply. The Proc's stop flags cannot stand in
-    // for it: a resume and a re-stop flip them while the thread never runs
-    // (DEBUG-FS-DESIGN 5c.6).
+    // clears it on return. The reader-role handoff skips me. The Proc's stop
+    // flags cannot stand in for it: a resume and a re-stop flip them while the
+    // thread never runs (DEBUG-FS-DESIGN 5c.6).
     bool           stop_parked;
     // flush(5), sync only; all under c->lock. `noted`: a caught note already
     // interrupted this op and stays pending until the EL0-return tail, so any
     // later wait for it is killable only. `flushing`: its Tflush is on the
-    // wire, so the demux applies a reply that beats the Rflush on arrival (into
-    // `flush_out`, recording `honoured` + `honour_rc`), and an Rflush that
-    // comes first sets `flushed`: the server cancelled the op.
+    // wire, so a reply that beats the Rflush is honoured with its tag reserved
+    // until that Rflush, and an Rflush that comes first sets `flushed`: the
+    // server cancelled the op.
     bool           noted;
     bool           flushing;
-    bool           honoured;
     bool           flushed;
-    int            honour_rc;
-    struct p9_dispatch_result *flush_out;
+    // Sync only, under c->lock: the reader that reads my reply applies it into
+    // `out` at once and records `apply_rc` (ARCH 21.11 part 4), so my tag is
+    // free when the reply is read, not when I next run.
+    int            apply_rc;
+    struct p9_dispatch_result *out;
 };
 
 // Receives a fid the server holds and nobody owns. Called under c->lock, so it

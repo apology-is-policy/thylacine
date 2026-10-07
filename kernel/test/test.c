@@ -1754,12 +1754,12 @@ void test_9p_client_note_flush_reader_rflush_first(void);
 void test_9p_client_note_flush_reply_beats_unsent_flush(void);
 void test_9p_client_note_flush_handoff_skips_staging(void);
 void test_9p_client_handoff_skips_send_parked(void);
-void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
-void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
+void test_9p_client_note_flush_staging_takes_pumped_tag(void);
+void test_9p_client_async_clunk_drain_takes_pumped_tag(void);
 void test_9p_client_stopped_waiter_elects_on_resume(void);
 void test_9p_client_resumed_waiter_is_designated(void);
-void test_9p_client_stop_parked_owner_not_owed(void);
-void test_9p_client_note_flush_stop_parked_staging_not_owed(void);
+void test_9p_client_stopped_owner_reply_frees_tag(void);
+void test_9p_client_note_flush_stopped_staging_reply_frees_tag(void);
 void test_9p_client_handoff_skips_restopped_owner(void);
 void test_9p_client_loom_enter_wakes_when_role_frees(void);
 void test_9p_client_loom_enter_reads_every_client(void);
@@ -4054,18 +4054,18 @@ struct test_case g_tests[] = {
                                        test_9p_client_note_flush_handoff_skips_staging, false, NULL },
     { "9p_client.handoff_skips_send_parked",
                                        test_9p_client_handoff_skips_send_parked, false, NULL },
-    { "9p_client.note_flush_staging_waits_for_owed_tag",
-                                       test_9p_client_note_flush_staging_waits_for_owed_tag, false, NULL },
-    { "9p_client.async_clunk_drain_waits_for_owed_tag",
-                                       test_9p_client_async_clunk_drain_waits_for_owed_tag, false, NULL },
+    { "9p_client.note_flush_staging_takes_pumped_tag",
+                                       test_9p_client_note_flush_staging_takes_pumped_tag, false, NULL },
+    { "9p_client.async_clunk_drain_takes_pumped_tag",
+                                       test_9p_client_async_clunk_drain_takes_pumped_tag, false, NULL },
     { "9p_client.stopped_waiter_elects_on_resume",
                                        test_9p_client_stopped_waiter_elects_on_resume, false, NULL },
     { "9p_client.resumed_waiter_is_designated",
                                        test_9p_client_resumed_waiter_is_designated, false, NULL },
-    { "9p_client.stop_parked_owner_not_owed",
-                                       test_9p_client_stop_parked_owner_not_owed, false, NULL },
-    { "9p_client.note_flush_stop_parked_staging_not_owed",
-                                       test_9p_client_note_flush_stop_parked_staging_not_owed, false, NULL },
+    { "9p_client.stopped_owner_reply_frees_tag",
+                                       test_9p_client_stopped_owner_reply_frees_tag, false, NULL },
+    { "9p_client.note_flush_stopped_staging_reply_frees_tag",
+                                       test_9p_client_note_flush_stopped_staging_reply_frees_tag, false, NULL },
     { "9p_client.handoff_skips_restopped_owner",
                                        test_9p_client_handoff_skips_restopped_owner, false, NULL },
     { "9p_client.loom_enter_wakes_when_role_frees",

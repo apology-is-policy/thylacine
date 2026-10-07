@@ -13,13 +13,13 @@ code:
   - kernel/include/thylacine/9p_client.h
 audit: hard
 guarded-by: [inv-i9, inv-i10, inv-i11]
-validated-by: [spec-9p-client, spec-reader-frame, gate-smp]
+validated-by: [spec-9p-client, spec-reader-frame, spec-tag-pool, gate-smp]
 locks: [lock-9p-client-c-lock]
 hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -107,9 +107,16 @@ a stack `struct p9_rpc`, registers it in the tag-indexed `c->inflight[]`
 under `c->lock`, sends its frame, then enters `client_wait`: a submitter
 with no reply yet becomes THE reader (one at a time via `c->reader_active`),
 drops the lock, `reader_recv_frame`s one frame, retakes the lock, demuxes it
-by tag to the owning rpc (frame copied to that rpc's `reply_buf`, waker
-wakes its own rendez), and repeats until its own reply lands; everyone else
-sleeps on their OWN rpc rendez. A departing reader hands the role off
+by tag to the owning rpc (frame copied to that rpc's `reply_buf` and APPLIED
+there -- `client_apply_reply_locked` dispatches it into the op's `out`,
+freeing its tag -- then the owner's rendez woken), and repeats until its own
+reply lands; everyone else sleeps on their OWN rpc rendez. The reader applies
+every reply it reads, sync or async, so a tag is free when its reply is read,
+not when its owner next runs (ARCH 21.11 part 4, 2026-10-07,
+[[dec-2026-10-07-tag-pool]]): until then a sync reply was stored and its
+owner dispatched it, so a stopped owner held its tag until its resume, and a
+tag drainer had to tell that "owed" tag apart (`client_tag_owed_locked`,
+deleted). A departing reader hands the role off
 (`client_handoff_reader_locked`) to one still-pending rpc — skipping
 an rpc whose thread is parked for a stop (`rpc->stop_parked`, which the thread
 sets itself in `client_debug_stop_park` under `c->lock` for exactly the park's
@@ -132,10 +139,9 @@ or a stop there (including the stop detour inside that sleep) took the role
 with it, leaving a survivor in `client_wait` with no reader (flush(5) round 2
 F2, 2026-09-30; the #349 park had it before the flush staging loop copied it).
 It needs no designation: every departure signals the send list first, and a
-woken sender self-elects -- except a tag drainer (the flush staging and
-`client_drain_until_free_tag`), which re-parks while a tag is owed and then
-rests on that owner's dispatch, which signals the send list when it frees the
-tag. `client_wait` clears `sending` on entry, so every
+woken sender self-elects; a tag drainer (the flush staging and
+`client_drain_until_free_tag`) is woken the same way, because the reader that
+applies a reply signals the send list as it frees the tag. `client_wait` clears `sending` on entry, so every
 rpc a designation can reach is one that can act on it.
 
 **Send-side flow control.** A transiently-full c2s ring is back-pressure,
@@ -234,26 +240,24 @@ only interrupt again (the claim is the thread's to re-take). The rpc KEEPS
 progress at a time and re-checks its own reply after each, because this op is
 on the wire and a pump can demux its answer, so `client_drain_until_free_tag`,
 which waits only for a free tag, would read on past it. A unit is a pump
-(`client_pump_or_park_locked`), except while a tag is owed
-(`client_tag_owed_locked`: a sync op's reply is stored and its owner, not
-parked for a stop (`stop_parked`), has yet to run the dispatch that frees the
-tag): then it parks
-for that dispatch's signal, because no frame announces the freed tag and a
-second pump would wait for an unrelated reply (flush(5) round 3 F3; the async
-clunk's drain does the same). The staged Tflush marks the op `owner_waits` in
+(`client_pump_or_park_locked`): the reply it reads is applied at once, so a
+tag it frees is free when the pump returns. (Until 2026-10-07 a stored reply
+left its tag owed to its owner's dispatch, and the drainer parked for that
+instead of pumping again -- flush(5) round 3 F3.) The staged Tflush marks the op `owner_waits` in
 the session and goes out through `client_send_flow`, parking on back-pressure
 like any send -- but that loop stops at the op's own reply (`rpc->noted &&
 rpc->done`, below). Then it sets `flushing` and waits in `client_wait` for the
 first answer:
 - **The original reply first.** The demux applies it at once, in wire order,
-  with `client_honour_locked` -> `p9_session_dispatch_flushed_rmsg`: the whole
-  reply, fid state included, into the caller's `out`, with the tag still
-  reserved until the Rflush (I-10 unchanged). It drops the registration and
-  sets `honoured`. The call returns its result, and the Rflush drains ownerless
-  later (`demux_orphan_flush`). A reply that lands before the Tflush is on the
-  wire is only stored (`flushing` is not yet set), and it answers the op
-  outright: the Tflush goes back unsent (the retract below) and the reply
-  completes the call as an ordinary one.
+  with `client_apply_reply_locked` -> `p9_session_dispatch_flushed_rmsg`: the
+  whole reply, fid state included, into the caller's `out`, with the tag still
+  reserved until the Rflush (I-10 unchanged). It drops the registration. The
+  call returns its result, and the Rflush drains ownerless later
+  (`demux_orphan_flush`). A reply that lands before the Tflush is on the wire
+  (`flushing` not yet set) answers the op outright: the demux takes the staged
+  Tflush back first (`p9_session_flush_retract` -- `dispatch_rmsg` would
+  absorb a reply on an `awaiting_flush` tag) and applies the reply as an
+  ordinary one, freeing both tags.
 - **The Rflush first.** The orphan-flush arm reads the flush's `flush_oldtag`
   before dispatching; once the dispatch has freed both tags, it drops the
   still-registered owner's `inflight[oldtag]` in the same critical section, so
@@ -273,9 +277,11 @@ first answer:
   `p9_session_flush_retract` (not `flush_rollback`: the owner is still here, so
   the op stays live), and the op waits for its reply, killable only -- or has
   it already, and completes with it; either way the note delivers after the
-  call. A genuine send break latches the session dead; no reply of the op's can
-  be stored by then, because the send loop re-checks under the lock it sends
-  under.
+  call. When the reply came first, the demux already took the Tflush back and
+  the op's tag may already be another op's, so the sender does not retract
+  again (a second retract could unstage that op's Tflush). A genuine send
+  break latches the session dead; no reply of the op's can be applied by then,
+  because the send loop re-checks under the lock it sends under.
 While the owner waits, the session counts its flushed op LIVE for the fid
 exclusion (`owner_waits`, set when the Tflush is staged): a reply that beats
 the Rflush is applied in full, so the op may yet act on its fid, and a clunk
@@ -302,9 +308,9 @@ Tflush meets a full send ring; the op's own reply, demuxed while it waits,
 completes the call and the Tflush goes back unsent),
 `.note_flush_handoff_skips_staging` and `.handoff_skips_send_parked` (a
 departing reader does not designate the op parked on the send list with the
-lower tag), `.note_flush_staging_waits_for_owed_tag` and
-`.async_clunk_drain_waits_for_owed_tag` (a drainer whose pump completed a sync
-op waits for that op's dispatch, not a second frame; on the mq loopback a
+lower tag), `.note_flush_staging_takes_pumped_tag` and
+`.async_clunk_drain_takes_pumped_tag` (a drainer whose pump completed a sync
+op sends on the tag that freed, not after a second frame; on the mq loopback a
 second read is an EOF that kills the session), and
 `9p_session.flush_owner_waits_keeps_fid_live`. Each mechanism has a sabotage
 that turns its test RED. They run a Linux-phenotype
@@ -494,10 +500,10 @@ the principals at its two ends, the system principal and a hostowner
   flags, `sending` (registered, not yet waiting in `client_wait`: the
   handoff skips it), its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
   async seam), `stop_parked` (its thread is parked for a stop inside the
-  client: the handoff and the owed check skip it), and the flush(5) state of a sync op a caught note interrupted:
-  `noted` (later waits killable only), `flushing` (its Tflush is on the
-  wire), `honoured` + `honour_rc` + `flush_out` (a reply applied by the
-  demux), `flushed` (the Rflush came first). Async containers are
+  client: the handoff skips it), `out` + `apply_rc` (the result the reader
+  applies a sync reply into, and its status), and the flush(5) state of a
+  sync op a caught note interrupted: `noted` (later waits killable only),
+  `flushing` (its Tflush is on the wire), `flushed` (the Rflush came first). Async containers are
   zero-allocated, so all of these read false there.
 - `p9_session.outstanding[]` entry states: active · `awaiting_flush`
   (reserved until Rflush) · `abandoned` (owner gone, no flush in flight —
@@ -644,20 +650,22 @@ this surface):
   discipline).
 - **The progress signal** (2026-09-30): a new path that frees a tag, or a new
   reader that departs, must call `client_send_progress_signal`, or a sender
-  parked for a tag or ring space sleeps on beside a free one. A tag drainer
-  must park, not pump, while a tag is owed (`client_tag_owed_locked`); a
-  self-pump blocked in the transport recv sees no client-side progress
-  (OPEN-BUGS 2026-09-30 11:01Z, the #349 root).
+  parked for a tag or ring space sleeps on beside a free one. A new path
+  that reads a sync reply must apply it then (`client_apply_reply_locked`),
+  not store it for its owner: a stored reply's tag is freed by no frame, so a
+  drainer self-pumping for it waits in the transport recv on unrelated
+  traffic, and a stopped owner would hold it (OPEN-BUGS 2026-09-30 11:01Z, the
+  #349 root; ARCH 21.11 part 4).
 - **The flush(5) arm** (2026-09-30): a reply on a flushing owner's tag must be
   applied BEFORE any later frame (the Rflush frees the tag); the owner may
-  never touch `inflight[tag]` after `honoured` or `flushed` (the tag may
-  already belong to another op); every wait after `noted` must be killable
+  never touch `inflight[tag]` after DONE or `flushed` (the tag may already
+  belong to another op), nor retract a Tflush after DONE (the demux did); every wait after `noted` must be killable
   only (a pending caught note would spin a note-interruptible one); death
   must still win in the flush wait; the Rflush-first hand-off must land in
   the dispatch's own critical section; a Tflush's send must stop at its op's
-  own reply (sent after it, the Tflush would leave the stored reply to
-  `dispatch_rmsg`, which absorbs a reply on an `awaiting_flush` tag: the call
-  would succeed with an empty result, a read's false EOF); a living owner's
+  own reply, and a reply that beats a staged Tflush is applied only after the
+  demux retracts it (`dispatch_rmsg` absorbs a reply on an `awaiting_flush`
+  tag: the call would succeed with an empty result, a read's false EOF); a living owner's
   flushed op must count live for the fid exclusion until it has acted, and the
   death-in-flush-wait arm must clear that before the Rflush.
 
@@ -666,13 +674,13 @@ this surface):
   set `stop_unwinds` and return to a loop that parks via
   `client_debug_stop_park`, or a stopped waiter parks in place and re-sleeps on
   resume without re-electing. `rpc->stop_parked` is written only by the parked
-  thread under `c->lock`; the handoff and `client_tag_owed_locked` read it and
-  never the Proc's stop flags, and the park clears it when it returns. Every
+  thread under `c->lock`; the handoff reads it and never the Proc's stop
+  flags, and the park clears it when it returns. Every
   `reader_active = false` site must run the handoff, whose
   no-designee exit is the Loom ENTER's only wake when a foreign sync reader
   leaves its async reply unread. Witnesses:
   `9p_client.stopped_waiter_elects_on_resume`, `.resumed_waiter_is_designated`,
-  `.stop_parked_owner_not_owed`, `.note_flush_stop_parked_staging_not_owed`,
+  `.stopped_owner_reply_frees_tag`, `.note_flush_stopped_staging_reply_frees_tag`,
   `.handoff_skips_restopped_owner`, `.handoff_skips_stop_parked`,
   `.reader_hook_contract`, `.loom_enter_wakes_when_role_frees`; the
   readiness-gated pump `.pump_ready_idle`, `.pump_ready_data_progresses`,

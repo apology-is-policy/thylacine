@@ -4216,11 +4216,11 @@ void test_9p_client_note_flush_reader_rflush_first(void);
 void test_9p_client_note_flush_reply_beats_unsent_flush(void);
 void test_9p_client_note_flush_handoff_skips_staging(void);
 void test_9p_client_handoff_skips_send_parked(void);
-void test_9p_client_note_flush_staging_waits_for_owed_tag(void);
-void test_9p_client_async_clunk_drain_waits_for_owed_tag(void);
+void test_9p_client_note_flush_staging_takes_pumped_tag(void);
+void test_9p_client_async_clunk_drain_takes_pumped_tag(void);
 void test_9p_client_stopped_waiter_elects_on_resume(void);
-void test_9p_client_stop_parked_owner_not_owed(void);
-void test_9p_client_note_flush_stop_parked_staging_not_owed(void);
+void test_9p_client_stopped_owner_reply_frees_tag(void);
+void test_9p_client_note_flush_stopped_staging_reply_frees_tag(void);
 void test_9p_client_handoff_skips_restopped_owner(void);
 void test_9p_client_loom_enter_wakes_when_role_frees(void);
 
@@ -5309,13 +5309,12 @@ void test_9p_client_handoff_skips_send_parked(void) {
     TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
 }
 
-// A tag an owner is about to free needs no frame. The interrupted walk A finds
-// the pool full and no reader, so it pumps one frame -- the read Y's Rread --
-// and Y's tag is then owed: Y's dispatch frees it, and no frame announces that.
-// A waits for the dispatch instead of reading again (on the mq loopback one more
-// read finds the queue empty, an EOF that kills the session), sends its Tflush
-// on the tag Y freed, and reads its own Rflush first.
-void test_9p_client_note_flush_staging_waits_for_owed_tag(void) {
+// The interrupted walk A finds the pool full and no reader, so it pumps one
+// frame -- the read Y's Rread -- and the pump applies it, freeing Y's tag (ARCH
+// 21.11 part 4). A stages its Tflush on that tag instead of reading again (on
+// the mq loopback one more read finds the queue empty, an EOF that kills the
+// session) and reads its own Rflush first.
+void test_9p_client_note_flush_staging_takes_pumped_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(142), 1u, "walk binds 142");
     g_rec_hold = P9_TWALK;
@@ -5348,7 +5347,7 @@ void test_9p_client_note_flush_staging_waits_for_owed_tag(void) {
     TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
     TEST_ASSERT(both, "both ops parked behind the held reader");
     TEST_ASSERT(full, "the pool is full");
-    TEST_ASSERT(!a_killed, "Y's dispatch woke the walk");
+    TEST_ASSERT(!a_killed, "the pump freed Y's tag for the walk");
     TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_INTR,
                    "the walk sent its Tflush on the tag Y freed and read its Rflush first");
     TEST_EXPECT_EQ((u64)flushes, (u64)1, "one Tflush went out");
@@ -5360,9 +5359,9 @@ void test_9p_client_note_flush_staging_waits_for_owed_tag(void) {
 }
 
 // The same for the async clunk's tag drain (FID-LIFECYCLE section 9): it finds
-// the pool full and no reader, pumps the read Y's Rread, then waits for Y's
-// dispatch to free a tag instead of reading again.
-void test_9p_client_async_clunk_drain_waits_for_owed_tag(void) {
+// the pool full and no reader, pumps the read Y's Rread, which frees Y's tag,
+// and sends on it instead of reading again.
+void test_9p_client_async_clunk_drain_takes_pumped_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(144) + dy_bind(145), 2u, "walks bind 144 and 145");
     u16 tags[P9_SESSION_MAX_OUTSTANDING];
@@ -5391,7 +5390,7 @@ void test_9p_client_async_clunk_drain_waits_for_owed_tag(void) {
     TEST_ASSERT(y_parked, "Y parked behind the held reader");
     TEST_ASSERT(full, "the pool is full");
     TEST_ASSERT(started, "the clunk ran");
-    TEST_ASSERT(!c_killed, "Y's dispatch woke the clunk");
+    TEST_ASSERT(!c_killed, "the pump freed Y's tag for the clunk");
     TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)0, "the Tclunk went out on the tag Y freed");
     TEST_EXPECT_EQ((u64)clunks, (u64)1, "one Tclunk");
     TEST_ASSERT(!bound, "its fid unbound");
@@ -5527,72 +5526,63 @@ void test_9p_client_resumed_waiter_is_designated(void) {
     TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
 }
 
-// A tag drainer must not wait on the dispatch of an owner parked for a stop.
-// The read Y waits behind the held reader and is stopped; its Rread is then read,
-// so Y's tag waits for Y's dispatch. The clunk C takes the last tag, its Rclunk
-// queued. Y's stop clears and comes back before Y runs, and in between the
-// async clunk D finds the pool full with no reader. Reading the flag while it
-// was clear, D counted Y's tag as owed and waited out the second stop; it must
-// read on instead, and C's Rclunk frees a tag.
-void test_9p_client_stop_parked_owner_not_owed(void) {
+// The reader applies a reply when it reads it (ARCH 21.11 part 4), so a stopped
+// owner holds no tag. The read Y takes the pool's last tag, waits behind the
+// held reader and is stopped (^Z); its Rread is read while it is stopped. Its tag
+// is free at once -- the async clunk C goes out on it with Y still stopped --
+// and Y, resumed, returns the bytes the reader applied for it.
+void test_9p_client_stopped_owner_reply_frees_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
-    TEST_EXPECT_EQ(dy_bind(147) + dy_bind(148) + dy_bind(149), 3u, "walks bind 147..149");
+    TEST_EXPECT_EQ(dy_bind(147) + dy_bind(148), 2u, "walks bind 147 and 148");
     u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
 
     dy_hold_reader(true);
     bool y_started = dyx_start(147);
     TEST_YIELD_UNTIL_SOFT(!y_started ||
                           (test_dying_parked(&g_dyx) && rec_count(P9_TREAD) == 1));
     bool y_waiting = y_started && test_dying_parked(&g_dyx) && !test_dying_done(&g_dyx);
+    bool full      = !p9_session_has_free_tag(&g_client.session);
     if (y_waiting) dy_stop(&g_dyx, /*job=*/false);
     TEST_YIELD_UNTIL_SOFT(!y_waiting || dy_stop_parked(&g_dyx));
     bool y_stopped = y_waiting && dy_stop_parked(&g_dyx);
     dy_hold_reader(false);
-    int  py   = y_stopped ? p9_client_reader_pump_ready(&g_client) : 0;   // Y's Rread
-    int  cc   = y_stopped ? p9_client_clunk_async(&g_client, 148) : -1;  // C
-    bool full = !p9_session_has_free_tag(&g_client.session);
-    if (y_started) dy_stop_flag(&g_dyx, /*job=*/false, 0u);              // the stop clears
-    bool started = y_stopped && full && dyz_start_clunk(149);            // D
-    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dyz) ||
-                          (g_client.send_waiters == 1 && test_dying_parked(&g_dyz)));
-    if (y_started) dy_stop_flag(&g_dyx, /*job=*/false, 1u);              // and comes back
-    bool d_killed = false, y_killed = false;
-    if (started) dy_finish_of(&g_dyz, &d_killed);
+    int  py    = y_stopped ? p9_client_reader_pump_ready(&g_client) : 0;   // Y's Rread
+    bool freed = y_stopped && p9_session_has_free_tag(&g_client.session);
+    u64  held  = p9_session_inflight(&g_client.session);
+    int  cc    = freed ? p9_client_clunk_async(&g_client, 148) : -1;      // C
+    bool y_killed = false;
     if (y_started) dy_resume(&g_dyx, /*job=*/false);
     if (y_started) dy_finish_of(&g_dyx, &y_killed);
-    u32  clunks = rec_count(P9_TCLUNK);
-    bool dead   = g_client.dead;
-    int  pd     = (!dead && started && !d_killed) ? p9_client_reader_pump_ready(&g_client) : 0;
+    bool dead = g_client.dead;
+    int  pc   = (!dead && cc == 0) ? p9_client_reader_pump_ready(&g_client) : 0;  // C's Rclunk
     dy_unfill_pool(filled, tags);
-    u64  end    = p9_session_inflight(&g_client.session);
+    u64  end  = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
     TEST_ASSERT(y_waiting, "Y waits behind the held reader");
+    TEST_ASSERT(full, "Y's read took the last tag");
     TEST_ASSERT(y_stopped, "stopped, Y parks");
     TEST_EXPECT_EQ(py, 1, "Y's Rread is read while Y is stopped");
-    TEST_EXPECT_EQ(cc, 0, "C takes the last tag");
-    TEST_ASSERT(full, "the pool is full");
-    TEST_ASSERT(started, "D ran");
-    TEST_ASSERT(!d_killed, "D read on past the stopped owner instead of waiting for it");
-    TEST_EXPECT_EQ((u64)(s64)g_dyzop.rc, (u64)0, "D's Tclunk went out on the tag C freed");
-    TEST_EXPECT_EQ((u64)clunks, (u64)2, "two Tclunks");
+    TEST_ASSERT(freed, "Y's tag is free while Y is stopped: the reader applied its reply");
+    TEST_EXPECT_EQ(held, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "only the filler holds tags");
+    TEST_EXPECT_EQ(cc, 0, "C goes out on Y's tag with Y still stopped");
     TEST_ASSERT(!y_killed, "Y completed once resumed");
-    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "Y completes with the server's bytes");
+    TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "Y returns the bytes the reader applied for it");
     TEST_ASSERT(!dead, "the session stays live");
-    TEST_EXPECT_EQ(pd, 1, "D's Rclunk drains ownerless");
+    TEST_EXPECT_EQ(pc, 1, "C's Rclunk drains ownerless");
     TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
 }
 
-// The same for an owner stopped while it stages a flush(5) Tflush: the
-// interrupted read S parks on the send list for a tag (the pool is full, the
-// reader held), is stopped there (^Z), and its own Rread is read. Parked inside
-// the send list's sleep, S was invisible to the client, and a drainer that read
-// S's stop flag while it was clear counted on S's dispatch.
-void test_9p_client_note_flush_stop_parked_staging_not_owed(void) {
+// The same for an owner stopped while it waits to stage a flush(5) Tflush: the
+// interrupted read S finds the pool full (the clunk C took the last tag) and the
+// reader held, parks on the send list, and is stopped there (^Z). Its Rread is
+// read while it is stopped: the reader applies it, so S's tag is free at once
+// and no Tflush is owed; resumed, S returns the read's bytes.
+void test_9p_client_note_flush_stopped_staging_reply_frees_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
-    TEST_EXPECT_EQ(dy_bind(150) + dy_bind(151) + dy_bind(152), 3u, "walks bind 150..152");
+    TEST_EXPECT_EQ(dy_bind(150) + dy_bind(151), 2u, "walks bind 150 and 151");
     u16 tags[P9_SESSION_MAX_OUTSTANDING];
     u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
 
@@ -5611,19 +5601,14 @@ void test_9p_client_note_flush_stop_parked_staging_not_owed(void) {
     TEST_YIELD_UNTIL_SOFT(!staging || dy_stop_parked(&g_dy));
     bool s_stopped = staging && dy_stop_parked(&g_dy);
     dy_hold_reader(false);
-    int  ps = s_stopped ? p9_client_reader_pump_ready(&g_client) : 0;     // S's Rread
-    if (started) dy_stop_flag(&g_dy, /*job=*/true, 0u);                  // the stop clears
-    bool d_started = s_stopped && dyz_start_clunk(152);                  // D
-    TEST_YIELD_UNTIL_SOFT(!d_started || test_dying_done(&g_dyz) ||
-                          (g_client.send_waiters == 1 && test_dying_parked(&g_dyz)));
-    if (started) dy_stop_flag(&g_dy, /*job=*/true, 1u);                  // and comes back
-    bool d_killed = false, s_killed = false;
-    if (d_started) dy_finish_of(&g_dyz, &d_killed);
+    int  ps    = s_stopped ? p9_client_reader_pump_ready(&g_client) : 0;  // S's Rread
+    bool freed = s_stopped && p9_session_has_free_tag(&g_client.session);
+    bool s_killed = false;
     if (started) dy_resume(&g_dy, /*job=*/true);
     if (started) dy_finish(&s_killed);
     u32  flushes = rec_count(P9_TFLUSH);
     bool dead    = g_client.dead;
-    int  pd      = (!dead && d_started && !d_killed) ? p9_client_reader_pump_ready(&g_client) : 0;
+    int  pc      = (!dead && cc == 0) ? p9_client_reader_pump_ready(&g_client) : 0;  // C's Rclunk
     dy_unfill_pool(filled, tags);
     u64  end     = p9_session_inflight(&g_client.session);
     dy_client_close();
@@ -5636,14 +5621,12 @@ void test_9p_client_note_flush_stop_parked_staging_not_owed(void) {
     TEST_ASSERT(staging, "interrupted, S parks on the send list to stage its Tflush");
     TEST_ASSERT(s_stopped, "stopped (^Z) there, S parks");
     TEST_EXPECT_EQ(ps, 1, "S's Rread is read while S is stopped");
-    TEST_ASSERT(d_started, "D ran");
-    TEST_ASSERT(!d_killed, "D read on past the stopped owner instead of waiting for it");
-    TEST_EXPECT_EQ((u64)(s64)g_dyzop.rc, (u64)0, "D's Tclunk went out on the tag C freed");
+    TEST_ASSERT(freed, "S's tag is free while S is stopped: the reader applied its reply");
     TEST_ASSERT(!s_killed, "S completed once resumed");
     TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)5, "its reply beat the flush: the read's bytes");
     TEST_EXPECT_EQ((u64)flushes, (u64)0, "no Tflush went out");
     TEST_ASSERT(!dead, "the session stays live");
-    TEST_EXPECT_EQ(pd, 1, "D's Rclunk drains ownerless");
+    TEST_EXPECT_EQ(pc, 1, "C's Rclunk drains ownerless");
     TEST_EXPECT_EQ(end, (u64)0, "every tag freed");
 }
 
