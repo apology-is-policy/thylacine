@@ -15,12 +15,31 @@
 #            are all DIFFERENT outcomes and each is a finding to investigate,
 #            not a pass (astra, yip 0161 t53).
 #
-# A MUTANT EDITS A PRODUCTION FILE, so the restore is not left to the happy
-# path: the pristine copy is hashed before the edit, an EXIT trap restores it
-# however this script dies, and the hash is re-verified afterwards. And because
-# a clean TREE is not a clean ARTIFACT -- test.sh boots whatever is in build/ --
-# stage 3 rebuilds and requires the kernel to come back BYTE-IDENTICAL to the
-# control's, which both cleans build/ and is a free determinism datum.
+# WHAT IT DOES NOT PROVE: that the ring RELEASES the reference it takes. The
+# balanced mutant tests ACQUISITION; the release half has no witness here and is
+# recorded as open in the fixture's own comment (astra, yip 0161 t55).
+#
+# RECOVERY IS AN ALL-EXIT REQUIREMENT, NOT A FINAL STAGE (astra, yip 0161 t55).
+# A mutant edits a production file AND leaves a mutant kernel in build/, and a
+# clean TREE is not a clean ARTIFACT -- test.sh boots whatever build/ holds. So
+# every exit path, including a failed build, a refused floor and a finding in
+# stage 2, runs the same recover():
+#   1. QUARANTINE FIRST. The mutant images are RENAMED out of build/ -- same
+#      volume, so it needs no cores and no disk headroom and is the one step
+#      that can never be refused. build/ is then imageless, which a later
+#      test.sh must repair by building, and cannot satisfy by booting a mutant.
+#   2. The source is restored and hash-verified, and a mismatch is NONZERO
+#      rather than a printed remark.
+#   3. The clean rebuild is attempted ONLY while the disk floor holds AND the
+#      lease is still mine, both re-measured at that moment. When it runs, the
+#      kernel must come back BYTE-IDENTICAL to the control or the run FAILS
+#      CLOSED; when it is refused, the quarantine is already the safe state.
+#   4. The original exit status is preserved; an incomplete recovery overrides
+#      it with 9, so "the experiment worked but the tree is dirty" cannot exit 0.
+# THE LEASE: this script never releases it -- a finding is investigated with the
+# machine held, and a re-acquire means the back of a 24h queue. It prints the
+# release line on every exit path instead, and the holder (thyla-wake, or me)
+# releases the moment the cores are no longer needed, failure paths included.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
@@ -29,6 +48,10 @@ OUT=work/oct5-as-r9/reap-leg-$STAMP
 mkdir -p "$OUT"
 YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
 FLOOR_GB=${FLOOR_GB:-8}
+MUTATED=0
+RECOVERED=0
+RECOVERY_FAILED=0
+CONTROL_BIN=
 free_gb() { df -g . | awk 'NR==2 {print $4}'; }
 floor() { # floor <label>
   _f=$(free_gb)
@@ -76,17 +99,110 @@ EXPECT_TESTS=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/t
 echo "-- expectation DERIVED from kernel/test/test.c: $EXPECT_TESTS registrations"
 floor "stage 0"
 
-# THE PRISTINE COPY AND THE TRAP, before anything can mutate.
+# THE PRISTINE COPY AND THE RECOVERY PATH, before anything can mutate.
 PRISTINE=$OUT/addrspace.c.pristine
 cp kernel/addrspace.c "$PRISTINE"
 PRISTINE_HASH=$(shasum -a 256 "$PRISTINE" | cut -d' ' -f1)
-restore() {
+
+recover() { # idempotent, and correct before any mutation has happened
+  [ "$RECOVERED" = 0 ] || return 0
+  RECOVERED=1
+  echo
+  echo "=== recovery (every exit path arrives here, not just the happy one) ==="
+
+  # 1. QUARANTINE FIRST -- a rename, so it cannot be refused for cores or disk.
+  if [ "$MUTATED" = 1 ]; then
+    Q=$OUT/mutant-artifacts-DO-NOT-BOOT
+    mkdir -p "$Q"
+    _moved=0
+    for _f in build/kernel/thylacine.elf build/kernel/thylacine.bin; do
+      [ -f "$_f" ] || continue
+      mv "$_f" "$Q/" && _moved=$((_moved + 1))
+    done
+    cat > "$Q/WARNING.txt" <<WARN
+These are MUTANT kernel images from $OUT, built with the ring's AddrSpace
+lifetime reference deliberately removed. They exist as evidence of what stage 2
+booted. NEVER boot them and never promote them: a boot of this kernel is
+expected to die on "AddrSpace final lifetime drop with private rings".
+The control kernel's hash for this run was: ${CONTROL_BIN:-unmeasured}
+WARN
+    echo "-- quarantined $_moved mutant image(s) -> $Q"
+    if [ -f build/kernel/thylacine.elf ] || [ -f build/kernel/thylacine.bin ]; then
+      echo "!! A MUTANT IMAGE IS STILL IN build/ -- failing closed rather than"
+      echo "   leaving one where the next test.sh would boot it."
+      RECOVERY_FAILED=1
+    else
+      echo "-- build/ now holds no kernel image, so a later run must BUILD one"
+      echo "   and cannot silently boot the mutant."
+    fi
+  fi
+
+  # 2. THE SOURCE. A failed restore is a nonzero run, not a printed remark.
   cp "$PRISTINE" kernel/addrspace.c
   _h=$(shasum -a 256 kernel/addrspace.c | cut -d' ' -f1)
-  if [ "$_h" = "$PRISTINE_HASH" ]; then echo "-- kernel/addrspace.c RESTORED and hash-verified"
-  else echo "!! RESTORE FAILED: kernel/addrspace.c is $_h, pristine was $PRISTINE_HASH"; fi
+  if [ "$_h" = "$PRISTINE_HASH" ]; then
+    echo "-- kernel/addrspace.c RESTORED and hash-verified"
+  else
+    echo "!! RESTORE FAILED: kernel/addrspace.c is $_h, pristine was $PRISTINE_HASH"
+    echo "   The pristine copy is kept at $PRISTINE -- restore it by hand."
+    RECOVERY_FAILED=1
+  fi
+
+  # 3. THE CLEAN REBUILD, only while it is SAFE to spend the resource. Both
+  #    conditions are re-measured here: a run that has been going for an hour
+  #    cannot inherit stage 0's disk reading or its lease.
+  if [ "$MUTATED" = 1 ] && [ "$RECOVERY_FAILED" = 0 ]; then
+    _f=$(free_gb)
+    "$YIP" resources > "$OUT/lease-recovery.txt" 2>&1 || true
+    if [ "$_f" -lt "$FLOOR_GB" ]; then
+      echo "-- NO REBUILD: ${_f} GiB free is under the $FLOOR_GB GiB floor. The"
+      echo "   quarantine is already the safe state; the next run builds its own."
+    elif ! /usr/bin/grep -qE '^mac +HELD by you' "$OUT/lease-recovery.txt"; then
+      echo "-- NO REBUILD: the mac lease is no longer mine, and a build without"
+      echo "   one would take cores a peer has been handed. Quarantine stands."
+    else
+      if tools/build.sh kernel --config ci > "$OUT/recovery-build.log" 2>&1; then
+        _r=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
+        if [ "$_r" = "$CONTROL_BIN" ]; then
+          echo "-- build/ holds the control kernel again, BYTE-IDENTICAL ($(echo "$_r" | cut -c1-16))"
+        else
+          echo "!! THE REBUILD IS NOT BYTE-IDENTICAL TO THE CONTROL:"
+          echo "   control $CONTROL_BIN"
+          echo "   rebuild $_r"
+          echo "   build/ is clean of the mutant, but byte identity was the stated"
+          echo "   requirement, so this run FAILS CLOSED rather than noting it."
+          RECOVERY_FAILED=1
+        fi
+      else
+        echo "!! THE RECOVERY BUILD FAILED -- see $OUT/recovery-build.log."
+        echo "   build/ is quarantined, so nothing can boot the mutant, but the"
+        echo "   tree is not back to a built state."
+        RECOVERY_FAILED=1
+      fi
+    fi
+  fi
+
+  # 4. THE LEASE AND THE EVIDENCE, on every path.
+  echo "-- disk at exit: $(free_gb) GiB free"
+  echo "-- evidence: $OUT"
+  echo "=== THE MAC IS STILL HELD BY YOU. The cores are free from here and the"
+  echo "    write-up is not a reason to hold them:   yip release mac"
 }
-trap restore EXIT
+
+on_exit() {
+  _rc=$?
+  set +e
+  trap - EXIT
+  recover
+  if [ "$RECOVERY_FAILED" = 1 ]; then
+    echo "!! RECOVERY INCOMPLETE -- exiting 9. The run's own status was $_rc,"
+    echo "   and it is preserved in this message rather than in the exit code,"
+    echo "   because a dirty tree outranks the experiment's verdict."
+    exit 9
+  fi
+  exit $_rc
+}
+trap on_exit EXIT
 echo "-- pristine kernel/addrspace.c held at $PRISTINE ($(echo "$PRISTINE_HASH" | cut -c1-16))"
 
 run_suite() { # run_suite <label>; leaves $OUT/<label>-boot.log and sets suite_rc
@@ -132,6 +248,8 @@ echo "-- CONTROL GREEN: the leg passes, suite $pass/$total, no extinction"
 
 echo
 echo "=== stage 2: the MUTANT -- one named invariant failure, nothing else ==="
+# Set BEFORE the edit: a mutation that dies half-written has still mutated.
+MUTATED=1
 python3 - <<'PY' || exit 5
 import sys
 p='kernel/addrspace.c'
@@ -171,6 +289,7 @@ if /usr/bin/grep -qF "$WANT" "$M"; then
     echo "   somewhere else entirely. Investigate; do not call this discrimination."
     exit 2; } || true
   echo "-- DISCRIMINATED: the ring's own lifetime reference is load-bearing."
+  echo "   ACQUISITION only. The release half has no witness in this run."
 else
   echo "   THE MUTANT DID NOT PRODUCE THE PREDICTED FAILURE."
   echo "   This is a FINDING to investigate, not a pass and not a reason to"
@@ -179,22 +298,4 @@ else
   echo "   (test.sh exit was $suite_rc; full log $M)"
   exit 2
 fi
-
-echo
-echo "=== stage 3: restore, and leave build/ holding a CLEAN kernel ==="
-restore
-trap - EXIT
-tools/build.sh kernel --config ci
-REBUILD_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
-if [ "$REBUILD_BIN" = "$CONTROL_BIN" ]; then
-  echo "-- build/ holds the control kernel again, BYTE-IDENTICAL ($(echo "$REBUILD_BIN" | cut -c1-16))"
-else
-  echo "!! the rebuild is NOT byte-identical to the control:"
-  echo "   control $CONTROL_BIN"
-  echo "   rebuild $REBUILD_BIN"
-  echo "   build/ is clean of the mutant, but the difference needs explaining."
-fi
-floor "end"
-echo
-echo "RELEASE THE MAC NOW -- the cores are free from here; the write-up is not"
-echo "a reason to hold them. Evidence: $OUT"
+# Recovery is NOT a stage here: on_exit runs it on this path and every other.

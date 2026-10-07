@@ -804,16 +804,37 @@ it waits for `>= goal`, which is EVENTUAL retirement, so exactly-once is asserte
 separately as a counter DELTA, with its precondition (nothing in flight at the
 snapshot) asserted rather than assumed. Neither reads the dead image.
 
-A RELEASE WITNESS, page-granular on purpose. The mutant proves the ring TAKES
-an image reference; a leaked `struct AddrSpace` is one slab object and no counter
-in this tree reports it, which is why an earlier version of this entry recorded
-"cannot prove release" as a hole needing a production counter. It does not: the
-final lifetime drop is also what runs `proc_pgtable_destroy`, so a reference that
-is never released strands the PAGE TABLES -- whole pages, which `phys_free_pages`
-sees, with `magazines_drain_all` first (the same instrument and drain
-`test_slub_leak_10k` uses). The leg takes that gauge before the creator exists
-and requires it back afterwards. So the narrowed truth is: a leaked IMAGE is now
-witnessed; a leaked OBJECT still is not.
+RELEASE IS NOT WITNESSED HERE, and how that was settled is worth more to a
+reader than the conclusion, because three positions were held on it in one day.
+First: "no witness without a production counter", a leaked `struct AddrSpace`
+being one slab object nothing in this tree counts. Then: "page-granular after
+all" -- the final lifetime drop also runs `proc_pgtable_destroy`, so a reference
+never released strands PAGE TABLES, whole pages that `phys_free_pages` sees once
+`magazines_drain_all` has run. Then OUT AGAIN, which is where it stands, because
+the instrument cannot be made sound HERE. `phys_free_pages` reports
+`g_zone0.total_free_pages` alone and an order-0 free goes to a per-CPU magazine
+with its flags cleared -- "magazine ownership, not free list" -- so the reading
+exists only after a drain, and `magazines_drain_all` walks EVERY CPU's magazine
+with no lock and no IRQ mask. The tree's other 24 page-accounting call sites
+free on the CPU they measure from, so for them that cross-CPU pass is a hazard
+only. This leg cannot: the retirer frees the dying image on whatever CPU it ran
+on, which makes the cross-CPU pass LOAD-BEARING for the reading, in a suite that
+runs after `smp_init` with kthreads runnable. A measurement whose instrument
+needs a quiescence the fixture cannot establish is a DIFFERENT claim, not a
+weaker one.
+
+astra named both halves on 0161 t55: normalise the snapshots under the drain's
+required quiescence, and keep the claim narrow until an omitted-put-only mutant
+shows the gauge can redden at all -- the balanced mutant tests ACQUISITION, not
+release. The asymmetric baseline was a real defect in the first version (sample,
+then drain only at the end, so earlier legs' magazine residue could fabricate a
+positive delta or cancel a leaked page); the symmetric discipline the tree
+already encodes is `test_cow.c`, which drains BEFORE and after and states its
+claim as a delta between two runs one variable apart, and which records in its
+own header that an order-0 free never reaches the buddy. The drain's cross-CPU
+exposure is enqueued as a tracked bug against `mm/magazines.c` rather than left
+in this prose: for the other call sites it is a latent SMP hazard, not an
+instrument question.
 
 UNRUN: the leg has never executed. Its translation unit does COMPILE -- a
 single-file `-fsyntax-only` with the kernel target's own defines, include paths
