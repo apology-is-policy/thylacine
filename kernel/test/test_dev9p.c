@@ -77,6 +77,7 @@ void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
 void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_dying_flush_keeps_run(void);
+void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3567,6 +3568,46 @@ void test_dev9p_wb_dying_flush_keeps_run(void) {
     TEST_EXPECT_EQ((u64)seen, 1ull, "the last close flushed the kept run");
     TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
     TEST_EXPECT_EQ(cap_off, 0ull, "at offset 0");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
+}
+
+// A metadata write stops staging only once its flush emptied the run. A death
+// that ends that flush keeps the run, and the priv must go on staging it: one
+// that stopped would never again overlay it on read or flush it on fsync, for
+// another Proc sharing the fd too. The live fsync stands in for that sharer.
+static void wbd_truncate(void *arg) {
+    (void)arg;
+    g_wbd_rc = dev9p.wstat_native(g_wbd_spoor, T_WSTAT_SIZE, 0, 0, 0, 0);
+}
+
+void test_dev9p_wb_dying_wstat_keeps_staging(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    TEST_ASSERT(test_dying_start(&g_wbd_thread, wbd_truncate, NULL, /*dead_now=*/true),
+                "a dying thread");
+    TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+    test_dying_reap(&g_wbd_thread);
+    u32 seen_dying = g_twrite_seen;
+    int frc        = dev9p.fsync(f, 0);
+    u32 seen       = g_twrite_seen;
+    u32 cap_len    = g_twrite_cap_len;
+    int crc        = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_ASSERT(g_wbd_rc < 0, "the dying truncate fails");
+    TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its flush: nothing on the wire");
+    TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "a live fsync after it succeeds");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "and flushes the run the truncate kept");
+    TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
 }
 

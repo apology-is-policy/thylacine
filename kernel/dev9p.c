@@ -2364,7 +2364,10 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     // F1 write-behind: a metadata write is a non-append op -- flush the
     // staged run FIRST (the staged bytes are older; a truncate must land
     // after them), then STOP staging on this priv (a size change moves the
-    // file end, so the append anchor is no longer known).
+    // file end, so the append anchor is no longer known). Only once the run
+    // is gone: a flush a death ended keeps it, and a priv that stopped
+    // staging no longer overlays it on read, flushes it on fsync or orders a
+    // write-through after it -- for another Proc sharing the fd, too.
     if (p->wb_eligible) {
         int fe = 0;
         spin_lock(&p->wb_lock);
@@ -2375,8 +2378,10 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
         // in-flight flush's Twrites -- the wait inside wb_flush_locked
         // covers it either way.
         if (p->wb_len || p->wb_flushers) fe = wb_flush_locked(p, c->qid.path);
-        p->wb_known    = false;
-        p->wb_eligible = false;
+        if (p->wb_len == 0) {
+            p->wb_known    = false;
+            p->wb_eligible = false;
+        }
         spin_unlock(&p->wb_lock);
         if (fe != 0) return fe;
     }
