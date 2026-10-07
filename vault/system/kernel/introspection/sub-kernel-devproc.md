@@ -890,7 +890,8 @@ that before it serves ([[sub-diorama]]). The two end-to-end witnesses above now
 read with `CAP_JIT` held, the target a live holder. New witnesses:
 `devproc.maps_code_trimmed` (fifty anon rows leave 13 bytes; the foreign listing
 drops the top two whole and carries all three zeroed rows),
-`devproc.maps_code_budget_stop` (76 aliases below the top row: the foreign
+`devproc.maps_code_budget_stop` (one alias more than the budget of 77 zeroed
+rows, all below the top row, the count derived from the row's length: the foreign
 reader gets the header alone, the owner a listing cut among the aliases),
 `devproc.debug_cover_counts_code` (the orphan, with the before-the-region,
 after-the-destroy and `CAP_JIT`-caller controls).

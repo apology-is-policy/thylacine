@@ -3390,7 +3390,7 @@ void test_devproc_maps_code_truncated(void) {
 
 // B-2b audit r2: the zeroed rows of a complete listing take their room from the
 // end -- whole rows dropped until they fit. Fifty 40-byte anon rows below the
-// window fill 2035 of 2048 bytes, and three zeroed rows need 81: the foreign
+// window fill 2035 of 2048 bytes, and three 26-byte zeroed rows need 78: the foreign
 // reader's listing loses the last two anon rows and carries all three zeroed
 // ones. The owner's, which prints the aliases in place above the anon rows, keeps
 // all fifty -- the premise that they fit.
@@ -3460,12 +3460,13 @@ void test_devproc_maps_code_trimmed(void) {
 }
 
 // B-2b audit r2: the walk's budget. A withheld row takes no buffer, so the walk
-// counts it against as many zeroed rows as the buffer holds -- (2048 - 35) / 27 =
-// 74 -- and stops past that; a stopped walk prints no zeroed row. 38 regions are
-// 76 aliases, all below the anon page at the window's top, so the foreign reader
-// gets the header and nothing else. The owner, whose rows show the aliases in
-// place, gets a listing the buffer truncates among them: the control that they
-// are there and lie below the top row.
+// counts it against as many zeroed rows as the buffer holds -- (2048 - 35) / 26 =
+// 77 -- and stops past that; a stopped walk prints no zeroed row. The region count
+// is derived from the same two lengths (a hand count of the row once said 27, and
+// 76 aliases then fit the budget), and every alias lies below the anon page at the
+// window's top, so the foreign reader gets the header and nothing else. The owner,
+// whose rows show the aliases in place, gets a listing the buffer truncates among
+// them: the control that they are there and lie below the top row.
 void test_devproc_maps_code_budget_stop(void) {
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
@@ -3473,9 +3474,11 @@ void test_devproc_maps_code_budget_stop(void) {
     const caps_t rp_caps = rp->caps;
     const u32 self_principal = rp->principal_id;
     const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
-    enum { REGIONS = 38 };
     const u64 top_va = EXEC_USER_BURROW_TOP - PAGE_SIZE;
     static const char header[] = "start-end perms off type file role\n";
+    static const char zeroed[] = "0x0-0x0 ---p 0x0 code - -\n";
+    const long budget  = (2048L - (long)(sizeof header - 1)) / (long)(sizeof zeroed - 1);
+    const int  regions = (int)(budget / 2) + 1;      // two aliases each: past the budget
 
     static char fa[2048], ow[2048];
     long nf = -2, no = -2;
@@ -3489,7 +3492,7 @@ void test_devproc_maps_code_budget_stop(void) {
     struct Burrow *bt = burrow_create_anon(PAGE_SIZE, false);
     rc_top = bt ? burrow_map(tgt, bt, top_va, PAGE_SIZE, VMA_PROT_RW) : -1;
     if (bt) burrow_unref(bt);
-    for (int i = 0; i < REGIONS; i++) {
+    for (int i = 0; i < regions; i++) {
         u64 w = 0, x = 0;
         if (sys_jit_create_region(tgt, PAGE_SIZE, &w, &x) == 0) made++;
     }
@@ -3505,7 +3508,7 @@ void test_devproc_maps_code_budget_stop(void) {
     proc_free(tgt);
 
     TEST_EXPECT_EQ((long)rc_top, 0L, "mapped the anon page at the window's top");
-    TEST_EXPECT_EQ((long)made, (long)REGIONS, "created every region");
+    TEST_EXPECT_EQ((long)made, (long)regions, "created every region");
     TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
     char ptop[24];
     maps_va_prefix(top_va, ptop);
