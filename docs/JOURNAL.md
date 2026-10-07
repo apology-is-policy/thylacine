@@ -37,7 +37,7 @@ shares per kind of op, a sync op waits, the reader applies every reply);
 later, as A then B+C.
 
 **What landed on `tagpool` (WIP, not yet on main).**
-- 82c478c22 TP-0: ARCH 21.11 + `specs/tag_pool.tla`. TLC (07:2xZ): clean 268
+- 82c478c22 TP-0: ARCH 21.11 + `specs/tag_pool.tla`. TLC (~07:00Z): clean 268
   distinct states; `BUGGY_NO_ASYNC_CAP` and `BUGGY_WAITER_APPLIES` fail
   `SyncProgress` (304, 360), `BUGGY_NO_FLUSH_HEADROOM` fails `FlushAlwaysFits`
   (127). The three counterexamples were read, not just counted: two deferred
