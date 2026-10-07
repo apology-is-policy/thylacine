@@ -22,6 +22,280 @@ needed the operator.
 
 
 ---
+## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
+
+**What the run is for.** The browser arc's B-2 brings JavaScriptCore's JIT onto
+`SYS_JIT_CREATE`. The operator voted its shape on 2026-09-28 (`project_b2_votes`):
+a lazy code Burrow; the writer alias hardened inside B-2 (random placement, an
+execute-only class for the engine's write thunk, unprivileged user copies); the
+tiers Baseline+YARR, then DFG, then FTL/BBQ/OMG. This entry covers the
+scripture (4f34abc78) and B-2a, the kernel half that makes the region a
+reservation (c39014c79 WIP, then the audit close).
+
+**The re-verification came first, and it moved the plan.** The 09-25 research
+was a week old and never re-checked, so before writing scripture a read-only
+agent re-derived every claim against `~/projects/webkit-thylacine` (113 calls).
+Most held. One did not: claim 14 said the Wasm thread set is filled only by
+threads that run Wasm. It is filled by every VM-entering thread
+(`VMEntryScope.cpp:43-48`), and the BBQ/OMG tier-up walk suspends each of them
+(`WasmCalleeGroup.cpp:331/423`, `WasmOSREntryPlan.cpp:170`) -- B-0's
+`Thread::suspend` is fatal, so B-2e has to replace the walk, not merely avoid
+it. The thunk facts came back sharper than recorded: the writer base lives in
+`movz/movk` immediates; the thunk copies byte by byte below 8 bytes, so a 4-byte
+patch is torn (Thylacine's thunk must store aligned words); the branch-
+compaction buffer keeps a readable heap copy of the stub. BROWSER-DESIGN 7 was
+rewritten from that report, not from the old notes.
+
+**Two scripture claims were wrong, and both were ours.** ARCH 25.4's JIT row and
+LLVM-DESIGN 16.18 said `IC IVAU` by the kernel's direct-map address reaches
+every alias of the page. It does on a PIPT I-cache. On a VIPT one (Cortex-A53
+class; `CTR_EL0.L1Ip` = 0b10) the index comes from the VA, so an invalidate by
+the direct-map VA can miss lines fetched through the exec alias. Corrected in
+4f34abc78; B-2a makes the code agree: any CPU reporting a non-PIPT I-cache sets
+a sticky flag, and the sync then cleans by VA and invalidates the whole I-cache
+(`IC IALLUIS`), as Linux's `sync_icache_aliases` does.
+
+**B-2a, what changed.** The CODE Burrow takes ANON_LAZY's pagemap and stays the
+admissibility tag. Create charges nothing. The first touch through either alias
+commits, zeroes, I-cache-invalidates and charges the page once (the CL-7k-3 F1
+invalidate moved from create to the commit, before any leaf names the page).
+Destroy refunds the footprint -- pages plus the pagemap nodes those commits
+built -- iff both unmaps succeed. `SYS_ICACHE_SYNC` walks the slots and skips
+uncommitted ones. Every release path stays closed to CODE: decommit and the
+range detach (a release through one alias would leave the other alias's leaf
+on a freed page), take, swap, mirror, populate, and fork.
+
+**Wrong turns, and what caught them.**
+- The first `max_region_is_a_reservation` expected the pool to grow by 2 for two
+  committed pages. The pagemap nodes come from the user pool too; the honest
+  figure is the footprint. Caught by re-reading `pagemap_install` before the
+  build, not by a red run.
+- `page_count` carries the page-table pages the faults build, and a destroy can
+  reclaim tables, so every exact page assertion in test_jit.c was off by the
+  tables. `jit_pages`/`jit_pool` subtract `pgtable_pages`.
+- Moving the fault arm's comment carried an overstatement with it: that
+  `make_user_pte_l3` makes W^X a property of the encoder (task #59). It does
+  not; `vma_alloc` refusing W|X (vma.c:65) is the guard. Rewritten.
+- The first commit was refused by the dossier gate: kernel/syscall.c is also
+  owned by `sub-kernel-syscall-abi` (audit:hard). Fixed by writing that
+  dossier's JIT paragraph, not by a trailer.
+
+**Census (self-audit while the Fable round ran).** Every `BURROW_TYPE_CODE` site
+(7 files) and every `->pages` consumer outside burrow.c: exec.c (ELF segments),
+vdso.c, weft.c (checks NULL), loom.c (ANON only, by type) and fault.c's ANON arm
+never see a CODE Burrow; addrspace_clone, reprotect and the Loom buffer gate
+refuse it by type; the debug reader walks PTEs, not `->pages`. The permission
+check in `demand_page_locked` (fault.c:429-437) runs before any arm, so a write
+to the exec alias is refused before it can commit a page.
+
+**Audit r1 (Fable 5.1, cross-family, 61 calls): 0/0/2/2, clean.** No defect in
+the mechanism; every chain the brief named survived (its "verified sound" list
+is in `memory/audit_b2a_closed_list.md`). What it found was the neighbourhood:
+the ABI header, `thyla_jit.h` and libthyla-rs still told a JIT that create
+refuses on the page budget (F1) -- a JIT that planned to fall back to its
+interpreter on that errno would have been killed at a touch instead; and ARCH
+25.4's prosecution row still said CODE "IS the ANON arm" and that the
+create-time sync "must stay" (F2) -- a reviewer following it would have flagged
+the correct removal as a regression. F4 was the sharper catch: no JIT test drove an
+instruction fetch, so every "first touch through the exec alias" leg was a read
+that the RX alias's READ bit admits; `jit.fetch_admission` now pins the EXEC
+bit, with its own RED (J9). Mesa patch 0004's comment was
+left in place on purpose: editing its diff rewrites every later reconstructed
+tree and voids the README's recorded hashes; it is queued for the next Mesa
+refresh. Close: 212f8e479.
+
+**RED, 212f8e479, 14:55Z-15:05Z.** Base 1941/1941. Four sabotage runs, nine
+sabotages in disjoint witness sets: R1 (create charges the region) failed 6
+tests, R2 (a second charge on the other alias; a sync refusing an uncommitted
+slot; VIPT-only decode) 5, R3 (refund without the nodes; no commit-time
+invalidate; never the whole-I-cache branch) 4 -- every one at the predicted test
+and the predicted message. R4 failed 4 where I predicted 2: dropping fault.c's
+EXEC check also failed `demand_page.permission_denied` and
+`demand_page.file_rodata_prot`. I had written, into 212f8e479's message and the
+RED script, that no kernel test drives an instruction fetch at all -- from a
+grep for `is_instruction = true`. Those tests set the flag through a helper's
+parameter (`make_fi(..., is_instr)`). The audit's own F4 was scoped correctly
+(the exec alias); my widening was the error, and the RED caught it because the
+prediction named an "only witness". Green 1941/1941.
+
+**Open.** The SMP multi-boot gate, the sanitizer matrix and the capacity/cow
+specs run once, on the B-2a+B-2b tree at the land (double the distance).
+
+### B-2b (the hardened writer) and F5
+
+**Votes, ~15:08Z.** The thunk is born sealed (`SYS_JIT_CREATE_SEALED`, 127);
+`SYS_LOOM_REGISTER` returns -errno. Scripture 1e9f8fe5a, kernel core
+608efb1dd, F5 + mirrors + tests 2715d83c0, dossiers 61210cfd7.
+
+**Found while tracing F5's errno set: a caught note lost staged bytes.**
+`wb_flush_locked` kept the run only for a death. A caught note ends the
+client's wait as CLIENT_WAIT_FLUSHED -> -P9_E_INTR ("the server cancelled the
+op and it counts as never sent", 9p_client.c ~1272), and the flush then
+latched EINTR and dropped the run: bytes write() had reported written never
+landed, and every later write/fsync/close returned EINTR. Enqueued in
+OPEN-BUGS at 15:31Z before fixing; witness
+`dev9p.wb_interrupted_flush_keeps_run` (an injected Rlerror(4) reaches the
+flush as the same -4). The same trace showed my own scripture wrong: LOOM.md
+8.1 (and dec-2026-10-07-loom-register-errno's Fork) said "a death's EINTR";
+a death's flush returns -EIO (the never-sent take-back), and the dying caller
+never reads it. LOOM.md fixed; the record plane is append-only (vault-lint R3
+refused the in-place edit), so the land's change record corrects the dec.
+
+**A cost I feared and measured instead of assuming.** Random placement gives
+each alias its own page tables; a test helper comment said tables "outlive a
+region's leaves until exit", which would have made create/destroy churn grow
+them without bound. The comment was stale since B-1a': `uninstall_range`
+reclaims an emptied table (mmu.c ~2035, `user_tables_reclaim`), and
+`burrow_unmap` takes the reclaiming form. Kept the per-allocation draw;
+corrected the comment.
+
+**Census figures re-measured, not carried.** The handoff predicted "124 live"
+syscall numbers after 127; the measurement says 125 live, 125 dispatch arms,
+both set differences empty, holes 26/30/43. Vivarium: of 100 Linux rows none in
+120..127.
+
+**Audit r1 (Fable 5.1, 0/0/0/4) and the finding that grew in triage.** F1 was
+real and mine: keeping the run on ANY -EINTR let a server's own Rlerror(4) pass
+for a caught note, so a last close reported success while the closer could lose
+the bytes. The arm now keys on the thread's note claim (`wb_note_cancelled`),
+which every caught-note unwind holds to the EL0-return tail. F2 arrived as a P3
+("maps is owner-gated"); reading devproc.c:519 showed maps is AMBIENT and its own
+comment obliged a same-chunk revisit if a user address ever became random. Random
+code aliases are exactly that, so F2 became a design fork, not a fix.
+
+**The vote, and the wake that never came.** The fork needed AskUserQuestion, and
+my own rule said not while thyla-wake was armed. Reading the script showed it
+types only into an empty input box with a rule above it, which a dialog never
+is, so the rule was stricter than the hazard. I asked at 16:4xZ; the operator
+answered at 17:44Z: redact the code rows (A). In the same question they took on
+waking aux, whose lease had sat idle for 1.6h. Aux found its own wake tool
+misread an idle input box as "typed" for an hour and gave up still holding the
+lease (aux-owned fix). The mac reached me at 17:45Z.
+
+**The first build said the kernel was right and my test was wrong.** Kernel C
+and the Rust passed niced syntax and cargo checks while the mac sat idle, and the
+first `build.sh kernel` (3.5 min) built clean. The suite: 1948/1949, the one
+failure `jit.sealed_fill_failure_refunds` at its own premise "at least one
+slot-table node". A pagemap of up to PAGEMAP_INLINE_MAX (32) slots is an
+uncharged inline kmalloc leaf (pagemap.c `pagemap_init`), so a one-page sealed
+region charges its page and nothing else. The test now uses 33 pages, so a node
+really is charged and the refund of nodes is exercised, not just the page's.
+
+**F2's design took three passes.** Zeroing addresses in place would still place
+each alias between its neighbours. Grouping the zeroed rows at the end fixed the
+order, but the listing truncates at ~2 KiB (~30-40 rows, the browser will
+always exceed that), so WHICH code rows appear would say which aliases lie below
+the cut. The shape that holds: withheld rows take no buffer and are counted per
+permission class against a budget of as many zeroed rows as the buffer holds;
+they print only when the walk reached the end; room comes from dropping whole
+rows off the end. The bytes a foreign reader gets then depend on the code
+aliases' COUNT, not their addresses. One residue stays, stated in the code: the
+budget stop, which needs more aliases below the last printed row than the buffer
+holds rows. Tests: maps_code_visible (predicate, NOTRACE self vs I-39's own
+refusal), maps_code_redacted (byte-identical foreign listing after the aliases
+move, owner's listing changed as control), maps_code_truncated.
+
+**Disk, measured twice.** Free space fell 8.2 -> 6.7 GiB at 16:41-16:45Z with
+nothing building: swap grew to 3072M and its files share the container. Corona
+read the drop as my build's; the timestamps put it an hour earlier, and corona
+recorded the swap mechanism. The RED driver now stops before a run below
+6300 MiB rather than let build.sh's 6 GiB floor trip mid-bake.
+
+### Audit r2 and its triage (closed ~18:57Z on 2026-10-07)
+
+Round 2 (Fable 5.1, start == end) read e77fce32f..4382e69b9 and reported 0/0/0/3 P3:
+the diorama's "no new authority" note named the ambient maps posture B-2b retired (F1),
+two load-bearing arms of format_maps had no witness (F2: the trim loop, the budget stop),
+and the probe arm failed silent (F3). Its F1 verdict leaned on "a capless diorama never
+covers a CAP_JIT holder", and checking that premise is what found the real defect.
+Caps never shrink on a live Proc (every write is a fetch_or), and a fork refuses a code
+region (the clone classifier's default arm), so the premise looked true -- but an
+rfork(RFPROC|RFMEM) child is born without CAP_JIT, shares the aliases, and keeps them
+once its creator is reaped. From then on the I-39 image join saw no CAP_JIT anywhere,
+and a capless same-principal peer covered the child: debug control of a writer/exec pair
+without the cap, and its addresses in maps -- which the boot diorama, capless and SYSTEM,
+would hand to a client of any principal. Pre-existing since code regions met the
+2026-09-24 image join; ours either way. Fix (3bb61e729): AddrSpace.code_vmas, kept by the
+two list primitives every link and unlink goes through, and the join ORs CAP_JIT while it
+is nonzero, before the sole-mapper fast path. The diorama now checks its own
+elevation-only caps are zero before it serves (deputy_check), so the property is read,
+not inherited from two spawn masks.
+
+Two smaller catches while fixing: JIT-ON-WX item 3 had said a NOTRACE Proc does not see
+its own code addresses, while the code (correctly) always shows a Proc itself -- scripture
+corrected; and test_devsrv_conn's connect helper leaked CAP_TCB_DIAL into every later
+test on its three early returns. SF-1 (page-table counts as a placement side channel)
+closed as a stated residual with its measure: ~7 of 34 bits in ~0.8% of placements.
+The two existing end-to-end maps tests had a capless target holding code -- exactly the
+orphan state the fix now refuses -- so they read with CAP_JIT held now; the first build
+is what proves that premise.
+
+The first build of the round-2 fixes ran 1954/1955, and the failure was mine:
+`devproc.maps_code_budget_stop` expected the foreign reader to get the header alone,
+and got 2011 bytes. Reasoning about it twice produced nothing, so I printed both
+listings from the test (a throwaway uart print): the header and 76 zeroed rows. The
+zeroed row is 26 bytes, not the 27 I counted by hand -- and the round-2 reviewer had
+"verified" 27 by hand too. The budget is therefore 77, 76 aliases fit, and the kernel
+did exactly what the design says: complete walk, top row trimmed whole, every zeroed
+row printed. The test now derives its sizes with sizeof (85cfc29a3). Two hand counts
+agreeing was one reading, not two.
+
+### RED, the B-2b tree (4382e69b9, 18:07-18:21Z)
+
+Base 1952/1952, boot OK, jit-prover and loom-smoke PASS. Every sabotage failed at
+its predicted test, with three explained extras. Under K5 the redacted-listing
+test's CONTROL failed: first-fit put the recreated aliases back at the same
+addresses, which is the case that control exists to catch. Under K16 the truncated
+test failed too, since zeroed rows printed in place reach a truncated listing. And
+R4 masked K10: making the sealed alias READ|EXEC makes `jit_vma_is_sealed` false,
+so three tests failed at "destroyed" before K10's assert ran. K10 alone (R10) was
+caught at `jit.sealed_fill_failure_refunds`. R7 (the copy-out tail's store made a
+plain STRB) stayed green, as predicted: an execute-only page is AP[2]=1, read-only
+at EL1 as well, so the store direction rests on AP[2] as much as on STTR. The clade
+bake (THYLACINE_BAKE_CLADE=1) ran llvmpipe's JIT from a writer and an exec alias
+some 46 TiB apart and verified its triangle: ORC/JITLink needs no near placement.
+Every default-image run of B-2a and B-2b had skipped that gate.
+
+### Audit r3 (Fable 5.1, start == end), and the second RED
+
+Round 3 read the round-2 fixes and reported 0/0/0/3. F1 was the 26-byte miscount,
+already fixed. F2: the proc.c and DEBUG-FS paragraphs said "the reap takes the lock
+this join runs under", which names the wrong edge. The chain runs: the creator's
+as->lock release, then program order, then its own exit publishing it a ZOMBIE
+under g_proc_table_lock, and a reap can only follow that. Rewritten in 5014a9dac and
+271bb358e. F3: an rfork(RFMEM) child orphans an I-34 MMIO/DMA/HOSTMEM mapping the
+same way, and the cover does not weigh it. It is pre-existing, and the same class as SF-2. It is enqueued in
+OPEN-BUGS and owned by main, but not fixed here: the count trick does not
+transfer, because an allowance's authority is per allowance, not one cap. It
+is weighed after B-2 lands. No round 4 is owed (0 P0-P2, no invasive fix).
+
+RED for r2 and r3 (85cfc29a3, 19:17-19:25Z). Base 1955/1955 with the diorama's
+deputy_check passing on a capless diorama. Each run was caught where predicted:
+- R11: dropping the join's code count failed `devproc.debug_cover_counts_code`,
+  and removing the trim loop failed `devproc.maps_code_trimmed`.
+- R12: dropping the decrement failed the same test's capless-owner-again control.
+- R13: removing the budget check tripped the new guard's extinction.
+- R14: a deputy_check that refuses the zero it parsed brought the boot down at
+  "/sbin/diorama DOWN".
+
+The green rebuild ran 1955/1955. AS-R9: corona cleared B-2's vma.c and loom.c
+hunks against its own work (yip 0198) and owns an idempotence hardening of
+vma_remove_in.
+
+### The land
+
+Gates on 271bb358e, 19:26-20:45Z: the burrow, capacity and cow specs, every clean
+cfg complete and every buggy cfg violating its named property (cow_buggy_vfork's
+is the liveness property EventuallyReleased, read from its log, not the summary
+line); tools/test-fault.sh 8/8; ci-smp-gate N=10 50/50 PASS over default-smp1/4/8
+and ubsan-smp4/8, no corruption. Corona had queued for the mac 1.4h by then; it
+went to them at 20:45Z. ls-ci did not run: 7 GiB was free on the shared disk when
+the gates started, and a worktree CI bake does not fit safely in that. It stays
+owed, with ls-jsc, B-2c's own gate. The land commit carries the change record
+(which also corrects three earlier records, the plane being append-only) and the
+status rows; main takes aux-3 (three thyla-wake commits, no file shared with b2)
+and then the merge, which is built and run in full before either mirror sees it.
+
 ## 2026-10-07 (main, Opus 5.5, effort max) -- the exit-close seam: a clunk that never waits, a kill that forces the final close, the closer that finishes it; and the Loom write-behind bypass (landed)
 
 **The vote (06:10Z, operator; never re-ask).** A now, then B with C; close()

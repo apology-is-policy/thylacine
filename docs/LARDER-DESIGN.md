@@ -764,7 +764,15 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   latest) sends it, rewriting any prefix that landed with the same bytes at
   the same offsets (2026-10-07, with `dec-2026-10-07-exit-close`; before,
   a kill inside `write`, `fsync` or `wstat` dropped bytes `write` had
-  already reported written). A last close that may not wait -- on a
+  already reported written). A caught note that interrupts the flush is the
+  same case: flush(5) cancelled the Twrite, so the call returns `EINTR`, the
+  run stays staged, and a retry or the last close sends it (2026-10-07,
+  B-2's land; before, the `EINTR` latched and the run was dropped, so every
+  later write, fsync and close on the file returned `EINTR`). The flush tells
+  the cancellation by the note's claim, which every caught-note unwind takes
+  and holds until the thread returns to EL0; a server that answers
+  Rlerror(`EINTR`) itself, with no claim, has failed the write, and that
+  latches like any other failure. A last close that may not wait -- on a
   die-pending thread, or on a kernel thread marked `closes_never_wait` -- does
   not flush: the run goes to a closer with the fid's clunk (ARCH 7.9.1 part
   C), which writes it and then DROPS the file's attr and pages instead of

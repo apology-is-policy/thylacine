@@ -515,12 +515,24 @@ void test_vmo_via_handle_table(void);
 void test_jit_create_requires_cap(void);
 void test_jit_create_rejects_bad_args(void);
 void test_jit_dual_alias_pte_wx_clean(void);
-void test_jit_charges_once_per_region(void);
+void test_jit_charges_once_per_page(void);
+void test_jit_max_region_is_a_reservation(void);
+void test_jit_decommit_refuses_code(void);
+void test_jit_icache_policy_decode(void);
+void test_jit_commit_invalidates_icache(void);
+void test_jit_fetch_admission(void);
+void test_jit_icache_aliasing_invalidates_all(void);
 void test_jit_destroy_tears_down_both(void);
 void test_jit_destroy_rejects_non_writer(void);
 void test_jit_alias_not_detachable(void);
 void test_jit_icache_sync_gate(void);
 void test_jit_write_through_writer_visible_at_exec(void);
+void test_jit_sealed_region(void);
+void test_jit_exec_alias_stays_readable(void);
+void test_jit_sealed_rejects(void);
+void test_jit_placement_not_first_fit(void);
+void test_jit_xonly_promoted_off_code(void);
+void test_jit_sealed_fill_failure_refunds(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
@@ -933,6 +945,12 @@ void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_maps_code_visible(void);     // B-2b audit F2
+void test_devproc_maps_code_redacted(void);    // B-2b audit F2
+void test_devproc_maps_code_truncated(void);   // B-2b audit F2
+void test_devproc_maps_code_trimmed(void);     // B-2b audit r2 F2
+void test_devproc_maps_code_budget_stop(void); // B-2b audit r2 F2
+void test_devproc_debug_cover_counts_code(void); // B-2b audit r2 SF-2
 void test_devproc_environ(void);               // VIVARIUM V-4b-6
 void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_rejects(void);
@@ -1896,6 +1914,8 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
 void test_dev9p_wb_loom_register_keeps_the_latch(void);
+void test_dev9p_wb_interrupted_flush_keeps_run(void);
+void test_dev9p_wb_server_eintr_latches(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -2584,12 +2604,24 @@ struct test_case g_tests[] = {
     { "jit.create_requires_cap",          test_jit_create_requires_cap,       false, NULL },
     { "jit.create_rejects_bad_args",      test_jit_create_rejects_bad_args,   false, NULL },
     { "jit.dual_alias_pte_wx_clean",      test_jit_dual_alias_pte_wx_clean,   false, NULL },
-    { "jit.charges_once_per_region",      test_jit_charges_once_per_region,   false, NULL },
+    { "jit.charges_once_per_page",        test_jit_charges_once_per_page,     false, NULL },
+    { "jit.max_region_is_a_reservation",  test_jit_max_region_is_a_reservation, false, NULL },
+    { "jit.decommit_refuses_code",        test_jit_decommit_refuses_code,     false, NULL },
     { "jit.destroy_tears_down_both",      test_jit_destroy_tears_down_both,   false, NULL },
     { "jit.destroy_rejects_non_writer",   test_jit_destroy_rejects_non_writer, false, NULL },
     { "jit.alias_not_detachable",         test_jit_alias_not_detachable,      false, NULL },
     { "jit.icache_sync_gate",             test_jit_icache_sync_gate,          false, NULL },
     { "jit.write_visible_at_exec_alias",  test_jit_write_through_writer_visible_at_exec, false, NULL },
+    { "jit.icache_policy_decode",         test_jit_icache_policy_decode,      false, NULL },
+    { "jit.commit_invalidates_icache",    test_jit_commit_invalidates_icache, false, NULL },
+    { "jit.fetch_admission",              test_jit_fetch_admission,           false, NULL },
+    { "jit.icache_aliasing_invalidates_all", test_jit_icache_aliasing_invalidates_all, false, NULL },
+    { "jit.sealed_region",                test_jit_sealed_region,             false, NULL },
+    { "jit.exec_alias_stays_readable",    test_jit_exec_alias_stays_readable, false, NULL },
+    { "jit.sealed_rejects",               test_jit_sealed_rejects,            false, NULL },
+    { "jit.placement_not_first_fit",      test_jit_placement_not_first_fit,   false, NULL },
+    { "jit.xonly_promoted_off_code",      test_jit_xonly_promoted_off_code,   false, NULL },
+    { "jit.sealed_fill_failure_refunds",  test_jit_sealed_fill_failure_refunds, false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
     { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },
     { "burrow.file_create_failure_retains_spoor", test_vmo_file_create_failure_retains_spoor, false, NULL },
@@ -3116,6 +3148,12 @@ struct test_case g_tests[] = {
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },
+    { "devproc.maps_code_visible",    test_devproc_maps_code_visible,     false, NULL },
+    { "devproc.maps_code_redacted",   test_devproc_maps_code_redacted,    false, NULL },
+    { "devproc.maps_code_truncated",  test_devproc_maps_code_truncated,   false, NULL },
+    { "devproc.maps_code_trimmed",    test_devproc_maps_code_trimmed,     false, NULL },
+    { "devproc.maps_code_budget_stop", test_devproc_maps_code_budget_stop, false, NULL },
+    { "devproc.debug_cover_counts_code", test_devproc_debug_cover_counts_code, false, NULL },
     { "devproc.environ",              test_devproc_environ,               false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
     { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },
@@ -4260,6 +4298,10 @@ struct test_case g_tests[] = {
                                        test_dev9p_wb_dying_loom_register_keeps_staging, false, NULL },
     { "dev9p.wb_loom_register_keeps_the_latch",
                                        test_dev9p_wb_loom_register_keeps_the_latch, false, NULL },
+    { "dev9p.wb_interrupted_flush_keeps_run",
+                                       test_dev9p_wb_interrupted_flush_keeps_run, false, NULL },
+    { "dev9p.wb_server_eintr_latches",
+                                       test_dev9p_wb_server_eintr_latches, false, NULL },
     { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },

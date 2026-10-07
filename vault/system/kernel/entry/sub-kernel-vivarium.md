@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -567,7 +567,7 @@ its reasoning fails a test rather than passing quietly.
   as task #163.
 - **`VIV_NATIVE_CEILING`'s declaration comment used to repeat the number the
   symbol exists to stop repeating, and went stale seven times.** The constant
-  is now **126** (`SYS_BURROW_MAP_FILE`, B-1d). The remedy was never going to be
+  is now **127** (`SYS_JIT_CREATE_SEALED`, B-2b). The remedy was never going to be
   a person remembering: since the 2026-09-17 PCI rewrite the assert is pinned
   to the `SYS__NATIVE_TOP - 1` sentinel, which the compiler recomputes on every
   append, and the declaration comment narrates that drift history instead of a
@@ -697,6 +697,17 @@ no row's argument. The phenotype's file-backed `mmap` rows and the new native
 number now call the same three D-3 cores ([[sub-kernel-syscall-dispatch]]):
 each entry decides its own word and hands the cores the same prot encoding, so
 the phenotype's deciders did not change.
+
+## Native ceiling 127 (2026-10-07, B-2b)
+
+`VIV_NATIVE_CEILING` is 127 (`SYS_JIT_CREATE_SEALED`), moved by the sentinel.
+Of the table's 100 Linux numbers none lies between 120 and 127, so the move
+voids no row's argument. 127 is the last number below `restart_syscall`
+(128): the NEXT native append lands on that row and owes it a per-number
+collision paragraph, as `pselect6` and `ppoll` have, before the ceiling can
+move again. A sealed JIT region is native-only; the phenotype's `PROT_EXEC`
+mappings stay readable, because `vma_alloc` promotes EXEC-alone to
+`READ | EXEC` everywhere but a code Burrow ([[sub-kernel-vma]]).
 
 ## A zero-timeout ppoll is no longer widened (2026-09-28, #98 NP-4c)
 

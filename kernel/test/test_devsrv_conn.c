@@ -203,12 +203,12 @@ static struct Spoor *connect_byte(struct Proc *p, const char *name) {
     caps_t lc_saved_caps = p->caps;
     p->caps |= CAP_TCB_DIAL;
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
-    if (!root) return NULL;
+    if (!root) { p->caps = lc_saved_caps; return NULL; }
     struct Spoor *sref = spoor_clone(root);
-    if (!sref) { spoor_clunk(root); return NULL; }
+    if (!sref) { spoor_clunk(root); p->caps = lc_saved_caps; return NULL; }
     const char *names[1] = { name };
     struct Walkqid *w = devsrv.walk(root, sref, names, 1);
-    if (!w) { spoor_clunk(sref); spoor_clunk(root); return NULL; }
+    if (!w) { spoor_clunk(sref); spoor_clunk(root); p->caps = lc_saved_caps; return NULL; }
     walkqid_free(w);
     struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)

@@ -2646,6 +2646,19 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     out->shared = false;
     if (!p || !p->as) return;
 
+    // A code alias is CAP_JIT's authority held by the image itself, and it can
+    // outlive every Proc that held the cap: an RFMEM child (born without the cap,
+    // the I-2 carve) keeps the aliases once their creator is reaped, and a cover
+    // over mappers' caps alone would then let a caller without CAP_JIT take total
+    // control of a writer/exec pair. So the image carries the cap while any alias
+    // lives, sole mapper or not. A count read stale-zero beside a create is
+    // harmless: the creator passed the CAP_JIT gate and is a live mapper, so its
+    // caps are already in the cover. The count only has to be right once that
+    // creator is gone, and its own exit publishes it a ZOMBIE under the lock this
+    // join runs under, after the store; a reap can only follow that.
+    if (__atomic_load_n(&p->as->code_vmas, __ATOMIC_RELAXED) != 0u)
+        out->caps |= CAP_JIT;
+
     // No other reference at all: nothing to join, and no traversal to pay for.
     // This is the overwhelmingly common case, which is what keeps a per-operation
     // join off the cost budget.

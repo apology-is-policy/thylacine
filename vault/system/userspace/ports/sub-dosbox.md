@@ -30,7 +30,7 @@ hazards: []
 abis: []
 design: [docs/DOSBOX.md]
 created: 2026-09-17
-updated: 2026-09-17
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -60,6 +60,14 @@ Patch 0006 acquires the process's own JIT clearance, then uses
 including the cache-reset path; ordinary EL0 cache maintenance cannot replace
 that syscall. Failure is fatal to the emulator rather than permission to use
 an executable ordinary heap.
+
+Since B-2b (2026-10-07) the kernel places each alias at a random address, so
+the patch's aliases are no longer adjacent, which it never assumed: it keeps
+the two pointers `thyla_jit_create` returns. `thyla_jit_create` can also answer
+`-EAGAIN` while the kernel's random source is unseeded, which DOSBox, started
+long after boot, does not meet. `thyla_jit.h` also carries
+`thyla_jit_create_sealed` (`SYS_JIT_CREATE_SEALED`, a region born
+execute-only) for the browser engine's write thunk; DOSBox does not use it.
 
 [[sub-sdl-port]] owns the display and input integration. Video-mode recreation
 restores the native title and dynamic-frame intent. Halcyon places and zooms

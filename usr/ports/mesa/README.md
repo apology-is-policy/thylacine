@@ -339,6 +339,16 @@ Three things about that set are not guessable and cost a round each:
   budget (I-32), and a larger allocation rounds up to a multiple of it, so
   nothing is capped by the choice.
 
+  **Since B-2a (2026-10-07) the charging half of that is false, and `0004`'s
+  comment still says it.** A code region is now a reservation: create charges
+  nothing, and each page is charged once, when first touched. The 1 MiB
+  granularity still holds for a different reason: each reservation costs two
+  VMAs against the per-space VMA cap, so sub-allocating shader modules out of
+  one slab is still the right shape. The comment is not fixed in place, because
+  editing `0004`'s diff would change the tree every later patch reconstructs to
+  and void the recorded hashes. It is folded at the next real refresh of the
+  series (OPEN-BUGS, B-2a audit F1).
+
   `osmesa_prove.c` also calls `SYS_JIT_CREATE` directly before any of Mesa runs.
   llvmpipe reaches the same syscall eventually, but behind enough machinery that
   a missing capability, a broken mapper and an unrelated gallivm fault all

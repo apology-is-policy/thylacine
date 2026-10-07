@@ -54,7 +54,8 @@ as wstat does, free the dead staging buffer, then drop the file's Larder
 pages; witnesses
 `p9_closer.loom_register_flushes_staged_run`,
 `dev9p.wb_dying_loom_register_keeps_staging`,
-`dev9p.wb_loom_register_keeps_the_latch`), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
+`dev9p.wb_loom_register_keeps_the_latch`; its errno is the registration's,
+`SYS_LOOM_REGISTER` returning it since B-2b), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
 `dev9p_priv_of`, `dev9p_create_errno` (#99), the cached-open/write-behind
 budget diagnostics + test bias.
 
@@ -91,6 +92,18 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    keeps the run staged and latches nothing (a death refused the send; the
    bytes were acknowledged), so this close sends it (`wb_flush_locked`,
    LARDER-DESIGN section 12; witness `dev9p.wb_dying_flush_keeps_run`).
+   A flush a caught note interrupted is the same case (2026-10-07, B-2b):
+   the client's flush(5) cancelled the Twrite and returned `-P9_E_INTR`, so
+   the call returns `EINTR`, the run stays staged and unlatched, and a retry
+   or the last close sends it; a close whose own flush is interrupted hands
+   the run to the closer and returns 0. Until then the `EINTR` latched and the
+   run was dropped, so every later write, fsync and close on the file
+   returned `EINTR`. The cancellation is told by the note's claim
+   (`wb_note_cancelled`: every caught-note unwind takes one and holds it to
+   the EL0-return tail); a server's own Rlerror(EINTR), with no claim, latches
+   like any failure and the last close reports it (B-2b audit F1). Witnesses
+   `dev9p.wb_interrupted_flush_keeps_run` (the claim held) and its control
+   `dev9p.wb_server_eintr_latches` (none).
    **A close that may not wait never flushes here** (2026-10-07, ARCH 7.9.1
    part C): `close_may_wait()` is false on a die-pending thread (a killed
    thread's own last close, or a final close a second kill forced) and on a

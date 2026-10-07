@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Graphical grant commit
 
@@ -383,6 +383,12 @@ so the invariant holds trivially today.
   "non-rfork-grantable" beside it and I-42's own "non-heritable" clause. The
   header says in as many words: do not "fix" this bit toward `CAP_ALL` on
   the strength of that phrase.
+- **`CAP_JIT` is the one cap an IMAGE can hold without any Proc holding it**
+  (2026-10-07; B-2b audit r2). Non-heritable means an `RFMEM` child is born
+  without it, yet it maps its parent's code aliases, and keeps them once the
+  parent is reaped. So the I-39 image join counts a space holding a code alias
+  as carrying `CAP_JIT` ([[sub-kernel-proc]]); a debugger without the cap does
+  not cover the child. Every other cap still lives only in a `caps` word.
 - **The comment drift this dossier once flagged is now fixed** (`830817c4`).
   Both enumerations had lagged their macros — the `CAP_ELEVATION_ONLY` comment
   said "All five" and then listed six; the `CAP_ALL` comment enumerated four

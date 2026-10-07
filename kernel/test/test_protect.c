@@ -534,7 +534,7 @@ void test_protect_refusals_change_nothing(void) {
 
     // A CODE alias (the I-42 pair).
     u64 cva = EXPLICIT_VA + 4 * P;
-    struct Burrow *bc = burrow_create_code(P, false);
+    struct Burrow *bc = burrow_create_code(P);
     TEST_ASSERT(bc != NULL, "code Burrow");
     spin_lock(&p->as->lock);
     TEST_EXPECT_EQ(burrow_map(p, bc, cva, P, VMA_PROT_RW), 0, "map the writer alias");

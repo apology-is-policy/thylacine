@@ -279,7 +279,12 @@ structured client API the design rests on):
   an op drives its fid straight to the wire (LARDER-DESIGN 12.2 item 4); the
   flush may wait for the server, on the registering thread. A failed flush,
   or an error an earlier flush latched, fails the registration with the old
-  table still in place; the Spoors before the failing one stay flushed and
+  table still in place, and the call returns that error as a negative errno
+  (`-ENOSPC`, the server's `-EIO`, a caught note's `-EINTR`, after which
+  the run is still staged and a retry flushes it; operator vote 2026-10-07,
+  `dec-2026-10-07-loom-register-errno`). Every other refusal is
+  a negative errno too: `-EBADF` for an fd that is not open, `-EFAULT` for an
+  argument array the kernel cannot read, `-EINVAL` for anything else. The Spoors before the failing one stay flushed and
   write through, a cost only. A successful registration drops the file's
   Larder pages, which the ring's writes would leave stale.
   `LOOM_REGISTER_BUFFERS`: pin Burrow regions for zero-copy payload.

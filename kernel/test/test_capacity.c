@@ -419,7 +419,7 @@ void test_detach_range_refusals_change_nothing(void) {
     const u64 X = HI_VA;
 
     // (a) A CODE alias: the I-42 pair's lifetime belongs to the JIT syscalls.
-    struct Burrow *code = burrow_create_code(P, false);
+    struct Burrow *code = burrow_create_code(P);
     TEST_ASSERT(code != NULL, "burrow_create_code");
     TEST_EXPECT_EQ(map_at(p, code, X, P, VMA_PROT_READ | VMA_PROT_EXEC), 0, "map the CODE burrow RX");
     burrow_unref(code);                  // the mapping holds it

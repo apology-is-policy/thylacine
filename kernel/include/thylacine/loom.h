@@ -592,7 +592,8 @@ void loom_unref(struct Loom *l);
 // dev9p_loom_register, which may wait) the caller retains its refs and the old
 // table stands, though the Spoors before the failing one stay flushed and no
 // longer stage (a cost only). Any previously-registered Spoors are clunked
-// (outside the lock). Returns 0 / -1.
+// (outside the lock). Returns 0, the failed flush's negative errno, or
+// -T_E_INVAL for bad arguments.
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
 
@@ -604,7 +605,8 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // registered buffer. On SUCCESS any previously-registered buffers are unref'd
 // (outside the lock) and the new set installed atomically; on FAILURE (any
 // range invalid / OOB / non-anon / not writable / n out of range) NOTHING is
-// changed and every Burrow ref taken so far is rolled back. Returns 0 / -1.
+// changed and every Burrow ref taken so far is rolled back. Returns 0 /
+// -T_E_INVAL.
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 

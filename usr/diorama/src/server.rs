@@ -98,8 +98,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_getgid, t_getuid, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo, T_OPATH,
-    T_OREAD, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_getgid, t_getpid, t_getuid, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo,
+    T_OPATH, T_OREAD, T_WALK_OPEN_FROM_ROOT,
 };
 
 // --- V-7: the vivarium (per-container) mode --------------------------------
@@ -314,6 +314,19 @@ static NODES: [Node; N_COUNT as usize] = [
 //     refuses any other reader: no new authority, section 6.2 intact. A refused
 //     read renders as an EMPTY file where Linux answers EACCES (tracked); Name:
 //     comes from the native ledger `name:` line, which the seal leaves readable.
+//   * One part of `maps` answers by READER, not by target: a code row's
+//     addresses go only to the target itself or to a reader with debug
+//     authority over it (I-39; DEBUG-FS-DESIGN 3.1), and every other reader
+//     gets the row zeroed (B-2b). Read as this server, a row this server may
+//     see would reach a client who may not -- so the server must be the
+//     weakest reader. Debug authority over an image holding code takes
+//     CAP_JIT (the kernel counts the aliases as that cap), CAP_HOSTOWNER or
+//     CAP_DEBUG, all elevation-only, and `deputy_check` refuses to serve
+//     while this Proc holds any elevation-only cap. Both dioramas are spawned
+//     with none, so the kernel zeroes every foreign code row before we see it.
+//     The cost falls on /self only: a peer holding code (a native JIT, never a
+//     Linux guest -- the phenotype has no code-region syscall) sees its own
+//     code rows zeroed here, where its native read would not.
 //   * What it does NOT do is scope the pid set to a container, because THERE IS
 //     NO SUCH SCOPING NATIVELY YET -- /ctl/procs lists every Proc on the box.
 //
@@ -676,7 +689,9 @@ impl Render {
 // ---------------------------------------------------------------------------
 // Native sources. Each is a plain read of a file the CALLING Proc could open
 // itself -- that is the section 6.2 property, and it is why the diorama needs no
-// privilege of its own.
+// privilege of its own. Where the answer depends on who reads (environ, a code
+// row in maps), the read is this server's: it serves no per-pid environ, and
+// holds no authority that would show it a code address (`deputy_check`).
 // ---------------------------------------------------------------------------
 
 /// Read a whole native file into `out`. Returns the byte count, or None if the
@@ -752,6 +767,22 @@ fn native_proc_path(pid: u32, leaf: &[u8], out: &mut [u8; 64]) -> usize {
     let n = if b.len() > out.len() { out.len() } else { b.len() };
     out[..n].copy_from_slice(&b[..n]);
     n
+}
+
+/// Refuse to serve while this Proc holds any elevation-only cap: with none it
+/// has debug authority over no image holding code, so the kernel shows it every
+/// other Proc's code rows zeroed (the visibility note above the pid tables).
+/// `imperium`'s `caps` field is exactly the elevation-only set held.
+pub fn deputy_check() -> Result<(), &'static str> {
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(unsafe { t_getpid() } as u32, b"imperium", &mut pbuf);
+    let mut buf = [0u8; 160];
+    let len = read_native(&pbuf[..n], &mut buf).ok_or("cannot read my imperium")?;
+    match parse_hex_after(&buf[..len], b" caps ") {
+        Some(0) => Ok(()),
+        Some(_) => Err("holds an elevation-only cap"),
+        None => Err("no caps field in my imperium"),
+    }
 }
 
 /// Does `pid` name a live Proc? Decided by a native `O_PATH` open of

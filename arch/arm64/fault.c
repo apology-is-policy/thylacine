@@ -508,15 +508,6 @@ static enum fault_result demand_page_locked(struct Proc *p,
     struct page *cow_release = NULL;
     switch (vma->burrow->type) {
     case BURROW_TYPE_ANON:
-    case BURROW_TYPE_CODE:
-        // I-42 (CL-7k): a CODE Burrow resolves exactly like ANON -- same
-        // contiguous eager chunk, same Normal-WB attrs. It shares this arm
-        // BECAUSE it must: both aliases of a code region fault through here, and
-        // each installs the PTE at its OWN vma->prot (RW for the writer alias,
-        // RX for the exec alias). The W^X decision therefore stays entirely in
-        // make_user_pte_l3, which is what makes "no PTE is ever W AND X" a
-        // property of the encoder rather than of this dispatch -- there is no
-        // code-specific PTE path that could drift away from I-12.
         if (!vma->burrow->pages)            return FAULT_UNHANDLED_USER;
         page_pa = page_to_pa(vma->burrow->pages) +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
@@ -584,7 +575,20 @@ static enum fault_result demand_page_locked(struct Proc *p,
         freq->exec        = (vma->prot & VMA_PROT_EXEC) != 0;  // text -> I-cache sync
         return FAULT_UNHANDLED_USER;    // ignored by the caller (freq->needed set)
     }
-    case BURROW_TYPE_ANON_LAZY: {
+    case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_CODE: {
+        // I-42 (CL-7k, B-2a): a CODE Burrow resolves exactly like ANON_LAZY --
+        // same sparse pagemap, same demand-zero commit, same Normal-WB attrs. It
+        // shares this arm BECAUSE it must: both aliases of a code region fault
+        // through here, the first touch through EITHER commits the page once
+        // (charged once), and each alias installs its leaf at its OWN vma->prot
+        // (RW for the writer, RX for the exec alias). No PTE is ever W AND X
+        // because no VMA is: vma_alloc refuses the pair, and this arm adds no
+        // code-specific install that could bypass it (make_user_pte_l3 would
+        // encode W|X faithfully if asked). A CODE mapping is never VMA_FLAG_COW
+        // (addrspace_clone refuses CODE), so the copy-on-write branch below is
+        // ANON_LAZY's alone.
+        //
         // Overcommit / I-32 (ARCH §6.5; SYS_BURROW_ATTACH_LAZY): demand-ZERO. The
         // page is allocated, zero-filled, and installed RW/XN on first touch. The
         // structural twin of the FILE arm but SIMPLER -- no backing read, so the
@@ -717,6 +721,17 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         // slot. (page.h states the contract; cow.h says why it is not inherited.)
         cow_page_set_sole(newpg);
 
+        // I-42 (CL-7k-3 audit F1, moved to the commit by B-2a): invalidate the
+        // I-cache over a CODE page BEFORE any leaf can name it. KP_ZERO zeroes
+        // memory, not the I-cache, and nothing on the free path does any cache
+        // maintenance, so a recycled page can still hold I-cache lines of a
+        // previous owner's instructions; an exec-alias fetch of a page the Proc
+        // never published would run them instead of the UDF #0 that zeroes
+        // promise. Here, while the page is private to this fault, is the one
+        // point both aliases' installs come after.
+        if (v->type == BURROW_TYPE_CODE)
+            arch_icache_sync_range(pa_to_kva(page_to_pa(newpg)), PAGE_SIZE);
+
         // Install-once into the slot. Under as->lock (held by the caller across
         // the whole demand_page_locked) no sibling faulter of this address space
         // can touch the map -- they serialize on as->lock -- so the slot is still
@@ -743,7 +758,7 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         }
         page_pa = page_to_pa(winner);
         mair_idx = MAIR_IDX_NORMAL_WB;
-        break;                              // -> step-5 PTE install (RW/XN, W^X-clean)
+        break;                              // -> step-5 PTE install at vma->prot
     }
     case BURROW_TYPE_INVALID:
     default:
@@ -806,9 +821,10 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
 // precheck admits FILE; a protect to none, sealed or not, is a guard), and the
 // re-lookup below proves only that the GEOMETRY still matches: the same
 // Burrow at the same slot answers yes for a piece protected to none.
-// Installing at the CURRENT vma->prot would then encode none as a
-// user-READABLE RO leaf (make_user_pte_l3 has no "no access" encoding), so
-// the guard would not guard and no fault would ever run step 2 again. Re-run
+// Installing at the CURRENT vma->prot would then put a leaf where a guard
+// stands (before B-2b the encoder even read none as a user-READABLE RO
+// leaf), and a fetch from a page lowered to R would get one it may not use,
+// so no fault would ever run step 2 for it again. Re-run
 // the admission for the recorded fault type against the prot as it reads NOW;
 // a refusal installs nothing and returns FAULT_UNHANDLED_USER, exactly what
 // the retry would answer (a read of a none page; an instruction fetch from a
