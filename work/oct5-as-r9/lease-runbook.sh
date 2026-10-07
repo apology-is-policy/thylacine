@@ -582,7 +582,8 @@ for t in settled_drop_retains_nonfinal_charge settled_drop_exact_payer \
     exit 1
   fi
 done
-echo "-- suite total must be base+4; a skip is NOT coverage (OPEN-BUGS: 17 ramfs"
+echo "-- suite total must EQUAL the registration count derived below (naming a
+   delta like 'base+4' is what went stale); a skip is NOT coverage (OPEN-BUGS: 17 ramfs"
 echo "   probe tests pass when their initrd file is missing):"
 # ASSERTED, not merely printed (astra, note 8): a `|| true` on the tally is a
 # number nobody checks.
