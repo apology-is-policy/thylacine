@@ -17,19 +17,35 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RUN=${RUN:-$ROOT/work/oct5-as-r9/reap-leg-run.sh}   # overridable so MUTANTS of it can be driven
-WORK=${TMPDIR:-/tmp}/reap-recovery-$$
+STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+# RETAINED, not printed and discarded: a reviewer cannot check a tally they
+# would have to re-run to see (astra, 0161 t57 -- she read the arms but could
+# not verify the reported 24/0). The scratch trees live INSIDE the evidence
+# directory, so the stubs a scenario ran against are part of the record.
+EVIDENCE=${EVIDENCE:-$ROOT/work/oct5-as-r9/recovery-test-$STAMP}
+mkdir -p "$EVIDENCE"
+WORK=$EVIDENCE/scratch
+RESULTS=$EVIDENCE/RESULTS.txt
 pass=0; fail=0
-ok()   { pass=$((pass+1)); echo "  ok   $1"; }
-bad()  { fail=$((fail+1)); echo "  WRONG: $1"; }
+say()  { echo "$1"; echo "$1" >> "$RESULTS"; }
+ok()   { pass=$((pass+1)); say "  ok   $1"; }
+bad()  { fail=$((fail+1)); say "  WRONG: $1"; }
+{
+  echo "recovery-harness run $STAMP"
+  echo "script under test : $RUN"
+  echo "  sha256          : $(shasum -a 256 "$RUN" | cut -d' ' -f1)"
+  echo "  git HEAD         : $(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+} > "$RESULTS"
 want() { # want <label> <expected> <got>
   if [ "$2" = "$3" ]; then ok "$1 ($2)"; else bad "$1 -- expected [$2] got [$3]"; fi
 }
 
 # ---- the extraction, with its own denominator control ----
-mkdir -p "$WORK"
+rm -rf "$WORK"; mkdir -p "$WORK"
 awk '/^recover\(\) \{/,/^\}$/'  "$RUN" >  "$WORK/fns.sh"
 awk '/^on_exit\(\) \{/,/^\}$/'  "$RUN" >> "$WORK/fns.sh"
 awk '/^free_gb\(\) \{/,/^\}$/'  "$RUN" >> "$WORK/fns.sh"
+echo "  fns sha256       : $(shasum -a 256 "$WORK/fns.sh" | cut -d' ' -f1)" >> "$RESULTS"
 for fn in recover on_exit free_gb; do
   if /usr/bin/grep -q "^$fn() {" "$WORK/fns.sh"; then ok "extracted $fn() from the live script"
   else bad "extraction found no $fn() -- THE HARNESS IS BROKEN, not the script"; fi
@@ -72,7 +88,7 @@ drive() { # drive <scenario> <mutated> <exit-status> <control-hash> <lease> <fre
 }
 
 echo
-echo "R1 a PRE-MUTATION exit: no quarantine, source restored, status preserved"
+say "R1 a PRE-MUTATION exit: no quarantine, source restored, status preserved"
 got=$(drive r1 0 3 "$CONTROL_HASH" lease-mine.txt 20)
 want "R1 exit status is the run's own, not the recovery's" 3 "$got"
 [ -d "$WORK/r1/out/mutant-artifacts-DO-NOT-BOOT" ] \
@@ -83,7 +99,7 @@ want "R1 exit status is the run's own, not the recovery's" 3 "$got"
   && ok "R1 prints the lease-release line on a refusal path" || bad "R1 lost the lease line"
 
 echo
-echo "R2 the HAPPY path: quarantine, restore, byte-identical rebuild, exit 0"
+say "R2 the HAPPY path: quarantine, restore, byte-identical rebuild, exit 0"
 got=$(drive r2 1 0 "$CONTROL_HASH" lease-mine.txt 20)
 want "R2 exits 0" 0 "$got"
 [ -f "$WORK/r2/out/mutant-artifacts-DO-NOT-BOOT/thylacine.bin" ] \
@@ -95,14 +111,14 @@ want "R2 exits 0" 0 "$got"
   && ok "R2 build/ holds a kernel image again" || bad "R2 left build/ imageless on the happy path"
 
 echo
-echo "R3 the REBUILD DIFFERS -- astra's named case: it must FAIL CLOSED"
+say "R3 the REBUILD DIFFERS -- astra's named case: it must FAIL CLOSED"
 got=$(drive r3 1 0 "0000000000000000000000000000000000000000000000000000000000000000" lease-mine.txt 20)
 want "R3 exits 9 although the run itself exited 0" 9 "$got"
 /usr/bin/grep -q 'FAILS CLOSED' "$WORK/r3.log" \
   && ok "R3 says so in words, not only in the status" || bad "R3 is silent about failing closed"
 
 echo
-echo "R4 the DISK FLOOR: no rebuild, quarantine stands, status preserved"
+say "R4 the DISK FLOOR: no rebuild, quarantine stands, status preserved"
 got=$(drive r4 1 2 "$CONTROL_HASH" lease-mine.txt 3)
 want "R4 keeps the finding's own status (2), since quarantine IS safe" 2 "$got"
 /usr/bin/grep -q 'NO REBUILD: 3 GiB free' "$WORK/r4.log" \
@@ -112,21 +128,21 @@ want "R4 keeps the finding's own status (2), since quarantine IS safe" 2 "$got"
   || ok "R4 leaves build/ imageless, so nothing can boot the mutant"
 
 echo
-echo "R5 the LEASE IS GONE: no rebuild, and the cores are not taken back"
+say "R5 the LEASE IS GONE: no rebuild, and the cores are not taken back"
 got=$(drive r5 1 2 "$CONTROL_HASH" lease-theirs.txt 20)
 want "R5 keeps the run's status" 2 "$got"
 /usr/bin/grep -q 'lease is no longer mine' "$WORK/r5.log" \
   && ok "R5 refuses the rebuild without a lease" || bad "R5 built without the lease"
 
 echo
-echo "R6 the RECOVERY BUILD FAILS: fail closed, and the log is named"
+say "R6 the RECOVERY BUILD FAILS: fail closed, and the log is named"
 got=$(drive r6 1 0 "$CONTROL_HASH" lease-mine.txt 20 7)
 want "R6 exits 9" 9 "$got"
 /usr/bin/grep -q 'RECOVERY BUILD FAILED' "$WORK/r6.log" \
   && ok "R6 names the failed build and its log" || bad "R6 did not report the build failure"
 
 echo
-echo "R7 a FAILED SOURCE RESTORE must be nonzero, not a printed remark"
+say "R7 a FAILED SOURCE RESTORE must be nonzero, not a printed remark"
 # The hash is one the restored file CANNOT match, so the defect under test is a
 # restore that reports success without having restored anything.
 got=$(drive r7 0 0 "$CONTROL_HASH" lease-mine.txt 20 0 deadbeef)
@@ -135,7 +151,7 @@ want "R7 exits 9 on a restore whose hash does not verify" 9 "$got"
   && ok "R7 tells the reader where the pristine copy is" || bad "R7 does not point at the pristine copy"
 
 echo
-echo "L1 THE LAYOUT, asked of the REAL tree and not of a stub"
+say "L1 THE LAYOUT, asked of the REAL tree and not of a stub"
 layout_paths=$(/usr/bin/grep -oE 'build/kernel/thylacine\.(elf|bin)' "$RUN" | sort -u | wc -l | tr -d ' ')
 if [ "$layout_paths" -lt 2 ]; then
   bad "L1 extracted only $layout_paths image path(s) from the script -- BROKEN ARM"
@@ -149,7 +165,7 @@ else
   done
 fi
 
-echo
-echo "RESULT: $pass pass, $fail wrong"
-rm -rf "$WORK"
+say ""
+say "RESULT: $pass pass, $fail wrong"
+echo "evidence: $EVIDENCE"
 [ "$fail" = 0 ] || exit 1
