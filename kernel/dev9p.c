@@ -449,6 +449,18 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     return 0;
 }
 
+// Staging has stopped for good (the anchor is gone, never set again) and no
+// run is left, so the buffer can never be used again: give it and its budget
+// share back now, not at the last close. Every reader of wb_buf is gated on
+// wb_len > 0. Holds wb_lock (kfree under it: the Larder leaf -> buddy order).
+static void wb_release_dead_locked(struct dev9p_priv *p) {
+    if (p->wb_known || p->wb_len || p->wb_flushers || !p->wb_buf) return;
+    kfree(p->wb_buf);
+    wb_budget_uncharge((u64)p->wb_cap);
+    p->wb_buf = NULL;
+    p->wb_cap = 0;
+}
+
 // The dev9p_write staging decision. Returns:
 //   > 0  -- staged (== count); no wire op, no invalidate (moved to flush)
 //   == 0 -- not staged; any ordering-required flush already done; the caller
@@ -466,8 +478,8 @@ static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
         }
         // The append anchor for this write: the live run's end, else the
         // known base. No known anchor -> never stages (an opened-existing
-        // file; a post-truncate priv). A live run implies wb_known (runs
-        // only start at a known anchor; wstat flushes before clearing it).
+        // file; a post-truncate priv). A run can outlive the anchor (a death
+        // kept it through a wstat): its end anchors while it lives.
         bool anchored  = p->wb_len ? true : p->wb_known;
         u64 append_at  = p->wb_len ? (p->wb_off + (u64)p->wb_len) : p->wb_base;
         bool stageable = anchored && offset == append_at &&
@@ -505,7 +517,8 @@ static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
         }
         // Cap: a full run flushes inline, then the loop retries the stage
         // into the emptied run (wb_base advanced to exactly this write's
-        // offset by the flush).
+        // offset by the flush; with the anchor gone the retry writes
+        // through).
         if ((u64)p->wb_len + (u64)count > (u64)DEV9P_WB_CAP) {
             int fe = wb_flush_locked(p, c->qid.path);
             if (fe != 0) {
@@ -686,7 +699,10 @@ int dev9p_loom_register(struct Spoor *c) {
     spin_lock(&p->wb_lock);
     int fe = p->wb_err ? -(p->wb_err) : 0;
     if (!fe && (p->wb_len || p->wb_flushers)) fe = wb_flush_locked(p, c->qid.path);
-    if (!fe) p->wb_known = false;    // a failure leaves the priv as it was
+    if (!fe) {                       // a failure leaves the priv as it was
+        p->wb_known = false;
+        wb_release_dead_locked(p);
+    }
     spin_unlock(&p->wb_lock);
     if (fe != 0) return fe;
     // The flush installed the run's pages as our own; the ring's WRITEs bypass
@@ -1769,7 +1785,7 @@ static int dev9p_close(struct Spoor *c) {
     // the flush keeps the run: a run still staged after this step goes to a
     // closer with the fid's clunk (ARCH 7.9.1 part C), and is no loss yet.
     // Then release the buffer + the global budget (unconditional on wb_buf:
-    // a wstat-de-eligibilized priv still owns its buffer).
+    // a priv that stopped staging may still own its buffer).
     int  crc    = 0;
     bool handed = false;
     if (p->wb_len && close_may_wait()) {
@@ -2044,8 +2060,8 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // F1 write-behind (LARDER-DESIGN section 12): stage a small pure-append
     // write on an eligible priv instead of paying a wire RPC per bufio
     // chunk. wb_eligible is a fast-path hint (set pre-share at create/
-    // OTRUNC; cleared by wstat) -- every real decision re-runs under
-    // wb_lock inside.
+    // OTRUNC, never cleared; staging stops by dropping the anchor) -- every
+    // real decision re-runs under wb_lock inside.
     if (p->wb_eligible) {
         long staged = wb_write_prepare(p, c, count, offset, (const u8 *)buf);
         if (staged != 0) return staged;
@@ -2400,6 +2416,7 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
         // covers it either way.
         if (p->wb_len || p->wb_flushers) fe = wb_flush_locked(p, c->qid.path);
         p->wb_known = false;
+        wb_release_dead_locked(p);
         spin_unlock(&p->wb_lock);
         if (fe != 0) return fe;
     }

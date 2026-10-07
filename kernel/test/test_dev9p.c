@@ -3575,10 +3575,11 @@ void test_dev9p_wb_dying_flush_keeps_run(void) {
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
 }
 
-// A metadata write stops staging only once its flush emptied the run. A death
-// that ends that flush keeps the run, and the priv must go on staging it: one
-// that stopped would never again overlay it on read or flush it on fsync, for
-// another Proc sharing the fd too. The live fsync stands in for that sharer.
+// A metadata write drops the append anchor, but a death that ends its flush
+// keeps the run, and the priv must go on staging it: overlaying it on read,
+// flushing it on fsync, and taking appends onto its end, for another Proc
+// sharing the fd too (the truncate was never sent). The live write and fsync
+// stand in for that sharer.
 static void wbd_truncate(void *arg) {
     (void)arg;
     g_wbd_rc = dev9p.wstat_native(g_wbd_spoor, T_WSTAT_SIZE, 0, 0, 0, 0);
@@ -3601,6 +3602,8 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void) {
     TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
     test_dying_reap(&g_wbd_thread);
     u32 seen_dying = g_twrite_seen;
+    long arc       = dev9p.write(f, chunk, 64, 256);
+    u32 seen_app   = g_twrite_seen;
     int frc        = dev9p.fsync(f, 0);
     u32 seen       = g_twrite_seen;
     u32 cap_len    = g_twrite_cap_len;
@@ -3609,9 +3612,11 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void) {
 
     TEST_ASSERT(g_wbd_rc < 0, "the dying truncate fails");
     TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its flush: nothing on the wire");
+    TEST_EXPECT_EQ((u64)arc, 64ull, "an append onto the kept run is taken");
+    TEST_EXPECT_EQ((u64)seen_app, 0ull, "and staged onto it");
     TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "a live fsync after it succeeds");
     TEST_EXPECT_EQ((u64)seen, 1ull, "and flushes the run the truncate kept");
-    TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
+    TEST_EXPECT_EQ((u64)cap_len, 320ull, "all 320 bytes, the append's too");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
 }
 
@@ -3728,6 +3733,7 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
     if (rrc != 0) spoor_clunk(f);
     bool empty = l->reg[0].spoor == NULL;
     loom_unref(l);
+    int  why   = dev9p_loom_register(f);          // the refusal's own errno
     long we  = dev9p.write(f, chunk, 256, 256);
     long fe1 = dev9p.fsync(f, 0);
     int  crc = spoor_clunk_rc(f);
@@ -3735,6 +3741,7 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
 
     TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
     TEST_ASSERT(rrc != 0, "the registration fails on the latch");
+    TEST_EXPECT_EQ((u64)(s64)why, (u64)(s64)-28, "its dev9p half returns the latched ENOSPC");
     TEST_ASSERT(empty, "and installs nothing");
     TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
     TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
@@ -3771,6 +3778,7 @@ void test_dev9p_wb_nonappend_writethrough(void) {
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
     struct dev9p_priv *fp = dev9p_priv_of(f);
     TEST_ASSERT(fp != NULL && !fp->wb_known, "wstat stops staging (no append anchor)");
+    TEST_ASSERT(fp->wb_buf == NULL && fp->wb_cap == 0, "and gives back the dead buffer");
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 1500), 100ull, "post-wstat write");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…goes straight through");

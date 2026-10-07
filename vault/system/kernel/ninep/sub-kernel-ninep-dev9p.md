@@ -50,7 +50,8 @@ report or send; no slot changes shape.
 Exports beyond the vtable: `dev9p_client_fid` (the Loom I-30 submit pin
 resolve), `dev9p_loom_register` (a Loom registration: fail on a latched
 flush error, flush the staged run, stop staging by clearing only `wb_known`
-as wstat does, then drop the file's Larder pages; witnesses
+as wstat does, free the dead staging buffer, then drop the file's Larder
+pages; witnesses
 `p9_closer.loom_register_flushes_staged_run`,
 `dev9p.wb_dying_loom_register_keeps_staging`,
 `dev9p.wb_loom_register_keeps_the_latch`), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
@@ -277,7 +278,9 @@ destroys it) -- never the eligibility flag, which gates the read overlay,
 fsync's flush and the write ordering of a run a death kept, and the latch's
 report on every write and fsync, for another Proc sharing the fd too
 (witnesses `dev9p.wb_dying_wstat_keeps_staging`,
-`dev9p.wb_wstat_keeps_the_latch`); on success
+`dev9p.wb_wstat_keeps_the_latch`), and with no run left it frees the
+staging buffer and its budget share at once (`wb_release_dead_locked`;
+nothing can stage into it again); on success
 attr invalidate (CRITICAL — the base X-check perm_checks the cached mode,
 so the invalidate keeps the guest's own chmod window at zero) + whole-file
 page invalidate when SIZE changed.

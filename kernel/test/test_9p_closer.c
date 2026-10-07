@@ -662,7 +662,8 @@ void test_p9_closer_first_kill_forces_exits_close(void) {
 // Loom FSYNC then reaches the server after the bytes write() took, and a later
 // write() goes straight through. The control is the fixture: before the
 // registration the same kind of write() staged, with nothing on the wire. The
-// flush's own pages go too -- the ring's WRITEs would leave them stale.
+// flush's own pages go too -- the ring's WRITEs would leave them stale -- and
+// so does the buffer, which nothing can stage into again.
 void test_p9_closer_loom_register_flushes_staged_run(void) {
     struct wbc w = {0};
     bool opened = wbc_open(&w);
@@ -673,6 +674,7 @@ void test_p9_closer_loom_register_flushes_staged_run(void) {
     u8   tail[16];
     for (u32 i = 0; i < sizeof(tail); i++) tail[i] = (u8)(0xA0u + i);
     u32  paged = ~0u;
+    u64  owned = 0, budget_reg = 0;
     u8   page[WBC_LEN];
     struct srv_rec rec = {0}, rec_reg = {0};
     if (opened) {
@@ -680,10 +682,13 @@ void test_p9_closer_loom_register_flushes_staged_run(void) {
         if (l) {
             spoor_ref(w.f);                       // the table adopts this one
             rights_t rt = RIGHT_READ | RIGHT_WRITE;
+            u64 owned0 = w.a->client->larder.page_own_installs;
             reg = loom_register_handles(l, &w.f, &rt, 1);
             if (reg != 0) spoor_clunk(w.f);
-            after_reg = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
-            rec_reg   = g_rec_a;
+            after_reg  = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+            rec_reg    = g_rec_a;
+            owned      = w.a->client->larder.page_own_installs - owned0;
+            budget_reg = dev9p_wb_budget_used();
             u64 seq0  = 0;
             paged = larder_page_serve(&w.a->client->larder, w.f->qid.path, 0, 0,
                                       WBC_LEN, 0, page, &seq0);
@@ -717,7 +722,9 @@ void test_p9_closer_loom_register_flushes_staged_run(void) {
     TEST_EXPECT_EQ(rec_reg.write_off, 0ull, "from offset 0");
     TEST_EXPECT_EQ((u64)rec_reg.write_len, (u64)WBC_LEN, "all of it");
     TEST_EXPECT_EQ((u64)rec_reg.write_sum, (u64)wbc_sum(), "the bytes write() took");
-    TEST_EXPECT_EQ((u64)paged, 0ull, "and dropped the pages the flush cached");
+    TEST_EXPECT_EQ(owned, 1ull, "the flush cached its page (control)");
+    TEST_EXPECT_EQ((u64)paged, 0ull, "and the registration dropped it");
+    TEST_EXPECT_EQ(budget_reg, w.budget0, "and gave back the staging buffer");
     TEST_EXPECT_EQ((u64)rec.write_off, (u64)WBC_LEN, "the last Twrite is the append");
     TEST_EXPECT_EQ((u64)entered, 1ull, "one SQE consumed");
     TEST_EXPECT_EQ((u64)(s64)cres, 0ull, "the Loom fsync succeeds");
