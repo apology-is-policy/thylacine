@@ -83,6 +83,7 @@ void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
 void test_dev9p_wb_loom_register_keeps_the_latch(void);
 void test_dev9p_wb_interrupted_flush_keeps_run(void);
+void test_dev9p_wb_server_eintr_latches(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3753,10 +3754,12 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
 
 // A caught note that interrupts a flush has its Twrite cancelled (flush(5)):
 // EINTR, never applied. The run stays staged and nothing latches, so the next
-// fsync sends it whole. A server's Rlerror(EINTR) reaches the flush as the same
-// -P9_E_INTR the client returns for a cancelled op, so it stands in for the
-// note. The control is wb_fsync_flush_and_error: the same injection with
-// ENOSPC latches and drops the run.
+// fsync sends it whole. The dev9p half is driven here: the thread holds a note
+// claim, as every caught-note unwind leaves it (thread_caught_note_unwinds),
+// and the flush meets -P9_E_INTR -- injected as a server Rlerror(EINTR), which
+// the client returns as the same value. The client half (a Tflush answered
+// first returns -P9_E_INTR) is 9p_client.note_flush_rflush_first_cancels.
+// The control, one variable away, is wb_server_eintr_latches: no claim.
 void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
@@ -3764,11 +3767,15 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     u8 *chunk = wb_scratch();
     TEST_ASSERT(chunk != NULL, "scratch");
     for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->note_claim == 0, "a test thread holds no claim");
     wb_wire_reset();
     g_twrite_pat_on = true;
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = P9_E_INTR;
+    t->note_claim = 1;                  // the claim an unwind would hold
     long fe0    = dev9p.fsync(f, 0);
+    t->note_claim = 0;                  // what the EL0-return tail releases
     u32  seen0  = g_twrite_seen;
     long fe1    = dev9p.fsync(f, 0);
     u32  seen1  = g_twrite_seen;
@@ -3790,6 +3797,36 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     TEST_EXPECT_EQ((u64)seen2, 3ull, "the close flushes it");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and returns 0");
     TEST_ASSERT(pat_ok, "every byte on the wire is the byte written");
+}
+
+// A server that answers a flush's Twrite with Rlerror(EINTR) has failed the
+// write: with no note claim the EINTR is the server's, not a cancellation, so
+// it latches and drops the run like ENOSPC, and the last close reports it
+// rather than handing the run to a closer and returning 0.
+void test_dev9p_wb_server_eintr_latches(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->note_claim == 0, "no note claim");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = P9_E_INTR;
+    long fe0  = dev9p.fsync(f, 0);
+    long fe1  = dev9p.fsync(f, 0);
+    u32  seen = g_twrite_seen;
+    int  crc  = spoor_clunk_rc(f);
+    u32  seen_close = g_twrite_seen;
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), (u64)P9_E_INTR, "the fsync returns the server's EINTR");
+    TEST_EXPECT_EQ((u64)(-fe1), (u64)P9_E_INTR, "and it latched: the next fsync returns it");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "nothing was resent");
+    TEST_EXPECT_EQ((u64)seen_close, 1ull, "the close sends nothing: the run was dropped");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-P9_E_INTR, "and the last close reports it");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run

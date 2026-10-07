@@ -990,3 +990,37 @@ void test_jit_xonly_promoted_off_code(void) {
     TEST_EXPECT_EQ(v->prot, VMA_PROT_READ | VMA_PROT_EXEC, "and was promoted to READ|EXEC");
     jit_drop_proc(p);
 }
+
+// The fill's failure path refunds exactly what the fill charged. The budget is
+// narrowed to one page and its slot-table nodes -- measured from a one-page
+// sealed region, not assumed -- so a two-page create is refused at its second
+// page with the first page and the nodes already charged, and the count, the
+// pool and the address space must all come back to where they were.
+void test_jit_sealed_fill_failure_refunds(void) {
+    sealed_src_fill();
+    struct Proc *p = jit_make_proc(/*with_cap=*/true);
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    p->principal_id = 1000u;                    // a user: the budget binds
+    TEST_ASSERT(!proc_resource_exempt(p), "a non-exempt Proc");
+    u32 c0    = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
+    u32 pool0 = jit_pool(p);
+
+    u64 xva = 0;
+    TEST_EXPECT_EQ(sys_jit_create_sealed_region(p, g_sealed_src, 0, 12, &xva), 0,
+        "a one-page sealed region");
+    u32 fp1 = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) - c0;
+    TEST_ASSERT(fp1 >= 2u, "it charged its page and at least one slot-table node");
+    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, xva), 0, "destroyed");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), c0, "and refunded");
+
+    __atomic_store_n(&p->as->page_budget, c0 + fp1, __ATOMIC_RELEASE);
+    xva = 0;
+    TEST_EXPECT_EQ(sys_jit_create_sealed_region(p, g_sealed_src, 0, sizeof g_sealed_src, &xva),
+        -T_E_NOMEM, "a two-page sealed region is refused at its second page");
+    TEST_EXPECT_EQ(xva, 0ull, "and returns no VA");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), c0,
+        "the first page and the nodes are refunded");
+    TEST_EXPECT_EQ(jit_pool(p), pool0, "and given back to the pool");
+    TEST_ASSERT(p->as->vmas == NULL, "and nothing is mapped");
+    jit_drop_proc(p);
+}

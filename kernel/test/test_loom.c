@@ -22,6 +22,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- cooperative yield to the SQPOLL kthread
+#include <thylacine/spoor.h>   // Spoor.ref -- the register rollback observation
 #include <thylacine/thread.h>  // THREAD_SLEEPING -- the F2 park observation
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -266,10 +267,19 @@ void test_loom_register_rejects(void) {
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1),
                    -T_E_INVAL, "non-Spoor fd rejected");
     // An fd that is not open is EBADF, after an open one was resolved and must
-    // be rolled back.
+    // be rolled back: its Spoor's ref count is what it was. (Both readings
+    // include the one ref the reading handle_get holds.)
+    struct Handle rh;
+    TEST_ASSERT(handle_get(p, rd, &rh) == 0, "handle_get(rd)");
+    int ref0 = __atomic_load_n(&((struct Spoor *)rh.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&rh);
     hidx_t gone[2] = { rd, (hidx_t)999 };
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, gone, 2),
                    -T_E_BADF, "an unopened fd is EBADF");
+    TEST_ASSERT(handle_get(p, rd, &rh) == 0, "handle_get(rd) after");
+    int ref1 = __atomic_load_n(&((struct Spoor *)rh.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&rh);
+    TEST_EXPECT_EQ(ref1, ref0, "and the resolved fd's ref was rolled back");
     // A bogus loom_fd is rejected.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1),
                    -T_E_BADF, "bad loom_fd is EBADF");

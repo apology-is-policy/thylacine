@@ -768,7 +768,11 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   same case: flush(5) cancelled the Twrite, so the call returns `EINTR`, the
   run stays staged, and a retry or the last close sends it (2026-10-07,
   B-2's land; before, the `EINTR` latched and the run was dropped, so every
-  later write, fsync and close on the file returned `EINTR`). A last close that may not wait -- on a
+  later write, fsync and close on the file returned `EINTR`). The flush tells
+  the cancellation by the note's claim, which every caught-note unwind takes
+  and holds until the thread returns to EL0; a server that answers
+  Rlerror(`EINTR`) itself, with no claim, has failed the write, and that
+  latches like any other failure. A last close that may not wait -- on a
   die-pending thread, or on a kernel thread marked `closes_never_wait` -- does
   not flush: the run goes to a closer with the fid's clunk (ARCH 7.9.1 part
   C), which writes it and then DROPS the file's attr and pages instead of

@@ -532,6 +532,7 @@ void test_jit_exec_alias_stays_readable(void);
 void test_jit_sealed_rejects(void);
 void test_jit_placement_not_first_fit(void);
 void test_jit_xonly_promoted_off_code(void);
+void test_jit_sealed_fill_failure_refunds(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
@@ -1908,6 +1909,7 @@ void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
 void test_dev9p_wb_loom_register_keeps_the_latch(void);
 void test_dev9p_wb_interrupted_flush_keeps_run(void);
+void test_dev9p_wb_server_eintr_latches(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -2613,6 +2615,7 @@ struct test_case g_tests[] = {
     { "jit.sealed_rejects",               test_jit_sealed_rejects,            false, NULL },
     { "jit.placement_not_first_fit",      test_jit_placement_not_first_fit,   false, NULL },
     { "jit.xonly_promoted_off_code",      test_jit_xonly_promoted_off_code,   false, NULL },
+    { "jit.sealed_fill_failure_refunds",  test_jit_sealed_fill_failure_refunds, false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
     { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },
     { "burrow.file_create_failure_retains_spoor", test_vmo_file_create_failure_retains_spoor, false, NULL },
@@ -4285,6 +4288,8 @@ struct test_case g_tests[] = {
                                        test_dev9p_wb_loom_register_keeps_the_latch, false, NULL },
     { "dev9p.wb_interrupted_flush_keeps_run",
                                        test_dev9p_wb_interrupted_flush_keeps_run, false, NULL },
+    { "dev9p.wb_server_eintr_latches",
+                                       test_dev9p_wb_server_eintr_latches, false, NULL },
     { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },

@@ -213,6 +213,17 @@ the shape on 2026-09-28; three things change.
    Linux's execute-only user mappings were reverted once because the kernel
    could still read them; OpenBSD ships the same scheme with unprivileged
    user copies.
+   The hardening answers an attacker holding a read/write primitive inside
+   the process's memory. A Proc's mapping listing (`/proc/<pid>/maps`) names
+   every code alias's address, as Linux's `/proc/self/maps` and macOS's
+   `vmmap` do, so a content process that can open files finds the writer
+   there: B-2c must leave `/proc` out of the web content process's namespace,
+   as a renderer sandbox leaves the file system out on other systems. That
+   listing is also AMBIENT here -- every Proc may read an unsealed Proc's
+   `maps` (Plan 9's posture, sound only while no user address was random,
+   devproc.c's own forward obligation) -- so random placement makes it a
+   cross-Proc disclosure of the writer's address. Its posture is OPEN as of
+   2026-10-07 (B-2b audit F2, widened in triage), owed before B-2 lands.
 
 ## Status / handoff
 

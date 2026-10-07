@@ -27,8 +27,10 @@
 //      Call it; then hand its address to write(2) and assert EFAULT -- the
 //      kernel's copy is an unprivileged load, so it cannot read the bytes on
 //      our behalf -- against a control write of the same bytes from a readable
-//      buffer. Destroy it by its own VA; a second destroy fails. (Step 2 also
-//      asserts the sealed create is refused without the capability.)
+//      buffer; read(2) INTO it is -EFAULT against a control read; a sealed
+//      create whose source is the sealed alias is -EFAULT (no laundering).
+//      Destroy it by its own VA; a second destroy fails. (Step 2 also asserts
+//      the sealed create is refused without the capability.)
 //
 // Step 5 is the load-bearing one. It is also the only place in the tree where
 // the icache sync is genuinely load-bearing rather than merely correct: skip it
@@ -467,11 +469,18 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let leak = unsafe { t_write(wr, sealed.exec_ptr(), 4) };
     let ctl = unsafe { t_write(wr, thunk.as_ptr() as *const u8, 4) };
+    // The store direction: read(2) INTO the sealed alias faults as well. A
+    // second control write first, so the pipe still holds four bytes for the
+    // control read whether or not the refused read consumed any.
+    let ctl2 = unsafe { t_write(wr, thunk.as_ptr() as *const u8, 4) };
+    let sink = unsafe { t_read(rd, sealed.exec_ptr() as *mut u8, 4) };
+    let mut back = [0u8; 4];
+    let ctl_rd = unsafe { t_read(rd, back.as_mut_ptr(), 4) };
     unsafe {
         let _ = t_close(rd);
         let _ = t_close(wr);
     }
-    if ctl != 4 {
+    if ctl != 4 || ctl2 != 4 {
         fail("jit-prover: FAIL control write from a readable buffer\n");
     }
     if leak != -14 {
@@ -482,6 +491,32 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { libthyla_rs::t_exits(1) }
     }
     t_putstr("jit-prover: write(2) of the sealed bytes = -EFAULT -- unreadable\n");
+    if ctl_rd != 4 {
+        fail("jit-prover: FAIL control read into a writable buffer\n");
+    }
+    if sink != -14 {
+        let mut b = [0u8; 24];
+        t_putstr("jit-prover: FAIL read(2) into the sealed alias returned ");
+        t_putstr(dec(sink, &mut b));
+        t_putstr(", not -EFAULT\n");
+        unsafe { libthyla_rs::t_exits(1) }
+    }
+    t_putstr("jit-prover: read(2) into the sealed alias = -EFAULT -- unwritable\n");
+
+    // Sealing cannot launder the bytes: a sealed create whose SOURCE is the
+    // sealed alias copies through the same unprivileged loads and fails.
+    let mut va2: u64 = 0;
+    let re = unsafe {
+        libthyla_rs::t_jit_create_sealed(sealed.exec_ptr() as u64, 4, &mut va2 as *mut u64 as u64)
+    };
+    if re == 0 {
+        let _ = unsafe { libthyla_rs::t_jit_destroy(va2) };
+        fail("jit-prover: FAIL a sealed create copied FROM a sealed alias\n");
+    }
+    if re != -14 {
+        fail("jit-prover: FAIL sealing from a sealed alias failed for the wrong reason\n");
+    }
+    t_putstr("jit-prover: sealing from a sealed alias = -EFAULT -- no laundering\n");
 
     let xo = sealed.exec_ptr() as u64;
     if sealed.destroy().is_err() {
