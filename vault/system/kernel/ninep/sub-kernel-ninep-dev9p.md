@@ -48,7 +48,9 @@ A CAPED session (the identity cape, below) changes what four of these slots
 report or send; no slot changes shape.
 
 Exports beyond the vtable: `dev9p_client_fid` (the Loom I-30 submit pin
-resolve), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
+resolve), `dev9p_loom_register` (a Loom registration: flush the staged run,
+then stop staging, as wstat does and only once the run is gone; witness
+`p9_closer.loom_register_flushes_staged_run`), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
 `dev9p_priv_of`, `dev9p_create_errno` (#99), the cached-open/write-behind
 budget diagnostics + test bias.
 

@@ -555,7 +555,9 @@ proven-in-principle to delivered.
   serve-your-own-FS-to-one-guest case). A concurrent *external* writer (out-of-
   band Stratum mutation) is bounded by the revalidation window, not instantly
   coherent — acceptable at v1.0, tightenable via the writeback modes.
-- **The Loom async path bypasses the Larder (L1c/L1d seam).** The Larder is
+- **The Loom async path bypasses the Larder (L1c/L1d seam).** (Its
+  write-behind half is closed: a Loom registration flushes the staged run and
+  stops staging, section 12.2 item 4.) The Larder is
   populated + invalidated ONLY on the SYNCHRONOUS dev9p path (`dev9p_stat_native`
   / `dev9p_walk_attrs` populate; `dev9p_write` / `dev9p_wstat_native` / create /
   rename / unlink invalidate). The Loom async engine (`kernel/loom.c` —
@@ -713,7 +715,20 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
      the read overlay, fsync's flush and the write ordering of a run a death
      kept, and the error latch's report on every write and fsync -- for
      another Proc sharing the fd too (2026-10-07: exit-close audit r1 F1, and
-     the Loom write-behind audit r1 F1, which found the latch half).
+     the Loom write-behind audit r1 F1, which found the latch half). A Loom
+     registration of the Spoor stops staging the same way
+     (`dev9p_loom_register`, from `loom_register_handles`, on the registering
+     syscall's thread), after flushing the run: a Loom op drives the fid
+     straight to the wire, past every path above, so every Loom op -- a
+     WRITE, a READ, an FSYNC, a SETATTR -- meets a priv with nothing staged.
+     A latched flush error fails the registration, as it fails fsync: no Loom
+     op consults the latch, and a registered priv can latch nothing new, since
+     it never stages. The registration also drops the file's Larder pages:
+     a flush installs them as own-write pages, which skip the version check,
+     and the ring's writes bypass the Larder. Before 2026-10-07 a Loom FSYNC
+     on a staged priv reached the server ahead of the staged bytes. The rest
+     of the Larder half of the Loom bypass (section 9's L1c/L1d seam) is
+     separate and still open.
   5. **a read of the same priv** needs no flush: the run is contiguous at
      the file's known end, so reads split cleanly — below `stage_off` = old
      content (server/cache, complete: the append-anchor discipline means the

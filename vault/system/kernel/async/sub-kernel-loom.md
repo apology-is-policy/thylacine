@@ -34,7 +34,11 @@ A ring is created with a power-of-two submission depth; the kernel allocates one
 anonymous region holding a header, a submission index array, the entry array and
 the completion array, maps it into the caller read-write, and reports the
 geometry. Two more calls register the objects operations may name: a fixed table
-of open file handles, and a fixed table of pinned buffer regions.
+of open file handles, and a fixed table of pinned buffer regions. Registering a
+dev9p handle first flushes its staged write-behind run and stops it staging
+(`dev9p_loom_register`, 2026-10-07): operations drive the fid straight to the
+wire, so none may meet bytes still staged. The flush may wait on the
+registering thread; a failure fails the registration and keeps the old table.
 
 Then: userspace fills entries and advances its tail; the kernel consumes them,
 and posts one completion per operation carrying the caller's opaque token and

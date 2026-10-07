@@ -274,7 +274,11 @@ structured client API the design rests on):
 - `SYS_LOOM_REGISTER(loom_fd, u32 op, const void *arg, u32 nargs) -> r`
   — `LOOM_REGISTER_HANDLES`: install an array of `KObj_Spoor` handles into the
   ring's fixed-handle table (the registered-fid / "fixed files" analog); each is
-  resolved once to `(p9_client *, fid)` + a rights snapshot.
+  resolved once to `(p9_client *, fid)` + a rights snapshot. A dev9p Spoor's
+  staged write-behind run is flushed first and the Spoor stops staging, since
+  an op drives its fid straight to the wire (LARDER-DESIGN 12.2 item 4); the
+  flush may wait for the server, on the registering thread, and its failure
+  fails the registration with the old table still in place.
   `LOOM_REGISTER_BUFFERS`: pin Burrow regions for zero-copy payload.
 
 ### 8.2 Submit + reap
