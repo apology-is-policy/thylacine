@@ -30,6 +30,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/caps.h>
 #include <thylacine/handle.h>
+#include <thylacine/loom.h>
 #include <thylacine/path.h>
 #include <thylacine/territory.h>
 
@@ -79,6 +80,7 @@ void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_wstat_keeps_the_latch(void);
+void test_dev9p_wb_dying_loom_register_keeps_staging(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3639,6 +3641,62 @@ void test_dev9p_wb_wstat_keeps_the_latch(void) {
     TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
     TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28, "and the last close");
+}
+
+// A Loom registration whose flush a death ends fails, with nothing installed:
+// the registered table must never name a priv with a run still staged. The
+// priv keeps the run and goes on staging it (the live fsync, standing in for
+// another holder of the fd, flushes it).
+static struct Loom *g_wbd_loom;
+
+static void wbd_register(void *arg) {
+    (void)arg;
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    spoor_ref(g_wbd_spoor);                       // the table would adopt it
+    g_wbd_rc = loom_register_handles(g_wbd_loom, &g_wbd_spoor, &rt, 1);
+    if (g_wbd_rc != 0) spoor_clunk(g_wbd_spoor);
+}
+
+void test_dev9p_wb_dying_loom_register_keeps_staging(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    u64 budget0 = dev9p_wb_budget_used();
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    g_wbd_loom = loom_create(8, 16, false);
+    TEST_ASSERT(g_wbd_loom != NULL, "loom_create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    TEST_ASSERT(test_dying_start(&g_wbd_thread, wbd_register, NULL, /*dead_now=*/true),
+                "a dying thread");
+    TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+    test_dying_reap(&g_wbd_thread);
+    bool empty     = g_wbd_loom->reg[0].spoor == NULL;
+    loom_unref(g_wbd_loom);
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    u32 kept       = fp ? fp->wb_len : 0;
+    u32 seen_dying = g_twrite_seen;
+    int frc        = dev9p.fsync(f, 0);
+    u32 seen       = g_twrite_seen;
+    u32 cap_len    = g_twrite_cap_len;
+    int crc        = spoor_clunk_rc(f);
+    wb_test_end(root);
+    u64 budget     = dev9p_wb_budget_used();
+
+    TEST_ASSERT(g_wbd_rc != 0, "the dying registration fails");
+    TEST_ASSERT(empty, "and installs nothing");
+    TEST_EXPECT_EQ((u64)kept, 256ull, "the run stays staged");
+    TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its flush: nothing on the wire");
+    TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "a live fsync after it succeeds");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "and flushes the run the registration kept");
+    TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
+    TEST_EXPECT_EQ(budget, budget0, "the run's budget charge came back");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
