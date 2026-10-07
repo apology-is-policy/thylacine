@@ -87,3 +87,29 @@ stratum dirty  : no
 (absent)          build/kernel-undefined/thylacine.elf
 cf650c39d99b8716  build/ramfs.cpio
 7f94b95e2b53df7e  build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-07T06:15:10Z ===
+my HEAD        : 50c74cc4d21d4d221162acf418ca5a0cc069ea7c
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 10
+STRATUM_SRC    : /Users/northkillpd/projects/stratum/v2
+stratum HEAD   : ac519fccf0b79fc0379f32d6c16ac7e65f3607cd
+stratum dirty  : YES
+4fcc788d6be38b80  build/.config
+1fe1ba3a46219dc1  build/kernel/thylacine.elf
+(absent)          build/kernel-undefined/thylacine.elf
+cf650c39d99b8716  build/ramfs.cpio
+f01c00189218b9e0  build/fixtures/pool.img
+=== post-build (my kernel, paired images) -- 2026-10-07T06:17:02Z ===
+my HEAD        : 51393330be3435e10dbb341dd5e0719e3f689379
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 9
+STRATUM_SRC    : /Users/northkillpd/projects/stratum-astra/v2
+stratum HEAD   : 61dde3727921e70e2c72fbd3c9e2044a192f4a54
+stratum dirty  : no
+4fcc788d6be38b80  build/.config
+1fe1ba3a46219dc1  build/kernel/thylacine.elf
+(absent)          build/kernel-undefined/thylacine.elf
+b5b71818dcbcc994  build/ramfs.cpio
+f0970aba37431897  build/fixtures/pool.img
