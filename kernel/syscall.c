@@ -7790,7 +7790,8 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     }
 
     // loom_register_handles ADOPTS the `got` refs on success. It fails when a
-    // dev9p Spoor's write-behind flush fails (a death, or the server), and
+    // dev9p Spoor's write-behind flush fails (a death, or the server) or had
+    // latched an error, and
     // then installs nothing, so the refs are still ours to drop.
     if (loom_register_handles(l, spoors, rights, got) != 0) goto rollback;
     handle_put(&lh);

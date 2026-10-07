@@ -38,7 +38,11 @@ of open file handles, and a fixed table of pinned buffer regions. Registering a
 dev9p handle first flushes its staged write-behind run and stops it staging
 (`dev9p_loom_register`, 2026-10-07): operations drive the fid straight to the
 wire, so none may meet bytes still staged. The flush may wait on the
-registering thread; a failure fails the registration and keeps the old table.
+registering thread; a failure fails the registration and keeps the old table,
+and so does an error an earlier flush latched, since no operation reads the
+latch. A failure part-way through the array leaves the handles before it
+flushed and writing through: a cost, not a hazard. A successful registration
+drops the file's cached pages, which the ring's writes would leave stale.
 
 Then: userspace fills entries and advances its tail; the kernel consumes them,
 and posts one completion per operation carrying the caller's opaque token and

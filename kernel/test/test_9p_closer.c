@@ -21,6 +21,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
+#include <thylacine/larder.h>
 #include <thylacine/loom.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
@@ -660,7 +661,8 @@ void test_p9_closer_first_kill_forces_exits_close(void) {
 // so registering a dev9p Spoor flushes its staged run and stops it staging: a
 // Loom FSYNC then reaches the server after the bytes write() took, and a later
 // write() goes straight through. The control is the fixture: before the
-// registration the same kind of write() staged, with nothing on the wire.
+// registration the same kind of write() staged, with nothing on the wire. The
+// flush's own pages go too -- the ring's WRITEs would leave them stale.
 void test_p9_closer_loom_register_flushes_staged_run(void) {
     struct wbc w = {0};
     bool opened = wbc_open(&w);
@@ -670,7 +672,9 @@ void test_p9_closer_loom_register_flushes_staged_run(void) {
     u32  after_reg = 0, after_append = 0;
     u8   tail[16];
     for (u32 i = 0; i < sizeof(tail); i++) tail[i] = (u8)(0xA0u + i);
-    struct srv_rec rec = {0};
+    u32  paged = ~0u;
+    u8   page[WBC_LEN];
+    struct srv_rec rec = {0}, rec_reg = {0};
     if (opened) {
         l = loom_create(8, 16, false);
         if (l) {
@@ -679,6 +683,10 @@ void test_p9_closer_loom_register_flushes_staged_run(void) {
             reg = loom_register_handles(l, &w.f, &rt, 1);
             if (reg != 0) spoor_clunk(w.f);
             after_reg = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+            rec_reg   = g_rec_a;
+            u64 seq0  = 0;
+            paged = larder_page_serve(&w.a->client->larder, w.f->qid.path, 0, 0,
+                                      WBC_LEN, 0, page, &seq0);
             if (reg == 0) {
                 struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
                 struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
@@ -706,11 +714,15 @@ void test_p9_closer_loom_register_flushes_staged_run(void) {
     TEST_ASSERT(l != NULL, "loom_create");
     TEST_EXPECT_EQ((u64)(s64)reg, 0ull, "the registration succeeds");
     TEST_EXPECT_EQ((u64)after_reg, 1ull, "and flushed the staged run");
+    TEST_EXPECT_EQ(rec_reg.write_off, 0ull, "from offset 0");
+    TEST_EXPECT_EQ((u64)rec_reg.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec_reg.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_EXPECT_EQ((u64)paged, 0ull, "and dropped the pages the flush cached");
     TEST_EXPECT_EQ((u64)rec.write_off, (u64)WBC_LEN, "the last Twrite is the append");
     TEST_EXPECT_EQ((u64)entered, 1ull, "one SQE consumed");
     TEST_EXPECT_EQ((u64)(s64)cres, 0ull, "the Loom fsync succeeds");
     TEST_EXPECT_EQ((u64)rec.nfsync, 1ull, "the server saw one Tfsync");
-    TEST_ASSERT(rec.fsync_at > 0 && rec.fsync_at < rec.write_at,
+    TEST_ASSERT(rec.fsync_at > rec_reg.nmsg && rec.fsync_at < rec.write_at,
                 "after the run's Twrite and before the append's");
     TEST_EXPECT_EQ((u64)after_append, 2ull, "a write() after it goes straight through");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "the close reports nothing lost");

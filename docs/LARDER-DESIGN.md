@@ -556,8 +556,9 @@ proven-in-principle to delivered.
   band Stratum mutation) is bounded by the revalidation window, not instantly
   coherent — acceptable at v1.0, tightenable via the writeback modes.
 - **The Loom async path bypasses the Larder (L1c/L1d seam).** (Its
-  write-behind half is closed: a Loom registration flushes the staged run and
-  stops staging, section 12.2 item 4.) The Larder is
+  write-behind half is closed: a Loom registration fails on a latched flush
+  error, flushes the staged run, stops staging and drops the file's pages,
+  section 12.2 item 4.) The Larder is
   populated + invalidated ONLY on the SYNCHRONOUS dev9p path (`dev9p_stat_native`
   / `dev9p_walk_attrs` populate; `dev9p_write` / `dev9p_wstat_native` / create /
   rename / unlink invalidate). The Loom async engine (`kernel/loom.c` —

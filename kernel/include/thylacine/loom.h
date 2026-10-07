@@ -588,9 +588,11 @@ void loom_unref(struct Loom *l);
 // Spoors in `spoors` (with their rights snapshots in `rights`). ADOPTS the
 // caller's ref on each spoor[i] on SUCCESS (the table releases them at
 // loom_unref / the next re-register); on failure (n out of range, or a dev9p
-// Spoor's write-behind flush failed: dev9p_loom_register, which may wait) the
-// caller retains its refs and the old table stands. Any previously-registered
-// Spoors are clunked (outside the lock). Returns 0 / -1.
+// Spoor's write-behind flush failed or had latched an error:
+// dev9p_loom_register, which may wait) the caller retains its refs and the old
+// table stands, though the Spoors before the failing one stay flushed and no
+// longer stage (a cost only). Any previously-registered Spoors are clunked
+// (outside the lock). Returns 0 / -1.
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
 

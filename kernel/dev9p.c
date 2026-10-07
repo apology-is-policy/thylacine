@@ -676,20 +676,23 @@ int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fi
 
 int dev9p_loom_register(struct Spoor *c) {
     // A Loom op drives the fid straight to the wire, past every write-behind
-    // path, so a registered priv never stages: flush the run and stop, as a
-    // metadata write does (dev9p_wstat_native). Once is enough -- eligibility
-    // is only ever set on a new priv, before it is shared.
+    // path, so a registered priv never stages: flush the run and drop the
+    // append anchor, as a metadata write does (dev9p_wstat_native). A latched
+    // flush error fails the registration: the ring's ops would never report
+    // it, and the registered ref keeps the user's close from being the last.
+    // wb_eligible stays set -- it gates the latch's report on write and fsync.
     struct dev9p_priv *p = priv_of(c);
     if (!p || !p->wb_eligible) return 0;
-    int fe = 0;
     spin_lock(&p->wb_lock);
-    if (p->wb_len || p->wb_flushers) fe = wb_flush_locked(p, c->qid.path);
-    if (p->wb_len == 0) {            // a death keeps the run: keep staging it
-        p->wb_known    = false;
-        p->wb_eligible = false;
-    }
+    int fe = p->wb_err ? -(p->wb_err) : 0;
+    if (!fe && (p->wb_len || p->wb_flushers)) fe = wb_flush_locked(p, c->qid.path);
+    if (!fe) p->wb_known = false;    // a failure leaves the priv as it was
     spin_unlock(&p->wb_lock);
-    return fe;
+    if (fe != 0) return fe;
+    // The flush installed the run's pages as our own; the ring's WRITEs bypass
+    // the Larder and would leave them stale for every opener of the file.
+    larder_page_invalidate(&p->client->larder, c->qid.path);
+    return 0;
 }
 
 // =============================================================================

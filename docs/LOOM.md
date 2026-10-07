@@ -277,8 +277,11 @@ structured client API the design rests on):
   resolved once to `(p9_client *, fid)` + a rights snapshot. A dev9p Spoor's
   staged write-behind run is flushed first and the Spoor stops staging, since
   an op drives its fid straight to the wire (LARDER-DESIGN 12.2 item 4); the
-  flush may wait for the server, on the registering thread, and its failure
-  fails the registration with the old table still in place.
+  flush may wait for the server, on the registering thread. A failed flush,
+  or an error an earlier flush latched, fails the registration with the old
+  table still in place; the Spoors before the failing one stay flushed and
+  write through, a cost only. A successful registration drops the file's
+  Larder pages, which the ring's writes would leave stale.
   `LOOM_REGISTER_BUFFERS`: pin Burrow regions for zero-copy payload.
 
 ### 8.2 Submit + reap

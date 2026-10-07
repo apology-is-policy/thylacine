@@ -1895,6 +1895,7 @@ void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
+void test_dev9p_wb_loom_register_keeps_the_latch(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -4257,6 +4258,8 @@ struct test_case g_tests[] = {
     { "dev9p.wb_wstat_keeps_the_latch", test_dev9p_wb_wstat_keeps_the_latch, false, NULL },
     { "dev9p.wb_dying_loom_register_keeps_staging",
                                        test_dev9p_wb_dying_loom_register_keeps_staging, false, NULL },
+    { "dev9p.wb_loom_register_keeps_the_latch",
+                                       test_dev9p_wb_loom_register_keeps_the_latch, false, NULL },
     { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },

@@ -81,6 +81,7 @@ void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
+void test_dev9p_wb_loom_register_keeps_the_latch(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3645,8 +3646,8 @@ void test_dev9p_wb_wstat_keeps_the_latch(void) {
 
 // A Loom registration whose flush a death ends fails, with nothing installed:
 // the registered table must never name a priv with a run still staged. The
-// priv keeps the run and goes on staging it (the live fsync, standing in for
-// another holder of the fd, flushes it).
+// priv keeps the run (the live fsync, standing in for another holder of the
+// fd, flushes it) and is left as it was, so it goes on staging appends.
 static struct Loom *g_wbd_loom;
 
 static void wbd_register(void *arg) {
@@ -3684,6 +3685,8 @@ void test_dev9p_wb_dying_loom_register_keeps_staging(void) {
     int frc        = dev9p.fsync(f, 0);
     u32 seen       = g_twrite_seen;
     u32 cap_len    = g_twrite_cap_len;
+    long arc       = dev9p.write(f, chunk, 64, 256);
+    u32 seen_app   = g_twrite_seen;
     int crc        = spoor_clunk_rc(f);
     wb_test_end(root);
     u64 budget     = dev9p_wb_budget_used();
@@ -3695,8 +3698,47 @@ void test_dev9p_wb_dying_loom_register_keeps_staging(void) {
     TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "a live fsync after it succeeds");
     TEST_EXPECT_EQ((u64)seen, 1ull, "and flushes the run the registration kept");
     TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
+    TEST_EXPECT_EQ((u64)arc, 64ull, "an append after it is taken");
+    TEST_EXPECT_EQ((u64)seen_app, 1ull, "and staged: the failed registration changed nothing");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
     TEST_EXPECT_EQ(budget, budget0, "the run's budget charge came back");
+}
+
+// A Loom registration refuses a priv whose flush the server refused: the
+// ring's ops never read the latch, and a registered ref would make the ring's
+// teardown the last close, whose report nobody sees. The latch keeps reporting
+// through the sync paths and the last close, as after a metadata write.
+void test_dev9p_wb_loom_register_keeps_the_latch(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
+    long fe0 = dev9p.fsync(f, 0);
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    spoor_ref(f);                                 // the table would adopt it
+    int  rrc   = loom_register_handles(l, &f, &rt, 1);
+    if (rrc != 0) spoor_clunk(f);
+    bool empty = l->reg[0].spoor == NULL;
+    loom_unref(l);
+    long we  = dev9p.write(f, chunk, 256, 256);
+    long fe1 = dev9p.fsync(f, 0);
+    int  crc = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
+    TEST_ASSERT(rrc != 0, "the registration fails on the latch");
+    TEST_ASSERT(empty, "and installs nothing");
+    TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
+    TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28, "and the last close");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
