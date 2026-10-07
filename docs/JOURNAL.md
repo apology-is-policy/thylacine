@@ -296,6 +296,100 @@ verbatim by the generator, which refuses with status 3 when that file is absent
 -- both arms measured, and the recovered text verified byte-identical to the
 version that last held it rather than eyeballed.
 
+### The preservation that held two of four inputs
+
+Astra took the floor on 0161 t43 and answered the question I had put to her: keep
+cpu1-green-pair, she will not release the successful baseline bytes to squeeze a
+moving shared-volume floor, keep the floor, remeasure at the offer and release
+immediately if short, prune nothing of a peer's. Her read of the volume matched
+mine to within the noise. That closed the one disk lever that was not mine.
+
+In the same turn she found a real defect in my own preservation, and it is the
+better kind of catch because the artifact looked complete: the directory held the
+default kernel's flat binary but, for the sanitizer flavour, only the ELF -- and
+QEMU boots the flat binary, never the ELF. The set that every 10-07 private-owner
+verdict attaches to was missing the file the 50 matrix boots actually loaded.
+
+Measuring the gap properly made it bigger before it got smaller. A boot reads
+four inputs, and build/kernel-undefined, build/ramfs.cpio, build/kernel and
+build/usr were ALL already gone -- the earlier invalidation had taken them before
+I made any copy. So the honest first finding was that three of four were lost,
+not one.
+
+Two of those three came back, and the method matters more than the result. A flat
+binary is a pure function of its ELF: kernel/CMakeLists.txt:343 is a bare
+objcopy -O binary with no flags. So the sanitizer .bin was REGENERATED from the
+retained ELF, and it hashes to 5193ee5f914f96ae -- equal to the hash the matrix
+log recorded hours before the loss. That is a verified reconstruction rather than
+a plausible one, and it carries a positive control, because a reconstruction
+checked only against itself proves nothing: the same recipe reproduces the
+default .bin's 5ced18c43ae8302a exactly, and two llvm-objcopy installs agree on
+both files. The hash match is also proof that the retained ELF is the matrix's
+ELF, which no amount of labelling could have established.
+
+The pool came back by a different route and corrected a defect of mine on the
+way. I had been about to report the matrix pool f948430ed9665b14 as lost; before
+saying so I checked what a boot actually consumes, and smp-multiboot.sh:315 calls
+pool_restore as the FIRST statement of the per-boot loop, copying
+pool.img.baked-snapshot over pool.img before every boot. So all 50 boots started
+from the snapshot's 9384c245b6f1cb5b, which was still on disk with its 06:19Z
+mtime -- and the hash my own matrix script recorded as "pool" was the live file at
+matrix start, the leftover of whatever ran last, read by nothing. The script had
+been faithfully recording an input no boot ever consumed. It now hashes the
+snapshot, and announces loudly when the snapshot is ABSENT, since that is the one
+state where pool_restore silently no-ops and boots mutate the pool cumulatively.
+
+The ramfs did not come back and is recorded as lost with hash-only provenance.
+It is not reconstructible off-lease -- the archive is built from build/ramfs-src
+plus the userspace binaries, and build/usr went with the same invalidation -- and
+a re-bake would be a substitution, not a preservation. The consequence is stated
+where an integrator will hit it: the preserved set pins what the kernel and the
+pool were, but cannot be booted as a set to reproduce the 10-07 matrix.
+
+Two measurements dissolved a problem I was about to escalate. I thought
+preserving the pool would cost 2.5 GiB against a floor I am already under, and
+was composing the trade-off question when du reported 283 MiB: the pool files are
+SPARSE, and ls had been showing me logical size. The clone then cost 0 MiB at df
+granularity, exactly as APFS predicts. Astra's caveat is the real price and it is
+deferred, not avoided: those shared blocks become real when the pool is rebaked.
+Measure first, then ask -- the question was never needed.
+
+The cure is structural, because the cause was not forgetfulness in the usual
+sense. Preservation depended on me remembering, at exactly the moment a lease was
+burning, that four files in a directory a script deletes unconditionally were the
+only copies of a verdict's inputs. The runbook now clones all four out of build/
+immediately after the build, when they exist together, and refuses when it finds
+an input it cannot preserve -- an absent input is recorded as absent and never
+substituted. It is bounded to two generations deliberately: an unbounded history
+of cloned pools would leak ~283 MiB per run into the very floor the script
+guards, so the fix would have fed the blocker.
+
+The step is tested as the step, not as a copy: preserve-inputs-test.sh EXTRACTS
+the function from the live runbook (refusing if the extraction yields too little
+to be the function), then drives 22 checks over 5 scenarios. It discriminates --
+sabotaging the flavour mapping so one kernel overwrites the other goes 6 WRONG,
+and removing the failed-copy refusal goes 2 WRONG. The collision was a real bug I
+wrote and caught before it ran: both flavours share the basename thylacine.elf,
+so a flat copy would have silently held two files while the manifest claimed
+four.
+
+Two of astra's smaller items closed with it. EXPECT_TESTS was pinned to 1834 and
+went stale the moment the port added its two tests; it is now DERIVED from the
+registration table in kernel/test/test.c, since a guard pinned to a named number
+is re-pointed by hand and one pinned to a derived value cannot go stale. The
+derivation names /usr/bin/grep by absolute path, and the reason is in the script:
+the agent's own embedded ugrep undercounts that exact pattern on that exact file,
+757 of 1836, exit 0, no stderr -- re-measured today and still reproducing. A
+derivation is only as sound as its counter, so it also refuses rather than lower
+the bar if the count collapses.
+
+And the "never run in this tree" wording she asked me to scope was still standing
+in two places -- the preservation manifest, and the status doc, where it was
+worse than stale: the full correction sits ABOVE the paragraph that restates the
+withdrawn claim as fact, so a reader going top-down met the correction first and
+the error last. Narrowed in place with the reading order called out, not deleted:
+a status document that edits its own history stops being evidence.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,

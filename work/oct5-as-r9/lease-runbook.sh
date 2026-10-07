@@ -96,6 +96,74 @@ floor() {
   echo "-- stage '$1': ${g} GiB free (floor ${FLOOR_GB})"
 }
 
+# PRESERVATION IS A STEP, NOT A MEMORY. Every 2026-10-07 private-owner verdict
+# attached to four boot inputs that lived ONLY in build/, and a bake destroys
+# all four: build.sh:440 wipes the ramfs staging tree and mkcpio.py (:812)
+# rewrites ramfs.cpio in place, :3482 deletes pool.img and system.key, :4554
+# refreshes the .baked-snapshot twins, and this script's own invalidation
+# removes both kernel trees. That is how the ubsan flat binary and the ramfs
+# were lost (astra, 0161 t43); only the kernel half could be reconstructed, and
+# only because a flat binary is a pure function of a retained ELF. The ramfs was
+# unrecoverable. So the inputs are cloned OUT of build/ by the script, at the
+# one moment they are all present, instead of depending on anyone remembering.
+#
+# QEMU BOOTS THE FLAT BINARY, NEVER THE ELF (run-vm.sh:35), and the PRE-BOOT
+# pool is the .baked-snapshot, NOT the live pool.img: smp-multiboot.sh restores
+# the snapshot before every boot, so the live file is what the last boot LEFT.
+# Preserving the live one would preserve an artifact no boot ever read.
+#
+# BOUNDED ON PURPOSE. cp -c costs no blocks today, but a clone's shared blocks
+# become REAL the moment the original is rebaked (~283 MiB for the sparse pool),
+# so an unbounded history would leak into the very floor this script guards.
+PRESERVE_DIR=work/oct5-as-r9/boot-inputs
+KEEP_INPUT_GENS=${KEEP_INPUT_GENS:-2}
+preserve_boot_inputs() { # preserve_boot_inputs <label>
+  _d="$PRESERVE_DIR/$1"
+  rm -rf "$_d"
+  mkdir -p "$_d" || { echo "REFUSING: cannot create $_d"; return 1; }
+  _kept=0
+  _missing=
+  # BOTH flavours share the basename thylacine.elf/.bin, so the destination
+  # name carries the flavour. A flat copy would have one overwrite the other
+  # and the manifest would then claim four files while holding two.
+  for _pair in \
+    "build/kernel/thylacine.elf:thylacine.elf" \
+    "build/kernel/thylacine.bin:thylacine.bin" \
+    "build/kernel/.config:.config" \
+    "build/kernel-undefined/thylacine.elf:thylacine-undefined.elf" \
+    "build/kernel-undefined/thylacine.bin:thylacine-undefined.bin" \
+    "build/ramfs.cpio:ramfs.cpio" \
+    "build/fixtures/pool.img.baked-snapshot:pool.img.baked-snapshot" \
+    "build/fixtures/system.key:system.key" ; do
+    _src=${_pair%%:*}
+    _dst=${_pair##*:}
+    if [ ! -f "$_src" ]; then _missing="$_missing $_src"; continue; fi
+    # A preservation that silently drops a file it FOUND is the exact failure
+    # this step exists to prevent, so a failed copy is fatal. An input that is
+    # merely ABSENT is recorded as absent and never substituted.
+    cp -c "$_src" "$_d/$_dst" 2>/dev/null || cp "$_src" "$_d/$_dst" || {
+      echo "REFUSING: found $_src but could not preserve it to $_d/$_dst"
+      return 1; }
+    _kept=$((_kept + 1))
+  done
+  _h=$(mktemp)
+  ( cd "$_d" && for _g in .config *; do
+      [ -f "$_g" ] || continue
+      printf '%s  %s\n' "$(shasum -a 256 "$_g" | cut -c1-16)" "$_g"
+    done ) > "$_h"
+  mv "$_h" "$_d/HASHES.txt"
+  echo "-- preserved $_kept boot input(s) -> $_d"
+  [ -n "$_missing" ] && echo "   ABSENT, recorded and NOT substituted:$_missing"
+  # Prune oldest generations. Newest-first, keep KEEP_INPUT_GENS.
+  _n=0
+  for _old in $(ls -1dt "$PRESERVE_DIR"/*/ 2>/dev/null); do
+    _n=$((_n + 1))
+    [ "$_n" -gt "$KEEP_INPUT_GENS" ] && rm -rf "$_old" && \
+      echo "   pruned old generation $_old (keeping $KEEP_INPUT_GENS)"
+  done
+  return 0
+}
+
 floor start
 provenance "stage-start (nothing built yet)"
 
@@ -395,6 +463,10 @@ STAMP=$(mktemp)
 tools/build.sh kernel --config ci
 floor post-build
 
+# Preserve THIS run's boot inputs now, while all four exist together and before
+# any later stage or next run can overwrite them.
+preserve_boot_inputs "run-$(date -u '+%Y%m%dT%H%M%SZ')" || exit 1
+
 # VERIFY THE PIN IN THE OUTPUT, NOT ONLY IN THE INPUT. The HEAD equality above
 # proves which source I SELECTED; it says nothing about what the build
 # CONSUMED. build.sh calls build_stratumd in the all-flow (build.sh:394) and
@@ -506,7 +578,22 @@ echo "-- suite total must be base+4; a skip is NOT coverage (OPEN-BUGS: 17 ramfs
 echo "   probe tests pass when their initrd file is missing):"
 # ASSERTED, not merely printed (astra, note 8): a `|| true` on the tally is a
 # number nobody checks.
-EXPECT_TESTS="${EXPECT_TESTS:-1834}"
+# EXPECT_TESTS IS DERIVED FROM THE REGISTRATION TABLE, never typed. It was
+# pinned to 1834 and went stale the moment the private-owner port added its two
+# tests (astra, 0161 t43): a guard pinned to a NAMED number is re-pointed by
+# hand, one pinned to a DERIVED value cannot go stale.
+# /usr/bin/grep BY ABSOLUTE PATH, not bare `grep`: Claude Code's embedded ugrep
+# 7.8.4 silently undercounts THIS pattern on THIS file -- 757 of 1836, exit 0,
+# no stderr (OPEN-BUGS). A derivation is only as sound as its counter.
+# DENOMINATOR CONTROL: a count that collapses must refuse, never quietly lower
+# the bar it exists to hold.
+if [ -z "${EXPECT_TESTS:-}" ]; then
+  EXPECT_TESTS=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c)
+  [ "${EXPECT_TESTS:-0}" -ge 1000 ] || {
+    echo "   REFUSING: derived only ${EXPECT_TESTS:-0} registrations from"
+    echo "   kernel/test/test.c -- the DERIVATION is broken, not the suite."; exit 1; }
+  echo "   expectation DERIVED from kernel/test/test.c: $EXPECT_TESTS registrations"
+fi
 tally=$(grep -E '  tests: [0-9]+/[0-9]+' "$BOOTLOG" | tail -1)
 [ -n "$tally" ] || { echo "   NO SUITE TALLY AT ALL -- the suite never reported; STOP"; exit 1; }
 echo "  $tally"
@@ -514,7 +601,8 @@ ran=$(echo "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+).*#\1#')
 tot=$(echo "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+).*#\2#')
 [ "$ran" = "$tot" ] || { echo "   only $ran of $tot passed; STOP"; exit 1; }
 [ "$tot" = "$EXPECT_TESTS" ] || {
-  echo "   total $tot != expected $EXPECT_TESTS (base 1830 + my 4)."
+  echo "   total $tot != expected $EXPECT_TESTS (derived from the registration"
+  echo "   table in kernel/test/test.c unless EXPECT_TESTS overrode it)."
   echo "   A total that MOVED means the test SET changed: account for it, do not"
   echo "   adjust the expectation to match the observation."; exit 1; }
 nskip=$(grep -c '\[skip\]' "$BOOTLOG" || true)

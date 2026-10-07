@@ -39,7 +39,20 @@ echo "== matrix stage on the qualified image, N=$N, $nrows rows derived from $GA
 echo "== default kernel  $(shasum -a 256 build/kernel/thylacine.bin | cut -c1-16)"
 echo "== ubsan kernel    $(shasum -a 256 build/kernel-undefined/thylacine.bin 2>/dev/null | cut -c1-16)"
 echo "== ramfs           $(shasum -a 256 build/ramfs.cpio | cut -c1-16)"
-echo "== pool            $(shasum -a 256 build/fixtures/pool.img | cut -c1-16)"
+# THE PRE-BOOT POOL IS THE SNAPSHOT, NOT THE LIVE FILE. smp-multiboot.sh's
+# pool_restore (:315, the first statement in the per-boot loop) copies
+# pool.img.baked-snapshot over pool.img before EVERY boot, so the live pool at
+# matrix start is the leftover of whatever ran last and is read by nothing.
+# Hashing it recorded an input no boot consumed (10-07: f948430ed9665b14, while
+# all 50 boots actually started from the snapshot's 9384c245b6f1cb5b).
+# An ABSENT snapshot makes pool_restore a silent no-op -- the one state where
+# boots mutate the pool cumulatively -- so say that loudly rather than print an
+# empty hash.
+if [ -f build/fixtures/pool.img.baked-snapshot ]; then
+  echo "== pool (pre-boot) $(shasum -a 256 build/fixtures/pool.img.baked-snapshot | cut -c1-16)  restored before every boot"
+else
+  echo "== pool (pre-boot) ABSENT -- pool_restore is a NO-OP; boots mutate the pool CUMULATIVELY"
+fi
 echo "== HEAD            $(git rev-parse HEAD)"
 
 # Keep every boot's serial log, so the per-boot D7 witnesses can be counted

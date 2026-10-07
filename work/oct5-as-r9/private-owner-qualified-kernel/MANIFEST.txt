@@ -1,0 +1,72 @@
+The inputs every 2026-10-07 private-owner verdict attaches to.
+
+branch : corona/async-memory
+commit : 774db83309ed7d6baea5dd2bc33e51ffd49ef89f  (kernel sources unchanged since 2666645b7)
+taken  : 2026-10-07T12:41:05Z (kernels), extended 14:1xZ (pool/key + the
+         recovered flat binary) after astra's 0161 t43
+why    : the preserved cpu1-green-pair/ is the 10-06 D7 pair, a DIFFERENT
+         kernel. Today's verdicts named 5ced18c43ae8302a and nothing outside
+         build/ held it, so the evidence pointed at a directory the runbook
+         deletes unconditionally.
+
+WHAT A BOOT ACTUALLY READS is four inputs, and the first revision of this
+manifest held only two of them. The matrix hashed its own inputs at
+work/oct5-as-r9/private-owner-logs/smp-matrix-1007T1040Z.log:3-6, which is the
+oracle every line below is checked against.
+
+thylacine.elf                 9523392  sha256 e266c931d9668a44853543f6f03a60ea2f610b0be641de649236b3a68dd7dd70
+thylacine.bin                 2848480  sha256 5ced18c43ae8302a671d5f415ea5f46de7bd6dfefda8b66b9194b98ffe252e81
+thylacine-undefined.elf      10222720  sha256 3e3d72ecd30c5c4f94e322101badc69246044b7789b3abd609cc448a788fcacf
+thylacine-undefined.bin       3136136  sha256 5193ee5f914f96ae7730a85add0cc5ac56c937a86d77073f97d5d7aa11a64581
+pool.img.baked-snapshot    2684354560  sha256 9384c245b6f1cb5bee35585f26be5079463044e7627afd07e85ec3fefcf675ec
+system.key                       3656  sha256 3635e7c4c5157321ce0bef55797d5ee4cc9a638419ffab432987a47a598f5f49
+.config                          1868  sha256 cf91bb7fed5759254deaa6c62ca2d5833f5c1ec61e9f32343fcfb26daf3a51f6
+
+thylacine-undefined.bin IS A RECONSTRUCTION, not a retained copy, and that is
+the honest label. QEMU boots the flat binary, never the ELF, and
+build/kernel-undefined was already deleted when astra named the gap. The .bin
+is a pure function of the .elf -- kernel/CMakeLists.txt:343 is a bare
+`${CMAKE_OBJCOPY} -O binary ELF BIN` with no flags -- so it was regenerated
+from the retained thylacine-undefined.elf and came out at
+5193ee5f914f96ae, EQUAL to the hash the matrix recorded before the loss.
+POSITIVE CONTROL, because a reconstruction that is only checked against itself
+proves nothing: the same recipe applied to the retained thylacine.elf
+reproduces thylacine.bin's 5ced18c43ae8302a exactly, and both llvm-objcopy
+22.1.4 installs agree on both files. The hash match is therefore also proof
+that the retained ELF is the matrix's ELF.
+
+pool.img.baked-snapshot IS THE PRE-BOOT POOL, and the matrix log's own `pool`
+line is NOT. tools/smp-multiboot.sh:315 calls pool_restore as the FIRST
+statement inside the per-boot loop, which copies pool.img.baked-snapshot over
+pool.img before every boot (:286), guarded by a system.key/snapshot equality
+check (:281) that held -- the two are byte-equal here. So all 50 matrix boots
+started from 9384c245b6f1cb5b. The header line `pool f948430ed9665b14`
+(smp-matrix-on-qualified-image.sh:42) hashed build/fixtures/pool.img at matrix
+START, which pool_restore overwrote before boot 1: it names an artifact NO BOOT
+EVER READ. The script now hashes the snapshot instead. Keeping the stale hash
+here would record the wrong input as the control.
+
+system.key is the pool's cryptographic twin -- they travel together or the
+guest gets STM_EBADTAG -> stratumd rc=-201 -> EXTINCTION. 3635e7c4c5157321 is
+identical at build/fixtures/system.key, at its .baked-snapshot, and at
+build/ramfs-src/bin/system.key (the copy baked into the cpio), so the pair
+preserved here is self-consistent.
+
+ramfs.cpio 63d781afe4a6e5f5 -- BYTES LOST, hash-only provenance.
+Stated plainly rather than omitted. build/ramfs.cpio was already gone when the
+gap was found, and it is NOT reconstructible off-lease: the cpio is assembled
+from build/ramfs-src plus the userspace binaries, and build/usr was deleted by
+the same invalidation. A re-bake would produce a different archive, so calling
+one "the" preserved ramfs would be a substitution, not a preservation. The
+consequence an integrator must not miss: these four files CANNOT be booted as a
+set to reproduce the 10-07 matrix. They pin what the kernel and the pool were;
+reproducing the boot needs a fresh ramfs and so is a new measurement.
+
+qualified by (all on this kernel): suite 1836/1836; both RED legs credited;
+green control byte-identical to the pre-legs kernel; SMP matrix stage 5/5
+rows 50/50 boots; D7 50/50 reached and PASS. astra closed PO-R1..R6 on it.
+SCOPE OF THE GATE CLAIM (corrected per astra 0161 t43): ci-smp-gate.sh has not
+run on THIS private-owner checkpoint -- the 5-row matrix stage was run directly
+on the qualified image. The earlier wording, "has never run in this tree", was
+wrong and erased evidence that stands: the gate script DID run here on the
+AS-R9 checkpoint at run-1007T061510Z and PASSED.
