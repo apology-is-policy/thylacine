@@ -1220,6 +1220,36 @@ claim was inherited from the D7 write-up and never measured). D7's cure WAS a
 stratumd from the peer tree -- that is measured -- but the mechanism attached to
 it is not.
 
+**SETTLED 2026-10-07 by the source-level comparison astra asked for, and it
+changes the remedy.** The two Stratum "trees" are ONE repository with two
+worktrees: `~/projects/stratum` on `main` at `ac519fc`, and
+`~/projects/stratum-astra` on the local branch `codex/astra-session-dek` at
+`61dde37`. `61dde37` is canonical `main` plus EXACTLY ONE commit, "Support
+independently proven session leases for home keys" -- 10 files, +269/-96,
+centred on the ctl DEK path, adding a per-session lease predicate and a lease
+test tool. The live remote was read with `ls-remote`, not from a cached ref, and
+holds `ac519fc` for `refs/heads/main`; the commit is on no remote-tracking
+branch, so it is local and unpushed. (The `origin/main` tracking ref reads
+`976cb6f`, which is stale and divergent -- zero commits ahead of `ac519fc` --
+which is exactly why a remote is judged with `ls-remote`.)
+
+So the withdrawn claim was wrong in BOTH directions, not merely unevidenced.
+Canonical `main` is not missing "the session-DEK lease work": it already carries
+a DEK lease table (its own `TLY-A5b` connection-binding). What it lacks is that
+ONE commit, which REWORKS that mechanism so an overlapping same-user session
+proves UNWRAP independently. The correct statement is therefore narrow and
+checkable: *this image's stratumd is canonical plus one unpushed commit*.
+
+The consequence for the enqueued provenance question is the part that matters:
+**"rebuild from canonical" is not the remedy.** It would drop `61dde37` and, on
+the D7 attribution already recorded here, re-redden the overlapping-login probe.
+The remedy is for that commit to land in Stratum `main` -- which is astra's
+change and the operator's push, not something this branch can do -- or for the
+pin to be recorded, which is the build-ledger line already landed on main at
+`cb7194c10`. Until one of those, an image built here is reproducible only with
+`STRATUM_SRC` pointed at that worktree, and saying so is the honest form of the
+claim.
+
 Because `ci-smp-gate.sh:140` opens with an unconditional `build.sh kernel`, the
 gate cannot run as a script here. `work/oct5-as-r9/smp-matrix-on-qualified-image.sh`
 runs its MATRIX STAGE instead -- the same five rows, the same N=10, the same
