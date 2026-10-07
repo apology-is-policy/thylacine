@@ -1,12 +1,12 @@
-oracle-arms transcript -- 2026-10-07T20:11:04Z
-HEAD            024c6d2df60742d7b0e17550d6a346ce0a08301c
-vs HEAD         1 of those 3 files modified
-runner          09467a51573aff23  work/oct5-as-r9/reap-leg-run.sh
+oracle-arms transcript -- 2026-10-07T20:33:02Z
+HEAD            cba496ed3d5875644db3f5641c1bb4dbb34fb6ac
+vs HEAD         2 of those 3 files modified
+runner          f83bfb0a4ba16c4c  work/oct5-as-r9/reap-leg-run.sh
 fixture         4b782c87576f7239  kernel/test/loom_private_fixture.h
-harness         ad45964c3202d98c  work/oct5-as-r9/oracle-arms.sh
+harness         4ba603903c73faa1  work/oct5-as-r9/oracle-arms.sh
 base logs       work/oct5-as-r9/reap-leg-20261007T190621Z/control-boot.log
                 work/oct5-as-r9/reap-leg-20261007T190621Z/mutant-boot.log
-oracle extract  lines 279-443 of the runner, 165 lines
+oracle extract  line 58 + lines 290-469 of the runner, 181 lines
 === the CONTROL oracle ===
 ok    check_control A-control-success.log                rc=0  verdict PASS in the leg's own block
 ok    check_control B-early-check-failure.log            rc=1  A CHECK INSIDE THE LEG FAILED

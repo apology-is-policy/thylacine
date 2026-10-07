@@ -48,6 +48,14 @@ OUT=work/oct5-as-r9/reap-leg-$STAMP
 mkdir -p "$OUT"
 YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
 FLOOR_GB=${FLOOR_GB:-8}
+# THE PREDICTED FAILURE, defined ONCE and before anything can need it. The
+# oracle requires this exact string and the quarantine warning names it to the
+# next reader, and those two must not be able to disagree: a warning promising a
+# different extinction than the experiment requires is a warning that will be
+# believed over the code. Defined above the EXIT trap so no exit path can reach
+# recover() with it unset, rather than being safe only because of a conditional
+# somewhere else.
+WANT='AddrSpace final lifetime drop with private rings'
 MUTATED=0
 RECOVERED=0
 RECOVERY_FAILED=0
@@ -175,7 +183,7 @@ recover() { # idempotent, and correct before any mutation has happened
 These are MUTANT kernel images from $OUT, built with the ring's AddrSpace
 lifetime reference deliberately removed. They exist as evidence of what stage 2
 booted. NEVER boot them and never promote them: a boot of this kernel is
-expected to die on "AddrSpace final lifetime drop with private rings".
+expected to die on "${WANT:-<unset -- see reap-leg-run.sh>}".
 The control kernel's hash for this run was: ${CONTROL_BIN:-unmeasured}
 WARN
     echo "-- quarantined $_moved mutant image(s) -> $Q"
@@ -266,9 +274,12 @@ echo "-- pristine kernel/loom.c held at $PRISTINE ($(echo "$PRISTINE_HASH" | cut
 
 run_suite() { # run_suite <label>; leaves $OUT/<label>-boot.log and sets suite_rc
   _l=$1
-  _rc=$OUT/$_l.rc
-  ( set +e; tools/test.sh > "$OUT/$_l-test.log" 2>&1; echo $? > "$_rc" )
-  suite_rc=$(cat "$_rc")
+  # _rcfile, not _rc: on_exit's `_rc=$?` is the run's exit STATUS, and this is a
+  # PATH to a file holding one. sh has no locals, so two meanings for one name in
+  # one script is a trap waiting for the first caller that nests them.
+  _rcfile=$OUT/$_l.rc
+  ( set +e; tools/test.sh > "$OUT/$_l-test.log" 2>&1; echo $? > "$_rcfile" )
+  suite_rc=$(cat "$_rcfile")
   # THE ORACLE IS THE BOOT LOG, not test.sh's stdout -- the suite's own records
   # live in build/test-boot.log and that is what every assertion below reads.
   if [ -f build/test-boot.log ]; then cp build/test-boot.log "$OUT/$_l-boot.log"
@@ -366,7 +377,19 @@ check_control() { # check_control <boot log>; 0 = green, nonzero = refuse
 
 check_mutant() { # check_mutant <boot log>; 0 = discriminated, nonzero = finding
   _m=$1; _blk=$OUT/mutant-leg-block.txt
-  WANT='AddrSpace final lifetime drop with private rings'
+  # AN EMPTY PREDICTED FAILURE IS NEVER A QUESTION FOR grep. Measured on this
+  # host: `/usr/bin/grep -qF "" <file>` returns 0 -- an empty -F pattern matches
+  # EVERY line -- so a lost or renamed definition would report the predicted
+  # extinction in ANY log at all, which is the one direction that must not fail
+  # open. (A first attempt to drive this appeared to show the opposite branch.
+  # The cause was not grep: I was driving a STALE extraction, from a directory
+  # the harness had stopped writing to when its output path became
+  # configurable. Fresh code, stale copy -- and the reading was confident.)
+  [ -n "$WANT" ] || {
+    echo "   REFUSING: the predicted-failure string is empty, so the test below"
+    echo "   would be \`grep -qF \"\"\`, which matches every line. This run can"
+    echo "   say nothing about the mutant."
+    return 2; }
   if ! /usr/bin/grep -qF "$WANT" "$_m"; then
     echo "   THE MUTANT DID NOT PRODUCE THE PREDICTED FAILURE."
     echo "   This is a FINDING to investigate, not a pass and not a reason to"
@@ -410,6 +433,9 @@ check_mutant() { # check_mutant <boot log>; 0 = discriminated, nonzero = finding
     echo "   THE LEG NEVER REACHED ITS OWNER DROP -- the arrival marker is"
     echo "   absent from the leg's block, so whatever died, it was not this"
     echo "   operation. A FINDING, not a pass."
+    # WHOLE LOG here, deliberately, while the assertion above reads the BLOCK:
+    # the question has just become "where DID the markers appear", and confining
+    # the answer to a block known not to contain them would print nothing.
     /usr/bin/grep -nF '[lp-mark]' "$_m" | head -4
     return 2
   fi

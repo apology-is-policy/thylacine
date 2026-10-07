@@ -9,7 +9,10 @@ ROOT=/Users/northkillpd/projects/thylacine-corona
 cd "$ROOT"
 W=${ARMS_DIR:-${TMPDIR:-/tmp}/reap-leg-oracle-arms}
 rm -rf "$W"; mkdir -p "$W"
-S=work/oct5-as-r9/reap-leg-run.sh
+# Overridable for the same reason the base logs are: the denominator control
+# below -- which refuses an extraction that lost the predicted-failure string --
+# is only a control if it can be DRIVEN against a runner that lacks it.
+S=${RUNNER:-work/oct5-as-r9/reap-leg-run.sh}
 # Overridable so the refusal below can be DRIVEN -- a refusal nothing exercises
 # is a refusal I cannot claim works, and the default paths exist on this host.
 REAL_CONTROL=${REAL_CONTROL:-work/oct5-as-r9/reap-leg-20261007T190621Z/control-boot.log}
@@ -24,11 +27,30 @@ for _f in "$REAL_CONTROL" "$REAL_MUTANT"; do
 done
 
 # ---- EXTRACT the oracle from the live file, with a denominator control. ----
+# WANT lives at the TOP of the runner now, outside this range, so it is
+# extracted separately -- and that matters more than it looks: without it
+# `grep -qF "$WANT"` becomes `grep -qF ""`, which matches EVERY line, so every
+# mutant arm would report the predicted extinction. The arms detect that on
+# their own (A, B and F contain no extinction at all and would flip to rc=0),
+# but the control below refuses before it can get that far.
+w=$(/usr/bin/grep -n "^WANT='" "$S" | head -1 | cut -d: -f1)
 a=$(/usr/bin/grep -n '^LEG=loom\.private_owner_lifecycle$' "$S" | cut -d: -f1)
 b=$(awk -v a="$a" 'NR>a && /^check_mutant\(\) \{/ {f=1} f && /^\}$/ {print NR; exit}' "$S")
-sed -n "${a},${b}p" "$S" > "$W/oracle.sh"
+# EVERY LINE NUMBER IS VALIDATED BEFORE sed SEES IT. An empty one makes
+# `sed -n "${w}p"` print the WHOLE FILE -- measured: the lost-WANT sabotage
+# extracted 752 lines, the entire runner, which the arms would then SOURCE,
+# top-level build commands and all. The substring control below did refuse it,
+# but a guard that works only because a later guard fires is not a guard.
+for _n in "$w" "$a" "$b"; do
+  case "${_n:-}" in
+    ''|*[!0-9]*) echo "REFUSING: an anchor did not resolve to a line number (w='$w' a='$a' b='$b') -- the EXTRACTION is broken, and an empty one would widen to the whole file"; exit 1;;
+  esac
+done
+sed -n "${w}p" "$S" > "$W/oracle.sh"
+sed -n "${a},${b}p" "$S" >> "$W/oracle.sh"
 echo "-- extracted the oracle: lines $a-$b, $(wc -l < "$W/oracle.sh" | tr -d ' ') lines"
-for need in 'leg_block() {' 'leg_verdict() {' 'last_announced() {' \
+for need in "WANT='AddrSpace final lifetime drop with private rings'" \
+            'leg_block() {' 'leg_verdict() {' 'last_announced() {' \
             'check_control() {' 'check_mutant() {' \
             'after-check-failure:' 'normal-fallthrough' 'DISCRIMINATED'; do
   /usr/bin/grep -qF "$need" "$W/oracle.sh" || { echo "REFUSING: extraction lost: $need"; exit 1; }
@@ -133,7 +155,7 @@ rec "fixture         $(shasum -a 256 kernel/test/loom_private_fixture.h | cut -c
 rec "harness         $(shasum -a 256 "$0" | cut -c1-16)  $0"
 rec "base logs       $REAL_CONTROL"
 rec "                $REAL_MUTANT"
-rec "oracle extract  lines $a-$b of the runner, $(wc -l < "$W/oracle.sh" | tr -d ' ') lines"
+rec "oracle extract  line $w + lines $a-$b of the runner, $(wc -l < "$W/oracle.sh" | tr -d ' ') lines"
 
 # ---- DRIVE both oracles on every arm. ----
 # set -e OFF for the drives: a refusing arm is the EXPECTED result on most of
