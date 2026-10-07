@@ -484,6 +484,18 @@ fi
 # then no per-boot question can be answered after the fact. smp-multiboot.sh
 # keeps all of them when this is set (default off, so no peer's gate changes).
 export SMP_KEEP_LOGS=1
+# MY OWN freshness datum for the logs I am about to read. The gate stamps each
+# kept file too, but that only proves the file is from the run that WROTE it --
+# if retention never ran here, an earlier run's directory could still hold
+# exactly N files and satisfy my count with stale evidence. A reader asks the
+# question for itself.
+GATESTAMP=$(mktemp)
+# Compared NUMERICALLY via stat, not with `-nt`: /bin/sh here is bash 3.2, whose
+# `[ a -nt b ]` truncates to whole seconds (measured -- a file 2.5 ms newer than
+# the stamp read as NOT newer), while bash 5.3's `[[ -nt ]]` is sub-second. A
+# guard whose correctness rests on the gate being slow is a guard resting on a
+# premise nobody states, so it rests on a number instead.
+GATESTAMP_M=$(stat -f %m "$GATESTAMP")
 SMPRC=$(mktemp)
 ( set +e; tools/ci-smp-gate.sh 2>&1; echo $? > "$SMPRC" ) | tee work/oct5-as-r9/guest-smp.log
 smp_rc=$(cat "$SMPRC")
@@ -550,6 +562,17 @@ for lbl in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
   att=0; pas=0; red=0
   for f in "$KEEP/$lbl-"*.log; do
     case "$f" in *-harness.log) continue ;; esac
+    if [ ! -r "$f" ]; then
+      echo "   REFUSING on $lbl: $f is not readable -- a search that cannot read"
+      echo "   its oracle reports ABSENT, which is the dodge, not a measurement."
+      exit 1
+    fi
+    f_m=$(stat -f %m "$f" 2>/dev/null || echo 0)
+    if [ "$f_m" -lt "$GATESTAMP_M" ]; then
+      echo "   REFUSING on $lbl: $f predates this gate run ($f_m < $GATESTAMP_M)"
+      echo "   -- it is an EARLIER run's evidence under a current boot's name."
+      exit 1
+    fi
     grep -q 'D7 three distinct login sessions simultaneously ready' "$f" && att=$((att+1)) || true
     grep -q 'D7 overlapping login probe PASS' "$f" && pas=$((pas+1)) || true
     grep -q 'D7 overlapping login probe FAILED' "$f" && red=$((red+1)) || true
