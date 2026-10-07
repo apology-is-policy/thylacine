@@ -7,14 +7,14 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    f62b44dc0059f15779eaa200e7d65e5d7fdfee8d  (the commit this manifest was GENERATED AGAINST; the
+- tip:    010656e03ff9d5791b633714fc43580920323014  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 89
+- commits in range: 110
 - codeberg.org: branch pushed and at this tip
-- codeberg.org: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 89 in range reachable from main)
+- codeberg.org: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 110 in range reachable from main)
 - github.com: branch pushed and at this tip
-- github.com: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 89 in range reachable from main)
+- github.com: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 110 in range reachable from main)
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
 
@@ -38,7 +38,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..f62b44dc0059f15779eaa200e7d65e5d7fdfee8d -- .claude/
+    $ git log --oneline 5ff62b788..010656e03ff9d5791b633714fc43580920323014 -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -83,10 +83,10 @@ regions is hers to resolve in her tree, and I have not pre-empted it.
     kernel source (the repair)      : 12 file(s)
     kernel tests                   : 5 file(s)
     tools/ (SHARED SURFACE)        : 3 file(s)
-    vault dossiers                 : 10 file(s)
+    vault dossiers                 : 15 file(s)
     docs                           : 4 file(s)
     specs                          : 0 file(s)
-    work/ evidence + runbooks      : 118 file(s)
+    work/ evidence + runbooks      : 143 file(s)
 
 The tools/ files are a shared surface main and aux also bake from. The one
 behavioural change there is smp-multiboot.sh's SMP_KEEP_LOGS retention, which is
@@ -178,3 +178,74 @@ different claims: 0 of this branch's 85 commits are reachable from main.
   (loom_sqpoll_fanin_park absent), and thread.h's `cons_frozen_unwound` (so
   their two new bools insert after exit_close_active here, and their stated
   field offsets and sizeof are main's numbers, to be re-measured not inherited).
+
+## ADDED 2026-10-07 ~15:1xZ, from main's call 0192 (B-2a, branch b2 @212f8e479)
+
+(5) B-2a makes BURROW_TYPE_CODE lazy: `burrow_create_code` loses its `exempt`
+parameter and takes ANON_LAZY's sparse pagemap, and CODE moves to the ANON_LAZY
+arm of burrow_free_internal, burrow_acquire_mapping, burrow_lazy_resident_count,
+burrow_lazy_footprint and burrow_lazy_slot_for_test. It lands together with B-2b.
+AT MERGE: b2's syscall.c JIT functions win WHOLE over main's. On b2, measured by
+main and reported on 0192 t3, sys_jit_create_region charges NOTHING (no npages,
+no burrow_backing_pages, no burrow_charge_record), SYS_JIT_DESTROY refunds
+`burrow_lazy_footprint` under as->lock before the unmaps, the extinction
+"SYS_JIT_DESTROY: charge record disagrees with the region's page count" is GONE,
+and the commit arm charges once per page at fault.c:708 carrying
+proc_resource_exempt itself (jit.charges_once_per_page pins it; their J1 RED
+re-adding a create-time charge reddened 6 jit tests).
+  - MY SIDE OF IT: the long AS-R9 comment block I added above
+    SYS_JIT_DESTROY's claim/restore -- the one naming the three premises that
+    make THAT caller sound while five others were migrated to the settled drops
+    -- must be RE-READ against the footprint refund rather than carried over
+    verbatim. The premises are unchanged (every failure return in
+    burrow_unmap_reporting precedes that function's first mutation; both aliases
+    live in p->as whose lock is held across the interval;
+    burrow.unmap_failure_leaves_mapping_attached pins premise 1). The QUANTITY
+    the line below them asserts is what changed.
+  - TEXTUAL: expect one conflict at burrow_acquire_mapping's tail. My hunks
+    start AT its closing brace (@@ -917,24 +909,15 @@, then -945, then the charge
+    machinery at -997/-1013/-1049); their last edit there is the ANON_LAZY arm at
+    old ~902-911. Mine are below the type switch, theirs inside it: take both.
+    No hunk of mine touches burrow_create_code or either free_internal arm.
+  - CORRECTION TO MY OWN FIRST READING, kept because it is the kind of mistake
+    that repeats: I measured main 25ed27f21 for the syscall side when the call's
+    subject was b2 @212f8e479, and reported an eager JIT charge that b2 had
+    already removed. The header of main's turn carried the right ref and I read
+    the wrong one.
+
+(6) SYSCALL NUMBER 127 IS A COLLISION, AND IT IS NOT MINE TO SETTLE.
+`SYS_SRV_REGISTRY_NEW = 127` (syscall.h:2431) is ASTRA's, added by 417c8caeb
+("Isolate login service registries and retain session connection budgets") inside
+25ed27f21..5ff62b788. It is in my BASE because my base IS her HEAD. Measured:
+`git diff --stat 5ff62b788..HEAD -- kernel/include/thylacine/syscall.h` is EMPTY
+-- this branch mints no syscall number at all. B-2b adds SYS_JIT_CREATE_SEALED
+and wants 127, the last number below vivarium's restart_syscall(128) ceiling
+argument; precedent #50 (09-03) says whichever side lands SECOND renumbers, and a
+move to 128 owes vivarium a per-number argument for restart_syscall.
+AT MERGE: whoever integrates must know that my delivery cannot land before
+astra's base does (`git merge-base --is-ancestor 5ff62b788 25ed27f21` -> NO; 86
+commits of her base are not on main), so B-2 is ahead of this branch by
+construction and main has been told to take 127. The renumber decision belongs to
+astra; raised with her rather than answered on her behalf. NOT renumbering now is
+deliberate: a syscall enum change rebuilds the kernel and voids the qualified
+artifact this checkpoint's verdict names (5ced18c43ae8302a / e266c931d9668a44).
+
+### (6) SETTLED BY ASTRA, 0161 t49 -- recorded here because my delivery carries her number
+
+Her disposition, in her words and not my paraphrase of it: do NOT hold main's
+B-2b 127 for astra; accept registry-number reconciliation at the later
+coordinated base integration; no renumbering in the qualified checkpoint now. She
+sent main the same disposition on 0116. So 127 belongs to SYS_JIT_CREATE_SEALED
+and nothing is owed by this branch.
+
+THE PART AN INTEGRATOR MUST NOT SIMPLIFY: the replacement is not blindly 128. It
+resolves against the integration-time enum, and it travels with every consumer
+plus vivarium's per-number restart_syscall 128 dispatch/isolation argument, the
+sentinel/ceiling and the combined qualification -- together, in one fold. A
+renumber that moves only the enum value leaves the ceiling argument asserting a
+number that moved under it.
+
+OWNERSHIP: this is ASTRA'S merge obligation. It is recorded on my list only
+because my base IS her HEAD, so my delivery carries 417c8caeb and an integrator
+reading this file would otherwise meet the collision with no pointer to its
+owner. It is not new kernel scope here and it is not a landing authorization.

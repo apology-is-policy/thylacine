@@ -901,3 +901,51 @@ unmutated. RUN=<path> drives a mutant copy.
 
 WHAT IS READY THE MOMENT THE LEASE LANDS, unchanged in its experiment half:
   sh work/oct5-as-r9/reap-leg-run.sh
+
+## 2026-10-07 ~17:0xZ: the run script's ORACLES are validated against real logs
+
+Everything below is off-lease verification of things that would otherwise have
+failed INSIDE the lease window, where a wasted hour costs a 24h re-queue.
+
+THE THREE ORACLES IN reap-leg-run.sh NOW MATCH REAL LOGS, both sides. A stub only
+tests my reading of a format, so each pattern was run against a retained log
+rather than reasoned about:
+  - '\[test\] loom\.private_owner_lifecycle \.\.\. PASS' -> 1 match in
+    work/oct5-as-r9/boot-logs/boot-confirm-140947Z.log, whose real line is
+    "    [test] loom.private_owner_lifecycle ... PASS" (indented; the pattern is
+    unanchored, so the indent does not matter).
+  - '  tests: [0-9]+/[0-9]+' -> 1 match, "  tests: 1836/1836 PASS", and 1836 is
+    exactly the number the script DERIVES from test.c's registrations.
+  - '^EXTINCTION:' -> validated against a REAL extinction log
+    (private-owner-logs/red-legs/20261007T103115Z/interior-unmap-serial.log):
+    anchored count 1 and UNANCHORED count 1 AGREE, so the line truly starts at
+    column 0 and nothing is hidden behind a prefix. Corroborated by the tree's
+    own ABI consumer: tools/test-fault.sh:177 greps the identical '^EXTINCTION:'.
+    This one mattered most -- an anchor that did not match would have made BOTH
+    the control's extinction check and stage 2's "no OTHER extinction fired"
+    check FAIL OPEN, i.e. pass while blind.
+
+THE PRESERVE-STEP EXTRACTION IS FAITHFUL. Stage 1 sources the step out of
+lease-runbook.sh with an awk range; a stale anchor would hand it an empty file
+and leave preserve_boot_inputs undefined mid-run. Measured now: 125 lines, sh -n
+clean, exactly one function definition, all four REFUSING guards, the PINNED
+mechanism, all NINE source pairs, ending at the function's own closing brace,
+and preserve_boot_inputs IS defined when sourced.
+
+THE MANIFEST IS REGENERATED and its figures are current: tip 010656e03, 110
+commits in range, both mirrors at that tip, main still 25ed27f21b5b, 0 of 110
+reachable from main, and exactly ONE commit (55cfdb54c) touches .claude/ so the
+EXCLUDED claim still holds. The regeneration left MERGE-OBLIGATIONS.md
+BYTE-IDENTICAL and all six obligations appear inside the generated file -- the
+protection added after a regeneration destroyed obligations (3) and (4) is
+proven rather than assumed.
+
+A MIRROR EPISODE WORTH KNOWING ABOUT: GitHub rejected the 010656e03 push four
+times over ~7 minutes with a server-side 500 (Internal Server Error) while
+ls-remote against it worked, its status page read all-operational, the pack was
+25 objects with an 8.5 KiB largest blob, --no-thin reproduced it, and codeberg
+accepted the identical push immediately. SSH is not provisioned here, so HTTPS
+was the only route. A background retry reconciled it at 17:01:56Z with NOTHING
+changed on my side, which is what proves it was the remote and not the content.
+The discipline that caught it: verify per URL with ls-remote, never read "pushed
+to both mirrors" off one push's output.
