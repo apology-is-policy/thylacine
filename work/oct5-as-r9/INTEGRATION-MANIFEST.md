@@ -7,10 +7,10 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    0fd8c9003aadd6dcd14ae2379db1add91356f74e  (the commit this manifest was GENERATED AGAINST; the
+- tip:    9857e90a930bbbd7b9b356d550972e092b565d67  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 45
+- commits in range: 51
 - nothing pushed; nothing landed on main
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
@@ -35,7 +35,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..0fd8c9003aadd6dcd14ae2379db1add91356f74e -- .claude/
+    $ git log --oneline 5ff62b788..9857e90a930bbbd7b9b356d550972e092b565d67 -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -75,10 +75,10 @@ regions is hers to resolve in her tree, and I have not pre-empted it.
     kernel source (the repair)      : 7 file(s)
     kernel tests                   : 3 file(s)
     tools/ (SHARED SURFACE)        : 2 file(s)
-    vault dossiers                 : 6 file(s)
+    vault dossiers                 : 7 file(s)
     docs                           : 4 file(s)
     specs                          : 0 file(s)
-    work/ evidence + runbooks      : 54 file(s)
+    work/ evidence + runbooks      : 57 file(s)
 
 The tools/ files are a shared surface main and aux also bake from. The one
 behavioural change there is smp-multiboot.sh's SMP_KEEP_LOGS retention, which is
