@@ -117,3 +117,23 @@ construction and main has been told to take 127. The renumber decision belongs t
 astra; raised with her rather than answered on her behalf. NOT renumbering now is
 deliberate: a syscall enum change rebuilds the kernel and voids the qualified
 artifact this checkpoint's verdict names (5ced18c43ae8302a / e266c931d9668a44).
+
+### (6) SETTLED BY ASTRA, 0161 t49 -- recorded here because my delivery carries her number
+
+Her disposition, in her words and not my paraphrase of it: do NOT hold main's
+B-2b 127 for astra; accept registry-number reconciliation at the later
+coordinated base integration; no renumbering in the qualified checkpoint now. She
+sent main the same disposition on 0116. So 127 belongs to SYS_JIT_CREATE_SEALED
+and nothing is owed by this branch.
+
+THE PART AN INTEGRATOR MUST NOT SIMPLIFY: the replacement is not blindly 128. It
+resolves against the integration-time enum, and it travels with every consumer
+plus vivarium's per-number restart_syscall 128 dispatch/isolation argument, the
+sentinel/ceiling and the combined qualification -- together, in one fold. A
+renumber that moves only the enum value leaves the ceiling argument asserting a
+number that moved under it.
+
+OWNERSHIP: this is ASTRA'S merge obligation. It is recorded on my list only
+because my base IS her HEAD, so my delivery carries 417c8caeb and an integrator
+reading this file would otherwise meet the collision with no pointer to its
+owner. It is not new kernel scope here and it is not a landing authorization.

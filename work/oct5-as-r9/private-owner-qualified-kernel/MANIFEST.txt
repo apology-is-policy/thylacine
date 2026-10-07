@@ -70,3 +70,19 @@ run on THIS private-owner checkpoint -- the 5-row matrix stage was run directly
 on the qualified image. The earlier wording, "has never run in this tree", was
 wrong and erased evidence that stands: the gate script DID run here on the
 AS-R9 checkpoint at run-1007T061510Z and PASSED.
+
+ONE MORE SET EXISTS, AND IT IS NOT THIS ONE (added 2026-10-07 ~15:4xZ).
+work/oct5-as-r9/gate-qualified-20261007T140647Z/ holds the COMPLETE boot-input
+set of the real ci-smp-gate run: both kernel flavours, ramfs, the pre-boot pool
+and the key pair, all from that one run. The relationship matters because the two
+sets are easy to conflate:
+  - THIS directory pins the inputs of the 10-07 MATRIX (smp-matrix-1007T1040Z),
+    and its ramfs was LOST before the gap was found, so it cannot be booted as a
+    set -- reproducing from it is a new measurement, not a replay.
+  - THAT directory pins the inputs of the ci-smp-gate RUN that followed, whose
+    own build replaced ramfs, pool and key at 14:11Z. It is complete.
+The default kernel is byte-identical in both (5ced18c43ae8302a /
+e266c931d9668a44) across a full cache invalidation, which is a reproducibility
+datum; the SANITIZER kernel is NOT (5193ee5f914f96ae here against
+988debebc9a4f803 there), so a reader must not assume one set's sanitizer bytes
+describe the other's run.
