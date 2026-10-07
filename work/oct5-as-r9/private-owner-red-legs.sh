@@ -15,9 +15,21 @@
 # Only the third removes the UNQUALIFIED marker. The first two can hold while
 # the image is still unfit to found any claim on.
 #
-# A kernel test FAIL EXTINCTS the boot, so a red leg's serial log stops at the
-# failure and carries no tally. That is expected, and it is why a red leg is
-# judged on its named verdict, its FAIL REASON and attribution -- never a tally.
+# A kernel test FAIL extincts the boot, but NOT where I thought. Measured on a
+# real mutant boot (red-legs/20261007T095600Z): the suite runs every test, prints
+# `tests: 1835/1836 FAIL`, and boot_main extincts on the SUMMARY. So a red leg
+# DOES carry a full tally, and that tally is an independent attribution signal --
+# the kernel's own count of failures against this script's parse of them. An
+# earlier version of this header claimed the opposite; it was never measured.
+#
+# THE VERDICT FORMAT IS NOT ONE LINE, which cost this script its first real run.
+# test.c prints `    [test] NAME ... ` BEFORE running the test, so anything the
+# test itself prints lands between that and its verdict -- and on failure
+# test_fail() calls sched_dump_runnable(), which prints a bracket and a per-CPU
+# line, so `FAIL: <msg>` arrives two lines later. 87 of 1836 green verdicts are
+# also split that way by ordinary kernel output. On top of that the serial log is
+# CRLF, so every `$`-anchored pattern silently fails. A single-line regex read
+# 1749 of 1836 verdicts and reported the reddened test as ABSENT.
 #
 # REQUIRES THE MAC LEASE: it builds and boots. Hold it before running. It kills
 # nothing it does not own: the only processes it ever signals are the child it
@@ -249,28 +261,64 @@ run_suite() { # run_suite <leg> -> sets SUITE_RC, writes $RUN/<leg>-serial.log
   } > "$RUN/$1-provenance.txt"
   printf 'test.sh rc=%s, %s bytes of NEW serial evidence\n' \
     "$SUITE_RC" "$(wc -c < "$RUN/$1-serial.log" | tr -d ' ')"
+  normalize_verdicts "$1"
 }
 
-# Every verdict below is read from the PRESERVED SERIAL LOG, never from stdout.
+# Every verdict below is read from the PRESERVED SERIAL LOG, never from stdout,
+# and through ONE normalisation pass rather than three regexes: a verdict is a
+# STATE in the log, not a line in it. The machine tracks the pending test name
+# from `[test] NAME ... ` and resolves it on the first following `FAIL: <msg>`
+# or line-final `PASS`, which is exactly how test.c:4604-4612 emits them.
+# Validated against two REAL logs before being trusted: the 1836/1836 green boot
+# (1836 rows, 1836 PASS, 0 unresolved) and a real mutant boot (1836 rows,
+# exactly 1 FAIL, correctly named and reasoned).
+normalize_verdicts() { # normalize_verdicts <leg> -> $RUN/<leg>-verdicts.tsv
+  awk '
+    { sub(/\r$/, "") }
+    {
+      line = $0
+      if (match(line, /\[test\] /)) {
+        tail = substr(line, RSTART + 7)
+        if (match(tail, / \.\.\. /)) {
+          cur  = substr(tail, 1, RSTART - 1)
+          line = substr(tail, RSTART + 5)
+        }
+      }
+      if (cur != "") {
+        if (match(line, /FAIL: /)) { print cur "\tFAIL\t" substr(line, RSTART + 6); cur = "" }
+        else if (line ~ /(^|[^A-Za-z-])PASS$/) { print cur "\tPASS\t"; cur = "" }
+      }
+    }
+    END { if (cur != "") print cur "\tPENDING\t" }
+  ' "$RUN/$1-serial.log" > "$RUN/$1-verdicts.tsv"
+  n=$(wc -l < "$RUN/$1-verdicts.tsv" | tr -d ' ')
+  # The denominator control. A boot that reached the suite at all produces
+  # thousands of verdicts; a handful means the PARSER broke, not the kernel, and
+  # that must refuse rather than report ABSENT for every test in the suite.
+  [ "$n" -ge 1000 ] \
+    || die "only $n verdicts parsed out of $RUN/$1-serial.log -- the parser or the boot is broken, and an ABSENT verdict here would be a lie"
+  p=$(cut -f2 "$RUN/$1-verdicts.tsv" | grep -c PENDING)
+  [ "$p" -eq 0 ] \
+    || die "$p verdict(s) in $1 never resolved to PASS or FAIL -- refusing to read a log the parser does not fully understand"
+  printf '%s verdicts parsed, 0 unresolved\n' "$n"
+}
+
 verdict() { # verdict <leg> <test name>
-  line=$(grep -E "\[test\] $2 \.\.\. (PASS|FAIL)" "$RUN/$1-serial.log" | tail -1)
-  case "${line:-}" in
-    *PASS*) echo PASS ;;
-    *FAIL*) echo FAIL ;;
-    *)      echo ABSENT ;;
-  esac
+  v=$(awk -F'\t' -v n="$2" '$1 == n { print $2 }' "$RUN/$1-verdicts.tsv" | tail -1)
+  printf '%s\n' "${v:-ABSENT}"
 }
 
-# test.c:4604-4607 prints `... FAIL: <msg>`, where msg is the failing
-# assertion's own string. That string is what distinguishes the assertion the
-# mutation targets from the dozens of others in the same test.
 fail_reason() { # fail_reason <leg> <test name>
-  sed -n -E "s/^.*\[test\] $2 \.\.\. FAIL: (.*)\$/\1/p" "$RUN/$1-serial.log" | tail -1
+  awk -F'\t' -v n="$2" '$1 == n && $2 == "FAIL" { print $3 }' "$RUN/$1-verdicts.tsv" | tail -1
 }
 
 failing_set() { # every test that FAILED, one per line
-  grep -oE '\[test\] [a-z0-9_.]+ \.\.\. FAIL' "$RUN/$1-serial.log" \
-    | sed 's/\[test\] //; s/ \.\.\. FAIL//' | sort -u
+  awk -F'\t' '$2 == "FAIL" { print $1 }' "$RUN/$1-verdicts.tsv" | sort -u
+}
+
+# The kernel's own count, independent of this script's parse of the same log.
+tally() { # tally <leg> -> "<ran>/<total> <PASS|FAIL>" or empty
+  sed -n -E 's/^ *tests: ([0-9]+\/[0-9]+) (PASS|FAIL).*$/\1 \2/p' "$RUN/$1-serial.log" | tail -1
 }
 
 mutate() { # mutate <file> <old> <new>
@@ -336,6 +384,14 @@ expect_red() { # expect_red <leg> <test> <expected fail-reason substring>
     printf 'FAIL  leg=%-14s %s FAILED, but so did:\n%s\n' "$1" "$2" "$others"
     die "leg $1 is unattributed -- another test failed too; evidence kept in $RUN"
   fi
+  # The kernel counted the failures itself. Requiring its count to agree with
+  # this script's parse means a verdict the parser cannot see can no longer be
+  # mistaken for a verdict that is not there.
+  want_tally="$((EXPECT_TESTS - 1))/$EXPECT_TESTS FAIL"
+  got_tally=$(tally "$1")
+  [ "$got_tally" = "$want_tally" ] \
+    || die "leg $1: the kernel's own tally is '$got_tally', not '$want_tally' -- exactly one test must have failed"
+  printf '      and the kernel agrees: tests %s\n' "$got_tally"
   printf 'PASS  leg=%-14s %s -> FAIL (%s), the ONLY failure\n' "$1" "$2" "$reason"
 }
 
@@ -406,13 +462,18 @@ run_suite green
 fail=0
 [ "$SUITE_RC" -eq 0 ] || { echo "FAIL  green: test.sh exited $SUITE_RC"; fail=1; }
 
-tally=$(grep -E '^ *tests: [0-9]+/[0-9]+ PASS' "$RUN/green-serial.log" | tail -1)
+# tally() returns the kernel's own line WITH its verdict word, so a FAIL tally
+# is reported as a failing suite rather than as a missing one.
+tally=$(tally green)
 if [ -z "$tally" ]; then
   echo "FAIL  green: no suite tally in the serial log -- the suite did not finish"
   fail=1
+elif [ "${tally##* }" != PASS ]; then
+  echo "FAIL  green: the kernel's own tally says ${tally} -- tests failed on the clean rebuild"
+  fail=1
 else
-  ran=$(printf '%s\n' "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+) PASS.*#\1#')
-  tot=$(printf '%s\n' "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+) PASS.*#\2#')
+  ran=${tally%%/*}
+  tot=${tally#*/}; tot=${tot%% *}
   if [ "$ran" != "$tot" ]; then
     echo "FAIL  green: tally $ran/$tot -- not every test passed"; fail=1
   elif [ "$tot" != "$EXPECT_TESTS" ]; then

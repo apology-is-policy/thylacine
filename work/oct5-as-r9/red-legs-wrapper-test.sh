@@ -25,6 +25,10 @@ RUNNER=${RUNNER:-$ROOT/work/oct5-as-r9/private-owner-red-legs.sh}
 # the handful of lines a stub writes.
 REAL_LOG=${REAL_LOG:-$ROOT/work/oct5-as-r9/boot-logs/boot-confirm-232503Z.log}
 [ -f "$REAL_LOG" ] || { printf 'no real serial log at %s -- refusing to run with stubs alone\n' "$REAL_LOG"; exit 2; }
+# A REAL mutant boot: the split three-line FAIL, the runnable dump, CRLF, and the
+# `1835/1836 FAIL` tally. No stub discovered the parser defect this log found.
+REAL_MUTANT_LOG=${REAL_MUTANT_LOG:-$ROOT/work/oct5-as-r9/private-owner-logs/red-legs-interior-mutant-serial.log}
+[ -f "$REAL_MUTANT_LOG" ] || { printf 'no real mutant log at %s\n' "$REAL_MUTANT_LOG"; exit 2; }
 WORK=${WORK:-${TMPDIR:-/tmp}/red-legs-wrapper-test.$$}
 PASS=0
 FAIL=0
@@ -52,6 +56,7 @@ new_tree() { # new_tree <name> -> echoes the path
   cp "$ROOT/kernel/burrow.c" "$ROOT/kernel/loom.c" "$t/kernel/"
   cp "$ROOT/kernel/test/test.c" "$t/kernel/test/"
   cp "$REAL_LOG" "$t/fixture-serial.log"
+  cp "$REAL_MUTANT_LOG" "$t/fixture-mutant.log"
   cat > "$t/work/oct5-as-r9/rebuild-kernel.sh" <<'STUB'
 #!/bin/sh
 set -u
@@ -77,33 +82,54 @@ n=$(cat build/.suites 2>/dev/null || echo 0); n=$((n + 1)); printf '%s\n' "$n" >
 eval "mode=\${SUITE_${n}_MODE:-green}"
 eval "rc=\${SUITE_${n}_RC:-0}"
 L=build/test-boot.log
-emit_head() { printf '==> qemu: accel=hvf\n' > "$L"; }
-emit_tail() { printf '  tests: %s/%s PASS\n' "$1" "$2" >> "$L"; printf '%s\n' "$BOOT_MARKER" >> "$L"; }
+# CRLF and the split verdict are the real serial format, not decoration: the
+# kernel prints `[test] NAME ... ` before running the test, so a failure's
+# `FAIL: msg` lands after sched_dump_runnable's output, two lines later.
+emit_head() { printf '==> qemu: accel=hvf\r\n' > "$L"; }
+emit_pass() { printf '    [test] %s ... PASS\r\n' "$1" >> "$L"; }
+emit_fail() { # emit_fail <name> <reason> -- the real three-line shape
+  printf '    [test] %s ...   [runnable-dump %s]\r\n' "$1" "$2" >> "$L"
+  printf '    cpu=0 tid=4 band=2 state=2 on_cpu=0 magic_ok=1\r\n' >> "$L"
+  printf 'FAIL: %s\r\n' "$2" >> "$L"
+}
+emit_tail() { printf '  tests: %s/%s %s\r\n' "$1" "$2" "${3:-PASS}" >> "$L"; printf '%s\r\n' "$BOOT_MARKER" >> "$L"; }
+# A red leg's boot runs the whole suite and extincts on the SUMMARY, so it does
+# carry a tally -- measured on a real mutant boot, contrary to an earlier belief.
+pad_passes() { i=0; while [ "$i" -lt "${1:-0}" ]; do printf '    [test] pad.t%s ... PASS\r\n' "$i" >> "$L"; i=$((i + 1)); done; }
 case "$mode" in
   nolog)   printf 'stub: exiting before the boot; no new serial log\n'; exit "$rc" ;;
   empty)   : > "$L"; exit "$rc" ;;
   red1)    emit_head
-           printf '    [test] burrow.unmap_interior_start_refused ... FAIL: an interior start must be refused -- v1.0 has no partial unmap\n' >> "$L"
-           printf 'EXTINCTION: test failure\n' >> "$L" ;;
+           emit_fail burrow.unmap_interior_start_refused "an interior start must be refused -- v1.0 has no partial unmap"
+           emit_pass loom.private_owner_lifecycle; pad_passes 1098
+           emit_tail 1835 1836 FAIL
+           printf 'EXTINCTION: kernel test suite failed\r\n' >> "$L" ;;
   red1wrong) emit_head
-           printf '    [test] burrow.unmap_interior_start_refused ... FAIL: proc_alloc failed\n' >> "$L"
-           printf 'EXTINCTION: test failure\n' >> "$L" ;;
+           emit_fail burrow.unmap_interior_start_refused "proc_alloc failed"
+           emit_pass loom.private_owner_lifecycle; pad_passes 1098
+           emit_tail 1835 1836 FAIL
+           printf 'EXTINCTION: kernel test suite failed\r\n' >> "$L" ;;
   red1plus) emit_head
-           printf '    [test] burrow.unmap_interior_start_refused ... FAIL: an interior start must be refused -- v1.0 has no partial unmap\n' >> "$L"
-           printf '    [test] weft.ring_teardown ... FAIL: something else broke\n' >> "$L"
-           printf 'EXTINCTION: test failure\n' >> "$L" ;;
+           emit_fail burrow.unmap_interior_start_refused "an interior start must be refused -- v1.0 has no partial unmap"
+           emit_fail weft.ring_teardown "something else broke"
+           emit_pass loom.private_owner_lifecycle; pad_passes 1098
+           emit_tail 1834 1836 FAIL
+           printf 'EXTINCTION: kernel test suite failed\r\n' >> "$L" ;;
   red2)    emit_head
-           printf '    [test] burrow.unmap_interior_start_refused ... PASS\n' >> "$L"
-           printf '    [test] loom.private_owner_lifecycle ... FAIL: a nonfinal ring drop refunds the metadata only\n' >> "$L"
-           printf 'EXTINCTION: test failure\n' >> "$L" ;;
+           emit_pass burrow.unmap_interior_start_refused
+           emit_fail loom.private_owner_lifecycle "a nonfinal ring drop refunds the metadata only"
+           pad_passes 1098
+           emit_tail 1835 1836 FAIL
+           printf 'EXTINCTION: kernel test suite failed\r\n' >> "$L" ;;
   green)   emit_head
-           printf '    [test] burrow.unmap_interior_start_refused ... PASS\n' >> "$L"
-           printf '    [test] loom.private_owner_lifecycle ... PASS\n' >> "$L"
+           emit_pass burrow.unmap_interior_start_refused
+           emit_pass loom.private_owner_lifecycle; pad_passes 1098
            emit_tail "${SUITE_TALLY:-1836}" "${SUITE_TALLY:-1836}" ;;
-  reallog) cp fixture-serial.log "$L" ;;
+  reallog)     cp fixture-serial.log "$L" ;;
+  realmutant)  cp fixture-mutant.log "$L" ;;
   greenshort) emit_head
-           printf '    [test] burrow.unmap_interior_start_refused ... PASS\n' >> "$L"
-           printf '    [test] loom.private_owner_lifecycle ... PASS\n' >> "$L"
+           emit_pass burrow.unmap_interior_start_refused
+           emit_pass loom.private_owner_lifecycle; pad_passes 1098
            emit_tail 1835 1835 ;;
   *) printf 'stub: unknown mode %s\n' "$mode" >&2; exit 9 ;;
 esac
@@ -260,6 +286,18 @@ else
   bad "S9 the stub build never started; scenario did not run"
   kill -TERM "$RUNNER_PID" 2>/dev/null; wait "$RUNNER_PID" 2>/dev/null
 fi
+
+# ----------------------- S12 a REAL mutant boot must credit the leg
+printf '\n-- S12 leg 1 judged from a REAL mutant boot (split FAIL, runnable dump, CRLF)\n'
+T=$(new_tree s12)
+cat > "$T/stub-plan" <<'P'
+SUITE_1_MODE=realmutant; SUITE_1_RC=1
+P
+run_runner "$T"
+check_has "S12 credits leg 1 from real kernel output" "$T/run.out" "PASS  leg=interior-unmap"
+check_has "S12 reads the real reason" "$T/run.out" "an interior start must be refused"
+check_has "S12 cross-checks the kernel's own tally" "$T/run.out" "the kernel agrees: tests 1835/1836 FAIL"
+check_has "S12 parses every verdict in the real log" "$T/run.out" "1836 verdicts parsed, 0 unresolved"
 
 # ------------------------------- S11 the parsers against a REAL serial log
 printf '\n-- S11 green control reads a REAL recorded boot log (1835 [test] lines, pre-dating both new tests)\n'
