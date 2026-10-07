@@ -1233,3 +1233,24 @@ call `_end`, so they would over-put by one under the mutant. Neither is
 exercised: the fixture's only refusal (:66) returns from loom_measure BEFORE
 addrspace_private_begin, so the guard is never taken on it. Mutating three sites
 to cover an unreachable path adds more risk than it removes.
+
+#### The mutant's outcome is DETERMINISTIC -- verified, not assumed (19:4xZ)
+
+The obvious worry about a mutant whose ring holds no lifetime reference is a
+RACE: if the retirer destroyed the ring before the dying Proc reached its
+lifetime drop, private_rings would already be 0, no guard would fire, and the leg
+would just PASS -- a burnt window with an unreadable result.
+
+IT CANNOT HAPPEN, and the reason is an ordering in proc_free that I had asserted
+in the fixture's own comment and had not checked: `addrspace_unref(p->as)` at
+kernel/proc.c:699 runs BEFORE `handle_table_free(p->handles)` at :720, and :686
+says so on purpose ("P3-Da: release the address space here, BEFORE
+handle_table_free"). So at :699 the handle table is intact, the Loom still holds
+its refcount, loom_unref has not run, nothing is enqueued, and private_rings is
+1. addrspace_unref drops the owner, drains the VMAs, then puts the lifetime
+reference -- so the guard's checks are reached in exactly the state the
+prediction names (owners 0, vmas drained, private_rings 1) and fire the third
+one. The retirer never gets a turn: the enqueue would only happen at :720.
+That ordering is also what makes this leg's claim true in the first place -- it is
+why the ring's own reference is the ONLY thing keeping the descriptor addressable
+across that window.

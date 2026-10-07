@@ -313,6 +313,22 @@ import sys
 # takes its own addrspace_pin before dropping at :172, which is the masking this
 # leg exists to remove. The unpinned-reap drop at :248 precedes its lp_wait at
 # :249 with no pin held, so it is the FIRST lethal point in the test.
+#
+# AND THE OUTCOME IS DETERMINISTIC, NOT RACY -- verified in the source rather
+# than hoped for, because the alternative would have made this run ambiguous.
+# Under this mutant the ring holds no lifetime reference, so one might expect a
+# race: if the retirer destroyed the ring before the dying Proc reached its
+# lifetime drop, private_rings would already be 0, no guard would fire, and the
+# leg would simply PASS -- a wasted window with an unreadable result. It cannot
+# happen. proc_free releases the address space at kernel/proc.c:699, BEFORE
+# handle_table_free at :720 (deliberately -- see its own comment at :686). At
+# :699 the handle table is still intact, so the Loom still holds its refcount,
+# loom_unref has not run, nothing has been enqueued, and private_rings is 1.
+# addrspace_unref then drops the owner, drains the VMAs and puts the lifetime
+# reference, so the guard's three checks are reached in the state the prediction
+# names: owners 0, vmas drained, private_rings 1. The retirer never gets a turn,
+# because the enqueue would only happen at :720 and the boot is already dead.
+# That same ordering is what makes this leg's claim true at all.
 p='kernel/loom.c'
 s=open(p).read()
 a="    if (!addrspace_private_begin(as)) return NULL;\n"
