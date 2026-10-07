@@ -177,6 +177,39 @@ The two languages actually chosen for the default toolchain (Rust + Go) need
 or a JVM arrives, the "exotic way" isn't exotic on Thylacine: it's the **W1.5
 LSE patcher, turned outward and gated as a capability.**
 
+## B-2: what a browser engine's JIT needs (2026-10-07)
+
+The browser arc (`docs/BROWSER-DESIGN.md` section 7) brings the first
+*untrusted* JIT: JavaScriptCore running a web page's script. The operator voted
+the shape on 2026-09-28; three things change.
+
+1. **The region is a reservation** (B-2a). JavaScriptCore reserves one
+   executable pool at startup (its ARM64 default is 128 MiB without jump
+   islands; Thylacine runs it at 64 MiB, `JIT_REGION_MAX`, inside the +-128 MiB
+   branch range) and fills it as it compiles. An eager region charged and
+   zeroed the whole pool at startup and needed one physically contiguous buddy
+   block. The code Burrow is now demand-zero, like `SYS_BURROW_ATTACH_LAZY`'s
+   memory: a page is committed, zeroed, I-cache-invalidated and charged once,
+   by the first touch through either alias. Nothing surveyed (V8,
+   SpiderMonkey, .NET, JSC itself) needs physical contiguity.
+2. **The I-cache sync is exact on aliasing I-caches** (B-2a). The sync
+   invalidates by the kernel's direct-map address. On a VIPT I-cache
+   (Cortex-A53 class) that can miss lines fetched through the exec alias, so
+   when any CPU reports a non-PIPT I-cache the sync invalidates the whole
+   I-cache, as Linux does. The syscall stays a syscall: handing EL0 the cache
+   maintenance instructions (`SCTLR_EL1.UCI`) would give every Proc a flush
+   primitive; Plan 9's `segflush(2)` is a system call too.
+3. **The writer alias is hardened before the JIT first runs** (B-2b). Caveat 5
+   above, answered for the browser: the aliases go to independent random
+   addresses; a sealed region's exec alias can be execute-only, which holds
+   the engine's write thunk with the writer base burned in as immediates (the
+   design Apple ships), so no readable memory names the writer; and the
+   kernel's user-copy routines use `LDTR`/`STTR`, which check EL0's
+   permissions, so no syscall reads an execute-only page for its caller.
+   Linux's execute-only user mappings were reverted once because the kernel
+   could still read them; OpenBSD ships the same scheme with unprivileged
+   user copies.
+
 ## Status / handoff
 
 - **NOVEL candidate** -- main agent folds the lead-position framing into

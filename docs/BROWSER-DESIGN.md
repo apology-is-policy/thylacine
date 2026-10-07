@@ -469,18 +469,51 @@ a second random address, make the original R+X and the alias R+W, and route
 every write through one function, `performJITMemcpy(dst, src, n)`, which in
 this mode calls a thunk with the *offset into the pool*. On Apple hardware the
 thunk is execute-only with the writable base burned in as an immediate, so the
-writable address is never readable -- a hardening we could adopt. The mode is
-compiled only for `OS(DARWIN) && HAVE(REMAP_JIT)` on ARM64 (verified,
-lines 189-334), and used only when fast permission switching is unavailable.
-Everywhere else JavaScriptCore maps its pool permanently RWX, which Thylacine
-cannot do and would not want. Porting the mode is three sites: replace the
-`mach_vm_remap` + `vm_protect` sequence with `SYS_JIT_CREATE`; stop the
-initial reservation asking for RWX; give `ARM64Assembler::cacheFlush` a
-Thylacine arm calling `SYS_ICACHE_SYNC` (it is a hard `#error` today).
-Unverified, and the first thing the JIT chunk must establish: that *every*
-writer goes through the chokepoint (the Apple fast-permission mode imposes the
-same discipline, which is good evidence and not proof). The YARR regex JIT,
-the CSS selector JIT and the Wasm tiers share the one allocator.
+writable address is never readable -- the hardening the operator voted to
+adopt (2026-09-28). The mode is compiled only for `OS(DARWIN) &&
+HAVE(REMAP_JIT)` (the guard spans `ExecutableAllocator.cpp` 202-353), and
+`ENABLE(SEPARATED_WX_HEAP)` is 0 except on Cocoa ARM64. Everywhere else
+JavaScriptCore maps its pool permanently RWX, which Thylacine cannot do and
+would not want: Pouch's `mmap` refuses the RWX reservation with `EACCES`
+before any syscall, and the engine then runs its interpreter.
+
+*Corrected 2026-10-07, after the source was re-read for B-2:*
+
+- **The chokepoint holds, but only with fast permissions off.** Every write
+  into the pool reaches `performJITMemcpy` (`ExecutableAllocator.h` 276-317),
+  which routes on `isJITPC`, one range check. LinkBuffer copies a finished
+  function out through it, and its link and patch steps write single
+  instructions through it at the exec address. The paths that bypass it --
+  LinkBuffer's direct-to-pool copy and the memcpy repatching -- open only
+  under `useFastJITPermissions`, Apple's APRR mode. That mode is the one that
+  *bypasses* the chokepoint; an earlier draft of this section cited it as
+  evidence *for* the chokepoint.
+- **`ARM64Assembler::cacheFlush` is no longer a hard `#error`.** B-0 gave it a
+  Thylacine arm: `SYS_ICACHE_SYNC` (103) by `svc`, with a release assert on
+  the result.
+- **The port is more than three sites.** Enable `SEPARATED_WX_HEAP`; give
+  `initializeSeparatedWXHeaps` a Thylacine arm (its caller is gated on the
+  flag, the callee on Darwin, so turning the flag on alone does not compile);
+  reserve through `SYS_JIT_CREATE` rather than `mmap`, through a WTF
+  `PageReservation` factory, since the (base, size) constructor is private;
+  generate a write thunk whose 4- and 8-byte copies are single aligned stores
+  (Apple's copies anything under 8 bytes a byte at a time, which tears an
+  instruction patch, and the separated arm ignores `RepatchingFlag::Atomic`);
+  run the pool at 64 MiB (`jitMemoryReservationSize`), inside the +-128 MiB
+  branch range, so no jump island is ever requested; acquire `CAP_JIT`; and
+  the build flags.
+- **The exec alias stays readable.** Repatching decodes the instruction it
+  replaces (`linkPointer`, `relinkJumpOrCall`), so only the thunk's own page
+  can be execute-only, as on Apple; the pool is R+X.
+- **The Wasm thread set is not empty.** Every thread that enters a VM joins
+  it when Wasm is on, and the Wasm tier-up paths that walk it suspend each
+  thread, which B-0 made fatal. Harmless until BBQ/OMG run (B-2e), which must
+  replace the walk.
+
+The YARR regex JIT, the CSS selector JIT and the Wasm tiers share the one
+allocator. The kernel side changes too (B-2a/B-2b): the region is a
+reservation committed page by page, and the writer alias is hardened before
+the JIT first runs (`docs/JIT-ON-WX-DESIGN.md`, "B-2").
 
 **Ladybird: nothing to do for JavaScript; one function for WebAssembly.**
 LibJS and LibRegex never generate code. The Cranelift bridge's generic path is
@@ -620,7 +653,11 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-1b | Pouch: `mprotect` / `madvise` / partial `munmap` / real pthread guards; the main-thread stack to 8 MiB with its extent in auxv. | `pouch-hello-*` legs incl. a pthread guard FAULT; the allocate-free-measure witness RED on the old libc |
 | B-1c | native: `dlmalloc-rs` over a Thylacine platform trait replaces the fixed 4 MiB heap; the witness on both substrates. | the kernel's page count rises past 4 MiB and FALLS after free, the trim sabotaged once |
 | B-1d | dlopen: PT_INTERP for native execs; `burrow_map_file`; the driver's `-shared` / PIE / `-dynamic-linker`; `libc.so` in the sysroot; ldso's boundary-line; the handle form designed. Lands before B-3. | a Pouch-built `.so` loaded by a Pouch host on the device; the deny paths (an `MNOEXEC` mount; a name outside the namespace) |
-| **B-2** | The JIT: separated WX heap on `SYS_JIT_CREATE`; `CAP_JIT` clearance for `jsc`. | same benchmark with JIT tiers; a deny-path probe (no `CAP_JIT` -> interpreter, never RWX); audit |
+| **B-2** | The JIT: separated WX heap on `SYS_JIT_CREATE`; `CAP_JIT` clearance for `jsc`. Split by the operator's votes of 2026-09-28: | same benchmark with JIT tiers; a deny-path probe (no `CAP_JIT` -> interpreter, never RWX); audit |
+| B-2a | kernel: the code Burrow becomes a reservation (demand-zero, charged per touched page, no physical contiguity); the I-cache sync exact on aliasing I-caches. Audit-bearing. | a 64 MiB region created for nothing; each witness RED once; audit closed |
+| B-2b | kernel: the writer alias hardened (random placement, an execute-only sealed thunk, `LDTR`/`STTR` user copies). Audit-bearing. | a syscall refuses to read an execute-only page; audit closed |
+| B-2c | JavaScriptCore's Thylacine separated-WX arm; `jsc` takes `CAP_JIT`; Baseline + YARR. | the benchmark with the JIT on; the deny probe; `ls-jsc` |
+| B-2d / B-2e | DFG; then FTL (B3) + Wasm BBQ/OMG, each its own chunk and audit. | the same benchmark |
 | **B-3** | P3: the libraries, ICU first. | each library's own tests under Pouch |
 | **B-4** | P2: design document, then the primitive, then WebKit's `Platform/IPC` + `SharedMemory` backend. | two-process message + shared-bitmap witness; audit |
 | **B-5** | WebCore + WebKit2 bring-up, headless: `PORT=Thylacine`, modelled on PlayStation. P5 resolved here. | `WKPagePaint` renders a local page to a PNG on the device |
