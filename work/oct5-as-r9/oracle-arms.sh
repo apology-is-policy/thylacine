@@ -113,6 +113,28 @@ PY
 cp "$REAL_MUTANT" "$W/I-real-unattributable.log"
 cp "$REAL_CONTROL" "$W/J-real-uninstrumented.log"
 
+# ---- THE TRANSCRIPT, retained. ----
+# Same reason the runner now keeps its disk readings: a result that exists only
+# in the terminal that produced it is a verdict without a capture, and a peer
+# reviewing this branch cannot see it. The header names WHAT was exercised --
+# the three files by content hash -- because a table of arm results with no
+# subject is not evidence of anything.
+TRANSCRIPT=${TRANSCRIPT:-work/oct5-as-r9/oracle-arms-transcript.txt}
+: > "$TRANSCRIPT"
+rec() { echo "$@" | tee -a "$TRANSCRIPT"; }
+rec "oracle-arms transcript -- $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+rec "HEAD            $(git rev-parse HEAD)"
+# The CONTENT HASHES are the authoritative half; HEAD is only the commit this
+# run was taken against, and the three files may be modified relative to it --
+# which is normal, since the arms are driven BEFORE the commit that lands them.
+rec "vs HEAD         $(git status --porcelain -- "$S" kernel/test/loom_private_fixture.h "$0" | wc -l | tr -d ' ') of those 3 files modified"
+rec "runner          $(shasum -a 256 "$S" | cut -c1-16)  $S"
+rec "fixture         $(shasum -a 256 kernel/test/loom_private_fixture.h | cut -c1-16)  kernel/test/loom_private_fixture.h"
+rec "harness         $(shasum -a 256 "$0" | cut -c1-16)  $0"
+rec "base logs       $REAL_CONTROL"
+rec "                $REAL_MUTANT"
+rec "oracle extract  lines $a-$b of the runner, $(wc -l < "$W/oracle.sh" | tr -d ' ') lines"
+
 # ---- DRIVE both oracles on every arm. ----
 # set -e OFF for the drives: a refusing arm is the EXPECTED result on most of
 # them, and under set -e the failing command substitution killed the harness
@@ -123,17 +145,17 @@ run() { # run <oracle> <log> <expected rc> <required substring>
   _got=$( cd "$W"; OUT=. sh -c ". ./oracle.sh; $_o '$_lg'" 2>&1; echo "rc=$?" )
   _rc=$(echo "$_got" | tail -1 | sed 's/rc=//')
   if [ "$_rc" != "$_want" ]; then
-    echo "FAIL  $_o($_lg): rc=$_rc, wanted $_want"; echo "$_got" | sed 's/^/        /'; FAILED=1; return
+    rec "FAIL  $_o($_lg): rc=$_rc, wanted $_want"; echo "$_got" | sed 's/^/        /'; FAILED=1; return
   fi
   if ! echo "$_got" | /usr/bin/grep -qF "$_sub"; then
-    echo "FAIL  $_o($_lg): rc=$_rc correct but the message lacks: $_sub"
+    rec "FAIL  $_o($_lg): rc=$_rc correct but the message lacks: $_sub"
     echo "$_got" | sed 's/^/        /'; FAILED=1; return
   fi
-  printf 'ok    %-13s %-36s rc=%s  %s\n' "$_o" "$_lg" "$_rc" "$_sub"
+  rec "$(printf 'ok    %-13s %-36s rc=%s  %s' "$_o" "$_lg" "$_rc" "$_sub")"
 }
 FAILED=0
 echo
-echo "=== the CONTROL oracle ==="
+rec "=== the CONTROL oracle ==="
 run check_control A-control-success.log               0 "verdict PASS in the leg's own block"
 run check_control B-early-check-failure.log           1 "A CHECK INSIDE THE LEG FAILED"
 run check_control C-late-check-failure.log            1 "A CHECK INSIDE THE LEG FAILED"
@@ -144,7 +166,7 @@ run check_control M-arrival-fail-no-cleanup.log       1 "the verdict in its own 
 run check_control I-real-unattributable.log           1 "NEVER ANNOUNCED"
 run check_control J-real-uninstrumented.log           1 "never reached its owner drop"
 echo
-echo "=== the MUTANT oracle ==="
+rec "=== the MUTANT oracle ==="
 run check_mutant  D-mutant-target.log                 0 "DISCRIMINATED"
 run check_mutant  A-control-success.log               2 "DID NOT PRODUCE THE PREDICTED FAILURE"
 run check_mutant  B-early-check-failure.log           2 "DID NOT PRODUCE THE PREDICTED FAILURE"
@@ -156,4 +178,5 @@ run check_mutant  N-two-extinctions.log                2 "OTHER extinction(s) fi
 run check_mutant  O-announced-no-arrival.log           2 "NEVER REACHED ITS OWNER DROP"
 run check_mutant  I-real-unattributable.log           2 "NOT ATTRIBUTABLE TO THIS LEG"
 echo
-[ "$FAILED" = 0 ] && echo "ALL ARMS BEHAVED AS SPECIFIED" || { echo "SOME ARMS FAILED"; exit 1; }
+[ "$FAILED" = 0 ] && rec "ALL ARMS BEHAVED AS SPECIFIED" || { rec "SOME ARMS FAILED"; exit 1; }
+echo "-- transcript retained at $TRANSCRIPT"

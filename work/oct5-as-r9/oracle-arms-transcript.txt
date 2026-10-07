@@ -1,0 +1,31 @@
+oracle-arms transcript -- 2026-10-07T20:11:04Z
+HEAD            024c6d2df60742d7b0e17550d6a346ce0a08301c
+vs HEAD         1 of those 3 files modified
+runner          09467a51573aff23  work/oct5-as-r9/reap-leg-run.sh
+fixture         4b782c87576f7239  kernel/test/loom_private_fixture.h
+harness         ad45964c3202d98c  work/oct5-as-r9/oracle-arms.sh
+base logs       work/oct5-as-r9/reap-leg-20261007T190621Z/control-boot.log
+                work/oct5-as-r9/reap-leg-20261007T190621Z/mutant-boot.log
+oracle extract  lines 279-443 of the runner, 165 lines
+=== the CONTROL oracle ===
+ok    check_control A-control-success.log                rc=0  verdict PASS in the leg's own block
+ok    check_control B-early-check-failure.log            rc=1  A CHECK INSIDE THE LEG FAILED
+ok    check_control C-late-check-failure.log             rc=1  A CHECK INSIDE THE LEG FAILED
+ok    check_control D-mutant-target.log                  rc=1  THE LEG DID NOT PASS
+ok    check_control G-no-arrival-but-pass.log            rc=1  never reached its owner drop
+ok    check_control H-pass-without-normal-marker.log     rc=1  normal-fallthrough marker is absent
+ok    check_control M-arrival-fail-no-cleanup.log        rc=1  the verdict in its own block is FAIL
+ok    check_control I-real-unattributable.log            rc=1  NEVER ANNOUNCED
+ok    check_control J-real-uninstrumented.log            rc=1  never reached its owner drop
+=== the MUTANT oracle ===
+ok    check_mutant  D-mutant-target.log                  rc=0  DISCRIMINATED
+ok    check_mutant  A-control-success.log                rc=2  DID NOT PRODUCE THE PREDICTED FAILURE
+ok    check_mutant  B-early-check-failure.log            rc=2  DID NOT PRODUCE THE PREDICTED FAILURE
+ok    check_mutant  E-arrival-then-later-extinction.log  rc=2  survived the target drop
+ok    check_mutant  F-arrival-pass-no-cleanup.log        rc=2  DID NOT PRODUCE THE PREDICTED FAILURE
+ok    check_mutant  K-arrival-pass-then-extinction.log   rc=2  THE LEG COMPLETED (verdict PASS
+ok    check_mutant  L-arrival-fail-then-extinction.log   rc=2  THE LEG COMPLETED (verdict FAIL
+ok    check_mutant  N-two-extinctions.log                rc=2  OTHER extinction(s) fired too
+ok    check_mutant  O-announced-no-arrival.log           rc=2  NEVER REACHED ITS OWNER DROP
+ok    check_mutant  I-real-unattributable.log            rc=2  NOT ATTRIBUTABLE TO THIS LEG
+ALL ARMS BEHAVED AS SPECIFIED
