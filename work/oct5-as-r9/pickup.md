@@ -715,3 +715,27 @@ Also OWED to aux on 0189: whether a wake delivered across a compaction at all.
 Their "survives your own compaction" is REASONED from the pane checks, not
 observed -- they compacted with no watcher armed. Report either outcome, and
 the negative is the more useful one.
+
+### STAGE 4's DERIVED GUARD IS VERIFIED AGAINST REAL LOGS -- do not redo it
+
+The EXPECT_TESTS derivation was first tested only standalone (it yields 1836).
+The STAGE around it has now been driven as EXTRACTED from the live runbook
+against real boot logs, three arms, exit statuses measured WITHOUT A PIPE:
+
+    build/multiboot-logs/default-smp4-2.log   tests: 1836/1836  -> exit 0  PASSES
+    work/oct5-as-r9/run-1007T061510Z.log      tests: 1834/1834  -> exit 1  REFUSES
+                                              ("total 1834 != expected 1836")
+    a log with no tally at all                                  -> exit 1  REFUSES
+                                              ("NO SUITE TALLY AT ALL")
+
+The 1834 arm is the discriminating one: it is the real AS-R9 checkpoint log, and
+the derived expectation correctly refuses it because that image genuinely had two
+fewer tests. So the guard still bites after being made derived.
+
+THE WRAPPER TRAP RECURRED, in a new dress, and it nearly made me report the
+opposite. I first ran each arm as `( ... ) 2>&1 | sed 's/^/    /'` and read `$?`
+-- which is SED's status, so BOTH arms printed "exit 0" and the refusal looked
+like a pass. The pickup already warned about the `cmd > log; echo "exited $?"`
+form; the general rule is the one to carry: ANY wrapper between the command and
+`$?` -- a pipe, an echo, a backgrounded job -- replaces the status you meant to
+read. Measure the status with nothing after it, or capture to a file first.
