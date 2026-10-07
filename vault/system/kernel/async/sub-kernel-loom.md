@@ -21,7 +21,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-07
 ---
 
 ## Approved private service lifecycle
@@ -29,12 +29,29 @@ updated: 2026-10-05
 Current Loom starts from attached service handles; synchronous native service
 setup and the mid-frame join trust assumption remain outside its asynchronous
 contract. The approved extension is reviewed in docs/ASYNC-SERVICE-LIFECYCLE.md
-and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. It is approved but not implemented; legacy
-rings and the current authority contract are unchanged. AS-0 has compiled
-record mirrors and a bounded lifecycle model. AS-1 supplies the nonblocking
-transport/handshake helpers in [[sub-kernel-ninep-transport]]; no private service handler is
-enabled. The exact boundary is [[abi-loom-service]] and implementation progress
-is recorded in docs/ASYNC-SERVICE-STATUS.md.
+and docs/ASYNC-MEMORY-DESIGN-REVIEW.md. Legacy rings and the current authority
+contract are unchanged. AS-0 has compiled record mirrors and a bounded lifecycle
+model. AS-1 supplies the nonblocking transport/handshake helpers in
+[[sub-kernel-ninep-transport]]. The exact boundary is [[abi-loom-service]] and
+implementation progress is recorded in docs/ASYNC-SERVICE-STATUS.md.
+
+The EMPTY PRIVATE OWNER is now implemented: a private Loom can be created,
+latched closed on its last handle, queued to a retirer kernel thread and
+destroyed, with the ring's backing charge settled inside the same `v->lock`
+interval that decides finality. **No private service handler is enabled and no
+syscall reaches the creation path**, so the only difference an unmodified system
+can observe is none; the admission surfaces that would otherwise accept work on
+such a ring refuse it explicitly rather than by absence.
+
+WHAT IS AND IS NOT QUALIFIED, because "implemented" and "qualified" are not the
+same claim. The port compiles, boots, and passes the full suite, and each of its
+two new witnesses has been shown RED against a mutation of the thing it guards --
+including a mutation of the shipped destructor itself, which is what
+distinguishes a test of this lifecycle from a test of a transcription of it.
+Activation gates have NOT passed: the private path, the replacement memory
+accounting and the clipboard all stay non-default, and the 128 MiB protection is
+retained until the replacement accounting passes its own gates. The A72/KVM axis
+is an explicit, owned, recorded residual rather than a silent gap.
 
 ## Purpose
 

@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-01
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -108,6 +108,36 @@ non-transferable kind cannot be duplicated; rights can only narrow; empty
 or out-of-range rights are refused; and an out-of-enum kind extincts (the
 compile-time assert defends the build, the `default:` arm defends against
 memory corruption at runtime).
+
+### Releasing an owner, not merely a reference
+
+A handle that names a PRIVATE Loom carries an obligation ordinary kinds do not:
+its object must learn that its last *handle* is gone, separately from its
+refcount reaching zero, because the retirement it then schedules has to be
+latched before the reference drops. `handle_release_owner(kind, obj)` wraps
+`handle_release_obj` for that: for `KOBJ_LOOM` it calls `loom_handle_closed`
+first, then releases.
+
+IT IS SWAPPED INTO FOUR OF THE SIX RELEASE SITES, and the two it leaves alone
+are the interesting part. `handle_table_free`, `handle_close`, `handle_replace`
+and `handle_dup_to` each destroy a handle, so each may be destroying the last
+one. `handle_put` does not: it returns a BORROWED reference while the handle
+still exists, so latching there would mark a live ring closing on a mere borrow.
+Nor does the dup-rollback site: it releases an acquire that never became a
+handle at all. The discriminator is "did a handle cease to exist", never "was a
+reference dropped" -- those differ, and only the first may latch.
+
+`handle_private_exec_latch(p)` is the exec-time half, and it runs **before**
+exec's commit point rather than after, which is the opposite of
+`handle_close_on_exec` above and for a reason that does not contradict it. The
+latch is infallible and leaf-only -- it takes no lock that can sleep and cannot
+fail -- because the image swap it precedes cannot be unwound; whereas the actual
+descriptor removal and waiter wake stay in `handle_close_on_exec`, after the
+commit point, where sleeping is allowed. So the two halves sit on opposite sides
+of the same commit point by design: *latch what cannot fail before*, *close what
+may sleep after*. `handle_close_on_exec` additionally ORs private Loom slots
+into its pending set, so a flagged private ring is latched and then closed by
+the same pass.
 
 ## Mechanism
 

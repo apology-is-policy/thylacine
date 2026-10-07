@@ -19,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -212,6 +212,29 @@ routine takes. Default boot measures 10448 of 16384 (63.8%).
 The banner contract [[abi-boot-banner]] is UNCHANGED: `Thylacine boot OK` and
 the `EXTINCTION:` prefix are what it pins, and this is an additive diagnostic
 line of the same class as its two neighbours.
+
+### Service kernel threads started late, and why the retirer is one of them
+
+`boot_main` starts a small number of permanently resident kernel threads on `kproc()` once
+the subsystems they serve exist. The private-ring retirer joins the weft reaper
+there: `loom_retire_init()` then a `thread_create(kproc(), loom_retirer_main)`
+made `ready`, with an `extinction` on allocation failure because a boot that
+cannot create its service threads has no sound state to continue into.
+
+WHY THE TEARDOWN NEEDS A THREAD AT ALL, since that is the part a reader will
+question. A private Loom's last reference can be dropped by a thread that must
+not block, but the teardown it triggers settles the ring's backing charge and
+releases the address-space pin -- work that must happen under locks a dropping
+thread may not be in a position to take. So the drop ENQUEUES and this thread
+performs. It parks indefinitely while the queue is empty, and the queue needs no
+admission control of its own because every entry on it is a ring that was
+already charged on creation: the bound is the charge, not the queue.
+
+This is an ordering constraint on boot, not merely a placement preference. The
+retirer must exist before anything can create a private ring, which is why it is
+started in `boot_main` rather than lazily on first use -- a lazily-created
+retirer would have to be created by the dropping thread, which is exactly the
+thread that cannot block. See [[sub-kernel-loom]] for the lifecycle it serves.
 
 ## Data structures
 
