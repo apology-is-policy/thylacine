@@ -22,6 +22,97 @@ needed the operator.
 
 
 ---
+## 2026-10-06/07 (main, Opus 5.5, effort max) -- seam-90 closed: a blocking 9P reader unwinds at any byte
+
+**Why now.** The arc order put it after devno-u64 and before B-2. The operator
+voted at 21:03Z to close `seam-90-hung-server`: since loom-mc (f6f4c0397) the
+partial frame is the client's (`c->rx_got`), so ARCH 8.8.1.1's block-through
+no longer protected the stream and only kept its cost -- a reader that any
+process serving a mount (`SYS_ATTACH_9P` takes anyone's pipes) can hold by
+stopping mid-reply. The vote named a death and a stop; the guard held caught
+notes too, so I asked, and at 22:15Z the operator added them ("Yes, all
+three"). Record: `dec-2026-10-06-seam90-unwind-any-byte`.
+
+**The heritage.** Plan 9 devmnt: `mountio`'s waserror ends an interrupted
+reader at any byte, `mntgate` hands the reader role on, and the partial
+message stays in `m->q`; Linux trans_fd keeps it in `m->rc.offset`. The tree's
+premise, checked per implementation: every transport recv returns the bytes it
+copied or none (srvconn and the pipe read in production; loopback and mq never
+sleep).
+
+**The build.** Scripture, spec, code and tests were written and committed as
+WIP 8672a3756 while aux held the Mac for its none-wall gate: ARCH 8.8.1.1
+rewritten (8.8.3, the I-9 row, the spec table, DEBUG-FS 5c.6, AUDIT-TRIGGERS
+row 53 with it); `reader_frame.tla` rewritten with two readers and a server
+that may stop for good; `reader_recv_frame` holds `stop_unwinds` for the whole
+recv; `thread_reader_blocks_death` deleted with its four sched.c guards and
+the notes.c one. Fable round 1 ran on the unbuilt WIP, read-only:
+0/0/0/4, all drift in prose and the spec gate (d4c2f17a9), plus three of the
+same kind from my self-audit.
+
+**TLC** (23:36Z; logs in the repo's untracked `scratchpad/tlc-seam90/`): clean
+39, 39 under a fair server, 34 for the old rule under a fair server (the
+2026-07-19 model's claim, reproduced as a control); the discard cfg violates
+NoDesync at 41 (A reads a chunk and unwinds to rx 0; B parses from 0 with the
+wire at 1); the old rule under a stopping server violates EventuallyUnwinds at
+34 with Safety intact (A two chunks in, the server stops, a stutter with A in
+its recv -- the seam itself). All five counts pinned; a wrong pin fails the
+checker.
+
+**Wrong turns, and what caught them.**
+- The two transport tests failed their premise on the first boot, and the
+  premise was one message, so the failure could not say which of six setup
+  stages broke. Two guesses (a zero client deadline; a server recv returning
+  -1 on an empty ring) were refuted by reading, and I stopped guessing: one
+  assertion per stage named it at once -- the server had read the handshake's
+  Tversion, still in c2s because its reply was staged ahead. The rig drains
+  them now (cea674ef2).
+- My RED run (b) checked main's kernel files out while Fable's round 2 was
+  reading the same tree; the reviewer noticed the restamped files and read
+  HEAD instead (round 2 F1). REDs run before a round is spawned, or in a
+  worktree.
+- I wrote two stamps in local time as if UTC; corrected in memory.
+
+**RED runs.** (a) `incomplete:` resetting `rx_got` on an unwind: exactly the
+two transport tests fail, each on "the client kept the partial frame".
+(b) main's sched.c, 9p_client.c, thread.h and notes.c under the new tests:
+exactly the five new tests fail on their headline assertions and the boot
+completes, so every RED leg releases its threads. Restored, rebuilt:
+1904/1904 (cea674ef2).
+
+**Found on the way, owned.**
+- `notes_deliver_tail` (static bool) fell off its end on the native handler
+  path since bbc7ab90a -- the build log's only -Wreturn-type warning -- and
+  its caller loops on the value. Aux (whose chunk it was) bounded the reach: a
+  garbage true costs one extra die/stop check after the handler frame is
+  built. Fixed with `return false`; `-Werror=return-type` is its regression (a
+  control build without the fix fails on exactly that line). Fable round 2:
+  0/0/0/3.
+- Researching what a killed Proc still waits on (the at-exit close,
+  `seam-close-flush-unbounded`, whose risk line assumed a trusted server):
+  Plan 9's escape is kill escalation (`forceclosefgrp` hands the open
+  channels to the `ccloseq` kprocs). Design vote owed.
+- The same research confirmed the pinned tag-pool item: a sync 9P op that
+  finds the 64-tag pool full fails EIO, and an async-clunk burst of 64+ closes
+  leaves the pool full on a plain mount. A witness run (patch
+  `scratchpad/tagpool_witness.py`, not committed) failed as predicted: the
+  control saw 64 tags held, then a sync walk failed. The write-behind flush
+  drops its data on that error and no close reports it. Design vote owed;
+  it goes before the exit-close seam.
+
+**aux-3 merged** (61c71525f, f8bd8688c) so one SMP gate covers both, as aux
+agreed: ARCH's debug row took both sides' disjoint edits against the merge
+base; the journal's three-way line census lost nothing; the views were
+re-rendered. Suite 1909/1909.
+
+**Gates.** <ci-smp-gate>; <ls-ci>.
+
+**What "fixed" covers.** A killed, stopped or signalled thread inside the
+elected reader's recv leaves it at once, at any byte, and the next reader
+resumes the frame. A killed Proc can still wait at exit when a close needs
+its server (`seam-close-flush-unbounded`), and the SQPOLL kthread's reap clunk
+the same.
+
 ## 2026-10-06 (aux, Opus 5.5 1M, effort xhigh) -- none owns nothing but itself; a /proc refusal answers EACCES
 
 **Why now.** The 9P-ends audit's F1 made a reader running as `none` no end of a `/ctl/9p-sessions` row, and enqueued the `/proc` owner predicate's view of none as its own item (OPEN-BUGS 17:00Z). Reading the whole owner family showed it was wider than enqueued. Every owner axis compared principals, so two unrelated Procs running as `none` were one owner everywhere: kill (I-26), debug whenever the caps covered, which two bare none Procs always do (I-39), and the owner-or-hostowner reads (`environ`, `sched`, `imperium`, `cpu_ns`). No in-tree program runs as none today; the exposure is a future pre-auth or network server.

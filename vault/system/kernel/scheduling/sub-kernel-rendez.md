@@ -35,9 +35,8 @@ that are not obvious.
   caught note delivers at its EL0-return tail. The arm fires only when `cond`
   is still false (data wins over the note) and the one predicate
   `thread_caught_note_unwinds` holds, which poll's verdict shares: the Proc is
-  a Linux phenotype, a mid-frame 9P reader is at a frame boundary (the #90
-  guard), and -- tested LAST -- `thread_caught_note_claim` claims the note's
-  family, which it does
+  a Linux phenotype and -- tested LAST -- `thread_caught_note_claim` claims the
+  note's family, which it does
   only for a thread whose call is on signal(7)'s list (`note_interruptible`)
   and only once per note: the peers the same wake reached find the family
   claimed and re-park ([[sub-kernel-notes]]). The claim is the claimant's until
