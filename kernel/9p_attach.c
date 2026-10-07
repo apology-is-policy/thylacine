@@ -692,10 +692,11 @@ static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
 }
 
 // Send every deferred Tclunk of `a`, each after its close job if it has one,
-// which this closer took off the run-queue (closer_busy). Each entry's reference is dropped outside the lock: the last
-// drop tears the session down, which may close Spoors and queue again. While
-// entries remain they hold references, so `a` outlives each unref but the
-// last; the closer lets go of `a` (closer_busy = false) before that one.
+// which this closer took off the run-queue (closer_busy). Each entry's
+// reference is dropped outside the lock: the last drop tears the session
+// down, which may close Spoors and queue again. While entries remain they
+// hold references, so `a` outlives each unref but the last; the closer lets
+// go of `a` (closer_busy = false) before that one.
 static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
     for (;;) {
         spin_lock(&g_closer_lock);

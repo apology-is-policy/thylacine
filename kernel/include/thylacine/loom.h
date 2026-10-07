@@ -526,12 +526,11 @@ struct Loom {
     // single-writer flags of the join handshake (release/acquire paired). The
     // kthread reads only over a ready stream and parks on readiness hooks
     // (LOOM.md 8.6), so its pump never waits in a recv and the stop's wake
-    // reaches its park. That is not "the join always terminates": a reap's last
-    // clunk can drain a full tag pool or wait out back-pressure in a blocking
-    // recv, which nothing interrupts on a kernel thread, so a server that stops
-    // delays the stop for as long as it lives. Termination rests on the server
-    // answering -- a trust assumption, not a mechanism (the vault's
-    // seam-close-flush-unbounded).
+    // reaches its park. Nor does a reap's last close wait for a server: no
+    // death reaches a kernel thread, so its Tclunk goes to the closer where it
+    // would wait for a tag or ring space (ARCH 8.8.1.1), and a staged
+    // write-behind run goes to the closer as a close job (closes_never_wait,
+    // ARCH 7.9.1 part C). The join's bound is the kthread's own work.
     struct Thread          *sqpoll;          // the kthread (NULL = no SQPOLL)
     bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
     bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)

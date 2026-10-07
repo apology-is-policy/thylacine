@@ -4262,12 +4262,10 @@ void thread_exit_self(void) {
     // REAPER's (non-dying) thread and worked; the flag restores exactly
     // that behavior inside the new window. The re-admitted wedged-server
     // strand is RELOCATED from the parent (where it hung the shell's
-    // wait_pid) onto the already-dying Proc -- and, unlike the old
-    // reap-time strand, it is NOT breakable by a further kill (the flag
-    // suppresses both death legs for the closer): a wedged flagged close
-    // parks the dying Proc unreapably. Precondition = a wedged TRUSTED
-    // server (an already system-degraded state); a bounded/abortable
-    // close-flush is the recorded v1.x seam (round-2 F3). proc_free's
+    // wait_pid) onto the already-dying Proc, where a kill breaks it: a
+    // kill that finds the Proc terminating lifts the flag's hold
+    // (proc_group_kill), the close's waits unwind as a death, and what it
+    // cannot finish goes to the closer (ARCH 7.9.1 parts B and C). proc_free's
     // handle_table_free remains the fallback for orphan/rollback paths
     // (idempotent: p->handles is NULLed by the close).
     if (become_zombie && p->handles) {
