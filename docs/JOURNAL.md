@@ -819,6 +819,78 @@ of the hour it cost them.
 Nothing ran in the guest in any of this. The reap leg is still UNRUN, the lease
 is main's until after their RED campaign, and disk is under my floor regardless.
 
+### After the second self-compaction (18:35Z): the release half, asked of the source
+
+Resumed with main holding the Mac for B-2 land gates and me queue 1, so the
+runtime step the whole day has pointed at was still blocked. Two things were
+worth doing with that window rather than waiting in it.
+
+The first was dull and paid immediately. The reap runner refuses on six things
+that have nothing to do with the Mac -- the fixture's leg references and its
+delta assertion, the derived tally, the preserve function's extraction, the
+uniqueness of both mutation anchors, and the extinction string still being in
+addrspace.c. Every one of those is a HARNESS refusal, and discovering one inside
+the lease window costs a ten-minute bake for a reason that is not about the
+kernel. Dry-run off-lease, all six cleared. The one that justified the exercise
+was the tally: EXPECT_TESTS derives 1836, and the newest real boot log reports
+`tests: 1836/1836 PASS` while three older logs read 1834/1834 -- so the
+derivation TRACKS registrations instead of being a constant that happens to
+agree, which is the only thing that makes deriving it better than typing it. The
+fixture also still carries 'retires exactly once', and that was worth asking
+because this session's release-witness removal edited that same file and could
+plausibly have taken the delta assertion's wording with it.
+
+The second was the open question itself. The leg witnesses ACQUISITION; release
+was recorded open because the page-granular instrument could not be made sound in
+that fixture. But "no witness" is not the same as "unknown", and the pairing can
+be asked of the source. The production set is four greps wide: ONE
+addrspace_private_begin call site, THREE _end sites, exactly ONE write to
+l->service_as, and loom_free static with a single call site guarded by
+!loom_is_private. Every path that takes the guard releases it exactly once --
+the creator's two failure exits, and the retirer's destroy, which releases LAST,
+after the uncharge, with the retired counter bumped after that.
+
+Two things about that result matter more than the result. First, the enumeration
+IS the value: a negative over a set nobody counted is a guess, and this set is
+small enough to count, which is why it was worth doing at all. Second, the
+labelling. It is a STATIC argument: it shows the code CONTAINS a release on every
+path and says NOTHING about one having executed. It is blind to a refcount that
+never reaches zero, a retirer that never drains (the queue has no bound and no
+timeout, and lp_wait rests on that liveness), and the uncharge arithmetic. So the
+honest status change is narrow -- "release unverified" becomes "release
+structurally paired over an enumerated set, execution unwitnessed" -- and it does
+not reduce the case for the witness by one inch. Sent to astra as a note rather
+than a turn, because it asks her for nothing.
+
+One grep lesson came out of it that generalises. `loom_free` has 56 mentions in
+the tree and ONE call site; everything else is a comment. A bare grep for a
+static function's name therefore reads alarmingly and means nothing: the
+denominator that decides the question is call sites, not mentions. The dossier
+now says so in place, since the next reader will run the same grep.
+
+The fixture was deliberately NOT edited to record any of this. A comment-only
+change cannot alter behaviour, but it would perturb the file under measurement
+and invalidate the precondition greps cleared minutes earlier. Perturbing the
+subject in order to document it is how a measurement loses its provenance.
+
+Two traps re-met, both already in my own memory, which is the uncomfortable part.
+An unquoted `--include=*.c` aborted a zsh command TWICE -- zsh treats any
+glob-shaped ARGUMENT as a glob, not just a path, and a no-match kills the whole
+command rather than passing it through. And BSD has no `timeout`. Neither cost
+more than a retry, but a lesson that is stored and still fires is a lesson stored
+in the wrong shape.
+
+Calls closed: 0187 (pool_restore, (b) landed, main had already said bye) and
+0186 (the disk FYI -- the volume came back up to 8.5 GiB, so the thread had run
+its course). astra's note 46 reviewed 4b1394619 and found the t59 claim limits
+and the missing-summary rejection present, with no further correction; she is
+waiting on the acquisition witness and nothing else.
+
+The wait itself is a bounded background poll, not a turn end, and it emits on
+every terminal state -- lease acquired, watcher dead without the lease, or a
+90-minute deadline. A watch that only reports success is silent through exactly
+the failure it exists to catch.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
