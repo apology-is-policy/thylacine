@@ -8,41 +8,25 @@
 # THAT -- so a green taken after a sabotage, without an intervening rebuild from
 # clean source, is a true statement about the wrong binary.
 #
-# THREE DEFECTS ASTRA FOUND IN THE FIRST VERSION OF THIS FILE (yip 0161 t31),
-# fixed here, each worth naming because each is a class this tree keeps meeting:
-#
-#  1. IT READ test.sh's STDOUT WHILE ITS COMMENT CLAIMED THE BOOT LOG. The
-#     per-test verdicts live in the SERIAL log ($BUILD_DIR/test-boot.log), which
-#     it never touched. That is the stdout-versus-serial defect that previously
-#     hid the suite witnesses, and the comment asserting the correct behaviour
-#     made it worse: a comment true about the wrong thing, in a script whose
-#     whole job is catching that. Now each leg's serial log is PRESERVED the
-#     moment test.sh exits, fail-closed on the copy AND on its content, into a
-#     unique per-run directory a retry cannot overwrite, and every verdict is
-#     read from the preserved copy.
-#  2. NO RESTORATION ON FAILURE. build() called die, so a failed mutant compile
-#     or an interrupt left TRACKED SOURCE MUTATED while the header above claimed
-#     it always reverted -- and a later unrelated build would then compile
-#     sabotaged source. Restoration now runs from an EXIT/INT/TERM/HUP trap,
-#     from exact byte copies taken before any mutation, verified by hash before
-#     it reports success. If a failure prevents the clean rebuild, build/ is
-#     STAMPED as holding a mutant kernel rather than left to be booted as clean.
-#  3. THE GREEN CONTROL COULD NOT SEE AN UNRELATED FAILURE. run_suite threw
-#     test.sh's status away (it returned printf's) and report() checked two named
-#     rows, so a green control with some other test failing still printed ALL
-#     ROWS AS PREDICTED. Status is data now; the clean control additionally
-#     requires the full tally with zero skips, no extinction and no other FAIL;
-#     and each RED is attributed by requiring the failing set to be EXACTLY its
-#     intended test, so an unrelated build or runtime failure cannot be banked
-#     as a successful red leg.
+# THREE SEPARATE FACTS, never collapsed into one (astra, yip 0161 t34-C):
+#   SRC_RESTORED    -- tracked source is byte-identical to its pre-run state
+#   IMAGE_REBUILT   -- build/ was rebuilt from that restored source
+#   IMAGE_QUALIFIED -- the suite on that rebuild passed every green check
+# Only the third removes the UNQUALIFIED marker. The first two can hold while
+# the image is still unfit to found any claim on.
 #
 # A kernel test FAIL EXTINCTS the boot, so a red leg's serial log stops at the
 # failure and carries no tally. That is expected, and it is why a red leg is
-# judged on its named verdict plus attribution, never on a tally.
+# judged on its named verdict, its FAIL REASON and attribution -- never a tally.
 #
 # REQUIRES THE MAC LEASE: it builds and boots. Hold it before running. It kills
-# nothing it does not own: test.sh manages its own VM, and no peer's process or
-# lease is touched.
+# nothing it does not own: the only processes it ever signals are the child it
+# launched and a QEMU whose command line names THIS tree's build/ directory.
+#
+# Everything it touches is relative to ROOT, so the wrapper's own control flow
+# is exercised off-lease by pointing ROOT at a scratch repo whose tools/ holds
+# stubs. There is deliberately NO command-override seam: a seam that can swap
+# the build or the suite is a seam that can fake a gate.
 set -u
 ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT" || exit 3
@@ -51,6 +35,15 @@ BOOTLOG=build/test-boot.log              # tools/test.sh:16,45 -- $BUILD_DIR/tes
 RUN=work/oct5-as-r9/private-owner-logs/red-legs/$(date -u +%Y%m%dT%H%M%SZ)
 PRISTINE=$RUN/pristine
 MUTANT_STAMP=build/MUTANT-UNQUALIFIED
+MUTATED_FILES="kernel/burrow.c kernel/loom.c"
+
+SRC_RESTORED=0
+IMAGE_REBUILT=0
+IMAGE_QUALIFIED=0
+CHILD_PID=
+SUITE_RC=
+MUTANT_HASH=                             # hash of the file currently mutated, if any
+MUTANT_FILE=
 
 say()  { printf '\n== %s\n' "$*"; }
 die()  { printf '\nREFUSING: %s\n' "$*"; exit 3; }
@@ -60,65 +53,200 @@ mkdir -p "$PRISTINE" || die "cannot create $PRISTINE"
 
 [ -z "$(git status --porcelain -- kernel tools)" ] \
   || die "kernel/ or tools/ is dirty -- commit first; this script mutates tracked source"
-[ -f "$BOOTLOG" ] || say "note: $BOOTLOG absent; it is created by the first suite run"
 
-HEAD_AT_START=$(git rev-parse HEAD)
+HEAD_AT_START=$(git rev-parse HEAD) || die "cannot read HEAD"
 printf '%s\n' "$HEAD_AT_START" > "$RUN/head.txt"
 
-# EXACT ORIGINALS, kept as bytes rather than trusted to the index, so restoration
-# cannot depend on git state that a later step might change.
-MUTATED_FILES="kernel/burrow.c kernel/loom.c"
+# EXACT ORIGINALS as bytes, plus their hashes, so restoration never depends on
+# git state a later step might move, and so an unexpected concurrent edit is
+# REFUSED rather than silently overwritten.
 for f in $MUTATED_FILES; do
   cp "$f" "$PRISTINE/$(basename "$f")" || die "cannot preserve $f"
+  git hash-object "$f" > "$PRISTINE/$(basename "$f").hash" || die "cannot hash $f"
 done
 
-CLEAN_REBUILT=0
-restore() {
-  rc_in=$?
+pristine_hash() { cat "$PRISTINE/$(basename "$1").hash"; }
+
+# ---------------------------------------------------------------------------
+# Owned work. Each build and each suite runs as a tracked child so that a signal
+# arriving mid-build cannot have the trap copy pristine source back underneath a
+# compiler that is still reading it, or leave an orphaned VM holding the lease's
+# cores after this script is gone.
+# ---------------------------------------------------------------------------
+OWNED_RC=
+run_owned() { # run_owned <logfile> <cmd> [args...]
+  log=$1; shift
+  "$@" > "$log" 2>&1 &
+  CHILD_PID=$!
+  wait "$CHILD_PID"
+  OWNED_RC=$?
+  CHILD_PID=
+}
+
+# QEMUs belonging to THIS tree only, identified by this ROOT's build/ path in
+# the command line. A peer's guest boots a different tree and is never matched,
+# never signalled, never waited on.
+my_qemu_pids() {
+  ps -Ao pid=,comm=,command= 2>/dev/null \
+    | awk -v r="$ROOT/build" '$2 ~ /qemu-system-aarch64$/ && index($0, r) { print $1 }'
+}
+
+reap_owned() {
+  if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
+    echo "stopping the owned child $CHILD_PID and waiting for it to exit"
+    kill -TERM "$CHILD_PID" 2>/dev/null
+    i=0
+    while kill -0 "$CHILD_PID" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 1; i=$((i + 1)); done
+    if kill -0 "$CHILD_PID" 2>/dev/null; then
+      echo "child $CHILD_PID ignored TERM; sending KILL"
+      kill -KILL "$CHILD_PID" 2>/dev/null
+      sleep 1
+    fi
+  fi
+  pids=$(my_qemu_pids)
+  if [ -n "$pids" ]; then
+    echo "this tree's QEMU still up ($(printf '%s' "$pids" | tr '\n' ' ')); stopping it before restoring source"
+    for q in $pids; do kill -TERM "$q" 2>/dev/null; done
+    i=0
+    while [ -n "$(my_qemu_pids)" ] && [ "$i" -lt 60 ]; do sleep 1; i=$((i + 1)); done
+    rest=$(my_qemu_pids)
+    if [ -n "$rest" ]; then
+      for q in $rest; do kill -KILL "$q" 2>/dev/null; done
+      sleep 1
+    fi
+  fi
+  [ -z "$(my_qemu_pids)" ] || echo "WARNING: this tree still has a QEMU up after KILL"
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup. Runs once, from the EXIT trap or from a signal, with traps disabled
+# on entry so `exit` here cannot re-enter it. A failure anywhere inside FORCES a
+# nonzero status: a run that could not put the tree back must never report 0.
+# ---------------------------------------------------------------------------
+cleanup() { # cleanup <rc> <why>
+  trap - EXIT INT TERM HUP
+  rc=$1
+  printf '\n== cleanup (%s, status %s)\n' "$2" "$rc"
+
+  reap_owned
+
   bad=0
   for f in $MUTATED_FILES; do
-    cp "$PRISTINE/$(basename "$f")" "$f" 2>/dev/null || { echo "RESTORE FAILED: $f"; bad=1; continue; }
-    want=$(git hash-object "$PRISTINE/$(basename "$f")")
-    got=$(git hash-object "$f")
-    [ "$want" = "$got" ] || { echo "RESTORE MISMATCH: $f ($got != $want)"; bad=1; }
+    want=$(pristine_hash "$f")
+    got=$(git hash-object "$f" 2>/dev/null || echo missing)
+    if [ "$got" = "$want" ]; then
+      continue
+    fi
+    # Overwrite ONLY what this script is known to have mutated. Anything else is
+    # a concurrent edit by someone or something that is not this run, and losing
+    # it would be worse than leaving the tree dirty.
+    if [ "$f" = "$MUTANT_FILE" ] && [ "$got" = "$MUTANT_HASH" ]; then
+      cp "$PRISTINE/$(basename "$f")" "$f" 2>/dev/null \
+        || { echo "RESTORE FAILED: $f"; bad=1; continue; }
+      back=$(git hash-object "$f")
+      [ "$back" = "$want" ] || { echo "RESTORE MISMATCH: $f ($back != $want)"; bad=1; }
+    else
+      echo "*** $f IS NOT WHAT THIS RUN LEFT ($got; this run's mutant was ${MUTANT_HASH:-none})"
+      echo "    REFUSING to overwrite an edit this run did not make. Original: $PRISTINE/$(basename "$f")"
+      bad=1
+    fi
   done
-  if [ $bad -eq 0 ]; then
-    echo "sources restored and verified byte-for-byte: $MUTATED_FILES"
+
+  now_head=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+  if [ "$now_head" != "$HEAD_AT_START" ]; then
+    echo "*** HEAD MOVED during the run ($HEAD_AT_START -> $now_head) -- evidence provenance is suspect"
+    bad=1
+  fi
+
+  if [ "$bad" -eq 0 ]; then
+    SRC_RESTORED=1
+    echo "source restored and verified byte-for-byte: $MUTATED_FILES"
   else
     echo "*** SOURCES MAY STILL BE MUTATED -- originals are in $PRISTINE ***"
   fi
-  if [ "$CLEAN_REBUILT" -eq 0 ]; then
-    { echo "build/ holds a kernel built from MUTATED source by $0"
-      echo "run at $(date -u +%Y-%m-%dT%H:%M:%SZ) against HEAD $HEAD_AT_START"
-      echo "DO NOT treat any artifact here as qualified; rebuild before any gate."
-    } > "$MUTANT_STAMP" 2>/dev/null
-    echo "*** build/ IS UNQUALIFIED: stamped $MUTANT_STAMP -- rebuild before booting it as clean ***"
+
+  if [ "$IMAGE_QUALIFIED" -eq 1 ]; then
+    rm -f "$MUTANT_STAMP"
+    echo "build/ is QUALIFIED: rebuilt from restored source and green; marker removed"
+  else
+    { echo "build/ IS NOT QUALIFIED."
+      echo "run      : $0"
+      echo "at       : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "HEAD     : $HEAD_AT_START"
+      echo "evidence : $RUN"
+      echo "src restored  : $SRC_RESTORED"
+      echo "image rebuilt : $IMAGE_REBUILT"
+      echo "image green   : $IMAGE_QUALIFIED"
+      if [ "$IMAGE_REBUILT" -eq 0 ]; then
+        echo "This kernel was built from MUTATED source. Rebuild before any gate."
+      else
+        echo "Rebuilt from restored source, but its suite did not pass every check."
+        echo "Do not found a claim on it; read the evidence directory."
+      fi
+    } > "$MUTANT_STAMP" 2>/dev/null \
+      || echo "WARNING: could not write $MUTANT_STAMP"
+    echo "*** build/ IS UNQUALIFIED: stamped $MUTANT_STAMP ***"
   fi
-  exit $rc_in
+
+  if [ "$bad" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=4; fi
+  exit "$rc"
 }
-trap restore EXIT INT TERM HUP
+trap 'cleanup $? "exit" ' EXIT
+trap 'cleanup 130 SIGINT'  INT
+trap 'cleanup 143 SIGTERM' TERM
+trap 'cleanup 129 SIGHUP'  HUP
+
+# The marker goes down BEFORE the first mutation, not only from the trap: a
+# SIGKILL or a power loss cannot run a trap, and the one state that must never
+# be silently inherited is a mutant kernel in build/ that looks clean.
+stamp_pre_mutation() {
+  { echo "build/ IS NOT QUALIFIED -- a red-legs run is in progress or died."
+    echo "started : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "HEAD    : $HEAD_AT_START"
+    echo "evidence: $RUN"
+    echo "If this file is still here, treat build/ as holding MUTATED-source output."
+  } > "$MUTANT_STAMP" 2>/dev/null || die "cannot write $MUTANT_STAMP"
+}
 
 build() { # build <leg>
   say "build ($1)"
-  if ! tools/build.sh kernel --config ci > "$RUN/$1-build.txt" 2>&1; then
+  run_owned "$RUN/$1-build.txt" tools/build.sh kernel --config ci
+  if [ "$OWNED_RC" -ne 0 ]; then
     tail -30 "$RUN/$1-build.txt"
-    die "build failed for $1 -- see $RUN/$1-build.txt"
+    die "build failed for $1 (rc $OWNED_RC) -- see $RUN/$1-build.txt"
   fi
 }
 
-# Runs the suite and PRESERVES the serial log immediately, fail-closed on both
-# the copy and its content: an empty or missing serial log means the run produced
-# no evidence, which is a refusal and never an absent verdict to interpret.
+# Runs the suite and preserves NEWLY PRODUCED serial evidence. The prior shared
+# log is DISPLACED first, so what is preserved cannot be a previous leg's boot:
+# test.sh truncates the log only once it launches QEMU (tools/test.sh:190), so an
+# earlier exit leaves no log at all -- which is a refusal, never a verdict.
 run_suite() { # run_suite <leg> -> sets SUITE_RC, writes $RUN/<leg>-serial.log
   say "suite ($1)"
-  tools/test.sh > "$RUN/$1-stdout.txt" 2>&1
-  SUITE_RC=$?
-  printf '%s\n' "$SUITE_RC" > "$RUN/$1-test-sh-rc.txt"
-  [ -f "$BOOTLOG" ] || die "$BOOTLOG absent after test.sh ($1) -- no serial evidence"
+  if [ -e "$BOOTLOG" ]; then
+    mv -f "$BOOTLOG" "$RUN/$1-displaced-prior-serial.log" \
+      || die "cannot displace the prior $BOOTLOG before leg $1"
+  fi
+  [ -e "$BOOTLOG" ] && die "$BOOTLOG still present after displacement -- refusing to read stale evidence"
+
+  run_owned "$RUN/$1-stdout.txt" tools/test.sh
+  SUITE_RC=$OWNED_RC
+
+  [ -f "$BOOTLOG" ] \
+    || die "no NEW serial log after test.sh ($1), rc=$SUITE_RC -- the boot never started, so there is no evidence"
   cp "$BOOTLOG" "$RUN/$1-serial.log" || die "cannot preserve the serial log for $1"
   grep -q '[^[:space:]]' "$RUN/$1-serial.log" \
     || die "$RUN/$1-serial.log has no content -- the boot produced no serial output"
-  printf 'test.sh rc=%s, serial log %s bytes\n' "$SUITE_RC" "$(wc -c < "$RUN/$1-serial.log" | tr -d ' ')"
+
+  { echo "leg      : $1"
+    echo "at       : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "HEAD     : $HEAD_AT_START"
+    echo "test.sh  : rc=$SUITE_RC"
+    echo "serial   : $(wc -c < "$RUN/$1-serial.log" | tr -d ' ') bytes, sha256 $(shasum -a 256 < "$RUN/$1-serial.log" | cut -d' ' -f1)"
+    for f in $MUTATED_FILES; do echo "$(basename "$f"): $(git hash-object "$f")"; done
+  } > "$RUN/$1-provenance.txt"
+  printf 'test.sh rc=%s, %s bytes of NEW serial evidence\n' \
+    "$SUITE_RC" "$(wc -c < "$RUN/$1-serial.log" | tr -d ' ')"
 }
 
 # Every verdict below is read from the PRESERVED SERIAL LOG, never from stdout.
@@ -130,6 +258,14 @@ verdict() { # verdict <leg> <test name>
     *)      echo ABSENT ;;
   esac
 }
+
+# test.c:4604-4607 prints `... FAIL: <msg>`, where msg is the failing
+# assertion's own string. That string is what distinguishes the assertion the
+# mutation targets from the dozens of others in the same test.
+fail_reason() { # fail_reason <leg> <test name>
+  sed -n -E "s/^.*\[test\] $2 \.\.\. FAIL: (.*)\$/\1/p" "$RUN/$1-serial.log" | tail -1
+}
+
 failing_set() { # every test that FAILED, one per line
   grep -oE '\[test\] [a-z0-9_.]+ \.\.\. FAIL' "$RUN/$1-serial.log" \
     | sed 's/\[test\] //; s/ \.\.\. FAIL//' | sort -u
@@ -147,42 +283,102 @@ open(p, "w").write(s.replace(old, new))
 PY
 }
 
-unmutate() { # restore one file from its pristine copy, mid-run
-  cp "$PRISTINE/$(basename "$1")" "$1" || die "cannot restore $1"
-  want=$(git hash-object "$PRISTINE/$(basename "$1")"); got=$(git hash-object "$1")
-  [ "$want" = "$got" ] || die "restore of $1 did not match ($got != $want)"
+begin_mutation() { # begin_mutation <file>; refuses unless the file is pristine
+  got=$(git hash-object "$1")
+  [ "$got" = "$(pristine_hash "$1")" ] \
+    || die "$1 is not what this run preserved ($got) -- refusing to mutate a file something else changed"
+  [ "$(git rev-parse HEAD)" = "$HEAD_AT_START" ] \
+    || die "HEAD moved since this run started -- refusing to mutate"
+  MUTANT_FILE=$1
 }
 
-# A red leg is credited ONLY if its intended test failed and nothing else did.
-# Otherwise the leg is unattributed: logs are kept and the run aborts rather
-# than continuing as though the mutation had been the cause.
-expect_red() { # expect_red <leg> <test>
+end_mutation() { # record the mutant's hash so cleanup knows what it may overwrite
+  MUTANT_HASH=$(git hash-object "$MUTANT_FILE")
+  [ "$MUTANT_HASH" != "$(pristine_hash "$MUTANT_FILE")" ] \
+    || die "the mutation left $MUTANT_FILE unchanged -- the anchor did not bite"
+  printf '%s\n' "$MUTANT_HASH" > "$RUN/$(basename "$MUTANT_FILE").mutant-hash"
+}
+
+unmutate() { # restore one file mid-run, refusing if it is not this run's mutant
+  got=$(git hash-object "$1")
+  [ "$got" = "$MUTANT_HASH" ] \
+    || die "$1 changed under this run ($got != $MUTANT_HASH) -- refusing to overwrite it"
+  cp "$PRISTINE/$(basename "$1")" "$1" || die "cannot restore $1"
+  back=$(git hash-object "$1")
+  [ "$back" = "$(pristine_hash "$1")" ] || die "restore of $1 did not match ($back)"
+  MUTANT_FILE=
+  MUTANT_HASH=
+}
+
+# A red leg is credited ONLY if the suite failed, its intended test failed FOR
+# THE INTENDED REASON, and nothing else failed. Any other shape is unattributed:
+# the logs are kept and the run aborts rather than banking a red it cannot
+# ascribe to the mutation.
+expect_red() { # expect_red <leg> <test> <expected fail-reason substring>
+  [ "$SUITE_RC" -ne 0 ] \
+    || die "leg $1: test.sh exited 0 -- a reddened fixture extincts the boot, so rc 0 means the mutation did not bite"
   got=$(verdict "$1" "$2")
-  others=$(failing_set "$1" | grep -v "^$2$" || true)
   if [ "$got" != FAIL ]; then
     printf 'FAIL  leg=%-14s %s -> %s (want FAIL)\n' "$1" "$2" "$got"
     die "leg $1 did not redden its intended test; evidence kept in $RUN"
   fi
+  reason=$(fail_reason "$1" "$2")
+  case "$reason" in
+    *"$3"*) ;;
+    *) printf 'FAIL  leg=%-14s %s reddened for the WRONG reason\n  got : %s\n  want: *%s*\n' \
+         "$1" "$2" "${reason:-(none captured)}" "$3"
+       die "leg $1 is unattributed -- the mutation must break the assertion it targets, not another one" ;;
+  esac
+  others=$(failing_set "$1" | grep -v "^$2\$" || true)
   if [ -n "$others" ]; then
     printf 'FAIL  leg=%-14s %s FAILED, but so did:\n%s\n' "$1" "$2" "$others"
     die "leg $1 is unattributed -- another test failed too; evidence kept in $RUN"
   fi
-  printf 'PASS  leg=%-14s %s -> FAIL, and it is the ONLY failure\n' "$1" "$2"
+  printf 'PASS  leg=%-14s %s -> FAIL (%s), the ONLY failure\n' "$1" "$2" "$reason"
 }
 
+# The expected suite size is DERIVED from the registration table rather than
+# written down, because a number written down is re-pointed by hand and a
+# derived one cannot go stale. The denominator control is the point: a pattern
+# that matches nothing, or a grep whose -o semantics differ, must refuse rather
+# than hand back a small number that looks like a tally.
+expected_tests() {
+  n=$(grep -ohE '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c | wc -l | tr -d ' ')
+  u=$(grep -ohE '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c \
+        | sed -E 's/^[[:space:]]*\{[[:space:]]*"//; s/"$//' | sort -u | wc -l | tr -d ' ')
+  [ "$n" -ge 1000 ] || die "derived test count $n is implausible -- the extractor, not the suite, is broken"
+  [ "$n" -eq "$u" ] || die "the registration table has $((n - u)) duplicate test name(s) -- fix that before trusting a tally"
+  echo "$n"
+}
+
+# The boot-completion banner is tooling ABI and test.sh is the consumer of
+# record (tools/test.sh:121). Read it from there: a string copied into this file
+# is re-pointed by hand, and a banner reword would leave this check green on a
+# boot that never completed -- which is the gauge-reading-zero failure exactly.
+BOOT_MARKER=$(sed -n 's/^BOOT_MARKER="\(.*\)"$/\1/p' tools/test.sh | tail -1)
+[ -n "$BOOT_MARKER" ] \
+  || die "cannot read BOOT_MARKER out of tools/test.sh -- refusing to guess the boot banner"
+
 say "evidence dir $RUN (HEAD $HEAD_AT_START)"
+EXPECT_TESTS=$(expected_tests) || exit 3
+say "expected suite size, derived from kernel/test/test.c: $EXPECT_TESTS"
+stamp_pre_mutation
 
 # ---------------------------------------------------------------- leg 1
 say "LEG 1: delete the vaddr_start guard, expect the interior fixture RED"
+begin_mutation kernel/burrow.c
 mutate kernel/burrow.c '    if (vma->vaddr_start != vaddr) return -1;
 ' '' || die "leg 1 mutation refused"
+end_mutation
 build interior-unmap
 run_suite interior-unmap
 unmutate kernel/burrow.c
-expect_red interior-unmap burrow.unmap_interior_start_refused
+expect_red interior-unmap burrow.unmap_interior_start_refused \
+  "an interior start must be refused"
 
 # ---------------------------------------------------------------- leg 2
 say "LEG 2: refund the ring unconditionally, expect the lifecycle fixture RED"
+begin_mutation kernel/loom.c
 mutate kernel/loom.c '    u32 refund = 0;
     (void)burrow_unref_settled_in(l->ring, as, &refund);
 ' '    u32 refund = 0;
@@ -190,19 +386,20 @@ mutate kernel/loom.c '    u32 refund = 0;
     (void)burrow_unref_settled_in(l->ring, as, &refund);
     refund = paid_unconditionally;
 ' || die "leg 2 mutation refused"
+end_mutation
 build uncond-refund
 run_suite uncond-refund
 unmutate kernel/loom.c
-expect_red uncond-refund loom.private_owner_lifecycle
+expect_red uncond-refund loom.private_owner_lifecycle \
+  "a nonfinal ring drop refunds the metadata only"
 
 # ------------------------------------------------- the green control, LAST
 # Both sources are restored and hash-verified above, but build/ still holds the
 # last MUTANT's kernel. This rebuild is what makes the green mean anything.
 say "GREEN CONTROL: rebuilt from restored source"
 build green
+IMAGE_REBUILT=1
 run_suite green
-CLEAN_REBUILT=1
-rm -f "$MUTANT_STAMP"
 
 fail=0
 [ "$SUITE_RC" -eq 0 ] || { echo "FAIL  green: test.sh exited $SUITE_RC"; fail=1; }
@@ -214,8 +411,20 @@ if [ -z "$tally" ]; then
 else
   ran=$(printf '%s\n' "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+) PASS.*#\1#')
   tot=$(printf '%s\n' "$tally" | sed -E 's#.*tests: ([0-9]+)/([0-9]+) PASS.*#\2#')
-  if [ "$ran" = "$tot" ]; then echo "PASS  green: tally $ran/$tot"
-  else echo "FAIL  green: tally $ran/$tot -- not every test passed"; fail=1; fi
+  if [ "$ran" != "$tot" ]; then
+    echo "FAIL  green: tally $ran/$tot -- not every test passed"; fail=1
+  elif [ "$tot" != "$EXPECT_TESTS" ]; then
+    echo "FAIL  green: tally $ran/$tot but $EXPECT_TESTS tests are registered -- tests went missing from the run"
+    fail=1
+  else
+    echo "PASS  green: tally $ran/$tot, matching the $EXPECT_TESTS registrations"
+  fi
+fi
+
+if grep -qF "$BOOT_MARKER" "$RUN/green-serial.log"; then
+  echo "PASS  green: boot completed (\"$BOOT_MARKER\")"
+else
+  echo "FAIL  green: no boot-completion banner -- the boot did not finish"; fail=1
 fi
 
 skips=$(grep -c '\[skip\]' "$RUN/green-serial.log")
@@ -233,16 +442,21 @@ for t in burrow.unmap_interior_start_refused loom.private_owner_lifecycle; do
                   || { printf 'FAIL  green: %s -> %s (want PASS)\n' "$t" "$g"; fail=1; }
 done
 
+# Only now, with every green check passed, is the image fit to found a claim on.
+[ "$fail" -eq 0 ] && IMAGE_QUALIFIED=1
+
 say "SUMMARY"
-printf 'HEAD           %s\n' "$HEAD_AT_START"
-printf 'evidence       %s\n' "$RUN"
+printf 'HEAD            %s\n' "$HEAD_AT_START"
+printf 'evidence        %s\n' "$RUN"
+printf 'expected tests  %s\n' "$EXPECT_TESTS"
 for f in $MUTATED_FILES; do
-  printf '%-14s %s\n' "$(basename "$f")" "$(git hash-object "$f")"
+  printf '%-15s %s\n' "$(basename "$f")" "$(git hash-object "$f")"
 done
-if [ $fail -eq 0 ]; then
-  echo "BOTH FIXTURES ARE WITNESSES: each reddened on its own mutant as the ONLY"
-  echo "failure, and both pass on a kernel rebuilt from restored source."
+if [ "$fail" -eq 0 ]; then
+  echo "BOTH FIXTURES ARE WITNESSES: each reddened on its own mutant, for the"
+  echo "assertion that mutant targets, as the ONLY failure -- and both pass on a"
+  echo "kernel rebuilt from restored source with the full $EXPECT_TESTS-test tally."
 else
   echo "GREEN CONTROL IMPERFECT -- read $RUN before claiming anything."
 fi
-exit $fail
+exit "$fail"

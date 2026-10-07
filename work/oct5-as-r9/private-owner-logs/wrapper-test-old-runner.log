@@ -1,0 +1,81 @@
+== the SAME wrapper test vs the PREVIOUS runner (10df1b8ae), to show it discriminates
+== run at 2026-10-07T09:44:37Z
+wrapper test, scratch in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2
+
+-- S1 happy path: both legs red for their own reason, green clean
+OK    S1 exit status (0)
+OK    S1 credits leg 1
+OK    S1 credits leg 2
+WRONG S1 derives the expected suite size: 'derived from kernel/test/test.c: 1836' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s1/run.out
+WRONG S1 pins the tally to the registrations: 'matching the 1836 registrations' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s1/run.out
+OK    S1 reports both as witnesses
+OK    S1 source restored (yes)
+OK    S1 marker removed on qualification (absent)
+OK    S1 built three times (3)
+
+-- S2 the first mutant build fails
+OK    S2 refuses (3)
+OK    S2 names the failing build
+OK    S2 source restored anyway (yes)
+OK    S2 marker present
+WRONG S2 marker separates the three facts: 'image rebuilt : 0' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s2/build/MUTANT-UNQUALIFIED
+
+-- S3 test.sh exits before producing a new serial log, with a stale FAIL log present
+OK    S3 refuses (3)
+WRONG S3 refuses for absent NEW evidence: 'no NEW serial log after test.sh' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s3/run.out
+WRONG S3 credits nothing: 'PASS  leg=' unexpectedly in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s3/run.out
+WRONG S3 displaced the stale log: got='lost' want='kept'
+OK    S3 source restored (yes)
+
+-- S4 the intended test reddens, but for a different assertion
+OK    S4 refuses (3)
+WRONG S4 names the wrong reason: 'reddened for the WRONG reason' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s4/run.out
+WRONG S4 credits nothing: 'PASS  leg=' unexpectedly in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s4/run.out
+
+-- S5 the intended test reddens and so does another
+OK    S5 refuses (3)
+OK    S5 names the other failure
+OK    S5 calls it unattributed
+
+-- S6 the named test shows FAIL but test.sh exited 0
+OK    S6 refuses (3)
+WRONG S6 refuses on the suite status: 'test.sh exited 0' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s6/run.out
+
+-- S7 green control passes every test but runs fewer than are registered
+WRONG S7 fails the run: got='0' want='1'
+WRONG S7 names the missing tests: 'tests went missing from the run' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s7/run.out
+WRONG S7 withholds the claim: 'GREEN CONTROL IMPERFECT' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s7/run.out
+WRONG S7 marker KEPT though source is clean and image rebuilt: got='absent' want='present'
+grep: /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s7/build/MUTANT-UNQUALIFIED: No such file or directory
+WRONG S7 marker says rebuilt but not green: 'image rebuilt : 1' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s7/build/MUTANT-UNQUALIFIED
+OK    S7 source restored (yes)
+
+-- S8 a third party edits a mutated file mid-run
+WRONG S8 refuses to mutate the changed file: 'refusing to mutate a file something else changed' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s8/run.out
+WRONG S8 refuses to overwrite the foreign edit: 'REFUSING to overwrite an edit this run did not make' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s8/run.out
+OK    S8 still credits leg 1, which did complete
+OK    S8 forces a nonzero status (nonzero)
+WRONG S8 leaves the foreign edit in place: got='0' want='1'
+WRONG S8 marker present: 'IS NOT QUALIFIED' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s8/build/MUTANT-UNQUALIFIED
+
+-- S9 SIGTERM arrives during the first mutant build
+WRONG S9 explicit SIGTERM status: got='1' want='143'
+WRONG S9 names the signal: 'cleanup (SIGTERM' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s9/run.out
+WRONG S9 stops its own child first: 'stopping the owned child' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s9/run.out
+OK    S9 source restored (yes)
+WRONG S9 marker present: 'IS NOT QUALIFIED' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s9/build/MUTANT-UNQUALIFIED
+
+-- S11 green control reads a REAL recorded boot log (1835 [test] lines, pre-dating both new tests)
+  real log: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/boot-logs/boot-confirm-232503Z.log (1835 [test] lines)
+OK    S11 fails the run (1)
+OK    S11 reads the real tally
+WRONG S11 catches the stale image by count: 'tests went missing from the run' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s11/run.out
+WRONG S11 finds the real boot banner: 'PASS  green: boot completed' not in /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2/s11/run.out
+OK    S11 finds no failing test in 1835 real verdict lines
+OK    S11 reports the absent new test as ABSENT, not as a pass
+WRONG S11 marker kept: got='absent' want='present'
+
+-- S10 the owned-QEMU filter discriminates (recorded input; signals nothing)
+WRONG S10 could not extract the filter from the runner -- nothing was tested
+
+== 26 passed, 26 wrong (scratch kept at /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/wt-old2)
