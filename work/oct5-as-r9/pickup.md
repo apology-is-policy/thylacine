@@ -1055,3 +1055,59 @@ thread had run its course; bye is a proposal and any say by aux reopens it).
 astra's note 46 at 18:38Z reviewed 4b1394619 and found the t59 claim limits and
 the missing-summary rejection present, with no further correction: she is
 waiting on the ACQUISITION WITNESS and nothing else from me.
+
+### THE RELEASE HALF, ANSWERED STATICALLY (18:5xZ, off-lease, NO defect found)
+
+The leg witnesses ACQUISITION only, and the release question was recorded OPEN.
+While main held the mac I asked it of the SOURCE instead of an instrument. The
+result is NEGATIVE -- the pairing is sound -- and the label matters more than
+the conclusion, so it is first: THIS IS A STATIC PAIRING ARGUMENT, NOT A
+WITNESS. It does not replace what I removed and it is not offered as doing so.
+
+THE SET, ENUMERATED (kernel/ only; the lone build/kernel-undefined hit is a
+GENERATED symbol table, not a caller -- `work/` and `build/` excluded):
+  addrspace_private_begin   1 production site    kernel/loom.c:334
+  addrspace_private_end     3 production sites   kernel/loom.c:345, :351, :431
+  writes to l->service_as   EXACTLY 1            kernel/loom.c:354
+  loom_free                 static, ONE site     kernel/loom.c:749
+
+WHY THE PAIRING IS TOTAL:
+  - loom_create_private has exactly three exits after a successful begin:
+    !charged -> _end (:345); layout alloc failed -> uncharge + _end (:351);
+    success -> service_as set (:354), after which NO further early return
+    exists (the rest is assignments plus the void burrow_charge_record).
+  - service_as is written once and never cleared, so loom_is_private (:323),
+    the sole routing discriminator, cannot go stale. 9 production readers, all
+    reading the same single write.
+  - the only last-ref path is loom_unref (:744): private -> enqueue, else ->
+    loom_free. loom_free is STATIC with exactly that one call site, guarded by
+    !loom_is_private, so a private ring cannot reach the kfree that would skip
+    the _end. (Every other `loom_free` hit in the tree is a COMMENT -- that is
+    why the grep looked alarming and is not: count the call sites, not the
+    mentions.)
+  - loom_retirer_main (:436) pops and calls loom_private_destroy
+    UNCONDITIONALLY per item; destroy releases the guard LAST (:431), after the
+    uncharge, with the retired counter bumped after that.
+
+WHAT IT DOES NOT ESTABLISH -- carry these, they are the real residue:
+  1. STATIC. The code contains a release on every path; nothing here shows one
+     EXECUTED.
+  2. A ring whose refcount never reaches 0 never enqueues: a ref leak leaks the
+     guard with this pairing fully intact. Refcount balance is unbounded here.
+  3. A retirer that never runs or never drains leaks the guard SILENTLY -- the
+     list has no bound and no timeout. lp_wait rests on that liveness premise.
+  4. Nothing about the PAGE-accounting release: the
+     addrspace_uncharge_pages(as, metadata + refund) arithmetic at :428 is a
+     separate claim with a separate witness.
+  5. The two extinction() arms in loom_private_destroy precede the _end, so a
+     private ring in legacy state dies LOUDLY. Those arms are not leak paths.
+
+STATUS CHANGE, deliberately narrow: "release unverified" -> "release
+structurally paired over an enumerated set, execution unwitnessed." astra's
+framing stands unchanged; sent as note 47 on 0161, one-way.
+
+AND THE FIXTURE WAS NOT EDITED to record this. A comment-only change cannot
+alter behaviour, but it would perturb the file under measurement and invalidate
+the P1 precondition greps cleared minutes earlier. It waits until the control
+and the mutant have both run. Perturbing the subject to document it is how a
+measurement loses its provenance.
