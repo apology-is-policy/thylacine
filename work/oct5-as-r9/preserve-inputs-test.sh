@@ -141,6 +141,27 @@ R=$T/t7b; mktree "$R"
 ck "S7b refuses nonzero" 1 "$([ $? -ne 0 ] && echo 1 || echo 0)"
 ck "S7b names the signature" 1 "$(/usr/bin/grep -c 'REFUSING: preserve_boot_inputs <run-stamp>' "$R/out")"
 
+echo "== S9: a PINNED generation is never pruned and never counted =="
+R=$T/t9; mktree "$R"
+for g in 1 2 3; do
+  ( cd "$R" && . "$FN" && PRESERVE_DIR=inputs KEEP_INPUT_GENS=2 \
+      preserve_boot_inputs run-$g pb default ) > "$R/out-$g" 2>&1
+  [ "$g" = 1 ] && touch "$R/inputs/run-1-pb/PINNED"
+  sleep 1
+done
+ck "S9 pinned oldest survives" 1 "$([ -d "$R/inputs/run-1-pb" ] && echo 1 || echo 0)"
+ck "S9 and is not counted, so both unpinned remain" 3 "$(ls -1d "$R"/inputs/*/ | wc -l | tr -d ' ')"
+ck "S9 says so" 1 "$(/usr/bin/grep -c 'PINNED, neither counted nor pruned' "$R/out-3")"
+# CONTROL one variable away: identical schedule without the pin must prune it.
+R=$T/t9b; mktree "$R"
+for g in 1 2 3; do
+  ( cd "$R" && . "$FN" && PRESERVE_DIR=inputs KEEP_INPUT_GENS=2 \
+      preserve_boot_inputs run-$g pb default ) >/dev/null 2>&1
+  sleep 1
+done
+ck "S9b control: unpinned oldest IS pruned" 0 "$([ -d "$R/inputs/run-1-pb" ] && echo 1 || echo 0)"
+ck "S9b control: two remain" 2 "$(ls -1d "$R"/inputs/*/ | wc -l | tr -d ' ')"
+
 echo "== S8: THE PREMISE, checked against the REAL build/ tree =="
 # Every stub above is built from my own belief about the layout. This arm takes
 # the source paths OUT OF THE FUNCTION and asks the real tree whether they

@@ -3,13 +3,13 @@ id: sub-kernel-burrow
 type: sub
 parent: moc-kernel-memory
 title: "The Burrow — a memory object with two refcounts and six backings"
-code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h"]
+code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h", "kernel/test/test_burrow.c"]
 audit: hard
 guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -798,3 +798,18 @@ when their leaves went ([[sub-kernel-vma]]), and an idle image has none. The
 protect, the unmap, the decommit and the detach's phase 2 clear their leaves
 through `vma_uninstall_range_in` now, mapping by mapping, so a FILE mapping's
 refund lands on the right counter.
+
+## The test file is claimed, not newly described (2026-10-07)
+
+`kernel/test/test_burrow.c` was UNOWNED -- `quaestor owner` put it among the 109
+unclaimed files under `kernel/test`, which is how a test file ends up describing
+a surface nobody is responsible for. It is claimed here because this dossier owns
+the code it exercises, which is the convention the memory dossiers already follow
+(vma, fault, addrspace and pagemap each claim their own).
+
+Nothing new is asserted by the claim: the five AS-R9 witnesses it added --
+`settled_drop_retains_nonfinal_charge`, `settled_drop_exact_payer`,
+`settled_mapping_drop_defers_free`, `unmap_failure_leaves_mapping_attached`,
+`unmap_interior_start_refused` -- are already described above, each beside the
+arm of the repair it pins. What changes is that churn in that file now flags THIS
+dossier, which is the point of ownership.

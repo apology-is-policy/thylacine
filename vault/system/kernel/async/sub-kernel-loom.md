@@ -7,6 +7,7 @@ code:
   - kernel/loom.c
   - kernel/test/test_loom.c
   - kernel/test/loom_receipt_fixture.h
+  - kernel/test/loom_private_fixture.h
   - tools/host-tests/loom-receipts.c
   - tools/test-loom-receipts.py
   - kernel/include/thylacine/loom.h
@@ -742,3 +743,38 @@ and pool, serialize all pool mutations with the same ring lock and enforce
 request order. Close/exec/reaper, private slot/protocol integration and safe
 owned clients remain. Public feature masks stay disabled; no clipboard, Pi or
 fresh graphical qualification is claimed.
+
+## The private-owner fixture, and the boundary it states about itself (2026-10-07)
+
+`kernel/test/loom_private_fixture.h` was UNOWNED and is claimed here, beside
+`loom_receipt_fixture.h` which it is built like. One entry point,
+`loom_private_fixture()`, returns an error STRING or NULL, so a failure names its
+own check (45 `LP_CHECK`s) instead of a line number a later edit re-points.
+
+What it drives: the private owner's admission and retirement -- a refused
+geometry leaving neither charge nor guard, exclusive image ownership at
+admission, public setup and legacy execution staying refused on a private owner,
+a returned BORROW not counting as a close, and the final/nonfinal retirement
+discrimination.
+
+Two details are load-bearing and easy to lose in a reformat:
+- `lp_wait` spins on `loom_private_retired()`, a MONOTONIC counter, under a 5s
+  deadline -- the retirer is a separate thread, so a retirement is OBSERVED
+  rather than assumed complete on return. A gauge read as zero would otherwise
+  be satisfied by "it never started".
+- `lp_detach_settling` encodes the settling discipline `vma_detach_range_in`
+  requires: `as->lock` held across the call, and the returned chain of Burrows
+  whose last mapping went handed to `burrow_free_deferred` AFTER the unlock,
+  because a FILE Burrow's free may sleep. Passing `payer` is what makes it settle
+  at all -- NULL settles nothing and leaves an eager region charged, which is the
+  safe direction and the wrong one for this fixture.
+
+THE BOUNDARY, which the header states and this dossier repeats because a reader
+of the vault may never open the header: scheduling is FORCED here. Handles are
+opened and closed directly and the fixture waits on a counter, so nothing in it
+demonstrates reachability from a syscall pair, and no such claim is made. The
+checks are the reviewed set from the paused owner-integration draft (astra,
+yip 0161) plus the final/nonfinal discrimination that set could not cover,
+because every retirement in it ends the ring's occupancy and so refunds the whole
+charge. The private runtime remains gated -- no syscall reaches
+`loom_create_private` -- so this fixture is currently its only driver.

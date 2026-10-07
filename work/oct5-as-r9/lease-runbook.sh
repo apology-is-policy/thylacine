@@ -226,6 +226,14 @@ preserve_boot_inputs() { # preserve_boot_inputs <run-stamp> <phase> <expected-fl
   # Prune oldest generations. Newest-first, keep KEEP_INPUT_GENS.
   _n=0
   for _old in $(ls -1dt "$PRESERVE_DIR"/*/ 2>/dev/null); do
+    # A PINNED generation is one someone has attached a verdict to. It is neither
+    # pruned NOR counted: counting it would let a pin squeeze the rolling history
+    # to nothing, which is the opposite of what pinning is for. The whole protocol
+    # is `touch <generation>/PINNED`, so it survives this script being rewritten.
+    if [ -f "$_old/PINNED" ]; then
+      echo "   PINNED, neither counted nor pruned: $_old"
+      continue
+    fi
     _n=$((_n + 1))
     [ "$_n" -gt "$KEEP_INPUT_GENS" ] && rm -rf "$_old" && \
       echo "   pruned old generation $_old (keeping $KEEP_INPUT_GENS)"
