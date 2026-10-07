@@ -1061,3 +1061,117 @@ Gates unchanged: 128 MiB protection retained; private async, replacement memory
 accounting and clipboard all non-default; no syscall reaches
 `loom_create_private`. The pi A72/KVM axis remains the named unrun residual --
 re-measured today, unreachable by both routes. Nothing pushed, nothing landed.
+
+### October 7, afternoon: the port compiles, boots, and both fixtures turn RED on command
+
+The lease landed 09:46Z. The three claims the section above called owed are now
+measured, and one belief it rested on turned out to be wrong.
+
+**The port compiles.** First whole-kernel build of the private-owner work: zero
+errors. The off-lease syntax check had predicted exactly that and it held, so
+the remaining pre-build risk really was link-time and behavioural rather than
+syntactic. The build did FAIL, but downstream and not in the kernel -- see the
+Stratum provenance note below.
+
+**The suite is green at the derived number.** 1836/1836 PASS, 0 FAIL, 0
+`[skip]`, 0 `EXTINCTION:`, boot banner present. Both new witnesses ran and
+passed, and the three `burrow.settled_*` AS-R9 witnesses are still green beside
+them. 1836 was not written down and then met: it was DERIVED from the
+registration table in `kernel/test/test.c` before the boot, and the suite's own
+tally came back equal to it. Two routes to one figure.
+
+**Both fixtures are witnesses.** Evidence
+`work/oct5-as-r9/private-owner-logs/red-legs/20261007T103115Z`, against HEAD
+`2666645b7`:
+
+| leg | mutation | verdict | reason | attribution |
+|---|---|---|---|---|
+| interior-unmap | the `vaddr_start` guard deleted from `burrow_unmap_reporting` | `burrow.unmap_interior_start_refused` FAIL | "an interior start must be refused -- v1.0 has no partial unmap" | only failure; kernel's own tally 1835/1836 FAIL |
+| uncond-refund | the ring refunded unconditionally in the ACTUAL `loom_private_destroy` | `loom.private_owner_lifecycle` FAIL | "a nonfinal ring drop refunds the metadata only" | only failure; tally 1835/1836 FAIL |
+| green control | sources restored, kernel rebuilt | 1836/1836 PASS | boot completed, 0 skips, no extinction | both fixtures PASS |
+
+Leg 2 is astra's PO-R2 discriminating test of the real destructor rather than of
+a transcription of it: the mutation is applied to the shipped function, and the
+assertion that breaks is the nonfinal one -- the exact arithmetic the retirement
+exists to get right. The all-final legs pass under that same mutant, which is
+why the nonfinal leg is the one that carries the argument. The green control's
+kernel is byte-identical to the pre-legs kernel (`thylacine.bin` sha256[0:16]
+`5ced18c43ae8302a` both times), so the mutate/build/restore/rebuild cycle
+returns both the tree and the artifact to where they started.
+
+**A VERDICT IS A STATE IN THE SERIAL LOG, NOT A LINE IN IT.** The first real run
+of the red legs REFUSED, reporting the reddened test as ABSENT, and it was right
+to refuse: the fixture and the mutation were both fine and the parser was not.
+`test.c` prints `    [test] NAME ... ` BEFORE running the test, so anything the
+test prints lands between the name and its verdict -- and on failure
+`test_fail()` calls `sched_dump_runnable()`, so `FAIL: <msg>` arrives two lines
+later. This is not a failure-path curiosity: 87 of the 1836 PASSING verdicts in
+the green boot are split the same way by ordinary kernel output, and the serial
+log is CRLF, so every `$`-anchored pattern fails silently. A single-line regex
+read 1749 of 1836 verdicts, and the green control's "no failing test" check had
+been blind to 87 tests all along -- it only looked sound because the tally check
+sat beside it. The parser is now one normalisation pass validated against two
+REAL logs before being trusted, it refuses below 1000 resolved verdicts or on any
+unresolved one, and `expect_red` cross-checks the KERNEL'S OWN tally against it.
+
+**A belief in two handoff notes and one script header was wrong.** "A kernel
+test FAIL extincts the boot, so a red leg carries no tally." Measured on a real
+mutant boot: the suite runs every test, prints `tests: 1835/1836 FAIL`, and
+`boot_main` extincts on THAT. A red leg carries a full tally, which is why the
+tally is now load-bearing evidence instead of something the runner was told not
+to expect.
+
+**The wrapper itself is now tested, not just its parsers.** Astra's note 34
+found six defects in the red-legs runner that a parser replica could not have
+reached: cleanup could report success on a failed restore, signals carried the
+interrupted command's status, there was no owned-child wait, the unqualified
+marker was cleared before the green checks ran, and the tally was not pinned to
+an expected count. `work/oct5-as-r9/red-legs-wrapper-test.sh` runs 11 scenarios
+and 57 checks against the real runner in throwaway git trees -- signal, build
+failure, stale serial log, wrong fail reason, unattributed red, a concurrent
+third-party edit, a short green tally, and two scenarios driven by REAL recorded
+boot logs. It discriminates: 57/57 against the corrected runner, 26 wrong against
+the previous one, including the old runner CREDITING a red leg from a stale log
+after `test.sh` never booted, exiting 0 while REMOVING the unqualified marker on
+a 1835-of-1836 suite, and silently overwriting a third party's edit to `loom.c`.
+
+**STRATUM PROVENANCE: D7's residue is in this tree's `build/`, and it blocks the
+gate script.** `tools/build.sh kernel --config ci` refuses at the stratumd step:
+`build/pouch/stratumd-cmake/CMakeCache.txt` and `build/host-stratum/CMakeCache.txt`
+were both generated from a PEER's source tree, while
+`build/host-stratum-pre-d7/CMakeCache.txt` -- whose name records when it was
+displaced -- holds the canonical one. Inherited through the APFS clone of a
+peer's `build/` that their now-spent approval covered. The half that matters:
+`build/pouch/stratumd-cmake` is the GUEST stratumd baked into the ramfs, so the
+AS-R9 green image's stratumd came from a peer's working tree. **The AS-R9 KERNEL
+verdict stands** -- the kernel ELF was the controlled variable and was
+byte-identical across the red/green pair -- **but that image is not reproducible
+from canonical Stratum, which is a weaker statement than this document has been
+making.** Enqueued in OPEN-BUGS, owned, not worked around. Main checked their own
+tree: both caches there name canonical, so the asymmetry is this tree's alone.
+
+Two claims of mine around it have been withdrawn rather than left standing: that
+a rebuild from canonical would bake "54 peer-uncommitted files" into the image
+(all 54 are `.md` or `.tla`, none a build input -- main measured it and I
+confirm), and that canonical "lacks the session-DEK lease work" (`install-dek`
+appears in 3 files in BOTH trees; that grep establishes no difference, and the
+claim was inherited from the D7 write-up and never measured). D7's cure WAS a
+stratumd from the peer tree -- that is measured -- but the mechanism attached to
+it is not.
+
+Because `ci-smp-gate.sh:140` opens with an unconditional `build.sh kernel`, the
+gate cannot run as a script here. `work/oct5-as-r9/smp-matrix-on-qualified-image.sh`
+runs its MATRIX STAGE instead -- the same five rows, the same N=10, the same
+per-row timeouts, classifier and pass condition, with the rows and N DERIVED out
+of `ci-smp-gate.sh` rather than retyped -- on the image the suite and both legs
+already qualified. It is **not** `ci-smp-gate.sh` and is not reported as that
+script having passed; what it omits is the gate's own userspace rebuild, which is
+the part that cannot run. For a kernel change it is arguably the better
+experiment: the image under test is bit-for-bit the one the green suite and both
+credited legs ran on, so the kernel is the single variable across all three
+bodies of evidence.
+
+Gates unchanged: 128 MiB protection retained; private async, replacement memory
+accounting and clipboard all non-default; no syscall reaches
+`loom_create_private`. The pi A72/KVM axis remains the named unrun residual.
+Nothing pushed, nothing landed.

@@ -426,3 +426,81 @@ peer's lease, jobs, checkout or artifacts; Astra's four protected drafts
 untouched and her tree unmodified (the port was authored here, not copied); do
 NOT merge main; `.claude/settings.json` (`55cfdb54c`) is EXCLUDED from delivery,
 not reverted.
+
+---
+
+## 2026-10-07 10:4xZ: THE PORT IS BUILT, BOOTED AND BOTH LEGS ARE CREDITED
+
+HEAD `475eeb27e` on `corona/async-memory`. Tree clean apart from the untracked
+`cpu1-green-pair/` artifacts and the red-legs `pristine/` byte copies (both
+deliberate). **Nothing pushed, nothing landed.** Mac lease taken 09:46Z, 3.0h;
+main is queue head behind me and I release the moment the matrix ends.
+
+### Done today, DO NOT REDO
+
+1. **Build**: first whole-kernel compile of the port -- ZERO errors.
+2. **Suite**: 1836/1836 PASS, 0 FAIL, 0 skip, 0 EXTINCTION, banner present.
+   Both new witnesses green; the three `burrow.settled_*` ones still green.
+   1836 is DERIVED from `kernel/test/test.c`'s registration table, and the
+   suite's own tally equalled it -- two routes, one number.
+3. **Both RED legs credited** (`private-owner-logs/red-legs/20261007T103115Z`):
+   each fixture reddened on its own mutant, for the assertion that mutant
+   targets, as the ONLY failure, with the kernel's own 1835/1836 tally agreeing
+   both times. Leg 2 mutates the ACTUAL `loom_private_destroy`, which is
+   astra's PO-R2. Green control 1836/1836 on a kernel byte-identical to the
+   pre-legs one (`5ced18c43ae8302a`).
+4. **Astra's note 34 (six wrapper defects) all fixed**, plus a 57-check,
+   11-scenario harness (`red-legs-wrapper-test.sh`) that tests the RUNNER, not
+   its parsers. It discriminates: 57/57 new vs 26 WRONG against the old runner.
+5. **The parser was rewritten** after the first real run refused: a verdict is a
+   STATE in the log, not a line. `test.c` prints the name before running the
+   test, `sched_dump_runnable()` lands between name and verdict, 87 of 1836
+   PASSING verdicts are split the same way, and the log is CRLF. Validated
+   against two REAL logs. **A red leg DOES carry a tally** -- the old belief
+   that it does not was never measured and is wrong.
+6. **Both build.sh OPEN-BUGS entries CLOSED**: main landed 6be56e59a +
+   a61898766 on main under cb7194c10, verified here with
+   `git merge-base --is-ancestor`. Do NOT re-deliver.
+
+### IN FLIGHT as this was written
+
+`work/oct5-as-r9/smp-matrix-on-qualified-image.sh`, launched 10:40Z, log
+`private-owner-logs/smp-matrix-1007T1040Z.log`. 5 rows x N=10 = 50 boots,
+`SMP_KEEP_LOGS=1`. Read its own `MATRIX PASS/FAIL` line and the per-row
+`ROW-RESULT` lines; the evidence dir is printed at the end. If it did not
+finish, the row results file is the truth, not the task's exit code.
+
+### THE ONE BLOCKER, and it is not the port
+
+`tools/ci-smp-gate.sh:140` opens with an unconditional `tools/build.sh kernel`,
+which REFUSES in this tree: `build/pouch/stratumd-cmake/CMakeCache.txt` and
+`build/host-stratum/CMakeCache.txt` were generated from a PEER's source tree
+(D7's residue via the APFS clone of their `build/`). So the gate SCRIPT cannot
+run here; the matrix runner above runs its matrix STAGE on the qualified image
+instead, with the rows DERIVED from the gate rather than retyped. **Never report
+that as `ci-smp-gate.sh` passing.** Enqueued in OPEN-BUGS, owned, not worked
+around. Main's tree is clean on this; the asymmetry is ours alone.
+
+TWO CLAIMS OF MINE AROUND IT ARE WITHDRAWN and must not be repeated: that a
+canonical rebuild would bake "54 peer-uncommitted files" into the image (all 54
+are .md/.tla, none a build input) and that canonical "lacks the session-DEK lease
+work" (`install-dek` is in 3 files in BOTH trees; the grep shows no difference).
+D7's cure WAS a peer stratumd -- measured -- but the mechanism is not.
+
+### NEXT, in order
+
+1. Read the matrix verdict. Release the mac (`yip release mac`) the moment it
+   ends -- main is queue head and has been waiting since 09:46Z.
+2. The five owning dossiers' pass, now UNBLOCKED (the guest has confirmed the
+   arithmetic). `quaestor owner` says: update `sub-kernel-loom`, `sub-kernel-vma`,
+   `sub-kernel-weft`, `sub-kernel-burrow`, plus the owners of handle.c, main.c,
+   proc.c, syscall.c. **`sub-kernel-loom.md` line 27 still says the private
+   service lifecycle is "approved but not implemented", which is false on this
+   branch -- that is the first edit.** `kernel/test/*.c` are UNOWNED and quaestor
+   asks for a NEW dossier; 111 of 137 test files are likewise unclaimed, so that
+   is a pre-existing gap to weigh, not a thing to invent in a hurry.
+3. Regenerate `INTEGRATION-MANIFEST.md` (`sh work/oct5-as-r9/make-manifest.sh`).
+4. Report to astra on 0161 with the actual numbers -- she is owed the native and
+   SMP results after the wrapper correction, and asked for no acknowledgement
+   beyond that.
+5. The pi A72/KVM residual stays open. Operator vote stands, NEVER re-ask.
