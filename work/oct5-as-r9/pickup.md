@@ -1296,6 +1296,60 @@ across that window.
 
 A FRESH CONTROL IS NOW OWED, because the fixture changed. astra: "preserving the
 original receipt does not require freezing the test forever."
-DISK AT 19:5xZ: 7674 MiB, i.e. df -g 7 against FLOOR_GB=8 -- the next run will
-REFUSE at stage 0 until it recovers. That is the floor working, not a problem to
-solve by lowering it.
+DISK AT 19:37Z (the stamp this line first carried, 19:5xZ, was ESTIMATED and
+about 20 minutes ahead of the commit that wrote it -- third time today, and the
+figure beside it disagreed with the 6857 MiB I measured two minutes later):
+df -g 7 against FLOOR_GB=8, so the next run REFUSES at stage 0 until it
+recovers. That is the floor working, not a problem to solve by lowering it.
+MEASURED SINCE, with `date -u` and `df -m` in the same command:
+  19:43Z  7064 MiB  (df -g 6)
+  20:06Z  8466 MiB  (df -g 8)  <- at the floor, so disk no longer refuses
+The volume came back UP while main's gates ran, which is the swap behaviour aux
+and I measured earlier: it moves with no builder of mine running.
+
+
+== 2026-10-07 20:0xZ: THE MARKERS BROKE THE ORACLE THEY WERE ADDED TO SERVE ==
+astra reviewed 97287f351 (her t63) and named two defects, both in the
+INTERACTION between the arrival markers and test.c's own output, and both mine.
+
+1. `done:` is ALSO the normal fallthrough from the leg's last check, so a
+   PASSING control prints the cleanup marker -- and stage 1 refused on ANY
+   cleanup marker. The oracle refused every healthy run, including the green one
+   I had already measured. The fixture now names the arrival:
+   `cleanup-owner-drop normal-fallthrough` or `... after-check-failure: <msg>`.
+2. `test_run_all` prints `    [test] <name> ... ` with NO newline, runs the
+   test, then prints the verdict, so a marker's own newline moves the verdict
+   onto a later line. `<name> ... PASS` cannot exist on one line in an
+   instrumented healthy run, and stage 1 required exactly that. The same newline
+   silently disabled the mutant's completion check, which looked for PASS/FAIL
+   on the announcement line where it can no longer appear.
+
+Both oracles now read the LEG'S OWN BLOCK and treat the verdict as a STATE in
+it: PASS, FAIL or NONE, NONE being the lethal mutant's expected state. They are
+FUNCTIONS now, which is what made the arms possible.
+
+work/oct5-as-r9/oracle-arms.sh -- 19 arms, both oracles, the real functions
+EXTRACTED from the runner with a denominator control, every log built by EDITING
+TODAY'S REAL BOOT LOGS at the leg's own line (so context, CRLF endings and
+emission shape are the guest's), two arms real logs unedited. Every gate in both
+oracles is exercised with its own required message; exactly one arm accepts per
+oracle. THREE further defects the arms found, which review had not named:
+  - the refusal ORDER was unhelpful: an early check failure leaves no arrival
+    marker, so an arrival-first oracle said "it never reached the drop" while
+    the log held the NAME of the failing check. Diagnostic gate first now.
+  - an arm I wrote to cover the verdict check DID NOT COVER IT: no extinction,
+    so the mutant oracle refused at its first gate and never reached the check
+    whose silent death defect 2 had just demonstrated. Arms K/L reach it.
+  - a refusal I could not drive: the harness's missing-base-log refusal was
+    unreachable because the script cd's to the repo root. Paths overridable now,
+    exercised both ways.
+
+Also landed: every floor reading is RETAINED ($OUT/disk.txt, printed at exit) --
+aux asked what one --config ci bake costs in this tree and I could not answer,
+because the figures had gone to a terminal while every other piece of evidence
+landed in $OUT.
+
+@dfca09ddc, both mirrors. Fixture TU compiles (errors=0, 2 pre-existing
+missing-prototype warnings). NOTHING LANDED, NOTHING ACTIVATED, no guest run.
+BLOCKER STATE: disk CLEARED (8.3 GiB); mac is main's for ~2.1h. A fresh control
+is owed when the lease arrives, because the fixture changed again.

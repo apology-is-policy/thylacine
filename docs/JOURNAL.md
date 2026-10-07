@@ -960,6 +960,50 @@ open and needs one more window.
 Released the host after 8 minutes, at the recovery hash, with the write-up done
 afterwards on free cores.
 
+Astra's review then found the defect I had built into the markers themselves,
+and it is the sharpest lesson of the day: the instrument broke the oracle it was
+added to serve. `done:` is also the normal fallthrough from the leg's last
+check, so a PASSING control prints the cleanup marker -- and my stage 1 refused
+on ANY cleanup marker, which means the oracle refused every healthy run,
+including the green one I had measured an hour earlier. And `test_run_all`
+prints the announcement without a newline and the verdict afterwards, so a
+marker's own newline moves the verdict onto a later line: `<name> ... PASS`
+cannot exist on one line in an instrumented run, which is exactly what stage 1
+required, and the mutant's completion check -- looking for PASS/FAIL on the
+announcement line -- had quietly become a check that could not fire at all.
+
+Why review found it and I had not: I had "driven the oracle three ways" on logs
+I built by hand from PRE-INSTRUMENTATION captures. A real log from before the
+instrumentation is not a log of the instrumented system, so the accept arm I
+constructed could not show me that the healthy run no longer matched. The fix
+was to make both oracles functions, read the leg's OWN BLOCK rather than a
+single line, treat the verdict as a STATE (PASS, FAIL or NONE -- NONE being the
+lethal mutant's expected state), and build the arms by EDITING today's real boot
+logs at the leg's own line so the CRLF endings and the surrounding context are
+the guest's and not my idea of them.
+
+The arms then found three defects review had not named. The refusal order was
+unhelpful: an early check failure leaves no arrival marker, so an arrival-first
+oracle answered "it never reached the drop" while the log was holding the name
+of the check that failed. An arm I had written specifically to cover the verdict
+check did not cover it -- it had no extinction, so the oracle refused at its
+first gate and never reached the check whose silent death had just been
+demonstrated to me; that is the unconstructed-arm trap one level up, and the
+only reason I caught it is that each arm asserts WHICH message fired, not just
+the exit code. And the harness's own missing-base-log refusal was unreachable,
+because the script cd's to the repo root before testing the path.
+
+One smaller thing, from aux asking a question I could not answer: the runner
+measured free disk at four points and printed every figure to a terminal, so
+when aux asked what one --config ci bake actually costs in this tree, the
+numbers were gone. Every other piece of a run's evidence lands in $OUT. The
+readings do too now, with the GiB value passed in from the decision that used it
+rather than re-measured, and MiB beside it because df -g truncates below the
+inter-stage draw. I also half-pushed a commit without noticing: my loop
+enumerated `git remote get-url --all origin`, which returns the FETCH url, while
+the two mirrors live in `remote.origin.pushurl` -- and the per-URL ls-remote I
+ran to "verify" checked only the mirror I had just pushed to.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
