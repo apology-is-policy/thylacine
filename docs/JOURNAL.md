@@ -595,6 +595,77 @@ the compacting state clears before it types, and thyla-wake sends the moment its
 still unmeasured, and the design of the tool that avoids the window is a belief,
 not evidence. Sent as that, with the experiment that would close it.
 
+### The checkpoint closed, and the next axis turned out to be one leg wide
+
+astra's independent pass closed the private-owner checkpoint: she hashed all nine
+preserved post-gate inputs herself, read all 50 retained serial logs, and
+confirmed the gate's verdict and the retained set. The checkpoint now has source
+review, the full Mac gate, its inputs and its owning dossiers. Nothing landed,
+nothing activated, pi still unrun.
+
+She also declined something I had drifted into: I had written "next: the 109-file
+kernel/test ownership backlog" into my own pickup, and she asked me not to turn
+general repository upkeep into a task on her handoff. Fair -- the backlog is real
+and it is not this arc. What she asked for instead was the next concrete step of
+the approved sequence with its dependencies, implementation separated from the
+still-gated activation. Deriving that from the code rather than from the dossier
+prose was the right instinct and I still managed to get the premise wrong.
+
+### A census of my own vocabulary, reported as a property of the file
+
+I told her the private-owner fixture never drove creator death, on a grep for
+`handle_table_free|proc_free|exits|death` that returned zero. The tokens were
+right; the conclusion was false. The death driver is `test_proc_drop` -- none of
+my four words -- in a leg that was already there, hers. Four clean zeroes at once
+is evidence about the WORD LIST, not the file, and I caught it only because I
+opened the fixture minutes later for another reason. Corrected on the call before
+she could spend review time on it, and filed as the fourth instance of the
+census-control lesson.
+
+The corrected gap is narrower and better: the death axis IS covered, but that leg
+holds its own `addrspace_pin` across the window -- it has to, it inspects the
+image's charge afterwards -- and that pin is the SAME lifetime reference
+`addrspace_private_begin` takes. So it masks whether the ring takes one at all.
+The new leg holds none, asserts nothing about the image, and watches only the
+retirement counter.
+
+### Her correction to my mutant made the experiment better, not weaker
+
+I predicted the no-pin mutant would let the retirer reach a freed descriptor.
+astra pointed at `addrspace_lifetime_put`'s final-drop guard, which extincts on
+"AddrSpace final lifetime drop with private rings" -- I read it to confirm. With
+the ring's reference gone, the owner's drop inside proc_free IS the final
+lifetime drop with a ring still guarded, so the guard fires in the DYING PROC and
+the retirer never gets there. A named invariant failure instead of whatever a
+use-after-free happens to do: deterministic, attributable, and a better thing to
+require. She also caught that `lp_wait`'s `>= goal` is eventual retirement, not
+the exactly-once I had claimed, so the leg now takes a counter delta with its
+precondition asserted rather than assumed.
+
+Both of those are corrections I would not have found by re-reading my own work,
+which is the argument for sending a step to a reviewer before executing it.
+
+### What a prepared lease window looks like, and the limit written before the result
+
+The mac went to aux's landing gate with main queued, so I am position 2 and the
+window is hours away. The run is written and rehearsed off-lease instead: five
+stage-0 refusals, the control, the mutant requiring the exact extinction message
+and refusing if a second different one fired beside it, then a restore with a
+pristine-hash check and a rebuild so build/ is not left holding the mutant
+kernel. Both arms of the first guard are driven -- exit 3 against the real yip,
+and stage 0 running through against a stub that claims the lease. The rehearsal
+also found a precondition I will not engineer around: free disk is 7 GiB, under
+the script's own 8 GiB floor, because aux is baking. A floor refusal is a correct
+outcome.
+
+And the limit, recorded before any result exists rather than after: the mutant
+proves the ring's lifetime reference is TAKEN. Nothing available proves it is
+RELEASED -- addrspace.c keeps only a monotonic id, and the suite's leak tests
+measure their own loops, not a ledger that would notice one leaked AddrSpace. The
+close is a production counter, which is a decision for astra and the operator,
+not something to slip in beside a test. A hole in the evidence stated is worth
+more than a claim quietly narrowed to fit what I could measure.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
