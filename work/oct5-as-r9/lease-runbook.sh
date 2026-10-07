@@ -463,9 +463,6 @@ STAMP=$(mktemp)
 tools/build.sh kernel --config ci
 floor post-build
 
-# Preserve THIS run's boot inputs now, while all four exist together and before
-# any later stage or next run can overwrite them.
-preserve_boot_inputs "run-$(date -u '+%Y%m%dT%H%M%SZ')" || exit 1
 
 # VERIFY THE PIN IN THE OUTPUT, NOT ONLY IN THE INPUT. The HEAD equality above
 # proves which source I SELECTED; it says nothing about what the build
@@ -503,6 +500,17 @@ for b in build/pouch/progs/stratumd build/ramfs-src/bin/stratumd; do
 done
 echo "-- pin VERIFIED IN THE OUTPUT: stratumd configured from $STRATUM_SRC"
 provenance "post-build (my kernel, paired images)"
+
+# PRESERVE THIS RUN'S BOOT INPUTS, and HERE is where it belongs -- after the
+# Stratum pin is verified in the OUTPUT, before any later stage can overwrite
+# them. The placement is load-bearing in BOTH directions, which is why it moved:
+# earlier (immediately after the build) a run about to be REJECTED for wrong
+# provenance would still take a generation slot, and against a bounded history
+# two rejected runs would evict both genuinely qualified sets -- the exact loss
+# this step exists to prevent. Later (after the suite or the gate) a run that
+# went RED would preserve nothing, and a failing run's inputs are precisely what
+# diagnosis needs.
+preserve_boot_inputs "run-$(date -u '+%Y%m%dT%H%M%SZ')" || exit 1
 
 # Stage 3 -- verify the image by CONTENT, not by the build's exit code. This is
 # the BAKE-TRAP class: failure looks like absent content plus a green ledger.
