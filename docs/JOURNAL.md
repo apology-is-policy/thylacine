@@ -296,6 +296,14 @@ owed, with ls-jsc, B-2c's own gate. The land commit carries the change record
 status rows; main takes aux-3 (three thyla-wake commits, no file shared with b2)
 and then the merge, which is built and run in full before either mirror sees it.
 
+The merge (4b48cb0f6) ran 1955/1955, boot OK, before either mirror saw it, and both
+mirrors read it back. ls-ci then ran after all. The "does not fit" call had weighed
+7 GiB free against the CI recipe's 5 GiB pool, which is a CLADE pool's figure; this
+tree's pool is 400 MiB allocated and corona measured a CI bake at about 250 MiB, so a
+fresh --config ci worktree (APFS-cloned build/) fit in 11 GiB. PASS in 71 s on the
+first attempt; the worktree was removed after. ls-jsc stays B-2c's: no jsc is built in
+any worktree, and B-2c builds it.
+
 ## 2026-10-07 (main, Opus 5.5, effort max) -- the exit-close seam: a clunk that never waits, a kill that forces the final close, the closer that finishes it; and the Loom write-behind bypass (landed)
 
 **The vote (06:10Z, operator; never re-ask).** A now, then B with C; close()
