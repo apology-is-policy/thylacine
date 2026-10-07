@@ -199,10 +199,21 @@ the shared session stays live. Before, a full ring latched the WHOLE session
 dead (every op of every Proc on the mount failed) and a full pool read as
 `-EIO`, which dev9p's poll reported as a socket error. A resubmitted op goes
 out (`9p_client.async_send_eagain_keeps_session_alive`,
-`9p_client.async_full_tag_pool_is_eagain`, both seen red first). The sync
-front-end still answers a full tag pool with `-EIO` (OPEN-BUGS: the pool is
-shared with poll arms held until readiness), except the sync clunk, which
-drains a tag first as the async one does.
+`9p_client.async_full_tag_pool_is_eagain`, both seen red first).
+
+**A sync op waits for a tag (ARCH 21.11 part 3, 2026-10-07,
+[[dec-2026-10-07-tag-pool]]).** Every sync op calls
+`client_await_tag_locked` before its build: with no free tag it waits in
+`client_drain_until_free_tag` -- the clunks' wait, killable, a stop parked
+holding nothing -- and builds under the same lock hold once a tag frees. It
+fails only when the session dies or the caller is dying (`-EIO`, nothing
+built). Until then a full pool failed every sync op but the clunks with
+`-EIO` at the build (against ARCH 21.5), and nothing above the client
+retries: a write-behind flush that met a full pool dropped its data, with no
+close to report it. The wait ends because the reader frees a tag when it
+reads the reply (part 4 above). Witness: `9p_client.full_pool_sync_op_gets_a_tag`
+(an async-clunk burst of 70 fills the 64-tag pool; a sync walk then gets a
+tag; RED before, `-EIO`).
 
 **Abandon on death.** A Proc dying mid-op NULLs `inflight[tag]`, frees its
 reply_buf, and sends `Tflush(oldtag)`; the tag stays reserved
@@ -577,7 +588,8 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
 ## Error paths
 
 - `-EINVAL` NULL/magic mismatch · `-EBUSY` before handshake · `-EIO`
-  send/recv failure, malformed frame, tag pool full, fid conflict ·
+  send/recv failure, malformed frame, fid conflict (never a full tag pool:
+  a sync op waits for a tag, ARCH 21.11) ·
   `-<ecode>` the server's Rlerror, **its wire ecode bounded to `[1,4095]`
   HERE in `map_error` before negation** (`ecode == 0 || ecode > 4095 ->
   -EIO`) — which closes the signed-overflow UB of `-(int)0x80000000` (a

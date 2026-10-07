@@ -1007,7 +1007,9 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
     return rc;
 }
 
-// FID-LIFECYCLE async-clunk F1: drain ownerless replies until a tag slot frees.
+// Drain replies until a tag slot frees: every sync op's wait for a tag (ARCH
+// 21.11 part 3, client_await_tag_locked) and the clunks'. FID-LIFECYCLE
+// async-clunk F1 is where it began:
 // A >64-fd async-close burst (the #926 proc-exit close of a handle table, or a
 // userspace batch-close) with no interleaved sync op fills the 64-slot tag pool
 // with undrained ownerless Rclunks; the next p9_session_send_clunk's alloc_tag
@@ -1036,6 +1038,20 @@ static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) 
         if (client_stop_pending(self)) { (void)client_debug_stop_park(c, rpc); continue; }
         client_pump_or_park_locked(c, rpc);
     }
+}
+
+// ARCH 21.11 part 3: a sync op that finds no free tag waits for one before its
+// build, as a clunk does, instead of failing -P9_E_IO on a full pool -- nothing
+// above the client retries, so a write-behind flush that met a full pool lost
+// its data. The wait is client_drain_until_free_tag's: killable, and a stop
+// parks it holding nothing. A tag found free stays free through the build,
+// which runs under this same lock hold. Returns 0, or -P9_E_IO when the session
+// died or the caller is dying (nothing built, nothing sent). c->lock HELD.
+static int client_await_tag_locked(struct p9_client *c) {
+    if (p9_session_has_free_tag(&c->session)) return 0;
+    struct p9_rpc token;
+    for (size_t i = 0; i < sizeof(token); i++) ((u8 *)&token)[i] = 0;
+    return client_drain_until_free_tag(c, &token) == 0 ? 0 : -P9_E_IO;
 }
 
 // flush(5) for a Thread that LIVES: a caught note interrupted my wait, but the
@@ -1843,6 +1859,8 @@ int p9_client_walk(struct p9_client *c,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_walk(&c->session, c->out_buf,
                                     c->out_buf_cap,
                                     src_fid, new_fid,
@@ -1889,6 +1907,8 @@ int p9_client_walkgetattr(struct p9_client *c,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_walkgetattr(&c->session, c->out_buf,
                                           c->out_buf_cap,
                                           src_fid, new_fid, request_mask,
@@ -2057,6 +2077,8 @@ int p9_client_lopen(struct p9_client *c, u32 fid, u32 flags,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_lopen(&c->session, c->out_buf,
                                      c->out_buf_cap, fid, flags);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2079,6 +2101,8 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_lcreate(&c->session, c->out_buf,
                                        c->out_buf_cap, fid,
                                        name, name_len, flags, mode, gid);
@@ -2131,6 +2155,8 @@ int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
     // on. Unreachable from any v1.0 mount (all >= 4096); fail closed.
     if (rmax == 0 && count > 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (count > rmax) count = rmax;      // short read; the caller loops
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_read(&c->session, c->out_buf,
                                     c->out_buf_cap,
                                     fid, offset, count);
@@ -2163,6 +2189,8 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     // a 0-clamp would return accepted=0 forever to a looping writer.
     if (wmax == 0 && count > 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (count > wmax) count = wmax;      // short write; the caller loops
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_write(&c->session, c->out_buf,
                                      c->out_buf_cap,
                                      fid, offset, count, data);
@@ -2187,6 +2215,8 @@ int p9_client_getattr(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_getattr(&c->session, c->out_buf,
                                        c->out_buf_cap,
                                        fid, request_mask);
@@ -2207,6 +2237,8 @@ int p9_client_setattr(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_setattr(&c->session, c->out_buf,
                                        c->out_buf_cap, fid, attr);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2226,6 +2258,8 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_readdir(&c->session, c->out_buf,
                                        c->out_buf_cap,
                                        fid, offset, count);
@@ -2250,6 +2284,8 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_statfs(&c->session, c->out_buf,
                                       c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2268,6 +2304,8 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_fsync(&c->session, c->out_buf,
                                      c->out_buf_cap, fid, datasync);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2294,6 +2332,8 @@ int p9_client_weft(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_weft(&c->session, c->out_buf,
                                     c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2317,6 +2357,8 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int slen = p9_session_send_weftio(&c->session, c->out_buf,
                                        c->out_buf_cap, fid, off, len, dir);
     if (slen < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2342,6 +2384,8 @@ int p9_client_symlink(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_symlink(&c->session, c->out_buf,
                                        c->out_buf_cap,
                                        fid, name, name_len,
@@ -2365,6 +2409,8 @@ int p9_client_mknod(struct p9_client *c, u32 dfid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_mknod(&c->session, c->out_buf,
                                      c->out_buf_cap,
                                      dfid, name, name_len,
@@ -2386,6 +2432,8 @@ int p9_client_rename(struct p9_client *c, u32 fid, u32 dfid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_rename(&c->session, c->out_buf,
                                       c->out_buf_cap,
                                       fid, dfid, name, name_len);
@@ -2406,6 +2454,8 @@ int p9_client_readlink(struct p9_client *c, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_readlink(&c->session, c->out_buf,
                                         c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -2432,6 +2482,8 @@ int p9_client_link(struct p9_client *c, u32 dfid, u32 fid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_link(&c->session, c->out_buf,
                                     c->out_buf_cap,
                                     dfid, fid, name, name_len);
@@ -2452,6 +2504,8 @@ int p9_client_mkdir(struct p9_client *c, u32 dfid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_mkdir(&c->session, c->out_buf,
                                      c->out_buf_cap,
                                      dfid, name, name_len, mode, gid);
@@ -2474,6 +2528,8 @@ int p9_client_renameat(struct p9_client *c, u32 olddirfid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_renameat(&c->session, c->out_buf,
                                         c->out_buf_cap,
                                         olddirfid, oldname, oldname_len,
@@ -2494,6 +2550,8 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_unlinkat(&c->session, c->out_buf,
                                         c->out_buf_cap,
                                         dfid, name, name_len, flags);

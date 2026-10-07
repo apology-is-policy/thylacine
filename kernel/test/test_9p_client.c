@@ -3769,6 +3769,47 @@ void test_9p_client_async_clunk_burst_no_fid_leak(void) {
     p9_mq_loopback_destroy(&g_mq);
 }
 
+// The tag-pool shortage (the pool's [M-PIN] OPEN-BUGS item, (d)): a >64-fd
+// async-close burst leaves the 64-tag pool FULL of ownerless Rclunks (each close
+// past 64 drains one and sends one), and on a mount no pump serves, nothing
+// reads them. A sync op that then needs a tag must get one -- the ready replies
+// free tags -- never fail -EIO for a shortage. The mq transport stages every
+// Rclunk unread, as a pipe server's replies wait in s2c. Values are taken before
+// the teardown, so a failing leg still releases the client.
+void test_9p_client_full_pool_sync_op_gets_a_tag(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    if (rc != 0) { p9_mq_loopback_destroy(&g_mq); TEST_ASSERT(false, "client init over mq"); }
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    int hs = p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0);
+
+    const u32 N = 70;   // > P9_SESSION_MAX_OUTSTANDING (64)
+    const u8 nm[] = {'f'};
+    struct p9_qid q;
+    u32 walked = 0, clunked = 0;
+    for (u32 i = 0; hs == 0 && i < N; i++)
+        if (p9_client_walk_one(&g_client, 0, i + 1, nm, sizeof(nm), &q) == 0) walked++;
+    for (u32 i = 0; walked == N && i < N; i++)
+        if (p9_client_clunk_async(&g_client, i + 1) == 0) clunked++;
+    u64 held = (u64)p9_session_inflight(&g_client.session);
+    int wrc  = (walked == N && clunked == N)
+                 ? p9_client_walk_one(&g_client, 0, N + 1, nm, sizeof(nm), &q) : 0x7fffffff;
+    bool live = !g_client.dead;
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+
+    TEST_EXPECT_EQ(hs, 0, "handshake");
+    TEST_EXPECT_EQ((u64)walked, (u64)N, "N fids bound");
+    TEST_EXPECT_EQ((u64)clunked, (u64)N, "the burst's clunks all sent");
+    TEST_EXPECT_EQ(held, 64ull, "control: the burst left the pool full of ownerless Rclunks");
+    TEST_EXPECT_EQ((u64)(s64)wrc, 0ull,
+        "a sync walk on a full pool gets a tag from the waiting replies -- not -EIO");
+    TEST_ASSERT(live, "the session lives");
+}
+
 // =============================================================================
 // #349: a transiently-FULL c2s ring is flow-control, NOT session death. Under
 // #841 pipelining + concurrent large frames the kernel->server c2s ring can fill

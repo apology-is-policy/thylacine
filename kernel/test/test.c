@@ -1733,6 +1733,7 @@ void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
+void test_9p_client_full_pool_sync_op_gets_a_tag(void);
 void test_9p_client_clunk_dying_keeps_fid_bound(void);
 void test_9p_client_clunk_killed_while_parked(void);
 void test_9p_client_clunk_killed_in_tag_drain(void);
@@ -4011,6 +4012,8 @@ struct test_case g_tests[] = {
     { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
+    { "9p_client.full_pool_sync_op_gets_a_tag",
+                                       test_9p_client_full_pool_sync_op_gets_a_tag, false, NULL },
     { "9p_client.clunk_dying_keeps_fid_bound",
                                        test_9p_client_clunk_dying_keeps_fid_bound, false, NULL },
     { "9p_client.clunk_killed_while_parked",
