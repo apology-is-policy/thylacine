@@ -125,6 +125,23 @@ tools/check-v80-floor.py            # fast: source + the ramfs binaries (~7 s)
 tools/check-v80-floor.py --all      # + /clade + /goroot   (or: make check-floor)
 make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 
+# Kernel-to-userspace prot-bit mirror (corona, 2026-10-07). Userspace cannot
+# include a kernel header, so VMA_PROT_* and BURROW_PROT_* are RETYPED in
+# usr/lib/libt and usr/lib/libthyla-rs behind a comment asking the author to keep
+# them equal -- and the kernel's own copies are pinned by _Static_assert while
+# this edge had nothing on it. Drift is silent and W^X-adjacent (I-12): a prot
+# meant as EXEC arrives as something else, presenting as a wrong-permission
+# fault rather than a refusal. The check is DERIVED (both sides enumerated, so
+# an APPENDED bit is seen) and refuses outright when a side yields zero
+# constants. An absence is reported rather than failed -- a composite
+# (VMA_PROT_RW) or a bit named only so its refusal can be spelled
+# (BURROW_PROT_EXEC) has no business in userspace -- and --expect-unmirrored
+# pins the absence COUNT, which is what makes an unmirrored new bit fail with no
+# allowlist to maintain. NOT yet wired into build.sh: the wiring belongs with
+# the next bake, not with a run that is mid-gate.
+tools/check-prot-mirror.py                       # 0 agree / 1 drift / 2 cannot measure
+tools/check-prot-mirror.py --expect-unmirrored 5 # today's absence count
+
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --
 # login + assert rendered command output (the test that would have caught LS-1).
 # Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded
