@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -90,6 +90,16 @@ the order they matter in:
 | `start >= end`, misalignment | a range that is not a range |
 | null Burrow | a mapping with nothing behind it (except a guard — below) |
 | past the Burrow's end (`burrow_offset > page_count << 12`, or a length past the span) | the mapping would name slots its pagemap does not have, and the range release walks the mapping's own slot bound (B-1a' audit F3: `burrow_map_in` never checked the length); written so neither term can overflow |
+
+**One promotion** follows the rejections (B-2b, 2026-10-07): `EXEC` without
+`READ` mints as `READ | EXEC` unless the Burrow is a code Burrow. The user PTE
+encoder gives EXEC-alone a real meaning since B-2b -- an execute-only leaf, no
+EL0 load or store ([[sub-kernel-mmu]]) -- and only a sealed JIT region
+(`SYS_JIT_CREATE_SEALED`) asks for that. A Linux `PROT_EXEC` mapping through
+Vivarium or an ELF segment flagged `PF_X` alone always mapped readable here,
+as Linux maps them, and a caller of those never expects its own loads of the
+page to fault; promoting at the one constructor keeps them so. The ceiling
+(`prot_max`) is the promoted prot.
 
 A **guard VMA** is the deliberate exception to the last: `prot == 0`, no
 Burrow, existing only to occupy address space. Two things follow from prot 0
@@ -594,6 +604,8 @@ P3-Da built the list; P6 #713 added the lock coverage that made it
 multi-thread-safe; G-2 added the cross-Proc share flag; G-3 made `vma_drain`
 take the lock. The I-32 charge arrived with the overcommit model.
 
+B-2b (2026-10-07): the EXEC-only promotion off code Burrows.
+
 Re-read 2026-08-16: the LINEAGE arc moved the list onto the address space and
 added the copy-on-write flag; the attribution work made the release report
 whether it freed. [[chg-2026-08-16-vma-cow-flag]].
@@ -634,7 +646,9 @@ reservation answers whole / part true and past / below / empty false; with the
 middle two pages detached, across the hole false and each remnant true; and
 the decommit core over the same shape -- across the hole `T_E_NOMEM`, a
 remnant 0, unaligned `T_E_INVAL`, the stack (below the window) `T_E_NOSYS`,
-the native form -1. Beyond the suite, `vma_alloc`'s rejections and the list walk are
+the native form -1. `jit.xonly_promoted_off_code` (`test_jit.c`, B-2b) maps an
+anon page EXEC-only and reads back `READ | EXEC`; `jit.sealed_region` is the
+other arm, a code Burrow that keeps EXEC alone. Beyond the suite, `vma_alloc`'s rejections and the list walk are
 exercised indirectly by every demand-page and attach/detach test through the
 fault path.
 

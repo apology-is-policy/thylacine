@@ -137,6 +137,12 @@ incremented: **124** live numbers, the span runs to 126 with the same three
 holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
 are empty.
 
+**B-2b append (2026-10-07).** `SYS_JIT_CREATE_SEALED` = 127; `SYS__NATIVE_TOP`
+is 128 and `VIV_NATIVE_CEILING` 127. Re-measured on this tree, not
+incremented: **125** live numbers, the span runs to 127 with the same three
+holes, `syscall_dispatch_body` has exactly 125 arms, and both set differences
+are empty. The section at the end of this dossier carries the record.
+
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
 deliberately Linux's AArch64 convention, so a ported libc's syscall stub needs
@@ -844,3 +850,35 @@ calls mean ([[dec-2026-10-06-chdir-physical]],
   only to the caller, the system principal and a hostowner; one made over
   `/srv` (`SYS_ATTACH_9P_SRV`) also shows them to the connection's server
   ([[sub-kernel-ninep-attach]], [[sub-kernel-devctl]]).
+
+## B-2b: SYS_JIT_CREATE_SEALED 127; SYS_LOOM_REGISTER answers -errno (2026-10-07)
+
+`SYS_JIT_CREATE_SEALED(src_va x0, length x1, out_va x2) -> 0 / -errno`
+(CAP_JIT, checked first): the kernel copies `length` bytes (1 ..
+`JIT_SEALED_MAX`, 1 MiB) from `src_va` into fresh pages, publishes them, and
+maps ONE execute-only alias at a random address, written as a u64 to `out_va`
+([[dec-2026-10-07-jit-sealed-thunk]]). Errors: `-EACCES`, `-EINVAL` (length),
+`-EFAULT` (source unreadable, `out_va` unwritable), `-EAGAIN` (the CSPRNG is
+unseeded), `-ENOMEM` (page budget -- a sealed region is charged at creation --
+VMA cap, gap or allocator). 127 also named astra's unlanded
+`SYS_SRV_REGISTRY_NEW` on her base; B-2 lands first and she renumbers at her
+merge, the pre-merge-collision exception under Mechanism. The ceiling is 127,
+so the next native append, 128, is the first that owes `restart_syscall` a
+decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
+
+Existing numbers whose answers changed, no number or record moved:
+
+- `SYS_JIT_CREATE` (101) also answers `-EAGAIN`: each alias goes at an
+  independent random address, and none is drawn while the CSPRNG is unseeded.
+- `SYS_JIT_DESTROY` (102) also takes a sealed region's VA, the base of its
+  one alias; an exec alias of a writable region is still refused.
+- `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-07-loom-register-errno]]): `-EBADF` for a `loom_fd` or listed
+  fd that is not open, `-EFAULT` for an argument array the kernel cannot read,
+  a failed write-behind flush's own errno (`-ENOSPC`, the server's `-EIO`, a
+  caught note's `-EINTR`, after which the run is still staged), `-EINVAL` for
+  the rest. A caller that tested `rc < 0` is unaffected; `libthyla_rs`'s
+  `register_handles` / `register_buffers` now map the value through
+  `Error::from_syscall_return` instead of answering `InvalidArgument` for
+  every failure. Mirrors: `thyla_jit.h`, `libthyla_rs` (`T_SYS_JIT_CREATE_SEALED`,
+  `t_jit_create_sealed`, `jit::SealedRegion`).

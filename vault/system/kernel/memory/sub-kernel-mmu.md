@@ -61,8 +61,13 @@ seven `_Static_assert`s pin the bits so a refactor that made kernel text
 writable fails the build rather than the boot.
 
 `make_user_pte_l3` derives user permissions from a VMA's prot: writable →
-read-write for both levels, otherwise read-only; executable → user-execute
-allowed, otherwise not. The kernel-execute bit is set unconditionally, because
+read-write for both levels; readable → read-only for both; neither → no EL0
+load or store at all (`AP[2:1]=10`, read-only at EL1). That last row is the
+**execute-only** leaf of a sealed code region (B-2b, 2026-10-07): EXEC without
+READ, which `vma_alloc` lets exist only over a code Burrow
+([[sub-kernel-vma]]); before B-2b the encoder read "neither" as read-only for
+both, and prot none never reaches a leaf. Executable → user-execute allowed,
+otherwise not. The kernel-execute bit is set unconditionally, because
 the kernel never executes user pages. The cacheability attribute is a MAIR index
 the caller passes directly — `NORMAL_WB` for cacheable RAM (the anon/code/DMA
 default), `DEVICE` (nGnRnE) for MMIO registers, and, since V-2, `NORMAL_NC`
@@ -209,7 +214,11 @@ unmap is all-ASID at the tightest address scope, which is why the ASID argument
 threaded through these functions is vestigial and documented as such.
 
 [[inv-i39]] — cross-Proc read and write, confined to the target's own tables,
-never faulting anything in, and refusing to write a read-only page.
+never faulting anything in, and refusing to write a read-only page. Since B-2b
+`cross_proc_resolve` also refuses a leaf with no EL0 read (`AP[1]` clear): the
+debug reader resolves the leaf to its page and copies through the direct map,
+where no permission bit of the leaf applies, so without the check
+`/proc/<pid>/mem` would read back a sealed region's bytes.
 
 **I-42** — the JIT's outward generalization of the self-modification alias
 (the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache
@@ -391,9 +400,13 @@ mismatching valid leaf is -1 with nothing to unwind -- the one legitimate
 mismatch, the copy-on-write break, has `mmu_replace_user_pte_attr` (below),
 a third leaf writer that changes no count. Since round 3 the demand-page
 path never asks for a mismatch: `mmu_user_pte_admits(as, va, write, exec)`
-reads the leaf without growing (a VALID leaf with EL0 access, AP[2] clear for
-a write, UXN clear for an instruction fetch) and a leaf that admits the
-access answers the fault before any arm runs (B-1a' audit F13 -- the read
+reads the leaf without growing (a VALID leaf, `AP[1]` set for a load or
+store, AP[2] clear for a write, UXN clear for an instruction fetch) and a leaf
+that admits the access answers the fault before any arm runs. The `AP[1]`
+term is B-2b's: an execute-only leaf admits a fetch only, and a load's
+permission fault on it -- a user load, or the kernel's `LDTR` copy
+([[sub-kernel-uaccess]]) -- would otherwise read as already answered and
+retry forever (B-1a' audit F13 -- the read
 arm's read-only install over the writable leaf a sibling's break had left was
 exactly such a mismatch, and it terminated the Proc; [[sub-kernel-fault]]). Each uninstall
 (`mmu_uninstall_user_pte`; the range form per page inside a present L3) drops
@@ -505,6 +518,9 @@ Re-read 2026-08-16: the real-silicon bring-up corrected a table-walk coherence
 claim that named a maintenance operation the tree does not perform.
 [[chg-2026-08-16-mmu-fictional-clean]].
 
+B-2b (2026-10-07): the execute-only row of the user encoder, `AP[1]` in
+`mmu_user_pte_admits`, and the debug reader's refusal of an execute-only leaf.
+
 Re-read 2026-09-06 for Warp-6 V-2 (`7973f8dc`): `make_user_pte_l3` took a MAIR
 index in place of the device bool (adding `NORMAL_NC` write-combining for
 host-visible shared memory), its W^X extinction widened from execute-on-device
@@ -514,6 +530,10 @@ install API became a wrapper over the index-aware entry.
 
 ## Tests
 
+`jit.sealed_region` reads a sealed region's real leaf (`AP=10`, UXN clear,
+PXN set), asks `mmu_user_pte_admits` for a fetch (yes), a load and a store
+(no), and `mmu_cross_proc_read` for its bytes (none); `jit.exec_alias_stays_readable`
+is its control, a pair's exec alias (`AP=11`) that both readers take.
 `demand_page.*` covers install, its rejections, and idempotence (its charge
 figures read the data view, `page_count - pgtable_pages`, since B-1a');
 `capacity.page_tables_charged_and_reclaimed` and

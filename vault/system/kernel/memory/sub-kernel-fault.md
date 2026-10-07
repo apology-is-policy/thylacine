@@ -225,7 +225,7 @@ now.
 | type | resolution | notes |
 |---|---|---|
 | anonymous | contiguous chunk; offset arithmetic | the ordinary case |
-| **code** | *identical to lazy-anonymous* (B-2a; identical to anonymous before) | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot; the commit invalidates the I-cache over the new page first |
+| **code** | *identical to lazy-anonymous* (B-2a; identical to anonymous before) | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot; the commit invalidates the I-cache over the new page first. A sealed region (B-2b) has one alias, EXEC alone, and its pages are resident from creation: step 2 refuses a load or store of it, and a fetch hits the resident page and installs an execute-only leaf with no sync |
 | MMIO | device PA + offset, device attributes | |
 | DMA | every page resolved through `kobj_dma_pa_at` (a weave is a SKEIN of blocks since 2026-09-09; `Burrow.pa` is 0 for a DMA Burrow, deliberately), cacheable | coherent on this platform's transports |
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
@@ -510,9 +510,10 @@ moment; the page-in then drops `as->lock` and sleeps on the 9P read; a sibling
 thread's `SYS_BURROW_PROTECT` to none (sealed or not) lands in that window --
 the precheck admits FILE, and a whole-mapping protect leaves the geometry the
 re-lookup verifies exactly as it was. Installing at the CURRENT `vma->prot`
-then encoded none as a user-READABLE RO leaf (`make_user_pte_l3` has no
-"no access" encoding): a guard that did not guard, with no fault ever running
-step 2 again for that page. `file_fault_still_admitted` now re-checks the
+then encoded none as a user-READABLE RO leaf (`make_user_pte_l3` had no
+"no access" encoding until B-2b, whose execute-only row gives none one too):
+a guard that did not guard, with no fault ever running step 2 again for that
+page. `file_fault_still_admitted` now re-checks the
 recorded fault type against the prot as it reads after the sleep, in BOTH
 install paths (each carries its own copy, as each carries the geometry check);
 a refusal installs nothing and answers `FAULT_UNHANDLED_USER`, which is what
@@ -649,6 +650,10 @@ of the path, unreachable-until-COW, hidden by a constant-mirroring unit test.
 including the read-ahead cluster's per-slot byte map, its boundedness, its
 one-batched-read property, an interior short read, and the fail-closed arm. The
 production path is exercised by every EL0 first touch on every boot.
+
+B-2b: `jit.sealed_region` drives a fetch (admitted, no sync), a load and a
+store (refused at step 2) and a load of a page with no leaf (refused, nothing
+mapped) against a sealed region.
 
 B-1a: `protect.pte_uninstalled_then_reinstalled_at_prot`,
 `protect.raise_and_write_keeps_contents` and `protect.cow_split_then_break`

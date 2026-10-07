@@ -398,6 +398,38 @@ reads stays valid after the lock drops, because no code slot is ever emptied or
 swapped while the region lives and the call holds a ref. The walk is bounded
 by the caller's own length (`JIT_REGION_MAX` / page size slots).
 
+**Since B-2b (2026-10-07) every alias goes at a random address, and a region
+can be born sealed.** `jit_place_locked` takes a random page of the burrow
+window as its start and the first gap at or above it, wrapping to the base
+when nothing above fits; the window is about 2^34 pages, so the start cannot be
+guessed although the pick is not uniform over gaps. First-fit had put the
+writer directly below the exec alias that every return address names, the one
+mapping an exploit wants. The random words are drawn BEFORE `as->lock` (the
+CSPRNG may reseed, which is no work for a spinlock), and with the CSPRNG
+unseeded the call fails `-EAGAIN` rather than fall back to a predictable
+address. A random alias costs its own page tables while it lives; they go back
+with its last leaf ([[sub-kernel-mmu]]), so create/destroy churn does not
+accumulate them.
+
+`SYS_JIT_CREATE_SEALED` (`sys_jit_create_sealed_region` under the
+`_for_proc` copy-out, the split SYS_JIT_CREATE has, so the kernel tests drive
+the mechanism with a kernel source) checks `CAP_JIT` before any argument, then
+the length (1 .. `JIT_SEALED_MAX`) and that exactly one source is named. It
+mints a code Burrow and fills it page by page with NO lock held -- the copy
+from user memory can fault, and the fault path takes `as->lock` -- because
+nothing else can reach the Burrow yet (no handle, no mapping) and the charge
+is CAS-safe without the lock: charge one page, allocate it, give it the
+demand-zero commit's `cow_page_set_sole`, copy, sync it to the I-cache,
+install it in the slot table. Only then, under `as->lock`, is the one alias
+placed and mapped `VMA_PROT_EXEC` -- execute-only ([[sub-kernel-vma]],
+[[sub-kernel-mmu]]) -- so no state of the region has a writer or an
+EL0-readable view. Any failure frees the Burrow and refunds exactly its
+footprint (pages plus pagemap nodes), read before the free. `SYS_JIT_DESTROY`
+accepts the sealed alias's base: one unmap, and the footprint refunded iff it
+succeeds. The secret the region keeps -- a write thunk's burned-in writer base --
+holds only because every kernel copy of user memory is an unprivileged access
+([[sub-kernel-uaccess]]).
+
 ### The FS handlers carry the identity gate, and walk-open sets the handle rights
 
 Three A-3 touches live on the FS-mutation and walk-open handlers, all in this
@@ -1548,3 +1580,15 @@ target through `proc_group_kill`. On a target already terminating that sets
 `PROC_FLAG_EXIT_CLOSE_FORCED` before the death wake, so a final close waiting
 on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
 B, [[sub-kernel-death]]); a first kill terminates exactly as before.
+
+## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
+
+`sys_loom_register_handler` and its two `_for_proc` cores moved from the bare
+-1 set to the errno set ([[dec-2026-10-07-loom-register-errno]]): `-EBADF`
+when `handle_get` fails for the ring or for a listed fd (the rollback clunks
+the refs already taken), `-EFAULT` when the argument array fails validation or
+a byte of it faults, the errno `loom_register_handles` returns -- a failed
+write-behind flush's own, passed through from `dev9p_loom_register`
+([[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]]) -- and `-EINVAL` for the
+rest (not a Loom, an unknown op, `nargs` over the table). `nargs` is a u32 by
+the ABI, so its upper bits are ignored as before.

@@ -40,7 +40,9 @@ dev9p handle first flushes its staged write-behind run and stops it staging
 wire, so none may meet bytes still staged. The flush may wait on the
 registering thread; a failure fails the registration and keeps the old table,
 and so does an error an earlier flush latched, since no operation reads the
-latch. A failure part-way through the array leaves the handles before it
+latch. The registration returns that failure's errno (`-ENOSPC`, the
+server's `-EIO`, a caught note's `-EINTR` -- after which the run is still
+staged, so a retry flushes it). A failure part-way through the array leaves the handles before it
 flushed and writing through: a cost, not a hazard. A successful registration
 drops the file's cached pages, which the ring's writes would leave stale.
 
@@ -600,6 +602,15 @@ allocation failure. Cancellation for a chain successor whose predecessor failed.
 
 Enter returns `-1` only for a corrupt ring object or invalid flags — everything
 about an individual operation is reported through its completion.
+
+Register answers a negative errno since 2026-10-07
+([[dec-2026-10-07-loom-register-errno]], landed with B-2b): `-EBADF` for a ring
+or listed fd that is not open, `-EFAULT` for an argument array the kernel
+cannot read, the failed flush's own errno, and `-EINVAL` otherwise --
+`loom_register_handles` and `loom_register_buffers` themselves answer
+`-EINVAL` for bad arguments and pass `dev9p_loom_register`'s errno through.
+Before, every refusal was the bare `-1`, which libthyla-rs read as
+`InvalidArgument`, so a full disk looked like a programming error.
 
 Two counters in the header are diagnostics: dropped submissions (a bad
 indirection index) and overflowed completions (which the admission rule is meant

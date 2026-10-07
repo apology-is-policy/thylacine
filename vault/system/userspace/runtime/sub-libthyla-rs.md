@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -328,6 +328,13 @@ None crossing a boundary; every ABI record belongs to
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.
+- **`SealedRegion`** (B-2b, 2026-10-07) — one sealed code region: the bytes
+  the kernel copied in, mapped once, execute-only, at a random address
+  (`SYS_JIT_CREATE_SEALED`). It holds only the alias's base and length;
+  there is no writer pointer to hold. `new` hands the kernel a slice of
+  instruction words as their in-memory bytes, which is the instruction stream
+  only on a little-endian target, and a const assertion says so. `destroy`
+  reports the kernel's answer; `Drop` makes the same call and discards it.
 
 ## Concurrency
 
@@ -384,11 +391,19 @@ Uniform: every module returns the crate `Result`, and every syscall return goes
 through the one decoder. Two exceptions, one deliberate and one worth watching.
 
 The deliberate one: the JIT module defines its own small error enum with
-domain-specific names, and its own copies of three errno constants, rather than
+domain-specific names, and its own copies of four errno constants (`EAGAIN`
+joined at B-2b, as `TryAgain`: every code alias goes at a random address, and
+none is drawn while the kernel's random source is unseeded), rather than
 reporting through the crate error type. Its catch-all preserves the raw value
 the same way, so nothing is lost — but the error module's claim to be the type
 "every libthyla-rs module reports through" has an exception that does not know
 it is one.
+
+The Loom ring's `register_handles` / `register_buffers` used to be a third
+exception, answering `InvalidArgument` for every failure; since 2026-10-07
+`SYS_LOOM_REGISTER` returns a negative errno and both go through the decoder,
+so a failed write-behind flush arrives as its own kind (`Io`, `Other(28)` for
+ENOSPC, `Other(4)` for a retryable EINTR) and an unopened fd as `BadHandle`.
 
 The one to watch: the formatting macros — the crate's `print!` family — swallow
 write errors by design, so a program whose output is optional does not fail
