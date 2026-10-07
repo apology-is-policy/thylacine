@@ -85,6 +85,23 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    keeps the run staged and latches nothing (a death refused the send; the
    bytes were acknowledged), so this close sends it (`wb_flush_locked`,
    LARDER-DESIGN section 12; witness `dev9p.wb_dying_flush_keeps_run`).
+   **A close that may not wait never flushes here** (2026-10-07, ARCH 7.9.1
+   part C): `close_may_wait()` is false on a die-pending thread (a killed
+   thread's own last close, or a final close a second kill forced) and on a
+   kernel thread marked `closes_never_wait` (the Loom SQPOLL kthread, which
+   `loom_free` joins). A run still staged after this step -- never tried, or
+   kept by a death that ended the flush -- goes to a closer with the fid's
+   clunk (`wb_close_hand_off` -> `p9_attached_defer_close`, a
+   `dev9p_close_job` owning the buffer and its budget charge), and the close
+   returns 0: nothing is lost yet. The closer writes the run
+   (`wb_write_run`, the loop `wb_flush_locked` uses), then drops the file's
+   cached attr and pages rather than installing them, since that write lands
+   unordered with the file's later writers; then it clunks. A hand-off that
+   cannot be made (no session owner -- a test's bare client -- or no memory)
+   loses the run loudly: `9p: close: flush of fid N failed rc R`, and the
+   close returns the errno. The kernel-thread arm keys on the flag, not on
+   kproc, because the in-kernel test runner is kproc's boot thread and waits
+   on its fixtures by design.
 5. `fid_owned`: **G2 donate or async clunk.** An unopened (COPEN clear)
    DIRECTORY fid on a cacheable client, not `fid_suspect`, and not staled
    (`larder_qid_staled_since` over the G4 ring since `fid_gen`) PARKS in
@@ -104,8 +121,9 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    [[sub-kernel-ninep-attach]]) -- before `p9_attached_unref` in step 6, so
    the entry's reference is taken while the priv's still holds. gopls's kill
    of a `go` child still in its spawn thunk was the measured case: three
-   leaked fids a boot. A thread no death reaches (`thread_death_reaches` false: a
-   kernel thread such as the Loom SQPOLL reap, or an exit close) never waits
+   leaked fids a boot. A handed-off close skips this step: the closer clunks
+   after its write. A thread no death reaches (`thread_death_reaches` false: a
+   kernel thread such as the Loom SQPOLL reap, or an unforced exit close) never waits
    here: the helper clunks through `p9_client_clunk_nowait`, so a full op
    share or a full request ring sends the fid to the closer instead of
    holding the close on the server (`dec-2026-10-07-exit-close`, part A). Only a fid the live session still holds after that

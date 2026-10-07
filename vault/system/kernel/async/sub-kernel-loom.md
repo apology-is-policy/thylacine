@@ -537,23 +537,28 @@ running, that is fatal and loud; if it is *sleeping*, it passes every gate the
 reclaim checks and frees a thread that later resumes on recycled memory — a
 silent use-after-free, and the worse half of why no abandon path exists.
 
-So the join is made uninterruptible with the mechanism the kernel already has
-rather than a new one. Closing a dying process's handle table suppresses the
-death check for its whole duration, precisely so that close hooks which must
-WAIT — the 9P clunk flush, and now this join — behave as a live thread's would.
-The join brackets itself in that same flag, saving and restoring rather than
-clearing, because on the at-exit path the close already owns it and a bare
-clear would re-arm the death legs for every later descriptor in the table.
+So the join is made uninterruptible by a flag of its own,
+`kthread_join_active`, set with save and restore around the sleep: while it is
+set no death reaches the joiner's sleeps. Until 2026-10-07 the join borrowed
+the at-exit close's `exit_close_active` instead; part B of the exit-close
+design (ARCH 7.9.1) lets a second kill lift that flag's hold so the final
+close stops waiting on its server, and a join riding it would then have
+returned from every sleep at once and spun in a non-preemptible syscall body
+-- forever at `-smp 1`, where the CPU it spins on is the one the poll thread
+needs. The join's own flag holds every death, forced or not
+(`loom.sqpoll_join_held_through_forced_close` catches the joiner inside the
+join, through a test-only hold on the poll thread's terminal, and requires it
+asleep).
 
-That inherits the flag's own residual rather than escaping it: a poll thread
-that never reaches its terminal parks the dying process unreapably instead of
-burning a CPU. It is the better failure, and it is reachable. The thread's
-pumps never wait inside a frame (a frame found in part stays with the client),
-but a reap's last clunk can wait for a free tag or for room in a full request
-ring, and nothing interrupts a kernel thread, so a server that stops answering
-holds the stop until the server dies. Any process can serve a mount, so this is
-not bounded by trust: it is [[seam-close-flush-unbounded]], the seam the at-exit
-close sits on too.
+What bounds the join is the poll thread's own work, never a server. Its pumps
+never wait inside a frame (a frame found in part stays with the client), the
+ops that would wait on a wire RPC are refused on an SQPOLL ring
+(`loom_dir_mutation_gate`), and its reap's last close never waits either: the
+thread marks itself `closes_never_wait` at entry, so its Tclunk goes to the
+closer where it would wait for a tag or ring space (part A) and a staged
+write-behind run goes to the closer as a close job (part C)
+([[sub-kernel-ninep-dev9p]]). This closes the residual
+[[seam-close-flush-unbounded]] recorded here before.
 
 **Quiescing.** Each surviving operation is abandoned through the engine under
 the client's lock, which makes it mutually exclusive with a demultiplex that

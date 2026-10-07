@@ -526,7 +526,8 @@ session (operator vote 2026-09-29).
 - A queued entry is a fid, or a close job (2026-10-07,
   `dec-2026-10-07-exit-close` part C): the rest of a dev9p last close whose
   write-behind flush may not wait (a die-pending thread's, or a kernel
-  thread's; ARCH 7.9.1). The closer writes the staged run with Twrites,
+  thread's that something joins without bound, `closes_never_wait`; ARCH
+  7.9.1). The closer writes the staged run with Twrites,
   waiting as long as the server takes, drops the file's cached attributes and
   pages, sends the Tclunk, and frees the run and its budget charge. A session
   that died meanwhile takes the run with it, as it takes its fids.

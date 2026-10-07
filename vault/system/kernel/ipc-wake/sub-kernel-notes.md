@@ -345,13 +345,18 @@ ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
 its return tail: `thread_die_pending` reports the latch in any family the
 thread has not masked, as well as group death. Five waits read
 `thread_group_death_pending` instead, `thread_die_pending`'s group-death leg
-alone with its `exit_close_active` gate. They are the tail's stop park, the
+alone with the same hold. They are the tail's stop park, the
 birth park, the nested stop park a sleep detours into, the vfork suspend and
 the held spawn's birth wait, all through `sleep_death_only`
 ([[sub-kernel-rendez]]). `thread_death_reaches` asks the question the other
 way round, for a caller choosing whether it may start a wait at all: a death
-can end the thread's sleeps unless it is a kernel thread or inside an exit
-close (dev9p's clunk, [[sub-kernel-ninep-dev9p]]). The latch's walk passes
+can end the thread's sleeps unless it is a kernel thread or held (dev9p's
+clunk, [[sub-kernel-ninep-dev9p]]). All three read one hold,
+`thread_death_held`: `loom_free`'s SQPOLL kthread join (`kthread_join_active`)
+always, and the final close (`exit_close_active`) until a kill finds the Proc
+already terminating and sets `PROC_FLAG_EXIT_CLOSE_FORCED` (ARCH 7.9.1 part B,
+[[sub-kernel-death]]). Caught delivery stays shut under either flag, forced or
+not: a forced close unwinds as a death, never for a caught note. The latch's walk passes
 the stop parks by, since they
 could only absorb its wake, and the parent suspends absorb it: a stopped thread
 stays stopped, and a suspended parent stays suspended
@@ -613,6 +618,11 @@ list reaches (the paragraph above), behind the one predicate
 `thread_caught_note_unwinds`.
 
 ## Tests
+
+`notes.forced_close_lifts_the_hold` (2026-10-07) pins the hold: an unforced
+exit close in a dying group holds every death (the control), the forced bit
+lifts it for all three predicates but not for caught delivery, and the kthread
+join holds every death, forced or not, inside the exit close or outside it.
 
 `notes.*` covers the queue, both paths, the masks and the fd surface, including
 the `S_IFCHR` report added when a missing metadata slot made `fstat` on a note

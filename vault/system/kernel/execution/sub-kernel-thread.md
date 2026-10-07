@@ -167,7 +167,15 @@ only the thread itself writes and its EL0-return tail releases; and since
 2026-10-05 `cons_frozen_unwound`, the console's record that a caught note
 unwound one of the thread's frozen reads, so its next console read re-takes the
 reader slot by waiting; the thread sets and consumes it, and exec clears it
-([[sub-kernel-cons]]). `cpu_pinned` is the single
+([[sub-kernel-cons]]); and since 2026-10-07 two exit-close flags in the same
+hole (ARCH 7.9.1): `kthread_join_active`, which `loom_free` sets with save and
+restore around its SQPOLL kthread join so no death reaches that sleep, not
+even the kill that forces a final close ([[sub-kernel-loom]]), and
+`closes_never_wait`, which the SQPOLL kthread sets on itself at entry so its
+reap's last dev9p close hands a staged write-behind run to the closer instead
+of waiting on the server ([[sub-kernel-ninep-dev9p]]). `exit_close_active` has
+one setter again, the at-exit close. The struct size is unchanged at 1760.
+`cpu_pinned` is the single
 clean unstealability predicate that replaced the old `kstack_base != NULL`
 gate — the #860 root cause was that `g_bootcpu_idle` owned a real kstack, so
 the old gate did not exclude it.

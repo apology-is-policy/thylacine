@@ -62,6 +62,16 @@ Tclunk is sent.
   `9p: close: clunk of fid N refused rc R`, which `tools/test.sh` fails on.
   `p9_closer_start()` makes the first closer (boot, after the poll pump;
   extinction on failure). `p9_closer_stats()` reports the pool.
+- A close job (2026-10-07, ARCH 7.9.1 part C): `p9_attached_defer_close(a,
+  fid, job)` queues the fid with a `struct p9_close_job {run, release}` the
+  closer runs first -- `run(job, client, fid)`, which may wait, then the
+  Tclunk, then `release(job)` -- so the rest of a last close that may not
+  wait for its server (dev9p's staged write-behind run) is finished by a
+  closer. On `-1` the caller still owns the job. `p9_attached_defer_clunk` is
+  the job-less form. A job whose run fails while the session still holds the
+  fid prints `9p: close: flush of fid N failed rc R`
+  (`p9_close_flush_failed`, also called by dev9p when a hand-off cannot be
+  made); `jobs` and `job_errors` count them.
 - `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
   → the dev9p root Spoor over a SrvConn, or NULL. `who` is the attaching
   Proc (its principal names the Tattach; with the cape, its principal and
@@ -238,7 +248,11 @@ Plan 9's `closeproc`, serialized per session. A session with deferred
 Tclunks waits on a run-queue (`closer_queued`) until a closer takes it
 (`closer_busy`); that closer sends every entry, oldest first, through
 `p9_client_clunk_async` like any live thread, parking on back-pressure if it
-must. So a server that never answers holds only its own session's closer.
+must. An entry with a close job runs the job first, on the closer (part C:
+dev9p's write-behind run, written with `p9_client_write`, which waits like a
+live thread's), then sends the Tclunk and releases the job outside the lock;
+the job's run and the clunk share the entry's session reference. So a server
+that never answers holds only its own session's closer.
 The closer that takes work spawns a spare when no other closer is idle, and
 a closer that finds no work retires when another is idle, so one idle closer
 is kept. A hand-off that finds a session waiting, no closer idle and none
@@ -459,7 +473,17 @@ stays live and the Tclunk is taken back, fid bound), and
 `exit_close_hands_off_tclunk` (2026-10-07, exit-close part A: a thread under
 `exit_close_active` drops a walked Spoor while the request ring is full and
 the reader held; it returns without waiting and a closer sends the Tclunk --
-where a clunk that may wait would park, and no kill could end the park). Each leaves the pool as
+where a clunk that may wait would park, and no kill could end the park), and
+three part-C witnesses (2026-10-07) over a closer session whose client stages
+writes, 256 patterned bytes staged at offset 0: `dying_close_hands_off_staged_run`
+(a killed thread's own last close cannot send; the closer writes the kept run,
+then clunks), `forced_exit_close_hands_off_flush` (every send meets a full
+ring; a plain exit close sleeps -- the control -- until `proc_group_kill`
+forces it, then returns without the server, and the closer writes the run once
+the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread marked
+`closes_never_wait` returns at once). Each checks the Twrite's offset, length
+and byte sum, that it precedes the Tclunk, one job, and the write-behind budget
+back at its baseline. Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.
 The stall transport wraps the mq loopback and declares no `hangup` (ARCH
 21.10): forwarding the inner op would hand it the wrapper's ctx, and the mq

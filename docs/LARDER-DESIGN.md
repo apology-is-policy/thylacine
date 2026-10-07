@@ -742,7 +742,13 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   latest) sends it, rewriting any prefix that landed with the same bytes at
   the same offsets (2026-10-07, with `dec-2026-10-07-exit-close`; before,
   a kill inside `write`, `fsync` or `wstat` dropped bytes `write` had
-  already reported written).
+  already reported written). A last close that may not wait -- on a
+  die-pending thread, or on a kernel thread marked `closes_never_wait` -- does
+  not flush: the run goes to a closer with the fid's clunk (ARCH 7.9.1 part
+  C), which writes it and then DROPS the file's attr and pages instead of
+  installing them as OWN, because that late write is unordered with the
+  file's later writers (the G1 write-populate premise holds only for a flush
+  inside the open).
 - **Unlink** of a closed staged file needs nothing (the flush happened at
   close). An unlink-while-open flushes at close into the orphaned fid
   (9P keeps the fid live until clunk) — harmless; the skip-flush-on-unlinked

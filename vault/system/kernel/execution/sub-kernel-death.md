@@ -199,6 +199,20 @@ whole finding: `group_exit_msg` is set on *every* `SYS_EXIT_GROUP` — a clean
 "dying" and every sleep-capable hook short-circuited, silently dropping the
 dev9p write-behind flush and skipping the close-time Tclunk.
 
+A second kill ends that hold (ARCH 7.9.1 part B, `dec-2026-10-07-exit-close`).
+`proc_group_kill` -- the `kill` note's cascade (syscall.c) and the `/proc` ctl
+`kill` (devproc.c), never a hangup, `EXITKILL` or a legate scope's end, which
+keep the string wrapper -- runs the same core as every termination, and when
+its CAS on `group_exit_msg` loses (the Proc is already terminating) it ORs
+`PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the wake loop.
+notes.c's `thread_death_held` then reads the hold as lifted: the final close's
+send is refused, its wait unwinds through Tflush, and what it could not finish
+goes to the closer ([[sub-kernel-ninep-dev9p]], part C). The first kill never
+forces, so an orderly exit close still has its flush reply before the parent's
+`wait` returns (I-38). `loom_free`'s SQPOLL join does not ride
+`exit_close_active` any more: it sets its own `kthread_join_active`, which
+holds every death, forced or not ([[sub-kernel-loom]]).
+
 Because the closer reads no death, a stop must not park it either: group death
 clears no stop owner, and a closer parked for a stop would hold the dying Proc
 until the stop cleared (read from the code: a `kill` of a Ctrl-Z'd job with a
@@ -430,7 +444,9 @@ What a change **must** re-establish:
   death path belongs in `proc_become_zombie_locked`, not in `exits()`;
 - the close window's three properties, and that `exit_close_active` stays
   owner-set, bounded to the one close pass, and checked *first* in
-  `thread_die_pending`;
+  `thread_die_pending` (through `thread_death_held`);
+- that only a kill's CAS-lost branch sets `PROC_FLAG_EXIT_CLOSE_FORCED`, and
+  before the wake loop (a close that re-checks after the wake must see it);
 - death winning over both stop owners at every branch, the exit close
   included (a dying group is never asked to park).
 
@@ -438,8 +454,9 @@ What a change **must** re-establish:
 
 - [[seam-exiting-tails-never-sleep]] — the recorded property a future
   anon-COW/pageout must re-establish.
-- [[seam-close-flush-unbounded]] — a wedged trusted server can strand a
-  flagged close, unbreakable by a further kill.
+- [[seam-close-flush-unbounded]] — a server that never answers held a flagged
+  close; parts A-C (2026-10-07) bound it: the clunk never waits, and a second
+  kill forces the close and hands the rest to the closer.
 - [[seam-death-cascade-smp-harness]] — the 3-way interleaving no
   deterministic test reaches.
 
@@ -453,10 +470,12 @@ What a change **must** re-establish:
 - **`group_exit_msg` set does not mean "killed".** A clean `exit_group(0)`
   sets it too. Treating the two as the same was #68 R1-F1
   ([[fnd-68-r1-f1]]) and cost silent data loss.
-- **The re-admitted strand is not breakable.** `exit_close_active` suppresses
-  both death legs, so a wedged flagged close parks the dying Proc unreapably.
-  That is a deliberate trade (the alternative was the parent hanging), whose
-  precondition is an already-degraded system.
+- **The re-admitted strand breaks on a second kill, not on the first.**
+  `exit_close_active` suppresses both death legs, so a server that never
+  answers holds the final close until a kill forces it (part B); the first
+  kill, an `exit_group`, a hangup or `EXITKILL` never force. A forced exit's
+  parent can read the file before the closer's write lands: the I-38 window
+  the second kill buys.
 - The interrupt-terminate wake deliberately omits both
   `torpor_wake_all_for_proc` and `smp_resched_others` — the former because
   torpor waiters are reachable via `rendez_blocked_on` anyway, the latter

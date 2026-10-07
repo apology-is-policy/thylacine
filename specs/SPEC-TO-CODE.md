@@ -1962,6 +1962,11 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   `exit_close_active`): `dev9p_clunk_fid` sends through
   `p9_client_clunk_nowait`, which takes the same -P9_E_AGAIN where it would
   wait for a tag or ring space; where it would not, the close is `UserClose`.
+  Part C maps here too: a dev9p last close that may not wait (a die-pending
+  thread, a `closes_never_wait` kernel thread) with a staged write-behind run
+  hands the fid with a close job (`p9_attached_defer_close`); the spec's fid
+  is that entry, and the job's Twrites are not modelled (they precede the
+  Tclunk on the same closer, so `CloserSend` still clunks each entry once).
 - `CloserSend` = `closer_serve` -> `closer_send` -> `p9_client_clunk_async` on a
   closer thread (kproc, never dying); the entry's session reference keeps the
   client alive until it is dropped after the send. Its weak fairness is the

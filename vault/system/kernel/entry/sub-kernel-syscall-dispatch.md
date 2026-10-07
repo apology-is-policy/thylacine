@@ -1524,3 +1524,11 @@ sleep that a caught note ended, with what was left, and through
 `rem`, and a completed sleep never touches it. Both dispatch arms return the
 shell's s64 straight into `x0`, so 101 and 115 never reach the native
 `SYS_JIT_CREATE` and `SYS_PCI_IRQ_CREATE` arms for a Linux caller.
+
+## A `kill` note forces a final close already under way (2026-10-07)
+
+`SYS_POSTNOTE`'s kill cascade (`postnote_kill_cascade_locked`) terminates the
+target through `proc_group_kill`. On a target already terminating that sets
+`PROC_FLAG_EXIT_CLOSE_FORCED` before the death wake, so a final close waiting
+on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
+B, [[sub-kernel-death]]); a first kill terminates exactly as before.

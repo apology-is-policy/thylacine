@@ -824,3 +824,13 @@ performance backlog.
 ## Provenance
 
 [[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption) · [[chg-2026-10-06-cpu-time-gate]].
+
+## The ctl `kill` forces a final close already under way (2026-10-07)
+
+The `kill` verb terminates through `proc_group_kill` instead of
+`proc_group_terminate(target, "killed")`. The termination is the same; the
+difference is a target already terminating: there the kill sets
+`PROC_FLAG_EXIT_CLOSE_FORCED` before its death wake, so a final close waiting
+on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
+B, [[sub-kernel-death]]). The debugger-exited and launcher-exited (`exitkill`)
+terminations keep the wrapper: only an explicit kill forces.
