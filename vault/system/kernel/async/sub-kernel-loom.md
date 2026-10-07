@@ -749,7 +749,9 @@ fresh graphical qualification is claimed.
 `kernel/test/loom_private_fixture.h` was UNOWNED and is claimed here, beside
 `loom_receipt_fixture.h` which it is built like. One entry point,
 `loom_private_fixture()`, returns an error STRING or NULL, so a failure names its
-own check (45 `LP_CHECK`s) instead of a line number a later edit re-points.
+own check (48 `LP_CHECK` call sites) instead of a line number a later edit
+re-points. The count is the measured one: an earlier revision of this paragraph
+said 45, which was the grep's answer including the macro's own `#define` line.
 
 What it drives: the private owner's admission and retirement -- a refused
 geometry leaving neither charge nor guard, exclusive image ownership at
@@ -768,6 +770,24 @@ Two details are load-bearing and easy to lose in a reformat:
   because a FILE Burrow's free may sleep. Passing `payer` is what makes it settle
   at all -- NULL settles nothing and leaves an eager region charged, which is the
   safe direction and the wrong one for this fixture.
+
+THE ONE LEG WHOSE WITNESS IS A MUTANT (2026-10-07). Retirement through creator
+death was already covered -- the leg that calls `test_proc_drop` and then checks
+the image's final charge -- but it keeps its own `addrspace_pin` across the whole
+window, because inspecting the charge after the reap requires one. That pin is
+the SAME `addrspace_lifetime_get` that `addrspace_private_begin` takes, so it
+masks the property `loom_private_destroy` actually depends on: with a second
+lifetime reference held, a ring that took none would still find its image
+addressable. The added "unpinned-reap" leg holds none, asserts NOTHING about the
+image (touching it would reintroduce the reference under test), and observes the
+retirement only through the monotonic counter. Its discrimination therefore lives
+entirely in a mutant -- remove the `lifetime_get` in `addrspace_private_begin`
+and the matching put in `_end`, and the retirer reaches a freed descriptor
+through this leg while every other leg stays green. A test whose only witness is
+a mutant would normally be a bad test; here any handle on the image IS the
+masking, so it is the only shape available, and saying so is part of the leg.
+UNRUN at the time of writing: it has never executed, because a kernel fixture leg
+needs a build and a boot.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are

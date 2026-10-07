@@ -173,6 +173,39 @@ static const char *loom_private_fixture(void) {
              "late retirement refunds original image only");
     addrspace_unpin(pin); pin = NULL;
 
+    // ---- The image reference the RETIRER depends on, with nothing else
+    // holding it up. ----
+    // The "creator reaped before private borrow" leg above keeps its own
+    // addrspace_pin across the whole window, and it has to: it inspects
+    // pin->page_count and pin->private_rings after the reap. But that pin is the
+    // SAME addrspace_lifetime_get that addrspace_private_begin takes, so it
+    // MASKS the property the retirer actually depends on -- with a second
+    // lifetime reference held, a ring that took none would still find its image
+    // addressable. This leg holds NONE, which is the only way to put the ring's
+    // own reference under load.
+    //
+    // So it asserts nothing whatever about the image: touching `as` here would
+    // reintroduce exactly the reference being tested. It observes the
+    // retirement only through the monotonic counter, and its witness is the
+    // MUTANT -- remove the lifetime_get in addrspace_private_begin and the
+    // matching put in addrspace_private_end, and the retirer reaches a freed
+    // descriptor through this leg while every leg above stays green.
+    p = test_proc_make();
+    LP_CHECK(p, "unpinned-reap creator allocated");
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    LP_CHECK(l, "unpinned-reap private owner admitted");
+    fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
+    LP_CHECK(fd >= 0, "unpinned-reap owner installed");
+    l = NULL;
+    // proc_free releases the image BEFORE it frees the handle table, so from
+    // this call onward the ring's own reference is the only thing keeping the
+    // descriptor addressable -- and the drop that ends the ring's occupancy is
+    // the table teardown's, on the dying Proc, not a close on a live one.
+    test_proc_drop(p); p = NULL; fd = -1;
+    LP_CHECK(lp_wait(goal),
+             "a reaped creator's ring retires on the ring's own image reference");
+
     // ---- The final / nonfinal ring-drop discrimination. ----
     // Every retirement above ends the ring's occupancy, so each refunds the
     // whole charge -- which means an implementation that refunded
