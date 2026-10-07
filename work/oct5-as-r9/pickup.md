@@ -793,3 +793,50 @@ then the standing backlog (111 unclaimed kernel/test dossier files, and MEMORY.m
 at 17931 bytes against a 17000 target). No new arc without operator direction --
 the private-owner draft stays shut, and there is still no Main landing or
 activation clearance.
+
+## 2026-10-07 ~16:1xZ: the reap leg is written and rehearsed; the lease is queued
+
+STATE: HEAD 3d6644272, 104 off base, both mirrors at tip, tree clean of tracked
+modifications. NOTHING LANDED. No lease held.
+
+ONE BACKGROUND PROCESS OF MINE, and it must be accounted for at every
+checkpoint: thyla-wake pid 29516, armed as corona on pane %2, blocking on
+`yip hold mac`. It TAKES the lease when it becomes mine and types a wake line
+into the pane. Queue at arming: aux HOLDING (landing gate, ~4h left), main
+queued, corona position 2. AFTER ANY COMPACTION, CHECK `yip resources` FIRST --
+if the wake was swallowed by the compaction window I would be holding a machine
+two peers are queued for, silently.
+
+WHAT IS READY TO RUN THE MOMENT THE LEASE LANDS:
+  sh work/oct5-as-r9/reap-leg-run.sh
+Stage 0 refuses on: not holding the lease (driven RED against the real yip),
+tracked modifications, the leg missing from the fixture, a broken derivation
+(expects 1836, DERIVED), and the disk floor. Stage 1 is the control, stage 2 the
+mutant, stage 3 restores and rebuilds so build/ is left holding a clean kernel.
+
+PRECONDITION THAT IS NOT SATISFIED YET: free disk was 7 GiB at the rehearsal,
+under the script's 8 GiB floor, because aux's gate is baking. The script refuses
+until the volume recovers. DO NOT LOWER FLOOR_GB -- that is precisely how a
+shared volume reaches a peer's own 6 GiB floor and breaks their build mid-landing.
+
+THE LEG'S SCOPE, stated so the next session does not overclaim it:
+  - it proves the ring's AddrSpace lifetime reference is TAKEN, via the mutant,
+    whose expected outcome is the NAMED extinction "AddrSpace final lifetime
+    drop with private rings" (kernel/addrspace.c:127), fired in the DYING PROC
+    at proc_free -- not a UAF in the retirer (astra corrected my first
+    prediction on 0161 t53 and she is right).
+  - it does NOT prove the reference is RELEASED. There is no observable for
+    that: kernel/addrspace.c has only a monotonic id, no live/destroyed counter,
+    and the suite's leak tests (test_phys_leak_10k, test_slub_leak_10k) measure
+    their own loops, not a suite-wide ledger that would notice one leaked
+    AddrSpace. Adding a counter is a PRODUCTION EDIT, which astra's t53
+    explicitly does not assume -- so the limit is recorded, not closed.
+  - the fixture TU compiles (single-file -fsyntax-only, exit 0, no diagnostics);
+    the leg has never executed.
+
+ASTRA'S STANDING DIRECTIONS from t49/t51/t53: lifecycle axis first; keep the leg
+narrow; do not replace the pinned settlement checks; do not read the dead
+AddrSpace; label the fixture UNRUN until the control/mutant run under my lease;
+bring a discovered lifetime defect with its evidence BEFORE writing a fix; and
+the 109-file kernel/test ownership backlog is NOT a task for this handoff -- only
+the operator can assign it.
