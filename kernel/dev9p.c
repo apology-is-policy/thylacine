@@ -12,6 +12,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/cons.h>
+#include <thylacine/notes.h>   // thread_death_reaches: may the clunk wait
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
@@ -33,9 +34,14 @@ _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
 // the closer through the session's owner. A fid still held by a live session
 // after that is a leak, reported; on a dead session it died with the session,
 // and a fid that was never bound (a failed walk's) had nothing to leak.
+// A thread no kill can pull out of a wait -- a kernel thread, an exit close --
+// never waits for the server here: where the clunk would wait for a tag or
+// for room in the request ring, the fid goes to the closer (ARCH 8.8.1.1).
 static void dev9p_clunk_fid(struct p9_client *cl, struct p9_attached *owner,
                             u32 fid) {
-    int rc = p9_client_clunk_async(cl, fid);
+    int rc = thread_death_reaches(current_thread())
+                 ? p9_client_clunk_async(cl, fid)
+                 : p9_client_clunk_nowait(cl, fid);
     if (rc == 0) return;
     if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
         return;

@@ -4276,6 +4276,8 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
 void test_9p_client_clunk_dying_keeps_fid_bound(void);
 void test_9p_client_clunk_killed_while_parked(void);
 void test_9p_client_clunk_killed_in_tag_drain(void);
+void test_9p_client_nowait_clunk_full_share_defers(void);
+void test_9p_client_nowait_clunk_full_ring_takes_back(void);
 void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
 void test_9p_client_flushed_walk_late_reply_to_sink(void);
 void test_9p_client_abandoned_walk_late_reply_kept(void);
@@ -4306,6 +4308,7 @@ void test_9p_client_loom_enter_wakes_when_role_frees(void);
 #define DY_CLUNK_SYNC   2
 #define DY_WALK         3
 #define DY_READ         4
+#define DY_CLUNK_NOWAIT 5
 
 static struct test_dying g_dy;
 static struct {
@@ -4341,6 +4344,8 @@ static void dy_run(void *arg) {
         rc = p9_client_clunk_async(&g_client, g_dyop.fid);
     else if (g_dyop.op == DY_CLUNK_SYNC)
         rc = p9_client_clunk(&g_client, g_dyop.fid);
+    else if (g_dyop.op == DY_CLUNK_NOWAIT)
+        rc = p9_client_clunk_nowait(&g_client, g_dyop.fid);
     else if (g_dyop.op == DY_WALK)
         rc = p9_client_walk_one(&g_client, 0, g_dyop.fid, (const u8 *)"w", 1, NULL);
     else if (g_dyop.op == DY_READ) {
@@ -4562,6 +4567,92 @@ void test_9p_client_clunk_killed_in_tag_drain(void) {
     TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 100 + n), "clunked");
     TEST_ASSERT(!g_client.dead, "the session stays live");
     dy_client_close();
+}
+
+// A clunk from a thread no death reaches (dec-2026-10-07-exit-close, part A)
+// never waits for its server. On a full op share it is refused before the
+// build, the fid still bound for the closer, where a clunk that may wait
+// drains for a tag: with the reader held, that one would park.
+void test_9p_client_nowait_clunk_full_share_defers(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_client.session.ops_max = TP_POOL;
+    const u32 n = TP_POOL;
+    u32 bound = 0;
+    for (u32 i = 0; i <= n; i++) bound += dy_bind(100 + i);
+    TEST_EXPECT_EQ(bound, n + 1, "walks bind 100..100+n");
+    for (u32 i = 0; i < n; i++)
+        TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100 + i), 0, "fill the op share");
+    TEST_ASSERT(!p9_session_has_free_tag(&g_client.session), "the op share is full");
+    u64 sends = g_mq.sends;
+
+    // The reader is held and the thread reaped before any assert: a clunk
+    // that waited (the RED case) is killed out of its park here.
+    dy_hold_reader(true);
+    bool started = dy_start(DY_CLUNK_NOWAIT, 100 + n, /*dying=*/false);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dy));
+    bool returned = started && test_dying_done(&g_dy);
+    if (started && !returned) {
+        test_dying_kill(&g_dy);
+        TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy));
+    }
+    if (started) test_dying_reap(&g_dy);
+    dy_hold_reader(false);
+    int  rc   = g_dyop.rc;
+    bool held = p9_session_fid_bound(&g_client.session, 100 + n);
+    u64  sent = g_mq.sends - sends;
+    // The control, one variable away: a clunk that may wait drains, then sends.
+    int  wrc     = p9_client_clunk_async(&g_client, 100 + n);
+    bool clunked = !p9_session_fid_bound(&g_client.session, 100 + n);
+    dy_client_close();
+
+    TEST_ASSERT(started, "sender");
+    TEST_ASSERT(returned, "the clunk returned without waiting for a tag");
+    TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-P9_E_AGAIN, "refused: -P9_E_AGAIN");
+    TEST_ASSERT(held, "the fid is still bound, for the closer");
+    TEST_EXPECT_EQ(sent, 0ull, "nothing was sent");
+    TEST_EXPECT_EQ((u64)(s64)wrc, 0ull, "a clunk that may wait drains a reply, then sends");
+    TEST_ASSERT(clunked, "clunked");
+}
+
+// The same on a full request ring: the Tclunk meets back-pressure at its
+// first send and is taken back whole -- -P9_E_AGAIN, the tag free, the fid
+// bound again -- where a clunk that may wait parks for progress.
+void test_9p_client_nowait_clunk_full_ring_takes_back(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    TEST_EXPECT_EQ(dy_bind(42), 1u, "walk binds 42");
+    u64 sends = g_mq.sends;
+
+    dy_hold_reader(true);
+    g_mq.eagain_budget = 1;                      // the Tclunk meets a full c2s ring
+    bool started = dy_start(DY_CLUNK_NOWAIT, 42, /*dying=*/false);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dy));
+    bool returned = started && test_dying_done(&g_dy);
+    if (started && !returned) {
+        test_dying_kill(&g_dy);
+        TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy));
+    }
+    if (started) test_dying_reap(&g_dy);
+    dy_hold_reader(false);
+    int  rc       = g_dyop.rc;
+    bool held     = p9_session_fid_bound(&g_client.session, 42);
+    u64  inflight = (u64)p9_session_inflight(&g_client.session);
+    u64  reserved = (u64)p9_session_n_reserved_slots(&g_client.session);
+    u32  budget   = g_mq.eagain_budget;
+    u64  sent     = g_mq.sends - sends;
+    int  wrc      = p9_client_clunk_async(&g_client, 42);
+    u64  tclunks  = (u64)rec_count(P9_TCLUNK);
+    dy_client_close();
+
+    TEST_ASSERT(started, "sender");
+    TEST_ASSERT(returned, "the clunk returned without waiting for ring space");
+    TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-P9_E_AGAIN, "taken back: -P9_E_AGAIN");
+    TEST_ASSERT(held, "the fid is bound again, for the closer");
+    TEST_EXPECT_EQ(inflight, 0ull, "the tag is free");
+    TEST_EXPECT_EQ(reserved, 0ull, "no slot held");
+    TEST_EXPECT_EQ((u64)budget, 0ull, "the send met the full ring");
+    TEST_EXPECT_EQ(sent, 0ull, "nothing reached the wire");
+    TEST_EXPECT_EQ((u64)(s64)wrc, 0ull, "a clunk that may wait sends it");
+    TEST_EXPECT_EQ(tclunks, 1ull, "the server saw one Tclunk");
 }
 
 // A Tclunk is never flushed (flush(5)): a flush the server honours would

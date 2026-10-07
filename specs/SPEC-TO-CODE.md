@@ -1957,6 +1957,11 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   (`kernel/9p_attach.c`), which queues it with a session reference.
   `NO_CLOSER` is the path before 2026-09-28: the build unbound the fid and the
   send was refused.
+  Since 2026-10-07 (`dec-2026-10-07-exit-close`, part A) it also stands for a
+  close by a thread no death reaches (a kernel thread, an exit close under
+  `exit_close_active`): `dev9p_clunk_fid` sends through
+  `p9_client_clunk_nowait`, which takes the same -P9_E_AGAIN where it would
+  wait for a tag or ring space; where it would not, the close is `UserClose`.
 - `CloserSend` = `closer_serve` -> `closer_send` -> `p9_client_clunk_async` on a
   closer thread (kproc, never dying); the entry's session reference keeps the
   client alive until it is dropped after the send. Its weak fairness is the

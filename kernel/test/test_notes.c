@@ -77,6 +77,7 @@ void test_notes_interrupt_terminate_gate(void);
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_death_reaches_predicate(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_claim_once(void);
@@ -905,6 +906,32 @@ void test_notes_die_pending_predicate(void) {
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+// thread_death_reaches -- can a death end this thread's waits? A user
+// thread's, yes; not a kernel thread's, not one inside an exit close, and not
+// a thread with no Proc.
+void test_notes_death_reaches_predicate(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    struct Thread fake_t;
+    fake_t.proc              = p;
+    fake_t.exit_close_active = false;
+    bool user = thread_death_reaches(&fake_t);
+    fake_t.exit_close_active = true;
+    bool ecl  = thread_death_reaches(&fake_t);
+    fake_t.exit_close_active = false;
+    fake_t.proc = kproc();
+    bool kth  = thread_death_reaches(&fake_t);
+    fake_t.proc = NULL;
+    bool none = thread_death_reaches(&fake_t);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(user, "a user thread: a death reaches it");
+    TEST_ASSERT(!ecl, "inside an exit close: no death reaches it");
+    TEST_ASSERT(!kth, "a kernel thread: no death reaches it");
+    TEST_ASSERT(!none && !thread_death_reaches(NULL), "no Proc, no thread: false");
 }
 
 // ---------------------------------------------------------------------------

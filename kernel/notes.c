@@ -1292,6 +1292,10 @@ bool thread_die_pending(struct Thread *t) {
 // A stopped thread keeps its stop when an interrupt arrives, and a parent
 // suspend must not return on a latch a peer can revoke (DEBUG-FS-DESIGN 5g), so
 // the waits that honour that ask only this: group death, which nothing revokes.
+bool thread_death_reaches(struct Thread *t) {
+    return t && t->proc && t->proc != kproc() && !t->exit_close_active;
+}
+
 bool thread_group_death_pending(struct Thread *t) {
     if (!t || t->exit_close_active) return false;
     struct Proc *p = t->proc;

@@ -54,6 +54,13 @@ One function per op, `0` on success / `-errno` on failure:
   or reply buffer that could not be allocated): nothing reached the wire, the
   tag is free and the fid is STILL BOUND, so the caller hands it to the closer
   ([[sub-kernel-ninep-attach]]).
+  `clunk_nowait` is `clunk_async` for a caller no death can pull out of a
+  wait (a kernel thread, an exit close; `dec-2026-10-07-exit-close`, part A):
+  its synthetic rpc carries `no_wait`, so where the tag drain would pump or
+  park it answers `-P9_E_AGAIN` before the build, and where the send meets a
+  full request ring `client_send_flow` returns `CLIENT_SEND_NEVER` at once and
+  the Tclunk is taken back whole. Every other rpc starts with `no_wait` false
+  (`client_run` sets it; tokens and async containers are zeroed).
   `p9_client_fid_held(c, fid)` (live, OPEN, bound) is the leak test a failed
   clunk is judged by; `p9_client_set_orphan_sink` installs where an
   ownerless late walk reply's fid goes.

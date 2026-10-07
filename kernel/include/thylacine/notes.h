@@ -600,6 +600,11 @@ bool thread_die_pending(struct Thread *t);
 // (DEBUG-FS-DESIGN §5g).
 bool thread_group_death_pending(struct Thread *t);
 
+// Can a death end this thread's sleeps? Not a kernel thread's (no death
+// reaches kproc) and not one inside an exit close (exit_close_active turns
+// both death legs off): a wait either starts ends only when its event comes.
+bool thread_death_reaches(struct Thread *t);
+
 // item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
 // notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-

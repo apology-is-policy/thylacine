@@ -868,6 +868,7 @@ void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sig
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_death_reaches_predicate(void);
 void test_notes_pipe_die_pending(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
@@ -1743,6 +1744,8 @@ void test_9p_client_async_share_leaves_sync_tags(void);
 void test_9p_client_clunk_dying_keeps_fid_bound(void);
 void test_9p_client_clunk_killed_while_parked(void);
 void test_9p_client_clunk_killed_in_tag_drain(void);
+void test_9p_client_nowait_clunk_full_share_defers(void);
+void test_9p_client_nowait_clunk_full_ring_takes_back(void);
 void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
 void test_9p_client_flushed_walk_late_reply_to_sink(void);
 void test_9p_client_abandoned_walk_late_reply_kept(void);
@@ -1902,6 +1905,7 @@ void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
 void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
 void test_p9_closer_dying_close_delivers_tclunk(void);
+void test_p9_closer_exit_close_hands_off_tclunk(void);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
 void test_p9_closer_failed_spawn_retried_by_hand_off(void);
@@ -3026,6 +3030,7 @@ struct test_case g_tests[] = {
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
+    { "notes.death_reaches_predicate",         test_notes_death_reaches_predicate,         false, NULL },
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
@@ -4036,6 +4041,10 @@ struct test_case g_tests[] = {
                                        test_9p_client_clunk_killed_while_parked, false, NULL },
     { "9p_client.clunk_killed_in_tag_drain",
                                        test_9p_client_clunk_killed_in_tag_drain, false, NULL },
+    { "9p_client.nowait_clunk_full_share_defers",
+                                       test_9p_client_nowait_clunk_full_share_defers, false, NULL },
+    { "9p_client.nowait_clunk_full_ring_takes_back",
+                                       test_9p_client_nowait_clunk_full_ring_takes_back, false, NULL },
     { "9p_client.clunk_dying_waiter_sends_no_flush",
                                        test_9p_client_clunk_dying_waiter_sends_no_flush, false, NULL },
     { "9p_client.flushed_walk_late_reply_to_sink",
@@ -4253,6 +4262,8 @@ struct test_case g_tests[] = {
     { "p9_attached.ctl_registry",      test_p9_attached_ctl_registry,      false, NULL },
     { "p9_closer.dying_close_delivers_tclunk",
                                        test_p9_closer_dying_close_delivers_tclunk, false, NULL },
+    { "p9_closer.exit_close_hands_off_tclunk",
+                                       test_p9_closer_exit_close_hands_off_tclunk, false, NULL },
     { "p9_closer.stalled_session_holds_one_closer",
                                        test_p9_closer_stalled_session_holds_one_closer, false, NULL },
     { "p9_closer.flushed_walk_fid_clunked",

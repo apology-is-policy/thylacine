@@ -24,9 +24,11 @@
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 void test_p9_closer_dying_close_delivers_tclunk(void);
+void test_p9_closer_exit_close_hands_off_tclunk(void);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
 void test_p9_closer_failed_spawn_retried_by_hand_off(void);
@@ -165,6 +167,84 @@ void test_p9_closer_dying_close_delivers_tclunk(void) {
     spoor_clunk(root);
     p9_attached_unref(a);                        // the construction reference, last
     p9_mq_loopback_destroy(&g_mq_a);
+}
+
+// =============================================================================
+// An exit close (exit_close_active), which no death reaches, never waits for
+// its server to clunk a fid (dec-2026-10-07-exit-close, part A). Its Tclunk
+// meets a full request ring with the reader held, where a clunk that may wait
+// would park for progress; this one hands the fid to a closer and returns,
+// and the closer sends it.
+// =============================================================================
+
+static struct test_dying g_ec_thread;
+
+static void ec_drop(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    self->exit_close_active = true;
+    spoor_clunk(g_t1_spoor);
+    self->exit_close_active = false;
+}
+
+void test_p9_closer_exit_close_hands_off_tclunk(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    g_rec_a = (struct srv_rec){0};
+    TEST_EXPECT_EQ(p9_mq_loopback_init(&g_mq_a, rec_responder, &g_rec_a), 0, "mq");
+    struct p9_attached *a = closer_session(p9_mq_loopback_ops_for(&g_mq_a));
+    TEST_ASSERT(a != NULL, "session");
+    struct Spoor *root = p9_attached_root_spoor(a);
+    TEST_ASSERT(root != NULL, "root Spoor");
+    struct dev9p_priv *rp = (struct dev9p_priv *)root->aux;
+    rp->attached_owner = a;
+    p9_attached_ref(a);
+
+    struct Spoor *walked = spoor_clone(root);
+    TEST_ASSERT(walked != NULL, "spoor_clone");
+    const char *name = "victim";
+    struct Walkqid *w = dev9p.walk(root, walked, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+    u32 fid = ((struct dev9p_priv *)walked->aux)->fid;
+    TEST_ASSERT(p9_session_fid_bound(&a->client->session, fid), "the walk bound its fid");
+
+    // No death reaches the closing thread, so a clunk that waited (the RED
+    // case) is released by progress: the reader freed, then a walk whose
+    // reader departure signals it. All before any assert below.
+    g_t1_spoor = walked;
+    hold_reader(a->client, true);
+    g_mq_a.eagain_budget = 1;                    // the Tclunk meets a full ring
+    bool started = test_dying_start(&g_ec_thread, ec_drop, NULL, /*dead_now=*/false);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_ec_thread));
+    bool returned = started && test_dying_done(&g_ec_thread);
+    hold_reader(a->client, false);
+    if (started && !returned) {
+        (void)p9_client_walk_one(a->client, 0, p9_client_alloc_fid(a->client),
+                                 (const u8 *)"u", 1, NULL);
+        TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_ec_thread));
+    }
+    if (started) test_dying_reap(&g_ec_thread);
+    u32 budget = g_mq_a.eagain_budget;
+    TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, fid));
+    TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    struct p9_closer_stats st = closer_now();
+    bool clunked = srv_clunked(&g_rec_a, fid);
+    bool unbound = !p9_session_fid_bound(&a->client->session, fid);
+
+    spoor_clunk(root);
+    p9_attached_unref(a);                        // the construction reference, last
+    p9_mq_loopback_destroy(&g_mq_a);
+
+    TEST_ASSERT(started, "a closing thread");
+    TEST_ASSERT(returned, "the exit close returned without waiting");
+    TEST_EXPECT_EQ((u64)budget, 0ull, "its Tclunk met the full ring");
+    TEST_ASSERT(clunked, "the server saw the Tclunk");
+    TEST_EXPECT_EQ(st.sent, base.sent + 1, "a closer sent it");
+    TEST_EXPECT_EQ(st.live_refusals, base.live_refusals, "no refusal line");
+    TEST_EXPECT_EQ(st.spawned - base.spawned, st.reaped - base.reaped,
+                   "every spare was reaped");
+    TEST_ASSERT(unbound, "the fid is clunked");
 }
 
 // =============================================================================

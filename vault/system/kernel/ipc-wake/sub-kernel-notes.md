@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -348,7 +348,11 @@ thread has not masked, as well as group death. Five waits read
 alone with its `exit_close_active` gate. They are the tail's stop park, the
 birth park, the nested stop park a sleep detours into, the vfork suspend and
 the held spawn's birth wait, all through `sleep_death_only`
-([[sub-kernel-rendez]]). The latch's walk passes the stop parks by, since they
+([[sub-kernel-rendez]]). `thread_death_reaches` asks the question the other
+way round, for a caller choosing whether it may start a wait at all: a death
+can end the thread's sleeps unless it is a kernel thread or inside an exit
+close (dev9p's clunk, [[sub-kernel-ninep-dev9p]]). The latch's walk passes
+the stop parks by, since they
 could only absorb its wake, and the parent suspends absorb it: a stopped thread
 stays stopped, and a suspended parent stays suspended
 (DEBUG-FS-DESIGN 5g, the operator's vote of 2026-09-30). No park consumes or

@@ -466,8 +466,8 @@ threads, Plan 9's `closeproc`.
 The rule this section adds: while a session lives, every fid the server holds
 is known to the client, and the client clunks it once nobody uses it.
 
-**The hand-off contract.** `p9_client_clunk_async` and `p9_client_clunk`
-return `-P9_E_AGAIN` when a Tclunk could not be sent and the session is live.
+**The hand-off contract.** `p9_client_clunk_async`, `p9_client_clunk_nowait`
+and `p9_client_clunk` return `-P9_E_AGAIN` when a Tclunk could not be sent and the session is live.
 It means nothing reached the wire, the tag is free, and the fid is still
 bound. The caller hands the fid to the closer and returns without waiting
 (I-24).
@@ -479,6 +479,14 @@ bound. The caller hands the fid to the closer and returns without waiting
   the fid bound again.
 - A live caller whose spill buffer cannot be allocated under back-pressure
   gets the same answer.
+- A caller no death can pull out of a wait, a kernel thread or the last
+  thread's exit close (`exit_close_active`), does not wait for the server at
+  all (`dec-2026-10-07-exit-close`, part A; 2026-10-07). dev9p's clunk sends
+  through `p9_client_clunk_nowait` for it, which gets the same answer where
+  `p9_client_clunk_async` would wait: no tag is free in the op share, so
+  nothing is built, or the request ring is full, so the Tclunk is taken back
+  whole. The closer's own sends still wait: waiting on its session's server
+  is the closer's job.
 - A dead session keeps today's answer, `-P9_E_IO`. Its fids died with it.
 - The root fid is never clunked by the client: `p9_session_send_clunk` refuses
   it, and the session's transport close releases it on the server.

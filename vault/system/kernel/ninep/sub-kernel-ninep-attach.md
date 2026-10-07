@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -455,7 +455,11 @@ set, so no second spare), `orphan_oom_on_dead_session_quiet` (the sink's node
 fails on a session a peer marked dead: -1, the fid stays bound, no refusal
 line), and `clunk_killed_while_self_pumping` (a sender reading the
 replies itself, killed in that read over the stall transport: the session
-stays live and the Tclunk is taken back, fid bound). Each leaves the pool as
+stays live and the Tclunk is taken back, fid bound), and
+`exit_close_hands_off_tclunk` (2026-10-07, exit-close part A: a thread under
+`exit_close_active` drops a walked Spoor while the request ring is full and
+the reader held; it returns without waiting and a closer sends the Tclunk --
+where a clunk that may wait would park, and no kill could end the park). Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.
 The stall transport wraps the mq loopback and declares no `hangup` (ARCH
 21.10): forwarding the inner op would hand it the wrapper's ctx, and the mq

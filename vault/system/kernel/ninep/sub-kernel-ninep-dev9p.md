@@ -100,7 +100,11 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    [[sub-kernel-ninep-attach]]) -- before `p9_attached_unref` in step 6, so
    the entry's reference is taken while the priv's still holds. gopls's kill
    of a `go` child still in its spawn thunk was the measured case: three
-   leaked fids a boot. Only a fid the live session still holds after that
+   leaked fids a boot. A thread no death reaches (`thread_death_reaches` false: a
+   kernel thread such as the Loom SQPOLL reap, or an exit close) never waits
+   here: the helper clunks through `p9_client_clunk_nowait`, so a full op
+   share or a full request ring sends the fid to the closer instead of
+   holding the close on the server (`dec-2026-10-07-exit-close`, part A). Only a fid the live session still holds after that
    is reported (`p9_clunk_refused`); a dead session's fids died with it, and
    a fid a failed walk never bound had nothing to leak.
 6. `p9_attached_unref` — possibly the last ref → the whole session tears

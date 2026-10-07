@@ -174,6 +174,10 @@ struct p9_rpc {
     // free when the reply is read, not when I next run.
     int            apply_rc;
     struct p9_dispatch_result *out;
+    // The caller may not wait for the server (a clunk from a thread no kill
+    // reaches): where it would wait for a free tag or for room in the
+    // request ring, it is refused with nothing on the wire instead.
+    bool           no_wait;
 };
 
 // Receives a fid the server holds and nobody owns. Called under c->lock, so it
@@ -532,6 +536,12 @@ int  p9_client_clunk(struct p9_client *c, u32 fid);
 // need not wait for the release. Returns 0 on send; -P9_E_AGAIN and -P9_E_IO as
 // p9_client_clunk.
 int  p9_client_clunk_async(struct p9_client *c, u32 fid);
+
+// p9_client_clunk_async for a caller no kill can pull out of a wait (ARCH
+// 8.8.1.1): it never waits for the server. -P9_E_AGAIN, with the fid STILL
+// BOUND, also where p9_client_clunk_async would wait -- no free tag in the op
+// share, or a full request ring -- so the caller hands the fid to the closer.
+int  p9_client_clunk_nowait(struct p9_client *c, u32 fid);
 
 // Install the orphan-fid sink (the attach layer's closer hand-off). Call once,
 // before the client is published.

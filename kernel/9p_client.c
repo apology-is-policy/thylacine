@@ -977,7 +977,8 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
     // contract (zero bytes pushed) is what makes the retry-from-spill exact:
     // there is never a partial prefix on the ring -- and it is also what
     // makes the CLIENT_SEND_NEVER exits (self-dying / dead-observed /
-    // spill-OOM) safely reclaimable: the server never saw the frame.
+    // spill-OOM / a caller that may not wait) safely reclaimable: the server
+    // never saw the frame.
     u8 *spill = NULL;
     const u8 *frame = c->out_buf;
     int rc;
@@ -1011,6 +1012,7 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
         int src = p9_transport_send(&c->transport, frame, built_len);
         if (src == 0)                   { rc = 0; break; }          // whole frame sent
         if (src != P9_TRANSPORT_EAGAIN) { rc = -P9_E_IO; break; }   // genuine break
+        if (rpc->no_wait)               { rc = CLIENT_SEND_NEVER; break; }  // never sent
 
         if (!spill) {
             spill = kmalloc(built_len, 0);
@@ -1034,8 +1036,8 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
 // a reply and at most P9_ASYNC_MAX async ops (ARCH 21.11, "Why the wait
 // ends"). Uses the SAME pump/park body as the send flow. c->lock HELD; returns
 // 0 (a tag is free), -P9_E_IO (the session died) or -P9_E_AGAIN (the caller is
-// dying on a live session; nothing was built, so the fid is still bound and
-// goes to the closer).
+// dying on a live session, or may not wait and no tag is free; nothing was
+// built, so the fid is still bound and goes to the closer).
 static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *self = current_thread();
     for (;;) {
@@ -1047,6 +1049,7 @@ static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) 
         if (c->dead)             return -P9_E_IO;
         if (client_self_dying()) return -P9_E_AGAIN;
         if (p9_session_has_free_tag(&c->session)) return 0;
+        if (rpc->no_wait)        return -P9_E_AGAIN;
         // 8c-3 (#89, F2): a debugger stop -- park role-free (no frame built, so
         // no spill). Else a stop-unwound self-pump would spin (drains nothing).
         // Resume re-checks has_free_tag.
@@ -1204,6 +1207,7 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.apply_rc    = 0;
     rpc.out         = out;           // the reader applies my reply into it
     rpc.stop_parked = false;
+    rpc.no_wait     = false;
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
     if (!rpc.reply_buf) {
@@ -2021,7 +2025,9 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
 // fid still bound (FID-LIFECYCLE section 9): a caller dying before the build is
 // refused there; one that dies, or meets a spill-OOM, after the build has its
 // Tclunk taken back whole. The caller hands the fid to the closer.
-int p9_client_clunk_async(struct p9_client *c, u32 fid) {
+// With `no_wait` (p9_client_clunk_nowait) the same answer comes where the F1
+// drain or the F2 send would wait.
+static int client_clunk_async(struct p9_client *c, u32 fid, bool no_wait) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     spin_lock(&c->lock);
@@ -2036,6 +2042,7 @@ int p9_client_clunk_async(struct p9_client *c, u32 fid) {
     // be_reader = false.
     struct p9_rpc rpc;
     for (size_t i = 0; i < sizeof(rpc); i++) ((u8 *)&rpc)[i] = 0;
+    rpc.no_wait = no_wait;
 
     // F1: ensure a free tag BEFORE send_clunk (else alloc_tag fails and the fid
     // leaks bound). Drains ownerless Rclunks on a full pool (the close-burst).
@@ -2085,6 +2092,14 @@ int p9_client_clunk_async(struct p9_client *c, u32 fid) {
     c->total_ops++;
     spin_unlock(&c->lock);
     return 0;
+}
+
+int p9_client_clunk_async(struct p9_client *c, u32 fid) {
+    return client_clunk_async(c, fid, false);
+}
+
+int p9_client_clunk_nowait(struct p9_client *c, u32 fid) {
+    return client_clunk_async(c, fid, true);
 }
 
 // =============================================================================
