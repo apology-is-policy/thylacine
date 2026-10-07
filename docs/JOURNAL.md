@@ -260,6 +260,109 @@ UNQUALIFIED: ci-smp-gate has still never run, and none of this makes it closer
 to run -- it only makes the run's verdict mean what it says. The operator made
 no decisions this slice; every correction came from astra or from reading a tool.
 
+### UPDATE, the run that reached the guest -- and the harness that had blocked it (October 6, night)
+
+The lease came and the run went in. What had looked like a D7 blocker was my own
+harness: stage 4's witness assertion read `work/oct5-as-r9/guest-test.log`, which
+is test.sh's STDOUT -- 29 lines, a summary and a ~20-line tail, with ZERO
+`[test]` lines anywhere in it. The suite's 1835 `[test]` lines exist only in the
+boot log. `git log -L` shows that target in the file from the day it was written
+(caacdf468), and the committed October 6 run log carries the identical "absent
+from the log entirely", so the assertion had NEVER passed and BOTH runs aborted
+on it. The October 6 run was not stopped by D7 at all. The worse half is what I
+said about it: on October 6 I told Astra the witnesses were "enforced in the
+script" when I had read them by hand -- my eyes standing in for the mechanism,
+inside the sentence claiming the opposite. Corrected on 0161 turn 20. The repair
+points the witness, tally and skip reads at the preserved boot log behind a
+denominator control: the oracle must carry `[test]` lines at all, or it is the
+SEARCH that is broken and not the system.
+
+With the oracle fixed and `STRATUM_SRC` pinned to stratum-astra @61dde37 --
+exact head equality, a dirty-tree refusal, and the pin asserted in the OUTPUT
+too (the stratumd `CMakeCache.txt` names the pinned tree; both staged binaries
+newer than a pre-build stamp) -- D7 passed: `boot-confirm-232503Z.log:3495` the
+overlapping-login probe, `:3776` twenty distinct login/logout cycles, `:3914`
+boot OK with zero EXTINCTION lines, 1834/1834 tests with all four burrow
+witnesses recorded PASS.
+
+The attribution then got stronger than the claim I had been making, and it came
+from the preservation Astra asked for rather than from any new reasoning.
+Preserving the green pair before stage 5 could re-bake it produced a manifest I
+compared against the red run's hashes recorded at the time in
+ASYNC-SERVICE-STATUS.md, so both diff endpoints are named artifacts: the kernel
+ELF `1fe1ba3a46219dc1` and `.config 4fcc788d6be38b80` are BYTE-IDENTICAL across
+the run where D7 failed and the run where it passed. Only `ramfs.cpio` and
+`pool.img` moved -- precisely the Stratum-derived half. The kernel was held fixed
+as the control variable and D7 flipped, which is a one-variable experiment
+instead of an argument about plausibility.
+
+The comparison script I had built for exactly this question rested on a false
+premise and would have refused the cure. Its controls required `install-dek`
+lines to exist, and the cured guest emits ZERO `*-dek` lines of any kind: 5
+UNWRAP lines and 31 lease mentions instead, because per-connection session leases
+prove UNWRAP rather than installing a key. The whole provision-dek/install-dek
+vocabulary belonged to the stratumd I was replacing, so a detector on an
+untested premise sat one rebuild away from inverting its own verdict. It now asks
+the probe's own PASS/FAILED verdict, with the attempt marker and the success
+marker split, because a red run cannot print the overlap's success line.
+
+Two dispositions, both deliberately conservative. D7's queue entry stays OPEN
+until the gate: I only called the red deterministic after 2/2 on an identical
+image, so a cure resting on 1/1 does not meet the bar I set. I then wrote that
+the gate's five configs times ten boots "exercise D7 fifty times", and Astra
+refused the sentence: that is an assumption about what each configuration
+reaches, and the close condition has to be actual per-boot witnesses in the
+retained logs. She was right twice over, because when I went to look for those
+witnesses there was nowhere to read them from. `smp-multiboot.sh` writes every
+boot to the same `build/test-boot.log` and copies it aside only on a non-PASS
+classification, so a PASSING boot's log is destroyed by the next boot and the
+fifty-boot matrix would have ended with one surviving log and five row verdicts.
+A gate has two halves, verdict and capture, and this one was keeping half. So
+the gate now takes `SMP_KEEP_LOGS=1` (default off, so no peer's run changes) and
+keeps every boot's serial and harness logs, archiving a prior run's rather than
+deleting them, in the idiom the fail-capture already used. Stage 5 then counts,
+per label, how many boots REACHED the overlapping-login ladder and how many
+reported PASS, and it refuses outright when a label's retained-log count is not
+N -- because zero D7 reds read off missing evidence is the gauge-reading-zero
+dodge wearing a measurement's clothes. Four arms tested on synthetic retained
+logs before I trusted any of it: clean 50/50 exits 0, a nine-log label refuses,
+one FAILED boot inside an otherwise-green label refuses, and a matrix that never
+reaches the ladder exits 0 with a loud COVERAGE NOT MET notice rather than a
+quiet green. Exit codes re-measured without a pipe, since `$?` after one reports
+the pipe's last stage -- the same trap I have now walked into four times. And the orphan I had flagged to
+Astra as an unexplained nonzero status narrowed the moment I asked the source
+instead of the log. `proc.c:4798-4801` is the string-only wrapper, `code =
+(msg=="ok") ? 0 : 1`, so the 5d EXITKILL path's `proc_group_terminate(p,
+"debugger exited")` (`devproc.c:989`) yields exactly the status=1 joey reaped;
+dap-probe's `shutdown()` kills ambush without an explicit detach, which
+`devproc.c:978-989` names as that path's load-bearing trigger; and the debuggee
+is a `main.parkLoop` that cannot exit on its own. I-39 is not holed. Two things I
+had said about it were also wrong: joey's `reap_adopted_orphans` is a
+post-BOOT_COMPLETE sweep of already-dead zombies, so its line is the first sweep
+and not proof the child lived that long, and the line is NOT in both runs -- the
+red boot extincted before the dap leg ever ran. What survives is a verification
+gap, filed rather than dropped: status=1 is what every kill-class terminate
+yields through the same wrapper, nothing asserts on a DAP-launched child's
+disposition, and no kernel line prints `group_exit_msg` for a non-extinction
+terminate, so the missing witness is a missing instrument rather than evidence
+either way.
+
+A smaller one, in the waiting tooling. The yip CLI resolves its relay state
+relative to the CWD: from the repo it reports the mac held with my queue entry
+behind it, while the same binary from the scratchpad reports every resource FREE
+with no queue and `presence` says nobody has beaten a heartbeat. A blank default
+state reads as FREE, which is the one reading that fires a waiter -- so my await
+was correct only because the harness happened to launch it with the repo as cwd.
+It now pins the directory and refuses any reading unless `presence` shows my own
+row, tested both ways.
+
+What "fixed" covers here: the stage-4 oracle, the D7 comparison's premise, and
+the await's state source. No kernel source changed. AS-R9 is still UNQUALIFIED --
+`ci-smp-gate` has never run, and the mac went to main's seam-90 close for about
+2.9 hours with my durable queue entry behind it. The operator made no decisions
+in this slice; Astra's preservation instruction is what produced the stronger
+attribution, and every other correction came from reading a tool.
+
 ## 2026-10-04: explicit protocol-buffer storage
 
 The private owner needs all metadata/payload transport storage accounted before

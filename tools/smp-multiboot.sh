@@ -78,6 +78,13 @@ sanflag=""
 
 LOG="$REPO_ROOT/build/test-boot.log"
 FAILDIR="$REPO_ROOT/build/multiboot-fails"
+# SMP_KEEP_LOGS=1 also keeps EVERY boot's logs, not only a non-PASS one's.
+# $LOG is overwritten by the next boot, so a PASSING boot's evidence is gone
+# the moment the next one starts -- which makes a per-boot question
+# unanswerable after the fact ("did the D7 overlapping-login ladder actually
+# RUN in boot 7 of ubsan-smp8?"), and five PASS rows cannot answer it either.
+# Opt-in, so the default gate's disk profile is unchanged.
+KEEPDIR="$REPO_ROOT/build/multiboot-logs"
 # Signatures of a real ctx/stack corruption (the SMP soundness bug class).
 # Use the EXACT extinction strings -- bare "canary" would match the benign
 # "canaries" hardening banner + "canary: initialized" boot line (false positive).
@@ -215,6 +222,23 @@ if (( ${#prior_captures[@]} > 0 )); then
     echo "  [$LABEL] archived ${#prior_captures[@]} prior capture(s) -> ${ARCHDIR#$REPO_ROOT/}"
 fi
 
+# Same masquerade hazard, same remedy, for the keep-everything logs: a stale
+# per-boot log from an earlier run of THIS label would be counted as current
+# evidence by whatever reads the directory. Archive, never delete (#223).
+if [[ -n "${SMP_KEEP_LOGS:-}" ]]; then
+    mkdir -p "$KEEPDIR"
+    shopt -s nullglob
+    prior_keeps=("$KEEPDIR/$LABEL-"*.log)
+    shopt -u nullglob
+    if (( ${#prior_keeps[@]} > 0 )); then
+        KEEPARCH="$KEEPDIR/archive/$LABEL-$(date -u +%Y%m%dT%H%M%SZ)"
+        mkdir -p "$KEEPARCH"
+        mv "${prior_keeps[@]}" "$KEEPARCH"/ 2>/dev/null || true
+        echo "  [$LABEL] archived ${#prior_keeps[@]} prior per-boot log(s) -> ${KEEPARCH#$REPO_ROOT/}"
+    fi
+    echo "  [$LABEL] SMP_KEEP_LOGS=1 -- every boot's logs kept in ${KEEPDIR#$REPO_ROOT/}"
+fi
+
 # Per-boot pool restore (#362): every boot's go4c probes write GOCACHE/$WORK
 # into the Stratum pool with ~6x CoW amplification (#39 -- garbage only a
 # commit sweeps), so N cumulative boots age the pool (later boots slow toward
@@ -271,6 +295,14 @@ for i in $(seq 1 "$N"); do
     boot_secs=$(( $(date +%s) - boot_t0 ))
     boot_secs_total=$(( boot_secs_total + boot_secs ))
     boot_secs_list="$boot_secs_list $boot_secs"
+
+    # Retain this boot's evidence BEFORE the classification, so a PASS keeps
+    # its log too (the PASS arm below `continue`s). $LOG is final here: test.sh
+    # has already returned.
+    if [[ -n "${SMP_KEEP_LOGS:-}" ]]; then
+        cp "$LOG"         "$KEEPDIR/$LABEL-$i.log"         2>/dev/null || true
+        cp "$HARNESS_LOG" "$KEEPDIR/$LABEL-$i-harness.log" 2>/dev/null || true
+    fi
 
     if (( rc_ok )); then
         # Belt-and-suspenders: even on exit 0, fail if a corruption marker leaked.

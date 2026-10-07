@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -405,6 +405,22 @@ costs a rename. Each failing class writes BOTH streams
 (`$LABEL-$i-<CLASS>[-<token>].log` guest serial, `-harness.log` the harness side,
 the token being `test.sh`'s result), and arm-1 EXTERNAL-KILL appends its resolved
 sender record to the harness capture.
+
+**`SMP_KEEP_LOGS=1` keeps EVERY boot's logs, not only a non-PASS boot's**, in
+`build/multiboot-logs/$LABEL-$i[.log|-harness.log]`, with the same
+archive-never-delete treatment for a prior run of that label. Default off, so an
+ordinary gate run's disk profile is unchanged. It exists because the default
+captures only what the classifier rejects: every boot writes the same
+`build/test-boot.log`, so a PASSING boot's evidence is destroyed by the next
+boot, and a 50-boot matrix ends holding one serial log plus five row verdicts.
+That is enough to answer "did any boot corrupt?" and nothing else — a per-boot
+question about what a boot actually *exercised* ("did the D7 overlapping-login
+ladder run in boot 7 of `ubsan-smp8`?") is unanswerable after the fact, and the
+five PASS rows cannot answer it either, since a row's verdict is
+`corrupt==0 && extkill==0 && other==0` and says nothing about coverage. A reader
+of the kept logs owes them a denominator control: a label with fewer than N
+retained logs means the evidence is missing, and a clean reading taken off
+missing evidence is a gauge reading zero because it never started.
 
 ## Concurrency
 

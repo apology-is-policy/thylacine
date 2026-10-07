@@ -479,6 +479,11 @@ fi
 if [ "${SMP_GATE_N:-10}" -lt 10 ]; then
   echo "REFUSING: SMP_GATE_N=${SMP_GATE_N:-10} < 10 -- a race needs the full N"; exit 5
 fi
+# RETAIN EVERY BOOT'S LOG. build/test-boot.log is overwritten by the next boot,
+# so a PASSING boot's evidence is gone the moment the next one starts -- and
+# then no per-boot question can be answered after the fact. smp-multiboot.sh
+# keeps all of them when this is set (default off, so no peer's gate changes).
+export SMP_KEEP_LOGS=1
 SMPRC=$(mktemp)
 ( set +e; tools/ci-smp-gate.sh 2>&1; echo $? > "$SMPRC" ) | tee work/oct5-as-r9/guest-smp.log
 smp_rc=$(cat "$SMPRC")
@@ -520,6 +525,48 @@ if [ "$unclean" != 0 ]; then
   exit 1
 fi
 echo "   all five labels: $SMP_N/$SMP_N CLEAN boots"
+
+# PER-BOOT D7 WITNESSES. "The 5x10 matrix exercises D7 fifty times" is an
+# ASSUMPTION, and astra refused it (0161 note 17): the D7 close condition is
+# actual per-boot PASS witnesses in the RETAINED logs, never an inference from
+# five green rows. The retention has its own DENOMINATOR CONTROL -- a label
+# with fewer than N kept logs means the EVIDENCE is missing, and zero D7 reds
+# read off missing evidence is the gauge-reading-zero dodge, so it REFUSES.
+KEEP=build/multiboot-logs
+echo "-- per-boot D7 witnesses in the retained logs ($KEEP):"
+d7_bad=0; d7_att_total=0; d7_pass_total=0
+for lbl in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
+  n_logs=$(find "$KEEP" -maxdepth 1 -name "$lbl-*.log" ! -name '*-harness.log' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$n_logs" != "$SMP_N" ]; then
+    echo "   REFUSING on $lbl: $n_logs retained boot logs, expected $SMP_N."
+    echo "   Per-boot evidence missing, so a clean D7 reading here would prove"
+    echo "   nothing. Check SMP_KEEP_LOGS reached tools/smp-multiboot.sh."
+    exit 1
+  fi
+  att=0; pas=0; red=0
+  for f in "$KEEP/$lbl-"*.log; do
+    case "$f" in *-harness.log) continue ;; esac
+    grep -q 'D7 three distinct login sessions simultaneously ready' "$f" && att=$((att+1)) || true
+    grep -q 'D7 overlapping login probe PASS' "$f" && pas=$((pas+1)) || true
+    grep -q 'D7 overlapping login probe FAILED' "$f" && red=$((red+1)) || true
+  done
+  echo "   $lbl: D7 ladder reached in $att/$n_logs boots, probe PASS in $pas, FAILED in $red"
+  [ "$red" = 0 ] || d7_bad=1
+  [ "$att" = "$pas" ] || d7_bad=1
+  d7_att_total=$((d7_att_total + att)); d7_pass_total=$((d7_pass_total + pas))
+done
+if [ "$d7_bad" != 0 ]; then
+  echo "   D7 IS NOT CLEAN ACROSS THE MATRIX: a boot reached the overlapping-login"
+  echo "   ladder and did not report PASS. That is the 10-06 red's own class, on a"
+  echo "   build whose Stratum input is pinned -- STOP and diagnose, do not retry."
+  exit 1
+fi
+echo "   D7 TOTALS: ladder reached in $d7_att_total boots, probe PASS in $d7_pass_total"
+if [ "$d7_att_total" = 0 ]; then
+  echo "   *** D7 COVERAGE NOT MET: no boot in this matrix reached the ladder. The"
+  echo "   *** SMP verdict above stands, but the D7 queue entry CANNOT be closed"
+  echo "   *** on this run -- it needs boots that actually exercise the overlap."
+fi
 
 # Stage 6 -- THE SECOND AXIS, and for a race fix it is not optional padding.
 # Everything above runs on one memory model (Apple M2 under HVF). AS-R9 is an

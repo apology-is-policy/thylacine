@@ -865,3 +865,44 @@ the live stale `CMakeCache.txt` rather than a synthetic one.
 **Posture unchanged: AS-R9 is UNQUALIFIED, because `ci-smp-gate` has never run.**
 None of this brings the gate closer to running; it only makes the run's verdict
 mean what it says.
+
+### October 6, night: the run reached the guest, and D7 is cured with the kernel exonerated
+
+What had aborted both earlier runs was stage 4's witness assertion, not D7: it
+read `work/oct5-as-r9/guest-test.log`, which is test.sh's stdout (29 lines, zero
+`[test]` lines), while the suite's 1835 `[test]` lines live only in the boot log.
+It had never passed since the day it was written, so the October 6 run's
+"aborted" was mine and not the guest's. The witness, tally and skip reads now use
+the preserved boot log behind a denominator control.
+
+With `STRATUM_SRC` pinned to stratum-astra @61dde37 (exact head equality, a
+dirty-tree refusal, and the pin asserted in the OUTPUT: the stratumd
+`CMakeCache.txt` names the pinned tree, both staged binaries newer than a
+pre-build stamp):
+
+- `joey: D7 overlapping login probe PASS` -- `work/oct5-as-r9/boot-logs/boot-confirm-232503Z.log:3495`
+- `joey: D7 twenty distinct login/logout cycles PASS` -- `:3776`
+- `Thylacine boot OK` -- `:3914`; EXTINCTION lines: 0
+- tests 1834/1834, all four burrow witnesses with PASS records
+
+Paired-image hashes of that run, preserved under
+`work/oct5-as-r9/cpu1-green-pair/` with a manifest before stage 5 can re-bake
+them (Astra, 0161 t21): `.config 4fcc788d6be38b80`, `thylacine.elf
+1fe1ba3a46219dc1`, `ramfs.cpio cf650c39d99b8716`, `pool.img f01c00189218b9e0`.
+Against the red run's hashes recorded above, the ELF and the `.config` are
+BYTE-IDENTICAL and only the Stratum-derived half moved. The kernel was held fixed
+as the control variable and D7 flipped, so no part of the charge-settlement
+repair can be the cause.
+
+D7's queue entry nevertheless stays OPEN until the gate. The red was only called
+deterministic after 2/2 on an identical image; a cure resting on 1/1 does not
+meet that bar. The close condition is per-boot D7 PASS witnesses in the retained
+logs, NOT an inference from five green rows (Astra, 0161 note 17) -- and the
+retention had to be built, because `smp-multiboot.sh` overwrites
+`build/test-boot.log` every boot and keeps a copy only for a non-PASS
+classification, so the passing boots' evidence was being discarded. It now takes
+`SMP_KEEP_LOGS=1` (default off; a prior run's logs are archived, not deleted),
+and stage 5 counts per label how many boots reached the overlapping-login ladder
+and how many reported PASS, refusing when a label's retained-log count is not N.
+
+**Posture unchanged: AS-R9 is UNQUALIFIED, because `ci-smp-gate` has never run.**
