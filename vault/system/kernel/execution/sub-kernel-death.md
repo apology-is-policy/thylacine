@@ -203,8 +203,11 @@ A second kill ends that hold (ARCH 7.9.1 part B, `dec-2026-10-07-exit-close`).
 `proc_group_kill` -- the `kill` note's cascade (syscall.c) and the `/proc` ctl
 `kill` (devproc.c), never a hangup, `EXITKILL` or a legate scope's end, which
 keep the string wrapper -- runs the same core as every termination, and when
-its CAS on `group_exit_msg` loses (the Proc is already terminating) it ORs
-`PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the wake loop.
+its CAS on `group_exit_msg` loses (the group is already terminating), or the
+Proc carries `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`, so
+an `exits()` close, which sets no group exit message, counts as terminating),
+it ORs `PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the
+wake loop.
 notes.c's `thread_death_held` then reads the hold as lifted: the final close's
 send is refused, its wait unwinds through Tflush, and what it could not finish
 goes to the closer ([[sub-kernel-ninep-dev9p]], part C). The first kill never
@@ -445,8 +448,9 @@ What a change **must** re-establish:
 - the close window's three properties, and that `exit_close_active` stays
   owner-set, bounded to the one close pass, and checked *first* in
   `thread_die_pending` (through `thread_death_held`);
-- that only a kill's CAS-lost branch sets `PROC_FLAG_EXIT_CLOSE_FORCED`, and
-  before the wake loop (a close that re-checks after the wake must see it);
+- that only a kill sets `PROC_FLAG_EXIT_CLOSE_FORCED` -- on a lost CAS or a
+  set `PROC_FLAG_EXIT_CLOSING` -- and before the wake loop (a close that
+  re-checks after the wake must see it);
 - death winning over both stop owners at every branch, the exit close
   included (a dying group is never asked to park).
 

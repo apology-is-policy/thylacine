@@ -3809,7 +3809,10 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         // that finds this Proc already terminating lifts the hold
         // (proc_group_kill): the close's waits then unwind as a death, and
         // what it cannot finish goes to the closer (ARCH 7.9.1 parts B, C).
+        // PROC_FLAG_EXIT_CLOSING is how a kill finds an exits() close, which
+        // set no group_exit_msg, terminating.
         struct Thread *closer = current_thread();
+        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
         closer->exit_close_active = true;
         // RW-7 R3-F1: stop this Proc's virtio devices before its fds (and the
         // KObj_DMA pages they hold) close -- the at-exit leg of the
@@ -4734,6 +4737,7 @@ static void group_terminate(struct Proc *p, int code, const char *msg, bool kill
     // still re-runs the wake + kick below (idempotent). __ATOMIC_RELEASE so a
     // peer's __ATOMIC_ACQUIRE load at its die-check sees a fully-published msg.
     const char *expected = NULL;
+    bool        first    = false;
     if (__atomic_compare_exchange_n(&p->group_exit_msg, &expected, msg,
                                     false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
         // #91: record the companion exit code EXACTLY ONCE, in the set-once
@@ -4744,13 +4748,16 @@ static void group_terminate(struct Proc *p, int code, const char *msg, bool kill
         // racing loser (a second exit_group, or a kill racing the exit) writes
         // NEITHER field, so no torn (msg, code) pair can be observed.
         p->group_exit_code = code;
-    } else if (kill) {
-        // A kill that finds the Proc already terminating forces its final
-        // close (ARCH 7.9.1 part B). Published before the wake below, so the
-        // closing thread re-checks into it (register-then-observe, I-9).
+        first = true;
+    }
+    // A kill that finds the Proc already terminating -- its group exiting, or
+    // its last thread in the final close of an exits() -- forces that close
+    // (ARCH 7.9.1 part B). Published before the wake below, so the closing
+    // thread re-checks into it (register-then-observe, I-9).
+    if (kill && (!first || (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                            PROC_FLAG_EXIT_CLOSING)))
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED,
                           __ATOMIC_RELEASE);
-    }
 
     // Wake every futex (torpor) sleeper of p so it returns from torpor_wait to
     // its EL0-return die-check. MUST run AFTER the flag set: a peer that

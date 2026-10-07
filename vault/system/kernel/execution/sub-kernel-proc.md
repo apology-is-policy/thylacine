@@ -404,6 +404,14 @@ The three lifecycle states are `INVALID(0)` / `ALIVE` / `ZOMBIE`, with
 There is no REAPED state — by the time `wait_pid` returns the pid, the
 descriptor is freed and its magic clobbered.
 
+The top two bits are the final close's (2026-10-07, ARCH 7.9.1 part B,
+[[sub-kernel-death]]): `PROC_FLAG_EXIT_CLOSING` (bit 31), set once by
+`proc_close_handles_at_exit` before its first close, so a kill finds an
+`exits()` close terminating although it set no group exit message; and
+`PROC_FLAG_EXIT_CLOSE_FORCED` (bit 30), set by `proc_group_kill` when it finds
+the Proc terminating, which lifts the final close's hold on death. Neither is
+inherited or ever cleared: both mark a Proc that is going.
+
 `proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
 (bit 29, above the caught-note claim field), stamped by the test link helpers (`proc_test_link`,
 `proc_test_link_child`) on every Proc they splice into the table. rfork links

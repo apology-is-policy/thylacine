@@ -2601,10 +2601,26 @@ void test_proc_kill_forces_final_close(void) {
     bool c_wrap   = (__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 
-    a->state = b->state = c->state = PROC_STATE_ZOMBIE;
+    // An exits() close sets no group_exit_msg: the final-close mark is what
+    // makes its first kill find it terminating. The control is a hangup.
+    struct Proc *d = proc_alloc();
+    struct Proc *e = proc_alloc();
+    TEST_ASSERT(d && e, "proc_alloc x2");
+    __atomic_or_fetch(&d->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
+    __atomic_or_fetch(&e->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
+    proc_group_kill(d);
+    bool d_closing = (__atomic_load_n(&d->proc_flags, __ATOMIC_ACQUIRE) &
+                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+    proc_group_terminate(e, "hangup");
+    bool e_hangup  = (__atomic_load_n(&e->proc_flags, __ATOMIC_ACQUIRE) &
+                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+
+    a->state = b->state = c->state = d->state = e->state = PROC_STATE_ZOMBIE;
     proc_free(a);
     proc_free(b);
     proc_free(c);
+    proc_free(d);
+    proc_free(e);
 
     TEST_ASSERT(a_msg && a_msg[0] == 'k', "a kill terminates as \"killed\"");
     TEST_ASSERT(!a_first, "the first kill leaves the final close orderly");
@@ -2613,4 +2629,6 @@ void test_proc_kill_forces_final_close(void) {
     TEST_ASSERT(b_kill, "a kill after an exit forces it");
     TEST_EXPECT_EQ(b_code, 0, "and the exit's code stands");
     TEST_ASSERT(!c_wrap, "a second termination through the wrapper never forces");
+    TEST_ASSERT(d_closing, "a first kill that finds the final close under way forces it");
+    TEST_ASSERT(!e_hangup, "a hangup that finds it does not");
 }

@@ -1190,6 +1190,10 @@ _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 // close no longer waits on a server -- thread_die_pending honours the flag
 // under exit_close_active. Set once, by proc_group_kill, before its death wake.
 #define PROC_FLAG_EXIT_CLOSE_FORCED  (1u << 30)
+// The last thread is in the final close (proc_close_handles_at_exit), so the
+// Proc is terminating even when nothing set group_exit_msg (an exits()): a kill
+// that finds it forces the close. Set once, never cleared.
+#define PROC_FLAG_EXIT_CLOSING       (1u << 31)
 _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
@@ -1199,6 +1203,16 @@ _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTR
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE)) == 0,
     "the forced-final-close mark must not overlap another flag");
+_Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
+    PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
+    PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
+    PROC_FLAG_CAUGHT_NOTE_MASK | PROC_FLAG_CAUGHT_CLAIM_MASK |
+    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
+    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE |
+    PROC_FLAG_EXIT_CLOSE_FORCED)) == 0,
+    "the final-close mark must not overlap another flag");
 
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
@@ -1785,7 +1799,8 @@ void proc_group_terminate(struct Proc *p, const char *msg);
 void proc_group_terminate_code(struct Proc *p, int code, const char *msg);
 
 // A kill (SYS_POSTNOTE "kill", the /proc/<pid>/ctl kill verb):
-// proc_group_terminate(p, "killed"), and when p is already terminating it also
+// proc_group_terminate(p, "killed"), and when p is already terminating -- its
+// group exiting, or its last thread in the final close -- it also
 // forces p's final close (ARCH 7.9.1 part B; PROC_FLAG_EXIT_CLOSE_FORCED),
 // published before the death wake so a final close asleep on its server wakes
 // into it. Other terminations (a hangup, EXITKILL, a legate scope) never
