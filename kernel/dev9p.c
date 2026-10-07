@@ -365,7 +365,12 @@ void dev9p_wb_budget_bias_for_test(s64 n) {
 // On failure the run is DROPPED and the errno latched (the voted NFS-async
 // posture: the bytes are lost, the latch reports it via every subsequent
 // write/fsync and the last close -- retry-forever would wedge close). The
-// buffer itself stays allocated (freed at dev9p_close).
+// buffer itself stays allocated (freed at dev9p_close). A thread dying inside
+// the flush is the exception: a death refuses its send or abandons its Twrite,
+// which says nothing about the server, and write() already reported those
+// bytes written. The run stays staged and nothing is latched, so the next
+// flusher -- the last close at the latest -- sends it; a prefix that landed
+// is rewritten with the same bytes at the same offsets.
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     while (p->wb_flushers != 0) {
         spin_unlock(&p->wb_lock);
@@ -423,6 +428,7 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     spin_lock(&p->wb_lock);
     p->wb_flushers--;
     if (err) {
+        if (thread_die_pending(current_thread())) return err;
         if (p->wb_err == 0) p->wb_err = (int)(-(long)err);   // positive errno
         p->wb_len   = 0;
         p->wb_known = false;

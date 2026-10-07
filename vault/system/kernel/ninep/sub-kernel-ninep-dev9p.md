@@ -81,6 +81,10 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    `close(2)` reports as `EIO` (2026-10-07, ARCH section 21.11; until then
    `Dev.close` was void and the failure was silent,
    [[seam-wb-close-flush-slot]]) — then free the buffer + uncharge.
+   A flush that fails on a thread dying inside `write`, `fsync` or `wstat`
+   keeps the run staged and latches nothing (a death refused the send; the
+   bytes were acknowledged), so this close sends it (`wb_flush_locked`,
+   LARDER-DESIGN section 12; witness `dev9p.wb_dying_flush_keeps_run`).
 5. `fid_owned`: **G2 donate or async clunk.** An unopened (COPEN clear)
    DIRECTORY fid on a cacheable client, not `fid_suspect`, and not staled
    (`larder_qid_staled_since` over the G4 ring since `fid_gen`) PARKS in

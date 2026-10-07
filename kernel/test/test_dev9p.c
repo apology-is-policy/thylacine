@@ -76,6 +76,7 @@ void test_dev9p_wb_overlay_read(void);
 void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
 void test_dev9p_wb_close_returns_flush_error(void);
+void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3512,6 +3513,61 @@ void test_dev9p_wb_close_returns_flush_error(void) {
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
                    "a close whose flush fails returns its errno");
     wb_test_end(root);
+}
+
+// A thread that dies inside a flushing call cannot send: a death refuses the
+// sender. The run it was flushing stays staged and unlatched -- write()
+// already reported those bytes written -- and the last close flushes it. The
+// control, one variable away: the same fsync on a live thread flushes.
+static struct Spoor     *g_wbd_spoor;
+static int               g_wbd_rc;
+static struct test_dying g_wbd_thread;
+
+static void wbd_fsync(void *arg) {
+    (void)arg;
+    g_wbd_rc = dev9p.fsync(g_wbd_spoor, 0);
+}
+
+void test_dev9p_wb_dying_flush_keeps_run(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (control)");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage (control)");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.fsync(f, 0), 0ull, "a live fsync succeeds (control)");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "and flushes the run (control)");
+    TEST_EXPECT_EQ((u64)(s64)spoor_clunk_rc(f), 0ull, "close (control)");
+    wb_test_end(root);
+
+    root = NULL;
+    f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    TEST_ASSERT(test_dying_start(&g_wbd_thread, wbd_fsync, NULL, /*dead_now=*/true),
+                "a dying thread");
+    TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+    test_dying_reap(&g_wbd_thread);
+    u32 seen_dying = g_twrite_seen;
+    int frc        = g_wbd_rc;
+    int crc        = spoor_clunk_rc(f);
+    u32 seen       = g_twrite_seen;
+    u32 cap_len    = g_twrite_cap_len;
+    u64 cap_off    = g_twrite_cap_off;
+    wb_test_end(root);
+
+    TEST_ASSERT(frc < 0, "the dying fsync fails");
+    TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its Twrite: nothing on the wire");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "the last close flushed the kept run");
+    TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
+    TEST_EXPECT_EQ(cap_off, 0ull, "at offset 0");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
