@@ -7,10 +7,10 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    7a2f3e79e27010f4ffe4cb41af5f22ddb72698f9  (the commit this manifest was GENERATED AGAINST; the
+- tip:    5e09e801168c8b82dd444a0b850f8a97a16806ee  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 69
+- commits in range: 74
 - nothing pushed; nothing landed on main
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
@@ -35,7 +35,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..7a2f3e79e27010f4ffe4cb41af5f22ddb72698f9 -- .claude/
+    $ git log --oneline 5ff62b788..5e09e801168c8b82dd444a0b850f8a97a16806ee -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -83,7 +83,7 @@ regions is hers to resolve in her tree, and I have not pre-empted it.
     vault dossiers                 : 9 file(s)
     docs                           : 4 file(s)
     specs                          : 0 file(s)
-    work/ evidence + runbooks      : 106 file(s)
+    work/ evidence + runbooks      : 112 file(s)
 
 The tools/ files are a shared surface main and aux also bake from. The one
 behavioural change there is smp-multiboot.sh's SMP_KEEP_LOGS retention, which is
@@ -107,6 +107,19 @@ DEFAULT OFF, so no peer's gate changes unless they opt in.
   accounting and clipboard remain NON-DEFAULT and ungated by this work.
 - The paused private-owner draft (base c822021a2ea56a452b4cdbe7709e6fa117a7678b)
   stays shut pending astra's review close.
+# Merge-time obligations -- HAND-WRITTEN, NEVER GENERATED
+
+make-manifest.sh INCLUDES this file verbatim into INTEGRATION-MANIFEST.md's
+gating section and REFUSES if it is missing. It lives apart because the manifest
+is generated: obligations (3) and (4), including main's final loom.h contract
+text recorded verbatim off yip 0183, were silently DESTROYED by a regeneration on
+2026-10-07 -- by the very command the manifest's own header tells the reader to
+run. Recovered from git and moved here, where no script rewrites them.
+
+Add obligations HERE. Each one names what must be done at merge, against which
+of main's commits, and how it was verified -- never "see the call", because a
+call transcript is not in the delivery.
+
 - MERGE-TIME OBLIGATIONS against main, which this base cannot carry: (1) merging
   main f6f4c0397 (loom-mc) requires `loom_drive_moved_locked(l);` before the
   spin_unlock in loom_post_pool_cqe; (2) main's tag-pool changes loom.c's CQ pump

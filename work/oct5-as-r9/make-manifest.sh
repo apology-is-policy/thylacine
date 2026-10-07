@@ -15,6 +15,10 @@ BASE=${BASE:-5ff62b788}
 TIP=$(git rev-parse HEAD)
 EXCL=${EXCL:-55cfdb54c}
 OUT=work/oct5-as-r9/INTEGRATION-MANIFEST.md
+OBLIG=$(dirname "$0")/MERGE-OBLIGATIONS.md
+# A loud absence beats a silently obligation-free manifest: an integrator who
+# reads "no obligations" and merges is the failure this refusal prevents.
+[ -f "$OBLIG" ] || { echo "REFUSING: $OBLIG is missing -- the manifest's merge obligations live there, and a manifest without them reads as 'nothing owed at merge'"; exit 3; }
 
 # The exclusion is load-bearing, so prove the commit exists and still touches
 # only what we claim before writing a document that says so.
@@ -129,12 +133,10 @@ DEFAULT OFF, so no peer's gate changes unless they opt in.
   accounting and clipboard remain NON-DEFAULT and ungated by this work.
 - The paused private-owner draft (base c822021a2ea56a452b4cdbe7709e6fa117a7678b)
   stays shut pending astra's review close.
-- MERGE-TIME OBLIGATIONS against main, which this base cannot carry: (1) merging
-  main f6f4c0397 (loom-mc) requires `loom_drive_moved_locked(l);` before the
-  spin_unlock in loom_post_pool_cqe; (2) main's tag-pool changes loom.c's CQ pump
-  budget to `submitted + P9_TAG_LIMIT + 1` -- verified independently as touching
-  no charge-settlement path and no v->lock, so it is a reconciliation item and
-  not a correctness interaction.
 EOF
+# The obligations are INCLUDED, never templated: hand-written merge instructions
+# inside a generated file are deleted by the next regeneration, and this script
+# did exactly that to two of them once.
+cat "$OBLIG"
 } > "$OUT"
 echo "wrote $OUT ($(wc -l < "$OUT" | tr -d ' ') lines) for tip $TIP"
