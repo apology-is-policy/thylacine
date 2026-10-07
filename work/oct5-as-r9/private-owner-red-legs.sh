@@ -208,9 +208,11 @@ stamp_pre_mutation() {
   } > "$MUTANT_STAMP" 2>/dev/null || die "cannot write $MUTANT_STAMP"
 }
 
+# Kernel-only, by the script that explains why: the mutations are kernel-only,
+# so userspace is held FIXED and the kernel is the single changed variable.
 build() { # build <leg>
   say "build ($1)"
-  run_owned "$RUN/$1-build.txt" tools/build.sh kernel --config ci
+  run_owned "$RUN/$1-build.txt" work/oct5-as-r9/rebuild-kernel.sh
   if [ "$OWNED_RC" -ne 0 ]; then
     tail -30 "$RUN/$1-build.txt"
     die "build failed for $1 (rc $OWNED_RC) -- see $RUN/$1-build.txt"

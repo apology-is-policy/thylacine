@@ -52,7 +52,7 @@ new_tree() { # new_tree <name> -> echoes the path
   cp "$ROOT/kernel/burrow.c" "$ROOT/kernel/loom.c" "$t/kernel/"
   cp "$ROOT/kernel/test/test.c" "$t/kernel/test/"
   cp "$REAL_LOG" "$t/fixture-serial.log"
-  cat > "$t/tools/build.sh" <<'STUB'
+  cat > "$t/work/oct5-as-r9/rebuild-kernel.sh" <<'STUB'
 #!/bin/sh
 set -u
 n=$(cat build/.builds 2>/dev/null || echo 0); n=$((n + 1)); printf '%s\n' "$n" > build/.builds
@@ -109,7 +109,7 @@ case "$mode" in
 esac
 exit "$rc"
 STUB
-  chmod 755 "$t/tools/build.sh" "$t/tools/test.sh"
+  chmod 755 "$t/work/oct5-as-r9/rebuild-kernel.sh" "$t/tools/test.sh"
   ( cd "$t" && git init -q . && git add -A kernel tools && git -c user.email=h@x -c user.name=h commit -qm base ) >/dev/null
   echo "$t"
 }
