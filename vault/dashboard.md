@@ -128,11 +128,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
+- 2026-10-07 [[chg-2026-10-07-b2-jit]] — The code region is a reservation, and its writer is hardened: random placement, a thunk born sealed and execute-only, unprivileged user copies, maps withholding code addresses, and an image join that counts code as CAP_JIT; Loom registration returns -errno
 - 2026-10-07 [[chg-2026-10-07-exit-close]] — The at-exit close no longer waits on a server no death can interrupt: the clunk never waits, a kill forces the final close, the closer finishes it; and a Loom registration flushes dev9p's staged run
 - 2026-10-07 [[chg-2026-10-07-tag-pool]] — The 9P tag table grows to the 16-bit tag space, each kind of op has a share, a sync op waits for a tag, and close(2) reports a failed write-behind flush
 - 2026-10-06 [[chg-2026-10-06-9p-sessions-ends]] — /ctl/9p-sessions shows a row's counters only to its two ends
 - 2026-10-06 [[chg-2026-10-06-chdir-physical]] — chdir stores the name of where the walk landed
 - 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
 - 2026-10-06 [[chg-2026-10-06-devno-u64]] — devno-u64: the kernel's device number is 64 bits and never reused; t_stat.devno carries all of it
-- 2026-10-06 [[chg-2026-10-06-flag-words]] — The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested
 <!-- generated:end -->
