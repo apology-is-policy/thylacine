@@ -225,6 +225,22 @@ The operator's decision, which I have not re-asked: the mac gate alone, with the
 pi A72/KVM axis recorded as an owned residual. So this is a ONE-AXIS
 qualification, and nothing here is pushed, landed, or activated.
 
+### One more, found by reading a diff instead of a success line
+
+Regenerating INTEGRATION-MANIFEST.md after those two commits printed `wrote ...
+(115 lines)` and succeeded. The diff said it had deleted merge obligations (3)
+and (4) -- main's register-gate ordering and the exit-close anchor report,
+including main's final loom.h contract comment recorded verbatim off 0183. The
+generator templates obligations (1) and (2) and knows nothing of any added by
+hand, while the manifest's own header tells the reader to regenerate rather than
+trust its tip line. So the document instructed its reader to run the command
+that destroys its most load-bearing content, and silently: a manifest with no
+obligations reads as "nothing owed at merge". They now live in
+work/oct5-as-r9/MERGE-OBLIGATIONS.md, which no script rewrites, included
+verbatim by the generator, which refuses with status 3 when that file is absent
+-- both arms measured, and the recovered text verified byte-identical to the
+version that last held it rather than eyeballed.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,
