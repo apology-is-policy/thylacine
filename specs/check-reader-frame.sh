@@ -26,8 +26,9 @@ CLEAN="reader_frame:39
 reader_frame_delivery:39
 reader_frame_blockthrough_fair:34"
 
-# buggy: cfg, invariant that must be the one reported
-BUGGY="reader_frame_buggy:NoDesync"
+# buggy: cfg, invariant that must be the one reported, distinct states at the
+# halt (deterministic under -workers 1; "-" = do not pin)
+BUGGY="reader_frame_buggy:NoDesync:41"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
@@ -57,12 +58,14 @@ echo "$CLEAN" | while IFS=: read -r cfg want; do
 done
 
 echo "== buggy (must violate, and violate the NAMED invariant) =="
-echo "$BUGGY" | while IFS=: read -r cfg want; do
+echo "$BUGGY" | while IFS=: read -r cfg want count; do
     run "$cfg"
     if [ "$RC" -eq 0 ]; then
         fail "FAIL $cfg: rc=0 -- the counterexample did NOT fire; $want is unguarded"
     elif ! grep -q "Invariant $want is violated" "$LOG"; then
         fail "FAIL $cfg: rc=$RC but not via $want -- got: $(grep -o -E '(Invariant|property) [A-Za-z]* (is|was) violated' "$LOG" | head -1)"
+    elif [ "$count" != "-" ] && [ "$GOT" != "$count" ]; then
+        fail "FAIL $cfg: $GOT distinct states at the halt, expected $count -- the model CHANGED"
     else
         echo "ok   $cfg: rc=$RC, $want violated as claimed ($GOT distinct states)"
     fi

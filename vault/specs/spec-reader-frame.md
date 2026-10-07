@@ -47,7 +47,7 @@ leaves (dies, parks and re-elects, or flushes); and the srvconn reading role
 | `BUGGY_BLOCK_THROUGH` | the deleted `thread_reader_blocks_death` guard |
 
 Checker: `specs/check-reader-frame.sh` (pins each cfg's verdict by name and
-every count). TLC 2026-10-06, N = 3: clean 39 / 39 (delivery) / 34
+every count, the buggy cfg's at its halt). TLC 2026-10-06 23:36Z, N = 3: clean 39 / 39 (delivery) / 34
 (blockthrough_fair); `reader_frame_buggy` NoDesync at 41;
 `reader_frame_blockthrough` EventuallyUnwinds at 34 (a stutter with A in its
 recv after the server stops mid-frame). Both counterexamples read.

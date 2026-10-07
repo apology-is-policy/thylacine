@@ -1696,8 +1696,8 @@ Until 2026-10-06 the module modelled the frame-atomic block-through (one
 reader, a boundary-guarded die-check, a fair server); that rule is now the
 `BUGGY_BLOCK_THROUGH` cfg.
 
-TLC 2026-10-06 (`-workers 1 -deadlock -lncheck final`; `specs/check-reader-frame.sh`
-pins every count), N = 3: `reader_frame.cfg` (Safety + EventuallyUnwinds, no
+TLC 2026-10-06 23:36Z (`-workers 1 -deadlock -lncheck final`;
+`specs/check-reader-frame.sh` pins every count, the buggy cfg's at its halt), N = 3: `reader_frame.cfg` (Safety + EventuallyUnwinds, no
 server fairness) 39 distinct states; `reader_frame_delivery.cfg` (FairServerSpec:
 + FrameDelivered) 39; `reader_frame_blockthrough_fair.cfg` (the superseded rule
 under a fair server -- the 2026-07-19 model's claim, a control) 34, clean.
