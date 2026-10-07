@@ -917,6 +917,22 @@ boot was inside when it died, derived from the log's last announcement, and
 refuses when that is not this leg -- driven against the real failed log, where it
 rejects.
 
+THAT IS NECESSARY AND NOT SUFFICIENT, which is why the fixture now carries
+ARRIVAL MARKERS. `LP_CHECK` is `goto done`, and the cleanup at `done:` unrefs the
+ring and drops the owner as well -- so under any mutant that strips the ring's
+image reference, an earlier check failure reaches an owner drop with a ring
+outstanding and raises the SAME named extinction inside the SAME test, while the
+check that actually failed never reaches the log because the boot ends before the
+suite can report it. Line order is not execution order, and a per-leg argument
+from line numbers does not survive a `goto`. The fixture therefore prints one
+marker immediately before the target leg's owner drop and a different one before
+the cleanup's, the mutant stage requires the first and refuses on the second, and
+the control stage requires the first too -- a control whose leg never reached that
+drop would pass without exercising the operation under test, which is the
+quietest way for a comparison to mean nothing. The cleanup marker also prints the
+failing check's message, so the hidden failure becomes visible rather than being
+replaced by its own consequence.
+
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are
 opened and closed directly and the fixture waits on a counter, so nothing in it

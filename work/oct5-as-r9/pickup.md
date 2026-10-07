@@ -1254,3 +1254,48 @@ one. The retirer never gets a turn: the enqueue would only happen at :720.
 That ordering is also what makes this leg's claim true in the first place -- it is
 why the ring's own reference is the ONLY thing keeping the descriptor addressable
 across that window.
+
+### astra t61: three corrections applied (19:4xZ) -- and the first killed my argument
+
+1. ARRIVAL, NOT POSITION. My per-leg "first lethal point" argument assumed
+   execution follows line order. It does not: `LP_CHECK` is `goto done`
+   (fixture:25) and the cleanup at `done:` does `if (l) loom_unref(l);` then
+   `if (p) test_proc_drop(p);` -- so under the mutant ANY earlier check failure
+   reaches an owner drop with a ring outstanding and raises the SAME named
+   extinction in the SAME test, while hiding the check that failed. astra saw it;
+   my enumeration did not.
+   FIX (she sanctioned the fixture change, no round-trip): the fixture prints
+   `[lp-mark] unpinned-reap-owner-drop` immediately before the target drop and
+   `[lp-mark] cleanup-owner-drop` before the cleanup's -- the latter also
+   printing the failing check's message, so the hidden failure reaches the log
+   instead of being replaced by its consequence. Oracle: stage 2 REQUIRES the
+   arrival marker and REFUSES on the cleanup marker; stage 1 requires the
+   arrival marker too, because a control whose leg never reached that drop would
+   pass without exercising what the mutant tests.
+   DRIVEN THREE WAYS against synthetic logs built from the real one:
+     M1 arrival, no cleanup, died in leg -> ACCEPT (rc 0)
+     M2 no arrival marker                -> "THE LEG NEVER REACHED ITS OWNER DROP"
+     M3 arrival AND cleanup              -> "THE CLEANUP PATH RAN", check named
+   The earlier four-way set for the test-granularity arm still passes (L1 accept,
+   L2 other test, L3 leg completed, L4 no announcements).
+2. THE GET-CANCEL MOVED to the successful create return, after charge AND layout
+   succeed, instead of immediately after the begin. This confines the net-zero
+   reference change to Looms that actually exist and leaves both rollback exits
+   balanced -- removing my assumption that allocation failures cannot occur
+   during a mutant run, which is not an assumption a mutant should rest on.
+3. THE CONTROL SET IS PINNED, out of the pruner's reach rather than by raising a
+   bound: moved to work/oct5-as-r9/reap-leg-control-PINNED-20261007T190621Z/
+   (a rename, no disk cost) with a PINNED.txt stating what each half of that run
+   is and is not evidence of. preserve_boot_inputs prunes $PRESERVE_DIR
+   newest-first to KEEP_INPUT_GENS (lease-runbook.sh:226-239), so the set would
+   have survived one more run and not two. Verified 9/9 against its own
+   HASHES.txt after the move; thylacine.bin = 9fae5eb3a0873190 as recorded.
+   (My first verification said 0 of 9 OK: HASHES.txt stores 16-char prefixes and
+   I compared them to full digests. Nine of nine failing is the tell -- suspect
+   the check.)
+
+A FRESH CONTROL IS NOW OWED, because the fixture changed. astra: "preserving the
+original receipt does not require freezing the test forever."
+DISK AT 19:5xZ: 7674 MiB, i.e. df -g 7 against FLOOR_GB=8 -- the next run will
+REFUSE at stage 0 until it recovers. That is the floor working, not a problem to
+solve by lowering it.

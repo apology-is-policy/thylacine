@@ -11,6 +11,7 @@
 #define LOOM_PRIVATE_FIXTURE_H
 
 #include <thylacine/addrspace.h>
+#include "../../arch/arm64/uart.h"
 #include <thylacine/vma.h>
 // The release witness below needs the physical-page gauge and its magazine
 // drain, which live in the mm internals rather than in kernel/include -- the
@@ -245,6 +246,14 @@ static const char *loom_private_fixture(void) {
     // below would be satisfied by someone else's retirement.
     u64 before = loom_private_retired();
     LP_CHECK(before + 1 == goal, "no retirement in flight at the snapshot");
+    // ARRIVAL MARKER. Line order is not execution order: LP_CHECK is `goto
+    // done`, and the cleanup at `done:` unrefs the ring and drops the owner too,
+    // so under a mutant that strips the ring's image reference ANY earlier check
+    // failure reaches an owner drop with a ring outstanding and produces the
+    // SAME named extinction -- hiding the check that actually failed. A mutant
+    // run therefore cannot attribute its death to this operation by position.
+    // This marker is the proof of arrival (astra, yip 0161 t61).
+    uart_puts("[lp-mark] unpinned-reap-owner-drop\n");
     test_proc_drop(p); p = NULL; fd = -1;
     LP_CHECK(lp_wait(goal),
              "a reaped creator's ring retires on the ring's own image reference");
@@ -309,6 +318,13 @@ done:
     handle_put(&second);
     handle_put(&borrow);
     if (p && mapped_va) (void)lp_detach_settling(p, mapped_va, mapped_len);
+    // The cleanup's own drop, marked and ATTRIBUTED: if a mutant dies here the
+    // extinction is the cleanup's, not the leg's, and the check that sent us to
+    // `done:` would otherwise never reach the log because the boot ends before
+    // the suite can report `error`.
+    uart_puts("[lp-mark] cleanup-owner-drop");
+    if (error) { uart_puts(" after-check-failure: "); uart_puts(error); }
+    uart_puts("\n");
     if (p) test_proc_drop(p);
     if (!lp_wait(goal) && !error) error = "private fixture cleanup retirement timed out";
     if (pin) addrspace_unpin(pin);

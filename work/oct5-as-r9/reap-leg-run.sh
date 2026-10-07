@@ -275,6 +275,20 @@ echo "-- suite: $tally (derived expectation $EXPECT_TESTS)"
 [ "$total" = "$EXPECT_TESTS" ] || { echo "   total $total != derived $EXPECT_TESTS"; exit 1; }
 [ "$pass" = "$total" ] || { echo "   $pass of $total passed"; exit 1; }
 [ "$suite_rc" = 0 ] || { echo "   test.sh exited $suite_rc on the control"; exit 1; }
+# The CONTROL must show ARRIVAL too: a control whose leg never reached the drop
+# would pass without exercising the operation stage 2 is about to test, which
+# would make the comparison meaningless in the quietest possible way.
+/usr/bin/grep -qF '[lp-mark] unpinned-reap-owner-drop' "$B" || {
+  echo "   THE CONTROL's leg never reached its owner drop -- arrival marker"
+  echo "   absent, so it passed WITHOUT exercising what the mutant tests."
+  echo "   Refusing before stage 2."; exit 1; }
+if /usr/bin/grep -qF '[lp-mark] cleanup-owner-drop' "$B"; then
+  echo "   THE CONTROL took the cleanup path: a check failed and the fixture"
+  echo "   recovered quietly. The marker line names it:"
+  /usr/bin/grep -nF '[lp-mark] cleanup-owner-drop' "$B" | head -2
+  exit 1
+fi
+echo "-- control reached the leg's owner drop (arrival marker present, no cleanup)"
 echo "-- CONTROL GREEN: the leg passes, suite $pass/$total, no extinction"
 
 echo
@@ -304,6 +318,15 @@ import sys
 # which this runner would correctly refuse but which would waste the window.
 # So the destroy's put is removed too, by decrementing the guard directly.
 #
+# AND THE GET-CANCEL SITS AT THE SUCCESSFUL RETURN, not immediately after the
+# begin (astra, yip 0161 t61). Cancelling right after begin leaves
+# loom_create_private's two rollback exits (!charged, layout-alloc) over-putting
+# by one, which I had excused as unreachable in this fixture -- an assumption
+# about allocation failures that a mutant run has no business resting on.
+# Cancelling after charge AND layout have both succeeded confines the net-zero
+# reference change to Looms that actually exist, leaves every rollback path
+# balanced, and needs no patch at three failure sites.
+#
 # WHY TEST-GRANULARITY ATTRIBUTION IS ENOUGH UNDER THIS MUTANT, verified per leg
 # rather than asserted: the fixture packs eight create sites into ONE test, so
 # "died inside this test" does not by itself name the leg. But a guard can only
@@ -331,13 +354,15 @@ import sys
 # That same ordering is what makes this leg's claim true at all.
 p='kernel/loom.c'
 s=open(p).read()
-a="    if (!addrspace_private_begin(as)) return NULL;\n"
+a="    burrow_charge_record(l->ring, p, backing);\n    return l;\n"
 b=("    addrspace_uncharge_pages(as, metadata + refund);\n"
    "    spin_unlock(&as->lock);\n"
    "    addrspace_private_end(as);\n")
 if s.count(a)!=1 or s.count(b)!=1:
     sys.exit("REFUSING: mutation anchors are not unique (%d, %d) -- the file moved under this script" % (s.count(a), s.count(b)))
-s=s.replace(a, a + "    addrspace_unpin(as);  /* MUTANT: cancel the ring's lifetime GET */\n", 1)
+s=s.replace(a, "    burrow_charge_record(l->ring, p, backing);\n"
+               "    addrspace_unpin(as);  /* MUTANT: cancel the ring's lifetime GET */\n"
+               "    return l;\n", 1)
 s=s.replace(b,
    "    addrspace_uncharge_pages(as, metadata + refund);\n"
    "    --as->private_rings;  /* MUTANT: drop the guard without its PUT */\n"
@@ -403,7 +428,31 @@ if /usr/bin/grep -qF "$WANT" "$M"; then
        echo "   fired in the same boot. Investigate; do not call this"
        echo "   discrimination."; exit 2;;
   esac
-  echo "-- attributed: the boot died inside this leg ($last_test)"
+  # ARRIVAL, NOT POSITION (astra, yip 0161 t61). The test-granularity check
+  # above is necessary and NOT sufficient: LP_CHECK is `goto done`, and the
+  # fixture's cleanup unrefs the ring and drops the owner too, so ANY earlier
+  # check failure reaches an owner drop with a ring outstanding and raises the
+  # SAME named extinction inside the SAME test -- while hiding the check that
+  # actually failed. Line order is not execution order. The fixture now prints a
+  # marker immediately before the target drop and a different one before the
+  # cleanup's drop; require the first and REFUSE on the second.
+  if ! /usr/bin/grep -qF '[lp-mark] unpinned-reap-owner-drop' "$M"; then
+    echo "   THE LEG NEVER REACHED ITS OWNER DROP -- the arrival marker is"
+    echo "   absent from the mutant boot log, so whatever died, it was not this"
+    echo "   operation. A FINDING, not a pass."
+    /usr/bin/grep -nF '[lp-mark]' "$M" | head -4
+    exit 2
+  fi
+  if /usr/bin/grep -qF '[lp-mark] cleanup-owner-drop' "$M"; then
+    echo "   THE CLEANUP PATH RAN, so this extinction belongs to the fixture's"
+    echo "   teardown drop and not to the leg -- and the check that sent it"
+    echo "   there is named on the marker line itself:"
+    /usr/bin/grep -nF '[lp-mark] cleanup-owner-drop' "$M" | head -2
+    echo "   Investigate that check first; this run says nothing about the leg."
+    exit 2
+  fi
+  echo "-- attributed: arrival marker present, cleanup marker absent, boot died"
+  echo "   inside this leg ($last_test)"
   echo "-- DISCRIMINATED: the ring's own lifetime reference is load-bearing."
   echo "   ACQUISITION only. The release half has no witness in this run."
 else
