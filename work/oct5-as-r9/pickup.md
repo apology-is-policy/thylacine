@@ -263,3 +263,40 @@ Floor on 0161 is ASTRA's. Notes 15-18 sent (pair preservation, two corrections,
 and the retention mechanism). She asked for no reply during the wait. Next on
 that call is the gate itself, with every label's clean-boot count AND the
 per-boot D7 witness counts, reported separately from D7's cure.
+
+## IN FLIGHT RIGHT NOW -- 2026-10-07 06:15Z onward (read before touching anything)
+
+**THE MAC IS HELD BY ME and the gate run is EXECUTING.** Lease taken 06:15Z with
+a 4h TTL; aux is queued behind me at 2.5h waited, so the lease is released the
+moment the GATE ends, not when the write-up ends. Run log:
+`work/oct5-as-r9/run-1007T061510Z.log`, launched as
+
+    SPECS=0 PI_AXIS=0 sh work/oct5-as-r9/lease-runbook.sh
+
+If you are a fresh instance reading this while it still runs: DO NOT start a
+build, a boot, TLC, or anything else that takes cores. The gate records per-boot
+wall clock (smp-multiboot.sh) and that number answers the #200 exposure question,
+so competing work does not merely slow it -- it corrupts the measurement. Read
+the log, wait for the task notification, then run
+`sh work/oct5-as-r9/gate-report.sh work/oct5-as-r9/run-1007T061510Z.log`, which
+quotes the run's own asserted lines rather than re-deriving them, and release the
+mac (`yip release mac`) before writing anything up.
+
+### OPERATOR VOTE 2026-10-07, NEVER RE-ASK: mac gate alone, residual recorded
+
+thyla-pi is unreachable on BOTH routes (mDNS name does not resolve; the
+cloudflared tunnel answers `websocket: bad handshake`, no local cloudflared), so
+the A72/KVM axis cannot run. AS-R9 qualifies on M2/HVF from the 50-boot matrix
+plus the per-boot D7 witnesses, and the missing axis is an EXPLICIT owned queued
+residual that astra reviews by name -- recorded in docs/ASYNC-SERVICE-STATUS.md
+and owned by the thyla-pi entry in OPEN-BUGS. It does NOT license reading the mac
+green as a two-axis qualification, and only the pi booting the repair closes it.
+
+### What the gate now produces that it did not before
+
+`SMP_KEEP_LOGS=1` keeps every boot's serial + harness log under
+`build/multiboot-logs/`, so stage 5 can count per label how many boots REACHED
+the overlapping-login ladder against how many reported PASS. That is astra's
+close condition for D7 (note 17): measured witnesses, never an inference from
+five green rows. Nothing on the retention path is suppressed, and the reader
+refuses a log set that is short, stale or unreadable.
