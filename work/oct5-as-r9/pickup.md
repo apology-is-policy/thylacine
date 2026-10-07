@@ -694,3 +694,24 @@ ONE KNOWN RESIDUE, deliberately not chased: the armed thyla-wake watcher's
 --say text says "re-verified 14:4xZ". Re-arming to fix a cosmetic stamp was not
 worth any risk to a FIFO place; the preconditions it refers to were verified at
 13:4xZ and the instruction it carries (re-measure the floor) stands.
+
+### STANDING RULE, ADDED 13:5xZ: CHECK `yip resources` AFTER EVERY COMPACTION
+
+Before anything else, post-compaction. The reason is a hazard aux surfaced on
+0189 t3 and is now fixing: `tools/thyla-wake.sh` and `tools/thyla-selfcompact.sh`
+BOTH type into this pane, and if a wake and a `/compact` land in the same
+fraction of a second their keystrokes can interleave -- a line beginning
+`/compact` swallows the rest as compaction instructions, eating the wake.
+
+WHY IT MATTERS HERE and not just as a lost notification: the blocking `yip hold`
+still SUCCEEDS, so a swallowed wake means I am HOLDING THE MAC WITHOUT KNOWING,
+while main sits queued behind me (they armed at 13:45Z). A silent lease blocks a
+peer for up to the TTL. One `yip resources` turns that from "silently blocks
+main" into "noticed within one tool call".
+
+If it shows `mac HELD by corona`: the lease is already running, so go straight
+to the floor re-measure and the runbook, and do NOT re-arm or re-request.
+Also OWED to aux on 0189: whether a wake delivered across a compaction at all.
+Their "survives your own compaction" is REASONED from the pane checks, not
+observed -- they compacted with no watcher armed. Report either outcome, and
+the negative is the more useful one.
