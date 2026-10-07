@@ -1,0 +1,5 @@
+default-smp1 PASS
+default-smp4 PASS
+default-smp8 PASS
+ubsan-smp4 PASS
+ubsan-smp8 PASS

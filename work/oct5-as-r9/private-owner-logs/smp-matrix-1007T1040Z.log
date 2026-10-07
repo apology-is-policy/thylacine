@@ -1,0 +1,103 @@
+== matrix stage on the qualified image, N=10, 5 rows derived from tools/ci-smp-gate.sh
+== default kernel  5ced18c43ae8302a
+== ubsan kernel    5193ee5f914f96ae
+== ramfs           63d781afe4a6e5f5
+== pool            f948430ed9665b14
+== HEAD            2666645b7bcc94446dad7ea82d69c590cd2f6f67
+
+-- default-smp1: cpus=1 sanitizer=none boot_timeout=300s N=10 --
+  [default-smp1] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/default-smp1-20261007T104019Z
+  [default-smp1] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [default-smp1 1/10] PASS (42s)
+  [default-smp1 2/10] PASS (41s)
+  [default-smp1 3/10] PASS (43s)
+  [default-smp1 4/10] PASS (41s)
+  [default-smp1 5/10] PASS (41s)
+  [default-smp1 6/10] PASS (43s)
+  [default-smp1 7/10] PASS (41s)
+  [default-smp1 8/10] PASS (42s)
+  [default-smp1 9/10] PASS (43s)
+  [default-smp1 10/10] PASS (41s)
+== default-smp1: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp1: exposure 418s total, ~41s mean/boot; per-boot: 42 41 43 41 41 43 41 42 43 41 ==
+ROW-RESULT default-smp1 PASS
+
+-- default-smp4: cpus=4 sanitizer=none boot_timeout=300s N=10 --
+  [default-smp4] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/default-smp4-20261007T104717Z
+  [default-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [default-smp4 1/10] PASS (47s)
+  [default-smp4 2/10] PASS (46s)
+  [default-smp4 3/10] PASS (44s)
+  [default-smp4 4/10] PASS (45s)
+  [default-smp4 5/10] PASS (46s)
+  [default-smp4 6/10] PASS (44s)
+  [default-smp4 7/10] PASS (45s)
+  [default-smp4 8/10] PASS (45s)
+  [default-smp4 9/10] PASS (45s)
+  [default-smp4 10/10] PASS (45s)
+== default-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp4: exposure 452s total, ~45s mean/boot; per-boot: 47 46 44 45 46 44 45 45 45 45 ==
+ROW-RESULT default-smp4 PASS
+
+-- default-smp8: cpus=8 sanitizer=none boot_timeout=300s N=10 --
+  [default-smp8] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/default-smp8-20261007T105449Z
+  [default-smp8] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [default-smp8 1/10] PASS (48s)
+  [default-smp8 2/10] PASS (48s)
+  [default-smp8 3/10] PASS (46s)
+  [default-smp8 4/10] PASS (46s)
+  [default-smp8 5/10] PASS (46s)
+  [default-smp8 6/10] PASS (46s)
+  [default-smp8 7/10] PASS (47s)
+  [default-smp8 8/10] PASS (46s)
+  [default-smp8 9/10] PASS (47s)
+  [default-smp8 10/10] PASS (46s)
+== default-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp8: exposure 466s total, ~46s mean/boot; per-boot: 48 48 46 46 46 46 47 46 47 46 ==
+ROW-RESULT default-smp8 PASS
+
+-- ubsan-smp4: cpus=4 sanitizer=undefined boot_timeout=420s N=10 --
+  [ubsan-smp4] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/ubsan-smp4-20261007T110236Z
+  [ubsan-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [ubsan-smp4 1/10] PASS (47s)
+  [ubsan-smp4 2/10] PASS (45s)
+  [ubsan-smp4 3/10] PASS (45s)
+  [ubsan-smp4 4/10] PASS (46s)
+  [ubsan-smp4 5/10] PASS (47s)
+  [ubsan-smp4 6/10] PASS (46s)
+  [ubsan-smp4 7/10] PASS (47s)
+  [ubsan-smp4 8/10] PASS (47s)
+  [ubsan-smp4 9/10] PASS (47s)
+  [ubsan-smp4 10/10] PASS (47s)
+== ubsan-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp4: exposure 464s total, ~46s mean/boot; per-boot: 47 45 45 46 47 46 47 47 47 47 ==
+ROW-RESULT ubsan-smp4 PASS
+
+-- ubsan-smp8: cpus=8 sanitizer=undefined boot_timeout=420s N=10 --
+  [ubsan-smp8] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/ubsan-smp8-20261007T111020Z
+  [ubsan-smp8] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [ubsan-smp8 1/10] PASS (48s)
+  [ubsan-smp8 2/10] PASS (49s)
+  [ubsan-smp8 3/10] PASS (47s)
+  [ubsan-smp8 4/10] PASS (49s)
+  [ubsan-smp8 5/10] PASS (49s)
+  [ubsan-smp8 6/10] PASS (47s)
+  [ubsan-smp8 7/10] PASS (48s)
+  [ubsan-smp8 8/10] PASS (47s)
+  [ubsan-smp8 9/10] PASS (48s)
+  [ubsan-smp8 10/10] PASS (48s)
+== ubsan-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp8: exposure 480s total, ~48s mean/boot; per-boot: 48 49 47 49 49 47 48 47 48 48 ==
+ROW-RESULT ubsan-smp8 PASS
+
+================ matrix summary (N=10) ================
+  default-smp1 PASS
+  default-smp4 PASS
+  default-smp8 PASS
+  ubsan-smp4 PASS
+  ubsan-smp8 PASS
+=======================================================
+MATRIX PASS: 5/5 rows, 0 corruption, 0 external-kill, 0 unclassified
+evidence: work/oct5-as-r9/private-owner-logs/smp-matrix/20261007T104019Z
+NOT a ci-smp-gate.sh run: its userspace rebuild is blocked by the stratumd
+cache bug. This is the gate's matrix stage on the already-qualified image.

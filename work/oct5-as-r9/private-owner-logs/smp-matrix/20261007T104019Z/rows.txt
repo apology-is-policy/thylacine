@@ -1,0 +1,5 @@
+default-smp1 1 -       300
+default-smp4 4 -       300
+default-smp8 8 -       300
+ubsan-smp4   4 undefined 420
+ubsan-smp8   8 undefined 420
