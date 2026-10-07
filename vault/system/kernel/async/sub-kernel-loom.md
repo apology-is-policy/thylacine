@@ -836,6 +836,37 @@ exposure is enqueued as a tracked bug against `mm/magazines.c` rather than left
 in this prose: for the other call sites it is a latent SMP hazard, not an
 instrument question.
 
+RELEASE IS PAIRED IN THE SOURCE, which is a weaker claim than witnessed and is
+recorded because it tells a reader chasing a guard leak where NOT to look. The
+production set is small enough to enumerate, and the enumeration is the whole
+value -- a negative over an uncounted set is a guess. `addrspace_private_begin`
+has ONE production call site, `loom_create_private`; `addrspace_private_end` has
+three, two of them that function's failure exits and one in
+`loom_private_destroy`. After a successful begin the creator has exactly three
+exits: the charge refusal, the layout-allocation failure, and success, after
+which no further early return exists. `l->service_as` is written ONCE and never
+cleared, so `loom_is_private` -- the sole routing discriminator, with nine
+production readers -- cannot go stale. The only last-ref path is `loom_unref`,
+which sends a private ring to the retire queue and everything else to
+`loom_free`; `loom_free` is static with exactly that one call site, guarded by
+`!loom_is_private`, so a private ring cannot reach the `kfree` that would skip
+the release. (Every other mention of `loom_free` in the tree is a COMMENT, which
+is why a bare grep reads alarmingly: count call sites, not mentions.) The retirer
+pops and destroys unconditionally, and the destroy releases the guard LAST, after
+the uncharge, with the retired counter bumped after that so a waiter's acquire
+orders the frees. Every path that takes the guard releases it exactly once.
+
+What that argument is blind to is the residue worth carrying. It shows the code
+CONTAINS a release on every path and says nothing about one having EXECUTED. A
+ring whose refcount never reaches zero never enqueues, so a reference leak would
+strand the guard with this pairing fully intact. A retirer that never runs, or a
+queue that never drains, strands it SILENTLY -- the list has no bound and no
+timeout, and the fixture's `lp_wait` rests on that liveness rather than on the
+pairing. The page-accounting release is a separate claim: the uncharge arithmetic
+in the destroy is not covered by any of this. And the two `extinction()` arms in
+the destroy precede the release, so a private ring in legacy state dies LOUDLY
+rather than leaking -- those arms are not leak paths.
+
 UNRUN: the leg has never executed. Its translation unit does COMPILE -- a
 single-file `-fsyntax-only` with the kernel target's own defines, include paths
 and `-std=c99`, exit 0, no diagnostics -- which is a different and much weaker
