@@ -707,7 +707,12 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   2. **fsync** — flush, then `p9_client_fsync`; errors return synchronously.
   3. **cap/threshold** — the mid-stream flushes above.
   4. **a non-append write / wstat / weft-bind** on the same priv — flush
-     first, then the op (ordering: the staged bytes are older).
+     first, then the op (ordering: the staged bytes are older). A wstat then
+     STOPS staging on the priv (a size change destroys the append anchor),
+     but only once the run is gone: a flush a death ended keeps the run,
+     and a priv that stopped staging would never again overlay it on read,
+     flush it on fsync or order a write after it -- for another Proc
+     sharing the fd too (2026-10-07, exit-close audit r1 F1).
   5. **a read of the same priv** needs no flush: the run is contiguous at
      the file's known end, so reads split cleanly — below `stage_off` = old
      content (server/cache, complete: the append-anchor discipline means the
