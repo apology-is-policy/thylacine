@@ -120,7 +120,18 @@ DEFAULT OFF, so no peer's gate changes unless they opt in.
   main's own reason -- a refused owner should not pay a flush -- applies equally
   to a refused SPOOR, and this branch's SQPOLL gate rejects spoors that their
   loop would otherwise have already flushed and stopped staging. Raised with
-  main on 0183 turn 2. (4) their exit-close hunks: the loom_free join hunk
+  main on 0183 turn 2 and AGREED there; main's Fable round found the same prefix
+  side effect independently (its F3) and the decision is to DOCUMENT it and NOT
+  restore staging -- staging is a performance property, the caller usually
+  retries, and restoring would reopen a stage window between flush and restore
+  that the single lock hold avoids. The FINAL loom.h contract comment to take at
+  merge (main 0183 note 1, loomwb d8b177156) reads "on failure (n out of range,
+  or a dev9p Spoor's write-behind flush failed or had latched an error:
+  dev9p_loom_register, which may wait) the caller retains its refs and the old
+  table stands, though the Spoors before the failing one stay flushed and no
+  longer stage (a cost only)". loom.c is unchanged from the hunk already
+  recorded; everything else in their fold is dev9p.c/h, tests and docs.
+  (4) their exit-close hunks: the loom_free join hunk
   applies here (4/4 anchors unique) but three anchors do NOT exist on this base
   -- `struct loom_sqpoll_wait w` (no fan-in machinery here, so their
   `closes_never_wait` line needs re-placing), `poll_waiter_list_unregister(w->cq)`
