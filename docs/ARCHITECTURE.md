@@ -101,6 +101,7 @@ Section §25.4 enumerates the audit-trigger surfaces. Every change to a file or 
 | BURROW | Pages live until last handle closed AND last mapping unmapped | Ref-counted; `burrow.tla` proves no UAF | `burrow.tla` |
 | 9P session | Fid table is per-connection; fids don't leak between connections | Per-session fid table | `9p_client.tla` |
 | 9P session | Per-session tag uniqueness | Per-session tag pool with monotonic generation | `9p_client.tla` |
+| 9P tag pool | A sync op waiting for a tag gets one; a Tflush always finds one | An op share with flush headroom, an async share within it, the reader applying every reply (§21.11) | `tag_pool.tla` |
 | Scheduler | Every runnable thread eventually runs | EEVDF deadline computation | `scheduler.tla` |
 | Wakeup | No wakeup lost between wait-condition check and sleep | Wait/wake state machine | `scheduler.tla`, `poll.tla`, `cons_poll.tla`, `tsleep.tla`, `death_wake.tla` (torpor leg prose-validated) |
 | Memory | W^X on every page | Page table entry mutual exclusion | runtime + `_Static_assert` on PTE bits |
@@ -2137,7 +2138,7 @@ struct Dev {
     int    (*stat)(struct Spoor *c, uint8_t *dp, int n);
     struct Spoor*  (*open)(struct Spoor *c, int omode);
     void   (*create)(struct Spoor *c, char *name, int omode, uint32_t perm);
-    void   (*close)(struct Spoor *c);
+    int    (*close)(struct Spoor *c);
     long   (*read)(struct Spoor *c, void *buf, long n, int64_t off);
     struct Block* (*bread)(struct Spoor *c, long n, int64_t off);
     long   (*write)(struct Spoor *c, void *buf, long n, int64_t off);
@@ -2151,7 +2152,7 @@ struct Dev {
 
 All kernel devices — including synthetic ones like `/dev/cons`, `/dev/null`, `/proc` — implement this interface. Userspace devices implement it remotely via 9P.
 
-The interface is Plan 9's `Dev` vtable (with C99 typing), preserved for two reasons: (a) it's right; (b) it makes porting from 9Front straightforward when we want to. The one Thylacine addition is `poll` — the readiness query backing `SYS_POLL` (§23.3); a device with no readiness state leaves the slot NULL, and `poll` then treats the fd as always ready (POSIX-correct for a regular file).
+The interface is Plan 9's `Dev` vtable (with C99 typing), preserved for two reasons: (a) it's right; (b) it makes porting from 9Front straightforward when we want to. The one Thylacine addition is `poll` — the readiness query backing `SYS_POLL` (§23.3); a device with no readiness state leaves the slot NULL, and `poll` then treats the fd as always ready (POSIX-correct for a regular file). `close` returns `int`, where Plan 9's returns `void`: a device whose close does work that can fail reports it -- dev9p's close flushes write-behind data, which Plan 9's mount driver never holds -- and `close(2)` returns it as `EIO` once the handle is closed (§21.11, `dec-2026-10-07-close-eio`). Every other device returns 0.
 
 ### 9.3 Userspace drivers as 9P servers
 
@@ -4029,7 +4030,7 @@ Stratum's server already supports this (io_uring-native write path). Thylacine's
 
 The kernel's 9P client maintains a **request pipeline** per session:
 
-- Maximum outstanding requests: 32 default, configurable per session via `/ctl/9p/<session>/max-outstanding`.
+- Maximum outstanding requests: 32 default, configurable per session via `/ctl/9p/<session>/max-outstanding`. *(As built: 64 per session until 2026-10-07, then a table that grows to the 16-bit tag space with a share per kind of op, §21.11.)*
 - Each request is assigned a unique tag from a per-session tag pool (16-bit tag space, tag 0xFFFF reserved for Tversion).
 - Requests are submitted to the session's send queue without waiting for prior requests to complete.
 - Completions are matched to waiting kernel threads by tag.
@@ -4092,7 +4093,7 @@ Because the kernel's 9P client pipelines, every userspace 9P server — drivers,
 ### 21.5 Flow control
 
 The pipeline is bounded to prevent unbounded queue growth:
-- If the outstanding request count reaches the session maximum, new requests block until a slot frees.
+- If the outstanding request count reaches the session maximum, new requests block until a slot frees. *(As built, a full pool failed a sync op with `EIO` instead; restored by §21.11.)*
 - Per-session credit-based flow control (from 9P2000.L): the server can advertise how many requests it can handle; the client respects this.
 
 ### 21.6 Halcyon and async I/O
@@ -4106,6 +4107,8 @@ Halcyon issues concurrent reads against multiple 9P servers simultaneously — k
 - Out-of-order completion correctness — tag N's reply wakes tag N's waiter regardless of arrival order.
 - No missed wakeups across the wait/wake race when a reply arrives before the requester sleeps.
 - Flow control — bounded outstanding requests.
+
+`specs/tag_pool.tla` (§21.11) proves that a sync op waiting for a tag gets one, with Loom ops and poll arms deferred forever and a waiter stopped forever, and that a Tflush always finds a tag.
 - Fid lifecycle — clunk eventually frees the fid; no fid reuse before clunk completes.
 
 ### 21.8 Open design questions
@@ -4179,6 +4182,25 @@ As-built: on the `CLIENT_WAIT_DIED` arm, after NULLing `inflight[tag]` and freei
 `stratumd` already answers `Tflush` (both the lp9 server it runs and the p9 server reply `Rflush`), so #845 is Thylacine-only — no Stratum change. The one residual (Opus audit F1 [P2], closed-with-justification) is a *non-conformant* server that sends a **duplicate** `Rflush` after the flush tag F was freed and reused for a new flush: indistinguishable on the wire (9P carries no per-tag generation), it would free the new flush's reserved `oldtag`. This is the generic "server sends exactly one reply per tag" assumption the entire client already rests on (a duplicate same-type reply mis-attributes for *any* op kind); it does not arise with the v1.0 trusted servers, and closing it for an untrusted/remote 9P server needs wire-level tag generations — a v1.x ABI lift, the same seam as the `n_uname` trust-stamp. No new spec per the 2026-05-23 spec-to-code broadening (Tflush is not modelled; `specs/9p_client.tla` clean + the 4 buggy cfgs remain the pre-commit gate, re-run GREEN). The deterministic multi-in-flight harness exercising the *live* `DIED → Tflush → survivor-reader` path is OWED with the A-5b multi-user workload (the same gap as the #841 elected-reader). Closed list: `memory/audit_845_closed_list.md`.
 
 **A living thread honours flush(5) (the caught-note arm, §8.8.3).** The death arm may discard a late original reply because nobody will read the result. A caught note's unwind may not: its Thread lives, and flush(5) says that "if a response to the flushed request is received before the Rflush, the client must honor the response as if it had not been flushed." That arm sends the same `Tflush` but keeps its `inflight[T]` registration, and waits, killable only, for the first answer. Once the `Tflush` is on the wire, an original reply is applied the moment it is demuxed, in wire order, by whichever thread reads it: `p9_session_dispatch_flushed_rmsg` applies the whole reply, fid state included, and leaves T reserved until the `Rflush`, so the I-10 guard above is unchanged. The call then completes with its result, and the `Rflush` drains ownerless. An `Rflush` that comes first frees both tags, and the demux hands the waiter `-P9_E_INTR` in the same critical section, before either tag can be reused. A flush that cannot go out at once waits for a free tag or for ring space, as any sender does. An original reply that lands first answers the op outright: the `Tflush` is taken back unsent, and the reply completes the call as an ordinary one. If the flush still cannot be sent, the waiter waits for the original reply without one, and the note rides the call out. While the waiter lives, its flushed op still counts as live on its fid, since an honoured reply acts on it. A death during the flush wait drops the registration and leaves both frames to drain ownerless, as above. This corrects 11b-9p (`86b4b714`), which reused the death abandon for the caught note: an interrupted socket or pts read lost bytes the server had consumed, and a write that had completed reported `EINTR`.
+
+### 21.11 The tag pool (2026-10-07; `dec-2026-10-07-tag-pool`)
+
+**As built until now.** 64 tags per session (`P9_SESSION_MAX_OUTSTANDING`). A sync op that found all 64 held failed `-P9_E_IO` at its build -- only a clunk drained for a tag (FID-LIFECYCLE F1) -- against §21.5's "new requests block until a slot frees". Nothing above the client retries, so a write-behind flush that met a full pool dropped its data, and no close reported it (`Dev.close` returned `void`). A burst of 64 or more async clunks (an exit closing its handle table) leaves the pool full of undrained Rclunks on a plain mount; a witness run on 2026-10-06 filled the pool and saw a sync walk fail. Ten kinds of holder keep a tag, and four of them can keep it without bound: an async op the server defers, a dev9p poll arm, an abandon that could not send its Tflush, and a reply stored for a waiter that is stopped.
+
+**The design: four parts that land as one.**
+
+1. **The table grows.** Tags run 0..0xFFFE (`NOTAG`, 0xFFFF, is Tversion's), Linux's range. The first 64 entries live in the session; more are allocated in 64-entry chunks when every entry is held (a non-blocking `kmalloc` under `c->lock`, as the reply buffers are) and kept until the session is destroyed. A chunk that cannot be allocated means no free tag (part 3), never an error. The lowest free tag is taken, so an idle session's tags stay small. Every 9P server in the tree treats a tag as an opaque 16-bit value (checked 2026-10-07: `usr/lib/ninep`, netd, ptyfs, tapestryd, Stratum's lp9 and fs_pool; none indexes a table by tag) and bounds what it defers with its own pending caps.
+2. **Each kind of op has a share.** An op (any T-message but Tflush) takes a tag only while fewer than `P9_OPS_MAX` = 32767 ops hold one; a Tflush takes any free tag. An op has at most one Tflush in flight and keeps its tag until that Rflush, so flushes never outnumber ops and ops plus flushes stay at or below 65534: a Tflush always finds a tag. The #845 abandon and flush(5) therefore never fall back to the flush-less abandon for want of a tag (the state in which a full pool's abandons hold tags that only replies the server may never send can free). Async ops -- Loom ring ops and the dev9p poll arm and snapshot, which no thread waits on -- hold at most `P9_ASYNC_MAX` = 16384 of the op share; past it a submit completes with the retryable `-P9_E_AGAIN`, as a full pool's does today. At least 16383 op tags stay open to the ops a thread waits on.
+3. **A sync op waits for a tag.** One that finds no op tag free waits for one -- killably, and a stop parks it holding nothing -- as a clunk does today (`client_drain_until_free_tag`): it reads a reply itself when no reader is elected, or parks until the reader makes progress. It fails when the session dies (`EIO`) or its Proc is killed, never for want of a tag.
+4. **The reader applies every reply.** The thread that reads a sync op's reply dispatches it into the op's result at once, under `c->lock`, as it already does for an async op and for a reply honoured under flush(5). The tag is free when the reply is read, not when the waiter next runs, so no tag waits on a stopped thread.
+
+**Why the wait ends.** With parts 2 and 4, a tag a waiting sync op could take is held by a sync op the server owes a reply, by a clunk or a Tflush the server must answer, or by an async op, and async ops hold at most half the op share. So the wait ends when the server answers ops it has received. A server that answers nothing holds every op on the session regardless; a sync op the server defers by design (a read on an empty pipe) is a thread that waits, so using up the 16383 sync tags takes 16383 such threads on one session. `specs/tag_pool.tla` checks the claim (`SyncProgress`), and each of its buggy cfgs removes one rule: no async share (`SyncProgress` fails), the waiter applying its own reply (`SyncProgress` fails while a stop lasts), and ops taking every tag (`FlushAlwaysFits` fails).
+
+**Close reports the flush (`dec-2026-10-07-close-eio`).** `Dev.close` returns `int` (§9.2). dev9p's close returns the write-behind error latched on the open file -- from the flush it runs at close, or an earlier one (the latch is sticky, the voted NFS model) -- and `close(2)` returns `EIO` for it after the handle is closed, as POSIX allows and Linux NFS does. The specific errno stays what `write` and `fsync` return. Callers with nobody to tell (the exit close, a Loom reap) ignore it.
+
+**Heritage.** 9front's mount driver allocates tags from one kernel-wide 16-bit bitmap and panics when it runs out; Linux's 9p client allocates per client in 0..0xFFFE and fails the request, leaving back-pressure to the transport. Neither waits and neither keeps shares, because neither puts ops no thread waits on (Loom, poll arms) on the same session as the ops threads wait on. Zircon (32-bit FIDL transaction ids) and Mach (a reply port per RPC) have no small pool to share.
+
+**Staging.** TP-0: this scripture and the model. TP-1: part 4. TP-2: part 3, for every sync op. TP-3: parts 1 and 2. TP-4: the close error. Each lands with its tests; one audit and one SMP gate cover the chunk.
 
 ---
 

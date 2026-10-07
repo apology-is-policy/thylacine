@@ -1724,6 +1724,34 @@ Regressions: `rendez.reader_recv_unwinds_death` / `_death_sleep` /
 `_caught_note`; `9p_srvconn_transport.reader_unwinds_mid_frame_death` /
 `_stop` (a real SrvConn; the server stops 20 bytes into a 160-byte Rgetattr).
 
+## tag_pool.tla — the 9P tag pool: shares, the wait for a tag, the reader applying every reply (2026-10-07; model-first)
+
+Written before the code for `dec-2026-10-07-tag-pool` (ARCH 21.11), because
+the design's central claim is liveness: a sync op that waits for a tag gets
+one. One session, tags counted (`9p_client.tla` owns tag identity, I-10).
+Two sync threads (fair server replies; a stop may last forever; a death
+abandons with a Tflush), two async issuers (replies deferrable forever).
+`Limit = 2 * OpsMax` in the clean cfg: the headroom argument at its tight
+case (the kernel's 65535 tags are 2 * 32767 + 1).
+
+| Spec action | Implementation site |
+|---|---|
+| `Take(s)` | a sync op's `alloc_tag` in `p9_session_send_*`, behind `client_drain_until_free_tag` (TP-2) |
+| `ReplySync(s)` | `demux_frame_locked` dispatching a sync reply into the op's result (TP-1) |
+| `Die(s)` / `Rflush(s)` | `client_run`'s `CLIENT_WAIT_DIED` abandon (`p9_session_send_flush`) / the ownerless Rflush arm of `demux_frame_locked` |
+| `Submit(a)` / `ReplyAsync(a)` | `p9_client_submit_async` (refused `-P9_E_AGAIN` past `P9_ASYNC_MAX`, TP-3) / the async arm of `demux_frame_locked` |
+| `OpRoom` | `P9_OPS_MAX`, the op share (TP-3) |
+
+| Cfg | Verdict | States |
+|---|---|---|
+| `tag_pool.cfg` | clean: TypeOK, TagsFit, FlushAlwaysFits; SyncProgress | pending |
+| `tag_pool_buggy_no_async_cap.cfg` | SyncProgress violated | pending |
+| `tag_pool_buggy_waiter_applies.cfg` | SyncProgress violated | pending |
+| `tag_pool_buggy_no_flush_headroom.cfg` | FlushAlwaysFits violated | pending |
+
+Checker: `specs/check-tag-pool.sh`. Regressions: the kernel tests
+`9p_client.full_pool_*` (TP-1..TP-3).
+
 ## net_poll.tla — net-6b (the dev9p.poll readiness bridge); rewritten for #98 (the SAMPLE/ARM split, 2026-09-28; spec-first re-enabled, model-first)
 
 Status: **the split was modeled first (NP-2, 2026-09-28) and landed in two

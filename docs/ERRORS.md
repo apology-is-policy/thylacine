@@ -291,6 +291,7 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WALK_CREATE` | not a directory | `-T_E_NOTDIR` (20) |
 | `SYS_UNLINK` (rmdir) | directory not empty | `-T_E_NOTEMPTY` (39) |
 | `SYS_FSTAT` / `SYS_*` | bad / wrong-kind handle | `-T_E_BADF` (9) |
+| `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
 | any handler | structurally bad argument | `-T_E_INVAL` (22) |
 | any handler | uaccess fault on a user VA | `-T_E_FAULT` (14) |
 
