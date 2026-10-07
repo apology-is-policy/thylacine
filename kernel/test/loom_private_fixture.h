@@ -322,8 +322,13 @@ done:
     // extinction is the cleanup's, not the leg's, and the check that sent us to
     // `done:` would otherwise never reach the log because the boot ends before
     // the suite can report `error`.
-    uart_puts("[lp-mark] cleanup-owner-drop");
-    if (error) { uart_puts(" after-check-failure: "); uart_puts(error); }
+    // `done:` is ALSO the normal fallthrough from the last check, so the marker
+    // says WHICH of the two arrivals this is. An oracle that distinguished them
+    // by the ABSENCE of a suffix reads a healthy run as a failing one, which is
+    // exactly what the first version did (astra, yip 0161 t63).
+    uart_puts("[lp-mark] cleanup-owner-drop ");
+    if (error) { uart_puts("after-check-failure: "); uart_puts(error); }
+    else uart_puts("normal-fallthrough");
     uart_puts("\n");
     if (p) test_proc_drop(p);
     if (!lp_wait(goal) && !error) error = "private fixture cleanup retirement timed out";

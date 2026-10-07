@@ -904,11 +904,21 @@ load-bearing -- is ALREADY witnessed in-tree, and witnessed POSITIVELY by that
 `ownerless` assertion rather than by a mutation, which is the stronger shape.
 Second, a mutation of a SHARED primitive cannot discriminate one caller's leg
 while an earlier test exercises the same primitive; the mutant has to be confined
-to the CALLER's use. The confined form is `addrspace_unpin` immediately after
-`addrspace_private_begin` inside `loom_create_private`, which leaves
-`addrspace.c` untouched so every addrspace test behaves normally and the boot
-reaches the leg. That form is written but UNRUN, and the acquisition witness
-accordingly remains OPEN.
+to the CALLER's use. The confined form leaves `addrspace.c` untouched, so every
+addrspace test behaves normally and the boot reaches the leg, and it is BALANCED
+over two sites: `addrspace_unpin` at `loom_create_private`'s SUCCESSFUL return --
+after the charge and the layout have both succeeded, so the two rollback exits
+stay balanced and the mutant rests on no assumption about allocation failure --
+and a direct `--as->private_rings` under `as->lock` in the destroy, replacing
+`addrspace_private_end`. Balance is the load-bearing word: the obvious confined
+form cancels the create's get and leaves the destroy's put, so every ring cycle
+nets -1 on the refcount and an earlier leg dies with a DIFFERENT message. The
+outcome is deterministic rather than racy, and the source settles that rather
+than the hope: `proc_free` releases the address space (`kernel/proc.c:699`)
+BEFORE `handle_table_free` (`:720`), so at the lifetime drop the handle table is
+intact, `loom_unref` has not run, nothing is enqueued and `private_rings` is 1 --
+the retirer never gets a turn. That form is written but UNRUN, and the
+acquisition witness accordingly remains OPEN.
 
 The runner's own oracle was the thing that called the failed run a success, and
 the defect is instructive: it asked only that the leg not report PASS, which a
@@ -932,6 +942,29 @@ drop would pass without exercising the operation under test, which is the
 quietest way for a comparison to mean nothing. The cleanup marker also prints the
 failing check's message, so the hidden failure becomes visible rather than being
 replaced by its own consequence.
+
+AND THEN THE MARKERS BROKE THE ORACLE THEY WERE ADDED TO SERVE (astra, yip 0161
+t63), recorded here because the defect lives in the INTERACTION and not in either
+piece. `done:` is ALSO the normal fallthrough from the leg's last check, so a
+PASSING run prints a cleanup marker -- and an oracle refusing on ANY cleanup
+marker refuses every healthy run. The marker now names which arrival it is,
+`normal-fallthrough` or `after-check-failure: <msg>`, so neither case is inferred
+from the absence of the other. And `test.c` prints `    [test] <name> ... `
+WITHOUT a newline, runs the test, and prints the verdict afterwards
+(`kernel/test/test.c:4481-4483`, `:4605-4610`), so a marker's own newline moves
+the verdict onto a later line: `<name> ... PASS` no longer exists on one line in
+an instrumented healthy run, and the mutant stage's completion check -- which
+looked for PASS or FAIL on the announcement line -- had become a check that could
+not fire. Both stages now read the LEG'S OWN BLOCK, its announcement to the next
+announcement, and treat the verdict as a STATE in that block: PASS, FAIL, or
+NONE, where NONE is the lethal mutant's expected state and a different thing from
+FAIL. Neither defect was reachable by the marker-only synthetic arms that
+preceded them, because both live in the interaction with the suite's own output
+and those arms were built by hand from PRE-INSTRUMENTATION logs -- so the accept
+case could not show that the instrumented healthy run no longer matched. The arms
+are now built by editing REAL boot logs at the leg's own line, every gate in both
+oracles has one, and two arms are real logs unedited, including the one the first
+oracle called discrimination.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are

@@ -276,6 +276,172 @@ run_suite() { # run_suite <label>; leaves $OUT/<label>-boot.log and sets suite_r
   echo "-- $_l: test.sh exit $suite_rc, boot log $OUT/$_l-boot.log"
 }
 
+LEG=loom.private_owner_lifecycle
+# THE LEG'S OWN BLOCK, because the verdict is NOT on the announcement line.
+# test.c prints "    [test] <name> ... " with NO newline (kernel/test/test.c
+# :4481-4483), then runs the test, then prints "PASS\n" or "FAIL: <msg>\n"
+# (:4605-4610). Everything the test itself prints therefore lands BETWEEN the
+# two, and the arrival marker's own newline pushes the verdict onto a later
+# line -- so a one-line grep for `<name> ... PASS` cannot match an instrumented
+# HEALTHY run, and the first version of this oracle would have refused the
+# control for that reason alone (astra, yip 0161 t63). Every assertion about the
+# leg is made against this block, which also makes the attribution positive: a
+# marker or a verdict from anywhere else in the log cannot satisfy it.
+# The block runs from the leg's announcement to the next test's announcement, or
+# to the end of the log when the boot died inside the leg.
+leg_block() { # leg_block <boot log> <out file>; nonzero if the leg never ran
+  awk -v leg="$LEG" '
+    /^[[:space:]]*\[test\] [^ ]+ \.\.\./ {
+      if (index($0, "[test] " leg " ... ") > 0) { inblk = 1; print; next }
+      if (inblk) exit
+    }
+    inblk { print }
+  ' "$1" > "$2"
+  [ -s "$2" ]
+}
+# The verdict as a STATE, read from the block: PASS, FAIL or NONE. NONE is the
+# mutant's expected state -- the boot died before test.c could print either --
+# and it is a different thing from FAIL, which the first oracle could not say.
+leg_verdict() { # leg_verdict <block file>
+  if /usr/bin/grep -qE '^FAIL:' "$1"; then echo FAIL
+  elif /usr/bin/grep -qE '^PASS' "$1"; then echo PASS
+  else echo NONE; fi
+}
+# The last test the boot ANNOUNCED. The pattern must match announcements ONLY:
+# the suite also prints summary lines beginning "[test] " -- e.g.
+# "[test] yield-waits: 724 invoked, ..." -- and a bare prefix match picks one of
+# those up as "the last test", a pattern matching the wrong thing and returning
+# a confident wrong answer. An announcement is `[test] <name> ... `.
+last_announced() { /usr/bin/grep -E '^[[:space:]]*\[test\] [^ ]+ \.\.\.' "$1" | tail -1; }
+
+check_control() { # check_control <boot log>; 0 = green, nonzero = refuse
+  _b=$1; _blk=$OUT/control-leg-block.txt
+  if ! leg_block "$_b" "$_blk"; then
+    echo "   THE CONTROL NEVER ANNOUNCED $LEG. The last test it announced was:"
+    echo "     $(last_announced "$_b")"
+    return 1
+  fi
+  # A QUIET CHECK FAILURE FIRST, because it is the most specific thing the log
+  # can say -- it NAMES the check. A failure before the target drop also leaves
+  # the arrival marker absent, so an arrival-first order answers a refusal with
+  # "it never arrived" and sends the reader hunting for a reason the log is
+  # already holding. Measured on the early-check-failure arm, which came back
+  # with the arrival message until this was reordered.
+  # Note what the discriminating text is NOT: "the cleanup ran". `done:` is the
+  # normal fallthrough too, so a passing run prints a cleanup marker and an
+  # oracle refusing on ANY cleanup marker refuses everything (astra, 0161 t63).
+  if /usr/bin/grep -qF 'cleanup-owner-drop after-check-failure:' "$_blk"; then
+    echo "   A CHECK INSIDE THE LEG FAILED and the fixture recovered quietly."
+    echo "   The marker names it:"
+    /usr/bin/grep -nF 'after-check-failure:' "$_blk" | head -2
+    return 1
+  fi
+  # ARRIVAL. A control whose leg never reached the drop would pass without
+  # exercising the operation stage 2 is about to test, which would make the
+  # comparison meaningless in the quietest possible way.
+  if ! /usr/bin/grep -qF '[lp-mark] unpinned-reap-owner-drop' "$_blk"; then
+    echo "   THE CONTROL's leg never reached its owner drop -- the arrival"
+    echo "   marker is absent from the leg's own block, so it passed WITHOUT"
+    echo "   exercising what the mutant tests. Refusing before stage 2."
+    return 1
+  fi
+  _v=$(leg_verdict "$_blk")
+  [ "$_v" = PASS ] || {
+    echo "   THE LEG DID NOT PASS -- the verdict in its own block is $_v."
+    echo "   The block, which carries the failing check's message:"
+    sed -n '1,12p' "$_blk" | sed 's/^/     /'
+    return 1; }
+  # And the NORMAL teardown marker must be present on a passing run: its absence
+  # would mean the emission moved, so the discrimination just above is no longer
+  # being made at all -- a check that cannot fail, passing.
+  /usr/bin/grep -qF 'cleanup-owner-drop normal-fallthrough' "$_blk" || {
+    echo "   THE LEG PASSED, but the normal-fallthrough marker is absent, so"
+    echo "   the fixture no longer distinguishes a quiet check failure from an"
+    echo "   ordinary fallthrough and the check above is vacuous. Refusing."
+    return 1; }
+  echo "-- control: leg announced, arrival marker present, teardown normal,"
+  echo "   verdict PASS in the leg's own block"
+  return 0
+}
+
+check_mutant() { # check_mutant <boot log>; 0 = discriminated, nonzero = finding
+  _m=$1; _blk=$OUT/mutant-leg-block.txt
+  WANT='AddrSpace final lifetime drop with private rings'
+  if ! /usr/bin/grep -qF "$WANT" "$_m"; then
+    echo "   THE MUTANT DID NOT PRODUCE THE PREDICTED FAILURE."
+    echo "   This is a FINDING to investigate, not a pass and not a reason to"
+    echo "   weaken the guard. What the boot did instead:"
+    /usr/bin/grep -nE '^EXTINCTION:|FAIL|tests: ' "$_m" | head -12
+    return 2
+  fi
+  echo "-- MUTANT DIED AS PREDICTED, by name:"
+  /usr/bin/grep -nF "$WANT" "$_m" | head -3
+  # AND NOTHING ELSE: a second, different extinction would mean the leg is not
+  # the thing that fired, and the prediction would be right by accident.
+  _others=$(/usr/bin/grep -E '^EXTINCTION:' "$_m" | /usr/bin/grep -vcF "$WANT" || true)
+  [ "${_others:-0}" = 0 ] || {
+    echo "   BUT $_others OTHER extinction(s) fired too -- read $_m first:"
+    /usr/bin/grep -nE '^EXTINCTION:' "$_m" | head -6
+    return 2; }
+  # ATTRIBUTION -- the half the first version LACKED, and whose absence turned a
+  # vacuously-satisfied negative into a false "DISCRIMINATED". The old check only
+  # asked that the leg did not report PASS, which is exactly what a leg that
+  # NEVER RAN also satisfies: the first mutant killed the boot inside
+  # addrspace.proc_alloc_in_shares, ~90 suite lines before this leg, and the
+  # runner reported discrimination anyway (reap-leg-20261007T190621Z). A gauge
+  # reading zero is satisfied by "it never started", so ask POSITIVELY.
+  if ! leg_block "$_m" "$_blk"; then
+    echo "   THE EXTINCTION IS NOT ATTRIBUTABLE TO THIS LEG."
+    _la=$(last_announced "$_m")
+    echo "   The last test the boot announced was:"
+    echo "     ${_la:-<the boot announced no test at all>}"
+    echo "   so the mutant killed it BEFORE $LEG ran, and this run says NOTHING"
+    echo "   about the leg. A FINDING, not a pass, and not a reason to weaken"
+    echo "   the mutant until the cause is known."
+    return 2
+  fi
+  # ARRIVAL, NOT POSITION (astra, yip 0161 t61). Test-granularity attribution is
+  # necessary and NOT sufficient: LP_CHECK is `goto done`, and the cleanup there
+  # unrefs the ring and drops the owner too, so ANY earlier check failure reaches
+  # an owner drop with a ring outstanding and raises the SAME named extinction
+  # inside the SAME test -- while hiding the check that actually failed. Line
+  # order is not execution order.
+  if ! /usr/bin/grep -qF '[lp-mark] unpinned-reap-owner-drop' "$_blk"; then
+    echo "   THE LEG NEVER REACHED ITS OWNER DROP -- the arrival marker is"
+    echo "   absent from the leg's block, so whatever died, it was not this"
+    echo "   operation. A FINDING, not a pass."
+    /usr/bin/grep -nF '[lp-mark]' "$_m" | head -4
+    return 2
+  fi
+  # ANY cleanup marker, either variant, means the boot got PAST the target drop
+  # and died (or recovered) somewhere else -- so under the lethal mutant the
+  # marker's presence is itself disqualifying, whichever variant it is
+  # (astra, yip 0161 t63).
+  if /usr/bin/grep -qF '[lp-mark] cleanup-owner-drop' "$_blk"; then
+    echo "   THE CLEANUP PATH RAN, so the boot survived the target drop and this"
+    echo "   extinction is not the one this leg predicts. The marker line says"
+    echo "   which arrival it was, and names the check if one failed:"
+    /usr/bin/grep -nF 'cleanup-owner-drop' "$_blk" | head -2
+    return 2
+  fi
+  # And it must have DIED INSIDE the leg, not completed it: a verdict in the
+  # block means the extinction came from somewhere after the leg, a third
+  # outcome and equally not discrimination. This is the check the arrival
+  # marker's newline silently disabled in the first version, which looked for
+  # PASS/FAIL on the announcement line where it can no longer appear.
+  _v=$(leg_verdict "$_blk")
+  [ "$_v" = NONE ] || {
+    echo "   THE LEG COMPLETED (verdict $_v in its own block) and yet the named"
+    echo "   extinction fired in the same boot. Investigate; do not call this"
+    echo "   discrimination."
+    return 2; }
+  echo "-- attributed: arrival marker present, no cleanup marker, no verdict --"
+  echo "   the boot died inside this leg, at the drop under test"
+  echo "-- DISCRIMINATED: the ring's own lifetime reference is load-bearing."
+  echo "   ACQUISITION only. The release half has no witness in this run."
+  return 0
+}
+
 echo
 echo "=== stage 1: the CONTROL -- the leg must PASS on the real tree ==="
 tools/build.sh kernel --config ci
@@ -290,12 +456,6 @@ preserve_boot_inputs "reap-leg-$STAMP" control default || exit 4
 run_suite control
 B=$OUT/control-boot.log
 /usr/bin/grep -qE '^EXTINCTION:' "$B" && { echo "   CONTROL EXTINCTED -- stop, read $B"; exit 1; } || true
-# BY NAME, not by the total: a suite that lost this test would still total right
-# if something else were added, and the total is not what this run is about.
-/usr/bin/grep -qE '\[test\] loom\.private_owner_lifecycle \.\.\. PASS' "$B" || {
-  echo "   THE LEG DID NOT PASS. Its error string names the failing check:"
-  /usr/bin/grep -nE 'loom\.private_owner_lifecycle|unpinned-reap|retirement|FAIL' "$B" | head -10
-  exit 1; }
 tally=$(/usr/bin/grep -E '  tests: [0-9]+/[0-9]+' "$B" | tail -1)
 got=$(echo "$tally" | sed -E 's/.*tests: ([0-9]+)\/([0-9]+).*/\1 \2/')
 pass=$(echo "$got" | cut -d' ' -f1); total=$(echo "$got" | cut -d' ' -f2)
@@ -303,20 +463,10 @@ echo "-- suite: $tally (derived expectation $EXPECT_TESTS)"
 [ "$total" = "$EXPECT_TESTS" ] || { echo "   total $total != derived $EXPECT_TESTS"; exit 1; }
 [ "$pass" = "$total" ] || { echo "   $pass of $total passed"; exit 1; }
 [ "$suite_rc" = 0 ] || { echo "   test.sh exited $suite_rc on the control"; exit 1; }
-# The CONTROL must show ARRIVAL too: a control whose leg never reached the drop
-# would pass without exercising the operation stage 2 is about to test, which
-# would make the comparison meaningless in the quietest possible way.
-/usr/bin/grep -qF '[lp-mark] unpinned-reap-owner-drop' "$B" || {
-  echo "   THE CONTROL's leg never reached its owner drop -- arrival marker"
-  echo "   absent, so it passed WITHOUT exercising what the mutant tests."
-  echo "   Refusing before stage 2."; exit 1; }
-if /usr/bin/grep -qF '[lp-mark] cleanup-owner-drop' "$B"; then
-  echo "   THE CONTROL took the cleanup path: a check failed and the fixture"
-  echo "   recovered quietly. The marker line names it:"
-  /usr/bin/grep -nF '[lp-mark] cleanup-owner-drop' "$B" | head -2
-  exit 1
-fi
-echo "-- control reached the leg's owner drop (arrival marker present, no cleanup)"
+# THE LEG ITSELF, by name and in its own block -- never by the suite total: a
+# suite that lost this test would still total right if something else were
+# added, and the total is not what this run is about.
+check_control "$B" || exit 1
 echo "-- CONTROL GREEN: the leg passes, suite $pass/$total, no extinction"
 
 echo
@@ -413,82 +563,10 @@ MUTANT_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
 echo "-- mutant kernel $(echo "$MUTANT_BIN" | cut -c1-16) (differs from the control)"
 run_suite mutant
 M=$OUT/mutant-boot.log
-WANT='AddrSpace final lifetime drop with private rings'
-if /usr/bin/grep -qF "$WANT" "$M"; then
-  echo "-- MUTANT DIED AS PREDICTED, by name:"
-  /usr/bin/grep -nF "$WANT" "$M" | head -3
-  # AND NOTHING ELSE: a second, different extinction would mean the leg is not
-  # the thing that fired, and the prediction would be right by accident.
-  others=$(/usr/bin/grep -E '^EXTINCTION:' "$M" | /usr/bin/grep -vcF "$WANT" || true)
-  [ "${others:-0}" = 0 ] || {
-    echo "   BUT $others OTHER extinction(s) fired too -- read $M before concluding:"
-    /usr/bin/grep -nE '^EXTINCTION:' "$M" | head -6; exit 2; }
-  # ATTRIBUTION -- the half the first version LACKED, and whose absence turned a
-  # vacuously-satisfied negative into a false "DISCRIMINATED". The old check only
-  # asked that the leg did not report PASS, which is exactly what a leg that
-  # NEVER RAN also satisfies: the first mutant killed the boot inside
-  # addrspace.proc_alloc_in_shares, ~90 suite lines before this leg, and the
-  # runner reported discrimination anyway (reap-leg-20261007T190621Z). A gauge
-  # reading zero is satisfied by "it never started"; so ask POSITIVELY which
-  # test the boot was in when it died, derived from the log rather than assumed.
-  # The pattern must match ANNOUNCEMENTS ONLY. The suite also prints summary
-  # lines that begin "[test] " -- e.g. "[test] yield-waits: 724 invoked, ..." --
-  # and a bare prefix match picks one of those up as "the last test", which is a
-  # pattern matching the wrong thing and returning a confident wrong answer. An
-  # announcement is `[test] <name> ... `; the summaries have no ` ... `.
-  last_test=$(/usr/bin/grep -E '^[[:space:]]*\[test\] [^ ]+ \.\.\.' "$M" | tail -1)
-  case "$last_test" in
-    *"loom.private_owner_lifecycle"*) : ;;
-    *) echo "   THE EXTINCTION IS NOT ATTRIBUTABLE TO THIS LEG."
-       echo "   The last test the boot announced was:"
-       echo "     ${last_test:-<the boot announced no test at all>}"
-       echo "   so the mutant killed it BEFORE loom.private_owner_lifecycle ran,"
-       echo "   and this run says NOTHING about the leg. A FINDING, not a pass,"
-       echo "   and not a reason to weaken the mutant until the cause is known."
-       exit 2;;
-  esac
-  # It must have DIED inside the leg, not completed it: an announced leg that
-  # carries a verdict on its own line means the extinction came from somewhere
-  # after it, which is a third outcome and equally not discrimination.
-  case "$last_test" in
-    *PASS*|*FAIL*)
-       echo "   THE LEG COMPLETED ($last_test) and yet the named extinction"
-       echo "   fired in the same boot. Investigate; do not call this"
-       echo "   discrimination."; exit 2;;
-  esac
-  # ARRIVAL, NOT POSITION (astra, yip 0161 t61). The test-granularity check
-  # above is necessary and NOT sufficient: LP_CHECK is `goto done`, and the
-  # fixture's cleanup unrefs the ring and drops the owner too, so ANY earlier
-  # check failure reaches an owner drop with a ring outstanding and raises the
-  # SAME named extinction inside the SAME test -- while hiding the check that
-  # actually failed. Line order is not execution order. The fixture now prints a
-  # marker immediately before the target drop and a different one before the
-  # cleanup's drop; require the first and REFUSE on the second.
-  if ! /usr/bin/grep -qF '[lp-mark] unpinned-reap-owner-drop' "$M"; then
-    echo "   THE LEG NEVER REACHED ITS OWNER DROP -- the arrival marker is"
-    echo "   absent from the mutant boot log, so whatever died, it was not this"
-    echo "   operation. A FINDING, not a pass."
-    /usr/bin/grep -nF '[lp-mark]' "$M" | head -4
-    exit 2
-  fi
-  if /usr/bin/grep -qF '[lp-mark] cleanup-owner-drop' "$M"; then
-    echo "   THE CLEANUP PATH RAN, so this extinction belongs to the fixture's"
-    echo "   teardown drop and not to the leg -- and the check that sent it"
-    echo "   there is named on the marker line itself:"
-    /usr/bin/grep -nF '[lp-mark] cleanup-owner-drop' "$M" | head -2
-    echo "   Investigate that check first; this run says nothing about the leg."
-    exit 2
-  fi
-  echo "-- attributed: arrival marker present, cleanup marker absent, boot died"
-  echo "   inside this leg ($last_test)"
-  echo "-- DISCRIMINATED: the ring's own lifetime reference is load-bearing."
-  echo "   ACQUISITION only. The release half has no witness in this run."
-else
-  echo "   THE MUTANT DID NOT PRODUCE THE PREDICTED FAILURE."
-  echo "   This is a FINDING to investigate, not a pass and not a reason to"
-  echo "   weaken the guard. What the boot did instead:"
-  /usr/bin/grep -nE '^EXTINCTION:|FAIL|tests: ' "$M" | head -12
-  echo "   (test.sh exit was $suite_rc; full log $M)"
-  exit 2
-fi
+# The oracle is a FUNCTION so the real code can be driven against
+# constructed logs off-lease, which is the only way to find a defect like
+# the two astra caught in t63: both were in the INTERACTION between the
+# markers and test.c's own output, and marker-only synthetic arms could not
+# contain that interaction at all.
+check_mutant "$M" || exit 2
 # Recovery is NOT a stage here: on_exit runs it on this path and every other.
