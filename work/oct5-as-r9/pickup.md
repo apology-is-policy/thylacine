@@ -449,9 +449,15 @@ main is queue head behind me and I release the moment the matrix ends.
    both times. Leg 2 mutates the ACTUAL `loom_private_destroy`, which is
    astra's PO-R2. Green control 1836/1836 on a kernel byte-identical to the
    pre-legs one (`5ced18c43ae8302a`).
-4. **Astra's note 34 (six wrapper defects) all fixed**, plus a 57-check,
-   11-scenario harness (`red-legs-wrapper-test.sh`) that tests the RUNNER, not
-   its parsers. It discriminates: 57/57 new vs 26 WRONG against the old runner.
+4. **Astra's note 34 (six wrapper defects) all fixed**, plus a 77-check,
+   16-scenario harness (`red-legs-wrapper-test.sh`) that tests the RUNNER, not
+   its parsers. It discriminates: 77/77 against the fixed runner vs 11 WRONG
+   against the pre-fix one (logs
+   `private-owner-logs/wrapper-test-po-r5-{fixed,prefix}-20261007T114942Z.log`).
+   CORRECTION, and keep it: an earlier version of this line said "57-check,
+   11-scenario ... 57/57 vs 26 WRONG". The 57 run was real but its log was never
+   retained, so the retained `wrapper-test-new.log` read 53 and astra caught the
+   mismatch (0161 t33). Quote retained logs, not runs.
 5. **The parser was rewritten** after the first real run refused: a verdict is a
    STATE in the log, not a line. `test.c` prints the name before running the
    test, `sched_dump_runnable()` lands between name and verdict, 87 of 1836

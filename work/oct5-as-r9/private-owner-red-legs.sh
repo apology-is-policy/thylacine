@@ -53,6 +53,8 @@ SRC_RESTORED=0
 IMAGE_REBUILT=0
 IMAGE_QUALIFIED=0
 CHILD_PID=
+OWNED_PGIDS=                             # every process group this run started
+QUIESCED=1                               # 0 once a group cannot be PROVEN empty
 SUITE_RC=
 MUTANT_HASH=                             # hash of the file currently mutated, if any
 MUTANT_FILE=
@@ -77,7 +79,7 @@ for f in $MUTATED_FILES; do
   git hash-object "$f" > "$PRISTINE/$(basename "$f").hash" || die "cannot hash $f"
 done
 
-pristine_hash() { cat "$PRISTINE/$(basename "$1").hash"; }
+pristine_hash() { cat "$PRISTINE/$(basename "$1").hash" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
 # Owned work. Each build and each suite runs as a tracked child so that a signal
@@ -86,13 +88,62 @@ pristine_hash() { cat "$PRISTINE/$(basename "$1").hash"; }
 # cores after this script is gone.
 # ---------------------------------------------------------------------------
 OWNED_RC=
+# Each owned command runs as its OWN PROCESS GROUP (set -m makes the job a group
+# leader, so its pgid equals its pid). That is what makes a build's compilers
+# reapable AS A SET: a grandchild reparented to init when its shell exits keeps
+# the group, so `kill -- -$pgid` reaches exactly the processes this run started
+# and provably nothing else. A peer's build has its own group and is never named.
 run_owned() { # run_owned <logfile> <cmd> [args...]
   log=$1; shift
+  set -m
   "$@" > "$log" 2>&1 &
   CHILD_PID=$!
+  set +m
+  lead=$CHILD_PID
+  OWNED_PGIDS="$OWNED_PGIDS $lead"
   wait "$CHILD_PID"
   OWNED_RC=$?
   CHILD_PID=
+  # The child exiting says NOTHING about its descendants. A compiler still
+  # writing objects while the next step mutates or restores source makes every
+  # later artifact unattributable, so quiescence is proven here, not assumed --
+  # and an unprovable one fails the run closed rather than carrying on.
+  if ! quiesce_group "$lead"; then
+    QUIESCED=0
+    die "processes this run started are still alive in group $lead ($(group_members "$lead" | tr '\n' ' ')) -- refusing to continue while they could touch source or build/"
+  fi
+}
+
+# Members of one process group, by pgid. Ancestry cannot be used: a grandchild
+# is reparented to init the moment its parent exits, which is exactly the case
+# that matters.
+group_members() { # group_members <pgid>
+  ps -Ao pid=,pgid= 2>/dev/null | awk -v g="$1" '$2 == g { print $1 }'
+}
+
+# Stop one owned group and PROVE it empty. Returns nonzero when it cannot be
+# proven, which callers treat as a refusal -- an unobserved process is unknown,
+# never dead.
+# The two graces are settable ONLY so off-lease coverage need not wait 40 s for
+# the escalation; shortening them makes the runner stricter, never laxer, and no
+# setting can turn an unproven quiescence into a pass.
+QUIESCE_GRACE=${QUIESCE_GRACE:-30}
+QUIESCE_KILL_GRACE=${QUIESCE_KILL_GRACE:-10}
+quiesce_group() { # quiesce_group <pgid>
+  g=$1
+  [ -n "$g" ] || return 0
+  [ -n "$(group_members "$g")" ] || return 0
+  echo "group $g still has members ($(group_members "$g" | tr '\n' ' ')); stopping it"
+  kill -TERM -"$g" 2>/dev/null
+  i=0
+  while [ -n "$(group_members "$g")" ] && [ "$i" -lt "$QUIESCE_GRACE" ]; do sleep 1; i=$((i + 1)); done
+  if [ -n "$(group_members "$g")" ]; then
+    echo "group $g ignored TERM; sending KILL"
+    kill -KILL -"$g" 2>/dev/null
+    i=0
+    while [ -n "$(group_members "$g")" ] && [ "$i" -lt "$QUIESCE_KILL_GRACE" ]; do sleep 1; i=$((i + 1)); done
+  fi
+  [ -z "$(group_members "$g")" ]
 }
 
 # QEMUs belonging to THIS tree only, identified by this ROOT's build/ path in
@@ -115,6 +166,12 @@ reap_owned() {
       sleep 1
     fi
   fi
+  # Every group this run started, not only the last child: leg 1's compiler
+  # outliving leg 1 is precisely the case a per-child wait misses.
+  for g in $OWNED_PGIDS; do
+    quiesce_group "$g" || { QUIESCED=0; echo "*** group $g NOT PROVEN EMPTY: $(group_members "$g" | tr '\n' ' ')"; }
+  done
+
   pids=$(my_qemu_pids)
   if [ -n "$pids" ]; then
     echo "this tree's QEMU still up ($(printf '%s' "$pids" | tr '\n' ' ')); stopping it before restoring source"
@@ -127,7 +184,10 @@ reap_owned() {
       sleep 1
     fi
   fi
-  [ -z "$(my_qemu_pids)" ] || echo "WARNING: this tree still has a QEMU up after KILL"
+  if [ -n "$(my_qemu_pids)" ]; then
+    QUIESCED=0
+    echo "*** this tree still has a QEMU up after KILL ($(my_qemu_pids | tr '\n' ' '))"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -143,7 +203,21 @@ cleanup() { # cleanup <rc> <why>
   reap_owned
 
   bad=0
+  # Restoring source while a process this run started is still running would
+  # race the restore against a writer, and the resulting tree would be neither
+  # the mutant nor the original. Unproven quiescence therefore STOPS the
+  # restore: a loudly mutated tree with its originals named is recoverable,
+  # a silently half-restored one is not.
+  if [ "$QUIESCED" -ne 1 ]; then
+    echo "*** QUIESCENCE UNPROVEN -- processes this run started may still be alive"
+    echo "    REFUSING to restore source. Originals: $PRISTINE"
+    for f in $MUTATED_FILES; do
+      printf '    %-16s now %s (pristine %s)\n' "$f" "$(git hash-object "$f" 2>/dev/null || echo missing)" "$(pristine_hash "$f")"
+    done
+    bad=1
+  fi
   for f in $MUTATED_FILES; do
+    [ "$QUIESCED" -eq 1 ] || break
     want=$(pristine_hash "$f")
     got=$(git hash-object "$f" 2>/dev/null || echo missing)
     if [ "$got" = "$want" ]; then
@@ -177,7 +251,12 @@ cleanup() { # cleanup <rc> <why>
     echo "*** SOURCES MAY STILL BE MUTATED -- originals are in $PRISTINE ***"
   fi
 
-  if [ "$IMAGE_QUALIFIED" -eq 1 ]; then
+  # Both halves, not either: a green suite says the IMAGE is sound, while the
+  # source/HEAD/quiescence checks say the EVIDENCE is attributable to this tree.
+  # The marker is the durable artifact a later session reads, so it outranks the
+  # exit status -- removing it on a green suite whose final checks failed would
+  # leave a tree that looks qualified and is not.
+  if [ "$IMAGE_QUALIFIED" -eq 1 ] && [ "$bad" -eq 0 ]; then
     rm -f "$MUTANT_STAMP"
     echo "build/ is QUALIFIED: rebuilt from restored source and green; marker removed"
   else
@@ -189,6 +268,13 @@ cleanup() { # cleanup <rc> <why>
       echo "src restored  : $SRC_RESTORED"
       echo "image rebuilt : $IMAGE_REBUILT"
       echo "image green   : $IMAGE_QUALIFIED"
+      echo "quiesced      : $QUIESCED"
+      echo "final checks  : $([ "$bad" -eq 0 ] && echo passed || echo FAILED)"
+      if [ "$IMAGE_QUALIFIED" -eq 1 ] && [ "$bad" -ne 0 ]; then
+        echo "The suite was green, but this run's final source/HEAD/quiescence"
+        echo "checks did NOT pass, so the evidence is not attributable. The"
+        echo "marker is kept deliberately: read the evidence directory."
+      fi
       if [ "$IMAGE_REBUILT" -eq 0 ]; then
         echo "This kernel was built from MUTATED source. Rebuild before any gate."
       else

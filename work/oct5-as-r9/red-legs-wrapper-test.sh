@@ -68,6 +68,26 @@ if [ "${FOREIGN_EDIT_ON:-x}" = "$n" ]; then
   printf '\n// a third party was here\n' >> kernel/loom.c
   printf 'stub: a third party edited kernel/loom.c during build #%s\n' "$n"
 fi
+# A build's real descendants are its compilers, and they outlive the shell that
+# launched them. These three hooks reproduce that, each one step harder to reap.
+if [ "${BUILD_ORPHAN_ON:-x}" = "$n" ]; then
+  sleep 30 &
+  printf '%s\n' "$!" > build/.orphan-pid
+  printf 'stub: left grandchild %s behind and exiting 0\n' "$(cat build/.orphan-pid)"
+fi
+if [ "${BUILD_ORPHAN_NOTERM_ON:-x}" = "$n" ]; then
+  sh -c "trap '' TERM; while :; do sleep 1; done" &
+  printf '%s\n' "$!" > build/.orphan-pid
+  printf 'stub: left TERM-ignoring grandchild %s behind\n' "$(cat build/.orphan-pid)"
+fi
+# Nothing survives SIGKILL, so the refusal branch cannot be driven with a real
+# process. It is driven by shadowing the INSTRUMENT instead: a fake ps that
+# keeps reporting a member of this build's group, which is what an unreapable
+# process looks like to the runner.
+if [ "${FAKE_PS_GROUP_ON:-x}" = "$n" ]; then
+  ps -o pgid= -p $$ | tr -d ' ' > fake-ps-group
+  printf 'stub: fake ps will keep claiming group %s is occupied\n' "$(cat fake-ps-group)"
+fi
 if [ "${BUILD_FAIL_ON:-x}" = "$n" ]; then printf 'stub: deliberate build failure\n'; exit 2; fi
 exit 0
 STUB
@@ -81,6 +101,12 @@ n=$(cat build/.suites 2>/dev/null || echo 0); n=$((n + 1)); printf '%s\n' "$n" >
 [ -f ./stub-plan ] && . ./stub-plan
 eval "mode=\${SUITE_${n}_MODE:-green}"
 eval "rc=\${SUITE_${n}_RC:-0}"
+# Moving HEAD mid-run is how a real tree loses provenance: a peer lands a commit
+# while the gate runs, so the evidence cannot be attributed to a known tree.
+if [ "${HEAD_MOVE_ON:-x}" = "$n" ]; then
+  git -c user.email=h@x -c user.name=h commit -q --allow-empty -m "a peer landed mid-run" >/dev/null 2>&1
+  printf 'stub: HEAD moved during suite #%s\n' "$n"
+fi
 L=build/test-boot.log
 # CRLF and the split verdict are the real serial format, not decoration: the
 # kernel prints `[test] NAME ... ` before running the test, so a failure's
@@ -141,8 +167,31 @@ STUB
 }
 
 run_runner() { # run_runner <tree> -> status in RC, output in $tree/run.out
-  ( cd "$1" && ROOT="$1" sh "$RUNNER" ) > "$1/run.out" 2>&1
+  # fakebin, when a scenario created it, shadows an INSTRUMENT the runner reads
+  # (ps). The runner itself is never substituted or given a seam.
+  # The graces are passed EXPLICITLY rather than relying on a prefix assignment
+  # reaching the subshell: an unexported knob would have left the field default
+  # in force and the scenario would have waited 40 s and still passed, which is
+  # a test that cannot fail for the reason it names.
+  ( cd "$1" && ROOT="$1" PATH="$1/fakebin:$PATH" \
+    QUIESCE_GRACE="${QUIESCE_GRACE:-30}" QUIESCE_KILL_GRACE="${QUIESCE_KILL_GRACE:-10}" \
+    sh "$RUNNER" ) > "$1/run.out" 2>&1
   RC=$?
+}
+
+alive() { kill -0 "$1" 2>/dev/null && echo alive || echo dead; }
+
+fake_ps() { # fake_ps <tree> -- passes real ps through, plus one synthetic member
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/ps" <<'FPS'
+#!/bin/sh
+/bin/ps "$@"
+case "$*" in
+  *pgid*) g=$(cat ./fake-ps-group 2>/dev/null); [ -n "$g" ] && printf '%s %s\n' 99999 "$g" ;;
+esac
+exit 0
+FPS
+  chmod 755 "$1/fakebin/ps"
 }
 
 src_intact() { # src_intact <tree> -> yes|no
@@ -340,6 +389,72 @@ FIX
   check "S10 matches the peer's guest only when given the peer's root" "$hits_peer" "11406"
   note "the sh decoy naming qemu and this build path is excluded by the comm test"
 fi
+
+# ------------------- S13 a build leaves a descendant behind (astra, PO-R5)
+printf '\n-- S13 the first mutant build leaves a grandchild running after it exits\n'
+T=$(new_tree s13)
+cat > "$T/stub-plan" <<'P'
+BUILD_ORPHAN_ON=1
+SUITE_1_MODE=red1; SUITE_1_RC=1
+SUITE_2_MODE=red2; SUITE_2_RC=1
+SUITE_3_MODE=green; SUITE_3_RC=0
+P
+run_runner "$T"
+ORPHAN=$(cat "$T/build/.orphan-pid" 2>/dev/null || echo 0)
+note "grandchild was pid $ORPHAN"
+check "S13 the grandchild is reaped, not merely unwaited" "$(alive "$ORPHAN")" dead
+check_has "S13 says it found the group occupied" "$T/run.out" "still has members"
+check "S13 the run still completes" "$RC" 0
+check "S13 source restored" "$(src_intact "$T")" yes
+check "S13 marker removed" "$([ -f "$T/build/MUTANT-UNQUALIFIED" ] && echo present || echo absent)" absent
+
+# ------------------------- S14 the descendant ignores TERM: escalate to KILL
+printf '\n-- S14 the grandchild ignores SIGTERM (graces shortened; escalation is what is under test)\n'
+T=$(new_tree s14)
+cat > "$T/stub-plan" <<'P'
+BUILD_ORPHAN_NOTERM_ON=1
+SUITE_1_MODE=red1; SUITE_1_RC=1
+SUITE_2_MODE=red2; SUITE_2_RC=1
+SUITE_3_MODE=green; SUITE_3_RC=0
+P
+QUIESCE_GRACE=3 QUIESCE_KILL_GRACE=3 run_runner "$T"
+ORPHAN=$(cat "$T/build/.orphan-pid" 2>/dev/null || echo 0)
+check_has "S14 escalates to KILL" "$T/run.out" "ignored TERM; sending KILL"
+check "S14 the TERM-proof grandchild is dead" "$(alive "$ORPHAN")" dead
+check "S14 the run still completes" "$RC" 0
+
+# -------- S15 quiescence cannot be proven: fail closed, do not restore source
+printf '\n-- S15 the group can never be proven empty (fake ps): the run must fail CLOSED\n'
+T=$(new_tree s15)
+fake_ps "$T"
+cat > "$T/stub-plan" <<'P'
+FAKE_PS_GROUP_ON=1
+SUITE_1_MODE=red1; SUITE_1_RC=1
+P
+QUIESCE_GRACE=2 QUIESCE_KILL_GRACE=2 run_runner "$T"
+check "S15 refuses" "$RC" 3
+check_has "S15 names the live group" "$T/run.out" "are still alive in group"
+check_has "S15 refuses to restore under it" "$T/run.out" "REFUSING to restore source"
+check "S15 leaves the mutant rather than racing a writer" "$(src_intact "$T")" no
+check_has "S15 names the originals" "$T/run.out" "pristine"
+check "S15 marker present" "$([ -f "$T/build/MUTANT-UNQUALIFIED" ] && echo present || echo absent)" present
+check_has "S15 marker records the unproven quiescence" "$T/build/MUTANT-UNQUALIFIED" "quiesced      : 0"
+
+# ---- S16 a green suite whose FINAL checks fail must NOT clear the marker
+printf '\n-- S16 HEAD moves during the green control: suite green, provenance lost\n'
+T=$(new_tree s16)
+cat > "$T/stub-plan" <<'P'
+SUITE_1_MODE=red1; SUITE_1_RC=1
+SUITE_2_MODE=red2; SUITE_2_RC=1
+SUITE_3_MODE=green; SUITE_3_RC=0
+HEAD_MOVE_ON=3
+P
+run_runner "$T"
+check_has "S16 the green control itself passed" "$T/run.out" "BOTH FIXTURES ARE WITNESSES"
+check_has "S16 catches the moved HEAD" "$T/run.out" "HEAD MOVED during the run"
+check "S16 marker KEPT although the suite was green" "$([ -f "$T/build/MUTANT-UNQUALIFIED" ] && echo present || echo absent)" present
+check_has "S16 marker says why it was kept" "$T/build/MUTANT-UNQUALIFIED" "not attributable"
+check "S16 exit status is not success" "$([ "$RC" -ne 0 ] && echo nonzero || echo zero)" nonzero
 
 printf '\n== %s passed, %s wrong (scratch kept at %s)\n' "$PASS" "$FAIL" "$WORK"
 [ "$FAIL" -eq 0 ] || exit 1

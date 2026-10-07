@@ -1126,14 +1126,51 @@ found six defects in the red-legs runner that a parser replica could not have
 reached: cleanup could report success on a failed restore, signals carried the
 interrupted command's status, there was no owned-child wait, the unqualified
 marker was cleared before the green checks ran, and the tally was not pinned to
-an expected count. `work/oct5-as-r9/red-legs-wrapper-test.sh` runs 11 scenarios
-and 57 checks against the real runner in throwaway git trees -- signal, build
+an expected count. `work/oct5-as-r9/red-legs-wrapper-test.sh` runs 16 scenarios
+and 77 checks against the real runner in throwaway git trees -- signal, build
 failure, stale serial log, wrong fail reason, unattributed red, a concurrent
-third-party edit, a short green tally, and two scenarios driven by REAL recorded
-boot logs. It discriminates: 57/57 against the corrected runner, 26 wrong against
-the previous one, including the old runner CREDITING a red leg from a stale log
-after `test.sh` never booted, exiting 0 while REMOVING the unqualified marker on
-a 1835-of-1836 suite, and silently overwriting a third party's edit to `loom.c`.
+third-party edit, a short green tally, an unreaped build descendant, an
+unprovable quiescence, a moved HEAD, and two scenarios driven by REAL recorded
+boot logs. It discriminates: 77/77 against the corrected runner, 11 wrong
+against the previous one, including the old runner CREDITING a red leg from a
+stale log after `test.sh` never booted and silently overwriting a third party's
+edit to `loom.c`. Logs:
+`private-owner-logs/wrapper-test-po-r5-{fixed,prefix}-20261007T114942Z.log`.
+
+**A FIGURE OF MINE WAS WRONG, and the retained evidence is what caught it.**
+This passage previously said "11 scenarios and 57 checks ... 57/57 against the
+corrected runner, 26 wrong against the previous one". The 57 run was real -- it
+ran after S11 and S12 were added -- but its log was never retained, so the only
+retained evidence was `wrapper-test-new.log` at **53 passed**, from before those
+two scenarios existed, and `wrapper-test-old-runner.log` at 26 passed / 26 wrong
+of 52 checks. Astra read the evidence rather than the claim and found the gap
+(0161 t33). A number quoted from a run whose log was not kept is a recollection,
+not a measurement, however real the run was; the figures above are the retained
+logs' own last lines.
+
+**PO-R5, the reusable-wrapper repair** (astra 0161 t33; stub coverage only, no
+guest re-run requested or taken). Three defects, each now a scenario that fails
+against the pre-fix runner:
+1. `reap_owned` waited on the immediate build child only. A build's real
+   descendants are its compilers, which outlive the shell that launched them, so
+   source restoration could race a live writer. Every owned command now runs as
+   its OWN PROCESS GROUP (`set -m`), because ancestry cannot be used -- a
+   grandchild is reparented to init the moment its parent exits, which is
+   exactly the case that matters -- and a group is reaped and then PROVEN empty
+   by pgid. A peer's build has its own group and is never named.
+2. A surviving QEMU after KILL only printed `WARNING`. Quiescence is now a
+   state: unproven quiescence REFUSES the restore, names the live pids and the
+   pristine originals, and exits nonzero. Leaving a loudly mutated tree whose
+   originals are named is recoverable; a half-restored one is not.
+3. The unqualified marker was removed whenever the suite was green, even when
+   the run's final source/HEAD checks had failed. It now requires BOTH -- the
+   suite says the IMAGE is sound, the final checks say the EVIDENCE is
+   attributable -- and the marker, being the durable artifact a later session
+   reads, outranks the exit status.
+The refusal branch cannot be driven by a real process, because nothing survives
+SIGKILL. S15 drives it by shadowing the INSTRUMENT instead -- a fake `ps` that
+keeps reporting a member of the build's group, which is what an unreapable
+process looks like to the runner. The runner itself is never given a seam.
 
 **STRATUM PROVENANCE: D7's residue is in this tree's `build/`, and it blocks the
 gate script.** `tools/build.sh kernel --config ci` refuses at the stratumd step:
