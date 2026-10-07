@@ -226,14 +226,15 @@ fn errno_to_taperror(rc: i64) -> TapError {
 const EV_REGION: u64 = 128;
 const EV_CAP: usize = 4 * TEVENT_LEN;
 /// Surfaces one EventRing carries. The bound is the compositor SESSION's,
-/// not the ring's: the kernel's 9P client holds one tag per in-flight RPC
-/// out of a 64-wide table (`P9_SESSION_MAX_OUTSTANDING`), and a parked event
-/// read holds its tag until an event arrives -- so N surfaces pin N tags
-/// nearly always, and the synchronous RPCs the same thread makes on the
-/// session (presents, ctl verbs, the pane-tree reads, `destroy`, the
-/// fire-and-forget clunk of every closed fd) need tags of their own: at 64
-/// the kernel refuses every send. 48 leaves 16; halcyond's worst case is
-/// 36. (The Loom registers 64 handles; the SQ holds 128.)
+/// not the ring's: the kernel's 9P client holds one tag per in-flight RPC,
+/// and a parked event read holds its tag until an event arrives -- so N
+/// surfaces pin N tags nearly always, and the synchronous RPCs the same
+/// thread makes on the session (presents, ctl verbs, the pane-tree reads,
+/// `destroy`, the fire-and-forget clunk of every closed fd) need tags of
+/// their own. The table was 64 wide when 48 was chosen; since ARCH 21.11 it
+/// grows, and ring ops hold at most the async share (`P9_ASYNC_MAX`, 16384),
+/// so 48 is the ring's bound, not the kernel's. halcyond's worst case is 36.
+/// (The Loom registers 64 handles; the SQ holds 128.)
 pub const MAX_RING_SURFACES: usize = 48;
 const RING_ENTRIES: u32 = 128;
 /// Events a slot holds unread before the ring stops arming its read: the

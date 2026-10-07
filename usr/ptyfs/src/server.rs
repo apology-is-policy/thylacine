@@ -1741,12 +1741,12 @@ impl Conn {
                 ptys.slave_write(n, a.data)
             };
             if consumed == 0 {
-                // The binding bound is the SHARED kernel 9P tag pool
-                // (P9_SESSION_MAX_OUTSTANDING == 64), NOT this per-Conn MAX_FIDS: a
-                // parked write holds its tag until poll_writes replies, and every
-                // Proc shares ONE /dev/pts client, so enough parked ops starve the
-                // pool for all pts users (F1 -- the pre-existing parked-READ class;
-                // the real fix is a kernel per-Proc outstanding quota, tracked).
+                // The binding bound is the SHARED kernel 9P tag pool, NOT this
+                // per-Conn MAX_FIDS: a parked write holds its tag until
+                // poll_writes replies, and every Proc shares ONE /dev/pts
+                // client. Since ARCH 21.11 an op waits for a tag rather than
+                // failing, and the op share (P9_OPS_MAX, 32767) takes that many
+                // parked threads to fill (F1 -- the parked-READ class).
                 // MAX_FIDS caps only THIS Conn's contribution.
                 if self.pending_writes.len() >= MAX_FIDS {
                     return self.err(tag, p9::E_PROTO);

@@ -87,7 +87,8 @@ submitter's thread is parked for the clunk RTT on every file close.
 
 **The ONE residual hazard = the tag (the `outstanding[]` slot, I-10).** `alloc_tag`
 returns the lowest free of `P9_SESSION_MAX_OUTSTANDING = 64` slots; the slot is
-freed only when its reply is dispatched. A fire-and-forget Tclunk whose Rclunk is
+freed only when its reply is dispatched. (Since 2026-10-07 the table grows to
+65535 tags and an op waits for one when the op share is full: ARCH 21.11.) A fire-and-forget Tclunk whose Rclunk is
 never reaped permanently burns a slot → tag-pool exhaustion → the client stalls.
 
 **The design:** send the Tclunk **without blocking** — `mark_outstanding` the tag

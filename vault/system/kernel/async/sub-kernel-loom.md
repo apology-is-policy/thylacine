@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -438,6 +438,14 @@ reference on that object, which the caller releases after the pump. A single
 reaper made this safe once; the poll thread was a second one, and it is not.
 The fan-in below takes one such reference per distinct client and holds it
 across the pumps, the hooks and the sleep, until every hook is off.
+
+**The pump budget.** One ENTER's wait pumps at most `submitted + P9_TAG_LIMIT
++ 1` frames (`loom_wait_for_completions`, the Loom-3 audit's F4), so a server
+flooding frames cannot hold a CPU inside one syscall. The frames ahead of this
+ring's own answer tags already in flight, and a session holds at most
+`P9_TAG_LIMIT` of those since its tag table grows (ARCH 21.11; the bound was the
+64-tag pool's before 2026-10-07), so a server that answers what it was sent
+never meets the budget.
 
 **Waiting for the reader role.** The reader role belongs to the 9P client, and a
 dev9p client is shared with other processes' synchronous calls. A synchronous

@@ -49,7 +49,7 @@ One function per op, `0` on success / `-errno` on failure:
   with no per-op deadline — death-interruptible instead).
 - **Path**: `p9_client_walk` / `walk_one` / `walkgetattr` (POUNCE fused) /
   `clunk` / `clunk_async` (fire-and-forget; ownerless Rclunk drain). Both
-  drain a full tag pool before the build, and both return `-P9_E_AGAIN` when
+  wait for a tag when the op share is full, before the build, and both return `-P9_E_AGAIN` when
   the Tclunk could not be sent on a live session (a dying caller, or a spill
   or reply buffer that could not be allocated): nothing reached the wire, the
   tag is free and the fid is STILL BOUND, so the caller hands it to the closer
@@ -103,8 +103,10 @@ its result instead.
 ## Mechanism
 
 **Elected-reader pipelining** (Plan 9 `devmnt`/`mountio`). Each op allocates
-a stack `struct p9_rpc`, registers it in the tag-indexed `c->inflight[]`
-under `c->lock`, sends its frame, then enters `client_wait`: a submitter
+a stack `struct p9_rpc`, registers it on its tag's session entry
+(`client_register` -> `p9_session_set_owner`; the entry's `owner` replaced
+the client's `inflight[]` array on 2026-10-07, so freeing a tag drops its
+registration) under `c->lock`, sends its frame, then enters `client_wait`: a submitter
 with no reply yet becomes THE reader (one at a time via `c->reader_active`),
 drops the lock, `reader_recv_frame`s one frame, retakes the lock, demuxes it
 by tag to the owning rpc (frame copied to that rpc's `reply_buf` and APPLIED
@@ -190,9 +192,11 @@ T-type with a 9-byte reply no parser accepts); the dying thread is
 kills each peer.
 
 **An async submit cannot wait, so a shortage is its retryable error (NP-4b,
-2026-09-28).** `p9_client_submit_async` checks for a free tag BEFORE it
-builds, and on a send that meets a full ring (`P9_TRANSPORT_EAGAIN`) it
-clears `inflight[tag]` and takes the op back whole with
+2026-09-28).** `p9_client_submit_async` checks the async share and the op
+share BEFORE it builds (ARCH 21.11 part 2: async ops -- Loom ring ops, the
+dev9p poll arm and snapshot -- hold at most `P9_ASYNC_MAX` tags, marked with
+`p9_session_mark_async` after the build), and on a send that meets a full ring
+(`P9_TRANSPORT_EAGAIN`) it drops the registration and takes the op back whole with
 `p9_session_retract_unsent` (the tag, and the fid a Tclunk unbound at
 build). Either way the op completes with `-P9_E_AGAIN` (== T_E_AGAIN), and
 the shared session stays live. Before, a full ring latched the WHOLE session
@@ -212,10 +216,14 @@ built). Until then a full pool failed every sync op but the clunks with
 retries: a write-behind flush that met a full pool dropped its data, with no
 close to report it. The wait ends because the reader frees a tag when it
 reads the reply (part 4 above). Witness: `9p_client.full_pool_sync_op_gets_a_tag`
-(an async-clunk burst of 70 fills the 64-tag pool; a sync walk then gets a
-tag; RED before, `-EIO`).
+(the op share lowered to 64; an async-clunk burst of 70 fills it; a sync walk
+then gets a tag; RED before, `-EIO`). Since TP-3 the table grows past 64 and a
+burst alone fills nothing (`9p_client.tag_table_grows`: 70 clunks hold 70
+tags in two chunks, none drained); the share is what a sync op can still find
+full, and `9p_client.async_share_leaves_sync_tags` shows deferred async ops
+cannot fill it for the sync ops.
 
-**Abandon on death.** A Proc dying mid-op NULLs `inflight[tag]`, frees its
+**Abandon on death.** A Proc dying mid-op drops its registration, frees its
 reply_buf, and sends `Tflush(oldtag)`; the tag stays reserved
 (`awaiting_flush`) until its Rflush — never freed by a late original reply.
 A Tclunk is never flushed (flush(5)): a flush the server honours would cancel
@@ -247,7 +255,8 @@ reported EINTR. `client_flush_wait` now marks the rpc `noted`: the note stays
 pending until the EL0-return tail, so every later wait for the op is killable
 only (`sleep`, and `reader_recv_frame` with `caught_ok=false`), or it would
 only interrupt again (the claim is the thread's to re-take). The rpc KEEPS
-`inflight[tag]`. It stages the Tflush -- with a full pool it makes one unit of
+registration. It stages the Tflush -- with no flush tag (a chunk allocation
+failed; the headroom of ARCH 21.11 part 2 otherwise always has one) it makes one unit of
 progress at a time and re-checks its own reply after each, because this op is
 on the wire and a pump can demux its answer, so `client_drain_until_free_tag`,
 which waits only for a free tag, would read on past it. A unit is a pump
@@ -269,10 +278,10 @@ first answer:
   Tflush back first (`p9_session_flush_retract` -- `dispatch_rmsg` would
   absorb a reply on an `awaiting_flush` tag) and applies the reply as an
   ordinary one, freeing both tags.
-- **The Rflush first.** The orphan-flush arm reads the flush's `flush_oldtag`
-  before dispatching; once the dispatch has freed both tags, it drops the
-  still-registered owner's `inflight[oldtag]` in the same critical section, so
-  the tag cannot be reused under it, and sets `flushed`. The call returns
+- **The Rflush first.** The orphan-flush arm reads the victim registered on
+  the flush's `flush_oldtag` before dispatching; the dispatch frees both tags
+  and drops that registration with the victim's entry, in the same critical
+  section, so the tag cannot be reused under it, and the arm sets `flushed`. The call returns
   `-P9_E_INTR` (`CLIENT_WAIT_FLUSHED`). A registered owner whose Tflush is not
   yet on the wire means the server answered a flush it never got: fail closed.
 - **A death in the flush wait** drops the registration and returns `-P9_E_IO`
@@ -412,7 +421,7 @@ explicit secondary entry (a device-teardown hook that holds the client),
 idempotent — the first death's reason stands. The reason rides only the async
 path because it is a Loom-completion (I-29) property the sync ABI does not
 expose; the audited #841 synchronous surface is untouched. Exactly-once holds
-by the demux clearing `inflight[tag]` **before** completing, so a reply and a
+by the demux dropping the registration **before** completing, so a reply and a
 death never both terminate one op — a late reply on a death-completed op
 dispatches ownerless (the `demux_orphan_late` taxonomy below) and is
 discarded, never a second terminal CQE. Spec: `loom_devgone.tla`
@@ -430,7 +439,7 @@ is valid.
 `demux_frame_locked` is the sole mutation site for six per-client
 counters, all under `c->lock`: `frames_rx` (every steady-state frame that
 reached the demux), `demux_owned` / `demux_wakes` (frames with a live
-`inflight[tag]` submitter, and sync wakeups actually issued), and a
+registered submitter, and sync wakeups actually issued), and a
 **three-way split of the ownerless case**.
 
 The split is the whole point, and it encodes the #214-F1 conflation
@@ -439,7 +448,7 @@ three by-design flows as camouflage.
 
 | Counter | Why a frame legitimately arrives unowned |
 |---|---|
-| `demux_orphan_clunk` | `p9_client_clunk_async` never registers `inflight[tag]`, so **every** async Rclunk is ownerless — constant background; so is a Tclunk whose owner died or abandoned it. Classified from the session table (`outstanding[tag].active && .kind == P9_TCLUNK`), so an Rlerror answering a clunk counts here, and an Rclunk on any other tag falls to the residue |
+| `demux_orphan_clunk` | `p9_client_clunk_async` never registers an owner, so **every** async Rclunk is ownerless — constant background; so is a Tclunk whose owner died or abandoned it. Classified from the session table (`outstanding[tag].active && .kind == P9_TCLUNK`), so an Rlerror answering a clunk counts here, and an Rclunk on any other tag falls to the residue |
 | `demux_orphan_flush` | the #845 abandon path sends its Tflush ownerless, so every abandon's Rflush lands here — death-driven. Classified from the session table (`outstanding[tag].active && .kind == P9_TFLUSH`): an Rflush on any other tag falls to the residue |
 | `demux_orphan_late` | an abandoned op's late ORIGINAL reply, classified from the session table (`outstanding[tag].active && (.awaiting_flush \|\| .abandoned)`) under the same `c->lock`; a walk's bind goes to the orphan sink |
 | `demux_orphan` | **the residue** — a frame no living mechanism accounts for |
@@ -475,9 +484,9 @@ the principals at its two ends, the system principal and a hostowner
 
 ## Data structures
 
-- `struct p9_client` (~36 KiB): embedded session (fid + 64-wide outstanding
-  tables), transport vtable, the inline 32 KiB `out_buf`, `c->lock`,
-  `inflight[]` (tag-indexed rpc pointers), `reader_active`,
+- `struct p9_client` (~36 KiB): embedded session (the fid table and the tag
+  table's inline chunk; each tag's entry holds the registered rpc), transport
+  vtable, the inline 32 KiB `out_buf`, `c->lock`, `reader_active`,
   `send_progress` + `send_waiters` + `send_waiters_list`, `role_waiters` +
   `role_waiters_list` (hooks waiting for the reader role itself, not a
   reply: the fan-in waiters' role hooks), `done_reply_buf`,
@@ -670,7 +679,7 @@ this surface):
   #349 root; ARCH 21.11 part 4).
 - **The flush(5) arm** (2026-09-30): a reply on a flushing owner's tag must be
   applied BEFORE any later frame (the Rflush frees the tag); the owner may
-  never touch `inflight[tag]` after DONE or `flushed` (the tag may already
+  never touch its tag's registration after DONE or `flushed` (the tag may already
   belong to another op), nor retract a Tflush after DONE (the demux did); every wait after `noted` must be killable
   only (a pending caught note would spin a note-interruptible one); death
   must still win in the flush wait; the Rflush-first hand-off must land in

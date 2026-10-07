@@ -36,6 +36,11 @@
 #include <thylacine/vivarium.h>  // flush(5) legs: a Linux sigtab row catches child_exit
 #include "../../mm/slub.h"       // flush(5) legs: kzalloc a sigtab proc_free frees
 
+// The pool as it was before ARCH 21.11. A test that needs a full pool sets it
+// as the op share (ops_max), or as the table's ceiling (tag_limit) when a
+// Tflush must find no tag either -- what a failed chunk allocation leaves.
+#define TP_POOL 64u
+
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
@@ -1113,31 +1118,53 @@ void test_9p_client_death_hangs_up_once(void) {
     TEST_EXPECT_EQ(closed, 1u, "the close is not a hangup");
 }
 
+// Hold a tag on `c` with a built, never-sent Tgetattr on the root fid, so a
+// test can register a hand-built rpc where only an op in flight has one;
+// tp_drop_tag takes it back. P9_NOTAG when no tag was had.
+static u16 tp_hold_tag(struct p9_client *c) {
+    u8 frame[64];
+    u32 sz; u8 ty; u16 tag = P9_NOTAG;
+    spin_lock(&c->lock);
+    int len = p9_session_send_getattr(&c->session, frame, sizeof(frame),
+                                      c->session.root_fid, P9_GETATTR_BASIC);
+    if (len > 0) (void)p9_peek_header(frame, (size_t)len, &sz, &ty, &tag);
+    spin_unlock(&c->lock);
+    return tag;
+}
+
+static void tp_drop_tag(struct p9_client *c, u16 tag) {
+    spin_lock(&c->lock);
+    p9_session_abort_unsent(&c->session, tag);
+    spin_unlock(&c->lock);
+}
+
 // The elected-reader handoff hands the role to a pending SYNC op and SKIPS an
-// async op (which has no thread to run the reader loop). White-box: inject one
-// of each into inflight[] and assert which one is flagged be_reader.
+// async op (which has no thread to run the reader loop). White-box: register
+// one of each on a held tag and assert which one is flagged be_reader.
 void test_9p_client_async_handoff_skips_async(void) {
     drive_client_open(&g_client, &g_loopback);
+    u16 ta = tp_hold_tag(&g_client);
+    u16 ts = tp_hold_tag(&g_client);
 
     g_handoff_async_fired = false;
     // Every hand-built rpc starts from zero: the handoff reads fields these
     // assignments do not name (`sending`), and stack garbage there would skip
     // the target.
     struct p9_rpc async_rpc = { 0 };
-    async_rpc.tag = 30; async_rpc.done = false; async_rpc.dead = false;
+    async_rpc.tag = ta; async_rpc.done = false; async_rpc.dead = false;
     async_rpc.be_reader = false; async_rpc.reply_len = 0; async_rpc.reply_buf = NULL;
     async_rpc.on_complete = test_handoff_async_recorder;   // async -> must be skipped
     rendez_init(&async_rpc.rendez);
 
     struct p9_rpc sync_rpc = { 0 };
-    sync_rpc.tag = 31; sync_rpc.done = false; sync_rpc.dead = false;
+    sync_rpc.tag = ts; sync_rpc.done = false; sync_rpc.dead = false;
     sync_rpc.be_reader = false; sync_rpc.reply_len = 0; sync_rpc.reply_buf = NULL;
     sync_rpc.on_complete = NULL;                      // sync -> the handoff target
     rendez_init(&sync_rpc.rendez);
 
     spin_lock(&g_client.lock);
-    g_client.inflight[30] = &async_rpc;
-    g_client.inflight[31] = &sync_rpc;
+    p9_session_set_owner(&g_client.session, ta, &async_rpc);
+    p9_session_set_owner(&g_client.session, ts, &sync_rpc);
     spin_unlock(&g_client.lock);
 
     p9_client_handoff_reader(&g_client);
@@ -1146,10 +1173,10 @@ void test_9p_client_async_handoff_skips_async(void) {
     TEST_ASSERT(!g_handoff_async_fired, "async op's callback NOT invoked (it was skipped)");
     TEST_ASSERT(sync_rpc.be_reader, "sync op chosen as the elected reader");
 
-    spin_lock(&g_client.lock);
-    g_client.inflight[30] = NULL;
-    g_client.inflight[31] = NULL;
-    spin_unlock(&g_client.lock);
+    TEST_ASSERT(ta != P9_NOTAG && ts != P9_NOTAG, "two tags held");
+
+    tp_drop_tag(&g_client, ta);   // the owner goes with the tag
+    tp_drop_tag(&g_client, ts);
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -1166,20 +1193,22 @@ void test_9p_client_async_handoff_skips_async(void) {
 // the flag would pick it.
 void test_9p_client_handoff_skips_stop_parked(void) {
     drive_client_open(&g_client, &g_loopback);
+    u16 tp = tp_hold_tag(&g_client);
+    u16 tv = tp_hold_tag(&g_client);
 
     // From zero: the handoff reads fields the assignments below do not name.
     struct p9_rpc rpc_parked = { 0 };
-    rpc_parked.tag = 40;
+    rpc_parked.tag = tp;
     rpc_parked.stop_parked = true;
     rendez_init(&rpc_parked.rendez);
 
     struct p9_rpc rpc_survivor = { 0 };
-    rpc_survivor.tag = 41;
+    rpc_survivor.tag = tv;
     rendez_init(&rpc_survivor.rendez);
 
     spin_lock(&g_client.lock);
-    g_client.inflight[40] = &rpc_parked;
-    g_client.inflight[41] = &rpc_survivor;
+    p9_session_set_owner(&g_client.session, tp, &rpc_parked);
+    p9_session_set_owner(&g_client.session, tv, &rpc_survivor);
     spin_unlock(&g_client.lock);
 
     p9_client_handoff_reader(&g_client);
@@ -1198,12 +1227,12 @@ void test_9p_client_handoff_skips_stop_parked(void) {
     bool control = rpc_parked.be_reader && !rpc_survivor.be_reader;
 
     // Unhook the stack rpcs before any verdict, so a failing assert leaves the
-    // shared client holding no pointer into this frame.
-    spin_lock(&g_client.lock);
-    g_client.inflight[40] = NULL;
-    g_client.inflight[41] = NULL;
-    spin_unlock(&g_client.lock);
+    // shared client holding no pointer into this frame: the owners go with
+    // their tags.
+    tp_drop_tag(&g_client, tp);
+    tp_drop_tag(&g_client, tv);
 
+    TEST_ASSERT(tp != P9_NOTAG && tv != P9_NOTAG && tp < tv, "two tags held, the parked one lower");
     TEST_ASSERT(skip_parked, "#89: a stop-parked op is NOT handed the reader role");
     TEST_ASSERT(to_survivor, "#89: the runnable survivor's op IS handed the reader role");
     TEST_ASSERT(dropped, "#89: every op stop-parked -> the role is dropped");
@@ -1263,20 +1292,19 @@ void test_9p_client_reader_hook_contract(void) {
     bool held_place  = (h.place == P9_HOOK_ROLE) && (h.pw.list == &g_client.role_waiters_list);
     u32  hooked      = g_client.role_waiters;
 
+    u16 tr = tp_hold_tag(&g_client);
     struct p9_rpc rpc_sync = { 0 };
-    rpc_sync.tag = 42;
+    rpc_sync.tag = tr;
     rendez_init(&rpc_sync.rendez);
     spin_lock(&g_client.lock);
-    g_client.inflight[42]  = &rpc_sync;
+    p9_session_set_owner(&g_client.session, tr, &rpc_sync);
     g_client.reader_active = false;
     spin_unlock(&g_client.lock);
     p9_client_handoff_reader(&g_client);
     bool designated  = rpc_sync.be_reader;
     bool held_quiet  = !h.pw.ready;
 
-    spin_lock(&g_client.lock);
-    g_client.inflight[42] = NULL;
-    spin_unlock(&g_client.lock);
+    tp_drop_tag(&g_client, tr);
     p9_client_handoff_reader(&g_client);
     bool woken       = h.pw.ready;
 
@@ -1514,7 +1542,7 @@ void test_9p_client_loom_rights_deny(void) {
 }
 
 // #898 quiesce: a Loom torn down with an async op in flight must abandon it --
-// Tflush on the client (clearing inflight[tag] so a late reply is discarded
+// Tflush on the client (dropping the registration so a late reply is discarded
 // ownerless), release the submit-time pin, and free the container -- with no
 // hang, no leak, and no use-after-free. Submit WITHOUT pumping (the reply is
 // staged but not demuxed), then loom_unref drives loom_free's quiesce.
@@ -1545,7 +1573,7 @@ void test_9p_client_loom_quiesce_abandons_inflight(void) {
     u64 destroyed0 = loom_total_destroyed();
 
     // Tear the ring down with the op in flight (#898). loom_free quiesces: the
-    // abandon clears inflight[tag] + Tflushes, the pin is clunked, the container
+    // abandon drops the registration + Tflushes, the pin is clunked, the container
     // freed. The dev9p root spoor (reg ref + the op's pin ref = 2) is fully
     // released; the loom is destroyed exactly once. No hang / leak / UAF.
     loom_unref(l);
@@ -3742,9 +3770,12 @@ void test_9p_client_async_clunk_burst_no_fid_leak(void) {
     TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)1,
                    "baseline: root bound");
 
-    // Bind N > 64 distinct fids (each Twalk is a sync op that drains its own
-    // Rwalk, so the pool is EMPTY before the burst).
-    const u32 N = 70;   // > P9_SESSION_MAX_OUTSTANDING (64)
+    // The op share at TP_POOL: the table could grow past a burst of N, but the
+    // share cannot, so the burst's last clunks find it full.
+    g_client.session.ops_max = TP_POOL;
+    // Bind N > TP_POOL distinct fids (each Twalk is a sync op that drains its
+    // own Rwalk, so the pool is EMPTY before the burst).
+    const u32 N = 70;
     for (u32 i = 0; i < N; i++) {
         struct p9_qid q;
         const u8 nm[] = {'f'};
@@ -3755,13 +3786,13 @@ void test_9p_client_async_clunk_burst_no_fid_leak(void) {
                    "N + root fids bound");
 
     // THE BURST: async-clunk all N with NO interleaved sync op. Closes 65..N hit
-    // a full pool; the F1 drain must free a tag for each.
+    // a full share; the F1 drain must free a tag for each.
     for (u32 i = 0; i < N; i++)
         TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, (u32)(i + 1)), 0,
                        "async clunk succeeds (drains the full pool)");
 
     // Every burst-closed fid is UNBOUND -> back to the root-only baseline. A leak
-    // would leave (N - 64) fids bound.
+    // would leave (N - TP_POOL) fids bound.
     TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)1,
                    "all burst-closed fids unbound (no F1 leak)");
 
@@ -3769,13 +3800,14 @@ void test_9p_client_async_clunk_burst_no_fid_leak(void) {
     p9_mq_loopback_destroy(&g_mq);
 }
 
-// The tag-pool shortage (the pool's [M-PIN] OPEN-BUGS item, (d)): a >64-fd
-// async-close burst leaves the 64-tag pool FULL of ownerless Rclunks (each close
-// past 64 drains one and sends one), and on a mount no pump serves, nothing
-// reads them. A sync op that then needs a tag must get one -- the ready replies
-// free tags -- never fail -EIO for a shortage. The mq transport stages every
-// Rclunk unread, as a pipe server's replies wait in s2c. Values are taken before
-// the teardown, so a failing leg still releases the client.
+// The tag-pool shortage (ARCH 21.11 part 3): with the op share full of ownerless
+// Rclunks -- a close burst past the share drains one and sends one per close --
+// and a mount no pump serves, nothing reads them. A sync op that then needs a
+// tag must get one -- the ready replies free tags -- never fail -EIO for a
+// shortage. The mq transport stages every Rclunk unread, as a pipe server's
+// replies wait in s2c. The share is TP_POOL, the old pool; the table can grow,
+// so only the share is full. Values are taken before the teardown, so a failing
+// leg still releases the client.
 void test_9p_client_full_pool_sync_op_gets_a_tag(void) {
     int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
     TEST_EXPECT_EQ(rc, 0, "mq loopback init");
@@ -3785,8 +3817,9 @@ void test_9p_client_full_pool_sync_op_gets_a_tag(void) {
     const u8 uname[] = {'r','o','o','t'};
     const u8 aname[] = {'/'};
     int hs = p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0);
+    g_client.session.ops_max = TP_POOL;
 
-    const u32 N = 70;   // > P9_SESSION_MAX_OUTSTANDING (64)
+    const u32 N = 70;   // > TP_POOL
     const u8 nm[] = {'f'};
     struct p9_qid q;
     u32 walked = 0, clunked = 0;
@@ -3804,9 +3837,9 @@ void test_9p_client_full_pool_sync_op_gets_a_tag(void) {
     TEST_EXPECT_EQ(hs, 0, "handshake");
     TEST_EXPECT_EQ((u64)walked, (u64)N, "N fids bound");
     TEST_EXPECT_EQ((u64)clunked, (u64)N, "the burst's clunks all sent");
-    TEST_EXPECT_EQ(held, 64ull, "control: the burst left the pool full of ownerless Rclunks");
+    TEST_EXPECT_EQ(held, (u64)TP_POOL, "control: the burst left the share full of ownerless Rclunks");
     TEST_EXPECT_EQ((u64)(s64)wrc, 0ull,
-        "a sync walk on a full pool gets a tag from the waiting replies -- not -EIO");
+        "a sync walk on a full share gets a tag from the waiting replies -- not -EIO");
     TEST_ASSERT(live, "the session lives");
 }
 
@@ -4033,7 +4066,7 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
 
     // An async op in flight: the mq transport stages its Rgetattr in the ring
-    // (undrained -- nothing pumps), so inflight[tag] is still ours at abandon.
+    // (undrained -- nothing pumps), so the op is still registered at abandon.
     TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 31, (const u8 *)"f", 1, NULL),
                    0, "walk root -> fid 31");
     g_async_op.loom        = l;
@@ -4059,8 +4092,8 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     // awaiting_flush; the never-sent flush tag was freed.
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)1,
                    "victim active; flush tag freed");
-    TEST_ASSERT(g_client.session.outstanding[vt].active, "victim still reserved");
-    TEST_ASSERT(!g_client.session.outstanding[vt].awaiting_flush,
+    TEST_ASSERT(p9_session_entry(&g_client.session, vt)->active, "victim still reserved");
+    TEST_ASSERT(!p9_session_entry(&g_client.session, vt)->awaiting_flush,
                 "victim not awaiting_flush (rolled back)");
 
     // The ownerless reclaim + live-session proof: a fresh sync op on the SAME
@@ -4136,13 +4169,14 @@ void test_9p_client_async_send_eagain_keeps_session_alive(void) {
     p9_mq_loopback_destroy(&g_mq);
 }
 
-// A full tag pool is a shortage, not a failure: an ASYNC submit that finds no
-// free tag sends nothing and completes with the retryable -P9_E_AGAIN (it used
-// to be -EIO, which a poll reported as a socket error), and once a reply frees
-// a tag the same op goes out. The mq transport stages every unread reply, so
-// P9_SESSION_MAX_OUTSTANDING unpumped async ops genuinely fill the pool.
-static struct test_async_op g_pool_ops[P9_SESSION_MAX_OUTSTANDING];
-static u32                  g_pool_fids[P9_SESSION_MAX_OUTSTANDING + 1];
+// A full async share is a shortage, not a failure: an ASYNC submit that finds
+// the share held sends nothing and completes with the retryable -P9_E_AGAIN (a
+// full pool's used to be -EIO, which a poll reported as a socket error), and
+// once a reply frees a tag the same op goes out. The share is TP_POOL; the mq
+// transport stages every unread reply, so TP_POOL unpumped async ops genuinely
+// hold it, while the op share keeps room for the ops a thread waits on.
+static struct test_async_op g_pool_ops[TP_POOL];
+static u32                  g_pool_fids[TP_POOL + 1];
 
 static void test_async_record(struct p9_rpc *rpc, int status,
                               struct p9_dispatch_result *dr) {
@@ -4163,8 +4197,9 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
     TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
                                        aname, sizeof(aname), 0),
                    0, "handshake over mq transport");
+    g_client.session.async_max = TP_POOL;
 
-    const u32 N = P9_SESSION_MAX_OUTSTANDING;
+    const u32 N = TP_POOL;
     for (u32 i = 0; i <= N; i++) {
         g_pool_fids[i] = 100u + i;
         TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, g_pool_fids[i],
@@ -4180,7 +4215,8 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
                                               test_build_clunk, &g_pool_fids[i]),
                        0, "an async clunk goes out; its reply stays unpumped");
     }
-    TEST_ASSERT(!p9_session_has_free_tag(&g_client.session), "the tag pool is full");
+    TEST_ASSERT(!p9_session_async_room(&g_client.session), "the async share is full");
+    TEST_ASSERT(p9_session_has_free_tag(&g_client.session), "the op share is not");
 
     u64 sends = g_mq.sends;
     g_async_op.loom            = NULL;
@@ -4190,7 +4226,7 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
     rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk,
                                 &g_pool_fids[N]);
     TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-P9_E_AGAIN,
-                   "a submit that finds no free tag returns -P9_E_AGAIN");
+                   "a submit that finds the async share full returns -P9_E_AGAIN");
     TEST_ASSERT(g_async_op.completed, "the op completed");
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)-P9_E_AGAIN,
                    "its completion carries -P9_E_AGAIN, not -EIO");
@@ -4198,7 +4234,7 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
     TEST_ASSERT(!g_client.dead, "the session stays LIVE");
 
     TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "one staged reply is demuxed");
-    TEST_ASSERT(p9_session_has_free_tag(&g_client.session), "its tag is free again");
+    TEST_ASSERT(p9_session_async_room(&g_client.session), "its share is free again");
     g_async_op.last_result = 0x7fffffff;
     g_async_op.completed   = false;
     rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk,
@@ -4215,6 +4251,7 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0, "with success");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
                    "the tag pool is empty");
+    TEST_EXPECT_EQ((u64)g_client.session.n_async, (u64)0, "no async op is counted");
 
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);
@@ -4406,6 +4443,16 @@ static u32 dy_bind(u32 fid) {
     return p9_client_walk_one(&g_client, 0, fid, (const u8 *)"f", 1, NULL) == 0 ? 1u : 0u;
 }
 
+static u32 dy_count_abandoned(void) {
+    u32 n = 0;
+    struct p9_outstanding *e;
+    spin_lock(&g_client.lock);
+    for (u32 t = 0; (e = p9_session_next_active(&g_client.session, &t)) != NULL; t++)
+        if (e->abandoned) n++;
+    spin_unlock(&g_client.lock);
+    return n;
+}
+
 // A thread already dying when it asks to clunk is refused before the Tclunk
 // is built: -P9_E_AGAIN, nothing on the wire, the fid still bound for the
 // closer. Before the closer the build unbound the fid, the send was refused,
@@ -4488,13 +4535,14 @@ void test_9p_client_clunk_killed_while_parked(void) {
 // and it is told -P9_E_AGAIN -- not -P9_E_IO, which would strand the fid.
 void test_9p_client_clunk_killed_in_tag_drain(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
-    const u32 n = P9_SESSION_MAX_OUTSTANDING;
+    g_client.session.ops_max = TP_POOL;
+    const u32 n = TP_POOL;
     u32 bound = 0;
     for (u32 i = 0; i <= n; i++) bound += dy_bind(100 + i);
     TEST_EXPECT_EQ(bound, n + 1, "walks bind 100..100+n");
     for (u32 i = 0; i < n; i++)
-        TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100 + i), 0, "fill the tag pool");
-    TEST_ASSERT(!p9_session_has_free_tag(&g_client.session), "the tag pool is full");
+        TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 100 + i), 0, "fill the op share");
+    TEST_ASSERT(!p9_session_has_free_tag(&g_client.session), "the op share is full");
     u64 sends = g_mq.sends;
 
     dy_hold_reader(true);
@@ -4614,11 +4662,7 @@ void test_9p_client_abandoned_walk_late_reply_kept(void) {
     test_dying_reap(&g_dy);
     TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the Tflush met the full ring");
     TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "no Tflush reached the server");
-    u32 abandoned = 0;
-    for (u32 t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++)
-        if (g_client.session.outstanding[t].active &&
-            g_client.session.outstanding[t].abandoned) abandoned++;
-    TEST_EXPECT_EQ((u64)abandoned, (u64)1, "the walk is abandoned");
+    TEST_EXPECT_EQ((u64)dy_count_abandoned(), (u64)1, "the walk is abandoned");
 
     dy_hold_reader(false);
     TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rwalk");
@@ -5007,8 +5051,21 @@ void test_9p_client_note_flush_reader_honours_walk(void) {
 }
 
 // Fill the tag pool with `n` never-sent fsyncs on the root fid, the way a busy
-// shared session holds its tags; dy_unfill_pool takes them back.
+// shared session holds its tags; dy_unfill_pool takes them back. The table is
+// capped at TP_POOL tags first, so once it is full neither an op nor a Tflush
+// finds a tag: the state a failed chunk allocation leaves (ARCH 21.11 part 1),
+// the only one in which a Tflush still waits for a tag.
+static u32 dy_fill_tags(u32 n, u16 *tags);
+
 static u32 dy_fill_pool(u32 n, u16 *tags) {
+    spin_lock(&g_client.lock);
+    g_client.session.tag_limit = TP_POOL;
+    spin_unlock(&g_client.lock);
+    return dy_fill_tags(n, tags);
+}
+
+// The fill alone: the table may grow, so it holds `n` op tags and no more.
+static u32 dy_fill_tags(u32 n, u16 *tags) {
     static u8 frame[64];
     u32 got = 0;
     spin_lock(&g_client.lock);
@@ -5037,8 +5094,8 @@ static void dy_unfill_pool(u32 n, const u16 *tags) {
 void test_9p_client_note_flush_full_pool_own_reply(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(134), 1u, "walk binds 134");
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 1, tags);
 
     dy_hold_reader(true);
     bool started = dy_start_noted(DY_READ, 134);
@@ -5056,7 +5113,7 @@ void test_9p_client_note_flush_full_pool_own_reply(void) {
     u64  end     = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 1), "63 tags held");
     TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
     TEST_ASSERT(parked, "the read parked behind the held reader");
     TEST_ASSERT(full, "with the read's own tag the pool is full");
@@ -5165,8 +5222,8 @@ void test_9p_client_note_flush_reply_beats_unsent_flush(void) {
 void test_9p_client_note_flush_pump_wakes_parked_flush(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(135), 1u, "walk binds 135");
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 1, tags);
 
     dy_hold_reader(true);
     bool started = dy_start_noted(DY_READ, 135);
@@ -5187,7 +5244,7 @@ void test_9p_client_note_flush_pump_wakes_parked_flush(void) {
     u64  end     = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 1), "63 tags held");
     TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
     TEST_ASSERT(parked, "the read parked behind the held reader");
     TEST_ASSERT(on_list, "interrupted, it parks for a tag on the send list");
@@ -5221,18 +5278,21 @@ static bool dyx_start(u32 fid) {
 // and the tag of the op designated to read next; -1 for none.
 static int dy_registered_tag_above(int after) {
     int t = -1;
+    struct p9_outstanding *e;
     spin_lock(&g_client.lock);
-    for (int i = after + 1; i < (int)P9_SESSION_MAX_OUTSTANDING && t < 0; i++)
-        if (g_client.inflight[i]) t = i;
+    for (u32 i = (u32)(after + 1); t < 0 &&
+         (e = p9_session_next_active(&g_client.session, &i)) != NULL; i++)
+        if (e->owner) t = (int)i;
     spin_unlock(&g_client.lock);
     return t;
 }
 
 static int dy_designated_tag(void) {
     int t = -1;
+    struct p9_outstanding *e;
     spin_lock(&g_client.lock);
-    for (int i = 0; i < (int)P9_SESSION_MAX_OUTSTANDING && t < 0; i++)
-        if (g_client.inflight[i] && g_client.inflight[i]->be_reader) t = i;
+    for (u32 i = 0; t < 0 && (e = p9_session_next_active(&g_client.session, &i)) != NULL; i++)
+        if (e->owner && ((struct p9_rpc *)e->owner)->be_reader) t = (int)i;
     spin_unlock(&g_client.lock);
     return t;
 }
@@ -5249,8 +5309,8 @@ void test_9p_client_note_flush_handoff_skips_staging(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(139), 1u, "walk binds 139");
     g_rec_hold = P9_TWALK;
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 2, tags);
 
     dy_hold_reader(true);
     bool started = dy_start_noted(DY_WALK, 138);
@@ -5283,7 +5343,7 @@ void test_9p_client_note_flush_handoff_skips_staging(void) {
     u64  end   = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 2), "62 tags held");
     TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
     TEST_ASSERT(both, "both ops parked behind the held reader");
     TEST_ASSERT(s_tag >= 0 && x_tag > s_tag, "the interrupted walk holds the lower tag");
@@ -5359,8 +5419,8 @@ void test_9p_client_note_flush_staging_takes_pumped_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(142), 1u, "walk binds 142");
     g_rec_hold = P9_TWALK;
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 2, tags);
 
     dy_hold_reader(true);
     bool y_started = dyx_start(142);
@@ -5384,7 +5444,7 @@ void test_9p_client_note_flush_staging_takes_pumped_tag(void) {
     u64  end     = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 2), "62 tags held");
     TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
     TEST_ASSERT(both, "both ops parked behind the held reader");
     TEST_ASSERT(full, "the pool is full");
@@ -5405,8 +5465,8 @@ void test_9p_client_note_flush_staging_takes_pumped_tag(void) {
 void test_9p_client_async_clunk_drain_takes_pumped_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(144) + dy_bind(145), 2u, "walks bind 144 and 145");
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 1, tags);
 
     dy_hold_reader(true);
     bool y_started = dyx_start(144);
@@ -5427,7 +5487,7 @@ void test_9p_client_async_clunk_drain_takes_pumped_tag(void) {
     u64  end    = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 1), "63 tags held");
     TEST_ASSERT(y_parked, "Y parked behind the held reader");
     TEST_ASSERT(full, "the pool is full");
     TEST_ASSERT(started, "the clunk ran");
@@ -5575,8 +5635,8 @@ void test_9p_client_resumed_waiter_is_designated(void) {
 void test_9p_client_stopped_owner_reply_frees_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(147) + dy_bind(148), 2u, "walks bind 147 and 148");
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 1, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 1, tags);
 
     dy_hold_reader(true);
     bool y_started = dyx_start(147);
@@ -5601,13 +5661,13 @@ void test_9p_client_stopped_owner_reply_frees_tag(void) {
     u64  end  = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "63 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 1), "63 tags held");
     TEST_ASSERT(y_waiting, "Y waits behind the held reader");
     TEST_ASSERT(full, "Y's read took the last tag");
     TEST_ASSERT(y_stopped, "stopped, Y parks");
     TEST_EXPECT_EQ(py, 1, "Y's Rread is read while Y is stopped");
     TEST_ASSERT(freed, "Y's tag is free while Y is stopped: the reader applied its reply");
-    TEST_EXPECT_EQ(held, (u64)(P9_SESSION_MAX_OUTSTANDING - 1), "only the filler holds tags");
+    TEST_EXPECT_EQ(held, (u64)(TP_POOL - 1), "only the filler holds tags");
     TEST_EXPECT_EQ(cc, 0, "C goes out on Y's tag with Y still stopped");
     TEST_ASSERT(!y_killed, "Y completed once resumed");
     TEST_EXPECT_EQ((u64)(s64)g_dyxop.rc, (u64)5, "Y returns the bytes the reader applied for it");
@@ -5624,8 +5684,8 @@ void test_9p_client_stopped_owner_reply_frees_tag(void) {
 void test_9p_client_note_flush_stopped_staging_reply_frees_tag(void) {
     TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
     TEST_EXPECT_EQ(dy_bind(150) + dy_bind(151), 2u, "walks bind 150 and 151");
-    u16 tags[P9_SESSION_MAX_OUTSTANDING];
-    u32 filled = dy_fill_pool(P9_SESSION_MAX_OUTSTANDING - 2, tags);
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_pool(TP_POOL - 2, tags);
 
     dy_hold_reader(true);
     bool started = dy_start_noted(DY_READ, 150);                         // S
@@ -5654,7 +5714,7 @@ void test_9p_client_note_flush_stopped_staging_reply_frees_tag(void) {
     u64  end     = p9_session_inflight(&g_client.session);
     dy_client_close();
 
-    TEST_EXPECT_EQ((u64)filled, (u64)(P9_SESSION_MAX_OUTSTANDING - 2), "62 tags held");
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 2), "62 tags held");
     TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
     TEST_ASSERT(parked, "S waits behind the held reader");
     TEST_EXPECT_EQ(cc, 0, "C takes the last tag");
@@ -6084,7 +6144,8 @@ void test_9p_client_loom_quiesce_drains_the_late_reply(void) {
         frames++;
     }
     spin_lock(&g_client.lock);
-    bool tag_held = tag < P9_SESSION_MAX_OUTSTANDING && g_client.session.outstanding[tag].active;
+    struct p9_outstanding *te = p9_session_entry(&g_client.session, tag);
+    bool tag_held = te && te->active;
     spin_unlock(&g_client.lock);
     bool dead = g_client.dead;
     dy_client_close();
@@ -6211,4 +6272,150 @@ bool test_9p_client_release(void) {
         p9_mq_loopback_destroy(&g_mq2);
     }
     return left;
+}
+
+// ARCH 21.11 part 1: a close burst past the old 64-tag pool fills nothing now.
+// The table grows a chunk and every clunk of the burst goes out at once, none
+// drained, and a sync op then takes a tag at once -- its reader drains the
+// burst's replies on the way to its own. The mq transport stages every Rclunk
+// unread, as a pipe server's replies wait in s2c. Values are taken before the
+// teardown, so a failing leg still releases the client.
+void test_9p_client_tag_table_grows(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    if (rc != 0) { p9_mq_loopback_destroy(&g_mq); TEST_ASSERT(false, "client init over mq"); }
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    int hs = p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0);
+
+    const u32 N = TP_POOL + 6;
+    const u8 nm[] = {'f'};
+    struct p9_qid q;
+    u32 walked = 0, clunked = 0;
+    for (u32 i = 0; hs == 0 && i < N; i++)
+        if (p9_client_walk_one(&g_client, 0, i + 1, nm, sizeof(nm), &q) == 0) walked++;
+    for (u32 i = 0; walked == N && i < N; i++)
+        if (p9_client_clunk_async(&g_client, i + 1) == 0) clunked++;
+    u64 held    = (u64)p9_session_inflight(&g_client.session);
+    u32 chunks  = g_client.session.n_chunks;
+    u64 drained = g_client.demux_orphan_clunk;
+    int wrc     = (walked == N && clunked == N)
+                    ? p9_client_walk_one(&g_client, 0, N + 1, nm, sizeof(nm), &q) : 0x7fffffff;
+    u64 end     = (u64)p9_session_inflight(&g_client.session);
+    bool live   = !g_client.dead;
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+
+    TEST_EXPECT_EQ(hs, 0, "handshake");
+    TEST_EXPECT_EQ((u64)walked, (u64)N, "N fids bound");
+    TEST_EXPECT_EQ((u64)clunked, (u64)N, "the burst's clunks all sent");
+    TEST_EXPECT_EQ(drained, 0ull, "none of them waited on a drained reply");
+    TEST_EXPECT_EQ(held, (u64)N, "every clunk holds its own tag");
+    TEST_EXPECT_EQ((u64)chunks, 2ull, "the table grew one chunk past the first 64");
+    TEST_EXPECT_EQ((u64)(s64)wrc, 0ull, "a sync walk then completes");
+    TEST_EXPECT_EQ(end, 0ull, "and its reader drained the burst's replies");
+    TEST_ASSERT(live, "the session lives");
+}
+
+// ARCH 21.11 part 2 at the #845 abandon: a walk holding the last op tag of a
+// full share dies. Its Tflush still finds a tag -- the table grows a chunk for
+// it -- and goes out, so the walk is abandoned the flushed way, its tag freed by
+// the Rflush, never the flush-less way whose tag waits on a reply the server may
+// never send. The late Rwalk is honoured (flush(5)); the fid it binds is kept.
+void test_9p_client_abandon_flush_fits_full_share(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_client.session.ops_max = TP_POOL;
+    u16 tags[TP_POOL];
+    u32 filled = dy_fill_tags(TP_POOL - 1, tags);
+
+    dy_hold_reader(true);
+    bool started = dy_start(DY_WALK, 70, /*dying=*/false);
+    TEST_YIELD_UNTIL_SOFT(!started ||
+                          (test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1));
+    bool parked = started && test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
+    bool full   = !p9_session_has_free_tag(&g_client.session);
+    if (started) {
+        test_dying_kill(&g_dy);
+        TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+        test_dying_reap(&g_dy);
+    }
+    u32 flushes   = rec_count(P9_TFLUSH);
+    u32 abandoned = dy_count_abandoned();
+    u32 chunks    = g_client.session.n_chunks;
+    dy_hold_reader(false);
+    int late      = p9_client_reader_pump_ready(&g_client);   // the Rwalk
+    int rflush    = p9_client_reader_pump_ready(&g_client);   // the Rflush
+    dy_unfill_pool(filled, tags);
+    u64 end       = p9_session_inflight(&g_client.session);
+    bool kept     = p9_session_fid_bound(&g_client.session, 70);
+    int  clunk    = kept ? p9_client_clunk_async(&g_client, 70) : -1;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)filled, (u64)(TP_POOL - 1), "63 op tags held");
+    TEST_ASSERT(parked, "the walk parked behind the held reader");
+    TEST_ASSERT(full, "with the walk's tag the op share is full");
+    TEST_EXPECT_EQ((u64)flushes, 1ull, "the dying walk's Tflush went out");
+    TEST_EXPECT_EQ((u64)abandoned, 0ull, "no flush-less abandon");
+    TEST_EXPECT_EQ((u64)chunks, 2ull, "on a chunk the table grew for it");
+    TEST_EXPECT_EQ(late, 1, "the late Rwalk is read");
+    TEST_EXPECT_EQ(rflush, 1, "then the Rflush");
+    TEST_EXPECT_EQ(end, 0ull, "which freed the walk's tag and its own");
+    TEST_ASSERT(kept, "the honoured late Rwalk bound fid 70");
+    TEST_EXPECT_EQ(clunk, 0, "and it clunks");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// ARCH 21.11 part 2: async ops the server defers hold at most the async share.
+// With it held by Tgetattrs the server never answers, another async submit
+// completes -P9_E_AGAIN with nothing sent, and a sync walk still gets a tag and
+// completes -- the op share keeps room for the ops a thread waits on. Lowered
+// shares: 8 ops, 4 of them async.
+void test_9p_client_async_share_leaves_sync_tags(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_client.session.ops_max   = 8;
+    g_client.session.async_max = 4;
+    g_rec_hold = P9_TGETATTR;                  // the server defers every Tgetattr
+    u32 fid = 0;
+    u32 sent = 0;
+    for (u32 i = 0; i < 4; i++) {
+        g_pool_ops[i].loom            = NULL;
+        g_pool_ops[i].last_result     = 0x7fffffff;
+        g_pool_ops[i].completed       = false;
+        g_pool_ops[i].rpc.on_complete = test_async_record;
+        if (p9_client_submit_async(&g_client, &g_pool_ops[i].rpc,
+                                   test_build_getattr, &fid) == 0) sent++;
+    }
+    bool share_full = !p9_session_async_room(&g_client.session);
+    u64 sends = g_mq.sends;
+    g_async_op.loom            = NULL;
+    g_async_op.last_result     = 0x7fffffff;
+    g_async_op.completed       = false;
+    g_async_op.rpc.on_complete = test_async_record;
+    int arc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_getattr, &fid);
+    bool nothing_sent = g_mq.sends == sends;
+    s32  acqe         = g_async_op.last_result;
+    u32  walked       = dy_bind(90);
+    u64  during       = p9_session_inflight(&g_client.session);
+    for (u32 i = 0; i < sent; i++) p9_client_abandon_async(&g_client, &g_pool_ops[i].rpc);
+    u32 rflushes = 0;
+    while (p9_client_reader_pump_ready(&g_client) == 1) rflushes++;
+    u64 end   = p9_session_inflight(&g_client.session);
+    u32 async = g_client.session.n_async;
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_EXPECT_EQ((u64)sent, 4ull, "four async ops hold the async share");
+    TEST_ASSERT(share_full, "the async share is full");
+    TEST_EXPECT_EQ((u64)(s64)arc, (u64)(s64)-P9_E_AGAIN, "a fifth async submit is -P9_E_AGAIN");
+    TEST_EXPECT_EQ((u64)(s64)acqe, (u64)(s64)-P9_E_AGAIN, "and completes with it");
+    TEST_ASSERT(nothing_sent, "nothing was sent for it");
+    TEST_EXPECT_EQ((u64)walked, 1ull, "a sync walk completes beside the deferred ops");
+    TEST_EXPECT_EQ(during, 4ull, "the deferred ops still hold their tags");
+    TEST_EXPECT_EQ((u64)rflushes, 4ull, "their abandons' Rflushes");
+    TEST_EXPECT_EQ(end, 0ull, "free every tag");
+    TEST_EXPECT_EQ((u64)async, 0ull, "and the async share");
+    TEST_ASSERT(!dead, "the session stays live");
 }

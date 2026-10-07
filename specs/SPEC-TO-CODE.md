@@ -1736,21 +1736,25 @@ case (the kernel's 65535 tags are 2 * 32767 + 1).
 
 | Spec action | Implementation site |
 |---|---|
-| `Take(s)` | a sync op's `alloc_tag` in `p9_session_send_*`, behind `client_drain_until_free_tag` (TP-2) |
+| `Take(s)` | a sync op's `alloc_tag(s, false)` in `p9_session_send_*`, behind `client_await_tag_locked` -> `client_drain_until_free_tag` (TP-2) |
 | `ReplySync(s)` | `demux_frame_locked` dispatching a sync reply into the op's result (TP-1) |
 | `Die(s)` / `Rflush(s)` | `client_run`'s `CLIENT_WAIT_DIED` abandon (`p9_session_send_flush`) / the ownerless Rflush arm of `demux_frame_locked` |
 | `Submit(a)` / `ReplyAsync(a)` | `p9_client_submit_async` (refused `-P9_E_AGAIN` past `P9_ASYNC_MAX`, TP-3) / the async arm of `demux_frame_locked` |
-| `OpRoom` | `P9_OPS_MAX`, the op share (TP-3) |
+| `OpRoom` | `alloc_tag`'s op-share check, `n_active - n_flush < ops_max` (`P9_OPS_MAX`); a Tflush (`alloc_tag(s, true)`) skips it and takes any free entry, growing the table (TP-3) |
 
 | Cfg | Verdict | States |
 |---|---|---|
-| `tag_pool.cfg` | clean: TypeOK, TagsFit, FlushAlwaysFits; SyncProgress | pending |
-| `tag_pool_buggy_no_async_cap.cfg` | SyncProgress violated | pending |
-| `tag_pool_buggy_waiter_applies.cfg` | SyncProgress violated | pending |
-| `tag_pool_buggy_no_flush_headroom.cfg` | FlushAlwaysFits violated | pending |
+| `tag_pool.cfg` | clean: TypeOK, TagsFit, FlushAlwaysFits; SyncProgress | 268 distinct |
+| `tag_pool_buggy_no_async_cap.cfg` | SyncProgress violated (two deferred async ops hold the op share; a sync op waits forever) | 304 distinct |
+| `tag_pool_buggy_waiter_applies.cfg` | SyncProgress violated (a stored reply waits on a thread that stays stopped) | 360 distinct |
+| `tag_pool_buggy_no_flush_headroom.cfg` | FlushAlwaysFits violated (a death finds no tag for its Tflush) | 127 distinct (at the halt) |
 
-Checker: `specs/check-tag-pool.sh`. Regressions: the kernel tests
-`9p_client.full_pool_*` (TP-1..TP-3).
+TLC 2026-10-07, `-workers 1 -lncheck final`. Checker: `specs/check-tag-pool.sh`
+(verdicts by name, counts pinned). Regressions: `9p_client.full_pool_sync_op_gets_a_tag`
+(part 3), `.stopped_owner_reply_frees_tag` (part 4), `.tag_table_grows` (part 1),
+`.abandon_flush_fits_full_share` + `9p_session.flush_headroom_grows_table`
+(`FlushAlwaysFits`), `.async_share_leaves_sync_tags` + `.async_full_tag_pool_is_eagain`
+(the async share).
 
 ## net_poll.tla — net-6b (the dev9p.poll readiness bridge); rewritten for #98 (the SAMPLE/ARM split, 2026-09-28; spec-first re-enabled, model-first)
 

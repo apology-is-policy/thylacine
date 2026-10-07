@@ -21,16 +21,16 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="tag_pool:-"
+CLEAN="tag_pool:268"
 
 # buggy: cfg, invariant that must be the one reported, distinct states at the
 # halt (deterministic under -workers 1; "-" = do not pin)
-BUGGY="tag_pool_buggy_no_flush_headroom:FlushAlwaysFits:-"
+BUGGY="tag_pool_buggy_no_flush_headroom:FlushAlwaysFits:127"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
-TEMPORAL="tag_pool_buggy_no_async_cap:SyncProgress:-
-tag_pool_buggy_waiter_applies:SyncProgress:-"
+TEMPORAL="tag_pool_buggy_no_async_cap:SyncProgress:304
+tag_pool_buggy_waiter_applies:SyncProgress:360"
 
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"

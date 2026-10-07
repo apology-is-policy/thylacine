@@ -457,7 +457,7 @@ static void loom_free(struct Loom *l) {
     //
     // For each op: p9_client_abandon_async runs UNDER the client's c->lock, so it
     // is mutually exclusive with that demux/mark_dead. If the reply has not been
-    // demuxed it clears inflight[tag] (no future on_complete can fire) + Tflushes
+    // demuxed it drops the op's registration (no future on_complete can fire) + Tflushes
     // (#845; a late original reply is discarded ownerless). If it already
     // completed, the abandon is a no-op. A racing demux that wins c->lock first
     // posts at-most-one CQE into the still-allocated ring (we free it only AFTER
@@ -2207,8 +2207,10 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     // Bound the active reader's recv spin so a hostile/buggy server flooding
     // ownerless frames cannot burn a CPU unbounded inside one syscall (Loom-3
     // audit F4). A trusted v1.0 server (stratumd / dev9p) completes within a
-    // frame per in-flight op, so the budget is never the limiter.
-    u32 pump_budget = submitted + (u32)P9_SESSION_MAX_OUTSTANDING + 1u;
+    // frame per in-flight op, and the ownerless frames ahead of ours answer
+    // tags in flight (at most P9_TAG_LIMIT), so the budget is never the
+    // limiter.
+    u32 pump_budget = submitted + (u32)P9_TAG_LIMIT + 1u;
     u32 pumps = 0;
 
     struct Rendez r;

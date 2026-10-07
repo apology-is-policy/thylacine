@@ -6,13 +6,13 @@ parent: moc-kernel-ninep
 code: [kernel/9p_session.c, kernel/include/thylacine/9p_session.h]
 audit: hard
 guarded-by: [inv-i10, inv-i11]
-validated-by: [spec-9p-client, gate-smp]
+validated-by: [spec-9p-client, spec-tag-pool, gate-smp]
 locks: []
 hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-30
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -50,8 +50,17 @@ retirement rules are mechanically enforced.
   `p9_session_flush_rollback(oldtag)`, `p9_session_flush_retract(oldtag)`,
   `p9_session_flush_owner_waits(oldtag, waits)`,
   `p9_session_mark_abandoned(tag)`.
-- Queries: `is_open`, `fid_bound`, `inflight`, `has_free_tag` (the
-  async-clunk pool-full pre-check), `n_bound_fids`, `n_reserved_slots`.
+- Queries: `is_open`, `fid_bound`, `inflight`, `has_free_tag` (an op would
+  get a tag now: the client asks before every build, ARCH 21.11 part 3),
+  `has_flush_tag`, `async_room`, `n_bound_fids`, `n_reserved_slots`.
+  `has_free_tag` and `has_flush_tag` may grow the table (the chunk stays), so
+  they take a non-const session.
+- The tag table, for the client (2026-10-07): `p9_session_entry(tag)` (NULL
+  past the table), `p9_session_next_active(&tag)` (the active entry at the
+  lowest tag at or above it, idle chunks skipped), `p9_session_owner` /
+  `p9_session_set_owner` (the client's rpc registered on an active tag; an
+  inactive tag takes none, so an owner never outlives its tag), and
+  `p9_session_mark_async(tag)` (counts the op against the async share).
 - `retract_unsent` returns `0` when it took the op back and `-1` on a guard
   (inactive, flushed or abandoned tag) or a failed re-bind; the tag is freed
   either way once it passed the guards.
@@ -62,15 +71,37 @@ retirement rules are mechanically enforced.
 
 **State machine**: INIT → (Rversion, NOTAG, out-of-band) → VERSIONED →
 (Tattach/Rattach, binds `root_fid`) → OPEN → CLOSED. Tversion never enters
-`outstanding[]` — it uses NOTAG (0xFFFF, outside the 0..63 index range) and
-the dispatcher special-cases Rversion in state INIT, negotiating msize DOWN
-to `min(server, proposed)`.
+the tag table — it uses NOTAG (0xFFFF, never allocated) and the dispatcher
+special-cases Rversion in state INIT, negotiating msize DOWN to
+`min(server, proposed)`.
 
-**Tag pool**: tag value == index into
-`outstanding[P9_SESSION_MAX_OUTSTANDING]` (64). `alloc_tag` returns the
-lowest inactive slot or `-1` — back-pressure surfaces as a send-side
-refusal, never a silent overwrite. A full table is the flow-control trip the
-client's #349 machinery sits above.
+**Tag table (2026-10-07, ARCH 21.11, `dec-2026-10-07-tag-pool`)**: tag value
+== table index, tags 0..0xFFFE (`P9_TAG_LIMIT`). Chunk 0 (`tags0`,
+`P9_TAG_CHUNK` = 64 entries) lives in the session; `alloc_tag` takes the
+lowest inactive entry and, when every entry is held, `grow` kmallocs the next
+64-entry chunk (`KP_ZERO`; the 1024-pointer directory with the first one)
+under the client's spinlock -- kmalloc never sleeps -- and keeps it until
+`p9_session_destroy` frees it. A failed allocation is no free tag, never an
+error. Each chunk counts its active entries, so `alloc_tag` skips full chunks
+and `next_active` skips idle ones: a walk over a grown table costs what is in
+flight.
+
+The shares (part 2): an op (any T but Tflush) is admitted only while
+`n_active - n_flush < ops_max` (`P9_OPS_MAX` = 32767); a Tflush takes any
+free entry. A victim has at most one Tflush and keeps its tag until the
+Rflush, so flushes never outnumber ops and `2 * P9_OPS_MAX <= P9_TAG_LIMIT`
+(a `_Static_assert`) leaves a Tflush a tag always, short of a failed chunk
+allocation. Async ops (`mark_async`, `n_async`) are admitted by the client
+only while `n_async < async_max` (`P9_ASYNC_MAX` = 16384). `ops_max`,
+`async_max` and `tag_limit` are session fields set from the constants at
+init; tests lower them (a `tag_limit` at the share stands in for a failed
+allocation). Back-pressure still surfaces as a send-side `-1`, never a silent
+overwrite; above it the client waits for a tag ([[sub-kernel-ninep-client]]).
+
+Each entry also carries the client's registration (`owner`, which replaced
+the client's `inflight[]` array: an entry cleared drops its owner), the
+`async` flag, and, on a flush victim, `flush_tag` -- the tag of its Tflush, so
+`flush_unstage` finds the flush without a search.
 
 **Fid table**: `bound_fids[P9_SESSION_MAX_FIDS]` (**1024** since the #198
 fid-ceiling chain; 256 before), linear scan,
@@ -198,11 +229,15 @@ exist — the deferred refinement is noted in place).
 ## Data structures
 
 `struct p9_session`: magic (`0x50395345` "P9SE"), state, root_fid, msize +
-negotiated_msize, `bound_fids[1024]` + count, `outstanding[64]`, monotonic
-`next_op_id`, sent/completed counters. `struct p9_outstanding`: `active`,
-`kind` (the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`,
-`abandoned`, `holds_slot` (a reserved fid-table slot), `flush_oldtag`,
-`wga_nwname` (the walkgetattr full-walk comparand). `n_reserved_slots` counts
+negotiated_msize, `bound_fids[1024]` + count, the tag table (`tags0`, the
+inline `struct p9_tag_chunk`; `tag_dir`, `n_chunks`; the counters `n_active`,
+`n_flush`, `n_async`; the limits `ops_max`, `async_max`, `tag_limit`),
+monotonic `next_op_id`, sent/completed counters. `struct p9_tag_chunk`: 64
+entries + `n_active`. `struct p9_outstanding` (40 bytes): `active`, `kind`
+(the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`, `abandoned`,
+`holds_slot` (a reserved fid-table slot), `flush_oldtag`, `wga_nwname` (the
+walkgetattr full-walk comparand), `flush_tag` (a victim's Tflush), `async`,
+`owner` (the client's registered rpc). `n_reserved_slots` counts
 the held slots. Compile-time: MAX_OUTSTANDING ∈ [1, 0xFFFE] (room for NOTAG),
 MAX_FIDS ≥ 1.
 
@@ -240,8 +275,11 @@ refusal a reserved slot leaves) deliberately complete with a synthetic
 
 ## Performance
 
-O(64) tag scan, O(n_bound) fid scan — both cache-tight linear arrays;
-`p9_session_inflight`/`has_free_tag` are pure scans. No allocation.
+`alloc_tag`: O(chunks + 64) with full chunks skipped; `inflight` and the
+share checks are O(1) counters; `any_outstanding_on_fid` and the client's
+scans walk the active entries only, idle chunks skipped. O(n_bound) fid scan.
+The table allocates only when every entry is held -- a 4 KiB page per chunk
+and an 8 KiB directory once -- and frees at destroy.
 
 ## Prosecution
 
@@ -262,7 +300,16 @@ O(64) tag scan, O(n_bound) fid scan — both cache-tight linear arrays;
 - **Send-time unbind ordering** (unbind BEFORE `mark_outstanding`) and the
   walkgetattr full-walk-only bind.
 - The `t != oldtag` argument in `send_flush` (alloc_tag skips the active
-  victim, so `mark_outstanding(t)` cannot clobber the victim pointer).
+  victim, so `mark_outstanding(t)` cannot clobber the victim pointer; a growth
+  adds a chunk and moves no entry, so the pointer also survives a grow).
+- **The tag table's counters and shares** (ARCH 21.11): `n_active`, `n_flush`,
+  `n_async` and each chunk's `n_active` change only in `mark_outstanding` /
+  `clear_outstanding`, and `mark_async`; a path that sets or clears `active`
+  any other way breaks the share arithmetic, and with it `FlushAlwaysFits`.
+  Prosecute an op admitted without the op-share check (a new `alloc_tag(s,
+  true)` caller that is not a Tflush voids the headroom), a victim with two
+  Tflushes, an entry pointer held across a `kfree` (only destroy frees), a tag
+  at or above `tag_limit` handed out, and an `owner` set on an inactive entry.
 - **Slot accounting**: every path that ends an op must release its
   reservation (`clear_outstanding` does, first) or turn it into a binding
   (`slot_bind`); only a NEW reservation may check `slot_available`. A path
@@ -282,7 +329,7 @@ O(64) tag scan, O(n_bound) fid scan — both cache-tight linear arrays;
 
 - `p9_dispatch_result` is a large zeroed-per-call struct; never read fields
   after a `-1` return.
-- Tversion is unflushable (NOTAG, never in `outstanding[]`) — `send_flush`
+- Tversion is unflushable (NOTAG, never in the tag table) — `send_flush`
   rejects it structurally; it is also valid in VERSIONED (so a hung Tattach
   IS flushable).
 - The session knows nothing of msize payload clamps — those live in the

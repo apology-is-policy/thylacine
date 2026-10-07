@@ -34,22 +34,23 @@
 //
 // Invariants this module upholds (TLC-pinned per `specs/9p_client.tla`):
 //
-//   I-10  Per-session tag uniqueness — bitmap allocator over a fixed
-//         outstanding-table; alloc_tag refuses to return a tag whose
-//         entry is currently active.
+//   I-10  Per-session tag uniqueness — the allocator over the tag table
+//         (ARCH 21.11) refuses to return a tag whose entry is currently
+//         active.
 //
 //   I-11  Per-session fid identity stable across open lifetime —
 //         fid_bind/fid_unbind are explicit; SendClunk Send-time-unbinds
 //         per spec's client discipline.
 //
 //   OutOfOrderCorrectness — dispatch_rmsg uses tag-indexed lookup
-//         (`outstanding[tag]`), not arrival-order, to apply the state
+//         (p9_session_entry), not arrival-order, to apply the state
 //         mutation. The bookkeeping pairs Send with the correct
 //         Receive regardless of Rmsg arrival order.
 //
-//   FlowControl — alloc_tag returns -1 when |Inflight| ==
-//         P9_SESSION_MAX_OUTSTANDING. Back-pressure surfaces as
-//         send-side refusal, never as silent overflow.
+//   FlowControl — alloc_tag returns -1 when the op share is full
+//         (P9_OPS_MAX ops in flight) or the table cannot grow. Back-
+//         pressure surfaces as send-side refusal, never as silent
+//         overflow; the client waits for a tag (ARCH 21.11 part 3).
 //
 // State machine:
 //
@@ -87,11 +88,21 @@
 // Sizing constants.
 // =============================================================================
 
-// Max outstanding tags per session. Sized to comfortably cover
-// pipelined-32 workloads (VISION §4.5 throughput target) with margin.
-// Conservative at v1.0; bumpable. Tags allocated from 0..MAX-1; tag
-// values past MAX are reserved (Tversion uses NOTAG = 0xFFFF).
-#define P9_SESSION_MAX_OUTSTANDING  64u
+// The tag table (ARCH 21.11). Tags run 0..P9_TAG_LIMIT-1; NOTAG (0xFFFF)
+// is Tversion's. The first P9_TAG_CHUNK entries live in the session; more
+// are allocated a chunk at a time when every entry is held, and kept until
+// p9_session_destroy. A chunk that cannot be allocated means no free tag.
+#define P9_TAG_CHUNK                64u
+#define P9_TAG_LIMIT                0xFFFFu
+#define P9_TAG_CHUNKS               ((P9_TAG_LIMIT + P9_TAG_CHUNK - 1u) / P9_TAG_CHUNK)
+
+// The shares. An op (any T-message but Tflush) takes a tag only while fewer
+// than P9_OPS_MAX ops hold one; a Tflush takes any free tag. Flushes never
+// outnumber ops, so with 2 * P9_OPS_MAX <= P9_TAG_LIMIT a Tflush always finds
+// a tag. Async ops, which no thread waits on, hold at most P9_ASYNC_MAX of
+// the op share, so the rest stays open to the ops a thread waits on.
+#define P9_OPS_MAX                  32767u
+#define P9_ASYNC_MAX                16384u
 
 // Max bound fids per session. 256 was comfortable for FS workloads but
 // bound the #198 GL client: a warp program holds one fid per live BO
@@ -177,6 +188,20 @@ struct p9_outstanding {
     // caller sends 0/1 names, where a partial walk cannot exist; the
     // pounce sends multi-name walks, where it can.)
     u16  wga_nwname;
+    // The tag of the Tflush in flight for this op; meaningful only with
+    // awaiting_flush, so a flush is unstaged without a search.
+    u16  flush_tag;
+    // An async op (p9_session_mark_async): counted against the async share.
+    bool async;
+    // The client's registration for the op's reply (its struct p9_rpc), or
+    // NULL. Set only on an active entry; cleared with the entry.
+    void *owner;
+};
+
+// A chunk of the tag table: P9_TAG_CHUNK consecutive tags.
+struct p9_tag_chunk {
+    struct p9_outstanding e[P9_TAG_CHUNK];
+    u32                   n_active;        // active entries in this chunk
 };
 
 // =============================================================================
@@ -203,10 +228,23 @@ struct p9_session {
     // P9_SESSION_MAX_FIDS, so a take-back or a walk's bind always finds room.
     size_t                n_reserved_slots;
 
-    // Outstanding table — indexed by tag (0..MAX-1). Each entry is
-    // active iff a Tmsg was sent under that tag and the corresponding
-    // Rmsg hasn't been dispatched yet.
-    struct p9_outstanding outstanding[P9_SESSION_MAX_OUTSTANDING];
+    // The tag table, indexed by tag. An entry is active iff a Tmsg was
+    // built under that tag and its Rmsg hasn't been dispatched yet.
+    // tags0 is chunk 0; tag_dir[k] is chunk k for 1 <= k < n_chunks, and
+    // tag_dir stays NULL until the first growth.
+    struct p9_tag_chunk   tags0;
+    struct p9_tag_chunk **tag_dir;
+    u32                   n_chunks;
+    u32                   n_active;         // active entries: ops + flushes
+    u32                   n_flush;          // active Tflush entries
+    u32                   n_async;          // active async ops
+    // The op share, the async share, and how many tags the table may grow
+    // to: P9_OPS_MAX, P9_ASYNC_MAX and P9_TAG_LIMIT from init. Tests lower
+    // them; a tag_limit below 2 * ops_max stands in for a chunk allocation
+    // that fails.
+    u32                   ops_max;
+    u32                   async_max;
+    u32                   tag_limit;
 
     // Counters (spec's op_seq + sent_ops + completed_ops; the impl
     // keeps cardinalities + a monotonic id).
@@ -225,7 +263,8 @@ struct p9_session {
 // -1 on arg violation.
 int  p9_session_init(struct p9_session *s, u32 root_fid, u32 msize);
 
-// Tear down: clears all state, clobbers magic. NULL-safe.
+// Tear down: clears all state, frees the grown chunks, clobbers magic.
+// NULL-safe.
 void p9_session_destroy(struct p9_session *s);
 
 // Close the session — requires no outstanding ops. Returns 0 on
@@ -300,10 +339,10 @@ int p9_session_send_clunk(struct p9_session *s,
 
 // Build a Tflush abandoning the in-flight request bearing `oldtag` (#845).
 // Valid in state VERSIONED or OPEN. Preconditions:
-//   - outstanding[oldtag] is active and is NOT itself a Tflush.
+//   - oldtag's entry is active and is NOT itself a Tflush.
 //   - oldtag is not already awaiting a flush.
-// Allocates a fresh tag for the flush, marks it outstanding (kind TFLUSH,
-// remembering oldtag), and RESERVES oldtag (`awaiting_flush`): from here
+// Allocates a fresh tag for the flush -- any free tag, outside the op share
+// -- marks it outstanding (kind TFLUSH, remembering oldtag), and RESERVES oldtag (`awaiting_flush`): from here
 // oldtag is freed only by this flush's Rflush, never by a late original
 // reply -- the 9P "oldtag not reusable until Rflush" rule, which is the
 // I-10 reuse-race guard. Returns the Tflush byte length, or -1.
@@ -602,8 +641,8 @@ struct p9_dispatch_result {
     const u8      *wga_data;
 };
 
-// Dispatch one received Rmsg. The Rmsg's tag is looked up in
-// outstanding[]; if the tag is in use and the type matches (or is
+// Dispatch one received Rmsg. The Rmsg's tag is looked up in the tag
+// table; if the tag is in use and the type matches (or is
 // Rlerror), the state mutation is applied and the op is marked
 // complete. Returns 0 on success, -1 on malformed / unmatched / wrong
 // type.
@@ -633,7 +672,37 @@ int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
 bool   p9_session_is_open(const struct p9_session *s);   // state == OPEN
 bool   p9_session_fid_bound(const struct p9_session *s, u32 fid);
 size_t p9_session_inflight(const struct p9_session *s);  // outstanding count
-bool   p9_session_has_free_tag(const struct p9_session *s);  // a tag slot is free
+// An op would get a tag now: the op share has room and an entry is free,
+// growing the table if every entry is held. A grown chunk stays, so this
+// may allocate; a failed allocation reads as no free tag.
+bool   p9_session_has_free_tag(struct p9_session *s);
+// A Tflush would get a tag now (any free entry, growing as above).
+bool   p9_session_has_flush_tag(struct p9_session *s);
+// The async share has room (P9_ASYNC_MAX less the async ops in flight).
+bool   p9_session_async_room(const struct p9_session *s);
+
+// =============================================================================
+// The tag table, for the client (ARCH 21.11).
+// =============================================================================
+
+// The entry for `tag`, or NULL past the table's current size.
+struct p9_outstanding *p9_session_entry(struct p9_session *s, u32 tag);
+
+// The active entry at the lowest tag >= *tag, its tag stored back in *tag,
+// or NULL. Chunks with nothing active are skipped, so a walk over a grown
+// table costs what is in flight.
+struct p9_outstanding *p9_session_next_active(struct p9_session *s, u32 *tag);
+
+// The owner registered on an active tag, or NULL.
+void *p9_session_owner(struct p9_session *s, u32 tag);
+
+// Register `owner` on an active tag; NULL drops it. Fail-soft: an inactive
+// or out-of-table tag is left alone, so an owner never outlives its tag.
+void  p9_session_set_owner(struct p9_session *s, u32 tag, void *owner);
+
+// Count the active op under `tag` against the async share. Fail-soft on an
+// inactive, already-async or Tflush entry.
+void  p9_session_mark_async(struct p9_session *s, u16 tag);
 size_t p9_session_n_bound_fids(const struct p9_session *s);
 size_t p9_session_n_reserved_slots(const struct p9_session *s);
 

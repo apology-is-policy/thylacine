@@ -41,4 +41,6 @@ is taken to be woken on every freed tag; `Take` is strongly fair).
 | `OpRoom` | the op share, `P9_OPS_MAX` (`BUGGY_NO_FLUSH_HEADROOM`: any free tag) |
 
 Checker: `specs/check-tag-pool.sh` (each cfg's verdict by name, the counts
-pinned). TLC: pending.
+pinned). TLC 2026-10-07: clean 268 distinct states; `BUGGY_NO_ASYNC_CAP` and
+`BUGGY_WAITER_APPLIES` fail `SyncProgress` (304, 360); `BUGGY_NO_FLUSH_HEADROOM`
+fails `FlushAlwaysFits` (127 at the halt).

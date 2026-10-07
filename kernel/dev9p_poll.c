@@ -679,7 +679,7 @@ void dev9p_poll_priv_release(struct dev9p_priv *p) {
     spin_unlock(&g_dev9p_poll_lock);
 
     if (grabbed) {
-        // Cancel at the client (clear c->inflight[tag] + Tflush; #845) so no late
+        // Cancel at the client (drop the registration + Tflush; #845) so no late
         // completion fires on the freed arm and it does not strand awaiting a
         // reply. Then free it (drop the session + ps refs). Outside g_lock. The
         // client is alive: the priv still holds its session ref (dropped last, in

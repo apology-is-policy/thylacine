@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -192,8 +192,10 @@ present-slot, the `presents` value at which it was last drawn, or
 
 Constants: `TEVENT_LEN` = 24 (the wire event record), `EV_REGION` = 128 B
 (the per-slot landing zone), `EV_CAP` = 4 × 24 (records per read),
-`MAX_RING_SURFACES` = 48 (the session's 64-tag table minus the synchronous
-RPCs' share — a parked event read holds a tag), `SLOT_QUEUE_CAP` = 256 (the
+`MAX_RING_SURFACES` = 48 (chosen as the session's 64-tag table minus the
+synchronous RPCs' share — a parked event read holds a tag; since ARCH 21.11
+the table grows and ring ops hold at most the async share, so 48 is the
+ring's own bound), `SLOT_QUEUE_CAP` = 256 (the
 client-side per-slot backlog before arming stops), `MAX_SLOTS` = 8 (the
 present-slot rotation the age array bounds).
 

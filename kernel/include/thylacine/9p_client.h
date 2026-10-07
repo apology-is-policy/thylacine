@@ -129,8 +129,8 @@ typedef void (*p9_rpc_complete_fn)(struct p9_rpc *rpc, int status,
                                    struct p9_dispatch_result *dr);
 
 // One in-flight steady-state op (ARCH §21.3 "Request" / §21.10). For a SYNC op
-// the submitter allocates a p9_rpc on its OWN stack, registers it in
-// c->inflight[tag] under c->lock, and blocks on its own `rendez` until the
+// the submitter allocates a p9_rpc on its OWN stack, registers it on its tag's
+// session entry (p9_session_set_owner) under c->lock, and blocks on its own `rendez` until the
 // elected reader copies the matching reply frame into `reply_buf` and sets
 // `done`. SINGLE-WAITER: exactly one thread (the submitter) ever sleeps on
 // `rendez` -- the struct Rendez single-waiter convention holds because each rpc
@@ -143,7 +143,7 @@ typedef void (*p9_rpc_complete_fn)(struct p9_rpc *rpc, int status,
 // on `rendez`, and leaves `reply_buf` NULL (the engine dispatches directly from
 // the transport recv buffer at demux + hands the result to `on_complete`).
 struct p9_rpc {
-    u16            tag;        // 9P tag (0..P9_SESSION_MAX_OUTSTANDING-1)
+    u16            tag;        // 9P tag (0..P9_TAG_LIMIT-1)
     bool           done;       // reply read into reply_buf and applied (reply_len valid)
     bool           dead;       // session torn down under me -> -P9_E_IO
     bool           be_reader;  // a departing reader handed me the reader role
@@ -194,9 +194,9 @@ struct p9_attached;
 
 struct p9_client {
     u32                  magic;
-    // Per-client lock. Protects session.outstanding[], session.bound_fids[],
-    // out_buf, next_fid, total_ops/total_errors, the inflight[] table, and
-    // reader_active / dead. Held across build + send + dispatch, but DROPPED
+    // Per-client lock. Protects the session's tag table (with each tag's
+    // registered rpc), session.bound_fids[], out_buf, next_fid,
+    // total_ops/total_errors, and reader_active / dead. Held across build + send + dispatch, but DROPPED
     // across the blocking reader recv and the per-rpc sleep (ARCH §21.10 --
     // the #841 elected-reader restoration; never held across a blocking wait).
     spin_lock_t          lock;
@@ -224,12 +224,12 @@ struct p9_client {
     u8                  *out_buf;
     u32                  out_buf_cap;
     size_t               recv_cap;     // transport recv-buf cap; per-rpc reply_buf size
-    // Pipeline state (ARCH §21.10). inflight[tag] is the submitter's stack
-    // p9_rpc for the op holding `tag`, or NULL (free / op died + unwound,
-    // leaving outstanding[tag] active for stray-reply reclaim). reader_active
-    // is the single-reader election flag; dead latches on transport EOF/error
-    // (every op then returns -P9_E_IO). All under c->lock.
-    struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
+    // Pipeline state (ARCH §21.10). The rpc registered on a tag's session
+    // entry (its `owner`) is the submitter's p9_rpc for the op holding the
+    // tag, or NULL (no submitter waits: an async clunk, or an op whose owner
+    // died + unwound, its tag left active for stray-reply reclaim).
+    // reader_active is the single-reader election flag; dead latches on
+    // transport EOF/error (every op then returns -P9_E_IO). All under c->lock.
     bool                 reader_active;
     bool                 dead;
     // Bytes of the frame being read already in transport.recv_buf. They stay
@@ -238,8 +238,8 @@ struct p9_client {
     u32                  rx_got;
     // #210 loss discriminator (all under c->lock; demux_frame_locked is the
     // sole mutation site). frames_rx counts every steady-state frame that
-    // reached the demux; owned/orphan split it by whether inflight[tag]
-    // held a submitter; wakes counts sync-owner wakeups actually issued.
+    // reached the demux; owned/orphan split it by whether the tag had an
+    // owner registered; wakes counts sync-owner wakeups actually issued.
     // Read by /ctl/9p-sessions via p9_client_ctl_snapshot. A bumped
     // demux_orphan with a parked submitter is the misdemux/tag arm; an
     // advanced demux_owned with the submitter still parked is the
@@ -248,7 +248,7 @@ struct p9_client {
     // orphan_clunk / orphan_flush / orphan_late are the LEGITIMATE TWINS
     // split out (the #214-F1 lesson: ask what else increments a pathology
     // counter). p9_client_clunk_async is fire-and-forget — it never
-    // registers inflight[tag], so every async Rclunk arrives ownerless by
+    // registers an owner, so every async Rclunk arrives ownerless by
     // design (constant FID-LIFECYCLE background). The #845 abandon path
     // sends its Tflush ownerless, so every abandon's Rflush lands here by
     // design (death-driven). An abandoned op's LATE ORIGINAL reply is the
@@ -439,7 +439,7 @@ int  p9_client_close(struct p9_client *c);
 // =============================================================================
 
 // At most this many in-flight tags are reported per snapshot (the live
-// table is P9_SESSION_MAX_OUTSTANDING wide; a wedge holds 1-2).
+// table may grow to P9_TAG_LIMIT tags; a wedge holds 1-2).
 #define P9_CTL_INFLIGHT_MAX 8
 
 struct p9_client_ctl {
@@ -453,7 +453,7 @@ struct p9_client_ctl {
         u16  tag;
         bool done;                 // reply delivered to the submitter's buf
         bool async;                // Loom on_complete op (no parked submitter)
-        u8   kind;                 // the sent T-type (session outstanding[])
+        u8   kind;                 // the sent T-type (the tag's session entry)
         u32  fid;                  // the op's primary target fid
     } tags[P9_CTL_INFLIGHT_MAX];
 };
@@ -740,8 +740,8 @@ void p9_client_reader_unhook(struct p9_client *c, struct p9_reader_hook *h);
 // and Tflush the op (reserving its tag awaiting_flush so a late original reply
 // is discarded ownerless, the I-10 reuse guard) -- except a Tclunk, which is
 // never flushed and completes without an owner. If `rpc` already completed
-// (inflight slot cleared / reused), this is a no-op. After it returns, `rpc` is
-// unreachable from inflight[] and the caller owns the container teardown with no
+// (its registration dropped / the tag reused), this is a no-op. After it
+// returns, `rpc` is registered nowhere and the caller owns the container teardown with no
 // concurrent completer. Idempotent on a NULL/foreign rpc. Best-effort: a failed
 // Tflush build/send latches the session dead (no regression vs the pre-#845
 // reclaim). The caller must NOT touch the engine for `rpc` afterward.

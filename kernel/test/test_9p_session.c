@@ -1938,3 +1938,62 @@ void test_9p_session_flush_rollback_restores_victim(void) {
 
     p9_session_destroy(&s);
 }
+
+// Fill `s`'s op share with Tgetattrs on the root fid; the first tag in *first.
+static u32 fill_op_share(struct p9_session *s, u32 n, u16 *first) {
+    u32 held = 0;
+    for (u32 i = 0; i < n; i++) {
+        int len = p9_session_send_getattr(s, g_buf, sizeof(g_buf), 0, P9_GETATTR_BASIC);
+        if (len <= 0) break;
+        u32 sz; u8 ty; u16 t;
+        if (p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t) < 0) break;
+        if (held == 0) *first = t;
+        held++;
+    }
+    return held;
+}
+
+// ARCH 21.11 parts 1 and 2: with the op share full an op finds no tag, but a
+// Tflush still does -- on a chunk the table grows for it -- and its Rflush
+// frees both tags. One variable away, a table that cannot grow past the share
+// (tag_limit at the share: a failed chunk allocation) leaves the Tflush none,
+// the flush-less abandon the headroom exists to prevent.
+void test_9p_session_flush_headroom_grows_table(void) {
+    const u32 share = P9_TAG_CHUNK;
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "open");
+    s.ops_max = share;
+    u16 first = P9_NOTAG;
+    u32 held = fill_op_share(&s, share, &first);
+    bool op_refused = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 0,
+                                              P9_GETATTR_BASIC) < 0;
+    bool no_op_tag  = !p9_session_has_free_tag(&s);
+    int  flen = p9_session_send_flush(&s, g_buf, sizeof(g_buf), first);
+    u32 sz; u8 ty; u16 ft = P9_NOTAG;
+    if (flen > 0) (void)p9_peek_header(g_buf, (size_t)flen, &sz, &ty, &ft);
+    u32 chunks = s.n_chunks;
+    int rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    struct p9_dispatch_result r;
+    int drc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r);
+    u64 after = p9_session_inflight(&s);
+    p9_session_destroy(&s);
+
+    struct p9_session c;
+    TEST_EXPECT_EQ(drive_session_open(&c, 0), 0, "open (control)");
+    c.ops_max   = share;
+    c.tag_limit = share;
+    u16 cfirst = P9_NOTAG;
+    u32 cheld  = fill_op_share(&c, share, &cfirst);
+    int cflen  = p9_session_send_flush(&c, g_buf, sizeof(g_buf), cfirst);
+    p9_session_destroy(&c);
+
+    TEST_EXPECT_EQ((u64)held, (u64)share, "the op share filled");
+    TEST_ASSERT(op_refused && no_op_tag, "an op finds no tag");
+    TEST_ASSERT(flen > 0, "a Tflush finds one");
+    TEST_EXPECT_EQ((u64)ft, (u64)share, "on the first tag of a grown chunk");
+    TEST_EXPECT_EQ((u64)chunks, 2ull, "the table grew one chunk");
+    TEST_EXPECT_EQ(drc, 0, "the Rflush dispatches");
+    TEST_EXPECT_EQ(after, (u64)(share - 1), "and frees the flush and its victim");
+    TEST_EXPECT_EQ((u64)cheld, (u64)share, "control: the share filled");
+    TEST_ASSERT(cflen < 0, "control: capped at the share, the Tflush finds no tag");
+}
