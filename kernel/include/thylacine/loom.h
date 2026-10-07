@@ -587,9 +587,10 @@ void loom_unref(struct Loom *l);
 // Replace the registered-handle table with the `n` (<= LOOM_MAX_REG_HANDLES)
 // Spoors in `spoors` (with their rights snapshots in `rights`). ADOPTS the
 // caller's ref on each spoor[i] on SUCCESS (the table releases them at
-// loom_unref / the next re-register); on failure (n out of range) the caller
-// retains its refs. Any previously-registered Spoors are clunked (outside the
-// lock). Returns 0 / -1.
+// loom_unref / the next re-register); on failure (n out of range, or a dev9p
+// Spoor's write-behind flush failed: dev9p_loom_register, which may wait) the
+// caller retains its refs and the old table stands. Any previously-registered
+// Spoors are clunked (outside the lock). Returns 0 / -1.
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
 

@@ -7789,8 +7789,9 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
         handle_put(&sh);
     }
 
-    // loom_register_handles ADOPTS the `got` refs on success (it cannot fail
-    // here: got <= n <= LOOM_MAX_REG_HANDLES).
+    // loom_register_handles ADOPTS the `got` refs on success. It fails when a
+    // dev9p Spoor's write-behind flush fails (a death, or the server), and
+    // then installs nothing, so the refs are still ours to drop.
     if (loom_register_handles(l, spoors, rights, got) != 0) goto rollback;
     handle_put(&lh);
     return 0;

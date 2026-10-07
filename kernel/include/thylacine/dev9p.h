@@ -251,6 +251,12 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid);
 // (a live dev9p Spoor implies a live client -- dev9p's lifecycle invariant).
 int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fid);
 
+// The dev9p side of a Loom registration: a staged write-behind run is flushed
+// and the Spoor stops staging, so no Loom op meets bytes still staged. May
+// wait for the server. 0 (also for a non-dev9p Spoor) or the flush's negative
+// errno, with the run still staged when a death ended the flush.
+int dev9p_loom_register(struct Spoor *c);
+
 // Weft-6b-2 data drive: try the zero-copy write path for a /net data fd whose
 // SYS_WRITE buffer points INTO its weft-bound shared ring. The kernel validates
 // the descriptor against the flow's private ring view (the I-30 validator-once)

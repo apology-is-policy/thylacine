@@ -21,6 +21,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
+#include <thylacine/loom.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -36,6 +37,7 @@ void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
+void test_p9_closer_loom_register_flushes_staged_run(void);
 extern void proc_close_handles_at_exit_for_test(struct Proc *p);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
@@ -77,6 +79,8 @@ struct srv_rec {
     u32 write_at;    // nmsg at the last Twrite
     u32 clunk_at;    // nmsg at the last Tclunk
     u32 fail_writes; // answer this many Twrites with Rlerror(EIO)
+    u32 nfsync;
+    u32 fsync_at;    // nmsg at the last Tfsync
     u32 nwrite_refused;
 };
 
@@ -117,6 +121,9 @@ static int rec_responder(void *ctx, const u8 *req, size_t req_len,
                 r->clunk_fid[n] = (u32)req[7] | (u32)req[8] << 8 |
                                   (u32)req[9] << 16 | (u32)req[10] << 24;
             __atomic_store_n(&r->nclunk, n + 1, __ATOMIC_RELEASE);
+        } else if (type == P9_TFSYNC) {
+            r->fsync_at = r->nmsg;
+            __atomic_store_n(&r->nfsync, r->nfsync + 1, __ATOMIC_RELEASE);
         } else if (type == P9_TWALK) {
             __atomic_store_n(&r->nwalk, r->nwalk + 1, __ATOMIC_RELEASE);
         } else if (type == P9_TFLUSH) {
@@ -647,6 +654,66 @@ void test_p9_closer_first_kill_forces_exits_close(void) {
     TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
     TEST_EXPECT_EQ(st.dropped, base.dropped, "no entry was dropped");
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+// A Loom op drives the fid straight to the wire, past every write-behind path,
+// so registering a dev9p Spoor flushes its staged run and stops it staging: a
+// Loom FSYNC then reaches the server after the bytes write() took, and a later
+// write() goes straight through. The control is the fixture: before the
+// registration the same kind of write() staged, with nothing on the wire.
+void test_p9_closer_loom_register_flushes_staged_run(void) {
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    struct Loom *l = NULL;
+    int  reg = -1, entered = -1, crc = -1;
+    s32  cres = -1;
+    u32  after_reg = 0, after_append = 0;
+    u8   tail[16];
+    for (u32 i = 0; i < sizeof(tail); i++) tail[i] = (u8)(0xA0u + i);
+    struct srv_rec rec = {0};
+    if (opened) {
+        l = loom_create(8, 16, false);
+        if (l) {
+            spoor_ref(w.f);                       // the table adopts this one
+            rights_t rt = RIGHT_READ | RIGHT_WRITE;
+            reg = loom_register_handles(l, &w.f, &rt, 1);
+            if (reg != 0) spoor_clunk(w.f);
+            after_reg = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+            if (reg == 0) {
+                struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+                struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+                struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+                u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+                for (u32 i = 0; i < sizeof(sqes[0]); i++) ((u8 *)&sqes[0])[i] = 0;
+                sqes[0].opcode     = LOOM_OP_FSYNC;
+                sqes[0].handle_idx = 0;
+                sqes[0].user_data  = 0x10037u;
+                sqa[0] = 0;
+                __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+                entered = loom_enter(l, /*to_submit=*/1, /*min_complete=*/1, 0);
+                if (l->cq_tail >= 1) cres = cqes[0].result;
+            }
+            (void)dev9p.write(w.f, tail, sizeof(tail), WBC_LEN);
+            after_append = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+            loom_unref(l);
+        }
+        rec = g_rec_a;
+        crc = spoor_clunk_rc(w.f);
+    }
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(l != NULL, "loom_create");
+    TEST_EXPECT_EQ((u64)(s64)reg, 0ull, "the registration succeeds");
+    TEST_EXPECT_EQ((u64)after_reg, 1ull, "and flushed the staged run");
+    TEST_EXPECT_EQ((u64)rec.write_off, (u64)WBC_LEN, "the last Twrite is the append");
+    TEST_EXPECT_EQ((u64)entered, 1ull, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cres, 0ull, "the Loom fsync succeeds");
+    TEST_EXPECT_EQ((u64)rec.nfsync, 1ull, "the server saw one Tfsync");
+    TEST_ASSERT(rec.fsync_at > 0 && rec.fsync_at < rec.write_at,
+                "after the run's Twrite and before the append's");
+    TEST_EXPECT_EQ((u64)after_append, 2ull, "a write() after it goes straight through");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "the close reports nothing lost");
 }
 
 // =============================================================================

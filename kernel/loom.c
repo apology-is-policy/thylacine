@@ -552,6 +552,13 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
     if (n > LOOM_MAX_REG_HANDLES)      return -1;
     if (n > 0 && (!spoors || !rights)) return -1;
 
+    // A Loom op bypasses dev9p's write-behind, so every new dev9p Spoor first
+    // flushes its staged run and stops staging. It may wait for the server,
+    // which the registering thread may (a syscall; a kill ends the wait).
+    // On a failure nothing is installed and the caller keeps its refs.
+    for (u32 i = 0; i < n; i++)
+        if (dev9p_loom_register(spoors[i]) != 0) return -1;
+
     // Replace the whole table (IORING_REGISTER_FILES semantics). Snapshot the
     // old Spoors + install the new under the lock, then clunk the old OUTSIDE
     // the lock (spoor_clunk may sleep -- it cannot run under the spin_lock).
