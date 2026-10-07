@@ -240,6 +240,17 @@ if [ "${SPECS:-1}" = 1 ]; then
 fi
 floor post-specs
 
+# SPECS_ONLY=1 stops here. The spec stage is the only part of this runbook that
+# needs nothing built, so making it independently runnable means its own
+# retention path can be verified on a SHORT lease instead of riding a 44-minute
+# matrix that astra explicitly said not to rerun. Without this the only way to
+# exercise the stage was to re-run everything, which is how a retention fix goes
+# unverified: the cheapest honest check was more expensive than the work.
+if [ "${SPECS_ONLY:-0}" = 1 ]; then
+  echo "== SPECS_ONLY=1 -- stopping after the model stage, nothing built, nothing booted =="
+  exit 0
+fi
+
 # Stage 1 -- the warm cache.
 #
 # ASTRA'S CLONE APPROVAL IS SPENT (0161 t17). The cache-copy acknowledgement she
