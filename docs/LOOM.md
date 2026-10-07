@@ -280,8 +280,9 @@ structured client API the design rests on):
   flush may wait for the server, on the registering thread. A failed flush,
   or an error an earlier flush latched, fails the registration with the old
   table still in place, and the call returns that error as a negative errno
-  (`-ENOSPC`, the server's `-EIO`, a death's `-EINTR`; operator vote
-  2026-10-07, `dec-2026-10-07-loom-register-errno`). Every other refusal is
+  (`-ENOSPC`, the server's `-EIO`, a caught note's `-EINTR`, after which
+  the run is still staged and a retry flushes it; operator vote 2026-10-07,
+  `dec-2026-10-07-loom-register-errno`). Every other refusal is
   a negative errno too: `-EBADF` for an fd that is not open, `-EFAULT` for an
   argument array the kernel cannot read, `-EINVAL` for anything else. The Spoors before the failing one stay flushed and
   write through, a cost only. A successful registration drops the file's

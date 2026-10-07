@@ -217,6 +217,7 @@ pub const T_SYS_YIELD: u64            = 87;
 pub const T_SYS_JIT_CREATE: u64       = 101;    // (length, out_va) -> 0; CAP_JIT-gated
 pub const T_SYS_JIT_DESTROY: u64      = 102;    // (writer_va) -> 0
 pub const T_SYS_ICACHE_SYNC: u64      = 103;    // (vaddr, length) -> 0
+pub const T_SYS_JIT_CREATE_SEALED: u64 = 127;   // (src_va, length, out_va) -> 0; CAP_JIT-gated
 pub const T_SYS_STAT: u64             = 88;
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
 // contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
@@ -3197,9 +3198,33 @@ pub unsafe fn t_jit_create(length: u64, out_va: u64) -> i64 {
     x0
 }
 
+// t_jit_create_sealed — mint a SEALED code region: the kernel copies `length`
+// bytes from `src_va` into fresh pages, publishes them, and maps ONE
+// execute-only alias at a random address, written as a u64 to `out_va`. No
+// writer ever exists, and EL0 cannot read the bytes back. Returns 0, or -errno
+// (-EACCES without CAP_JIT, -EINVAL on a length of 0 or over JIT_SEALED_MAX,
+// -EFAULT on an unreadable source or unwritable out_va, -EAGAIN while the
+// kernel's random source is unseeded, -ENOMEM).
+//
+// # Safety
+// `src_va` must point to `length` readable bytes, `out_va` to 8 writable ones.
+#[inline(always)]
+pub unsafe fn t_jit_create_sealed(src_va: u64, length: u64, out_va: u64) -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") src_va => x0,
+        in("x1") length,
+        in("x2") out_va,
+        in("x8") T_SYS_JIT_CREATE_SEALED,
+        options(nostack)
+    );
+    x0
+}
+
 // t_jit_destroy — tear down BOTH aliases of the region whose WRITER alias
-// starts at `writer_va`, and free its pages. Returns 0, or -EINVAL if
-// writer_va is not the base of a live code region of this Proc.
+// starts at `writer_va`, and free its pages; a sealed region is named by its
+// one alias's base. Returns 0, or -EINVAL if the VA is neither.
 //
 // # Safety
 // Any pointer into either alias is dangling afterwards.

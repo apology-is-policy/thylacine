@@ -22,16 +22,25 @@
 // a D-cache clean plus an I-cache invalidate; without it the CPU may fetch
 // whatever the instruction cache held before, which for a fresh region is the
 // zero pattern (UDF #0) and for a reused one is the previous function.
+//
+// A `SealedRegion` is the other shape: code the kernel copies in, publishes and
+// maps ONCE, execute-only, with no writer at any moment. EL0 cannot read it
+// back. It is for code that must never change once made, such as a JIT's
+// write thunk.
 
-use crate::{t_icache_sync, t_jit_create, t_jit_destroy};
+use crate::{t_icache_sync, t_jit_create, t_jit_create_sealed, t_jit_destroy};
 
 // Mirrors <thylacine/errno.h>. The denial is EACCES, not EPERM: errno.h forbids
 // a handler returning -T_E_PERM because its value (1) collides with the kernel's
 // flat -1 generic-failure sentinel, so a caller could not tell "you lack CAP_JIT"
 // from "something broke".
+const E_AGAIN: i64 = 11;
 const E_NOMEM: i64 = 12;
 const E_ACCES: i64 = 13;
 const E_INVAL: i64 = 22;
+
+/// The largest sealed region, in bytes (`JIT_SEALED_MAX` in <thylacine/syscall.h>).
+pub const SEALED_MAX: usize = 1024 * 1024;
 
 /// The two aliases of one code region, as `SYS_JIT_CREATE` returns them.
 /// Mirrors `struct t_jit_region` in <thylacine/syscall.h>.
@@ -54,9 +63,15 @@ pub enum JitError {
     NotPermitted,
     /// Zero length, or larger than the kernel's per-region cap.
     BadLength,
-    /// The VMA cap, the VA space, or the allocator said no. Never the page
-    /// budget: the region is a reservation, charged per page at first touch.
+    /// The VMA cap, the VA space, or the allocator said no. For a
+    /// `CodeRegion` never the page budget: it is a reservation, charged per
+    /// page at first touch. A `SealedRegion` charges its pages at creation, so
+    /// for it the budget too.
     OutOfMemory,
+    /// The kernel's random source is not seeded yet. Every code alias goes at
+    /// a random address, so creation waits for it rather than pick a
+    /// predictable one. Retry.
+    TryAgain,
     /// Anything else the kernel reported.
     Other(i64),
 }
@@ -67,6 +82,7 @@ impl JitError {
             r if r == -E_ACCES => JitError::NotPermitted,
             r if r == -E_INVAL => JitError::BadLength,
             r if r == -E_NOMEM => JitError::OutOfMemory,
+            r if r == -E_AGAIN => JitError::TryAgain,
             other => JitError::Other(other),
         }
     }
@@ -206,6 +222,99 @@ impl Drop for CodeRegion {
         // alias, which is how the kernel identifies the region.
         unsafe {
             let _ = t_jit_destroy(self.writer as u64);
+        }
+    }
+}
+
+/// One sealed code region: the bytes the kernel copied in at creation, mapped
+/// once, execute-only, at a random address.
+///
+/// Nothing can change them -- no writer alias exists at any moment -- and EL0
+/// cannot read them: a load faults, and a syscall handed the address fails
+/// with EFAULT, because the kernel copies user memory with unprivileged loads.
+/// Not `Send`/`Sync`, for the reason `CodeRegion` is not.
+pub struct SealedRegion {
+    exec: *const u8,
+    len: usize,
+}
+
+// `new` hands the instruction words to the kernel as their in-memory bytes,
+// which are the instruction stream only on a little-endian target.
+const _: () = assert!(cfg!(target_endian = "little"));
+
+impl SealedRegion {
+    /// Seal `code`, a sequence of AArch64 instructions. Requires `CAP_JIT`.
+    /// The rest of the last page is zero, i.e. `UDF #0`.
+    pub fn new(code: &[u32]) -> Result<Self, JitError> {
+        let bytes = unsafe {
+            core::slice::from_raw_parts(code.as_ptr() as *const u8, core::mem::size_of_val(code))
+        };
+        Self::from_bytes(bytes)
+    }
+
+    /// Seal `bytes` (at most `SEALED_MAX`). Requires `CAP_JIT`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, JitError> {
+        if bytes.is_empty() {
+            return Err(JitError::BadLength);
+        }
+        let mut va: u64 = 0;
+        let rc = unsafe {
+            t_jit_create_sealed(bytes.as_ptr() as u64, bytes.len() as u64, &mut va as *mut u64 as u64)
+        };
+        if rc != 0 {
+            return Err(JitError::from_rc(rc));
+        }
+        Ok(SealedRegion {
+            exec: va as *const u8,
+            len: (bytes.len() + 0xFFF) & !0xFFF,
+        })
+    }
+
+    /// The region's size in bytes (the input rounded up to whole pages).
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The base of the one alias. Branch through this; it cannot be read.
+    pub fn exec_ptr(&self) -> *const u8 {
+        self.exec
+    }
+
+    /// Reinterpret `exec_ptr() + offset` as a callable function.
+    ///
+    /// # Safety
+    /// As for [`CodeRegion::entry`]: valid machine code implementing `F`'s
+    /// signature and calling convention must begin at that offset.
+    pub unsafe fn entry<F: Copy>(&self, offset: usize) -> F {
+        const { assert!(core::mem::size_of::<F>() == core::mem::size_of::<usize>()) };
+        debug_assert!(offset + 4 <= self.len);
+        let addr = self.exec as usize + offset;
+        core::mem::transmute_copy(&addr)
+    }
+
+    /// Unmap and free the region now, reporting the kernel's answer. Dropping
+    /// it does the same and discards the answer.
+    pub fn destroy(self) -> Result<(), JitError> {
+        let va = self.exec as u64;
+        core::mem::forget(self);
+        let rc = unsafe { t_jit_destroy(va) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(JitError::from_rc(rc))
+        }
+    }
+}
+
+impl Drop for SealedRegion {
+    fn drop(&mut self) {
+        // A sealed region is named by its one alias.
+        unsafe {
+            let _ = t_jit_destroy(self.exec as u64);
         }
     }
 }

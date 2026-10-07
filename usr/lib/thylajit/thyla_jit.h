@@ -1,8 +1,8 @@
-/* thyla_jit.h -- the I-42 JIT syscall trio for a pouch C/C++ consumer.
+/* thyla_jit.h -- the I-42 JIT syscalls for a pouch C/C++ consumer.
  *
  * Companion to thyla_capjit.h (which ACQUIRES CAP_JIT by walking the corvus
- * clearance). This header carries the three syscalls that operate a dual-mapped
- * code Burrow once the capability is held:
+ * clearance). This header carries the syscalls that operate a code Burrow once
+ * the capability is held:
  *
  *   thyla_jit_create(len, &region)  -- SYS_JIT_CREATE (101), CAP_JIT-gated.
  *       Installs BOTH aliases of one code region: a WRITER alias (RW, emit here)
@@ -19,9 +19,14 @@
  *       `dc cvau`/`ic ivau` (what __builtin___clear_cache lowers to) TRAPS;
  *       the kernel performs the maintenance on its own direct map instead.
  *   thyla_jit_destroy(writer_va)    -- SYS_JIT_DESTROY (102), not gated.
- *       Tears down both aliases, named by the writer VA. Not needed by a JIT
- *       that holds its region for the life of the process (proc teardown frees
- *       it); provided for completeness.
+ *       Tears down both aliases, named by the writer VA (a sealed region: by
+ *       its one alias). Not needed by a JIT that holds its region for the
+ *       life of the process (proc teardown frees it).
+ *   thyla_jit_create_sealed(src, len, &va) -- SYS_JIT_CREATE_SEALED (127),
+ *       CAP_JIT-gated. The kernel copies `len` bytes into fresh pages,
+ *       publishes them, and maps ONE execute-only alias at a random address:
+ *       no writer ever exists and EL0 cannot read the bytes back. For a small
+ *       thunk that must never be patched (the JIT's write stub).
  *
  * The numbers are ABI (kernel/include/thylacine/syscall.h). Issued as inline
  * SVC rather than through libc: musl carries no wrapper for a Thylacine-private
@@ -40,7 +45,9 @@
 #define THYLA_SYS_JIT_CREATE  101L
 #define THYLA_SYS_JIT_DESTROY 102L
 #define THYLA_SYS_ICACHE_SYNC 103L
+#define THYLA_SYS_JIT_CREATE_SEALED 127L
 #define THYLA_JIT_REGION_MAX  (64u * 1024u * 1024u)
+#define THYLA_JIT_SEALED_MAX  (1u * 1024u * 1024u)
 
 /* struct t_jit_region -- the SYS_JIT_CREATE out-parameter. Layout pinned by
  * _Static_assert on the kernel side (writer_va@0, exec_va@8, size 16). */
@@ -51,7 +58,9 @@ struct thyla_jit_region {
 
 /* SYS_JIT_CREATE. Returns 0 and fills *out on success; -errno otherwise
  * (-13/EACCES = no CAP_JIT, -22/EINVAL = length 0 or > JIT_REGION_MAX,
- * -12/ENOMEM = VMA cap/VA/allocator, -14/EFAULT = out unwritable). The region
+ * -12/ENOMEM = VMA cap/VA/allocator, -14/EFAULT = out unwritable, -11/EAGAIN =
+ * the kernel's random source is not seeded yet: the aliases go at random
+ * addresses, so creation waits for it). The region
  * is a reservation: each page is charged when first touched, and a touch over
  * the page budget terminates the Proc rather than failing here. */
 static inline long thyla_jit_create(size_t length, struct thyla_jit_region *out)
@@ -74,7 +83,24 @@ static inline long thyla_jit_icache_sync(void *va, size_t length)
     return x0;
 }
 
-/* SYS_JIT_DESTROY. `writer_va` must be a region's writer-alias base. */
+/* SYS_JIT_CREATE_SEALED. Returns 0 and writes the alias's VA to *out_va, or
+ * -errno (-13/EACCES = no CAP_JIT, -22/EINVAL = length 0 or >
+ * THYLA_JIT_SEALED_MAX, -14/EFAULT = src unreadable or out_va unwritable,
+ * -11/EAGAIN = the kernel's random source is not seeded yet, -12/ENOMEM). The
+ * pages are charged at creation. */
+static inline long thyla_jit_create_sealed(const void *src, size_t length,
+                                           uint64_t *out_va)
+{
+    register long x0 __asm__("x0") = (long)(uintptr_t)src;
+    register long x1 __asm__("x1") = (long)length;
+    register long x2 __asm__("x2") = (long)(uintptr_t)out_va;
+    register long x8 __asm__("x8") = THYLA_SYS_JIT_CREATE_SEALED;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+/* SYS_JIT_DESTROY. `writer_va` must be a region's writer-alias base, or a
+ * sealed region's alias base. */
 static inline long thyla_jit_destroy(uint64_t writer_va)
 {
     register long x0 __asm__("x0") = (long)writer_va;

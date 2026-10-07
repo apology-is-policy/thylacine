@@ -256,18 +256,26 @@ void test_loom_register_rejects(void) {
     hidx_t one[1] = { rd };
     // Unsupported op (BUFFERS reserved for Loom-6).
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1),
-                   -1, "LOOM_REGISTER_BUFFERS rejected");
+                   -T_E_INVAL, "LOOM_REGISTER_BUFFERS rejected");
     // nargs over the table cap.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, one,
                                               LOOM_MAX_REG_HANDLES + 1u),
-                   -1, "nargs over cap rejected");
+                   -T_E_INVAL, "nargs over cap rejected");
     // A non-KOBJ_SPOOR fd (the loom fd itself) is rejected.
     hidx_t bad[1] = { loom_fd };
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1),
-                   -1, "non-Spoor fd rejected");
+                   -T_E_INVAL, "non-Spoor fd rejected");
+    // An fd that is not open is EBADF, after an open one was resolved and must
+    // be rolled back.
+    hidx_t gone[2] = { rd, (hidx_t)999 };
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, gone, 2),
+                   -T_E_BADF, "an unopened fd is EBADF");
     // A bogus loom_fd is rejected.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1),
-                   -1, "bad loom_fd rejected");
+                   -T_E_BADF, "bad loom_fd is EBADF");
+    // A Spoor fd named as the ring is EINVAL: open, but not a Loom.
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, rd, LOOM_REGISTER_HANDLES, one, 1),
+                   -T_E_INVAL, "a non-Loom loom_fd is EINVAL");
 
     test_proc_drop(p);
 }
@@ -370,11 +378,11 @@ void test_loom_register_buffers_rejects(void) {
     struct loom_buf_reg um   = { .va = 0x1000,   .len = PAGE_SIZE };       // unmapped low VA
 
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &one,
-                   LOOM_MAX_REG_BUFFERS + 1u), -1, "n over cap rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -1, "len 0 rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -1, "OOB len rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -1, "unmapped VA rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -1, "bad loom_fd rejected");
+                   LOOM_MAX_REG_BUFFERS + 1u), -T_E_INVAL, "n over cap rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -T_E_INVAL, "len 0 rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -T_E_INVAL, "OOB len rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -T_E_INVAL, "unmapped VA rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -T_E_BADF, "bad loom_fd is EBADF");
 
     // Every reject is atomic: the table stays empty + no ref leaked.
     struct Handle h;

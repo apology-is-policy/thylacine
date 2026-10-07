@@ -548,16 +548,19 @@ void loom_unref(struct Loom *l) {
 
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n) {
-    if (!l || l->magic != LOOM_MAGIC)  return -1;
-    if (n > LOOM_MAX_REG_HANDLES)      return -1;
-    if (n > 0 && (!spoors || !rights)) return -1;
+    if (!l || l->magic != LOOM_MAGIC)  return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
+    if (n > 0 && (!spoors || !rights)) return -T_E_INVAL;
 
     // A Loom op bypasses dev9p's write-behind, so every new dev9p Spoor first
     // flushes its staged run and stops staging. It may wait for the server,
     // which the registering thread may (a syscall; a kill ends the wait).
-    // On a failure nothing is installed and the caller keeps its refs.
-    for (u32 i = 0; i < n; i++)
-        if (dev9p_loom_register(spoors[i]) != 0) return -1;
+    // On a failure nothing is installed and the caller keeps its refs; the
+    // flush's errno is the registration's.
+    for (u32 i = 0; i < n; i++) {
+        int fe = dev9p_loom_register(spoors[i]);
+        if (fe != 0) return fe;
+    }
 
     // Replace the whole table (IORING_REGISTER_FILES semantics). Snapshot the
     // old Spoors + install the new under the lock, then clunk the old OUTSIDE
@@ -623,9 +626,9 @@ static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n) {
-    if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
-    if (n > LOOM_MAX_REG_BUFFERS)            return -1;
-    if (n > 0 && !bufs)                      return -1;
+    if (!l || l->magic != LOOM_MAGIC || !p)  return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_BUFFERS)            return -T_E_INVAL;
+    if (n > 0 && !bufs)                      return -T_E_INVAL;
 
     // Resolve + pin the WHOLE new set first (all-or-nothing, like
     // loom_register_handles): under p->vma_lock so vma_lookup is stable. On any
@@ -643,7 +646,7 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     spin_unlock(&p->as->lock);
     if (rc != 0) {
         for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
-        return -1;
+        return -T_E_INVAL;
     }
 
     // Install: swap the table under l->lock, then unref the displaced pins OUTSIDE

@@ -434,7 +434,12 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     spin_lock(&p->wb_lock);
     p->wb_flushers--;
     if (err) {
-        if (thread_die_pending(current_thread())) return err;
+        // Neither a death nor a caught note is the server failing the write:
+        // the one refused or abandoned the Twrite, the other had it cancelled
+        // (flush(5): EINTR means never applied). The run stays staged for the
+        // next flusher; resending a landed prefix rewrites the same bytes.
+        if (err == -P9_E_INTR || thread_die_pending(current_thread()))
+            return err;
         if (p->wb_err == 0) p->wb_err = (int)(-(long)err);   // positive errno
         p->wb_len   = 0;
         p->wb_known = false;

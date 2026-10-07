@@ -82,6 +82,7 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
 void test_dev9p_wb_loom_register_keeps_the_latch(void);
+void test_dev9p_wb_interrupted_flush_keeps_run(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3696,7 +3697,8 @@ void test_dev9p_wb_dying_loom_register_keeps_staging(void) {
     wb_test_end(root);
     u64 budget     = dev9p_wb_budget_used();
 
-    TEST_ASSERT(g_wbd_rc != 0, "the dying registration fails");
+    TEST_EXPECT_EQ((u64)(s64)g_wbd_rc, (u64)(s64)-P9_E_IO,
+                   "the dying registration returns the refused send's EIO");
     TEST_ASSERT(empty, "and installs nothing");
     TEST_EXPECT_EQ((u64)kept, 256ull, "the run stays staged");
     TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its flush: nothing on the wire");
@@ -3740,12 +3742,54 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
     wb_test_end(root);
 
     TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
-    TEST_ASSERT(rrc != 0, "the registration fails on the latch");
+    TEST_EXPECT_EQ((u64)(s64)rrc, (u64)(s64)-28,
+                   "the registration returns the latched ENOSPC");
     TEST_EXPECT_EQ((u64)(s64)why, (u64)(s64)-28, "its dev9p half returns the latched ENOSPC");
     TEST_ASSERT(empty, "and installs nothing");
     TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
     TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28, "and the last close");
+}
+
+// A caught note that interrupts a flush has its Twrite cancelled (flush(5)):
+// EINTR, never applied. The run stays staged and nothing latches, so the next
+// fsync sends it whole. A server's Rlerror(EINTR) reaches the flush as the same
+// -P9_E_INTR the client returns for a cancelled op, so it stands in for the
+// note. The control is wb_fsync_flush_and_error: the same injection with
+// ENOSPC latches and drops the run.
+void test_dev9p_wb_interrupted_flush_keeps_run(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = P9_E_INTR;
+    long fe0    = dev9p.fsync(f, 0);
+    u32  seen0  = g_twrite_seen;
+    long fe1    = dev9p.fsync(f, 0);
+    u32  seen1  = g_twrite_seen;
+    u32  len1   = g_twrite_cap_len;
+    u64  off1   = g_twrite_cap_off;
+    long we     = dev9p.write(f, chunk + 256, 256, 256);
+    int  crc    = spoor_clunk_rc(f);
+    u32  seen2  = g_twrite_seen;
+    bool pat_ok = g_twrite_pat_ok;
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), (u64)P9_E_INTR, "the interrupted fsync returns EINTR");
+    TEST_EXPECT_EQ((u64)seen0, 1ull, "its Twrite went out and was cancelled");
+    TEST_EXPECT_EQ((u64)fe1, 0ull, "the retry succeeds: nothing latched");
+    TEST_EXPECT_EQ((u64)seen1, 2ull, "the retry resends the run");
+    TEST_EXPECT_EQ((u64)len1, 256ull, "all of it");
+    TEST_EXPECT_EQ(off1, 0ull, "at its offset");
+    TEST_EXPECT_EQ((u64)we, 256ull, "a later append stages");
+    TEST_EXPECT_EQ((u64)seen2, 3ull, "the close flushes it");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and returns 0");
+    TEST_ASSERT(pat_ok, "every byte on the wire is the byte written");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run

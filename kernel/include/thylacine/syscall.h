@@ -1466,18 +1466,23 @@ enum {
     // bad args / non-zero flags / OOM / handle-table-full.
     SYS_LOOM_SETUP   = 66,   // arg: entries (x0), params_va (x1)
 
-    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -1   (Loom-2a)
+    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -errno   (Loom-2a)
     //   x0 = loom_fd : a KObj_Loom handle.
     //   x1 = op      : LOOM_REGISTER_HANDLES (install the fixed-handle table)
-    //                  at Loom-2a; LOOM_REGISTER_BUFFERS is reserved (Loom-6).
+    //                  or LOOM_REGISTER_BUFFERS (pin the buffer table, Loom-6).
     //   x2 = arg_va  : LOOM_REGISTER_HANDLES -> user-VA of a u32[nargs] of fds
     //                  (each must be a KOBJ_SPOOR handle in the caller). The
     //                  call REPLACES the whole table (IORING_REGISTER_FILES
     //                  semantics); each registered handle is resolved + its
     //                  rights snapshotted (the I-30 submit-time-pin substrate).
-    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES.
-    // -1 on bad loom_fd / unsupported op / nargs out of range / a non-KOBJ_SPOOR
-    // fd in the list.
+    //                  LOOM_REGISTER_BUFFERS -> a struct loom_buf_reg[nargs].
+    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES (or LOOM_MAX_REG_BUFFERS).
+    // -EBADF: loom_fd or a listed fd is not open. -EFAULT: the array is
+    // unreadable. A dev9p Spoor's write-behind flush failing, or an error an
+    // earlier flush latched, returns that errno (-ENOSPC, the server's -EIO, a
+    // caught note's -EINTR; operator vote 2026-10-07). -EINVAL otherwise:
+    // loom_fd not a Loom, an unknown op, nargs out of range, a non-KOBJ_SPOOR
+    // fd, a buffer range that is not one writable anon VMA.
     SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
 
     // SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) -> n / -1  (Loom-3)
@@ -1981,7 +1986,8 @@ enum {
     //   writer_va, free the pages it committed and refund their charge.
     //   Identified by the writer VA alone: the kernel remembers the pairing,
     //   so a caller cannot destroy half a region or pass two VAs that name
-    //   different regions.
+    //   different regions. A SEALED region (SYS_JIT_CREATE_SEALED) has no
+    //   writer, so it is named by the base of its one execute-only alias.
     //
     //   NOT CAP_JIT-gated. Destroying your own mapping is not an exercise of
     //   the emission authority, and gating it would mean a Proc whose legate
@@ -1989,8 +1995,9 @@ enum {
     //   turning a capability expiry into a memory leak. Authority to create is
     //   the scarce thing; authority to release is not.
     //
-    //   Errors: -EINVAL (writer_va is not the base of a live code region of
-    //   this Proc). Idempotent only in the sense that a second call fails
+    //   Errors: -EINVAL (writer_va is not the base of a live code region's
+    //   writer, or of a sealed region, in this Proc; an exec alias of a
+    //   writable region is refused). Idempotent only in the sense that a second call fails
     //   cleanly; it never tears down an unrelated mapping.
     SYS_JIT_DESTROY = 102,  // arg: writer_va (x0)
 

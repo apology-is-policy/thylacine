@@ -23,6 +23,12 @@
 //      alias. A wrong answer, a fault, or a hang here means the dual map, the
 //      RX PTE, or the cache maintenance is broken.
 //   6. destroy the region; assert a second destroy fails cleanly.
+//   7. SEAL a thunk (B-2b): the kernel copies it in and maps it execute-only.
+//      Call it; then hand its address to write(2) and assert EFAULT -- the
+//      kernel's copy is an unprivileged load, so it cannot read the bytes on
+//      our behalf -- against a control write of the same bytes from a readable
+//      buffer. Destroy it by its own VA; a second destroy fails. (Step 2 also
+//      asserts the sealed create is refused without the capability.)
 //
 // Step 5 is the load-bearing one. It is also the only place in the tree where
 // the icache sync is genuinely load-bearing rather than merely correct: skip it
@@ -39,9 +45,9 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use alloc::vec::Vec;
 use libthyla_rs::cap::{self, Caps};
-use libthyla_rs::jit::{a64, CodeRegion, JitError};
+use libthyla_rs::jit::{a64, CodeRegion, JitError, SealedRegion};
 use libthyla_rs::{
-    t_close, t_open, t_putstr, t_read, t_write, T_CAP_JIT, T_OREAD, T_ORDWR,
+    t_close, t_open, t_pipe, t_putstr, t_read, t_write, T_CAP_JIT, T_OREAD, T_ORDWR,
     T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -235,6 +241,13 @@ pub extern "C" fn rs_main() -> i64 {
         }
         Ok(_) => fail("jit-prover: FAIL ungated create SUCCEEDED -- CAP_JIT gate is open\n"),
     }
+    match SealedRegion::new(&[a64::BTI_C, a64::RET]) {
+        Err(JitError::NotPermitted) => {
+            t_putstr("jit-prover: ungated sealed create REFUSED (no CAP_JIT) -- correct\n");
+        }
+        Err(_) => fail("jit-prover: FAIL ungated sealed create failed for the WRONG reason\n"),
+        Ok(_) => fail("jit-prover: FAIL ungated sealed create SUCCEEDED -- CAP_JIT gate is open\n"),
+    }
 
     // --- Steps 1/3/4: acquire CAP_JIT through the real clearance path. -------
     let mut conn: i64 = -1;
@@ -366,6 +379,7 @@ pub extern "C" fn rs_main() -> i64 {
                 JitError::NotPermitted => { t_putstr("NotPermitted (CAP_JIT missing)\n"); }
                 JitError::BadLength => { t_putstr("BadLength\n"); }
                 JitError::OutOfMemory => { t_putstr("OutOfMemory\n"); }
+                JitError::TryAgain => { t_putstr("TryAgain (random source unseeded)\n"); }
                 JitError::Other(rc) => {
                     t_putstr("Other rc=");
                     t_putstr(dec(rc, &mut [0u8; 24]));
@@ -429,6 +443,52 @@ pub extern "C" fn rs_main() -> i64 {
     let second = unsafe { libthyla_rs::t_jit_destroy(writer) };
     if second == 0 {
         fail("jit-prover: FAIL second destroy SUCCEEDED (double teardown)\n");
+    }
+
+    // --- Step 7: a SEALED thunk. ---------------------------------------------
+    let thunk = [a64::BTI_C, a64::movz(0, 42), a64::RET];
+    let sealed = match SealedRegion::new(&thunk) {
+        Ok(r) => r,
+        Err(_) => fail("jit-prover: FAIL sealed create after redeem\n"),
+    };
+    let h: extern "C" fn() -> u64 = unsafe { sealed.entry(0) };
+    if h() != 42 {
+        fail("jit-prover: FAIL sealed thunk returned the wrong value\n");
+    }
+    t_putstr("jit-prover: sealed thunk = 42 -- copied, published, EXECUTED\n");
+
+    // The kernel must not read execute-only bytes on our behalf. fd 1 is not
+    // open here (joey spawns this with no fds), so the probe writes into a
+    // pipe. The control is one variable away: the same four bytes from a
+    // readable buffer.
+    let (rd, wr) = unsafe { t_pipe() };
+    if rd < 0 || wr < 0 {
+        fail("jit-prover: FAIL pipe\n");
+    }
+    let leak = unsafe { t_write(wr, sealed.exec_ptr(), 4) };
+    let ctl = unsafe { t_write(wr, thunk.as_ptr() as *const u8, 4) };
+    unsafe {
+        let _ = t_close(rd);
+        let _ = t_close(wr);
+    }
+    if ctl != 4 {
+        fail("jit-prover: FAIL control write from a readable buffer\n");
+    }
+    if leak != -14 {
+        let mut b = [0u8; 24];
+        t_putstr("jit-prover: FAIL write(2) of the sealed bytes returned ");
+        t_putstr(dec(leak, &mut b));
+        t_putstr(", not -EFAULT\n");
+        unsafe { libthyla_rs::t_exits(1) }
+    }
+    t_putstr("jit-prover: write(2) of the sealed bytes = -EFAULT -- unreadable\n");
+
+    let xo = sealed.exec_ptr() as u64;
+    if sealed.destroy().is_err() {
+        fail("jit-prover: FAIL destroy of the sealed region by its VA\n");
+    }
+    if unsafe { libthyla_rs::t_jit_destroy(xo) } == 0 {
+        fail("jit-prover: FAIL second sealed destroy SUCCEEDED\n");
     }
 
     t_putstr("jit-prover: PASS (CL-7k I-42 end-to-end)\n");

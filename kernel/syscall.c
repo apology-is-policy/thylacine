@@ -7901,14 +7901,14 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n) {
-    if (!p)                            return -1;
-    if (op != LOOM_REGISTER_HANDLES)   return -1;   // BUFFERS reserved (Loom-6)
-    if (n > LOOM_MAX_REG_HANDLES)      return -1;
-    if (n > 0 && !fds)                 return -1;
+    if (!p)                            return -T_E_INVAL;
+    if (op != LOOM_REGISTER_HANDLES)   return -T_E_INVAL;   // BUFFERS: its own entry
+    if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
+    if (n > 0 && !fds)                 return -T_E_INVAL;
 
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_INVAL; }
     struct Loom *l = (struct Loom *)lh.obj;
 
     // Resolve each fd -> KOBJ_SPOOR, taking the table's OWN ref + snapshotting
@@ -7919,10 +7919,15 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     struct Spoor *spoors[LOOM_MAX_REG_HANDLES];
     rights_t      rights[LOOM_MAX_REG_HANDLES];
     u32 got = 0;
+    int rc  = -T_E_BADF;
     for (u32 i = 0; i < n; i++) {
         struct Handle sh;
         if (handle_get(p, fds[i], &sh) != 0)   goto rollback;
-        if (sh.kind != KOBJ_SPOOR)             { handle_put(&sh); goto rollback; }
+        if (sh.kind != KOBJ_SPOOR) {
+            handle_put(&sh);
+            rc = -T_E_INVAL;
+            goto rollback;
+        }
         spoor_ref((struct Spoor *)sh.obj);
         spoors[got] = (struct Spoor *)sh.obj;
         rights[got] = sh.rights;
@@ -7931,28 +7936,29 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     }
 
     // loom_register_handles ADOPTS the `got` refs on success. It fails when a
-    // dev9p Spoor's write-behind flush fails (a death, or the server) or had
-    // latched an error, and
-    // then installs nothing, so the refs are still ours to drop.
-    if (loom_register_handles(l, spoors, rights, got) != 0) goto rollback;
+    // dev9p Spoor's write-behind flush fails (a death, a caught note, or the
+    // server) or had latched an error, and then installs nothing, so the refs
+    // are still ours to drop; its errno is the caller's.
+    rc = loom_register_handles(l, spoors, rights, got);
+    if (rc != 0) goto rollback;
     handle_put(&lh);
     return 0;
 
 rollback:
     for (u32 i = 0; i < got; i++) spoor_clunk(spoors[i]);
     handle_put(&lh);
-    return -1;
+    return rc;
 }
 
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n) {
-    if (!p)                            return -1;
-    if (n > LOOM_MAX_REG_BUFFERS)      return -1;
-    if (n > 0 && !bufs)               return -1;
+    if (!p)                            return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_BUFFERS)      return -T_E_INVAL;
+    if (n > 0 && !bufs)               return -T_E_INVAL;
 
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_INVAL; }
     struct Loom *l = (struct Loom *)lh.obj;
 
     // handle_get holds a ref on the Loom across the call (the #844 by-value
@@ -7997,24 +8003,27 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     return (s64)fd;
 }
 
+// Every refusal is a negative errno (LOOM.md 8.1): -EBADF for a loom_fd or
+// fds[i] that is not open, -EFAULT for an argument array the kernel cannot
+// read, a failed write-behind flush's own errno, -EINVAL for the rest.
 static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                      u64 arg_va, u64 nargs_raw) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc)                              return -1;
+    if (!t || !t->proc)                              return -T_E_INVAL;
     struct Proc *p = t->proc;
     u32 op = (u32)op_raw;
     u32 n  = (u32)nargs_raw;
 
     if (op == LOOM_REGISTER_HANDLES) {
-        if (n > LOOM_MAX_REG_HANDLES)                return -1;
+        if (n > LOOM_MAX_REG_HANDLES)                return -T_E_INVAL;
         hidx_t fds[LOOM_MAX_REG_HANDLES];
         if (n > 0) {
-            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -1;
+            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -T_E_FAULT;
             for (u32 i = 0; i < n; i++) {
                 u8 fb[4];
                 for (int b = 0; b < 4; b++)
                     if (uaccess_load_u8(arg_va + (u64)i * 4u + (u64)b, &fb[b]) != 0)
-                        return -1;
+                        return -T_E_FAULT;
                 u32 v = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
                 fds[i] = (hidx_t)v;
             }
@@ -8024,18 +8033,18 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
     }
 
     if (op == LOOM_REGISTER_BUFFERS) {
-        if (n > LOOM_MAX_REG_BUFFERS)                return -1;
+        if (n > LOOM_MAX_REG_BUFFERS)                return -T_E_INVAL;
         struct loom_buf_reg bufs[LOOM_MAX_REG_BUFFERS];
         if (n > 0) {
             if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(struct loom_buf_reg)))
-                return -1;
+                return -T_E_FAULT;
             // Copy each {u64 va; u64 len} byte-by-byte (TOCTOU-safe; never re-read
             // after the kernel snapshot) and assemble little-endian.
             for (u32 i = 0; i < n; i++) {
                 u64 base = arg_va + (u64)i * (u64)sizeof(struct loom_buf_reg);
                 u8 raw[16];
                 for (int b = 0; b < 16; b++)
-                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -1;
+                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -T_E_FAULT;
                 u64 va = 0, len = 0;
                 for (int b = 0; b < 8; b++) {
                     va  |= (u64)raw[b]      << (8 * b);
@@ -8049,7 +8058,7 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                                        n > 0 ? bufs : NULL, n);
     }
 
-    return -1;   // unknown register op
+    return -T_E_INVAL;   // unknown register op
 }
 
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
