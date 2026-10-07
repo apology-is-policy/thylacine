@@ -804,6 +804,17 @@ it waits for `>= goal`, which is EVENTUAL retirement, so exactly-once is asserte
 separately as a counter DELTA, with its precondition (nothing in flight at the
 snapshot) asserted rather than assumed. Neither reads the dead image.
 
+A RELEASE WITNESS, page-granular on purpose. The mutant proves the ring TAKES
+an image reference; a leaked `struct AddrSpace` is one slab object and no counter
+in this tree reports it, which is why an earlier version of this entry recorded
+"cannot prove release" as a hole needing a production counter. It does not: the
+final lifetime drop is also what runs `proc_pgtable_destroy`, so a reference that
+is never released strands the PAGE TABLES -- whole pages, which `phys_free_pages`
+sees, with `magazines_drain_all` first (the same instrument and drain
+`test_slub_leak_10k` uses). The leg takes that gauge before the creator exists
+and requires it back afterwards. So the narrowed truth is: a leaked IMAGE is now
+witnessed; a leaked OBJECT still is not.
+
 UNRUN: the leg has never executed. Its translation unit does COMPILE -- a
 single-file `-fsyntax-only` with the kernel target's own defines, include paths
 and `-std=c99`, exit 0, no diagnostics -- which is a different and much weaker

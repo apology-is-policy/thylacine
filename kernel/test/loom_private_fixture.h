@@ -12,6 +12,13 @@
 
 #include <thylacine/addrspace.h>
 #include <thylacine/vma.h>
+// The release witness below needs the physical-page gauge and its magazine
+// drain, which live in the mm internals rather than in kernel/include -- the
+// same two headers test_slub.c includes for the same instrument. Taking the
+// real declarations rather than hand-writing externs: a prototype copied by
+// hand is one that can drift from the definition without anything noticing.
+#include "../../mm/phys.h"
+#include "../../mm/magazines.h"
 
 // A VA for the surviving-mapping leg, clear of the 0x140000000 range the
 // SQPOLL fixtures in this file use.
@@ -201,6 +208,16 @@ static const char *loom_private_fixture(void) {
     // the owner's drop IS the final lifetime drop while a ring is outstanding.
     // Under the pinned leg above, the fixture's own reference makes that drop
     // non-final, so the guard cannot fire there and the mutant stays invisible.
+    // A RELEASE WITNESS, and it is page-granular on purpose. The mutant below
+    // proves the ring TAKES an image reference; nothing proves it RELEASES one,
+    // and a leaked `struct AddrSpace` is a single slab object that no counter
+    // here reports. But the final lifetime drop is also what runs
+    // proc_pgtable_destroy, so a reference that is never released strands the
+    // PAGE TABLES -- whole pages, which phys_free_pages does see (the same
+    // instrument test_slub_leak_10k uses, with the same magazine drain). So
+    // this witnesses a leaked IMAGE, not a leaked object: if the ring's own
+    // reference outlived the retirement, these pages would not come back.
+    u64 phys0 = phys_free_pages();
     p = test_proc_make();
     LP_CHECK(p, "unpinned-reap creator allocated");
     l = loom_create_private(p, 2, 2, true);
@@ -227,6 +244,9 @@ static const char *loom_private_fixture(void) {
     // gone, and reading it is the masking this leg exists to avoid.
     LP_CHECK(loom_private_retired() == before + 1,
              "the reaped creator's ring retires exactly once");
+    magazines_drain_all();
+    LP_CHECK(phys_free_pages() == phys0,
+             "the reaped creator's image is fully returned, page tables included");
 
     // ---- The final / nonfinal ring-drop discrimination. ----
     // Every retirement above ends the ring's occupancy, so each refunds the
