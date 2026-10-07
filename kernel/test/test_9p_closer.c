@@ -357,8 +357,9 @@ static void wbc_exit_drop(void *arg) {
     self->exit_close_active = false;
 }
 
-// A killed thread's own last close cannot send: its flush keeps the run, and
-// the closer writes it. Before part C the close freed the run with the priv.
+// A killed thread's own last close cannot send, so it never flushes: it hands
+// the staged run to a closer, which writes it. Before part C the close's flush
+// failed at once and the run was freed with the priv.
 void test_p9_closer_dying_close_hands_off_staged_run(void) {
     TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
     struct p9_closer_stats base = closer_now();
