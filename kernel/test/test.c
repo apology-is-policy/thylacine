@@ -390,6 +390,7 @@ void test_burrow_settled_drop_retains_nonfinal_charge(void);
 void test_burrow_settled_drop_exact_payer(void);
 void test_burrow_settled_mapping_drop_defers_free(void);
 void test_burrow_unmap_failure_leaves_mapping_attached(void);
+void test_burrow_unmap_interior_start_refused(void);
 void test_vmo_dup_oom_rollback(void);
 void test_vmo_file_create_close_round_trip(void);
 void test_vmo_file_create_failure_retains_spoor(void);
@@ -2340,6 +2341,8 @@ struct test_case g_tests[] = {
       test_burrow_settled_mapping_drop_defers_free,     false, NULL },
     { "burrow.unmap_failure_leaves_mapping_attached",
       test_burrow_unmap_failure_leaves_mapping_attached, false, NULL },
+    { "burrow.unmap_interior_start_refused",
+      test_burrow_unmap_interior_start_refused,         false, NULL },
 
     // I-42 / CL-7k: the JIT capability. jit.dual_alias_pte_wx_clean is the
     // invariant test -- it reads the real L3 descriptors, not the VMA prots.

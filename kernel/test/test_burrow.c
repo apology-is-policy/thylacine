@@ -758,17 +758,26 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
     TEST_ASSERT(attached >= 1, "the mapping must be attached before the refusals");
     burrow_charge_record(v, p, 1);
 
-    // The geometry checks this fixture covers, each of which must leave the
-    // mapping attached and the charge record intact: zero length
-    // (kernel/burrow.c:1241), misaligned vaddr (:1242), misaligned length
-    // (:1243), no VMA at the address (:1252) and a mismatched end (:1254).
+    // burrow_unmap_reporting refuses in eight places, all of them above its
+    // first mutation (the vma_uninstall_range_in call), which is what the proof
+    // above rests on. Seven are probed here, and each must leave the mapping
+    // attached and the charge record intact: end mismatch, no VMA at the
+    // address, zero length, misaligned vaddr, misaligned length, a null Proc,
+    // and a range whose end wraps past 2^64. (Named by predicate, not by line:
+    // a line number here would be re-pointed by hand on the next edit to
+    // burrow.c, and silently wrong until someone noticed.)
     //
-    // UNCOVERED, of the eight failure returns at :1240-:1254 -- all of which
-    // precede the function's first mutation at :1284, which is what the proof
-    // above rests on: the null Proc (:1240), the vaddr+length overflow (:1249),
-    // and the vaddr_start mismatch (:1253). The probe below lands one page past
-    // a one-page mapping, so it takes the !vma branch; reaching :1253 needs an
-    // interior aligned address inside a larger VMA (astra, yip 0161 R3).
+    // The last two are BEHAVIOUR pins, not guard pins, and saying so is the
+    // honest form: vma_lookup null-guards its own Proc, and no VMA can be
+    // installed spanning a wrapped range, so deleting EITHER guard still
+    // refuses -- at the no-VMA miss, with an identical observable. Neither can
+    // be made load-bearing through this API, so what the two assertions buy is
+    // that both inputs are refused without faulting and without mutating, NOT
+    // that the guard named beside them is the one that fired.
+    //
+    // The eighth, vma->vaddr_start != vaddr, IS load-bearing, and the geometry
+    // that makes it so needs its own fixture -- see
+    // burrow.unmap_interior_start_refused below.
     TEST_ASSERT(burrow_unmap(p, 0x10000000ull, 2 * PAGE_SIZE) != 0,
         "a length that does not match the mapping exactly must be refused");
     TEST_ASSERT(burrow_unmap(p, 0x10000000ull + PAGE_SIZE, PAGE_SIZE) != 0,
@@ -779,6 +788,10 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
         "a misaligned vaddr must be refused");
     TEST_ASSERT(burrow_unmap(p, 0x10000000ull, PAGE_SIZE + 1) != 0,
         "a misaligned length must be refused");
+    TEST_ASSERT(burrow_unmap(NULL, 0x10000000ull, PAGE_SIZE) != 0,
+        "a null Proc must be refused, never dereferenced");
+    TEST_ASSERT(burrow_unmap(p, ~(u64)0 & ~(u64)(PAGE_SIZE - 1), 2 * PAGE_SIZE) != 0,
+        "a range whose end wraps past 2^64 must be refused");
 
     TEST_EXPECT_EQ(burrow_mapping_count(v), attached,
         "a REFUSED burrow_unmap must leave its mapping attached -- this is the "
@@ -802,6 +815,53 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
     TEST_ASSERT(burrow_unref_settled(v, p, &settled), "last handle drop frees");
     TEST_EXPECT_EQ(settled, 1u, "and settles the record it left intact");
     TEST_EXPECT_EQ(destroyed_since_snap(), (u64)1, "freed exactly once");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// The one unmap refusal that is load-bearing rather than defence-in-depth:
+// burrow_unmap_reporting's vma->vaddr_start != vaddr check. The geometry below
+// is the probe for which it is the ONLY guard left -- a tail-aligned interior
+// page, whose want_end equals the VMA's own end, so the end-mismatch check
+// passes too. Delete the start check and this call stops refusing: it
+// uninstalls the tail page and then vma_remove()s the WHOLE two-page VMA, a
+// partial unmap silently accepted as a full teardown, leaving the head page's
+// PTEs installed over a Burrow whose mapping reference is gone. That is why it
+// gets its own fixture: unlike the null-Proc and wrapped-end probes, which
+// collapse onto the no-VMA miss, this refusal is observably the work of the
+// guard it names.
+void test_burrow_unmap_interior_start_refused(void) {
+    snap_counters();
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    struct Burrow *v = burrow_create_anon(2 * PAGE_SIZE, false);
+    TEST_ASSERT(v != NULL, "burrow_create_anon NULL");
+    TEST_EXPECT_EQ(burrow_map(p, v, 0x20000000ull, 2 * PAGE_SIZE, VMA_PROT_RW), 0,
+        "burrow_map should succeed on a clean Proc");
+    int attached = burrow_mapping_count(v);
+    TEST_ASSERT(attached >= 1, "the mapping must be attached before the refusal");
+
+    TEST_ASSERT(burrow_unmap(p, 0x20000000ull + PAGE_SIZE, PAGE_SIZE) != 0,
+        "an interior start must be refused -- v1.0 has no partial unmap");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), attached,
+        "the refused interior unmap must leave the VMA attached");
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)0,
+        "and must not free the region");
+
+    // The control that proves the probe reached the start check and not the
+    // no-VMA miss: the same VMA unmaps on its exact geometry, which is only
+    // possible if it was installed spanning BOTH pages -- so the interior
+    // address above was covered, and vma_lookup returned it rather than NULL.
+    TEST_EXPECT_EQ(burrow_unmap(p, 0x20000000ull, 2 * PAGE_SIZE), 0,
+        "the whole-VMA geometry must still succeed");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), attached - 1,
+        "the accepted unmap detaches exactly one mapping");
+
+    burrow_unref(v);
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)1,
+        "the last handle drop frees it exactly once");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

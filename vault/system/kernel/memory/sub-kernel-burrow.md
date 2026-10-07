@@ -293,7 +293,23 @@ address space whose lock is held across the interval, while refs from any other
 space only **add** to the counts. Premise one is the fragile half — a failure
 return added below the mutation point would silently make that site a UAF — so
 `burrow.unmap_failure_leaves_mapping_attached` pins it, with a
-correctly-shaped unmap as the positive control one variable away.
+correctly-shaped unmap as the positive control one variable away. The refusal
+set is eight returns at the head of the function, all of them above its first
+mutation (the `vma_uninstall_range_in` call); that fixture probes seven. Two of
+the seven are labelled **behaviour** pins rather than guard pins, because that
+is what they are: `vma_lookup` null-guards its own `Proc`, and no VMA can be
+installed spanning a range whose end wraps, so deleting either the null-`Proc`
+guard or the wrapped-end guard refuses at the no-VMA miss with an identical
+observable. Neither can be made load-bearing through this API, so those two
+assertions buy refusal without a fault and without mutation -- not the identity
+of the guard that fired. The eighth, the `vma->vaddr_start != vaddr` check, is
+the one that IS load-bearing, and `burrow.unmap_interior_start_refused` pins it
+with the geometry that makes it so: a tail-aligned interior page whose
+`want_end` equals the VMA's own end, so the end-mismatch check passes too and
+the start check is the only guard left. Delete it and that call uninstalls the
+tail page and then `vma_remove`s the whole two-page VMA -- a partial unmap
+accepted as a full teardown, leaving the head page's PTEs installed over a
+Burrow whose mapping reference is gone.
 
 **The witness set, and a second self-audit on it.** Four tests pin the repair:
 `burrow.settled_drop_retains_nonfinal_charge` (a non-final drop leaves the record
