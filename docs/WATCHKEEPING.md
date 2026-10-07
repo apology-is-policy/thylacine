@@ -851,12 +851,13 @@ re-exec'd detached with `nohup … </dev/null &`:
   `THYLA_WAKE_HELD_BOUND` seconds (default 600), it releases the lease too, then
   types a line saying so once the box frees.
 - `watch <res>` claims nothing and wakes when the machine is free or already
-  the agent's; `cancel` stops watchers and touches neither a lease nor a queued
-  request; `probe` prints what a watcher would see.
+  the agent's; `cancel` stops the caller's own watchers (the state directory is
+  shared by every agent, so `cancel --all` is the operator's) and touches
+  neither a lease nor a queued request; `probe` prints what a watcher would see.
 - yip names the asker's own lease `HELD by you`, a peer's by name — the match
   takes both.
 
-**Proven.** 45 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
+**Proven.** 48 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
 names as an agent) against throwaway panes running a fake input box and,
 for every lease state, a fake `yip`: a shell pane and a missing pane are
 refused; an empty box is typed into once, verbatim; a half-typed line is waited
@@ -867,7 +868,8 @@ lease is released; `cancel` leaves nothing typed and no child alive; eight exact
 screens (one measured from an idle pane) through a stand-in tmux, including a
 colour whose parameters contain a 2, which must not read as dim; a real pane
 showing a dim suggestion is typed into; a box that stays typed past the held
-bound gets the lease released and the agent told. Three of
+bound gets the lease released and the agent told; `cancel` leaves a peer's
+watcher alone and `--all` does not. Three of
 those controls failed on the first build, each a real bug: the `HELD by you`
 spelling would have missed every grant; trailing blank rows of a tall pane
 pushed the box out of the bottom-rows window; and the missing-pane check passed

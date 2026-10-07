@@ -6,8 +6,8 @@
 #   thyla-wake.sh watch <res> [--say <text>]
 #                         claim nothing; wake when <res> is FREE or held by this agent
 #   thyla-wake.sh status  armed watchers, and the tail of the log
-#   thyla-wake.sh cancel  stop every armed watcher (a HELD lease is NOT released,
-#                         a queued request is NOT cancelled -- those are yip's verbs)
+#   thyla-wake.sh cancel [--all]  stop this agent's armed watchers (--all: every agent's);
+#                         a HELD lease is NOT released, a queued request is NOT cancelled
 #   thyla-wake.sh probe [pane]   what a watcher would see: program, identity, input box
 #
 # Nothing here is specific to one repository: any agent in a tmux pane on a yip
@@ -237,15 +237,22 @@ status() {
     tail -n 8 "$DIR/log.tsv" 2>/dev/null || echo "  (empty)"
 }
 
+# The state directory is shared by every agent on the machine, so cancel stops
+# only the watchers armed under the caller's yip identity; --all is the
+# operator's, and stops every one.
 cancel() {
-    local m pid n=0
+    local m pid n=0 kept=0 who=""
+    if [ "${1:-}" != --all ]; then
+        who=$(me); [ -n "$who" ] || die "yip presence names no '(you)' line -- cancel --all stops every agent's watchers"
+    fi
     for m in "$DIR"/*.meta; do
         [ -e "$m" ] || continue
+        if [ -n "$who" ] && ! grep -q " me=$who " "$m"; then kept=$((kept + 1)); continue; fi
         pid=$(basename "$m" .meta)
         kill -0 "$pid" 2>/dev/null && kill "$pid" && { echo "  cancelled pid=$pid"; n=$((n + 1)); }
         rm -f "$m"
     done
-    echo "thyla-wake: $n watcher(s) stopped"
+    echo "thyla-wake: $n watcher(s) stopped${who:+ (armed as $who; $kept of other agents left alone)}"
 }
 
 # Arm: validate here, where the caller sees the error, then re-exec detached.
@@ -300,7 +307,7 @@ case "${1:-help}" in
     -h|--help|help) usage 0 ;;
     hold|watch)     m="$1"; shift; arm "$m" "$@" ;;
     status)         status ;;
-    cancel)         cancel ;;
+    cancel)         shift; cancel "$@" ;;
     probe)          shift; probe "$@" ;;
     _run_hold)      run_hold ;;
     _run_watch)     run_watch ;;

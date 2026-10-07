@@ -158,6 +158,20 @@ sleep 10
 grep -q '^\[thyla-wake\] mac WAS yours from [0-9:]*Z, but your input box was not usable for 4s, so the lease was RELEASED at [0-9:]*Z .* -- T12$' "$o" \
     && [ "$(lines "$o")" = 1 ] && pass "T12 told, once the box emptied" || fail "T12 got: $(cat "$o")"
 
+echo "== T13 cancel stops only the caller's watchers; --all stops a peer's too"
+: > "$F/calls"; setres "HELD by main for 2m, 1.0h left"; echo 60 > "$F/hold.sleep"
+sleep 120 & peer=$!
+printf 'mode=hold res=mac pane=%%99998 prog=x me=corona armed=00:00Z\n' > "$THYLA_WAKE_DIR/$peer.meta"
+o=$WORK/o13; : > "$o"; p=$(pane "python3 -I $T/fakebox.py $o empty"); sleep 1
+TMUX_PANE=$p "$W" watch mac >/dev/null || fail "T13 arm"
+sleep 1
+out=$("$W" cancel)
+grep -q '1 watcher(s) stopped (armed as aux; 1 of other agents left alone)' <<< "$out" && pass "T13 cancel stopped aux's one" || fail "T13 cancel said: $out"
+kill -0 "$peer" 2>/dev/null && [ -e "$THYLA_WAKE_DIR/$peer.meta" ] && pass "T13 the peer's watcher and its meta survive" || fail "T13 the peer's watcher was stopped"
+"$W" cancel --all >/dev/null
+sleep 1
+! kill -0 "$peer" 2>/dev/null && pass "T13 cancel --all stopped the peer's" || { fail "T13 --all left the peer"; kill "$peer" 2>/dev/null; }
+
 echo "== log"; cat "$THYLA_WAKE_DIR/log.tsv" | cut -c1-200
 tmux kill-session -t thyla-wake-test 2>/dev/null
 echo "work dir: $WORK"
