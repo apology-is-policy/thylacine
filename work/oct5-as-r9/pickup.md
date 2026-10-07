@@ -389,13 +389,14 @@ when the mac is mine and the harness re-invokes.
 1. `tools/build.sh kernel --config ci`, then the suite. Expect 1836 (1834 + the
    two new tests). The private-owner port has NEVER COMPILED -- expect to fix
    build errors before anything else is meaningful.
-2. Both RED legs, each of which must be shown red before it is a witness:
-   - delete `vma->vaddr_start != vaddr` in `burrow_unmap_reporting` ->
-     `burrow.unmap_interior_start_refused` must FAIL.
-   - make `loom_private_destroy` uncharge `metadata + backing` unconditionally ->
-     the nonfinal leg of `loom.private_owner_lifecycle` must FAIL.
-   After each sabotage run, REBUILD from clean source: a sabotage run leaves its
-   kernel in `build/` and `test.sh` boots THAT.
+2. Both RED legs: `sh work/oct5-as-r9/private-owner-red-legs.sh`. Do NOT redo
+   them by hand -- the script is written, and its mutation anchors, the mutants'
+   compilability and the byte-exactness of its reverts are already verified
+   off-lease. It mutates, builds, reads the per-test verdict out of the BOOT LOG
+   (ABSENT reported as its own outcome), reverts, and runs its green control
+   LAST after its own rebuild, because a sabotage run leaves its kernel in
+   `build/` and `test.sh` boots THAT. Expect 4 rows: both fixtures FAIL under
+   their own mutant, both PASS on the rebuild.
 3. `tools/ci-smp-gate.sh` -- the retirement is an I-32 settlement path, so it
    needs the multi-boot matrix for the same reason AS-R9 did.
 4. The five owning dossiers' pass (`sub-kernel-loom`, `-handle`,
