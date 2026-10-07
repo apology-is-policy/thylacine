@@ -29,6 +29,27 @@ free_gb() { df -g . | awk 'NR==2 {print $4}'; }
 
 # Overridable only so the HEAD-equality refusal below has a testable arm.
 ASTRA_TREE=${ASTRA_TREE:-../thylacine-astra}
+
+# AMBUSH FORK PIN (aux, yip 0179). build.sh bakes from ${AMBUSHFORK:-~/projects/ambush}
+# and THIS base predates main's cf296caa1, so ambush_fork_check still requires
+# held_on_thylacine.go to declare launchHeld = true. aux is moving shared master
+# to c3c7914, which deletes that file -- so consuming the shared default would
+# break this bake the moment they land it. Pin to the worktree aux left at
+# 073faaa, and REFUSE rather than fall back: a silent fallback to a moved master
+# would fail later, inside the build, with a message about the fork instead of
+# about the pin.
+AMBUSHFORK=${AMBUSHFORK:-$HOME/projects/ambush-pin-073faaa}
+_af_held="$AMBUSHFORK/pkg/proc/native/held_on_thylacine.go"
+if [ ! -f "$_af_held" ]; then
+  echo "REFUSING: AMBUSHFORK=$AMBUSHFORK has no pkg/proc/native/held_on_thylacine.go;"
+  echo "  build.sh:126 needs it. Point AMBUSHFORK at a fork at/behind 073faaa."
+  exit 4
+fi
+if ! grep -q '^const launchHeld = true$' "$_af_held"; then
+  echo "REFUSING: $_af_held does not declare launchHeld = true (build.sh:125)."
+  exit 4
+fi
+export AMBUSHFORK
 PROV=work/oct5-as-r9/provenance.log
 # astra, 0169 t4 + 0161 t9: retain the exact source/config and PAIRED IMAGE
 # hashes with each result. A verdict without them cannot be attributed to a

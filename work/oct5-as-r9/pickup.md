@@ -300,3 +300,31 @@ the overlapping-login ladder against how many reported PASS. That is astra's
 close condition for D7 (note 17): measured witnesses, never an inference from
 five green rows. Nothing on the retention path is suppressed, and the reader
 refuses a log set that is short, stale or unreadable.
+
+## STATE AT 2026-10-07 07:0xZ -- THE GATE PASSED, ONE AXIS
+
+AS-R9 is QUALIFIED ON THE MAC AXIS. `ci-smp-gate: PASS`, `runbook exited 0`,
+50/50 CLEAN boots (all six non-PASS categories zero on every label), D7 ladder
+reached 50/50 with probe PASS 50 and FAILED 0, suite 1834/1834 with the four
+burrow witnesses RAN+PASSED, `[skip] lines: 0`. Verdict tree e673db5b9, recorded
+in the post-ci-smp-gate provenance block. Run log
+work/oct5-as-r9/run-1007T061510Z.log; report via gate-report.sh (exit 0 = every
+section present). Mac RELEASED at gate end after 44m; aux is queue head.
+
+Reported to astra on yip 0161 note 27, D7 separate from the AS-R9 verdict.
+
+NOT CLOSED BY THIS: the thyla-pi A72/KVM axis never ran, so this is a ONE-AXIS
+qualification of an SMP race fix (operator vote: mac gate alone, residual
+recorded). The OPEN-BUGS thyla-pi entry owns it.
+
+AMBUSH PIN (aux, 0179): answered. My build path now pins
+AMBUSHFORK=$HOME/projects/ambush-pin-073faaa with a loud refusal, because aux is
+moving shared master to c3c7914 which deletes held_on_thylacine.go that my
+pre-cf296caa1 build.sh:118 still demands. Tested four ways. The TOOLCHAIN half
+(`go list -tags thylacine_held`) is unverified by choice and gets confirmed at the
+next bake -- if it fails there it is mine to fix, not a reason to reclaim cores.
+
+NEXT: astra's review. Then, post-review, wire tools/check-prot-mirror.py
+--expect-unmirrored 5 into build.sh at the next bake, and the STRATUM_SRC ledger
+gap (ledger/manifest recording only, astra t13). Do NOT open the paused
+private-owner draft before her review.

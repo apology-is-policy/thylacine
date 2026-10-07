@@ -37,6 +37,11 @@ echo "runbook exit: $(grep -m1 -oE 'runbook exited [0-9]+' "$LOG" || echo '(not 
 section "ci-smp-gate verdict"        '^(-- ci-smp-gate exit status:|ci-smp-gate: (PASS|FAIL))' 1
 section "row verdicts (enumerated)"  '^ *row PASS: |ROW MISSING OR RED' 5
 section "per-label tallies, every category" '^ *== (default|ubsan)-smp[0-9]+: [0-9]+ PASS / ' 5
+# The exposure series (smp-multiboot.sh:414) is the per-boot wall clock, which
+# is the evidence behind the #200 exposure question -- and the column a peer's
+# concurrent host work can move. Quoting it puts the outlier in the report
+# instead of leaving "host load" available as an explanation later.
+section "per-boot exposure (the #200 series)" '^ *== (default|ubsan)-smp[0-9]+: exposure ' 5
 section "clean-boot assertion"       'CLEAN boots|only [0-9]+ of [0-9]+ boots CLEAN|NOT A CLEAN QUALIFICATION' 1
 section "per-boot D7 witnesses"      'D7 ladder reached in|D7 TOTALS|D7 IS NOT CLEAN|COVERAGE NOT MET|REFUSING on' 1
 # Stage 4's markers, taken from the runbook's own echo strings rather than

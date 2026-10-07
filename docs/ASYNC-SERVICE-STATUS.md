@@ -934,3 +934,45 @@ stage 6 refuses out loud if anyone sets it otherwise without the lease.
 What this does NOT license: reading the mac gate's green as a two-axis
 qualification, or closing the residual by argument. The residual is owned in
 OPEN-BUGS by the thyla-pi entry, which also carries the vote.
+
+### October 7, later: the gate qualified AS-R9 on the mac axis
+
+`ci-smp-gate: PASS -- 0 corruption across all configs` on run log
+`work/oct5-as-r9/run-1007T061510Z.log`, verdict tree
+`e673db5b941fb71123cfb5a2d38e3e163b38aba2` as recorded in that run's
+post-ci-smp-gate provenance block. Gate exit 0, `runbook exited 0`.
+
+- **50/50 CLEAN boots**, not five PASS rows: every label reports
+  `10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other (N=10)`.
+  Each boot carries exactly one classification (`smp-multiboot.sh` `rc_ok` arm
+  increments `pass` then `continue`s; all other paths fall through a single-match
+  `case`), which is what licenses reading `pass == N` as "all six others zero".
+- **Two kernels**: 30 boots on the default ELF `1fe1ba3a46219dc1`, 20 on the
+  sanitizer ELF `8fdd7f1f5695b4ff` (absent before the gate built it).
+- **D7, reported separately**: ladder reached 10/10 per label, 50 total, probe
+  PASS 50, FAILED 0, measured off the 50 retained logs behind the denominator
+  control. The OPEN-BUGS D7 entry is CLOSED on this evidence.
+- **Suite**: `tests: 1834/1834 PASS`, `[skip] lines: 0` on the gate image, and the
+  four burrow witnesses each RAN+PASSED by name:
+  `settled_drop_retains_nonfinal_charge`, `settled_drop_exact_payer`,
+  `settled_mapping_drop_defers_free`, `unmap_failure_leaves_mapping_attached`.
+- **Exposure (#200)**: per-label means 42 / 45 / 47 / 46 / 49 s per boot, rising
+  monotonically with CPU count and the sanitizer, 50 boots with no outlier.
+  Astra's disclosed verification window (06:25:00-06:28:30Z) overlapped
+  `default-smp1` boots 8-10 and `default-smp4` boots 1-2; those boots read 42,
+  42, 44 and 45, 46 against label means 42 and 45, so no perturbation is visible.
+  Recorded as a negative result, which excuses nothing because nothing failed.
+- **Provenance note**: post-gate `.config` (`cd0200373d03e647`) is the sanitizer
+  configuration the gate left behind; the default build's pin is the post-build
+  block at 06:17:02Z (`4fcc788d6be38b80`), and the default kernel ELF is
+  byte-identical across all three blocks. `STRATUM_SRC` stayed
+  `stratum-astra/v2 @61dde3727921e70e2c72fbd3c9e2044a192f4a54`, clean.
+
+**STILL ONE AXIS.** All 50 boots ran on Apple M2 + HVF. The A72/KVM leg never ran
+(thyla-pi unreachable on both routes), per the operator's "mac gate alone,
+residual recorded". This does not license reading the mac green as two axes; only
+the pi booting this repair closes it. Astra reviews with the residual named.
+
+Nothing pushed, nothing landed on main. The 128 MiB protection, private async and
+clipboard are unchanged; the paused private-owner draft stays shut until Astra's
+review.

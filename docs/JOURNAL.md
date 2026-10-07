@@ -390,6 +390,104 @@ qualification, and the residual cannot be closed by argument -- only by the pi
 booting the repair. Recorded in ASYNC-SERVICE-STATUS.md and owned by the thyla-pi
 entry in OPEN-BUGS, which carries the vote so nobody re-asks it.
 
+### UPDATE, the gate qualified AS-R9 on one axis -- 2026-10-07 06:58Z
+
+`ci-smp-gate: PASS -- 0 corruption across all configs`, gate exit 0, `runbook
+exited 0`, and the report's own completeness check exit 0. 50 boots across five
+labels, and all 50 CLEAN in the strict sense: every one of the six non-PASS
+categories is zero on every label, so no boot was waved through carrying a
+timing or inject-miss while the row verdict passed. That distinction is Astra's
+(0161 note 8) and it is the whole reason the report quotes tallies instead of
+rows -- `smp-multiboot.sh:347` accepts `corrupt==0 && extkill==0 && other==0`,
+which five PASS rows can satisfy with unclean boots inside them.
+
+I did not take my own comment's word for why `pass == N` may be read as clean. The
+licence is that each boot carries exactly ONE classification: the `rc_ok` arm
+increments `pass` and `continue`s, and every other path falls through a
+single-match `case`, so `pass == N` IS "all six other categories zero". Checked
+in the source, because a derived guard cannot go stale and a name-pinned one can.
+
+TWO THINGS MEASURED DURING THE WAIT THAT WOULD HAVE COST THE RUN. First, stage 5
+greps the per-label tally as `^== $lbl:` in `guest-smp.log`, and if `ci-smp-gate`
+had indented or piped smp-multiboot's output, that grep would have found nothing
+and aborted stage 5 AFTER a 2.5h green matrix -- `ci-smp-gate.sh:171` invokes it
+inside `if ...; then` with no pipe and no redirect, so the lines land at column 0
+where the grep needs them. Second, `gate-report.sh` was missing the per-boot
+exposure series (`smp-multiboot.sh:414`), which is the #200 evidence; added, and
+tested both ways (the live partial log, holding one exposure line, refuses with
+`MISSING: 1 line(s) matched, expected at least 5`; a synthetic five-label log
+prints all five).
+
+D7 IS CLOSED, AND ON THE CONDITION ASTRA SET RATHER THAN THE ONE I ASSUMED: the
+ladder was reached in 10/10 boots on every label, 50 total, probe PASS in 50,
+FAILED in 0 -- actual per-boot witnesses read off the 50 retained serial logs
+behind the denominator control, which refused nothing. My original claim was that
+"the 5x10 matrix exercises D7 fifty times"; that was an assumption about what
+each configuration reaches, she refused it in note 17, and the retention that
+makes it measurable exists only because she did. It also spans two kernels -- 30
+boots on the default ELF `1fe1ba3a46219dc1`, 20 on the sanitizer ELF
+`8fdd7f1f5695b4ff`, which did not exist before the gate built it -- so the cure
+holds under UBSan, which no single controlled boot could have shown.
+
+A PROVENANCE READING THAT LOOKS LIKE A CONTRADICTION AND IS NOT. Post-gate
+`.config` is `cd0200373d03e647` while stage-start and post-build are both
+`4fcc788d6be38b80`, beside a kernel ELF that never moved. The gate builds the
+sanitizer flavour and that build rewrites `build/.config`, so the post-gate block
+records the configuration the gate LEFT BEHIND; the block that pins the default
+build is the post-BUILD one at 06:17:02Z. The default ELF reads
+`1fe1ba3a46219dc1` in all three blocks -- a fourth byte-identical reading of the
+control variable. I reported this to Astra before she could find it, because a
+changed config beside an unchanged kernel is exactly the shape that invites a
+wrong inference.
+
+I HELD THE COMMIT ON PURPOSE while the gate ran. `lease-runbook.sh:677` records
+`my HEAD` in the post-gate provenance block, so committing mid-run would have
+made the qualifying verdict's own provenance name a tree the gate never ran on.
+The block landed naming `e673db5b9`, which is the truth, and the held edits went
+in afterwards.
+
+THE TIMING COLUMN, WITH A DISCLOSED OVERLAP AND NO EXCUSE ATTACHED. Astra ran
+serialized Go/PTY checks under the operator's earlier authorization and, when I
+asked, disclosed the window to the second (note 24: 06:25:00-06:28:30Z,
+conservative). Mapping boot completion times against it: `default-smp1` boots 8,
+9 and 10 finished inside it (06:25:34, 06:26:16, 06:27:00) and `default-smp4`
+boot 1 at 06:27:45, with boot 2 completing 06:28:31, one second past the close,
+so its run spanned the window. Their per-boot seconds are 42, 42, 44 and 45, 46
+against label means of 42 and 45 -- no deviation. Per-label means rise
+monotonically with CPU count and the sanitizer: 42 / 45 / 47 / 46 / 49 s. That is
+a negative result on perturbation, and it is worth exactly that much: nothing
+failed, so there is nothing it excuses. The point of having the series is that an
+outlier would have been IN the report instead of leaving "host load" lying around
+as an available explanation.
+
+WHAT THE GREEN DOES NOT COVER. Every one of those 50 boots ran on Apple M2 + HVF.
+thyla-pi is unreachable on both routes, so the A72/KVM axis -- the only non-Apple
+memory model in the fleet, and the second axis that can separate two causes
+sharing one reading -- never ran. The operator's answer was "mac gate alone,
+residual recorded", so this is a ONE-AXIS qualification of an SMP race fix and I
+am not reading it as two. The OPEN-BUGS thyla-pi entry owns the residual and now
+records that its asymmetry is live rather than forecast.
+
+AUX'S FORK, ANSWERED, INCLUDING MY OWN WRONG LOOK. aux held shared
+`~/projects/ambush` at 073faaa pending my answer, because moving master to
+c3c7914 deletes `held_on_thylacine.go` and my pre-cf296caa1 `build.sh:118`
+`ambush_fork_check` still demands it -- their move would have broken my next bake,
+and my runbook set `AMBUSHFORK` zero times. I declined their option (a), holding
+master until I merge a main carrying cf296caa1, because I am instructed not to
+merge main while the reader-role/lifecycle work is unreconciled: that would have
+held a shared fork on a condition I cannot satisfy. Took the pin instead, and
+verified it myself -- my first check looked for the file at the worktree ROOT,
+where it is absent, which read for a moment as a broken pin; `build.sh:126` looks
+under `pkg/proc/native/`. Read the checker's path, not the plausible one. The
+runbook now pins and REFUSES rather than falling back, tested four ways including
+a positive control (today's shared master still passes, so the guard discriminates
+instead of merely rejecting). The toolchain half is deliberately unverified: aux
+was queue head for the mac seconds after I released it, and I would not reclaim
+cores to upgrade evidence I already had statically.
+
+The matrix took 44m wall, not the ~2.5h that had been circulating. Mac released at
+gate end rather than at write-up end; aux's 3.3h wait resolved on it.
+
 ## 2026-10-04: explicit protocol-buffer storage
 
 The private owner needs all metadata/payload transport storage accounted before

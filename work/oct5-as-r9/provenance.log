@@ -113,3 +113,16 @@ stratum dirty  : no
 (absent)          build/kernel-undefined/thylacine.elf
 b5b71818dcbcc994  build/ramfs.cpio
 f0970aba37431897  build/fixtures/pool.img
+=== post-ci-smp-gate (the qualifying verdict) -- 2026-10-07T06:58:35Z ===
+my HEAD        : e673db5b941fb71123cfb5a2d38e3e163b38aba2
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 8
+STRATUM_SRC    : /Users/northkillpd/projects/stratum-astra/v2
+stratum HEAD   : 61dde3727921e70e2c72fbd3c9e2044a192f4a54
+stratum dirty  : no
+cd0200373d03e647  build/.config
+1fe1ba3a46219dc1  build/kernel/thylacine.elf
+8fdd7f1f5695b4ff  build/kernel-undefined/thylacine.elf
+63d781afe4a6e5f5  build/ramfs.cpio
+9f9ea3727d5c6065  build/fixtures/pool.img
