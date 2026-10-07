@@ -600,9 +600,10 @@ a capless same-principal peer would cover the child, take total control of a
 writer/exec pair (I-42) and see where it lies (`maps`). So the join ORs `CAP_JIT` into
 its caps while the address space holds any code alias (`AddrSpace.code_vmas`, kept by
 the VMA list's own insert and remove), sole mapper or not. The count has to be right
-only once the creator is gone, and the reap takes the lock the join runs under; until
-then the creator, which passed the `CAP_JIT` gate, is a mapper the cover already
-weighs. A fork refuses a code region outright (the clone classifier), so `RFMEM` is
+only once the creator is gone: the creator's own exit publishes it a ZOMBIE under
+`g_proc_table_lock` after its store, a reap can only follow that, and the join runs
+under the same lock. Until then the creator, which passed the `CAP_JIT` gate, is a
+mapper the cover already weighs. A fork refuses a code region outright (the clone classifier), so `RFMEM` is
 the only way to inherit one.
 
 **What this does NOT close.**
