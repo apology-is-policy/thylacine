@@ -225,6 +225,61 @@ The operator's decision, which I have not re-asked: the mac gate alone, with the
 pi A72/KVM axis recorded as an owned residual. So this is a ONE-AXIS
 qualification, and nothing here is pushed, landed, or activated.
 
+### The dossier for the format every gate parses
+
+With the mac held by a peer and the pi unreachable on both routes again
+(re-measured: mDNS does not resolve, the tunnel's edge answers and its origin
+does not), the work left was the kind that needs no host. `kernel/test/test.c`
+and `test.h` were UNOWNED -- quaestor had been asking for a dossier and the ask
+had been deferred as pre-existing, which is the disposition the stewardship rule
+warns about. The parser lesson made it concrete: the format every gate in the
+fleet parses, and every investigation-time one-liner, was described nowhere.
+
+`sub-substrate-gates` owns the consumer half, so the new dossier is the producer
+half -- what the kernel emits, in what order, and which readings are therefore
+sound. Two of its facts came out of measuring rather than reading. A census
+needs BOTH the `[test] ` marker and the ` ... ` separator: each alone counts
+1837 on a 1836-test boot, because a non-test yield-waits summary line carries
+the marker and an unrelated userspace probe line carries the separator. Two
+decoys, from unrelated sources, each inflating by exactly one -- the error least
+likely to be noticed, since the total still looks plausible. And my first draft
+described the registration row's trailing fields as "dispatch fields the runner
+uses to decide how to invoke it"; the header says they are the harness's output
+slots, the verdict itself, and the `false, NULL` ending every row is their
+initial value. I had inferred from the rows' shape instead of reading the
+declaration. The correction stayed in the dossier, because a dossier can be true
+about the wrong thing exactly as a comment can.
+
+### The provenance question, and a claim that was wrong in both directions
+
+Astra's close asked that the D7 mechanism stay pending a source-level comparison
+rather than the shallow grep I had withdrawn. Read-only, no lease, and it
+settled: the two Stratum trees are ONE repository with two worktrees, and the
+sibling is canonical `main` plus EXACTLY ONE commit -- the session-lease rework,
+ten files, centred on the ctl DEK path, adding a lease predicate that is absent
+from canonical's source and a test tool absent from canonical's tree. The live
+remote, read with `ls-remote` rather than from a cached ref, holds canonical's
+tip for `refs/heads/main`, and the commit is on no remote-tracking branch. The
+`origin/main` TRACKING ref reads a stale, divergent commit that is zero ahead of
+the real tip, which would have misled me if I had trusted it -- a remote is
+judged with `ls-remote`, never a cached ref.
+
+So the withdrawn claim was wrong in both directions, not merely unevidenced.
+Canonical is not missing "the session-DEK lease work": it carries a DEK lease
+table of its own. It lacks the one commit that REWORKS that mechanism. The
+coarse version I had been repeating would have sent the next reader hunting for
+a mechanism already present.
+
+And the remedy inverts. "Rebuild from canonical", which I had treated as the
+obvious cure, would DROP that commit and re-redden D7's overlapping-login probe
+on the attribution already recorded -- it reproduces the original red rather
+than resolving it. What is actually owed is for the commit to land in Stratum
+main, which is astra's change and the operator's push, or for the pin to be
+recorded, which is the ledger line already on main. Put to astra as the one
+question the enqueued item now reduces to; if it is blocked rather than merely
+queued, it becomes an operator decision about Stratum rather than a line sitting
+in my queue under my name.
+
 ### One more, found by reading a diff instead of a success line
 
 Regenerating INTEGRATION-MANIFEST.md after those two commits printed `wrote ...
