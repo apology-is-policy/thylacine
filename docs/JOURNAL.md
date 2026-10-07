@@ -666,6 +666,84 @@ close is a production counter, which is a decision for astra and the operator,
 not something to slip in beside a test. A hole in the evidence stated is worth
 more than a claim quietly narrowed to fit what I could measure.
 
+Astra read the reap leg before the lease arrived and sent two findings, which is
+the cheapest review there is: both were about work that had not yet spent a core.
+
+The first killed a claim I had made twice. My release witness sampled
+`phys_free_pages()` before the creator and compared it after a
+`magazines_drain_all()`. She said the baseline was not normalised, and the source
+agrees: `phys_free_pages` returns `g_zone0.total_free_pages` alone
+(mm/phys.c:267), and `mag_free` stashes an order-0 page with its flags cleared
+under the comment "magazine ownership, not free list" (mm/magazines.c:134), so
+the end-of-leg drain also returns whatever EARLIER legs left in magazines. The
+delta could therefore be fabricated by someone else's freed pages, or cancel a
+leaked one exactly. Worse for my self-image, the tree already encoded the cure:
+test_cow.c:249-253 drains BEFORE and after and states its claim as a delta
+between two runs one variable apart, and its own header records the measured
+lesson that an order-0 free never reaches the buddy. I had copied test_slub.c
+instead, whose asymmetry survives only because nothing is in a magazine at its
+position -- a premise my fixture cannot inherit, since ten of its own legs free
+pages before the baseline. So the first version of the witness was wrong in a way
+that would have reddened a correct kernel or hidden a leak, depending on the day.
+
+Normalising it would have been a two-line fix, and it is not what I did. The
+drain walks EVERY CPU's magazine with no lock and no IRQ mask
+(mm/magazines.c:154), while `mag_free` protects a set only with
+`spin_lock_irqsave(NULL)` -- IRQ masking that pins the local CPU and excludes
+nothing elsewhere. For the tree's other 24 call sites that is a hazard, because
+they free on the CPU they measure from. For this leg the cross-CPU pass is
+LOAD-BEARING: the retirer frees the dying image on whatever CPU it ran on, and
+`test_run_all` is at main.c:874, after `smp_init` at :689, at the default -smp 4
+with three kthreads runnable. An instrument that needs a quiescence the fixture
+cannot establish is a different claim, not a weaker one, so the witness came out
+and release is recorded as open with the conditions for restoring it: a quiescent
+drain or a production counter, plus an omitted-put-only mutant, because the
+balanced mutant tests ACQUISITION and nothing else. Three positions on one claim
+in one day -- needs a counter, page-granular after all, out -- and the dossier
+records all three, because the sequence is the part a later reader needs.
+
+The drain's own exposure is a real find in the commons and it is enqueued rather
+than mentioned: an interleaving where CPU B's push resurrects a count over an
+entry already handed to the buddy, so a later `mag_alloc` returns a page the
+buddy also owns. `buddy_free` does take `zone->lock` (mm/buddy.c:273), so the
+zone side is sound; it is the per-CPU array that is unguarded. Unreproduced, by
+reading only, and said so to both peers whose gates run those tests -- with the
+request that they send me the line rather than file it fresh, and without any
+claim that it explains a past result.
+
+Her second finding was that my runner recovered only on the happy path: the EXIT
+trap restored the SOURCE, but any failure after the mutation left a MUTANT KERNEL
+in build/, which the next test.sh would boot, and a stage-3 hash mismatch merely
+printed before exiting 0. Now one recover() runs on every path, and the ordering
+is the design: QUARANTINE FIRST, renaming the mutant images out of build/ --
+same volume, so it costs no cores and no disk and can never be refused -- which
+leaves build/ imageless, a state a later run must repair by building and cannot
+satisfy by booting a mutant. Then the source restore, nonzero on a hash mismatch.
+Then the clean rebuild, attempted only while the floor holds AND the lease is
+still mine, both re-measured at that moment rather than inherited from stage 0,
+failing closed on a byte-identity mismatch. The run's own status survives;
+incomplete recovery overrides it with 9, so "the experiment worked but the tree
+is dirty" cannot exit 0.
+
+I drove that half before trusting it, which is how the next lesson arrived. The
+harness extracts the functions from the live script so they cannot drift, runs 24
+checks over 7 scenarios, and asks the LAYOUT question of the real build tree
+rather than the stub -- my stubs encode my belief about the layout, which is
+exactly how the preserve step passed 22 checks and missed the file it existed
+for. Three mutants one variable apart each redden their named arm only. But its
+first run reported two reds, and they were the HARNESS's: a command substitution
+plus a misplaced redirect between the subshell and `$?`, so the status printed to
+the terminal and the log stayed empty. The wrapper trap, a fourth time today, in
+a disguise I had not seen. The tell was that the failure message quoted the very
+line it claimed was missing -- when a check's own output contradicts its verdict,
+suspect the check.
+
+Nothing ran on hardware in any of this. aux still holds the mac with hours left,
+main is queue 1, I am queue 2, and the leg is still UNRUN -- which is the honest
+summary of the day's last stretch: two defects in my own unrun work, found by a
+peer reading it and by a harness driven backwards, fixed before a single core was
+spent on them.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,

@@ -840,3 +840,64 @@ AddrSpace; label the fixture UNRUN until the control/mutant run under my lease;
 bring a discovered lifetime defect with its evidence BEFORE writing a fix; and
 the 109-file kernel/test ownership backlog is NOT a task for this handoff -- only
 the operator can assign it.
+
+## 2026-10-07 ~16:4xZ: astra's two pre-lease findings, both real, both fixed
+
+HEAD 5acae9b33, pushed to both mirrors and verified per URL. Tree clean of
+tracked modifications. Still NOTHING landed, merged or activated; the leg is
+still UNRUN; aux holds the mac (~3.8h left at writing), main is queue 1, I am
+queue 2, disk 8.0 GiB.
+
+SUPERSEDES THE SECTION ABOVE on one point. That section says the release half has
+"no observable". The sequence is more useful than that: there IS a page-granular
+observable (the final lifetime drop runs proc_pgtable_destroy, so an unreleased
+reference strands page tables, which phys_free_pages sees after a drain) and it
+was written, then REMOVED, because its INSTRUMENT cannot be made sound in this
+fixture. Do not re-add it without reading this.
+
+F1, from yip 0161 t55 -- THE RELEASE GAUGE IS OUT, not normalised.
+  - Her premise, confirmed at the source: phys_free_pages returns
+    g_zone0.total_free_pages alone (mm/phys.c:267) and mag_free stashes an
+    order-0 page with flags cleared, "magazine ownership, not free list"
+    (mm/magazines.c:134). My baseline was taken WITHOUT a drain and compared
+    after one, so earlier legs' magazine residue could fabricate the delta or
+    cancel a leaked page. The tree's symmetric discipline is test_cow.c:249-253
+    (drain before AND after, claim as a delta between two runs one variable
+    apart); I had copied test_slub.c:152/160, whose asymmetry survives only
+    because nothing is in a magazine at its position.
+  - Why normalising was not enough: magazines_drain_all (mm/magazines.c:154)
+    walks EVERY CPU's magazine with no lock and no IRQ mask. The other 24 call
+    sites free on the CPU they measure from, so for them that is a hazard only.
+    THIS leg's retirer frees the dying image on whatever CPU it ran on, making
+    the cross-CPU pass LOAD-BEARING for the reading, in a suite that runs at
+    main.c:874 after smp_init at :689, -smp 4, with kthreads runnable.
+  - So the leg witnesses ACQUISITION. To restore the release witness you need a
+    quiescent drain or a production counter, PLUS an omitted-put-only mutant to
+    show the gauge can redden at all -- the balanced mutant does not test
+    release (astra's condition, recorded verbatim in the fixture and the
+    dossier).
+  - The drain's cross-CPU exposure is ENQUEUED as a tracked bug against
+    mm/magazines.c (memory OPEN-BUGS.md) and sent to main (0187 note 1) and aux
+    (0186 note 3) one-way. Reading only: nothing run, no corruption observed,
+    no claim that it explains any past result.
+
+F2 -- RECOVERY IS ALL-EXIT in work/oct5-as-r9/reap-leg-run.sh (now 301 lines).
+One recover() that every path arrives through: quarantine FIRST (rename the
+mutant images out of build/ -- same volume, no cores, no disk, cannot be
+refused -- leaving build/ imageless, kept as evidence with a WARNING.txt);
+source restore NONZERO on a hash mismatch; the clean rebuild only while the
+floor holds AND the lease is still mine, both RE-MEASURED there, failing closed
+on a byte-identity mismatch or a failed build; the run's own status preserved,
+overridden with 9 only when recovery is incomplete; the lease line on every
+path. The script still never releases the mac itself -- a finding is
+investigated with the machine held.
+
+NEW, and run it before trusting a change to the runner:
+  sh work/oct5-as-r9/reap-leg-recovery-test.sh      # 24 checks, 7 scenarios
+Functions are EXTRACTED from the live script so they cannot drift; the LAYOUT
+arm asks the real build tree, never the stub. Driven both ways: three mutants
+one variable apart redden their named arm only (23/1, 22/2, 23/1) against 24/0
+unmutated. RUN=<path> drives a mutant copy.
+
+WHAT IS READY THE MOMENT THE LEASE LANDS, unchanged in its experiment half:
+  sh work/oct5-as-r9/reap-leg-run.sh
