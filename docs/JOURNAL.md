@@ -22,6 +22,170 @@ needed the operator.
 
 
 ---
+## 2026-10-07 (main, Opus 5.5, effort max) -- the exit-close seam: a clunk that never waits, a kill that forces the final close, the closer that finishes it; and the Loom write-behind bypass (landed)
+
+**The vote (06:10Z, operator; never re-ask).** A now, then B with C; close()
+returns EIO (that half landed with the tag pool). The seam: the last thread
+out closes its handles under `exit_close_active`, where no death reaches it,
+so a 9P server that never answers held the dying Proc forever; any process
+can serve a mount.
+
+**A (c05c1cdd1).** `thread_death_reaches(t)`: a death can end t's sleeps
+unless t is a kproc thread or under `exit_close_active`. dev9p's clunk on such
+a thread goes through `p9_client_clunk_nowait`: `rpc->no_wait` makes the tag
+drain refuse before the build and the send flow refuse at its first
+back-pressure, -P9_E_AGAIN with the fid bound, and the fid goes to the closer.
+While mapping DyingClose I found `net_poll_teardown_buggy_no_closer.cfg` had
+never been run by `specs/check-net-poll.sh`; it is in the checker now.
+
+**A2 (1b4840118), the OPEN-BUGS 07:44Z kill-mid-flush P2.** A flush a death
+ended kept nothing: the run was dropped and the errno latched, though
+`write()` had reported the bytes written. Now the run stays staged and
+nothing latches; runs carry explicit offsets, so a re-flush rewrites a landed
+prefix with the same bytes. A2 alone does not save a die-pending thread's own
+last close: `dev9p_close` freed the kept run with the priv. That is C's.
+
+**B+C design (08:48Z-08:56Z), and the hazard that shaped B.** Reading
+`proc_group_terminate_code` showed a second kill already re-runs the death
+wake over every peer's `rendez_blocked_on`; the closer just re-slept because
+`thread_die_pending` read false under `exit_close_active`. So B is a Proc bit
+honoured by the hold. Reading loom.c ~355-400 showed the trap: `loom_free`'s
+SQPOLL join borrowed `exit_close_active` to be death-proof, and under a forced
+close its `while (!exited) sleep()` would return at once forever -- a spin in
+a non-preemptible syscall body, the -smp 1 hang class that hid 19 days
+(bug_loom_free_spins_on_a_kthread_join). So the join got its own
+`kthread_join_active`. Forcing is restricted to explicit kills
+(`proc_group_kill`: the kill note and the ctl kill), so a hangup, EXITKILL or
+a legate scope's end never opens the I-38 window.
+
+**The census B rests on.** Of the 22 Dev close hooks, only dev9p's flush and
+clunk wait, plus Loom's join; the kernel has no sleeping locks. A forced close
+therefore reaches nothing else that could spin or unwind early.
+
+**Two wrong turns, both caught before a build.**
+- C's kernel-thread arm was first `proc == kproc()`. The in-kernel test
+  runner IS kproc's boot thread (main.c `test_run_all`), so every test close
+  of a staged file would have gone to a closer -- on fixtures with no session
+  owner, losing the run. Keyed instead on a new owner-only Thread bool,
+  `closes_never_wait`, which only the SQPOLL kthread sets (loom_free joins it).
+  Part A keeps kproc (a no-wait clunk only differs on a full pool or ring).
+- The first B forced only when the kill's CAS on `group_exit_msg` lost. An
+  `exits()` close sets no group exit message and the Proc stays ALIVE, so an
+  ordinary single-threaded program hung in its close needed two kills.
+  `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`) fixes it
+  (e0005e470): a first kill that finds the close under way forces it.
+
+**The rebase and a second self-review (while the Mac was held).** Rebased
+onto main cb7194c10 as `exitclose-land`: no file overlaps the land commit, so
+nothing moved. Re-reading the whole diff found two comments the change made
+false, both claims about the very hazard this chunk removes: proc.c's
+thread_exit_self note ("NOT breakable by a further kill") and loom.h's sqpoll
+note ("termination rests on the server answering"); fixed in dbfeb561a with
+a misplaced helper. A grep for the same claims elsewhere finds only history
+(AUDIT-TRIGGERS addenda, fnd-68-r2-f3) and the seam this chunk closes. I also
+checked the one close-time Tflush outside the census, dev9p_poll_priv_release
+-> p9_client_abandon_async: a non-blocking ring write that rolls back on
+EAGAIN, so the census holds there. The Fable round died on a network error
+mid-read and was resumed from its transcript.
+
+**A defect A2 itself introduced, found before the audit said so.** While
+designing the Loom fix I reread wstat's flush arm: it clears write-behind
+eligibility after the flush unconditionally. Before A2 a failed flush always
+dropped the run, so a priv that stopped staging never had one. A2 keeps the
+run on a death, so a dying wstat left `wb_len > 0 && !wb_eligible`, and every
+eligibility-gated path (read overlay, fsync's flush-first, write ordering,
+fstat) then walked past bytes write() had acknowledged, for a forked sharer
+of the fd too. Fixed in e2a63fe76 (clear only when the run is gone); witness
+`dev9p.wb_dying_wstat_keeps_staging`. Fable's F1, minutes later, was the
+same defect.
+
+**Audit r1 (Fable 5.1, 0/0/1/6, clean; d29246829).** Besides F1: F2, the
+final-close mark was published after exits() dropped the proc-table lock, so a
+first kill could fall between the exit's commitment and the mark. Fable's
+second suggested fix, taking the lock inside the close, would not have closed
+it, because the exit commits in the earlier critical section. exits() now ORs
+the mark before the unlock. F3, no gate matched the new loss line (test.sh
+does now). F4, a close job had no retry for a write never sent for want of
+memory, which comes back as the same -EIO a refusal does (closer_run_job). F5,
+the SPEC-TO-CODE fairness caveat. F6, the production EXIT_CLOSING setter had
+no witness (`p9_closer.first_kill_forces_exits_close` drives the real at-exit
+close and sends ONE kill). F7, the seam closes in the land commit. The round
+died once on a network error and was resumed from its transcript.
+
+**The latch half (b34ed7c30), found by the Loom audit.** e2a63fe76's rule
+(clear eligibility only when the run is gone) was still wrong one way: a run
+a server refusal dropped leaves `wb_len` 0 with the errno latched, and write
+and fsync read the latch only on an eligible priv, so a later wstat erased
+the report. "Stop staging" now clears only the append anchor `wb_known`;
+eligibility is never cleared once set. Witness `dev9p.wb_wstat_keeps_the_latch`.
+
+**The Loom write-behind bypass, fixed alongside (branch loomwb, OPEN-BUGS
+09:12Z).** Loom's FSYNC sent a bare Tfsync (`dev9p_client_fid` has no
+write-behind hook), so a staged run was not flushed first, and Loom's WRITE
+skipped the flush-first ordering. Registration is the only way a Spoor reaches
+a Loom op, and it runs on the user's thread, so it is where the run is flushed
+and staging stopped: the wstat precedent (227375707). Fable 5.1 r1, 0/0/1/4,
+closed in d8b177156. F1 was the latch erasure above, at registration too: a
+latched priv registered with nothing to flush and lost its report; it now
+fails the registration, since no Loom op reads the latch. F2: the flush
+installs the run as own Larder pages, which skip the version check, and the
+ring's writes would leave them stale; a successful registration drops them.
+F3: a registration failing part-way leaves the earlier Spoors write-through;
+documented, not restored (restoring reopens a stage window; agreed with
+corona on 0183). F4: the main witness counted the flush without checking it.
+F5: SYS_LOOM_REGISTER strips the errno to -1; changing that is a
+syscall-interface change, enqueued for a vote (OPEN-BUGS 11:18Z). Witnesses
+`p9_closer.loom_register_flushes_staged_run`,
+`dev9p.wb_dying_loom_register_keeps_staging`,
+`dev9p.wb_loom_register_keeps_the_latch`.
+
+**Built at last.** The Mac was corona's (a 50-boot SMP matrix) until 11:18Z.
+On d8b177156, which carries both chunks: build clean, suite 1935/1935 PASS,
+the count test.c registers (main 1917 + 15 + 3).
+
+**RED, all in one script (11:24Z-11:36Z).** Nine runs, each applying its
+sabotages, rebuilding, running the suite, restoring and checking the tree
+clean: exit-close R1..R7 and Loom R1..R2, then a green rebuild. The fold had
+moved the Loom anchors, so its script was rewritten first (L1 drop the call;
+L2 ignore the latch; L3 stop staging on a failed registration; L4 keep the
+own pages; L2-L4 share a run, their witness sets disjoint). L3 had no witness
+until I gave the dying-registration test an append leg: clearing the anchor
+while a run is kept still overlays and flushes it, so only a write after the
+flush shows that the failed registration changed the priv. Each run's failure
+set matched its prediction exactly by name and count. One assertion
+differed: with S14 (the closer skips the job's run),
+`close_job_retries_a_refused_write` stopped at "the server refused the first
+write", one assertion before the predicted one, because no write was sent at
+all. Corona's lesson from the same morning shaped the extractor: test.c
+prints the test's name before running it, so kernel output can split a name
+from its verdict; the script attributes each `FAIL:` line to the last
+`[test]` line before it and reads the `tests: N/M` tally rather than matching
+one line. Green after: 1935/1935, `9p: close: flush of fid` absent.
+
+**TLC.** `specs/check-net-poll.sh` on d8b177156: ten clean cfgs complete, eleven
+buggy cfgs violate their named property, `net_poll_teardown_buggy_no_closer`
+among them.
+
+**Round 2, and a gate stopped early.** Fable 5.1 on the flag model (a
+frozen worktree at d8b177156): 0/0/0/6, the model sound. Its F6 was the one
+with teeth: a priv that stopped staging kept up to 256 KiB and its share of
+the 8 MiB budget until its last close, so a program holding 32 registered
+fds could push every other file to write-through. F6 changed kernel code, so
+I stopped the SMP gate (11:41Z, as its first row began) rather than let it
+certify d8b177156, folded all six (ef64e4b3a), and reran the whole RED
+campaign plus three new sabotages (L5/L6 keep the dead buffer at each stop
+site; L7 stops a run kept past the anchor from anchoring appends).
+
+**The rerun on ef64e4b3a (11:46Z-12:02Z).** Base 1935/1935, then all ten
+runs: every failure set matched its prediction by name, count and
+assertion. Two predicted messages moved with the new legs: S16 now trips
+the dying-wstat test at "and staged onto it", and S6 at "an append onto
+the kept run is taken". The extra assertions sit earlier in the test, so
+the first failure moved; the verdict did not. Green 1935/1935, tree clean.
+Then I released the Mac to aux for its lantern window.
+
+**Gates.** `ci-smp-gate` N=10 on ef64e4b3a (12:09Z-13:18Z): 50/50 PASS over default-smp1, default-smp4, default-smp8, ubsan-smp4 and ubsan-smp8, no corruption. A first run on d8b177156 was stopped as its first row began, because round 2's F6 changed kernel code. Suite 1935/1935 on ef64e4b3a, before the first RED run and after the green rebuild. `ls-ci` was NOT run. The shared disk had 9.1 GiB free when the gates began and 7.7 GiB when the SMP gate ended. A worktree CI bake repopulates a 5 GiB pool and adds Rust artifacts, and `build.sh` checks its 6 GiB floor only at the start, so the bake would have taken the volume near zero for every agent, as on 10-05. The chunk changes no userspace, and the suite boots the default image to login on every run. Still, ls-ci is owed at the next landing with disk headroom. The Mac went back to aux at 13:18Z for its lantern hunt: lantern leg (f) fails 2 in 4 on aux's tree, cut on fcf771404, and is enqueued in OPEN-BUGS.
+
 ## 2026-10-07 (main, Opus 5.5, effort max) -- the 9P tag pool: it grows, it has shares, a sync op waits (landed)
 
 **Why now.** Right after seam-90 in the arc order. A sync op that found the

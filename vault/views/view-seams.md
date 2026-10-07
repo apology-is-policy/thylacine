@@ -19,6 +19,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
 | [[seam-90-hung-server]] | closed | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-9p-tag-block-on-full]] | closed | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
+| [[seam-close-flush-unbounded]] | closed | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-devcap-plain-caps-read]] | closed | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
@@ -45,7 +46,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-affinity-mask]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | a future SYS_SCHED_SETATTR |
 | [[seam-boot-banner-coupdate-list]] | open | sub-substrate-gates | chg-2026-08-16-boot-banner-mirror-set | yip to main 2026-08-16; sequel to main#244 |
 | [[seam-buddy-bulk-op]] | open | sub-kernel-mm-phys | chg-2026-05-04-p1d-phys-allocator | HT11.R1-F6 |
-| [[seam-close-flush-unbounded]] | open | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
 | [[seam-console-chrome-on-handoff]] | open | sub-tapestryd | fnd-kt1-r1-c11 | the KT-1 audit round 1 (C-F11) |
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |

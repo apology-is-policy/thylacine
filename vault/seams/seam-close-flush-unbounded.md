@@ -2,12 +2,13 @@
 id: seam-close-flush-unbounded
 type: seam
 title: "The at-exit close-flush is unbounded and un-killable"
-status: open
+status: closed
 surface: [sub-kernel-death]
 opened-by: fnd-68-r2-f3
 tracker: "unfiled"
 created: 2026-08-01
 updated: 2026-10-07
+closed-by: chg-2026-10-07-exit-close
 ---
 ## Owed
 
@@ -64,3 +65,19 @@ trade, not an oversight.
   wait at exit happens only when a session's op share (32767 ops) is full or a
   chunk of the tag table cannot be allocated; the write-behind flush's reply
   and room in a full request ring are unchanged.
+- Closed by [[chg-2026-10-07-exit-close]] ([[dec-2026-10-07-exit-close]]),
+  as voted, with no deadline. A clunk on a thread no death reaches never
+  waits: a full tag share or request ring hands the fid to the closer. A
+  flush a death ends keeps its run instead of dropping it. An explicit kill
+  that finds the final close under way (exits() marks it under the
+  proc-table lock) forces it: the hold lets the death through, so the closing
+  thread's sleeps end, and a close that may no longer wait hands its staged
+  run and fid to the closer, which writes the run (retrying -EIO while the
+  fid is held), then clunks. A hand-off that fails prints
+  `9p: close: flush of fid`, and `tools/test.sh` fails on it. Loom's SQPOLL
+  join keeps its own `kthread_join_active`, which no kill lifts, and the
+  SQPOLL kthread marks itself `closes_never_wait`, so its reap close never
+  waits on a server.
+- What stays as it was: an unkilled final close still waits for its server,
+  as Plan 9's `closefgrp` does; only an explicit kill (the kill note or the
+  ctl kill) forces. A hangup, EXITKILL or a legate scope's end never does.
