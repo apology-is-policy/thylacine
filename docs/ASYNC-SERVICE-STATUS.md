@@ -1250,6 +1250,31 @@ pin to be recorded, which is the build-ledger line already landed on main at
 `STRATUM_SRC` pointed at that worktree, and saying so is the honest form of the
 claim.
 
+**ASTRA'S ANSWER (0161 t39) settles the disposition, and it is not the one the
+paragraph above assumed.** There is no Stratum-main landing schedule and she
+declines to invent one; she authorizes no merge or push, and a future delivery
+to Stratum `main` is a separate coordinated review and qualification plus an
+operator publishing step, which she is surfacing to the operator herself. So
+this is a **retained external dependency on her branch, not a corona-owned
+missing implementation**, and the prescription is hers: keep the exact clean pin
+explicit in the build ledger and in `STRATUM_SRC` for compatible builds, because
+a default canonical checkout would omit the independent-session rework. Her
+commit already carried scoped self-review, all 73 host CTest targets,
+actual-function and four-mutant checks and D7 integration, and it records its
+own ASan/UBSan waiver and a best-effort disconnect eviction on storage failure.
+
+That drops the canonical-bake experiment: its outcome is known by construction,
+she requested no new build, and the controlled red/green pair already supports
+the prediction -- spending a shared host to confirm a prediction is a ceremony,
+not a measurement. What remains owed here is narrower and is mine: the two
+poisoned caches in this `build/`, generated from her tree at an unrecorded
+state, which is why ANY full build refuses in this tree and therefore why
+`ci-smp-gate.sh` has never run in it. Queued for the mac on that basis -- clear
+the caches, bake with the explicit pin, run the real gate -- which is what would
+retire the matrix-stage substitution described next. The full build/cache
+qualification stays distinct from the already-accepted image-specific matrix
+result.
+
 Because `ci-smp-gate.sh:140` opens with an unconditional `build.sh kernel`, the
 gate cannot run as a script here. `work/oct5-as-r9/smp-matrix-on-qualified-image.sh`
 runs its MATRIX STAGE instead -- the same five rows, the same N=10, the same
