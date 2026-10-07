@@ -1,9 +1,42 @@
-# The CPU1/D7-GREEN pair, preserved 2026-10-07 before the SMP gate rebuilds artifacts
-# (astra, yip 0161 t21). Boot evidence: boot-logs/boot-confirm-232503Z.log
-# pool.img and ramfs.cpio are a CRYPTOGRAPHIC PAIR -- they travel together or not at all.
-my HEAD : c68cc162f5f1ea69444264a78820a9a0530bf985
-f01c00189218b9e0  pool.img
-cf650c39d99b8716  ramfs.cpio
-1fe1ba3a46219dc1  thylacine.elf
-4fcc788d6be38b80  .config
-258fbd6350445c6f  system.key
+# The D7-GREEN artifact set, preserved 2026-10-06/07 before the SMP gate re-bakes
+# (astra, yip 0161 t21). Boot evidence: ../boot-logs/boot-confirm-232503Z.log
+# my HEAD at preservation: c32f0c19a43ffeafa5a521d8152e1ba4b5f9e847
+#
+# WHAT A BOOT ACTUALLY READS (tools/run-vm.sh), which is why this set grew:
+#   -kernel  thylacine.bin        (run-vm.sh:35 + :823 -- the .elf is NOT the boot image)
+#   -initrd  ramfs.cpio           (:93-96)
+#   -drive   pool.img             (:148-152)
+#   -drive   disk.img             (:113 + :126)
+# The first revision of this manifest listed only the ELF, so the set could not
+# have been booted. Preserving an artifact you cannot boot is not preservation.
+#
+# pool.img and the key-bearing ramfs.cpio are a CRYPTOGRAPHIC PAIR -- they travel
+# together or the guest gets STM_EBADTAG -> stratumd rc=-201 -> EXTINCTION.
+#
+# PRE-BOOT vs POST-BOOT, and the distinction is load-bearing. The guest WRITES to
+# pool.img, so the live file is the pool as the green boot LEFT it, while
+# pool.img.baked-snapshot is the state it STARTED from (what smp-multiboot's
+# pool_restore copies back before each boot). To REPRODUCE the green boot, restore
+# the .baked-snapshot; to inspect what the boot did, read the live one.
+#
+#  sha256[0:16]        mtime (UTC)            file
+  8af97788aaf40953  2026-10-06T23:23:01Z  thylacine.bin
+  1fe1ba3a46219dc1  2026-10-06T23:23:01Z  thylacine.elf
+  4fcc788d6be38b80  2026-10-06T23:36:06Z  .config
+  cf650c39d99b8716  2026-10-06T23:23:55Z  ramfs.cpio
+  7f94b95e2b53df7e  2026-10-06T23:23:52Z  pool.img.baked-snapshot
+  f01c00189218b9e0  2026-10-06T23:24:44Z  pool.img
+  258fbd6350445c6f  2026-10-06T23:23:48Z  system.key.baked-snapshot
+  258fbd6350445c6f  2026-10-06T23:36:06Z  system.key
+  d66755e27f6f0033  2026-10-06T23:24:21Z  disk.img
+  8f3ea34d840ffde3  2026-10-06T23:23:52Z  mkfs-populate.stratumd.log
+#
+# THE ATTRIBUTION THIS SET CARRIES: thylacine.elf 1fe1ba3a46219dc1 and .config
+# 4fcc788d6be38b80 are BYTE-IDENTICAL to the 10-06 RED run's (recorded at the time
+# in docs/ASYNC-SERVICE-STATUS.md:758-760). Only the Stratum-derived half moved --
+# ramfs.cpio 817320cea4ccd9b6 -> cf650c39d99b8716 and pool.img a3ae8a265b3355e4 ->
+# f01c00189218b9e0 (both of those are post-boot states, as above). The kernel was
+# held fixed as the control variable and D7 flipped.
+#
+# Only this manifest is committed: a 2.5G sparse pool does not belong in git, and
+# the files sit beside it on disk, APFS-cloned (771M real for the whole set).
