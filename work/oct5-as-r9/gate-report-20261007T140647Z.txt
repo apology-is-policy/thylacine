@@ -1,0 +1,69 @@
+gate-report for work/oct5-as-r9/run-20261007T140647Z.log
+run started : (no stamp in the first lines)
+runbook exit: (not recorded in this log)
+
+== ci-smp-gate verdict ==
+ci-smp-gate: PASS -- 0 corruption across all configs
+-- ci-smp-gate exit status: 0 (0 = every config passed)
+
+== row verdicts (enumerated) ==
+row PASS: default-smp1
+row PASS: default-smp4
+row PASS: default-smp8
+row PASS: ubsan-smp4
+row PASS: ubsan-smp8
+
+== per-label tallies, every category ==
+== default-smp1: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp1: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+
+== per-boot exposure (the #200 series) ==
+== default-smp1: exposure 422s total, ~42s mean/boot; per-boot: 42 44 41 43 41 43 42 43 42 41 ==
+== default-smp4: exposure 510s total, ~51s mean/boot; per-boot: 45 60 61 62 57 45 45 45 45 45 ==
+== default-smp8: exposure 531s total, ~53s mean/boot; per-boot: 47 46 48 47 47 46 62 62 62 64 ==
+== ubsan-smp4: exposure 621s total, ~62s mean/boot; per-boot: 61 63 61 61 61 63 63 63 61 64 ==
+== ubsan-smp8: exposure 488s total, ~48s mean/boot; per-boot: 50 48 48 49 49 50 48 50 48 48 ==
+
+== clean-boot assertion ==
+all five labels: 10/10 CLEAN boots
+
+== per-boot D7 witnesses ==
+default-smp1: D7 ladder reached in 10/10 boots, probe PASS in 10, FAILED in 0
+default-smp4: D7 ladder reached in 10/10 boots, probe PASS in 10, FAILED in 0
+default-smp8: D7 ladder reached in 10/10 boots, probe PASS in 10, FAILED in 0
+ubsan-smp4: D7 ladder reached in 10/10 boots, probe PASS in 10, FAILED in 0
+ubsan-smp8: D7 ladder reached in 10/10 boots, probe PASS in 10, FAILED in 0
+D7 TOTALS: ladder reached in 50 boots, probe PASS in 50
+
+== witness records (stage 4) ==
+RAN+PASSED: burrow.settled_drop_retains_nonfinal_charge
+RAN+PASSED: burrow.settled_drop_exact_payer
+RAN+PASSED: burrow.settled_mapping_drop_defers_free
+RAN+PASSED: burrow.unmap_failure_leaves_mapping_attached
+
+== suite tally and skips ==
+expectation DERIVED from kernel/test/test.c: 1836 registrations
+tests: 1836/1836 PASS
+[skip] lines: 0 (must be 0 on the gate image)
+
+== preserved boot inputs ==
+-- preserved 5 boot input(s) -> work/oct5-as-r9/boot-inputs/run-20261007T140852Z
+ABSENT, recorded and NOT substituted: build/kernel/.config build/kernel-undefined/thylacine.elf build/kernel-undefined/thylacine.bin
+
+== D7 axis (separate verdict) ==
+-- D7 axis (separate verdict): work/oct5-as-r9/boot-logs/boot-confirm-140947Z.log
+-- D7 verdict code: 0  (0 cured / 20 UNCHANGED known red / 22 refused but
+
+== provenance blocks recorded ==
+   0 block(s) in this log; the hashes live in work/oct5-as-r9/provenance.log
+
+GATE VERDICT: PASS (0 corruption across all configs, per the gate's own line)
+gate-report: every section present.

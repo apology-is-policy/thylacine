@@ -139,3 +139,42 @@ cd0200373d03e647  build/.config
 8fdd7f1f5695b4ff  build/kernel-undefined/thylacine.elf
 63d781afe4a6e5f5  build/ramfs.cpio
 9f9ea3727d5c6065  build/fixtures/pool.img
+=== stage-start (nothing built yet) -- 2026-10-07T14:06:47Z ===
+my HEAD        : 856ecae7613e00e562d19ee5537f819a9737d023
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 8
+STRATUM_SRC    : /Users/northkillpd/projects/stratum/v2
+stratum HEAD   : ac519fccf0b79fc0379f32d6c16ac7e65f3607cd
+stratum dirty  : YES
+cf91bb7fed575925  build/.config
+(absent)          build/kernel/thylacine.elf
+(absent)          build/kernel-undefined/thylacine.elf
+(absent)          build/ramfs.cpio
+39c3f9124093f3e0  build/fixtures/pool.img
+=== post-build (my kernel, paired images) -- 2026-10-07T14:08:42Z ===
+my HEAD        : 856ecae7613e00e562d19ee5537f819a9737d023
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 8
+STRATUM_SRC    : /Users/northkillpd/projects/stratum-astra/v2
+stratum HEAD   : 61dde3727921e70e2c72fbd3c9e2044a192f4a54
+stratum dirty  : no
+4fcc788d6be38b80  build/.config
+e266c931d9668a44  build/kernel/thylacine.elf
+(absent)          build/kernel-undefined/thylacine.elf
+8f658d3c7fac7e09  build/ramfs.cpio
+b9045c6eb55a99ca  build/fixtures/pool.img
+=== post-ci-smp-gate (the qualifying verdict) -- 2026-10-07T14:54:32Z ===
+my HEAD        : 856ecae7613e00e562d19ee5537f819a9737d023
+my base        : 5ff62b78809846af4780ec41f82d1676e7584e80
+astra HEAD     : 5ff62b78809846af4780ec41f82d1676e7584e80
+free GiB       : 8
+STRATUM_SRC    : /Users/northkillpd/projects/stratum-astra/v2
+stratum HEAD   : 61dde3727921e70e2c72fbd3c9e2044a192f4a54
+stratum dirty  : no
+cd0200373d03e647  build/.config
+e266c931d9668a44  build/kernel/thylacine.elf
+9a9252b1e92140cb  build/kernel-undefined/thylacine.elf
+947dd838eb890f66  build/ramfs.cpio
+5fbf34ae9e30b82a  build/fixtures/pool.img
