@@ -181,7 +181,12 @@ if [ "${SPECS:-1}" = 1 ]; then
     # with || true and judge by CONTENT.
     out=$("$JAVA" -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" burrow.tla 2>&1 || true)
     printf '%s\n' "$out" > "$SPECDIR/$c.log" || { echo "   REFUSING: could not retain $c output"; exit 3; }
-    [ -s "$SPECDIR/$c.log" ] || { echo "   REFUSING: $SPECDIR/$c.log is empty -- TLC printed nothing"; exit 3; }
+    # NOT `[ -s ]`: `printf '%s\n' "$out"` on empty output writes a single
+    # NEWLINE, so the file is 1 byte and -s calls it non-empty -- the guard could
+    # not fire on the one condition it exists for (measured in replica, 10-07).
+    # Ask for a non-whitespace character instead.
+    grep -q '[^[:space:]]' "$SPECDIR/$c.log" \
+      || { echo "   REFUSING: $SPECDIR/$c.log has no content -- TLC printed nothing"; exit 3; }
     echo "$out" | grep -E 'is violated|states generated|Model checking completed' | head -3
     # burrow's cfgs declare `INVARIANTS Invariants` -- ONE CONJUNCTION (TypeOk
     # /\ RefcountConsistent /\ NoUseAfterFree) -- so TLC names the CONJUNCTION,
@@ -203,7 +208,12 @@ if [ "${SPECS:-1}" = 1 ]; then
     echo "-- $c (expect: NoOrphan VIOLATED, ChargeConserved HOLDING)"
     out=$("$JAVA" -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" capacity.tla 2>&1 || true)
     printf '%s\n' "$out" > "$SPECDIR/$c.log" || { echo "   REFUSING: could not retain $c output"; exit 3; }
-    [ -s "$SPECDIR/$c.log" ] || { echo "   REFUSING: $SPECDIR/$c.log is empty -- TLC printed nothing"; exit 3; }
+    # NOT `[ -s ]`: `printf '%s\n' "$out"` on empty output writes a single
+    # NEWLINE, so the file is 1 byte and -s calls it non-empty -- the guard could
+    # not fire on the one condition it exists for (measured in replica, 10-07).
+    # Ask for a non-whitespace character instead.
+    grep -q '[^[:space:]]' "$SPECDIR/$c.log" \
+      || { echo "   REFUSING: $SPECDIR/$c.log has no content -- TLC printed nothing"; exit 3; }
     echo "$out" | grep -E 'is violated|states generated|Model checking completed' | head -3
     # capacity's cfgs declare TypeOk, ChargeConserved and NoOrphan SEPARATELY, so
     # TLC DOES name the specific one -- which is why SPEC-TO-CODE requires NoOrphan
