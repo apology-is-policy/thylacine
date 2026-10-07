@@ -49,7 +49,17 @@ section "per-boot D7 witnesses"      'D7 ladder reached in|D7 TOTALS|D7 IS NOT C
 # log carries only the lines stage 4 prints ABOUT them. Reaching for
 # "tests: N/N" here would be the same wrong-oracle mistake stage 4 itself made.
 section "witness records (stage 4)"  '^ *(RAN\+PASSED: burrow\.|NO PASS RECORD: burrow\.)' 4
-section "suite tally and skips"      '^ *(tests: [0-9]+/[0-9]+|\[skip\] lines:)' 1
+# The tally alone is half the evidence: it says what RAN, not what it was
+# CHECKED AGAINST. The expectation is derived from the registration table now
+# rather than pinned, so the derived number belongs beside the tally -- a reader
+# can then see both routes to the same figure instead of taking one on trust.
+section "suite tally and skips"      '^ *(tests: [0-9]+/[0-9]+|\[skip\] lines:|expectation DERIVED from)' 1
+
+# Which boot inputs this run preserved, and which were ABSENT. On 2026-10-07 a
+# qualified verdict's inputs existed only in build/ and were destroyed, so the
+# run now clones them out and the report has to say so -- a preservation nobody
+# can see in the evidence is one nobody will check.
+section "preserved boot inputs"      '^-- preserved [0-9]+ boot input|^ *ABSENT, recorded and NOT substituted:|^REFUSING: found .* but could not preserve' 1
 section "D7 axis (separate verdict)" '^-- D7 (axis|verdict code)|TOLERATED as the UNCHANGED known D7|FATAL: a red boot' 1
 
 printf '\n== provenance blocks recorded ==\n'
