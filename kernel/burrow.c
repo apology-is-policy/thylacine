@@ -435,32 +435,31 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     return v;
 }
 
-// I-42 / CL-7k: the dual-mappable CODE Burrow (docs/JIT-ON-WX-DESIGN.md).
-// Backing is byte-identical to burrow_create_anon -- one eager contiguous
-// KP_ZERO chunk -- and deliberately so: the type is an ADMISSIBILITY token, not
-// a different allocator. Keeping the backing identical means the CODE arm of
-// every downstream switch (free, acquire-liveness, demand-page) is the ANON arm,
-// so the new type adds a gate without adding a lifetime.
+// I-42 / CL-7k, B-2a: the dual-mappable CODE Burrow (docs/JIT-ON-WX-DESIGN.md).
+// Backing is byte-identical to burrow_create_anon_lazy -- the sparse pagemap,
+// every page demand-zeroed on first touch -- and deliberately so: the type is an
+// ADMISSIBILITY token, not a different allocator. Keeping the backing identical
+// means the CODE arm of every downstream switch (free, acquire-liveness,
+// demand-page) is the ANON_LAZY arm, so the type adds a gate without adding a
+// lifetime. The one thing the demand-page arm adds for CODE is the I-cache
+// invalidation of each page it commits, before any PTE can name it.
 //
-// KP_ZERO is load-bearing, not hygiene: an executable page handed back with a
-// previous owner's bytes would be code the Proc can RUN without having emitted
-// it. All-zero AArch64 is UDF #0 (permanently undefined), so an un-emitted page
-// traps instead of executing residue.
-struct Burrow *burrow_create_code(size_t size, bool exempt) {
+// Lazy rather than one contiguous chunk because a JIT's region is a RESERVATION
+// (JavaScriptCore reserves its whole executable pool up front and fills it as it
+// compiles): an eager region charged and zeroed the whole pool at startup, and
+// needed a physically contiguous buddy block to do it.
+struct Burrow *burrow_create_code(size_t size) {
     if (!g_vmo_cache) extinction("burrow_create_code before burrow_init");
     if (size == 0)    return NULL;
-    // Same overflow guard as burrow_create_anon: size + PAGE_SIZE - 1 must not
-    // wrap, or an enormous request would silently become a tiny page_count.
+    // Same overflow guard as burrow_create_anon_lazy: size + PAGE_SIZE - 1 must
+    // not wrap, or an enormous request would silently become a tiny page_count.
     if (size > SIZE_MAX - (PAGE_SIZE - 1)) return NULL;
+
+    size_t page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
     if (!v) return NULL;
-
-    size_t page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    unsigned order = order_for_pages(page_count);
-
-    struct page *pages = alloc_user_pages(order, KP_ZERO, exempt);
-    if (!pages) {
+    if (pagemap_init(&v->pm, page_count) != 0) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;
     }
@@ -471,8 +470,8 @@ struct Burrow *burrow_create_code(size_t size, bool exempt) {
     v->page_count    = page_count;
     v->handle_count  = 1;            // construction reference
     v->mapping_count = 0;
-    v->pages         = pages;
-    v->order         = order;
+    v->pages         = NULL;         // LAZY: no contiguous alloc_pages chunk
+    v->order         = 0;
     g_vmo_created++;
     return v;
 }
@@ -682,16 +681,8 @@ static void burrow_free_internal(struct Burrow *v) {
 
     switch (v->type) {
     case BURROW_TYPE_ANON:
-    case BURROW_TYPE_CODE:
-        // I-42: a CODE Burrow's backing IS an ANON Burrow's -- one contiguous
-        // eager chunk -- so it frees identically. The type differs only in what
-        // it AUTHORIZES (an RX alias), never in what it owns, which is why it
-        // shares this arm rather than duplicating it. The two aliases a code
-        // region carries are VMAs, and both must be gone before this runs: the
-        // #847 dual count reaches {0,0} only after each alias's vma_free has
-        // dropped its own mapping_count, so the pages outlive BOTH views.
         if (!v->pages)
-            extinction("burrow_free_internal(ANON/CODE) with pages already NULL (double-free)");
+            extinction("burrow_free_internal(ANON) with pages already NULL (double-free)");
         free_pages(v->pages, v->order);
         v->pages = NULL;
         break;
@@ -754,6 +745,13 @@ static void burrow_free_internal(struct Burrow *v) {
         v->spoor = NULL;
         break;
     case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_CODE:
+        // I-42 (B-2a): a CODE Burrow's backing IS an ANON_LAZY Burrow's, so it
+        // frees identically; the type differs only in what it AUTHORIZES (an RX
+        // alias). Both of its aliases are gone before this runs -- the #847 dual
+        // count reaches {0,0} only after each alias's vma_free -- and
+        // SYS_JIT_DESTROY uncharged the region's footprint as it unmapped them.
+        //
         // Overcommit / I-32: free every resident demand-zeroed page (order 0 each),
         // then the pagemap's nodes. Runs at {handle_count==0 && mapping_count==0},
         // so no VMA maps this Burrow and no concurrent faulter touches the pagemap
@@ -766,7 +764,7 @@ static void burrow_free_internal(struct Burrow *v) {
         // (addrspace_unref); burrow_free_internal is Proc-agnostic so it cannot
         // uncharge.
         if (!pagemap_live(&v->pm))
-            extinction("burrow_free_internal(ANON_LAZY) with the pagemap already destroyed (double-free)");
+            extinction("burrow_free_internal(ANON_LAZY/CODE) with the pagemap already destroyed (double-free)");
         // LINEAGE L-4b: a page here may be COW-shared with a Burrow this
         // fork's sibling holds, so the free is CONDITIONAL (lazy_put_page) --
         // the page returns to the buddy only when this was its last holder.
@@ -866,11 +864,9 @@ void burrow_acquire_mapping(struct Burrow *v) {
     // P4-Ic1: per-type liveness. ANON: pages alive; MMIO/DMA: the kobj held.
     switch (v->type) {
     case BURROW_TYPE_ANON:
-    case BURROW_TYPE_CODE:
-        // I-42: identical backing -> identical liveness test (see the free arm).
         if (!v->pages) {
             spin_unlock(&v->lock);
-            extinction("burrow_acquire_mapping of ANON/CODE BURROW with NULL pages (UAF)");
+            extinction("burrow_acquire_mapping of ANON BURROW with NULL pages (UAF)");
         }
         break;
     case BURROW_TYPE_MMIO:
@@ -902,13 +898,14 @@ void burrow_acquire_mapping(struct Burrow *v) {
         }
         break;
     case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_CODE:
         // Overcommit: liveness is the pagemap. It MAY be empty (no page faulted
         // in yet, or fully decommitted) -- the normal state, not a UAF (mirror
         // FILE). Not live only post-free (the {0,0} resurrection guard above
-        // already covers the freed case).
+        // already covers the freed case). I-42: CODE has the same backing.
         if (!pagemap_live(&v->pm)) {
             spin_unlock(&v->lock);
-            extinction("burrow_acquire_mapping of ANON_LAZY BURROW with a dead pagemap (UAF)");
+            extinction("burrow_acquire_mapping of ANON_LAZY/CODE BURROW with a dead pagemap (UAF)");
         }
         break;
     case BURROW_TYPE_INVALID:
@@ -1277,6 +1274,8 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
 // A plain ANON_LAZY mapping: the only kind a decommit or a range detach releases
 // page by page. A shared-in mapping is another Proc's memory (its pages are the
 // sharer's commit, never this address space's charge); a guard has no Burrow.
+// CODE shares the pagemap but never this: a release through one alias leaves the
+// other alias's leaf naming the freed page.
 static bool lazy_release_admits(const struct Vma *v) {
     if (!v || !v->burrow || v->burrow->magic != VMO_MAGIC) return false;
     if (v->flags & VMA_FLAG_SHARED_IN)                     return false;
@@ -1379,7 +1378,8 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
 // nonetheless mutates the lock word -- audit F3, dropping the const-cast).
 u32 burrow_lazy_resident_count(struct Burrow *v) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
-    if (v->type != BURROW_TYPE_ANON_LAZY)   return 0;
+    if (v->type != BURROW_TYPE_ANON_LAZY &&
+        v->type != BURROW_TYPE_CODE)        return 0;
     spin_lock(&v->lock);
     u32 n = pagemap_live(&v->pm) ? (u32)pagemap_resident(&v->pm) : 0;
     spin_unlock(&v->lock);
@@ -1388,7 +1388,8 @@ u32 burrow_lazy_resident_count(struct Burrow *v) {
 
 u32 burrow_lazy_footprint(struct Burrow *v) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
-    if (v->type != BURROW_TYPE_ANON_LAZY)   return 0;
+    if (v->type != BURROW_TYPE_ANON_LAZY &&
+        v->type != BURROW_TYPE_CODE)        return 0;
     spin_lock(&v->lock);
     u32 n = pagemap_live(&v->pm)
           ? (u32)pagemap_resident(&v->pm) + pagemap_node_count(&v->pm) : 0;
@@ -1711,8 +1712,8 @@ struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx) {
 struct page *burrow_lazy_slot_for_test(const struct Burrow *v, size_t idx) {
     if (!v || v->magic != VMO_MAGIC)
         extinction("burrow_lazy_slot_for_test: bad Burrow");
-    if (v->type != BURROW_TYPE_ANON_LAZY)
-        extinction("burrow_lazy_slot_for_test: not an ANON_LAZY Burrow");
+    if (v->type != BURROW_TYPE_ANON_LAZY && v->type != BURROW_TYPE_CODE)
+        extinction("burrow_lazy_slot_for_test: not an ANON_LAZY or CODE Burrow");
     return pagemap_get(&v->pm, idx);
 }
 #endif

@@ -7026,55 +7026,20 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // JIT_REGION_MAX is page-aligned, so the rounded length cannot exceed it
     // and the addition cannot overflow.
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
-    // #106: the buddy-rounded occupancy, not the page-rounded request --
-    // burrow_create_code below allocates 1 << order like every eager Burrow.
-    // JIT_REGION_MAX is 2^14 pages, so a MAX-sized region rounds to itself and
-    // the u32 cast is safe; it is the sizes BELOW it that round up (a 33-MiB
-    // region occupies 64 MiB), and a JIT emitting odd-sized regions is exactly
-    // the workload that makes this routine rather than theoretical.
-    u32 npages = (u32)burrow_backing_pages(length);
 
     spin_lock(&p->as->lock);
 
-    // I-32: charge ONCE for the region, not once per alias. The two aliases are
-    // two views of ONE set of physical pages -- charging twice would bill a JIT
-    // double for memory it holds once, and the uncharge at destroy would then
-    // have to know to refund twice. One region, one charge.
-    if (!proc_page_charge(p, npages)) {
-        spin_unlock(&p->as->lock);
-        return -T_E_NOMEM;
-    }
-
-    struct Burrow *b = burrow_create_code(length, proc_resource_exempt(p));
+    // B-2a: a code region is a RESERVATION. Nothing is allocated or charged
+    // here; each page is committed, zeroed, I-cache-invalidated and charged
+    // ONCE by the fault that first touches it through either alias (the CODE
+    // arm of userland_demand_page), so the I-32 count is what the JIT has
+    // touched, never what it reserved, and no physically contiguous block is
+    // needed.
+    struct Burrow *b = burrow_create_code(length);
     if (!b) {
-        proc_page_uncharge(p, npages);
         spin_unlock(&p->as->lock);
         return -T_E_NOMEM;
     }
-
-    // CL-7k-3 audit F1: invalidate the I-cache over the fresh pages BEFORE any
-    // RX PTE can name them.
-    //
-    // KP_ZERO zeroes MEMORY; it does not touch the instruction cache. Nothing on
-    // the free path does either -- burrow_unmap clears PTEs and broadcasts TLBI
-    // (a TLB operation), and free_pages does no cache maintenance at all. So a
-    // recycled page can still carry I-cache lines holding a PREVIOUS code
-    // region's instructions, and a Proc that branches into a page it has not
-    // published would fetch them instead of taking the UDF #0 that all-zero
-    // memory promises. That promise is stated in four places; this is what makes
-    // it true rather than requiring it be weakened.
-    //
-    // It also restores consistency: every other executable backing in the tree
-    // syncs at acquisition for exactly this reason (kernel/exec.c's two eager
-    // paths + arch/arm64/fault.c's FILE demand-page arms -- the REVENANT arm's
-    // comment names the hazard as "a stale line from a prior occupant of this
-    // recycled PA"). Named, not cited by line: #107 moved the exec.c pair.
-    // A code Burrow was the sole exception.
-    //
-    // One call, not a per-page loop: a CODE Burrow is one contiguous
-    // alloc_pages chunk, so its direct-map range is contiguous too. Bounded by
-    // JIT_REGION_MAX -- the same ceiling the mandatory publish already pays.
-    arch_icache_sync_range(pa_to_kva(page_to_pa(b->pages)), length);
 
     // Both gaps are found and both VMAs installed under ONE lock hold, so a
     // sibling thread cannot claim either gap between them and no observer ever
@@ -7102,13 +7067,6 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // (handle_count 0, mapping_count 2). The #847 dual count frees the pages
     // only when BOTH aliases are gone -- which is exactly the lifetime a
     // dual-mapped region needs, with no new refcount to get wrong.
-    //
-    // #131/#132: record the payer first. A CODE Burrow can reach neither of the
-    // paths that made attribution load-bearing (burrow_share_into admits only
-    // ANON + the weave DMA subtype; loom_resolve_buf admits only ANON), so this
-    // region is settled by destroy or by exit and by nobody else -- but the
-    // record costs one store and means no settler anywhere has to KNOW that.
-    burrow_charge_record(b, p, npages);
     burrow_unref(b);
     spin_unlock(&p->as->lock);
 
@@ -7119,10 +7077,10 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
 fail_unmap_writer:
     (void)burrow_unmap(p, wva, length);
     // burrow_unmap dropped the writer's mapping ref; the construction handle
-    // below is then the last reference and frees the Burrow.
+    // below is then the last reference and frees the Burrow. Nothing was
+    // touched, so nothing was charged.
 fail_unref:
     burrow_unref(b);
-    proc_page_uncharge(p, npages);
     spin_unlock(&p->as->lock);
     return -T_E_NOMEM;
 }
@@ -7205,10 +7163,6 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
 
     u64 length  = w->vaddr_end - w->vaddr_start;
     u64 exec_va = x->vaddr_start;
-    // #106: recompute the create-time charge. `length` is the VMA span, which
-    // IS the page-rounded length create passed to burrow_backing_pages, so the
-    // refund reproduces the charge exactly.
-    u32 npages  = (u32)burrow_backing_pages(length);
 
     // CL-7k-3 audit F3: validate the exec alias' geometry BEFORE touching
     // either mapping. Both burrow_unmaps below are issued unconditionally, so
@@ -7233,29 +7187,24 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     // means that at no instant does an executable view of the region outlive
     // its writable partner, which keeps the "code is reachable only as a
     // complete region" reading true even mid-teardown.
-    // #131/#132: claim the charge BEFORE the unmaps -- the record lives on the
-    // Burrow, and a successful pair of unmaps frees it, so there is nothing to
-    // read afterwards. Claiming is what makes the refund exactly-once; `npages`
-    // above is kept only as the cross-check that the recomputation still agrees
-    // with what was actually charged.
-    // Snapshot the Burrow: both burrow_unmaps below free their Vma structs, so
-    // `w` and `x` are dangling the moment the second one returns.
-    struct Burrow *wb = w->burrow;
-    u32 paid = burrow_charge_claim(wb, p);
-    if (paid != 0 && paid != npages)
-        extinction("SYS_JIT_DESTROY: charge record disagrees with the region's page count");
+    //
+    // B-2a: what this space paid for the region is its FOOTPRINT -- each page
+    // it touched (charged once, by the fault that committed it) plus the
+    // pagemap nodes those commits allocated -- read BEFORE the unmaps, because
+    // the second one frees the Burrow and the count with it. It is exact:
+    // every fault that could add to it runs under as->lock, which we hold, and
+    // nothing removes a CODE page while the region lives (decommit and the
+    // range detach refuse CODE). burrow_free_internal is Proc-agnostic and
+    // cannot refund, so this is the one place the region's charge returns;
+    // exit needs none, since the count dies with the address space.
+    u32 paid = burrow_lazy_footprint(w->burrow);
 
     int rc_x = burrow_unmap(p, exec_va, length);
     int rc_w = burrow_unmap(p, writer_va, length);
-    if (rc_x == 0 && rc_w == 0) {
-        if (paid) proc_page_uncharge(p, paid);
-    } else if (paid) {
-        // Neither alias was fully torn down, so the region -- and the charge
-        // that belongs to it -- survives. Put the claim back for the retry or
-        // for exit to settle. `wb` is still live: a partial teardown by
-        // definition left a mapping holding it.
-        burrow_charge_restore(wb, p, paid);
-    }
+    // Both unmaps or nothing: a surviving alias still maps the region, and the
+    // charge stays with it for the retry or for exit to settle.
+    if (rc_x == 0 && rc_w == 0 && paid)
+        proc_page_uncharge(p, paid);
     spin_unlock(&p->as->lock);
 
     return (rc_x == 0 && rc_w == 0) ? 0 : -T_E_INVAL;
@@ -7278,9 +7227,10 @@ static s64 sys_jit_destroy_handler(u64 writer_va) {
 //
 // It is also architecturally exact. ARMv8 requires data caches to behave as
 // PIPT, so cleaning ANY VA that maps the PA cleans the same line the user's
-// write through the RW alias dirtied; and IC IVAU is specified to invalidate
-// every alias of the PA. This is precisely how Linux's flush_icache_range
-// publishes module text written through the linear map.
+// write through the RW alias dirtied. The I-side is exact by policy: an
+// invalidate by the direct-map VA reaches the exec alias's lines only on a PIPT
+// I-cache, so on any other arch_icache_sync_range invalidates the whole I-cache
+// (Linux's sync_icache_aliases, which publishes user text the same way).
 s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
     if (!p)                                          return -T_E_INVAL;
     if (length == 0)                                 return -T_E_INVAL;
@@ -7301,15 +7251,10 @@ s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
     }
 
     struct Burrow *b = v->burrow;
-    if (!b->pages) {
-        spin_unlock(&p->as->lock);
-        return -T_E_INVAL;
-    }
     // Byte offset of the range within the Burrow, and a handle ref so the
     // pages survive a sibling thread's concurrent SYS_JIT_DESTROY while we
     // sync outside the lock.
     u64 off = (vaddr - v->vaddr_start) + v->burrow_offset;
-    paddr_t base_pa = page_to_pa(b->pages);
     u64 bsize = (u64)b->size;
     burrow_ref(b);
 
@@ -7324,18 +7269,28 @@ s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
         return -T_E_INVAL;
     }
 
-    // Walk page by page: the region is physically contiguous (a CODE Burrow is
-    // one alloc_pages chunk), but the direct map is addressed per page and
-    // arch_icache_sync_range takes a kernel VA, so sync each page's span.
-    // Bounded by JIT_REGION_MAX / PAGE_SIZE iterations.
+    // Walk page by page through the pagemap (B-2a: the region's pages are
+    // committed one at a time and are not contiguous). A slot not yet committed
+    // holds nothing the caller wrote -- a write commits its page under
+    // as->lock before the store lands -- and its own commit will invalidate it,
+    // so it is skipped. A page read here stays valid after v->lock drops: no
+    // CODE slot is ever emptied or swapped while the Burrow lives (decommit,
+    // the range detach and the copy-on-write swap all refuse CODE), and our
+    // ref keeps the Burrow alive. Bounded by JIT_REGION_MAX / PAGE_SIZE
+    // iterations, paid for by the caller's own length.
     u64 done = 0;
     while (done < length) {
         u64 cur      = off + done;
         u64 page_off = cur & (PAGE_SIZE - 1);
         u64 chunk    = PAGE_SIZE - page_off;
         if (chunk > length - done) chunk = length - done;
-        u8 *kva = (u8 *)pa_to_kva(base_pa + (cur & ~(u64)(PAGE_SIZE - 1)));
-        arch_icache_sync_range(kva + page_off, (size_t)chunk);
+        spin_lock(&b->lock);
+        struct page *pg = pagemap_get(&b->pm, (size_t)(cur / PAGE_SIZE));
+        spin_unlock(&b->lock);
+        if (pg) {
+            u8 *kva = (u8 *)pa_to_kva(page_to_pa(pg));
+            arch_icache_sync_range(kva + page_off, (size_t)chunk);
+        }
         done += chunk;
     }
 

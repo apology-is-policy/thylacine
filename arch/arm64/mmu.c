@@ -46,6 +46,7 @@
 #include "mmu.h"
 #include "kaslr.h"
 #include "asid.h"             // asid_hw_bits (TCR_EL1.AS sizing, RW-1 B-F1)
+#include "hwfeat.h"           // hw_icache_aliasing (arch_icache_sync_range)
 
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
@@ -976,9 +977,10 @@ static void patch_unmap(void) {
 
 // Instruction-cache maintenance to PoU for the modified range (ARM ARM
 // B2.4). The write landed in the D-cache via `scratch`; clean it to the
-// point-of-unification, then invalidate the I-cache for the canonical VA.
-// Both alias the same PA -> the same physical PoU line (D/I caches are PIPT
-// on ARMv8). Stride by the implemented line sizes from CTR_EL0.
+// point-of-unification (data caches behave as PIPT, so cleaning through
+// `scratch` cleans the line), then invalidate the I-cache by the canonical VA
+// -- the VA the kernel fetches through, which is right whatever the I-cache's
+// indexing. Stride by the implemented line sizes from CTR_EL0.
 static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
     u64 ctr;
     __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
@@ -995,9 +997,14 @@ static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
     __asm__ __volatile__("isb" ::: "memory");
 }
 
-// Single-VA instruction-cache sync (page.h contract). The write and the fetch
-// share the same kernel VA (and PA) -- unlike patch_sync_icache, whose scratch
-// alias differs from the canonical VA -- so clean + invalidate the one range.
+// Instruction-cache sync of a range written through `addr` (page.h contract).
+// `addr` is usually the DIRECT-MAP alias of a page that EL0 will fetch through
+// a different VA. The clean is right through any alias (data caches behave as
+// PIPT). The invalidate by `addr` is right only on a PIPT I-cache: a VIPT one
+// indexes its lines by the VA they were fetched through, so an invalidate by the
+// direct-map VA can miss the user's exec-VA lines. On such a part the whole
+// I-cache is invalidated instead, broadcast to the Inner Shareable domain
+// (Linux's sync_icache_aliases).
 void arch_icache_sync_range(const void *addr, size_t len) {
     if (len == 0) return;
     u64 ctr;
@@ -1008,8 +1015,18 @@ void arch_icache_sync_range(const void *addr, size_t len) {
     for (uintptr_t p = s & ~(uintptr_t)(dline - 1); p < end; p += dline)
         __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
     dsb_ish();
-    for (uintptr_t p = s & ~(uintptr_t)(iline - 1); p < end; p += iline)
-        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_icache_sync_calls_for_test, 1, __ATOMIC_RELAXED);
+#endif
+    if (hw_icache_aliasing()) {
+#ifdef KERNEL_TESTS
+        __atomic_add_fetch(&g_icache_sync_all_for_test, 1, __ATOMIC_RELAXED);
+#endif
+        __asm__ __volatile__("ic ialluis" ::: "memory");
+    } else {
+        for (uintptr_t p = s & ~(uintptr_t)(iline - 1); p < end; p += iline)
+            __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    }
     dsb_ish();
     __asm__ __volatile__("isb" ::: "memory");
 }

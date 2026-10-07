@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -219,14 +219,29 @@ makes an un-emitted page decode as `UDF #0` rather than run residue — does **n
 touch the instruction cache, and nothing on the free path does either (unmap
 broadcasts a TLBI, a *TLB* operation; `free_pages` performs no cache maintenance).
 So a fresh code region could carry a previous region's I-cache lines and execute
-bytes the Proc never emitted; `sys_jit_create_region` therefore invalidates the
-I-cache over the fresh pages before any RX PTE can name them (the CL-7k-3 F1
-finding — the code Burrow had been the sole executable backing in the tree that
-skipped this, where `exec.c`'s eager paths and `fault.c`'s FILE demand-page arm
-already did it). *At publish* (`SYS_ICACHE_SYNC`): the maintenance runs on the
+bytes the Proc never emitted; the I-cache is therefore invalidated over each
+fresh page before any RX PTE can name it (the CL-7k-3 F1 finding — the code
+Burrow had been the sole executable backing in the tree that skipped this, where
+`exec.c`'s eager paths and `fault.c`'s FILE demand-page arm already did it).
+Since B-2a (2026-10-07) the region is committed page by page, so the
+invalidate runs in the fault arm's commit ([[sub-kernel-fault]]), not at
+create. *At publish* (`SYS_ICACHE_SYNC`): the maintenance runs on the
 **direct map**, never the user VA — `dc cvau`/`ic ivau` can take translation
-faults and a user VA is exactly what a caller can arrange to be unmapped, and
-`IC IVAU` is architecturally PIPT-exact across every alias of the PA. The cache
+faults and a user VA is exactly what a caller can arrange to be unmapped. The
+clean is exact through any alias (data caches behave as PIPT). The invalidate
+by the direct-map VA is exact only on a **PIPT I-cache**: a VIPT one indexes
+lines by the VA they were fetched through, so an `IC IVAU` of the direct-map VA
+can miss the exec alias's lines. This dossier used to say `IC IVAU` was
+"PIPT-exact across every alias of the PA"; B-2a corrected it.
+`arch_icache_sync_range` now asks `hw_icache_aliasing()` (any CPU whose
+`CTR_EL0.L1Ip` is not PIPT, recorded at bring-up --
+[[sub-kernel-boot-sequence]]) and, when it is set, invalidates the whole
+I-cache with `IC IALLUIS` after the clean, as Linux's `sync_icache_aliases`
+does. Every direct-map sync in the tree (exec's eager paths, the FILE fault
+arm, the code commit, `SYS_ICACHE_SYNC`) goes through this one routine, so all
+of them are exact. `patch_sync_icache` (the kernel's own text patch) keeps the
+by-VA invalidate: it invalidates by the canonical text VA, the one the kernel
+fetches through, which is right on any I-cache. The cache
 half is genuinely cross-PE (`IC IVAU` is Inner-Shareable *broadcast*); the
 trailing `ISB` is **not** — it retires prefetch on the *calling* PE only, so a
 peer PE that already executed at those exec-alias addresses must take a

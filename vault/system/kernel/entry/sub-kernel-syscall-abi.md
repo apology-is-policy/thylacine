@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -386,6 +386,14 @@ offset assertions plus the size assertion, the most-grown record at 104 bytes),
 the stat result (88 bytes after two growths), the hardware allowance descriptor,
 the PCI info block and its two sub-records, the debug register frames, the peer
 identity record, a timespec, and a JIT region descriptor.
+
+The JIT region descriptor and the three JIT numbers (101-103) did not change
+when B-2a (2026-10-07) made the region a reservation, but one answer did: a
+create no longer allocates or charges anything, so its `-ENOMEM` reports a VMA,
+gap or slab failure and never the size of the region. Memory is charged when
+a page is first touched, so a JIT over its budget is refused at that touch,
+which terminates the Proc as any demand-zero overcommit does (I-32), rather
+than at the create ([[sub-kernel-syscall-dispatch]]).
 
 One is pinned only transitively. The hardware window — a base/size pair — has no
 assertion naming it, but the descriptor that contains an array of eight of them

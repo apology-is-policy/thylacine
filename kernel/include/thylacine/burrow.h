@@ -128,11 +128,11 @@ enum burrow_type {
     // destroys the pagemap (mirrors the FILE arm, minus the spoor_clunk).
     BURROW_TYPE_ANON_LAZY = 5,
     // I-42 (CL-7k; docs/JIT-ON-WX-DESIGN.md, LLVM-DESIGN.md §8):
-    // BURROW_TYPE_CODE — an anonymous, eagerly-allocated region that is the ONLY
+    // BURROW_TYPE_CODE — an anonymous, demand-zeroed region that is the ONLY
     // backing object from which userspace may hold an EXECUTABLE mapping. Backing
-    // is identical to BURROW_TYPE_ANON (one contiguous alloc_pages chunk in
-    // `pages`/`order`); the type is not a different allocator, it is a different
-    // ADMISSIBILITY. It exists so "this region may carry an RX alias" is a property
+    // is identical to BURROW_TYPE_ANON_LAZY (the sparse pagemap `pm`, each page
+    // committed and charged on first touch; B-2a); the type is not a different
+    // allocator, it is a different ADMISSIBILITY. It exists so "this region may carry an RX alias" is a property
     // the KERNEL mints at creation under CAP_JIT — never one a caller asserts at map
     // time. That is the G-2 WEAVE discipline (a shareable DMA region is minted by
     // SYS_DMA_CREATE_WEAVE, not flagged by its creator) applied to the W^X boundary:
@@ -151,6 +151,9 @@ enum burrow_type {
     // Emitted bytes become fetchable only after an explicit SYS_ICACHE_SYNC over
     // the range — the D-cache-clean / I-cache-invalidate sequence the architecture
     // requires between a data write and an instruction fetch of the same address.
+    // A page is also I-cache-invalidated when the fault arm commits it, before
+    // either alias maps it, so an un-emitted page fetches its zeroes (UDF #0),
+    // never a recycled page's stale lines.
     BURROW_TYPE_CODE    = 6,
     // V-2 (Warp-6 Venus / GPU-DESIGN 6.2.1): backing is a subrange of a PCI
     // hostmem BAR -- host-visible shared memory (VIRTIO_PCI_CAP_SHARED_MEMORY_
@@ -245,7 +248,7 @@ struct Burrow {
     u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
-    struct pagemap    pm;           // FILE / ANON_LAZY: the sparse slot table; not live for other types
+    struct pagemap    pm;           // FILE / ANON_LAZY / CODE: the sparse slot table; not live for other types
 
     // #131/#132: WHO PAID the I-32 page_count for this region, and how much.
     // A Burrow's `type` tells you the region's SHAPE; it has never told you who
@@ -450,23 +453,23 @@ struct Burrow *burrow_create_anon_lazy(size_t size);
 // I-42 / CL-7k: burrow_create_code — the dual-mappable CODE Burrow, the only
 // backing object from which userspace may hold an executable mapping
 // (docs/JIT-ON-WX-DESIGN.md; LLVM-DESIGN.md §8). Allocation is byte-identical to
-// burrow_create_anon (one eager contiguous KP_ZERO chunk); the ONLY difference
-// is `type`, which is the kernel-minted, create-immutable admissibility token
-// the RX-mapping gate reads.
+// burrow_create_anon_lazy (B-2a: nothing allocated until a page is touched); the
+// ONLY difference is `type`, which is the kernel-minted, create-immutable
+// admissibility token the RX-mapping gate reads.
 //
-// KP_ZERO is load-bearing here, not incidental hygiene: a code page handed back
-// with stale contents would be a region the Proc can EXECUTE without having
-// written it. Zero-filled AArch64 decodes as UDF #0 (an always-undefined
-// encoding), so an un-emitted page faults rather than running whatever the
-// previous owner left behind.
+// The demand-zero commit is load-bearing here, not incidental hygiene: a code
+// page handed back with stale contents would be a region the Proc can EXECUTE
+// without having written it. Zero-filled AArch64 decodes as UDF #0 (an
+// always-undefined encoding), so an un-emitted page faults rather than running
+// whatever the previous owner left behind.
 //
 // Callers MUST hold CAP_JIT (enforced at the syscall boundary, not here — this
 // is the mechanism; kernel tests drive it directly). handle_count starts at 1
 // (the construction reference), mapping_count 0, exactly as burrow_create_anon.
 //
-// Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, or
-// allocator OOM.
-struct Burrow *burrow_create_code(size_t size, bool exempt);
+// Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, SLUB
+// OOM, or pagemap OOM.
+struct Burrow *burrow_create_code(size_t size);
 // LINEAGE L-4b: clone an ANON_LAZY Burrow for a forking address space -- Plan 9's
 // dupseg. The result is a SEPARATE Burrow of the same size whose pagemap holds
 // the SAME page pointers, one extra COW share taken per resident page.

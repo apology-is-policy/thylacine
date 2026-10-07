@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -225,7 +225,7 @@ now.
 | type | resolution | notes |
 |---|---|---|
 | anonymous | contiguous chunk; offset arithmetic | the ordinary case |
-| **code** | *identical to anonymous* | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot |
+| **code** | *identical to lazy-anonymous* (B-2a; identical to anonymous before) | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot; the commit invalidates the I-cache over the new page first |
 | MMIO | device PA + offset, device attributes | |
 | DMA | every page resolved through `kobj_dma_pa_at` (a weave is a SKEIN of blocks since 2026-09-09; `Burrow.pa` is 0 for a DMA Burrow, deliberately), cacheable | coherent on this platform's transports |
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
@@ -241,18 +241,29 @@ NORMAL_NC for WC), honoured exactly rather than guessed. So the arms now carry a
 fixed index (NORMAL_WB or DEVICE) and are byte-identical to the bool they
 replaced.
 
-The code arm shares the anonymous arm **because it must**: a JIT region is
+The code arm shares the lazy-anonymous arm **because it must**: a JIT region is
 mapped twice, writable at one address and executable at another, and both
-aliases fault through here. Each installs at its own VMA's prot, so no
-code-specific PTE path exists that could drift away from W^X.
+aliases fault through here. The first touch through EITHER alias commits the
+page -- charged once -- and the other alias's first touch finds it resident and
+maps it uncharged. Each installs at its own VMA's prot, so no code-specific PTE
+path exists that could drift away from W^X. A code VMA is never
+`VMA_FLAG_COW` (`addrspace_clone` refuses CODE), so the copy-on-write branch
+stays ANON_LAZY's.
 
-**But the comment on that arm overstates where the safety comes from.** It says
-the W^X decision "stays entirely in `make_user_pte_l3`, which is what makes
-'no PTE is ever W AND X' a property of the encoder." The encoder does no such
-thing — handed `WRITE|EXEC` it emits a writable, user-executable PTE faithfully.
-The property holds because `vma_alloc` refuses to create such a VMA. On the one
-surface that deliberately holds two mappings of one code region, the comment
-points at the wrong guard. Task #59.
+**The commit invalidates the I-cache first (B-2a).** A code page's commit runs
+`arch_icache_sync_range` over the fresh page before `pagemap_install`, while
+the page is private to the fault, so it precedes both aliases' leaves. Zeroing
+does not touch the I-cache and nothing on the free path does, so without it an
+exec-alias fetch of a page the Proc never published could run a previous
+owner's stale lines instead of the `UDF #0` the zeroes promise. This is the
+CL-7k-3 F1 invalidate, moved from create (which no longer allocates) to the
+commit ([[sub-kernel-mmu]]).
+
+**The arm's comment used to overstate where the safety comes from** (task #59).
+It said the W^X decision "stays entirely in `make_user_pte_l3`." The encoder
+does no such thing — handed `WRITE|EXEC` it emits a writable, user-executable
+PTE faithfully; the property holds because `vma_alloc` refuses to create such a
+VMA. B-2a rewrote the comment to name `vma_alloc` as the guard.
 
 ## The COW break — a different axis, not a seventh row
 

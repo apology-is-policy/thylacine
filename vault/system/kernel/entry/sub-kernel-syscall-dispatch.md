@@ -382,6 +382,22 @@ So the authority is enforced by *kernel-minted object type*, not by repeating a
 capability check at every touch. A re-check would be the weaker design: it has
 to be added to each new operation, and forgetting one is silent.
 
+**Since B-2a (2026-10-07) the create allocates nothing.** `sys_jit_create_region`
+mints a demand-zero code Burrow and installs both aliases; it charges nothing
+and needs no contiguous block, so its `-ENOMEM` now means a VMA, gap or slab
+failure, never "the pool could not be zeroed up front". Each page is committed
+and charged once by its first touch through either alias
+([[sub-kernel-fault]]). `SYS_JIT_DESTROY` reads the region's footprint --
+resident pages plus pagemap nodes, exact because every commit runs under
+`as->lock`, which destroy holds -- and refunds it only when both unmaps
+succeed; a surviving alias keeps the charge for a retry or for exit, where the
+count dies with the address space. `SYS_ICACHE_SYNC` walks the range slot by
+slot under `b->lock` and syncs only committed pages: an uncommitted slot holds
+nothing the caller wrote, and its own commit will invalidate it. A page it
+reads stays valid after the lock drops, because no code slot is ever emptied or
+swapped while the region lives and the call holds a ref. The walk is bounded
+by the caller's own length (`JIT_REGION_MAX` / page size slots).
+
 ### The FS handlers carry the identity gate, and walk-open sets the handle rights
 
 Three A-3 touches live on the FS-mutation and walk-open handlers, all in this

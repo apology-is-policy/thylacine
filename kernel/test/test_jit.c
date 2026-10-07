@@ -17,6 +17,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/fault.h"
+#include "../../arch/arm64/hwfeat.h"
 #include "../../arch/arm64/mmu.h"
 #include "../../mm/phys.h"
 
@@ -43,7 +44,25 @@ s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va);
 s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length);
 s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+
+// What the address space is charged for MEMORY: its count less the page-table
+// pages the faults built, which the I-32 count also carries and which outlive a
+// region's leaves until exit.
+static u32 jit_pages(struct Proc *p) {
+    return p->as->page_count - p->as->pgtable_pages;
+}
+
+// The user pool's charge, less this space's page tables (the same reason).
+static u32 jit_pool(struct Proc *p) {
+    return capacity_pool_charged() - p->as->pgtable_pages;
+}
+
+// The page a code region's slot holds, or NULL while it is uncommitted.
+static struct page *jit_slot(const struct Burrow *b, size_t idx) {
+    return burrow_lazy_slot_for_test(b, idx);
+}
 
 #define JIT_LEN     (2u * 4096u)     // two pages -- exercises the per-page loop
 #define ONE_PAGE    4096ull
@@ -149,7 +168,7 @@ void test_jit_create_requires_cap(void) {
         "capless + oversize -> EACCES (cap checked before args)");
 
     // No region was created, so nothing was charged.
-    TEST_EXPECT_EQ(p->as->page_count, 0u,
+    TEST_EXPECT_EQ(jit_pages(p), 0u,
         "a refused create must charge nothing");
 
     jit_drop_proc(p);
@@ -165,7 +184,7 @@ void test_jit_create_rejects_bad_args(void) {
         "zero length rejected");
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_REGION_MAX + 1, &w, &x), -T_E_INVAL,
         "length above JIT_REGION_MAX rejected");
-    TEST_EXPECT_EQ(p->as->page_count, 0u, "no charge on a rejected create");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "no charge on a rejected create");
 
     jit_drop_proc(p);
 }
@@ -202,6 +221,8 @@ void test_jit_dual_alias_pte_wx_clean(void) {
         "#847 mapping_count reflects both aliases");
     TEST_EXPECT_EQ(burrow_handle_count(w->burrow), 0,
         "construction handle dropped -- the mappings own the Burrow");
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(w->burrow), 0u,
+        "B-2a: a fresh region commits nothing");
 
     // Fault BOTH aliases in through the real fault path, then read the actual
     // hardware descriptors. This is the assertion that matters: the MMU
@@ -243,12 +264,16 @@ void test_jit_dual_alias_pte_wx_clean(void) {
     // decoration on two unrelated regions.
     TEST_EXPECT_EQ(pte_w & PTE_PA_MASK, pte_x & PTE_PA_MASK,
         "both aliases must map the SAME physical page -- that is the dual map");
-    TEST_EXPECT_EQ(pte_w & PTE_PA_MASK, page_to_pa(w->burrow->pages),
+    TEST_ASSERT(jit_slot(w->burrow, 0) != NULL, "the first touch committed slot 0");
+    TEST_EXPECT_EQ(pte_w & PTE_PA_MASK, page_to_pa(jit_slot(w->burrow, 0)),
         "and that page is the Burrow's own backing");
 
-    // Page 2 as well, so the property is not an artifact of the first page.
-    jit_fault_in(p, reg.writer_va + ONE_PAGE, /*is_write=*/true);
+    // Page 2 as well, so the property is not an artifact of the first page --
+    // and touched through the EXEC alias first, so the commit is not the
+    // writer's alone: whichever alias touches a page first commits it, and the
+    // other maps the same one.
     jit_fault_in(p, reg.exec_va + ONE_PAGE,   /*is_write=*/false);
+    jit_fault_in(p, reg.writer_va + ONE_PAGE, /*is_write=*/true);
     u64 pte_w2 = jit_walk_l3(p->as->pgtable_root, reg.writer_va + ONE_PAGE);
     u64 pte_x2 = jit_walk_l3(p->as->pgtable_root, reg.exec_va + ONE_PAGE);
     TEST_EXPECT_EQ(pte_w2 & PTE_PA_MASK, pte_x2 & PTE_PA_MASK,
@@ -260,27 +285,118 @@ void test_jit_dual_alias_pte_wx_clean(void) {
 }
 
 // ---------------------------------------------------------------------------
-// I-32: one region, ONE charge -- not one per alias.
+// I-32: a page is charged ONCE, when first touched -- not once per alias, and
+// not at create (B-2a: the region is a reservation).
 // ---------------------------------------------------------------------------
-void test_jit_charges_once_per_region(void) {
+void test_jit_charges_once_per_page(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    TEST_EXPECT_EQ(p->as->page_count, 0u, "fresh Proc charged nothing");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "fresh Proc charged nothing");
 
     struct t_jit_region reg = { 0, 0 };
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
         "create succeeds");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "create charges nothing: a reservation is free");
+    struct Burrow *b = vma_lookup(p, reg.writer_va)->burrow;
 
-    // Two aliases, ONE set of physical pages -> JIT_LEN/PAGE_SIZE charged, not
-    // twice that. A double charge would bill a JIT for memory it holds once and
-    // would leave the destroy-side refund wrong in the other direction.
-    TEST_EXPECT_EQ(p->as->page_count, (u32)(JIT_LEN / 4096u),
-        "one region charges its page count ONCE, not once per alias");
+    // The first touch commits and charges the page, plus the map nodes it needed.
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
+    u32 one = jit_pages(p);
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 1u, "one page committed");
+    TEST_EXPECT_EQ(one, burrow_lazy_footprint(b),
+        "the charge is the footprint: the page and its nodes");
+
+    // The SAME page through the other alias: mapped, not charged again. A
+    // per-alias charge would bill a JIT twice for memory it holds once.
+    jit_fault_in(p, reg.exec_va, /*is_write=*/false);
+    TEST_EXPECT_EQ(jit_pages(p), one,
+        "the exec alias maps the committed page without a second charge");
+
+    // The second page, first touched through the exec alias.
+    jit_fault_in(p, reg.exec_va + ONE_PAGE, /*is_write=*/false);
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 2u, "two pages committed");
+    TEST_EXPECT_EQ(jit_pages(p), burrow_lazy_footprint(b),
+        "still exactly the footprint");
 
     TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "destroy succeeds");
-    TEST_EXPECT_EQ(p->as->page_count, 0u,
-        "destroy refunds exactly what create charged");
+    TEST_EXPECT_EQ(jit_pages(p), 0u,
+        "destroy refunds exactly what the touches charged");
 
+    jit_drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// B-2a: the largest region is a reservation -- created without a physical
+// page, committed one touched page at a time, and refunded whole.
+// ---------------------------------------------------------------------------
+void test_jit_max_region_is_a_reservation(void) {
+    struct Proc *p = jit_make_proc(/*with_cap=*/true);
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u32 pool0 = jit_pool(p);
+
+    struct t_jit_region reg = { 0, 0 };
+    TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_REGION_MAX, &reg.writer_va, &reg.exec_va), 0,
+        "a JIT_REGION_MAX region is created");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "and charged nothing");
+    TEST_EXPECT_EQ(jit_pool(p), pool0, "and took no user page");
+    struct Burrow *b = vma_lookup(p, reg.writer_va)->burrow;
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 0u, "nothing committed");
+
+    // The two ends, far apart in the map, so the refund below has nodes to give
+    // back as well as pages.
+    u64 last = JIT_REGION_MAX - ONE_PAGE;
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
+    jit_fault_in(p, reg.writer_va + last, /*is_write=*/true);
+    jit_fault_in(p, reg.exec_va + last, /*is_write=*/false);
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 2u, "two pages committed of 16384");
+    u32 fp = burrow_lazy_footprint(b);
+    TEST_ASSERT(fp > 2u, "the footprint includes the map's nodes");
+    TEST_EXPECT_EQ(jit_pages(p), fp, "the charge is that footprint");
+    TEST_EXPECT_EQ(jit_pool(p), pool0 + fp,
+        "and the pool paid for exactly it: two pages and their nodes");
+    TEST_EXPECT_EQ(jit_walk_l3(p->as->pgtable_root, reg.exec_va + last) & PTE_PA_MASK,
+                   page_to_pa(jit_slot(b, (size_t)(last / ONE_PAGE))),
+        "the exec alias of the last page maps the committed page");
+
+    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "destroy succeeds");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "the pages and the nodes are refunded");
+    TEST_EXPECT_EQ(jit_pool(p), pool0, "and returned to the pool");
+
+    jit_drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// B-2a: a code page is released only with its region. SYS_BURROW_DECOMMIT
+// releases a lazy page through ONE mapping; on a code region the other alias's
+// leaf would still name the freed page.
+// ---------------------------------------------------------------------------
+void test_jit_decommit_refuses_code(void) {
+    struct Proc *p = jit_make_proc(/*with_cap=*/true);
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    struct t_jit_region reg = { 0, 0 };
+    TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
+        "create succeeds");
+    struct Burrow *b = vma_lookup(p, reg.writer_va)->burrow;
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
+    jit_fault_in(p, reg.exec_va,   /*is_write=*/false);
+    u64 pte_x = jit_walk_l3(p->as->pgtable_root, reg.exec_va);
+    TEST_ASSERT(pte_x != 0, "the exec alias maps the page");
+    u32 charged = jit_pages(p);
+
+    TEST_EXPECT_EQ(burrow_decommit(p, reg.writer_va, ONE_PAGE), -(int)T_E_INVAL,
+        "decommit through the writer alias is refused");
+    TEST_EXPECT_EQ(burrow_decommit(p, reg.exec_va, ONE_PAGE), -(int)T_E_INVAL,
+        "and through the exec alias");
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 1u, "the page is still committed");
+    TEST_EXPECT_EQ(jit_walk_l3(p->as->pgtable_root, reg.exec_va), pte_x,
+        "the exec leaf is untouched");
+    TEST_ASSERT(jit_walk_l3(p->as->pgtable_root, reg.writer_va) != 0,
+        "the writer leaf is untouched");
+    TEST_EXPECT_EQ(jit_pages(p), charged, "and nothing was refunded");
+
+    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "cleanup");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "destroy refunds it");
     jit_drop_proc(p);
 }
 
@@ -371,8 +487,14 @@ void test_jit_alias_not_detachable(void) {
     struct t_jit_region reg = { 0, 0 };
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
         "create succeeds");
-    u32 charged = p->as->page_count;
-    TEST_EXPECT_EQ(charged, (u32)(JIT_LEN / 4096u), "one charge for the region");
+    // Touch both pages: a region that has charged nothing would make the
+    // "nothing refunded" check below unable to fail.
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
+    jit_fault_in(p, reg.writer_va + ONE_PAGE, /*is_write=*/true);
+    u32 charged = jit_pages(p);
+    TEST_EXPECT_EQ(charged, burrow_lazy_footprint(vma_lookup(p, reg.writer_va)->burrow),
+        "the region is charged its footprint");
+    TEST_ASSERT(charged >= 2u, "both pages charged");
 
     // BOTH aliases must be refused -- either one alone breaks the pair.
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, reg.exec_va, JIT_LEN), -1,
@@ -385,20 +507,20 @@ void test_jit_alias_not_detachable(void) {
     // and page_count would read 0 here.
     TEST_ASSERT(vma_lookup(p, reg.writer_va) != NULL, "writer alias survives");
     TEST_ASSERT(vma_lookup(p, reg.exec_va) != NULL,   "exec alias survives");
-    TEST_EXPECT_EQ(p->as->page_count, charged,
+    TEST_EXPECT_EQ(jit_pages(p), charged,
         "a refused detach must not refund the region's charge");
 
     // And the region is still destroyable the ONLY correct way.
     TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0,
         "SYS_JIT_DESTROY still works after the refused detaches");
-    TEST_EXPECT_EQ(p->as->page_count, 0u, "destroy refunds exactly once");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "destroy refunds exactly once");
 
     // A plain anon mapping is of course still detachable -- the gate is narrow.
     s64 anon = sys_burrow_attach_for_proc(p, 4096);
     TEST_ASSERT(anon > 0, "burrow_attach");
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)anon, 4096), 0,
         "an ordinary anon mapping is still detachable");
-    TEST_EXPECT_EQ(p->as->page_count, 0u, "anon detach refunds");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "anon detach refunds");
 
     jit_drop_proc(p);
 }
@@ -413,9 +535,21 @@ void test_jit_icache_sync_gate(void) {
     struct t_jit_region reg = { 0, 0 };
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
         "create succeeds");
+    struct Burrow *b = vma_lookup(p, reg.writer_va)->burrow;
+
+    // B-2a: over pages nothing has touched, a sync has nothing to publish and
+    // must not commit them -- a publish that faulted pages in would charge a
+    // JIT for its whole reservation.
+    TEST_EXPECT_EQ(sys_icache_sync_for_proc(p, reg.writer_va, JIT_LEN), 0,
+        "sync over an untouched region succeeds");
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 0u, "and commits nothing");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "and charges nothing");
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
 
     // Either alias names the range legitimately -- both map the same physical
-    // pages, so a JIT may publish through whichever pointer it holds.
+    // pages, so a JIT may publish through whichever pointer it holds. The
+    // region is half committed now: the walk must take the committed page and
+    // step over the other.
     TEST_EXPECT_EQ(sys_icache_sync_for_proc(p, reg.writer_va, JIT_LEN), 0,
         "sync over the whole region via the writer alias");
     TEST_EXPECT_EQ(sys_icache_sync_for_proc(p, reg.exec_va, JIT_LEN), 0,
@@ -483,13 +617,16 @@ void test_jit_write_through_writer_visible_at_exec(void) {
 
     struct Vma *w = vma_lookup(p, reg.writer_va);
     TEST_ASSERT(w != NULL && w->burrow != NULL, "writer VMA");
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
+    jit_fault_in(p, reg.writer_va + ONE_PAGE, /*is_write=*/true);
 
-    // Fresh code pages are ZERO. That is load-bearing, not hygiene: zero
+    // Committed code pages are ZERO. That is load-bearing, not hygiene: zero
     // decodes as AArch64 UDF #0, so an un-emitted page traps instead of
     // executing whatever the previous owner of the page left behind.
-    u32 *kva = (u32 *)pa_to_kva(page_to_pa(w->burrow->pages));
+    u32 *kva  = (u32 *)pa_to_kva(page_to_pa(jit_slot(w->burrow, 0)));
+    u32 *kva1 = (u32 *)pa_to_kva(page_to_pa(jit_slot(w->burrow, 1)));
     TEST_EXPECT_EQ(kva[0], 0u, "a fresh code page is zero (UDF #0, not residue)");
-    TEST_EXPECT_EQ(kva[(JIT_LEN / 4) - 1], 0u, "the whole region is zero");
+    TEST_EXPECT_EQ(kva1[(ONE_PAGE / 4) - 1], 0u, "the whole region is zero");
 
     // Emit through the writer alias' backing and observe it under the exec
     // alias' backing -- the aliases share pages, so this is the same store the
@@ -502,10 +639,89 @@ void test_jit_write_through_writer_visible_at_exec(void) {
     // Read back via the EXEC alias' own VMA -> same Burrow -> same page.
     struct Vma *x = vma_lookup(p, reg.exec_va);
     TEST_ASSERT(x != NULL && x->burrow == w->burrow, "exec VMA shares the Burrow");
-    u32 *kva_x = (u32 *)pa_to_kva(page_to_pa(x->burrow->pages));
+    jit_fault_in(p, reg.exec_va, /*is_write=*/false);
+    u32 *kva_x = (u32 *)pa_to_kva(jit_walk_l3(p->as->pgtable_root, reg.exec_va) & PTE_PA_MASK);
     TEST_EXPECT_EQ(kva_x[0], 0xd65f03c0u,
         "bytes written through the writer alias are visible under the exec alias");
 
     TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "cleanup");
     jit_drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// SYS_ICACHE_SYNC's I-side policy: which CTR_EL0 values make the sync
+// invalidate the whole I-cache. A VA-indexed invalidate by the direct-map VA is
+// exact only on a PIPT I-cache.
+// ---------------------------------------------------------------------------
+void test_jit_icache_policy_decode(void) {
+    // L1Ip is CTR_EL0 bits 15:14. The other fields are a Cortex-A53's (VIPT,
+    // 0x84448004) and a Cortex-A72's (PIPT, 0x8444c004).
+    TEST_ASSERT(!hw_ctr_icache_aliases(0x8444c004ull), "PIPT (0b11) does not alias");
+    TEST_ASSERT(hw_ctr_icache_aliases(0x84448004ull),  "VIPT (0b10) aliases");
+    TEST_ASSERT(hw_ctr_icache_aliases(0x84444004ull),  "AIVIVT (0b01) is treated as aliasing");
+    TEST_ASSERT(hw_ctr_icache_aliases(0x84440004ull),  "VPIPT (0b00) is treated as aliasing");
+
+    // The boot CPU recorded its own: the policy agrees with what it reports.
+    u64 ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    if (hw_ctr_icache_aliases(ctr))
+        TEST_ASSERT(hw_icache_aliasing(), "an aliasing CPU set the policy");
+}
+
+// ---------------------------------------------------------------------------
+// The commit of a code page invalidates the I-cache over it (CL-7k-3 F1, at the
+// commit since B-2a); an anonymous commit does not. The QEMU targets model no
+// I-cache, so the witness is that the sync RAN: counted, with the anonymous
+// commit as the control that the count is not simply every fault's.
+// ---------------------------------------------------------------------------
+void test_jit_commit_invalidates_icache(void) {
+    struct Proc *p = jit_make_proc(/*with_cap=*/true);
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    struct t_jit_region reg = { 0, 0 };
+    TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
+        "create succeeds");
+    s64 anon = sys_burrow_attach_lazy_for_proc(p, ONE_PAGE);
+    TEST_ASSERT(anon > 0, "a lazy anonymous page for the control");
+
+    u64 c0 = __atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED);
+    jit_fault_in(p, (u64)anon, /*is_write=*/true);
+    TEST_EXPECT_EQ(__atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED), c0,
+        "control: an anonymous commit runs no I-cache sync");
+
+    jit_fault_in(p, reg.writer_va, /*is_write=*/true);
+    u64 c1 = __atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(c1, c0 + 1, "a code commit through the writer invalidates once");
+
+    jit_fault_in(p, reg.exec_va, /*is_write=*/false);
+    TEST_EXPECT_EQ(__atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED), c1,
+        "the other alias maps the committed page without another");
+
+    jit_fault_in(p, reg.exec_va + ONE_PAGE, /*is_write=*/false);
+    TEST_EXPECT_EQ(__atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED), c1 + 1,
+        "a commit through the exec alias invalidates too");
+
+    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "cleanup");
+    jit_drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// On an aliasing I-cache every sync invalidates the whole I-cache. Forced on
+// here, since no target this suite boots on reports one.
+// ---------------------------------------------------------------------------
+void test_jit_icache_aliasing_invalidates_all(void) {
+    static u8 buf[64];
+    bool was = hw_icache_aliasing();
+
+    u64 a0 = __atomic_load_n(&g_icache_sync_all_for_test, __ATOMIC_RELAXED);
+    hw_icache_aliasing_force_for_test(false);
+    arch_icache_sync_range(buf, sizeof buf);
+    TEST_EXPECT_EQ(__atomic_load_n(&g_icache_sync_all_for_test, __ATOMIC_RELAXED), a0,
+        "control: a PIPT I-cache is invalidated by VA");
+
+    hw_icache_aliasing_force_for_test(true);
+    arch_icache_sync_range(buf, sizeof buf);
+    u64 a1 = __atomic_load_n(&g_icache_sync_all_for_test, __ATOMIC_RELAXED);
+    hw_icache_aliasing_force_for_test(was);
+    TEST_EXPECT_EQ(a1, a0 + 1, "an aliasing I-cache is invalidated whole");
 }
