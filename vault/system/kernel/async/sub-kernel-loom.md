@@ -914,8 +914,8 @@ and a direct `--as->private_rings` under `as->lock` in the destroy, replacing
 form cancels the create's get and leaves the destroy's put, so every ring cycle
 nets -1 on the refcount and an earlier leg dies with a DIFFERENT message. The
 outcome is deterministic rather than racy, and the source settles that rather
-than the hope: `proc_free` releases the address space (`kernel/proc.c:699`)
-BEFORE `handle_table_free` (`:720`), so at the lifetime drop the handle table is
+than the hope: `proc_free` releases the address space BEFORE it calls
+`handle_table_free`, so at the lifetime drop the handle table is
 intact, `loom_unref` has not run, nothing is enqueued and `private_rings` is 1 --
 the retirer never gets a turn. That form is written but UNRUN, and the
 acquisition witness accordingly remains OPEN.
@@ -951,7 +951,7 @@ marker refuses every healthy run. The marker now names which arrival it is,
 `normal-fallthrough` or `after-check-failure: <msg>`, so neither case is inferred
 from the absence of the other. And `test.c` prints `    [test] <name> ... `
 WITHOUT a newline, runs the test, and prints the verdict afterwards
-(`kernel/test/test.c:4481-4483`, `:4605-4610`), so a marker's own newline moves
+(`test_run_all`), so a marker's own newline moves
 the verdict onto a later line: `<name> ... PASS` no longer exists on one line in
 an instrumented healthy run, and the mutant stage's completion check -- which
 looked for PASS or FAIL on the announcement line -- had become a check that could
