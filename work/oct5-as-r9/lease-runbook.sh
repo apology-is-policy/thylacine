@@ -149,7 +149,8 @@ if [ "${SPECS:-1}" = 1 ]; then
     # Print the version: a pinned tool whose version goes unprinted is not pinned,
     # and ~/tla2tools.jar is a stale 2.19 that reports temporal violations WITHOUT
     # the property name, which breaks every by-name verdict.
-    "$JAVA" -cp "$JAR" tlc2.TLC 2>&1 | grep -m1 'TLC2 Version' || true
+    "$JAVA" -cp "$JAR" tlc2.TLC 2>&1 | tee "$ROOT/work/oct5-as-r9/spec-tlc-version.txt" \
+        | grep -m1 'TLC2 Version' || true
     SPECS_RAN=1
   fi
 
@@ -159,6 +160,17 @@ if [ "${SPECS:-1}" = 1 ]; then
   # spec stopped constraining the thing it was written to catch, which is
   # exactly how a repair can silently void its own proof.
   if [ "${SPECS_RAN:-0}" = 1 ]; then
+  # RETAIN THE FULL TLC OUTPUT, not just the lines this stage greps for. The
+  # first version captured stdout into `$out` and printed three matched lines,
+  # so the only durable record of a spec run was those lines in whatever log
+  # happened to hold the stage's stdout -- a gate keeping its VERDICT and
+  # discarding its EVIDENCE, which is the same defect I had already fixed in
+  # tools/smp-multiboot.sh and did not recognise here (astra, 0161 review R2:
+  # she went looking for the TLC verdicts and found none). Writing each cfg's
+  # whole output to its own file costs nothing and makes the claim checkable
+  # by someone who was not in the room.
+  SPECDIR="$ROOT/work/oct5-as-r9/spec-logs"
+  rm -rf "$SPECDIR"; mkdir -p "$SPECDIR" || { echo "REFUSING: cannot create $SPECDIR"; exit 3; }
   cd specs
   # burrow.tla -- I-7, the dual-refcount lifecycle whose {0,0} decision this
   # repair RELOCATED into the settled drops. Each must violate NoUseAfterFree.
@@ -168,6 +180,8 @@ if [ "${SPECS:-1}" = 1 ]; then
     # that aborted the stage silently after printing only the header, so capture
     # with || true and judge by CONTENT.
     out=$("$JAVA" -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" burrow.tla 2>&1 || true)
+    printf '%s\n' "$out" > "$SPECDIR/$c.log" || { echo "   REFUSING: could not retain $c output"; exit 3; }
+    [ -s "$SPECDIR/$c.log" ] || { echo "   REFUSING: $SPECDIR/$c.log is empty -- TLC printed nothing"; exit 3; }
     echo "$out" | grep -E 'is violated|states generated|Model checking completed' | head -3
     # burrow's cfgs declare `INVARIANTS Invariants` -- ONE CONJUNCTION (TypeOk
     # /\ RefcountConsistent /\ NoUseAfterFree) -- so TLC names the CONJUNCTION,
@@ -188,6 +202,8 @@ if [ "${SPECS:-1}" = 1 ]; then
   for c in capacity_buggy_detach_no_refund capacity_buggy_replace_orphans; do
     echo "-- $c (expect: NoOrphan VIOLATED, ChargeConserved HOLDING)"
     out=$("$JAVA" -cp "$JAR" tlc2.TLC -workers auto -deadlock -config "$c.cfg" capacity.tla 2>&1 || true)
+    printf '%s\n' "$out" > "$SPECDIR/$c.log" || { echo "   REFUSING: could not retain $c output"; exit 3; }
+    [ -s "$SPECDIR/$c.log" ] || { echo "   REFUSING: $SPECDIR/$c.log is empty -- TLC printed nothing"; exit 3; }
     echo "$out" | grep -E 'is violated|states generated|Model checking completed' | head -3
     # capacity's cfgs declare TypeOk, ChargeConserved and NoOrphan SEPARATELY, so
     # TLC DOES name the specific one -- which is why SPEC-TO-CODE requires NoOrphan
