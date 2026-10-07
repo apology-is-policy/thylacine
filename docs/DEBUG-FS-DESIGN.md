@@ -181,7 +181,9 @@ is the same principal"). Concretely, before this rule:
 - **Disclosure through identity-only surfaces.** `environ` gates on
   owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
   the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
-  `cwd` and `maps` are mode 0444 — none of them weighs caps. So an unelevated peer
+  `cwd` and `maps` are mode 0444 — none of them weighs caps, except that `maps`
+  prints a code row's addresses only for a reader that passes the debug gate
+  (B-2b, `JIT-ON-WX-DESIGN.md` item 3). So an unelevated peer
   still READS an elevated same-principal target — `environ` being the one that
   matters, since it is where secrets live by convention. This rule governs
   *control*, not *disclosure*; disclosure is the seal's axis, and 3.2 below says
@@ -404,7 +406,9 @@ and each walk with its own read path (`environ`, `mem`, `regs`/`fpregs`/`kregs`,
 `kstack`, `wait`). `devproc_read_cb` refuses an image kind on the seal **before any
 formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
 all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
-posture — and hand out nothing for a sealed one. `environ`, the one image file with an
+posture — and hand out nothing for a sealed one. (One later carve-out: since the code
+aliases are placed at random, `maps` zeroes a code row's addresses for a reader without
+debug authority over the target; `JIT-ON-WX-DESIGN.md` item 3.) `environ`, the one image file with an
 owner gate of its own, composes the two in `devproc_extract_authorized`. The mem and
 regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
 meaning and no seal, and gates `sched` and `imperium`.

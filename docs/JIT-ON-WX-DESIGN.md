@@ -219,11 +219,18 @@ the shape on 2026-09-28; three things change.
    `vmmap` do, so a content process that can open files finds the writer
    there: B-2c must leave `/proc` out of the web content process's namespace,
    as a renderer sandbox leaves the file system out on other systems. That
-   listing is also AMBIENT here -- every Proc may read an unsealed Proc's
-   `maps` (Plan 9's posture, sound only while no user address was random,
-   devproc.c's own forward obligation) -- so random placement makes it a
-   cross-Proc disclosure of the writer's address. Its posture is OPEN as of
-   2026-10-07 (B-2b audit F2, widened in triage), owed before B-2 lands.
+   listing is also ambient here -- every Proc may read an unsealed Proc's
+   `maps`, Plan 9's posture, sound only while no user address was random --
+   so the addresses of its code rows go only to a reader with debug authority
+   over the target: the I-39 predicate, which admits a Proc reading itself
+   unless it is NOTRACE. Any other reader still sees each code row's
+   permissions and type, with its addresses and offset printed as zero,
+   listed after the other rows and grouped by permission, so the listing's
+   order does not place them in the address space either (voted 2026-10-07,
+   B-2b audit F2). Linux gates all of `maps` on `PTRACE_MODE_READ` and zeroes
+   the code addresses in `/proc/<pid>/stat` for a reader without it; the rest
+   of Thylacine's `maps` stays ambient, because nothing else in it is random
+   and the diorama reads a Linux guest's map as itself.
 
 ## Status / handoff
 
