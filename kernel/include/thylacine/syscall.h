@@ -1930,11 +1930,18 @@ enum {
     // ===================================================================
 
     // SYS_JIT_CREATE(length, out_va) -> 0 / -errno. CAP_JIT-gated.
-    //   Allocate a CODE Burrow of `length` bytes (rounded up to whole pages)
+    //   Reserve a CODE Burrow of `length` bytes (rounded up to whole pages)
     //   and install BOTH of its aliases in the caller's own address space:
     //   a WRITER alias mapped RW and an EXEC alias mapped RX, each a separate
     //   VMA over the same physical pages. Writes {writer_va, exec_va} as a
     //   `struct t_jit_region` to out_va.
+    //
+    //   The region is a RESERVATION, like SYS_BURROW_ATTACH_LAZY's memory:
+    //   create allocates and charges no page. Each page is committed, zeroed,
+    //   I-cache-invalidated and charged to the I-32 page budget ONCE, by the
+    //   first touch through either alias. A touch over the budget terminates
+    //   the Proc at the touch (I-32's clean failure); it never surfaces as an
+    //   errno here, so a JIT cannot learn its budget from create.
     //
     //   ONE syscall installs BOTH aliases, deliberately. Splitting create from
     //   map would admit a state in which an RX alias exists with no writer (or
@@ -1957,8 +1964,8 @@ enum {
     //   page traps rather than running residue.
     //
     //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX),
-    //   -ENOMEM (page budget, no VA gap, or allocator), -EFAULT (out_va not
-    //   writable by the caller).
+    //   -ENOMEM (the VMA cap, no VA gap, or the allocator), -EFAULT (out_va
+    //   not writable by the caller).
     //
     //   The denial is -T_E_ACCES (13), NOT -T_E_PERM: errno.h forbids a
     //   handler returning -T_E_PERM because its value (1) collides with the
@@ -1969,9 +1976,10 @@ enum {
 
     // SYS_JIT_DESTROY(writer_va) -> 0 / -errno.
     //   Tear down BOTH aliases of the code region whose WRITER alias starts at
-    //   writer_va, and free the backing pages. Identified by the writer VA
-    //   alone: the kernel remembers the pairing, so a caller cannot destroy
-    //   half a region or pass two VAs that name different regions.
+    //   writer_va, free the pages it committed and refund their charge.
+    //   Identified by the writer VA alone: the kernel remembers the pairing,
+    //   so a caller cannot destroy half a region or pass two VAs that name
+    //   different regions.
     //
     //   NOT CAP_JIT-gated. Destroying your own mapping is not an exercise of
     //   the emission authority, and gating it would mean a Proc whose legate
@@ -1992,7 +2000,10 @@ enum {
     //   `dsb ish` / `isb` sequence the architecture requires between a data
     //   write and an instruction fetch of the same location -- the same dance
     //   the kernel's own W1.5 alternatives-patcher performs, lifted to a
-    //   syscall.
+    //   syscall. When any CPU reports a non-PIPT I-cache, the invalidate is
+    //   `ic ialluis` instead: an invalidate by the kernel's alias of the page
+    //   is exact only on a PIPT I-cache. Pages of the range not yet committed
+    //   are skipped; their commit invalidates them.
     //
     //   The range must lie within ONE of the caller's code-region aliases
     //   (either the writer or the exec alias -- both name the same physical
@@ -2491,10 +2502,10 @@ _Static_assert(sizeof(struct t_jit_region) == 16, "t_jit_region ABI: size");
 _Static_assert(__builtin_offsetof(struct t_jit_region, writer_va) == 0, "t_jit_region ABI: writer_va@0");
 _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_region ABI: exec_va@8");
 
-// Largest single code region (I-42). 64 MiB is generous for a shader/method
-// JIT while staying well inside the I-32 per-Proc page budget, so a code
-// region can never be the instrument that exhausts a Proc's memory floor --
-// the pages are charged against the page budget exactly like SYS_BURROW_ATTACH's.
+// Largest single code region (I-42): JavaScriptCore's executable pool, and
+// inside AArch64's +-128 MiB direct-branch range. The region is a reservation,
+// so the bound is on address space; the pages a JIT touches are charged one at
+// a time against the I-32 page budget, as SYS_BURROW_ATTACH_LAZY's are.
 #define JIT_REGION_MAX  (64u * 1024u * 1024u)
 
 // SYS_PTY_REGISTER ops.

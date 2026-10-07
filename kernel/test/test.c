@@ -520,6 +520,7 @@ void test_jit_max_region_is_a_reservation(void);
 void test_jit_decommit_refuses_code(void);
 void test_jit_icache_policy_decode(void);
 void test_jit_commit_invalidates_icache(void);
+void test_jit_fetch_admission(void);
 void test_jit_icache_aliasing_invalidates_all(void);
 void test_jit_destroy_tears_down_both(void);
 void test_jit_destroy_rejects_non_writer(void);
@@ -2599,6 +2600,7 @@ struct test_case g_tests[] = {
     { "jit.write_visible_at_exec_alias",  test_jit_write_through_writer_visible_at_exec, false, NULL },
     { "jit.icache_policy_decode",         test_jit_icache_policy_decode,      false, NULL },
     { "jit.commit_invalidates_icache",    test_jit_commit_invalidates_icache, false, NULL },
+    { "jit.fetch_admission",              test_jit_fetch_admission,           false, NULL },
     { "jit.icache_aliasing_invalidates_all", test_jit_icache_aliasing_invalidates_all, false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
     { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },

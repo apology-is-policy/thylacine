@@ -54,7 +54,8 @@ pub enum JitError {
     NotPermitted,
     /// Zero length, or larger than the kernel's per-region cap.
     BadLength,
-    /// The per-Proc page budget, the VA space, or the allocator said no.
+    /// The VMA cap, the VA space, or the allocator said no. Never the page
+    /// budget: the region is a reservation, charged per page at first touch.
     OutOfMemory,
     /// Anything else the kernel reported.
     Other(i64),

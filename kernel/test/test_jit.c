@@ -706,6 +706,70 @@ void test_jit_commit_invalidates_icache(void) {
 }
 
 // ---------------------------------------------------------------------------
+// An instruction fetch is admitted by the exec alias's EXEC bit and refused
+// through the writer alias before it can commit, charge or sync a page. The
+// other first-touch legs in this file are reads, which the exec alias's READ
+// bit admits as well, so they cannot tell the two bits apart.
+// ---------------------------------------------------------------------------
+static enum fault_result jit_fetch(struct Proc *p, u64 vaddr) {
+    struct fault_info fi;
+    fi.vaddr           = vaddr;
+    fi.elr             = vaddr;
+    fi.esr             = 0;
+    fi.ec              = 0x20;          // instruction abort from EL0
+    fi.fsc             = 0x07;
+    fi.fault_level     = 3;
+    fi.from_user       = true;
+    fi.is_instruction  = true;
+    fi.is_write        = false;
+    fi.is_translation  = true;
+    fi.is_permission   = false;
+    fi.is_access_flag  = false;
+    fi.is_alignment    = false;
+    fi.is_external     = false;
+    return userland_demand_page(p, &fi);
+}
+
+void test_jit_fetch_admission(void) {
+    struct Proc *p = jit_make_proc(/*with_cap=*/true);
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    struct t_jit_region reg = { 0, 0 };
+    TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
+        "create succeeds");
+    struct Burrow *b = vma_lookup(p, reg.writer_va)->burrow;
+    u64 c0 = __atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED);
+
+    TEST_EXPECT_EQ(jit_fetch(p, reg.writer_va), FAULT_UNHANDLED_USER,
+        "a fetch through the writer alias is refused");
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 0u, "and commits nothing");
+    TEST_EXPECT_EQ(jit_pages(p), 0u, "and charges nothing");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED), c0,
+        "and syncs nothing");
+
+    TEST_EXPECT_EQ(jit_fetch(p, reg.exec_va), FAULT_HANDLED,
+        "a fetch through the exec alias commits the page");
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 1u, "one page committed");
+    TEST_EXPECT_EQ(jit_pages(p), burrow_lazy_footprint(b), "and charged once");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_icache_sync_calls_for_test, __ATOMIC_RELAXED), c0 + 1,
+        "and invalidated before the leaf");
+    u64 pte_x = jit_walk_l3(p->as->pgtable_root, reg.exec_va);
+    TEST_ASSERT(pte_x != 0 && (pte_x & BIT_UXN) == 0, "the fetch installed an executable leaf");
+    TEST_EXPECT_EQ(pte_x & PTE_PA_MASK, page_to_pa(jit_slot(b, 0)),
+        "over the committed page");
+
+    // Residency changes nothing about the writer: the page it would fetch is
+    // committed now, and the fetch is still refused.
+    TEST_EXPECT_EQ(jit_fetch(p, reg.writer_va), FAULT_UNHANDLED_USER,
+        "a fetch through the writer alias of a committed page is refused");
+    TEST_EXPECT_EQ(jit_walk_l3(p->as->pgtable_root, reg.writer_va), 0ull,
+        "and installs no writer leaf");
+
+    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "cleanup");
+    jit_drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
 // On an aliasing I-cache every sync invalidates the whole I-cache. Forced on
 // here, since no target this suite boots on reports one.
 // ---------------------------------------------------------------------------

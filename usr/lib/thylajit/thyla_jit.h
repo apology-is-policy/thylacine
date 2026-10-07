@@ -51,7 +51,9 @@ struct thyla_jit_region {
 
 /* SYS_JIT_CREATE. Returns 0 and fills *out on success; -errno otherwise
  * (-13/EACCES = no CAP_JIT, -22/EINVAL = length 0 or > JIT_REGION_MAX,
- * -12/ENOMEM = budget/VA/allocator, -14/EFAULT = out unwritable). */
+ * -12/ENOMEM = VMA cap/VA/allocator, -14/EFAULT = out unwritable). The region
+ * is a reservation: each page is charged when first touched, and a touch over
+ * the page budget terminates the Proc rather than failing here. */
 static inline long thyla_jit_create(size_t length, struct thyla_jit_region *out)
 {
     register long x0 __asm__("x0") = (long)length;
