@@ -1381,3 +1381,50 @@ line proved today.
 
 NOT A HOLLOW CLEAN: the enumeration above is the claim, so the next session can
 check my reasoning instead of re-deriving it or trusting it.
+
+== 2026-10-07 20:49Z: DISCRIMINATED. THE ACQUISITION WITNESS IS CLOSED ==
+Run work/oct5-as-r9/reap-leg-20261007T204646Z/, exit 0, 20:46:46-20:49:43Z,
+three minutes on a warm build/ (the cold control at 19:00Z took nine).
+
+CONTROL (fresh, because the fixture changed):
+  tests: 1836/1836 PASS against the DERIVED expectation 1836
+  leg announced + arrival marker + normal-fallthrough marker + PASS in its block
+  test.sh exit 0, no extinction, control kernel dd0c4e67c7306ae0
+  (NOT 9fae5eb3a0873190 -- a different kernel is CORRECT here: the fixture's
+  marker text changed between the two runs. The 19:00Z receipt stays pinned at
+  reap-leg-control-PINNED-20261007T190621Z/ and is still 9/9.)
+
+MUTANT (confined to loom.c, balanced, both halves verified present):
+  kernel 92f1dbb1c7de3778, differs from the control
+  test.sh exit 1, ONE extinction, by name, at line 603 of mutant-boot.log:
+    601:    [test] loom.private_owner_lifecycle ... [lp-mark] unpinned-reap-owner-drop
+    603:EXTINCTION: AddrSpace final lifetime drop with private rings
+  ATTRIBUTED: arrival marker present, NO cleanup marker, NO verdict in the leg's
+  block -> it died AT the drop under test, not elsewhere in the same test.
+  AND INDEPENDENTLY: HALLS frame #4 = test_loom_private_owner_lifecycle+0xb14,
+  which owes nothing to my instrumentation. Worth knowing for the next mutant:
+  the crash dump may already name the function, so check the dump BEFORE
+  building markers -- though a marker is what lets the ORACLE decide instead of
+  a human reading a trace.
+
+RECOVERY, same exit: 2 mutant images quarantined -> mutant-artifacts-DO-NOT-BOOT,
+build/ left imageless then rebuilt BYTE-IDENTICAL to the control
+(dd0c4e67c7306ae0), kernel/loom.c restored and hash-verified to cbdd71f6f5ee4c74.
+Tree clean, 0 dirty tracked. Mac RELEASED after 4 minutes; main was next and
+their wait resolved on it.
+
+DISK COST OF THE WHOLE RUN, the figure aux asked for at 13:33Z and nothing had
+retained: 499 MiB for two --config ci bakes + a recovery bake + two full boots.
+  20:46:46  stage-0             11359 MiB
+  20:47:28  post-control-build  11314 MiB
+  20:49:01  post-mutant-build   10878 MiB
+  20:49:05  pre-recovery-build  10877 MiB
+  20:49:43  exit                10860 MiB
+
+STILL OPEN, and not weakened by this: THE RELEASE HALF. This mutant tests
+ACQUISITION. A missing release LEAKS rather than extincting, so it has no loud
+witness, and the enumerated structural pairing (1 begin site, 3 end sites, 1
+service_as write, loom_free static with 1 guarded call site, the retirer
+destroying unconditionally) remains its whole basis. Also still open and
+SEPARATE: whether the suite's 24 magazines_drain_all call sites satisfy the
+quiescence their sanctioned use requires -- needs the guest.

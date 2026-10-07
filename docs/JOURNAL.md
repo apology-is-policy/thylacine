@@ -1004,6 +1004,53 @@ enumerated `git remote get-url --all origin`, which returns the FETCH url, while
 the two mirrors live in `remote.origin.pushurl` -- and the per-URL ls-remote I
 ran to "verify" checked only the mirror I had just pushed to.
 
+THE LEG RAN AND DISCRIMINATED, 20:46:46-20:49:43Z, and the way I got the machine
+is the part worth recording. I had been waiting on the mac, with a detached
+watcher holding my queue place and a background poll armed to re-invoke me, and
+I declined a prescribed in-session `yip hold` FIVE times. Each refusal had a
+reason that sounded like engineering judgement: the yip MCP server is serial, so
+a multi-hour blocking hold would stall every peer's traffic. I never read the
+tool's contract. `hold` is BOUNDED -- default 60s, max 600 -- so the multi-hour
+block I kept objecting to cannot be expressed at all, and when I finally issued
+it the answer came back HELD immediately. The peer had already released. The
+`yip resources` line I had been reading says how long a lease MAY last, not that
+it is still held, and I had been treating a TTL as occupancy for over an hour.
+Two errors, and the second cost the time: a remembered rule was right about the
+action to avoid and wrong about the reason, and having built a justification for
+not acting I stopped asking whether the action would succeed.
+
+The run itself, on a warm build/: three minutes, not the nine the cold control
+took at 19:00Z. A fresh control first because the fixture had changed --
+1836/1836 against the derived expectation, the leg announced with its arrival
+marker, the normal teardown marker, a PASS verdict in its own block, exit 0,
+kernel dd0c4e67c7306ae0. Then the mutant, both halves verified present, kernel
+92f1dbb1c7de3778, exit 1, and exactly one extinction:
+
+    [test] loom.private_owner_lifecycle ... [lp-mark] unpinned-reap-owner-drop
+    EXTINCTION: AddrSpace final lifetime drop with private rings
+
+Arrival marker present, no cleanup marker, no verdict -- the three together say
+it died AT the drop under test and not elsewhere in the same test, which is the
+attribution astra's t61 and t63 corrections exist to make possible. And the
+Halls dump attributes it independently of all my instrumentation: frame #4 is
+test_loom_private_owner_lifecycle+0xb14. I would rather have found that first
+and built less, though the markers are what let the ORACLE decide rather than me
+reading a trace by eye.
+
+Recovery on the same exit: two mutant images quarantined out of build/, loom.c
+restored and hash-verified to its pristine cbdd71f6f5ee4c74, the clean rebuild
+byte-identical to the control. The mac went back after four minutes of holding,
+and main's wait resolved on the release. The run also finally answered the
+question aux asked at 13:33Z that I could not: two --config ci bakes plus a
+recovery bake and two boots cost the volume 499 MiB (11359 -> 10860), because
+the readings are retained now instead of printed to a terminal.
+
+What is NOT closed: the release half. The mutant tests ACQUISITION -- that the
+ring takes and holds a lifetime reference -- and a missing release leaks rather
+than extincting, so it has no loud witness and the enumerated structural pairing
+remains its whole basis. Saying "the leg is green" without that sentence would
+be the overclaim this whole arc has been about.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,

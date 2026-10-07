@@ -879,7 +879,7 @@ in the destroy is not covered by any of this. And the two `extinction()` arms in
 the destroy precede the release, so a private ring in legacy state dies LOUDLY
 rather than leaking -- those arms are not leak paths.
 
-RUN AT LAST, AND ONLY HALF OF IT HOLDS (2026-10-07 19:0xZ, under lease). The leg
+RUN AT LAST, AND BOTH HALVES NOW HOLD (2026-10-07, across two leases). The leg
 EXECUTES AND PASSES: a full suite on the gate image reported `tests: 1836/1836
 PASS` with `[test] loom.private_owner_lifecycle ... PASS` by name, `test.sh`
 exit 0 and no extinction, on the pinned Stratum, with the control kernel
@@ -917,8 +917,34 @@ outcome is deterministic rather than racy, and the source settles that rather
 than the hope: `proc_free` releases the address space BEFORE it calls
 `handle_table_free`, so at the lifetime drop the handle table is
 intact, `loom_unref` has not run, nothing is enqueued and `private_rings` is 1 --
-the retirer never gets a turn. That form is written but UNRUN, and the
-acquisition witness accordingly remains OPEN.
+the retirer never gets a turn.
+
+AND THAT FORM HAS NOW RUN: THE ACQUISITION WITNESS IS CLOSED (2026-10-07
+20:46:46-20:49:43Z, under a second lease, three minutes on a warm `build/`).
+A FRESH control first, because the fixture had changed: `tests: 1836/1836 PASS`
+against the DERIVED expectation of 1836 registrations, the leg announced with
+its arrival marker, the NORMAL teardown marker, a PASS verdict in its own block,
+`test.sh` exit 0, control kernel `dd0c4e67c7306ae0`. Then the mutant, both halves
+verified present, kernel `92f1dbb1c7de3778` and therefore not the control's:
+`test.sh` exit 1 and ONE extinction, by name --
+
+    [test] loom.private_owner_lifecycle ... [lp-mark] unpinned-reap-owner-drop
+    EXTINCTION: AddrSpace final lifetime drop with private rings
+
+-- with the arrival marker present, NO cleanup marker, and NO verdict, which
+together say the boot died AT the drop under test rather than anywhere else in
+the same test. The Halls dump then attributes it independently of any of that
+instrumentation: frame #4 is `test_loom_private_owner_lifecycle+0xb14`. So the
+guard fires in this leg because the ring's own lifetime reference is gone, and
+the reference is load-bearing for a private ring outliving its creator's Proc.
+ACQUISITION ONLY: the release half still has no execution witness, and the
+structural pairing recorded above remains its whole basis.
+Recovery ran on the same exit: two mutant images quarantined out of `build/`,
+`kernel/loom.c` restored and hash-verified to its pristine `cbdd71f6f5ee4c74`,
+and the clean rebuild BYTE-IDENTICAL to the control. The whole run -- two
+`--config ci` bakes and a third for recovery, plus two full boots -- cost the
+volume 499 MiB (11359 -> 10860 MiB), which is the figure a peer had asked for
+and nothing had retained until this run kept its own readings.
 
 The runner's own oracle was the thing that called the failed run a success, and
 the defect is instructive: it asked only that the leg not report PASS, which a
