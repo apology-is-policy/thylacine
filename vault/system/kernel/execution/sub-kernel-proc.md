@@ -405,8 +405,10 @@ There is no REAPED state — by the time `wait_pid` returns the pid, the
 descriptor is freed and its magic clobbered.
 
 The top two bits are the final close's (2026-10-07, ARCH 7.9.1 part B,
-[[sub-kernel-death]]): `PROC_FLAG_EXIT_CLOSING` (bit 31), set once by
-`proc_close_handles_at_exit` before its first close, so a kill finds an
+[[sub-kernel-death]]): `PROC_FLAG_EXIT_CLOSING` (bit 31), set by
+`proc_close_handles_at_exit` before its first close (and by `exits()` under
+`g_proc_table_lock`, just before it drops the lock for that close; the OR is
+idempotent and nothing clears it), so a kill finds an
 `exits()` close terminating although it set no group exit message; and
 `PROC_FLAG_EXIT_CLOSE_FORCED` (bit 30), set by `proc_group_kill` when it finds
 the Proc terminating, which lifts the final close's hold on death. Neither is

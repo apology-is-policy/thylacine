@@ -691,6 +691,22 @@ static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
     }
 }
 
+// Run a close job, retried like closer_send while the fid is still bound on a
+// live session: a write never sent for want of memory comes back -P9_E_IO
+// too, and a resend of the run's explicit offsets is idempotent.
+static int closer_run_job(struct p9_closer *self, struct p9_attached *a,
+                          struct p9_closer_entry *e) {
+    u64 backoff = CLOSER_RETRY_NS_MIN;
+    for (u32 tries = 0;; tries++) {
+        int rc = e->job->run(e->job, a->client, e->fid);
+        if (rc != -P9_E_IO || tries >= CLOSER_RETRIES ||
+            !p9_client_fid_held(a->client, e->fid))
+            return rc;
+        (void)tsleep(&self->r, closer_never_cond, NULL, timer_now_ns() + backoff);
+        backoff *= 2;
+    }
+}
+
 // Send every deferred Tclunk of `a`, each after its close job if it has one,
 // which this closer took off the run-queue (closer_busy). Each entry's
 // reference is dropped outside the lock: the last drop tears the session
@@ -707,7 +723,7 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
 
         // A close job first: its writes need the fid bound. Its failure on a
         // live session loses bytes write() reported written, so it is loud.
-        int  jrc   = e->job ? e->job->run(e->job, a->client, e->fid) : 0;
+        int  jrc   = e->job ? closer_run_job(self, a, e) : 0;
         bool jlost = jrc != 0 && p9_client_fid_held(a->client, e->fid);
         if (jlost) p9_close_flush_failed(e->fid, jrc);
 

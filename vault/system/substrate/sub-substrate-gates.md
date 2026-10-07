@@ -328,7 +328,10 @@ dead session's fids die with it, so neither prints anything
 refused rc R` is a fid the live session holds after the hand-off failed: a
 real leak until the session ends. After the banner `test.sh` fails on the
 line and prints it. Its red run injected one refusal at boot: all 1764 kernel
-tests passed and the verdict failed on the line; the clean boot prints none. The knob, and the collector
+tests passed and the verdict failed on the line; the clean boot prints none.
+Its sibling `9p: close: flush of fid N failed rc R` (2026-10-07, ARCH 7.9.1
+part C: a last close's staged bytes never reached a live server) fails the
+verdict the same way. The knob, and the collector
 mode the dev9p tests set, are released by the kernel test runner after every
 test, which prints `POLL-KNOB(...)` and fails a passing test that left one set
 (the POOL-PARKED pattern: a knob restored on a test's last line is restored
@@ -554,4 +557,5 @@ gate changes of 2026-09-22 that landed without a dossier update recorded here:
 main's `default-smp1` row (`6e1cda16`, the loom join) and the `/webkit` floor
 path (`b70e1bfd`). 2026-09-24: the netd selftest verdict joins the exit status.
 2026-09-28: the `poll: FAILSAFE` check (#98 NP-4c). 2026-09-29: the
-`clunk of fid` refusal check (the Tclunk closer).
+`clunk of fid` refusal check (the Tclunk closer). 2026-10-07: the `flush of
+fid` loss check (the exit-close seam, part C).

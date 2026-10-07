@@ -1967,6 +1967,7 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   hands the fid with a close job (`p9_attached_defer_close`); the spec's fid
   is that entry, and the job's Twrites are not modelled (they precede the
   Tclunk on the same closer, so `CloserSend` still clunks each entry once).
+  That is the safety half; the liveness half weakens (below).
 - `CloserSend` = `closer_serve` -> `closer_send` -> `p9_client_clunk_async` on a
   closer thread (kproc, never dying); the entry's session reference keeps the
   client alive until it is dropped after the send. Its weak fairness is the
@@ -1979,6 +1980,12 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   that spawn was failing is covered by the spawn's own retry, up to three
   attempts (`p9_closer.hand_off_inside_failed_spawn_retried`); a closer spawn
   that keeps failing (memory exhausted) is outside the fairness assumption.
+  Since part C a close job's Twrites run ahead of its entry's Tclunk and
+  wait for their Rwrites, so `WF_vars(CloserSend)` for that entry, and for
+  every entry queued behind it on the session, also assumes the server
+  ANSWERS those writes, where before it needed only the server to read. A
+  server that reads and never answers holds its own session's clunks behind
+  a job; by the voted design (no deadline) its hangup is the way out.
 
 NOT modeled (caught by the kernel test `dev9p.poll_cancel_at_close`, not the
 spec): the abandon's Tflush leaves the readiness oldtag `awaiting_flush`, which

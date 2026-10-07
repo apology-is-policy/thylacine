@@ -205,7 +205,10 @@ A second kill ends that hold (ARCH 7.9.1 part B, `dec-2026-10-07-exit-close`).
 keep the string wrapper -- runs the same core as every termination, and when
 its CAS on `group_exit_msg` loses (the group is already terminating), or the
 Proc carries `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`, so
-an `exits()` close, which sets no group exit message, counts as terminating),
+an `exits()` close, which sets no group exit message, counts as terminating;
+`exits()` publishes it first, under `g_proc_table_lock` before it drops the
+lock for the close, so no kill falls between the exit's commitment and the
+mark -- witness `p9_closer.first_kill_forces_exits_close`),
 it ORs `PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the
 wake loop.
 notes.c's `thread_death_held` then reads the hold as lifted: the final close's

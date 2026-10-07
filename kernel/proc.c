@@ -3810,7 +3810,9 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         // (proc_group_kill): the close's waits then unwind as a death, and
         // what it cannot finish goes to the closer (ARCH 7.9.1 parts B, C).
         // PROC_FLAG_EXIT_CLOSING is how a kill finds an exits() close, which
-        // set no group_exit_msg, terminating.
+        // set no group_exit_msg, terminating; exits() publishes it first,
+        // under g_proc_table_lock, so no kill falls between its commitment
+        // and this line.
         struct Thread *closer = current_thread();
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
         closer->exit_close_active = true;
@@ -4143,6 +4145,10 @@ void exits_code(int code, const char *msg) {
     // group_exit_msg mid-close; either would short-circuit the write-behind
     // flush + Tclunk without the flag).
     if (p->handles) {
+        // The final-close mark, published under the lock a kill decides
+        // under: a kill that takes it after this point finds the close under
+        // way and forces it (ARCH 7.9.1 part B). Set inside the close too.
+        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         proc_close_handles_at_exit(p);
         s = spin_lock_irqsave(&g_proc_table_lock);

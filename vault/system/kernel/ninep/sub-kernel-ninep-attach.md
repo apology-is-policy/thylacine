@@ -68,8 +68,13 @@ Tclunk is sent.
   Tclunk, then `release(job)` -- so the rest of a last close that may not
   wait for its server (dev9p's staged write-behind run) is finished by a
   closer. On `-1` the caller still owns the job. `p9_attached_defer_clunk` is
-  the job-less form. A job whose run fails while the session still holds the
-  fid prints `9p: close: flush of fid N failed rc R`
+  the job-less form. A job whose run fails with `-P9_E_IO` while the fid is
+  still bound is run again with `closer_send`'s backoff (`closer_run_job`: 10
+  tries from 1 ms, about 1 s): a write never sent for want of memory comes
+  back as the same `-EIO` as a server's refusal, and a resend at the run's
+  explicit offsets is idempotent (witness
+  `p9_closer.close_job_retries_a_refused_write`). A job whose run still fails
+  while the session holds the fid prints `9p: close: flush of fid N failed rc R`
   (`p9_close_flush_failed`, also called by dev9p when a hand-off cannot be
   made); `jobs` and `job_errors` count them.
 - `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
