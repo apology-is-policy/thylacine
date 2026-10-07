@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-10-07 (main, Opus 5.5, effort max) -- the 9P tag pool: it grows, it has shares, a sync op waits (IN FLIGHT)
+## 2026-10-07 (main, Opus 5.5, effort max) -- the 9P tag pool: it grows, it has shares, a sync op waits (landed)
 
 **Why now.** Right after seam-90 in the arc order. A sync op that found the
 64-tag pool full failed `-P9_E_IO` at its build, nothing above the client
@@ -105,11 +105,35 @@ NFS does" overstates parity -- Linux reports at every close through
 `->flush`, ours at the open file's last close; a long comment line; stale
 `inflight[]` prose in a test comment, SPEC-TO-CODE and loom_devgone.tla).
 
-**Open.** The audit close; ci-smp-gate N=10 + ls-ci; the land. AS-R9: corona
-checked the loom.c hunk at 07:37Z (yip 0181 t7): no interaction with her
-charge settlement. Corona's two `tools/build.sh` patches (the Stratum pin in
-the ledger, `check-prot-mirror.py` wired failing) ride the same landing,
-copied to scratchpad/corona-buildsh/ with their hashes.
+**The audit close (d5326904b, 08:13Z).** Fable r1 (5.1; MODEL(start) =
+MODEL(end)): 0 P0 / 0 P1 / 0 P2 / 8 P3, plus my three. The one with teeth was
+F1: the reader handoff walked every in-flight tag under the client lock, and
+the table can now hold 16K of them. A per-chunk count of sync-owned entries
+(kept by `set_owner`, `mark_async` and `clear_outstanding`) lets the walk skip
+chunks without one; witness `9p_session.sync_owner_index`. Also fixed: the
+client header's errno contract (F2), a fail-soft registration, now
+`ASSERT_OR_DIE` (F3), ARCH's overclaim under a failed chunk allocation (F4),
+and my three. Tracked in OPEN-BUGS (08:11Z): the other three O(in-flight)
+walks and Loom's widened flood budget (F5). Recorded: no poll reservation in
+the async share (F6, `seam-9p-async-share-poll-reserve`), wait fairness (F7)
+and the table that never shrinks (F8) in the session dossier. A clean close, so
+no round 2. AS-R9: corona checked the loom.c hunk at 07:37Z (yip 0181 t7).
+Corona's two `tools/build.sh` patches (the Stratum pin in the ledger,
+`check-prot-mirror.py` wired failing) ride the landing as 6be56e59a and
+a61898766, by `git am`; `--expect-unmirrored 5` exits 0 here, 4 exits 1.
+
+**RED-4 (08:20Z-08:25Z).** Suite 1917/1917 on d5326904b first (08:20Z).
+Predicted before the run, from `client_apply_reply_locked`: with the count's
+increment in `set_owner` removed, only `sync_owner_index` goes red, at "the
+walk finds the sync owner in the grown chunk" -- not the client's handoff
+tests, because the client unregisters before the entry clears, so the first
+finished sync op wraps chunk 0's count to nonzero and every later walk scans
+it; with the decrement in `clear_outstanding` removed, the same test goes red
+at "every chunk's count is back at zero". Run one at a time: 1916/1917 each
+(08:23Z, 08:24Z), each at its predicted assertion. Restored, rebuilt,
+1917/1917 (08:25Z).
+
+**The gates.** `ci-smp-gate` N=10 on d5326904b (08:29Z-09:33Z): 50/50 PASS over default-smp1, default-smp4, default-smp8, ubsan-smp4 and ubsan-smp8, no corruption. `ls-ci` on a `--config ci` bake of the same tip in a worktree (baked by 09:40Z): PASS in 55 s. Suite 1917/1917 at 08:20Z, and again at 08:25Z after RED-4.
 
 ---
 ## 2026-10-06/07 (main, Opus 5.5, effort max) -- seam-90 closed: a blocking 9P reader unwinds at any byte

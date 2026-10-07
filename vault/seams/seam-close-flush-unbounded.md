@@ -60,3 +60,7 @@ trade, not an oversight.
   closes it" paragraph above is superseded on that point. The tag-pool
   shortage (a full pool fails a sync op, and the write-behind flush then drops
   its data) is fixed first.
+- [[chg-2026-10-07-tag-pool]] fixed that shortage. Since then the "free tag"
+  wait at exit happens only when a session's op share (32767 ops) is full or a
+  chunk of the tag table cannot be allocated; the write-behind flush's reply
+  and room in a full request ring are unchanged.

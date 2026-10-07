@@ -53,7 +53,11 @@ client (`c->rx_got`), and the **seam-90 close**
 ([[chg-2026-10-06-seam90-close]], [[dec-2026-10-06-seam90-unwind-any-byte]])
 then let a death, a stop or a caught note unwind the reader at any byte:
 block-through's cost was a reader that any process serving a mount could hold.
-`reader_frame.tla` was rewritten with a server that may stop for good.
+`reader_frame.tla` was rewritten with a server that may stop for good. The
+**tag pool** ([[chg-2026-10-07-tag-pool]]) then replaced the fixed 64-tag
+table: it grows to the 16-bit tag space, ops and async ops each have a share,
+a sync op waits for a tag instead of failing, and the reader applies every
+sync reply, so the client's `inflight[]` became the tag entry's owner.
 
 ## The standing lesson
 

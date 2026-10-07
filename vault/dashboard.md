@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 86
+## Open seams: 85
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -53,7 +53,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-845-untrusted-server]] (sub-kernel-ninep-client)
 - [[seam-87-disk-write-proof]] (sub-substrate-interactive, sub-substrate-gates)
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
-- [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
+- [[seam-9p-async-share-poll-reserve]] (sub-kernel-ninep-client)
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
 - [[seam-boot-banner-coupdate-list]] (sub-substrate-gates)
 - [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
@@ -125,16 +125,15 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
-- [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
 - 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
+- 2026-10-07 [[chg-2026-10-07-tag-pool]] — The 9P tag table grows to the 16-bit tag space, each kind of op has a share, a sync op waits for a tag, and close(2) reports a failed write-behind flush
 - 2026-10-06 [[chg-2026-10-06-9p-sessions-ends]] — /ctl/9p-sessions shows a row's counters only to its two ends
 - 2026-10-06 [[chg-2026-10-06-chdir-physical]] — chdir stores the name of where the walk landed
 - 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
 - 2026-10-06 [[chg-2026-10-06-devno-u64]] — devno-u64: the kernel's device number is 64 bits and never reused; t_stat.devno carries all of it
 - 2026-10-06 [[chg-2026-10-06-flag-words]] — The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested
 - 2026-10-06 [[chg-2026-10-06-haul-p3b]] — Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
-- 2026-10-06 [[chg-2026-10-06-held-untagged]] — The held launch drops its build tag: every ambush build spawns held
 <!-- generated:end -->
