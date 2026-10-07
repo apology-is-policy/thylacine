@@ -155,7 +155,10 @@ the whole argument, which is why it reads as a changelog rather than a number.
 
 The tail is dense with single-purpose flags that each fit an existing
 padding hole: `cpu_pinned`, `exit_close_active`, `debug_ss_armed`,
-`stop_unwinds`, `stop_no_park`, `stop_unwound`, and since 2026-09-29
+`stop_unwinds`, `stop_no_park`, `stop_unwound` (the elected 9P reader holds
+the first two for its whole recv, so a stop unwinds it at any byte and the
+caught arm latches `note_unwound` for it; no die-check reads them since the
+seam-90 close, [[chg-2026-10-06-seam90-close]]), and since 2026-09-29
 `note_interruptible`: whether a caught note may unwind the thread's current
 wait, set only by the vivarium dispatcher for signal(7)'s list and cleared at
 the syscall exit and around a page-in ([[sub-kernel-notes]]); and since

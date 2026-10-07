@@ -7,7 +7,7 @@ surface: [sub-kernel-death]
 opened-by: fnd-68-r2-f3
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-07
 ---
 ## Owed
 
@@ -34,3 +34,29 @@ strictly better placed but no longer interruptible.
 The honest framing recorded at the time: dropping the flag to restore
 killability would reopen the silent data loss of [[fnd-68-r1-f1]]. This is a
 trade, not an oversight.
+
+## As of 2026-10-07
+
+- The risk paragraph above is WRONG about its precondition: `SYS_ATTACH_9P`
+  takes pipes from any process, so the server need not be trusted or wedged
+  by accident -- any process can serve a mount and stop answering. A killed
+  Proc then waits at exit wherever a close needs that server: a write-behind
+  flush's reply, a free tag, room in a full request ring; the Loom SQPOLL
+  kthread's reap clunk the same, and `loom_free`'s join with it.
+- [[chg-2026-10-06-seam90-close]] made the elected reader unwind at any byte
+  for a death, a stop or a caught note, so a killed Proc's reader no longer
+  waits on its server; its at-exit close still does, under
+  `exit_close_active`, where no death reaches it.
+- Heritage researched (2026-10-06): Plan 9 has no timeout here either, and
+  escapes by kill escalation -- a kill landing during `closefgrp` makes
+  `sleep()` call `forceclosefgrp`, which hands the still-open channels to the
+  `ccloseq` close-queue kprocs. Linux 9p and FUSE wait until the server hangs
+  up or the connection is aborted. Options and the owner: OPEN-BUGS
+  (2026-10-06 22:17Z).
+- The operator voted on 2026-10-07: first the clunk side never waits at
+  exit (the clunk goes to the closer, nothing lost); then a kill during the
+  final close hands the rest of it, the write-behind run included, to the
+  closer kthread, as Plan 9's `forceclosefgrp` does. No deadline: the "What
+  closes it" paragraph above is superseded on that point. The tag-pool
+  shortage (a full pool fails a sync op, and the write-behind flush then drops
+  its data) is fixed first.

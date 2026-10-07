@@ -2,12 +2,13 @@
 id: seam-90-hung-server
 type: seam
 title: "Dying-reader liveness against a hung/untrusted server (mid-frame stall)"
-status: open
+status: closed
 surface: [sub-kernel-ninep-client]
 opened-by: chg-2026-07-19-90-death-block-through
 tracker: "v1.x"
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-07
+closed-by: chg-2026-10-06-seam90-close
 ---
 ## Owed
 
@@ -45,3 +46,12 @@ it converted a reachable corruption into this bounded v1.x liveness debt
   voted design (block-through), so it is the operator's decision (owned:
   OPEN-BUGS 2026-10-06). The pumps (Loom waiters, the dev9p poll kthread)
   never wait inside a frame, so only blocking sync readers carry the seam.
+
+## As of 2026-10-07
+
+- Closed by [[chg-2026-10-06-seam90-close]] ([[dec-2026-10-06-seam90-unwind-any-byte]]):
+  a death, a stop or a caught note unwinds the elected reader at any byte, and
+  the client keeps the partial frame for the next reader. No deadline or
+  watchdog was needed.
+- A stalled server still holds the at-exit close and the Loom SQPOLL reap:
+  [[seam-close-flush-unbounded]].

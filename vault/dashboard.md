@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 87
+## Open seams: 86
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -52,7 +52,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-841-mi-harness]] (sub-kernel-ninep-client)
 - [[seam-845-untrusted-server]] (sub-kernel-ninep-client)
 - [[seam-87-disk-write-proof]] (sub-substrate-interactive, sub-substrate-gates)
-- [[seam-90-hung-server]] (sub-kernel-ninep-client)
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
 - [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
@@ -130,6 +129,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
 - 2026-10-06 [[chg-2026-10-06-9p-sessions-ends]] — /ctl/9p-sessions shows a row's counters only to its two ends
 - 2026-10-06 [[chg-2026-10-06-chdir-physical]] — chdir stores the name of where the walk landed
 - 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
@@ -137,5 +137,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-06 [[chg-2026-10-06-flag-words]] — The flag-word check: every bit-allocated word, not only proc_flags, derived from its header and self-tested
 - 2026-10-06 [[chg-2026-10-06-haul-p3b]] — Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine
 - 2026-10-06 [[chg-2026-10-06-held-untagged]] — The held launch drops its build tag: every ambush build spawns held
-- 2026-10-06 [[chg-2026-10-06-loom-multiclient]] — Waiters fan in: a Loom ring's waiters read every 9P client it has an op on, over a ready stream only
 <!-- generated:end -->

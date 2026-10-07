@@ -91,21 +91,25 @@ completes, so every RED leg releases its threads. Restored, rebuilt:
 - Researching what a killed Proc still waits on (the at-exit close,
   `seam-close-flush-unbounded`, whose risk line assumed a trusted server):
   Plan 9's escape is kill escalation (`forceclosefgrp` hands the open
-  channels to the `ccloseq` kprocs). Design vote owed.
+  channels to the `ccloseq` kprocs). The operator voted on 2026-10-07: the
+  clunk never waits at exit now; then a kill during the final close hands the
+  rest of it, write-behind included, to the closer (Plan 9's escape).
 - The same research confirmed the pinned tag-pool item: a sync 9P op that
   finds the 64-tag pool full fails EIO, and an async-clunk burst of 64+ closes
   leaves the pool full on a plain mount. A witness run (patch
   `scratchpad/tagpool_witness.py`, not committed) failed as predicted: the
   control saw 64 tags held, then a sync walk failed. The write-behind flush
-  drops its data on that error and no close reports it. Design vote owed;
-  it goes before the exit-close seam.
+  drops its data on that error and no close reports it. The operator voted on
+  2026-10-07: grow the pool to 65534, reserve a share for sync ops, wait
+  (killably) instead of failing, and apply sync replies at the demux; and
+  close(2) reports a failed flush as EIO. It goes before the exit-close seam.
 
 **aux-3 merged** (61c71525f, f8bd8688c) so one SMP gate covers both, as aux
 agreed: ARCH's debug row took both sides' disjoint edits against the merge
 base; the journal's three-way line census lost nothing; the views were
 re-rendered. Suite 1909/1909.
 
-**Gates.** <ci-smp-gate>; <ls-ci>.
+**Gates.** ci-smp-gate N=10 PASS on 1c18fb87a (default-smp1/4/8 + ubsan-smp4/8: 50 of 50 boots, 0 corruption; 2026-10-07 00:11Z-01:18Z); ls-ci PASS at 00:10Z (55 s, first attempt) on a `--config ci` bake of ea18b94cd, whose code the tip carries unchanged (1c18fb87a adds docs only).
 
 **What "fixed" covers.** A killed, stopped or signalled thread inside the
 elected reader's recv leaves it at once, at any byte, and the next reader

@@ -17,6 +17,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-80-pivot-orphan-mounts]] | closed | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
+| [[seam-90-hung-server]] | closed | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-devcap-plain-caps-read]] | closed | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
@@ -37,7 +38,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-841-mi-harness]] | open | sub-kernel-ninep-client | chg-2026-06-03-841-pipeline | standing (carried across #841/#845/#349/#375/#52-#53/Loom/8c-3/#90) |
 | [[seam-845-untrusted-server]] | open | sub-kernel-ninep-client | fnd-845-r1-f1 | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-87-disk-write-proof]] | open | sub-substrate-interactive, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #87 |
-| [[seam-90-hung-server]] | open | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-932-devsrv-readdir]] | open | sub-kernel-devsrv | fnd-957-r1-f2 | task #932 |
 | [[seam-9p-tag-block-on-full]] | open | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
 | [[seam-affinity-mask]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | a future SYS_SCHED_SETATTR |
