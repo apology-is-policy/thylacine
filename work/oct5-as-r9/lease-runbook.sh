@@ -169,8 +169,16 @@ if [ "${SPECS:-1}" = 1 ]; then
   # she went looking for the TLC verdicts and found none). Writing each cfg's
   # whole output to its own file costs nothing and makes the claim checkable
   # by someone who was not in the room.
-  SPECDIR="$ROOT/work/oct5-as-r9/spec-logs"
-  rm -rf "$SPECDIR"; mkdir -p "$SPECDIR" || { echo "REFUSING: cannot create $SPECDIR"; exit 3; }
+  # PER-RUN DIRECTORY, AND NOTHING IS EVER DELETED. The first version did
+  # `rm -rf "$SPECDIR"` before running, which would have destroyed the previous
+  # run's evidence -- including a FAILING run's -- on the next invocation
+  # (astra, 0161 R4). That is the same archive-never-delete rule I had already
+  # applied in tools/smp-multiboot.sh's retention and then broke here: a
+  # retention path that clears itself is a retention path with a one-run memory.
+  SPECDIR="$ROOT/work/oct5-as-r9/spec-logs/$(date -u +%Y%m%dT%H%M%SZ)"
+  [ -e "$SPECDIR" ] && { echo "REFUSING: $SPECDIR already exists -- refusing to write over a prior run"; exit 3; }
+  mkdir -p "$SPECDIR" || { echo "REFUSING: cannot create $SPECDIR"; exit 3; }
+  echo "-- model logs for this run: $SPECDIR (prior runs are kept, never cleared)"
   cd specs
   # burrow.tla -- I-7, the dual-refcount lifecycle whose {0,0} decision this
   # repair RELOCATED into the settled drops. Each must violate NoUseAfterFree.

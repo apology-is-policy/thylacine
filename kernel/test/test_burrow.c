@@ -758,22 +758,17 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
     TEST_ASSERT(attached >= 1, "the mapping must be attached before the refusals");
     burrow_charge_record(v, p, 1);
 
-    // The GEOMETRY refusals burrow_unmap_reporting can issue, each of which must
-    // leave the mapping attached and the charge record intact. NOT every refusal:
-    // the function has seven failure returns and this exercises the five that a
-    // mapped Proc can reach by shape. Uncovered, named rather than implied
-    // (astra, yip 0161 review R3): the null-Proc refusal (kernel/burrow.c:1240)
-    // and the vaddr+length overflow refusal (:1249, `want_end < vaddr`).
+    // The geometry checks this fixture covers, each of which must leave the
+    // mapping attached and the charge record intact: zero length
+    // (kernel/burrow.c:1241), misaligned vaddr (:1242), misaligned length
+    // (:1243), no VMA at the address (:1252) and a mismatched end (:1254).
     //
-    // The proof premise is unaffected by that gap, and it is now ENUMERATED
-    // instead of asserted: all seven failure returns sit at burrow.c:1240-1254,
-    // and the function's first mutation is the vma_uninstall_range_in at :1284,
-    // so every one of them precedes it. The SHARED_IN branch at :1291 is below
-    // the mutation point but is NOT a failure return -- it uncharges and falls
-    // through to vma_remove and `return 0` -- so it does not weaken the premise.
-    // What this test pins is that the five reachable-by-shape refusals really do
-    // leave the mapping attached; what keeps the other two sound is the
-    // enumeration above, which a reader can re-check against the line numbers.
+    // UNCOVERED, of the eight failure returns at :1240-:1254 -- all of which
+    // precede the function's first mutation at :1284, which is what the proof
+    // above rests on: the null Proc (:1240), the vaddr+length overflow (:1249),
+    // and the vaddr_start mismatch (:1253). The probe below lands one page past
+    // a one-page mapping, so it takes the !vma branch; reaching :1253 needs an
+    // interior aligned address inside a larger VMA (astra, yip 0161 R3).
     TEST_ASSERT(burrow_unmap(p, 0x10000000ull, 2 * PAGE_SIZE) != 0,
         "a length that does not match the mapping exactly must be refused");
     TEST_ASSERT(burrow_unmap(p, 0x10000000ull + PAGE_SIZE, PAGE_SIZE) != 0,
