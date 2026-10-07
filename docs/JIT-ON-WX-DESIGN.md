@@ -201,11 +201,15 @@ the shape on 2026-09-28; three things change.
    primitive; Plan 9's `segflush(2)` is a system call too.
 3. **The writer alias is hardened before the JIT first runs** (B-2b). Caveat 5
    above, answered for the browser: the aliases go to independent random
-   addresses; a sealed region's exec alias can be execute-only, which holds
-   the engine's write thunk with the writer base burned in as immediates (the
-   design Apple ships), so no readable memory names the writer; and the
-   kernel's user-copy routines use `LDTR`/`STTR`, which check EL0's
-   permissions, so no syscall reads an execute-only page for its caller.
+   addresses; the engine's write thunk, with the writer base burned in as
+   immediates (the design Apple ships), lives in a **sealed** region, so no
+   readable memory names the writer. A sealed region is born that way
+   (`SYS_JIT_CREATE_SEALED`, voted 2026-10-07): the kernel copies the thunk's
+   bytes in, invalidates the I-cache and maps only an execute-only alias, so
+   no writer alias ever exists for it. The kernel's user-copy routines use
+   `LDTR`/`STTR`, which check EL0's permissions, so no syscall reads an
+   execute-only page for its caller, and the debugger's memory reader refuses
+   one too.
    Linux's execute-only user mappings were reverted once because the kernel
    could still read them; OpenBSD ships the same scheme with unprivileged
    user copies.

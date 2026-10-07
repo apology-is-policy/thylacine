@@ -655,7 +655,7 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-1d | dlopen: PT_INTERP for native execs; `burrow_map_file`; the driver's `-shared` / PIE / `-dynamic-linker`; `libc.so` in the sysroot; ldso's boundary-line; the handle form designed. Lands before B-3. | a Pouch-built `.so` loaded by a Pouch host on the device; the deny paths (an `MNOEXEC` mount; a name outside the namespace) |
 | **B-2** | The JIT: separated WX heap on `SYS_JIT_CREATE`; `CAP_JIT` clearance for `jsc`. Split by the operator's votes of 2026-09-28: | same benchmark with JIT tiers; a deny-path probe (no `CAP_JIT` -> interpreter, never RWX); audit |
 | B-2a | kernel: the code Burrow becomes a reservation (demand-zero, charged per touched page, no physical contiguity); the I-cache sync exact on aliasing I-caches. Audit-bearing. | a 64 MiB region created for nothing; each witness RED once; audit closed |
-| B-2b | kernel: the writer alias hardened (random placement, an execute-only sealed thunk, `LDTR`/`STTR` user copies). Audit-bearing. | a syscall refuses to read an execute-only page; audit closed |
+| B-2b | kernel: the writer alias hardened (random placement; the thunk in a region born sealed, `SYS_JIT_CREATE_SEALED`, execute-only, voted 2026-10-07; `LDTR`/`STTR` user copies; the debug reader refuses an execute-only leaf). Audit-bearing. | a syscall refuses to read an execute-only page; audit closed |
 | B-2c | JavaScriptCore's Thylacine separated-WX arm; `jsc` takes `CAP_JIT`; Baseline + YARR. | the benchmark with the JIT on; the deny probe; `ls-jsc` |
 | B-2d / B-2e | DFG; then FTL (B3) + Wasm BBQ/OMG, each its own chunk and audit. | the same benchmark |
 | **B-3** | P3: the libraries, ICU first. | each library's own tests under Pouch |
