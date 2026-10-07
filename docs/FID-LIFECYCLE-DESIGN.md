@@ -523,6 +523,13 @@ session (operator vote 2026-09-29).
   `-P9_E_IO`. Its fids died with it, and the entry is dropped quietly.
 - If a spare cannot be spawned, the queued sessions wait for a closer to
   finish. Nothing is lost.
+- A queued entry is a fid, or a close job (2026-10-07,
+  `dec-2026-10-07-exit-close` part C): the rest of a dev9p last close whose
+  write-behind flush may not wait (a die-pending thread's, or a kernel
+  thread's; ARCH 7.9.1). The closer writes the staged run with Twrites,
+  waiting as long as the server takes, drops the file's cached attributes and
+  pages, sends the Tclunk, and frees the run and its budget charge. A session
+  that died meanwhile takes the run with it, as it takes its fids.
 
 **A flushed request's reply is honoured** (flush(5)). The client flushes a
 request only when its owner has died or been interrupted by a note, so
