@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-04
+updated: 2026-10-07
 ---
 ## Registry creation is a role, not an Imperium capability
 
@@ -482,3 +482,22 @@ never whether the worker is counted; even exempt counters refuse overflow.
 The ticket carries only stripes, not cached credentials or authority. It cannot
 authorize a service request and adds no capability or inheritance rule. Private
 ring runtime remains gated; [[sub-kernel-proc]] owns the lifetime contract.
+
+## 2026-10-07: flagged by co-tenancy, nothing owed (AS-R9)
+
+`kernel/proc.c` moved +6 lines since this dossier's date and `quaestor stale`
+flagged it, as it flags every owner of that file -- churn is measured per FILE,
+not per surface ([[chg-2026-08-15-stale-by-cotenancy]], which recorded the same
+disposition for this surface once before).
+
+The entire delta is ONE hunk: `handle_private_exec_latch(p)` plus its five-line
+comment inside `proc_exec_replace`. Checked by bounded token count against this
+dossier's own material rather than by eye:
+
+    proc_exec_replace        0 mentions in this dossier
+    handle_private_exec_latch / private_exec   0
+    close_on_exec                              0
+
+The hunk installs no capability check, reads none, and changes nothing about the fork-grantable ceiling, the cap device or the legate. A latched ring confers no authority, which is also what [[sub-kernel-proc]]'s private-worker entry records for the ticket. The fact is owed by [[sub-kernel-proc]], which owns
+`proc_exec_replace`, and it is recorded there. Dated current rather than left
+flagged, so the next session does not redo this check.

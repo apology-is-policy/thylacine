@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-04
+updated: 2026-10-07
 ---
 ## Session registry retirement
 
@@ -588,3 +588,22 @@ been reaped; only a still-present matching stripes identity has its count
 decremented. ZOMBIE retains a counter, exec retains that same process counter,
 and replacement descriptors are untouched. Actual worker retirement must precede
 release. This adds no active death/close hook yet; see [[sub-kernel-proc]].
+
+## 2026-10-07: flagged by co-tenancy, nothing owed (AS-R9)
+
+`kernel/proc.c` moved +6 lines since this dossier's date and `quaestor stale`
+flagged it, as it flags every owner of that file -- churn is measured per FILE,
+not per surface ([[chg-2026-08-15-stale-by-cotenancy]], which recorded the same
+disposition for this surface once before).
+
+The entire delta is ONE hunk: `handle_private_exec_latch(p)` plus its five-line
+comment inside `proc_exec_replace`. Checked by bounded token count against this
+dossier's own material rather than by eye (word-bounded: the first pass of the 08-15 sweep reported churn that did not exist because `sid` matched inside `ASID`):
+
+    proc_exec_replace        0 mentions in this dossier
+    handle_private_exec_latch / private_exec   0
+    close_on_exec                              0
+
+This dossier never names the exec-replace path at all, and the hunk touches no part of the death path -- not the ZOMBIE chokepoint, not the universal death-wake, not reaping. Nothing of its material moved. The fact is owed by [[sub-kernel-proc]], which owns
+`proc_exec_replace`, and it is recorded there. Dated current rather than left
+flagged, so the next session does not redo this check.

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-04
+updated: 2026-10-07
 ---
 ## Session posting ownership
 
@@ -301,6 +301,10 @@ second and third share a failure mode the first does not.
   registered entries go.
 - **The pending-note mask.**
 - **The hardware breakpoint and watchpoint slots.**
+
+A fourth operation runs in the same region and is deliberately NOT in that list,
+because it is a **latch, not a reset**: see "The private ring latch at image
+replacement" below.
 
 **The debug slots are the instructive one.** Nothing else disarms them — the
 debug state lives until the process is freed — and the context-switch path
@@ -657,3 +661,27 @@ using its existing charge API. Tests: actual-source ASan/UBSan,100 pthread
 admission/refund schedules, eight intended mutants and the expanded native
 `proc.stripes_smoke` fixture including real Proc destruction. Fresh boot1830/1830;
 broad SMP/UBSan matrix remains owed for this primitive.
+
+## The private ring latch at image replacement (2026-10-07, AS-R9)
+
+`handle_private_exec_latch(p)` is called from `proc_exec_replace`, two lines
+before `old = p->as; p->as = nas;`, and the position is the whole content of this
+entry. Measured on the function body rather than read off a design doc: the
+proc-table lock is taken at the top of that block (`spin_lock_irqsave(&g_proc_table_lock)`)
+and released after the swap, so the latch runs **under that lock with interrupts
+off**. That is why it must be infallible and leaf-only -- the swap it precedes
+cannot be unwound, and nothing under this lock may sleep.
+
+The descriptor removal and the waiter wake are NOT here: `handle_close_on_exec`
+does both, and the exec syscall calls it directly -- outside
+`proc_exec_replace` entirely and so outside this lock, where a wake is allowed to
+sleep. [[sub-kernel-handle]] owns the latch's contract and the reason
+the two halves sit on opposite sides of the commit point; [[sub-kernel-loom]]
+owns the ring side. What belongs on this dossier is only that the exec path calls
+it, exactly where, and under which guarantee -- the enumeration above is by *who
+re-arms this*, and a latched ring is the case where nothing re-arms but the
+descriptor outlives the image it was admitted against.
+
+The private runtime consumer remains gated: no syscall reaches
+`loom_create_private`, so this path is reachable today only from the kernel
+tests.

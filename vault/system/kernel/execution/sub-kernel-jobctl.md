@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-04
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -464,3 +464,22 @@ without a signal, wake, allocation or scheduler callback. Admission uses the
 ordinary thread-plus-SQPOLL limit and refuses a group already terminating. The
 private owner must invoke it outside Loom/protocol locks. This does not alter
 job-control ownership or stop/resume behavior; see [[sub-kernel-proc]].
+
+## 2026-10-07: flagged by co-tenancy, nothing owed (AS-R9)
+
+`kernel/proc.c` moved +6 lines since this dossier's date and `quaestor stale`
+flagged it, as it flags every owner of that file -- churn is measured per FILE,
+not per surface ([[chg-2026-08-15-stale-by-cotenancy]], which recorded the same
+disposition for this surface once before).
+
+The entire delta is ONE hunk: `handle_private_exec_latch(p)` plus its five-line
+comment inside `proc_exec_replace`. Checked by bounded token count against this
+dossier's own material rather than by eye:
+
+    proc_exec_replace        1 mention, in this dossier's own 2026-08-16 co-tenancy entry -- not in its material
+    handle_private_exec_latch / private_exec   0
+    close_on_exec                              0
+
+The single hit is this dossier's own prior record of the same disposition, which is the third time the same file has flagged it. Sessions, process groups, the group note fan, the terminal seam and the job-control stop are all untouched by the hunk. The fact is owed by [[sub-kernel-proc]], which owns
+`proc_exec_replace`, and it is recorded there. Dated current rather than left
+flagged, so the next session does not redo this check.
