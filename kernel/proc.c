@@ -2653,8 +2653,9 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     // control of a writer/exec pair. So the image carries the cap while any alias
     // lives, sole mapper or not. A count read stale-zero beside a create is
     // harmless: the creator passed the CAP_JIT gate and is a live mapper, so its
-    // caps are already in the cover; the count only has to be right after that
-    // creator is reaped, and the reap takes the lock this join runs under.
+    // caps are already in the cover. The count only has to be right once that
+    // creator is gone, and its own exit publishes it a ZOMBIE under the lock this
+    // join runs under, after the store; a reap can only follow that.
     if (__atomic_load_n(&p->as->code_vmas, __ATOMIC_RELAXED) != 0u)
         out->caps |= CAP_JIT;
 
