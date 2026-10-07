@@ -187,9 +187,20 @@ static const char *loom_private_fixture(void) {
     // So it asserts nothing whatever about the image: touching `as` here would
     // reintroduce exactly the reference being tested. It observes the
     // retirement only through the monotonic counter, and its witness is the
-    // MUTANT -- remove the lifetime_get in addrspace_private_begin and the
-    // matching put in addrspace_private_end, and the retirer reaches a freed
-    // descriptor through this leg while every leg above stays green.
+    // MUTANT -- but the mutant's expected outcome is a NAMED invariant failure,
+    // not an arbitrary crash (astra 0161 t53, checked against the source).
+    // Remove the lifetime_get in addrspace_private_begin and the matching put
+    // in _end while keeping ++private_rings, and the owner's drop inside
+    // proc_free becomes the FINAL lifetime drop with a private ring still
+    // guarded -- which addrspace_lifetime_put extincts on by name, "AddrSpace
+    // final lifetime drop with private rings" (addrspace.c:127). The guard
+    // fires in the DYING PROC, before the retirer could reach a freed
+    // descriptor.
+    //
+    // Which says what this leg's content really is: it is the ONLY leg where
+    // the owner's drop IS the final lifetime drop while a ring is outstanding.
+    // Under the pinned leg above, the fixture's own reference makes that drop
+    // non-final, so the guard cannot fire there and the mutant stays invisible.
     p = test_proc_make();
     LP_CHECK(p, "unpinned-reap creator allocated");
     l = loom_create_private(p, 2, 2, true);
@@ -202,9 +213,20 @@ static const char *loom_private_fixture(void) {
     // this call onward the ring's own reference is the only thing keeping the
     // descriptor addressable -- and the drop that ends the ring's occupancy is
     // the table teardown's, on the dying Proc, not a close on a live one.
+    // The delta is taken from the counter, with its precondition asserted
+    // rather than assumed: every earlier leg ends in its own lp_wait, so
+    // nothing should be in flight here, and if something is then the delta
+    // below would be satisfied by someone else's retirement.
+    u64 before = loom_private_retired();
+    LP_CHECK(before + 1 == goal, "no retirement in flight at the snapshot");
     test_proc_drop(p); p = NULL; fd = -1;
     LP_CHECK(lp_wait(goal),
              "a reaped creator's ring retires on the ring's own image reference");
+    // lp_wait only establishes `>= goal`, which is EVENTUAL retirement. Exactly
+    // once needs the delta, and it has to come from the counter: the image is
+    // gone, and reading it is the masking this leg exists to avoid.
+    LP_CHECK(loom_private_retired() == before + 1,
+             "the reaped creator's ring retires exactly once");
 
     // ---- The final / nonfinal ring-drop discrimination. ----
     // Every retirement above ends the ring's occupancy, so each refunds the

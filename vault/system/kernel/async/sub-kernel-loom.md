@@ -780,14 +780,35 @@ masks the property `loom_private_destroy` actually depends on: with a second
 lifetime reference held, a ring that took none would still find its image
 addressable. The added "unpinned-reap" leg holds none, asserts NOTHING about the
 image (touching it would reintroduce the reference under test), and observes the
-retirement only through the monotonic counter. Its discrimination therefore lives
-entirely in a mutant -- remove the `lifetime_get` in `addrspace_private_begin`
-and the matching put in `_end`, and the retirer reaches a freed descriptor
-through this leg while every other leg stays green. A test whose only witness is
-a mutant would normally be a bad test; here any handle on the image IS the
-masking, so it is the only shape available, and saying so is part of the leg.
-UNRUN at the time of writing: it has never executed, because a kernel fixture leg
-needs a build and a boot.
+retirement only through the monotonic counter.
+
+Its discrimination lives in a mutant, and the mutant's expected outcome is a
+NAMED invariant failure rather than an arbitrary crash: remove the
+`lifetime_get` in `addrspace_private_begin` and the matching put in `_end` while
+keeping `++private_rings`, and the owner's drop inside `proc_free` becomes the
+FINAL lifetime drop with a private ring still guarded -- which
+`addrspace_lifetime_put` extincts on by name, "AddrSpace final lifetime drop with
+private rings". The guard fires in the DYING PROC, before the retirer could reach
+a freed descriptor, so the evidence is deterministic and attributable instead of
+being whatever a use-after-free happens to do. (The first version of this
+paragraph predicted the UAF; astra corrected it against the source on 0161 t53,
+and the correction makes the experiment better, not weaker.)
+
+That also states what the leg's content really is: it is the ONLY leg where the
+owner's drop IS the final lifetime drop while a ring is outstanding. Under the
+pinned leg, the fixture's own reference makes that drop non-final, so the guard
+cannot fire there at all.
+
+Two claims are kept apart in the leg because `lp_wait` cannot tell them apart:
+it waits for `>= goal`, which is EVENTUAL retirement, so exactly-once is asserted
+separately as a counter DELTA, with its precondition (nothing in flight at the
+snapshot) asserted rather than assumed. Neither reads the dead image.
+
+UNRUN: the leg has never executed. Its translation unit does COMPILE -- a
+single-file `-fsyntax-only` with the kernel target's own defines, include paths
+and `-std=c99`, exit 0, no diagnostics -- which is a different and much weaker
+claim than "it passes", and the control plus the mutant still have to run under a
+lease.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are
