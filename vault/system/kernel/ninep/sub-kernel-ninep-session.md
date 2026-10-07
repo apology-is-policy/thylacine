@@ -59,8 +59,10 @@ retirement rules are mechanically enforced.
   past the table), `p9_session_next_active(&tag)` (the active entry at the
   lowest tag at or above it, idle chunks skipped), `p9_session_owner` /
   `p9_session_set_owner` (the client's rpc registered on an active tag; an
-  inactive tag takes none, so an owner never outlives its tag), and
-  `p9_session_mark_async(tag)` (counts the op against the async share).
+  inactive tag takes none and the call returns false, so an owner never
+  outlives its tag), `p9_session_next_sync_owned(&tag)` (as `next_active`, over
+  the entries a sync waiter owns), and `p9_session_mark_async(tag)` (counts the
+  op against the async share).
 - `retract_unsent` returns `0` when it took the op back and `-1` on a guard
   (inactive, flushed or abandoned tag) or a failed re-bind; the tag is freed
   either way once it passed the guards.
@@ -84,7 +86,13 @@ under the client's spinlock -- kmalloc never sleeps -- and keeps it until
 `p9_session_destroy` frees it. A failed allocation is no free tag, never an
 error. Each chunk counts its active entries, so `alloc_tag` skips full chunks
 and `next_active` skips idle ones: a walk over a grown table costs what is in
-flight.
+flight. Each chunk also counts its sync-owned entries (`n_sync`: an owner on an
+entry not counted as async), kept by `set_owner`, `mark_async` and
+`clear_outstanding`; the client's reader handoff walks only those, so thousands
+of async ops in flight do not lengthen it (audit r1 F1). The table never
+shrinks: a session that once held 16384 deferred async ops keeps its 256 chunks
+(about 1 MiB) until destroy, at most 1023 chunks and the directory (about
+4 MiB), charged to no Proc -- bounded, so I-32 holds.
 
 The shares (part 2): an op (any T but Tflush) is admitted only while
 `n_active - n_flush < ops_max` (`P9_OPS_MAX` = 32767); a Tflush takes any
@@ -233,7 +241,7 @@ negotiated_msize, `bound_fids[1024]` + count, the tag table (`tags0`, the
 inline `struct p9_tag_chunk`; `tag_dir`, `n_chunks`; the counters `n_active`,
 `n_flush`, `n_async`; the limits `ops_max`, `async_max`, `tag_limit`),
 monotonic `next_op_id`, sent/completed counters. `struct p9_tag_chunk`: 64
-entries + `n_active`. `struct p9_outstanding` (40 bytes): `active`, `kind`
+entries + `n_active` + `n_sync`. `struct p9_outstanding` (40 bytes): `active`, `kind`
 (the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`, `abandoned`,
 `holds_slot` (a reserved fid-table slot), `flush_oldtag`, `wga_nwname` (the
 walkgetattr full-walk comparand), `flush_tag` (a victim's Tflush), `async`,
@@ -276,8 +284,13 @@ refusal a reserved slot leaves) deliberately complete with a synthetic
 ## Performance
 
 `alloc_tag`: O(chunks + 64) with full chunks skipped; `inflight` and the
-share checks are O(1) counters; `any_outstanding_on_fid` and the client's
-scans walk the active entries only, idle chunks skipped. O(n_bound) fid scan.
+share checks are O(1) counters; the reader handoff walks only chunks holding a
+sync waiter. `any_outstanding_on_fid` (seven fid-exclusive builds), the client's
+`mark_dead` and `/ctl` snapshot walk every active entry, idle chunks skipped:
+O(in flight) under the client's lock, up to the op share on a session that holds
+that many (OPEN-BUGS, audit r1 F1). O(n_bound) fid scan. The tag wait is not
+FIFO: a waiter re-tests on every freed tag and a fresh op may take one first
+(`tag_pool.tla`'s strong fairness on `Take` is an abstraction, r1 F7).
 The table allocates only when every entry is held -- a 4 KiB page per chunk
 and an 8 KiB directory once -- and frees at destroy.
 
@@ -309,7 +322,9 @@ and an 8 KiB directory once -- and frees at destroy.
   Prosecute an op admitted without the op-share check (a new `alloc_tag(s,
   true)` caller that is not a Tflush voids the headroom), a victim with two
   Tflushes, an entry pointer held across a `kfree` (only destroy frees), a tag
-  at or above `tag_limit` handed out, and an `owner` set on an inactive entry.
+  at or above `tag_limit` handed out, an `owner` set on an inactive entry, and
+  an owner written other than through `set_owner` or `entry_zero` (it would
+  skew `n_sync`; an undercount hides a sync waiter from the reader handoff).
 - **Slot accounting**: every path that ends an op must release its
   reservation (`clear_outstanding` does, first) or turn it into a binding
   (`slot_bind`); only a NEW reservation may check `slot_available`. A path

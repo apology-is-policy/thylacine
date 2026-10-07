@@ -151,6 +151,11 @@ static struct p9_outstanding *entry(struct p9_session *s, u32 t) {
     return &chunk(s, k)->e[t % P9_TAG_CHUNK];
 }
 
+// Owned by a sync waiter: the entries the reader handoff looks for.
+static bool sync_owned(const struct p9_outstanding *e) {
+    return e->owner != NULL && !e->async;
+}
+
 static void entry_zero(struct p9_outstanding *e) {
     e->active         = false;
     e->kind           = 0;
@@ -226,6 +231,7 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
     slot_release(s, t);
     if (e->kind == P9_TFLUSH) s->n_flush--;
     if (e->async)             s->n_async--;
+    if (sync_owned(e))        chunk(s, t / P9_TAG_CHUNK)->n_sync--;
     entry_zero(e);
     chunk(s, t / P9_TAG_CHUNK)->n_active--;
     s->n_active--;
@@ -297,6 +303,7 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
     s->n_reserved_slots = 0;
     for (u32 i = 0; i < P9_TAG_CHUNK; i++) entry_zero(&s->tags0.e[i]);
     s->tags0.n_active   = 0;
+    s->tags0.n_sync     = 0;
     s->tag_dir          = NULL;
     s->n_chunks         = 1;
     s->n_active         = 0;
@@ -323,6 +330,7 @@ void p9_session_destroy(struct p9_session *s) {
     s->n_reserved_slots = 0;
     for (u32 i = 0; i < P9_TAG_CHUNK; i++) entry_zero(&s->tags0.e[i]);
     s->tags0.n_active   = 0;
+    s->tags0.n_sync     = 0;
     if (s->tag_dir) {
         for (u32 k = 1; k < s->n_chunks; k++) kfree(s->tag_dir[k]);
         kfree(s->tag_dir);
@@ -1601,14 +1609,35 @@ void *p9_session_owner(struct p9_session *s, u32 tag) {
     return (e && e->active) ? e->owner : NULL;
 }
 
-void p9_session_set_owner(struct p9_session *s, u32 tag, void *owner) {
+bool p9_session_set_owner(struct p9_session *s, u32 tag, void *owner) {
     struct p9_outstanding *e = p9_session_entry(s, tag);
-    if (e && e->active) e->owner = owner;
+    if (!e || !e->active) return false;
+    struct p9_tag_chunk *ch = chunk(s, tag / P9_TAG_CHUNK);
+    if (sync_owned(e)) ch->n_sync--;
+    e->owner = owner;
+    if (sync_owned(e)) ch->n_sync++;
+    return true;
+}
+
+struct p9_outstanding *p9_session_next_sync_owned(struct p9_session *s, u32 *tag) {
+    if (!s || s->magic != P9_SESSION_MAGIC) return NULL;
+    for (u32 k = *tag / P9_TAG_CHUNK; k < s->n_chunks; k++) {
+        struct p9_tag_chunk *ch = chunk(s, k);
+        u32 i = (k == *tag / P9_TAG_CHUNK) ? *tag % P9_TAG_CHUNK : 0;
+        if (ch->n_sync == 0) continue;
+        for (; i < P9_TAG_CHUNK; i++) {
+            if (!ch->e[i].active || !sync_owned(&ch->e[i])) continue;
+            *tag = k * P9_TAG_CHUNK + i;
+            return &ch->e[i];
+        }
+    }
+    return NULL;
 }
 
 void p9_session_mark_async(struct p9_session *s, u16 tag) {
     struct p9_outstanding *e = p9_session_entry(s, tag);
     if (!e || !e->active || e->async || e->kind == P9_TFLUSH) return;
+    if (sync_owned(e)) chunk(s, tag / P9_TAG_CHUNK)->n_sync--;
     e->async = true;
     s->n_async++;
 }

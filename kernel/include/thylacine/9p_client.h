@@ -772,12 +772,14 @@ void p9_client_mark_devgone(struct p9_client *c);
 //             arg too long).
 //   -EBUSY  — session not OPEN (handshake hasn't run).
 //   -EIO    — lower-layer failure: send/recv error, frame malformed,
-//             tag pool full (a SYNC op), fid bookkeeping conflict, etc.
-//   -EAGAIN — an ASYNC op could not be sent now: the session's tag pool
-//             or its send ring was full. Nothing reached the server and
-//             the session is intact; the op may be resubmitted. The sync
-//             front-end never returns it: it waits a full ring out
-//             (client_send_flow), and a full tag pool is its -EIO.
+//             fid bookkeeping conflict, the session died, or the caller
+//             is dying, etc.
+//   -EAGAIN — an ASYNC op could not be sent now: the async share or the
+//             tag table was full, or the send ring was. Nothing reached
+//             the server and the session is intact; the op may be
+//             resubmitted. The sync front-end never returns it: it waits
+//             a full ring out (client_send_flow) and waits for a tag
+//             (ARCH 21.11).
 //   -ENODEV — the backing device/service disappeared: the session died
 //             because the SERVER endpoint vanished (a clean peer-gone
 //             EOF), distinct from a generic -EIO transport error. The

@@ -70,11 +70,46 @@ tag`, and both stopped-owner `tag is free` legs). RED-2 (no growth) is owed.
   failed chunk allocation leaves -- still reachable, so still worth testing --
   and the headroom got its own witnesses.
 
-**Open.** RED-2; TP-4 (`Dev.close` returns `int`, `close(2)` EIO); the Fable
-audit; ci-smp-gate N=10 + ls-ci; the land. AS-R9: corona is pinged before
-`kernel/loom.c` reaches main. Corona's two `tools/build.sh` patches (the
-Stratum pin in the ledger, `check-prot-mirror.py` wired failing) ride the
-same landing (yip 0181).
+**RED-2 (07:20Z, grow() returns -1).** 1910/1914. Predicted before the run:
+`tag_table_grows`, `abandon_flush_fits_full_share`,
+`flush_headroom_grows_table`, and -- read off the test before the run, not
+after -- `async_full_tag_pool_is_eagain` at "the op share is not": 64 async
+ops fill chunk 0, so `has_free_tag` must grow to answer true. Exactly those
+four. Restored, rebuilt, 1914/1914 again (07:23Z).
+
+**TP-4 (a22793699, 07:33Z).** `Dev.close` returns `int` across the 18 kernel
+Devs and 6 test Devs (a script converted each hook, counting its `return;`
+lines against a per-hook expectation before writing anything). dev9p's close
+returns the flush's failure, or the latched one; `spoor_clunk_rc` ->
+`handle_release_obj` (int) -> `handle_close_report` -> `sys_close` maps a
+negative to `-T_E_IO` after the fd is gone. `handle_close` keeps its 0 / -1
+contract, so its ~20 callers, exit, close-on-exec, `dup2` and Loom reaps are
+unchanged and ignore it. Suite 1916/1916.
+
+The first witness design had a hole: a dup'd-fd test through dev9p and
+`sys_close` goes red under BOTH "dev9p drops the error" and "sys_close drops
+the error", so one RED run could not tell whether the mapping itself was
+load-bearing. The `sys_close` leg moved to a test Dev whose close hook returns
+a chosen value, which makes every sabotage's witness unique. RED-3 (three
+sabotages: the latched arm, the flush-now arm, the mapping): 1913/1916,
+exactly the three predicted, each at its own assertion. Restored, rebuilt,
+1916/1916 (07:37Z).
+
+**Audit.** Fable r1 spawned ~07:35Z on the restored tree (the seam-90 lesson:
+no RED checkout while a reviewer reads). Self-audit in parallel: the reader
+freeing a tag at apply time (TP-1) would let an abandon Tflush someone else's
+tag if `client_wait` could return DIED after `done` -- it cannot (`done` is
+checked first; the note arm cannot see it set); flushes never exceed ops,
+because a victim stays active until its Rflush; three P3s (ARCH's "as Linux
+NFS does" overstates parity -- Linux reports at every close through
+`->flush`, ours at the open file's last close; a long comment line; stale
+`inflight[]` prose in a test comment, SPEC-TO-CODE and loom_devgone.tla).
+
+**Open.** The audit close; ci-smp-gate N=10 + ls-ci; the land. AS-R9: corona
+checked the loom.c hunk at 07:37Z (yip 0181 t7): no interaction with her
+charge settlement. Corona's two `tools/build.sh` patches (the Stratum pin in
+the ledger, `check-prot-mirror.py` wired failing) ride the same landing,
+copied to scratchpad/corona-buildsh/ with their hashes.
 
 ---
 ## 2026-10-06/07 (main, Opus 5.5, effort max) -- seam-90 closed: a blocking 9P reader unwinds at any byte

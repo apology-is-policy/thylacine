@@ -1607,6 +1607,7 @@ void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
 void test_9p_session_walk_fid_full_no_latch(void);
 void test_9p_session_flush_headroom_grows_table(void);
+void test_9p_session_sync_owner_index(void);
 void test_9p_session_clunk_retract_after_peer_fill(void);
 void test_9p_session_flushed_walk_late_reply_binds(void);
 void test_9p_session_flushed_reply_honoured_for_waiting_owner(void);
@@ -3755,6 +3756,7 @@ struct test_case g_tests[] = {
     { "9p_session.walk_fid_full_no_latch", test_9p_session_walk_fid_full_no_latch, false, NULL },
     { "9p_session.flush_headroom_grows_table",
                                        test_9p_session_flush_headroom_grows_table, false, NULL },
+    { "9p_session.sync_owner_index",   test_9p_session_sync_owner_index,   false, NULL },
     { "9p_session.clunk_retract_after_peer_fill",
                                        test_9p_session_clunk_retract_after_peer_fill, false, NULL },
     { "9p_session.flushed_walk_late_reply_binds",

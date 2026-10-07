@@ -184,8 +184,12 @@ static struct p9_rpc *client_owner(struct p9_client *c, u32 tag) {
     return (struct p9_rpc *)p9_session_owner(&c->session, tag);
 }
 
+// Every caller registers right after its build marked the tag, under the same
+// lock hold; a registration that did not take would leave the op waiting for a
+// reply that drains ownerless.
 static void client_register(struct p9_client *c, u32 tag, struct p9_rpc *rpc) {
-    p9_session_set_owner(&c->session, tag, rpc);
+    ASSERT_OR_DIE(p9_session_set_owner(&c->session, tag, rpc),
+                  "9p: an rpc registered on a tag with no op");
 }
 
 // Drop `rpc`'s registration on `tag` if it is still there: a tag freed and
@@ -223,7 +227,7 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
             // Async (POST_CQE, Loom): there is no submitter to wake. Clear the
             // slot + complete the op with an error CQE carrying the reason. The
             // callback runs under c->lock and MUST NOT sleep (seam contract).
-            e->owner = NULL;
+            p9_session_set_owner(&c->session, tag, NULL);
             r->on_complete(r, async_status, NULL);
         } else {
             wakeup(&r->rendez);
@@ -243,7 +247,9 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
 
 // Hand the reader role to one still-pending op so a survivor keeps reading
 // after the current reader departs (LOAD-BEARING when the departing reader's
-// Proc dies). Picks the first inflight rpc that is not the departing one, not
+// Proc dies). The walk visits only sync-owned entries (the session's per-chunk
+// count), so thousands of async ops in flight cost it nothing. Picks the first
+// sync rpc that is not the departing one, not
 // yet done/dead/flagged, not still sending and not parked for a stop, flags it
 // be_reader + wakes it. If none, no sync op can take the role now: those still
 // sending self-elect, a stop-parked one re-elects on resume, and a role waiter
@@ -251,7 +257,7 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
 static void client_handoff_reader_locked(struct p9_client *c,
                                          struct p9_rpc *departing) {
     struct p9_outstanding *e;
-    for (u32 tag = 0; (e = p9_session_next_active(&c->session, &tag)) != NULL; tag++) {
+    for (u32 tag = 0; (e = p9_session_next_sync_owned(&c->session, &tag)) != NULL; tag++) {
         struct p9_rpc *r = e->owner;
         if (r && r != departing && !r->done && !r->dead && !r->be_reader &&
             !r->on_complete &&
@@ -1026,9 +1032,10 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
 // Draining ANY reply frees its tag, and a reader parked here wakes on every
 // freed one. The wait ends because the share's holders are ops the server owes
 // a reply and at most P9_ASYNC_MAX async ops (ARCH 21.11, "Why the wait
-// ends"). Uses the SAME pump/park body as the send flow. c->lock HELD; returns 0 (a tag is free), -P9_E_IO (the
-// session died) or -P9_E_AGAIN (the caller is dying on a live session; nothing
-// was built, so the fid is still bound and goes to the closer).
+// ends"). Uses the SAME pump/park body as the send flow. c->lock HELD; returns
+// 0 (a tag is free), -P9_E_IO (the session died) or -P9_E_AGAIN (the caller is
+// dying on a live session; nothing was built, so the fid is still bound and
+// goes to the closer).
 static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) {
     struct Thread *self = current_thread();
     for (;;) {

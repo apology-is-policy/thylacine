@@ -804,8 +804,8 @@ void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void) {
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
     // In-flight async op over the real transport: a Tfsync on the attach-bound
-    // root fid 0. No reply is staged, so it stays registered in c->inflight[]
-    // until device-gone completes it.
+    // root fid 0. No reply is staged, so it stays registered on its tag until
+    // device-gone completes it.
     g_sc_async.loom        = l;
     g_sc_async.user_data   = 0x5E3D00DFEEDULL;
     g_sc_async.last_result = 0x7fffffff;

@@ -202,6 +202,7 @@ struct p9_outstanding {
 struct p9_tag_chunk {
     struct p9_outstanding e[P9_TAG_CHUNK];
     u32                   n_active;        // active entries in this chunk
+    u32                   n_sync;          // entries a sync waiter owns
 };
 
 // =============================================================================
@@ -693,12 +694,18 @@ struct p9_outstanding *p9_session_entry(struct p9_session *s, u32 tag);
 // table costs what is in flight.
 struct p9_outstanding *p9_session_next_active(struct p9_session *s, u32 *tag);
 
+// As p9_session_next_active, over the entries a sync waiter owns (an owner on
+// an entry not counted as async). Chunks without one are skipped, so the walk
+// costs the sync waiters, not the async ops beside them.
+struct p9_outstanding *p9_session_next_sync_owned(struct p9_session *s, u32 *tag);
+
 // The owner registered on an active tag, or NULL.
 void *p9_session_owner(struct p9_session *s, u32 tag);
 
-// Register `owner` on an active tag; NULL drops it. Fail-soft: an inactive
-// or out-of-table tag is left alone, so an owner never outlives its tag.
-void  p9_session_set_owner(struct p9_session *s, u32 tag, void *owner);
+// Register `owner` on an active tag; NULL drops it. Returns false and changes
+// nothing for an inactive or out-of-table tag, so an owner never outlives its
+// tag.
+bool  p9_session_set_owner(struct p9_session *s, u32 tag, void *owner);
 
 // Count the active op under `tag` against the async share. Fail-soft on an
 // inactive, already-async or Tflush entry.

@@ -104,7 +104,9 @@ its result instead.
 
 **Elected-reader pipelining** (Plan 9 `devmnt`/`mountio`). Each op allocates
 a stack `struct p9_rpc`, registers it on its tag's session entry
-(`client_register` -> `p9_session_set_owner`; the entry's `owner` replaced
+(`client_register` -> `p9_session_set_owner`, which must take: a registration
+that did not would leave the op waiting for a reply that drains ownerless, so
+it is an `ASSERT_OR_DIE`; the entry's `owner` replaced
 the client's `inflight[]` array on 2026-10-07, so freeing a tag drops its
 registration) under `c->lock`, sends its frame, then enters `client_wait`: a submitter
 with no reply yet becomes THE reader (one at a time via `c->reader_active`),
@@ -119,7 +121,8 @@ not when its owner next runs (ARCH 21.11 part 4, 2026-10-07,
 owner dispatched it, so a stopped owner held its tag until its resume, and a
 tag drainer had to tell that "owed" tag apart (`client_tag_owed_locked`,
 deleted). A departing reader hands the role off
-(`client_handoff_reader_locked`) to one still-pending rpc — skipping
+(`client_handoff_reader_locked`, walking only the sync-owned entries through
+`p9_session_next_sync_owned`) to one still-pending rpc — skipping
 an rpc whose thread is parked for a stop (`rpc->stop_parked`, which the thread
 sets itself in `client_debug_stop_park` under `c->lock` for exactly the park's
 span; the Proc's stop flags are not read, because a resume-then-re-stop flips
