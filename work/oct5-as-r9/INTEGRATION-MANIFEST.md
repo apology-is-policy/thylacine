@@ -7,11 +7,14 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    5e09e801168c8b82dd444a0b850f8a97a16806ee  (the commit this manifest was GENERATED AGAINST; the
+- tip:    0e3a06c6178834852fa8a21f62322e5432e2c5e6  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 74
-- nothing pushed; nothing landed on main
+- commits in range: 83
+- codeberg.org: branch pushed and at this tip
+- codeberg.org: main at cb7194c10ad6; nothing of this branch is landed there
+- github.com: branch pushed and at this tip
+- github.com: main at cb7194c10ad6; nothing of this branch is landed there
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
 
@@ -35,7 +38,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..5e09e801168c8b82dd444a0b850f8a97a16806ee -- .claude/
+    $ git log --oneline 5ff62b788..0e3a06c6178834852fa8a21f62322e5432e2c5e6 -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -80,10 +83,10 @@ regions is hers to resolve in her tree, and I have not pre-empted it.
     kernel source (the repair)      : 12 file(s)
     kernel tests                   : 5 file(s)
     tools/ (SHARED SURFACE)        : 3 file(s)
-    vault dossiers                 : 9 file(s)
+    vault dossiers                 : 10 file(s)
     docs                           : 4 file(s)
     specs                          : 0 file(s)
-    work/ evidence + runbooks      : 112 file(s)
+    work/ evidence + runbooks      : 116 file(s)
 
 The tools/ files are a shared surface main and aux also bake from. The one
 behavioural change there is smp-multiboot.sh's SMP_KEEP_LOGS retention, which is

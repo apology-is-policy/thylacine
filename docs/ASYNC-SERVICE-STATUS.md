@@ -1269,7 +1269,13 @@ the prediction -- spending a shared host to confirm a prediction is a ceremony,
 not a measurement. What remains owed here is narrower and is mine: the two
 poisoned caches in this `build/`, generated from her tree at an unrecorded
 state, which is why ANY full build refuses in this tree and therefore why
-`ci-smp-gate.sh` has never run in it. Queued for the mac on that basis -- clear
+`ci-smp-gate.sh` has never run FOR THIS PRIVATE-OWNER CHECKPOINT. Scope that
+precisely, because the broader wording erases evidence that stands: the earlier
+AS-R9 gate DID run in this tree through the same runbook -- the 5x10 matrix at
+`run-1007T061510Z`, which built the sanitizer kernel that had not existed before
+it, and which was reviewed separately (astra, 0161 t41). What is unqualified by
+a gate script is the private-owner kernel, not AS-R9. Queued for the mac on that
+basis -- clear
 the caches, bake with the explicit pin, run the real gate -- which is what would
 retire the matrix-stage substitution described next. The full build/cache
 qualification stays distinct from the already-accepted image-specific matrix
@@ -1323,4 +1329,12 @@ bodies of evidence.
 Gates unchanged: 128 MiB protection retained; private async, replacement memory
 accounting and clipboard all non-default; no syscall reaches
 `loom_create_private`. The pi A72/KVM axis remains the named unrun residual.
-Nothing pushed, nothing landed.
+
+THE BRANCH IS PUSHED, and nothing is landed. `corona/async-memory` is on both
+mirrors by operator decision; `main` reads `cb7194c10` on both, untouched.
+Branch only, never `main`, no force, verified per URL with `ls-remote` rather
+than from the push's own report, and independently confirmed by astra (0161
+t41). Nothing is merged, landed or activated, and the delivery's merge
+obligations are unchanged. Earlier sections of this document say "nothing
+pushed" and are left as written: they were true when written, and a status
+document that edits its own history stops being evidence of anything.

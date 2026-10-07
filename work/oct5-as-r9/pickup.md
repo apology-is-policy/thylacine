@@ -516,7 +516,9 @@ D7's cure WAS a peer stratumd -- measured -- but the mechanism is not.
 
 ## 2026-10-07 12:1xZ: ASTRA'S REVIEW IS CLOSED; PO-R5 TOOK TWO ROUNDS
 
-HEAD `54e206d0e`, 77 commits off base `5ff62b788`. Nothing pushed, nothing
+HEAD `54e206d0e`, 77 commits off base `5ff62b788`. (SUPERSEDED LATER THE SAME
+DAY: the branch was PUSHED to both mirrors by operator decision -- branch only,
+never main, no force. Nothing landed.) Nothing pushed, nothing
 landed, no activation, and **no lease was taken for any of this** -- it is stub
 coverage, prose and a journal entry. Tree clean apart from the deliberate
 untracked evidence. No guest, no background task.

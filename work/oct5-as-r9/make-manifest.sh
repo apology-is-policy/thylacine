@@ -39,7 +39,27 @@ printf -- '- tip:    %s  (the commit this manifest was GENERATED AGAINST; the\n'
 printf -- '  manifest'"'"'s own commit sits above it, so regenerate rather than reading\n'
 printf -- '  this line as HEAD)\n'
 printf -- '- commits in range: %s\n' "$(git rev-list --count $BASE..$TIP)"
-printf -- '- nothing pushed; nothing landed on main\n\n'
+# DERIVED, never asserted: this line claimed "nothing pushed" for hours after the
+# branch was pushed, because a generated file cannot know a fact nobody re-takes.
+# ls-remote per push URL is the only honest source -- a cached origin/<branch>
+# ref can be stale, which is exactly how a remote gets misjudged. When the check
+# cannot run, say NOT CHECKED rather than printing the safer-sounding negative.
+_br=$(git rev-parse --abbrev-ref HEAD)
+_tip=$(git rev-parse HEAD)
+for _u in $(git remote get-url --push --all origin 2>/dev/null); do
+  _host=$(printf '%s' "$_u" | cut -d/ -f3)
+  _r=$(SSL_CERT_FILE=/etc/ssl/cert.pem git ls-remote "$_u" "refs/heads/${_br}" 2>/dev/null | cut -f1)
+  if [ -z "$_r" ]; then
+    printf -- '- %s: branch ABSENT or NOT CHECKED (no ls-remote answer)\n' "$_host"
+  elif [ "$_r" = "$_tip" ]; then
+    printf -- '- %s: branch pushed and at this tip\n' "$_host"
+  else
+    printf -- '- %s: branch pushed at %s, NOT this tip\n' "$_host" "$(printf '%s' "$_r" | cut -c1-12)"
+  fi
+  _m=$(SSL_CERT_FILE=/etc/ssl/cert.pem git ls-remote "$_u" refs/heads/main 2>/dev/null | cut -f1)
+  printf -- '- %s: main at %s; nothing of this branch is landed there\n' "$_host" "$(printf '%s' "${_m:-NOT CHECKED}" | cut -c1-12)"
+done
+printf -- '\n'
 printf '## EXCLUDED FROM DELIVERY -- local configuration, not implementation\n\n'
 printf 'Commit `%s` is EXCLUDED. It touches exactly one path:\n\n' "$(git rev-parse --short $EXCL)"
 git show --name-only --format= "$EXCL" | sed 's/^/    /'
