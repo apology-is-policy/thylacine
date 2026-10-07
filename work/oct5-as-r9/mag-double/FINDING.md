@@ -53,7 +53,11 @@ analogue, so the faithful model is no cross-thread exclusion. The
 | `cross` | none (faithful) | 1 | 0 | 0 | 0 |
 | `owner-lock` | owner masked, drainer not (also faithful: that IS a mask vs a peer) | 4 | **0** | **7575** | 98 |
 | `both-locked` | ATTRIBUTION CONTROL: both excluded | **0** | 0 | **0** | 0 |
-| `self-drain` | FIX CANDIDATE: each CPU drains its own set | **0** | 0 | **0** | 0 |
+| `self-drain` | local-ownership exclusion (NOT an IPI drain) | **0** | 0 | **0** | 0 |
+
+Every count in that table is an OBSERVATION IN THIS SIMPLIFIED BUDDY DOUBLE --
+"a page was on the double's free list when the double's mag_alloc returned it" --
+and NOT a count of corruption in the Thylacine guest, which never ran.
 
 TSan names the conflicting production lines (translated out of the generated
 include, and disambiguated by enclosing function because the same statement text
@@ -74,13 +78,21 @@ appears in three of these bodies):
 2. **The finding attaches to the missing cross-CPU exclusion, not to the
    harness.** Giving both sides the same lock takes races AND corruption to zero
    with everything else identical.
-3. **The fix candidate holds.** Each CPU draining its own set -- what an
-   IPI-per-CPU drain means, the discipline the rest of the file already relies
-   on -- does the same work with 0 races and 0 corruption.
-4. **A single leg's zero is a FALSE NEGATIVE.** `cross` reported 0 corruption
-   while `owner-lock` reported 7575 on the same code: manifestation is
-   timing-dependent, so any future attempt to test for this class needs more than
-   one schedule before it may report safety.
+3. **The LOCAL-OWNERSHIP EXCLUSION IDEA is supported in the modelled
+   schedule -- which is NOT the same as qualifying an IPI drain** (astra, 0161
+   t59, correcting my first wording "the fix candidate is validated"). The
+   `self-drain` leg serialises each thread's own alloc/free/drain. It implements
+   no IPI delivery, no completion rendezvous, no offline-CPU handling and no
+   stable global measurement, so it says nothing about whether an actual
+   IPI-per-CPU drain would be correct, and nothing about making a global
+   before/after page gauge sound while peers keep allocating. It supports the
+   idea; it qualifies no implementation.
+4. **Manifestation is schedule-dependent.** `cross` observed 0 aliases while
+   `owner-lock` observed 7575 on identical code, so a count of zero from one
+   schedule is not evidence of safety. Stated precisely, because my first
+   wording ("a false negative") was wrong in a way that maligned the instrument:
+   TSan DID report the race in the `cross` leg. What failed to manifest there was
+   my own ALIAS COUNTER, not TSan's detection.
 
 ## WHAT IT DOES NOT ESTABLISH
 
@@ -91,6 +103,28 @@ appears in three of these bodies):
 - **Nothing about whether the kernel suite is actually quiescent** at its 24 call
   sites. That is the remaining open question and it needs the guest, not reading.
 - It is not a reproduction in Thylacine. No guest ran.
+- It qualifies no fix. See point 3 above.
+
+## THE RUNNER JUDGES EVERY LEG'S TERMINATION (added after astra's 0161 t59)
+
+The first version wrote `|| true` after each leg and only warned when the
+summary line was missing, so a leg that CRASHED EARLY would contribute zero
+races and zero aliases and read as clean -- fail-open evidence, the same class
+as an unverified pattern check. Now each leg's exit status is retained in
+`<leg>.rc` and a leg counts only if it produced a completed summary line AND
+terminated acceptably; otherwise the runner REFUSES TO REPORT (exit 5).
+
+Making that rule crisp needed one more thing: on Darwin TSan ABORTS after
+reporting (SIGABRT, status 134), which is indistinguishable from a genuine
+crash -- the first run of the new check rejected two good legs for exactly that
+reason. With `abort_on_error=0 exitcode=66`, a reporting leg exits 66
+deterministically, so "reported a race" and "died" are different statuses.
+
+CONTROL, run: with `CC` pointed at a wrapper that compiles a program which traps
+immediately in place of the double, the build and the `__tsan_` check still pass
+and all four legs are REJECTED ("no completed summary line -- the leg did not
+finish, so its zero counts are not evidence"), exit 5. So the acceptance rule
+discriminates rather than decorates.
 
 ## TWO HARNESS BUGS, recorded because the second nearly fooled me
 

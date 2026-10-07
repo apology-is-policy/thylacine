@@ -60,10 +60,44 @@ if ! nm "$OUT/mag-double" 2>/dev/null | /usr/bin/grep -q '__tsan_'; then
 fi
 echo "-- instrument verified live (__tsan_ symbols present)"
 
-# ---- the three legs ----
+# ---- the legs ----
+# EVERY LEG'S STATUS IS RETAINED AND JUDGED (astra, 0161 t59). The first version
+# wrote `|| true` after each run and only warned when the summary line was
+# missing, so a leg that CRASHED early would contribute zero races and zero
+# aliases and read as clean -- fail-open evidence, the same class as an
+# unverified pattern check. A leg now counts only if it ran to completion AND
+# terminated acceptably: exit 0, or exit 66 which is TSan's configured
+# exitcode after it has reported (the report IS the expected outcome on a
+# faithful leg, so a nonzero status there must not be read as a broken run).
+TSAN_EXITCODE=66
+# abort_on_error=0 is what makes the rule crisp: on Darwin TSan ABORTS after
+# reporting (SIGABRT, status 134), which is indistinguishable from a genuine
+# crash. With it off, a reporting leg exits with exitcode deterministically,
+# so "reported a race" and "died" are different statuses.
+export TSAN_OPTIONS="abort_on_error=0 exitcode=$TSAN_EXITCODE"
+legs_bad=0
 for leg in cross owner-lock both-locked self-drain; do
-  "$OUT/mag-double" "$leg" > "$OUT/$leg.out" 2>&1 || true
+  set +e
+  "$OUT/mag-double" "$leg" > "$OUT/$leg.out" 2>&1
+  rc=$?
+  set -e
+  echo "$rc" > "$OUT/$leg.rc"
   races=$(/usr/bin/grep -c 'WARNING: ThreadSanitizer: data race' "$OUT/$leg.out" || true)
-  printf '%-13s races=%-3s %s\n' "$leg" "${races:-0}" "$(/usr/bin/grep -h '^leg=' "$OUT/$leg.out" || echo '(no summary line)')"
+  summary=$(/usr/bin/grep -h '^leg=' "$OUT/$leg.out" || true)
+  verdict=ok
+  if [ -z "$summary" ]; then
+    verdict="REJECTED: no completed summary line -- the leg did not finish, so its"
+    verdict="$verdict zero counts are not evidence"
+    legs_bad=$((legs_bad + 1))
+  elif [ "$rc" -ne 0 ] && [ "$rc" -ne "$TSAN_EXITCODE" ]; then
+    verdict="REJECTED: exit $rc is neither 0 nor TSan's reporting exit $TSAN_EXITCODE"
+    legs_bad=$((legs_bad + 1))
+  fi
+  printf '%-13s rc=%-4s races=%-3s %s\n' "$leg" "$rc" "${races:-0}" "${summary:-(none)}"
+  [ "$verdict" = ok ] || printf '              %s\n' "$verdict"
 done
 echo "-- evidence: $OUT"
+if [ "$legs_bad" -ne 0 ]; then
+  echo "REFUSING TO REPORT: $legs_bad leg(s) did not produce usable evidence."
+  exit 5
+fi
