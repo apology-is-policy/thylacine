@@ -1111,3 +1111,75 @@ alter behaviour, but it would perturb the file under measurement and invalidate
 the P1 precondition greps cleared minutes earlier. It waits until the control
 and the mutant have both run. Perturbing the subject to document it is how a
 measurement loses its provenance.
+
+## 2026-10-07 19:0xZ: THE LEG RAN. Control GREEN, discrimination NOT established.
+
+Lease held 19:00-19:09Z (8 min of host). main stopped a superseded 40-minute
+ci-smp-gate to hand it over early; I released the moment the recovery hash
+printed and they re-took at 19:09Z.
+
+WHAT HOLDS -- the leg is no longer UNRUN:
+  control kernel 9fae5eb3a0873190, stratum pinned stratum-astra @61dde37 CLEAN
+  tests: 1836/1836 PASS   (derived expectation 1836, matched)
+  [test] loom.private_owner_lifecycle ... PASS   (by name)
+  test.sh exit 0, no '^EXTINCTION:' anywhere in the control boot log
+  preserved 9 of 9 boot inputs, no ABSENT line -- the FIXED preserve step's
+  first exercise inside a real run, which PRESERVE-STEP-DEFECTS.md had left as
+  the one thing its 44-check harness could not prove.
+So reachability is demonstrated: a private ring on a reaped Proc retires on the
+ring's OWN image reference, through the real retirer, with no fixture pin.
+
+WHAT DOES NOT HOLD -- and my runner reported it as success:
+The mutant produced the predicted NAMED extinction, "AddrSpace final lifetime
+drop with private rings", and the runner printed DISCRIMINATED. IT DID NOT
+DISCRIMINATE. The extinction fired inside `addrspace.proc_alloc_in_shares`
+(mutant-boot.log:511, last announcement at :510); `loom.private_owner_lifecycle`
+sits at line 601 of the CONTROL log, ~90 suite lines later. The boot died before
+the leg ran.
+  CAUSE IN THE TREE: test_addrspace.c's private_ring_sharing_failure() -- the
+  first statement of that test -- ends `addrspace_private_begin(as);
+  addrspace_unref(as);` and asserts the space survives ownerless BECAUSE the
+  guard pins it. Remove the guard's reference and that unref is the final
+  lifetime drop with private_rings == 1. So a balanced mutation of
+  addrspace_private_begin/_end can NEVER reach this leg.
+  CAUSE IN MY ORACLE: the third condition was "the leg did not report PASS",
+  which a leg that NEVER RAN satisfies just as well -- a vacuous negative,
+  exactly [[bug-215-negative-assert-satisfied-by-broken-fixture]] and the
+  gauge-reading-zero pin. Two of three conditions were real; the third was free.
+
+BOTH FIXED, neither run:
+  - the mutation is now CONFINED to loom's USE: `addrspace_unpin(as)` inserted
+    immediately after `addrspace_private_begin(as)` in loom_create_private
+    (kernel/loom.c), leaving addrspace.c untouched so every addrspace test
+    behaves normally and the boot reaches the leg. addrspace_unpin IS
+    addrspace_lifetime_put (addrspace.c:164), so this is exactly "the ring keeps
+    no net lifetime reference". PRISTINE/restore retargeted to kernel/loom.c.
+  - the oracle now asks POSITIVELY which test the boot was inside when it died,
+    from the log's LAST ANNOUNCEMENT, and refuses when that is not this leg. It
+    also refuses if the leg completed with a verdict while the extinction fired
+    elsewhere. DRIVEN AGAINST THE REAL FAILED LOG: it rejects
+    reap-leg-20261007T190621Z, which is the run it exists to have caught.
+    The announcement pattern needed tightening too -- the suite prints summary
+    lines beginning "[test] " (e.g. "[test] yield-waits: 724 invoked, ...") and
+    a bare prefix match picked one up as "the last test".
+
+A GENUINE BY-PRODUCT, worth more than the failed mutant: the property the mutant
+was built to witness is ALREADY witnessed in-tree, and POSITIVELY -- that
+`ownerless` assertion in private_ring_sharing_failure asserts the guard's
+reference keeps an ownerless space alive, with no mutation needed. So the leg's
+unique content is narrower than I had it: not "the guard takes a reference" but
+"the RETIRER reaches the dying image through the ring's own reference, end to
+end, with no fixture pin" -- which is what the control green now shows.
+
+ALSO LANDED THIS WINDOW: the runner was building against the WRONG STRATUM. It
+called tools/build.sh with STRATUM_SRC unset, so build.sh fell back to
+~/projects/stratum/v2 while build/'s stratumd cache was configured from the
+pinned stratum-astra at 14:09:56Z. CMake's source-mismatch error is the ONLY
+reason it failed loudly instead of building a control against a different
+Stratum than the leg was qualified against. Fixed at b5943591d by EXTRACTING the
+runbook's pin block (not copying it), with a denominator control that refuses if
+STRATUM_PIN_FULL is absent, since rev-parse alone succeeds in any tree holding
+the object and the HEAD-equality is the discriminating half.
+
+STILL OPEN: the acquisition witness. It needs one more lease window with the
+confined mutant. Everything else for it is in place and pre-cleared.

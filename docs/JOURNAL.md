@@ -891,6 +891,75 @@ every terminal state -- lease acquired, watcher dead without the lease, or a
 90-minute deadline. A watch that only reports success is silent through exactly
 the failure it exists to catch.
 
+### The leg ran (19:00-19:09Z): control green, and my own oracle lied to me
+
+main stopped a superseded 40-minute gate to hand the host over early, so the
+window opened at 19:00Z. Two defects surfaced in it, both mine, and the second
+is the one worth reading.
+
+THE FIRST killed the run before it started. tools/build.sh died with a CMake
+source mismatch: build/'s stratumd cache was configured from the PINNED Stratum
+(stratum-astra @61dde372) during the morning's qualified run, and my reap runner
+called build.sh with STRATUM_SRC unset, so it fell back to the default
+~/projects/stratum/v2. The error is the build protecting the experiment -- in a
+tree without that cache to disagree with, the run would have built the control
+quietly against a Stratum the leg was never qualified against. An unset lever's
+failure mode is a wrong image, not an error. Fixed by EXTRACTING the runbook's
+pin block instead of copying it, with a control that refuses if the HEAD-equality
+half is missing, since rev-parse alone succeeds in any tree holding the object.
+
+THE SECOND is that the runner then reported DISCRIMINATED, and it had not
+discriminated anything. The mutant did die with the predicted named extinction,
+"AddrSpace final lifetime drop with private rings" -- but inside
+addrspace.proc_alloc_in_shares, about ninety suite lines before
+loom.private_owner_lifecycle runs. The boot never reached the leg.
+
+The cause in the tree is the interesting half. test_addrspace.c's
+private_ring_sharing_failure() ends with `addrspace_private_begin(as);
+addrspace_unref(as);` and asserts the space survives with zero owners BECAUSE
+the guard pins it. Strip the guard's reference and that unref becomes the final
+lifetime drop with a ring outstanding, so the guard fires there first. A
+mutation of a SHARED primitive cannot discriminate one caller's leg while an
+earlier test exercises the same primitive -- the mutant has to be confined to
+the caller's use, which it now is (addrspace_unpin immediately after
+addrspace_private_begin, inside loom_create_private, leaving addrspace.c
+untouched).
+
+The cause in my oracle is the lesson. Its three conditions were: the named
+extinction fired; no OTHER extinction fired; and the leg did not report PASS.
+The first two are real. The third is FREE -- a leg that never ran satisfies it
+just as well as a leg that died. I have two pins on exactly this (a negative
+assertion satisfied by a broken fixture; a gauge reading zero satisfied by "it
+never started") and I wrote the check anyway, because the condition reads as
+though it is about the leg when it is only about the leg's absence. It now asks
+positively which test the boot was INSIDE when it died, from the log's last
+announcement, and refuses when that is not this leg. Driven against the real
+failed log, it rejects it.
+
+Tightening that check found one more of the same family: the suite prints
+summary lines beginning "[test] " -- "[test] yield-waits: 724 invoked, ..." --
+so a bare prefix match returns a summary as "the last test". The announcement
+form carries " ... "; the summaries do not.
+
+WHAT DOES HOLD, and it is not small: the leg is no longer UNRUN. The control is
+green -- 1836/1836 PASS, the leg passing by name, test.sh exit 0, no extinction
+anywhere in the boot log, on the pinned Stratum, with nine of nine boot inputs
+preserved (the fixed preserve step's first exercise inside a real run, which its
+own 44-check harness could not prove). So the reachability the dossier called
+unproven is demonstrated: a private ring on a reaped Proc retires on the ring's
+own image reference, through the real retirer, with no fixture pin holding the
+image up.
+
+And a by-product worth more than the failed mutant: the property the mutant was
+built to witness is already witnessed in-tree, POSITIVELY, by that `ownerless`
+assertion -- no mutation required. Which narrows what this leg uniquely carries:
+not "the guard takes a reference" but "the retirer reaches the dying image
+through the ring's own reference, end to end". The acquisition witness stays
+open and needs one more window.
+
+Released the host after 8 minutes, at the recovery hash, with the write-up done
+afterwards on free cores.
+
 ## 2026-10-05: AS-R9 charge settlement (corona) -- REPRODUCED ON A HOST DOUBLE, GUEST UNRUN
 
 The operator authorised corona to assist Astra on the approved async/memory arc,

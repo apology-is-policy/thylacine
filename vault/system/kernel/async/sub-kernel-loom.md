@@ -879,11 +879,43 @@ in the destroy is not covered by any of this. And the two `extinction()` arms in
 the destroy precede the release, so a private ring in legacy state dies LOUDLY
 rather than leaking -- those arms are not leak paths.
 
-UNRUN: the leg has never executed. Its translation unit does COMPILE -- a
-single-file `-fsyntax-only` with the kernel target's own defines, include paths
-and `-std=c99`, exit 0, no diagnostics -- which is a different and much weaker
-claim than "it passes", and the control plus the mutant still have to run under a
-lease.
+RUN AT LAST, AND ONLY HALF OF IT HOLDS (2026-10-07 19:0xZ, under lease). The leg
+EXECUTES AND PASSES: a full suite on the gate image reported `tests: 1836/1836
+PASS` with `[test] loom.private_owner_lifecycle ... PASS` by name, `test.sh`
+exit 0 and no extinction, on the pinned Stratum, with the control kernel
+preserved beside its nine boot inputs. So the reachability this dossier called
+unproven is now demonstrated: a private ring created on a Proc that is then
+reaped does retire on the ring's own image reference, through the real retirer,
+with no fixture pin holding the image up.
+
+THE MUTANT HALF DOES NOT HOLD, and the reason is a property of the TREE rather
+than of the leg. The balanced mutation of `addrspace_private_begin`/`_end` is
+LETHAL IN AN EARLIER TEST: `test_addrspace.c`'s `private_ring_sharing_failure()`
+-- the first statement of `addrspace.proc_alloc_in_shares` -- ends with
+`addrspace_private_begin(as); addrspace_unref(as);` and asserts the space
+SURVIVES with zero owners precisely because the guard pins it. Strip the guard's
+reference and that unref becomes the final lifetime drop with `private_rings ==
+1`, so the named extinction fires there, about ninety suite lines before
+`loom.private_owner_lifecycle` is reached. The boot never ran the leg.
+
+TWO CONSEQUENCES, both worth more than the failed run. First, the property the
+mutant was built to witness -- that the guard's lifetime reference is
+load-bearing -- is ALREADY witnessed in-tree, and witnessed POSITIVELY by that
+`ownerless` assertion rather than by a mutation, which is the stronger shape.
+Second, a mutation of a SHARED primitive cannot discriminate one caller's leg
+while an earlier test exercises the same primitive; the mutant has to be confined
+to the CALLER's use. The confined form is `addrspace_unpin` immediately after
+`addrspace_private_begin` inside `loom_create_private`, which leaves
+`addrspace.c` untouched so every addrspace test behaves normally and the boot
+reaches the leg. That form is written but UNRUN, and the acquisition witness
+accordingly remains OPEN.
+
+The runner's own oracle was the thing that called the failed run a success, and
+the defect is instructive: it asked only that the leg not report PASS, which a
+leg that never ran satisfies just as well. It now asks POSITIVELY which test the
+boot was inside when it died, derived from the log's last announcement, and
+refuses when that is not this leg -- driven against the real failed log, where it
+rejects.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are

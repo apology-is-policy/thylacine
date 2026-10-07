@@ -131,8 +131,8 @@ echo "-- stratum lever SET for every build below: STRATUM_SRC=$STRATUM_SRC"
 floor "stage 0"
 
 # THE PRISTINE COPY AND THE RECOVERY PATH, before anything can mutate.
-PRISTINE=$OUT/addrspace.c.pristine
-cp kernel/addrspace.c "$PRISTINE"
+PRISTINE=$OUT/loom.c.pristine
+cp kernel/loom.c "$PRISTINE"
 PRISTINE_HASH=$(shasum -a 256 "$PRISTINE" | cut -d' ' -f1)
 
 recover() { # idempotent, and correct before any mutation has happened
@@ -169,12 +169,12 @@ WARN
   fi
 
   # 2. THE SOURCE. A failed restore is a nonzero run, not a printed remark.
-  cp "$PRISTINE" kernel/addrspace.c
-  _h=$(shasum -a 256 kernel/addrspace.c | cut -d' ' -f1)
+  cp "$PRISTINE" kernel/loom.c
+  _h=$(shasum -a 256 kernel/loom.c | cut -d' ' -f1)
   if [ "$_h" = "$PRISTINE_HASH" ]; then
-    echo "-- kernel/addrspace.c RESTORED and hash-verified"
+    echo "-- kernel/loom.c RESTORED and hash-verified"
   else
-    echo "!! RESTORE FAILED: kernel/addrspace.c is $_h, pristine was $PRISTINE_HASH"
+    echo "!! RESTORE FAILED: kernel/loom.c is $_h, pristine was $PRISTINE_HASH"
     echo "   The pristine copy is kept at $PRISTINE -- restore it by hand."
     RECOVERY_FAILED=1
   fi
@@ -234,7 +234,7 @@ on_exit() {
   exit $_rc
 }
 trap on_exit EXIT
-echo "-- pristine kernel/addrspace.c held at $PRISTINE ($(echo "$PRISTINE_HASH" | cut -c1-16))"
+echo "-- pristine kernel/loom.c held at $PRISTINE ($(echo "$PRISTINE_HASH" | cut -c1-16))"
 
 run_suite() { # run_suite <label>; leaves $OUT/<label>-boot.log and sets suite_rc
   _l=$1
@@ -283,18 +283,27 @@ echo "=== stage 2: the MUTANT -- one named invariant failure, nothing else ==="
 MUTATED=1
 python3 - <<'PY' || exit 5
 import sys
-p='kernel/addrspace.c'
+# CONFINED TO loom.c BY NECESSITY, not by preference. The first version mutated
+# addrspace_private_begin/_end themselves -- and that mutation is LETHAL IN AN
+# EARLIER IN-TREE TEST: test_addrspace.c's private_ring_sharing_failure() ends
+# with `addrspace_private_begin(as); addrspace_unref(as);` and asserts the space
+# SURVIVES ownerless because the guard pins it, so with the guard's reference
+# removed that unref becomes the final drop with private_rings == 1 and extincts
+# there. addrspace.proc_alloc_in_shares is registered ~90 suite lines BEFORE
+# loom.private_owner_lifecycle, so the boot died before this leg ever ran and
+# the run proved nothing about it (measured: reap-leg-20261007T190621Z).
+# Mutating loom's USE instead leaves addrspace.c untouched, so every addrspace
+# test behaves normally and the boot reaches the leg.
+p='kernel/loom.c'
 s=open(p).read()
-a="    addrspace_lifetime_get(as);\n    ++as->private_rings;\n"
-b="    --as->private_rings;\n    spin_unlock(&as->lock);\n    addrspace_lifetime_put(as); // may free; never under as->lock\n"
-if s.count(a)!=1 or s.count(b)!=1:
-    sys.exit("REFUSING: mutation anchors are not unique (%d, %d) -- the file moved under this script" % (s.count(a), s.count(b)))
-s=s.replace(a, "    ++as->private_rings;  /* MUTANT: the ring takes NO lifetime ref */\n")
-s=s.replace(b, "    --as->private_rings;\n    spin_unlock(&as->lock);\n")
+a="    if (!addrspace_private_begin(as)) return NULL;\n"
+if s.count(a)!=1:
+    sys.exit("REFUSING: mutation anchor is not unique (%d) -- the file moved under this script" % s.count(a))
+s=s.replace(a, a + "    addrspace_unpin(as);  /* MUTANT: the ring keeps NO net lifetime ref */\n")
 open(p,'w').write(s)
-print("-- MUTANT applied: balanced removal of the ring's lifetime get/put")
+print("-- MUTANT applied: the ring drops the lifetime reference its guard took")
 PY
-/usr/bin/grep -q 'MUTANT: the ring takes NO lifetime ref' kernel/addrspace.c || {
+/usr/bin/grep -q 'MUTANT: the ring keeps NO net lifetime ref' kernel/loom.c || {
   echo "REFUSING: the mutation did not land"; exit 5; }
 tools/build.sh kernel --config ci
 floor "post-mutant-build"
@@ -315,10 +324,40 @@ if /usr/bin/grep -qF "$WANT" "$M"; then
   [ "${others:-0}" = 0 ] || {
     echo "   BUT $others OTHER extinction(s) fired too -- read $M before concluding:"
     /usr/bin/grep -nE '^EXTINCTION:' "$M" | head -6; exit 2; }
-  /usr/bin/grep -qE '\[test\] loom\.private_owner_lifecycle \.\.\. PASS' "$M" && {
-    echo "   AND THE LEG REPORTED PASS ANYWAY -- the extinction came from"
-    echo "   somewhere else entirely. Investigate; do not call this discrimination."
-    exit 2; } || true
+  # ATTRIBUTION -- the half the first version LACKED, and whose absence turned a
+  # vacuously-satisfied negative into a false "DISCRIMINATED". The old check only
+  # asked that the leg did not report PASS, which is exactly what a leg that
+  # NEVER RAN also satisfies: the first mutant killed the boot inside
+  # addrspace.proc_alloc_in_shares, ~90 suite lines before this leg, and the
+  # runner reported discrimination anyway (reap-leg-20261007T190621Z). A gauge
+  # reading zero is satisfied by "it never started"; so ask POSITIVELY which
+  # test the boot was in when it died, derived from the log rather than assumed.
+  # The pattern must match ANNOUNCEMENTS ONLY. The suite also prints summary
+  # lines that begin "[test] " -- e.g. "[test] yield-waits: 724 invoked, ..." --
+  # and a bare prefix match picks one of those up as "the last test", which is a
+  # pattern matching the wrong thing and returning a confident wrong answer. An
+  # announcement is `[test] <name> ... `; the summaries have no ` ... `.
+  last_test=$(/usr/bin/grep -E '^[[:space:]]*\[test\] [^ ]+ \.\.\.' "$M" | tail -1)
+  case "$last_test" in
+    *"loom.private_owner_lifecycle"*) : ;;
+    *) echo "   THE EXTINCTION IS NOT ATTRIBUTABLE TO THIS LEG."
+       echo "   The last test the boot announced was:"
+       echo "     ${last_test:-<the boot announced no test at all>}"
+       echo "   so the mutant killed it BEFORE loom.private_owner_lifecycle ran,"
+       echo "   and this run says NOTHING about the leg. A FINDING, not a pass,"
+       echo "   and not a reason to weaken the mutant until the cause is known."
+       exit 2;;
+  esac
+  # It must have DIED inside the leg, not completed it: an announced leg that
+  # carries a verdict on its own line means the extinction came from somewhere
+  # after it, which is a third outcome and equally not discrimination.
+  case "$last_test" in
+    *PASS*|*FAIL*)
+       echo "   THE LEG COMPLETED ($last_test) and yet the named extinction"
+       echo "   fired in the same boot. Investigate; do not call this"
+       echo "   discrimination."; exit 2;;
+  esac
+  echo "-- attributed: the boot died inside this leg ($last_test)"
   echo "-- DISCRIMINATED: the ring's own lifetime reference is load-bearing."
   echo "   ACQUISITION only. The release half has no witness in this run."
 else
