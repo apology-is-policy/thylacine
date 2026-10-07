@@ -7,10 +7,10 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    9857e90a930bbbd7b9b356d550972e092b565d67  (the commit this manifest was GENERATED AGAINST; the
+- tip:    7a2f3e79e27010f4ffe4cb41af5f22ddb72698f9  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 51
+- commits in range: 69
 - nothing pushed; nothing landed on main
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
@@ -35,7 +35,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..9857e90a930bbbd7b9b356d550972e092b565d67 -- .claude/
+    $ git log --oneline 5ff62b788..7a2f3e79e27010f4ffe4cb41af5f22ddb72698f9 -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -55,6 +55,8 @@ table rows:
     void test_burrow_settled_drop_exact_payer(void);
     void test_burrow_settled_mapping_drop_defers_free(void);
     void test_burrow_unmap_failure_leaves_mapping_attached(void);
+    void test_burrow_unmap_interior_start_refused(void);
+    void test_loom_private_owner_lifecycle(void);
         // AS-R9: the charge decision inside the drop's lock interval.
         { "burrow.settled_drop_retains_nonfinal_charge",
           test_burrow_settled_drop_retains_nonfinal_charge, false, NULL },
@@ -64,6 +66,9 @@ table rows:
           test_burrow_settled_mapping_drop_defers_free,     false, NULL },
         { "burrow.unmap_failure_leaves_mapping_attached",
           test_burrow_unmap_failure_leaves_mapping_attached, false, NULL },
+        { "burrow.unmap_interior_start_refused",
+          test_burrow_unmap_interior_start_refused,         false, NULL },
+        { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
 
 So her draft registrations and mine are append-only into the same two regions
 (the declaration block and the registration table) and do not overlap. The
@@ -72,13 +77,13 @@ regions is hers to resolve in her tree, and I have not pre-empted it.
 
 ## WHAT IS DELIVERED, BY CATEGORY
 
-    kernel source (the repair)      : 7 file(s)
-    kernel tests                   : 3 file(s)
-    tools/ (SHARED SURFACE)        : 2 file(s)
-    vault dossiers                 : 7 file(s)
+    kernel source (the repair)      : 12 file(s)
+    kernel tests                   : 5 file(s)
+    tools/ (SHARED SURFACE)        : 3 file(s)
+    vault dossiers                 : 9 file(s)
     docs                           : 4 file(s)
     specs                          : 0 file(s)
-    work/ evidence + runbooks      : 57 file(s)
+    work/ evidence + runbooks      : 106 file(s)
 
 The tools/ files are a shared surface main and aux also bake from. The one
 behavioural change there is smp-multiboot.sh's SMP_KEEP_LOGS retention, which is
@@ -107,4 +112,18 @@ DEFAULT OFF, so no peer's gate changes unless they opt in.
   spin_unlock in loom_post_pool_cqe; (2) main's tag-pool changes loom.c's CQ pump
   budget to `submitted + P9_TAG_LIMIT + 1` -- verified independently as touching
   no charge-settlement path and no v->lock, so it is a reconciliation item and
-  not a correctness interaction.
+  not a correctness interaction. (3) main's Loom write-behind fix (branch
+  loomwb, sent on yip 0183) inserts a `dev9p_loom_register(spoors[i])` flush
+  loop into `loom_register_handles`, which is where this branch's private-owner
+  refusal sits. ORDER AT MERGE: magic check, private-owner refusal, n/arg
+  checks, the Loom-4c SQPOLL deadline-capable gate, THEN their flush loop.
+  main's own reason -- a refused owner should not pay a flush -- applies equally
+  to a refused SPOOR, and this branch's SQPOLL gate rejects spoors that their
+  loop would otherwise have already flushed and stopped staging. Raised with
+  main on 0183 turn 2. (4) their exit-close hunks: the loom_free join hunk
+  applies here (4/4 anchors unique) but three anchors do NOT exist on this base
+  -- `struct loom_sqpoll_wait w` (no fan-in machinery here, so their
+  `closes_never_wait` line needs re-placing), `poll_waiter_list_unregister(w->cq)`
+  (loom_sqpoll_fanin_park absent), and thread.h's `cons_frozen_unwound` (so
+  their two new bools insert after exit_close_active here, and their stated
+  field offsets and sizeof are main's numbers, to be re-measured not inherited).
