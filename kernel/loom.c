@@ -412,8 +412,10 @@ static void loom_private_destroy(struct Loom *l) {
     // nonfinal drop reports zero and leaves the record for whichever drop does
     // end the occupancy -- a ring mapping that outlives the fd settles it at VMA
     // teardown, which is why the refund is read from the drop and not from a
-    // value claimed before it. The guards above exclude a second holder today;
-    // exclusivity is not what makes the settlement sound, so it is not relied on.
+    // value claimed before it. The guards above bound LEGACY EXECUTION, BUFFER
+    // AND FID state; they say nothing about mapping references, so a second
+    // holder of this ring is not merely possible but routine, and no exclusivity
+    // argument is available here or relied on.
     u32 refund = 0;
     (void)burrow_unref_settled_in(l->ring, as, &refund);
 

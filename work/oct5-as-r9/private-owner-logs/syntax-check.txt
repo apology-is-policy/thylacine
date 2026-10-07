@@ -1,0 +1,15 @@
+cc    : /opt/homebrew/opt/llvm/bin/clang
+flags : from build/kernel/kernel/CMakeFiles/thylacine.elf.dir/flags.make
+
+kernel/loom.c                  errors=0   missing-prototype=0   other-warnings=0
+kernel/handle.c                errors=0   missing-prototype=0   other-warnings=0
+kernel/proc.c                  errors=0   missing-prototype=7   other-warnings=0
+kernel/main.c                  errors=0   missing-prototype=0   other-warnings=0
+kernel/test/test_loom.c        errors=0   missing-prototype=2   other-warnings=0
+kernel/test/test_burrow.c      errors=0   missing-prototype=6   other-warnings=0
+kernel/test/test.c             errors=0   missing-prototype=0   other-warnings=0
+
+7 file(s) checked
+NO ERRORS. missing-prototype warnings are the pre-existing pattern for
+kernel test entry points (declared in test.c, not in a header); the kernel
+build carries no -Werror, so they do not fail it.

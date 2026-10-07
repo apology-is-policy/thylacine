@@ -19,6 +19,22 @@
 
 #define LP_CHECK(x, msg) do { if (!(x)) { error = msg; goto done; } } while (0)
 
+// The charge-settling range detach, with the discipline vma_detach_range_in
+// requires: as->lock held across the call, and the returned chain of Burrows
+// whose last mapping went handed to burrow_free_deferred AFTER the unlock,
+// because a FILE Burrow's free may sleep. `payer` is what makes this settle at
+// all -- passing NULL settles nothing and leaves an eager region charged, which
+// is the safe direction and the wrong one for this fixture.
+static bool lp_detach_settling(struct Proc *p, u64 vaddr, u32 length) {
+    struct Burrow *dead = NULL;
+    spin_lock(&p->as->lock);
+    int rc = vma_detach_range_in(p->as, proc_resource_exempt(p), p,
+                                 vaddr, (u64)length, 0, &dead);
+    spin_unlock(&p->as->lock);
+    burrow_free_deferred(dead);
+    return rc == 0;
+}
+
 // The retirer is a separate thread, so every retirement here is observed by
 // waiting on its monotonic counter rather than assumed complete on return.
 static bool lp_wait(u64 target) {
@@ -192,8 +208,15 @@ static const char *loom_private_fixture(void) {
              "a nonfinal ring drop refunds the metadata only");
     LP_CHECK(!p->as->private_rings,
              "the image pin is released at retirement even when the ring lives");
-    LP_CHECK(burrow_unmap(p, mapped_va, mapped_len) == 0,
-             "the surviving ring mapping unmaps");
+    // The detach must be the CHARGE-SETTLING one. burrow_unmap passes no payer,
+    // so it reaches vma_free_freed and settles nothing: the last mapping would
+    // free the ring and leave the recorded backing charged forever, and this
+    // leg's closing assertion would fail for a reason that has nothing to do
+    // with the retirement under test (astra, yip 0161 note 32). burrow_unmap's
+    // semantics are deliberately NOT changed to suit this fixture -- the JIT and
+    // the other callers settle separately and rely on exactly that.
+    LP_CHECK(lp_detach_settling(p, mapped_va, mapped_len),
+             "the surviving ring mapping detaches through the settling path");
     mapped_va = 0;
     LP_CHECK(p->as->page_count == base,
              "the mapping teardown settles the ring charge exactly once");
@@ -204,7 +227,7 @@ done:
     if (l) loom_unref(l);
     handle_put(&second);
     handle_put(&borrow);
-    if (p && mapped_va) (void)burrow_unmap(p, mapped_va, mapped_len);
+    if (p && mapped_va) (void)lp_detach_settling(p, mapped_va, mapped_len);
     if (p) test_proc_drop(p);
     if (!lp_wait(goal) && !error) error = "private fixture cleanup retirement timed out";
     if (pin) addrspace_unpin(pin);

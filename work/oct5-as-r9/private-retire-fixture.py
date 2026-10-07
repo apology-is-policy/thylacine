@@ -12,10 +12,20 @@ real locking, or reachability from any syscall. The lock is a counter and the
 schedule is single-threaded and cooperative. The AS-R9 double's boundary
 statement applies here verbatim.
 
-WHY IT IS NOT CIRCULAR. The three settlement functions are EXTRACTED verbatim
-from kernel/burrow.c rather than restated here, so the decision under test is
-the shipped one; only its environment is doubled. Each extracted body is
-asserted to be a verbatim substring of its source before it is used.
+WHY IT IS NOT CIRCULAR, AND EXACTLY HOW FAR THAT GOES. The three Burrow
+settlement functions are EXTRACTED verbatim from kernel/burrow.c rather than
+restated here, so the DECISION under test is the shipped one; only its
+environment is doubled, and each extracted body is asserted to be a verbatim
+substring of its source before use.
+
+BUT retire_settled below is NOT extracted -- it is a hand transcription of
+loom_private_destroy's accounting sequence (astra, yip 0161 note 32). So the
+single changed variable in this matrix is MY TRANSCRIPTION of the retirement,
+not the shipped destructor, and a divergence between the two would be invisible
+here. What this therefore bounds is the ARITHMETIC of that sequence. The
+discriminating test of the ACTUAL loom_private_destroy path is the native
+regression with the real destructor mutated, which needs the guest; this does
+not stand in for it and the matrix below should not be read as if it did.
 
 THE MATRIX IS THE POINT. An unconditional refund must PASS the final leg and
 FAIL the nonfinal one. Requiring the pass is what proves the new leg -- and not
@@ -99,6 +109,10 @@ static void burrow_charge_record(struct Burrow *v, const struct AddrSpace *as, u
 """
 
 RETIRE = r"""
+/* TRANSCRIBED, not extracted: this mirrors loom_private_destroy's accounting
+   sequence by hand, so it tests the arithmetic of that sequence rather than the
+   shipped function. A drift between the two is invisible here, which is why the
+   native regression mutates the REAL destructor. */
 /* The ported form: the refund is whatever the settled drop decided. */
 static void retire_settled(struct Burrow *ring, struct AddrSpace *as, u32 metadata, u32 backing) {
     (void)backing;
