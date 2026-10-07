@@ -185,3 +185,81 @@ Also from main, for the integration order: devno-u64 (t_stat.devno widened in
 place to 64 bits) lands on main next; its trial merge into corona/async-memory
 conflicts in the same 26 files main already does and ADDS NONE. Rules in
 handoff 046.
+
+## STATE AT 2026-10-07 00:40Z -- read this section FIRST; it supersedes the stage prose above where they differ
+
+HEAD `de5e1056a`, 33 commits off base `5ff62b788`. NOTHING pushed, NOTHING
+landed on main. Tree clean except the deliberately-untracked green-pair
+artifacts (`work/oct5-as-r9/cpu1-green-pair/{pool.img,ramfs.cpio,.config,
+system.key}` -- only MANIFEST.txt is committed). No lease held.
+
+**AS-R9 IS UNQUALIFIED FOR EXACTLY ONE REASON: `ci-smp-gate` has never run.**
+Everything else on this arc is done and evidenced.
+
+### The lease window, when the await fires
+
+    SPECS=0 PI_AXIS=0 sh work/oct5-as-r9/lease-runbook.sh > work/oct5-as-r9/run-<stamp>.log 2>&1
+
+Claim inside the 2-minute offer window. Do NOT pass `CLONE_APPROVED=1` (obsolete;
+astra's approval is SPENT). RELEASE THE MAC the moment the gate ends, not when
+the write-up ends. WRAPPER TRAP: a backgrounded `cmd > log; echo "exited $?"`
+makes the harness report ECHO's status, so a task can say exit 0 for a FAILED
+run -- read `runbook exited N` in the task output, never the task's own code.
+Mac was main's (seam-90 close, ~2.9h from 23:40Z); I am queue head with a
+durable request. The background await is cwd-pinned and refuses any reading
+unless `yip presence` shows my own row: the yip CLI resolves relay state
+RELATIVE TO THE CWD, and from outside the tree it reports every resource FREE
+with no queue, which is the one reading that fires a waiter.
+
+### D7: cured and attributed, entry deliberately still OPEN
+
+Cause was the unequal external Stratum input, not the repair. The kernel ELF
+`1fe1ba3a46219dc1` and `.config 4fcc788d6be38b80` are BYTE-IDENTICAL across the
+red run (hashes recorded at the time in docs/ASYNC-SERVICE-STATUS.md:758-760)
+and the green run (work/oct5-as-r9/cpu1-green-pair/MANIFEST.txt); only
+ramfs.cpio and pool.img moved. The kernel was the control variable, held fixed,
+and D7 flipped. Green evidence: boot-logs/boot-confirm-232503Z.log:3495 (probe
+PASS), :3776 (20 cycles), :3914 (boot OK), 1834/1834, 0 EXTINCTION.
+It stays OPEN because 1/1 is not the 2/2 bar I set for the red, and because
+astra refused the inference that the 5x10 matrix exercises D7 fifty times
+(0161 note 17): the close condition is MEASURED per-boot witnesses.
+
+### What stage 5 now measures (new, commit de5e1056a)
+
+`tools/smp-multiboot.sh` discarded every PASSING boot's log (one shared
+`build/test-boot.log`, copied aside only on a non-PASS classification), so the
+witnesses had nowhere to come from. It now takes `SMP_KEEP_LOGS=1` (default OFF)
+and keeps each boot's serial + harness log under `build/multiboot-logs/`,
+archiving a prior run of that label. Stage 5 exports it and counts, per label,
+boots that REACHED the overlapping-login ladder vs boots that reported PASS,
+and REFUSES when a label's retained-log count is not N. Four arms tested on
+synthetic logs; exit codes measured without a pipe.
+
+### Stage 4's oracle (the reason the gate never ran, twice)
+
+The witness/tally/skip assertions read `guest-test.log` -- test.sh's STDOUT, 29
+lines, ZERO `[test]` lines -- while the suite's 1835 `[test]` lines live only in
+the boot log. It had never passed since caacdf468. Now they read the preserved
+`$BOOTLOG` behind a denominator control (the oracle must carry `[test]` lines at
+all, else the SEARCH is broken).
+
+### The orphan: a P3 observability gap, NOT an I-39 hole
+
+`joey: reaped adopted orphan pid=4536 status=1` after boot OK is the DESIGNED
+5d EXITKILL outcome: kernel/proc.c:4798-4801 is the string-only wrapper
+(`code = (msg=="ok") ? 0 : 1`), so `proc_group_terminate(p, "debugger exited")`
+at kernel/devproc.c:989 yields exactly 1; dap-probe's `shutdown()`
+(usr/dap-probe/src/main.rs:472-477) kills ambush without an explicit detach,
+which devproc.c:978-989 names as that path's trigger; the debuggee is a
+`main.parkLoop` that cannot exit on its own. joey's `reap_adopted_orphans`
+(usr/joey/joey.c:3791-3822) is a post-BOOT_COMPLETE sweep of ALREADY-DEAD
+zombies, so the reap line is the first sweep, not a lifetime. What survives is
+filed: nothing can distinguish that designed terminate from a real teardown
+failure, and nothing asserts on a DAP-launched child's disposition.
+
+### Call state
+
+Floor on 0161 is ASTRA's. Notes 15-18 sent (pair preservation, two corrections,
+and the retention mechanism). She asked for no reply during the wait. Next on
+that call is the gate itself, with every label's clean-boot count AND the
+per-boot D7 witness counts, reported separately from D7's cure.
