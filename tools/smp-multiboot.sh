@@ -225,17 +225,41 @@ fi
 # Same masquerade hazard, same remedy, for the keep-everything logs: a stale
 # per-boot log from an earlier run of THIS label would be counted as current
 # evidence by whatever reads the directory. Archive, never delete (#223).
+# EVERY STEP ON THIS PATH FAILS LOUDLY -- no `|| true`. The fail-capture above
+# can afford suppression (its verdict does not depend on the copy landing), but
+# a READER of these logs counts them, so a suppressed mv or cp leaves a stale
+# file sitting under a current boot's name and satisfies that count with an
+# earlier run's evidence. That is the masquerade the archiving exists to
+# prevent, re-introduced by the suppression (astra, 0161 note 19).
 if [[ -n "${SMP_KEEP_LOGS:-}" ]]; then
-    mkdir -p "$KEEPDIR"
+    mkdir -p "$KEEPDIR" || { echo "  [$LABEL] KEEP FAILED: cannot create $KEEPDIR" >&2; exit 1; }
     shopt -s nullglob
     prior_keeps=("$KEEPDIR/$LABEL-"*.log)
     shopt -u nullglob
     if (( ${#prior_keeps[@]} > 0 )); then
         KEEPARCH="$KEEPDIR/archive/$LABEL-$(date -u +%Y%m%dT%H%M%SZ)"
-        mkdir -p "$KEEPARCH"
-        mv "${prior_keeps[@]}" "$KEEPARCH"/ 2>/dev/null || true
+        mkdir -p "$KEEPARCH" || { echo "  [$LABEL] KEEP FAILED: cannot create $KEEPARCH" >&2; exit 1; }
+        if ! mv "${prior_keeps[@]}" "$KEEPARCH"/; then
+            echo "  [$LABEL] KEEP FAILED: could not archive ${#prior_keeps[@]} prior log(s)" >&2
+            echo "  [$LABEL] refusing to boot with an earlier run's logs under current names." >&2
+            exit 1
+        fi
         echo "  [$LABEL] archived ${#prior_keeps[@]} prior per-boot log(s) -> ${KEEPARCH#$REPO_ROOT/}"
     fi
+    # POST-CONDITION, asked of the directory rather than of mv's status: the
+    # slot must be EMPTY before the first boot writes into it.
+    shopt -s nullglob
+    left_behind=("$KEEPDIR/$LABEL-"*.log)
+    shopt -u nullglob
+    if (( ${#left_behind[@]} > 0 )); then
+        echo "  [$LABEL] KEEP FAILED: ${#left_behind[@]} prior log(s) still present after archiving" >&2
+        exit 1
+    fi
+    # This run's freshness datum. A kept log must be NEWER than this, which no
+    # survivor of an earlier run can be -- the staleness class dies on a
+    # timestamp instead of on a return code.
+    KEEPSTAMP="$KEEPDIR/.stamp-$LABEL"
+    : > "$KEEPSTAMP" || { echo "  [$LABEL] KEEP FAILED: cannot write $KEEPSTAMP" >&2; exit 1; }
     echo "  [$LABEL] SMP_KEEP_LOGS=1 -- every boot's logs kept in ${KEEPDIR#$REPO_ROOT/}"
 fi
 
@@ -300,8 +324,20 @@ for i in $(seq 1 "$N"); do
     # its log too (the PASS arm below `continue`s). $LOG is final here: test.sh
     # has already returned.
     if [[ -n "${SMP_KEEP_LOGS:-}" ]]; then
-        cp "$LOG"         "$KEEPDIR/$LABEL-$i.log"         2>/dev/null || true
-        cp "$HARNESS_LOG" "$KEEPDIR/$LABEL-$i-harness.log" 2>/dev/null || true
+        for keep_pair in "$LOG:$KEEPDIR/$LABEL-$i.log" \
+                         "$HARNESS_LOG:$KEEPDIR/$LABEL-$i-harness.log"; do
+            keep_src="${keep_pair%%:*}"; keep_dst="${keep_pair#*:}"
+            if ! cp "$keep_src" "$keep_dst"; then
+                echo "  [$LABEL $i/$N] KEEP FAILED: cp $keep_src -> $keep_dst" >&2
+                exit 1
+            fi
+            # Non-empty AND newer than this run's stamp: a stale file that
+            # survived cannot pass the second half, whatever cp reported.
+            if [[ ! -s "$keep_dst" || ! "$keep_dst" -nt "$KEEPSTAMP" ]]; then
+                echo "  [$LABEL $i/$N] KEEP FAILED: $keep_dst is empty or not from this run" >&2
+                exit 1
+            fi
+        done
     fi
 
     if (( rc_ok )); then

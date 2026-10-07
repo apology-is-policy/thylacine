@@ -422,6 +422,17 @@ of the kept logs owes them a denominator control: a label with fewer than N
 retained logs means the evidence is missing, and a clean reading taken off
 missing evidence is a gauge reading zero because it never started.
 
+**Nothing on this path is suppressed.** The fail-capture can afford
+`|| true` — its verdict does not depend on the copy landing — but a reader
+*counts* the kept logs, so a swallowed `mv` or `cp` leaves an earlier run's file
+under a current boot's name and satisfies that count with stale evidence, which
+is the masquerade the archiving exists to prevent. Every step therefore fails the
+label loudly: the archive `mv`, both `cp`s, and a post-condition asked of the
+directory rather than of `mv`'s status (the slot must be EMPTY before the first
+boot writes into it). Each kept file is then checked non-empty and NEWER than a
+per-run stamp file, so a survivor of an earlier run is rejected on a timestamp
+rather than on a return code.
+
 ## Concurrency
 
 The matrix is sequential by construction. Two worktrees can gate

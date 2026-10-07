@@ -529,7 +529,11 @@ echo "   all five labels: $SMP_N/$SMP_N CLEAN boots"
 # PER-BOOT D7 WITNESSES. "The 5x10 matrix exercises D7 fifty times" is an
 # ASSUMPTION, and astra refused it (0161 note 17): the D7 close condition is
 # actual per-boot PASS witnesses in the RETAINED logs, never an inference from
-# five green rows. The retention has its own DENOMINATOR CONTROL -- a label
+# five green rows. The retention has its own DENOMINATOR CONTROL, and the
+# count is trustworthy because retention itself now fails the label loudly on
+# any archive/copy error and stamps each kept file as being from THIS run
+# (astra, 0161 note 19 -- a swallowed mv left stale evidence satisfying the
+# count). A label
 # with fewer than N kept logs means the EVIDENCE is missing, and zero D7 reds
 # read off missing evidence is the gauge-reading-zero dodge, so it REFUSES.
 KEEP=build/multiboot-logs
