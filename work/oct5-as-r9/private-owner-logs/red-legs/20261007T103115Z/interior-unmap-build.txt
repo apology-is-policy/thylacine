@@ -1,0 +1,19 @@
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/burrow.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  2848480 Oct  7 11:31 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  9523384 Oct  7 11:31 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+-105553110730296 0000000000041864 b g_reap_fake_client
+-105553111128864 0000000000041864 b g_sc_client
+-105553111663496 0000000000047456 b pc
+-105553113064536 0000000000058784 D g_tests
+-105553112252048 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110911459 0000000000065792 b g_pe_payload
+-105553110832896 0000000000083728 b pti_front_clients
+-105553111010799 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553113224484 0000000000119244 R halls_symtab_names
+-105553112862720 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf

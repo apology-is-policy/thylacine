@@ -1,0 +1,53 @@
+
+== evidence dir work/oct5-as-r9/private-owner-logs/red-legs/20261007T103115Z (HEAD 2666645b7bcc94446dad7ea82d69c590cd2f6f67)
+
+== expected suite size, derived from kernel/test/test.c: 1836
+
+== LEG 1: delete the vaddr_start guard, expect the interior fixture RED
+
+== build (interior-unmap)
+
+== suite (interior-unmap)
+test.sh rc=1, 113106 bytes of NEW serial evidence
+1836 verdicts parsed, 0 unresolved
+      and the kernel agrees: tests 1835/1836 FAIL
+PASS  leg=interior-unmap burrow.unmap_interior_start_refused -> FAIL (an interior start must be refused -- v1.0 has no partial unmap), the ONLY failure
+
+== LEG 2: refund the ring unconditionally, expect the lifecycle fixture RED
+
+== build (uncond-refund)
+
+== suite (uncond-refund)
+test.sh rc=1, 112647 bytes of NEW serial evidence
+1836 verdicts parsed, 0 unresolved
+      and the kernel agrees: tests 1835/1836 FAIL
+PASS  leg=uncond-refund  loom.private_owner_lifecycle -> FAIL (a nonfinal ring drop refunds the metadata only), the ONLY failure
+
+== GREEN CONTROL: rebuilt from restored source
+
+== build (green)
+
+== suite (green)
+test.sh rc=0, 208632 bytes of NEW serial evidence
+1836 verdicts parsed, 0 unresolved
+PASS  green: tally 1836/1836, matching the 1836 registrations
+PASS  green: boot completed ("Thylacine boot OK")
+PASS  green: 0 skips
+PASS  green: no extinction
+PASS  green: no failing test
+PASS  green: burrow.unmap_interior_start_refused -> PASS
+PASS  green: loom.private_owner_lifecycle -> PASS
+
+== SUMMARY
+HEAD            2666645b7bcc94446dad7ea82d69c590cd2f6f67
+evidence        work/oct5-as-r9/private-owner-logs/red-legs/20261007T103115Z
+expected tests  1836
+burrow.c        c8f5a3b0ea54b4b5b197a34ca3bc7c786a6a396d
+loom.c          dcad40afc6ea7eea67df1a15885128bebdab3651
+BOTH FIXTURES ARE WITNESSES: each reddened on its own mutant, for the
+assertion that mutant targets, as the ONLY failure -- and both pass on a
+kernel rebuilt from restored source with the full 1836-test tally.
+
+== cleanup (exit, status 0)
+source restored and verified byte-for-byte: kernel/burrow.c kernel/loom.c
+build/ is QUALIFIED: rebuilt from restored source and green; marker removed
