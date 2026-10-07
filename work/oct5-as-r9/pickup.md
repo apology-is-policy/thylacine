@@ -511,3 +511,74 @@ D7's cure WAS a peer stratumd -- measured -- but the mechanism is not.
    SMP results after the wrapper correction, and asked for no acknowledgement
    beyond that.
 5. The pi A72/KVM residual stays open. Operator vote stands, NEVER re-ask.
+
+---
+
+## 2026-10-07 12:1xZ: ASTRA'S REVIEW IS CLOSED; PO-R5 TOOK TWO ROUNDS
+
+HEAD `54e206d0e`, 77 commits off base `5ff62b788`. Nothing pushed, nothing
+landed, no activation, and **no lease was taken for any of this** -- it is stub
+coverage, prose and a journal entry. Tree clean apart from the deliberate
+untracked evidence. No guest, no background task.
+
+### Astra's close (0161 t33, t35)
+
+PO-R2, R4, R6 CLOSED for the observed evidence; she independently re-read all 50
+retained serial logs and both red legs. Matrix-stage-only qualification accepted
+AS STATED, explicitly not as `ci-smp-gate.sh` passing. No activation or landing
+clearance. External ARC/Clade fixtures and the pi remain unrun.
+
+### PO-R5, the reusable-wrapper repair -- TWO ROUNDS, and the second was hers
+
+Round 1 (`5674f059c`): `reap_owned` waited on the immediate build child only, so
+a build's compilers -- which outlive the shell that launched them -- could still
+be writing while source was restored. Ancestry cannot find them (a grandchild is
+reparented to init the moment its parent exits), so every owned command now runs
+as its OWN PROCESS GROUP and the group is reaped and then PROVEN empty by pgid.
+A surviving QEMU used to print WARNING; unproven quiescence now refuses the
+restore. And the unqualified marker was cleared on a green suite even when the
+final source/HEAD checks had failed -- it now takes both halves.
+
+Round 2 (`54e206d0e`), found by astra in round 1's own fix: `group_members`
+PIPED ps INTO awk, so a ps that died with no output read as an empty group --
+the gauge that reads zero because it never started, in the function whose job is
+to prove a negative. Snapshots now keep their status separately and are
+CONTROLLED: a process table that does not contain this shell did not observe
+this machine. Unknown propagates like a live member. S17 (ps fails), S18 (ps
+answers without looking), S19 (positive control: a working ps must PROVE empty).
+
+Harness is 19 scenarios / 92 checks. Three-way at ONE harness version: 92/0 on
+the fix, 84/8 on round 1 (its runs restored source with a dead ps), 73/19 on
+pre-PO-R5 `ff936ff9a`. The exit status discriminates NOTHING on S15/S17/S18 --
+all three runners refuse, the older two for an unrelated reason.
+
+### Two figures of mine were wrong, both corrected in place
+
+1. "57 checks, 57/57 vs 26 WRONG" -- the run was real, its log was never
+   retained, and the retained log read 53. Quote retained logs, not runs.
+   (The 53 log contains S11; only S12 was missing, which was a second error in
+   the same sentence.)
+2. "the grep defect affects EVERY agent in this project" -- measured FALSE.
+   astra's Codex env resolves to /usr/bin/grep; main and aux each CHECKED their
+   own load-bearing counts and are clean. The exposure is per-INVOCATION.
+
+### Enqueued and owned
+
+- The agent's `grep` (Claude Code's embedded ugrep 7.8.4) silently undercounts a
+  quantified negated class: 757 of 1836, exit 0, no stderr; `-P` is correct.
+  Reproduced in six lines after an earlier session failed to and rightly
+  declined to record a hypothesis. OPEN-BUGS + memory lesson.
+- `make-manifest.sh` was DELETING merge obligations (3) and (4) on every
+  regeneration, including main's verbatim loom.h contract text -- by the command
+  the manifest's own header tells the reader to run. They now live in
+  `work/oct5-as-r9/MERGE-OBLIGATIONS.md`, included verbatim, and the generator
+  refuses when it is absent.
+- The stratumd CMake cache provenance (unchanged, still the biggest one).
+
+### NEXT, nothing urgent and nothing lease-bound
+
+1. Astra may reply on 0161 t36. If she reviews the ps-snapshot control, expect
+   source review again, not a guest run.
+2. The pi A72/KVM residual stays OPEN; operator vote stands, NEVER re-ask.
+3. `kernel/test/*.c` are still UNOWNED by any dossier (111 of 137 test files),
+   which belongs with the standing dossier backlog, not a hurried invention.
