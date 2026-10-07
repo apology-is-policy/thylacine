@@ -584,3 +584,100 @@ all three runners refuse, the older two for an unrelated reason.
 2. The pi A72/KVM residual stays OPEN; operator vote stands, NEVER re-ask.
 3. `kernel/test/*.c` are still UNOWNED by any dossier (111 of 137 test files),
    which belongs with the standing dossier backlog, not a hurried invention.
+
+---
+
+## 2026-10-07 14:4xZ: THE FLOOR CLEARS, PRESERVATION IS A SCRIPT STEP, MAIN MOVED
+
+HEAD `d98839268`, 88 commits off base `5ff62b788`, both mirrors verified at tip
+by `ls-remote` per URL. Tree clean apart from the deliberate untracked evidence.
+Nothing of mine is running: no background task, no monitor, no QEMU naming this
+tree. NOTHING LANDED -- measured, not asserted: 0 of 88 commits in range are
+reachable from main.
+
+### THE FLOOR PASSES FOR THE FIRST TIME TODAY, and it is not a promise
+
+`df -m` reads 9445 MiB (9.22 GiB), so `df -g` truncates to 9 and the runbook's
+`FLOOR_GB=8` PASSES. The cause is astra's OPERATOR-AUTHORIZED cleanup of her own
+inactive Cargo caches and 14 post-run scratch pools (0161 t45): ~1.65 GiB net,
+and du again overstated it. SHE QUALIFIED IT EXPLICITLY and the qualification is
+binding: this clears the threshold AT AN INSTANT, it is not reserved capacity.
+So the plan is unchanged -- claim, RE-MEASURE, release immediately if short
+rather than burn the next waiter's turn. Do not lower the floor. Do not re-plan
+on anyone's du totals.
+
+### MAIN MOVED cb7194c10 -> 25ed27f21 (18 commits). DO NOT MERGE IT
+
+exit-close LANDED, and the loomwb WIP commits are on main too. Consequence for
+the delivery: ALL FOUR merge obligations now target code ON main -- f6f4c0397
+loom-mc (1), cb7194c10 tag pool (2), d8b177156 + ef64e4b3a loomwb (3),
+25ed27f21 exit close (4) -- each tested with `merge-base --is-ancestor`, not read
+off a log. Recorded in `MERGE-OBLIGATIONS.md`. NOTHING IS APPLIED. Obligation
+(4)'s anchor report was measured against the exit-close BRANCH, so re-measure its
+anchors and field offsets against 25ed27f21 at merge rather than inherit them.
+
+### THE LEASE PLAN, UNCHANGED IN SHAPE, CHANGED IN THE SCRIPT
+
+    SPECS=0 PI_AXIS=0 sh work/oct5-as-r9/lease-runbook.sh > work/oct5-as-r9/run-<stamp>.log 2>&1
+
+aux holds the mac (took it 14:19Z, ~2.8h, hunting a NONDETERMINISTIC lantern
+failure); I am queue 1 with the durable request. TAKE NO CORES WHILE THEY HOLD IT
+-- they are hunting a race and their measurement is timing-sensitive; I told them
+so on 0186. Claim inside the 2-minute offer window.
+
+Two changes in the runbook since the last section, both tested off-lease:
+- `EXPECT_TESTS` is DERIVED from kernel/test/test.c's registration table, not
+  pinned (it was 1834 and went stale when the port added its two tests). Derives
+  1836 today. It names `/usr/bin/grep` BY ABSOLUTE PATH because the agent's
+  embedded ugrep undercounts that exact pattern on that exact file (757 of 1836,
+  exit 0, no stderr -- re-measured today, still reproducing), and it REFUSES
+  rather than lower the bar if the count collapses.
+- `preserve_boot_inputs` clones the four boot inputs out of `build/` AFTER the
+  post-build Stratum pin is verified and BEFORE stage 3. The placement is
+  load-bearing in both directions and moved once already: earlier, a run about to
+  be rejected for wrong provenance would take a generation slot and two rejected
+  runs would evict both qualified sets; later, a RED run would preserve nothing,
+  and a failing run's inputs are what diagnosis needs. Bounded to 2 generations
+  because a clone's shared blocks become REAL when the original is rebaked
+  (~283 MiB per pool), so an unbounded history would feed the disk blocker.
+  Tested by `work/oct5-as-r9/preserve-inputs-test.sh`, which EXTRACTS the
+  function from the live runbook: 22 checks / 5 scenarios, and discriminating --
+  flat-copy sabotage 6 WRONG, removed-refusal sabotage 2 WRONG.
+
+### PRESERVATION STATE -- read the manifest, it is the honest version
+
+`work/oct5-as-r9/private-owner-qualified-kernel/` now holds both kernel flavours
+(.elf and .bin), the PRE-BOOT pool and its key twin, and .config.
+- `thylacine-undefined.bin` is a RECONSTRUCTION, labelled as one, and astra
+  credits it as reconstructed (t45). QEMU boots the flat binary, never the ELF,
+  and `build/kernel-undefined` was gone before any copy existed. Regenerated from
+  the retained ELF (`kernel/CMakeLists.txt:343`, bare `objcopy -O binary`) to
+  `5193ee5f914f96ae` -- EQUAL to the hash the matrix log recorded before the
+  loss -- with the default pair as a positive control.
+- The pre-boot pool is `pool.img.baked-snapshot` `9384c245b6f1cb5b`, NOT the live
+  `pool.img`: `smp-multiboot.sh:315` restores the snapshot before every boot. My
+  matrix header had hashed the live file, naming an artifact no boot ever read.
+- `ramfs.cpio` `63d781afe4a6e5f5` is LOST, hash-only. NOT reconstructible
+  off-lease. CONSEQUENCE: the set pins what the kernel and pool were but CANNOT
+  be booted as a set, so reproducing the 10-07 matrix is a NEW measurement.
+  astra asks this stay explicitly disclosed. Do not substitute a re-bake for it.
+
+### OPEN CALLS and who holds each floor
+
+- 0161 astra -- floor MINE. She has NOT reviewed the preserve fixture and claims
+  no full-gate completion. Her standing calls: keep cpu1-green-pair (~771 MiB,
+  hers, do NOT delete), keep the floor, prune nothing of a peer's.
+- 0186 aux -- floor mine, nothing owed. They will report `df` when they release.
+- 0187 main -- floor THEIRS, and a real decision is pending: `pool_restore`
+  returns 0 SILENTLY when the snapshot is missing, so an N-boot row can stop
+  being N independent boots with no signal. Shared tools/ file, their gates ride
+  on it. I offered (a) announce only, (b) announce + refuse for the gate,
+  (c) refuse unconditionally; I lean (b) and am NOT patching it unilaterally.
+  Enqueued in OPEN-BUGS as P2 so it does not rest on the call.
+
+### STILL OPEN, unchanged
+
+The pi A72/KVM residual (operator vote stands, NEVER re-ask: mac gate alone,
+residual recorded). The 111 unclaimed `kernel/test` dossier files. The five
+owning dossiers' pass needs `quaestor`, which is a Go build and therefore cores
+-- deferred until aux releases, deliberately.
