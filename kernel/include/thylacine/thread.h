@@ -340,14 +340,13 @@ struct Thread {
     // stop may park them either: proc_stop_requested reads false then (5g,
     // death wins in the exit close). An exits() close in a live group still
     // honours a stop, and the group's death ends that park through its wake
-    // condition. TWO setters since 2026-09-22, and a third would need
-    // the same justification: proc_close_handles_at_exit wraps the whole
-    // at-exit close (#68 F1, the original), and loom_free brackets its SQPOLL
-    // kthread join (the peer-close race that falls OUTSIDE that window --
-    // abandoning that join frees a live Thread). A NESTED setter must
-    // SAVE AND RESTORE, never bare-clear: loom_free runs inside the at-exit
-    // close on one of its paths, and clearing there would re-arm the death
-    // legs for every later fd in the same table. Fits in the tail padding.
+    // condition. A kill that finds the Proc already terminating lifts the
+    // hold (PROC_FLAG_EXIT_CLOSE_FORCED, ARCH 7.9.1 part B): the close's waits
+    // then unwind as a death, and what it cannot finish goes to the closer.
+    // ONE setter, proc_close_handles_at_exit (#68 F1); a second would need the
+    // same justification, and a NESTED setter must SAVE AND RESTORE, never
+    // bare-clear, or it re-arms the death legs for every later fd in the same
+    // table. Fits in the tail padding.
     bool               exit_close_active;
     // IM-1 across a caught note (cons.c, cons_input_read): a frozen console
     // read that a caught note unwound marks its thread, so the thread's next
@@ -358,6 +357,17 @@ struct Thread {
     // console read a wait for a busy slot where it would have been refused.
     // Fits the padding after exit_close_active -- no size change.
     bool               cons_frozen_unwound;
+    // loom_free's SQPOLL kthread join: no death reaches this thread's sleeps
+    // while set, not even a kill that forces the final close -- abandoning the
+    // join frees a live Thread, and a sleep a death refuses would spin the join
+    // in a non-preemptible syscall body. Owner-only; a nested setter saves and
+    // restores. Fits the same padding.
+    bool               kthread_join_active;
+    // A kernel thread something joins without bound (the Loom SQPOLL kthread,
+    // joined by loom_free): its last closes never wait for a 9P server, so a
+    // staged write-behind run goes to a closer (ARCH 7.9.1 part C). Set once by
+    // the thread itself at entry; read only by it. Fits the same padding.
+    bool               closes_never_wait;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
     // this Thread's OWN debugger park rendez. A thread observing a debugger stop

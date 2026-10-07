@@ -338,6 +338,21 @@ void dev9p_wb_budget_bias_for_test(s64 n) {
     __atomic_fetch_add(&g_wb_budget_used, (u64)n, __ATOMIC_RELAXED);
 }
 
+// Write a run as msize-max Twrites. 0 or a negative errno.
+static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
+                        const u8 *buf) {
+    u32 done = 0;
+    while (done < total) {
+        u32 acc = 0;
+        int rc = p9_client_write(cl, fid, off + (u64)done, total - done,
+                                 buf + done, &acc);
+        if (rc != 0)  return rc;           // already a -errno
+        if (acc == 0) return -P9_E_IO;     // no progress: fail, don't spin
+        done += acc;
+    }
+    return 0;
+}
+
 // Flush the visible run over the wire as msize-max Twrites. The caller HOLDS
 // wb_lock; returns still holding it (the lock is dropped across the wire I/O
 // -- blocking 9P never under a spinlock, #360). Returns 0 or a negative
@@ -384,16 +399,7 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     p->wb_flushers++;
     spin_unlock(&p->wb_lock);
 
-    int err = 0;
-    u32 done = 0;
-    while (done < total) {
-        u32 acc = 0;
-        int rc = p9_client_write(p->client, p->fid, off + (u64)done,
-                                 total - done, buf + done, &acc);
-        if (rc != 0) { err = rc; break; }          // already a -errno
-        if (acc == 0) { err = -P9_E_IO; break; }   // no progress: fail, don't spin
-        done += acc;
-    }
+    int err = wb_write_run(p->client, p->fid, off, total, buf);
     // Own-write invalidates move per-write -> per-FLUSH (fs_cache.tla
     // OwnWrite realized at the wire moment). The attr drops on BOTH arms
     // (size/mtime/cvers changed server-side even on a partial land). Pages:
@@ -1604,6 +1610,67 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     return c;
 }
 
+// The rest of a last close that may not wait for its server (ARCH 7.9.1 part
+// C): a closer writes the staged run, then clunks the fid. The job owns the
+// run's buffer and its budget charge until released.
+struct dev9p_close_job {
+    struct p9_close_job job;     // first: the closer hands back this pointer
+    u8                 *buf;
+    u32                 cap;
+    u32                 len;
+    u64                 off;
+    u64                 qid_path;
+};
+
+static int dev9p_close_job_run(struct p9_close_job *job, struct p9_client *c,
+                               u32 fid) {
+    struct dev9p_close_job *j = (struct dev9p_close_job *)job;
+    int err = wb_write_run(c, fid, j->off, j->len, j->buf);
+    // Dropped, never installed as the flush installs them: this write lands
+    // after the close returned, unordered with the file's later writers.
+    larder_attr_invalidate(&c->larder, j->qid_path);
+    larder_page_invalidate(&c->larder, j->qid_path);
+    return err;
+}
+
+static void dev9p_close_job_release(struct p9_close_job *job) {
+    struct dev9p_close_job *j = (struct dev9p_close_job *)job;
+    kfree(j->buf);
+    wb_budget_uncharge((u64)j->cap);
+    kfree(j);
+}
+
+// May a last close wait for its server? Not on a thread a death has reached
+// (its sends are refused), nor on a kernel thread something joins without
+// bound (closes_never_wait: nothing would end the wait).
+static bool close_may_wait(void) {
+    struct Thread *t = current_thread();
+    return t && !t->closes_never_wait && !thread_die_pending(t);
+}
+
+// Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
+// negative errno when it cannot -- the priv owns no fid or no session
+// reference (a test's bare client), or no memory.
+static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
+    if (!p->fid_owned || !p->attached_owner) return -T_E_IO;
+    struct dev9p_close_job *j = kmalloc(sizeof(*j), 0);
+    if (!j) return -T_E_NOMEM;
+    j->job.run     = dev9p_close_job_run;
+    j->job.release = dev9p_close_job_release;
+    j->buf         = p->wb_buf;
+    j->cap         = p->wb_cap;
+    j->len         = p->wb_len;
+    j->off         = p->wb_off;
+    j->qid_path    = qid_path;
+    if (p9_attached_defer_close(p->attached_owner, p->fid, &j->job) != 0) {
+        kfree(j);
+        return -T_E_NOMEM;
+    }
+    p->wb_buf = NULL;
+    p->wb_len = 0;
+    return 0;
+}
+
 static int dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
@@ -1677,15 +1744,24 @@ static int dev9p_close(struct Spoor *c) {
     // wb_len/wb_err reads and the uncontended flush are sound; wb_flushers is
     // 0. The close returns this flush's failure, or the one the latch kept
     // from an earlier flush, and close(2) reports it as EIO (ARCH 21.11).
+    // A close that may not wait never flushes here, and a death that ends
+    // the flush keeps the run: a run still staged after this step goes to a
+    // closer with the fid's clunk (ARCH 7.9.1 part C), and is no loss yet.
     // Then release the buffer + the global budget (unconditional on wb_buf:
     // a wstat-de-eligibilized priv still owns its buffer).
-    int crc = 0;
-    if (p->wb_len) {
+    int  crc    = 0;
+    bool handed = false;
+    if (p->wb_len && close_may_wait()) {
         spin_lock(&p->wb_lock);
         crc = wb_flush_locked(p, c->qid.path);
         spin_unlock(&p->wb_lock);
-    } else if (p->wb_err) {
+    } else if (!p->wb_len && p->wb_err) {
         crc = -(p->wb_err);
+    }
+    if (p->wb_len) {
+        crc    = wb_close_hand_off(p, c->qid.path);
+        handed = crc == 0;
+        if (!handed) p9_close_flush_failed(p->fid, crc);
     }
     if (p->wb_buf) {
         kfree(p->wb_buf);
@@ -1714,7 +1790,7 @@ static int dev9p_close(struct Spoor *c) {
     // Pre-fix the root branch ran p9_attached_destroy IMMEDIATELY and
     // tore down the adapter — walked privs closing afterward UAF'd via
     // their stale client pointer (R15 F236).
-    if (p->fid_owned) {
+    if (p->fid_owned && !handed) {
         // Walk-derived Spoor: clunk the fid. FID-LIFECYCLE async-clunk -- the
         // normal close path fires the Tclunk fire-and-forget (the submitter is
         // not parked for the clunk RTT; the fid unbinds at send + its number is

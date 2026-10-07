@@ -52,6 +52,7 @@ void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
 void test_loom_sqpoll_parks_on_cq_full(void);
+void test_loom_sqpoll_join_held_through_forced_close(void);
 
 void test_loom_register_buffers(void);
 void test_loom_register_buffers_rejects(void);
@@ -920,6 +921,64 @@ void test_loom_sqpoll_setup_and_teardown(void) {
     test_proc_drop(p);
     TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1,
                    "ring freed (kthread joined) exactly once on teardown");
+}
+
+// ARCH 7.9.1 part B: loom_free's join of its SQPOLL kthread sleeps through a
+// kill that forces the final close. A join a death could end would return from
+// every sleep at once and spin until the kthread exited -- in a non-preemptible
+// syscall body, forever at -smp 1. The kthread is held before its terminal, so
+// the joiner is caught inside the join; the owner Proc outlives the free.
+static struct Loom       *g_jf_loom;
+static u64                g_jf_slept;
+static struct test_dying  g_jf_thread;
+
+static void jf_drop(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    __atomic_or_fetch(&self->proc->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED,
+                      __ATOMIC_RELEASE);
+    self->exit_close_active = true;
+    u64 n0 = self->nsleeps;
+    loom_unref(g_jf_loom);
+    g_jf_slept = self->nsleeps - n0;
+    self->exit_close_active = false;
+}
+
+void test_loom_sqpoll_join_held_through_forced_close(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct loom_params kp;
+    hidx_t fd = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd), 0,
+                   "SQPOLL setup succeeds");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, fd, &h) == 0, "handle_get(loom fd)");
+    struct Loom *l = (struct Loom *)h.obj;
+    TEST_ASSERT(l->sqpoll != NULL, "SQPOLL kthread spawned");
+    loom_ref(l);                                  // the dying thread's, its last
+    handle_put(&h);
+    TEST_EXPECT_EQ(handle_close(p, fd), 0, "close the loom fd");
+    u64 destroyed0 = loom_total_destroyed();
+
+    loom_sqpoll_hold_exit_for_test(true);
+    g_jf_loom  = l;
+    g_jf_slept = 0;
+    bool started = test_dying_start(&g_jf_thread, jf_drop, NULL, /*dead_now=*/true);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_parked(&g_jf_thread) ||
+                          test_dying_done(&g_jf_thread));
+    bool parked = started && test_dying_parked(&g_jf_thread);
+    loom_sqpoll_hold_exit_for_test(false);
+    if (started) {
+        TEST_YIELD_UNTIL(test_dying_done(&g_jf_thread));
+        test_dying_reap(&g_jf_thread);
+    }
+    u64 destroyed = loom_total_destroyed() - destroyed0;
+    test_proc_drop(p);
+
+    TEST_ASSERT(started, "a dying thread drops the last reference");
+    TEST_ASSERT(parked, "its join sleeps through the forced close");
+    TEST_ASSERT(g_jf_slept >= 1, "it blocked rather than spun");
+    TEST_EXPECT_EQ(destroyed, (u64)1, "and the ring was freed once the kthread left");
 }
 
 // Zero-syscall drain. On an SQPOLL ring the user stages SQEs + bumps sq_tail; an

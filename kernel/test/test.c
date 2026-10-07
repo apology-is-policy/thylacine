@@ -380,6 +380,7 @@ void test_proc_legate_teardown_from_zombie_chokepoint(void);
 void test_proc_rfork_refused_while_terminating(void);   // IM-2: the straggler close
 void test_proc_walk_deep_chain(void);
 void test_proc_walk_preorder_and_early_exit(void);
+void test_proc_kill_forces_final_close(void);
 void test_pgrp_defaults_and_inherit(void);
 void test_pgrp_setsid_semantics(void);
 void test_pgrp_setpgid_rule_matrix(void);
@@ -827,6 +828,7 @@ void test_loom_cq_waiter_no_spurious_wake_on_full(void);
 void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
+void test_loom_sqpoll_join_held_through_forced_close(void);
 void test_loom_sqpoll_drains_sq(void);
 void test_loom_sqpoll_parks_on_cq_full(void);
 void test_loom_sqpoll_charges_thread_budget(void);
@@ -869,6 +871,7 @@ void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_death_reaches_predicate(void);
+void test_notes_forced_close_lifts_the_hold(void);
 void test_notes_pipe_die_pending(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
@@ -1907,6 +1910,9 @@ void test_p9_attached_walked_outlives_root_no_uaf(void);
 void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
 void test_p9_closer_dying_close_delivers_tclunk(void);
 void test_p9_closer_exit_close_hands_off_tclunk(void);
+void test_p9_closer_dying_close_hands_off_staged_run(void);
+void test_p9_closer_forced_exit_close_hands_off_flush(void);
+void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
 void test_p9_closer_failed_spawn_retried_by_hand_off(void);
@@ -2404,6 +2410,7 @@ struct test_case g_tests[] = {
     { "proc.walk_deep_chain",          test_proc_walk_deep_chain,          false, NULL },
     { "proc.walk_preorder_and_early_exit",
                                        test_proc_walk_preorder_and_early_exit, false, NULL },
+    { "proc.kill_forces_final_close", test_proc_kill_forces_final_close, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
     { "proc.wait_pid_for_wnohang_alive_then_reap",
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
@@ -2990,6 +2997,8 @@ struct test_case g_tests[] = {
     { "loom.enter_inline_min_complete",  test_loom_enter_inline_min_complete,  false, NULL },
     { "loom.enter_min_complete_no_inflight", test_loom_enter_min_complete_no_inflight, false, NULL },
     { "loom.sqpoll_setup_and_teardown",  test_loom_sqpoll_setup_and_teardown,  false, NULL },
+    { "loom.sqpoll_join_held_through_forced_close",
+                                       test_loom_sqpoll_join_held_through_forced_close, false, NULL },
     { "loom.sqpoll_drains_sq",           test_loom_sqpoll_drains_sq,           false, NULL },
     { "loom.sqpoll_parks_on_cq_full",    test_loom_sqpoll_parks_on_cq_full,    false, NULL },
     { "loom.sqpoll_charges_thread_budget", test_loom_sqpoll_charges_thread_budget, false, NULL },
@@ -3032,6 +3041,7 @@ struct test_case g_tests[] = {
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
     { "notes.death_reaches_predicate",         test_notes_death_reaches_predicate,         false, NULL },
+    { "notes.forced_close_lifts_the_hold",     test_notes_forced_close_lifts_the_hold,     false, NULL },
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
@@ -4266,6 +4276,12 @@ struct test_case g_tests[] = {
                                        test_p9_closer_dying_close_delivers_tclunk, false, NULL },
     { "p9_closer.exit_close_hands_off_tclunk",
                                        test_p9_closer_exit_close_hands_off_tclunk, false, NULL },
+    { "p9_closer.dying_close_hands_off_staged_run",
+                                       test_p9_closer_dying_close_hands_off_staged_run, false, NULL },
+    { "p9_closer.forced_exit_close_hands_off_flush",
+                                       test_p9_closer_forced_exit_close_hands_off_flush, false, NULL },
+    { "p9_closer.kthread_close_hands_off_staged_run",
+                                       test_p9_closer_kthread_close_hands_off_staged_run, false, NULL },
     { "p9_closer.stalled_session_holds_one_closer",
                                        test_p9_closer_stalled_session_holds_one_closer, false, NULL },
     { "p9_closer.flushed_walk_fid_clunked",

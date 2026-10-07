@@ -221,9 +221,27 @@ bool p9_attached_is_open(const struct p9_attached *a);
 // (p9_clunk_refused).
 int p9_attached_defer_clunk(struct p9_attached *a, u32 fid);
 
+// The rest of a final close that may not wait for its server (ARCH 7.9.1
+// part C): the closer calls run(job, client, fid) before it clunks the fid --
+// on a session that died first too, where the run's sends fail at once -- and
+// then release(job). run returns 0 or a negative errno; it may wait.
+struct p9_close_job {
+    int  (*run)(struct p9_close_job *job, struct p9_client *c, u32 fid);
+    void (*release)(struct p9_close_job *job);
+};
+
+// p9_attached_defer_clunk with a job that runs before the Tclunk. On -1 the
+// caller still owns the job, and the fid stays bound.
+int p9_attached_defer_close(struct p9_attached *a, u32 fid,
+                            struct p9_close_job *job);
+
 // Print `9p: close: clunk of fid N refused rc R` and count it. Only for a fid
 // that stays live on a live session: tools/test.sh fails on the line.
 void p9_clunk_refused(u32 fid, int rc);
+
+// Print `9p: close: flush of fid N failed rc R`: a last close's write-behind
+// run never reached a live server, so bytes write() reported written are lost.
+void p9_close_flush_failed(u32 fid, int rc);
 
 // Boot: start the pool with its first closer. -1 if it could not be created.
 int p9_closer_start(void);
@@ -241,6 +259,8 @@ struct p9_closer_stats {
     u64 dropped;         // entries that needed no Tclunk: the session died
                          // (its fids with it) or the fid was not bound
     u64 refused;         // entries left live on a live session (reported)
+    u64 jobs;            // close jobs run (p9_attached_defer_close)
+    u64 job_errors;      // of those, run failed on a live session (reported)
     u64 spawned;
     u64 spawn_failed;
     u64 reaped;

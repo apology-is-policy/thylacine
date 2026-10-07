@@ -5703,7 +5703,7 @@ struct postnote_walk_ctx {
 // it via proc_for_each; the self arm takes it around this call.
 static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) {
     if (!notes_name_is_kill(name)) return false;
-    proc_group_terminate(target, "killed");
+    proc_group_kill(target);
     return true;
 }
 

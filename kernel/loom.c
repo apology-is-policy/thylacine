@@ -353,8 +353,7 @@ static void loom_free(struct Loom *l) {
     // this site as one interrupts-on does NOT fix, against an earlier draft that
     // wrongly claimed it did.)
     //
-    // THE WAIT IS ALSO UNINTERRUPTIBLE, and it borrows the mechanism the tree
-    // already has rather than inventing one. sleep() refuses to block a thread
+    // THE WAIT IS ALSO UNINTERRUPTIBLE. sleep() refuses to block a thread
     // whose Proc is group-terminating -- and a peer thread closing this fd
     // during exit_group is exactly that thread. The refusal CANNOT be honoured:
     // abandoning the join means thread_free on a kthread that is still live.
@@ -364,39 +363,33 @@ static void loom_free(struct Loom *l) {
     // memory -- a silent UAF, and the worse half of the reason there is no
     // abandon path.
     //
-    // `exit_close_active` is that mechanism: #68 F1 added it so a CLOSE that
-    // must WAIT behaves like a live thread's rather than short-circuiting --
-    // "the exit-close window is ORDERLY FINALIZATION, not duress". The 9P
-    // Tclunk flush is its first user and this join is the second; both are
-    // close hooks of the same handle table, with the same obligation. The
-    // at-exit path already arrives here with it set (proc_close_handles_at_exit
-    // wraps the whole close), so the bracket below is a no-op there and covers
-    // the peer-close race that is NOT inside that window.
+    // `kthread_join_active` is that mechanism: while it is set no death
+    // reaches this thread's sleeps -- not even the kill that forces a final
+    // close (ARCH 7.9.1 part B), which makes every OTHER wait of that close
+    // unwind, and under which a join that honoured death would spin right here.
+    // Its own flag, not exit_close_active, for exactly that reason: the final
+    // close's waits are held only until a kill forces them; this one is held
+    // always.
     //
-    // SAVE AND RESTORE, NEVER A BARE CLEAR. proc_close_handles_at_exit may
-    // already own the flag; clearing it unconditionally would re-arm the death
-    // legs for every LATER fd in the same table, reopening the #68 F1
-    // data-loss / fid-leak class this flag exists to close.
+    // SAVE AND RESTORE, NEVER A BARE CLEAR (thread.h's rule for an owner-only
+    // flag a nested caller may already own).
     //
-    // WHAT THIS COSTS, stated rather than elided: the join inherits #68 F1's
-    // own residual. A kthread that never reaches its terminal parks the dying
-    // Proc unreapably instead of burning a CPU on a yield-loop. That is
-    // strictly the better failure -- and it is REACHABLE: no death or stop
-    // reaches a kernel thread, so a kthread blocked in a recv (a reap's last
-    // clunk can drain a full tag pool or wait out back-pressure) waits for its
-    // server, at any byte, until it sends or EOFs. A server that stops delays
-    // the stop for as long as it lives; the bound is the server's, not a
-    // mechanism, and it is the SAME one the Tclunk flush already rests on (the
-    // vault's seam-close-flush-unbounded).
+    // WHAT BOUNDS IT: the kthread's own work, never a server. It must never
+    // block on a wire RPC (loom_dir_mutation_gate's rule: those ops are refused
+    // on an SQPOLL ring), and its reap's last close never waits for one either:
+    // no death reaches a kernel thread, so its Tclunk goes to the closer where
+    // it would wait for a tag or ring space (ARCH 8.8.1.1), and a write-behind
+    // run it cannot flush at once goes to the closer as a close job (ARCH 7.9.1
+    // part C).
     if (l->sqpoll) {
         __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
         wakeup(&l->sqpoll_park);
-        struct Thread *self     = current_thread();
-        bool           prev_ecl = self->exit_close_active;
-        self->exit_close_active = true;
+        struct Thread *self       = current_thread();
+        bool           prev_join  = self->kthread_join_active;
+        self->kthread_join_active = true;
         while (!__atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE))
             (void)sleep(&l->sqpoll_join, loom_sqpoll_exited_cond, l);
-        self->exit_close_active = prev_ecl;
+        self->kthread_join_active = prev_join;
         thread_free(l->sqpoll);
         l->sqpoll = NULL;
     }
@@ -2617,6 +2610,14 @@ static void loom_sqpoll_fanin_park(struct loom_sqpoll_wait *w, u32 gen0) {
     poll_waiter_list_unregister(w->cq);
 }
 
+// Tests: hold every SQPOLL kthread before its terminal, so a joiner is caught
+// inside loom_free's join.
+static u32 g_loom_sqpoll_exit_hold;
+
+void loom_sqpoll_hold_exit_for_test(bool hold) {
+    __atomic_store_n(&g_loom_sqpoll_exit_hold, hold ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
 void loom_sqpoll_main(void *arg) {
     struct Loom *l = (struct Loom *)arg;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
@@ -2627,6 +2628,9 @@ void loom_sqpoll_main(void *arg) {
     struct poll_waiter pw_cq;
     poll_waiter_init(&pw_cq, &l->sqpoll_park);
     struct loom_sqpoll_wait w = { .l = l, .cq = &pw_cq, .fs = &fs };
+    // loom_free joins this thread, so a reap's last close must not wait for
+    // its server (ARCH 7.9.1 part C).
+    current_thread()->closes_never_wait = true;
 
     for (;;) {
         if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) break;
@@ -2695,6 +2699,7 @@ void loom_sqpoll_main(void *arg) {
     // next thread's finish-task-switch) before reclaiming. This is the wait_pid
     // reap terminal minus the Proc-zombie bookkeeping a kproc thread cannot run
     // (thread_exit_self extincts from kproc).
+    while (__atomic_load_n(&g_loom_sqpoll_exit_hold, __ATOMIC_ACQUIRE)) sched();
     loom_reap_terminal(l);
 
     (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window

@@ -78,6 +78,7 @@ void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_death_reaches_predicate(void);
+void test_notes_forced_close_lifts_the_hold(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_claim_once(void);
@@ -844,6 +845,7 @@ void test_notes_die_pending_predicate(void) {
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
+    fake_t.kthread_join_active = false;
 
     TEST_ASSERT(!thread_die_pending(NULL), "NULL thread -> false");
     TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
@@ -917,6 +919,7 @@ void test_notes_death_reaches_predicate(void) {
     struct Thread fake_t;
     fake_t.proc              = p;
     fake_t.exit_close_active = false;
+    fake_t.kthread_join_active = false;
     bool user = thread_death_reaches(&fake_t);
     fake_t.exit_close_active = true;
     bool ecl  = thread_death_reaches(&fake_t);
@@ -932,6 +935,51 @@ void test_notes_death_reaches_predicate(void) {
     TEST_ASSERT(!ecl, "inside an exit close: no death reaches it");
     TEST_ASSERT(!kth, "a kernel thread: no death reaches it");
     TEST_ASSERT(!none && !thread_death_reaches(NULL), "no Proc, no thread: false");
+}
+
+// ARCH 7.9.1 part B: a kill that forces the final close lifts its hold on
+// death -- every death leg reaches it again -- but never loom_free's kthread
+// join, and never caught delivery. The control, one variable away: the same
+// exit close in a dying group, unforced.
+void test_notes_forced_close_lifts_the_hold(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    struct Thread fake_t;
+    fake_t.proc                = p;
+    fake_t.note_mask           = 0u;
+    fake_t.exit_close_active   = true;
+    fake_t.kthread_join_active = false;
+    bool held_die   = thread_die_pending(&fake_t);
+    bool held_group = thread_group_death_pending(&fake_t);
+    bool held_reach = thread_death_reaches(&fake_t);
+
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED, __ATOMIC_RELEASE);
+    bool f_die    = thread_die_pending(&fake_t);
+    bool f_group  = thread_group_death_pending(&fake_t);
+    bool f_reach  = thread_death_reaches(&fake_t);
+    bool f_caught = thread_caught_note_deliverable(&fake_t);
+
+    fake_t.kthread_join_active = true;
+    bool j_die   = thread_die_pending(&fake_t);
+    bool j_group = thread_group_death_pending(&fake_t);
+    bool j_reach = thread_death_reaches(&fake_t);
+    fake_t.exit_close_active = false;             // a peer's close, outside the exit
+    bool jp_die  = thread_die_pending(&fake_t);
+
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_EXIT_CLOSE_FORCED, __ATOMIC_RELEASE);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(!held_die && !held_group && !held_reach,
+                "an unforced exit close holds every death (control)");
+    TEST_ASSERT(f_die, "forced: the death reaches the close");
+    TEST_ASSERT(f_group, "forced: so does the group-death leg");
+    TEST_ASSERT(f_reach, "forced: thread_death_reaches agrees");
+    TEST_ASSERT(!f_caught, "forced: still no caught delivery");
+    TEST_ASSERT(!j_die && !j_group && !j_reach,
+                "the kthread join holds every death, forced or not");
+    TEST_ASSERT(!jp_die, "and outside the exit close too");
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1003,7 @@ void test_notes_pipe_die_pending(void) {
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
+    fake_t.kthread_join_active = false;
 
     TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
 
@@ -1093,6 +1142,7 @@ void test_notes_caught_note_deliverable_predicate(void) {
     fake_t.proc               = p;
     fake_t.note_mask          = 0u;
     fake_t.exit_close_active  = false;
+    fake_t.kthread_join_active = false;
     fake_t.in_handler         = false;
     fake_t.note_interruptible = true;   // a wait on signal(7)'s list
 

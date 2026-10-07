@@ -501,6 +501,7 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
 struct p9_closer_entry {
     struct p9_closer_entry *next;
     u32                     fid;
+    struct p9_close_job    *job;     // NULL: a Tclunk alone
 };
 
 struct p9_closer {
@@ -577,11 +578,13 @@ static void closer_enqueue_locked(struct p9_attached *a,
     if (g_closer_idle) closer_kick_locked(g_closer_idle);
 }
 
-int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
+int p9_attached_defer_close(struct p9_attached *a, u32 fid,
+                            struct p9_close_job *job) {
     if (!a || a->magic != P9_ATTACHED_MAGIC) return -1;
     struct p9_closer_entry *e = closer_entry_alloc();
     if (!e) return -1;
     e->fid = fid;
+    e->job = job;
     p9_attached_ref(a);          // the entry's; the caller's own keeps it above 0
     spin_lock(&g_closer_lock);
     closer_enqueue_locked(a, e);
@@ -594,6 +597,10 @@ int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
     spin_unlock(&g_closer_lock);
     if (spawn) (void)closer_spawn();
     return 0;
+}
+
+int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
+    return p9_attached_defer_close(a, fid, NULL);
 }
 
 // A reference for a caller that holds none: fails once the count reached 0,
@@ -632,6 +639,7 @@ static int attached_orphan_sink(void *arg, u32 fid) {
     }
     if (!attached_tryref(a)) { kfree(e); return -1; }
     e->fid = fid;
+    e->job = NULL;
     spin_lock(&g_closer_lock);
     closer_enqueue_locked(a, e);
     spin_unlock(&g_closer_lock);
@@ -647,6 +655,17 @@ void p9_clunk_refused(u32 fid, int rc) {
     cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
     cons_diag_line_putdec(&dl, (u64)fid);
     cons_diag_line_puts(&dl, " refused rc ");
+    cons_diag_line_putdec(&dl, (u64)(rc < 0 ? -rc : rc));
+    cons_diag_line_puts(&dl, "\n");
+    cons_diag_line_emit(&dl);
+}
+
+void p9_close_flush_failed(u32 fid, int rc) {
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "9p: close: flush of fid ");
+    cons_diag_line_putdec(&dl, (u64)fid);
+    cons_diag_line_puts(&dl, " failed rc ");
     cons_diag_line_putdec(&dl, (u64)(rc < 0 ? -rc : rc));
     cons_diag_line_puts(&dl, "\n");
     cons_diag_line_emit(&dl);
@@ -672,8 +691,8 @@ static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
     }
 }
 
-// Send every deferred Tclunk of `a`, which this closer took off the run-queue
-// (closer_busy). Each entry's reference is dropped outside the lock: the last
+// Send every deferred Tclunk of `a`, each after its close job if it has one,
+// which this closer took off the run-queue (closer_busy). Each entry's reference is dropped outside the lock: the last
 // drop tears the session down, which may close Spoors and queue again. While
 // entries remain they hold references, so `a` outlives each unref but the
 // last; the closer lets go of `a` (closer_busy = false) before that one.
@@ -685,6 +704,12 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
         if (!a->closer_head) a->closer_tail = NULL;
         spin_unlock(&g_closer_lock);
 
+        // A close job first: its writes need the fid bound. Its failure on a
+        // live session loses bytes write() reported written, so it is loud.
+        int  jrc   = e->job ? e->job->run(e->job, a->client, e->fid) : 0;
+        bool jlost = jrc != 0 && p9_client_fid_held(a->client, e->fid);
+        if (jlost) p9_close_flush_failed(e->fid, jrc);
+
         int  rc   = closer_send(self, a, e->fid);
         bool live = rc != 0 && p9_client_fid_held(a->client, e->fid);
         if (live) p9_clunk_refused(e->fid, rc);
@@ -693,11 +718,14 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
         if (rc == 0)   g_closer_st.sent++;
         else if (live) g_closer_st.refused++;
         else           g_closer_st.dropped++;     // the session died: its fids too
+        if (e->job)    g_closer_st.jobs++;
+        if (jlost)     g_closer_st.job_errors++;
         g_closer_st.pending--;
         bool done = a->closer_head == NULL;
         if (done) a->closer_busy = false;
         spin_unlock(&g_closer_lock);
 
+        if (e->job) e->job->release(e->job);
         kfree(e);
         p9_attached_unref(a);
         if (done) return;

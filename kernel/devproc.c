@@ -2211,7 +2211,7 @@ static int devproc_kill_walk_cb(struct Proc *target, void *arg) {
     // whose status it may not read (the none wall).
     if (!devproc_kill_authorized(k->caller, target)) { k->result = -T_E_ACCES; return 1; }
     if (target->state != PROC_STATE_ALIVE)         { k->result = -1; return 1; }
-    proc_group_terminate(target, "killed");
+    proc_group_kill(target);
     k->result = 1;
     return 1;
 }

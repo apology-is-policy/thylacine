@@ -20,6 +20,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
+#include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
@@ -29,6 +30,9 @@
 
 void test_p9_closer_dying_close_delivers_tclunk(void);
 void test_p9_closer_exit_close_hands_off_tclunk(void);
+void test_p9_closer_dying_close_hands_off_staged_run(void);
+void test_p9_closer_forced_exit_close_hands_off_flush(void);
+void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
 void test_p9_closer_failed_spawn_retried_by_hand_off(void);
@@ -61,6 +65,13 @@ struct srv_rec {
     u32 clunk_fid[SRV_FIDS];
     u32 nwalk;
     u32 nflush;
+    u32 nmsg;        // every request, in arrival order
+    u32 nwrite;
+    u64 write_off;   // the last Twrite's
+    u32 write_len;
+    u32 write_sum;   // its payload's byte sum
+    u32 write_at;    // nmsg at the last Twrite
+    u32 clunk_at;    // nmsg at the last Tclunk
 };
 
 static int rec_responder(void *ctx, const u8 *req, size_t req_len,
@@ -68,7 +79,23 @@ static int rec_responder(void *ctx, const u8 *req, size_t req_len,
     struct srv_rec *r = (struct srv_rec *)ctx;
     u32 size; u8 type; u16 tag;
     if (r && p9_peek_header(req, req_len, &size, &type, &tag) == 0) {
-        if (type == P9_TCLUNK && req_len >= P9_HDR_LEN + 4) {
+        r->nmsg++;
+        if (type == P9_TWRITE && req_len >= P9_HDR_LEN + 16) {
+            const u8 *b = req + P9_HDR_LEN + 4;           // past the fid
+            u64 off = 0;
+            for (u32 i = 0; i < 8; i++) off |= (u64)b[i] << (8 * i);
+            u32 cnt = (u32)b[8] | (u32)b[9] << 8 | (u32)b[10] << 16 |
+                      (u32)b[11] << 24;
+            u32 sum = 0;
+            for (u32 i = 0; i < cnt && P9_HDR_LEN + 16 + i < req_len; i++)
+                sum += b[12 + i];
+            r->write_off = off;
+            r->write_len = cnt;
+            r->write_sum = sum;
+            r->write_at  = r->nmsg;
+            __atomic_store_n(&r->nwrite, r->nwrite + 1, __ATOMIC_RELEASE);
+        } else if (type == P9_TCLUNK && req_len >= P9_HDR_LEN + 4) {
+            r->clunk_at = r->nmsg;
             u32 n = r->nclunk;
             if (n < SRV_FIDS)
                 r->clunk_fid[n] = (u32)req[7] | (u32)req[8] << 8 |
@@ -245,6 +272,250 @@ void test_p9_closer_exit_close_hands_off_tclunk(void) {
     TEST_EXPECT_EQ(st.spawned - base.spawned, st.reaped - base.reaped,
                    "every spare was reaped");
     TEST_ASSERT(unbound, "the fid is clunked");
+}
+
+// =============================================================================
+// The rest of a last close that may not wait for its server -- the staged
+// write-behind run and the fid's clunk -- goes to a closer, which writes the run
+// and then clunks (dec-2026-10-07-exit-close, part C). The fixture: a closer
+// session whose client stages writes, and a file created under its root with
+// WBC_LEN patterned bytes staged at offset 0, nothing on the wire yet.
+// =============================================================================
+
+#define WBC_LEN 256u
+
+struct wbc {
+    struct p9_attached *a;
+    struct Spoor       *root;
+    struct Spoor       *f;
+    u32                 fid;
+    u64                 budget0;
+};
+
+static u8 wbc_pat(u32 i) { return (u8)(i * 7u + 3u); }
+
+static u32 wbc_sum(void) {
+    u32 s = 0;
+    for (u32 i = 0; i < WBC_LEN; i++) s += wbc_pat(i);
+    return s;
+}
+
+static bool wbc_open(struct wbc *w) {
+    g_rec_a = (struct srv_rec){0};
+    if (p9_mq_loopback_init(&g_mq_a, rec_responder, &g_rec_a) != 0) return false;
+    w->a = closer_session(p9_mq_loopback_ops_for(&g_mq_a));
+    if (!w->a) { p9_mq_loopback_destroy(&g_mq_a); return false; }
+    w->root = p9_attached_root_spoor(w->a);
+    ((struct dev9p_priv *)w->root->aux)->attached_owner = w->a;
+    p9_attached_ref(w->a);
+    w->a->client->loose = true;
+    __atomic_store_n(&w->a->client->cacheable, true, __ATOMIC_RELAXED);
+    w->f = NULL;
+    struct Spoor *nc = spoor_clone(w->root);
+    if (!nc) return false;
+    struct Walkqid *wq = dev9p.walk(w->root, nc, NULL, 0);
+    if (!wq) { spoor_clunk(nc); return false; }
+    walkqid_free(wq);
+    w->f = dev9p.create(nc, "wbfile", 1 /*OWRITE*/, 0644u, 1000u);
+    if (!w->f) { spoor_clunk(nc); return false; }
+    w->budget0 = dev9p_wb_budget_used();
+    u8 chunk[WBC_LEN];
+    for (u32 i = 0; i < WBC_LEN; i++) chunk[i] = wbc_pat(i);
+    if (dev9p.write(w->f, chunk, WBC_LEN, 0) != (long)WBC_LEN) return false;
+    w->fid = ((struct dev9p_priv *)w->f->aux)->fid;
+    return __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE) == 0;   // staged
+}
+
+static void wbc_end(struct wbc *w) {
+    if (w->root) spoor_clunk(w->root);
+    if (w->a) p9_attached_unref(w->a);           // the construction reference, last
+    p9_mq_loopback_destroy(&g_mq_a);
+}
+
+// The server answers again: the ring takes frames, the reader is free, and a
+// walk's reader departure wakes whoever parked for progress meanwhile.
+static void wbc_unstall(struct wbc *w) {
+    g_mq_a.eagain_budget = 0;
+    hold_reader(w->a->client, false);
+    (void)p9_client_walk_one(w->a->client, 0, p9_client_alloc_fid(w->a->client),
+                             (const u8 *)"u", 1, NULL);
+}
+
+static struct test_dying g_wbc_thread;
+static int               g_wbc_crc;
+
+static void wbc_drop(void *arg) {
+    (void)arg;
+    g_wbc_crc = spoor_clunk_rc(g_t1_spoor);
+}
+
+static void wbc_exit_drop(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    self->exit_close_active = true;
+    g_wbc_crc = spoor_clunk_rc(g_t1_spoor);
+    self->exit_close_active = false;
+}
+
+// A killed thread's own last close cannot send: its flush keeps the run, and
+// the closer writes it. Before part C the close freed the run with the priv.
+void test_p9_closer_dying_close_hands_off_staged_run(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    bool started = false;
+    if (opened) {
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, wbc_drop, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "the close reports nothing lost");
+    TEST_EXPECT_EQ((u64)rec.nwrite, 1ull, "the closer wrote the kept run");
+    TEST_EXPECT_EQ(rec.write_off, 0ull, "at offset 0");
+    TEST_EXPECT_EQ((u64)rec.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_ASSERT(rec.write_at < rec.clunk_at, "then the Tclunk");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
+    TEST_EXPECT_EQ(st.sent, base.sent + 1, "a closer sent the Tclunk");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+// A plain exit close waits for its server (I-38: the parent's wait returns after
+// the flush). A kill that finds the Proc terminating forces it (part B): the
+// close returns without the server, and the closer writes the run once the
+// server answers (part C). Every send meets a full ring, so before the kill
+// nothing reaches the server and the close sleeps; the only way the bytes land
+// is the closer's write.
+void test_p9_closer_forced_exit_close_hands_off_flush(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    bool started = false, waited = false, returned = false;
+    u32  before = 0;
+    if (opened) {
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        hold_reader(w.a->client, true);
+        g_mq_a.eagain_budget = 0xffffffffu;
+        started = test_dying_start(&g_wbc_thread, wbc_exit_drop, NULL,
+                                   /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_parked(&g_wbc_thread) ||
+                                  test_dying_done(&g_wbc_thread));
+            waited = !test_dying_done(&g_wbc_thread);
+            // The bare call is sound here: the Proc's one thread sleeps in the
+            // close, and nothing else kills or reaps it.
+            proc_group_kill(g_wbc_thread.proc);
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_wbc_thread));
+            returned = test_dying_done(&g_wbc_thread);
+        }
+        before = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+        wbc_unstall(&w);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_wbc_thread));
+            if (test_dying_done(&g_wbc_thread)) test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(started, "a closing thread");
+    TEST_ASSERT(waited, "a plain exit close waits for its server (control)");
+    TEST_ASSERT(returned, "the forcing kill ended the close without the server");
+    TEST_EXPECT_EQ((u64)before, 0ull, "nothing reached the server before then");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "the close reports nothing lost");
+    TEST_EXPECT_EQ((u64)rec.nwrite, 1ull, "the closer wrote the run");
+    TEST_EXPECT_EQ(rec.write_off, 0ull, "at offset 0");
+    TEST_EXPECT_EQ((u64)rec.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_ASSERT(rec.write_at < rec.clunk_at, "then the Tclunk");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+// A kernel thread something joins without bound (closes_never_wait: the Loom
+// SQPOLL kthread) never waits for its server in a last close. Every send meets
+// a full ring; the close returns at once and the closer writes the run later.
+static struct Spoor  *g_kc_spoor;
+static volatile int   g_kc_crc;
+static volatile bool  g_kc_done;
+static volatile bool  g_kc_exited;
+
+static void kc_entry(void) {
+    current_thread()->closes_never_wait = true;
+    g_kc_crc = spoor_clunk_rc(g_kc_spoor);
+    __atomic_store_n(&g_kc_done, true, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_kc_exited);
+}
+
+void test_p9_closer_kthread_close_hands_off_staged_run(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    struct Thread *t = NULL;
+    bool returned = false;
+    u32  before = 0;
+    if (opened) {
+        g_kc_spoor  = w.f;
+        g_kc_crc    = 1;
+        g_kc_done   = false;
+        g_kc_exited = false;
+        hold_reader(w.a->client, true);
+        g_mq_a.eagain_budget = 0xffffffffu;
+        t = thread_create(kproc(), kc_entry);
+        if (t) {
+            ready(t);
+            TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_kc_done, __ATOMIC_ACQUIRE));
+            returned = __atomic_load_n(&g_kc_done, __ATOMIC_ACQUIRE);
+        }
+        before = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+        wbc_unstall(&w);
+        if (t) {
+            TEST_YIELD_UNTIL(__atomic_load_n(&g_kc_done, __ATOMIC_ACQUIRE));
+            test_kthread_join_free(t, &g_kc_exited);
+        }
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(t != NULL, "a kernel thread");
+    TEST_ASSERT(returned, "its last close returned without waiting");
+    TEST_EXPECT_EQ((u64)before, 0ull, "nothing reached the server before then");
+    TEST_EXPECT_EQ((u64)(s64)g_kc_crc, 0ull, "the close reports nothing lost");
+    TEST_EXPECT_EQ((u64)rec.nwrite, 1ull, "the closer wrote the run");
+    TEST_EXPECT_EQ((u64)rec.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_ASSERT(rec.write_at < rec.clunk_at, "then the Tclunk");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
 }
 
 // =============================================================================

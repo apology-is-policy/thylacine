@@ -3805,7 +3805,10 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         // loss) and the close-time Tclunk (a server-side fid leak per fd).
         // The closer is always current_thread() (both sites are the dying
         // thread's own straight-line code); the flag is cleared before
-        // return on the same line-of-control, so it cannot leak.
+        // return on the same line-of-control, so it cannot leak. A kill
+        // that finds this Proc already terminating lifts the hold
+        // (proc_group_kill): the close's waits then unwind as a death, and
+        // what it cannot finish goes to the closer (ARCH 7.9.1 parts B, C).
         struct Thread *closer = current_thread();
         closer->exit_close_active = true;
         // RW-7 R3-F1: stop this Proc's virtio devices before its fds (and the
@@ -4708,7 +4711,7 @@ void proc_group_terminate(struct Proc *p, const char *msg) {
     proc_group_terminate_code(p, code, msg);
 }
 
-void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
+static void group_terminate(struct Proc *p, int code, const char *msg, bool kill) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
     if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
     if (!msg) msg = "killed";
@@ -4741,6 +4744,12 @@ void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
         // racing loser (a second exit_group, or a kill racing the exit) writes
         // NEITHER field, so no torn (msg, code) pair can be observed.
         p->group_exit_code = code;
+    } else if (kill) {
+        // A kill that finds the Proc already terminating forces its final
+        // close (ARCH 7.9.1 part B). Published before the wake below, so the
+        // closing thread re-checks into it (register-then-observe, I-9).
+        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED,
+                          __ATOMIC_RELEASE);
     }
 
     // Wake every futex (torpor) sleeper of p so it returns from torpor_wait to
@@ -4784,6 +4793,14 @@ void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
     // IPIs); a CPU not running a peer of p simply no-ops its die-check. The
     // periodic preemption timer is the floor if the IPI is somehow missed.
     smp_resched_others();
+}
+
+void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
+    group_terminate(p, code, msg, false);
+}
+
+void proc_group_kill(struct Proc *p) {
+    group_terminate(p, 1, "killed", true);
 }
 
 void el0_return_die_check(void) {

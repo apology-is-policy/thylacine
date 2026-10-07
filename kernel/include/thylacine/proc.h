@@ -1186,6 +1186,20 @@ _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED)) == 0,
     "the test-fixture mark must not overlap another flag");
 
+// ARCH 7.9.1 part B: a kill found this Proc already terminating, so its final
+// close no longer waits on a server -- thread_die_pending honours the flag
+// under exit_close_active. Set once, by proc_group_kill, before its death wake.
+#define PROC_FLAG_EXIT_CLOSE_FORCED  (1u << 30)
+_Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
+    PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
+    PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
+    PROC_FLAG_CAUGHT_NOTE_MASK | PROC_FLAG_CAUGHT_CLAIM_MASK |
+    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
+    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE)) == 0,
+    "the forced-final-close mark must not overlap another flag");
+
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -1769,6 +1783,14 @@ void proc_group_terminate(struct Proc *p, const char *msg);
 // proc_group_terminate(p, msg) is the string-only wrapper (kept for the kill /
 // legate / debugger callers): code = 0 iff msg=="ok", else 1.
 void proc_group_terminate_code(struct Proc *p, int code, const char *msg);
+
+// A kill (SYS_POSTNOTE "kill", the /proc/<pid>/ctl kill verb):
+// proc_group_terminate(p, "killed"), and when p is already terminating it also
+// forces p's final close (ARCH 7.9.1 part B; PROC_FLAG_EXIT_CLOSE_FORCED),
+// published before the death wake so a final close asleep on its server wakes
+// into it. Other terminations (a hangup, EXITKILL, a legate scope) never
+// force. Same lock contract as proc_group_terminate.
+void proc_group_kill(struct Proc *p);
 
 // LINEAGE L-2 (docs/LINEAGE.md section 5.2, I-44): execve's address-space swap.
 //

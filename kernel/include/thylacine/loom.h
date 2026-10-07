@@ -636,6 +636,9 @@ short loom_poll(struct Loom *l, short events, struct poll_waiter *pw);
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);
 
+// Tests: hold every SQPOLL kthread before its terminal until released.
+void loom_sqpoll_hold_exit_for_test(bool hold);
+
 // Loom-4c: the SQPOLL poll-thread entry + its lifecycle (LOOM.md 8.6). The
 // kthread is a kproc() thread (the console_mgr precedent) that drains the SQ +
 // drives the elected reader. loom_start_sqpoll spawns + readies it (sets

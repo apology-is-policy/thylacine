@@ -2254,6 +2254,7 @@ void test_proc_dying_takes_no_stop(void) {
 }
 
 void test_proc_exec_drops_image_note_state(void);
+void test_proc_kill_forces_final_close(void);
 
 // #247: a successful exec must drop every note-side thing that names the OLD
 // image -- including the in-handler LATCH, which the reset missed.
@@ -2565,4 +2566,51 @@ void test_proc_walk_preorder_and_early_exit(void) {
         TEST_EXPECT_EQ(full.seq[k], want[k], "pre-order is A C E B D");
     TEST_EXPECT_EQ(cut_rv, 7, "the stopping callback's value is what the walk returns");
     TEST_EXPECT_EQ(cut.n, 3, "the walk stops at E: A, C, E, and neither B nor D");
+}
+
+// ARCH 7.9.1 part B: only a kill that finds the Proc already terminating forces
+// its final close. The first kill, an exit_group, and every termination that is
+// not a kill (a hangup, EXITKILL, a legate scope's end: the string wrapper)
+// leave the close orderly. Threadless Procs: the bare calls are sound because
+// the peer walk and its wakes have nothing to reach.
+void test_proc_kill_forces_final_close(void) {
+    struct Proc *a = proc_alloc();
+    struct Proc *b = proc_alloc();
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(a && b && c, "proc_alloc x3");
+
+    proc_group_kill(a);
+    bool a_first  = (__atomic_load_n(&a->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+    const char *a_msg = __atomic_load_n(&a->group_exit_msg, __ATOMIC_ACQUIRE);
+    proc_group_kill(a);
+    bool a_second = (__atomic_load_n(&a->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+
+    proc_group_terminate_code(b, 0, "ok");           // an exit_group(0)
+    proc_group_terminate(b, "hangup");
+    bool b_other  = (__atomic_load_n(&b->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+    proc_group_kill(b);
+    bool b_kill   = (__atomic_load_n(&b->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+    int  b_code   = b->group_exit_code;
+
+    proc_group_terminate(c, "killed");
+    proc_group_terminate(c, "killed");
+    bool c_wrap   = (__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
+                     PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
+
+    a->state = b->state = c->state = PROC_STATE_ZOMBIE;
+    proc_free(a);
+    proc_free(b);
+    proc_free(c);
+
+    TEST_ASSERT(a_msg && a_msg[0] == 'k', "a kill terminates as \"killed\"");
+    TEST_ASSERT(!a_first, "the first kill leaves the final close orderly");
+    TEST_ASSERT(a_second, "a kill that finds it terminating forces it");
+    TEST_ASSERT(!b_other, "a hangup after an exit does not force it");
+    TEST_ASSERT(b_kill, "a kill after an exit forces it");
+    TEST_EXPECT_EQ(b_code, 0, "and the exit's code stands");
+    TEST_ASSERT(!c_wrap, "a second termination through the wrapper never forces");
 }

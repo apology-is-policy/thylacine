@@ -1215,6 +1215,16 @@ void notes_mark_self_managing(struct Proc *p) {
     spin_unlock(&q->lock);
 }
 
+// No death reaches this thread's sleeps: loom_free's kthread join always, and
+// the final close until a kill forces it (ARCH 7.9.1 part B).
+static bool thread_death_held(const struct Thread *t) {
+    if (t->kthread_join_active) return true;
+    if (!t->exit_close_active) return false;
+    const struct Proc *p = t->proc;
+    return !(p && (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                   PROC_FLAG_EXIT_CLOSE_FORCED));
+}
+
 // The widened #811 death predicate (ARCH 8.8.1 + 8.8.2). LOCK-FREE: atomic
 // loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
@@ -1238,22 +1248,18 @@ bool thread_die_pending(struct Thread *t) {
     // Tclunk sends short-circuited (client_self_dying), silently dropping
     // staged writes and leaking server-side fids on every normal
     // multi-thread exit AND every Ctrl-C'd default-terminate. The gate
-    // suppresses BOTH death legs while set. While the flag is set the
-    // closer's sends/waits behave like a live thread's; the wedged-server
-    // strand this re-admits is the pre-#68 reap-time exposure RELOCATED
-    // from the parent's wait_pid onto the already-dying Proc -- and,
-    // unlike the old strand, NOT breakable by a further kill (a wedged
-    // flagged close parks the dying Proc unreapably; precondition = a
-    // wedged trusted server, an already system-degraded state -- the
-    // bounded/abortable close-flush is the recorded v1.x seam). The window
-    // is one bounded close pass; only the owning thread sets/clears it, and
-    // every caller passes self, so the read needs no synchronization. TWO
-    // setters since 2026-09-22 -- proc_close_handles_at_exit (the original)
-    // and loom_free's SQPOLL kthread join, which has the identical
-    // obligation (abandoning it frees a live Thread) and nests inside the
-    // first on the at-exit path, so it saves and restores rather than
-    // clearing. See thread.h's field comment for the rule a third would owe.
-    if (t->exit_close_active) return false;
+    // suppresses BOTH death legs while set, so the final close's
+    // sends/waits behave like a live thread's and the parent's wait returns
+    // after the flush (I-38). A server that never answers would park the
+    // dying Proc there; a kill that finds the Proc already terminating sets
+    // PROC_FLAG_EXIT_CLOSE_FORCED (proc_group_kill), and from then on the
+    // death legs reach the close again, which hands what it cannot finish
+    // to the closer (ARCH 7.9.1 parts B and C). loom_free's SQPOLL kthread
+    // join is held against every death, forced or not: abandoning it frees a
+    // live Thread (kthread_join_active). Only the owning thread sets or
+    // clears either flag and every caller passes self, so the reads need no
+    // synchronization; the forced bit is published before the death wake.
+    if (thread_death_held(t)) return false;
     struct Proc *p = t->proc;
     if (!p) return false;
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
@@ -1293,11 +1299,11 @@ bool thread_die_pending(struct Thread *t) {
 // suspend must not return on a latch a peer can revoke (DEBUG-FS-DESIGN 5g), so
 // the waits that honour that ask only this: group death, which nothing revokes.
 bool thread_death_reaches(struct Thread *t) {
-    return t && t->proc && t->proc != kproc() && !t->exit_close_active;
+    return t && t->proc && t->proc != kproc() && !thread_death_held(t);
 }
 
 bool thread_group_death_pending(struct Thread *t) {
-    if (!t || t->exit_close_active) return false;
+    if (!t || thread_death_held(t)) return false;
     struct Proc *p = t->proc;
     return p && __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL;
 }
@@ -1311,15 +1317,16 @@ bool thread_group_death_pending(struct Thread *t) {
 // notes_arm_caught_note_locked's RELEASE arm), OWNER-read note_mask (written
 // only by the owning thread -- see the thread_die_pending contract). The
 // caught-note sub-field is per-family; `& ~note_mask` drops the families this
-// thread deferred. Gated off for kproc + the exit_close_active finalization
-// window (a closing thread must not EINTR-unwind its orderly handle close) --
-// the same two gates thread_die_pending applies. DISJOINT from thread_die_-
+// thread deferred. Gated off for kproc, for the exit_close_active finalization
+// window (a closing thread must not EINTR-unwind its orderly handle close) even
+// once a kill forces it -- a forced close unwinds as a death, never for a caught
+// note -- and for loom_free's kthread join. DISJOINT from thread_die_-
 // pending by construction: a caught bit is armed ONLY for a caught note, which
 // the terminate arm refuses -- so no note ever sets both a terminate latch and
 // a caught bit, and death (checked FIRST at every sleep site) always wins.
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
-    if (t->exit_close_active) return false;
+    if (t->exit_close_active || t->kthread_join_active) return false;
     // ARCH 8.8.3 (signal(7)'s list): only a wait whose syscall is one a signal
     // may interrupt unwinds for a caught note. Every other wait -- socket(),
     // open(), a regular file's read(), any page-in -- rides the note out and
