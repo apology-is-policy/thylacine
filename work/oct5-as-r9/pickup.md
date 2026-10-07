@@ -1353,3 +1353,31 @@ landed in $OUT.
 missing-prototype warnings). NOTHING LANDED, NOTHING ACTIVATED, no guest run.
 BLOCKER STATE: disk CLEARED (8.3 GiB); mac is main's for ~2.1h. A fresh control
 is owed when the lease arrives, because the fixture changed again.
+
+== 2026-10-07 20:4xZ: THE SUITE-LEVEL CHECKS, EXAMINED AND LEFT ALONE ==
+I told astra (t64) that stage 1's suite-level checks are NOT covered by the arms
+-- only the leg-level oracles are. Closing that gap honestly meant examining
+them rather than building machinery, and the answer is that they need none:
+every parse failure I can construct fails CLOSED.
+
+  `grep -qE '^EXTINCTION:' "$B"`      the log is CRLF; '^EXTINCTION:' is
+                                      anchored at the start, unaffected.
+  tally absent                        $tally empty -> $got empty -> pass/total
+                                      empty -> the equality against the DERIVED
+                                      expectation fails -> refuse.
+  tally present, regex DRIFTS         sed leaves the line unchanged, so $got is
+                                      the whole line, which begins with two
+                                      spaces -- `cut -d' ' -f1/-f2` then yield
+                                      EMPTY, not a wrong number -> refuse.
+  a test failed                       pass != total -> refuse.
+  EXPECT_TESTS somehow empty          the equality fails -> refuse; and stage 0
+                                      already requires it to derive >= 1000.
+
+So there is no fail-open direction among them and no vacuous comparison. An arm
+set here would exercise string equality, not a mechanism, which is motion. What
+WOULD be worth arms is any future check whose predicate is a PATTERN rather than
+an equality -- those are the ones that fail open, as `grep -qF ""` matching every
+line proved today.
+
+NOT A HOLLOW CLEAN: the enumeration above is the claim, so the next session can
+check my reasoning instead of re-deriving it or trusting it.
