@@ -22,6 +22,61 @@ needed the operator.
 
 
 ---
+## 2026-10-07 (main, Opus 5.5, effort max) -- the 9P tag pool: it grows, it has shares, a sync op waits (IN FLIGHT)
+
+**Why now.** Right after seam-90 in the arc order. A sync op that found the
+64-tag pool full failed `-P9_E_IO` at its build, nothing above the client
+retried, so a write-behind flush that met a full pool dropped its data and no
+close said so. A witness written before the fix (`9p_client.full_pool_sync_op_gets_a_tag`)
+ran RED on the seam90 tree on 2026-10-06 23:53Z.
+
+**The operator's decisions (2026-10-07 ~06:10Z, `dec-2026-10-07-tag-pool`,
+`-close-eio`, `-exit-close`).** All four parts as one design (grow the table,
+shares per kind of op, a sync op waits, the reader applies every reply);
+`close(2)` returns `EIO` for a failed write-behind flush; the exit close
+later, as A then B+C.
+
+**What landed on `tagpool` (WIP, not yet on main).**
+- 82c478c22 TP-0: ARCH 21.11 + `specs/tag_pool.tla`. TLC (07:2xZ): clean 268
+  distinct states; `BUGGY_NO_ASYNC_CAP` and `BUGGY_WAITER_APPLIES` fail
+  `SyncProgress` (304, 360), `BUGGY_NO_FLUSH_HEADROOM` fails `FlushAlwaysFits`
+  (127). The three counterexamples were read, not just counted: two deferred
+  async ops holding both op tags; a stored reply waiting on a thread a stop
+  keeps re-stopping; a death that finds the pool full and abandons flush-less.
+  `9p_client.tla` re-run: clean 197 distinct (as recorded), five buggy cfgs
+  violate.
+- a92b3d37b TP-1 (part 4), bff734a37 TP-2 (part 3), 529f427f5 TP-3 (parts 1+2):
+  first build of all three together compiled clean; suite 1914/1914.
+
+**RED runs.** RED-1 (one kernel, four sabotages with disjoint witness sets:
+no flush headroom, no async share, a sync op failing EIO instead of waiting,
+the reader skipping a stopped owner's reply): 1907/1914, the seven failures
+exactly the predicted witnesses, each at its own assertion (`a Tflush finds
+one`, `the dying walk's Tflush went out`, `a fifth async submit is
+-P9_E_AGAIN`, the async-share fixture, `a sync walk on a full share gets a
+tag`, and both stopped-owner `tag is free` legs). RED-2 (no growth) is owed.
+
+**Wrong turns caught.**
+- Moving the rpc registration into the tag's session entry (TP-3) changes
+  when it disappears: clearing the entry now drops it. The ownerless Rflush
+  arm read the victim's registration AFTER the dispatch that frees the
+  victim's tag, so on its fail-closed path `mark_dead` would no longer have
+  found the victim -- a sync victim would have slept forever. Caught reading
+  every `inflight[]` site for read-after-clear before building; the arm now
+  reads the victim first and fails closed before dispatching.
+- The flush headroom changes the meaning of every test whose premise was "a
+  full pool also blocks the Tflush". Rather than rewrite seven of them, the
+  fixture caps the table at 64 (`tag_limit`), which is exactly the state a
+  failed chunk allocation leaves -- still reachable, so still worth testing --
+  and the headroom got its own witnesses.
+
+**Open.** RED-2; TP-4 (`Dev.close` returns `int`, `close(2)` EIO); the Fable
+audit; ci-smp-gate N=10 + ls-ci; the land. AS-R9: corona is pinged before
+`kernel/loom.c` reaches main. Corona's two `tools/build.sh` patches (the
+Stratum pin in the ledger, `check-prot-mirror.py` wired failing) ride the
+same landing (yip 0181).
+
+---
 ## 2026-10-06/07 (main, Opus 5.5, effort max) -- seam-90 closed: a blocking 9P reader unwinds at any byte
 
 **Why now.** The arc order put it after devno-u64 and before B-2. The operator
