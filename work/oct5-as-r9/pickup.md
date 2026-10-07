@@ -1183,3 +1183,53 @@ the object and the HEAD-equality is the discriminating half.
 
 STILL OPEN: the acquisition witness. It needs one more lease window with the
 confined mutant. Everything else for it is in place and pre-cleared.
+
+### CORRECTION, ~19:3xZ: the confined mutant I committed was UNBALANCED
+
+Caught off-lease, by doing the per-caller enumeration I had just written down as
+the lesson from the failed run. It would have cost the second window.
+
+THE DEFECT IN MY FIX: `addrspace_unpin(as)` after `addrspace_private_begin(as)`
+cancels the ring's GET correctly (net 0 ref, +1 ring at create), but
+loom_private_destroy still calls `addrspace_private_end`, whose PUT then has no
+matching get. Every ring create/destroy cycle therefore nets **-1** on the
+AddrSpace lifetime refcount. The early legs (:73, :126, :144) each retire a ring
+while their Proc is still ALIVE, so the count would reach zero with an owner
+still holding the space and `addrspace_lifetime_put` would fire its FIRST guard
+-- "AddrSpace final lifetime drop with live owners" (addrspace.c:120) -- or
+"addrspace_unref of an already-released AddrSpace" (:118). Both are the WRONG
+extinction in the WRONG leg. The hardened oracle would have refused it correctly,
+which is some comfort, but the window would be gone.
+The balanced addrspace.c mutant did not have this problem because it removed the
+get AND the put together; confining it to loom re-opened the balance question
+and I did not re-ask it.
+
+THE BALANCED CONFINED FORM, now installed, two sites both in loom.c:
+  loom_create_private  `addrspace_unpin(as);`        cancels the GET
+  loom_private_destroy `--as->private_rings;` under as->lock, REPLACING
+                       `addrspace_private_end(as);` -- removes the unmatched PUT
+Net per cycle: 0 ref, 0 rings, and the ring holds NO lifetime reference, which is
+the condition under test. `private_rings` is a plain u32 (addrspace.h:163) and
+loom.c already touches `as->` fields, so this needs no header change. Both
+anchors asserted unique (the BARE `addrspace_private_end(as);` appears 3x in
+loom.c and is NOT usable as an anchor), and the runner REFUSES if only one half
+lands -- a half-applied balanced mutation is precisely the unbalanced one.
+Syntax-checked with both halves applied: errors=0; loom.c reverted
+byte-identical (cbdd71f6f5ee4c74).
+
+WHY TEST-GRANULARITY ATTRIBUTION SUFFICES HERE, verified per leg rather than
+assumed -- which matters because the fixture packs EIGHT create sites into ONE
+test, so "died inside this test" does not by itself name the leg:
+  :120 :138 :159  lp_wait the ring to retirement BEFORE dropping the Proc, so
+                  private_rings == 0 at the drop -- cannot fire.
+  :171 :172       takes its own addrspace_pin BEFORE dropping, so the drop is
+                  not final -- the masking this leg exists to remove.
+  :248 :249       drops the Proc with the ring OUTSTANDING and NO pin held.
+                  THE FIRST LETHAL POINT IN THE TEST.
+  :312            the cleanup drop, after this leg, so it cannot precede it.
+TWO PATHS LEFT DELIBERATELY UNBALANCED, and named rather than fixed:
+loom_create_private's two failure exits (:345 !charged, :351 layout-alloc) still
+call `_end`, so they would over-put by one under the mutant. Neither is
+exercised: the fixture's only refusal (:66) returns from loom_measure BEFORE
+addrspace_private_begin, so the guard is never taken on it. Mutating three sites
+to cover an unreachable path adds more risk than it removes.

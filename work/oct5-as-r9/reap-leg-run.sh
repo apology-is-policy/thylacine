@@ -283,28 +283,58 @@ echo "=== stage 2: the MUTANT -- one named invariant failure, nothing else ==="
 MUTATED=1
 python3 - <<'PY' || exit 5
 import sys
-# CONFINED TO loom.c BY NECESSITY, not by preference. The first version mutated
-# addrspace_private_begin/_end themselves -- and that mutation is LETHAL IN AN
-# EARLIER IN-TREE TEST: test_addrspace.c's private_ring_sharing_failure() ends
-# with `addrspace_private_begin(as); addrspace_unref(as);` and asserts the space
-# SURVIVES ownerless because the guard pins it, so with the guard's reference
-# removed that unref becomes the final drop with private_rings == 1 and extincts
-# there. addrspace.proc_alloc_in_shares is registered ~90 suite lines BEFORE
-# loom.private_owner_lifecycle, so the boot died before this leg ever ran and
-# the run proved nothing about it (measured: reap-leg-20261007T190621Z).
-# Mutating loom's USE instead leaves addrspace.c untouched, so every addrspace
-# test behaves normally and the boot reaches the leg.
+# CONFINED TO loom.c, AND BALANCED. Both properties were learned the hard way.
+#
+# CONFINED, because the first version mutated addrspace_private_begin/_end
+# themselves and that is LETHAL IN AN EARLIER TEST: test_addrspace.c's
+# private_ring_sharing_failure() ends `addrspace_private_begin(as);
+# addrspace_unref(as);` and asserts the space survives OWNERLESS because the
+# guard pins it, so with the guard's reference gone that unref is the final drop
+# with private_rings == 1 and the named extinction fires there --
+# addrspace.proc_alloc_in_shares, ~90 suite lines before this leg. Measured:
+# reap-leg-20261007T190621Z died there and the runner called it discrimination.
+#
+# BALANCED, because the obvious confined form is NOT. Adding addrspace_unpin
+# after the begin cancels the ring's GET (net 0 ref, +1 ring at create -- right),
+# but loom_private_destroy still calls addrspace_private_end, whose PUT then has
+# no matching get, so every ring cycle nets -1 on the AddrSpace refcount. The
+# early legs would hit zero while their Proc is still alive and die with
+# "AddrSpace final lifetime drop with live owners" or "addrspace_unref of an
+# already-released AddrSpace" -- a different extinction, in a different leg,
+# which this runner would correctly refuse but which would waste the window.
+# So the destroy's put is removed too, by decrementing the guard directly.
+#
+# WHY TEST-GRANULARITY ATTRIBUTION IS ENOUGH UNDER THIS MUTANT, verified per leg
+# rather than asserted: the fixture packs eight create sites into ONE test, so
+# "died inside this test" does not by itself name the leg. But a guard can only
+# fire where the owner's drop is the FINAL lifetime drop with a ring still
+# outstanding, and every earlier leg excludes exactly that -- :120, :138 and :159
+# each lp_wait the ring to retirement BEFORE their Proc is dropped, and :171
+# takes its own addrspace_pin before dropping at :172, which is the masking this
+# leg exists to remove. The unpinned-reap drop at :248 precedes its lp_wait at
+# :249 with no pin held, so it is the FIRST lethal point in the test.
 p='kernel/loom.c'
 s=open(p).read()
 a="    if (!addrspace_private_begin(as)) return NULL;\n"
-if s.count(a)!=1:
-    sys.exit("REFUSING: mutation anchor is not unique (%d) -- the file moved under this script" % s.count(a))
-s=s.replace(a, a + "    addrspace_unpin(as);  /* MUTANT: the ring keeps NO net lifetime ref */\n")
+b=("    addrspace_uncharge_pages(as, metadata + refund);\n"
+   "    spin_unlock(&as->lock);\n"
+   "    addrspace_private_end(as);\n")
+if s.count(a)!=1 or s.count(b)!=1:
+    sys.exit("REFUSING: mutation anchors are not unique (%d, %d) -- the file moved under this script" % (s.count(a), s.count(b)))
+s=s.replace(a, a + "    addrspace_unpin(as);  /* MUTANT: cancel the ring's lifetime GET */\n", 1)
+s=s.replace(b,
+   "    addrspace_uncharge_pages(as, metadata + refund);\n"
+   "    --as->private_rings;  /* MUTANT: drop the guard without its PUT */\n"
+   "    spin_unlock(&as->lock);\n", 1)
 open(p,'w').write(s)
-print("-- MUTANT applied: the ring drops the lifetime reference its guard took")
+print("-- MUTANT applied: the ring keeps NO lifetime reference, balanced, loom-only")
 PY
-/usr/bin/grep -q 'MUTANT: the ring keeps NO net lifetime ref' kernel/loom.c || {
-  echo "REFUSING: the mutation did not land"; exit 5; }
+# BOTH halves must land: a half-applied balanced mutation is the unbalanced one.
+for _m in "MUTANT: cancel the ring's lifetime GET" "MUTANT: drop the guard without its PUT"; do
+  /usr/bin/grep -qF "$_m" kernel/loom.c || {
+    echo "REFUSING: mutation half did not land: $_m"; exit 5; }
+done
+echo "-- both mutation halves present (an unbalanced half-apply is refused)"
 tools/build.sh kernel --config ci
 floor "post-mutant-build"
 MUTANT_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
