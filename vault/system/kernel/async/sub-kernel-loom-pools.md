@@ -30,30 +30,6 @@ The owner must hold its ring lock and retain canonical Burrow pins throughout.
 It must resolve authority, mapping ranges and exclusion against accepted fixed
 I/O before prepare. Those are caller obligations, not proven by this helper.
 
-## Mechanism
-
-Registration has a validate pass followed by an infallible reservation pass.
-Cells store their pool reference and local ordinal. Lookups scan at most64
-cells, keeping quota and physical overlap global to this ring without a second
-pool-slot registry. A result remains in its cell until publication/return.
-
-
-## Data structures
-
-One zero-initialized loom_pool_bank per ring has64 cells,5128bytes including
-its monotonic last-issued64-bit nonce. Each cell is80bytes: full pool reference,
-canonical backing pointer/offset/length, lease nonce, user_data, member ordinal,
-phase, requested/result lengths and MORE. Each32-byte loom_pool descriptor
-belongs in the shared64-slot service table; this module adds no separate slot
-registry. A48-byte transient result carries a32-byte receipt and completion
-metadata. Static assertions pin all four sizes. These sizes are NOT a charge
-or allocator footprint measurement; owner allocation/accounting remains owed.
-
-Members have FREE, AVAILABLE, BUSY, PENDING, LEASED phases. Pool descriptors
-are EMPTY, RESERVED or LIVE. The bank's nonce is never reset by pool removal.
-UINT64_MAX can be issued once; a further claim returns ENOSPC without wrapping,
-even if all members are held. Failed/aborted shots burn their nonce.
-
 ## Contract
 
 All APIs below require caller serialization. No helper wakes a peer or progress
@@ -101,25 +77,29 @@ No CQ-head API exists. Reaping a completion does not call into this module and
 cannot return a payload. Whole-ring destruction must first stop actual kernel
 writers; it is not implemented by calling reap on a still-active pool.
 
-## Prosecution
+## Mechanism
 
-Claim/Reply/Deliver/Return in [[spec-loom-service-buffers]] map to claim/commit/
-deliver/return here. Stop maps to release_busy after writer quiescence. Source
-Finalize/Retire and paired CQ stores remain caller integration obligations.
-Physical mapping pins, fixed-I/O admission, usercopy and source locks remain
-outside this helper's verified boundary.
+Registration has a validate pass followed by an infallible reservation pass.
+Cells store their pool reference and local ordinal. Lookups scan at most64
+cells, keeping quota and physical overlap global to this ring without a second
+pool-slot registry. A result remains in its cell until publication/return.
 
-The actual module links directly into tools/test-loom-service-pool.py's host
-fixture, with ASan/UBSan and eleven source mutations. Assertions cover canonical
-aliasing, provisional exclusion/quota, rollback, retained byte patterns A/B/C,
-out-of-order/stale/double returns, pending/source-retirement retention, result
-correlation, nonce exhaustion and reap refusal. The shared native fixture returns
-errors to the outer TEST_ASSERT, avoiding nested void assertions that hide a
-subtest failure. Mutants must fail the exact named assertion, not compilation.
 
-Evidence and native build outcome live in docs/ASYNC-SERVICE-STATUS.md and
-work/oct4-async-service/buffer-pools. No throughput, multi-stream fairness,
-graphical result, syscall activation or complete private-I/O claim follows.
+## Data structures
+
+One zero-initialized loom_pool_bank per ring has64 cells,5128bytes including
+its monotonic last-issued64-bit nonce. Each cell is80bytes: full pool reference,
+canonical backing pointer/offset/length, lease nonce, user_data, member ordinal,
+phase, requested/result lengths and MORE. Each32-byte loom_pool descriptor
+belongs in the shared64-slot service table; this module adds no separate slot
+registry. A48-byte transient result carries a32-byte receipt and completion
+metadata. Static assertions pin all four sizes. These sizes are NOT a charge
+or allocator footprint measurement; owner allocation/accounting remains owed.
+
+Members have FREE, AVAILABLE, BUSY, PENDING, LEASED phases. Pool descriptors
+are EMPTY, RESERVED or LIVE. The bank's nonce is never reset by pool removal.
+UINT64_MAX can be issued once; a further claim returns ENOSPC without wrapping,
+even if all members are held. Failed/aborted shots burn their nonce.
 
 ## Concurrency
 
@@ -148,6 +128,26 @@ All scans are bounded by64 cells. prepare checks at most64x64 member overlaps;
 claim's cursor search is at most64x64 comparisons. No measured latency claim.
 Member rotation does not establish fairness between streams. Exact structure
 sizes above are compiled assertions, not actual allocator/payer charges.
+
+## Prosecution
+
+Claim/Reply/Deliver/Return in [[spec-loom-service-buffers]] map to claim/commit/
+deliver/return here. Stop maps to release_busy after writer quiescence. Source
+Finalize/Retire and paired CQ stores remain caller integration obligations.
+Physical mapping pins, fixed-I/O admission, usercopy and source locks remain
+outside this helper's verified boundary.
+
+The actual module links directly into tools/test-loom-service-pool.py's host
+fixture, with ASan/UBSan and eleven source mutations. Assertions cover canonical
+aliasing, provisional exclusion/quota, rollback, retained byte patterns A/B/C,
+out-of-order/stale/double returns, pending/source-retirement retention, result
+correlation, nonce exhaustion and reap refusal. The shared native fixture returns
+errors to the outer TEST_ASSERT, avoiding nested void assertions that hide a
+subtest failure. Mutants must fail the exact named assertion, not compilation.
+
+Evidence and native build outcome live in docs/ASYNC-SERVICE-STATUS.md and
+work/oct4-async-service/buffer-pools. No throughput, multi-stream fairness,
+graphical result, syscall activation or complete private-I/O claim follows.
 
 ## Seams
 
