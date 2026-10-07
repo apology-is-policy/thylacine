@@ -289,6 +289,29 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     }
 }
 
+// The release path for a handle that is genuinely CLOSING, as distinct from
+// handle_put's return of a borrowed reference: a private Loom latches shut and
+// wakes its waiters here, so a poller sees POLLHUP at the close of the fd and
+// not only at the last reference. Borrow returns and rolled-back dup acquires
+// deliberately keep the plain release -- no handle ceases to exist on those, and
+// latching there would mark a live ring closing on every borrow.
+static void handle_release_owner(enum kobj_kind kind, void *obj) {
+    if (kind == KOBJ_LOOM && obj) loom_handle_closed((struct Loom *)obj);
+    handle_release_obj(kind, obj);
+}
+
+void handle_private_exec_latch(struct Proc *p) {
+    struct HandleTable *t = p->handles;
+    if (!t) return;
+    spin_lock(&t->lock);
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        struct Handle *s = &t->slots[i];
+        if (s->magic == HANDLE_MAGIC && s->kind == KOBJ_LOOM)
+            loom_exec_latch((struct Loom *)s->obj);
+    }
+    spin_unlock(&t->lock);
+}
+
 void handle_table_free(struct HandleTable *t) {
     if (!t) return;
 
@@ -315,7 +338,7 @@ void handle_table_free(struct HandleTable *t) {
     // slot-zeroing is belt-and-suspenders before the kfree.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
-            handle_release_obj(t->slots[i].kind, t->slots[i].obj);
+            handle_release_owner(t->slots[i].kind, t->slots[i].obj);
             t->slots[i].magic  = 0;
             t->slots[i].kind   = KOBJ_INVALID;
             t->slots[i].rights = RIGHT_NONE;
@@ -495,7 +518,7 @@ int handle_close(struct Proc *p, hidx_t h) {
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    handle_release_obj(kind, obj);
+    handle_release_owner(kind, obj);
     return 0;
 }
 
@@ -553,7 +576,7 @@ int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
     // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after
     // the new object is already installed, so the slot is never momentarily
     // empty for a peer thread to allocate into.
-    handle_release_obj(old_kind, old_obj);
+    handle_release_owner(old_kind, old_obj);
     return 0;
 }
 
@@ -880,7 +903,7 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     // the new object is installed, so the slot is never momentarily empty for a
     // peer thread to allocate into. handle_replace does it in this order for
     // the same reason.
-    if (had) handle_release_obj(old_kind, old_obj);
+    if (had) handle_release_owner(old_kind, old_obj);
     return new_h;
 }
 
@@ -997,6 +1020,15 @@ int handle_close_on_exec(struct Proc *p) {
     spin_lock(&t->lock);
     for (u32 w = 0; w < HANDLE_CLOEXEC_WORDS; w++) {
         pending[w]    = t->cloexec[w];
+        // A private ring never survives the image it was admitted against, so
+        // it closes on exec whether or not userspace marked it close-on-exec.
+        // Folded into the same snapshot rather than closed separately, so it
+        // inherits the clear-first property above verbatim.
+        for (u32 b = 0; b < 64 && w * 64 + b < PROC_HANDLE_MAX; b++) {
+            struct Handle *slot = &t->slots[w * 64 + b];
+            if (slot->magic == HANDLE_MAGIC && slot->kind == KOBJ_LOOM &&
+                loom_is_private((struct Loom *)slot->obj)) pending[w] |= 1ull << b;
+        }
         t->cloexec[w] = 0;
     }
     spin_unlock(&t->lock);

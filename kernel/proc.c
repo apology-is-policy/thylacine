@@ -4667,6 +4667,12 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
             extinction("proc_exec_replace: a live peer thread appeared");
         }
         pts_interaction_invalidate_locked(p, true);
+        // Latch every private ring shut before the image it was admitted against
+        // stops being this Proc's. Infallible and leaf-only: the descriptors are
+        // removed, and their waiters woken, by handle_close_on_exec outside this
+        // lock -- nothing here may sleep or fail, because the swap below cannot
+        // be unwound.
+        handle_private_exec_latch(p);
         old   = p->as;
         p->as = nas;
 

@@ -52,8 +52,9 @@
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
 #include <thylacine/image.h>    // image_cache_init (REVENANT R-3)
-#include <thylacine/vdso.h>
-#include <thylacine/weft.h>     // vdso_init (the clock vDSO page, #343)
+#include <thylacine/vdso.h>     // vdso_init (the clock vDSO page, #343)
+#include <thylacine/weft.h>
+#include <thylacine/loom.h>     // loom_retire_init / loom_retirer_main
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/9p_attach.h>  // p9_closer_start (FID-LIFECYCLE section 9)
@@ -832,6 +833,18 @@ void boot_main(void) {
         struct Thread *weft_reaper = thread_create(kproc(), weft_reaper_main);
         if (!weft_reaper) extinction("boot_main: weft_reaper alloc failed");
         ready(weft_reaper);
+    }
+
+    // The private-ring retirer. A private Loom's last reference can be dropped
+    // by a thread that must not block, so the teardown -- which settles the
+    // ring's charge and releases the image pin -- is handed to this thread
+    // instead. Parks indefinitely while nothing is queued; the queue is bounded
+    // by rings that are already charged, so it needs no admission control.
+    loom_retire_init();
+    {
+        struct Thread *retirer = thread_create(kproc(), loom_retirer_main);
+        if (!retirer) extinction("boot_main: private Loom retirer alloc failed");
+        ready(retirer);
     }
     uart_puts("  cons:  UART RX live (INTID ");
     uart_putdec((u64)UART_INTID_PL011);

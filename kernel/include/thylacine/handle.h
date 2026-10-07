@@ -506,4 +506,9 @@ int handle_table_count(const struct HandleTable *t);
 u64 handle_total_allocated(void);
 u64 handle_total_freed(void);
 
+// Infallible exec commit, before the image swap. Leaf latches only; descriptor
+// removal and wakes follow outside the process-table lock through
+// handle_close_on_exec.
+void handle_private_exec_latch(struct Proc *p);
+
 #endif // THYLACINE_HANDLE_H

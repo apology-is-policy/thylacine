@@ -16,6 +16,7 @@
 // holds a reference.
 
 #include <thylacine/loom.h>
+#include <thylacine/addrspace.h>
 #include <thylacine/loom_service_pool.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
@@ -191,11 +192,28 @@ static u32 align_up_u32(u32 x, u32 a) { return (x + (a - 1u)) & ~(a - 1u); }
 
 static bool is_pow2_u32(u32 x) { return x != 0u && (x & (x - 1u)) == 0u; }
 
-static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exempt,
-                                        bool receipts) {
-    if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return NULL;
-    if (!is_pow2_u32(cq_entries))                                   return NULL;
-    if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return NULL;
+// The ring geometry, computed without allocating anything. A private owner must
+// know ring_size to reserve its storage charge BEFORE it commits to building a
+// ring, so the measurement is separated from the construction rather than
+// duplicated at the second caller.
+struct loom_layout {
+    u32 hdr_off;
+    u32 sq_array_off;
+    u32 sq_array_size;
+    u32 sqe_off;
+    u32 sqe_size;
+    u32 cqe_off;
+    u32 cqe_size;
+    u32 receipt_off;
+    u32 receipt_size;
+    u32 ring_size;
+};
+
+static bool loom_measure(u32 sq_entries, u32 cq_entries, bool receipts,
+                         struct loom_layout *g) {
+    if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return false;
+    if (!is_pow2_u32(cq_entries))                                   return false;
+    if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return false;
 
     // Geometry. Each region 64-aligned (cache line); the whole ring
     // page-rounded. All sizes are bounded (sq/cq <= 2*LOOM_MAX_ENTRIES, each
@@ -213,9 +231,27 @@ static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exem
     u32 ring_end     = receipts ? receipt_off + receipt_size : cqe_off + cqe_size;
     u32 ring_size     = (ring_end + (PAGE_SIZE - 1u)) & ~((u32)PAGE_SIZE - 1u);
 
+    g->hdr_off       = hdr_off;
+    g->sq_array_off  = sq_array_off;
+    g->sq_array_size = sq_array_size;
+    g->sqe_off       = sqe_off;
+    g->sqe_size      = sqe_size;
+    g->cqe_off       = cqe_off;
+    g->cqe_size      = cqe_size;
+    g->receipt_off   = receipt_off;
+    g->receipt_size  = receipt_size;
+    g->ring_size     = ring_size;
+    return true;
+}
+
+static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exempt,
+                                        bool receipts) {
+    struct loom_layout g;
+    if (!loom_measure(sq_entries, cq_entries, receipts, &g)) return NULL;
+
     struct Loom *l = kmalloc(sizeof(struct Loom), KP_ZERO);
     if (!l) return NULL;
-    struct Burrow *r = burrow_create_anon((size_t)ring_size, exempt);
+    struct Burrow *r = burrow_create_anon((size_t)g.ring_size, exempt);
     if (!r) { kfree(l); return NULL; }
 
     l->magic    = LOOM_MAGIC;
@@ -232,16 +268,16 @@ static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exem
     l->ring_kva = (u8 *)pa_to_kva(page_to_pa(r->pages));
     l->sq_entries    = sq_entries;
     l->cq_entries    = cq_entries;
-    l->hdr_off       = hdr_off;
-    l->sq_array_off  = sq_array_off;
-    l->sqe_off       = sqe_off;
-    l->cqe_off       = cqe_off;
-    l->sq_array_size = sq_array_size;
-    l->sqe_size      = sqe_size;
-    l->cqe_size      = cqe_size;
-    l->ring_size     = ring_size;
-    l->receipt_off   = receipt_off;
-    l->receipt_size  = receipt_size;
+    l->hdr_off       = g.hdr_off;
+    l->sq_array_off  = g.sq_array_off;
+    l->sqe_off       = g.sqe_off;
+    l->cqe_off       = g.cqe_off;
+    l->sq_array_size = g.sq_array_size;
+    l->sqe_size      = g.sqe_size;
+    l->cqe_size      = g.cqe_size;
+    l->ring_size     = g.ring_size;
+    l->receipt_off   = g.receipt_off;
+    l->receipt_size  = g.receipt_size;
     l->cq_tail       = 0;   // kernel-private authoritative CQ tail (the shared mirror starts 0 too)
 
     // Stamp the immutable geometry into the shared ring header. The Burrow pages
@@ -249,7 +285,7 @@ static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exem
     // + entry counts are written here. A dsb ish publishes the stores to the
     // inner-shareable domain so a secondary CPU that maps + reads the ring sees
     // them (burrow_create_anon already dsb'd its own zeroing).
-    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + hdr_off);
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + g.hdr_off);
     h->sq_mask    = sq_entries - 1u;
     h->sq_entries = sq_entries;
     h->cq_mask    = cq_entries - 1u;
@@ -266,6 +302,148 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
 
 struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt) {
     return loom_create_layout(sq_entries, cq_entries, exempt, true);
+}
+
+// The intrusive queue is bounded by already charged rings. Its lock never
+// encloses ring cleanup; an idle owner parks indefinitely rather than polling.
+static spin_lock_t service_retire_lock;
+static struct Rendez service_retire_wait;
+static struct Loom *service_retire_head;
+static struct Loom **service_retire_tail;
+static bool service_retire_ready;
+static u64 service_retired_count;
+
+void loom_retire_init(void) {
+    spin_lock_init(&service_retire_lock);
+    rendez_init(&service_retire_wait);
+    service_retire_tail = &service_retire_head;
+    service_retire_ready = true;
+}
+
+bool loom_is_private(const struct Loom *l) { return l && l->service_as != NULL; }
+
+u64 loom_private_retired(void) {
+    return __atomic_load_n(&service_retired_count, __ATOMIC_ACQUIRE);
+}
+
+struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
+    struct loom_layout g;
+    if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
+        !loom_measure(sq, cq, receipts, &g)) return NULL;
+    struct AddrSpace *as = p->as;
+    if (!addrspace_private_begin(as)) return NULL;
+    // Loom uses the buddy path of kmalloc; a conservative whole page also
+    // attributes its ring's slab descriptor for as long as ring mappings live.
+    _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
+    _Static_assert(sizeof(struct Burrow) <= PAGE_SIZE, "descriptor page attribution bounds object");
+    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom));
+    u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
+    bool exempt = proc_resource_exempt(p);
+    spin_lock(&as->lock);
+    bool charged = addrspace_charge_pages(as, metadata + backing, exempt);
+    spin_unlock(&as->lock);
+    if (!charged) { addrspace_private_end(as); return NULL; }
+    struct Loom *l = loom_create_layout(sq, cq, exempt, receipts);
+    if (!l) {
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, metadata + backing);
+        spin_unlock(&as->lock);
+        addrspace_private_end(as);
+        return NULL;
+    }
+    l->service_as = as;
+    l->service_creator = p->stripes;
+    l->service_metadata_pages = metadata;
+    // The charge follows the ring Burrow, including when a mapping survives fd
+    // retirement. No raw Proc pointer is consulted by the eventual refund.
+    burrow_charge_record(l->ring, p, backing);
+    return l;
+}
+
+void loom_exec_latch(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    spin_lock(&l->lock);
+    l->service_closing = true;
+    spin_unlock(&l->lock);
+}
+
+void loom_handle_closed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    loom_exec_latch(l);
+    poll_waiter_list_wake(&l->cq_waiters);
+    wakeup(&l->sqpoll_park);
+}
+
+static void loom_private_enqueue(struct Loom *l) {
+    loom_handle_closed(l);
+    spin_lock(&service_retire_lock);
+    l->service_retire_next = NULL;
+    *service_retire_tail = l;
+    service_retire_tail = &l->service_retire_next;
+    spin_unlock(&service_retire_lock);
+    wakeup(&service_retire_wait);
+}
+
+static int loom_private_pending(void *unused) {
+    (void)unused;
+    spin_lock(&service_retire_lock);
+    int pending = service_retire_head != NULL;
+    spin_unlock(&service_retire_lock);
+    return pending;
+}
+
+static void loom_private_destroy(struct Loom *l) {
+    // Snapshotted before anything frees l: everything after the kfree below
+    // reaches the address space through these two locals and never through l.
+    struct AddrSpace *as = l->service_as;
+    u32 metadata = l->service_metadata_pages;
+
+    // Until the private engine owns its cleanup, refuse every legacy admission
+    // path. A retirement must never enter blocking legacy clunk/join code.
+    if (l->sqpoll || l->n_reg_buf || l->inflight_ops)
+        extinction("private Loom reached legacy cleanup state");
+    for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
+        if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
+
+    // One settled drop rather than claim / drop / restore. The refund is decided
+    // inside the same v->lock interval that decides whether this drop ends the
+    // ring's occupancy, so a peer holder's final drop cannot land in a gap and
+    // leave this one writing a charge record through a freed descriptor. A
+    // nonfinal drop reports zero and leaves the record for whichever drop does
+    // end the occupancy -- a ring mapping that outlives the fd settles it at VMA
+    // teardown, which is why the refund is read from the drop and not from a
+    // value claimed before it. The guards above exclude a second holder today;
+    // exclusivity is not what makes the settlement sound, so it is not relied on.
+    u32 refund = 0;
+    (void)burrow_unref_settled_in(l->ring, as, &refund);
+
+    l->magic = 0;
+    kfree(l);
+
+    // The pin addrspace_private_begin took is what keeps `as` addressable here,
+    // so it is released LAST: addrspace_private_end may drop the final lifetime
+    // reference and free the descriptor, and nothing may touch `as` after it.
+    spin_lock(&as->lock);
+    addrspace_uncharge_pages(as, metadata + refund);
+    spin_unlock(&as->lock);
+    addrspace_private_end(as);
+
+    __atomic_fetch_add(&g_loom_destroyed, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&service_retired_count, 1, __ATOMIC_RELEASE);
+}
+
+void loom_retirer_main(void) {
+    for (;;) {
+        (void)sleep(&service_retire_wait, loom_private_pending, NULL);
+        spin_lock(&service_retire_lock);
+        struct Loom *l = service_retire_head;
+        if (l) {
+            service_retire_head = l->service_retire_next;
+            if (!service_retire_head) service_retire_tail = &service_retire_head;
+        }
+        spin_unlock(&service_retire_lock);
+        if (l) loom_private_destroy(l);
+    }
 }
 
 // Last-ref teardown. No concurrent access (refcount hit 0), so no lock is
@@ -565,13 +743,15 @@ void loom_unref(struct Loom *l) {
     if (!l || l->magic != LOOM_MAGIC) return;
     if (__atomic_fetch_sub(&l->refcount, 1, __ATOMIC_RELEASE) == 1) {
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        loom_free(l);
+        if (loom_is_private(l)) loom_private_enqueue(l);
+        else loom_free(l);
     }
 }
 
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n) {
     if (!l || l->magic != LOOM_MAGIC)  return -1;
+    if (loom_is_private(l))            return -T_E_OPNOTSUPP;
     if (n > LOOM_MAX_REG_HANDLES)      return -1;
     if (n > 0 && (!spoors || !rights)) return -1;
 
@@ -658,6 +838,7 @@ static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n) {
     if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
+    if (loom_is_private(l))                  return -T_E_OPNOTSUPP;
     if (n > LOOM_MAX_REG_BUFFERS)            return -1;
     if (n > 0 && !bufs)                      return -1;
 
@@ -1805,6 +1986,7 @@ short loom_poll(struct Loom *l, short events, struct poll_waiter *pw) {
     if ((events & POLLIN) && loom_cq_ready(l) > 0) {
         revents |= POLLIN;
     }
+    if (l->service_closing) revents |= POLLHUP;
     spin_unlock(&l->lock);
     return revents;
 }
@@ -2387,6 +2569,13 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
     if (flags & ~LOOM_ENTER_VALID)    return -1;
 
+    if (loom_is_private(l)) {
+        spin_lock(&l->lock);
+        bool closed = l->service_closing;
+        spin_unlock(&l->lock);
+        return closed ? -T_E_CANCELED : -T_E_OPNOTSUPP;
+    }
+
     // --- SUBMIT phase. ---
     // On an SQPOLL ring the poll-thread OWNS submission (LOOM.md 8.6): ENTER does
     // NOT consume SQEs -- it WAKES the (possibly idled) kthread so it drains the
@@ -2592,6 +2781,7 @@ void loom_sqpoll_main(void *arg) {
 
 int loom_start_sqpoll(struct Loom *l) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (loom_is_private(l))           return -T_E_OPNOTSUPP;
     // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
     // group-terminates and its only exit is the stop-flag terminal above). Set
     // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free

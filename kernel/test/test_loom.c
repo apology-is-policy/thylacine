@@ -82,6 +82,15 @@ static void test_proc_drop(struct Proc *p) {
 // stamped with the immutable masks/counts (visible via the kernel direct map).
 // ---------------------------------------------------------------------------
 #include "loom_receipt_fixture.h"
+#include "loom_private_fixture.h"
+
+// Its own test rather than a passenger on the geometry fixture: this one
+// asserts the whole private-owner admission/retirement lifecycle, and a failure
+// should name that instead of a ring-layout check.
+void test_loom_private_owner_lifecycle(void) {
+    const char *owner_error = loom_private_fixture();
+    TEST_ASSERT(owner_error == NULL, owner_error);
+}
 
 void test_loom_create_geometry(void) {
     const char *receipt_error = loom_receipt_fixture();

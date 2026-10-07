@@ -37,6 +37,7 @@
 struct Burrow;
 struct Spoor;
 struct Proc;
+struct AddrSpace;
 struct loom_pool;
 struct loom_pool_bank;
 struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
@@ -440,6 +441,14 @@ struct Loom {
     u32 ring_size;
     u32 receipt_off;  // optional paired32-byte CQ receipts; zero for legacy rings
     u32 receipt_size;
+    // Non-NULL only for internally admitted private owners. Immutable until
+    // retirement; the exact image pin outlives both the creator and the fd, so
+    // the refund at retirement names an AddrSpace and never a Proc pointer.
+    struct AddrSpace *service_as;
+    u64 service_creator;
+    u32 service_metadata_pages;
+    bool service_closing;              // serialized with result commit by lock
+    struct Loom *service_retire_next;  // preadmitted last-reference queue link
     // Kernel-PRIVATE authoritative completion-queue tail (under `lock`). The
     // shared `loom_ring_hdr.cq_tail` is a userspace-READABLE mirror; loom_post_cqe
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
@@ -577,6 +586,19 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt);
 // Internal layout constructor for the private service owner. Geometry only:
 // no identity, charge, mapping, authority or public setup-feature activation.
 struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt);
+
+
+// Internal empty private owner; public setup remains disabled. Captures the
+// caller's live, exclusively owned image and reserves all base storage charges.
+// Caller retains p and its image throughout construction. No scopes, registered
+// buffers or worker are admitted until their private engine is qualified.
+struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts);
+void loom_handle_closed(struct Loom *l);
+void loom_exec_latch(struct Loom *l); // leaf only; caller retains the table owner
+bool loom_is_private(const struct Loom *l);
+void loom_retire_init(void);
+void loom_retirer_main(void);
+u64 loom_private_retired(void);
 
 
 // Refcount. loom_unref's last drop clunks every registered Spoor and

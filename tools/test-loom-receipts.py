@@ -7,7 +7,7 @@ from pathlib import Path
 import argparse,os,shlex,subprocess,tempfile,importlib.util
 ROOT=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('progress_fixture',ROOT/'tools/test-9p-client-progress.py');helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
-NAMES=['align_up_u32','is_pow2_u32','loom_create_layout','loom_create','loom_create_with_receipts','loom_post_cqe','loom_post_pool_cqe']
+NAMES=['align_up_u32','is_pow2_u32','loom_measure','loom_create_layout','loom_create','loom_create_with_receipts','loom_post_cqe','loom_post_pool_cqe']
 MUTANTS=[
  ('early-tail','    receipts[idx] = result.receipt;','    __atomic_store_n(&h->cq_tail, tail + 1u, __ATOMIC_RELEASE);\n    receipts[idx] = result.receipt;','publication pairs payload receipt and lease before tail'),
  ('wrong-receipt','    receipts[idx] = result.receipt;','    receipts[idx] = (struct loom_service_buffer_receipt){0};','publication pairs payload receipt and lease before tail'),
@@ -21,6 +21,9 @@ MUTANTS=[
 def main():
  p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
  source=(ROOT/'kernel/loom.c').read_text();actual='\n\n'.join(helper.function(source,n) for n in NAMES)
+ # loom_measure writes through a struct loom_layout, so the type has to come
+ # across with it or the extracted translation unit does not compile.
+ _s=source.index('struct loom_layout {');actual=source[_s:source.index('};',_s)+2]+'\n'+actual
  actual=actual.replace('__asm__ __volatile__("dsb ish" ::: "memory");','__atomic_thread_fence(__ATOMIC_SEQ_CST);')
  template=(ROOT/'tools/host-tests/loom-receipts.c').read_text()
  with tempfile.TemporaryDirectory(prefix='loom-receipts-') as tmp:
