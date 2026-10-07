@@ -118,6 +118,10 @@ struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
     return should_free ? v : NULL;
 }
 
+/* TRANSCRIBED, not extracted: this mirrors loom_private_destroy's accounting
+   sequence by hand, so it tests the arithmetic of that sequence rather than the
+   shipped function. A drift between the two is invisible here, which is why the
+   native regression mutates the REAL destructor. */
 /* The ported form: the refund is whatever the settled drop decided. */
 static void retire_settled(struct Burrow *ring, struct AddrSpace *as, u32 metadata, u32 backing) {
     (void)backing;
