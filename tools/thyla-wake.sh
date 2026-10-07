@@ -36,15 +36,20 @@
 #     where the box was, and keystrokes there answer it; an operator's half-typed
 #     line would be submitted with the wake glued to it. Either way this waits,
 #     flashing the tmux status line instead, and types once the box is empty.
-# If the agent is gone, nobody can be told about the lease, so a lease taken by
-# `hold` is RELEASED rather than left to block every peer for its whole TTL.
+#     Text drawn DIM after the prompt is Claude Code's suggestion, not typing
+#     (measured 2026-10-07: `❯` NBSP ESC[2m keep going ESC[0m), so it counts as
+#     empty; reading it as typed once held a Mac idle for 2.6 h.
+# A lease nobody knows about blocks every peer, so a lease taken by `hold` is
+# RELEASED when the agent is gone, and when its box stays unusable for
+# THYLA_WAKE_HELD_BOUND seconds; the agent is then told it was released.
 set -uo pipefail
 
 YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
 DIR="${THYLA_WAKE_DIR:-$HOME/.claude/thyla-wake}"
 POLL="${THYLA_WAKE_POLL:-20}"                    # watch: seconds between resource reads
 BOUND="${THYLA_WAKE_BOUND:-86400}"               # watch: give up after this
-DELIVER_BOUND="${THYLA_WAKE_DELIVER_BOUND:-3600}" # stop trying to type after this
+DELIVER_BOUND="${THYLA_WAKE_DELIVER_BOUND:-3600}" # stop trying to type a notice after this
+HELD_BOUND="${THYLA_WAKE_HELD_BOUND:-600}"        # a held lease: release it if the wake is not typed by then
 TAILN="${THYLA_WAKE_TAIL:-15}"
 GLYPH="${THYLA_WAKE_GLYPH:-$'\xe2\x9d\xaf'}"     # ❯, the input box's prompt
 RULE="${THYLA_WAKE_RULE:-$'\xe2\x94\x80'}"       # ─, the box's top edge
@@ -74,59 +79,113 @@ held_by_me() { printf '%s' "$1" | grep -qE "HELD by (you|$ME)( |,|$)"; }
 # hands back its own id.
 pane_alive() { [ "$(tmux display-message -p -t "$PANE" '#{pane_id}' 2>/dev/null)" = "$PANE" ]; }
 
-# empty | typed | none -- the state of the agent's input box. The box is the LAST
-# line opening with the prompt glyph whose line above opens with the rule; the
-# rule test keeps a dialog's `❯ 1. Yes` cursor (no rule above it) from passing.
-# Trailing blank rows are dropped first: on a pane taller than its content they
-# would fill the whole tail window and push the box out of it.
+# empty | typed | none, then a TAB and what the box held -- the state of the
+# agent's input box. The box is the LAST line opening with the prompt glyph whose
+# line above opens with the rule; the rule test keeps a dialog's `❯ 1. Yes`
+# cursor (no rule above it) from passing. Trailing blank rows are dropped first:
+# on a pane taller than its content they would fill the whole tail window and
+# push the box out of it. The capture keeps its escapes (-e) so that text drawn
+# dim (SGR 2) is told from typing; tmux carries attributes across lines, so the
+# dim state is tracked from the top of the capture. A colour's own parameters
+# (38;5;n, 38;2;r;g;b) are skipped, so colour index 2 is not mistaken for dim.
 input_box() {
     pane_alive || { echo none; return; }
-    LC_ALL=C tmux capture-pane -p -t "$PANE" 2>/dev/null \
+    LC_ALL=C tmux capture-pane -p -e -t "$PANE" 2>/dev/null \
         | LC_ALL=C sed "s/$NBSP/ /g" \
         | LC_ALL=C awk -v g="$GLYPH" -v r="$RULE" -v n="$TAILN" '
-            { line[NR] = $0 }
-            END {
-                last = NR; while (last > 0 && line[last] ~ /^[ \t]*$/) last--
-                first = last - n + 1; if (first < 2) first = 2
-                for (i = first; i <= last; i++)
-                    if (index(line[i], g) == 1 && index(line[i-1], r) == 1) {
-                        rest = substr(line[i], length(g) + 1); gsub(/[ \t]/, "", rest)
-                        st = (rest == "") ? "empty" : "typed"
+            function sgr(seq,   body, k, a, i, p) {
+                body = substr(seq, 3, length(seq) - 3)
+                k = split(body, a, ";")
+                if (k == 0) { dim = 0; return }
+                for (i = 1; i <= k; i++) {
+                    p = a[i]
+                    if (p == "" || p == "0" || p == "22") dim = 0
+                    else if (p == "2") dim = 1
+                    else if (p == "38" || p == "48" || p == "58") {
+                        if (a[i + 1] == "5") i += 2
+                        else if (a[i + 1] == "2") i += 4
                     }
-                print (st == "" ? "none" : st)
+                }
+            }
+            # Walk one raw line: update dim; past the glyph (after = 1 from the start
+            # when want = 0), collect visible text into typed / ph (dim placeholder).
+            function walk(s, want,   after, c) {
+                after = !want; typed = ""; ph = ""
+                while (length(s) > 0) {
+                    if (substr(s, 1, 1) == ESC) {
+                        if (match(s, CSI)) { if (substr(s, RLENGTH, 1) == "m") sgr(substr(s, 1, RLENGTH)); s = substr(s, RLENGTH + 1); continue }
+                        if (match(s, OSC)) { s = substr(s, RLENGTH + 1); continue }
+                        s = substr(s, 3); continue
+                    }
+                    if (!after) {
+                        if (substr(s, 1, length(g)) == g) { after = 1; s = substr(s, length(g) + 1); continue }
+                        s = substr(s, 2); continue
+                    }
+                    c = substr(s, 1, 1); s = substr(s, 2)
+                    if (c == " " || c == "\t") { if (dim) ph = ph " "; else typed = typed " "; continue }
+                    if (dim) ph = ph c; else typed = typed c
+                }
+            }
+            BEGIN {
+                ESC = sprintf("%c", 27); BEL = sprintf("%c", 7)
+                CSI = "^" ESC "\\[[0-9;?]*[ -/]*[@-~]"
+                OSC = "^" ESC "][^" BEL "]*" BEL
+            }
+            {
+                raw[NR] = $0; dim0[NR] = dim
+                walk($0, 0)
+                pl[NR] = typed ph
+            }
+            END {
+                last = NR; while (last > 0 && pl[last] ~ /^[ \t]*$/) last--
+                first = last - n + 1; if (first < 2) first = 2
+                box = 0
+                for (i = first; i <= last; i++)
+                    if (index(pl[i], g) == 1 && index(pl[i-1], r) == 1) box = i
+                if (!box) { print "none"; exit }
+                dim = dim0[box]; walk(raw[box], 1)
+                t = typed; gsub(/[ \t]/, "", t)
+                gsub(/\t/, " ", typed); gsub(/\t/, " ", ph)
+                if (t == "") printf "empty\tplaceholder=\"%s\"\n", substr(ph, 1, 80)
+                else printf "typed\ttext=\"%s\" placeholder=\"%s\"\n", substr(typed, 1, 80), substr(ph, 1, 40)
             }'
 }
 
-# Type "$1" into the pane once it is safe; 0 = typed, 1 = the agent is gone, 2 = never safe.
+# Type "$1" into the pane once it is safe, trying for $2 seconds; 0 = typed, 1 = the agent is gone,
+# 2 = never safe.
 deliver() {
-    local msg="[thyla-wake] $1${SAY:+ -- $SAY}" t0 cur box last_flash=0 now
+    local msg="[thyla-wake] $1${SAY:+ -- $SAY}" bound="$2" t0 cur box st last_flash=0 now
     t0=$(date +%s)
     while :; do
         pane_alive || { log agent-gone "pane $PANE no longer exists"; return 1; }
         cur=$(tmux display-message -p -t "$PANE" '#{pane_current_command}' 2>/dev/null)
         [ "$cur" = "$PROG" ] || { log agent-gone "pane $PANE now runs '$cur', not '$PROG'"; return 1; }
-        box=$(input_box)
-        if [ "$box" = empty ]; then
+        box=$(input_box); st=${box%%$'\t'*}
+        if [ "$st" = empty ]; then
             tmux send-keys -t "$PANE" -l -- "$msg"
             sleep 0.3
             tmux send-keys -t "$PANE" C-m
             sleep 2
-            log delivered "box after: $(input_box); $msg"
+            log delivered "box before: ${box//$'\t'/ }; after: $(input_box | cut -f1); $msg"
             return 0
         fi
         now=$(date +%s)
         if [ $((now - last_flash)) -ge 60 ]; then
-            tmux display-message -t "$PANE" -d 15000 "thyla-wake: $1 (waiting for an empty input box: $box)" 2>/dev/null
-            log waiting "input box: $box"
+            tmux display-message -t "$PANE" -d 15000 "thyla-wake: $1 (waiting for an empty input box: $st)" 2>/dev/null
+            log waiting "input box: ${box//$'\t'/ }"
             last_flash=$now
         fi
-        [ $((now - t0)) -ge "$DELIVER_BOUND" ] && { log undelivered "box never empty in ${DELIVER_BOUND}s: $msg"; return 2; }
+        [ $((now - t0)) -ge "$bound" ] && { log undelivered "box never empty in ${bound}s (last: ${box//$'\t'/ }): $msg"; return 2; }
         sleep 3
     done
 }
 
+release_lease() {  # $1 why
+    if "$YIP" release "$RES" >/dev/null 2>&1; then log released "$1"; else log release-failed "$1"; fi
+}
+
 run_hold() {
-    local hp hrc line out="$DIR/$$.hold"
+    local hp hrc line since out="$DIR/$$.hold"
     trap '[ -n "${hp:-}" ] && kill "$hp" 2>/dev/null; log cancelled "TERM while waiting"; rm -f "$DIR/$$.meta"; exit 143' TERM INT
     log armed "hold pane=$PANE prog=$PROG me=$ME for=$FOR wait=$WAIT"
     "$YIP" hold "$RES" "$REASON" --for "$FOR" --wait "$WAIT" > "$out" 2>&1 &
@@ -135,10 +194,15 @@ run_hold() {
     line=$(res_line "$RES")
     log hold-returned "rc=$hrc; $(head -1 "$out" 2>/dev/null); $line"
     if held_by_me "$line"; then
-        deliver "$RES is yours: HELD by $ME since $(stamp) (yip hold rc=$hrc). Set lease_update phase+pids for what you start; release the moment the cores free." \
-            || { [ $? -eq 1 ] && "$YIP" release "$RES" >/dev/null 2>&1 && log released "nobody left to tell about the lease"; }
+        since=$(stamp)
+        deliver "$RES is yours: HELD by $ME since $since (yip hold rc=$hrc). Set lease_update phase+pids for what you start; release the moment the cores free." "$HELD_BOUND"
+        case $? in
+            1) release_lease "nobody left to tell about the lease" ;;
+            2) release_lease "the wake could not be typed in ${HELD_BOUND}s, and a lease nobody knows about blocks every peer"
+               deliver "$RES WAS yours from $since, but your input box was not usable for ${HELD_BOUND}s, so the lease was RELEASED at $(stamp) for the next in the queue. Re-arm if you still want it." "$DELIVER_BOUND" ;;
+        esac
     else
-        deliver "$RES hold ended WITHOUT the lease at $(stamp) (yip hold rc=$hrc: $(head -1 "$out" 2>/dev/null | cut -c1-160)). Now: ${line:-no $RES line}. Re-arm if still wanted."
+        deliver "$RES hold ended WITHOUT the lease at $(stamp) (yip hold rc=$hrc: $(head -1 "$out" 2>/dev/null | cut -c1-160)). Now: ${line:-no $RES line}. Re-arm if still wanted." "$DELIVER_BOUND"
     fi
     rm -f "$DIR/$$.meta"
 }
@@ -151,7 +215,7 @@ run_watch() {
     while :; do
         line=$(res_line "$RES")
         if printf '%s' "$line" | grep -qE "^$RES +FREE" || held_by_me "$line"; then
-            deliver "$RES changed at $(stamp): $line"
+            deliver "$RES changed at $(stamp): $line" "$DELIVER_BOUND"
             break
         fi
         [ $(( $(date +%s) - t0 )) -ge "$BOUND" ] && { log watch-timeout "no change in ${BOUND}s"; break; }
@@ -226,7 +290,9 @@ probe() {
     if pane_alive; then echo "program : $(tmux display-message -p -t "$PANE" '#{pane_current_command}')"
     else echo "program : <no such pane>"; fi
     echo "me      : $(me)"
-    echo "box     : $(input_box)"
+    local box; box=$(input_box)
+    echo "box     : ${box%%$'\t'*}"
+    case "$box" in *$'\t'*) echo "boxtext : ${box#*$'\t'}" ;; esac
     "$YIP" resources 2>/dev/null | grep -E '^[a-z]+ ' | sed 's/^/yip     : /'
 }
 

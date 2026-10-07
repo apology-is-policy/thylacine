@@ -1,6 +1,7 @@
 #!/bin/bash
 # Controls for tools/thyla-wake.sh. T0-T4 read the real yip (`watch pi` only reads; no lease is
-# taken); T5-T9 run against fakeyip.sh, so every lease state is canned and no real lease moves.
+# taken); T5-T12 run against fakeyip.sh, so every lease state is canned and no real lease moves.
+# T10 judges exact screen bytes through a stand-in tmux (tmuxshim.sh, fixtures.py).
 # Every pane typed into is a throwaway one in the tmux session thyla-wake-test, running fakebox.py.
 # Usage: tools/thyla-wake-test/run.sh   (inside tmux, from a checkout on a yip line)
 set -u
@@ -122,6 +123,40 @@ sleep 2
 [ "$(grep -c '	cancelled	' "$THYLA_WAKE_DIR/log.tsv")" = 2 ] && pass "T9 two cancelled lines" || fail "T9 cancelled lines: $(grep -c cancelled "$THYLA_WAKE_DIR/log.tsv")"
 [ ! -s "$o" ] && pass "T9 nothing typed" || fail "T9 typed: $(cat "$o")"
 pgrep -f "fakeyip.sh hold mac T9" >/dev/null && fail "T9 the hold child outlived cancel" || pass "T9 hold child gone"
+
+echo "== T10 the box parser on exact bytes (a stand-in tmux replays each fixture; f1 is a measured idle pane)"
+FX=$WORK/fx; mkdir -p "$FX/bin"; cp "$T/tmuxshim.sh" "$FX/bin/tmux"; python3 -I "$T/fixtures.py" "$FX"
+nfx=0
+for f in "$FX"/*.txt; do
+    want=$(basename "$f" .txt); want=${want##*.}; nfx=$((nfx+1))
+    got=$(SHIM_CAPTURE=$f PATH=$FX/bin:$PATH "$W" probe %7 | sed -n 's/^box *: //p')
+    [ "$got" = "$want" ] && pass "T10 $(basename "$f" .txt) reads $want" || fail "T10 $(basename "$f") reads '$got', want $want"
+done
+[ "$nfx" = 8 ] && pass "T10 all 8 fixtures judged" || fail "T10 judged $nfx fixtures, want 8"
+got=$(SHIM_CAPTURE=$FX/f1_measured.empty.txt PATH=$FX/bin:$PATH "$W" probe %7 | sed -n 's/^boxtext *: //p')
+[ "$got" = 'placeholder="keep going"' ] && pass "T10 probe names the dim suggestion" || fail "T10 boxtext '$got'"
+
+echo "== T11 a dim suggestion in a real pane is an empty box: the wake is typed"
+setres "HELD by main for 2m, 1.0h left"
+o=$WORK/o11; : > "$o"; p=$(pane "python3 -I $T/fakebox.py $o placeholder"); sleep 1
+b=$(boxof "$p"); [ "$b" = empty ] && pass "T11 the suggestion box reads empty" || fail "T11 suggestion box reads '$b'"
+TMUX_PANE=$p "$W" watch pi --say "T11" >/dev/null || fail "T11 arm"
+sleep 5
+grep -q '^\[thyla-wake\] pi changed at .*: pi  *FREE -- T11$' "$o" && [ "$(lines "$o")" = 1 ] \
+    && pass "T11 one wake line" || fail "T11 got: $(cat "$o")"
+
+echo "== T12 hold granted but the box stays typed past the held bound -> released, then told"
+: > "$F/calls"; setres "HELD by you for 0s, 6.0h left"; echo "HELD" > "$F/hold.out"; echo 0 > "$F/hold.rc"; echo 1 > "$F/hold.sleep"
+o=$WORK/o12; : > "$o"; p=$(pane "python3 -I $T/fakebox.py $o draft"); sleep 1
+THYLA_WAKE_HELD_BOUND=4 TMUX_PANE=$p "$W" hold mac "T12" --say "T12" >/dev/null || fail "T12 arm"
+sleep 9
+grep -qx 'release mac' "$F/calls" && pass "T12 released at the bound" || fail "T12 calls: $(cat "$F/calls")"
+[ ! -s "$o" ] && pass "T12 nothing typed into the draft" || fail "T12 typed into the draft: $(cat "$o")"
+grep -q "	released	the wake could not be typed in 4s" "$THYLA_WAKE_DIR/log.tsv" && pass "T12 the release is logged" || fail "T12 no released line"
+grep -q '	waiting	input box: typed text=" hello draft"' "$THYLA_WAKE_DIR/log.tsv" && pass "T12 the wait logs what the box held" || fail "T12 no box text in the waiting line"
+sleep 10
+grep -q '^\[thyla-wake\] mac WAS yours from [0-9:]*Z, but your input box was not usable for 4s, so the lease was RELEASED at [0-9:]*Z .* -- T12$' "$o" \
+    && [ "$(lines "$o")" = 1 ] && pass "T12 told, once the box emptied" || fail "T12 got: $(cat "$o")"
 
 echo "== log"; cat "$THYLA_WAKE_DIR/log.tsv" | cut -c1-200
 tmux kill-session -t thyla-wake-test 2>/dev/null
