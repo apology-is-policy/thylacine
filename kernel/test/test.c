@@ -897,6 +897,7 @@ void test_spoor_ref_lifecycle(void);
 void test_spoor_clone_lifecycle(void);
 void test_spoor_clone_copies_state(void);
 void test_spoor_clunk_dispatches_close(void);
+void test_spoor_close_error_reaches_close_syscall(void);
 void test_spoor_alloc_10k_no_leak(void);
 void test_trivial_devs_bestiary_smoke(void);
 void test_null_attach_open_close(void);
@@ -1882,6 +1883,7 @@ void test_dev9p_wb_coalesce_one_twrite(void);
 void test_dev9p_wb_overlay_read(void);
 void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3054,6 +3056,7 @@ struct test_case g_tests[] = {
     { "spoor.clone_lifecycle",         test_spoor_clone_lifecycle,         false, NULL },
     { "spoor.clone_copies_state",      test_spoor_clone_copies_state,      false, NULL },
     { "spoor.clunk_dispatches_close",  test_spoor_clunk_dispatches_close,  false, NULL },
+    { "spoor.close_error_is_eio",      test_spoor_close_error_reaches_close_syscall, false, NULL },
     { "spoor.alloc_10k_no_leak",       test_spoor_alloc_10k_no_leak,       false, NULL },
     { "trivial_devs.bestiary_smoke",   test_trivial_devs_bestiary_smoke,   false, NULL },
     { "null.attach_open_close",        test_null_attach_open_close,        false, NULL },
@@ -4220,6 +4223,7 @@ struct test_case g_tests[] = {
     { "dev9p.wb_overlay_read",         test_dev9p_wb_overlay_read,             false, NULL },
     { "dev9p.wb_flush_at_close",       test_dev9p_wb_flush_at_close,           false, NULL },
     { "dev9p.wb_fsync_flush_and_error", test_dev9p_wb_fsync_flush_and_error,   false, NULL },
+    { "dev9p.wb_close_returns_flush_error", test_dev9p_wb_close_returns_flush_error, false, NULL },
     { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },

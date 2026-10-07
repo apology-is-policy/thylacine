@@ -974,11 +974,12 @@ void test_burrow_munmap_range_empty_ok(void) {
 static int g_f1_close_calls   = 0;
 static u32 g_f1_close_preempt = 0xffffffffu;   // sentinel: "close never ran"
 
-static void f1_stub_close(struct Spoor *c) {
+static int f1_stub_close(struct Spoor *c) {
     (void)c;
     g_f1_close_calls++;
     struct Thread *t = current_thread();
     g_f1_close_preempt = t ? t->preempt_count : 0xdeadu;
+    return 0;
 }
 
 // A minimal read so the FILE Burrow's backing Dev is byte-I/O-able (never

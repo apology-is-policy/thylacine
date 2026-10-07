@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -39,6 +39,7 @@ struct Spoor *spoor_alloc(struct Dev *d);             // ref 1; NULL on d==NULL 
 void          spoor_ref(struct Spoor *c);             // +1; extincts on NULL/corrupt/pre<=0
 void          spoor_unref(struct Spoor *c);           // -1, free at 0; NO dev->close
 void          spoor_clunk(struct Spoor *c);           // -1, dev->close THEN free at 0
+int           spoor_clunk_rc(struct Spoor *c);        // spoor_clunk; returns dev->close's result
 struct Spoor *spoor_clone(struct Spoor *c);           // fresh Spoor, copied state, ref 1
 u64           spoor_next_devno(void);                 // monotonic from 1; never wraps, never reused
 int           spoor_stat_native(struct Spoor *c, struct t_stat *out);
@@ -55,6 +56,9 @@ wrong one is a live bug class rather than a style question:
 - **`spoor_clunk` is the general "I am done with this" entry.** On the
   last drop it runs `dev->close` before freeing. Dev close hooks may
   assume one-shot semantics — nothing calls them twice on one Spoor.
+  `spoor_clunk_rc` is the same drop returning the hook's result: 0, or the
+  hook's negative error when this drop was the last (2026-10-07; the
+  handle layer carries it to `close(2)`'s `EIO`, [[sub-kernel-handle]]).
 - **`spoor_unref` is the pure refcount drop**, for a caller that knows
   the per-Dev state was never wired up or has already been torn down.
   Its production use is the failure-unwind in the walk syscalls, where

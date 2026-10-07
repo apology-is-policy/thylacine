@@ -1822,8 +1822,9 @@ static struct Spoor *devcons_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
-static void devcons_close(struct Spoor *c) {
+static int devcons_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 // =============================================================================

@@ -251,12 +251,16 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
                     rights_t rights, void *obj);
 
 // Release a handle. Returns 0 on success, -1 if the slot is empty
-// (already-closed or never-allocated) or out-of-range. At v1.0 P2-Fc
-// the underlying kobj is NOT reference-counted; close just zeros the
-// slot.
+// (already-closed or never-allocated) or out-of-range. The slot is zeroed
+// under the table lock; the object's release (a Spoor's clunk, which may
+// sleep) runs after.
 //
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
+
+// handle_close that also returns, in *close_rc, what the object's last close
+// reported: 0, or a Dev close hook's negative error (close(2)'s EIO).
+int handle_close_report(struct Proc *p, hidx_t h, int *close_rc);
 
 // Swap what a LIVE handle denotes, in place, keeping the same slot index.
 // Returns 0 on success, -1 on any refusal (out-of-range h, empty slot, bad

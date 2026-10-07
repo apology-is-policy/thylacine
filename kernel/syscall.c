@@ -1985,9 +1985,10 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
 // SYS_CLOSE / SYS_DUP — handle table operations (P5-fd-syscalls).
 // =============================================================================
 //
-// SYS_CLOSE(fd) → 0 on success, -1 on invalid fd. Thin wrapper over
-//                 handle_close. For KOBJ_SPOOR handles, the release
-//                 path (wired at P5-fd-pipe) routes to spoor_clunk.
+// SYS_CLOSE(fd) → 0; -T_E_BADF on an invalid fd; -T_E_IO when the last
+//                 close's Dev hook failed (the fd is closed either way).
+//                 For KOBJ_SPOOR handles the release routes to
+//                 spoor_clunk_rc.
 //
 // SYS_DUP(oldfd, new_rights) → new fd (>=0) on success, -1 on bad
 //                              oldfd / rights elevation / table-full.
@@ -1998,17 +1999,32 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
 //                              spoor_ref so each handle independently
 //                              holds a reference.
 
+// #100 (ER-3): handle_close's own -1 means "no such slot / not a live handle"
+// -- EBADF. Mapped HERE rather than inside handle_close so the internal
+// contract (and its ~20 kernel callers, which test == 0 or ignore the result)
+// stays byte-unchanged. ARCH 21.11: a last close whose Dev hook failed (dev9p's
+// write-behind flush, now or latched earlier) is EIO, and the fd is closed all
+// the same -- POSIX leaves the descriptor's state unspecified after an EIO
+// close, and Linux, like us, never leaves it open.
+static s64 sys_close_in(struct Proc *p, u64 hraw) {
+    int crc;
+    if (handle_close_report(p, (hidx_t)hraw, &crc) != 0)
+        return (s64)(-T_E_BADF);
+    return crc < 0 ? (s64)(-T_E_IO) : 0;
+}
+
 static s64 sys_close_handler(u64 hraw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    // #100 (ER-3): handle_close's own -1 means "no such slot / not a live
-    // handle" -- EBADF, the only failure close(2) has. Mapped HERE rather than
-    // inside handle_close so the internal contract (and its ~20 kernel callers,
-    // which test == 0 or ignore the result) stays byte-unchanged.
-    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF);
+    return sys_close_in(p, hraw);
 }
+
+#ifdef KERNEL_TESTS
+s64 sys_close_for_test(struct Proc *p, u64 h);
+s64 sys_close_for_test(struct Proc *p, u64 h) { return sys_close_in(p, h); }
+#endif
 
 // =============================================================================
 // SYS_FSTAT / SYS_LSEEK — POSIX-shaped file-metadata + seek surfaces.

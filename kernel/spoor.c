@@ -274,8 +274,8 @@ void spoor_devno_advance_for_test(u64 v) {
 }
 #endif
 
-void spoor_clunk(struct Spoor *c) {
-    if (!c) return;
+int spoor_clunk_rc(struct Spoor *c) {
+    if (!c) return 0;
     if (c->magic != SPOOR_MAGIC)
         extinction("spoor_clunk of corrupted Spoor (use-after-free?)");
 
@@ -304,14 +304,20 @@ void spoor_clunk(struct Spoor *c) {
     int pre = t_atomic_fetch_sub_acqrel_int(&c->ref, 1);
     if (pre <= 0)
         extinction("spoor_clunk of zero-ref Spoor");
+    int rc = 0;
     if (pre == 1) {
         // Last drop. Run Dev close hook (releases per-Spoor aux),
         // then free. The close hook sees ref=0 but storage is intact.
         if (c->dev && c->dev->close) {
-            c->dev->close(c);
+            rc = c->dev->close(c);
         }
         spoor_free_internal(c);
     }
+    return rc;
+}
+
+void spoor_clunk(struct Spoor *c) {
+    (void)spoor_clunk_rc(c);
 }
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }

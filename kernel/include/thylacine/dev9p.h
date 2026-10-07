@@ -168,8 +168,8 @@ struct dev9p_priv {
     // realloc -- a flusher reads wb_buf outside the lock) and concurrent
     // writes go write-through; readers overlay the still-visible run.
     // wb_err latches the first flush failure (positive errno); once set,
-    // every subsequent write/fsync on this fd returns it (the voted NFS
-    // error model) and the run is dropped.
+    // every subsequent write/fsync on this fd, and its last close, returns
+    // it (the voted NFS error model) and the run is dropped.
     spin_lock_t               wb_lock;
     bool                      wb_eligible;  // create/OTRUNC-born + loose+cacheable plain file
     bool                      wb_known;     // wb_base is the file's true current end

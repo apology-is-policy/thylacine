@@ -1100,8 +1100,9 @@ static struct Spoor *devctl_create(struct Spoor *c, const char *name, int omode,
     return NULL;
 }
 
-static void devctl_close(struct Spoor *c) {
+static int devctl_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 // prowl-1 bumped 512 -> 2048: /ctl/procs formats the WHOLE listing into this

@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -76,9 +76,11 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    guarded) → `weft_binding_release`.
 3. Cached-open: free `co_buf` + uncharge the global budget.
 4. Write-behind: flush the staged run (the fid must still be live for the
-   flush Twrites) — best-effort; a failure latches-and-drops (`Dev.close`
-   is void at v1.0, [[seam-wb-close-flush-slot]]) — then free the buffer +
-   uncharge.
+   flush Twrites); a failure latches and drops the run, and the close
+   returns it -- or the failure the latch kept from an earlier flush -- which
+   `close(2)` reports as `EIO` (2026-10-07, ARCH section 21.11; until then
+   `Dev.close` was void and the failure was silent,
+   [[seam-wb-close-flush-slot]]) — then free the buffer + uncharge.
 5. `fid_owned`: **G2 donate or async clunk.** An unopened (COPEN clear)
    DIRECTORY fid on a cacheable client, not `fid_suspect`, and not staled
    (`larder_qid_staled_since` over the G4 ring since `fid_gen`) PARKS in

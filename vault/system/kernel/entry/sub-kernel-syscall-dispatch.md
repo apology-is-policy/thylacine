@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -143,7 +143,10 @@ distinguishable things:
   unrelated file's operation and a dial verb written to a stranger's connection.
   The hook is deliberately not a translation row: `close` must stay a plain
   renumber that falls through, so descriptor teardown keeps exactly one
-  implementation. And a phenotyped `read`, `write`, `readv`, `writev`,
+  implementation. That implementation, `SYS_CLOSE`, returns `-EBADF` for a dead
+  descriptor and, since 2026-10-07, `-EIO` when the last close's Dev hook failed
+  (a dev9p write-behind flush) -- the descriptor gone either way
+  ([[sub-kernel-handle]]'s `handle_close_report`). And a phenotyped `read`, `write`, `readv`, `writev`,
   `pread64` or `pwrite64` on a socket whose connect a signal interrupted
   finishes that connect first
   (`viv_sock_finish_before_io`, 2026-09-30): the fd still names `ctl` until the

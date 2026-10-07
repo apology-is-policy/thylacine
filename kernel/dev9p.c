@@ -358,8 +358,8 @@ void dev9p_wb_budget_bias_for_test(s64 n) {
 //
 // On failure the run is DROPPED and the errno latched (the voted NFS-async
 // posture: the bytes are lost, the latch reports it via every subsequent
-// write/fsync -- retry-forever would wedge close). The buffer itself stays
-// allocated (freed at dev9p_close).
+// write/fsync and the last close -- retry-forever would wedge close). The
+// buffer itself stays allocated (freed at dev9p_close).
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     while (p->wb_flushers != 0) {
         spin_unlock(&p->wb_lock);
@@ -1592,9 +1592,9 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     return c;
 }
 
-static void dev9p_close(struct Spoor *c) {
+static int dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
-    if (!p) return;
+    if (!p) return 0;
 
     // net-6b-2b + #294: release the readiness poll-state (if this was a netd
     // `ready` file). A registered poller holds the Spoor obj-ref, so poll_list is
@@ -1662,15 +1662,18 @@ static void dev9p_close(struct Spoor *c) {
     // below (the fid must be live for the flush Twrites -- a Tclunk racing
     // ahead would write to a dead fid). LAST-ref runs here (the cached-open/
     // weft invariant), so no concurrent op exists on this priv: the plain
-    // wb_len read and the uncontended flush are sound; wb_flushers is 0. A
-    // flush failure latches + drops -- the Dev.close slot is void at v1.0
-    // (documented seam; fsync is the reliable error channel). Then release
-    // the buffer + the global budget (unconditional on wb_buf: a wstat-
-    // de-eligibilized priv still owns its buffer).
+    // wb_len/wb_err reads and the uncontended flush are sound; wb_flushers is
+    // 0. The close returns this flush's failure, or the one the latch kept
+    // from an earlier flush, and close(2) reports it as EIO (ARCH 21.11).
+    // Then release the buffer + the global budget (unconditional on wb_buf:
+    // a wstat-de-eligibilized priv still owns its buffer).
+    int crc = 0;
     if (p->wb_len) {
         spin_lock(&p->wb_lock);
-        (void)wb_flush_locked(p, c->qid.path);
+        crc = wb_flush_locked(p, c->qid.path);
         spin_unlock(&p->wb_lock);
+    } else if (p->wb_err) {
+        crc = -(p->wb_err);
     }
     if (p->wb_buf) {
         kfree(p->wb_buf);
@@ -1756,6 +1759,7 @@ static void dev9p_close(struct Spoor *c) {
     p->magic = 0;
     kfree(p);
     c->aux = NULL;
+    return crc;
 }
 
 static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {

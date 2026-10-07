@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -32,6 +32,16 @@ be the interface's simplest possible instances. Each substantial Dev
 has its own dossier.
 
 ## Contract
+
+**`Dev.close` returns `int` (2026-10-07).** Plan 9's close is `void`; ours
+returns 0, or a negative error for work the close could not finish. Only
+[[sub-kernel-ninep-dev9p]] has such work -- its last close flushes write-behind
+data, which Plan 9's mount driver never holds -- and every other Dev returns 0.
+The hook still runs only on the last drop, and [[sub-kernel-spoor]]'s
+`spoor_clunk_rc` hands its result up; `close(2)` reports a negative as `EIO`
+once the fd is gone (ARCH section 21.11, `dec-2026-10-07-close-eio`). Every
+other path that drops a Spoor -- exit, close-on-exec, `dup2` over an open fd, a
+Loom reap -- ignores it, as POSIX's do.
 
 **`spoor_open_errno` (U, 2026-09-23).** A `Dev.open` returns a `Spoor *` with no
 room for an errno, so a Dev that wants to report a specific cause for a FAILED

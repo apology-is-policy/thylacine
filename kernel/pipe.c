@@ -288,9 +288,9 @@ static int pipe_block_locked(struct pipe_ring *r) {
     return rc;
 }
 
-static void devpipe_close(struct Spoor *c) {
+static int devpipe_close(struct Spoor *c) {
     struct pipe_endpoint *p = priv_of(c);
-    if (!p) return;
+    if (!p) return 0;
     struct pipe_ring *r = p->ring;
     if (!r || r->magic != PIPE_RING_MAGIC) {
         extinction("pipe: close on endpoint with corrupted ring");
@@ -333,6 +333,7 @@ static void devpipe_close(struct Spoor *c) {
     p->magic = 0;
     kmem_cache_free(g_endpoint_cache, p);
     c->aux = NULL;
+    return 0;
 }
 
 bool pipe_hangup_write(struct Spoor *c) {

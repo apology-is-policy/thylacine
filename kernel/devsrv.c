@@ -1157,8 +1157,8 @@ static struct Spoor *devsrv_create(struct Spoor *c, const char *name, int omode,
 // so the peer wakes, then release the reference. A Spoor with aux == NULL
 // (a failed/transient walk clone normalized in devsrv_walk) is a clean
 // no-op.
-static void devsrv_close(struct Spoor *c) {
-    if (!c || c->dc != 's' || !c->aux) return;   // root sans-reg / transient — no-op
+static int devsrv_close(struct Spoor *c) {
+    if (!c || c->dc != 's' || !c->aux) return 0;   // root sans-reg / transient — no-op
     u64 m = *(const u64 *)c->aux;
     if (m == SRV_REGISTRY_MAGIC) {
         // A /srv root instance: drop its registry ref (the last drop drains
@@ -1202,6 +1202,7 @@ static void devsrv_close(struct Spoor *c) {
         extinction("devsrv_close: Spoor aux has unknown magic (corruption)");
     }
     c->aux = NULL;
+    return 0;
 }
 
 // read — a connection Spoor's read drains the c2s ring (the bytes the

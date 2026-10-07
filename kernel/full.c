@@ -50,8 +50,9 @@ static struct Spoor *devfull_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
-static void devfull_close(struct Spoor *c) {
+static int devfull_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 // Read: NUL-fill the caller's buffer (same shape as devzero). The

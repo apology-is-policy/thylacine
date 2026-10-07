@@ -75,6 +75,7 @@ void test_dev9p_wb_coalesce_one_twrite(void);
 void test_dev9p_wb_overlay_read(void);
 void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -3475,9 +3476,41 @@ void test_dev9p_wb_fsync_flush_and_error(void) {
     fe = dev9p.fsync(f, 0);
     TEST_EXPECT_EQ((u64)(-fe), 28ull, "subsequent fsync returns the latch");
     u32 tw_before_close = g_twrite_seen;
-    spoor_clunk(f);
+    int crc = spoor_clunk_rc(f);
     TEST_EXPECT_EQ((u64)g_twrite_seen, (u64)tw_before_close,
                    "close emits no Twrite (the run was dropped)");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
+                   "the last close returns the latched errno too");
+    wb_test_end(root);
+}
+
+// The close flush's failure is the close's result. The control, one variable
+// away: the same staged run, flushed without a failure, closes with 0.
+void test_dev9p_wb_close_returns_flush_error(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (control)");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage (control)");
+    int crc = spoor_clunk_rc(f);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "the close flushed (control)");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "a close whose flush succeeds returns 0");
+    wb_test_end(root);
+
+    root = NULL;
+    f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    crc = spoor_clunk_rc(f);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "the close flushed");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
+                   "a close whose flush fails returns its errno");
     wb_test_end(root);
 }
 

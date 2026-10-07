@@ -364,6 +364,10 @@ void spoor_devno_advance_for_test(u64 v);
 // NULL is a safe no-op.
 void spoor_clunk(struct Spoor *c);
 
+// spoor_clunk that returns the Dev close hook's result: 0, or the hook's
+// negative error on the last drop (0 while another holder keeps the Spoor).
+int spoor_clunk_rc(struct Spoor *c);
+
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:
 //   - spoor_total_allocated increments on every successful spoor_alloc /

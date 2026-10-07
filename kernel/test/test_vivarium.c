@@ -4661,7 +4661,7 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
 // Dev (never registered) whose close counts into a counter of that Spoor's own
 // (aux) -- so "released exactly once" is asserted of EACH Spoor, where a total
 // would let a double release of one and a leak of another cancel out.
-static void viv_ready_stub_close(struct Spoor *c) { (*(u32 *)c->aux)++; }
+static int viv_ready_stub_close(struct Spoor *c) { (*(u32 *)c->aux)++; return 0; }
 static struct Dev g_viv_ready_stub_dev = {
     .dc    = (int)'+',
     .name  = "vivreadystub",

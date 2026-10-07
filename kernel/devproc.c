@@ -1016,7 +1016,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     return 1;                                        // matched -> stop
 }
 
-static void devproc_close(struct Spoor *c) {
+static int devproc_close(struct Spoor *c) {
     // 8a-1b (I-39, DEBUG-FS §7.2): the handle-lifetime-tied stop ownership. If
     // this ctl Spoor holds a debug attach slot (CDEBUGOWNER), releasing the fd —
     // by explicit close, or by debugger death closing its handles at exit
@@ -1031,6 +1031,7 @@ static void devproc_close(struct Spoor *c) {
         proc_for_each(devproc_debug_release_cb, &r);
     }
     dev_simple_close(c);
+    return 0;
 }
 
 // Read: dispatch by qid kind. Generates synthetic content into a stack

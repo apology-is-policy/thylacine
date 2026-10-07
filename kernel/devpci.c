@@ -344,8 +344,9 @@ static struct Spoor *devpci_create(struct Spoor *c, const char *name, int omode,
     return NULL;     // read-only inventory
 }
 
-static void devpci_close(struct Spoor *c) {
+static int devpci_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 static long devpci_read(struct Spoor *c, void *buf, long n, s64 off) {

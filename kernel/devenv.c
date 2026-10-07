@@ -252,8 +252,9 @@ static struct Spoor *devenv_create(struct Spoor *c, const char *name, int omode,
     return c;
 }
 
-static void devenv_close(struct Spoor *c) {
+static int devenv_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 static long devenv_read(struct Spoor *c, void *buf, long n, s64 off) {

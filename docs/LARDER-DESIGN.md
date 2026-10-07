@@ -731,10 +731,11 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   write/fsync on that fd returns the latched errno (so a streaming writer
   aborts at the next op); **fsync is the reliable error channel**. A failed
   flush DROPS the staged run (the NFS-async posture: the bytes are lost, the
-  latch reports it — retry-forever would wedge close). The
-  `Dev.close` slot is `void` at v1.0, so a close-flush failure cannot reach
-  the caller's close() return — documented seam; v1.x grows the slot. The
-  threshold flushes bound the silently-at-risk tail to < 256 KiB.
+  latch reports it — retry-forever would wedge close). The last close
+  returns a close-flush failure, or one the latch kept, and close(2)
+  reports it as `EIO` (ARCH 21.11, `dec-2026-10-07-close-eio`; until
+  2026-10-07 `Dev.close` was `void` and a close-flush failure was silent).
+  The threshold flushes bound the tail a failure can drop to < 256 KiB.
 - **Unlink** of a closed staged file needs nothing (the flush happened at
   close). An unlink-while-open flushes at close into the orphaned fid
   (9P keeps the fid live until clunk) — harmless; the skip-flush-on-unlinked

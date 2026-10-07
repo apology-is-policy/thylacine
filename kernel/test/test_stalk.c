@@ -543,7 +543,7 @@ static struct Spoor *fix_create(struct Spoor *nc, const char *name, int omode,
     return nc;
 }
 
-static void fix_close(struct Spoor *c) { (void)c; /* qid-based: no heap aux */ }
+static int fix_close(struct Spoor *c) { (void)c; return 0; /* qid-based: no heap aux */ }
 
 // D-1: the fixture readlink. Counted so a test can prove the resolver issued
 // exactly the expansions it should (a chain costs two, a cached answer would

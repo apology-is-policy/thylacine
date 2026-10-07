@@ -256,11 +256,14 @@ struct Dev {
     //                    spoor_clunks c, which clunks the walked fid).
     //                    A read-only Dev returns NULL.
     //   close(c)       — release any per-Spoor resources held while open.
-    //                    Called by spoor_clunk on its way to spoor_unref.
+    //                    Called by spoor_clunk on the last drop. Returns 0,
+    //                    or a negative error for work the close could not
+    //                    finish (dev9p: its write-behind flush); close(2)
+    //                    reports that as EIO.
     struct Spoor *(*open)(struct Spoor *c, int omode);
     struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
                             u32 perm, u32 gid);
-    void          (*close)(struct Spoor *c);
+    int           (*close)(struct Spoor *c);
 
     // I/O.
     //   read / write   — byte-stream I/O at offset.

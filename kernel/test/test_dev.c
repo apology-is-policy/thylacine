@@ -29,6 +29,9 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
+#include <thylacine/handle.h>
+#include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -41,6 +44,8 @@ void test_spoor_ref_lifecycle(void);
 void test_spoor_clone_lifecycle(void);
 void test_spoor_clone_copies_state(void);
 void test_spoor_clunk_dispatches_close(void);
+void test_spoor_close_error_reaches_close_syscall(void);
+s64 sys_close_for_test(struct Proc *p, u64 h);
 void test_spoor_alloc_10k_no_leak(void);
 
 // =============================================================================
@@ -72,10 +77,12 @@ static u64 free_since_snap(void) {
 // =============================================================================
 
 static int g_test_dev_close_calls;
+static int g_test_dev_close_rc;      // what the close hook returns
 
-static void test_only_dev_close(struct Spoor *c) {
+static int test_only_dev_close(struct Spoor *c) {
     (void)c;
     g_test_dev_close_calls++;
+    return g_test_dev_close_rc;
 }
 
 static struct Dev g_test_only_dev = {
@@ -361,6 +368,40 @@ void test_spoor_clunk_dispatches_close(void) {
 
     TEST_EXPECT_EQ(g_test_dev_close_calls, before + 1,
                    "spoor_clunk dispatches dev->close exactly once");
+}
+
+// A Dev close hook's error is close(2)'s EIO, at the LAST close only: while a
+// dup holds the Spoor a close returns 0 and runs no hook; the last close runs
+// it, returns -T_E_IO, and the fd is gone all the same. The control, one
+// variable away: a hook returning 0 makes the last close 0.
+static void close_leg(struct Proc *pr, int hook_rc, s64 want) {
+    struct Spoor *c = spoor_alloc(&g_test_only_dev);
+    TEST_ASSERT(c != NULL, "alloc on test-only dev succeeds");
+    hidx_t h1 = handle_alloc(pr, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, c);
+    TEST_ASSERT(h1 >= 0, "the Spoor is installed as an fd");
+    hidx_t h2 = handle_dup(pr, h1, RIGHT_READ | RIGHT_WRITE);
+    TEST_ASSERT(h2 >= 0, "and dup'd");
+    int calls = g_test_dev_close_calls;
+    g_test_dev_close_rc = hook_rc;
+    TEST_EXPECT_EQ(sys_close_for_test(pr, (u64)h1), 0,
+                   "a close while a dup holds the Spoor returns 0");
+    TEST_EXPECT_EQ(g_test_dev_close_calls, calls, "and runs no close hook");
+    s64 rc = sys_close_for_test(pr, (u64)h2);
+    g_test_dev_close_rc = 0;
+    TEST_EXPECT_EQ(g_test_dev_close_calls, calls + 1, "the last close runs the hook");
+    TEST_EXPECT_EQ(rc, want, "the last close returns what the hook's result maps to");
+    TEST_EXPECT_EQ(sys_close_for_test(pr, (u64)h2), (s64)-T_E_BADF,
+                   "the fd is closed either way");
+}
+
+void test_spoor_close_error_reaches_close_syscall(void) {
+    register_test_only_dev_once();
+    struct Proc *pr = proc_alloc();
+    TEST_ASSERT(pr != NULL, "proc");
+    close_leg(pr, 0, 0);                    // control: a clean hook
+    close_leg(pr, -28, (s64)-T_E_IO);       // a failing hook (ENOSPC) -> EIO
+    pr->state = PROC_STATE_ZOMBIE;
+    proc_free(pr);
 }
 
 void test_spoor_alloc_10k_no_leak(void) {
