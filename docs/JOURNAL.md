@@ -472,10 +472,16 @@ dotfile and my `ls` had no -a.
 
 And four committed files carried stamps an hour fast: 14:1xZ for events at
 13:1xZ. Not a guess this time but a mechanism, which is why it is worth the
-line -- `ls` prints LOCAL time, UTC+1 today, and I transcribed those mtimes with
-a Z. Third timestamp slip today and the first to reach provenance files, which
-is exactly where a wrong stamp does damage, because a preservation manifest is
-read later by someone reconstructing an order of events.
+line -- `ls` prints LOCAL time, which was UTC+1 at that moment, and I
+transcribed those mtimes with a Z. Third timestamp slip today and the first to
+reach provenance files, which is exactly where a wrong stamp does damage, because
+a preservation manifest is read later by someone reconstructing an order of
+events. NARROWED LATER THE SAME DAY, because the fix I wrote down was itself a
+remembered constant: the host's /etc/localtime was relinked to Europe/Prague
+mid-session and the offset became +0200. Measured off my own commits -- every one
+up to 14:03:15Z carries +0100, the 14:57:52Z one carries +0200 -- so a stamp read
+from `ls` either side of that boundary is wrong by a different amount. The lesson
+is not "subtract an hour" but that there is no offset to carry: read UTC.
 
 ### Two measurements that dissolved questions instead of answering them
 

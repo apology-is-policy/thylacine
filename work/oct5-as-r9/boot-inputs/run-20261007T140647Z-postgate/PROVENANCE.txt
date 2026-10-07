@@ -1,0 +1,27 @@
+run      : run-20261007T140647Z
+phase    : postgate
+taken    : 2026-10-07T15:22:38Z
+flavour  : build/.config says SANITIZE=ubsan -> undefined
+           (this call expected undefined)
+reads    : QEMU boots thylacine.bin, NEVER the .elf (run-vm.sh:35).
+           The pre-boot pool is pool.img.baked-snapshot, which
+           pool_restore copies over pool.img before EVERY boot
+           (smp-multiboot.sh:286); the live pool.img is what the last
+           boot LEFT and is deliberately not preserved.
+           system.key and its .baked-snapshot must be equal for that
+           restore to be legal (smp-multiboot.sh:281).
+complete : a generation is a COMPLETE boot-input set, never a diff
+           against another generation -- the gate rebakes ramfs, pool
+           and key, so the two generations of one run differ.
+NOTE     : preserved RETROACTIVELY at the stamp above, not inside the run.
+           The step that should have written it had no post-gate call at all --
+           that is the defect this fix closes (see PRESERVE-STEP-DEFECTS.md), so
+           build/kernel-undefined was recorded ABSENT by the run itself. The run
+           stamp names the gate run these artifacts came from
+           (work/oct5-as-r9/run-20261007T140647Z.log). Their mtimes, measured
+           with TZ=UTC stat: 14:07:25Z default .bin, 14:10:59Z sanitizer .bin,
+           14:11:25Z ramfs, 14:11:23Z pool snapshot.
+           CROSS-CHECKED, not self-certified: astra independently named this set
+           on 0161 t47 and all five hashes she quoted -- 5ced18c43ae8302a,
+           e266c931d9668a44, 988debebc9a4f803, 9a9252b1e92140cb,
+           947dd838eb890f66 -- agree with HASHES.txt here.

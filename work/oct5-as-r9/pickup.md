@@ -687,9 +687,15 @@ owning dossiers' pass needs `quaestor`, which is a Go build and therefore cores
 The stamps in this section and in three other files were first written an hour
 fast -- 14:1xZ / 14:3xZ / 14:4xZ for events at 13:1xZ / 13:3xZ / 13:4xZ. CAUSE,
 which is the useful part: I read mtimes out of `ls`, which prints LOCAL time
-(BST, UTC+1 today), and wrote them with a `Z`. Corrected here, in
+(then UTC+1), and wrote them with a `Z`. Corrected here, in
 MERGE-OBLIGATIONS.md, in the preservation MANIFEST.txt and in the OPEN-BUGS
 entry. `date -u` and `TZ=UTC stat -f %Sm` are the only two sources to quote.
+AND THE OFFSET IS NOT A CONSTANT, which is why "UTC+1 today" was the wrong thing
+to write down even though it was true at the time: this host's /etc/localtime was
+relinked to Europe/Prague mid-session, measured off the commits themselves --
+every commit up to 14:03:15Z carries +0100 and the 14:57:52Z one carries +0200.
+A stamp transcribed either side of that boundary is off by a different amount, so
+there is no offset to remember. Read UTC directly or do not quote a time.
 ONE KNOWN RESIDUE, deliberately not chased: the armed thyla-wake watcher's
 --say text says "re-verified 14:4xZ". Re-arming to fix a cosmetic stamp was not
 worth any risk to a FIFO place; the preconditions it refers to were verified at

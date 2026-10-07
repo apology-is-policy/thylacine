@@ -116,25 +116,72 @@ floor() {
 # become REAL the moment the original is rebaked (~283 MiB for the sparse pool),
 # so an unbounded history would leak into the very floor this script guards.
 PRESERVE_DIR=work/oct5-as-r9/boot-inputs
+RUN_STAMP=${RUN_STAMP:-run-$(date -u '+%Y%m%dT%H%M%SZ')}
+# A RUN WRITES TWO GENERATIONS -- post-build (the default flavour, beside the
+# suite's verdict) and post-gate (the sanitizer flavour, which does not exist
+# until ci-smp-gate builds it). So this bound counts GENERATIONS, not runs, and
+# the default therefore retains THIS run's pair and nothing older. Measured
+# 2026-10-07: 398 MiB per complete generation once the originals are rebaked and
+# the pool snapshot's clone blocks stop being shared, so a bound of 4 would put
+# 1.6 GiB against the same disk the floor checks guard. The DURABLE qualified set
+# is the curated work/oct5-as-r9/private-owner-qualified-kernel/ with its
+# committed MANIFEST.txt; this history is a rolling safety net, not the archive.
+GENS_PER_RUN=2
 KEEP_INPUT_GENS=${KEEP_INPUT_GENS:-2}
-preserve_boot_inputs() { # preserve_boot_inputs <label>
-  _d="$PRESERVE_DIR/$1"
+preserve_boot_inputs() { # preserve_boot_inputs <run-stamp> <phase> <expected-flavour>
+  [ $# -eq 3 ] || {
+    echo "REFUSING: preserve_boot_inputs <run-stamp> <phase> <expected-flavour>"; return 1; }
+  _run=$1; _phase=$2; _want_flav=$3
+  # A bound below one run's own generation count would have the post-gate call
+  # evict its post-build sibling -- the half-set this step exists to prevent,
+  # self-inflicted. `ls -1dt` is newest-first, so AT or ABOVE GENS_PER_RUN this
+  # run's generations are never the ones pruned, and that is why this refusal is
+  # the whole guarantee rather than a special case inside the prune loop.
+  if [ "${KEEP_INPUT_GENS:-0}" -lt "${GENS_PER_RUN:-2}" ]; then
+    echo "REFUSING: KEEP_INPUT_GENS=$KEEP_INPUT_GENS cannot hold one run's ${GENS_PER_RUN:-2} generations"
+    return 1
+  fi
+  _d="$PRESERVE_DIR/$_run-$_phase"
   rm -rf "$_d"
   mkdir -p "$_d" || { echo "REFUSING: cannot create $_d"; return 1; }
   _kept=0
   _missing=
+  # build/.config IS SHARED AND REWRITTEN BY EVERY FLAVOUR (the gate's sanitizer
+  # build overwrites the default's, measured cf91bb7fed575925 -> cd0200373d03e647
+  # within one run), and it is NOT at build/kernel/.config -- the first version of
+  # this step looked there and recorded .config ABSENT, which is correct behaviour
+  # on a wrong premise. So the destination carries the flavour, and the flavour is
+  # READ OUT OF THE FILE rather than taken from the caller's word: a name nobody
+  # can check is not provenance. The caller's expectation is kept as a CROSS-CHECK
+  # that announces a disagreement instead of silently labelling.
+  _cfg_san=$(/usr/bin/grep -E '^SANITIZE[[:space:]]*=' build/.config 2>/dev/null \
+             | head -1 | sed -E 's/^SANITIZE[[:space:]]*=[[:space:]]*([^[:space:]#]*).*/\1/')
+  case "${_cfg_san:-ABSENT}" in
+    none)   _cfg_flav=default ;;
+    ubsan)  _cfg_flav=undefined ;;
+    ABSENT) _cfg_flav= ;;
+    *)      _cfg_flav="sanitize-$_cfg_san" ;;
+  esac
+  if [ -n "$_cfg_flav" ] && [ "$_cfg_flav" != "$_want_flav" ]; then
+    echo "   MISLABEL AVOIDED: build/.config says SANITIZE=$_cfg_san ($_cfg_flav),"
+    echo "   this call expected $_want_flav -- preserved under the OBSERVED name."
+  fi
   # BOTH flavours share the basename thylacine.elf/.bin, so the destination
   # name carries the flavour. A flat copy would have one overwrite the other
   # and the manifest would then claim four files while holding two.
+  # system.key.baked-snapshot travels too: pool_restore's legality guard
+  # (smp-multiboot.sh:281) compares the live key with that twin, so preserving
+  # only one of the pair leaves the guard uncheckable by a later reader.
   for _pair in \
     "build/kernel/thylacine.elf:thylacine.elf" \
     "build/kernel/thylacine.bin:thylacine.bin" \
-    "build/kernel/.config:.config" \
     "build/kernel-undefined/thylacine.elf:thylacine-undefined.elf" \
     "build/kernel-undefined/thylacine.bin:thylacine-undefined.bin" \
+    "build/.config:.config-${_cfg_flav:-unknown}" \
     "build/ramfs.cpio:ramfs.cpio" \
     "build/fixtures/pool.img.baked-snapshot:pool.img.baked-snapshot" \
-    "build/fixtures/system.key:system.key" ; do
+    "build/fixtures/system.key:system.key" \
+    "build/fixtures/system.key.baked-snapshot:system.key.baked-snapshot" ; do
     _src=${_pair%%:*}
     _dst=${_pair##*:}
     if [ ! -f "$_src" ]; then _missing="$_missing $_src"; continue; fi
@@ -147,11 +194,33 @@ preserve_boot_inputs() { # preserve_boot_inputs <label>
     _kept=$((_kept + 1))
   done
   _h=$(mktemp)
-  ( cd "$_d" && for _g in .config *; do
+  ( cd "$_d" && for _g in .config-* *; do
       [ -f "$_g" ] || continue
       printf '%s  %s\n' "$(shasum -a 256 "$_g" | cut -c1-16)" "$_g"
     done ) > "$_h"
   mv "$_h" "$_d/HASHES.txt"
+  # WHAT A GENERATION IS, written beside it: the loss this step answers was half
+  # "nothing outside build/ held it" and half "which flavour is this?".
+  # The stamp is MEASURED with date -u, never transcribed from ls, which prints
+  # local time (this host's offset changed from +0100 to +0200 mid-day on
+  # 2026-10-07, so even today's offset is not a constant).
+  {
+    echo "run      : $_run"
+    echo "phase    : $_phase"
+    echo "taken    : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "flavour  : build/.config says SANITIZE=${_cfg_san:-ABSENT} -> ${_cfg_flav:-unknown}"
+    echo "           (this call expected $_want_flav)"
+    echo "reads    : QEMU boots thylacine.bin, NEVER the .elf (run-vm.sh:35)."
+    echo "           The pre-boot pool is pool.img.baked-snapshot, which"
+    echo "           pool_restore copies over pool.img before EVERY boot"
+    echo "           (smp-multiboot.sh:286); the live pool.img is what the last"
+    echo "           boot LEFT and is deliberately not preserved."
+    echo "           system.key and its .baked-snapshot must be equal for that"
+    echo "           restore to be legal (smp-multiboot.sh:281)."
+    echo "complete : a generation is a COMPLETE boot-input set, never a diff"
+    echo "           against another generation -- the gate rebakes ramfs, pool"
+    echo "           and key, so the two generations of one run differ."
+  } > "$_d/PROVENANCE.txt"
   echo "-- preserved $_kept boot input(s) -> $_d"
   [ -n "$_missing" ] && echo "   ABSENT, recorded and NOT substituted:$_missing"
   # Prune oldest generations. Newest-first, keep KEEP_INPUT_GENS.
@@ -510,7 +579,7 @@ provenance "post-build (my kernel, paired images)"
 # this step exists to prevent. Later (after the suite or the gate) a run that
 # went RED would preserve nothing, and a failing run's inputs are precisely what
 # diagnosis needs.
-preserve_boot_inputs "run-$(date -u '+%Y%m%dT%H%M%SZ')" || exit 1
+preserve_boot_inputs "$RUN_STAMP" postbuild default || exit 1
 
 # Stage 3 -- verify the image by CONTENT, not by the build's exit code. This is
 # the BAKE-TRAP class: failure looks like absent content plus a green ledger.
@@ -691,6 +760,21 @@ smp_rc=$(cat "$SMPRC")
 # A GATE HAS TWO HALVES -- VERDICT AND CAPTURE. The tee is capture only: the
 # pipeline's status is tee's, so set -e cannot see this gate fail. Assert it.
 echo "-- ci-smp-gate exit status: $smp_rc (0 = every config passed)"
+
+# THE SECOND GENERATION, and the one the first could not hold. ci-smp-gate builds
+# the sanitizer flavour itself -- `build.sh kernel --config ci` does not -- so at
+# the post-build preserve point build/kernel-undefined does not exist and the step
+# recorded thylacine.bin ABSENT: the exact artifact astra caught missing (0161
+# t43), recorded correctly and uselessly. The gate also REBAKES ramfs, pool and
+# key, measured within one run on 2026-10-07: 947dd838eb890f66 /
+# b165814100fd4dbf / d98f28f3cc7d2f7f here against 8f658d3c7fac7e09 /
+# b9045c6eb55a99ca / 4c1eaaba391836c6 in the post-build generation. So this is a
+# SECOND COMPLETE SET, never a top-up of the first.
+# BEFORE the red-gate exit ON PURPOSE: a failing run's inputs are precisely what
+# diagnosis needs, and they are what the next bake destroys. The failure is
+# carried to AFTER the verdict rather than exiting here, so a red gate and a lost
+# preservation are both reported instead of the first one hiding the second.
+preserve_boot_inputs "$RUN_STAMP" postgate undefined || POSTGATE_PRESERVE_FAILED=1
 [ "$smp_rc" = 0 ] || { echo "   SMP GATE RED. Logs: build/multiboot-fails/. STOP, do not retry blind."; exit 1; }
 grep -q 'ci-smp-gate: PASS' work/oct5-as-r9/guest-smp.log \
   || { echo "   exit 0 but NO PASS line -- the gate never reached its verdict"; exit 1; }
@@ -701,6 +785,10 @@ for lbl in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
     && echo "   row PASS: $lbl" \
     || { echo "   ROW MISSING OR RED: $lbl -- the matrix did not run in full"; exit 1; }
 done
+[ -z "${POSTGATE_PRESERVE_FAILED:-}" ] || {
+  echo "   STOP: the gate verdict is above, but the post-gate boot inputs were NOT"
+  echo "   preserved (see the REFUSING line). The sanitizer kernel this verdict"
+  echo "   names lives only in build/ and the next bake deletes it."; exit 1; }
 # FIVE PASS ROWS ARE THE SCRIPT'S ACCEPTANCE, NOT 50 CLEAN BOOTS (astra, 0161
 # note 8). smp-multiboot's own verdict is `corrupt==0 && extkill==0 &&
 # other==0` (smp-multiboot.sh:347), so a row can PASS with nonzero TIMING or

@@ -66,3 +66,54 @@ different claims: 0 of this branch's 85 commits are reachable from main.
   (loom_sqpoll_fanin_park absent), and thread.h's `cons_frozen_unwound` (so
   their two new bools insert after exit_close_active here, and their stated
   field offsets and sizeof are main's numbers, to be re-measured not inherited).
+
+## ADDED 2026-10-07 ~15:1xZ, from main's call 0192 (B-2a, branch b2 @212f8e479)
+
+(5) B-2a makes BURROW_TYPE_CODE lazy: `burrow_create_code` loses its `exempt`
+parameter and takes ANON_LAZY's sparse pagemap, and CODE moves to the ANON_LAZY
+arm of burrow_free_internal, burrow_acquire_mapping, burrow_lazy_resident_count,
+burrow_lazy_footprint and burrow_lazy_slot_for_test. It lands together with B-2b.
+AT MERGE: b2's syscall.c JIT functions win WHOLE over main's. On b2, measured by
+main and reported on 0192 t3, sys_jit_create_region charges NOTHING (no npages,
+no burrow_backing_pages, no burrow_charge_record), SYS_JIT_DESTROY refunds
+`burrow_lazy_footprint` under as->lock before the unmaps, the extinction
+"SYS_JIT_DESTROY: charge record disagrees with the region's page count" is GONE,
+and the commit arm charges once per page at fault.c:708 carrying
+proc_resource_exempt itself (jit.charges_once_per_page pins it; their J1 RED
+re-adding a create-time charge reddened 6 jit tests).
+  - MY SIDE OF IT: the long AS-R9 comment block I added above
+    SYS_JIT_DESTROY's claim/restore -- the one naming the three premises that
+    make THAT caller sound while five others were migrated to the settled drops
+    -- must be RE-READ against the footprint refund rather than carried over
+    verbatim. The premises are unchanged (every failure return in
+    burrow_unmap_reporting precedes that function's first mutation; both aliases
+    live in p->as whose lock is held across the interval;
+    burrow.unmap_failure_leaves_mapping_attached pins premise 1). The QUANTITY
+    the line below them asserts is what changed.
+  - TEXTUAL: expect one conflict at burrow_acquire_mapping's tail. My hunks
+    start AT its closing brace (@@ -917,24 +909,15 @@, then -945, then the charge
+    machinery at -997/-1013/-1049); their last edit there is the ANON_LAZY arm at
+    old ~902-911. Mine are below the type switch, theirs inside it: take both.
+    No hunk of mine touches burrow_create_code or either free_internal arm.
+  - CORRECTION TO MY OWN FIRST READING, kept because it is the kind of mistake
+    that repeats: I measured main 25ed27f21 for the syscall side when the call's
+    subject was b2 @212f8e479, and reported an eager JIT charge that b2 had
+    already removed. The header of main's turn carried the right ref and I read
+    the wrong one.
+
+(6) SYSCALL NUMBER 127 IS A COLLISION, AND IT IS NOT MINE TO SETTLE.
+`SYS_SRV_REGISTRY_NEW = 127` (syscall.h:2431) is ASTRA's, added by 417c8caeb
+("Isolate login service registries and retain session connection budgets") inside
+25ed27f21..5ff62b788. It is in my BASE because my base IS her HEAD. Measured:
+`git diff --stat 5ff62b788..HEAD -- kernel/include/thylacine/syscall.h` is EMPTY
+-- this branch mints no syscall number at all. B-2b adds SYS_JIT_CREATE_SEALED
+and wants 127, the last number below vivarium's restart_syscall(128) ceiling
+argument; precedent #50 (09-03) says whichever side lands SECOND renumbers, and a
+move to 128 owes vivarium a per-number argument for restart_syscall.
+AT MERGE: whoever integrates must know that my delivery cannot land before
+astra's base does (`git merge-base --is-ancestor 5ff62b788 25ed27f21` -> NO; 86
+commits of her base are not on main), so B-2 is ahead of this branch by
+construction and main has been told to take 127. The renumber decision belongs to
+astra; raised with her rather than answered on her behalf. NOT renumbering now is
+deliberate: a syscall enum change rebuilds the kernel and voids the qualified
+artifact this checkpoint's verdict names (5ced18c43ae8302a / e266c931d9668a44).
