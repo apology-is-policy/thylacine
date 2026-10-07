@@ -324,7 +324,27 @@ pre-cf296caa1 build.sh:118 still demands. Tested four ways. The TOOLCHAIN half
 (`go list -tags thylacine_held`) is unverified by choice and gets confirmed at the
 next bake -- if it fails there it is mine to fix, not a reason to reclaim cores.
 
-NEXT: astra's review. Then, post-review, wire tools/check-prot-mirror.py
+UPDATE 08:3xZ -- HER REVIEW LANDED AND ITS THREE ITEMS ARE RETURNED (0161 t23/t24).
+Scoped source review of cd7711eee: NO new blocking correctness defect in the
+settled-drop core, the five caller migrations or the JIT exception. Not blanket
+approval of the branch and NOT activation clearance. Three handoff items, all
+closed without a lease: R1 the integration manifest (work/oct5-as-r9/
+INTEGRATION-MANIFEST.md + make-manifest.sh, excluding 55cfdb54c without
+reverting it); R2 the spec evidence (work/oct5-as-r9/spec-evidence-1006T1112Z.log
+-- the full TLC output was NEVER retained because my own spec stage captured it
+into a variable and printed only greps, the same verdict-without-capture defect I
+fixed in smp-multiboot a day earlier; the stage now retains per-cfg output and
+refuses on an empty file); R3 the unmap prose, narrowed with the two uncovered
+refusals named (burrow.c:1240 null-Proc, :1249 overflow) and the premise
+re-grounded on an enumeration.
+
+ALSO DELIVERED TO MAIN (0181): two build.sh patches they approved and will land
+inside the tag-pool run -- the STRATUM_SRC ledger line and the prot-mirror
+wiring. They hold copies with sha256s; both OPEN-BUGS entries stay mine until
+they confirm. aux consented to the prot-mirror failure mode (0179, now closed);
+their fork move no longer waits on me.
+
+NEXT: astra closes review (hers), main confirms the land (hours away). Then, post-review, wire tools/check-prot-mirror.py
 --expect-unmirrored 5 into build.sh at the next bake, and the STRATUM_SRC ledger
 gap (ledger/manifest recording only, astra t13). Do NOT open the paused
 private-owner draft before her review.
