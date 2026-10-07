@@ -53,8 +53,29 @@ RECOVERED=0
 RECOVERY_FAILED=0
 CONTROL_BIN=
 free_gb() { df -g . | awk 'NR==2 {print $4}'; }
+free_mb() { df -m . | awk 'NR==2 {print $4}'; }
+# EVERY DISK READING IS RETAINED, not just printed. These floor readings are the
+# only record of what a --config ci bake actually costs in THIS tree, and when a
+# peer asked exactly that today I could not answer it: the figures had gone to a
+# terminal, which a compaction does not keep, while every other piece of this
+# run's evidence lands in $OUT. A gate has two halves, the verdict and the
+# capture, and I had built only the verdict.
+# The GiB figure is PASSED IN rather than re-measured, so the number recorded is
+# the one the decision was actually made on; MiB is recorded beside it because
+# df -g truncates and the draw between two stages is smaller than its resolution
+# (a fall from 8.9 to 8.1 GiB reads as "8" at both ends).
+# The label is recorded as ONE token: "stage 0" as written would make the MiB
+# figure field 4 on that row and field 3 on every other, and the first thing I
+# did with this table was read it by column and get a wrong answer.
+disk_record() { # disk_record <label> <the GiB value the caller decided on>
+  printf '%s  %-22s %6s MiB free (df -g %s, floor %s GiB)\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    "$(printf '%s' "$1" | tr ' ' '-')" "$(free_mb)" "$2" "$FLOOR_GB" \
+    >> "$OUT/disk.txt"
+}
 floor() { # floor <label>
   _f=$(free_gb)
+  disk_record "$1" "$_f"
   echo "-- disk at $1: ${_f} GiB free (floor $FLOOR_GB)"
   [ "$_f" -ge "$FLOOR_GB" ] || {
     echo "   REFUSING at $1: ${_f} GiB is under the floor. A bake here could push"
@@ -184,6 +205,7 @@ WARN
   #    cannot inherit stage 0's disk reading or its lease.
   if [ "$MUTATED" = 1 ] && [ "$RECOVERY_FAILED" = 0 ]; then
     _f=$(free_gb)
+    disk_record "pre-recovery-build" "$_f"
     "$YIP" resources > "$OUT/lease-recovery.txt" 2>&1 || true
     if [ "$_f" -lt "$FLOOR_GB" ]; then
       echo "-- NO REBUILD: ${_f} GiB free is under the $FLOOR_GB GiB floor. The"
@@ -214,7 +236,13 @@ WARN
   fi
 
   # 4. THE LEASE AND THE EVIDENCE, on every path.
-  echo "-- disk at exit: $(free_gb) GiB free"
+  _f=$(free_gb)
+  disk_record "exit" "$_f"
+  echo "-- disk at exit: ${_f} GiB free"
+  if [ -f "$OUT/disk.txt" ]; then
+    echo "-- what this run cost the volume (retained at $OUT/disk.txt):"
+    sed 's/^/     /' "$OUT/disk.txt"
+  fi
   echo "-- evidence: $OUT"
   echo "=== THE MAC IS STILL HELD BY YOU. The cores are free from here and the"
   echo "    write-up is not a reason to hold them:   yip release mac"
