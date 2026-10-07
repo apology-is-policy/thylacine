@@ -587,7 +587,7 @@ all three runners refuse, the older two for an unrelated reason.
 
 ---
 
-## 2026-10-07 14:4xZ: THE FLOOR CLEARS, PRESERVATION IS A SCRIPT STEP, MAIN MOVED
+## 2026-10-07 13:4xZ: THE FLOOR CLEARS, PRESERVATION IS A SCRIPT STEP, MAIN MOVED
 
 HEAD `d98839268`, 88 commits off base `5ff62b788`, both mirrors verified at tip
 by `ls-remote` per URL. Tree clean apart from the deliberate untracked evidence.
@@ -681,3 +681,16 @@ The pi A72/KVM residual (operator vote stands, NEVER re-ask: mac gate alone,
 residual recorded). The 111 unclaimed `kernel/test` dossier files. The five
 owning dossiers' pass needs `quaestor`, which is a Go build and therefore cores
 -- deferred until aux releases, deliberately.
+
+### TIMESTAMP CORRECTION (and the mechanism, so it does not recur)
+
+The stamps in this section and in three other files were first written an hour
+fast -- 14:1xZ / 14:3xZ / 14:4xZ for events at 13:1xZ / 13:3xZ / 13:4xZ. CAUSE,
+which is the useful part: I read mtimes out of `ls`, which prints LOCAL time
+(BST, UTC+1 today), and wrote them with a `Z`. Corrected here, in
+MERGE-OBLIGATIONS.md, in the preservation MANIFEST.txt and in the OPEN-BUGS
+entry. `date -u` and `TZ=UTC stat -f %Sm` are the only two sources to quote.
+ONE KNOWN RESIDUE, deliberately not chased: the armed thyla-wake watcher's
+--say text says "re-verified 14:4xZ". Re-arming to fix a cosmetic stamp was not
+worth any risk to a FIFO place; the preconditions it refers to were verified at
+13:4xZ and the instruction it carries (re-measure the floor) stands.

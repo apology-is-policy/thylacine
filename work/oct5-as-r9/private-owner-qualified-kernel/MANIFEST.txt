@@ -2,7 +2,7 @@ The inputs every 2026-10-07 private-owner verdict attaches to.
 
 branch : corona/async-memory
 commit : 774db83309ed7d6baea5dd2bc33e51ffd49ef89f  (kernel sources unchanged since 2666645b7)
-taken  : 2026-10-07T12:41:05Z (kernels), extended 14:1xZ (pool/key + the
+taken  : 2026-10-07T12:41:05Z (kernels), extended 13:1xZ (pool/key + the
          recovered flat binary) after astra's 0161 t43
 why    : the preserved cpu1-green-pair/ is the 10-06 D7 pair, a DIFFERENT
          kernel. Today's verdicts named 5ced18c43ae8302a and nothing outside

@@ -7,14 +7,14 @@ the script that generated this file, not typed from memory: regenerate with
 - branch: corona/async-memory
 - base:   5ff62b788  (equal to astra's HEAD at review time -- asserted by the
   runbook's stage 1, which refuses when her HEAD moves off this base)
-- tip:    aa2fa27aa759ad94f37daccecd9980b465b9bb70  (the commit this manifest was GENERATED AGAINST; the
+- tip:    f62b44dc0059f15779eaa200e7d65e5d7fdfee8d  (the commit this manifest was GENERATED AGAINST; the
   manifest's own commit sits above it, so regenerate rather than reading
   this line as HEAD)
-- commits in range: 85
+- commits in range: 89
 - codeberg.org: branch pushed and at this tip
-- codeberg.org: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 85 in range reachable from main)
+- codeberg.org: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 89 in range reachable from main)
 - github.com: branch pushed and at this tip
-- github.com: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 85 in range reachable from main)
+- github.com: main at 25ed27f21b5b; nothing of this branch is landed there (measured: 0 of 89 in range reachable from main)
 
 ## EXCLUDED FROM DELIVERY -- local configuration, not implementation
 
@@ -38,7 +38,7 @@ Verification that an assembled integration excludes it -- this must print nothin
 And on this branch, exactly one commit touches that path (so there is nothing
 else of this class hiding in the range):
 
-    $ git log --oneline 5ff62b788..aa2fa27aa759ad94f37daccecd9980b465b9bb70 -- .claude/
+    $ git log --oneline 5ff62b788..f62b44dc0059f15779eaa200e7d65e5d7fdfee8d -- .claude/
     55cfdb54c Drop stale yip hook entries from .claude/settings.json
 
 ## ASTRA'S FOUR PROTECTED WORKING DRAFTS
@@ -123,7 +123,7 @@ Add obligations HERE. Each one names what must be done at merge, against which
 of main's commits, and how it was verified -- never "see the call", because a
 call transcript is not in the delivery.
 
-## STATUS 2026-10-07 ~14:3xZ: ALL FOUR NOW TARGET CODE ON MAIN
+## STATUS 2026-10-07 ~13:3xZ: ALL FOUR NOW TARGET CODE ON MAIN
 
 main moved from cb7194c10 to **25ed27f21** (18 commits) while this branch sat.
 Every commit the obligations below are written against is now an ancestor of

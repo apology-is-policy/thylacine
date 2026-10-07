@@ -11,7 +11,7 @@ Add obligations HERE. Each one names what must be done at merge, against which
 of main's commits, and how it was verified -- never "see the call", because a
 call transcript is not in the delivery.
 
-## STATUS 2026-10-07 ~14:3xZ: ALL FOUR NOW TARGET CODE ON MAIN
+## STATUS 2026-10-07 ~13:3xZ: ALL FOUR NOW TARGET CODE ON MAIN
 
 main moved from cb7194c10 to **25ed27f21** (18 commits) while this branch sat.
 Every commit the obligations below are written against is now an ancestor of
