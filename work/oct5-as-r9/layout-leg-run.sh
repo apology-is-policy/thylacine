@@ -539,6 +539,7 @@ run_mutant M2 "$M2_OLD" '        spin_unlock(&as->lock);
 
 echo
 echo "=== stage 3: the seam's PRODUCTION SHAPE -- loom.c with KERNEL_TESTS OFF ==="
+lease_and_floor "pre-shape-compile"
 SH=$OUT/shape
 mkdir -p "$SH"
 SEAM_COMMIT=$(git log -1 --format=%H -S'loom_private_layout_fault_take' -- kernel/loom.c)
@@ -567,7 +568,10 @@ for v in base seam; do
   ( cd build/kernel/kernel && eval "\"$CCX\" $DEF $INC -iquote \"$ROOT/kernel\" $FL -c \"$SHA/loom-$v.c\" -o \"$SHA/loom-$v.o\"" ) \
     > "$SH/compile-$v.log" 2>&1 || { echo "REFUSING: the $v compile failed -- $SH/compile-$v.log"; exit 7; }
   "$TOOLS/llvm-nm" "$SH/loom-$v.o" > "$SH/loom-$v.nm"
-  "$TOOLS/llvm-objdump" -d --disassemble-symbols=loom_create_private "$SH/loom-$v.o" \
+  # -r interleaves each relocation with the instruction it patches: identical
+  # branch BYTES in a relocatable object say nothing about their TARGETS until
+  # the relocation naming the target is compared too (astra, yip 0161 t73).
+  "$TOOLS/llvm-objdump" -d -r --disassemble-symbols=loom_create_private "$SH/loom-$v.o" \
     | sed -n '/<loom_create_private>:/,$p' > "$SH/loom_create_private-$v.dis"
 done
 # A denominator first: the disassembly must actually contain the function.
@@ -582,8 +586,11 @@ awk '{print $NF}' "$SH/loom-base.nm" | sort > "$SH/base.names"; awk '{print $NF}
 cmp -s "$SH/base.names" "$SH/seam.names" && echo "-- symbol NAMES identical to the baseline" || {
   echo "   SYMBOL NAMES DIFFER from the baseline:"; diff "$SH/base.names" "$SH/seam.names" | head; exit 7; }
 _ni=$(/usr/bin/grep -cE '^ +[0-9a-f]+:' "$SH/loom_create_private-seam.dis")
+_nr=$(/usr/bin/grep -cE 'R_AARCH64_' "$SH/loom_create_private-seam.dis" || true)
+[ "${_nr:-0}" -ge 1 ] || { echo "REFUSING: no relocation lines in the disassembly -- -r did not take"; exit 7; }
 if cmp -s "$SH/loom_create_private-base.dis" "$SH/loom_create_private-seam.dis"; then
-  echo "-- loom_create_private: IDENTICAL machine code to the baseline ($_ni instructions, bytes and offsets)"
+  echo "-- loom_create_private: IDENTICAL to the baseline -- $_ni instructions (bytes and"
+  echo "   offsets) AND all $_nr relocations, so every call site binds the same target"
 else
   echo "   loom_create_private's code DIFFERS from the baseline:"
   diff "$SH/loom_create_private-base.dis" "$SH/loom_create_private-seam.dis" | head -20
@@ -592,11 +599,12 @@ fi
 "$TOOLS/llvm-objcopy" --dump-section .text="$SH/base.text" "$SH/loom-base.o" "$SH/scratch-base.o" 2>/dev/null || true
 "$TOOLS/llvm-objcopy" --dump-section .text="$SH/seam.text" "$SH/loom-seam.o" "$SH/scratch-seam.o" 2>/dev/null || true
 if [ -s "$SH/base.text" ] && cmp -s "$SH/base.text" "$SH/seam.text"; then
-  echo "-- and the whole .text section is byte-identical ($(wc -c < "$SH/seam.text" | tr -d ' ') bytes)"
+  echo "-- and the whole .text section is byte-identical ($(wc -c < "$SH/seam.text" | tr -d ' ') bytes;"
+  echo "   UNRELOCATED bytes only -- the relocation-bound claim is the function's, above)"
 else
   echo "-- (whole-.text comparison: not identical or not extractable -- recorded, not claimed)"
 fi
-record_stage "shape" "no seam symbols; names identical; loom_create_private identical ($_ni insns)"
+record_stage "shape" "no seam symbols; names identical; loom_create_private identical ($_ni insns, $_nr relocations)"
 echo
 echo "-- DISCRIMINATED, both halves: M1 and M2 each failed the leg at its own"
 echo "   assertion, and the seam leaves no trace in the production shape. The"

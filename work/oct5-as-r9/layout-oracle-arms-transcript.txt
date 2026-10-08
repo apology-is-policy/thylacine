@@ -1,4 +1,4 @@
-layout-oracle-arms: runner e9e0ae5c2db36a4a, 4783d6f92, 2026-10-08T09:25:18Z
+layout-oracle-arms: runner 72433053031fbc7d, 0c1fe758f, 2026-10-08T11:51:58Z
 
 === the CONTROL oracle ===
 ok    check_control R-real-control.log                   rc=0  verdict PASS in its own block
