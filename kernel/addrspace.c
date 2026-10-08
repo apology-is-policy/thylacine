@@ -76,6 +76,7 @@ int addrspace_ref_count(const struct AddrSpace *as) {
 static u64 g_drain_device_resets;
 static u64 g_teardown_seq;
 static u64 g_drain_seq;
+u64 addrspace_teardown_stamp(void);
 u64 addrspace_teardown_stamp(void) {
     return __atomic_add_fetch(&g_teardown_seq, 1, __ATOMIC_ACQ_REL);
 }

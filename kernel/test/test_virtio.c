@@ -302,6 +302,7 @@ u64 proc_exec_device_resets_for_test(void);
 u64 proc_exec_walk_a_seq_for_test(void);
 u64 addrspace_drain_device_resets_for_test(void);
 u64 addrspace_drain_seq_for_test(void);
+u64 addrspace_teardown_stamp(void);
 
 static struct {
     u64 page;

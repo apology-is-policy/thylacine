@@ -239,11 +239,6 @@ void addrspace_unref(struct AddrSpace *as);
 bool addrspace_release(struct AddrSpace *as);
 void addrspace_destroy(struct AddrSpace *as);
 
-#ifdef KERNEL_TESTS
-// A monotonic stamp for ordering teardown steps in tests.
-u64 addrspace_teardown_stamp(void);
-#endif
-
 // LINEAGE L-4b: build a COPY-ON-WRITE clone of `src` -- the address-space half of
 // fork. Returns a fresh AddrSpace with ref 1 whose VMA list mirrors `src`'s, or
 // NULL (having freed everything it allocated) on OOM, an over-cap child, or a VMA

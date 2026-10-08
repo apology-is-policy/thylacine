@@ -610,11 +610,13 @@ int addrspace_quiesce_mapped_devices(struct AddrSpace *as) {
     int reset = 0;
     // The walk reads the list without its lock, and the weft reaper is the one
     // cross-Proc writer of it: it unmaps under the lock, reaches a space only
-    // through a live Proc's `->as` under g_proc_table_lock, and starts nothing on
-    // a Proc that is non-ALIVE or whose exit close has begun (read under that
-    // lock). So once the caller's Proc is dying, has exec'd off this space, or no
-    // Proc holds it, no new unmap starts here, and taking and dropping the lock
-    // waits out one already under way.
+    // through a live Proc's `->as` under g_proc_table_lock, and skips a Proc that
+    // is non-ALIVE, or in its exit close while holding the space alone (both read
+    // under that lock). Every caller is in one of those cases or past them: the
+    // exit close walks only a space it holds alone, exec has swapped `->as` off
+    // the space, and at the last reference no Proc names it. So no new unmap
+    // starts here, and taking and dropping the lock waits out one already under
+    // way.
     spin_lock(&as->lock);
     spin_unlock(&as->lock);
     for (struct Vma *v = as->vmas; v; v = v->next) {
@@ -689,6 +691,7 @@ int proc_quiesce_owned_devices(struct Proc *p) {
 #ifdef KERNEL_TESTS
 // Devices reset by exec's walk (a), summed over every exec, and the stamp of its
 // latest run (the *_for_test convention: extern-declared by the harness).
+u64 addrspace_teardown_stamp(void);
 static u64 g_exec_device_resets;
 static u64 g_exec_walk_a_seq;
 u64 proc_exec_device_resets_for_test(void);

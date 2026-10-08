@@ -653,7 +653,8 @@ void weft_reap_unregister(struct weft_binding *wb) {
 // (PROC_FLAG_EXIT_CLOSING, read under the lock it pairs with) when it is the
 // space's only holder: its device quiesce then walks the list without this lock,
 // after taking and dropping it once (proc_quiesce_owned_devices), and its drain
-// takes the stale mapping. A shared space is unmapped as usual -- the quiesce
+// takes the stale mapping. The last reference's teardown walks it the same way
+// (addrspace_destroy), when no Proc names the space at all. A shared space is unmapped as usual -- the quiesce
 // does not walk it, and the survivor's drain is the survivor's death, which is
 // too late for the pixel pages the reaper exists to return. A ref read of 1
 // cannot be stale here: a sharer's departure that made it 1 precedes the

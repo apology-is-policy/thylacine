@@ -630,7 +630,7 @@ devices of the image it leaves. `proc_exec_replace` drops its reference to the
 old space with `addrspace_release`, and when that drop is the last it runs the
 handle-table walk (`quiesce_fd_devices`) before `addrspace_destroy` drains the
 space. A holder that remains -- a vfork parent, an RFMEM sibling -- keeps the
-mappings and may still be driving the device, and nothing is freed. Deciding by
+mappings and may still be driving the device, and the drain frees nothing. Deciding by
 the drop rather than by reading the count first matters: a sharer's reap racing
 the exec could otherwise take the last reference after the exec read two. The
 close-on-exec sweep runs after the replace, so the walk still sees a descriptor
@@ -651,10 +651,15 @@ left. The exit close keeps its own sole-gated walk: a DMA buffer held only by a
 handle frees at that close, before any drain. A device reset twice is reset
 once; `status = 0` and a revoked PCI function are both idempotent.
 
-Residual, by the vote: an exec whose drop is not the last resets nothing, and a
-device its descriptor still claims keeps the physical addresses of buffers left
-in that space, which free when the last holder leaves (and the drain resets only
-what the space maps). A sibling that has exited but is not yet reaped still holds
+Residual, by the vote: an exec whose drop is not the last resets nothing. Two
+classes of buffer can then free under an armed device: one a close-on-exec
+descriptor held alone, which the exec's own close-on-exec sweep frees at once,
+and one left mapped in the shared space, which frees when the last holder leaves
+(that drain resets only what the space maps). Death has no such gap -- its
+handle-table walk runs ungated, before the handles close -- because a dying
+Proc's descriptors go regardless, while a shared exec's sharer may still be
+driving the device through a mapping. Setting close-on-exec on a DMA descriptor
+the device holds is the driver releasing what the device still uses. A sibling that has exited but is not yet reaped still holds
 the space, so it counts as a holder although it cannot drive anything; that is a
 deliberate over-approximation of "held alone" (a gate on live holders, like the
 image join's zombie count, would be the precise form). A device armed but
