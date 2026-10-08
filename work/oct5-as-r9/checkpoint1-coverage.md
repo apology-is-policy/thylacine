@@ -108,3 +108,12 @@ that helper delivers an already committed result, and pre-abort commits may be
 delivered afterward. Owner integration must distinguish commitment from delivery
 and require consumer detachment/local retirement before whole-ring discard.
 See the current pickup and Loom dossier for ledger scope and retained evidence.
+
+
+October8 22:14UTC: the dormant slot-ledger fixture on ceac7f380 passed the full
+Mac matrix,50/50 clean (default smp1/4/8, UBSan smp4/8), each1837/1837 with
+separate ledger and private-owner verdicts and complete D7 evidence. Ten captured
+input hashes and100 logs verified; minimum recorded admission10757MiB. Detailed
+provenance and remaining caller/engine/guest-allocator obligations are in the
+latest pickup and astra-takeover/current-gate-20261008T213148Z-result.json.
+No activation or Main landing; retain128MiB protection. Self-review only.

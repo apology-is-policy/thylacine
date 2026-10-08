@@ -1,0 +1,10 @@
+{
+  "source": "ceac7f380334a272cbc8e37f3ac9b1923e28f761",
+  "log": "build/multiboot-logs/default-smp1-1.log",
+  "sha256": "6e2df99b4fcefe410aba70c00fc7e6815148a964aaf47e70af295f0f93b1955d",
+  "slot_fixture": "[test] loom.service_slots ... PASS",
+  "tests": "1837/1837",
+  "d7_overlap": true,
+  "d7_distinct_cycles": 20,
+  "scope": "First default smp1 boot only; full matrix pending"
+}

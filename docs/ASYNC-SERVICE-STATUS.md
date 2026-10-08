@@ -1472,3 +1472,12 @@ runtime qualification is pending for this changed source. Scope and caller
 obligations are in the Loom dossier and work/oct5-as-r9/astra-takeover.md.
 The ledger is not yet owned/charged by a private Loom and enables no handler.
 Async engine integration still precedes MM0-MM4; all activation protections stay.
+
+
+October8 22:14UTC: the dormant slot-ledger fixture on ceac7f380 passed the full
+Mac matrix,50/50 clean (default smp1/4/8, UBSan smp4/8), each1837/1837 with
+separate ledger and private-owner verdicts and complete D7 evidence. Ten captured
+input hashes and100 logs verified; minimum recorded admission10757MiB. Detailed
+provenance and remaining caller/engine/guest-allocator obligations are in the
+latest pickup and astra-takeover/current-gate-20261008T213148Z-result.json.
+No activation or Main landing; retain128MiB protection. Self-review only.

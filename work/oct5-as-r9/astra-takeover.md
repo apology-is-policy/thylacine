@@ -369,3 +369,29 @@ link now succeeds; all 14 actual-module ASan/UBSan host outcomes were rerun
 successfully with the corrected shared fixture (slots-20261008T2132Z/).
 The original failure and original host evidence remain preserved. Full native
 matrix remains pending until a new, exact-source run completes.
+
+
+## October 8, 22:14 UTC: slot-ledger full Mac gate verified
+
+current-gate-20261008T213148Z completed on exact clean source
+ceac7f380334a272cbc8e37f3ac9b1923e28f761 with gate.rc=runner.rc=0.
+All five standard rows (default smp1/4/8, UBSan smp4/8) passed 10/10, zero
+other classifications. Each of the fifty retained serial logs independently
+shows 1837/1837, loom.service_slots PASS, private-owner normal fallthrough PASS,
+D7 overlap and twenty distinct d7user00..19 completed cycles, plus boot banner.
+No extinction or kernel-test failure. The two optional graphics diagnostics
+remain explicitly absent programs in the exact captured ramfs, not passes.
+
+The retained verifier checked all ten captured config/kernel/ramfs/pool/key
+hashes, source identity and clean end diff, and saved 100 serial/harness logs
+with per-file hashes. Wrapper checks also matched live immutable build inputs
+to capture. Stratum remained clean at exact 61dde37. Minimum recorded admission
+space was 10757 MiB, above the unchanged8192MiB floor; Mac lease released.
+Result: astra-takeover/current-gate-20261008T213148Z-result.json. The captured
+input generation is PINNED. This qualifies the dormant ledger's shared fixture
+on the recorded Mac source. Caller locking, native authority, scope/payload/
+terminal integration and owner charging remain unimplemented here; sequential
+fixture success does not close them. Guest final allocator reclamation and
+Pi/A72/KVM remain open; host destruction controls remain separately bounded.
+Self-review only, no independent audit. Continue private owner integration before
+MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.

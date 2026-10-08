@@ -1,0 +1,10 @@
+.config-default: OK
+.config-undefined: OK
+thylacine-undefined.bin: OK
+thylacine-undefined.elf: OK
+thylacine.bin: OK
+thylacine.elf: OK
+ramfs.cpio: OK
+pool.img.baked-snapshot: OK
+system.key: OK
+system.key.baked-snapshot: OK
