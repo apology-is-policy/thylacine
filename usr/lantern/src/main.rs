@@ -526,7 +526,10 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
     let mut at = 0usize;
     let mut parser = Parser::new();
     let mut stdin = io::stdin();
-    let mut buf = [0u8; 64];
+    // One byte per read: the quit key is the last byte this program takes. Bytes
+    // typed behind it -- the next command, a paste -- stay queued for the shell; a
+    // larger read would carry them away with the slide.
+    let mut buf = [0u8; 1];
 
     out.put(lantern::HIDE_CARET);
     show(&mut out, tier, width, d, dir, at, foot);

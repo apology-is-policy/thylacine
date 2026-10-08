@@ -32,7 +32,8 @@ footer that gives the deck's title and the slide's position, such as
 `Beacon slides  ·  1 / 4`. Space, the right arrow or `n` shows the next slide,
 and the left arrow or `p` shows the previous one. The caret is hidden while a
 slide is on the screen. `q` ends the presentation: the last slide stays on the
-screen, and the shell prompt returns below it.
+screen, and the shell prompt returns below it. Anything typed after `q` goes to
+the shell, even before the prompt appears.
 
 Advancing past the last slide keeps the last slide on the screen; lantern
 neither wraps to the first slide nor exits, because the end of a deck is where

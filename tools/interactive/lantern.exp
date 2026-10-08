@@ -215,6 +215,36 @@ lc_send {echo lnpres $status}
 lantern_status lnpres 0 "lantern(f) presentation exit status"
 lc_pass "lantern(f): the presentation paints a slide, advances on a keystroke to a boxed block quote, jumps to the picture's boxed stand-in, and leaves on q, exit 0"
 
+# (j) A line typed behind the quit key belongs to the shell. Someone who presses
+# q and goes straight on typing, or pastes the next command, sends bytes the
+# presentation must not take with it. q and the next line go out in ONE write,
+# but the console still takes them in a byte at a time, so a presenter that
+# reads past its quit key fails here only when its read sees more than the q:
+# the usual case, not a certainty. Three rounds make a miss need three lucky
+# reads. A swallowed head leaves the shell a mangled line it cannot run, and an
+# interactive ut prints nothing for that, so each round then asks for $status
+# under a second tag: that tag arriving first is the red, at once, where waiting
+# for the first tag alone would only time out.
+proc lantern_ahead {i} {
+    global lc_cmd_timeout timeout
+    lc_send {lantern /deck}
+    lc_expect "1 / 4" "lantern(j$i) slide one is presented"
+    lc_raw_send "qecho lnahead$i \$status\r" "lantern(j$i) q, with the next line typed ahead in the same write"
+    lc_send "echo lnjafter$i \$status"
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex "lnahead$i 0\r"           { lc_step "saw: lantern(j$i) the line typed behind q reached the shell whole" }
+        -re "lnjafter$i (\[0-9\]+)\r" { lc_fail "lantern(j$i): the shell never ran the typed-ahead line (next status $expect_out(1,string)) -- the presenter read past q" }
+        -re "lnahead$i (\[0-9\]+)\r"  { lc_fail "lantern(j$i): the typed-ahead line ran with status $expect_out(1,string), want 0" }
+        -re {EXTINCTION:}             { lc_extinction_fail "kernel extinction during 'lantern(j$i)'" }
+        timeout                       { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[lnahead$i 0\] during 'lantern(j$i)'" }
+        eof                           { lc_fail "unexpected EOF during 'lantern(j$i)'" }
+    }
+    lantern_status lnjafter$i 0 "lantern(j$i) the shell took the next line too"
+}
+foreach i {1 2 3} { lantern_ahead $i }
+lc_pass "lantern(j): a line typed ahead behind q reaches the shell whole, exit 0, in 3 of 3 rounds"
+
 lc_quit
 lc_pass "LS-CI lantern: the check with a picture decoded by view, the cat posture with manifest order and the picture's stand-in, four refusals, and a real keystroke-driven presentation"
 exit 0

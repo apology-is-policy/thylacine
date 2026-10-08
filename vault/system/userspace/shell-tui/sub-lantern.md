@@ -23,7 +23,7 @@ hazards: []
 abis: []
 design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3", "docs/HALCYON.md section 14.7"]
 created: 2026-09-22
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -313,10 +313,17 @@ paint, so an edit mid-rehearsal shows on the next keypress.
 
 ## Concurrency
 
-One process, one thread, one blocking read on fd 0. A picture slide runs `view`
-as a child and waits for it -- both pipes drained by one poll, a stall bound,
-the child killed and reaped on a stall -- so nothing runs beside lantern's own
-state. No locks, no waiters, no signals (`-isig` is set for the duration).
+One process, one thread, one blocking read on fd 0, one byte per read: the quit
+key is the last byte lantern takes, so whatever was typed behind it -- the next
+command line, a paste -- stays queued for the shell. A 64-byte read carried those
+bytes away with the deck whenever they shared a read with `q` (2026-10-07: `ut`
+ran `cho lnpres $status`); `lantern.exp` leg (j) sends `q` and the next line in
+one write, three times. The queued bytes wait in the console's input ring
+(receive pauses, without loss, once some 256 are unread) or a pts's 4 KiB ring,
+far more than anyone types between lantern's exit and the shell's next read.
+A picture slide runs `view` as a child and waits for it -- both pipes drained
+by one poll, a stall bound, the child killed and reaped on a stall -- so
+nothing runs beside lantern's own state. No locks, no waiters, no signals (`-isig` is set for the duration).
 
 ## Invariants enforced
 
@@ -461,3 +468,5 @@ Low-value target, but the two places worth attacking:
   was wrong; corrected in `ae30a6b3`).
 - 2026-09-29 -- the picture slide (aux (d2), vote 3 of 2026-09-28;
   [[dec-2026-09-29-image-slide]]).
+- 2026-10-07 -- one byte per read, so a line typed behind `q` reaches the shell
+  whole; `lantern.exp` leg (j).
