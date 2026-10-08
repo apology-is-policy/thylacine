@@ -59,6 +59,7 @@ void test_weft_weave_clunk_unmap_guard(void);
 void test_weft_reap_orphan_reclaimed(void);
 void test_weft_reap_unlocks_the_space_it_locked(void);
 void test_weft_reap_skips_an_exit_closing_proc(void);
+void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
 
@@ -1036,6 +1037,50 @@ void test_weft_reap_skips_an_exit_closing_proc(void) {
 
     weft_reap_unregister(b);
     weft_binding_release(b);
+    drop_proc(server);
+    drop_proc(client);
+}
+
+// vmaguard audit r3 F1: the skip is for a space the exiting Proc holds alone. A
+// space an RFMEM sharer still holds is not walked by the quiesce, and nothing
+// else would unmap the stale mapping before the sharer's own death, so the
+// sweep unmaps it as usual.
+void test_weft_reap_unmaps_a_shared_exit_closing_space(void) {
+    struct Proc *server = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    struct Burrow *v = NULL;
+    struct weft_binding *b = NULL;
+    reap_fixture(server, client, &v, &b);
+    TEST_ASSERT(b != NULL, "fixture built");
+    struct Proc *sharer = proc_alloc_in(client->as, client->page_budget);
+    TEST_ASSERT(sharer != NULL, "an RFMEM sharer of the client's space");
+    TEST_EXPECT_EQ(addrspace_ref_count(client->as), 2, "(premise) the space has two holders");
+
+    proc_test_link(client);
+    reap_fake_session_init(true);
+    weft_reap_register(b, NULL, &g_reap_fake_client);
+
+    u64 now = 5000ull * 1000 * 1000;
+    vma_drain(server);
+    reap_fake_session_kill();
+    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+    __atomic_or_fetch(&client->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
+    int reclaimed = weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1);
+    bool unmapped  = vma_lookup(client, WEFT_TEST_VA) == NULL;
+    u32  pages     = client->as->shared_map_pages;
+    bool free_lock = __atomic_load_n(&client->as->lock.value, __ATOMIC_ACQUIRE) == 0u;
+    __atomic_and_fetch(&client->proc_flags, ~PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
+    proc_test_unlink(client);
+
+    TEST_EXPECT_EQ(reclaimed, 1, "past the grace: the binding is reclaimed");
+    TEST_ASSERT(unmapped, "the shared space's stale mapping is unmapped despite the exit close");
+    TEST_EXPECT_EQ(pages, 0u, "and its shared-in budget uncharged");
+    TEST_ASSERT(free_lock, "and the space's lock released");
+
+    weft_reap_unregister(b);
+    weft_binding_release(b);
+    drop_proc(sharer);
     drop_proc(server);
     drop_proc(client);
 }

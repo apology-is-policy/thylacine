@@ -637,9 +637,14 @@ void weft_reap_unregister(struct weft_binding *wb) {
 // reaper's transient reference would read as a sharer (vmaguard audit r2 F1).
 //
 // A non-ALIVE match is skipped, and so is a Proc whose exit close has begun
-// (PROC_FLAG_EXIT_CLOSING, read under the lock it pairs with): its own close
-// and drain own its teardown, and its device quiesce walks the list without
-// this lock, after taking and dropping it once (proc_quiesce_owned_devices).
+// (PROC_FLAG_EXIT_CLOSING, read under the lock it pairs with) when it is the
+// space's only holder: its device quiesce then walks the list without this lock,
+// after taking and dropping it once (proc_quiesce_owned_devices), and its drain
+// takes the stale mapping. A shared space is unmapped as usual -- the quiesce
+// does not walk it, and the survivor's drain is the survivor's death, which is
+// too late for the pixel pages the reaper exists to return. A ref read of 1
+// cannot be stale here: a sharer's departure that made it 1 precedes the
+// quiesce's read, and the quiesce's barrier unlock precedes this lock.
 struct weft_reap_find_ctx {
     u32 pid;
     struct AddrSpace *locked;   // non-NULL => this space's lock is HELD by the caller
@@ -660,7 +665,8 @@ static int weft_reap_find_cb(struct Proc *q, void *arg) {
     if (!q->as) return 1;
     struct AddrSpace *as = q->as;
     spin_lock(&as->lock);
-    if (__atomic_load_n(&q->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_EXIT_CLOSING) {
+    if ((__atomic_load_n(&q->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_EXIT_CLOSING)
+        && addrspace_ref_count(as) == 1) {
         spin_unlock(&as->lock);
         return 1;
     }

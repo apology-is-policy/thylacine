@@ -267,13 +267,20 @@ audit F1). It holds a lock and not a reference because the device-death
 quiesce and the image join read the reference count as "who else holds this
 space", and a transient reaper reference read as a sharer (audit r2 F1). The
 find skips a Proc whose exit close has begun (`PROC_FLAG_EXIT_CLOSING`, read
-under the lock), and the quiesce takes and drops the lock before its lock-free
-walk ([[sub-kernel-death]]). `weft.reap_unlocks_the_space_it_locked` swaps the
-space inside that window while another party holds the new space's lock, and
-checks that the find held the old lock and took no reference, that the sweep
-unmapped and uncharged the old space and unlocked its lock, and that the other
-party's hold survived; `weft.reap_skips_an_exit_closing_proc` checks the skip. Registration and unregistration both run lock-free. The
-close path unregisters before reading the binding, and the reaper nulls the
+under the lock) when it holds the space alone, and the quiesce takes and drops
+the lock before its lock-free walk ([[sub-kernel-death]]); a SHARED space is
+unmapped as usual, because the quiesce does not walk it and the survivor's
+drain would come only at the survivor's death (audit r3 F1).
+`weft.reap_unlocks_the_space_it_locked` swaps the space inside that window
+while another party holds the new space's lock, and checks that the find held
+the old lock and took no reference, that the sweep unmapped and uncharged the
+old space and unlocked its lock, and that the other party's hold survived;
+`weft.reap_skips_an_exit_closing_proc` checks the skip, and
+`weft.reap_unmaps_a_shared_exit_closing_space` that a shared space is still
+unmapped.
+
+Registration and unregistration take the registry lock alone, never the table
+or a space lock. The close path unregisters before reading the binding, and the reaper nulls the
 region pointer under the registry lock, so neither side sees a half-reclaimed
 binding.
 

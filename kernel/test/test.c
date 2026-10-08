@@ -600,6 +600,7 @@ void test_weft_sharer_charge_released_at_detach(void);
 void test_weft_reap_kproc_pid_survives_walk(void);
 void test_weft_reap_unlocks_the_space_it_locked(void);
 void test_weft_reap_skips_an_exit_closing_proc(void);
+void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
 void test_weft_reap_orphan_reclaimed(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
@@ -2700,6 +2701,7 @@ struct test_case g_tests[] = {
     { "weft.reap_kproc_pid_survives_walk", test_weft_reap_kproc_pid_survives_walk, false, NULL },
     { "weft.reap_unlocks_the_space_it_locked", test_weft_reap_unlocks_the_space_it_locked, false, NULL },
     { "weft.reap_skips_an_exit_closing_proc", test_weft_reap_skips_an_exit_closing_proc, false, NULL },
+    { "weft.reap_unmaps_a_shared_exit_closing_space", test_weft_reap_unmaps_a_shared_exit_closing_space, false, NULL },
     { "weft.reap_orphan_reclaimed",       test_weft_reap_orphan_reclaimed,    false, NULL },
     { "weft.reap_live_session_untouched", test_weft_reap_live_session_untouched, false, NULL },
     { "weft.reap_close_unregisters",      test_weft_reap_close_unregisters,   false, NULL },

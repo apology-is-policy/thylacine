@@ -609,8 +609,9 @@ peer has committed to EXITING by then, so the one other writer of that list is
 the weft orphan reaper, which unmaps a stale framebuffer mapping cross-Proc
 under the space's lock ([[sub-kernel-weft]]). The sweep now takes and drops
 that lock before walking, which waits out an unmap already under way, and the
-reaper no longer starts on a Proc that is non-ALIVE or carries
-`PROC_FLAG_EXIT_CLOSING`, which it reads under the same lock. Both close sites
+reaper no longer starts on a Proc that is non-ALIVE, or that carries
+`PROC_FLAG_EXIT_CLOSING`, read under the same lock, while holding its space
+alone (the only case the sweep walks). Both close sites
 set the flag before the quiesce, so a reaper that takes the lock after the
 barrier sees it. Before this, a reaper unmap could free a VMA the sweep was
 about to step through. The reaper also holds the space by its lock rather than
