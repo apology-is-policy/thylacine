@@ -208,6 +208,16 @@ warned; a later touch faults.
 The reaper parks indefinitely on an empty registry rather than ticking, so an
 idle machine has no periodic wakeup.
 
+The kernel test suite runs beside the live reaper thread, which sweeps on the
+real clock once a second while anything is registered. A test drives its own
+sweeps on a synthetic clock, so a live sweep landing inside a test's window
+would stamp or reclaim the test's binding and decide the test by when the
+thread's second came up. A binding a test registers
+(`weft_reap_register_for_test`) is therefore invisible to the thread's
+`weft_reap_sweep` and swept only by `weft_reap_sweep_for_test`, which in turn
+never touches a real binding; `weft.reap_live_sweep_leaves_test_bindings`
+drives the thread's own sweep against a dead test binding.
+
 Its liveness test reads the session's dead latch, which only an *active* receive
 path sets. So the guarantee is narrower than it looks: it reclaims a client whose
 session **observed** the death. One that maps and then never touches the session

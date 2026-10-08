@@ -591,6 +591,9 @@ void weft_reap_register(struct weft_binding *wb,
     wb->sess_att = att;
     wb->sess_cl = cl;
     wb->orphan_since_ns = 0;
+#ifdef KERNEL_TESTS
+    wb->reap_test_only = false;
+#endif
     spin_lock(&g_weft_reap_lock);
     wb->reap_next = g_maponly_bindings;
     g_maponly_bindings = wb;
@@ -700,7 +703,7 @@ static inline void weft_reap_test_window(void) {}
 // leftovers reclaim next sweep -- a 1 s slip, not a leak).
 #define WEFT_REAP_MAX_DROP 8
 
-int weft_reap_sweep(u64 now_ns) {
+static int weft_reap_sweep_in(u64 now_ns, bool test_only) {
     struct Burrow *drop[WEFT_REAP_MAX_DROP];
     int ndrop = 0;
     int reclaimed = 0;
@@ -709,6 +712,14 @@ int weft_reap_sweep(u64 now_ns) {
     struct weft_binding **pp = &g_maponly_bindings;
     while (*pp && ndrop < WEFT_REAP_MAX_DROP) {
         struct weft_binding *wb = *pp;
+#ifdef KERNEL_TESTS
+        if (wb->reap_test_only != test_only) {
+            pp = &wb->reap_next;
+            continue;
+        }
+#else
+        (void)test_only;
+#endif
         bool dead = wb->sess_att ? !p9_attached_is_open(wb->sess_att)
                                  : !p9_client_is_open(wb->sess_cl);
         if (!dead) {
@@ -760,6 +771,28 @@ int weft_reap_sweep(u64 now_ns) {
         if (drop[i]) burrow_unref(drop[i]);
     return reclaimed;
 }
+
+int weft_reap_sweep(u64 now_ns) {
+    return weft_reap_sweep_in(now_ns, false);
+}
+
+#ifdef KERNEL_TESTS
+void weft_reap_register_for_test(struct weft_binding *wb, const struct p9_client *cl) {
+    if (!wb || !weft_kind_maponly((int)wb->kind)) return;
+    wb->sess_att = NULL;
+    wb->sess_cl = cl;
+    wb->orphan_since_ns = 0;
+    wb->reap_test_only = true;
+    spin_lock(&g_weft_reap_lock);
+    wb->reap_next = g_maponly_bindings;
+    g_maponly_bindings = wb;
+    spin_unlock(&g_weft_reap_lock);
+}
+
+int weft_reap_sweep_for_test(u64 now_ns) {
+    return weft_reap_sweep_in(now_ns, true);
+}
+#endif
 
 static int weft_reap_have_work(void *arg) {
     (void)arg;

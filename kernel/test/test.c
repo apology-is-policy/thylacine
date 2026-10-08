@@ -604,6 +604,7 @@ void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
 void test_weft_reap_orphan_reclaimed(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
+void test_weft_reap_live_sweep_leaves_test_bindings(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_attr_index(void);
@@ -2705,6 +2706,7 @@ struct test_case g_tests[] = {
     { "weft.reap_orphan_reclaimed",       test_weft_reap_orphan_reclaimed,    false, NULL },
     { "weft.reap_live_session_untouched", test_weft_reap_live_session_untouched, false, NULL },
     { "weft.reap_close_unregisters",      test_weft_reap_close_unregisters,   false, NULL },
+    { "weft.reap_live_sweep_leaves_test_bindings", test_weft_reap_live_sweep_leaves_test_bindings, false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

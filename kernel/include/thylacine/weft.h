@@ -414,6 +414,11 @@ struct weft_binding {
     u64                       orphan_since_ns;
     const struct p9_attached *sess_att;
     const struct p9_client   *sess_cl;
+#ifdef KERNEL_TESTS
+    // Registered by a test, which sweeps it on its own synthetic clock: the
+    // live kthread's sweep leaves it alone (weft_reap_sweep).
+    bool                      reap_test_only;
+#endif
 };
 
 // Register a per-flow ring `v` (netd's backing ANON Burrow) owned by `owner`
@@ -579,10 +584,17 @@ void weft_reap_register(struct weft_binding *wb,
 // the guarantee no reaper sweep still holds wb.
 void weft_reap_unregister(struct weft_binding *wb);
 
-// One sweep pass at `now_ns` (the kthread's body; test-drivable). Returns
-// the number of bindings force-reclaimed this pass.
+// One sweep pass at `now_ns` (the kthread's body). Returns the number of
+// bindings force-reclaimed this pass.
 int weft_reap_sweep(u64 now_ns);
 #ifdef KERNEL_TESTS
+// A test's binding and a test's sweep. The kthread runs from boot, beside the
+// suite, on the real clock; a test's synthetic `now_ns` against a stamp the
+// kthread took (or the kthread reclaiming mid-test) would decide a test by
+// when the kthread's second came up, so the kthread never touches a binding
+// registered here and only weft_reap_sweep_for_test sweeps it.
+void weft_reap_register_for_test(struct weft_binding *wb, const struct p9_client *cl);
+int  weft_reap_sweep_for_test(u64 now_ns);
 // Runs `fn` between a sweep's find and its unmap (NULL clears it), where an
 // exec's address-space swap can land.
 void weft_reap_test_set_window_hook(void (*fn)(void));

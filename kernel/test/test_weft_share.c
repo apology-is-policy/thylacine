@@ -62,6 +62,7 @@ void test_weft_reap_skips_an_exit_closing_proc(void);
 void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
+void test_weft_reap_live_sweep_leaves_test_bindings(void);
 
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
@@ -823,7 +824,7 @@ void test_weft_reap_kproc_pid_survives_walk(void) {
 
     proc_test_link(client);
     reap_fake_session_init(true);
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     // Point the binding at kproc. This is what the G-2 bare-u32 pid wrap would
     // eventually produce on its own; here it is produced deliberately.
@@ -832,15 +833,15 @@ void test_weft_reap_kproc_pid_survives_walk(void) {
     u64 now = 2000ull * 1000 * 1000;
     vma_drain(server);
     reap_fake_session_kill();
-    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "dead sweep 1: stamps, no reclaim");
 
     // The walk visits kproc, matches pid 0, and must decline it rather than
     // locking a NULL address space. The entry still reclaims -- there is simply
     // no client mapping to unmap, which is exactly true of a Proc with no
     // address space.
-    TEST_EXPECT_EQ(weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1), 1,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS + 1), 1,
         "past the grace: reclaimed without dereferencing kproc's NULL as");
-    TEST_EXPECT_EQ(weft_reap_sweep(now + 10 * WEFT_REAP_GRACE_NS), 0,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + 10 * WEFT_REAP_GRACE_NS), 0,
         "the reclaimed entry left the registry");
 
     // The client's own mapping is untouched: the reaper never resolved to it.
@@ -867,13 +868,13 @@ void test_weft_reap_orphan_reclaimed(void) {
     // link the synthetic client under kproc for the sweep's duration.
     proc_test_link(client);
     reap_fake_session_init(true);
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     u64 now = 1000ull * 1000 * 1000;
 
     // Alive session: sweeps reclaim nothing, however late.
-    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "live session: no reclaim");
-    TEST_EXPECT_EQ(weft_reap_sweep(now + 100 * WEFT_REAP_GRACE_NS), 0,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "live session: no reclaim");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + 100 * WEFT_REAP_GRACE_NS), 0,
         "live session: still no reclaim");
     TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) != NULL,
         "the client mapping is untouched while the session lives");
@@ -885,13 +886,13 @@ void test_weft_reap_orphan_reclaimed(void) {
     // LAST ref, proving the pin actually dropped).
     vma_drain(server);   // server dead first (the compositor-crash shape)
     reap_fake_session_kill();
-    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
-    TEST_EXPECT_EQ(weft_reap_sweep(now + WEFT_REAP_GRACE_NS / 2), 0,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "dead sweep 1: stamps, no reclaim");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS / 2), 0,
         "within the grace: no reclaim");
     TEST_EXPECT_EQ(client->as->shared_map_pages, 2u, "still charged pre-reclaim");
     u64 destroyed_before = burrow_total_destroyed();
     u64 live_before = kobj_dma_live_count();
-    TEST_EXPECT_EQ(weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1), 1,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS + 1), 1,
         "past the grace: reclaimed");
     TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) == NULL,
         "the stale client mapping is force-unmapped");
@@ -903,7 +904,7 @@ void test_weft_reap_orphan_reclaimed(void) {
         "the pixel chunk freed with it");
 
     // A second sweep is a no-op (the entry unlinked).
-    TEST_EXPECT_EQ(weft_reap_sweep(now + 10 * WEFT_REAP_GRACE_NS), 0,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + 10 * WEFT_REAP_GRACE_NS), 0,
         "the reclaimed entry left the registry");
 
     // The eventual close-equivalent on the DISARMED binding: unregister is
@@ -957,12 +958,12 @@ void test_weft_reap_unlocks_the_space_it_locked(void) {
 
     proc_test_link(client);
     reap_fake_session_init(true);
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     u64 now = 3000ull * 1000 * 1000;
     vma_drain(server);
     reap_fake_session_kill();
-    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "dead sweep 1: stamps, no reclaim");
     TEST_EXPECT_EQ(old->shared_map_pages, 2u, "(premise) the old space is charged");
     int refs_before = addrspace_ref_count(old);
 
@@ -970,7 +971,7 @@ void test_weft_reap_unlocks_the_space_it_locked(void) {
     g_reap_swap_to         = nas;
     g_reap_window_held_new = false;
     weft_reap_test_set_window_hook(reap_window_exec_swap);
-    int reclaimed = weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1);
+    int reclaimed = weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS + 1);
     weft_reap_test_set_window_hook(NULL);
 
     // Observe first, then put the fixture back, then assert: a sweep that left
@@ -1018,14 +1019,14 @@ void test_weft_reap_skips_an_exit_closing_proc(void) {
 
     proc_test_link(client);
     reap_fake_session_init(true);
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     u64 now = 4000ull * 1000 * 1000;
     vma_drain(server);
     reap_fake_session_kill();
-    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "dead sweep 1: stamps, no reclaim");
     __atomic_or_fetch(&client->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
-    int reclaimed = weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1);
+    int reclaimed = weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS + 1);
     bool kept = vma_lookup(client, WEFT_TEST_VA) != NULL;
     bool free_lock = __atomic_load_n(&client->as->lock.value, __ATOMIC_ACQUIRE) == 0u;
     __atomic_and_fetch(&client->proc_flags, ~PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
@@ -1059,14 +1060,14 @@ void test_weft_reap_unmaps_a_shared_exit_closing_space(void) {
 
     proc_test_link(client);
     reap_fake_session_init(true);
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     u64 now = 5000ull * 1000 * 1000;
     vma_drain(server);
     reap_fake_session_kill();
-    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "dead sweep 1: stamps, no reclaim");
     __atomic_or_fetch(&client->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
-    int reclaimed = weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1);
+    int reclaimed = weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS + 1);
     bool unmapped  = vma_lookup(client, WEFT_TEST_VA) == NULL;
     u32  pages     = client->as->shared_map_pages;
     bool free_lock = __atomic_load_n(&client->as->lock.value, __ATOMIC_ACQUIRE) == 0u;
@@ -1096,13 +1097,13 @@ void test_weft_reap_live_session_untouched(void) {
 
     proc_test_link(client);
     reap_fake_session_init(true);
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     // Arbitrarily many sweeps over a LIVE session never touch the mapping;
     // a dead stamp from a transient... (a session cannot revive, but the
     // stamp-reset arm keeps the machine two-valued -- drive it anyway).
     for (int i = 0; i < 5; i++)
-        TEST_EXPECT_EQ(weft_reap_sweep((u64)(i + 1) * WEFT_REAP_GRACE_NS), 0,
+        TEST_EXPECT_EQ(weft_reap_sweep_for_test((u64)(i + 1) * WEFT_REAP_GRACE_NS), 0,
             "live session: swept, never reclaimed");
     TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) != NULL, "mapping intact");
     TEST_EXPECT_EQ(client->as->shared_map_pages, 2u, "budget intact");
@@ -1129,13 +1130,13 @@ void test_weft_reap_close_unregisters(void) {
 
     proc_test_link(client);
     reap_fake_session_init(false);   // born dead -- the harshest ordering
-    weft_reap_register(b, NULL, &g_reap_fake_client);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
 
     // The close races ahead of the reaper: unregister FIRST (the dev9p_close
     // order), then no later sweep -- however dead + late -- touches the
     // binding or the mapping.
     weft_reap_unregister(b);
-    TEST_EXPECT_EQ(weft_reap_sweep(100 * WEFT_REAP_GRACE_NS), 0,
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(100 * WEFT_REAP_GRACE_NS), 0,
         "an unregistered binding is invisible to the sweep");
     TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) != NULL,
         "the mapping survives (the close path owns it)");
@@ -1143,6 +1144,49 @@ void test_weft_reap_close_unregisters(void) {
     TEST_EXPECT_EQ(weft_binding_clunk_unmap(b, client), 0, "close unmaps");
     weft_binding_release(b);
     vma_drain(server);
+    proc_test_unlink(client);
+    drop_proc(server);
+    drop_proc(client);
+}
+
+// The live kthread runs weft_reap_sweep beside the suite on the real clock. A
+// binding a test registered is invisible to it -- no stamp, no reclaim, however
+// late -- and the test's own sweep, one call away, stamps and reclaims the same
+// binding (the positive control).
+void test_weft_reap_live_sweep_leaves_test_bindings(void) {
+    struct Proc *server = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    struct Burrow *v = NULL;
+    struct weft_binding *b = NULL;
+    reap_fixture(server, client, &v, &b);
+    TEST_ASSERT(b != NULL, "fixture built");
+
+    proc_test_link(client);
+    reap_fake_session_init(true);
+    weft_reap_register_for_test(b, &g_reap_fake_client);
+
+    u64 now = 5000ull * 1000 * 1000;
+    vma_drain(server);
+    reap_fake_session_kill();
+    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "the live sweep reclaims nothing");
+    TEST_EXPECT_EQ(b->orphan_since_ns, 0ull, "the live sweep took no orphan stamp");
+    TEST_EXPECT_EQ(weft_reap_sweep(now + 10 * WEFT_REAP_GRACE_NS), 0,
+        "the live sweep, long past any grace, still reclaims nothing");
+    TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) != NULL,
+        "the mapping survives the live sweeps");
+
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now), 0, "the test sweep stamps");
+    TEST_EXPECT_EQ(b->orphan_since_ns, now, "the test sweep's stamp is its own clock");
+    TEST_EXPECT_EQ(weft_reap_sweep_for_test(now + WEFT_REAP_GRACE_NS + 1), 1,
+        "the test sweep reclaims the same binding");
+    TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) == NULL,
+        "the reclaim unmapped it");
+
+    weft_reap_unregister(b);
+    TEST_EXPECT_EQ(weft_binding_clunk_unmap(b, client), -1,
+        "clunk-unmap on the disarmed binding refuses");
+    weft_binding_release(b);
     proc_test_unlink(client);
     drop_proc(server);
     drop_proc(client);
