@@ -1145,3 +1145,14 @@ yip 0161) plus the final/nonfinal discrimination that set could not cover,
 because every retirement in it ends the ring's occupancy and so refunds the whole
 charge. The private runtime remains gated -- no syscall reaches
 `loom_create_private` -- so this fixture is currently its only driver.
+
+
+October 8 runtime evidence: `inner-leg-20261008T195301Z` on 2bf48f7ad
+discriminated all three pristine-source mutants at their distinct assertions,
+with one failure each (1835/1836) and a green 1836/1836 control. Test-off kfree
+and four emitted Loom constructors match the baseline including relocations;
+no test symbols survive. Sources and clean control ELF/bin restored exactly.
+This closes the inner-unwind witness at one Mac default boot per side only.
+The observer records free-site entry, not buddy completion. Release sensitivity,
+new-source full gates and engine admission/retirement remain separate. Full
+self-review results and pins: work/oct5-as-r9/astra-takeover/inner-run-20261008T195301Z-result.json.

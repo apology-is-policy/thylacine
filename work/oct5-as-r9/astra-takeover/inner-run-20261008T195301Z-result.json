@@ -1,0 +1,96 @@
+{
+  "source": "2bf48f7add8f03c8b8375d2b203da7a680daf1ab",
+  "run": "work/oct5-as-r9/inner-leg-20261008T195301Z",
+  "runner_exit": 0,
+  "scope": "Mac default single boot per side; free observer measures entry, not buddy reclamation. No newer-source SMP/UBSan qualification.",
+  "results": {
+    "control": {
+      "boot_sha256": "f350a2dd16d69762cb85f51ced85a85415c825f058305c5284862aaa16dc160a",
+      "block": "[test] loom.private_owner_lifecycle ... [lp-mark] unpinned-reap-owner-drop\n[lp-mark] cleanup-owner-drop normal-fallthrough\nPASS",
+      "test_rc": "0"
+    },
+    "M1": {
+      "boot_sha256": "d30331e7c88ad701ad3be24760b4bbdc35bae4e1f32a7de7dd9469a84c4dcc4a",
+      "block": "[test] loom.private_owner_lifecycle ... [lp-mark] cleanup-owner-drop after-check-failure: the inner ring failure frees the unpublished Loom\n  [runnable-dump the inner ring failure frees the unpublished Loom]\n    cpu=0 tid=4 band=2 state=2 on_cpu=0 proc=0xffff000041e3d000 magic_ok=1\nFAIL: the inner ring failure frees the unpublished Loom",
+      "test_rc": "1"
+    },
+    "M2": {
+      "boot_sha256": "0131c7084dcc5637159626d50010a3dd1fb073cf406d3dc0ea702882776b9145",
+      "block": "[test] loom.private_owner_lifecycle ... [lp-mark] cleanup-owner-drop after-check-failure: a watched large free fires the watch\n  [runnable-dump a watched large free fires the watch]\n    cpu=0 tid=4 band=2 state=2 on_cpu=0 proc=0xffff000041e3d000 magic_ok=1\nFAIL: a watched large free fires the watch",
+      "test_rc": "1"
+    },
+    "M3": {
+      "boot_sha256": "a2cfca948cb4268542ae4ba1077bb5fa8aef216509ce20eb61454672e3daf828",
+      "block": "[test] loom.private_owner_lifecycle ... [lp-mark] cleanup-owner-drop after-check-failure: a watched free on another thread leaves the watch quiet\n  [runnable-dump a watched free on another thread leaves the watch quiet]\n    cpu=0 tid=4 band=2 state=2 on_cpu=0 proc=0xffff000041e3d000 magic_ok=1\nFAIL: a watched free on another thread leaves the watch quiet",
+      "test_rc": "1"
+    }
+  },
+  "shape": {
+    "kfree": {
+      "instructions": 43,
+      "relocations": 15,
+      "disassembly_sha256": "6dfc6f6b1359b94179f05db5b5e4b9e44c336b50c5a38237c20521c8923b9f31"
+    },
+    "loom_create_layout": {
+      "instructions": 130,
+      "relocations": 10,
+      "disassembly_sha256": "fea94f8876d12b326a48515b2deb7f656da805cfb8c57035ba09bc54f67d01b9"
+    },
+    "loom_create": {
+      "instructions": 3,
+      "relocations": 0,
+      "disassembly_sha256": "28f77e8e2b6ab41e6dc7775f1af6c71543dd31380c40ab88e2b26e094ee7a1d6"
+    },
+    "loom_create_with_receipts": {
+      "instructions": 3,
+      "relocations": 0,
+      "disassembly_sha256": "e7ea88c2c878c08fc3071112b8cb97f10a7d48fea6fbcf7b9aa90fb122bce1d1"
+    },
+    "loom_create_private": {
+      "instructions": 127,
+      "relocations": 13,
+      "disassembly_sha256": "a14af4387de649fbf3015d86405dfa1c8774b6d3759ea824143cc6e6d7d4373d"
+    }
+  },
+  "pin": "work/oct5-as-r9/inner-leg-control-PINNED-20261008T195301Z",
+  "hashes": [
+    {
+      "file": ".config-default",
+      "sha256": "4fcc788d6be38b80d3892e51f20edeff0671532c33045c46157fbed05cccae63"
+    },
+    {
+      "file": "pool.img.baked-snapshot",
+      "sha256": "43e63cdf87b4bcd56af6b69aef96179ac2aa25ade0c44b529f8e4b206ae9381c"
+    },
+    {
+      "file": "ramfs.cpio",
+      "sha256": "5368ee828d3b0538cb0e8cccc574935fa4fe825c19bc3a99ac9ee5c07b4f4ff9"
+    },
+    {
+      "file": "system.key",
+      "sha256": "7258b3b0e5be26379b273b1743c9d50a78c1fd7f0e4651f1eea661107e46920e"
+    },
+    {
+      "file": "system.key.baked-snapshot",
+      "sha256": "7258b3b0e5be26379b273b1743c9d50a78c1fd7f0e4651f1eea661107e46920e"
+    },
+    {
+      "file": "thylacine-undefined.bin",
+      "sha256": "988debebc9a4f803af1232c2c42585f934b03cbec0d47cb977a6532f960069e9"
+    },
+    {
+      "file": "thylacine-undefined.elf",
+      "sha256": "9a9252b1e92140cb80c49cea31a9a014c4a0d521d85b4888a9781d4b472a7152"
+    },
+    {
+      "file": "thylacine.bin",
+      "sha256": "ae48cf3dcc59c047acf94108780ff6b2cfb3bf0e85db555d1bd532bf50e8ed27"
+    },
+    {
+      "file": "thylacine.elf",
+      "sha256": "d16bcf72a632f7ff7b0251f221cfde05033fb92e79fed10d49fb8ffdfcdebf29"
+    }
+  ],
+  "recovery": "loom.c and slub.c match pristine and HEAD; build ELF and bin match pinned control exactly; lease released",
+  "UBSan": "Preserved undefined pair belongs to older 856ecae generation; not built/run here"
+}

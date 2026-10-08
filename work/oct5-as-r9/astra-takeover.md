@@ -17,8 +17,8 @@ or early removal of the 128 MiB protection follows from this transfer.
 
 ## Work queue
 
-1. **T83 helper timeout attribution:** implementation corrected; verification
-   in progress. `lp_cross_wait` returns an explicit completion result. The shared
+1. **T83 helper timeout attribution:** correction verified by seven host cases
+   and the normal-completion guest control. `lp_cross_wait` returns an explicit completion result. The shared
    void join is called only after the helper's terminal publication. Timeout
    disarms the watch and fails before the inner leg, without reclaiming a
    transferred object or potentially running helper. A late terminal publication
@@ -29,8 +29,10 @@ or early removal of the 128 MiB protection follows from this transfer.
    Host control executed on October 8: the old block loses the timeout (expected
    rc 11); all seven repaired cases pass. Kernel syntax has zero errors, two
    pre-existing prototype warnings. No new guest result exists.
-2. **Inner unwind qualification:** run control and independent M1/M2/M3 with
-   `inner-leg-run.sh`, then its test-off shape check. Preserve all raw logs,
+2. **Inner unwind qualification:** COMPLETE at bounded Mac single-boot scope
+   in inner-leg-20261008T195301Z (see final entry below). The control and
+   independent M1/M2/M3 were run with
+   `inner-leg-run.sh`, including its test-off shape check. Preserve all raw logs,
    exact source, mutations, nine matching boot inputs and restored control
    artifacts. The new log check requires exactly the expected failure diagnostic
    as well as the final verdict, so a helper timeout cannot be overwritten and
@@ -128,3 +130,45 @@ hashes and missing build images. Next: establish enough disk headroom for the
 remaining bakes and recovery, acquire Astra resource ownership, then complete
 all mutants and test-off shape. Full gates, release sensitivity and engine/MM
 work remain open; all activation and integration restrictions remain in force.
+
+
+## October 8, 19:58: inner unwind discriminated, bounded Mac scope
+
+Run `inner-leg-20261008T195301Z` completed with exit 0 on `2bf48f7ad`, clean
+external Stratum `61dde3727921e70e2c72fbd3c9e2044a192f4a54`. Control passed
+1836/1836 with normal fallthrough. Independent pristine-source mutants each
+produced exactly one expected failure, 1835/1836 and test.sh rc1:
+M1 missing inner kfree -> "the inner ring failure frees the unpublished Loom";
+M2 disabled observer -> "a watched large free fires the watch";
+M3 removed thread guard -> "a watched free on another thread leaves the watch quiet".
+M2 and M3 stop before the inner fault is armed. M1 intentionally leaks one large
+allocation until its disposable VM exits; the observer proves free-site ENTRY,
+not buddy reclamation.
+
+KERNEL_TESTS-off comparison: no test symbols, identical names; kfree 43
+instructions/15 relocations, layout 130/10, create 3/0, receipts 3/0, private
+127/13, all byte-identical disassemblies including relocations. Recovery restored
+both sources to pristine == HEAD, and ELF/bin match the saved control exactly
+(bin ae48cf3dcc59c047, ELF d16bcf72a632f7ff). Mac lease released.
+
+Control inputs moved outside pruning to `inner-leg-control-PINNED-20261008T195301Z`;
+all nine hashes verified. The undefined pair in that preserved set is older
+856ecae evidence, not new-source sanitizer coverage. Full SHA256s, raw result
+checks and shape counts: `astra-takeover/inner-run-20261008T195301Z-result.json`.
+Self-review reread all four raw boot logs, asserted sole diagnostics and verdicts,
+compared saved disassemblies and verified restored sources and artifacts. This
+is single-agent self-review, not an independent audit. Scope is one Mac default
+boot per side. Older full gates still cover only their recorded source.
+
+Disk was unblocked by reclaiming unused reproducible native Cargo debug caches
+in Main and b2c under the operator resource grant; no tracked/source files,
+release outputs, raw evidence or pinned generations were removed. Inventories:
+astra-takeover/main-cargo-cache-cleanup.json and b2c-cargo-cache-cleanup.json.
+APFS sharing made the first apparent 2.6 GiB deletion reclaim little; removing the
+other cache brought actual free space to 9.7 GiB. This run stayed above the 8 GiB
+floor, 9943 -> 9468 MiB. Prior floor-refusal evidence remains intact.
+
+NEXT: release-half sensitivity and remaining structural/engine obligations in
+checkpoint1-coverage.md, then new-source full gates and approved async-first
+engine work before MM0-MM4. No Main landing, private async/clipboard activation,
+or removal of the 128 MiB protection is implied by this bounded result.

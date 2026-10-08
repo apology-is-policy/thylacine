@@ -1,0 +1,24 @@
+{
+  "at": "2026-10-08T19:52:19.764592+00:00",
+  "authorization": "Operator resource reclamation grant, reproducible unused native Cargo debug cache in b2c worktree; no sources or run evidence",
+  "path": "/Users/northkillpd/projects/thylacine-b2c/build/usr-rs/aarch64-apple-darwin/debug",
+  "files": 152471,
+  "entries": [
+    ".cargo-artifact-lock",
+    ".cargo-build-lock",
+    ".cargo-lock",
+    ".fingerprint",
+    "build",
+    "deps",
+    "examples",
+    "libhalcyond.d",
+    "libhalcyond.rlib",
+    "libnora.d",
+    "libnora.rlib",
+    "libvt.d",
+    "libvt.rlib"
+  ],
+  "before_df": "Filesystem   1024-blocks      Used Available Capacity iused    ifree %iused  Mounted on\n/dev/disk3s5   482797652 445858180   7373024    99% 2876378 73730240    4%   /System/Volumes/Data\n",
+  "du": "8181764\t/Users/northkillpd/projects/thylacine-b2c/build/usr-rs/aarch64-apple-darwin/debug\n",
+  "after_df": "Filesystem   1024-blocks      Used Available Capacity iused     ifree %iused  Mounted on\n/dev/disk3s5   482797652 443049320  10181884    98% 2723544 101818840    3%   /System/Volumes/Data\n"
+}
