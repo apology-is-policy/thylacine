@@ -1,9 +1,20 @@
 # x86 on Thylacine -- the translation layer (design)
 
-> **Status: DRAFT for operator votes, 2026-10-04.** Not yet scripture; nothing here
-> binds until the forks in section 10 are voted and the result lands as a scripture
-> commit (`docs/agent/DESIGN-FORKS.md`). Arc prefix **XT** (proposed). Name: held
-> (section 14).
+> **Status: DRAFT for operator votes, 2026-10-04; revised 2026-10-08.** Not yet
+> scripture; nothing here binds until the forks in section 10 are voted and the
+> result lands as a scripture commit (`docs/agent/DESIGN-FORKS.md`). Arc prefix
+> **XT** (proposed). Name: held (section 14).
+>
+> **The 2026-10-08 revision** re-reads the draft against `main`@`04df02c9`, which
+> carries B-2: the code Burrow became a lazy reservation at random addresses, a
+> sealed execute-only region exists, and debug authority over an image holding a
+> code alias now needs `CAP_JIT` cover. It closes two gaps the first draft left
+> open:
+> - how the entitlement meets debug authority (section 5.2);
+> - guest code provenance: a translated program may execute only guest code a
+>   native program could (section 5.4 item 4, I-48(e)).
+>
+> It adds one fork, F10 (guest code generation).
 >
 > Motivated by `docs/WINE-STUDY.md`, which found every route to x86 software runs
 > through an x86 translator and the same handful of missing kernel primitives.
@@ -13,7 +24,7 @@
 > result must stay true to Thylacine's tenets while embracing novel angles aligned
 > with its heritage.
 >
-> Evidence conventions follow the study: `path:line` at `main`@`8746a8a2`; outside
+> Evidence conventions follow the study: `path:line` at `main`@`04df02c9`; outside
 > claims tagged **[V]** verified at the source, **[S]** search extract only, **[R]**
 > recalled, unconfirmed.
 
@@ -35,7 +46,7 @@ Seven principles carry the design. Each later section cites the one it serves.
 | # | Principle | Tenet it serves |
 |---|---|---|
 | **P1** | **The kernel never learns x86.** It gains ISA-neutral primitives only: exact faults, shapes, a declared second decode, entitlement, memory-model control. No x86 decoder, syscall table or register file enters the kernel | VISION 3.4: compatibility comes from translation layers, "not by designing the kernel around a foreign ABI" |
-| **P2** | **An objtype is a namespace property.** A tree is *declared* to hold `amd64` or `386` programs, Plan 9's `$objtype` made executable. The ELF header corroborates; it never decides | VISION 3.2 (territories); I-43's rule "an ELF byte may corroborate but never decide" (`docs/ARCHITECTURE.md:5080`) |
+| **P2** | **An objtype is a namespace property.** A tree is *declared* to hold `amd64` or `386` programs, Plan 9's `$objtype` made executable. The ELF header corroborates; it never decides | VISION 3.2 (territories); I-43's rule "an ELF byte may corroborate but never decide" (`docs/ARCHITECTURE.md:5194`) |
 | **P3** | **The translator is a native citizen.** It is a vouched Thylacine program, entitled by the system, using native facilities directly: code Burrows, notes, 9P, native libraries | VISION 3.6: rigor over expedience |
 | **P4** | **Linux semantics live once, in Vivarium.** The translator converts x86 *shape* into Vivarium's shape and never re-implements Linux | single source of truth; I-43 by construction |
 | **P5** | **Translated code is text.** It is stored as files, demand-paged, shared through the Image cache and integrity-checked by Stratum. JIT is the fallback, not the path | VISION 3.1 ("everything is a file", 9P composition); REVENANT |
@@ -90,14 +101,14 @@ means:
 - **`#!` interpreters.** `exec` already loads a different image from the one named
   when the file says so [R]. Thylacine's DISTRO D-4 is the modern form: "the kernel
   loads exactly ONE image per exec ... What changes is WHICH image"
-  (`kernel/exec.c:1125-1131`).
+  (`kernel/exec.c:1128-1130`).
 - **`notify`/`noted` with a Ureg.**
   - The handler receives the interrupted registers. 9front's `notify(2)`: the Ureg
     "is provided to help recover from traps such as floating point exceptions" [V].
   - `notejmp` "modif[ies] the saved state" and then calls `noted(NCONT)` [V]. So a
     handler that edits the state it resumes into is the heritage contract.
   - Thylacine's `NCONT` currently restores a kernel-side copy and ignores edits
-    (`kernel/notes.c:1963-1975`). P7 restores the heritage.
+    (`kernel/notes.c:2011-2024`). P7 restores the heritage.
 - **Shared text.** Plan 9 shares text segments among processes running the same
   image. Thylacine's Image cache is that idea, qid-keyed
   (`docs/EXEC-LOAD-DESIGN.md` section 4.4). P5 extends it to translated text.
@@ -117,7 +128,7 @@ means:
 
 - **Fuchsia: code authority is a resource.** Making memory executable needs
   `zx_vmo_replace_as_executable` with the VMEX resource, handed to specific
-  components. ARCH cites it as the precedent for `CAP_JIT` (`docs/ARCHITECTURE.md:557`).
+  components. ARCH cites it as the precedent for `CAP_JIT` (`docs/ARCHITECTURE.md:558`).
 - **Fuchsia Starnix** runs Linux binaries in userspace but does no ISA translation
   [R].
 - **macOS hardened runtime: entitlements are image-bound authority.** A binary may
@@ -151,41 +162,55 @@ The full survey is `docs/WINE-STUDY.md` section 2. The facts this design moves:
 - **ELF.** The loader accepts only `EM_AARCH64` (`kernel/elf.c:89`).
 - **Phenotype.** Decided at *every* image load from the namespace: an `MPHENO_LINUX`
   mount crossing or the Territory's `root_pheno`. ELF bytes never decide
-  (`docs/VIVARIUM.md:4099-4125`).
+  (`docs/VIVARIUM.md` sections 12.1 and 13.10).
 - **Layout.**
   - Main stack `[0x7F80_0000, 0x8000_0000)` (`kernel/include/thylacine/exec.h:87-88`).
-  - PIE base `0x2000_0000` (`kernel/include/thylacine/elf.h:139-143`).
+  - PIE base `0x2000_0000` (`kernel/include/thylacine/elf.h:143`).
   - vDSO clock page `0xC000_0000`.
   - Every runtime mapping lives in `[4 GiB, 64 TiB)`, and FIXED below it is refused
-    (`kernel/include/thylacine/exec.h:110-111`, `kernel/syscall.c:6447`).
+    (`kernel/include/thylacine/exec.h:110-111`, `kernel/syscall.c:6465`).
 - **The three doors to X:** exec, a provenance-vouched file map, and
   `SYS_JIT_CREATE`. Only `devramfs` and `dev9p` may back executable bytes
-  (`docs/ARCHITECTURE.md:545-557`).
-- **JIT.** Code Burrows are dual-mapped RW/RX at kernel-chosen addresses, at most
-  64 MiB each (`kernel/syscall.c:7068-7083`;
-  `kernel/include/thylacine/syscall.h:2494-2498`). `CAP_JIT` is elevation-only and
-  comes from the corvus `jit` clearance, which needs re-authentication and does not
-  propagate (`usr/corvus/src/main.rs:1285-1301`).
+  (`docs/ARCHITECTURE.md:546-558`).
+- **JIT** (as reshaped by B-2, `docs/ARCHITECTURE.md:595`).
+  - A code Burrow is a lazy reservation of at most 64 MiB, dual-mapped RW/RX. A
+    page is committed, zeroed, I-cache-invalidated and charged on its first touch
+    through either alias (`kernel/include/thylacine/syscall.h:2542`).
+  - The two aliases sit at independent random addresses. A *sealed* region
+    (`SYS_JIT_CREATE_SEALED`) is born with only an execute-only alias.
+  - User copies use `LDTR`/`STTR`, so no syscall reads an execute-only page for
+    its caller. EL0 cache maintenance stays off: `SYS_ICACHE_SYNC` is the only
+    publish path (`docs/JIT-ON-WX-DESIGN.md`, "B-2").
+  - `/proc/<pid>/maps` shows a code alias's addresses only to the target and to a
+    reader with debug authority over it (`docs/ARCHITECTURE.md:5072`).
+  - **Debug authority over an image holding a code alias needs `CAP_JIT` cover**,
+    because a debugger may write a stopped target's data memory, which includes
+    the writer alias. I-39's image join ORs `CAP_JIT` into an address space's caps
+    while it holds any code alias (`docs/DEBUG-FS-DESIGN.md:595-607`).
+  - `CAP_JIT` is elevation-only and comes from the corvus `jit` clearance, which
+    needs re-authentication and does not propagate
+    (`usr/corvus/src/main.rs:1285-1301`).
 - **Notes.**
   - fd-shaped first; the async handler path receives only a name and an argument
     (`kernel/include/thylacine/notes.h:1-40`).
-  - Every EL0 fault terminates the Proc (`arch/arm64/exception.c:481-631`).
-  - `NCONT` ignores handler edits (`kernel/notes.c:1963-1975`).
+  - Every EL0 fault terminates the Proc (`arch/arm64/exception.c:429-634`).
+  - `NCONT` ignores handler edits (`kernel/notes.c:2011-2024`).
   - No alternate stack; no thread-directed posting
     (`kernel/include/thylacine/syscall.h:886-914`).
-- **Threads.** 256 per Proc, counted over the Proc's lifetime (`kernel/proc.c:1193`;
+- **Threads.** 256 per Proc, counted over the Proc's lifetime: an exited thread
+  is freed only when the whole Proc is reaped (`kernel/proc.c:1200`, `:6075-6082`;
   `docs/WINE-STUDY.md` Appendix A, F3).
 - **Feature discovery.** A trapped `mrs` of an ID register kills the Proc
-  (`arch/arm64/exception.c:627-631`); only `AT_HWCAP`, no `AT_HWCAP2`.
+  (`arch/arm64/exception.c:630-634`); only `AT_HWCAP`, no `AT_HWCAP2`.
 - **Hardware.** The userspace floor is ARMv8.0 (`tools/check-v80-floor.py`). The
   permanent hardware box is a Pi 400 (Cortex-A72: no LSE, no RCpc;
   `docs/agent/THYLA-PI.md:6-10`). The dev loop is QEMU/HVF on an M2.
 - **Already right for this design.**
   - 4 KiB pages; a 47-bit user range.
   - x18 preserved across exceptions.
-  - B-1d `dlopen` (`docs/ARCHITECTURE.md:577-579`).
+  - B-1d `dlopen` (`docs/ARCHITECTURE.md:578`).
   - The Image cache.
-  - Pouch's C++20 runtime (`docs/LLVM-DESIGN.md:200-204`).
+  - Pouch's C++20 runtime (`docs/LLVM-DESIGN.md:202-206`).
 
 ---
 
@@ -216,8 +241,9 @@ The full survey is `docs/WINE-STUDY.md` section 2. The facts this design moves:
 ### 4.2 The life of an x86 process
 
 1. **Exec.** The user runs `/amd64/bin/ls`. The path crosses a mount declared
-   `objtype amd64` + `pheno linux` (P2). `exec` opens the file, reads the ELF
-   header and sees `EM_X86_64`, which corroborates the declaration.
+   `objtype amd64` + `pheno linux` (P2). `exec` opens the file and checks it
+   exactly as a native exec would (the X bit, the vouching rule). The ELF header
+   says `EM_X86_64`, which corroborates the declaration.
 2. **The objtype table.** The kernel consults the system objtype table, which maps
    `(linux, amd64)` to: translator image `/lib/xt/amd64` (vouched), shape `foreign`,
    entitlement `code-emit`.
@@ -262,13 +288,13 @@ The full survey is `docs/WINE-STUDY.md` section 2. The facts this design moves:
 
 ## 5. Kernel primitives (the redesigns)
 
-Eight changes. Each is ISA-neutral, so each also benefits non-x86 consumers
+Nine changes. Each is ISA-neutral, so each also benefits non-x86 consumers
 (named per item).
 
 ### 5.1 XT-K1 -- objtype declaration and foreign exec
 
 - **Declaration channels.** These mirror Vivarium's two phenotype channels exactly
-  (Design D, `docs/VIVARIUM.md:4099-4125`).
+  (Design D, `docs/VIVARIUM.md` section 13.10).
   - **By location:** a mount marked with an objtype, `MOBJ_AMD64` or `MOBJ_386`.
     The natural place is the Plan 9 tree `/amd64` and `/386`. An x86 tree mount
     carries the personality flag too (`MPHENO_LINUX`).
@@ -279,12 +305,18 @@ Eight changes. Each is ISA-neutral, so each also benefits non-x86 consumers
 - **Corroboration.** `e_machine` must equal the declared objtype (`EM_X86_64` for
   amd64, `EM_386` for 386); a mismatch refuses the exec. The header confirms the
   declaration and never chooses.
+- **The guest file passes exec's own checks.** Before substituting the translator,
+  foreign exec applies to the guest file every check a native exec applies to its
+  image: the X bit, the `may_back_exec` floor, and a mount not marked `MNOEXEC`
+  (the vouching rule, `docs/ARCHITECTURE.md:546-552`). A file a native exec would
+  refuse is refused here too: translation is never a way around `noexec`
+  (I-48(e), section 5.4 item 4).
 - **The objtype table.** A small kernel table:
   `(personality, objtype) -> {translator image, shape, entitlements}`.
   - It is loaded at boot from a system file (Plan 9 `/lib` idiom, e.g.
     `/lib/objtype`) by a TCB process through a ctl file.
   - Changing it needs host-owner authority.
-  - The translator image must resolve on a vouched mount (`docs/ARCHITECTURE.md:545-551`).
+  - The translator image must resolve on a vouched mount (`docs/ARCHITECTURE.md:546-552`).
     Its identity is pinned by qid version, so a swapped file is not the registered
     image.
 - **Foreign exec.** A D-4-shaped image substitution:
@@ -322,6 +354,27 @@ image* carries the `code-emit` entitlement from the objtype table.
 named components. Thylacine needs no signature machinery, because a pinned qid on a
 vouched mount *is* the identity.
 
+**Debug authority (I-39, after B-2).** A host debugger may write a stopped target's
+data memory, and a translator's writer alias is data memory. Three rules follow.
+- **The entitlement counts as `CAP_JIT` in I-39's image join**, from the moment it
+  is stamped and before any alias exists. B-2b already counts each code alias that
+  way (`docs/DEBUG-FS-DESIGN.md:595-607`). Attaching a host debugger to a
+  translated Proc therefore needs `CAP_JIT` cover, or the `CAP_DEBUG`/
+  `CAP_HOSTOWNER` axis. A birth-held translator (`SPAWN_DEBUG_HELD`) offers no
+  window before its first alias.
+- **No entitlement is stamped on a load by a debug-tainted Proc**, by I-39's rule
+  that a debugged image never elevates. That load gets the translator without code
+  emission: it runs what the store holds (and an interpreter, where the engine has
+  one), or `SYS_JIT_CREATE` fails it cleanly with `EACCES`.
+- **Guest-level debugging is the runtime's own** and needs none of this: x86
+  registers, guest memory, breakpoints placed by retranslation. It is a designed
+  extension, not built in XT. The runtime would serve each guest as a per-objtype
+  debug view, the shape of acid's `$objtype`-selected machine tables [R].
+
+B-2b's writer hardening (random aliases, a sealed write thunk) is open to the
+runtime, but buys little here. Under P6 a guest can reach the runtime's memory
+through translated stores anyway.
+
 **Also unblocks.** DOSBox-X's dynrec (today it activates the corvus clearance), and
 Wine's loader when it hosts FEX.
 
@@ -340,7 +393,7 @@ load. The objtype table names it; native Procs get `native`.
   - non-PIE x86-64 binaries at `0x400000`;
   - every 386 guest (all below 4 GiB);
   - and Wine (`KUSER_SHARED_DATA` at `0x7ffe0000`, PE preferred bases, WoW64).
-- **The FIXED rule moves into the shape.** `kernel/syscall.c:6447`'s window check
+- **The FIXED rule moves into the shape.** `kernel/syscall.c:6465`'s window check
   becomes "inside the Proc's shape's FIXED-able range".
 
 **Why a shape and not a global change.** The native layout keeps its guard
@@ -384,11 +437,43 @@ needs three things no Thylacine Proc has had.
    - The runtime mirrors each guest thread's mask into that thread's native note
      mask, so Vivarium's EINTR rules (VIV-EINTR) still decide which guest blocking
      calls a note interrupts.
+4. **Guest code provenance (proposed I-48(e)).** The runtime translates only
+   *guest-executable* memory. Guest memory becomes guest-executable only on the
+   terms native code would:
+   - **The guest image**, which foreign exec has already vouched (section 5.1).
+   - **A guest file map with `PROT_EXEC`**: the guest's `ld.so` loading a
+     library, or Wine mapping a DLL. The guest decode applies the vouching rule as
+     Vivarium's native arm does, and records *guest-X* on the mapping. Host X is
+     never set.
+   - **Anonymous or written guest memory made executable**: `mprotect(PROT_EXEC)`,
+     `VirtualProtect`, an x86 JIT, a packer, self-modifying code. That is code
+     generation, so it needs code authority: `CAP_JIT`, or what fork F10 decides.
+
+   A jump to memory that is not guest-executable raises the guest's own fault
+   (`SIGSEGV`, `STATUS_ACCESS_VIOLATION`). That is how the runtime emulates NX.
+
+   **The split.** The kernel owns the checks and the guest-X marking. The runtime
+   is the only thing that fetches guest code, so it owns the honouring, and it is in
+   the TCB for that as the loader is for native code. Without this rule, `MNOEXEC`
+   and I-42 would hold for every program except translated ones.
 
 **Threads.** A guest `clone(CLONE_THREAD)` goes out through the guest decode with a
 *runtime* entry point and host stack, which Vivarium's N-3 row already accepts.
 The new Thread joins the guest's thread group and runs runtime code first. `fork`
 and `execve` go through the guest decode too, and re-decide objtype per section 5.1.
+
+**A fork carries text, not scratch.**
+- Today a fork of an address space holding a code region fails whole. The clone
+  classifier sends `BURROW_TYPE_CODE` to its refusing arm (`kernel/addrspace.c:204-208`),
+  because a pair of aliases over one region has no copy-on-write.
+- XT adds a creation flag, *don't-fork*, set at `SYS_JIT_CREATE`: the shape of
+  Linux's `MADV_DONTFORK` [R]. A fork omits such a region. The child is born
+  holding none, and its runtime rebuilds its JIT state.
+- Store text is file-backed, so the fork shares it as it shares all text
+  (`kernel/addrspace.c:177-183`). A fork child therefore mostly maps what its
+  parent translated, instead of compiling it again.
+- A region created without the flag keeps today's refusal.
+- The child keeps the entitlement, because it runs the same image.
 
 **Why this is the proper answer.** The alternative is a translator that is itself a
 Linux-phenotype program (section 10, F1, option A1). That translator could reach
@@ -471,10 +556,15 @@ single-homed (P4).
 - **XT-K8.**
   - Emulate EL0 `mrs` of the ID registers (`ID_AA64*`, sanitised `MIDR_EL1`),
     following Linux's documented `HWCAP_CPUID` ABI [R].
-  - Let EL0 read `CTR_EL0` directly (`SCTLR_EL1.UCT`).
+  - Let EL0 read `CTR_EL0` directly (`SCTLR_EL1.UCT`). That is a read of cache
+    geometry only; the maintenance instructions (`SCTLR_EL1.UCI`) stay off, per B-2a.
   - Add `AT_HWCAP2`.
   - Fix the EL2-entry `nTWE`/`nTWI` defect while in the same register
-    (`docs/WINE-STUDY.md` Appendix A, F2).
+    (`docs/WINE-STUDY.md` Appendix A, F2). The EL2 path writes `0x30D00800`
+    (`arch/arm64/start.S:130-134`), and the MMU enable only ORs in M, C and I
+    (`arch/arm64/mmu.c:767`). So `SCTLR_EL1`'s EL0 controls are whatever the entry
+    path left, and the two boot paths differ. The fix composes one explicit
+    value, as Linux's `INIT_SCTLR_EL1_MMU_ON` does [R].
 - **XT-K9.**
   - Reap exited threads individually, so `PROC_THREAD_MAX` counts live threads
     (study F3).
@@ -516,7 +606,13 @@ like FEX's own Windows ones, and keep core patches minimal and enumerated.
   - This is the pattern FEX's own source names and Madeira proved [V], and the one
     DOSBox-X's DX-4 port already uses here.
   - `JIT_REGION_MAX` (64 MiB) against FEX's 128 MB buffers means two regions or a
-    revised cap (XT-12 measures).
+    revised cap (XT-12 measures). B-2a's lazy regions suit FEX: an untouched
+    reservation costs nothing.
+  - FEX's own cache maintenance (its clear-cache loop) becomes `SYS_ICACHE_SYNC`,
+    since EL0 cache maintenance stays off (B-2a).
+  - Its code regions are created *don't-fork* (section 5.4, "A fork carries text,
+    not scratch"). Its post-fork child path discards its block cache and rebuilds
+    the dispatcher before it returns to the guest.
 - **Memory.** The runtime's own allocations are native burrows in the runtime
   arena. Guest allocations go through the guest decode into the guest arena.
 - **Faults.** FEX's signal delegator is rebased onto exact notes (section 5.5).
@@ -528,8 +624,8 @@ like FEX's own Windows ones, and keep core patches minimal and enumerated.
   - Guest `clone` uses the hosted thread path (section 5.4).
   - x86 glibc guests are therefore *easier* than aarch64 glibc binaries under plain
     Vivarium. FEX owns their signal frames and thread creation, so Vivarium's
-    `SA_RESTORER` and clone flag-word limits (`kernel/vivarium.c:3221-3236`,
-    `kernel/include/thylacine/vivarium.h:2403-2413`)
+    `SA_RESTORER` and clone flag-word limits (`kernel/vivarium.c:3230-3245`,
+    `kernel/include/thylacine/vivarium.h:2402-2435`)
     never reach the guest. What remains is the aarch64-Linux calls FEX forwards,
     `FUTEX_WAIT_BITSET` among them.
 - **FEXServer** (rootfs mounting, shared state) is not ported. The territory *is*
@@ -597,7 +693,7 @@ The store is a directory tree on Stratum, not a daemon protocol:
 
 - **Mapping.**
   - The runtime maps `text` RX through the existing vouched file-map door, since
-    `dev9p` may back executable bytes (`docs/ARCHITECTURE.md:545-557`). It maps
+    `dev9p` may back executable bytes (`docs/ARCHITECTURE.md:546-558`). It maps
     `index` R.
   - No new door to X exists, and none is needed.
 - **Sharing.** The Image cache shares the pages across every Proc that maps the
@@ -611,7 +707,7 @@ The store is a directory tree on Stratum, not a daemon protocol:
   - The user's own runtime writes it: blocks it JIT-compiled become entries for the
     next run.
   - It needs **no new trust**. A user can already author executable bytes in their
-    own executable tree (`docs/ARCHITECTURE.md:549`, "crosses no boundary").
+    own executable tree (`docs/ARCHITECTURE.md:550`, "crosses no boundary").
   - A bad entry harms only that user.
 - **System store (`/lib/xt/store/`).**
   - Covers system-installed trees only, such as an amd64 tree shipped in the image.
@@ -690,6 +786,10 @@ The store is a directory tree on Stratum, not a daemon protocol:
 > **(c)** The hosted decode is partitioned: a guest-decode call names only
 > guest-partition handles and acts only on guest-arena memory.
 > **(d)** A requested memory model is honoured or refused, never silently weakened.
+> **(e)** Guest code is held to host code's rules. Guest memory becomes
+> guest-executable only through exec's vouching (the guest image, guest file maps)
+> or through code authority (`CAP_JIT`, or the objtype entry's guest-code policy,
+> section 10 F10). The runtime translates nothing else.
 
 ### 9.2 Amendments
 
@@ -697,7 +797,11 @@ The store is a directory tree on Stratum, not a daemon protocol:
 - **I-43:** objtype declaration (same channels, same fail-safe), and the hosted
   decode as shape.
 - **I-19:** sub-invariant N-6 (section 5.5).
-- **I-12:** unchanged. Restated for translated Procs by I-48(a).
+- **I-39:** a `code-emit`-entitled image counts as `CAP_JIT` in the image join from
+  the moment the entitlement is stamped, and no entitlement is stamped on a
+  debug-tainted load (section 5.2).
+- **I-12:** unchanged. I-48 restates it for translated Procs: the page half in (a),
+  the provenance half in (e).
 
 ### 9.3 Specs (spec-first is suspended; re-enabling is the operator's call)
 
@@ -716,6 +820,9 @@ Everything else is prose plus audit, under the standing policy
 - The foreign-exec path (I-12, I-36, I-43).
 - The entitlement (I-42).
 - The hosted decode and partitions (I-48(b), (c)).
+- The guest-X marking at the guest decode, and the runtime's honouring of it
+  (I-48(e)).
+- Don't-fork code regions at the clone classifier (I-44, I-42).
 - Exact faults (I-19 N-6, I-24).
 - Memory-model switching (context switch).
 - The store producer (I-36, I-48(a)).
@@ -727,7 +834,10 @@ Everything else is prose plus audit, under the standing policy
   run *on Thylacine*, and are diffed against the same suites on Linux.
 - **Torture.** Self-modifying-code stress; signal torture (nested masks,
   `sigaltstack`, `SIGSEGV` resume); thread churn (more than 1,000 spawns, proving
-  XT-K9); fork/exec chains crossing objtypes.
+  XT-K9); fork/exec chains crossing objtypes; a translated shell's fork loop.
+- **Provenance.** A guest jump into data faults as the guest's own `SIGSEGV`; an x86
+  binary on an `MNOEXEC` mount is refused; a guest `mprotect(PROT_EXEC)` on
+  anonymous memory is refused without code authority (I-48(e)).
 - **Bridges.** An x86 SDL program paints a Tapestry pane (screendump gate, the
   DOSBox-X idiom).
 - **Sharing.** Two processes running one image share store text (`/proc` shows one
@@ -743,13 +853,14 @@ The research (section 2) collapses most of these; each carries a recommendation.
 |---|---|---|---|
 | **F1** | Where the guest's Linux semantics live, and what the translator is | **A1** the translator is a Linux-phenotype program (FEX's Linux frontend as is); **A2** native translator plus a hosted decode into Vivarium; **A3** the kernel learns x86 Linux (a second table, FreeBSD `linux32`-style) | **A2.** It is the only option where the translator is native (P3) *and* Linux stays single-homed (P4). It alone allows native bridges (section 6.4), without which x86 games need a Linux display stack. A1 forces Thylacine through Linux-shaped side doors and makes the translator's own correctness depend on Vivarium. A3 violates VISION 3.4 and doubles Vivarium. Cost of A2: section 5.4, a new kernel organ |
 | **F2** | Fault delivery model | **In-thread** `notify`/`noted` with an editable Ureg; or an **out-of-thread** exception channel (Fuchsia, Mach) | **In-thread.** The heritage contract (`notejmp`), zero context switches on the self-modifying-code hot path, and what FEX and Wine are written for. The fd-shaped channel is the designed extension for debuggers, not the translator's path. (This is the fork `docs/JIT-ON-WX-DESIGN.md:148-160` left open) |
-| **F3** | Code-emission authority for translators | **Image entitlement** (section 5.2); the per-process corvus clearance (status quo, a prompt per process); an **out-of-process writer** (no writable code in guest Procs at all) | **Image entitlement.** The out-of-process writer is the strongest W^X posture and genuinely novel. But under P6 its marginal security is small (a guest already holds its Proc's full authority through syscalls), and its cost is an IPC per cache miss plus a split engine. Most code arrives as store text anyway (F4), so the writable surface is small. Revisit if translated code ever runs with *less* authority than its Proc |
+| **F3** | Code-emission authority for translators | **Image entitlement** (section 5.2); the per-process corvus clearance (status quo, a prompt per process); an **out-of-process writer** (no writable code in guest Procs at all) | **Image entitlement.** The out-of-process writer is the strongest W^X posture and genuinely novel. But under P6 its marginal security is small (a guest already holds its Proc's full authority through syscalls), and its cost is an IPC per cache miss plus a split engine. Most code arrives as store text anyway (F4), so the writable surface is small. Revisit if translated code ever runs with *less* authority than its Proc. Consequence, stated: the entitlement counts as `CAP_JIT` for debug authority (section 5.2) |
 | **F4** | Translation store | In-process cache only; **Stratum files, per user plus a system store for system trees**; one shared system store | **Per-user plus system-trees store.** Sharing via the Image cache, integrity via Stratum, no new door to X, no new trust for per-user entries, and no deduplication side channel. FEX's disk cache is the interim |
 | **F5** | Low-address space | **Per-Proc shapes at exec**; a global layout change; Madeira-style guest windows (no kernel change, a deep Wine/FEX fork) | **Shapes.** Layout is ABI shape (I-43), so the native layout keeps its properties and future ASLR |
 | **F6** | Engine | **FEX**, with Box64 evaluated for ARMv8.0; Box64 primary; write our own | **FEX** (one core for Linux and Windows, TSO by default), kept behind an engine-agnostic kernel. Writing our own would spend years re-earning FEX's x86 corner cases; first class comes from integration, not from the JIT |
 | **F7** | Second-decode selector | **SVC immediate**; an explicit `SYS_GUEST_CALL(nr, args)` | **SVC immediate.** Zero cost, keeps the argument registers unshuffled, with precedent (Windows ARM64). The explicit call is the fallback if hardware or debuggers make the immediate awkward |
 | **F8** | Memory model | Software TSO only; **plus a kernel per-thread primitive where hardware has it** | **Plus the primitive.** It is cheap, ISA-neutral and honest (I-48(d)), and is the Rosetta advantage where it exists |
 | **F9** | Spec posture | Prose plus audit only; **re-enable spec-first for `fault_note` and `hosted_decode`** | **Re-enable for those two** (section 9.3). They are the two genuinely concurrent new mechanisms |
+| **F10** | Guest code generation: who may make anonymous or written guest memory executable. Examples: x86 JITs (Unity's Mono, Java), packers (UPX), DRM, self-modifying 386 code, and 32-bit Windows programs built without `/NXCOMPAT`, which Windows' default OptIn policy runs with DEP off [R] (section 5.4 item 4) | **G1** strict: `CAP_JIT` only, exactly as for a native JIT (the corvus `jit` clearance, a prompt per process). **G2** a guest-code policy per objtype entry in the host-owned table, `strict` or `permissive`: the shape of Windows' system-wide DEP policy. **G3** a per-session grant: the launcher takes the `jit` clearance once and the territory's Procs inherit it | **G2.** Proposed defaults: `strict` for `(linux, amd64)`; `permissive` for `(linux, 386)` and both Windows entries, whose corpora need it. The research does not settle this; it is a value call between W^X posture and compatibility. For G2: guest code runs with exactly its Proc's authority (P6), so `permissive` costs exploit mitigation, not authority, the posture Linux and Windows give these programs natively. And the decision sits where the entitlement does, in one auditable host-owned file. Against it: under `permissive`, an x86 JIT needs no clearance that a native one would. Under G1, most 32-bit Windows games and every Mono-built Unity title prompt (IL2CPP builds are compiled ahead of time and do not). G3 makes the `jit` clearance propagate, which it deliberately does not (`usr/corvus/src/main.rs:1285-1301`). Contrast DOSBox-X, whose guests self-modify freely because the emulator *is* a sandbox: a DOS guest makes no Thylacine syscalls |
 
 ---
 
@@ -760,13 +871,13 @@ Each closes with its gate.
 
 | Chunk | Content | Exit (gate) |
 |---|---|---|
-| **XT-0** | This design, voted, landed as a scripture commit; ARCH section 28 rows (I-48, the amendments); NOVEL candidates | ratified |
+| **XT-0** | This design, voted (F1-F10), landed as a scripture commit; ARCH section 28 rows (I-48, the amendments); NOVEL candidates | ratified |
 | **XT-1** | Exact faults (5.5), plus `fault_note.tla` | A native C test catches `SIGSEGV`, edits pc, resumes; Linux-phenotype `SIGSEGV` with an edited `ucontext`; OpenSSL's probe without `OPENSSL_armcap` |
 | **XT-2** | Thread-directed notes and user note names (5.6) | Cross-thread suspend/resume test; Vivarium `tgkill` |
 | **XT-3** | Thread reaping and feature discovery (5.8; study F2, F3) | More than 1,000 thread spawns in one Proc; `mrs ID_AA64ISAR0_EL1` at EL0 returns sanitised values |
 | **XT-4** | Address-space shapes (5.3) | A foreign-shape Proc maps FIXED at `0x400000` and `0x7ffe0000`; native layout byte-identical |
-| **XT-5** | Objtype declaration, the table, foreign exec, entitlement (5.1, 5.2) | `exec` of an x86 ELF under an amd64 mount loads the registered stub translator with `AT_GUEST_IMAGE`; refused when undeclared or mismatched |
-| **XT-6** | Hosted Procs (5.4), plus `hosted_decode.tla` | `svc #GUEST` reaches Vivarium; partition tests (guest `close` cannot touch runtime handles; guest `munmap` cannot touch the runtime arena) |
+| **XT-5** | Objtype declaration, the table, foreign exec, entitlement (5.1, 5.2) | `exec` of an x86 ELF under an amd64 mount loads the registered stub translator with `AT_GUEST_IMAGE`; refused when undeclared, mismatched, or when a native exec would refuse the guest file (`MNOEXEC`, no X bit) |
+| **XT-6** | Hosted Procs (5.4), plus `hosted_decode.tla` | `svc #GUEST` reaches Vivarium; partition tests (guest `close` cannot touch runtime handles; guest `munmap` cannot touch the runtime arena); guest-X marking (a vouched `PROT_EXEC` file map is marked, an anonymous one is refused without code authority); don't-fork code regions (a Proc holding one forks, and the child holds none) |
 | **XT-7** | Memory-model primitive (5.7), plus the HVF measurement | Recorded either way; `ENOTSUP` honest on the Pi 400 |
 | **XT-8** | FEX port: the Thylacine host layer, code Burrows, faults, threads (6.2) | **XT first light:** a static x86-64 hello on serial |
 | **XT-9** | The amd64 territory: an Alpine x86_64 rootfs, the `amd64` command, dynamic musl guests (6.3) | busybox sh plus coreutils gate suite under translation; FEX's instruction tests diffed against Linux |
@@ -803,6 +914,11 @@ K4 and K5 (for Wine).
   semantics it forwards to.
 - **The store producer is TCB.** A compromised system producer is equivalent to a
   compromised `/bin`. It must be audited like the loader.
+- **The runtime is TCB for guest NX (I-48(e)).** A runtime bug that translates
+  memory the guest never made executable reopens code injection for that guest.
+  Hence the provenance gates (section 9.5), and the runtime in the audit set.
+- **A fork child recompiles what the store lacks** (section 5.4). Fork-heavy guests
+  (preforking servers, build systems) pay for it until the store holds their code.
 
 ---
 
@@ -821,6 +937,11 @@ K4 and K5 (for Wine).
    foreign ISA. The translator is a citizen, not a guest.
 4. **Image entitlements without code signing.** Code-emission authority bound to a
    content-pinned image on a vouched mount, registered in a host-owned table.
+5. **Translated code under native code's provenance rules** (I-48(e)). NX, `noexec`
+   mounts and JIT-as-a-capability hold for an x86 program exactly as for a native
+   one, because the translator refuses to translate what the native loader would
+   refuse to map. To verify before NOVEL.md: whether Rosetta or FEX applies the
+   host's `noexec` and exec-memory policy to guest code [R].
 
 ---
 
@@ -851,4 +972,5 @@ K4 and K5 (for Wine).
 - I-48 and the amendments are in ARCH section 28; `fault_note` and `hosted_decode`
   pass their clean and buggy configs; every audit row is closed.
 - No page is ever writable and executable.
+- A translated program executes only guest code a native program could (I-48(e)).
 - The kernel contains no x86.
