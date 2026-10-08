@@ -125,6 +125,14 @@ returned once the free space at the top of the heap passes 2 MiB. Freed small
 blocks that lie below a block still in use stay charged, and the program's later
 allocations reuse them.
 
+A process may have at most 256 threads alive at once; the kernel's own
+processes are not limited. A thread that has finished stops counting at once,
+and its memory is returned when the process next starts or finishes a thread, so
+a program that keeps starting and finishing threads never reaches the limit
+through its history. Starting a thread beyond the limit fails with `EAGAIN`. The
+`threads` figure in the status file counts the threads alive now, and `cpu_ns`
+still includes the time of the threads that have finished.
+
 `/ctl/procs` is one snapshot taken under the process-table lock, and it stops
 when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
 `prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
