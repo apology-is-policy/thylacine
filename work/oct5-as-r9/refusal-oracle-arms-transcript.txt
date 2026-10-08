@@ -1,4 +1,4 @@
-refusal-oracle-arms: runner cd9df14545cd3c38, fea85b498, 2026-10-08T05:39:42Z
+refusal-oracle-arms: runner 1e44237ccf8a1b81, 82ee056e3, 2026-10-08T08:34:50Z
 
 === the CONTROL oracle ===
 ok    check_control R-real-control.log                   rc=0  verdict PASS in its own block

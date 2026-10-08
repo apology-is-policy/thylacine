@@ -471,5 +471,17 @@ MUTANT_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
 echo "-- mutant kernel $(echo "$MUTANT_BIN" | cut -c1-16) (differs from the control)"
 run_suite mutant
 M=$OUT/mutant-boot.log
-check_mutant "$M" || exit 2
+# Inside an `if`, because under set -e a bare failing call would exit before
+# the status check below could run.
+if check_mutant "$M"; then _mv=0; else _mv=$?; fi
+# The harness status must agree with the guest. A guest FAIL that test.sh
+# reported as success is a harness inconsistency, never a silent accept
+# (astra, yip 0161 t69).
+if [ "$suite_rc" = 0 ]; then
+  echo "   HARNESS INCONSISTENCY: test.sh exited 0 on the mutant boot, whatever"
+  echo "   the log says. Refusing to call this discrimination."
+  exit 2
+fi
+echo "-- test.sh exited $suite_rc on the mutant, consistent with the guest FAIL"
+[ "$_mv" = 0 ] || exit 2
 # Recovery is NOT a stage here: on_exit runs it on this path and every other.

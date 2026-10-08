@@ -97,6 +97,9 @@ static const char *loom_private_fixture(void) {
     LP_CHECK(tight_initial + (charged - initial) > tight->as->page_budget,
              "the bound cannot cover the admission it must refuse");
     refused = loom_create_private(tight, 2, 2, true);
+    // Counted before the check, as every other ring here is: an admission that
+    // wrongly succeeds still retires at cleanup, and the wait must cover it.
+    if (refused) goal++;
     LP_CHECK(!refused, "over-budget private owner refused");
     LP_CHECK(tight->as->page_count == tight_initial && !tight->as->private_rings &&
              addrspace_ref_count(tight->as) == tight_refs &&

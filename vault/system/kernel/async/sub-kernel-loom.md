@@ -1008,9 +1008,13 @@ confined one-site mutant, deleting `addrspace_private_end` from the `!charged`
 branch only. It is attributed to the leg's OWN assertion: the exact verdict, and
 the fixture's `after-check-failure` marker naming the same check. The resulting
 `kernel test suite failed` is required to be the ONLY extinction and is never
-accepted on, because any FAIL produces it. The fixture's cleanup releases a whole
+accepted on, because any FAIL produces it, and `test.sh`'s own status must be
+nonzero too: a guest FAIL that the harness reports as success is a harness
+inconsistency, not a pass (astra, t69). The fixture's cleanup releases a whole
 leaked guard after the assertion records the failure, so the mutant cannot carry
-the leak into later tests. The oracle's 18 arms pass off-lease, built from real
+the leak into later tests. An admission that wrongly SUCCEEDS is counted into the
+expected retirements before its check fails, so cleanup waits for that ring too
+and no asynchronous work escapes the leg. The oracle's 18 arms pass off-lease, built from real
 guest logs including a retained real FAIL of this fixture. The guest run is owed.
 The layout-allocation unwind (`loom_create_layout` failing after the charge:
 uncharge, then `addrspace_private_end`) is STRUCTURAL ONLY and its runtime
