@@ -39,7 +39,8 @@ Advancing past the last slide keeps the last slide on the screen; lantern
 neither wraps to the first slide nor exits, because the end of a deck is where
 a talk stops for questions. A digit shows the slide with that number, and a
 digit larger than the number of slides is ignored. Escape does not end a
-presentation. Every key lantern understands is listed under Keys.
+presentation, and the key pressed after it works as usual. Every key lantern
+understands is listed under Keys.
 
 ### Present to a room
 
@@ -317,8 +318,10 @@ When the shell starts lantern, it recognises the program by name and switches
 the terminal to raw input, which delivers each key as it is pressed. In this
 mode the terminal also stops converting line endings, so lantern converts
 them itself. Escape begins the byte sequence of every arrow and function key,
-and a lone Escape could only be told apart from those sequences by waiting;
-this is why Escape does not end a presentation.
+so lantern waits a twentieth of a second after an Escape to see whether the
+rest of a sequence follows. When nothing follows, lantern ignores the Escape.
+Because a lone Escape is only known after that wait, Escape does not end a
+presentation.
 
 ### Checking and memory
 

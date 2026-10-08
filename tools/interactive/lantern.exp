@@ -245,6 +245,32 @@ proc lantern_ahead {i} {
 foreach i {1 2 3} { lantern_ahead $i }
 lc_pass "lantern(j): a line typed ahead behind q reaches the shell whole, exit 0, in 3 of 3 rounds"
 
+# (k) Escape is a key of its own. A bare ESC is held for a moment in case it is
+# the head of an arrow key; with nothing behind it, it is the Escape key, which
+# lantern ignores, and the SPACE after it advances as SPACE always does. A
+# presenter that waited for the next byte instead would read ESC SPACE as
+# Alt-SPACE and swallow the advance. The pause is ten times the holdoff. q and
+# a status probe follow, so a swallowed advance fails as soon as the probe's
+# tag arrives without slide two.
+lc_send {lantern /deck}
+lc_expect "1 / 4" "lantern(k) slide one is presented"
+lc_raw_send "\x1b" "lantern(k) Escape, alone"
+after 500
+lc_raw_send " " "lantern(k) then SPACE"
+after 500
+lc_raw_send "q" "lantern(k) q to leave"
+lc_send {echo lnesc $status}
+set timeout $lc_cmd_timeout
+expect {
+    -ex "2 / 4"            { lc_step "saw: lantern(k) the SPACE after a lone Escape advanced" }
+    -re "lnesc (\[0-9\]+)\r" { lc_fail "lantern(k): lantern left from slide one -- the SPACE after Escape was swallowed (status $expect_out(1,string))" }
+    -re {EXTINCTION:}      { lc_extinction_fail "kernel extinction during 'lantern(k)'" }
+    timeout                { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[2 / 4\] during 'lantern(k)'" }
+    eof                    { lc_fail "unexpected EOF during 'lantern(k)'" }
+}
+lantern_status lnesc 0 "lantern(k) exit status"
+lc_pass "lantern(k): a lone Escape is a key of its own -- the SPACE after it still advances, exit 0"
+
 lc_quit
 lc_pass "LS-CI lantern: the check with a picture decoded by view, the cat posture with manifest order and the picture's stand-in, four refusals, and a real keystroke-driven presentation"
 exit 0

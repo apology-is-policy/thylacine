@@ -763,6 +763,51 @@ proc lc_run_expect_hardfail_re {cmd expected failre} {
     }
 }
 
+# A line typed behind a raw-mode program's quit key belongs to the shell: the
+# program must not read past the key that ends it (kaua::intake; lantern.exp leg
+# (j) is the first of these). `launch` is typed at the prompt, `ready` is a token
+# the program's first frame prints, `quit` is the keys that end it. The quit and
+# the next line go out in ONE write, but the console takes them in a byte at a
+# time (the PL011 runs without its FIFO), so a program that reads past its quit
+# key fails only when its read sees more than the quit: the usual case, not a
+# certainty, hence `rounds`. A swallowed head leaves the shell a mangled line,
+# and an interactive ut prints nothing for that, so each round then asks for
+# $status under a second tag: that tag arriving first is the red, at once. The
+# second tag waits until the program has left its screen; sent at once, a
+# program that drains past its quit key takes it too, and the leg ends on its
+# timeout without naming the defect.
+proc lc_quit_typeahead {name launch ready quit tag rounds} {
+    global lc_cmd_timeout timeout
+    for {set i 1} {$i <= $rounds} {incr i} {
+        lc_send $launch
+        lc_expect $ready "${name}($i) is up"
+        lc_raw_send "${quit}echo $tag$i \$status\r" "${name}($i) its quit key, the next line typed ahead in the same write"
+        set timeout $lc_cmd_timeout
+        expect {
+            -ex "\x1b\[?1049l"            { lc_step "${name}($i) left its screen" }
+            -re {EXTINCTION:}             { lc_extinction_fail "kernel extinction during '${name}($i)'" }
+            timeout                       { lc_fail "${name}($i): $name never left its screen after its quit key" }
+            eof                           { lc_fail "unexpected EOF during '${name}($i)'" }
+        }
+        lc_send "echo ${tag}x$i \$status"
+        expect {
+            -ex "$tag$i 0\r"              { lc_step "saw: ${name}($i) the line typed behind the quit key reached the shell whole" }
+            -re "${tag}x$i (\[0-9\]+)\r" { lc_fail "${name}($i): the shell never ran the typed-ahead line (next status $expect_out(1,string)) -- $name read past its quit key" }
+            -re "$tag$i (\[0-9\]+)\r"    { lc_fail "${name}($i): the typed-ahead line ran with status $expect_out(1,string), want 0" }
+            -re {EXTINCTION:}             { lc_extinction_fail "kernel extinction during '${name}($i)'" }
+            timeout                       { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$tag$i 0\] during '${name}($i)'" }
+            eof                           { lc_fail "unexpected EOF during '${name}($i)'" }
+        }
+        expect {
+            -ex "${tag}x$i 0\r"           { lc_step "saw: ${name}($i) the shell took the next line too" }
+            -re "${tag}x$i (\[0-9\]+)\r" { lc_fail "${name}($i): the next line ran with status $expect_out(1,string), want 0" }
+            -re {EXTINCTION:}             { lc_extinction_fail "kernel extinction during '${name}($i)'" }
+            timeout                       { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[${tag}x$i 0\] during '${name}($i)'" }
+            eof                           { lc_fail "unexpected EOF during '${name}($i)'" }
+        }
+    }
+}
+
 # Log in over the console. Reaching the shell banner proves the kernel received
 # every keystroke (the LS-1 regression) and that login authenticated.
 proc lc_login {user pass} {

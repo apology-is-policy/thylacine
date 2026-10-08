@@ -72,6 +72,11 @@ sleep 2
 lc_run_expect "echo quarry-restored | tr a-z A-Z" "QUARRY-RESTORED"
 lc_pass "quarry: quit + ut console restore"
 
+# A line typed behind q belongs to the shell: kaua reads one byte at a time and
+# quarry stops at its quit key. The footer is the last thing the frame paints.
+lc_quit_typeahead quarry quarry "b bench all" q qyta 3
+lc_pass "quarry: a line typed ahead behind q reaches the shell whole, in 3 of 3 rounds"
+
 lc_quit
 lc_pass "LS-CI quarry: the GPU demo-bench launcher verified end to end"
 exit 0

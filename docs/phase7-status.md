@@ -1359,6 +1359,59 @@ quarry, ptyhost) are checked for the same loss as their own item.
 
 **Gate** (aux-gate `run-cwd3.sh` on d69f2bc2f, the landing's code, 2026-10-08 08:39-10:03Z): the session image with the Instrument profile, `ls-halcyon-lantern` PASS; the gate image, suite 1939/1939, and the 12 interactive legs PASS (ls-ci, cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata, dap-nora, go6, lantern with leg (j)'s three rounds, ergo-1, dev-accounts, abin-tar). Eight kernel sabotages each turned exactly their witnesses red -- one per broken test function, since a failing `TEST_ASSERT` returns -- and joey's probes on a second boot with the four suite tests unregistered; the narrowing sabotage (a devno parameter cut to u32) failed the build three times over; the two checker sabotages (a swapped tail mirror field, a second flag on bit 0) were refused. `ci-smp-gate` PASS, 0 corruption across every configuration. The first run of the sabotage phase (on 0b0c72cc9, the same code bar one test) found that `spawn_cwd.refusals` could not see a spawner whose cwd moved; that test now stands the spawner in /, and C8 turns it red.
 
+## kaua reads one byte per read; a lone Escape is a key of its own — 2026-10-08
+
+OPEN-BUGS 2026-10-07 13:45Z and 14:20Z, and two of the three items the first audit round queued (2026-10-08 07:27Z).
+Code, witnesses, dossiers and the manual in one commit, LAND_HASH. Cut on aux-3
+1a1bba463 (the spawn cwd landing). Userspace only: `usr/lib/kaua`, prowl, quarry, nora, lantern, ptyfs, `tools/interactive`.
+
+- **A quit key is the last byte an app reads.** A kaua app that quits, or hands the terminal to a child, leaves what was
+  typed behind its last key to whoever reads fd 0 next. A byte read cannot be given back -- a terminal has no pushback,
+  and a TIOCSTI-like one is a forgery primitive -- so the only way to leave it is never to read it. `kaua::intake`
+  reads fd 0 one byte per read(2) and returns at the byte that completes an event, less(1)'s trade. PollSource used to
+  drain every ready byte into a batch, so prowl, quarry and nora took the type-ahead behind their quit key with them.
+- **Still one paint per burst.** A `Burst` waits the app's timeout for its first event and takes only what fd 0 already
+  holds for the rest, at most `BURST_MAX` (1024) events; `QUIET_BYTES_MAX` (4096) bounds the bytes one call reads
+  without completing an event (NULs, an over-long CSI).
+- **The ESC holdoff lives in the intake** (#173): a held bare ESC waits `ESC_HOLDOFF_MS` (50) for its continuation, then
+  is the Escape key. lantern drove the parser itself and never flushed it, so ESC then SPACE read as Alt-SPACE and the
+  advance was swallowed.
+- `kaua::source` supplies the readiness wait (fd 0, or the `/dev/pts/<n>ready` sibling on a pts) and the one-byte read.
+  The external-mux mode is gone: since #98 a zero-timeout poll of a pts ready file answers from a fresh snapshot, so
+  nora's own mux and the source may both poll it. A `source` feature splits the input half from `backend`; lantern
+  takes `source` alone.
+- prowl, quarry, nora and lantern pull a burst key by key and stop at an event that may end them; quarry also at Play,
+  so a game gets the keys typed behind Enter.
+- **The launch size probe is bounded on a pts.** It polled fd 0, which on a pts reports always readable, so it went
+  straight to a read and waited for the reply or a key: a kaua program on a pts whose far side never answers drew nothing
+  until a key. On a boot with a display aurora answers every CPR on the console, a pts's forwarded one included, so
+  this held only on a console-primary boot under ptyhost. It polls the ready sibling now and hands that fd to the
+  source (`PollSource::with_probe`), so a program opens one ready file.
+- **ptyfs counts seven fids a pts.** The table assumed four; a hosted tile holds the master, the slave three times
+  (one per stdio slot, `ptyhold::spawn_on_slave`), the shell's ctl and ready files, and the kaua program's ready file.
+  The old table of 80 filled at 13 plain shells (six fids each, before any kaua program), below `PTS_MAX` (16).
+  `FIDS_PER_PTS = 7`, `MAX_FIDS` 128, and a selftest battery binds that set for every pts and proves the bind past the
+  bound is refused. A reader whose ready file will not open says so on the diagnostic UART.
+- Witnesses: 17 intake host tests (a drain sabotage turns 7 red, no holdoff 2, no byte budget 1). Device legs:
+  `lc_quit_typeahead` in prowl-7, quarry and nora-demo -- the quit key and the next shell line in one write, three
+  rounds, a fail-fast arm when the shell's next line (sent once the app has left its screen) arrives first; lantern (k),
+  ESC, a pause, SPACE; `pts-probe`, prowl in a shell ptyhost hosts on a console-primary boot (no aurora to answer),
+  nothing typed until its first frame. ptyfs's selftest fid-budget battery.
+- Audit round 1, Fable 5.1 reviewing Opus 5.5: 0/0/0/6, clean. F1 the byte budget (fixed); F2 ptyhost (disposed: a
+  flow-control item); F3-F5 prose (fixed); F6 witness gaps (the pts path rides the gate's session legs).
+- Audit round 2 (the probe and the fid budget), Fable 5.1: 0/1/1/2. F1 the first pts-probe hosted prowl directly on a
+  cooked pts and could not pass; F2 five fids a pts undercounted; F3 the fallback line; F4 KAUA.md 4.2. All fixed.
+
+**Gate** (hunt 9a91e4a94, the Mac, run 2, 15:38-15:57Z): host tests (kaua 109, lantern 30, nora 249; the 17 intake tests by name); the ci bake; ten legs PASS -- lantern, prowl, quarry, nora-demo, pts-probe, ls-7, dap-nora, ls-ci, split173, flood-174 -- each new leg through all its rounds; suite 1939/1939, ambush-probe PASS, `ptyfs: selftest PASS`; on the session image `ls-halcyon-lantern` and `s7-nora-probe` PASS. `FIDS_PER_PTS` 7 -> 6 stops the boot on `ptyfs: selftest FAIL: fid-budget-short`. ci-smp-gate not run: no kernel change, and no boot it runs executes a kaua app.
+
+**Red control** b1ec375dd (`usr/` at aux-3, the legs kept; never lands): all five new legs FAIL on their named arm in round 1 -- lantern (k) swallowed the SPACE after Escape; prowl, quarry and nora read past their quit key; pts-probe drew nothing in 20 s, on a boot that asserted no aurora. Run 1 (dbba17c68 against 3b4aab074) was green in every clean phase, and its red phase showed two witnesses failing for the wrong reason: aurora answered pts-probe's CPR through the console, and the old drain took the sentinel line too. Both were fixed before run 2.
+
+**Still open.** ptyhost, the fifth raw-mode member, still loses type-ahead: its pump is not synchronized with the
+hosted reader, so one-byte reads would not bound it (OPEN-BUGS 07:27Z, a ptyfs flow-control design). A full ptyfs fid
+table still reaches its caller as ENOENT (dev9p_walk drops the server's error; OPEN-BUGS 2026-09-29, widened
+2026-10-08). The cost of a paste into nora in a tile
+is unmeasured.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

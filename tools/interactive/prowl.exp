@@ -141,6 +141,13 @@ sleep 2
 lc_run_expect "echo prowl-restored | tr a-z A-Z" "PROWL-RESTORED"
 lc_pass "prowl-2: quit + ut console restore"
 
+# prowl-7: a line typed behind q belongs to the shell. kaua reads one byte at a
+# time and prowl stops at its quit key, so nothing typed after it is taken.
+# "kproc" is the first frame's last row (the restore line above consumed the
+# earlier one).
+lc_quit_typeahead prowl prowl kproc q prta 3
+lc_pass "prowl-7: a line typed ahead behind q reaches the shell whole, in 3 of 3 rounds"
+
 lc_quit
 lc_pass "LS-CI prowl: process monitor verified end to end"
 exit 0

@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/PROWL-DESIGN.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -117,7 +117,11 @@ are the right choice.
 ## Concurrency
 
 None. Single-threaded, one poll loop, keys and the refresh interval
-sharing one wait.
+sharing one wait. Keys come from kaua's `PollSource` a burst at a time
+([[sub-kaua]]); a burst that ends with nothing taken is the refresh tick. On
+`q` prowl returns from inside the burst, and kaua reads one byte at a time, so
+a line typed behind the `q` is never taken and goes to the shell
+(`prowl.exp` prowl-7).
 
 ## Invariants enforced
 

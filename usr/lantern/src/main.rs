@@ -40,7 +40,8 @@ use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::T_CAP_CSPRNG_READ;
 
-use kaua::input::Parser;
+use kaua::event::Event;
+use kaua::source::{EventSource, PollSource};
 use lantern::deck::{self, Deck, SlideKind};
 use lantern::nav::{action_for, Action};
 use manual::{format as section, sanitize, SECTION_MAX};
@@ -524,12 +525,12 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
     let width = plain_width(tier);
     let mut out = Out::to_stdout();
     let mut at = 0usize;
-    let mut parser = Parser::new();
-    let mut stdin = io::stdin();
-    // One byte per read: the quit key is the last byte this program takes. Bytes
-    // typed behind it -- the next command, a paste -- stay queued for the shell; a
-    // larger read would carry them away with the slide.
-    let mut buf = [0u8; 1];
+    // kaua's source reads one byte at a time and stops at the key in hand, so
+    // the quit key is the last byte this program takes: what is typed behind
+    // it -- the next command, a paste -- stays queued for the shell. It also
+    // holds a bare ESC briefly for a continuation, so Escape is a key of its
+    // own rather than an Alt- on the next one.
+    let mut src = PollSource::new();
 
     out.put(lantern::HIDE_CARET);
     show(&mut out, tier, width, d, dir, at, foot);
@@ -540,33 +541,29 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
             eprintln!("lantern: write error");
             return 1;
         }
-        // A read error is fatal, as it is in `kaua::source` -- there is no
-        // EINTR in this Error set (the raw-mode dance's `-isig` means no note is
-        // cooked for this program anyway), and spinning on a would-block with no
-        // poll in hand would be worse than stopping.
-        let n = match stdin.read(&mut buf) {
-            Ok(0) => {
-                // stdin closed: the deck is over.
-                out.put(lantern::SHOW_CARET);
-                return 0;
-            }
-            Ok(n) => n,
-            Err(e) => {
-                out.put(lantern::SHOW_CARET);
-                eprintln!("lantern: read: {}", e);
-                return 1;
-            }
-        };
-        for &b in &buf[..n] {
-            let event = parser.feed(b);
-            // A cursor-position report is the console's answer to a size query,
-            // never a key (kaua's own source surfaces it as a Resize), so the
-            // latch is drained UNCONDITIONALLY and before the no-event bail.
-            // Draining it after that bail would leave a CPR latched -- feed
-            // yields no event for one -- and the next REAL key would then be
-            // swallowed as if it were the report.
-            let _ = parser.take_resize();
-            let Some(key) = event else { continue };
+        if src.is_eof() {
+            // stdin closed: the deck is over.
+            out.put(lantern::SHOW_CARET);
+            return 0;
+        }
+        let mut repaint = false;
+        let mut burst = src.burst(PollTimeout::Block);
+        loop {
+            // A read error is fatal, as it is in every kaua app -- there is no
+            // EINTR in this Error set (the raw-mode dance's `-isig` means no
+            // note is cooked for this program anyway).
+            let key = match burst.next() {
+                Ok(Some(Event::Key(k))) => k,
+                // A resize (a late size report) changes nothing: a slide is
+                // laid out for its tier, not the window.
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(e) => {
+                    out.put(lantern::SHOW_CARET);
+                    eprintln!("lantern: read: {}", e);
+                    return 1;
+                }
+            };
             let action = action_for(key);
             if action == Action::Quit {
                 // Leave the last slide on the screen: a talk ends on its
@@ -576,16 +573,16 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
                 out.put(b"\n");
                 return 0;
             }
-            let repaint = match action.target(at, d.slides.len()) {
+            match action.target(at, d.slides.len()) {
                 Some(to) => {
                     at = to;
-                    true
+                    repaint = true;
                 }
-                None => action == Action::Redraw,
-            };
-            if repaint {
-                show(&mut out, tier, width, d, dir, at, foot);
+                None => repaint |= action == Action::Redraw,
             }
+        }
+        if repaint {
+            show(&mut out, tier, width, d, dir, at, foot);
         }
     }
 }

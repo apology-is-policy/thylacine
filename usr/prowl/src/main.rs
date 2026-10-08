@@ -229,7 +229,7 @@ pub extern "C" fn rs_main() -> i64 {
         }
     };
     // Replay any keystroke typed during the launch probe (kaua::query #117-F2).
-    let mut src = PollSource::with_pending(probe.pending);
+    let mut src = PollSource::with_probe(probe);
 
     let code = run(&mut term, &mut src, &mut app);
     // Explicit restore (Drop also runs it; both idempotent). ut re-cooks the
@@ -249,44 +249,46 @@ fn run(term: &mut Terminal, src: &mut PollSource, app: &mut App) -> i32 {
         if src.is_eof() {
             return 0;
         }
-        // Block up to one refresh interval for a key. An empty return == the
-        // timeout lapsed == a tick: re-sample + redraw.
-        let events = match src.poll(PollTimeout::Millis(REFRESH_MS)) {
-            Ok(e) => e,
-            Err(_) => return 1,
-        };
+        // Block up to one refresh interval for a key. A burst that ends with
+        // nothing taken == the timeout lapsed == a tick: re-sample + redraw.
+        // On Quit, return straight from the burst: the keys typed behind it
+        // were never read and go to the shell.
         let mut dirty = false;
-        if events.is_empty() {
+        let mut burst = src.burst(PollTimeout::Millis(REFRESH_MS));
+        loop {
+            let ev = match burst.next() {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => return 1,
+            };
+            match ev {
+                Event::Key(k) => match handle_key(app, k) {
+                    Action::Quit => return 0,
+                    Action::Redraw => dirty = true,
+                    Action::None => {}
+                },
+                // A late CPR the launch probe missed (slow HVF serial): resize
+                // to the real console. There is no winsize signal over UART, so
+                // this is the only live-resize path (mirrors nora).
+                Event::Resize(c, r) => {
+                    let c = c.clamp(MIN_DIM, MAX_DIM);
+                    let r = r.clamp(MIN_DIM, MAX_DIM);
+                    if (c, r) != (term.area().width, term.area().height) {
+                        term.resize(Rect::new(0, 0, c, r));
+                        dirty = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if burst.taken() == 0 {
             resample(app);
             dirty = true;
-        } else {
-            for ev in events {
-                match ev {
-                    Event::Key(k) => match handle_key(app, k) {
-                        Action::Quit => return 0,
-                        Action::Redraw => dirty = true,
-                        Action::None => {}
-                    },
-                    // A late CPR the launch probe missed (slow HVF serial): resize
-                    // to the real console. There is no winsize signal over UART, so
-                    // this is the only live-resize path (mirrors nora).
-                    Event::Resize(c, r) => {
-                        let c = c.clamp(MIN_DIM, MAX_DIM);
-                        let r = r.clamp(MIN_DIM, MAX_DIM);
-                        if (c, r) != (term.area().width, term.area().height) {
-                            term.resize(Rect::new(0, 0, c, r));
-                            dirty = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // Refresh even under sustained key activity once the interval lapses,
-            // so %CPU never stalls while the user navigates.
-            if app.last_sample.elapsed().as_millis() as u64 >= REFRESH_MS as u64 {
-                resample(app);
-                dirty = true;
-            }
+        } else if app.last_sample.elapsed().as_millis() as u64 >= REFRESH_MS as u64 {
+            // Refresh even under sustained key activity once the interval
+            // lapses, so %CPU never stalls while the user navigates.
+            resample(app);
+            dirty = true;
         }
         if dirty && ui::render(term, app).is_err() {
             return 1;

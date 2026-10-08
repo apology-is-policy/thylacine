@@ -15,7 +15,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-10-08
 area: userspace
 ---
 ## Purpose
@@ -95,6 +95,14 @@ descriptors the live servers offer — and blocks. A keystroke, a diagnostic, a
 debugger stop and a console resize all wake the loop identically. **There is no
 tick**, which is the design's sharp edge stated in its own comment: a message
 that nothing polls for is a message that never repaints.
+
+The keyboard's descriptor is kaua's `poll_fd()` — fd 0 on the console, the pts's
+`ready` sibling in a tile. When it fires, nora takes a zero-timeout burst from
+kaua's `PollSource` ([[sub-kaua]]), one key at a time, and stops at the key that
+sets its quit flag: kaua reads one byte per read, so a command typed straight
+after `:q` is never taken into the editor and goes to the shell (`nora-demo.exp`).
+The same burst runs once before the loop, for the type-ahead the launch probe
+pulled in, which the descriptor would never announce.
 
 A dead server contributes an empty descriptor list, so its fds are never polled
 again — safe by construction rather than by bookkeeping, because the set is

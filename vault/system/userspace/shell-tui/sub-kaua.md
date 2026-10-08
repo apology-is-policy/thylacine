@@ -7,6 +7,7 @@ code:
   - usr/lib/kaua/src/lib.rs
   - usr/lib/kaua/src/term.rs
   - usr/lib/kaua/src/source.rs
+  - usr/lib/kaua/src/intake.rs
   - usr/lib/kaua/src/query.rs
   - usr/lib/kaua/src/input.rs
   - usr/lib/kaua/src/encode.rs
@@ -24,7 +25,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-10-08
 area: userspace
 ---
 ## Purpose
@@ -55,6 +56,12 @@ spawned; kaua assumes bytes already arrive raw and never asks for that to be
 true. So a kaua app is never console-attached, and the same API is honest for a
 trusted or an untrusted caller.
 
+**Input never takes a byte past the event in hand.** A kaua app borrows its
+terminal: when it quits, or hands the terminal to a child, what was typed behind
+its last key belongs to whoever reads fd 0 next. The source reads one byte at a
+time and stops at the byte that completes an event, and the app stops asking at
+an event that may end it.
+
 **Input is a separate object from output.** `PollSource` reads fd 0; `Terminal`
 writes fd 1; they share no state. The separation exists so the Loom seam is real
 — a future `LoomSource` implementing the same `EventSource` trait replaces the
@@ -82,18 +89,36 @@ cell. The whole frame lands in one reused scratch buffer, written to fd 1 in a
 single `write_all`, after which the real cursor is placed (or hidden) and front
 takes back's contents.
 
-**The input cycle.** One `poll` returns every event decodable from the bytes
-available this round. It drains fd 0 repeatedly into a *single retained parser*
-before deciding anything, because a paste larger than the console ring arrives
-across several reads and flushing between them would mis-key a sequence
-straddling a read boundary. Three bounds govern the loop: `DRAIN_MAX` caps the
-sweeps per round against an unbounded writer — and on hitting the cap it returns
-*without* flushing, so a half-assembled sequence survives to the next round; the
-first sweep blocks for the caller's timeout only if no event is already in hand;
-and a sweep that finds the parser holding a bare ESC waits `ESC_HOLDOFF_MS`
-instead of declaring the drain dry, so a split arrow key assembles rather than
-resolving to a spurious Escape. A lone ESC becomes an Escape key only once fd 0
-is genuinely empty.
+**The input cycle.** The source hands the app one event at a time, and reads fd
+0 one byte per `read(2)` up to the byte that completes it. A byte read into the
+process could not be given back — there is no pushback into a terminal, and one
+would be a forgery primitive — so leaving the type-ahead behind a quit key in
+the kernel means never reading it. That is less(1)'s trade; an editor's bulk read
+is what loses the line typed behind `:q`. The app still paints once per *burst*:
+`PollSource::burst` waits the app's timeout for the first event and takes only
+what fd 0 already holds for the rest, up to `BURST_MAX` (1024) events, so a paste
+is handled as one run and a flood still repaints; bytes that complete no event
+(NULs, an over-long CSI) are bounded separately, `QUIET_BYTES_MAX` (4096) per
+call, so a writer of nothing cannot hold the app either. A bare ESC changes the next
+wait to `ESC_HOLDOFF_MS`, so a split arrow key assembles; with nothing behind it
+in that window the ESC is an Escape key. A half-collected CSI, SS3 or UTF-8
+sequence waits across calls for its next byte and is never flushed. The decode
+loop is `kaua::intake`, pure and driven by a scripted terminal in the host
+tests; `kaua::source` supplies its two operations, a readiness wait and a
+one-byte read.
+
+**On a pts.** dev9p reports a pts slave's data fd as always readable, so the
+source waits on the `/dev/pts/<n>ready` sibling and reads fd 0. Since #98 a
+zero-timeout poll of the sibling answers from a fresh snapshot
+([[sub-kernel-ninep-dev9p-poll]]), so an app's own mux and the source may both
+poll it: nora polls `poll_fd()` beside its server pipes, then runs a
+zero-timeout burst. (The port that added the sibling worked around the pre-#98
+cache with a trust-the-mux mode; that mode is gone.) The launch probe polls the
+same sibling and hands it to the source (`PollSource::with_probe`), so a program
+holds one ready fid, the one ptyfs's budget of seven per pts counts
+([[sub-ptyfs]]). A
+pts slave whose ready file will not open falls back to polling fd 0, where no
+timeout ever lapses, and kaua says so on the diagnostic UART.
 
 **The size handshake.** The console has no winsize syscall, so `terminal_size`
 does the standard CPR round-trip: save the cursor, park it at a far corner (the
@@ -102,7 +127,12 @@ terminal clamps to bottom-right), request its position, and parse the
 properties were bought the hard way. It is **bounded by a total deadline**,
 re-polling the remaining budget per byte, so a reply dribbled a byte at a time by
 a hypervisor's serial path still assembles while a slow peer still cannot
-multiply the budget by the buffer capacity. And it is **lossless**: bytes read
+multiply the budget by the buffer capacity. On a pts it polls the ready sibling:
+the data fd polls as always readable, so a read there waited for the reply or a
+key, and a terminal that never answered held the app before its first frame.
+On a boot with a display aurora answers every CPR on the console, a pts's
+forwarded one included, so the hold needed a console-primary boot (no renderer)
+under ptyhost. And it is **lossless**: bytes read
 that are not part of the reply are returned as `pending` and replayed through the
 steady-state parser, and the read stops at the `R` so later bytes stay in the
 kernel ring. If the reply is slower than the whole budget, the steady-state
@@ -138,8 +168,12 @@ recognized CPR lands in.
 `Terminal` — front and back buffers, the app cursor, a repaint flag, a reused
 scratch `Vec<u8>`, and an `entered` guard so the restore runs exactly once.
 
-`PollSource` — a `PollSet`, stdin, the retained `Parser`, a fixed read chunk, an
-EOF flag, and the `pending` replay bytes handed over by the launch probe.
+`Intake` — the retained `Parser`, the launch probe's `pending` bytes not yet
+replayed, and an EOF flag. A byte completes at most one event (the parser
+surfaces a cursor report as a resize and no key), so nothing decoded waits. `PollSource` — a `PollSet` over
+the readiness fd, stdin, the `Intake`, and which fd the wait polls. `Burst` — a
+borrow of the intake and of fd 0 with a count; it ends at the first empty wait or
+at `BURST_MAX`.
 
 The widget set — `Block`, `Paragraph`, `List`, `Table`, `Tree`, `Tabs`,
 `Scrollbar`, `StatusLine`, `Span` — are pure painters over a `Buffer` and a
@@ -157,7 +191,7 @@ the `PollSource` exists, handing over its leftover bytes, or type-ahead is lost 
 the `with_pending` constructor is what makes that transfer explicit rather than
 implicit.
 
-The crate consumes [[inv-i9]] rather than establishing it: the drain loop's
+The crate consumes [[inv-i9]] rather than establishing it: the readiness wait's
 correctness rests on the kernel's readiness edges not being lost between the
 sample and the block. Reads are death-interruptible, so a dying app unwinds.
 
@@ -180,7 +214,9 @@ bounded run and resets.
 ## Error paths
 
 Uniformly degrade-not-fail. A failed size probe returns `None` and the caller
-uses a fixed default. An unreachable or malformed `/dev/winsize` returns `None`
+uses a fixed default. A ready file that will not open degrades the readiness
+wait to fd 0, and says so on the diagnostic UART rather than on the screen the
+app owns. An unreachable or malformed `/dev/winsize` returns `None`
 and falls back to CPR. A write error during `enter` leaves `entered` false so the
 restore does not fire on a screen never taken. `leave` is guarded by `entered` so
 a double call is a no-op, and `Drop` ignores its result because there is nothing
@@ -197,10 +233,13 @@ construction. The diff means an idle screen costs nothing and a single changed
 cell costs a cursor move plus a glyph. `render_cells` suppresses redundant moves
 and redundant SGRs, so a run of same-styled adjacent cells emits just the glyphs.
 
-The input read chunk is 1 KiB against a 256-byte console ring, so a burst is
-normally one read. `DRAIN_MAX` bounds a round at 64 reads — 64 KiB, far above any
-real paste. The ESC holdoff costs 50 ms once per genuine lone-Escape press, the
-standard terminal tradeoff.
+Input costs a readiness wait and a one-byte read per byte: two local syscalls on
+the console, two 9P round trips to ptyfs on a pts. That is the price of leaving
+type-ahead in the kernel, and a pager's price. `BURST_MAX` bounds a burst at 1024
+events, so a flood still paints. The ESC holdoff costs 50 ms once per genuine
+lone-Escape press, the standard terminal tradeoff. Not yet measured: a paste
+into nora in a tile, where each byte is two 9P round trips (some 8-12 thousand
+for 4 KiB, against a handful of reads before).
 
 ## Prosecution
 
@@ -213,12 +252,24 @@ standard terminal tradeoff.
   escape family with a growable buffer would void it.
 - **Is the CPR probe still bounded in total, not per byte?** The distinction is
   the whole fix: a per-byte budget lets a dribbling peer multiply the wait by the
-  buffer capacity.
+  buffer capacity. On a pts the bound holds only while the probe polls the ready
+  sibling; `pts-probe.exp` runs prowl in a shell ptyhost hosts on a
+  console-primary boot, where aurora is absent and nothing answers, and expects
+  a first frame.
 - **Is type-ahead still lossless?** The probe's leftover bytes must reach the
-  steady-state parser through `with_pending`, and the read must still stop at
+  steady-state parser through `with_probe`, and the read must still stop at
   `R`.
-- **Does the drain still refuse to flush on the cap?** Flushing a partially
-  assembled sequence is how a paste becomes mis-keyed input.
+- **Does the source still stop at the event in hand?** A read of more than one
+  byte, or a loop that decodes ahead, takes the type-ahead behind a quit key with
+  it. `intake::tests` pin it, and turn red under both a drain and a missing
+  holdoff.
+- **Does every app stop asking at an event that may end it?** The intake leaves
+  bytes unread only while the app stops pulling: an app that collects a burst
+  before acting on it reintroduces the loss. prowl, quarry and lantern return
+  from inside the burst on their quit key, quarry also stops at Play, and nora
+  stops at the key that sets its quit flag.
+- **Is a half-collected sequence still kept, not flushed, when input pauses?**
+  Flushing it is how a split key becomes mis-keyed input.
 
 ## Seams
 
@@ -235,21 +286,10 @@ standard terminal tradeoff.
 
 ## Caveats
 
-**`query.rs` describes its own algorithm three times and one of them is the bug
-it fixed.** The module header documents the total-deadline probe and explains
-exactly why the previous approach was wrong: it "assumed one-drain delivery... and
-gave up the instant the ring went empty mid-reply." The inline comment at the loop
-says the same. But the `///` doc comments on `terminal_size` and `read_cpr` still
-describe the *old* algorithm — "waiting up to `timeout_ms` for the reply to START
-(then non-blocking)" and "the first poll on the full deadline and the rest
-non-blocking" — which is precisely the behaviour the header identifies as the
-defect. `terminal_size`'s version even points the reader at the module header,
-which contradicts it.
-
-The mechanism is visible in the fix commit: it rewrote the `//` header and added
-the `//` inline comment, and left both `///` docs untouched. The author updated
-the prose they were reading while working, not the prose the reader receives —
-rustdoc renders the doc comments, not the header. See [[chg-2026-08-03-kaua-sweep]].
+**Type-ahead the launch probe read is already in the process.** The size probe
+reads one byte at a time and stops at its reply, but what arrived before the
+reply is in `pending`; an app that quits among those bytes takes the rest with
+it. The window is the probe's few hundred milliseconds at launch.
 
 **This crate is the counter-example to a claim the vault itself recorded.** An
 earlier sweep asserted that ~878 `#[test]` functions across six native crates

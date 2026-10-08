@@ -23,7 +23,7 @@ hazards: []
 abis: []
 design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3", "docs/HALCYON.md section 14.7"]
 created: 2026-09-22
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -285,10 +285,14 @@ n / j / l. Prev: left / up / pageup / backspace / p / k / h. First: home / g.
 Last: end / G. `Goto` on 1-9. Redraw on Ctrl-L. Quit on `q`, Ctrl-C, Ctrl-D --
 Ctrl-C spelled out because `-isig` means the byte reaches the program instead of
 becoming an `interrupt` note. **Escape is deliberately NOT quit**: it is the
-first byte of every arrow key, so resolving a lone one needs a timing holdoff,
-and a deck that vanishes because a holdoff guessed wrong is worse than pressing
-`q`. An unmapped key is `Ignore`, the default, so a presenter leaning on the
-keyboard does not lose the talk.
+first byte of every arrow key, so a lone one is known only after a timing
+holdoff, and a deck that vanishes because a holdoff guessed wrong is worse than
+pressing `q`. A lone Escape is resolved by kaua's holdoff (50 ms) and is
+`Ignore`, and the key after it means what it always means (`lantern.exp` leg
+(k)). Until 2026-10-08 lantern drove the parser itself with no holdoff, so the
+ESC waited for the next byte and the pair read as Alt-<key> -- an `Ignore` that
+swallowed the key. An unmapped key is `Ignore`, the default, so a presenter
+leaning on the keyboard does not lose the talk.
 
 `Action::target` neither wraps nor exits at the ends -- a deck's end is where a
 talk pauses for questions -- and a `Goto` past the end is REFUSED rather than
@@ -313,12 +317,18 @@ paint, so an edit mid-rehearsal shows on the next keypress.
 
 ## Concurrency
 
-One process, one thread, one blocking read on fd 0, one byte per read: the quit
-key is the last byte lantern takes, so whatever was typed behind it -- the next
-command line, a paste -- stays queued for the shell. A 64-byte read carried those
-bytes away with the deck whenever they shared a read with `q` (2026-10-07: `ut`
-ran `cho lnpres $status`); `lantern.exp` leg (j) sends `q` and the next line in
-one write, three times. The queued bytes wait in the console's input ring
+One process, one thread. Input is kaua's `PollSource` ([[sub-kaua]]): one byte
+per read, one event at a time, a repaint per burst of keys. The quit key is the
+last byte lantern takes, so whatever was typed behind it -- the next command
+line, a paste -- stays queued for the shell. A 64-byte read carried those bytes
+away with the deck whenever they shared a read with `q` (2026-10-07: `ut` ran
+`cho lnpres $status`); `lantern.exp` leg (j) sends `q` and the next line in one
+write, three times. The bin depends on kaua's `source` feature and not on
+`backend`, so lantern's code cannot name kaua's alt-screen `Terminal`. The
+workspace build unifies kaua's features across its members, so the linked
+library may still carry it: the guarantee is what lantern can reach (see
+Cargo.toml's note). On a tile's
+pts the readiness wait is the pts's `ready` sibling, which kaua finds itself. The queued bytes wait in the console's input ring
 (receive pauses, without loss, once some 256 are unread) or a pts's 4 KiB ring,
 far more than anyone types between lantern's exit and the shell's next read.
 A picture slide runs `view` as a child and waits for it -- both pipes drained
@@ -470,3 +480,5 @@ Low-value target, but the two places worth attacking:
   [[dec-2026-09-29-image-slide]]).
 - 2026-10-07 -- one byte per read, so a line typed behind `q` reaches the shell
   whole; `lantern.exp` leg (j).
+- 2026-10-08 -- input through kaua's `PollSource` ([[sub-kaua]]): the quit key
+  stays the last byte read, and a lone Escape is a key of its own; leg (k).

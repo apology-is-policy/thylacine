@@ -77,6 +77,7 @@ mirrors:
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
   - "tools/interactive/manual.exp"
+  - "tools/interactive/pts-probe.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -87,7 +88,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-08
 ---
 ## The surface
 

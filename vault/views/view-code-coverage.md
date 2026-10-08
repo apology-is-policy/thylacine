@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**546 owned · 47 unowned · 593 files (92% owned) · ~12692 unswept lines.**
+**548 owned · 46 unowned · 594 files (92% owned) · ~11659 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **78 files, ~37597 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,13 +75,12 @@ Excluded as harness and counted here rather than dropped: **78 files, ~37597 lin
 | usr/pouch-hello | 11 | 17 | 2486 |
 | kernel | 130 | 13 | 1958 |
 | usr/ports | 19 | 5 | 1691 |
-| usr/quarry | 0 | 1 | 1033 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 28 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 68 | 1 | 72 |
+| usr/lib | 69 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
@@ -113,6 +112,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~37597 lin
 | usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
+| usr/quarry | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
 | usr/utopia | 28 | 0 | 0 |
 | usr/view | 2 | 0 | 0 |
@@ -131,7 +131,6 @@ Excluded as harness and counted here rather than dropped: **78 files, ~37597 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/quarry/src/main.rs | 1033 |
 | kernel/include/thylacine/errno.h | 389 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
