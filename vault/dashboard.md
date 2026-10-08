@@ -127,6 +127,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-08 [[chg-2026-10-08-image-holder-record-land]] — capmark's land: the holder record's verification, which its change note left as an unfilled marker
 - 2026-10-08 [[chg-2026-10-08-image-holder-record]] — An address space records every holder that has left it, and the I-39 image join weighs the record; the code-alias count retires
 - 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
 - 2026-10-07 [[chg-2026-10-07-b2-jit]] — The code region is a reservation, and its writer is hardened: random placement, a thunk born sealed and execute-only, unprivileged user copies, maps withholding code addresses, and an image join that counts code as CAP_JIT; Loom registration returns -errno
@@ -134,5 +135,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-07 [[chg-2026-10-07-tag-pool]] — The 9P tag table grows to the 16-bit tag space, each kind of op has a share, a sync op waits for a tag, and close(2) reports a failed write-behind flush
 - 2026-10-06 [[chg-2026-10-06-9p-sessions-ends]] — /ctl/9p-sessions shows a row's counters only to its two ends
 - 2026-10-06 [[chg-2026-10-06-chdir-physical]] — chdir stores the name of where the walk landed
-- 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
 <!-- generated:end -->

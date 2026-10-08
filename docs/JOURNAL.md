@@ -22,6 +22,96 @@ needed the operator.
 
 
 ---
+## 2026-10-08 (main, Opus 5.5, effort max) -- the image records every holder that has left it (landed)
+
+**What the run is for.** B-2b audit r3 F3 left one finding enqueued at the B-2
+land: a driver's `rfork(RFPROC|RFMEM)` child, carved below its parent (I-2),
+keeps the parent's MMIO/DMA window after the parent is reaped, and a capless
+same-principal peer then covered the child and could write the device through
+`/proc/<pid>/mem`. B-2b had closed the same shape for code regions alone, by
+counting code aliases as `CAP_JIT`.
+
+**The question went to the operator, with the land done first.** Reading the
+code while the land gates ran gave three shapes: per-type counts (MMIO/DMA as
+`CAP_HW_CREATE`, which is the live driver's own bar; but a GPU host-memory
+mapping belongs to an ordinary client holding no such cap), refusing RFMEM over
+a device mapping (libthyla-rs's `rfork_spawn` uses RFMEM, so drivers could no
+longer spawn), or a per-space record of every holder's caps, the shape of
+Linux's dumpability, which belongs to the address-space group rather than the
+task. It rewords
+I-39, so it was the operator's call, and I asked only after the push, so the
+question could not hold the mac. Voted 2026-10-08: the record.
+
+**A second leak of the same class turned up while writing the scripture.**
+Seals do not cross fork; DEBUG-FS 3.3 justified that by the join "reading the
+parent's bit at the moment of the access" -- which holds only while the parent
+maps the image. A sealed parent's later RFMEM child read unsealed once the
+parent was reaped. The vote's rewording ("every Proc that has held it") covers
+every guard I-39 names, so the seal and taint bits ride the same record
+(`guards_ever`), and that is stated in the scripture commit (95ec416cf) and the
+dec, not slipped in.
+
+**Recording at departure, not at every grant.** The first sketch recorded at
+every caps write (five sites, an ordering argument per site, and every kernel
+test that writes `->caps` directly would have had to change). A holder leaves at
+three points -- the ZOMBIE transition, the exec swap, `proc_free` -- and a live
+Proc's caps only grow (checked: every write is a `fetch_or`; a legate scope ends
+by tearing its members down), so its caps at departure are all it ever held. Two
+of the three run under `g_proc_table_lock`, the join's own lock, and the ZOMBIE
+transition writes before any reap can unlink the Proc, which also closed the
+reap-window miss DEBUG-FS 3.3 had listed as open. The code-alias count
+(`code_vmas`) went with it.
+
+**Audit r1 (Fable 5.1, start == end): 0/0/1/3, clean.** F1 was mine and sharp:
+both rfork-driven witnesses spawned through the plain kernel `rfork`, which
+carves a kernel child to `CAP_NONE`, so their premise was red on the first run
+and their equalities compared 0 with 0 -- a removed record site would have
+passed them. They spawn with `CAP_ALL` now, with a "not empty" assert beside
+each equality. F2: the taint rides the record redundantly (inherit + stamp
+already cover it); stated, and pinned by its own witness. F3: the text said
+`proc_free` serves "orphan paths" (there are none in production), and called the
+record Linux's dumpability when it is stricter (Linux's bit is re-raisable).
+F4: no seal had been driven through a real death; the zombie and exec children
+now seal themselves through `proc_seal`. Self-found while it ran: the zombie test
+read the record after a lock-free state load. Fixes 04d32797b.
+
+**The heritage claim was wrong twice before it was right.** The question and the
+dec said Linux's bit is "sticky until exec"; audit r1 F3 caught that it is
+re-raisable (`prctl(PR_SET_DUMPABLE, 1)`), and my r1 fix then wrote that
+`commit_creds` lowers it "on any credential change". Writing the chg record's
+Correction, I read Linux's tree instead of my memory of it: `commit_creds`
+lowers it only when the effective or filesystem ids change or the permitted caps
+grow (`!cred_cap_issubset(old, new)`), and the current tree has moved the bit off
+`mm->flags` into a `task_exec_state` that `CLONE_VM` siblings share
+(`copy_exec_state`). Both earlier versions paraphrased a paraphrase; the third
+was read from the code. 3.3 and the ARCH cell were corrected at the land, the dec
+through the chg record's Corrections.
+
+**RED: five runs, each red where predicted.** In its own worktree at 82381492f
+(06:54-07:10Z): base and green 1959/1959 (main's 1955 plus four; the cover
+test was renamed). Removing the ZOMBIE-site record (R1) failed the zombie test
+and nothing else of the record's (the taint mask in the same run failed its
+own test); the exec site (R2), the exec test alone; the `proc_free` site (R3),
+the three tests whose holder leaves through `proc_free`; dropping the caps half
+of the join with NOTRACE out of the mask (R4), the cover test, the seal test's
+NOTRACE leg and the exec test's seal; the guards half (R5), the three seal and
+taint legs. R1 and R2 fired on the "not empty" guard audit r1 added, one line
+before the equality I had predicted; it reads the same record at the same
+moment, so it names the same site.
+
+**Gates and land.** On 82381492f: suite 1959/1959, test-fault 8/8,
+ci-smp-gate N=10 50/50 over five rows with no corruption (07:11-08:33Z). No spec
+models the join; the ZOMBIE transition's modelled steps are unchanged. `main`
+had not moved and aux-3 was already in it, so the land is a fast-forward with
+the docs commit on top; the suite above is the landed tree's. Corona was rung
+under AS-R9 for the `vma.c` hunks (call 0202, not live; it rings at their next
+session). One wrong turn at the very end: I had committed the change record
+as a draft (82381492f) with a marker where its Verification would go, and the
+record plane froze it there; the hook refused the fill. The verification went
+into a superseding note (`chg-2026-10-08-image-holder-record-land`). A change
+record is written in the land commit or not at all.
+
+
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
 **What the run is for.** The browser arc's B-2 brings JavaScriptCore's JIT onto
