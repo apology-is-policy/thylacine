@@ -407,6 +407,37 @@ void *kcalloc(size_t n, size_t size, unsigned flags) {
     return kzalloc(n * size, flags);
 }
 
+#ifdef KERNEL_TESTS
+static const void *g_kfree_large_watch;
+static bool g_kfree_large_watch_fired;
+
+void kfree_large_watch_arm_for_test(const void *obj) {
+    __atomic_store_n(&g_kfree_large_watch_fired, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_kfree_large_watch, obj, __ATOMIC_RELEASE);
+}
+
+void kfree_large_watch_disarm_for_test(void) {
+    __atomic_store_n(&g_kfree_large_watch, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kfree_large_watch_fired, false, __ATOMIC_RELEASE);
+}
+
+bool kfree_large_watch_armed_for_test(void) {
+    return __atomic_load_n(&g_kfree_large_watch, __ATOMIC_ACQUIRE) != NULL;
+}
+
+bool kfree_large_watch_fired_for_test(void) {
+    return __atomic_load_n(&g_kfree_large_watch_fired, __ATOMIC_ACQUIRE);
+}
+
+// Compares the pointer only: nothing of the object or its page is read here.
+static void kfree_large_watch_note(const void *p) {
+    if (p == __atomic_load_n(&g_kfree_large_watch, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&g_kfree_large_watch_fired, true, __ATOMIC_RELEASE);
+}
+#else
+static inline void kfree_large_watch_note(const void *p) { (void)p; }
+#endif
+
 void kfree(void *p) {
     if (!p) return;
     // P3-Bb: convert direct-map KVA to PA for page-frame database lookup.
@@ -439,6 +470,7 @@ void kfree(void *p) {
             extinction("kfree: large-allocation pointer not page-aligned "
                        "(interior pointer?)");
         }
+        kfree_large_watch_note(p);
         free_pages(page, page->order);
     }
 }

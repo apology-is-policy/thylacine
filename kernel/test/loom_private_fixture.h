@@ -5,14 +5,17 @@
 // retirement discrimination at the end -- which the draft's set did not cover,
 // because every retirement in it ends the ring's occupancy and so refunds the
 // whole charge -- and the admission refusal edges, the layout failure reached
-// through a KERNEL_TESTS one-shot in loom.c. Scheduling is FORCED by this
-// fixture (handles are opened and closed directly, and lp_wait spins on the
-// retirer's counter); none of it demonstrates reachability from a syscall pair,
-// and no claim of that is made.
+// through a KERNEL_TESTS one-shot in loom.c, and loom_create_layout's own unwind
+// of a refused ring, observed by a large-kfree watch in slub. Scheduling is
+// FORCED by this fixture (handles are opened and closed directly, and lp_wait
+// spins on the retirer's counter); none of it demonstrates reachability from a
+// syscall pair, and no claim of that is made.
 #ifndef LOOM_PRIVATE_FIXTURE_H
 #define LOOM_PRIVATE_FIXTURE_H
 
 #include <thylacine/addrspace.h>
+#include <thylacine/page.h>
+#include "../../mm/slub.h"
 #include "../../arch/arm64/uart.h"
 #include <thylacine/vma.h>
 // A VA for the surviving-mapping leg, clear of the 0x140000000 range the
@@ -51,7 +54,7 @@ static const char *loom_private_fixture(void) {
     struct Proc *tight = NULL;
     struct Loom *refused = NULL;
     struct Proc *roomy = NULL;
-    struct Loom *probe = NULL, *faulted = NULL;
+    struct Loom *probe = NULL, *faulted = NULL, *inner = NULL;
     bool roomy_settled = false;
     u32 roomy_initial = 0;
     struct Loom *l = NULL;
@@ -156,6 +159,60 @@ static const char *loom_private_fixture(void) {
     LP_CHECK(!roomy->as->private_rings && addrspace_ref_count(roomy->as) == roomy_refs &&
              addrspace_owner_count(roomy->as) == 1,
              "layout failure releases the guard, reference and owner");
+
+    // Inner layout failure: the Loom metadata is allocated and the ring Burrow
+    // then refused, so loom_create_layout itself must free the metadata before
+    // the caller unwinds. The fault is keyed to this thread. The watch records
+    // ENTRY to kfree's validated large-free site for that one pointer, not the
+    // buddy outcome, and is first checked on a same-class pair: each object is
+    // freed exactly once, and only then are the verdicts read.
+    _Static_assert(sizeof(struct Loom) > SLUB_MAX_OBJECT_SIZE,
+                   "the Loom is a large kmalloc, the only path the watch observes");
+    void *wa = kmalloc(sizeof(struct Loom), KP_ZERO);
+    void *wb = kmalloc(sizeof(struct Loom), KP_ZERO);
+    bool pair = wa && wb;
+    bool large = pair && !(pa_to_page(kva_to_pa(wa))->flags & PG_SLAB) &&
+                 !(pa_to_page(kva_to_pa(wb))->flags & PG_SLAB);
+    bool other_fired = false, own_fired = false;
+    if (large) kfree_large_watch_arm_for_test(wa);
+    kfree(wb);
+    if (large) other_fired = kfree_large_watch_fired_for_test();
+    kfree(wa);
+    if (large) own_fired = kfree_large_watch_fired_for_test();
+    kfree_large_watch_disarm_for_test();
+    LP_CHECK(pair, "the watch's self-check pair allocated");
+    LP_CHECK(large, "the self-check pair takes the Loom's large-kmalloc path");
+    LP_CHECK(!other_fired, "an unwatched large free leaves the watch quiet");
+    LP_CHECK(own_fired, "a watched large free fires the watch");
+
+    // No other call on this thread reaches loom_create_layout between the arm
+    // and the admission, and the outer fault is spent, so the layout is reached.
+    int inner_refs = addrspace_ref_count(roomy->as);
+    LP_CHECK(roomy->as->page_count == roomy_initial && !roomy->as->private_rings &&
+             addrspace_owner_count(roomy->as) == 1 &&
+             !loom_private_layout_fault_armed_for_test(),
+             "inner-fault creator is settled and the outer fault is spent");
+    LP_CHECK(!loom_layout_ring_fault_armed_for_test(), "the ring fault starts disarmed");
+    loom_layout_ring_fault_arm_for_test();
+    LP_CHECK(loom_layout_ring_fault_armed_for_test(), "the ring fault arms");
+    inner = loom_create_private(roomy, 2, 2, true);
+    if (inner) goal++;
+    bool ring_shot_left = loom_layout_ring_fault_armed_for_test();
+    bool watched = kfree_large_watch_armed_for_test();
+    bool freed = kfree_large_watch_fired_for_test();
+    kfree_large_watch_disarm_for_test();
+    LP_CHECK(!inner, "an armed ring fault refuses the admission");
+    LP_CHECK(!ring_shot_left, "the faulted admission consumed the ring fault");
+    LP_CHECK(watched, "the consumed ring fault watched the unpublished Loom");
+    LP_CHECK(roomy->as->page_count == roomy_initial,
+             "the inner ring failure returns the charge");
+    LP_CHECK(!roomy->as->private_rings && addrspace_ref_count(roomy->as) == inner_refs &&
+             addrspace_owner_count(roomy->as) == 1,
+             "the inner ring failure releases the guard, reference and owner");
+    // Last in this leg, so a lone FAIL here also shows every check above it
+    // passed. A Loom whose free went unobserved is never reclaimed: unobserved
+    // is not owned.
+    LP_CHECK(freed, "the inner ring failure frees the unpublished Loom");
 
     bool shared = addrspace_try_ref(p->as);
     if (shared) addrspace_unref(p->as);
@@ -405,12 +462,15 @@ done:
     else uart_puts("normal-fallthrough");
     uart_puts("\n");
     loom_private_layout_fault_disarm_for_test();
+    loom_layout_ring_fault_disarm_for_test();
+    kfree_large_watch_disarm_for_test();
     if (probe) loom_unref(probe);
     if (faulted) loom_unref(faulted);
+    if (inner) loom_unref(inner);
     // A layout-failure unwind that kept its charge or its guard is undone here,
     // after the assertion recorded it, so neither outlives the leg. Only once
     // the probe has retired: before that, a live ring legitimately holds both.
-    if (roomy && roomy_settled && !faulted && roomy->as) {
+    if (roomy && roomy_settled && !faulted && !inner && roomy->as) {
         spin_lock(&roomy->as->lock);
         if (roomy->as->page_count > roomy_initial)
             addrspace_uncharge_pages(roomy->as, roomy->as->page_count - roomy_initial);

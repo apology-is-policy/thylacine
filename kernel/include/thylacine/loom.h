@@ -600,6 +600,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts);
 void loom_private_layout_fault_arm_for_test(void);
 void loom_private_layout_fault_disarm_for_test(void);
 bool loom_private_layout_fault_armed_for_test(void);
+// One-shot keyed to the arming thread: that thread's next loom_create_layout
+// treats its ring Burrow as refused AFTER allocating the Loom metadata, and
+// arms the large-kfree watch on that metadata.
+void loom_layout_ring_fault_arm_for_test(void);
+void loom_layout_ring_fault_disarm_for_test(void);
+bool loom_layout_ring_fault_armed_for_test(void);
 #endif
 void loom_handle_closed(struct Loom *l);
 void loom_exec_latch(struct Loom *l); // leaf only; caller retains the table owner

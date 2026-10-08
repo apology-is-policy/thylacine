@@ -1051,8 +1051,8 @@ cross-arms show neither prediction is satisfied by the other's log. The runner
 then compiles `loom.c` with `KERNEL_TESTS` off against the seam's parent: no seam
 symbol may survive, and `loom_create_private`'s machine code must be identical.
 `loom_create_layout`'s OWN inner failure path (its `kfree` when
-`burrow_create_anon` fails) is a separate obligation and stays STRUCTURAL. Neither
-edge bears on the retirement's release half, which stays open.
+`burrow_create_anon` fails) is a separate obligation, with its own leg below.
+Neither edge bears on the retirement's release half, which stays open.
 
 AND IT RAN (2026-10-08, 11:52:13-11:56:19Z, under lease, on source 9bb7e6037).
 - Control: `tests: 1836/1836 PASS`, the leg PASS in its own block, `test.sh` exit 0,
@@ -1071,6 +1071,49 @@ AND IT RAN (2026-10-08, 11:52:13-11:56:19Z, under lease, on source 9bb7e6037).
   without touching a byte of code.
 - `kernel/loom.c` was restored and `build/` rebuilt byte-identical to the control.
 That is one boot per side on the Mac axis: not SMP, not activation.
+
+THE INNER UNWIND (2026-10-08; AUTHORED, NOT YET RUN). `loom_create_layout` allocates
+the Loom metadata and then the ring Burrow, and when the Burrow is refused it must
+`kfree` the metadata itself, before the caller's unwind runs. That path is shared
+by every Loom constructor, so the fault cannot lean on the fixture-only argument
+the outer seam uses (astra, t75). It is a `KERNEL_TESTS` one-shot KEYED TO THE
+ARMING THREAD, taken only after the metadata allocation succeeded, and consumed
+by a compare-and-swap from the current thread to NULL. A NULL current, before
+`thread_init`, is refused explicitly, or the swap would match a disarmed slot and
+fault an unarmed boot-time caller. The only production caller of the
+constructors is `SYS_LOOM_SETUP` on a user thread, which can never match.
+
+The observer is the hard part. `struct Loom` is larger than 2048 bytes (a
+`_Static_assert` in `loom_create_private`), so it is a LARGE kmalloc, and `kfree`
+returns it through `free_pages` directly, never through `kmem_cache_free`. A
+freelist walk after the call races with reuse by another CPU, and no gauge is
+specific to one object, so slub gained a single-slot `KERNEL_TESTS` watch on the
+validated large-free branch, described in [[sub-kernel-mm-slub]]. The take arms
+it on the metadata while that is live and unpublished. If `kfree` runs, the watch
+fires at the call. If `kfree` is omitted, the pages stay allocated, so nothing can
+fire it. Both readings are independent of scheduling. It records ENTRY to the
+free site, not the buddy outcome.
+
+The leg first checks the watch on a same-class pair: an unwatched free stays quiet
+and the watched one fires. Each object is freed exactly once before any verdict
+is read. Then the leg admits with the ring fault armed and asserts, in this
+order: the refusal, the spent shot, the watched metadata, the charge, and the
+guard/reference/owner; the ORACLE (the watch fired) comes last in the leg. A
+`LP_CHECK` failure jumps to cleanup, so a lone FAIL at the oracle also shows that
+every earlier check passed. A free that went unobserved is UNKNOWN, not owned:
+the leaked metadata of the `kfree`-deleted mutant is never reclaimed, and stays
+an intended, bounded leak until its disposable VM ends (astra, t77).
+
+The runner (`work/oct5-as-r9/inner-leg-run.sh`) has two mutants, each applied to
+pristine copies of both files:
+- `kfree(l)` deleted: must fail ONLY the oracle.
+- the watch's hook deleted: must fail ONLY the self-check, which precedes the
+  arm, so the inner leg does not run under that mutant.
+The shape stage compiles `loom.c` and `slub.c` with `KERNEL_TESTS` off and compares
+`kfree` and every emitted Loom constructor, with relocations. The kmalloc-NULL
+edge returns before anything is allocated, and its caller-side NULL is the one
+the outer leg already discriminated. It is recorded as its own STRUCTURAL row:
+a bounded coverage statement, not runtime closure of every allocation failure.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are

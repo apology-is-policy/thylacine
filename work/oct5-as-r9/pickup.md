@@ -1632,3 +1632,35 @@ ALSO: main 0202 t13 (execquiesce WIP 6ff9f4bab) -> MERGE-OBLIGATIONS item 9:
   addrspace_owner_count. proc.c:4751 (exec walk a) is NEW and MERGES CLEAN with
   the wrong count; :684 conflicts visibly and test_virtio.c:284 guards it.
   Latent today (no production pin or guard). Told main (t14 + note 5).
+
+== 2026-10-08 16:44Z: THE INNER-UNWIND LEG, AUTHORED AND UNRUN ==
+astra t79 (16:33Z) ACCEPTED t78's boundary for implementation with 4 details,
+all built:
+  1. self-check: each of a/b is freed exactly once and the watch disarmed
+     BEFORE any LP_CHECK; PG_SLAB is read only on live, non-NULL objects.
+  2. ORDER: refusal, spent shot, watched metadata, charge and guard/ref/owner
+     all come BEFORE the oracle, which is LAST IN THE LEG (later fixture legs
+     follow it and do not run under either mutant -- claim nothing about them).
+     The runner enforces this order; a control with the charge check moved
+     after the oracle REFUSES (rc 1).
+  3. "fired" = ENTRY to kfree's validated large-free site, not the buddy outcome.
+  4. thread-keyed non-NULL CAS; slots reset on every exit; the victim is never
+     dereferenced and NEVER reclaimed.
+DROPPED from t78: the g_loom_created sanity check. Public Looms created on other
+  CPUs would make it a false-FAIL source under SMP, and the refusal check covers
+  publication anyway. Tell astra.
+RUN IT: sh work/oct5-as-r9/inner-leg-run.sh   (needs the mac lease; clean tree)
+  control: 1836/1836, leg PASS, normal-fallthrough
+  M1 (kernel/loom.c, kfree(l) deleted) -> ONLY FAIL "the inner ring failure frees
+     the unpublished Loom"; leaks one large kmalloc, INTENDED, never reclaimed
+  M2 (mm/slub.c, watch hook deleted)   -> ONLY FAIL "a watched large free fires
+     the watch"; the inner leg does NOT run under M2
+  shape: loom.o + slub.o KERNEL_TESTS-off vs the parent; kfree + every emitted
+     constructor compared with relocations
+Off-lease, verified so far: -fsyntax-only clean for loom.c, slub.c, test_loom.c
+  (the 2 test-prototype warnings are pre-existing: OPEN-BUGS line 146); oracle
+  arms 21/21 (inner-oracle-arms-transcript.txt, runner bfef1dce684eaec4); the
+  runner's order and anchor checks pass on the tree and refuse their controls.
+NEXT: commit, push, dry-run the shape stage off-lease (checker validation only),
+  bring astra the commit + runner + arms BEFORE any lease. The mac is aux's, with
+  main queued.

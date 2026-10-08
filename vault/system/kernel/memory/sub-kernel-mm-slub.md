@@ -114,6 +114,17 @@ tolerated-stale lock-free read pair.
   audit discipline "one kfree per kmalloc" is the only guard.
 - The list lock's leaf-ness: any future walker that needs per-cache
   state must drop the list lock before taking `c->lock`.
+- The `KERNEL_TESTS` large-free watch (`kfree_large_watch_*_for_test`,
+  2026-10-08) is one slot on `kfree`'s LARGE branch only, after the
+  page-aligned validation and before `free_pages`, and it compares the
+  pointer alone. It records ENTRY to that call site for one armed
+  pointer, not the buddy outcome, and never sees a slab free. Arming
+  and disarming both clear `fired`. Arm it only on a pointer you own
+  while it is live. An unobserved free is UNKNOWN, never evidence that
+  the object is still allocated: reclaiming on a missing notification
+  double-frees as soon as the observer is the thing that broke. It is
+  compiled out of the production shape, which the inner layout leg's
+  runner checks with relocations ([[sub-kernel-loom]]).
 
 ## Seams
 

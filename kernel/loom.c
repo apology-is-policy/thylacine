@@ -244,6 +244,42 @@ static bool loom_measure(u32 sq_entries, u32 cq_entries, bool receipts,
     return true;
 }
 
+#ifdef KERNEL_TESTS
+// Keyed to the arming thread, so a Loom created on any other thread never meets
+// the fault, and a NULL current (before thread_init) never matches a disarmed
+// slot. Taken only after the metadata allocation succeeded.
+static struct Thread *g_loom_ring_fault_thread;
+
+void loom_layout_ring_fault_arm_for_test(void) {
+    struct Thread *me = current_thread();
+    if (!me) extinction("loom_layout_ring_fault_arm_for_test without a thread");
+    __atomic_store_n(&g_loom_ring_fault_thread, me, __ATOMIC_RELAXED);
+}
+
+void loom_layout_ring_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_ring_fault_thread, NULL, __ATOMIC_RELAXED);
+}
+
+bool loom_layout_ring_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_ring_fault_thread, __ATOMIC_RELAXED) != NULL;
+}
+
+static bool loom_layout_ring_fault_take(const struct Loom *l) {
+    struct Thread *me = current_thread();
+    if (!me) return false;
+    if (!__atomic_compare_exchange_n(&g_loom_ring_fault_thread, &me, NULL, false,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return false;
+    kfree_large_watch_arm_for_test(l);
+    return true;
+}
+#else
+static inline bool loom_layout_ring_fault_take(const struct Loom *l) {
+    (void)l;
+    return false;
+}
+#endif
+
 static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exempt,
                                         bool receipts) {
     struct loom_layout g;
@@ -251,7 +287,8 @@ static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exem
 
     struct Loom *l = kmalloc(sizeof(struct Loom), KP_ZERO);
     if (!l) return NULL;
-    struct Burrow *r = burrow_create_anon((size_t)g.ring_size, exempt);
+    struct Burrow *r = loom_layout_ring_fault_take(l)
+                           ? NULL : burrow_create_anon((size_t)g.ring_size, exempt);
     if (!r) { kfree(l); return NULL; }
 
     l->magic    = LOOM_MAGIC;

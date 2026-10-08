@@ -1,0 +1,43 @@
+inner-oracle-arms: runner bfef1dce684eaec4, ffceff5af, 2026-10-08T16:41:54Z
+
+=== the CONTROL oracle ===
+ok    check_control R-real-control.log                   rc=0  verdict PASS in its own block
+ok    check_control D-predicted-mutant.log               rc=1  A CHECK INSIDE THE LEG FAILED
+ok    check_control S-real-fail-other-assertion.log      rc=1  THE LEG DID NOT PASS
+ok    check_control N-pass-without-normal-marker.log     rc=1  normal-fallthrough marker is absent
+ok    check_control I-real-never-announced.log           rc=1  NEVER ANNOUNCED
+
+=== the MUTANT oracle ===
+ok    check_mutant  D-predicted-mutant.log               rc=0  DISCRIMINATED
+ok    check_mutant  D2-predicted-M2.log                  rc=0  DISCRIMINATED
+ok    check_mutant  D-predicted-mutant.log               rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  D2-predicted-M2.log                  rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  D-predicted-mutant.log               rc=2  predicted assertion message is empty
+ok    check_mutant  I-real-never-announced.log           rc=2  NOT ATTRIBUTABLE TO THIS LEG
+ok    check_mutant  R-real-control.log                   rc=2  the leg PASSED
+ok    check_mutant  J-real-died-inside-leg.log           rc=2  THE LEG HAS NO VERDICT
+ok    check_mutant  S-real-fail-other-assertion.log      rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  V-different-assertion.log            rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  B-marker-and-verdict-disagree.log    rc=2  The two attributions disagree
+ok    check_mutant  C-no-cleanup-marker.log              rc=2  The two attributions disagree
+ok    check_mutant  E-second-failing-test.log            rc=2  FAIL verdicts in the boot, not 1
+ok    check_mutant  T-tally-total-wrong.log              rc=2  THE TALLY DISAGREES
+ok    check_mutant  X-extra-extinction.log               rc=2  NOT EXACTLY THE SUITE'S CONSEQUENCE
+ok    check_mutant  Z-no-extinction.log                  rc=2  NOT EXACTLY THE SUITE'S CONSEQUENCE
+
+d6b56d21eef1386b  B-marker-and-verdict-disagree.log
+d5362a0d26efb94b  C-no-cleanup-marker.log
+9d088f3ca40004ee  D-predicted-mutant.log
+5d3b5cbada46eb5a  D2-predicted-M2.log
+66ad13d091b20d09  E-second-failing-test.log
+04ce473b172a016c  I-real-never-announced.log
+64c5b26f90c76d2a  J-real-died-inside-leg.log
+de3709cc71bac2ac  N-pass-without-normal-marker.log
+083458a1fba9900b  R-real-control.log
+66cf606b34002e2c  S-real-fail-other-assertion.log
+54b2b11c864218c2  T-tally-total-wrong.log
+921ec4dd96ca96a1  V-different-assertion.log
+6c7d966eb3479870  X-extra-extinction.log
+7f2b87644eccdc0a  Z-no-extinction.log
+
+ALL ARMS BEHAVED AS SPECIFIED
