@@ -62,6 +62,7 @@ remains UNRUN. T83's helper-timeout handling is corrected in source, and the
 checker has 26 passing constructed-log arms including a timeout masked by a
 later expected verdict. The same new arm fails against the original runner,
 which wrongly accepts the masked timeout. Evidence: astra-takeover/inner-arms.txt
-and astra-takeover/inner-arms-before.txt. Actual-source host execution and guest
-control/M1/M2/M3 remain pending resources; see astra-takeover.md. No coverage
+and astra-takeover/inner-arms-before.txt. Actual-source host execution subsequently passed all seven repaired cases
+with an expected failing old-block control (572f434b3). Guest control/M1/M2/M3
+remain pending; see astra-takeover.md. No coverage
 state is promoted by this source/checker checkpoint.

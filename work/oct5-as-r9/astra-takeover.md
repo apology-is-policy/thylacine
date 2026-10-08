@@ -80,3 +80,20 @@ at `/Users/northkillpd/projects/stratum-astra/v2`. Prior full Mac qualification
 and later single-boot checkpoints retain their original scopes and source pins.
 This takeover has not repeated them. Self-review is single-agent, not independent
 Corona/Astra review. Coordination through turn 83; operator resource override and host results recorded separately.
+
+
+## October 8, 18:20 heartbeat: disk headroom
+
+Removed only reproducible Cargo debug caches beneath this inherited checkout's
+build/usr-rs (host target debug, bare-metal target debug and shared debug build
+outputs). Checked no tracked files, no symlink targets, no source-like files in
+the target caches, and no compiler using the checkout. No raw test logs, pinned
+inputs, sources, release outputs or peer jobs were removed. Inventory and df
+readings: astra-takeover/cargo-cache-cleanup.json. Available space changed from
+7.122 to 8.157 GiB; apparent du size overstates reclaimed
+blocks on the shared volume. Headroom above 8 GiB remains small: recheck before
+every bake and recovery. Main's gate still runs (default-smp8 boot 8/10 passed
+in its raw log); this is Main's source only, no Corona qualification. No new
+guest work launched and no peer lease changed. Next: preserve the running gate,
+recheck its completion and disk, then record Astra resource ownership under the
+operator override and run the inner-unwind control/M1/M2/M3/shape runner.

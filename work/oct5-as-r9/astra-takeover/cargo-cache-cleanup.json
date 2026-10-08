@@ -1,0 +1,49 @@
+{
+  "time": "2026-10-08T18:20:51.334181+00:00",
+  "scope": "Unused reproducible Cargo debug caches in inherited Corona checkout only; no source, raw test logs or pinned generations",
+  "before_df": "Filesystem   1024-blocks      Used Available Capacity iused    ifree %iused  Mounted on\n/dev/disk3s5   482797652 445763700   7467588    99% 2908341 74675880    4%   /System/Volumes/Data\n",
+  "paths": [
+    {
+      "path": "/Users/northkillpd/projects/thylacine-corona/build/usr-rs/aarch64-apple-darwin/debug",
+      "du": "1180056\t/Users/northkillpd/projects/thylacine-corona/build/usr-rs/aarch64-apple-darwin/debug",
+      "entries": [
+        ".cargo-artifact-lock",
+        ".cargo-build-lock",
+        ".cargo-lock",
+        ".fingerprint",
+        "build",
+        "deps",
+        "examples",
+        "incremental"
+      ]
+    },
+    {
+      "path": "/Users/northkillpd/projects/thylacine-corona/build/usr-rs/aarch64-unknown-none/debug",
+      "du": "268656\t/Users/northkillpd/projects/thylacine-corona/build/usr-rs/aarch64-unknown-none/debug",
+      "entries": [
+        ".cargo-build-lock",
+        ".cargo-lock",
+        ".fingerprint",
+        "build",
+        "deps",
+        "examples",
+        "incremental"
+      ]
+    },
+    {
+      "path": "/Users/northkillpd/projects/thylacine-corona/build/usr-rs/debug",
+      "du": "113704\tbuild/usr-rs/debug",
+      "entries": [
+        ".cargo-artifact-lock",
+        ".cargo-build-lock",
+        ".cargo-lock",
+        ".fingerprint",
+        "build",
+        "deps",
+        "examples",
+        "incremental"
+      ]
+    }
+  ],
+  "after_df": "Filesystem   1024-blocks      Used Available Capacity iused    ifree %iused  Mounted on\n/dev/disk3s5   482797652 444677884   8553404    99% 2899746 85534040    3%   /System/Volumes/Data\n"
+}
