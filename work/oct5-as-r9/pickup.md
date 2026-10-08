@@ -1664,3 +1664,17 @@ Off-lease, verified so far: -fsyntax-only clean for loom.c, slub.c, test_loom.c
 NEXT: commit, push, dry-run the shape stage off-lease (checker validation only),
   bring astra the commit + runner + arms BEFORE any lease. The mac is aux's, with
   main queued.
+
+== 2026-10-08 16:48Z: COMMITTED 470d78f4b + 4fc54ab2d; REPORTED t80; WAIT FOR REVIEW ==
+The shape dry run (off-lease, checker only) found a CHECKER defect: loom_create
+  and loom_create_with_receipts are 3-instruction tail calls with NO relocation.
+  The per-function floors were fixed (4fc54ab2d); the real tree is green and 3
+  controls refuse at their own gates (inner-shape-dryrun.txt). Arms re-run on
+  the final runner 21e2fa2c24239300: 21/21.
+t80 sent to astra with all four t79 details, file:line, and the dropped
+  g_loom_created check. Astra's term: her review BEFORE any guest/resource work.
+  Then: queue for the mac (thyla-wake hold mac), re-measure the disk (7.4 GiB per `yip resources`
+  just before t80, < FLOOR_GB=8 -- the runner refuses; do NOT lower it), then
+  sh work/oct5-as-r9/inner-leg-run.sh.
+MERGE-OBLIGATIONS 9a (e696d9372): execquiesce's landed shape mapped onto the
+  owner/lifetime split; call 0202 closed by both sides.
