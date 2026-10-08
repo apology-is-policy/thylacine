@@ -255,11 +255,13 @@ have a buggy cfg in [[spec-cow]].
 `vma_count` / `shared_map_pages` / `page_budget` / `page_peak` /
 `pgtable_pages` (B-1a' audit F1: the hardware tables inside `page_count`,
 telemetry) / `file_pages` (audit F8: the mapped FILE pages inside it,
-telemetry) / `code_vmas` (B-2b audit r2: how many listed VMAs alias a code
-Burrow, kept by `vma_insert_in` / `vma_remove_in` under `lock`; the image join
-reads it lock-free and counts a space holding any as carrying `CAP_JIT`,
-[[sub-kernel-proc]]) / `id` (a u64 from a global counter, never reused; the eager
-charge record's key, audit F4).
+telemetry) / `guards_ever` and `caps_ever` (2026-10-08,
+[[dec-2026-10-08-image-holder-record]]: the image's record of the Procs that have
+left it -- their `NODUMP` / `NOTRACE` / `DEBUG_TAINTED` bits and their caps,
+ORed in at each departure and never cleared; the I-39 image join weighs them,
+[[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
+from a global counter, never reused; the eager charge record's key, audit F4).
+The struct is 80 bytes.
 
 `context_id` lives here because **the ASID names a translation table**,
 which is what the allocator always semantically meant. Two Procs sharing

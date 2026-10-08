@@ -651,6 +651,21 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     return reset;
 }
 
+// I-39 (DEBUG-FS-DESIGN 3.3): a holder leaving an address space leaves what it
+// held in the image's record, because the bytes outlive it -- an RFMEM child
+// keeps the image its creator filled, and the image join would otherwise stop
+// weighing the creator at its reap. A live Proc's caps only grow, so the caps it
+// carries as it leaves are every cap it held. Every departure calls this: the
+// ZOMBIE transition, the exec swap, and proc_free.
+static void addrspace_record_holder(struct AddrSpace *as, const struct Proc *p) {
+    if (!as) return;
+    __atomic_fetch_or(&as->caps_ever, __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE),
+                      __ATOMIC_RELAXED);
+    __atomic_fetch_or(&as->guards_ever,
+                      __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_IMAGE_GUARDS,
+                      __ATOMIC_RELAXED);
+}
+
 void proc_free(struct Proc *p) {
     if (!p)                       extinction("proc_free(NULL)");
     // Magic check catches double-free and corrupt-Proc passes. SLUB's
@@ -676,6 +691,10 @@ void proc_free(struct Proc *p) {
     // `state=ZOMBIE; proc_free()` orphan/rollback paths whose table is
     // still intact (round-2 F4).
     proc_quiesce_owned_devices(p);
+
+    // The departures that never passed proc_become_zombie_locked (the rollback
+    // and orphan paths) record here; for the rest this repeats an OR.
+    addrspace_record_holder(p->as, p);
 
     // P3-Da: release the address space here, BEFORE handle_table_free. The
     // ordering is the original one and the reason is unchanged -- the drain
@@ -2646,18 +2665,14 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     out->shared = false;
     if (!p || !p->as) return;
 
-    // A code alias is CAP_JIT's authority held by the image itself, and it can
-    // outlive every Proc that held the cap: an RFMEM child (born without the cap,
-    // the I-2 carve) keeps the aliases once their creator is reaped, and a cover
-    // over mappers' caps alone would then let a caller without CAP_JIT take total
-    // control of a writer/exec pair. So the image carries the cap while any alias
-    // lives, sole mapper or not. A count read stale-zero beside a create is
-    // harmless: the creator passed the CAP_JIT gate and is a live mapper, so its
-    // caps are already in the cover. The count only has to be right once that
-    // creator is gone, and its own exit publishes it a ZOMBIE under the lock this
-    // join runs under, after the store; a reap can only follow that.
-    if (__atomic_load_n(&p->as->code_vmas, __ATOMIC_RELAXED) != 0u)
-        out->caps |= CAP_JIT;
+    // The holders that have LEFT the image, sole mapper or not: what they held is
+    // still in the bytes (a creator's code aliases, a driver's device windows, a
+    // sealed parent's secrets), and no live mapper's word names it any more. The
+    // record is written under this lock at the ZOMBIE transition and the exec
+    // swap, so a holder is in the record before a reap can take it out of the
+    // walk below.
+    out->caps  |= __atomic_load_n(&p->as->caps_ever, __ATOMIC_RELAXED);
+    out->flags |= __atomic_load_n(&p->as->guards_ever, __ATOMIC_RELAXED);
 
     // No other reference at all: nothing to join, and no traversal to pay for.
     // This is the overwhelmingly common case, which is what keeps a per-operation
@@ -3659,6 +3674,10 @@ void proc_exit_notify_parent_locked(struct Proc *p) {
 // msg:    captured by reference; caller-owned (typically a string
 //         literal). NULL becomes "ok".
 static void proc_become_zombie_locked(struct Proc *p, int status, const char *msg) {
+    // The departure record, under the lock every image join reads it under, and
+    // before any reap can unlink p out of the joins' traversal.
+    addrspace_record_holder(p->as, p);
+
     // A-4a (I-25): if p is a legate ROOT, tear down its scope as it dies. Placed
     // at this chokepoint (not in exits() alone) so the sweep fires on EVERY death
     // path -- a clean exit AND a kill / group-terminate (the path A-4b's CAP_KILL
@@ -4599,6 +4618,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
             extinction("proc_exec_replace: a live peer thread appeared");
         }
         old   = p->as;
+        addrspace_record_holder(old, p);
         p->as = nas;
 
         // LINEAGE L-3c-2: this swap IS the vfork release. A parent suspended in

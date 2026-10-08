@@ -1697,8 +1697,8 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
         // stripped is a LOWER-authority door to a HIGHER-authority image, which
         // is precisely the shape musl's posix_spawn creates on every call. So
         // the caller must cover every mapper, not merely the one it named --
-        // and the image's own code aliases, which the join counts as CAP_JIT
-        // because they outlive the Proc that held it (proc_image_join_locked).
+        // and every holder that has left the image, whose authority is still in
+        // its bytes (the space's record; proc_image_join_locked).
         caps_t target_caps = __atomic_load_n(&target->caps, __ATOMIC_ACQUIRE);
         axis = ((target_caps | image.caps) & ~caller_caps) == 0;
     }

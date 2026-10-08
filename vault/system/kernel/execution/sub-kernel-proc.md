@@ -251,17 +251,26 @@ restriction to all of them. Both walk the table and so require
 `g_proc_table_lock`, and both skip the walk when `addrspace_ref_count == 1`,
 which is the ordinary case.
 
-**The image carries `CAP_JIT` while it holds a code alias (2026-10-07; B-2b audit
-r2).** A code region is that cap's authority, and it belongs to the image: an
-RFMEM child, born without the cap, keeps the aliases once their creator is
-reaped, and from then on no mapper's `caps` names them. So the join ORs `CAP_JIT`
-in whenever `AddrSpace.code_vmas` is nonzero, before the sole-mapper fast path
-([[sub-kernel-addrspace]]). A stale zero read beside a create is harmless -- the
-creator passed the `CAP_JIT` gate and is a live mapper -- and the count matters
-only once that creator is gone: its own exit publishes it a ZOMBIE under
-`g_proc_table_lock` after the store, a reap can only follow, and the join runs
-under the same lock. The caps union has one consumer, the debug cover rule
-([[sub-kernel-devproc]]); a new one inherits a cap no mapper may hold.
+**The image weighs every holder that has left it (2026-10-08;
+[[dec-2026-10-08-image-holder-record]]).** What a Proc held stays in the bytes
+after the Proc is gone: an RFMEM child, carved below its creator, keeps the
+creator's code aliases (`CAP_JIT`'s authority), its device windows
+(`CAP_HW_CREATE`'s) and, if it sealed, its secrets, and from then on no mapper's
+word names any of it. So the address space keeps a record, `caps_ever` and
+`guards_ever` ([[sub-kernel-addrspace]]): `addrspace_record_holder` ORs the
+departing Proc's caps and its `PROC_IMAGE_GUARDS` bits (`NODUMP`, `NOTRACE`,
+`DEBUG_TAINTED`) in at each of the three ways a holder leaves -- the ZOMBIE
+transition ([[sub-kernel-death]]), the exec swap, and `proc_free` for the
+rollback and orphan paths -- and the join ORs the record in before the
+sole-mapper fast path. The first two write under `g_proc_table_lock`, the join's
+own lock, and the ZOMBIE transition writes before any reap can unlink the Proc
+out of the walk, so a departing holder is never in neither. A live Proc's caps
+only grow, so what it carries as it leaves is all it ever held. Nothing clears the
+record; exec's fresh space starts without one, and a COW clone's new space starts
+without one too (whether a copied secret is secret is decision A). It replaced
+B-2b audit r2's count of code aliases. The caps union has one consumer, the debug
+cover rule ([[sub-kernel-devproc]]); the flags union has three (the two seals'
+reads and the elevation check), all reading only restricting bits.
 
 `shared` is **references minus the zombies the traversal saw**, and each half of
 that earns its place. It asks whether another Proc could still *use* the image,

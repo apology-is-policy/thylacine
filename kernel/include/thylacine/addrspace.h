@@ -63,6 +63,7 @@
 #ifndef THYLACINE_ADDRSPACE_H
 #define THYLACINE_ADDRSPACE_H
 
+#include <thylacine/caps.h>      // caps_t
 #include <thylacine/page.h>      // paddr_t
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
@@ -146,11 +147,14 @@ struct AddrSpace {
     // pgtable_pages.
     u32            file_pages;
 
-    // B-2b audit r2: how many of `vmas` are aliases of a code Burrow (writer,
-    // exec or sealed). Kept by vma_insert_in / vma_remove_in under `lock` and
-    // stored atomically for the one lockless reader, the image join, which
-    // counts a space holding any as carrying CAP_JIT (struct ProcImageJoin).
-    u32            code_vmas;
+    // The image's record of the Procs that have LEFT it (I-39; DEBUG-FS-DESIGN
+    // 3.3): the NODUMP / NOTRACE / DEBUG_TAINTED bits they carried (PROC_IMAGE_GUARDS)
+    // here, their caps in caps_ever below. A holder's authority stays in the bytes
+    // after the holder is gone -- an RFMEM child keeps the image its creator filled
+    // -- so the image join weighs the record beside its live mappers. Written at
+    // every departure (proc_note_departure_locked), never cleared; exec's fresh
+    // space starts without one.
+    u32            guards_ever;
 
     // B-1a' audit F4: this space's identity, for the records that outlive it.
     // The eager charge record on a Burrow names the address space that PAID
@@ -158,13 +162,16 @@ struct AddrSpace {
     // the successor's space, which never paid. From a global counter at
     // addrspace_alloc; never 0, never reused.
     u64            id;
+
+    // The caps half of the record above.
+    caps_t         caps_ever;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 72,
-               "AddrSpace is 72 bytes: ref+lock (8) + pgtable_root (8) + "
+_Static_assert(sizeof(struct AddrSpace) == 80,
+               "AddrSpace is 80 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
                "page_budget + page_peak + pgtable_pages + file_pages + "
-               "code_vmas (32) + id (8). "
+               "guards_ever (32) + id (8) + caps_ever (8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM

@@ -881,9 +881,11 @@ reader no code row).
 measures a zeroed row, if the row ever outgrows it (every reader's listing would
 otherwise empty quietly), and the trim loop, if it runs out of rows (what a
 broken budget looks like; it would otherwise scan below the buffer). And the
-cover sees an orphaned region: the image join counts a code alias as `CAP_JIT`
-([[sub-kernel-proc]]), so an RFMEM child that kept its creator's aliases is not
-covered by a capless owner. That is also what bounds the diorama, which reads
+cover sees an orphaned region: since 2026-10-08 the image join weighs the
+space's record of every holder that has left it ([[sub-kernel-proc]]; it replaced
+round 2's count of code aliases), so an RFMEM child that kept its creator's
+aliases, device windows or sealed bytes is not covered by an owner the creator's
+caps would not let in, and its creator's seals still hold. That is also what bounds the diorama, which reads
 every pid's `maps` as itself for clients of any principal: holding no
 elevation-only cap, it is shown every foreign code row zeroed, and it checks
 that before it serves ([[sub-diorama]]). The two end-to-end witnesses above now
@@ -893,8 +895,14 @@ drops the top two whole and carries all three zeroed rows),
 `devproc.maps_code_budget_stop` (one alias more than the budget of 77 zeroed
 rows, all below the top row, the count derived from the row's length: the foreign
 reader gets the header alone, the owner a listing cut among the aliases),
-`devproc.debug_cover_counts_code` (the orphan, with the before-the-region,
-after-the-destroy and `CAP_JIT`-caller controls).
+`devproc.debug_cover_weighs_departed` (the orphan of an unlinked creator: admitted
+before the creator leaves, refused after it and still after the aliases are
+destroyed, admitted to a `CAP_JIT` caller), `devproc.seal_outlives_its_holder`
+(a sealed parent's orphan: `maps` EACCES and control refused after the parent is
+freed; an unsealed parent's orphan reads), `devproc.zombie_records_departure`
+(through the real `rfork` + `exits`: the record holds the child's caps while it
+is an unreaped zombie) and `devproc.exec_records_departure` (the child runs
+`proc_exec_replace` on itself; only the swap writes the old space's record).
 
 **A residual this section does not close.** `status` prints `tables:` (and
 `pages:`, which includes them), and the `/ctl/procs` table carries the same

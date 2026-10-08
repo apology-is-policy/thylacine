@@ -94,6 +94,13 @@ every live Proc's ALIVE→ZOMBIE transition passes through, from both
 in `exits()` alone is what makes them fire on *every* death path — a clean
 exit and a kill alike:
 
+- first, the image's departure record (2026-10-08,
+  [[dec-2026-10-08-image-holder-record]]): `addrspace_record_holder` ORs this
+  Proc's caps and seal/taint bits into its address space, so an RFMEM sharer
+  that outlives it is still weighed against what it held. It runs here, under
+  `g_proc_table_lock`, because this is before any reap can unlink the Proc out
+  of the image join's walk ([[sub-kernel-proc]]); witness
+  `devproc.zombie_records_departure`;
 - the A-4a legate-scope teardown if this Proc is a legate root (audit F1);
 - **the arm-6 session hangup** (`proc_session_hangup_if_leader`, IDENTITY-DESIGN
   9.9.1): if this Proc is a `PROC_FLAG_SESSION_HANGUP`-armed session leader

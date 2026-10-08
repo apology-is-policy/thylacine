@@ -1143,6 +1143,12 @@ _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
 // It is stamped across the whole ADDRESS SPACE, not one Proc: the image is the
 // asset, and every Proc mapping it is a door to the same bytes.
 #define PROC_FLAG_DEBUG_TAINTED      (1u << 21)
+
+// The proc_flags bits that restrict an IMAGE rather than confer anything: the two
+// seals and the taint. An address space records them from every holder that
+// leaves it (AddrSpace.guards_ever), so they must never include a bit a reader
+// could take as permission.
+#define PROC_IMAGE_GUARDS (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_DEBUG_TAINTED)
 _Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_CAUGHT_NOTE_MASK |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING |
     PROC_FLAG_SEAT_MANAGER)) == 0,
@@ -2574,8 +2580,8 @@ struct ProcImageJoin {
     // The union over every OTHER Proc in the table mapping this address space,
     // ZOMBIES INCLUDED: a zombie holds its reference until it is reaped, so its
     // bytes are still in the image and a seal it took must still refuse a read.
-    // Plus CAP_JIT while the space holds a code alias, whoever maps it: the
-    // aliases are that cap's authority, and they outlive the Proc that held it.
+    // Plus the space's record of every holder that has LEFT it (caps_ever,
+    // guards_ever): what a holder held stays in the bytes after it is gone.
     caps_t caps;
     u32    flags;
     // Whether another Proc could still USE this image -- which is the one

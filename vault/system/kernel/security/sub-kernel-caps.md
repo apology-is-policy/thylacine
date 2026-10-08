@@ -383,12 +383,17 @@ so the invariant holds trivially today.
   "non-rfork-grantable" beside it and I-42's own "non-heritable" clause. The
   header says in as many words: do not "fix" this bit toward `CAP_ALL` on
   the strength of that phrase.
-- **`CAP_JIT` is the one cap an IMAGE can hold without any Proc holding it**
-  (2026-10-07; B-2b audit r2). Non-heritable means an `RFMEM` child is born
-  without it, yet it maps its parent's code aliases, and keeps them once the
-  parent is reaped. So the I-39 image join counts a space holding a code alias
-  as carrying `CAP_JIT` ([[sub-kernel-proc]]); a debugger without the cap does
-  not cover the child. Every other cap still lives only in a `caps` word.
+- **An IMAGE keeps the caps of every Proc that has left it** (2026-10-08;
+  [[dec-2026-10-08-image-holder-record]]). Non-heritable means an `RFMEM` child
+  is born without its parent's elevation-only caps, yet it maps the parent's
+  image -- code aliases made under `CAP_JIT`, device windows under
+  `CAP_HW_CREATE` -- and keeps it once the parent is reaped. So the address
+  space records each departing holder's caps (`AddrSpace.caps_ever`) and the
+  I-39 image join weighs the record ([[sub-kernel-proc]]); a debugger that does
+  not cover the creator does not cover the child. The record is not a grant: no
+  gate reads it as authority the holder has, only as authority a caller must
+  cover. (B-2b audit r2 had counted code aliases as `CAP_JIT` alone; the record
+  replaced it.)
 - **The comment drift this dossier once flagged is now fixed** (`830817c4`).
   Both enumerations had lagged their macros — the `CAP_ELEVATION_ONLY` comment
   said "All five" and then listed six; the `CAP_ALL` comment enumerated four
