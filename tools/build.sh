@@ -5236,10 +5236,23 @@ gl_link_program() {
     # hardcoded here: it is exactly what meson computed for osmesa-prove's
     # own link, so a list typed out in this script could only ever drift
     # from the one that is known to close.
+    # A PATH entry (the eight ExecutionEngine/JIT archives) is found by its file
+    # name inside THIS build: the list travels with build/ when a worktree
+    # clones it, so a recorded path can name the origin worktree's build, which
+    # need not exist any more. An archive found in neither directory keeps its
+    # path, so the link fails naming it.
     local llvm_flags=()
     local l
     while IFS= read -r l; do
-        [[ -n "$l" ]] && llvm_flags+=( "$l" )
+        [[ -n "$l" ]] || continue
+        if [[ $l == */* ]]; then
+            if [[ -f "$gl_lib/${l##*/}" ]]; then
+                l="$gl_lib/${l##*/}"
+            elif [[ -f "$llvm_lib/${l##*/}" ]]; then
+                l="$llvm_lib/${l##*/}"
+            fi
+        fi
+        llvm_flags+=( "$l" )
     done < "$libs_list"
 
     # TWO Mesa archives, not the seven osmesa-prove's own link line names.
