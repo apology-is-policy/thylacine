@@ -28,3 +28,16 @@ Fixed: per function, require the label and >= 1 instruction; require relocations
 
 controls: tests-on = KERNEL_TESTS left in the defines; kfree-differs = one nop at the top of the
 baseline's kfree; layout-differs = one nop in the baseline's !r unwind of loom_create_layout.
+
+== RE-RUN after the thread-keyed watch (322cd68c3, runner ea8597c1ade95a2a), 2026-10-08T17:00:46Z, still a DRY RUN:
+real tree rc 0:
+-- kfree: IDENTICAL -- 43 instructions AND 15 relocations
+-- loom_create_layout: IDENTICAL -- 130 instructions AND 10 relocations
+-- loom_create: IDENTICAL -- 3 instructions AND 0 relocations
+-- loom_create_with_receipts: IDENTICAL -- 3 instructions AND 0 relocations
+-- loom_create_private: IDENTICAL -- 127 instructions AND 13 relocations
+-- loom .text byte-identical (16056 bytes; UNRELOCATED bytes only)
+-- slub .text byte-identical (3544 bytes; UNRELOCATED bytes only)
+control ctl-tests-on: A TEST SYMBOL SURVIVED loom's production shape:
+control ctl-kfree-differs: kfree's code DIFFERS from the baseline:
+control ctl-layout-differs: loom_create_layout's code DIFFERS from the baseline:
