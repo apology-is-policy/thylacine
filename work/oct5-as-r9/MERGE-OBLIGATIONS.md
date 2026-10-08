@@ -246,3 +246,39 @@ Measured against my branch (merge-base 8746a8a24) on 2026-10-08:
   any path of mine that takes as->lock and then reaches gptl indirectly.
 - A CLEAN auto-merge can still move a hunk into another function: check
   placement in each of these four files, do not trust a clean merge.
+
+## ADDED 2026-10-08 16:29Z, from main's call 0202 t13 (execquiesce, NOT landed)
+
+### 9. execquiesce's sole-holder tests read the WRONG count on this branch.
+main's `execquiesce` (WIP 6ff9f4bab, Fable audit running; read from the shared
+object store, not main's checkout) adds device quiesce walks gated on
+"the address space is sole". On main, `addrspace_ref_count` IS the owner count.
+On THIS branch it is not: `ref` is the LIFETIME count (owners + kernel pins +
+private-ring guards) and `owners` is `addrspace_owner_count`. This branch
+already converted every pre-existing sole test to the owner count (proc.c:638,
+2718, 2751; syscall.c:9496 at 3ec536ee8).
+At merge, EVERY sole test execquiesce adds must read `addrspace_owner_count`:
+- its proc.c:684 (exit walk (b), proc_quiesce_owned_devices): will CONFLICT
+  textually with this branch's :638 `as_sole` -- visible.
+- its proc.c:4751 (exec walk (a), `addrspace_ref_count(old) == 1`): a NEW line.
+  It will MERGE CLEAN with the wrong count. This is the one to catch.
+- its proc.c:2737 / :2770: main's copies of sites this branch already converted.
+WHY IT MATTERS: under `ref`, a single-owner image with a kernel pin or a live
+private ring reads 2 and SKIPS the walk, but the last-OWNER drain still frees
+the image's pages -- exactly the DMA-into-freed-pages window the walk exists to
+close (main's own comment: a DMA buffer held only by a handle frees at that
+close). "Sole, and staying sole" holds for OWNERS here: an owner is made only
+by addrspace_try_ref from a live owner, refused while private_rings != 0; a
+pin never makes an owner.
+PLACEMENT: execquiesce's `addrspace_quiesce_mapped_devices` in addrspace_unref
+goes in THIS branch's last-OWNER branch, `if (pre == 1) { quiesce; vma_drain_in }`,
+NOT in addrspace_lifetime_put (which extincts on any remaining VMA).
+REACHABILITY TODAY: latent. No production caller takes a pin or a private
+guard (grep at 3ec536ee8: addrspace_pin only in kernel/test/, private_begin
+only via loom_create_private, fixture-only), so ref == owners outside tests.
+It goes live the moment private async gets a caller.
+REGRESSION COVERAGE IS HALF THERE: test_virtio.c:284 (from fdbf2e6cc) already
+asserts "proc death resets a VMA-only device despite a descriptor pin" -- it
+FAILS if the exit walk (:684) merges with `ref`. NOTHING pins the image across
+EXEC's walk (a) (:4751), the line that merges clean. At merge, add the pinned
+exec counterpart and see it RED with `ref` before trusting it green.

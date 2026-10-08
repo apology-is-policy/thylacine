@@ -1607,3 +1607,28 @@ SENT t76 (12:07Z), the boundary. NOTHING EDITED; wait for her answer:
     (nothing to unwind; its caller-side NULL was already discriminated).
   Held aside: the saturation refusal (addrspace.c:89) can be driven from a
     constructed state, with no seam.
+
+== 2026-10-08 16:32Z: t76 AMENDED by astra t77; REVISED BOUNDARY SENT AS t78 ==
+astra t77 (12:12Z) caught two real errors in t76, both mine:
+  1. struct Loom > 2048 (loom.c:361 _Static_assert) -> kmalloc's LARGE path;
+     kfree's large branch calls free_pages directly (slub.c:432-442), so a
+     kmem_cache_free watch would NEVER fire, even on the healthy control.
+  2. "watch did not fire -> still allocated -> kfree(victim)" double-frees
+     under the M2 instrument mutant. An unobserved free is UNKNOWN, not owned.
+t78 (revised; NOTHING EDITED): the hook goes in kfree's validated LARGE branch
+  only, and compares the pointer only; the self-check uses the SAME class
+  (sizeof(struct Loom), !PG_SLAB asserted while live, plus a _Static_assert
+  against SLUB_MAX_OBJECT_SIZE), frees each object ONCE and asserts only
+  afterwards; the victim is never reclaimed and there is no victim accessor;
+  M1's leak is recorded as INTENDED; the charge/guard cleanup is proven by
+  the AddrSpace counters, independent of the observer; the fault slot and
+  the watch are disarmed on every exit; the arming-thread lifetime is stated;
+  shape compares kfree plus every function carrying the loom code, with
+  relocations. The kmalloc-NULL row is STRUCTURAL (bounded statement); no
+  saturation.
+WAIT for astra's answer to t78 before writing any code.
+ALSO: main 0202 t13 (execquiesce WIP 6ff9f4bab) -> MERGE-OBLIGATIONS item 9:
+  its sole-holder tests read addrspace_ref_count; on this branch they must read
+  addrspace_owner_count. proc.c:4751 (exec walk a) is NEW and MERGES CLEAN with
+  the wrong count; :684 conflicts visibly and test_virtio.c:284 guards it.
+  Latent today (no production pin or guard). Told main (t14 + note 5).
