@@ -1,6 +1,6 @@
-From 74d42d2d1ee0883947e20a2b9e354078f3b84408 Mon Sep 17 00:00:00 2001
+From c67c637301e76eb06ade09fd8cee30aef36e293f Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <noreply@example.invalid>
-Date: Thu, 8 Oct 2026 17:42:24 +0200
+Date: Thu, 8 Oct 2026 18:27:19 +0200
 Subject: [PATCH] thylacine: B-2c the Baseline JIT on one SYS_JIT_CREATE code
  region (WIP, local only)
 
@@ -12,12 +12,17 @@ an execute-only thunk sealed by SYS_JIT_CREATE_SEALED, hand-encoded so no
 LinkBuffer copy of it exists; jsc acquires CAP_JIT by the SELF form before
 JSC::initialize, and --thylacine-no-cap-jit skips the acquisition (the deny
 probe). Any refusal leaves the reservation empty and JSC runs its interpreters.
+Every JIT tier is built (as on RISCV64, the configuration upstream builds);
+DFG, FTL and Wasm's BBQ and OMG are forced off at run time in
+Options::notifyOptionsChanged, so Baseline and the RegExp JIT are the only
+tiers that run.
 ---
  .../jit/ExecutableAllocator.cpp               | 137 +++++++++++++++++-
  Source/JavaScriptCore/jsc.cpp                 |  32 ++++
+ Source/JavaScriptCore/runtime/Options.cpp     |  11 ++
  Source/WTF/wtf/PageReservation.h              |  11 ++
  Source/WTF/wtf/PlatformEnable.h               |  17 +++
- 4 files changed, 196 insertions(+), 1 deletion(-)
+ 5 files changed, 207 insertions(+), 1 deletion(-)
 
 diff --git a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
 index c9e3589bac..7f34d4c1fa 100644
@@ -249,6 +254,28 @@ index 7a26bf7e0d..647ba659ed 100644
      JSC::initialize();
  #if ENABLE(JIT_OPERATION_VALIDATION)
      JSC::JITOperationList::populatePointersInEmbedder(&startOfJITOperationsInShell, &endOfJITOperationsInShell);
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 0cf9ec4133..35cf88457b 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -836,6 +836,17 @@ void Options::notifyOptionsChanged()
+     Options::useFTLJIT() = false;
+ #endif
+ 
++#if OS(THYLACINE)
++    // As on RISCV64, every JIT tier is built (the configuration upstream builds) and
++    // the tiers not yet opened on Thylacine are off at run time: Baseline and the
++    // RegExp JIT run; DFG, FTL and Wasm's BBQ and OMG stay off whatever a flag or the
++    // environment asked, until each is opened in its own audited step.
++    Options::useDFGJIT() = false;
++    Options::useFTLJIT() = false;
++    Options::useBBQJIT() = false;
++    Options::useOMGJIT() = false;
++#endif
++
+ #if !CPU(X86_64) && !CPU(ARM64)
+     Options::useConcurrentGC() = false;
+     Options::forceUnlinkedDFG() = false;
 diff --git a/Source/WTF/wtf/PageReservation.h b/Source/WTF/wtf/PageReservation.h
 index f55dac3c04..e39738108e 100644
 --- a/Source/WTF/wtf/PageReservation.h

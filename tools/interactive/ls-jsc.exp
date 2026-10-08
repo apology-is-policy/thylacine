@@ -22,6 +22,9 @@
 #           each prints its time for the record (asserted: the value, never a time)
 #   sunspider / sunspider-deny   SunSpider 1.0.2 (26 tests, each checking its own
 #           result), three runs each, JIT on and denied; the totals are the record
+#   tiers   DFG, FTL, BBQ and OMG stay off although every one is asked for by flag;
+#           --useDollarVM=true in the same line reads on, so the flags were parsed
+#           (jscOptions() reports a bool as the number 0 or 1)
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -95,6 +98,11 @@ lc_send "/webkit/jsc --thylacine-no-cap-jit --dumpCompiledRegExpPatterns=true -e
 lc_expect $nojit "denied, the pattern goes to the YARR interpreter"
 lc_expect "JSCL-1000" "the interpreted pattern matches the same"
 lc_pass "ls-jsc(rx-deny): Can't JIT, JSCL-1000"
+
+set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
+lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
+    "JSCO-0-0-0-0-1-1"
+lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
 
 lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI-820578176-"
 lc_pass "ls-jsc(loop): JSCI-820578176 (Baseline JIT)"

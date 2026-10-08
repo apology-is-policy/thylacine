@@ -6638,10 +6638,11 @@ build_libcxx() {
 }
 
 # --- Boosty (the browser arc, docs/BROWSER-DESIGN.md): ICU + JavaScriptCore -------
-# B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: the Baseline JIT
-# and the YARR regexp JIT on (DFG and FTL off, which keeps Wasm's BBQ/OMG off with them;
-# WebKitFeatures.cmake), the pool one SYS_JIT_CREATE region written through a sealed
-# execute-only thunk (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
+# B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: every JIT tier is
+# built (upstream no longer builds JIT without DFG/FTL on ARM64) and patch 0002 forces
+# DFG, FTL, BBQ and OMG off at run time, so the Baseline JIT and the YARR regexp JIT run;
+# the pool is one SYS_JIT_CREATE region written through a sealed execute-only thunk
+# (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
 # Without CAP_JIT the pool is refused and JSC runs its LLInt + IPInt interpreters. DEFAULT-OFF (CHUNK_WEBKIT /
 # THYLACINE_BAKE_WEBKIT=1): ~10 min of ICU + ~30 min of JSC on this host, and the
 # source is neither vendored nor small (a sparse partial clone beside the other
@@ -6836,7 +6837,8 @@ build_jsc() {
         -DTHYLACINE_EXTRA_INCLUDES="$REPO_ROOT/usr/lib/thylajit" \
         -DICU_ROOT="$icu_stage" -DCMAKE_BUILD_TYPE=Release \
         -DPORT=JSCOnly -DENABLE_STATIC_JSC=ON \
-        -DENABLE_JIT=ON -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_C_LOOP=OFF \
+        -DENABLE_JIT=ON -DENABLE_DFG_JIT=ON -DENABLE_FTL_JIT=ON -DENABLE_C_LOOP=OFF \
+        -DENABLE_WEBASSEMBLY_BBQJIT=ON -DENABLE_WEBASSEMBLY_OMGJIT=ON \
         -DENABLE_WEBASSEMBLY=ON -DUSE_SYSTEM_MALLOC=ON \
         -DENABLE_SAMPLING_PROFILER=OFF -DENABLE_REMOTE_INSPECTOR=OFF \
         -DDEVELOPER_MODE=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_UNIFDEF=ON \
