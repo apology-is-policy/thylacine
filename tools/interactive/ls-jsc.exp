@@ -1,7 +1,8 @@
 #!/usr/bin/expect -f
-# tools/interactive/ls-jsc.exp -- Boosty B-0 over a real PTY: JavaScriptCore
-# (WebKit's JSCOnly port, static, every JIT tier off) runs as the logged-in user
-# from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md; docs/browser-status.md.
+# tools/interactive/ls-jsc.exp -- Boosty over a real PTY: JavaScriptCore (WebKit's
+# JSCOnly port, static; B-2c: the Baseline and regexp JITs on one SYS_JIT_CREATE
+# code region, DFG and FTL off) runs as the logged-in user from the pool at
+# /webkit/jsc. docs/BROWSER-DESIGN.md; docs/browser-status.md.
 #
 # What each leg pins, and the libc defect it would have caught (all three were
 # found by running this engine, not by review):
@@ -13,6 +14,12 @@
 #           sysconf(_SC_PHYS_PAGES) returned stack residue; arrays died at ~1000)
 #   typed   a 64 MiB typed array, last byte written and read back (lazy anon mmap)
 #   wasm    the WebAssembly object exists and validates a module header (IPInt)
+#   jit / jit-deny     a hot function runs Baseline JIT code ($vm.baselineJITTrue);
+#           --thylacine-no-cap-jit, one flag away, leaves it interpreted
+#   rx / rx-deny       a regexp compiles to the YARR JIT; denied, the same pattern
+#           goes to the YARR interpreter (JSC says "Can't JIT" for it)
+#   loop / loop-deny   a 2e7-iteration int32 loop computes the same value both ways;
+#           each prints its time for the record (asserted: the value, never a time)
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -58,6 +65,39 @@ foreach {tag js want} {
     lc_run_expect "/webkit/jsc -e '$js' | tr a-z A-Z" $want
     lc_pass "ls-jsc($tag): $want"
 }
+
+# B-2c. michael is jit-eligible, so jsc acquires CAP_JIT by the SELF form before
+# JSC creates its pool; --thylacine-no-cap-jit skips that, the pool's SYS_JIT_CREATE
+# is refused (EACCES) and the same script runs on the interpreters. Every JIT-on
+# witness is paired with its denied twin: a "false" or a "Can't JIT" alone is also
+# what a JIT that never started would print. @T is each leg's own marker.
+set witness {function f(){return $vm.baselineJITTrue()}; var r=false; for(var i=0;i<1e6&&!r;i++)r=f(); print("@T-"+r)}
+set rx {var n=0; for(var i=0;i<1000;i++) if(/a+b/.test("x"+i+"aab")) n++; print("@T-"+n)}
+set loop {var t=preciseTime(); var s=0; for(var i=0;i<2e7;i++)s=(s+i*i)|0; print("@T-"+s+"-"+Math.round((preciseTime()-t)*1000)+"ms")}
+set nojit {Can't JIT this regular expression: "/a+b/"}
+
+lc_send "/webkit/jsc --useDollarVM=true -e '[string map {@T jscg} $witness]' | tr a-z A-Z"
+lc_expect "CAP_JIT acquired (SELF)" "jsc acquires CAP_JIT by the SELF form"
+lc_expect "JSCG-TRUE" "a hot function runs Baseline JIT code"
+lc_pass "ls-jsc(jit): CAP_JIT acquired (SELF), JSCG-TRUE"
+
+lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit --useDollarVM=true -e '[string map {@T jsck} $witness]' | tr a-z A-Z" \
+    "JSCK-FALSE" "CAP_JIT acquired"
+lc_pass "ls-jsc(jit-deny): JSCK-FALSE, no CAP_JIT"
+
+lc_run_expect_hardfail "/webkit/jsc --dumpCompiledRegExpPatterns=true -e '[string map {@T jsch} $rx]' | tr a-z A-Z" \
+    "JSCH-1000" $nojit
+lc_pass "ls-jsc(rx): JSCH-1000 through the YARR JIT"
+
+lc_send "/webkit/jsc --thylacine-no-cap-jit --dumpCompiledRegExpPatterns=true -e '[string map {@T jscl} $rx]' | tr a-z A-Z"
+lc_expect $nojit "denied, the pattern goes to the YARR interpreter"
+lc_expect "JSCL-1000" "the interpreted pattern matches the same"
+lc_pass "ls-jsc(rx-deny): Can't JIT, JSCL-1000"
+
+lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI-820578176-"
+lc_pass "ls-jsc(loop): JSCI-820578176 (Baseline JIT)"
+lc_run_expect "/webkit/jsc --thylacine-no-cap-jit -e '[string map {@T jscj} $loop]' | tr a-z A-Z" "JSCJ-820578176-"
+lc_pass "ls-jsc(loop-deny): JSCJ-820578176 (interpreted)"
 
 lc_quit
 exit 0
