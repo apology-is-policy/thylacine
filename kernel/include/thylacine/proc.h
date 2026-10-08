@@ -1557,6 +1557,11 @@ bool proc_child_cap_ok(struct Proc *p);
 // Exposed for the device-death-quiesce regression test.
 int proc_quiesce_owned_devices(struct Proc *p);
 
+// The same reset for the devices mapped in `as` alone (proc_quiesce_owned_devices'
+// walk (b)), for a caller that knows nobody else holds `as`; the last
+// addrspace_unref runs it before its drain. Returns the number reset.
+int addrspace_quiesce_mapped_devices(struct AddrSpace *as);
+
 // LINEAGE L-3c-2: has a vfork child let go of its parent's address space --
 // and so of the parent's live stack frame, which under RFMEM is the thing the
 // suspend exists to protect? True iff the child exec'd (a different AddrSpace),

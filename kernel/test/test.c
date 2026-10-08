@@ -1541,6 +1541,8 @@ void test_virtio_reset_in_range_no_match(void);
 void test_virtio_vq_size_for(void);
 void test_virtio_proc_death_quiesces_device(void);
 void test_virtio_proc_death_quiesces_vma_only_device(void);
+void test_virtio_exec_quiesces_devices(void);
+void test_virtio_last_unref_quiesces_mapped_device(void);
 void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
@@ -3704,6 +3706,10 @@ struct test_case g_tests[] = {
                                        test_virtio_proc_death_quiesces_device, false, NULL },
     { "virtio.proc_death_quiesces_vma_only_device",
                                        test_virtio_proc_death_quiesces_vma_only_device, false, NULL },
+    { "virtio.exec_quiesces_devices",
+                                       test_virtio_exec_quiesces_devices, false, NULL },
+    { "virtio.last_unref_quiesces_mapped_device",
+                                       test_virtio_last_unref_quiesces_mapped_device, false, NULL },
     { "irqfwd.create_destroy",         test_irqfwd_create_destroy,         false, NULL },
     { "irqfwd.refcount_lifecycle",     test_irqfwd_refcount_lifecycle,     false, NULL },
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },

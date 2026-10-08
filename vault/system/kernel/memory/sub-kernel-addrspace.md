@@ -132,6 +132,17 @@ second reached by a vfork child execing, which is the `posix_spawn` shape
 exactly — so this is one fix at the right layer rather than a gate
 repeated at each site.
 
+**The last reference also stops the devices the space maps** (2026-10-08,
+execquiesce). Before `vma_drain_in`, `addrspace_unref` runs
+`addrspace_quiesce_mapped_devices`: every device a `BURROW_TYPE_MMIO` mapping in
+the space claims is reset (a PCI function quiesced) before the drain frees the
+DMA buffers it was handed (RW-7 R3-F1). Each departing holder also checks, but
+reads the count before dropping its reference, so two holders leaving at once can
+each read the other's and both skip; the last reference is the one point that
+cannot be skipped -- the same argument that moved the drain here. The walk is a
+no-op on a space with no device mapping (a failed exec's space, the COW
+rollback). [[sub-kernel-death]] owns the reset itself.
+
 **No TLB flush at teardown**, the Linux model. What makes it sound is the
 **ASID tag**, not any earlier invalidation: every user PTE is non-global,
 so a stale entry is reachable only under this address space's own ASID,

@@ -534,7 +534,9 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
 // the quiescence argument is live_peers == 0 (every peer has committed
 // EXITING, whose residual execution never touches the table, and no new
 // peer can spawn without a RUNNING thread); at proc_free all threads are
-// reaped. Returns the device count for the regression test.
+// reaped; at exec the caller is the Proc's one live thread (proc_exec_alone,
+// re-checked under g_proc_table_lock at the swap). Returns the device count
+// for the regression tests.
 //
 // RESIDUAL (round-3 F1, trust-envelope): a driver that FULLY releases its
 // KObj_MMIO claim (SYS_BURROW_DETACH + close the fd) while the device is still
@@ -546,12 +548,13 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
 // mmio_handle.c rng-slot residual. The structural close is a per-device
 // KObj_VIRTIO_DEV that resets at owner-death OR last-claim-drop (device-session
 // model; R3-F8, P5+), which closes this residual by construction.
-int proc_quiesce_owned_devices(struct Proc *p) {
-    if (!p) return 0;
-    int reset = 0;
+//
+// The last addrspace_unref also runs walk (b), before its drain, and exec runs
+// walk (a) when it leaves a space it holds alone (proc_exec_replace).
 
-    // (a) device-register claims held by an open fd.
-    struct HandleTable *t = p->handles;
+// (a) device-register claims held by an open fd.
+static int quiesce_fd_devices(struct HandleTable *t) {
+    int reset = 0;
     if (t) {
         for (int i = 0; i < PROC_HANDLE_MAX; i++) {
             struct Handle *h = &t->slots[i];
@@ -596,6 +599,47 @@ int proc_quiesce_owned_devices(struct Proc *p) {
         }
     }
 
+    return reset;
+}
+
+// (b) device-register claims held ONLY by a BURROW_TYPE_MMIO mapping. The caller
+// has established that nobody else holds `as`: proc_quiesce_owned_devices by
+// reading the count, addrspace_unref by dropping the last reference.
+int addrspace_quiesce_mapped_devices(struct AddrSpace *as) {
+    if (!as) return 0;
+    int reset = 0;
+    // The walk reads the list without its lock, and the weft reaper is the one
+    // cross-Proc writer of it: it unmaps under the lock, reaches a space only
+    // through a live Proc's `->as` under g_proc_table_lock, and starts nothing on
+    // a Proc that is non-ALIVE or whose exit close has begun (read under that
+    // lock). So once the caller's Proc is dying, has exec'd off this space, or no
+    // Proc holds it, no new unmap starts here, and taking and dropping the lock
+    // waits out one already under way.
+    spin_lock(&as->lock);
+    spin_unlock(&as->lock);
+    for (struct Vma *v = as->vmas; v; v = v->next) {
+        struct Burrow *b = v->burrow;
+        if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
+        if (b->kobj_pci) {
+            // PCI BAR mappings can outlive a closed PCI handle. Quiesce DMA
+            // before tearing down ANY of this address space's DMA buffers.
+            struct KObj_PCI *kp = b->kobj_pci;
+            if (__atomic_load_n(&kp->hostmem_burrows, __ATOMIC_ACQUIRE) > 0)
+                reset += kobj_pci_quiesce_dma_only(kp) ? 1 : 0;
+            else
+                reset += kobj_pci_quiesce(kp) ? 1 : 0;
+            continue;
+        }
+        struct KObj_MMIO *k = b->kobj_mmio;
+        reset += virtio_mmio_reset_in_range(k->pa, k->size);
+    }
+    return reset;
+}
+
+int proc_quiesce_owned_devices(struct Proc *p) {
+    if (!p) return 0;
+    int reset = quiesce_fd_devices(p->handles);
+
     // (b) device-register claims held ONLY by a BURROW_TYPE_MMIO mapping (fd
     // closed after SYS_MMIO_MAP). Independent of (a): a NULL handle table does
     // not imply no mapped devices.
@@ -630,35 +674,27 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // child's DEATH would run this walk and reset device registers its parent
     // is still driving. Any future change that lets a hardware handle reach a
     // second Proc must add a sole-ownership gate here, exactly like walk (b).
-    bool as_sole = (addrspace_ref_count(p->as) == 1);
-    // The walk below reads the list without its lock, and the weft reaper is the
-    // one cross-Proc writer of it: it unmaps under the lock, and it no longer
-    // starts once this Proc is non-ALIVE or its exit close has begun, which it
-    // reads under that lock. Taking and dropping the lock here waits out an
-    // unmap already under way.
-    if (as_sole) {
-        spin_lock(&p->as->lock);
-        spin_unlock(&p->as->lock);
-    }
-    for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
-        struct Burrow *b = v->burrow;
-        if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
-        if (b->kobj_pci) {
-            // PCI BAR mappings can outlive a closed PCI handle. Quiesce DMA
-            // before tearing down ANY of this address space's DMA buffers.
-            struct KObj_PCI *kp = b->kobj_pci;
-            if (__atomic_load_n(&kp->hostmem_burrows, __ATOMIC_ACQUIRE) > 0)
-                reset += kobj_pci_quiesce_dma_only(kp) ? 1 : 0;
-            else
-                reset += kobj_pci_quiesce(kp) ? 1 : 0;
-            continue;
-        }
-        struct KObj_MMIO *k = b->kobj_mmio;
-        reset += virtio_mmio_reset_in_range(k->pa, k->size);
-    }
-
+    //
+    // The count is read here and dropped later (at the reap, or by exec), so two
+    // holders leaving at once can each read the other's reference and both skip
+    // this walk. The last addrspace_unref therefore repeats it before the drain
+    // frees anything; this call stays for what must be quiet before this Proc's
+    // own handles close, since a DMA buffer held only by a handle frees at that
+    // close.
+    if (addrspace_ref_count(p->as) == 1)
+        reset += addrspace_quiesce_mapped_devices(p->as);
     return reset;
 }
+
+#ifdef KERNEL_TESTS
+// Devices reset by exec's walk (a), summed over every exec (the *_for_test
+// convention: extern-declared by the harness).
+static u64 g_exec_device_resets;
+u64 proc_exec_device_resets_for_test(void);
+u64 proc_exec_device_resets_for_test(void) {
+    return __atomic_load_n(&g_exec_device_resets, __ATOMIC_ACQUIRE);
+}
+#endif
 
 // I-39 (DEBUG-FS-DESIGN 3.3): a holder leaving an address space leaves what it
 // held in the image's record, because the bytes outlive it -- an RFMEM child
@@ -4694,6 +4730,32 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     // space can be matched either (every user PTE is nG). Those two facts are the
     // whole of addrspace_unref's precondition here.
     sched_activate_addrspace(self);
+
+    // The image's devices go with it, as they do at death (RW-7 R3-F1). A driver's
+    // DMA buffer whose fd it closed after mapping it is held only by that mapping,
+    // so the drain below frees it while the device it was handed to may still be
+    // armed, and the device then writes into recycled memory. Death's two walks
+    // run before that drain: (a) over the handle table here, and (b) over `old`
+    // inside addrspace_unref, which runs it for every last reference. Walk (a)
+    // runs only when `old` is ours alone, which is when the drain frees anything;
+    // a sharer (a vfork parent, an RFMEM sibling) keeps the mappings and may still
+    // be driving the device. Read after the swap, 1 stays 1: a new reference
+    // needs an rfork by a Proc holding `old`, and ours now holds `nas`. sys exec
+    // sweeps the close-on-exec descriptors after this function returns, so walk
+    // (a) still sees the ones about to close.
+    //
+    // It is death's reset, so a device whose descriptor survives into the new image
+    // arrives reset: a virtio-mmio device initializes again from status 0, and a PCI
+    // function is revoked for good (pci_quiesce is terminal), so the new image
+    // closes that descriptor and claims the function again.
+    if (addrspace_ref_count(old) == 1) {
+        int reset = quiesce_fd_devices(p->handles);
+#ifdef KERNEL_TESTS
+        __atomic_fetch_add(&g_exec_device_resets, (u64)reset, __ATOMIC_RELEASE);
+#else
+        (void)reset;
+#endif
+    }
 
     // Now this Proc's reference to the outgoing address space can go. If it was
     // the last, addrspace_unref drains the VMA list -- dropping each Burrow's

@@ -68,6 +68,16 @@ int addrspace_ref_count(const struct AddrSpace *as) {
     return __atomic_load_n(&as->ref, __ATOMIC_ACQUIRE);
 }
 
+#ifdef KERNEL_TESTS
+// Devices reset by the last-reference drain, summed (the *_for_test convention:
+// extern-declared by the harness).
+static u64 g_drain_device_resets;
+u64 addrspace_drain_device_resets_for_test(void);
+u64 addrspace_drain_device_resets_for_test(void) {
+    return __atomic_load_n(&g_drain_device_resets, __ATOMIC_ACQUIRE);
+}
+#endif
+
 void addrspace_unref(struct AddrSpace *as) {
     // NULL-safe: a kernel-only Proc has no address space, and a rollback that
     // fired before addrspace_alloc ran has none either.
@@ -90,6 +100,18 @@ void addrspace_unref(struct AddrSpace *as) {
     // Nothing between the decrement and here can take a new reference: a ref is
     // only ever taken from a Proc that already holds one (rfork, from a live
     // parent), so reaching zero means no holder is left to hand one out.
+    //
+    // RW-7 R3-F1: the devices mapped here stop before the drain frees the DMA
+    // buffers they were handed. Each departing holder checks too, but it reads the
+    // count before it drops its reference, so two holders leaving at once can each
+    // read the other's and both skip the reset; the last reference cannot be
+    // missed.
+    int reset = addrspace_quiesce_mapped_devices(as);
+#ifdef KERNEL_TESTS
+    __atomic_fetch_add(&g_drain_device_resets, (u64)reset, __ATOMIC_RELEASE);
+#else
+    (void)reset;
+#endif
     vma_drain_in(as);
 
     // B-1a': nothing returns to the pool here. The pool is physical -- every
