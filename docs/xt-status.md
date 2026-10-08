@@ -32,15 +32,15 @@ The kernel never learns x86.
 | `dd0846c5` | design revised against B-2: citations re-anchored; debug authority (5.2); guest code provenance (5.4 item 4, I-48(e)); a fork carries text, not scratch (don't-fork code regions); F10 added | docs only |
 | `f350cc76` (XT-0) | RATIFIED: `dec-2026-10-08-xt-design`, `dec-2026-10-08-xt-guest-code`, `arc-xt`; ARCH section 28 I-48 RESERVED and the XT amendments paragraph; CLAUDE.md row; ERRORS.md exact-fault contract; the NOVEL.md candidate; the tenth spec-first re-enablement | `tools/check-invariants.py` 48 rows; `quaestor lint` |
 | `ab768299`, `5f0e65f3`, `cfb9201e` (XT-3a) | `SCTLR_EL1` composed whole on every entry path: the direct EL1 entry, the EL2 drop, PSCI secondaries (`start.S` `sctlr_el1_init_base`, `0x30D40998` after the audit). An EL0 `WFI` that would wait traps, and `exception.c`'s `EC_WFX` arm retires it (ELR + 4; SS and BTYPE cleared); `WFE` runs; SP alignment is checked at EL0 and EL1 on every path; BT1 is set with BT0. Each CPU records its final value (`hw_cpu_ident.sctlr_el1`). Fixes task #6. Audit r1 (cross-family): 0 P0 / 1 P1 / 1 P2 / 8 P3, all fixed but F10's event stream (task #15) | suite 1956/1956 on QEMU TCG (`-cpu max`); `hardening.sctlr_composed` (every online CPU, and the live register); `/hint-probe`; red-first: sabotage A fails the test, sabotage B kills the probe; `debug_step.tla` clean + 2 buggy cfgs red; SMP subset (1/4/8 CPUs, N=3): 9/9 PASS, 0 corruption. HVF and KVM runs owed (no such host here) |
-| *(pending)* (XT-3b) | Per-thread reaping, model-first (`specs/thread_reap.tla`). A thread that exits while a peer lives on RETIRES in its EXITING hold (off `p->threads` onto `p->exited`), so `thread_count` and `PROC_THREAD_MAX` count live threads; a live peer frees it at its next spawn or exit once its switch away has settled, exec drains it before the swap, `wait_pid` takes the rest with the zombie. Fixes task #7 (study F3). Also fixes task #19 (exec freed the old address space under a retired tail, a pre-existing race) and task #18's finding (both spawn handlers read `nt->tid` after `ready()`). `proc_cpu_ns` and the kstack peak keep the freed threads' totals | suite 1959/1959 on QEMU TCG; `proc.thread_reap_churn` (1,200 spawns, non-exempt), `proc.thread_reap_inflight`, `proc.thread_reap_concurrent`; `/thread-torture` at boot (1,553 spawns, live threads 1) and as a user (`ls-ci.exp` leg (f)); `check-thread-reap.sh`: 2 clean + 5 buggy cfgs as claimed. Audit pending |
+| `dec9cd55`, `3638a075`, `3da0ac5c`, `541bb193`, *(pending)* (XT-3b) | Per-thread reaping, model-first (`specs/thread_reap.tla`). A thread that exits while a peer lives on RETIRES in its EXITING hold (off `p->threads` onto `p->exited`), so `thread_count` and `PROC_THREAD_MAX` count live threads. A live peer claims it once its switch away has settled, at that peer's next spawn or exit, then commits it (its run time and stack depth folded, and the unlink, in one hold) and frees it; exec drains the retired list before the swap; `wait_pid` takes the rest with the zombie. `preempt_check_irq` refuses an EXITING thread, and the last Thread out's /srv, /cap and weft teardown now runs before its EXITING commit, so on both exit paths the tail is the clear-child-tid handoff and `sched()`. Fixes task #7 (study F3), task #19 (exec freed the old address space under a retired tail), task #18's finding (both spawn handlers read `nt->tid` after `ready()`) and task #20 (an EXITING tail was preemptible at the `userland_enter` die-check). Audit (cross-family, Fable 5.1 at max effort): r1 0 P0 / 0 P1 / 0 P2 / 7 P3, r2 (on the fixes) 0 / 0 / 0 / 3, all fixed | suite 1961/1961 on QEMU TCG, default and UBSan; SMP subset 9/9 (1, 4 and 8 CPUs, 3 boots each, 0 CORRUPTION) and UBSan 4 CPUs 3/3; `/thread-torture` at boot and as a user (`ls-ci.exp` leg (f), first attempt); `check-thread-reap.sh`: 2 clean cfgs (858 / 5994 states, reap rounds modelled) and 6 buggy cfgs as claimed; red-first: sabotage A' and B failed exactly their predicted 5 and 4 tests. HVF and KVM runs are owed by the operator's hosts |
 
 ## Next
 
 Sequence (the design's arc order, with two owned defects pulled forward):
 
 1. **XT-3a** closed (audit r1, SMP 9/9). HVF and KVM gate runs are owed by the operator's hosts.
-2. **XT-3b: thread reaping** landed as WIP (above); the audit round and the SMP
-   subset are next.
+2. **XT-3b** closed (two audit rounds, SMP 9/9, UBSan, ls-ci). HVF and KVM gate
+   runs are owed by the operator's hosts.
 3. **PAC keys per address space** (task #5, study F1): today one key set is
    shared by the kernel's `pac-ret` and every EL0 process.
 4. **XT-1: exact faults**, `specs/fault_note.tla` first.
@@ -52,12 +52,9 @@ and XT-8 onward (the runtime).
 
 - #5 PAC keys shared between the kernel and every EL0 process (study F1).
 - #6 EL2-entry `SCTLR_EL1` leaves `nTWE`/`nTWI` clear (study F2) -> XT-3a.
-- #7 `PROC_THREAD_MAX` is a lifetime cap (study F3) -> XT-3b (landed, audit pending).
-- #18 (sweep) no `struct Thread *` used after the Thread can be reaped -> XT-3b
-  (the two spawn handlers' `nt->tid` after `ready()`; the two lock-free list
-  walks in `test_thread_spawn.c`).
-- #19 exec freed the old address space while a retired tail could still store
-  into it -> XT-3b (`proc_drain_retired` before the swap).
+- #7, #18, #19 and #20 closed by XT-3b: the lifetime cap; no `struct Thread *`
+  used after its Thread can be reaped; exec's drain before the swap; the
+  EXITING preempt gate.
 - #8 documentation drift the study surfaced (its Appendix A, F4).
 - #12 `build_tyrquake` extracts an LHA archive with `/usr/bin/tar`, which is bsdtar
   only on macOS (unverified here: the shareware data is unreachable).
@@ -72,6 +69,13 @@ and XT-8 onward (the runtime).
   truncates at 4 KiB without a sign. `ps` and `cpubench` now read once
   (`41df9a8a`, task #16's fix); the systemic choice, a snapshot per open or the
   single-read contract, is open.
+- #22 hygiene: `dyz_start_clunk` and its statics in `test_9p_client.c` are dead
+  since tagpool TP-1 rewrote the two tests that used them.
+- #23 investigate: `boot-wc`'s TOTAL `max_ms` reads 1-5.5 s in KERNEL_TESTS
+  boots on TCG (pre-existing), while TICKLESS-IDLE.md says a starved periodic
+  park ends within a tick; measure which park it is.
+- #24 harness: the ls-ci timings table records the REQUESTED accel (`hvf`) when
+  `run-vm.sh` falls back to TCG, because the spawn path logs no resolved accel.
 
 ## Building in a Linux container (what this branch's gates ran on)
 

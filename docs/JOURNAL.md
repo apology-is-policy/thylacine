@@ -363,6 +363,31 @@ That is the second time in this chunk that a test's failure mode, not its
 assertion, decided what a sabotage run could show. Both times the fix was to
 make the failure end its own Proc cleanly.
 
+**The close's gates, all on `541bb193`** (the code of the close; what came after
+it is docs):
+- the suite passes 1961/1961 on QEMU TCG, on the default build and on UBSan,
+  with no sanitizer reports;
+- the SMP subset (`tools/smp-multiboot.sh`) passes 9/9 at 1, 4 and 8 CPUs, three
+  boots each, and 3/3 at UBSan 4 CPUs. There was 0 CORRUPTION, and boots took
+  145-236 s under TCG;
+- `ls-ci.exp` passes on its first attempt. Its leg (f) is the cap's real
+  witness, because joey's children are exempt from the cap: a non-exempt user's
+  Proc spawned and joined 1,553 threads and ended with one live;
+- `specs/check-thread-reap.sh` and `specs/check-syscall-irqs.sh` give every
+  config its stated verdict.
+
+`expect` was missing from this container. Without it, `test-interactive.sh`
+SKIPs with exit 0, so the user leg would have read as green without running.
+It was installed for this run.
+
+**Queued from the gates, not this chunk's code:**
+- task #23: the `boot-wc` max starved park;
+- task #24: the ls-ci timings table records the requested accel (`hvf`) when
+  `run-vm.sh` falls back to TCG;
+- task #22: a dead 9P test helper, the build's one `-Wunused-function`.
+
+**Still owed:** HVF and KVM runs, on the operator's hosts.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
