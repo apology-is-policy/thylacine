@@ -1,4 +1,4 @@
-inner-oracle-arms: runner bfef1dce684eaec4, ffceff5af, 2026-10-08T16:41:54Z
+inner-oracle-arms: runner 21e2fa2c24239300, 470d78f4b, 2026-10-08T16:46:15Z
 
 === the CONTROL oracle ===
 ok    check_control R-real-control.log                   rc=0  verdict PASS in its own block

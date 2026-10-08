@@ -1,0 +1,30 @@
+inner-leg shape stage: OFF-LEASE DRY RUN, checker validation only (NOT the measurement of record).
+runner 21e2fa2c24239300, tree 470d78f4b + the per-function-floor fix, 2026-10-08T16:46:16Z
+FIRST DRY RUN found a CHECKER defect: it refused the real tree at 'only 3 instructions disassembled
+from loom_create'. loom_create and loom_create_with_receipts are 3-instruction tail calls into
+loom_create_layout, and a branch to a static function in the same section has NO relocation.
+Fixed: per function, require the label and >= 1 instruction; require relocations in kfree.
+
+== real tree (rc 0):
+-- baseline: ffceff5af715cfe050f275656e7c0b0cceefbacd (parent of the seam+watch commit 470d78f4b73cf4656a8f189fe5243723c73c8f27)
+-- loom: no test symbol, symbol names identical to the baseline
+-- slub: no test symbol, symbol names identical to the baseline
+-- kfree: IDENTICAL -- 43 instructions AND 15 relocations
+-- loom_create_layout: IDENTICAL -- 130 instructions AND 10 relocations
+-- loom_create: IDENTICAL -- 3 instructions AND 0 relocations
+-- loom_create_with_receipts: IDENTICAL -- 3 instructions AND 0 relocations
+-- loom_create_private: IDENTICAL -- 127 instructions AND 13 relocations
+-- loom .text byte-identical (16056 bytes; UNRELOCATED bytes only)
+-- slub .text byte-identical (3544 bytes; UNRELOCATED bytes only)
+
+== control ctl-tests-on (must refuse at its own gate):
+4:   A TEST SYMBOL SURVIVED loom's production shape:
+
+== control ctl-kfree-differs (must refuse at its own gate):
+6:   kfree's code DIFFERS from the baseline:
+
+== control ctl-layout-differs (must refuse at its own gate):
+7:   loom_create_layout's code DIFFERS from the baseline:
+
+controls: tests-on = KERNEL_TESTS left in the defines; kfree-differs = one nop at the top of the
+baseline's kfree; layout-differs = one nop in the baseline's !r unwind of loom_create_layout.

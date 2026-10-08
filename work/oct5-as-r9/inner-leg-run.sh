@@ -643,8 +643,11 @@ for spec in slub:kfree loom:loom_create_layout loom:loom_create loom:loom_create
   done
   _ni=$(/usr/bin/grep -cE '^ +[0-9a-f]+:' "$SH/$fn-seam.dis" || true)
   _nr=$(/usr/bin/grep -cE 'R_AARCH64_' "$SH/$fn-seam.dis" || true)
-  [ "${_ni:-0}" -ge 5 ] || { echo "REFUSING: only ${_ni:-0} instructions disassembled from $fn"; exit 7; }
-  [ "${_nr:-0}" -ge 1 ] || { echo "REFUSING: no relocation lines in $fn -- -r did not take"; exit 7; }
+  # Per function, only that it disassembled: loom_create is a three-instruction
+  # tail call into loom_create_layout, and a branch to a static function in the
+  # same section carries no relocation at all (measured in the off-lease dry run).
+  { /usr/bin/grep -q "<$fn>:" "$SH/$fn-seam.dis" && [ "${_ni:-0}" -ge 1 ]; } || {
+    echo "REFUSING: $fn did not disassemble"; exit 7; }
   if cmp -s "$SH/$fn-base.dis" "$SH/$fn-seam.dis"; then
     echo "-- $fn: IDENTICAL -- $_ni instructions AND $_nr relocations"
     record_stage "shape-fn" "$fn identical ($_ni insns, $_nr relocations)"
@@ -653,8 +656,11 @@ for spec in slub:kfree loom:loom_create_layout loom:loom_create loom:loom_create
     echo "   $fn's code DIFFERS from the baseline:"; diff "$SH/$fn-base.dis" "$SH/$fn-seam.dis" | head -20; exit 7
   fi
 done
-# kfree and at least one Loom constructor must actually have been compared.
+# kfree and at least one Loom constructor must actually have been compared, and
+# kfree -- which calls out -- must carry relocations, or -r did not take.
 [ -s "$SH/kfree-seam.dis" ] || { echo "REFUSING: kfree was never compared"; exit 7; }
+_kr=$(/usr/bin/grep -cE 'R_AARCH64_' "$SH/kfree-seam.dis" || true)
+[ "${_kr:-0}" -ge 1 ] || { echo "REFUSING: no relocation lines in kfree -- -r did not take"; exit 7; }
 [ "$COMPARED" -ge 2 ] || { echo "REFUSING: only $COMPARED function(s) compared"; exit 7; }
 for o in loom slub; do
   "$TOOLS/llvm-objcopy" --dump-section .text="$SH/$o-base.text" "$SH/$o-base.o" "$SH/scratch-$o-base.o" 2>/dev/null || true
