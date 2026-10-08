@@ -53,6 +53,30 @@ Sequence (the design's arc order, with two owned defects pulled forward):
    - PAC-1: the entropy gate and exec's fail-closed AT_RANDOM (task #25);
    - PAC-2: the key model;
    - PAC-3: the EL0 witness, I-49 to ENFORCED, and the audit.
+
+   The PAC-2 plan (a draft, from the tree as read at `81703763`):
+   - **Storage.** Five user keys in `struct AddrSpace`, as 80 B, with its size
+     assert updated. The thread's kernel APIA, and a copy of its address
+     space's user APIA, live in `struct Context`: `cpu_switch_context` already
+     takes that by pointer and reaches its fields at literal offsets pinned by
+     `_Static_assert`s.
+   - **Generation.**
+     - Exec's new address space draws all five keys from `kern_random_bytes`,
+       and the exec fails closed if the draw fails.
+     - `addrspace_clone` copies them.
+     - Thread creation draws the kernel key, or uses the boot key before the
+       CSPRNG is seeded. It copies the user APIA from the thread's address
+       space, and exec's swap refreshes that copy.
+   - **Loads.**
+     - `cpu_switch_context` loads the next thread's kernel APIA and an ISB
+       between restoring next and its `ret`.
+     - The address-space switch loads IB/DA/DB/GA.
+     - EL0 entry installs the kernel APIA before any C code.
+     - Every return to EL0 installs the user APIA with no C after it.
+   - **Gating.** A boot-patched alternative (the W1.5 framework, extended
+     to FEAT_PAuth) turns every key write into a NOP on a core without PAuth.
+     A secondary CPU whose PAuth fields differ from the boot CPU's is not
+     brought online.
 4. **XT-1: exact faults**, `specs/fault_note.tla` first.
 
 Then XT-2, the rest of XT-3 (MRS emulation, `AT_HWCAP2`), XT-4 to XT-7 (kernel),
