@@ -1362,7 +1362,7 @@ quarry, ptyhost) are checked for the same loss as their own item.
 ## kaua reads one byte per read; a lone Escape is a key of its own — 2026-10-08
 
 OPEN-BUGS 2026-10-07 13:45Z and 14:20Z, and two of the three items the first audit round queued (2026-10-08 07:27Z).
-Code, witnesses, dossiers and the manual in one commit, LAND_HASH. Cut on aux-3
+Code, witnesses, dossiers and the manual in one commit, 210b14507. Cut on aux-3
 1a1bba463 (the spawn cwd landing). Userspace only: `usr/lib/kaua`, prowl, quarry, nora, lantern, ptyfs, `tools/interactive`.
 
 - **A quit key is the last byte an app reads.** A kaua app that quits, or hands the terminal to a child, leaves what was
