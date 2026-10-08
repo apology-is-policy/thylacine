@@ -120,7 +120,10 @@ static void init_cache(struct kmem_cache *c, const char *name,
     c->align       = align;
     c->flags       = flags;
     c->slab_order  = 0;     // P1-E: single-page slabs only
-    c->objects_per_slab = (PAGE_SIZE << c->slab_order) / actual;
+    // The count lands in the u32 page refcount (the slab's in-use count).
+    _Static_assert((PAGE_SIZE << MAX_ORDER) / SLUB_MIN_OBJECT_SIZE <= 0xFFFFFFFFull,
+                   "a slab of any buddy order counts its objects in a u32");
+    c->objects_per_slab = (unsigned)((PAGE_SIZE << c->slab_order) / actual);
     list_init_head(&c->partial_list);
     list_init_head(&c->full_list);          // F33: track full slabs explicitly
     c->nr_partial      = 0;

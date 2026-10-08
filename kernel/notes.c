@@ -715,7 +715,7 @@ int notes_peek_locked(struct Proc *p, struct Thread *t, struct Note *out) {
     struct NoteQueue *q = p->notes;
     if (q->count == 0) return 0;
 
-    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    u64 mask = (t != NULL) ? t->note_mask : 0u;
 
     // F2 audit close: kill is non-catchable (N-4) — mask MUST NOT defer
     // its delivery. First pass scans for kill regardless of mask.
@@ -781,7 +781,7 @@ int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
     struct NoteQueue *q = p->notes;
     if (q->count == 0) return 0;
 
-    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    u64 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_is_kill(q->ring[idx].name)) {
@@ -805,7 +805,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
     struct NoteQueue *q = p->notes;
     if (q->count == 0) return 0;
 
-    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    u64 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_is_kill(q->ring[idx].name)) {
@@ -832,7 +832,7 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
     struct NoteQueue *q = p->notes;
     if (q->count == 0) return 0;
 
-    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    u64 mask = (t != NULL) ? t->note_mask : 0u;
 
     // F2 audit close: kill bypasses the mask (N-4 non-catchable). First
     // pass scans for kill in FIFO order regardless of mask state.
@@ -1018,7 +1018,7 @@ __attribute__((noreturn)) extern void exits(const char *msg);
 static const char *notes_terminate_pending_name_locked(struct Proc *p,
                                                        struct Thread *t) {
     struct NoteQueue *q = p->notes;
-    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    u64 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         const char *name = q->ring[idx].name;
@@ -1081,7 +1081,7 @@ const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
 // entry.
 static int notes_stop_pending_idx_locked(struct Proc *p, struct Thread *t) {
     struct NoteQueue *q = p->notes;
-    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    u64 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         const char *name = q->ring[idx].name;

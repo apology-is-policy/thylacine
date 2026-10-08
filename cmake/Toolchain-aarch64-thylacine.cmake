@@ -124,6 +124,12 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    no +bti needed). NOPs on ARMv8.0; active
 #                                    where start.S sets SCTLR_EL1.BT0
 #                                    (runtime-gated on FEAT_BTI).
+#   -Werror=shorten-64-to-32       — an implicit u64 -> u32 narrowing fails the
+#                                    build (an explicit cast still compiles).
+#                                    The device number is u64 end to end and
+#                                    never reused (dec-2026-09-28-t-stat-devno-
+#                                    u64); a u32 local or parameter would
+#                                    truncate it with no other symptom.
 #
 # DEFERRED to post-v1.0 (per CLAUDE.md "complexity is permitted only where
 # it is verified"):
@@ -157,6 +163,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-Wstrict-prototypes"
     "-Wmissing-prototypes"
     "-Wno-unused-parameter"
+    "-Werror=shorten-64-to-32"
     "-std=c99"
     "-O2"
     "-g"

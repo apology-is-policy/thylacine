@@ -44,6 +44,11 @@ If a branch of yours adds a `t_stat` reader, a `PgrpMount` initialiser or a
 devno parameter, re-check it against these rules after the merge; the build
 does not warn on a u64-to-u32 narrowing (no `-Wshorten-64-to-32`).
 
+**Update 2026-10-07 (aux):** the kernel now builds with
+`-Werror=shorten-64-to-32` (`chg-2026-10-07-narrowing-error`), so an implicit
+narrowing in kernel C fails the build. The sentence above still holds for
+userspace C (libt, joey, the pouch patches), which those flags do not cover.
+
 ## Carried from 045 (one site, named)
 
 045's rule 5 (every change a Loom waiter must drive bumps `drive_gen` under

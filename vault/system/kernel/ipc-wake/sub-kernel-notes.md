@@ -548,6 +548,18 @@ in both the name table and [[abi-note-names]].
 
 ## Caveats
 
+**Re-measured 2026-10-06: the first caveat below is history.** IM-1 added
+`NOTE_BIT_SAK` (bit 6), so the kernel's `NOTE_MASK_SUPPORTED` is `0x7f`, and it
+is consumed now: `thread_caught_note_deliverable` and `thread_caught_note_claim`
+AND it into the deliverable set, and three `_Static_assert`s tie it to the
+32-bit `proc_flags` caught-note fields and to the `u8` `Thread.note_claim`. That
+last assert bounds every supported note bit at 7. libthyla-rs is `0x7f` and
+names `T_NOTE_BIT_TTY` and `T_NOTE_BIT_SAK`; pouch is still `0x2f` (no `snare`,
+no `sak`, a kernel-synthetic note for the native login authority). The
+per-thread `note_mask` is `u64`, and so is every local the queue scans read it
+into: they were `u32`, lossless only because of that bound, and the kernel now
+builds with `-Werror=shorten-64-to-32`.
+
 **`NOTE_MASK_SUPPORTED` has zero consumers** — and re-measuring it on
 2026-08-16 found the caveat was scoped to one file when the constant lives in
 **three, with three different values**:

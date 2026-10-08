@@ -302,7 +302,7 @@ void test_tty_terminate_class_gate(void) {
     struct Proc *p = pgrp_make_linked_in_session();
     TEST_ASSERT(p, "proc_alloc failed");
     struct Thread *t = current_thread();
-    u32 saved_mask = t->note_mask;
+    u64 saved_mask = t->note_mask;
 
     // tty:quit on a handler-less, non-self-managing Proc: terminate-class.
     TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_QUIT, 0u, NULL, true) == 0,
