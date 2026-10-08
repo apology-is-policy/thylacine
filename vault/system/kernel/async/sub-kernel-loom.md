@@ -1172,3 +1172,13 @@ Release decrement now discriminated in release-leg-20261008T200530Z on
 at the exact ref-count check. Self-review verified source and control ELF/bin
 restoration, nine pinned inputs and raw diagnostics. The retained creator owner
 makes this a decrement witness only; final image reclamation stays open.
+
+
+Current fixture full Mac qualification, October 8: actual ci-smp-gate.sh on
+98c50e844 completed all 50 default-smp1/4/8 and UBSan-smp4/8 boots cleanly.
+Every boot reports 1836/1836 and private-owner normal fallthrough, D7 overlap
+and twenty distinct user cycles. Ten exact input hashes and 100 raw logs
+preserved in work/oct5-as-r9/current-gate-20261008T201816Z; self-review result
+in astra-takeover/current-gate-20261008T201816Z-result.json. This is control
+coverage on Mac HVF, not new mutant or Pi evidence. Final image reclamation
+and the private engine remain open; no activation or Main landing.

@@ -81,3 +81,12 @@ Release decrement witness authored October 8: first isolated private retirement,
 creator still owns its image, exact ref count after retirement publication.
 Omitted-put-only mutant scoped to loom_private_destroy; guest UNRUN. This can
 close release decrement sensitivity only, not final image destruction.
+
+
+October 8, 21:00: the current fixture on 98c50e844 passed the real full Mac
+default/UBSan matrix: 50/50 clean, private-owner normal fallthrough and
+1836/1836 in every boot. D7 overlap plus twenty distinct user cycles passed
+in all fifty. Exact ten input hashes and 100 raw logs are preserved under
+current-gate-20261008T201816Z; result JSON is in astra-takeover. This adds
+SMP/sanitizer CONTROL coverage; it does not rerun or widen the older mutant
+legs, close final image reclamation, or close the engine-owned rows.

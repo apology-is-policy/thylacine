@@ -249,3 +249,40 @@ Shell syntax passed. Vault render/lint: 1463 notes, zero failures, one warning
 for 46 stale dossiers. Raw preflight: astra-takeover/gate-preflight.txt.
 This is single-agent self-review. The new runtime matrix is not yet qualified;
 read the unique current-gate-* directory and gate.rc/runner.rc on pickup.
+
+
+## October 8, 21:00: current-source full Mac matrix qualified
+
+Real ci-smp-gate.sh run current-gate-20261008T201816Z on
+98c50e844fcaf2d62da3705fbfa0d45de383152c completed with gate.rc=0 and
+runner.rc=0. All five standard rows (default smp1/4/8, UBSan smp4/8) were
+10/10 clean: 50 PASS, zero corruption, external-kill, inject-miss, timing or
+other classifications. Every retained serial log reports 1836/1836, the private
+owner fixture's normal-fallthrough PASS, D7 overlap PASS, twenty-cycle PASS and
+the boot banner, with no extinction or kernel test failure. All twenty distinct
+d7user00..d7user19 E2E-completion records were checked separately in each boot.
+
+Self-review copied and hashed all 100 fresh serial/harness logs into the unique
+run's verified-logs directory. The verifier is retained as verify.py. Initial
+broad FAIL scanning found the two optional Venus/Vulkan spawn diagnostics;
+source explicitly treats these as nonfatal and parsing the captured newc ramfs
+proved both programs absent. Those are NOT graphics passes; graphics and Pi/A72
+KVM remain outside this result. The verifier requires exactly those two
+nonfatal lines and refuses any additional failure marker.
+
+All ten captured config/kernel/ramfs/pool/key input hashes verified. The wrapper
+also compared the live immutable build inputs with the pre-matrix captures,
+and source stayed clean at the recorded HEAD through completion. Stratum
+remained clean at 61dde3727921e70e2c72fbd3c9e2044a192f4a54. Default bin
+aa7b16dc8fdfad3b, UBSan bin 39772be897d55371; full hashes, per-boot log hashes
+and checks: astra-takeover/current-gate-20261008T201816Z-result.json. Inputs
+are marked PINNED outside automatic pruning. Minimum recorded disk admission
+was 8758 MiB versus the unchanged 8192 MiB floor. Mac lease released.
+
+This qualifies the current fixture on Mac default/UBSan across the five rows.
+It does not expand the earlier mutant experiments beyond their recorded single
+boots, nor prove final descriptor/page-table reclamation. That witness and the
+remaining structural/engine obligations stay open, followed by the approved
+async-first implementation then MM0-MM4. No Main landing, unfinished activation
+or removal of the 128 MiB protection. This was single-agent self-review, not an
+independent audit.
