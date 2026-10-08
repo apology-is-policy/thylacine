@@ -40,7 +40,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* A consumer that only operates a region (JavaScriptCore's allocator) defines
+ * THYLA_JIT_NO_CAPJIT and takes none of the acquisition code. */
+#ifndef THYLA_JIT_NO_CAPJIT
 #include "thyla_capjit.h" /* thyla_acquire_cap_jit() */
+#endif
 
 #define THYLA_SYS_JIT_CREATE  101L
 #define THYLA_SYS_JIT_DESTROY 102L

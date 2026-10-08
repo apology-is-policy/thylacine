@@ -35,6 +35,15 @@
 #include <string.h>
 #include <unistd.h>
 
+/* THYLA_CAPJIT_SELF_ONLY: the SELF form alone, for a program that must carry no
+ * credential (jsc); its reports go to stderr, so a program whose stdout is its
+ * output (a script's print) stays clean. */
+#ifdef THYLA_CAPJIT_SELF_ONLY
+#define THYLA_CAPJIT_OUT stderr
+#else
+#define THYLA_CAPJIT_OUT stdout
+#endif
+
 #define THYLA_CAP_JIT     (1ull << 11)
 #define THYLA_SYS_CAP_USE 33
 #define THYLA_SYS_OPEN    65
@@ -225,13 +234,17 @@ __attribute__((weak)) int thyla_capjit_held;
  * failure both statuses are reported; one alone would name the wrong door. */
 static int thyla_acquire_cap_jit(const char *who)
 {
+#ifndef THYLA_CAPJIT_SELF_ONLY
     static const char PASS[] = "correct-horse-battery-staple-v1";
     unsigned char pl[128], rx[256], token[33];
-    unsigned long long granted = 0;
-    unsigned char st_self = 0, st = 0;
+    unsigned char st = 0;
     size_t o, rl, pw;
+    int rc;
+#endif
+    unsigned long long granted = 0;
+    unsigned char st_self = 0;
     long root = -1, ctl;
-    int i, rc, self_ok;
+    int i, self_ok;
 
     if (thyla_capjit_held) {
         return THYLA_CAPJIT_OK;
@@ -242,19 +255,26 @@ static int thyla_acquire_cap_jit(const char *who)
                                  THYLA_OREAD);
     }
     if (root < 0) {
-        printf("%s: FAIL cannot reach /srv/corvus\n", who);
+        fprintf(THYLA_CAPJIT_OUT, "%s: FAIL cannot reach /srv/corvus\n", who);
         return THYLA_CAPJIT_ENOSRV;
     }
     ctl = thyla_capjit_open(root, "ctl", 3, THYLA_ORDWR);
     close((int)root);
     if (ctl < 0) {
-        printf("%s: FAIL cannot open corvus ctl\n", who);
+        fprintf(THYLA_CAPJIT_OUT, "%s: FAIL cannot open corvus ctl\n", who);
         return THYLA_CAPJIT_ENOCTL;
     }
 
     /* The SELF form first -- the one that quotes nothing. */
     self_ok = (thyla_capjit_activate((int)ctl, NULL, &granted, &st_self) == 0);
 
+#ifdef THYLA_CAPJIT_SELF_ONLY
+    if (!self_ok) {
+        fprintf(THYLA_CAPJIT_OUT, "%s: FAIL self=%u corvus CLEARANCE (the SELF form only)\n",
+                who, (unsigned)st_self);
+        return THYLA_CAPJIT_ECLEAR;
+    }
+#else
     if (!self_ok) {
         /* AUTH, then the bearer form. CLEARANCE_LIST is skipped on purpose --
          * ACTIVATE fails identically if the principal is not eligible, and
@@ -277,26 +297,27 @@ static int thyla_acquire_cap_jit(const char *who)
          * that sometimes is not there. */
         rc = thyla_capjit_rpc((int)ctl, 1, pl, o, rx, sizeof rx, &rl, &st);
         if (rc != 0 || st != 0 || rl != sizeof token) {
-            printf("%s: FAIL self=%u auth=%u rc=%d rl=%u corvus AUTH\n", who,
+            fprintf(THYLA_CAPJIT_OUT, "%s: FAIL self=%u auth=%u rc=%d rl=%u corvus AUTH\n", who,
                    (unsigned)st_self, (unsigned)st, rc, (unsigned)rl);
             return THYLA_CAPJIT_EAUTH;
         }
         memcpy(token, rx, sizeof token);
 
         if (thyla_capjit_activate((int)ctl, token, &granted, &st) != 0) {
-            printf("%s: FAIL self=%u clear=%u corvus CLEARANCE\n", who,
+            fprintf(THYLA_CAPJIT_OUT, "%s: FAIL self=%u clear=%u corvus CLEARANCE\n", who,
                    (unsigned)st_self, (unsigned)st);
             return THYLA_CAPJIT_ECLEAR;
         }
     }
+#endif
 
     if (granted != THYLA_CAP_JIT) {
-        printf("%s: FAIL clearance granted 0x%llx, want CAP_JIT\n", who,
+        fprintf(THYLA_CAPJIT_OUT, "%s: FAIL clearance granted 0x%llx, want CAP_JIT\n", who,
                granted);
         return THYLA_CAPJIT_EGRANT;
     }
     if (thyla_capjit_cap_use(granted) != 0) {
-        printf("%s: FAIL redeeming the CAP_JIT grant\n", who);
+        fprintf(THYLA_CAPJIT_OUT, "%s: FAIL redeeming the CAP_JIT grant\n", who);
         return THYLA_CAPJIT_EREDEEM;
     }
     /* ctl is deliberately left open for the life of the process, as
@@ -309,9 +330,9 @@ static int thyla_acquire_cap_jit(const char *who)
      * that always worked, and #95 eats line TAILS -- a discriminator parked at
      * the end is a discriminator that sometimes is not there. */
     thyla_capjit_held = 1;
-    printf("%s: CAP_JIT acquired (%s) via the corvus jit clearance\n", who,
+    fprintf(THYLA_CAPJIT_OUT, "%s: CAP_JIT acquired (%s) via the corvus jit clearance\n", who,
            self_ok ? "SELF" : "bearer");
-    fflush(stdout);
+    fflush(THYLA_CAPJIT_OUT);
     return THYLA_CAPJIT_OK;
 }
 

@@ -30,7 +30,7 @@ hazards: []
 abis: []
 design: [docs/DOSBOX.md]
 created: 2026-09-17
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -68,6 +68,8 @@ the two pointers `thyla_jit_create` returns. `thyla_jit_create` can also answer
 long after boot, does not meet. `thyla_jit.h` also carries
 `thyla_jit_create_sealed` (`SYS_JIT_CREATE_SEALED`, a region born
 execute-only) for the browser engine's write thunk; DOSBox does not use it.
+It includes `thyla_capjit.h` for the acquisition unless the consumer defines
+`THYLA_JIT_NO_CAPJIT`, as JavaScriptCore's allocator does; DOSBox takes both.
 
 [[sub-sdl-port]] owns the display and input integration. Video-mode recreation
 restores the native title and dynamic-frame intent. Halcyon places and zooms

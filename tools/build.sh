@@ -6637,8 +6637,11 @@ build_libcxx() {
 }
 
 # --- Boosty (the browser arc, docs/BROWSER-DESIGN.md): ICU + JavaScriptCore -------
-# B-0: WebKit's JSCOnly port, static, every JIT tier OFF (the asm LLInt + IPInt
-# interpreters), against a cross-built ICU. DEFAULT-OFF (CHUNK_WEBKIT /
+# B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: the Baseline JIT
+# and the YARR regexp JIT on (DFG and FTL off, which keeps Wasm's BBQ/OMG off with them;
+# WebKitFeatures.cmake), the pool one SYS_JIT_CREATE region written through a sealed
+# execute-only thunk (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
+# Without CAP_JIT the pool is refused and JSC runs its LLInt + IPInt interpreters. DEFAULT-OFF (CHUNK_WEBKIT /
 # THYLACINE_BAKE_WEBKIT=1): ~10 min of ICU + ~30 min of JSC on this host, and the
 # source is neither vendored nor small (a sparse partial clone beside the other
 # forks). Pins live in tools/build-manifest.toml ([source.webkit], [cache.icu4c]);
@@ -6793,16 +6796,17 @@ build_jsc() {
     if [[ -f "$out" && -f "$stage/jsc" && -z "${WEBKIT_FORCE:-}" ]]; then
         local stale
         stale="$(find "$port_dir" "$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
-                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" -type f -newer "$out" -print -quit 2>/dev/null)"
+                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" "$REPO_ROOT/usr/lib/thylajit" \
+                      -type f -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$out" && ! "$sysroot/lib/libc++.a" -nt "$out" \
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
-            ledger "jsc (JavaScriptCore, JIT off): REUSED (cached + up-to-date)"
+            ledger "jsc (JavaScriptCore, Baseline + YARR JIT): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, JIT off, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, Baseline + YARR JIT, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6810,9 +6814,10 @@ build_jsc() {
         -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
         -DLLVMFORK="$fork/build" -DHOSTLLVM="$LLVM_PREFIX" \
         -DTHYLACINE_SYSROOT="$sysroot" -DTHYLACINE_EXTRA_ROOTS="$icu_stage" \
+        -DTHYLACINE_EXTRA_INCLUDES="$REPO_ROOT/usr/lib/thylajit" \
         -DICU_ROOT="$icu_stage" -DCMAKE_BUILD_TYPE=Release \
         -DPORT=JSCOnly -DENABLE_STATIC_JSC=ON \
-        -DENABLE_JIT=OFF -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_C_LOOP=OFF \
+        -DENABLE_JIT=ON -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_C_LOOP=OFF \
         -DENABLE_WEBASSEMBLY=ON -DUSE_SYSTEM_MALLOC=ON \
         -DENABLE_SAMPLING_PROFILER=OFF -DENABLE_REMOTE_INSPECTOR=OFF \
         -DDEVELOPER_MODE=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_UNIFDEF=ON \
@@ -6837,7 +6842,7 @@ build_jsc() {
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
     echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
-    ledger "jsc (JavaScriptCore, JIT off): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    ledger "jsc (JavaScriptCore, Baseline + YARR JIT): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {
