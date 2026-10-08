@@ -37,6 +37,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vault]] | active | 33 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
+| [[arc-xt]] | active | 0 |
 
 ## Open seams: 84
 

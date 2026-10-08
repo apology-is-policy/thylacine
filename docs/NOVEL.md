@@ -394,6 +394,32 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   network — Angle #1 (9P totalized) reaching the last subsystem Plan 9 left as
   a single writer on one file. Candidate invariant I-46 (reserved in ARCH §28).
 
+- **x86 as ordinary processes: translation as text, objtype as a namespace
+  declaration** (`docs/X86-TRANSLATION-DESIGN.md`; ratified 2026-10-08,
+  `dec-2026-10-08-xt-design`). x86 Linux and Windows programs run through a
+  native translator, and the kernel never learns x86. Four claims.
+  (1) **Translation as text.** Translated code is served by the filesystem,
+  mapped through the ordinary exec-provenance door, shared through the Image
+  cache and checked by Stratum's Merkle tree. Rosetta's AOT cache and
+  Windows' XtaCache are private caches; none shares translations through the
+  page cache of an integrity-verified, content-addressed filesystem.
+  (2) **Objtype as a namespace declaration.** Plan 9's `$objtype` made
+  executable: an x86 environment is a `bind`, and a binary's ISA is decided by
+  where it was found, never by its header. That is I-43's rule for
+  phenotypes, extended to ISAs.
+  (3) **Hosted Procs.** A declared second decode (`svc #GUEST`) with
+  kernel-partitioned handles and memory lets a native runtime drive the
+  system's single Linux personality for a foreign ISA. The translator is a
+  citizen, not a guest, so translated programs reach native SDL, Venus and
+  OSMesa through bridges.
+  (4) **Image entitlements without code signing.** Code-emission authority
+  is bound to a content-pinned image on a vouched mount, registered once in a
+  host-owned table. That is macOS's `allow-jit` and Fuchsia's VMEX, with no
+  signature machinery, because the qid *is* the identity.
+  A fifth, to verify before claiming it: translated code held to native
+  code's provenance rules (`noexec`, NX, JIT-as-a-capability), I-48(e).
+  Candidate invariant I-48 (reserved in ARCH §28).
+
 ---
 
 ## 3. Per-angle scope

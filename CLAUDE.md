@@ -154,7 +154,8 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-44 | Address-space integrity under sharing + COW -- ENFORCED | `cow.tla` + LINEAGE + audit |
 | I-45 | GPU authority bounded by the context; guest half ENFORCED, host half on virgl/Venus trusted | prose GPU-DESIGN 8 + audits |
 | I-46 | RESERVED: Nocturne audio authority + no-stall cycle | planned `nocturne_cycle.tla` |
-| I-47 | RESERVED: inline media -- decode outside halcyond, bounded place-request | planned prose + audit |
+| I-47 | Inline media: decode outside halcyond, a bounded place-request, no authority in an image -- ENFORCED (2026-09-29) | prose HALCYON 14.7 + audits |
+| I-48 | RESERVED: foreign code is never host code -- no guest byte host-executable; objtype is shape, not authority; hosted decode partitioned; memory model honoured or refused; guest code held to host provenance | planned `hosted_decode.tla` + prose + audit |
 
 ---
 

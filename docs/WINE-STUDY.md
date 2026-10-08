@@ -12,8 +12,9 @@
 > recalled and unconfirmed. Inferences are marked *(inference)*.
 >
 > **Follow-up (2026-10-04):** the operator chose translator-first. The x86
-> translation layer this study's sections 6-7 depend on is drafted in
-> `docs/X86-TRANSLATION-DESIGN.md`.
+> translation layer this study's sections 6-7 depend on is designed in
+> `docs/X86-TRANSLATION-DESIGN.md` (ratified 2026-10-08; live state in
+> `docs/xt-status.md`).
 
 ---
 

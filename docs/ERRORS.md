@@ -163,6 +163,37 @@ and multi-thread fault paths now both terminate only the offending Proc.
 `proc_fault_terminate` still emits the uart diagnostic before
 terminating, so test failures attribute correctly.
 
+### Exact faults: a `snare:*` note a handler may catch and resume (ratified 2026-10-08; lands at XT-1)
+
+Operator-ratified with the x86 translation design (`docs/X86-TRANSLATION-DESIGN.md`
+§5.5, `dec-2026-10-08-xt-design` F2). Until XT-1 lands, the default action above
+is the only behaviour. The contract XT-1 builds is Plan 9's: `notify(2)` hands the
+handler the interrupted registers, and `notejmp` edits them before `noted(NCONT)`.
+
+- **Where it goes.** A synchronous fault note goes to the **faulting thread**, never
+  into the per-Proc queue's fd path. That thread retires no further EL0
+  instruction until the note is handled or its default runs.
+- **What the handler gets.** `x0` = the name, `x1` = the argument (the fault
+  address, as today), `x2` = a pointer to a **Ureg** on the note stack. The Ureg
+  holds the general registers, sp, pc and pstate, the FP/SIMD state, the FAR and
+  ESR, and a decoded fault kind. XT-1 fixes its layout behind a version word.
+- **How it resumes.** `noted(NCONT)` copies the Ureg back, validates it (pstate
+  must be EL0t AArch64 with only user-writable flags; pc canonical, aligned and in
+  user space), and resumes there. A Ureg that fails validation, or cannot be read
+  back, takes the default action: fail closed. An unedited Ureg resumes exactly
+  where the fault occurred, which is today's behaviour.
+- **An alternate stack.** `SYS_NOTE_STACK` sets a note stack per thread (the
+  `sigaltstack` analogue), so a stack-overflow fault is handleable.
+- **What it cannot do.** A synchronous fault is never deferred: the faulting
+  instruction cannot proceed. If the thread masks `snare:*`, or the fault occurs
+  inside its own handler, the default action runs. That is the heritage rule,
+  and the shape of Linux's forced signals.
+- **Unchanged.** The default action (terminate the Proc, group-terminate a
+  multi-thread one), the names, `NOTE_NAME_MAX`, the `snare:` prefix's
+  reservation, and `kill`'s uncatchability (I-19 N-4).
+- **Invariant.** I-19 gains sub-invariant N-6 (ARCH §28, the XT paragraph),
+  modelled first in `specs/fault_note.tla` (spec-first re-enabled 2026-10-08).
+
 ## The trusted-path note — `sak`
 
 **Registered 2026-09-07 (operator signoff, fork F3 of `docs/IMPERIUM-DESIGN.md`

@@ -1,9 +1,15 @@
 # x86 on Thylacine -- the translation layer (design)
 
-> **Status: DRAFT for operator votes, 2026-10-04; revised 2026-10-08.** Not yet
-> scripture; nothing here binds until the forks in section 10 are voted and the
-> result lands as a scripture commit (`docs/agent/DESIGN-FORKS.md`). Arc prefix
-> **XT** (proposed). Name: held (section 14).
+> **Status: RATIFIED 2026-10-08.** The operator voted F1-F9 as recommended and
+> F10 as G2 with the proposed defaults (`dec-2026-10-08-xt-design`,
+> `dec-2026-10-08-xt-guest-code`). The scripture this binds:
+> - ARCH section 28: I-48, RESERVED, plus the XT paragraph's amendments;
+> - `docs/ERRORS.md`: the exact-fault contract;
+> - `specs/SPEC-TO-CODE.md`: spec-first re-enabled for `fault_note` and
+>   `hosted_decode`.
+>
+> Live state is in `docs/xt-status.md`. Arc prefix **XT**. Name: held (section 14).
+> Drafted 2026-10-04.
 >
 > **The 2026-10-08 revision** re-reads the draft against `main`@`04df02c9`, which
 > carries B-2: the code Burrow became a lazy reservation at random addresses, a
@@ -848,6 +854,8 @@ Everything else is prose plus audit, under the standing policy
 ## 10. Forks for the operator
 
 The research (section 2) collapses most of these; each carries a recommendation.
+**Voted 2026-10-08: every recommendation below was ratified as written**, F1-F9
+together and F10 separately, with its proposed defaults.
 
 | # | Fork | Options | Recommendation and why |
 |---|---|---|---|

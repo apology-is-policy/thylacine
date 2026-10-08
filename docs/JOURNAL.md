@@ -22,6 +22,67 @@ needed the operator.
 
 
 ---
+## 2026-10-08 (claude/magical-shannon-sq5t3k, effort max) -- XT-0: the x86 translation design re-read against B-2 and ratified; a fresh Linux clone builds the gate image
+
+**What the run is for.** The operator asked to begin work on
+`docs/X86-TRANSLATION-DESIGN.md`, drafted 2026-10-04 at `8746a8a2`. Its first
+chunk, XT-0, is ratification, and that needed the design to be true of the
+current tree first.
+
+**The draft was stale before the vote.** `main` had moved 134 commits, B-2
+among them (`4b48cb0f`), and B-2 reshaped the code region the draft builds on.
+Merged at `124ac831`, and every citation re-anchored. Three findings changed
+the design, not just its line numbers:
+- I-39's image join now counts a code alias as `CAP_JIT`
+  (`docs/DEBUG-FS-DESIGN.md:595-607`). An entitled translator is exactly such
+  an image, so the entitlement must count as `CAP_JIT` from the stamp, and
+  must never be stamped on a debug-tainted load (design 5.2).
+- The draft never said guest code must meet native code's provenance rules.
+  Without that, `MNOEXEC` and I-42 hold for every program except translated
+  ones: a guest could `mprotect(PROT_EXEC)` its way to code generation, or
+  load a library from a `noexec` mount through its own `ld.so`. Hence I-48(e),
+  and the new fork F10.
+- A fork of an address space holding a code region fails whole: the clone
+  classifier sends `BURROW_TYPE_CODE` to its `default:` refusal
+  (`kernel/addrspace.c:204-208`). A translated shell could never fork. The
+  design answers with a don't-fork creation flag, so store text (file-backed)
+  is shared across the fork and JIT scratch is not.
+
+Revision `dd0846c5`.
+
+**The operator's votes (AskUserQuestion, 2026-10-08):** F1-F9 ratified as
+recommended; F10 G2, a per-objtype guest-code policy, `strict` for Linux amd64
+and `permissive` for Linux 386 and Windows. Recorded in
+`dec-2026-10-08-xt-design` and `dec-2026-10-08-xt-guest-code`.
+
+**The gates had never run on Linux.** This container (Ubuntu 24.04, no KVM)
+could not build the gate image. Three tree defects were fixed in `6018e567`:
+- `.gitignore`'s `.vscode/` and `build/` rules dropped two vendored crate files
+  that cargo's checksums name;
+- the pouch musl series did not apply under GNU patch: 0012 and 0043 had
+  uneven context, which GNU reads as an end-of-file anchor, and seven hunks sat
+  at an offset;
+- the SDL2 and vkQuake series had the same two faults.
+
+Every patched tree is byte-identical (`diff -r`) to the old series applied at
+`-F 2`. Three further defects are enqueued rather than fixed here:
+- #13: Stratum's host link order under GNU ld;
+- #12: `build_tyrquake`'s macOS-only LHA extraction;
+- #14: a boot-stack margin of 848 B in the test build.
+
+The baseline on QEMU TCG: `tests: 1955/1955 PASS`, boot banner at 161 s.
+
+**A wrong turn worth keeping.** The first check of the port series reported
+every patch clean. It was hollow: `patch -d DIR -i REL` resolves the patch path
+*inside* DIR, so no patch was ever opened, and the error text did not match the
+grep. The tell was a SDL2 file that the check called patched, still holding no
+`THYLACINEAUDIO`. A clean result from a check that never touched its input is
+the hollow-close pattern, at the scale of a shell loop.
+
+**Open.** Tasks #5 to #8 and #12 to #14. Next is XT-3a: compose `SCTLR_EL1`
+once for both boot paths (#6).
+
+---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
 **What the run is for.** The browser arc's B-2 brings JavaScriptCore's JIT onto

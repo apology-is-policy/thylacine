@@ -32,6 +32,7 @@ Generated from note fields — do not edit between the markers
 | [[arc-vault]] | active | 33 |  |
 | [[arc-vivarium]] | active | 2 |  |
 | [[arc-weft]] | active | 4 |  |
+| [[arc-xt]] | active | 0 |  |
 | [[arc-phase1-foundation]] | complete | 3 | seam-buddy-bulk-op, seam-slub-debug-mode |
 | [[arc-phase5-ipc]] | complete | 3 | seam-poll-heap-waiters, seam-poll-srv-registry-retain |
 | [[arc-phase6-pouch]] | complete | 6 |  |
