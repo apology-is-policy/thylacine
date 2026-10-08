@@ -22,8 +22,15 @@
 #            ONLY FAIL is the self-check, "a watched large free fires the watch".
 #            The self-check precedes the arm, so under M2 the inner leg does NOT
 #            run, and nothing is claimed about it.
+#   M3       the arming-thread check deleted from the watch's notifier
+#            (mm/slub.c): the ONLY FAIL is the cross-thread control, "a watched
+#            free on another thread leaves the watch quiet". That check is what
+#            keeps a stale notification -- a reused address freed on another CPU,
+#            stalled between its load and its store -- off a later arming
+#            (astra, yip 0161 t81). It precedes the arm, so the inner leg does
+#            NOT run under M3 either.
 #   Each mutant is applied to PRISTINE sources (both files, hash-verified),
-#   never on top of the other; the two predictions are distinct.
+#   never on top of another; the three predictions are distinct.
 #   SHAPE    loom.c and slub.c compiled with KERNEL_TESTS OFF against the parent
 #            of the seam commit: no seam or watch symbol survives, symbol names
 #            are identical, and kfree plus every Loom constructor the parent
@@ -55,6 +62,7 @@ FLOOR_GB=${FLOOR_GB:-8}
 # somewhere else.
 WANT_M1='the inner ring failure frees the unpublished Loom'
 WANT_M2='a watched large free fires the watch'
+WANT_M3='a watched free on another thread leaves the watch quiet'
 # check_mutant and the quarantine warning read WANT; each mutant sets its own.
 WANT=$WANT_M1
 MUT_LABEL=M1
@@ -112,11 +120,12 @@ echo "-- HEAD $HEAD_SHA, tree clean of tracked modifications"
 
 # THE LEG MUST BE IN THE FIXTURE. Both predicted messages are checked
 # non-empty FIRST: an empty -F pattern matches every line.
-for _w in "$WANT_M1" "$WANT_M2"; do
+for _w in "$WANT_M1" "$WANT_M2" "$WANT_M3"; do
   [ -n "$_w" ] || { echo "REFUSING: a predicted assertion message is empty"; exit 3; }
 done
-[ "$WANT_M1" != "$WANT_M2" ] || { echo "REFUSING: the two predictions are identical"; exit 3; }
-for _need in "$WANT_M1" "$WANT_M2" \
+[ "$WANT_M1" != "$WANT_M2" ] && [ "$WANT_M1" != "$WANT_M3" ] && [ "$WANT_M2" != "$WANT_M3" ] || {
+  echo "REFUSING: two predictions are identical"; exit 3; }
+for _need in "$WANT_M1" "$WANT_M2" "$WANT_M3" \
     'an unwatched large free leaves the watch quiet' \
     'the inner ring failure returns the charge' \
     'the inner ring failure releases the guard, reference and owner' \
@@ -132,7 +141,7 @@ echo "-- fixture carries the leg, the self-check and the charge/guard assertions
 # refusal, consumption, watch, charge and guard checks all come BEFORE the
 # oracle. The fixture's later legs (sharing, legacy, borrow) follow it and do
 # not run under either mutant; nothing is claimed about them from those boots.
-python3 - "$WANT_M1" <<'PY' || exit 3
+python3 - "$WANT_M1" "$WANT_M2" "$WANT_M3" <<'PY' || exit 3
 import sys
 s = open('kernel/test/loom_private_fixture.h').read()
 o = s.index(sys.argv[1])
@@ -146,10 +155,14 @@ for need in ('an armed ring fault refuses the admission',
         sys.exit("REFUSING: '%s' is not once, between the admission and the oracle" % need)
 if s.count(sys.argv[1]) != 1:
     sys.exit("REFUSING: the oracle message occurs %d times" % s.count(sys.argv[1]))
-# The self-check precedes the arm, which is what makes M2's reading true.
-if not (s.index('a watched large free fires the watch') < s.index('loom_layout_ring_fault_arm_for_test();')):
-    sys.exit("REFUSING: the self-check does not precede the arm")
-print("-- this leg's checks all precede its oracle, and the self-check precedes the arm")
+# The pair check, then the cross-thread control, then the arm: that order is
+# what makes M2's and M3's readings ("the inner leg did not run") true, and
+# what keeps M3's FAIL from being preceded by M2's.
+pair, cross, arm = (s.index(sys.argv[2]), s.index(sys.argv[3]),
+                    s.index('loom_layout_ring_fault_arm_for_test();'))
+if not (pair < cross < arm):
+    sys.exit("REFUSING: the order is not pair check < cross-thread control < arm")
+print("-- this leg's checks precede its oracle; pair < cross-thread control < arm")
 PY
 # THE MUTATION ANCHORS, each exactly once in ITS file and at ITS site, checked
 # before the control spends the window.
@@ -160,7 +173,10 @@ M2_FILE=mm/slub.c
 M2_OLD='        kfree_large_watch_note(p);
         free_pages(page, page->order);
 '
-python3 - "$M1_OLD" "$M2_OLD" <<'PY' || exit 3
+M3_FILE=mm/slub.c
+M3_OLD='    if (!me || me != __atomic_load_n(&g_kfree_large_watch_thread, __ATOMIC_ACQUIRE)) return;
+'
+python3 - "$M1_OLD" "$M2_OLD" "$M3_OLD" <<'PY' || exit 3
 import sys
 lo = open('kernel/loom.c').read(); sl = open('mm/slub.c').read()
 if lo.count(sys.argv[1]) != 1: sys.exit("REFUSING: the M1 anchor occurs %d times in kernel/loom.c" % lo.count(sys.argv[1]))
@@ -169,7 +185,10 @@ i = lo.index('struct Burrow *r = loom_layout_ring_fault_take(l)'); j = lo.index(
 if not (i < j < i + 200): sys.exit("REFUSING: the M1 anchor is not the unwind right after the ring take")
 k = sl.index('extinction("kfree: large-allocation pointer not page-aligned'); m = sl.index(sys.argv[2])
 if not (k < m < k + 200): sys.exit("REFUSING: the M2 anchor is not right after the large-free validation")
-print("-- both mutation anchors present exactly once, each at its own site")
+if sl.count(sys.argv[3]) != 1: sys.exit("REFUSING: the M3 anchor occurs %d times in mm/slub.c" % sl.count(sys.argv[3]))
+n = sl.index('static void kfree_large_watch_note(const void *p) {'); q = sl.index(sys.argv[3])
+if not (n < q < n + 200): sys.exit("REFUSING: the M3 anchor is not inside kfree_large_watch_note")
+print("-- all three mutation anchors present exactly once, each at its own site")
 PY
 
 # THE EXPECTED TALLY IS DERIVED, never typed: this leg adds no registration, so
@@ -578,6 +597,10 @@ run_mutant M2 "$M2_FILE" "$M2_OLD" '        /* MUTANT M2: the large-free watch i
 ' "$WANT_M2" "inner-leg-NOT-run=self-check-precedes-the-arm"
 echo "-- M2: the self-check failed BEFORE the ring fault was armed. The inner leg"
 echo "   did NOT run under M2, and nothing about it is claimed from this boot."
+run_mutant M3 "$M3_FILE" "$M3_OLD" '    (void)me; /* MUTANT M3: the watch hears every thread */
+' "$WANT_M3" "inner-leg-NOT-run=cross-thread-control-precedes-the-arm"
+echo "-- M3: the cross-thread control failed BEFORE the ring fault was armed: a"
+echo "   watch that hears every thread is caught, and the inner leg did NOT run."
 
 echo
 echo "=== stage 3: PRODUCTION SHAPE -- loom.c and slub.c with KERNEL_TESTS OFF ==="
@@ -674,7 +697,8 @@ done
 record_stage "shape" "no test symbols in loom.o or slub.o; names identical; $COMPARED function(s) identical incl. relocations"
 echo
 echo "-- DISCRIMINATED: M1 failed the leg at the oracle alone, after every earlier"
-echo "   check passed; M2 failed the self-check alone; and neither the seam nor"
-echo "   the watch leaves a trace in the production shape. The watch records ENTRY"
+echo "   check passed; M2 failed the self-check alone; M3 failed the cross-thread"
+echo "   control alone; and neither the seam nor the watch leaves a trace in the"
+echo "   production shape. The watch records ENTRY"
 echo "   to the validated large-free site, not the buddy outcome. The kmalloc-NULL"
 echo "   row, the release half and SMP stay separate."

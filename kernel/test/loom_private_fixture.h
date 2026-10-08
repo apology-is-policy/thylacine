@@ -48,6 +48,15 @@ static bool lp_wait(u64 target) {
     return loom_private_retired() >= target;
 }
 
+// The cross-thread watch control's helper: it frees the one object handed to it,
+// exactly once, then parks terminally for the joiner.
+static void *volatile g_lp_cross_obj;
+static volatile bool g_lp_cross_exited;
+static void lp_cross_free(void) {
+    kfree((void *)g_lp_cross_obj);
+    test_kthread_park_terminal(&g_lp_cross_exited);
+}
+
 static const char *loom_private_fixture(void) {
     const char *error = NULL;
     struct Proc *p = test_proc_make();
@@ -184,6 +193,33 @@ static const char *loom_private_fixture(void) {
     LP_CHECK(large, "the self-check pair takes the Loom's large-kmalloc path");
     LP_CHECK(!other_fired, "an unwatched large free leaves the watch quiet");
     LP_CHECK(own_fired, "a watched large free fires the watch");
+
+    // The notifier is keyed to the arming thread, so a free of the watched
+    // address on ANOTHER thread must leave the watch quiet. That one property is
+    // what keeps a late notification -- a reused address freed on another CPU,
+    // stalled between its pointer load and its store -- off a later arming: the
+    // notifier's own thread cannot change mid-call. The object is handed to the
+    // helper, which frees it exactly once; if no helper exists it is still ours.
+    void *wc = kmalloc(sizeof(struct Loom), KP_ZERO);
+    bool cross_ran = false, cross_fired = false;
+    if (wc) {
+        kfree_large_watch_arm_for_test(wc);
+        g_lp_cross_obj = wc;
+        g_lp_cross_exited = false;
+        struct Thread *helper = thread_create(kproc(), lp_cross_free);
+        if (helper) {
+            ready(helper);
+            test_kthread_join_free(helper, &g_lp_cross_exited);
+            cross_ran = true;
+            cross_fired = kfree_large_watch_fired_for_test();
+        } else {
+            kfree(wc);
+        }
+        wc = NULL;
+    }
+    kfree_large_watch_disarm_for_test();
+    LP_CHECK(cross_ran, "the cross-thread watch control ran");
+    LP_CHECK(!cross_fired, "a watched free on another thread leaves the watch quiet");
 
     // No other call on this thread reaches loom_create_layout between the arm
     // and the admission, and the outer fault is spent, so the layout is reached.

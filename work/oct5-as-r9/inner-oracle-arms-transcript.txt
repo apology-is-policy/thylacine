@@ -1,4 +1,4 @@
-inner-oracle-arms: runner 21e2fa2c24239300, 470d78f4b, 2026-10-08T16:46:15Z
+inner-oracle-arms: runner ea8597c1ade95a2a, 353d4c878, 2026-10-08T16:59:07Z
 
 === the CONTROL oracle ===
 ok    check_control R-real-control.log                   rc=0  verdict PASS in its own block
@@ -11,6 +11,10 @@ ok    check_control I-real-never-announced.log           rc=1  NEVER ANNOUNCED
 ok    check_mutant  D-predicted-mutant.log               rc=0  DISCRIMINATED
 ok    check_mutant  D2-predicted-M2.log                  rc=0  DISCRIMINATED
 ok    check_mutant  D-predicted-mutant.log               rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  D2-predicted-M2.log                  rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  D3-predicted-M3.log                  rc=0  DISCRIMINATED
+ok    check_mutant  D3-predicted-M3.log                  rc=2  NOT AT THE PREDICTED ASSERTION
+ok    check_mutant  D3-predicted-M3.log                  rc=2  NOT AT THE PREDICTED ASSERTION
 ok    check_mutant  D2-predicted-M2.log                  rc=2  NOT AT THE PREDICTED ASSERTION
 ok    check_mutant  D-predicted-mutant.log               rc=2  predicted assertion message is empty
 ok    check_mutant  I-real-never-announced.log           rc=2  NOT ATTRIBUTABLE TO THIS LEG
@@ -29,6 +33,7 @@ d6b56d21eef1386b  B-marker-and-verdict-disagree.log
 d5362a0d26efb94b  C-no-cleanup-marker.log
 9d088f3ca40004ee  D-predicted-mutant.log
 5d3b5cbada46eb5a  D2-predicted-M2.log
+14ae54a1397a0d1b  D3-predicted-M3.log
 66ad13d091b20d09  E-second-failing-test.log
 04ce473b172a016c  I-real-never-announced.log
 64c5b26f90c76d2a  J-real-died-inside-leg.log

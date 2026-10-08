@@ -27,9 +27,10 @@ b=$(awk -v a="$a" 'NR>a && /^check_mutant\(\) \{/ {f=1} f && /^\}$/ {print NR; e
 for n in "$w" "$a" "$b"; do
   case $n in ''|*[!0-9]*) echo "REFUSING: an extraction anchor is not one line number: '$n'"; exit 1;; esac
 done
-{ sed -n "${w},$((w + 1))p" "$RUNNER"; echo 'WANT=$WANT_M1'; echo 'MUT_LABEL=M1'; sed -n "${a},${b}p" "$RUNNER"; } > "$W/oracle.sh"
+{ sed -n "${w},$((w + 2))p" "$RUNNER"; echo 'WANT=$WANT_M1'; echo 'MUT_LABEL=M1'; sed -n "${a},${b}p" "$RUNNER"; } > "$W/oracle.sh"
 for need in "WANT_M1='the inner ring failure frees the unpublished Loom'" \
             "WANT_M2='a watched large free fires the watch'" \
+            "WANT_M3='a watched free on another thread leaves the watch quiet'" \
             'leg_block() {' 'leg_verdict() {' 'last_announced() {' 'all_fails() {' \
             'check_control() {' 'check_mutant() {' 'after-check-failure:' \
             'normal-fallthrough' 'kernel test suite failed' 'DISCRIMINATED'; do
@@ -44,6 +45,7 @@ import sys, os
 W, rc, rf, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 WANT = 'the inner ring failure frees the unpublished Loom'
 WANT2 = 'a watched large free fires the watch'
+WANT3 = 'a watched free on another thread leaves the watch quiet'
 ANN = '    [test] loom.private_owner_lifecycle ... '
 MARK = '[lp-mark] cleanup-owner-drop after-check-failure: '
 def lines(p): return open(p, newline='').read().split('\n')   # keeps each \r
@@ -66,6 +68,7 @@ assert len(tally_fail) == 1 and F[tally_fail[0]] == '  tests: %d/%d FAIL\r' % (n
 D = with_block(failblock(WANT, WANT))
 put('D-predicted-mutant.log', D)
 put('D2-predicted-M2.log', with_block(failblock(WANT2, WANT2)))
+put('D3-predicted-M3.log', with_block(failblock(WANT3, WANT3)))
 put('B-marker-and-verdict-disagree.log', with_block(failblock('the inner ring failure returns the charge', WANT)))
 put('C-no-cleanup-marker.log', with_block(failblock(WANT, WANT, marker=False)))
 put('V-different-assertion.log', with_block(failblock('the inner ring failure returns the charge',
@@ -125,6 +128,10 @@ run check_mutant  D-predicted-mutant.log            0 "DISCRIMINATED"
 run check_mutant  D2-predicted-M2.log               0 "DISCRIMINATED" "a watched large free fires the watch"
 run check_mutant  D-predicted-mutant.log            2 "NOT AT THE PREDICTED ASSERTION" "a watched large free fires the watch"
 run check_mutant  D2-predicted-M2.log               2 "NOT AT THE PREDICTED ASSERTION"
+run check_mutant  D3-predicted-M3.log               0 "DISCRIMINATED" "a watched free on another thread leaves the watch quiet"
+run check_mutant  D3-predicted-M3.log               2 "NOT AT THE PREDICTED ASSERTION"
+run check_mutant  D3-predicted-M3.log               2 "NOT AT THE PREDICTED ASSERTION" "a watched large free fires the watch"
+run check_mutant  D2-predicted-M2.log               2 "NOT AT THE PREDICTED ASSERTION" "a watched free on another thread leaves the watch quiet"
 run check_mutant  D-predicted-mutant.log            2 "predicted assertion message is empty" ""
 run check_mutant  I-real-never-announced.log        2 "NOT ATTRIBUTABLE TO THIS LEG"
 run check_mutant  R-real-control.log                2 "the leg PASSED"

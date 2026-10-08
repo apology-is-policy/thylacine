@@ -1091,8 +1091,14 @@ specific to one object, so slub gained a single-slot `KERNEL_TESTS` watch on the
 validated large-free branch, described in [[sub-kernel-mm-slub]]. The take arms
 it on the metadata while that is live and unpublished. If `kfree` runs, the watch
 fires at the call. If `kfree` is omitted, the pages stay allocated, so nothing can
-fire it. Both readings are independent of scheduling. It records ENTRY to the
-free site, not the buddy outcome.
+fire it. It records ENTRY to the free site, not the buddy outcome. The first
+version keyed the notifier to the POINTER only, and astra found a stale-notifier
+interleaving in review (t81). The self-check's freed object is reused on another
+CPU, and that CPU's `kfree` loads the still-armed watch and stalls. Meanwhile the
+fixture re-arms on the Loom, and the stalled store then lands on the new arming,
+so a `kfree`-deleted mutant would PASS. The notifier is now keyed to the arming
+thread as well. A cross-thread control drives the property that closes it: a
+helper kthread frees a watched object, and the watch must stay quiet.
 
 The leg first checks the watch on a same-class pair: an unwatched free stays quiet
 and the watched one fires. Each object is freed exactly once before any verdict
@@ -1109,6 +1115,8 @@ pristine copies of both files:
 - `kfree(l)` deleted: must fail ONLY the oracle.
 - the watch's hook deleted: must fail ONLY the self-check, which precedes the
   arm, so the inner leg does not run under that mutant.
+- the watch's thread check deleted: must fail ONLY the cross-thread control,
+  which also precedes the arm.
 The shape stage compiles `loom.c` and `slub.c` with `KERNEL_TESTS` off and compares
 `kfree` and every emitted Loom constructor, with relocations. The kmalloc-NULL
 edge returns before anything is allocated, and its caller-side NULL is the one

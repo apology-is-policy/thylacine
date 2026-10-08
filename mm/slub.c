@@ -408,16 +408,23 @@ void *kcalloc(size_t n, size_t size, unsigned flags) {
 }
 
 #ifdef KERNEL_TESTS
+#include <thylacine/thread.h>
+
 static const void *g_kfree_large_watch;
+static struct Thread *g_kfree_large_watch_thread;
 static bool g_kfree_large_watch_fired;
 
 void kfree_large_watch_arm_for_test(const void *obj) {
+    struct Thread *me = current_thread();
+    if (!me || !obj) extinction("kfree_large_watch_arm_for_test without a thread or object");
     __atomic_store_n(&g_kfree_large_watch_fired, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_kfree_large_watch_thread, me, __ATOMIC_RELAXED);
     __atomic_store_n(&g_kfree_large_watch, obj, __ATOMIC_RELEASE);
 }
 
 void kfree_large_watch_disarm_for_test(void) {
     __atomic_store_n(&g_kfree_large_watch, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kfree_large_watch_thread, NULL, __ATOMIC_RELAXED);
     __atomic_store_n(&g_kfree_large_watch_fired, false, __ATOMIC_RELEASE);
 }
 
@@ -429,8 +436,13 @@ bool kfree_large_watch_fired_for_test(void) {
     return __atomic_load_n(&g_kfree_large_watch_fired, __ATOMIC_ACQUIRE);
 }
 
-// Compares the pointer only: nothing of the object or its page is read here.
+// Keyed to the arming thread as well as the pointer, and nothing of the object
+// or its page is read. A notifier on any other thread never stores, however late
+// it runs, so a free of a reused address on another CPU cannot land on a later
+// arming; the arming thread's own store completes inside its own kfree.
 static void kfree_large_watch_note(const void *p) {
+    struct Thread *me = current_thread();
+    if (!me || me != __atomic_load_n(&g_kfree_large_watch_thread, __ATOMIC_ACQUIRE)) return;
     if (p == __atomic_load_n(&g_kfree_large_watch, __ATOMIC_ACQUIRE))
         __atomic_store_n(&g_kfree_large_watch_fired, true, __ATOMIC_RELEASE);
 }

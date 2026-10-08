@@ -119,7 +119,15 @@ tolerated-stale lock-free read pair.
   page-aligned validation and before `free_pages`, and it compares the
   pointer alone. It records ENTRY to that call site for one armed
   pointer, not the buddy outcome, and never sees a slab free. Arming
-  and disarming both clear `fired`. Arm it only on a pointer you own
+  and disarming both clear `fired`. The notifier is ALSO keyed to the
+  arming thread (astra, yip 0161 t81). With the pointer alone, a free
+  of a REUSED address on another CPU could load the old watch, stall,
+  and then store `fired` into a LATER arming, because the slot and the
+  flag are separate atomics, and no acquire/release ordering between
+  them closes that. A notifier's own thread cannot change mid-call, so
+  one on another thread never stores, however late it runs, and the
+  arming thread's store completes inside its own `kfree`. Arm it only
+  on a pointer you own
   while it is live. An unobserved free is UNKNOWN, never evidence that
   the object is still allocated: reclaiming on a missing notification
   double-frees as soon as the observer is the thing that broke. It is

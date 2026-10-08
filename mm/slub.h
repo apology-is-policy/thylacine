@@ -113,8 +113,8 @@ u64 kmem_cache_live_count(const struct kmem_cache *c);
 
 #ifdef KERNEL_TESTS
 // Single-slot observer on kfree's validated large-allocation path: it records
-// ENTRY to that free for the one armed pointer, never the buddy outcome.
-// Arming and disarming both clear the fired flag.
+// ENTRY to that free for the one armed pointer, by the ARMING THREAD only, never
+// the buddy outcome. Arming and disarming both clear the fired flag.
 void kfree_large_watch_arm_for_test(const void *obj);
 void kfree_large_watch_disarm_for_test(void);
 bool kfree_large_watch_armed_for_test(void);
