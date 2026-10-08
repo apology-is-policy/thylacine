@@ -1567,3 +1567,43 @@ source 9bb7e6037 (astra t73's refinements in). Mac held 6 min, RELEASED 11:56Z.
 All verified from raw logs. BOUNDED: Mac axis, one boot per side.
 STILL OPEN: loom_create_layout's own inner failure path; release sensitivity; SMP; activation.
 MERGE item 8 added (vmaguard landed main = 943dcca51: disjoint hunks, placement check owed).
+
+== 2026-10-08 12:07Z: (b) ACCEPTED; NEXT IS THE INNER UNWIND, PROPOSAL SENT ==
+astra t75 (12:03Z) VERIFIED note 54 independently at a9db74956 (raw logs, both
+  saved diffs, loom.c == pristine == HEAD, ELF/bin == pinned control, 9/9 input
+  hashes, 127 insns + 13 relocations). The two caller-side layout-unwind
+  witnesses are CLOSED at single-boot Mac scope. Preserve them; no repeat without
+  a relevant change.
+She NAMED the next item, so do not ask again: loom_create_layout's INNER unwind
+  (loom.c:255, `if (!r) { kfree(l); return NULL; }`). Her terms: the two
+  allocation failures handled distinctly; the private caller's charge/guard
+  balance asserted through the real inner return; an oracle that detects a
+  missing kfree of THAT Loom (g_loom_created is insufficient); no global
+  magazine drain; no generic fault framework; public callers protected from
+  the injected fault (the fixture-only argument does NOT carry over to the
+  shared loom_create_layout); bring the seam/observation boundary FIRST if
+  new instrumentation is needed.
+SENT t76 (12:07Z), the boundary. NOTHING EDITED; wait for her answer:
+  FAULT: a thread-keyed one-shot in loom.c. take(l) runs after the kmalloc
+    succeeds, is consumed by a CAS from current_thread() to NULL, and has an
+    EXPLICIT NULL-current refusal, because current_thread() is NULL before
+    thread_init (thread.h:660) and a naive CAS would fault an unarmed caller.
+    On a match it records the victim and arms the slub free watch on it.
+  OBSERVATION: a single-slot free watch in slub's kmem_cache_free, KERNEL_TESTS
+    only. It is deterministic both ways: armed while l is live, so a freed l
+    is seen at the free itself, and a leaked l cannot be freed by anyone.
+    mm/slub.c sits on the Allocator audit row; this is flagged to astra.
+  WHY NEW: a freelist walk races with LIFO reuse (fabricated RED in the
+    control); the kmalloc caches are static (slub.c:44) and shared by a size
+    class; the slub totals are global.
+  LEG: an instrument self-check first (watch a, free b -> not fired, free a ->
+    fired); baselines before arm; separate assertions for the refusal, the
+    consumed shot, the ORACLE "the inner ring failure frees the unpublished
+    Loom", the charge, the guard/ref/owner, and g_loom_created (sanity only).
+  RED: M1 deletes kfree(l); M2 deletes the watch hook (the self-check FAILs).
+    The caller-side unwind is NOT re-mutated (astra: no repeat of the outer
+    witness). SHAPE: loom.c and slub.c compiled with KERNEL_TESTS off.
+  The kmalloc failure is proposed as its own STRUCTURAL row, not driven
+    (nothing to unwind; its caller-side NULL was already discriminated).
+  Held aside: the saturation refusal (addrspace.c:89) can be driven from a
+    constructed state, with no seam.
