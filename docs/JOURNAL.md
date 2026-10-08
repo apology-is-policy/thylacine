@@ -330,6 +330,39 @@ The close is clean by the audit-round rule: round 2 had no P0, P1 or P2, and
 its fixes are a reorder into an existing window plus documentation and model.
 No round 3 is owed.
 
+**Sabotage B, and the second time a failing test hid the others.** B made
+four changes, with an exact predicted red set written before the run:
+- S3: the drain is a no-op;
+- S4: the reap is a no-op;
+- S5: the EXITING gate is removed;
+- S6: the claim unlinks and folds as the old detach did.
+
+The first run timed out at 2400 s. The gate test failed as predicted, but its
+child's only thread had been switched out for good while EXITING, so the child
+could never become a zombie. `proc.orphan_reparent_smoke` drains every child
+of the runner with a blocking `wait_pid`, and waited on it forever, so the
+other three predictions never ran.
+
+The gate test now gives its child a watchdog peer. Once the main thread is
+EXITING with `on_cpu` clear, it is provably lost (with the gate it is EXITING
+only while on its CPU). The watchdog then exits as the last live thread, which
+lets `wait_pid` free both. The runner reaps before it checks any flag (`541bb193`).
+
+Re-run on `541bb193`, B failed exactly the four predicted tests (1957/1961),
+each for its stated reason:
+- the gate test: the EXITING thread never came back;
+- `thread_reap_churn`: nothing was freed while the Proc lived;
+- `thread_reap_inflight`: the drain returned before the in-flight switch
+  settled;
+- `thread_reap_gauges`: the claimed Thread dropped out of `proc_kstack_peak`.
+
+The same tree unsabotaged passes 1961/1961, and `/thread-torture` passes at
+boot.
+
+That is the second time in this chunk that a test's failure mode, not its
+assertion, decided what a sabotage run could show. Both times the fix was to
+make the failure end its own Proc cleanly.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
