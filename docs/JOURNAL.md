@@ -22,6 +22,44 @@ needed the operator.
 
 
 ---
+## 2026-10-08 (main, Opus 5.5, effort max) -- the live weft reaper never sweeps a test's binding (landed)
+
+**What the run is for.** vmaguard's audit r2 (F4) noticed that the G-3 reaper
+tests run beside the live reaper thread: `main.c` readies the thread before
+`test_run_all`, and once anything is registered it sweeps every second on the
+real clock. The tests register a binding, kill its session and drive the sweep
+themselves on a synthetic clock. A live sweep landing between a test's kill and
+its own sweeps would stamp the binding with real uptime -- the test's clock is
+1000-5000 s, so its next sweep finds the stamp far past the grace and reclaims
+one sweep early -- or reclaim the binding itself, and the window-hook tests'
+hook would never run. Whether a suite boot failed depended on whether the
+reaper group straddled the thread's second. It was enqueued at vmaguard r2
+(OPEN-BUGS 10-08 (b)) and taken right after vmaguard.
+
+**A mark, not a park.** Parking the thread for the reaper group was the obvious
+fix and the wrong one: a park set at a test's start is released only by a test
+that reaches its last line, and every sibling `return`s on a failed assert, so
+one failing test would leave the reaper parked for the rest of the suite. A
+test now registers through `weft_reap_register_for_test`, which marks the
+binding (`reap_test_only`, test builds only) and wakes nothing; the thread's
+`weft_reap_sweep` skips a marked binding and `weft_reap_sweep_for_test` skips an
+unmarked one, both under the registry lock the mark is written before. There is
+nothing to release. The witness, `weft.reap_live_sweep_leaves_test_bindings`,
+drives the thread's own sweep against a dead test binding (no stamp, no reclaim,
+however late) and then the test sweep one call away (stamp, reclaim).
+
+**Audit r1 (Fable 5.1, start == end): 0/0/0/4, clean.** It confirmed the hazard
+from the code (the thread's `tsleep` re-checks a never-true condition until its
+deadline, so the sweep lands exactly a second after the wake) and that the mark
+cannot hide a production binding. Its P3s: the dossier still said the thread
+sweeps "while anything is registered" (a test registration wakes nothing); my
+first commit message said the stamp makes the test's `now - stamp` wrap, when
+on those clocks it exceeds the grace instead; the two register bodies were
+duplicates (now one `weft_reap_link`); and the "test sweep never touches a real
+binding" half holds by construction with no witness, which the dossier now says.
+
+**RED and the land gates.** RED in the weftpark worktree, 12:18-12:29Z: base 1964/1964 (main's 1963 plus the witness). W1 (the thread's sweep loses its skip) went red only at "the live sweep took no orphan stamp". W2 (the test sweep wired to the real partition) went red at the witness's "the test sweep's stamp is its own clock" and in the five converted tests whose own sweep must stamp or reclaim; the two that only assert that nothing is reclaimed stayed green, as they must under W2. Green 1964/1964. The SMP gate failed to start twice, both times on the worktree's cloned build/, never on the code: first the build's 6 GB disk floor (6137 MB free after the RED rebuilt the userspace; I cleared the Go build cache), then CMake caches cloned from the primary tree for the sanitizer and fault kernels. The worktree recipe in memory already names `kernel-undefined`; my RED script, copied from a primary-tree one, never consulted it. The gate ran in the primary tree detached at bc05696fa instead: 50/50 across default smp1/4/8 and UBSan smp4/8, no corruption.
+
 ## 2026-10-08 (main, Opus 5.5, effort max) -- a VMA the list does not hold is never removed; the weft reaper holds the space it locked (landed)
 
 **What the run is for.** Corona found, in the B-2b hunks, that a second
