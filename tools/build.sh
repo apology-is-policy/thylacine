@@ -4546,7 +4546,8 @@ DBXCONF /lib/dosbox-x/dosbox-x.conf"
     fi
     if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$vp_webkit/jsc" ]]; then
         bake_want="$bake_want
-WEBKIT /webkit/jsc"
+WEBKIT /webkit/jsc
+SUNSPIDER /webkit/sunspider/run.js"
     fi
 
     local bake_missing=""
@@ -6765,6 +6766,23 @@ webkit_checkout_ok() {
     return 0
 }
 
+# SunSpider 1.0.2 (the fork's PerformanceTests, in the manifest's sparse cone) and
+# its driver, staged beside jsc so the bake carries /webkit/sunspider. Each test
+# checks its own result, so the benchmark is also a correctness run.
+stage_jsc_bench() {
+    local wk="$1" stage="$2" port_dir="$3"
+    local src="$wk/PerformanceTests/SunSpider/tests/sunspider-1.0.2" n
+    [[ -f "$src/LIST" ]] || { echo "==> jsc: SunSpider 1.0.2 is not in the checkout ($src)" \
+        "-- run 'tools/forage.sh webkit' (the manifest's sparse cone names it)" >&2; exit 1; }
+    rm -rf "${stage:?}/sunspider"
+    mkdir -p "$stage/sunspider"
+    cp "$src/LIST" "$src"/*.js "$stage/sunspider/"
+    cp "$port_dir/sunspider-run.js" "$stage/sunspider/run.js"
+    n="$(grep -c . "$src/LIST")"
+    [[ "$(find "$stage/sunspider" -name '*.js' | wc -l | tr -d ' ')" == "$((n + 1))" ]] \
+        || { echo "==> jsc: the SunSpider stage does not hold LIST's $n tests plus run.js" >&2; exit 1; }
+}
+
 build_jsc() {
     local sysroot="$BUILD_DIR/sysroot"
     local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
@@ -6797,10 +6815,11 @@ build_jsc() {
         local stale
         stale="$(find "$port_dir" "$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
                       "$REPO_ROOT/cmake/Platform/Thylacine.cmake" "$REPO_ROOT/usr/lib/thylajit" \
-                      -type f -newer "$out" -print -quit 2>/dev/null)"
+                      -type f ! -name sunspider-run.js -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$out" && ! "$sysroot/lib/libc++.a" -nt "$out" \
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
+            stage_jsc_bench "$wk" "$stage" "$port_dir"
             ledger "jsc (JavaScriptCore, Baseline + YARR JIT): REUSED (cached + up-to-date)"
             return 0
         fi
@@ -6841,6 +6860,7 @@ build_jsc() {
         || { echo "==> jsc: readelf printed no LOAD segments -- the W+X check saw nothing" >&2; exit 1; }
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
+    stage_jsc_bench "$wk" "$stage" "$port_dir"
     echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
     ledger "jsc (JavaScriptCore, Baseline + YARR JIT): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }

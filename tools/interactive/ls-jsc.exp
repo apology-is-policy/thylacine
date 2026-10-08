@@ -20,6 +20,8 @@
 #           goes to the YARR interpreter (JSC says "Can't JIT" for it)
 #   loop / loop-deny   a 2e7-iteration int32 loop computes the same value both ways;
 #           each prints its time for the record (asserted: the value, never a time)
+#   sunspider / sunspider-deny   SunSpider 1.0.2 (26 tests, each checking its own
+#           result), three runs each, JIT on and denied; the totals are the record
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -98,6 +100,11 @@ lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI
 lc_pass "ls-jsc(loop): JSCI-820578176 (Baseline JIT)"
 lc_run_expect "/webkit/jsc --thylacine-no-cap-jit -e '[string map {@T jscj} $loop]' | tr a-z A-Z" "JSCJ-820578176-"
 lc_pass "ls-jsc(loop-deny): JSCJ-820578176 (interpreted)"
+
+lc_run_expect_hardfail "/webkit/jsc /webkit/sunspider/run.js -- jscm | tr a-z A-Z" "JSCM-OK-26-" "JSCM-FAIL"
+lc_pass "ls-jsc(sunspider): 26 of 26 with the JIT on"
+lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit /webkit/sunspider/run.js -- jscn | tr a-z A-Z" "JSCN-OK-26-" "JSCN-FAIL"
+lc_pass "ls-jsc(sunspider-deny): 26 of 26 interpreted"
 
 lc_quit
 exit 0

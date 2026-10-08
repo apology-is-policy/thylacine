@@ -117,9 +117,11 @@ do_clone_sparse() {
         git clone --filter=blob:none --no-checkout --depth 1 --branch "$tag" "$repo" "$path" \
             || { echo "forage: clone failed" >&2; return 1; }
         git -C "$path" sparse-checkout init --cone || return 1
-        # shellcheck disable=SC2086  # the cone list is space-separated on purpose
-        git -C "$path" sparse-checkout set $sparse || return 1
     fi
+    # Re-applied to an existing checkout as well, so a cone the manifest widened
+    # reaches it. It moves no commit, and git keeps a file with local changes.
+    # shellcheck disable=SC2086  # the cone list is space-separated on purpose
+    git -C "$path" sparse-checkout set $sparse || return 1
     local at; at="$(git -C "$path" rev-parse "$tag^{commit}" 2>/dev/null || true)"
     if [[ "$at" != "$commit" ]]; then
         echo "forage: $sec: tag $tag resolves to '${at:-nothing}', the manifest pins $commit -- refusing" >&2
