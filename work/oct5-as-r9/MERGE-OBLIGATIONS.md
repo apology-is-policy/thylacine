@@ -227,3 +227,22 @@ wholly silent. Main took the linkage guard and a double-remove regression test
 re-measures the call sites on main and will ring 0202 before it lands. At merge:
 take main's guard, and make sure none of my vma.c hunks (vma_free,
 vma_free_deferred, vma_detach_range_in) bypass it.
+
+### 8. vmaguard LANDED (main = 943dcca51): vma.c, burrow.c, weft.c, proc.c.
+Measured against my branch (merge-base 8746a8a24) on 2026-10-08:
+- vma.c: main adds vma_linked_in and refuses a double remove / re-insert of the
+  head (my item 7, now RESOLVED ON MAIN -- take theirs). My vma.c hunks are in
+  vma_free, vma_free_deferred and vma_detach_range_in; none in insert/remove.
+- burrow.c: main splits burrow_unmap{,_reporting} into _in forms against a
+  NAMED space (old bodies, caller holds as->lock). My hunks are in burrow_ref,
+  the mapping acquire/release and charge record/restore -- disjoint by function.
+  At merge, confirm no AS-R9 settlement change of mine belongs inside the moved
+  unmap bodies (my diff touches none of them today).
+- weft.c: main rewrites the reaper (find hands back the LOCKED space; the sweep
+  never re-reads q->as). My hunks are in weft_share_unregister and
+  weft_share_release_owner -- disjoint.
+- LOCK ORDER main asked about: gptl -> as->lock (the reaper's find). My branch
+  ADDS no line naming gptl (grep of my kernel/ diff: 0). Re-check at merge for
+  any path of mine that takes as->lock and then reaches gptl indirectly.
+- A CLEAN auto-merge can still move a hunk into another function: check
+  placement in each of these four files, do not trust a clean merge.

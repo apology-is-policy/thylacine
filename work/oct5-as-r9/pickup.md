@@ -1551,3 +1551,19 @@ RUN IT: sh work/oct5-as-r9/layout-leg-run.sh (lease; clean tree). One window:
   control, M1, M2, shape, recovery; lease + disk re-checked before every bake.
 Still separate and open: loom_create_layout's OWN inner failure path; release
 sensitivity; SMP; activation. 128 MiB stays.
+
+== 2026-10-08 11:57Z: (b) THE LAYOUT-FAILURE LEG DISCRIMINATED, BOTH HALVES ==
+Run work/oct5-as-r9/layout-leg-20261008T115213Z/, exit 0, 11:52:13-11:56:19Z,
+source 9bb7e6037 (astra t73's refinements in). Mac held 6 min, RELEASED 11:56Z.
+  control 1836/1836, leg PASS, test.sh 0, kernel 2b56a62ae6cc92ae
+  M1 (uncharge deleted)    -> FAIL "layout failure returns the charge", only FAIL, 1835/1836, rc 1, kernel 5a8a5ac93fb18e32
+  M2 (private_end deleted) -> FAIL "layout failure releases the guard, reference and owner", only FAIL, 1835/1836, rc 1, kernel 1458457252f31eaa
+  shape (KERNEL_TESTS off vs parent 4783d6f92): no seam symbol, names identical,
+    loom_create_private identical: 127 insns AND 13 relocations; .text identical (unrelocated)
+  relocation-only CONTROL (off-guest, scratch): one CALL26 retargeted in the object
+    -> unrelocated identical, -r DIFFERS -> the check refuses it.
+  recovery: loom.c == pristine == HEAD; build/ byte-identical (2b56a62ae6cc92ae). Disk 421 MiB.
+  PINNED: layout-leg-control-PINNED-20261008T115213Z/ (9/9). boot-inputs/ = run-20261007T140852Z only.
+All verified from raw logs. BOUNDED: Mac axis, one boot per side.
+STILL OPEN: loom_create_layout's own inner failure path; release sensitivity; SMP; activation.
+MERGE item 8 added (vmaguard landed main = 943dcca51: disjoint hunks, placement check owed).

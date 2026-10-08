@@ -1,0 +1,11 @@
+PINNED CONTROL GENERATION -- the 2026-10-08 11:52:13Z fresh control for the
+checkpoint-1 LAYOUT-FAILURE leg, against which both mutants were measured (run
+work/oct5-as-r9/layout-leg-20261008T115213Z/, exit 0). Source 9bb7e6037.
+Moved OUT of boot-inputs/ on the reap/refusal footing (astra t65, t73: retain
+the new paired inputs), so pruning cannot reach it and run-20261007T140852Z is
+not pushed toward the prune either.
+  control: tests 1836/1836 PASS; the leg PASS in its own block with the
+  normal-fallthrough marker; test.sh exit 0; no extinction.
+  kernel thylacine.bin prefix 2b56a62ae6cc92ae (recovery rebuilt it byte-identical).
+VERIFIED AFTER THE MOVE: 9 of 9, at each stored PREFIX's width.
+NOT A SUPERSESSION: the reap-leg and refusal-leg pins remain those legs' receipts.

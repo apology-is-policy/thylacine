@@ -1027,7 +1027,7 @@ branch, and the assertion does see a leaked guard. `kernel/loom.c` was restored 
 its pristine hash and `build/` was rebuilt byte-identical to the control. That is one
 boot per side on the Mac axis. It is not an SMP qualification, and nothing is
 activated by it.
-THE LAYOUT-FAILURE UNWIND (authored 2026-10-08, UNRUN). This edge is
+THE LAYOUT-FAILURE UNWIND (2026-10-08; it RAN, see the end of this paragraph). This edge is
 `loom_create_layout` failing AFTER the charge, which should uncharge and then call
 `addrspace_private_end`. Nothing in `kernel/` could make an allocation fail, so a
 test-only seam was added, with its scope reviewed first (astra, t71). It is a
@@ -1053,6 +1053,24 @@ symbol may survive, and `loom_create_private`'s machine code must be identical.
 `loom_create_layout`'s OWN inner failure path (its `kfree` when
 `burrow_create_anon` fails) is a separate obligation and stays STRUCTURAL. Neither
 edge bears on the retirement's release half, which stays open.
+
+AND IT RAN (2026-10-08, 11:52:13-11:56:19Z, under lease, on source 9bb7e6037).
+- Control: `tests: 1836/1836 PASS`, the leg PASS in its own block, `test.sh` exit 0,
+  kernel `2b56a62ae6cc92ae`. That PASS includes every seam-contract check.
+- M1 (the uncharge deleted, on pristine source, kernel `5a8a5ac93fb18e32`): the leg
+  failed at `layout failure returns the charge`.
+- M2 (the `private_end` deleted, on pristine source, kernel `1458457252f31eaa`): it
+  failed at `layout failure releases the guard, reference and owner`.
+- Each failure is named twice (the verdict and the `after-check-failure` marker) and
+  is the ONLY FAIL in its boot: `tests: 1835/1836`, `test.sh` exit 1, and only the
+  suite's consequential extinction.
+- Shape, with `KERNEL_TESTS` off against the seam's parent: no seam symbol,
+  identical symbol names, and `loom_create_private` identical in all 127
+  instructions AND all 13 relocations. The comparison was shown to refuse a
+  relocation-only change, by an object-level control that retargeted one CALL26
+  without touching a byte of code.
+- `kernel/loom.c` was restored and `build/` rebuilt byte-identical to the control.
+That is one boot per side on the Mac axis: not SMP, not activation.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are
