@@ -97,3 +97,34 @@ in its raw log); this is Main's source only, no Corona qualification. No new
 guest work launched and no peer lease changed. Next: preserve the running gate,
 recheck its completion and disk, then record Astra resource ownership under the
 operator override and run the inner-unwind control/M1/M2/M3/shape runner.
+
+
+## October 8, 18:50: inner control passed; disk stopped mutant qualification
+
+Astra reclaimed the Mac under the explicit operator grant after Main's registered
+runners died and its gate ended at 18:49Z. Yip event
+operator-reclaim-6137f867f1554aab83f9dbb73b60643d retains the previous lease and
+evidence; the administrative pre-TTL transfer ran under Yip's OS lock, without
+impersonating Main. Main's separate b0bd631a0 gate failed: 49/50 boots, one
+single-CPU joey nonzero exit. Both TLC commands lacked Java, not model verdicts.
+Raw observations are retained in astra-takeover/main-gate-observation/.
+
+Inherited run inner-leg-20261008T185135Z at a89f55240, clean Stratum 61dde37:
+control 1836/1836 PASS, private-owner normal fallthrough, test.sh rc 0. Default
+kernel ae48cf3dcc59c047, ELF d16bcf72a632f7ff. M1 built, but NOT BOOTED: post-build
+free space 8096 MiB breached the unchanged 8192 MiB floor. Runner exit 3.
+M2/M3 and shape UNRUN. Recovery restored both sources to pristine == HEAD and
+quarantined M1's ELF/bin in mutant-artifacts-DO-NOT-BOOT. No kernel image remains
+in build/kernel; clean recovery rebuild was correctly deferred below the floor.
+Lease RELEASED. Do not boot the quarantined mutant or claim discrimination.
+
+Moved the complete control generation outside automatic pruning to
+inner-leg-control-PINNED-20261008T185135Z; verified all nine hashes. Its default
+inputs match this control, but the also-preserved undefined pair is the older
+856ecae generation and gives NO new-source UBSan claim. Full SHA256s and scoped
+result: astra-takeover/inner-run-20261008T185135Z-result.json. Self-review verified
+raw control tally, normal-fallthrough block, one-line M1 diff, restored source
+hashes and missing build images. Next: establish enough disk headroom for the
+remaining bakes and recovery, acquire Astra resource ownership, then complete
+all mutants and test-off shape. Full gates, release sensitivity and engine/MM
+work remain open; all activation and integration restrictions remain in force.

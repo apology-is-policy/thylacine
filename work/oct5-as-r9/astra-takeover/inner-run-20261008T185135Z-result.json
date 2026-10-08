@@ -1,0 +1,49 @@
+{
+  "source": "a89f55240b0f7d8ed6d9c5473f182967334bb253",
+  "run": "work/oct5-as-r9/inner-leg-20261008T185135Z",
+  "exit": 3,
+  "control": "1836/1836 PASS, normal fallthrough, test.sh exit 0; default Mac single boot only",
+  "M1": "built but not booted: post-build disk 8096 MiB below 8192 MiB floor",
+  "M2_M3_shape": "unrun",
+  "recovery": "both sources match pristine and HEAD; mutant ELF/bin quarantined; no image in build/kernel; clean rebuild deferred below floor",
+  "pin": "work/oct5-as-r9/inner-leg-control-PINNED-20261008T185135Z",
+  "hashes": [
+    {
+      "file": ".config-default",
+      "sha256": "4fcc788d6be38b80d3892e51f20edeff0671532c33045c46157fbed05cccae63"
+    },
+    {
+      "file": "pool.img.baked-snapshot",
+      "sha256": "eba9912c0418968aaf2b4c7f1b5d960130343eca2801843b550a29fdae6911ad"
+    },
+    {
+      "file": "ramfs.cpio",
+      "sha256": "d34bac9b7ef7d7e94e9c91f0e401b47e3e1526b3f14a1c90d070adf556c21278"
+    },
+    {
+      "file": "system.key",
+      "sha256": "44251628fd6fb0d1ded0eda269c3a335343b9a46d85f182c16665dee2e4dbaf0"
+    },
+    {
+      "file": "system.key.baked-snapshot",
+      "sha256": "44251628fd6fb0d1ded0eda269c3a335343b9a46d85f182c16665dee2e4dbaf0"
+    },
+    {
+      "file": "thylacine-undefined.bin",
+      "sha256": "988debebc9a4f803af1232c2c42585f934b03cbec0d47cb977a6532f960069e9"
+    },
+    {
+      "file": "thylacine-undefined.elf",
+      "sha256": "9a9252b1e92140cb80c49cea31a9a014c4a0d521d85b4888a9781d4b472a7152"
+    },
+    {
+      "file": "thylacine.bin",
+      "sha256": "ae48cf3dcc59c047acf94108780ff6b2cfb3bf0e85db555d1bd532bf50e8ed27"
+    },
+    {
+      "file": "thylacine.elf",
+      "sha256": "d16bcf72a632f7ff7b0251f221cfde05033fb92e79fed10d49fb8ffdfcdebf29"
+    }
+  ],
+  "scope": "Default control files match this run. The preserved undefined kernel pair is unchanged older 856ecae qualification, NOT this source; no new UBSan claim."
+}

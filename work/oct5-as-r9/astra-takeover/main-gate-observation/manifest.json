@@ -1,0 +1,25 @@
+{
+  "scope": "Read-only observation of Main gate on its recorded b0bd631a0; not inherited Corona source qualification",
+  "files": [
+    {
+      "source": "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine/83514251-c48e-4989-ae95-48b9726cee35/scratchpad/gs-gates.txt",
+      "bytes": 621,
+      "sha256": "8605d30ffa4c277af985850ea049101af227f33abc9f6bb72f61d6023c92bd4b"
+    },
+    {
+      "source": "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine/83514251-c48e-4989-ae95-48b9726cee35/scratchpad/gs-smp.log",
+      "bytes": 134782,
+      "sha256": "c0a8a9214e311a4df21c086f83ab49272cd7da0bea436d96aa0df21911f9b16b"
+    },
+    {
+      "source": "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine/83514251-c48e-4989-ae95-48b9726cee35/scratchpad/gs-tlc-death_wake.cfg.log",
+      "bytes": 142,
+      "sha256": "23531437063d4675e9d6b7036fbf4e19978f0e25a90279babf75c40d496d637f"
+    },
+    {
+      "source": "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine/83514251-c48e-4989-ae95-48b9726cee35/scratchpad/gs-tlc-death_wake_buggy.cfg.log",
+      "bytes": 142,
+      "sha256": "23531437063d4675e9d6b7036fbf4e19978f0e25a90279babf75c40d496d637f"
+    }
+  ]
+}

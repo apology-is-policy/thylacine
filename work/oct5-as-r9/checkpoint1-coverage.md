@@ -66,3 +66,10 @@ and astra-takeover/inner-arms-before.txt. Actual-source host execution subsequen
 with an expected failing old-block control (572f434b3). Guest control/M1/M2/M3
 remain pending; see astra-takeover.md. No coverage
 state is promoted by this source/checker checkpoint.
+
+
+October 8, 18:50: actual guest CONTROL passed 1836/1836 with normal fallthrough
+on a89f55240 (inner-leg-20261008T185135Z). M1 built but never booted because
+the 8 GiB disk floor stopped the run. All mutant discrimination and shape
+qualification remain UNRUN. Sources restored; images quarantined. See the
+takeover result JSON for exact provenance; no full-gate or UBSan promotion.
