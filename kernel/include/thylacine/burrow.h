@@ -791,6 +791,14 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
                            bool *out_freed, struct Burrow **out_free);
 
+// The same, against an address space the caller names rather than a Proc's
+// current one: a caller that resolved the space under g_proc_table_lock and
+// pinned it keeps working on THAT space after an exec swaps the Proc's pointer.
+// Caller holds as->lock.
+int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
+                              bool *out_freed, struct Burrow **out_free);
+int burrow_unmap_in(struct AddrSpace *as, u64 vaddr, size_t length);
+
 // =============================================================================
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).
 // =============================================================================

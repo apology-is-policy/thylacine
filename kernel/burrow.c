@@ -1190,9 +1190,19 @@ int burrow_protect(struct Proc *p, u64 vaddr, size_t length, u32 prot, bool seal
 
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
                            bool *out_freed, struct Burrow **out_free) {
+    if (!p) {
+        if (out_freed) *out_freed = false;
+        if (out_free)  *out_free  = NULL;
+        return -1;
+    }
+    return burrow_unmap_reporting_in(p->as, vaddr, length, out_freed, out_free);
+}
+
+int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
+                              bool *out_freed, struct Burrow **out_free) {
     if (out_freed) *out_freed = false;
     if (out_free)  *out_free  = NULL;
-    if (!p) return -1;
+    if (!as) return -1;
     if (length == 0) return -1;
     if (vaddr & (PAGE_SIZE - 1)) return -1;
     if (length & (PAGE_SIZE - 1)) return -1;
@@ -1203,7 +1213,7 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
     u64 want_end = vaddr + length;
     if (want_end < vaddr) return -1;     // overflow
 
-    struct Vma *vma = vma_lookup(p, vaddr);
+    struct Vma *vma = vma_lookup_in(as, vaddr);
     if (!vma) return -1;
     if (vma->vaddr_start != vaddr) return -1;
     if (vma->vaddr_end   != want_end) return -1;
@@ -1237,16 +1247,16 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
     // RW-1 B-F1: the asid arg is vestigial (mmu_uninstall_user_range does an
     // all-ASID `tlbi vaae1is`); pass 0 now that the Proc has no permanent ASID.
     // B-1a' audit F8: per mapping, so a FILE mapping's leaves refund the holder.
-    (void)vma_uninstall_range_in(p->as, vaddr, want_end);
+    (void)vma_uninstall_range_in(as, vaddr, want_end);
 
     // G-2: a SHARED_IN VMA's teardown uncharges the client's shared-in budget
     // (paired with burrow_share_into's charge; same p->vma_lock hold, so the
     // pairing is exact). Covers both the explicit SYS_BURROW_DETACH of a
     // shared VA and the weave-fid clunk unmap.
     if (vma->flags & VMA_FLAG_SHARED_IN)
-        proc_shared_map_uncharge(p, (u32)(length / PAGE_SIZE));
+        addrspace_uncharge_shared_map(as, (u32)(length / PAGE_SIZE));
 
-    vma_remove(p, vma);
+    vma_remove_in(as, vma);
     // D-3c F1: DEFER the Burrow free when the caller asked for it (out_free
     // non-NULL) -- the caller holds as->lock, and a FILE Burrow's free reaches
     // a possibly-sleeping spoor_clunk. `vma_free_deferred` hands back the
@@ -1265,6 +1275,10 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
 
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
     return burrow_unmap_reporting(p, vaddr, length, NULL, NULL);
+}
+
+int burrow_unmap_in(struct AddrSpace *as, u64 vaddr, size_t length) {
+    return burrow_unmap_reporting_in(as, vaddr, length, NULL, NULL);
 }
 
 // =============================================================================

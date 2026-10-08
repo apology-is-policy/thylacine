@@ -210,7 +210,10 @@ int vma_insert(struct Proc *p, struct Vma *v) {
 // A Vma is in as's list exactly when both of its links agree: its predecessor
 // points at it (or, for the first mapping, the list head does), and its successor
 // points back. A removed or never-inserted Vma has no links and is not the head,
-// so the links alone cannot tell the SOLE mapping from an unlinked one.
+// so the links alone cannot tell the SOLE mapping from an unlinked one. Exact for
+// a Vma that is in as's list or in none; one linked into ANOTHER space reads
+// unlinked only when it is that space's head, so a caller names the space it
+// found the Vma in, not a Proc's current one (an exec can swap it between).
 bool vma_linked_in(const struct AddrSpace *as, const struct Vma *v) {
     if (v->prev ? v->prev->next != v : as->vmas != v) return false;
     return !v->next || v->next->prev == v;

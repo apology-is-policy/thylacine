@@ -519,6 +519,13 @@ What a change must re-establish:
   `PROC_SHARED_MAP_MAX_PAGES` constants. Only the page axis got shape (A),
   so a reader who generalises "the cap lives beside the count" to all
   three will not find the other two.
+- **A reference is taken only through a holder** (2026-10-08): `rfork` from a
+  live parent, and the weft reaper's pin, taken under the process table lock
+  from an ALIVE Proc's current space, which that Proc's own reference covers
+  until its exec swap or its reap, both under the same lock. That is what lets
+  the last unref drain without a lock. The reaper's unref can be the last one;
+  it comes after every holder has left, from a kthread on the kernel's TTBR0,
+  so it owes the same "no CPU translates here" the other callers do.
 - **`addrspace_ref_count` is answerable only by a caller that can argue no
   new reference can appear.** A dying Proc can argue that; a live one
   cannot. Using it to decide whether a concurrent sharer may appear is a

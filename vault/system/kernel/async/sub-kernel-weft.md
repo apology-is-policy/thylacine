@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-08-24
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -43,6 +43,11 @@ Three calls, and none of them hands a shared object to anyone:
   claims it, and maps the region in. Idempotent: a second call returns the same
   address.
 - **Unshare** — the registrant disarms one of its own unclaimed identifiers.
+- **Claim from a named owner** (`weft_share_claim_from`, Lictor's seat import,
+  2026-09-22) — a trusted broker claims an identifier only if its registrant's
+  stripes match the peer the broker's accepted connection names, so a mismatch
+  never consumes another peer's share. The seat-import syscall checks the seat
+  service and its hardware-creation capability before it claims.
 
 The identifier never reaches the client. It travels server-to-kernel inside a
 round-trip the kernel initiated, so a client cannot forge one, and a claim
@@ -248,10 +253,20 @@ threads of one guest mapping the same fid each build a binding from a distinct
 identifier; exactly one wins, and the loser tears its own down and returns the
 winner's address.
 
-**The reaper's order** is registry lock, then the process table, then the target's
-address-space lock — acquired under the table lock and *held past its release*,
-so the per-page unmap runs with interrupts on rather than inside the table's
-interrupt-off window. Registration and unregistration both run lock-free. The
+**The reaper's order** is registry lock, then the process table, under which the
+find takes a *reference* on the target's address space, then that space's lock,
+taken after the table lock drops, so the per-page unmap runs with interrupts on
+rather than inside the table's interrupt-off window. The reaper holds the space,
+not the Proc: exec swaps a Proc's space under the table lock alone, so once the
+walk ends the Proc's pointer may name another one. Until 2026-10-08 the find
+took the lock and the sweep re-read the pointer three times; an exec in that
+window had it unlock the new space and leave the old one locked forever, and
+exec's drain of the old space then spun on it (vmaguard audit F1). The
+reference also keeps the space's teardown out, since a drain runs only at the
+last unref, and the reaper drops it after the registry lock, because a last
+unref drains and a drain may sleep. `weft.reap_pins_the_space_across_exec`
+swaps the space inside that window and checks the old one is unmapped, uncharged,
+unlocked and unpinned, and the new one untouched. Registration and unregistration both run lock-free. The
 close path unregisters before reading the binding, and the reaper nulls the
 region pointer under the registry lock, so neither side sees a half-reclaimed
 binding.

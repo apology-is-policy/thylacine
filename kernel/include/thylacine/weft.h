@@ -582,6 +582,11 @@ void weft_reap_unregister(struct weft_binding *wb);
 // One sweep pass at `now_ns` (the kthread's body; test-drivable). Returns
 // the number of bindings force-reclaimed this pass.
 int weft_reap_sweep(u64 now_ns);
+#ifdef KERNEL_TESTS
+// Runs `fn` between a sweep's find and its unmap (NULL clears it), where an
+// exec's address-space swap can land.
+void weft_reap_test_set_window_hook(void (*fn)(void));
+#endif
 
 // Boot init + the reaper kthread main (spawned as a kproc thread).
 void weft_reap_init(void);

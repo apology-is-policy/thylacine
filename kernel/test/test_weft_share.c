@@ -31,6 +31,7 @@
 
 #include <thylacine/9p_client.h>   // G-3: the reaper tests' fake session
 #include <thylacine/9p_session.h>
+#include <thylacine/addrspace.h>   // the exec-swap reap test
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/dma_handle.h>   // G-2: the weave mint + kobj live count
@@ -56,6 +57,7 @@ void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
 void test_weft_reap_orphan_reclaimed(void);
+void test_weft_reap_pins_the_space_across_exec(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
 
@@ -911,6 +913,78 @@ void test_weft_reap_orphan_reclaimed(void) {
     weft_binding_release(b);
 
     proc_test_unlink(client);
+    drop_proc(server);
+    drop_proc(client);
+}
+
+// vmaguard audit F1: exec swaps a Proc's address space under g_proc_table_lock
+// alone, after the reaper's find has released that lock. The sweep must finish
+// on the space its find pinned -- unmap the stale mapping from it, unlock it,
+// release the pin -- and never touch the space the Proc moved to. The window
+// hook makes the swap there, as an exec would (exec takes the lock for it; the
+// find no longer holds it, which is the point).
+static struct Proc      *g_reap_swap_proc;
+static struct AddrSpace *g_reap_swap_to;
+
+static void reap_window_exec_swap(void) {
+    g_reap_swap_proc->as = g_reap_swap_to;
+}
+
+void test_weft_reap_pins_the_space_across_exec(void) {
+    struct Proc *server = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    struct Burrow *v = NULL;
+    struct weft_binding *b = NULL;
+    reap_fixture(server, client, &v, &b);
+    TEST_ASSERT(b != NULL, "fixture built");
+    struct AddrSpace *old = client->as;
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
+    TEST_ASSERT(nas != NULL, "a fresh space for the exec");
+
+    proc_test_link(client);
+    reap_fake_session_init(true);
+    weft_reap_register(b, NULL, &g_reap_fake_client);
+
+    u64 now = 3000ull * 1000 * 1000;
+    vma_drain(server);
+    reap_fake_session_kill();
+    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+    TEST_EXPECT_EQ(old->shared_map_pages, 2u, "(premise) the old space is charged");
+    int refs_before = addrspace_ref_count(old);
+    u32 nas_vmas    = __atomic_load_n(&nas->vma_count, __ATOMIC_RELAXED);
+
+    g_reap_swap_proc = client;
+    g_reap_swap_to   = nas;
+    weft_reap_test_set_window_hook(reap_window_exec_swap);
+    int reclaimed = weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1);
+    weft_reap_test_set_window_hook(NULL);
+
+    // Observe first, then put the fixture back, then assert: a sweep that left
+    // the old space locked must not leave this test's Procs linked over it.
+    bool swapped   = client->as == nas;
+    bool old_free  = __atomic_load_n(&old->lock.value, __ATOMIC_ACQUIRE) == 0u;
+    bool nas_free  = __atomic_load_n(&nas->lock.value, __ATOMIC_ACQUIRE) == 0u;
+    bool unmapped  = vma_lookup_in(old, WEFT_TEST_VA) == NULL;
+    u32  old_pages = old->shared_map_pages;
+    u32  nas_after = __atomic_load_n(&nas->vma_count, __ATOMIC_RELAXED);
+    int  refs_after = addrspace_ref_count(old);
+    if (!old_free) spin_unlock_raw(&old->lock);
+    client->as = old;
+    proc_test_unlink(client);
+
+    TEST_EXPECT_EQ(reclaimed, 1, "past the grace: reclaimed");
+    TEST_ASSERT(swapped, "(premise) the swap landed between the find and the unmap");
+    TEST_ASSERT(old_free, "the space the sweep locked is the space it unlocked");
+    TEST_ASSERT(nas_free, "the space the Proc moved to was never locked");
+    TEST_ASSERT(unmapped, "the stale mapping left the space it lived in");
+    TEST_EXPECT_EQ(old_pages, 0u, "and that space's shared-in budget was uncharged");
+    TEST_EXPECT_EQ(nas_after, nas_vmas, "the new space was not uncharged for a mapping it never held");
+    TEST_EXPECT_EQ(refs_after, refs_before, "the sweep released its pin");
+
+    addrspace_unref(nas);
+    weft_reap_unregister(b);
+    weft_binding_release(b);
     drop_proc(server);
     drop_proc(client);
 }

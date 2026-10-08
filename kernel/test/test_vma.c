@@ -1,27 +1,5 @@
-// P3-Da: VMA tree tests.
-//
-// Six smoke tests for the per-Proc VMA list:
-//
-//   vma.alloc_free_smoke
-//     Basic alloc + free; verifies counters advance.
-//
-//   vma.alloc_constraints
-//     Constraint validation: zero-length, unaligned, overlapping range,
-//     W+X reject all return NULL.
-//
-//   vma.insert_lookup_smoke
-//     Insert several non-overlapping VMAs into a Proc; verify lookup
-//     finds them at every covered address; misses on uncovered addresses.
-//
-//   vma.insert_overlap_rejected
-//     Insert an existing VMA's range overlap → rejected with -1.
-//
-//   vma.insert_sorted_invariant
-//     Insert in mixed order; verify the resulting list is sorted by
-//     vaddr_start ascending.
-//
-//   vma.drain_releases_all
-//     vma_drain frees every VMA + decrements BURROW mapping_count.
+// P3-Da: VMA tree tests -- the per-Proc VMA list. What each test pins is listed
+// in the sub-kernel-vma dossier's Tests section.
 
 #include "test.h"
 

@@ -32,7 +32,7 @@ tearing it down.
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
 round 4, F18); `vma_remove` unlinks, and extincts on a VMA its list does not
-hold (`vma_linked_in`);
+hold (`vma_linked_in`, exact for a VMA in that list or in none);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain` tears the whole list down at Proc death.
 
@@ -773,7 +773,15 @@ The insert's already-linked check had the same blind spot: inserting the sole
 mapping a second time would have been refused as an overlap with itself, and
 the caller would then have freed a VMA the head still pointed at. It now
 extincts there too. Both extinctions run only in the double-call case, which
-no suite test can survive, so the suite pins the predicate they ask.
+no suite test can survive: the suite pins the remove's predicate, and the
+insert's head clause has no suite witness, only the one-off boots recorded at
+the land.
+
+The predicate is exact for a VMA in this space's list or in none. A VMA
+interior to ANOTHER space's list reads linked, because only the head clause
+consults the space. So a caller names the space it found the VMA in, never a
+Proc's current one: the audit of this guard found the weft reaper doing the
+latter across an exec swap ([[sub-kernel-weft]]).
 
 ## Referenced by
 

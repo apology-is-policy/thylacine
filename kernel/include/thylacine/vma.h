@@ -313,8 +313,9 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
 // built FOR. Passing it in rather than a Proc keeps this layer free of identity.
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
-// True iff v sits in as's list, by its links and the head. vma_remove_in
-// extincts on a Vma for which this is false. Caller holds as->lock.
+// True iff v sits in as's list, by its links and the head -- for a Vma in as's
+// list or in none; one interior to another space's list reads linked.
+// vma_remove_in extincts on a Vma for which this is false. Caller holds as->lock.
 bool        vma_linked_in(const struct AddrSpace *as, const struct Vma *v);
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 

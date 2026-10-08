@@ -4670,10 +4670,13 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     // phenotype.
     __atomic_store_n(&p->phenotype, new_pheno, __ATOMIC_RELEASE);
 
-    // Every cross-Proc reader of `->as` -- /proc/<pid>/{maps,mem}, /ctl/procs,
-    // the weft reaper -- resolves its target under g_proc_table_lock, so after
-    // the section above none of them can still be holding `old`. That is what
-    // makes the drop below safe rather than a race.
+    // Every cross-Proc reader of `->as` resolves its target under
+    // g_proc_table_lock. /proc/<pid>/{maps,mem} and /ctl/procs finish with it
+    // inside that walk, so after the section above none of them is holding
+    // `old`. The weft reaper keeps it past the walk, but as a reference taken
+    // under the lock, never a bare pointer: its unref, not ours, drains `old`
+    // if it outlasts us. That is what makes the drop below safe rather than a
+    // race.
 
     // Put the NEW translation in the hardware before touching the old one. After
     // the isb inside this call, no fetch or access on this CPU walks `old`, and
