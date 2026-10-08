@@ -1078,6 +1078,56 @@ void test_sched_preempt_gate_defers_while_locked(void) {
     sched_clear_need_resched_for_test(smp_cpu_idx_self());  // leave no dangling preempt
 }
 
+// scheduler.preempt_gate_defers_while_exiting -- XT-3b audit F2 (task #20).
+// An EXITING thread is never switched out involuntarily: with need_resched
+// armed, preempt_check_irq leaves it pending across tick returns, and the
+// thread's own sched() takes the switch. The thread runs in a Proc of its own,
+// marks itself EXITING for three ticks, then restores RUNNING and exits.
+//
+// RED without the gate: the first tick return switches the thread out, sched()
+// never re-enqueues an EXITING thread, and it never runs again -- the done flag
+// stays clear, and the runner's bounded wait fails instead of hanging in
+// wait_pid.
+static volatile u32 g_pge_pending;
+static volatile u32 g_pge_done;
+
+static void pge_entry(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    irq_state_t s = proc_table_lock_acquire();
+    self->state = THREAD_EXITING;
+    proc_table_lock_release(s);
+    // EXITING from here, so no involuntary switch and no migration: `cpu`
+    // stays this thread's CPU until the restore.
+    unsigned cpu = smp_cpu_idx_self();
+    sched_clear_need_resched_for_test(cpu);
+    sched_set_need_resched_for_test(cpu);
+    u64 t0 = timer_get_ticks();
+    while (timer_get_ticks() < t0 + 3) {
+        __asm__ __volatile__("" ::: "memory");
+    }
+    bool pending = sched_need_resched_pending(cpu);
+    s = proc_table_lock_acquire();
+    self->state = THREAD_RUNNING;
+    proc_table_lock_release(s);
+    __atomic_store_n(&g_pge_pending, pending ? 1u : 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_pge_done, 1u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_sched_preempt_gate_defers_while_exiting(void) {
+    __atomic_store_n(&g_pge_pending, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_pge_done, 0u, __ATOMIC_RELEASE);
+    int pid = rfork(RFPROC, pge_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_pge_done, __ATOMIC_ACQUIRE) != 0u);
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the test Proc");
+    TEST_EXPECT_EQ(status, 0, "the test Proc exited cleanly");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_pge_pending, __ATOMIC_ACQUIRE), 1u,
+        "the gate DEFERS (does not consume) need_resched while the thread is EXITING");
+}
+
 // =============================================================================
 // sched_preempt_point's witness is GONE with the point (ARCH 8.12).
 // =============================================================================

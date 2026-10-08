@@ -11,24 +11,52 @@
 (*     -- the clear_child_tid store into the address space and the torpor    *)
 (*     wake -- and it switches away for good. The switch's on_cpu clear is   *)
 (*     the moment it SETTLES.                                                *)
-(*   - A LIVE Thread of the same Proc reaps at its spawn and at its exit:    *)
-(*     under the lock it detaches every SETTLED retired Thread, then frees   *)
-(*     them with the lock dropped. Detaching under the lock IS the claim;    *)
-(*     it is what keeps two concurrent reapers disjoint.                     *)
+(*   - A LIVE Thread of the same Proc reaps at its spawn and at its exit.    *)
+(*     The CLAIM, under the lock, marks every SETTLED unclaimed retired      *)
+(*     Thread; marking under the lock is what keeps two concurrent reapers   *)
+(*     disjoint. A claimed Thread stays on the retired list, still counted   *)
+(*     by the Proc's totals, until the COMMIT: one hold folds its run time   *)
+(*     and stack depth into the Proc and unlinks it, then the free follows   *)
+(*     with the lock dropped.                                                *)
 (*   - wait_pid reaps a ZOMBIE: it detaches both lists (the last Thread out  *)
 (*     stays on the live list; retired Threads no peer reached), spins each  *)
 (*     until settled, frees it, then frees the Proc and its address space.   *)
+(*     The zombie is unreachable by then, so nothing reads its totals.       *)
 (*   - exec, whose execer is the Proc's only live Thread, DRAINS the retired *)
-(*     list (claim all, spin each until settled, free) BEFORE it frees the   *)
-(*     old address space: a retired Thread's tail still stores into it.      *)
+(*     list (claim, wait each out until settled, commit, free) BEFORE it     *)
+(*     frees the old address space: a retired Thread's tail still stores     *)
+(*     into it.                                                              *)
 (*   - the spawner reads the new Thread's tid BEFORE ready(): once ready,    *)
 (*     the new Thread can run, exit and be reaped by a peer.                 *)
 (*                                                                         *)
 (* A live reaper and wait_pid never overlap on one Proc, because a Proc is *)
 (* ZOMBIE only once no Thread of it is live. The model checks that instead *)
-(* of assuming it: Reap needs a live reaper, Exit makes the Proc ZOMBIE     *)
-(* only from the last live Thread, and every free goes through the claim    *)
-(* its freer made.                                                          *)
+(* of assuming it: Claim needs a live reaper, Exit makes the Proc ZOMBIE    *)
+(* only from the last live Thread, every free goes through the claim its    *)
+(* freer made, and ClaimsHeldByLive says no claim outlives its claimer.     *)
+(*                                                                         *)
+(* COARSENINGS, each a superset of the C's behaviours:                      *)
+(*   - Exit does not have to follow a reap. The C reaps at every exit's     *)
+(*     entry; the model lets an exit skip it, so its safety verdicts cover  *)
+(*     the C's reap-first exits.                                            *)
+(*   - Claim takes every reapable Thread at once. The C claims REAP_ROUND   *)
+(*     at a time and repeats until a round comes back short; the action     *)
+(*     property ClaimTakesAllSettled pins the sum.                          *)
+(*   - Exec claims every retired Thread at once, settled or not, and frees  *)
+(*     each once settled. The C claims settled ones round by round; no      *)
+(*     other reaper exists while the execer is alone, so the two orders     *)
+(*     cannot be told apart.                                                *)
+(*   - One step folds, unlinks and frees a claimed Thread. The C folds and  *)
+(*     unlinks a round in one hold and frees after it; between the two the *)
+(*     Thread is on no list and held by one claim, so nothing can reach it. *)
+(*                                                                         *)
+(* NOT MODELLED: CPUs. The bound on retired-but-allocated Threads (about   *)
+(* twice the CPU count, kernel/include/thylacine/proc.h proc_reap_retired)  *)
+(* rests on a stretch per CPU that is never switched out, which this model  *)
+(* has no CPU to state; it lets every Thread sit in its tail at once. The   *)
+(* half it can see is ClaimTakesAllSettled: a claim leaves no settled       *)
+(* Thread behind. The churn test's retired_max and /thread-torture witness  *)
+(* the bound at runtime.                                                    *)
 (*                                                                         *)
 (* NOT MODELLED, and why it needs no step here: walkers of the live list   *)
 (* (the death-wake cascade, devproc, proc_cpu_ns) run entirely under        *)
@@ -40,8 +68,10 @@
 (* THE BUG CLASSES (one buggy cfg each, each judged by ONE named invariant):*)
 (*   BUGGY_REAP_IGNORES_ONCPU    reap a retired Thread still in its tail    *)
 (*                               -> NoFreeInFlight                          *)
-(*   BUGGY_CLAIM_UNLOCKED        choose under the lock, detach after it     *)
+(*   BUGGY_CLAIM_UNLOCKED        choose under the lock, mark after it       *)
 (*                               -> OneFreerPerThread                       *)
+(*   BUGGY_UNLINK_AT_CLAIM       the claim unlinks, the fold comes later    *)
+(*                               (audit F1) -> EveryThreadCounted           *)
 (*   BUGGY_EXEC_NO_DRAIN         exec frees the old space under a tail      *)
 (*                               -> TailsOnLiveSpace                        *)
 (*   BUGGY_WAITPID_SKIPS_RETIRED wait_pid frees the live list only          *)
@@ -57,6 +87,7 @@ CONSTANTS
     MaxGen,                       \* address-space generations (exec bound)
     BUGGY_REAP_IGNORES_ONCPU,
     BUGGY_CLAIM_UNLOCKED,
+    BUGGY_UNLINK_AT_CLAIM,
     BUGGY_EXEC_NO_DRAIN,
     BUGGY_WAITPID_SKIPS_RETIRED,
     BUGGY_TID_AFTER_READY
@@ -71,7 +102,7 @@ Wait     == "wait"     \* wait_pid in the parent: a freer that is not a Thread o
      "unborn"    -- not yet spawned
      "live"      -- RUNNING / RUNNABLE / SLEEPING: a live Thread
      "spawning"  -- live, inside the spawn after ready() (BUGGY_TID_AFTER_READY)
-     "selecting" -- live, candidates chosen, not yet detached (BUGGY_CLAIM_UNLOCKED)
+     "selecting" -- live, candidates chosen, not yet marked (BUGGY_CLAIM_UNLOCKED)
      "reaping"   -- live, freeing the Threads it claimed
      "execing"   -- live, the exec drain
      "tail"      -- EXITING and still on a CPU: the tail, then the switch away
@@ -91,11 +122,12 @@ VARIABLES
     gen,           \* the Proc's current address-space generation
     tgen,          \* [Threads -> 0..MaxGen]  the space each Thread runs in
     dead,          \* address-space generations already freed
+    folded,        \* Threads whose totals were folded into the Proc's
     freeInFlight,  \* a Thread was freed while it was still in its tail
     doubleFree,    \* a Thread was freed twice
     uafRead        \* the spawner read a freed Thread
 
-vars == <<pc, list, claims, sel, pending, proc, gen, tgen, dead,
+vars == <<pc, list, claims, sel, pending, proc, gen, tgen, dead, folded,
           freeInFlight, doubleFree, uafRead>>
 
 Live(t)  == pc[t] \in {"live", "spawning", "selecting", "reaping", "execing"}
@@ -111,6 +143,7 @@ TypeOk ==
     /\ gen     \in 1..MaxGen
     /\ tgen    \in [Threads -> 0..MaxGen]
     /\ dead    \subseteq 1..MaxGen
+    /\ folded  \subseteq Threads
     /\ freeInFlight \in BOOLEAN
     /\ doubleFree   \in BOOLEAN
     /\ uafRead      \in BOOLEAN
@@ -125,6 +158,7 @@ Init ==
     /\ gen     = 1
     /\ tgen    = [t \in Threads |-> IF t = Main THEN 1 ELSE 0]
     /\ dead    = {}
+    /\ folded  = {}
     /\ freeInFlight = FALSE
     /\ doubleFree   = FALSE
     /\ uafRead      = FALSE
@@ -136,6 +170,13 @@ FreeBy(c, t) ==
     /\ doubleFree'   = (doubleFree \/ pc[t] = "freed")
     /\ pc'     = [pc EXCEPT ![t] = "freed"]
     /\ claims' = [claims EXCEPT ![t] = @ \ {c}]
+
+(* The commit of a claimed Thread, then its free: the fold and the unlink in
+   one hold (proc_commit_reaped), the free after it. *)
+CommitFree(c, t) ==
+    /\ list'   = [list EXCEPT ![t] = "none"]
+    /\ folded' = folded \cup {t}
+    /\ FreeBy(c, t)
 
 Detached(set) == [t \in Threads |-> IF t \in set THEN "none" ELSE list[t]]
 ClaimedBy(set, c) ==
@@ -151,7 +192,7 @@ Spawn(s, n) ==
               /\ pending' = [pending EXCEPT ![s] = n]
          ELSE /\ pc'      = [pc EXCEPT ![n] = "live"]
               /\ UNCHANGED pending
-    /\ UNCHANGED <<claims, sel, proc, gen, dead, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<claims, sel, proc, gen, dead, folded, freeInFlight, doubleFree, uafRead>>
 
 (* The spawner's `return nt->tid` when it is read after ready(). *)
 ReadTid(s) ==
@@ -159,7 +200,7 @@ ReadTid(s) ==
     /\ uafRead' = (uafRead \/ pc[pending[s]] = "freed")
     /\ pc'      = [pc EXCEPT ![s] = "live"]
     /\ pending' = [pending EXCEPT ![s] = NoThread]
-    /\ UNCHANGED <<list, claims, sel, proc, gen, tgen, dead, freeInFlight, doubleFree>>
+    /\ UNCHANGED <<list, claims, sel, proc, gen, tgen, dead, folded, freeInFlight, doubleFree>>
 
 (* --- exit: thread_exit_self's commit, one g_proc_table_lock hold --- *)
 Exit(t) ==
@@ -170,32 +211,35 @@ Exit(t) ==
               /\ UNCHANGED list
          ELSE /\ list' = [list EXCEPT ![t] = "retired"]
               /\ UNCHANGED proc
-    /\ UNCHANGED <<claims, sel, pending, gen, tgen, dead, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<claims, sel, pending, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
 
 (* The final switch away completes: the destination clears on_cpu. *)
 Settle(t) ==
     /\ pc[t] = "tail"
     /\ pc' = [pc EXCEPT ![t] = "settled"]
-    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead,
+    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead, folded,
                    freeInFlight, doubleFree, uafRead>>
 
 (* --- the live reaper (proc_reap_retired, at spawn and at exit) --- *)
 Reapable(t) ==
-    /\ list[t] = "retired"
+    /\ list[t] = "retired" /\ claims[t] = {}
     /\ \/ pc[t] = "settled"
        \/ BUGGY_REAP_IGNORES_ONCPU /\ pc[t] = "tail"
 
-Reap(r) ==
+(* The claim (proc_claim_settled_retired): marked under the lock, left on the
+   retired list. *)
+Claim(r) ==
     /\ ~BUGGY_CLAIM_UNLOCKED
     /\ pc[r] = "live" /\ proc = "alive"
     /\ LET cand == {t \in Threads : Reapable(t)} IN
          /\ cand # {}
-         /\ list'   = Detached(cand)
          /\ claims' = ClaimedBy(cand, r)
+         /\ IF BUGGY_UNLINK_AT_CLAIM THEN list' = Detached(cand)
+                                     ELSE UNCHANGED list
     /\ pc' = [pc EXCEPT ![r] = "reaping"]
-    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
 
-(* BUGGY_CLAIM_UNLOCKED: chosen under the lock, detached after it, so a second
+(* BUGGY_CLAIM_UNLOCKED: chosen under the lock, marked after it, so a second
    reaper can choose the same Threads in between. *)
 Select(r) ==
     /\ BUGGY_CLAIM_UNLOCKED
@@ -204,28 +248,27 @@ Select(r) ==
          /\ cand # {}
          /\ sel' = [sel EXCEPT ![r] = cand]
     /\ pc' = [pc EXCEPT ![r] = "selecting"]
-    /\ UNCHANGED <<list, claims, pending, proc, gen, tgen, dead, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, claims, pending, proc, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
 
-Detach(r) ==
+Mark(r) ==
     /\ pc[r] = "selecting"
-    /\ list'   = Detached(sel[r])
     /\ claims' = ClaimedBy(sel[r], r)
     /\ sel'    = [sel EXCEPT ![r] = {}]
     /\ pc'     = [pc EXCEPT ![r] = "reaping"]
-    /\ UNCHANGED <<pending, proc, gen, tgen, dead, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, pending, proc, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
 
-(* With the lock dropped. A settled Thread needs no wait; thread_free_retired's
-   on_cpu spin is defence for this freer, not a step it relies on. *)
+(* A settled Thread needs no wait; thread_free_retired's on_cpu spin is
+   defence for this freer, not a step it relies on. *)
 ReapFree(r, t) ==
     /\ pc[r] = "reaping" /\ r \in claims[t]
-    /\ FreeBy(r, t)
-    /\ UNCHANGED <<list, sel, pending, proc, gen, tgen, dead, uafRead>>
+    /\ CommitFree(r, t)
+    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, uafRead>>
 
 ReapDone(r) ==
     /\ pc[r] = "reaping"
     /\ \A t \in Threads : r \notin claims[t]
     /\ pc' = [pc EXCEPT ![r] = "live"]
-    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead,
+    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead, folded,
                    freeInFlight, doubleFree, uafRead>>
 
 (* --- exec (proc_exec_replace): the execer is the only live Thread --- *)
@@ -236,19 +279,18 @@ Exec(e) ==
          THEN /\ dead' = dead \cup {gen}
               /\ gen'  = gen + 1
               /\ tgen' = [tgen EXCEPT ![e] = gen + 1]
-              /\ UNCHANGED <<pc, list, claims>>
-         ELSE /\ LET ret == {t \in Threads : list[t] = "retired"} IN
-                   /\ list'   = Detached(ret)
-                   /\ claims' = ClaimedBy(ret, e)
+              /\ UNCHANGED <<pc, claims>>
+         ELSE /\ claims' = ClaimedBy({t \in Threads : list[t] = "retired"}, e)
               /\ pc' = [pc EXCEPT ![e] = "execing"]
               /\ UNCHANGED <<gen, tgen, dead>>
-    /\ UNCHANGED <<sel, pending, proc, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, sel, pending, proc, folded, freeInFlight, doubleFree, uafRead>>
 
-(* The drain's spin: a claimed Thread is freed once its switch has settled. *)
+(* The drain's wait: a claimed Thread is committed and freed once its switch
+   has settled. *)
 ExecFree(e, t) ==
     /\ pc[e] = "execing" /\ e \in claims[t] /\ pc[t] = "settled"
-    /\ FreeBy(e, t)
-    /\ UNCHANGED <<list, sel, pending, proc, gen, tgen, dead, uafRead>>
+    /\ CommitFree(e, t)
+    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, uafRead>>
 
 ExecSwap(e) ==
     /\ pc[e] = "execing"
@@ -257,7 +299,7 @@ ExecSwap(e) ==
     /\ gen'  = gen + 1
     /\ tgen' = [tgen EXCEPT ![e] = gen + 1]
     /\ pc'   = [pc EXCEPT ![e] = "live"]
-    /\ UNCHANGED <<list, claims, sel, pending, proc, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, claims, sel, pending, proc, folded, freeInFlight, doubleFree, uafRead>>
 
 (* --- wait_pid in the parent --- *)
 WaitPid ==
@@ -268,25 +310,25 @@ WaitPid ==
          /\ list'   = Detached(take)
          /\ claims' = ClaimedBy(take, Wait)
     /\ proc' = "reaped"
-    /\ UNCHANGED <<pc, sel, pending, gen, tgen, dead, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<pc, sel, pending, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
 
 WaitFree(t) ==
     /\ proc = "reaped" /\ Wait \in claims[t] /\ pc[t] = "settled"
     /\ FreeBy(Wait, t)
-    /\ UNCHANGED <<list, sel, pending, proc, gen, tgen, dead, uafRead>>
+    /\ UNCHANGED <<list, sel, pending, proc, gen, tgen, dead, folded, uafRead>>
 
 ProcFree ==
     /\ proc = "reaped"
     /\ \A t \in Threads : Wait \notin claims[t]
     /\ proc' = "freed"
     /\ dead' = dead \cup {gen}
-    /\ UNCHANGED <<pc, list, claims, sel, pending, gen, tgen,
+    /\ UNCHANGED <<pc, list, claims, sel, pending, gen, tgen, folded,
                    freeInFlight, doubleFree, uafRead>>
 
 Next ==
     \/ \E s, n \in Threads : Spawn(s, n)
     \/ \E t \in Threads : ReadTid(t) \/ Exit(t) \/ Settle(t)
-    \/ \E r \in Threads : Reap(r) \/ Select(r) \/ Detach(r) \/ ReapDone(r)
+    \/ \E r \in Threads : Claim(r) \/ Select(r) \/ Mark(r) \/ ReapDone(r)
     \/ \E r, t \in Threads : ReapFree(r, t)
     \/ \E e \in Threads : Exec(e) \/ ExecSwap(e)
     \/ \E e, t \in Threads : ExecFree(e, t)
@@ -300,7 +342,7 @@ Next ==
 Fairness ==
     /\ \A t \in Threads : WF_vars(Settle(t))
     /\ \A t \in Threads : WF_vars(ReadTid(t))
-    /\ \A r \in Threads : WF_vars(Detach(r)) /\ WF_vars(ReapDone(r))
+    /\ \A r \in Threads : WF_vars(Mark(r)) /\ WF_vars(ReapDone(r))
     /\ \A r, t \in Threads : WF_vars(ReapFree(r, t))
     /\ \A e, t \in Threads : WF_vars(ExecFree(e, t))
     /\ \A e \in Threads : WF_vars(ExecSwap(e))
@@ -320,6 +362,16 @@ RetiredAreExited   == \A t \in Threads : list[t] = "retired" => pc[t] \in {"tail
 LiveListIsLive     == proc = "alive" => \A t \in Threads : list[t] = "live" => Live(t)
 NoLiveAfterZombie  == proc # "alive" => \A t \in Threads : ~Live(t)
 FreedProcHoldsNone == proc = "freed" => \A t \in Threads : pc[t] # "settled"
+(* While the Proc can be read (alive, or a zombie not yet unlinked), every
+   Thread it ever had is on one of its lists or folded into its totals: no
+   reading of proc_cpu_ns or proc_kstack_peak loses one (audit F1). *)
+EveryThreadCounted ==
+    proc \in {"alive", "zombie"} =>
+        \A t \in Threads : pc[t] # "unborn" => (list[t] # "none" \/ t \in folded)
+(* A claim is held only by a live Thread, or by wait_pid: so exec, which runs
+   alone, and wait_pid, which runs on a zombie, never meet another's claim. *)
+ClaimsHeldByLive ==
+    \A t \in Threads : \A c \in claims[t] : c = Wait \/ Live(c)
 
 Safety ==
     /\ TypeOk
@@ -332,12 +384,22 @@ Safety ==
     /\ LiveListIsLive
     /\ NoLiveAfterZombie
     /\ FreedProcHoldsNone
+    /\ EveryThreadCounted
+    /\ ClaimsHeldByLive
 
 (* --- liveness --- *)
 (* A zombie is freed: no spin of wait_pid's waits forever. *)
 EventuallyFreed == (proc = "zombie") ~> (proc = "freed")
 (* An exec drain completes: no retired Thread holds the execer forever. *)
 ExecCompletes == \A e \in Threads : (pc[e] = "execing") ~> (pc[e] = "live")
-(* A claim is always freed: no reaper strands what it detached. *)
+(* A claim is always freed: no reaper strands what it claimed. *)
 ClaimsDischarged == \A t \in Threads : (claims[t] # {}) ~> (pc[t] = "freed")
+
+(* --- action property --- *)
+(* A live reaper's claim leaves no settled Thread behind: the half of the
+   retired-list bound this model can state (see the header). *)
+ClaimTakesAllSettled ==
+    [][\A r \in Threads :
+         (pc[r] = "live" /\ pc'[r] = "reaping") =>
+             \A t \in Threads : Reapable(t) => r \in claims'[t]]_vars
 ====

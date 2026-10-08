@@ -458,14 +458,16 @@ What a change **must** re-establish:
   included (a dying group is never asked to park);
 - (XT-3b) that a Thread retires in the SAME hold that commits it EXITING, and
   only while a peer lives on; that a reaper takes only settled Threads and only
-  by detaching under the table lock; and that nothing frees the Proc, or exec
-  frees its old address space, while a retired tail can still run
-  ([[spec-thread-reap]]).
+  by a claim under the table lock; that a claimed Thread stays counted until one
+  hold folds and unlinks it; that an EXITING thread is never preempted; and that
+  nothing frees the Proc, or exec frees its old address space, while a retired
+  tail can still run ([[spec-thread-reap]]).
 
 ## Seams
 
 - [[seam-exiting-tails-never-sleep]] — the recorded property a future
-  anon-COW/pageout must re-establish.
+  anon-COW/pageout must re-establish; since XT-3b the exec drain's termination
+  and the retired-list bound rest on it too.
 - [[seam-close-flush-unbounded]] — a server that never answers held a flagged
   close; parts A-C (2026-10-07) bound it: the clunk never waits, and a second
   kill forces the close and hands the rest to the closer.
@@ -622,24 +624,52 @@ only live Threads plus that last one.
 wake) and its final switch; its `on_cpu` clears only when the destination CPU
 finishes that switch, and an EXITING Thread is never dispatched again, so a clear
 `on_cpu` means nothing will ever run on it. `proc_reap_retired` frees exactly
-those: under the table lock it detaches every retired Thread whose `on_cpu` reads
-clear (ACQUIRE), folding its `run_ns` into `p->reaped_run_ns` in the same hold so
-`proc_cpu_ns` never dips, and then frees the detached chain with the lock dropped
-(`thread_free_retired`; the kstack peak is scanned there and folded into
-`p->reaped_kstack_peak` afterwards, because the scan's cost is inverted, ARCH 8.12
-audit F2). The detach is the claim: two reapers can never take one Thread.
+those, in two halves. The CLAIM (`proc_claim_settled_retired`), under the table
+lock, marks `Thread.reap_claimed` on each retired Thread whose `on_cpu` reads
+clear (ACQUIRE) and that no other reaper holds, and leaves it on `p->exited`:
+marking under the lock is what keeps two reapers off one Thread. The kstack
+depths are then measured with the lock dropped, because the scan's cost is
+inverted (ARCH 8.12 audit F2). The COMMIT (`proc_commit_reaped`) takes the lock
+once more and, in that one hold, folds each Thread's `run_ns` into
+`p->reaped_run_ns` and its depth into `p->reaped_kstack_peak` and unlinks it;
+the free (`thread_free_retired`) follows with the lock dropped. A claimed Thread
+is therefore still on a list for every reader until the hold that folds it, so
+neither `proc_cpu_ns` nor `proc_kstack_peak` can dip across a reap. (The first
+shape detached at the claim and folded the depth in a later hold, so a
+`/ctl/kstack` reading between the two lost the Thread: XT-3b audit F1, the
+model's `BUGGY_UNLINK_AT_CLAIM`.) A round claims at most `REAP_ROUND` (16),
+the size of the depth array; rounds repeat until one comes back short, so a
+reap takes every Thread settled at its start.
 
 The reap points are every place a LIVE Thread of the Proc passes on its way
 through the kernel: the spawn handlers, before the cap check (the native
 `sys_thread_spawn_handler` and the vivarium clone thread arm), and
 `thread_exit_self` / `exits_code`, at entry. A live reaper is what keeps the Proc
 ALIVE through the free -- a Proc goes ZOMBIE only once no Thread of it is live --
-so no `wait_pid` can reach the same Threads. Because every exit reaps first, the
-retired-but-allocated set per Proc is bounded by the Threads between their own
-reap and their commit plus the ones still switching away at the last reap: about
-twice the CPU count. A dying group therefore reclaims itself as it goes, and its
-zombie holds only its last Thread and whatever was still switching away when that
-Thread passed.
+so no `wait_pid` can reach the same Threads, and `wait_pid` extincts if a
+zombie's retired list holds a claimed Thread.
+
+**The bound** on the retired-but-allocated set rests on two premises. Every exit
+reaps first. And the stretch from a Thread's reap to its settle never sleeps and
+is never switched out involuntarily: up to the commit it is a syscall body
+(`in_syscall`) or an IRQ-masked exit path, and after it the tail is EXITING,
+which `preempt_check_irq` refuses to preempt (XT-3b audit F2; task #20, below).
+So each CPU holds at most one Thread in that stretch, and at most one per CPU has
+settled since the last claim: about twice the CPU count per Proc. Two residues
+stay within `PROC_THREAD_MAX`. A dying group whose Threads exit together leaves
+its last stragglers to `wait_pid`, so its zombie holds its last Thread and
+whatever retired after the last claim. And a Proc whose remaining Threads never
+spawn or exit again keeps that small set, about one kernel stack per CPU, until
+one does. The never-sleeps premise is [[seam-exiting-tails-never-sleep]].
+
+**The EXITING preempt gate** (task #20, a hole that predates XT-3b). A switch of
+an EXITING thread is its last, since `sched()` never re-enqueues EXITING, so an
+involuntary one drops the rest of its tail: the clear-child-tid wake and, for the
+last Thread out, the /srv, /cap and weft cleanup, which nothing repeats. The
+`userland_enter` die-check runs outside a syscall with IRQs on, so a timer tick
+there could do exactly that. `preempt_check_irq` now returns early for an EXITING
+thread, leaving `need_resched` pending for the thread's own `sched()`
+([[sub-kernel-sched]]).
 
 **wait_pid** takes `zombie->exited` whole in the hold that unlinks the zombie and
 frees it after the zombie's live list, spinning each `on_cpu` out.
@@ -649,10 +679,12 @@ running". A Thread that exits just before an exec is retired but may still be in
 its tail, storing its clear_child_tid word through the OLD translation -- and a
 fault there resolves against `p->as`, which the swap replaces. `proc_exec_replace`
 therefore calls `proc_drain_retired` before the swap and the unref of the old
-space: rounds of the settled-only reap, yielding between them, until `p->exited`
-is empty. The execer is the Proc's only live Thread, so nothing new can retire
-meanwhile (the drain asserts it); the swap's critical section re-checks that the
-list is still empty.
+space: the same claim and commit rounds, yielding while a tail is still switching
+away, until `p->exited` is empty. The execer is the Proc's only live Thread, so
+nothing new can retire meanwhile; the drain asserts it with
+`proc_count_live_peers_locked`, the predicate `proc_exec_alone` and the swap
+use, so the three cannot drift apart (audit F3). The swap's critical section
+re-checks that the list is still empty.
 
 **The spawner's last look.** Once `ready()` publishes the new Thread it can run,
 exit, retire and be freed by a peer, so both spawn handlers read the tid before
@@ -662,8 +694,10 @@ safe only while a live Proc's Threads were never freed).
 Witnesses: `proc.thread_reap_churn` (1,200 spawn/exit cycles in a non-exempt Proc:
 no cap refusal, frees while the Proc lives, a bounded retired list, monotonic
 `proc_cpu_ns`, the focus cleared), `proc.thread_reap_inflight` (a retired Thread
-with `on_cpu` held survives the reap and holds up the drain), and
-`proc.thread_reap_concurrent` (three peers spawning, reaping and exiting at once);
+with `on_cpu` held survives the reap and holds up the drain),
+`proc.thread_reap_gauges` (both gauges read between the claim and the commit),
+`proc.thread_reap_concurrent` (three peers spawning, reaping and exiting at once)
+and `scheduler.preempt_gate_defers_while_exiting` (the gate);
 at EL0, `/thread-torture` -- joey's boot rung ([[sub-stratum-boot]]) and the
 `ls-ci.exp` user leg -- spawns and joins 1,553 threads in one Proc and reads its
 live count back as 1.

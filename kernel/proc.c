@@ -1240,100 +1240,130 @@ static void proc_exited_unlink_locked(struct Proc *p, struct Thread *t) {
     t->prev_in_proc = NULL;
 }
 
-// Detach every SETTLED retired Thread (its switch away done: on_cpu clear)
-// into a private chain through next_in_proc. The detach IS the claim -- under
-// the lock, so two reapers never take the same Thread (thread_reap.tla
-// BUGGY_CLAIM_UNLOCKED) -- and each run_ns is folded in the same hold, so
-// proc_cpu_ns never dips. An EXITING Thread is never re-dispatched, so on_cpu
-// once clear stays clear: the ACQUIRE load reading false means the switch
+// Retired Threads one reap round claims. It sizes the stack array that holds
+// their kstack depths across the lock-dropped scan, and bounds the fold and
+// free work of a round.
+#define REAP_ROUND 16u
+
+// Claim up to REAP_ROUND SETTLED retired Threads (the switch away done: on_cpu
+// clear) into v. The claim is under the lock, so two reapers never take the
+// same Thread (thread_reap.tla BUGGY_CLAIM_UNLOCKED). A claimed Thread stays on
+// p->exited, still summed by proc_cpu_ns and scanned by proc_kstack_peak,
+// until proc_commit_reaped folds and unlinks it in one hold, so neither gauge
+// dips across a reap. An EXITING Thread is never re-dispatched, so on_cpu once
+// clear stays clear: the ACQUIRE load reading false means the switch
 // completed, and a stale true only defers the Thread to a later reap.
-// `alone`: the caller asserts it is p's only live Thread (the exec drain).
-// *more: whether a retired Thread is left (still switching away).
-static struct Thread *proc_detach_settled_retired(struct Proc *p, bool alone,
-                                                  bool *more) {
-    struct Thread *chain = NULL;
+// `alone`: the caller asserts it is p's only live Thread (the exec drain), by
+// the predicate proc_exec_alone and the swap re-check use. *more: whether a
+// retired Thread was left -- still switching away, claimed by another reaper,
+// or past the round.
+static unsigned proc_claim_settled_retired(struct Proc *p, struct Thread **v,
+                                           bool alone, bool *more) {
+    unsigned n    = 0;
+    bool     left = false;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    if (alone && p->thread_count != 1) {
+    if (alone && proc_count_live_peers_locked(p, current_thread()) != 0) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         extinction("proc_drain_retired: a live peer exists");
     }
-    struct Thread *t = p->exited;
-    while (t) {
-        struct Thread *next = t->next_in_proc;
+    for (struct Thread *t = p->exited; t; t = t->next_in_proc) {
         if (!t->retired || t->state != THREAD_EXITING) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);
-            extinction("proc_detach_settled_retired: a non-retired Thread on p->exited");
+            extinction("proc_claim_settled_retired: a non-retired Thread on p->exited");
         }
-        if (!__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-            proc_exited_unlink_locked(p, t);
-            p->reaped_run_ns += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
-            t->next_in_proc = chain;
-            chain = t;
+        if (t->reap_claimed || n == REAP_ROUND ||
+            __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+            left = true;
+            continue;
         }
-        t = next;
+        t->reap_claimed = true;
+        v[n++] = t;
     }
-    if (more) *more = (p->exited != NULL);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
-    return chain;
+    if (more) *more = left;
+    return n;
 }
 
-// Free a detached chain with the lock dropped. The kstack scan runs here, not
-// under the lock -- its cost is inverted (a shallow stack costs the most, ARCH
-// 8.12 audit F2) -- and only the fold of the deepest takes the lock again.
-static void proc_free_retired_chain(struct Proc *p, struct Thread *chain) {
-    if (!chain) return;
-    u32 peak = 0;
-    int peak_tid = 0;
-    for (struct Thread *t = chain; t; t = t->next_in_proc) {
-        u32 used = thread_kstack_used(t, NULL);
-        if (used > peak) { peak = used; peak_tid = t->tid; }
-    }
-    if (peak) {
-        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-        if (peak > p->reaped_kstack_peak) {
-            p->reaped_kstack_peak = peak;
-            p->reaped_kstack_tid  = peak_tid;
+// Fold what the n claimed Threads leave behind into p's totals and unlink
+// them, in one hold, then free them with the lock dropped. Their kstack depths
+// are measured first, lock-free -- the scan's cost is inverted (a shallow
+// stack costs the most, ARCH 8.12 audit F2) -- which is safe because a claimed
+// Thread is settled and only its claimant frees it.
+static void proc_commit_reaped(struct Proc *p, struct Thread **v, unsigned n) {
+    if (n == 0) return;
+    u32 used[REAP_ROUND];
+    for (unsigned i = 0; i < n; i++) used[i] = thread_kstack_used(v[i], NULL);
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    for (unsigned i = 0; i < n; i++) {
+        struct Thread *t = v[i];
+        p->reaped_run_ns += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+        if (used[i] > p->reaped_kstack_peak) {
+            p->reaped_kstack_peak = used[i];
+            p->reaped_kstack_tid  = t->tid;
         }
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_exited_unlink_locked(p, t);
     }
-    while (chain) {
-        struct Thread *t = chain;
-        chain = t->next_in_proc;
-        t->next_in_proc = NULL;
-        thread_free_retired(t);
-    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    for (unsigned i = 0; i < n; i++) thread_free_retired(v[i]);
 }
 
 void proc_reap_retired(struct Proc *p) {
-    if (!p || p->magic != PROC_MAGIC) return;
-    if (!__atomic_load_n(&p->exited, __ATOMIC_RELAXED)) return;   // nothing retired
-    proc_free_retired_chain(p, proc_detach_settled_retired(p, false, NULL));
+    if (!p || p->magic != PROC_MAGIC) extinction("proc_reap_retired: bad Proc");
+    struct Thread *v[REAP_ROUND];
+    unsigned n;
+    do {
+        // A hint: a Thread that retires after this read is a later reap's.
+        if (!__atomic_load_n(&p->exited, __ATOMIC_RELAXED)) return;
+        n = proc_claim_settled_retired(p, v, false, NULL);
+        proc_commit_reaped(p, v, n);
+    } while (n == REAP_ROUND);
 }
 
 void proc_drain_retired(struct Proc *p) {
-    if (!p || p->magic != PROC_MAGIC) return;
-    // Settled-only rounds rather than one take-all: the run_ns fold stays in
-    // the detaching hold (a Thread still switching away has not folded its
-    // last slice yet). It ends: the caller being alone, nothing new retires,
-    // and every retired Thread is in a short non-preemptible, non-sleeping
-    // tail on some CPU.
+    if (!p || p->magic != PROC_MAGIC) extinction("proc_drain_retired: bad Proc");
+    // Settled-only rounds rather than one take-all: a Thread still switching
+    // away has not folded its last slice into run_ns. It ends: the caller is
+    // alone, so nothing new retires, and every retired tail settles -- it is
+    // short, never sleeps, and is never preempted (preempt_check_irq refuses
+    // an EXITING thread).
+    struct Thread *v[REAP_ROUND];
     for (;;) {
         bool more = false;
-        proc_free_retired_chain(p, proc_detach_settled_retired(p, true, &more));
-        if (!more) return;
-        __asm__ __volatile__("yield" ::: "memory");
+        unsigned n = proc_claim_settled_retired(p, v, true, &more);
+        if (n == 0 && !more) return;
+        proc_commit_reaped(p, v, n);
+        if (n == 0) __asm__ __volatile__("yield" ::: "memory");
     }
 }
 
-// Test hooks (the *_for_test convention; deliberately absent from the header).
-// Retire a Thread the test built and never ran, as thread_exit_self's commit
-// does, so a test can hold its on_cpu set and stand in for a switch in flight.
+#ifdef KERNEL_TESTS
+// Test hooks (the *_for_test convention; deliberately absent from the header),
+// compiled out of production. Retire a Thread the test built and never ran,
+// as thread_exit_self's commit does, so a test can hold its on_cpu set and
+// stand in for a switch in flight.
 void proc_retire_for_test(struct Proc *p, struct Thread *t);
 void proc_retire_for_test(struct Proc *p, struct Thread *t) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     t->state = THREAD_EXITING;
     proc_retire_locked(p, t);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// The two halves of one reap round, so a test can read the gauges between the
+// claim and the commit. One test at a time drives them.
+static struct Thread *g_reap_test_claimed[REAP_ROUND];
+static unsigned       g_reap_test_n;
+
+unsigned proc_reap_claim_for_test(struct Proc *p);
+unsigned proc_reap_claim_for_test(struct Proc *p) {
+    g_reap_test_n = proc_claim_settled_retired(p, g_reap_test_claimed, false, NULL);
+    return g_reap_test_n;
+}
+
+void proc_reap_commit_for_test(struct Proc *p);
+void proc_reap_commit_for_test(struct Proc *p) {
+    proc_commit_reaped(p, g_reap_test_claimed, g_reap_test_n);
+    g_reap_test_n = 0;
 }
 
 unsigned proc_retired_count_for_test(struct Proc *p);
@@ -1344,6 +1374,7 @@ unsigned proc_retired_count_for_test(struct Proc *p) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return n;
 }
+#endif
 
 // Charge one SQPOLL kthread against the creating Proc's thread budget.
 // Check-and-increment under one lock hold (unlike the thread path's
@@ -6229,20 +6260,26 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
                     extinction("wait_pid: zombie thread not in EXITING state");
                 }
             }
+            // A claim is held only by a live reaper, and a zombie has none.
             for (struct Thread *ct = zombie->exited; ct; ct = ct->next_in_proc) {
                 if (ct->state != THREAD_EXITING || !ct->retired) {
                     spin_unlock_irqrestore(&g_proc_table_lock, s);
                     extinction("wait_pid: zombie's retired list holds a live thread");
+                }
+                if (ct->reap_claimed) {
+                    spin_unlock_irqrestore(&g_proc_table_lock, s);
+                    extinction("wait_pid: zombie's retired list holds a claimed thread");
                 }
             }
 
             proc_unlink_child(p, zombie);
 
             // XT-3b: and the retired Threads no live peer reached -- the ones
-            // still switching away when the last Thread passed its reap point.
-            // Taken whole in this hold: the zombie is unreachable from here,
-            // so no reaper can detach them (none can run -- no live Thread is
-            // left), and the spin below waits out any switch still in flight
+            // that retired, or were still switching away, after the last
+            // reaper's claim. Taken whole in this hold: the zombie is
+            // unreachable from here, so no reaper can claim them (none can
+            // run -- no live Thread is left), and the spin below waits out any
+            // switch still in flight
             // (thread_reap.tla WaitPid / WaitFree; BUGGY_WAITPID_SKIPS_RETIRED
             // frees the Proc's space under a tail that is still storing).
             struct Thread *retired = zombie->exited;

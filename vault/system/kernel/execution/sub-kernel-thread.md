@@ -331,8 +331,9 @@ is the running proof that the window is real.
 - `thread_switch`'s off-tree half of the contract is unenforced (above).
 - (XT-3b) `thread_free_retired` cannot check that a retired Thread is not still
   the HEAD of `Proc.exited` without the Proc's lock; it checks the link fields,
-  which catch a mid-list Thread. The reapers detach under the lock first, which
-  is the real guarantee ([[spec-thread-reap]] `OneFreerPerThread`).
+  which catch a mid-list Thread. The freers claim under the lock and unlink in
+  the commit's hold first, which is the real guarantee ([[spec-thread-reap]]
+  `OneFreerPerThread`).
 
 ## Caveats
 
@@ -371,8 +372,11 @@ kstack until then. Now a Thread that exits while a peer lives on RETIRES
 `Proc.exited`, and one of three freers takes it once its switch away has settled:
 a live peer's `proc_reap_retired` at that peer's spawn or exit, exec's
 `proc_drain_retired`, or `wait_pid` with the zombie ([[sub-kernel-death]] has the
-protocol; [[spec-thread-reap]] the model). Each detaches under the table lock and
-frees through `thread_free_retired`. The `on_cpu` protocol above is what makes the
+protocol; [[spec-thread-reap]] the model). A live peer and exec claim under the
+table lock (`Thread.reap_claimed`, set once, never cleared; the claimed Thread
+stays on `Proc.exited` until one hold folds its totals and unlinks it), and
+`wait_pid` takes the zombie's lists whole; all three free through
+`thread_free_retired`. The `on_cpu` protocol above is what makes the
 early free sound: an EXITING Thread is never dispatched again, so once its `on_cpu`
 reads clear nothing can touch its kstack or ctx, which is the same fact
 `wait_pid`'s reap always relied on.
@@ -383,7 +387,12 @@ which use `thread_free`: they live in kproc and never retire.
 `kernel/test/test_thread_spawn.c` (claimed here) holds the spawn/exit/reap
 witnesses: `thread.create_user_ctx_layout`, `thread.exit_self_*`,
 `proc.multi_thread_reap`, `proc.wait_pid_concurrent_waiters_both_reap`, and the
-XT-3b trio `proc.thread_reap_churn`, `proc.thread_reap_inflight`,
-`proc.thread_reap_concurrent`. Two of the older tests waited for their peers by
-walking `p->threads` lock-free; with peers now freed while the Proc lives, such a
-walk can stand on a freed node, so they poll the live `thread_count` instead.
+XT-3b set `proc.thread_reap_churn`, `proc.thread_reap_inflight`,
+`proc.thread_reap_gauges`, `proc.thread_reap_concurrent`. Two of the older tests
+waited for their peers by walking `p->threads` lock-free; with peers now freed
+while the Proc lives, such a walk can stand on a freed node, so they poll the
+live `thread_count` instead, through `TEST_YIELD_UNTIL_PROC`, so a retire that
+never comes fails the test instead of hanging the suite (the first sabotage run
+of the audit hung there). The reap test hooks (`proc_retire_for_test`, the
+split `proc_reap_claim_for_test` / `proc_reap_commit_for_test`,
+`proc_retired_count_for_test`) compile only under `KERNEL_TESTS`.

@@ -7,7 +7,9 @@
 # its verdict -- the exit status plus the NAME of the invariant that fired.
 # Each buggy cfg is built to violate exactly one named invariant.
 #
-# Counts measured 2026-10-08 on the module as committed at XT-3b.
+# Counts measured 2026-10-08 on the module as committed at the XT-3b audit
+# close (round 1 split the reap into a claim and a commit: 668 -> 808 and
+# 4532 -> 5496).
 #
 # What this script CANNOT see, said so the green reads no larger: the model
 # abstracts a Thread's memory to one "freed" state, so it proves WHO may free and
@@ -23,12 +25,13 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="thread_reap:668
-thread_reap_4:4532"
+CLEAN="thread_reap:808
+thread_reap_4:5496"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="thread_reap_buggy_no_oncpu:NoFreeInFlight
 thread_reap_buggy_unlocked_claim:OneFreerPerThread
+thread_reap_buggy_unlink_at_claim:EveryThreadCounted
 thread_reap_buggy_exec_no_drain:TailsOnLiveSpace
 thread_reap_buggy_waitpid_skips_retired:TailsOnLiveSpace
 thread_reap_buggy_tid_after_ready:NoTidReadAfterFree"

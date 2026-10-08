@@ -318,14 +318,17 @@ void test_sys_spawn_killed_child_delivers_pipe_eof_before_reap(void) {
 // exits()'s live_peers-gated close window -- NOT at reap.
 //
 // /thread-probe spawns worker Threads and joins each via the
-// clear-child-tid torpor handshake; a worker's SYS_THREAD_EXIT leaves it
-// THREAD_EXITING but UNREAPED (thread_count decrements only at reap), so
-// main's t_exits() arrives with thread_count > 1 and live_peers == 0 --
-// the exact shape the retired thread_count==1 gate skipped (round-2 F2):
-// pre-fix the close deferred to reap, so the drain-before-reap parent
-// below never saw EOF until it reaped. Post-fix exits()'s window closes
-// the table pre-ZOMBIE. (The killed_child test above exercises the
-// thread_exit_self site; this one pins the exits() site.)
+// clear-child-tid torpor handshake. When this test was written a joined
+// worker stayed on p->threads, THREAD_EXITING but unreaped, so main's
+// t_exits() arrived with thread_count > 1 and live_peers == 0 -- the shape
+// the retired thread_count==1 gate skipped (round-2 F2): the close deferred
+// to reap, so the drain-before-reap parent below never saw EOF until it
+// reaped. Since XT-3b a worker retires off p->threads in the hold that
+// commits it EXITING, so thread_count is 1 by the join and the two gates
+// agree here: the test still pins the EOF-before-reap ordering at the
+// exits() site, but no longer tells the live_peers gate from a
+// thread_count one. (The killed_child test above exercises the
+// thread_exit_self site.)
 //
 // Shape: pipe B's write end is the child's fd 1 (we close our copy after
 // spawn, so the child's is the LAST write end); child fd 0 gets pipe A's

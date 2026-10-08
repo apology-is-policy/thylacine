@@ -2718,6 +2718,16 @@ void preempt_check_irq(void) {
     // machinery can still switch when the marker is absent.
     if (t->in_syscall) return;
 
+    // An EXITING thread is never switched out involuntarily. Its own sched()
+    // is a few instructions away, and a switch taken here would be its last:
+    // sched() never re-enqueues EXITING, so the rest of its tail -- the
+    // clear_child_tid wake and, for the last thread out, the /srv, /cap and
+    // weft cleanup -- would never run, and nothing repeats that cleanup. The
+    // userland_enter die-check runs outside a syscall with IRQs ON, so the
+    // window is live there. Leave need_resched pending, as the gates above
+    // do; that sched() clears it at entry.
+    if (t->state == THREAD_EXITING) return;
+
     // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-
     // trigger. The cross-CPU write now exists for real (#866 F1: ready_on's
     // cross-CPU placement sets this CPU's flag so a busy target reschedules and

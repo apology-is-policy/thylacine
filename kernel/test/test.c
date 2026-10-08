@@ -322,6 +322,7 @@ void test_sched_wake_preempts_policy(void);
 void test_sched_wake_preempt_same_cpu(void);
 void test_spinlock_preempt_count_balance(void);
 void test_sched_preempt_gate_defers_while_locked(void);
+void test_sched_preempt_gate_defers_while_exiting(void);
 void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_death_interrupts_sleep(void);
@@ -851,6 +852,7 @@ void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
 void test_proc_thread_reap_churn(void);
 void test_proc_thread_reap_inflight(void);
+void test_proc_thread_reap_gauges(void);
 void test_proc_thread_reap_concurrent(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
@@ -2320,6 +2322,8 @@ struct test_case g_tests[] = {
                                        test_spinlock_preempt_count_balance, false, NULL },
     { "scheduler.preempt_gate_defers_while_locked",
                                        test_sched_preempt_gate_defers_while_locked, false, NULL },
+    { "scheduler.preempt_gate_defers_while_exiting",
+                                       test_sched_preempt_gate_defers_while_exiting, false, NULL },
     { "rendez.sleep_immediate_cond_true",
                                        test_rendez_sleep_immediate_cond_true,
                                                                            false, NULL },
@@ -3052,6 +3056,7 @@ struct test_case g_tests[] = {
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
     { "proc.thread_reap_churn",                test_proc_thread_reap_churn,                false, NULL },
     { "proc.thread_reap_inflight",             test_proc_thread_reap_inflight,             false, NULL },
+    { "proc.thread_reap_gauges",               test_proc_thread_reap_gauges,               false, NULL },
     { "proc.thread_reap_concurrent",           test_proc_thread_reap_concurrent,           false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },

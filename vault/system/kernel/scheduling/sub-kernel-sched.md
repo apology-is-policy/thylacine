@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -122,6 +122,21 @@ decrements after the release store. `preempt_check_irq` returns
 the once-set cross-CPU placement kick, so consuming it would lose the
 placement; the deferred preempt fires at the first IRQ-return after the
 hold drops, within a tick.
+
+**The EXITING gate** (2026-10-08, XT-3b audit F2, task #20) is the third early
+return, after the count and the in-syscall marker: `preempt_check_irq` never
+switches out a thread whose state is EXITING, and leaves `need_resched` pending
+as the other two do. An EXITING thread's own `sched()` is a few instructions
+away, and a switch taken before it would be the thread's last, because `sched()`
+never re-enqueues EXITING: the rest of its tail -- the clear-child-tid wake and,
+for the last thread out, the /srv, /cap and weft cleanup -- would never run, and
+nothing repeats it. The window was live at the `userland_enter` die-check, which
+runs outside a syscall with IRQs on. The gate also keeps a retired thread's
+reap-to-settle stretch unpreempted, the premise of the retired-list bound
+([[sub-kernel-death]]). `scheduler.preempt_gate_defers_while_exiting` arms the
+flag on an EXITING thread and checks it is still pending three ticks later;
+with the gate removed the thread is switched out for good and the runner's
+bounded wait fails.
 
 `sched_preempt_point()` WAS the count's other consumer, and it is gone. For
 part of one day (2026-09-22) it served poll's noise loop ([[sub-kernel-poll]]):
@@ -339,7 +354,8 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
   extinctions, and both fired during bring-up.
 - **`preempt_check_irq` must not consume `need_resched` when it defers.**
   The flag can be the once-set cross-CPU placement kick; consuming it
-  loses the placed thread until the next tick.
+  loses the placed thread until the next tick. This holds for all three
+  gates: the count, the in-syscall marker and the EXITING state.
 - **The park-commit re-check (#363).** `sched_idle_park` loops
   `while (cpu_has_surplus_for_kick(cs)) sched();` before arming and
   parking. Deleting it re-opens a park of up to the tickless backstop

@@ -789,22 +789,24 @@ enum {
     //   (no args)
     //
     // In order (kernel/proc.h thread_exit_self has the detail):
-    //   1. Mark self THREAD_EXITING under g_proc_table_lock. If this is the
+    //   1. Free the Proc's retired Threads whose switch away has settled
+    //      (proc_reap_retired; XT-3b).
+    //   2. Mark self THREAD_EXITING under g_proc_table_lock. If this is the
     //      LAST live thread in the Proc, also transition the Proc to ZOMBIE
     //      with exit_status = 0 + wake parent's child_waiters (mirrors
     //      exits() with status 0); otherwise the thread RETIRES and stops
     //      counting against PROC_THREAD_MAX.
-    //   2. If clear_child_tid != 0 on this Thread (set via
+    //   3. If clear_child_tid != 0 on this Thread (set via
     //      SYS_SET_TID_ADDRESS): uaccess_store_u32(0) at that user-VA +
     //      torpor_wake(UINT32_MAX) on the same address. Best-effort —
     //      a failed store (page unmapped) skips the wake but does not
     //      extinct.
-    //   3. yield via sched(); never returns.
+    //   4. yield via sched(); never returns.
     //
     // After-exit reaping (XT-3b): a retired Thread's descriptor + kstack
     // are freed while the Proc lives on, by a live peer at its next spawn
-    // or exit once the switch away has completed; the last ones go with
-    // the zombie at wait_pid. So PROC_THREAD_MAX bounds the threads alive
+    // or exit once the switch away has completed, or by exec's drain; the
+    // last ones go with the zombie at wait_pid. So PROC_THREAD_MAX bounds the threads alive
     // at once, and a pool that retires and respawns workers can run
     // indefinitely.
     //

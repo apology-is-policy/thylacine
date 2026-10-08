@@ -142,8 +142,7 @@ static void mte_parent_entry(void *arg) {
     // so the live count falling back to 1 (this thread) says exactly that.
     // Not a walk of p->threads: lock-free, a peer's reap may free the node
     // the walk stands on.
-    while (__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) != 1)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) == 1);
 
     // Self-check: Proc is still ALIVE — neither peer's thread_exit_self
     // counted as last live thread (main is still alive).
@@ -234,8 +233,7 @@ static void mtr_parent_entry(void *arg) {
     }
 
     // As in mte_parent_entry: the live count, never a lock-free list walk.
-    while (__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) != 1)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) == 1);
 
     exits("ok");
 }
@@ -483,7 +481,7 @@ void test_proc_thread_reap_churn(void) {
     TEST_ASSERT(__atomic_load_n(&g_trc_retired_max, __ATOMIC_ACQUIRE) <= 4u,
         "the retired list stays bounded (I-32: retired-but-allocated per Proc)");
     TEST_EXPECT_EQ(__atomic_load_n(&g_trc_cpu_dipped, __ATOMIC_ACQUIRE), 0u,
-        "proc_cpu_ns never dips across a reap (reaped_run_ns folds in the detach)");
+        "proc_cpu_ns never dips across a reap (the commit folds and unlinks in one hold)");
     TEST_EXPECT_EQ(__atomic_load_n(&g_trc_focus_kept, __ATOMIC_ACQUIRE), 0u,
         "a debug focus on a Thread is cleared when it retires (no recycled-slot match)");
     TEST_EXPECT_EQ(thread_total_created() - created0, (u64)TRC_SPAWNS + 1u,
@@ -589,6 +587,91 @@ void test_proc_thread_reap_inflight(void) {
         "the test Proc's thread, the stand-in and the helper created");
     TEST_EXPECT_EQ(thread_total_destroyed() - destroyed0, 3ull,
         "all three freed by the time wait_pid returns");
+}
+
+// ---------------------------------------------------------------------------
+// proc.thread_reap_gauges
+//
+// A claimed Thread is still counted until the commit folds it: proc_cpu_ns and
+// proc_kstack_peak never read less after a step of a reap than before it
+// (audit F1). The test retires a settled Thread whose run time and stack depth
+// it sets -- the deepest stack in the Proc -- and reads both gauges before the
+// claim, between the claim and the commit, and after the commit.
+//
+// FAILS PRE-FIX: the old reap took the Thread off p->exited in the claiming
+// hold and folded its stack depth in a later one, so the reading between the
+// two lost it.
+// ---------------------------------------------------------------------------
+
+unsigned proc_reap_claim_for_test(struct Proc *p);
+void     proc_reap_commit_for_test(struct Proc *p);
+
+#define TRG_RUN_NS 1000000000ull   // a second: more than the test Proc runs
+
+static volatile u32 g_trg_claimed;
+static volatile u32 g_trg_freed;
+static volatile u64 g_trg_cpu[3];
+static volatile u32 g_trg_peak[3];
+
+static void trg_never_runs(void *arg) {
+    (void)arg;
+    extinction("trg_never_runs: a never-readied Thread ran");
+}
+
+static void trg_read(struct Proc *p, unsigned at) {
+    irq_state_t s = proc_table_lock_acquire();
+    g_trg_cpu[at]  = proc_cpu_ns(p);
+    g_trg_peak[at] = proc_kstack_peak(p, NULL, NULL);
+    proc_table_lock_release(s);
+}
+
+static void trg_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    struct Thread *f = thread_create_with_arg(p, trg_never_runs, NULL);
+    if (!f) extinction("trg: thread_create_with_arg failed");
+    // The deepest a stack can read: its first usable word written, which no
+    // running thread reaches without faulting on the guard below it.
+    *(volatile u64 *)((char *)f->kstack_base + THREAD_KSTACK_GUARD_SIZE) = 0;
+    __atomic_store_n(&f->run_ns, TRG_RUN_NS, __ATOMIC_RELAXED);
+    proc_retire_for_test(p, f);           // never ran, so on_cpu is clear: settled
+
+    u64 d0 = thread_total_destroyed();
+    trg_read(p, 0);
+    __atomic_store_n(&g_trg_claimed, proc_reap_claim_for_test(p), __ATOMIC_RELEASE);
+    trg_read(p, 1);
+    proc_reap_commit_for_test(p);
+    trg_read(p, 2);
+    __atomic_store_n(&g_trg_freed, (u32)(thread_total_destroyed() - d0), __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_proc_thread_reap_gauges(void) {
+    __atomic_store_n(&g_trg_claimed, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trg_freed, 0u, __ATOMIC_RELEASE);
+
+    int pid = rfork(RFPROC, trg_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the test Proc");
+    TEST_EXPECT_EQ(status, 0, "the test Proc exited cleanly");
+
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trg_claimed, __ATOMIC_ACQUIRE), 1u,
+        "the claim took the one settled retired Thread");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trg_freed, __ATOMIC_ACQUIRE), 1u,
+        "the commit freed it");
+    TEST_EXPECT_EQ(g_trg_peak[0], (u32)THREAD_KSTACK_SIZE,
+        "the retired Thread holds the Proc's deepest stack before the reap");
+    TEST_EXPECT_EQ(g_trg_peak[1], (u32)THREAD_KSTACK_SIZE,
+        "proc_kstack_peak still counts a claimed Thread (audit F1)");
+    TEST_EXPECT_EQ(g_trg_peak[2], (u32)THREAD_KSTACK_SIZE,
+        "the commit folded its depth into the reaped peak");
+    TEST_ASSERT(g_trg_cpu[0] >= TRG_RUN_NS,
+        "the retired Thread's run time is in proc_cpu_ns before the reap");
+    TEST_ASSERT(g_trg_cpu[1] >= g_trg_cpu[0],
+        "proc_cpu_ns does not dip between the claim and the commit");
+    TEST_ASSERT(g_trg_cpu[2] >= g_trg_cpu[1],
+        "proc_cpu_ns does not dip across the commit");
 }
 
 // ---------------------------------------------------------------------------

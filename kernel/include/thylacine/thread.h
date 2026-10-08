@@ -375,6 +375,11 @@ struct Thread {
     // g_proc_table_lock hold that commits it EXITING; never cleared. Fits the
     // same padding.
     bool               retired;
+    // XT-3b: a reaper has claimed this retired Thread (under g_proc_table_lock)
+    // and will fold its totals, unlink it and free it; other reapers skip it.
+    // It stays on Proc.exited until that commit, so the per-Proc totals keep
+    // counting it. Set once; never cleared. Fits the same padding.
+    bool               reap_claimed;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
     // this Thread's OWN debugger park rendez. A thread observing a debugger stop

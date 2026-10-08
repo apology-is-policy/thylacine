@@ -662,14 +662,17 @@ Spoors it clunks with the same Tclunk the `handle_table_free` beside it sends.
   re-reads under the lock).
 - `reaped_run_ns` -- the `run_ns` of the Threads already freed, so `proc_cpu_ns`
   (which now sums `threads`, `exited` and this) still spans the Proc's whole life.
-  Folded in the SAME hold that detaches each Thread, so a reader under the lock
-  never sees the total dip -- `/ctl/procs` diffs it for %CPU, and a dip would read
-  as a wrap.
 - `reaped_kstack_peak` / `reaped_kstack_tid` -- the deepest kernel stack a freed
   Thread reached; `proc_kstack_peak` starts from it and then scans both lists.
-  Folded after the scan, outside the detaching hold (the scan's cost is inverted,
-  ARCH 8.12 audit F2), so the peak is a floor for an instant, which its contract
-  already says it is.
+
+  Both are folded in the hold that unlinks the Thread from `exited`
+  (`proc_commit_reaped`); a claimed Thread stays on `exited` until then, and its
+  depth is measured beforehand with the lock dropped (the scan's cost is
+  inverted, ARCH 8.12 audit F2). So a reader under the lock sees every Thread
+  either on a list or in the totals, and neither figure dips -- `/ctl/procs`
+  diffs `cpu_ns` for %CPU, where a dip would read as a wrap. (The first shape
+  folded the depth after the unlink, in a later hold, and let the peak dip for an
+  instant: XT-3b audit F1, `proc.thread_reap_gauges`.)
 
 `proc_free` now also refuses a Proc whose `exited` is non-NULL.
 `proc_exec_replace` drains `exited` (`proc_drain_retired`) before the swap, and

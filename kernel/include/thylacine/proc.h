@@ -976,8 +976,8 @@ struct Proc {
     struct Thread     *exited;
     // What the freed Threads leave behind for the per-Proc totals that span
     // its life: their run_ns (proc_cpu_ns) and the deepest kernel stack any
-    // of them reached, with its tid (proc_kstack_peak). Folded under
-    // g_proc_table_lock when a reaper frees them.
+    // of them reached, with its tid (proc_kstack_peak). Folded in the
+    // g_proc_table_lock hold that unlinks them from `exited`.
     u64                reaped_run_ns;
     u32                reaped_kstack_peak;
     int                reaped_kstack_tid;
@@ -1560,15 +1560,27 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 bool proc_thread_cap_ok(struct Proc *p);
 
 // proc_reap_retired -- free p's retired Threads whose switch away has settled
-//   (XT-3b; specs/thread_reap.tla Reap / ReapFree). The caller is a LIVE Thread
+//   (XT-3b; specs/thread_reap.tla Claim / Commit). The caller is a LIVE Thread
 //   of p holding no lock: the spawn handlers call it before the cap check, and
 //   thread_exit_self / exits_code at entry. A live caller is what keeps p
 //   ALIVE through the free, so no wait_pid can reach the same Threads; the
-//   detach under g_proc_table_lock is what keeps two concurrent reapers
-//   disjoint. A Thread still switching away stays for a later reap point.
-//   Bound, the I-32 argument for the retired list: every exit reaps first and
-//   the Threads between their reap and their commit are on CPUs, so at most
-//   about twice the CPU count are ever retired-but-allocated per Proc.
+//   claim under g_proc_table_lock keeps two concurrent reapers disjoint. A
+//   claimed Thread stays on p->exited until one hold folds its run time and
+//   stack depth into p's totals and unlinks it, so proc_cpu_ns and
+//   proc_kstack_peak never dip. Rounds repeat until one comes back short:
+//   every Thread settled at the call is taken unless another reaper holds it.
+//   A Thread still switching away stays for a later reap point.
+//   Bound, the I-32 argument for the retired list: every exit reaps first,
+//   and the stretch from a Thread's reap to its settle never sleeps and is
+//   never switched out involuntarily -- a syscall body (in_syscall) or an
+//   IRQ-masked exit path up to the commit, an EXITING tail after it
+//   (preempt_check_irq refuses EXITING). So each CPU holds at most one Thread
+//   in that stretch, at most one per CPU has settled since the last claim,
+//   and about twice the CPU count are retired-but-allocated per Proc. Two
+//   cases wait longer, both within PROC_THREAD_MAX: a dying Proc whose
+//   Threads exit together leaves the last stragglers to wait_pid, and a Proc
+//   whose remaining Threads never spawn or exit again keeps that small set
+//   until one does.
 void proc_reap_retired(struct Proc *p);
 
 // proc_drain_retired -- free EVERY retired Thread of p, spinning out the ones
