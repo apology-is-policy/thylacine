@@ -31,7 +31,8 @@ tearing it down.
 `vma_alloc(start, end, prot, burrow, offset)` mints a descriptor and takes a
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
-round 4, F18); `vma_remove` unlinks;
+round 4, F18); `vma_remove` unlinks, and extincts on a VMA its list does not
+hold (`vma_linked_in`);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain` tears the whole list down at Proc death.
 
@@ -469,8 +470,9 @@ the MAP_FIXED replace no longer refuses a COW survivor.
 Every rejection is a `NULL` or `-1` return with nothing allocated and nothing
 linked — there is no partial state to unwind. The extinctions are reserved for
 conditions that mean memory is already corrupt: a bad magic, freeing a VMA
-still in a list, inserting one already linked, or finding a corrupted entry
-mid-walk. Those are not error handling; they are the structure declaring it can
+still in a list, inserting one already linked (the sole mapping included, which
+only the list head shows), removing one the list does not hold, or finding a
+corrupted entry mid-walk. Those are not error handling; they are the structure declaring it can
 no longer be trusted.
 
 The reprotect family is the first in this file to speak errno rather than
@@ -631,7 +633,7 @@ fails. All three were sabotage-measured.
 
 ## Tests
 
-`kernel/test/test_vma.c` — six unit tests exercising this file directly:
+`kernel/test/test_vma.c` — seven unit tests exercising this file directly:
 `vma.alloc_free_smoke` (alloc/free; the `vma_total_allocated`/`_freed` counters
 advance), `vma.alloc_constraints` (the rejections — zero-length, reversed,
 unaligned, `WRITE|EXEC`, null Burrow — each return NULL),
@@ -639,9 +641,11 @@ unaligned, `WRITE|EXEC`, null Burrow — each return NULL),
 address and misses the gaps), `vma.insert_overlap_rejected` (exact and partial
 overlaps return -1; an adjacent range touching at a boundary is accepted — the
 half-open semantic), `vma.insert_sorted_invariant` (insert in mixed order, walk
-ascending), and `vma.drain_releases_all` (insert four, drain, assert
+ascending), `vma.drain_releases_all` (insert four, drain, assert
 `burrow_mapping_count` returns to baseline — the `vma_alloc` <-> `burrow_map`
-symmetry). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
+symmetry), and `vma.linked_in_tracks_the_list` (the predicate the remove guard
+asks, over a never-inserted, sole, head, interior and tail VMA, each removed
+shape, and a forged predecessor and successor). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
 reservation answers whole / part true and past / below / empty false; with the
 middle two pages detached, across the hole false and each remnant true; and
 the decommit core over the same shape -- across the hole `T_E_NOMEM`, a
@@ -748,6 +752,28 @@ refund can never exceed the charge because every FILE leaf install charges
 first and refunds itself when the leaf was already there, and no other path
 clears a FILE leaf (the fork's keep-tables clear covers COW mappings, which
 are lazy-anonymous only). Witness: `demand_page.file_pages_charge_the_holder`.
+
+## The linkage guard (2026-10-08)
+
+A second `vma_remove_in` of the same VMA used to wipe the list. The first
+remove leaves both links NULL, so the second takes the no-predecessor arm and
+writes `as->vmas = v->next`, which is NULL, and `addrspace_uncharge_vma`,
+clamp-safe, says nothing. No path reaches it today: the five call sites (the
+detach walk, the reprotect merge and its rollback, the drain, `burrow_unmap`)
+each remove once and then free. Corona found it while reading the B-2b hunks,
+and B-2b's code-alias count, whose underflow extinction would have made a double
+remove loud, left with [[chg-2026-10-08-image-holder-record]]. The remove now
+asks `vma_linked_in` first and extincts on a VMA the list does not hold, the
+posture of Linux's list hardening (`__list_del_entry_valid`), which checks that
+both neighbours point back.
+
+The links alone cannot tell the sole mapping from an unlinked VMA (both have
+two NULL links), so the predicate also asks whether the VMA is the list head.
+The insert's already-linked check had the same blind spot: inserting the sole
+mapping a second time would have been refused as an overlap with itself, and
+the caller would then have freed a VMA the head still pointed at. It now
+extincts there too. Both extinctions run only in the double-call case, which
+no suite test can survive, so the suite pins the predicate they ask.
 
 ## Referenced by
 

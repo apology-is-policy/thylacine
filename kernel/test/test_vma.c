@@ -37,6 +37,7 @@ void test_vma_insert_lookup_smoke(void);
 void test_vma_insert_overlap_rejected(void);
 void test_vma_insert_sorted_invariant(void);
 void test_vma_drain_releases_all(void);
+void test_vma_linked_in_tracks_the_list(void);
 
 // User-VA test ranges. We use bits 47:0 directly (TTBR0 user-half).
 // 0x10000000 = 256 MiB; well within any reasonable user-VA bound.
@@ -246,6 +247,66 @@ void test_vma_drain_releases_all(void) {
         "burrow mapping_count returned to baseline");
 
     p->state = 2;
+    proc_free(p);
+    burrow_unref(burrow);
+}
+
+// vma_remove_in extincts on a Vma its list does not hold, so the predicate it
+// asks must tell every linked shape from the same Vma once removed. The sole
+// mapping and a removed head look alike by their links (both NULL); only the
+// head tells them apart.
+void test_vma_linked_in_tracks_the_list(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB, false);
+    TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
+    struct AddrSpace *as = p->as;
+
+    struct Vma *v1 = vma_alloc(VA_BASE,               VA_BASE +     VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    struct Vma *v2 = vma_alloc(VA_BASE + 2 * VA_PAGE, VA_BASE + 3 * VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    struct Vma *v3 = vma_alloc(VA_BASE + 4 * VA_PAGE, VA_BASE + 5 * VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(v1 && v2 && v3, "vma_alloc failed");
+
+    TEST_ASSERT(!vma_linked_in(as, v1), "a Vma never inserted is not linked");
+    TEST_EXPECT_EQ(vma_insert(p, v1), 0, "insert v1");
+    TEST_ASSERT(vma_linked_in(as, v1), "the sole mapping, both links NULL, is linked");
+    TEST_EXPECT_EQ(vma_insert(p, v2), 0, "insert v2");
+    TEST_EXPECT_EQ(vma_insert(p, v3), 0, "insert v3");
+    TEST_ASSERT(vma_linked_in(as, v1), "the head is linked");
+    TEST_ASSERT(vma_linked_in(as, v2), "an interior mapping is linked");
+    TEST_ASSERT(vma_linked_in(as, v3), "the tail is linked");
+
+    u32 before = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+    vma_remove_in(as, v2);
+    TEST_ASSERT(!vma_linked_in(as, v2), "a removed interior mapping is not linked");
+    TEST_ASSERT(as->vmas == v1 && v1->next == v3 && v3->prev == v1,
+                "its neighbours closed over it");
+    vma_remove_in(as, v1);
+    TEST_ASSERT(!vma_linked_in(as, v1),
+                "a removed head is not linked, though its links are NULL like a sole mapping's");
+    TEST_ASSERT(as->vmas == v3 && v3->prev == NULL, "the next mapping became the head");
+    TEST_ASSERT(vma_linked_in(as, v3), "the survivor, now sole, is linked");
+    TEST_EXPECT_EQ(__atomic_load_n(&as->vma_count, __ATOMIC_RELAXED), before - 2u,
+                   "each remove uncharged once");
+
+    // Links the list does not return: a predecessor that does not point back,
+    // and a successor that does not.
+    v2->prev = v3;
+    TEST_ASSERT(!vma_linked_in(as, v2), "a predecessor that does not point at it");
+    v2->prev = NULL;
+    v3->next = v2;
+    TEST_ASSERT(!vma_linked_in(as, v3), "a successor that does not point back");
+    v3->next = NULL;
+    TEST_ASSERT(vma_linked_in(as, v3), "(control) the restored sole mapping is linked again");
+
+    vma_free(v1);
+    vma_free(v2);
+    vma_drain(p);
+    TEST_ASSERT(as->vmas == NULL, "the drain removed the survivor");
+    p->state = 2;     // PROC_STATE_ZOMBIE
     proc_free(p);
     burrow_unref(burrow);
 }

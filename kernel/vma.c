@@ -207,10 +207,23 @@ int vma_insert(struct Proc *p, struct Vma *v) {
     return vma_insert_in(p->as, proc_resource_exempt(p), v);
 }
 
+// A Vma is in as's list exactly when both of its links agree: its predecessor
+// points at it (or, for the first mapping, the list head does), and its successor
+// points back. A removed or never-inserted Vma has no links and is not the head,
+// so the links alone cannot tell the SOLE mapping from an unlinked one.
+bool vma_linked_in(const struct AddrSpace *as, const struct Vma *v) {
+    if (v->prev ? v->prev->next != v : as->vmas != v) return false;
+    return !v->next || v->next->prev == v;
+}
+
 int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (!as || !v)               extinction("vma_insert_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_insert of corrupted Vma");
-    if (v->next || v->prev)      extinction("vma_insert of already-linked Vma");
+    // The head test catches the sole mapping, whose links are both NULL: the walk
+    // below would reject it as overlapping itself, and the caller would free it
+    // with the head still pointing at it.
+    if (v->next || v->prev || as->vmas == v)
+        extinction("vma_insert of already-linked Vma");
 
     // Walk the sorted list to find:
     //   - The insertion point (last node with start < v->start).
@@ -258,6 +271,9 @@ void vma_remove(struct Proc *p, struct Vma *v) {
 void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     if (!as || !v)               extinction("vma_remove_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_remove of corrupted Vma");
+    // A second remove of the same Vma would take the no-predecessor arm and wipe
+    // the whole list head, and the clamp-safe uncharge below would hide it.
+    if (!vma_linked_in(as, v))   extinction("vma_remove of a Vma not linked in this address space");
 
     if (v->prev) v->prev->next = v->next;
     else         as->vmas      = v->next;
