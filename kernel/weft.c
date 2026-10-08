@@ -584,20 +584,30 @@ void weft_reap_init(void) {
     g_maponly_bindings = NULL;
 }
 
-void weft_reap_register(struct weft_binding *wb,
-                        const struct p9_attached *att,
-                        const struct p9_client *cl) {
-    if (!wb || !weft_kind_maponly((int)wb->kind)) return;
+// Every field the sweep reads is written here, before the link, for both a real
+// and a test registration.
+static bool weft_reap_link(struct weft_binding *wb, const struct p9_attached *att,
+                           const struct p9_client *cl, bool test_only) {
+    if (!wb || !weft_kind_maponly((int)wb->kind)) return false;
     wb->sess_att = att;
     wb->sess_cl = cl;
     wb->orphan_since_ns = 0;
 #ifdef KERNEL_TESTS
-    wb->reap_test_only = false;
+    wb->reap_test_only = test_only;
+#else
+    (void)test_only;
 #endif
     spin_lock(&g_weft_reap_lock);
     wb->reap_next = g_maponly_bindings;
     g_maponly_bindings = wb;
     spin_unlock(&g_weft_reap_lock);
+    return true;
+}
+
+void weft_reap_register(struct weft_binding *wb,
+                        const struct p9_attached *att,
+                        const struct p9_client *cl) {
+    if (!weft_reap_link(wb, att, cl, false)) return;
     // First-registration wake: the reaper parks indefinitely on an empty
     // registry (tickless-idle-friendly -- no 1 Hz kthread tick on an idle
     // box); a registered binding starts its cadence.
@@ -708,6 +718,9 @@ static int weft_reap_sweep_in(u64 now_ns, bool test_only) {
     int ndrop = 0;
     int reclaimed = 0;
 
+#ifndef KERNEL_TESTS
+    (void)test_only;
+#endif
     spin_lock(&g_weft_reap_lock);
     struct weft_binding **pp = &g_maponly_bindings;
     while (*pp && ndrop < WEFT_REAP_MAX_DROP) {
@@ -717,8 +730,6 @@ static int weft_reap_sweep_in(u64 now_ns, bool test_only) {
             pp = &wb->reap_next;
             continue;
         }
-#else
-        (void)test_only;
 #endif
         bool dead = wb->sess_att ? !p9_attached_is_open(wb->sess_att)
                                  : !p9_client_is_open(wb->sess_cl);
@@ -778,15 +789,7 @@ int weft_reap_sweep(u64 now_ns) {
 
 #ifdef KERNEL_TESTS
 void weft_reap_register_for_test(struct weft_binding *wb, const struct p9_client *cl) {
-    if (!wb || !weft_kind_maponly((int)wb->kind)) return;
-    wb->sess_att = NULL;
-    wb->sess_cl = cl;
-    wb->orphan_since_ns = 0;
-    wb->reap_test_only = true;
-    spin_lock(&g_weft_reap_lock);
-    wb->reap_next = g_maponly_bindings;
-    g_maponly_bindings = wb;
-    spin_unlock(&g_weft_reap_lock);
+    (void)weft_reap_link(wb, NULL, cl, true);
 }
 
 int weft_reap_sweep_for_test(u64 now_ns) {

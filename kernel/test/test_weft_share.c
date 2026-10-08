@@ -1152,7 +1152,10 @@ void test_weft_reap_close_unregisters(void) {
 // The live kthread runs weft_reap_sweep beside the suite on the real clock. A
 // binding a test registered is invisible to it -- no stamp, no reclaim, however
 // late -- and the test's own sweep, one call away, stamps and reclaims the same
-// binding (the positive control).
+// binding (the positive control). The live sweeps here run on the test's clock
+// over the real partition too; that is safe only because no real binding exists
+// during the suite (the one real register is SYS_WEFT_MAP's, and userspace starts
+// after the suite).
 void test_weft_reap_live_sweep_leaves_test_bindings(void) {
     struct Proc *server = make_proc();
     struct Proc *client = make_proc();
