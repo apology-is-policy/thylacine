@@ -358,3 +358,14 @@ Whole-ring discard requires detached consumer and local borrow retirement.
 Engine integration must preserve that distinction. Self-review only, not an
 independent audit. Prior 50-boot qualification remains bound to 98c50e844.
 No activation, Main landing, or removal of 128 MiB protection.
+
+
+October 8, native link correction: current-gate-20261008T213009Z stopped
+before any boot (gate.rc=runner.rc=1). The fixture's 1552-byte aggregate zero
+assignments lowered to an undefined libc memset despite freestanding flags.
+Replaced those two resets with the byte-loop convention used by existing pool
+and receipt fixtures. No production ledger behavior changed. Native kernel
+link now succeeds; all 14 actual-module ASan/UBSan host outcomes were rerun
+successfully with the corrected shared fixture (slots-20261008T2132Z/).
+The original failure and original host evidence remain preserved. Full native
+matrix remains pending until a new, exact-source run completes.

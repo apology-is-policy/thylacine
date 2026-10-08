@@ -1,0 +1,41 @@
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_loom.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:88:6: warning: no previous prototype for function 'test_loom_service_slots' [-Wmissing-prototypes]
+   88 | void test_loom_service_slots(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:88:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+   88 | void test_loom_service_slots(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:96:6: warning: no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]
+   96 | void test_loom_private_owner_lifecycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:96:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+   96 | void test_loom_private_owner_lifecycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1074:6: warning: no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]
+ 1074 | void test_loom_sqpoll_charges_thread_budget(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1074:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1074 | void test_loom_sqpoll_charges_thread_budget(void) {
+      | ^
+      | static 
+3 warnings generated.
+[  2%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  2860816 Oct  8 23:31 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  9557832 Oct  8 23:31 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+-105553110715384 0000000000041864 b g_reap_fake_client
+-105553111116544 0000000000041864 b g_sc_client
+-105553111651176 0000000000047456 b pc
+-105553113052248 0000000000058816 D g_tests
+-105553112239728 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110899139 0000000000065792 b g_pe_payload
+-105553110820576 0000000000083728 b pti_front_clients
+-105553110998479 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553113212932 0000000000119638 R halls_symtab_names
+-105553112850432 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf

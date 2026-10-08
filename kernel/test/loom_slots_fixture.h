@@ -4,10 +4,15 @@
 #include <thylacine/loom_service_slots.h>
 #include <thylacine/errno.h>
 #define LS_CHECK(c, msg) do { if (!(c)) return msg; } while (0)
+// Match the existing freestanding fixture convention: a large aggregate
+// assignment lowers to an unavailable libc memset, even with -fno-builtin.
+static void ls_zero(void *p, size_t n) {
+    for (size_t i = 0; i < n; ++i) ((u8 *)p)[i] = 0;
+}
 static const char *loom_slots_fixture(void) {
     // Static to avoid spending 1552 bytes of the kernel test thread's stack.
     static struct loom_slot_table t;
-    t = (struct loom_slot_table){0};
+    ls_zero(&t, sizeof(t));
     static struct loom_service_ref refs[LOOM_SERVICE_SLOT_COUNT];
     struct loom_service_ref a, b;
     LS_CHECK(loom_slot_reserve(&t, 0, &a) == -T_E_INVAL && !t.next_incarnation,
@@ -53,7 +58,7 @@ static const char *loom_slots_fixture(void) {
     LS_CHECK(loom_slot_reserve(&t, LOOM_SERVICE_TARGET, &a) == -T_E_NOSPC &&
              t.next_incarnation == UINT64_MAX, "incarnation exhaustion never wraps");
     // New table = different owning ring, never a reset of a live ring's ledger.
-    t = (struct loom_slot_table){0};
+    ls_zero(&t, sizeof(t));
     LS_CHECK(!loom_slot_reserve(&t, LOOM_SERVICE_SCOPE, &a) && !loom_slot_publish(&t, a), "close control live slot");
     LS_CHECK(!loom_slot_reserve(&t, LOOM_SERVICE_POOL, &b), "close control pending copyout");
     t.slots[a.slot].pins = UINT32_MAX;

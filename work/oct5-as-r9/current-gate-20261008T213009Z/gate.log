@@ -1,0 +1,50 @@
+== ci-smp-gate: bake config -- CLADE=0 GOROOT=1 ==
+== ci-smp-gate: building kernels (default=1 ubsan=1) ==
+== ci-smp-gate: disk before-default-build: 11892 MiB free, floor 8192 ==
+
+638 hunks checked: 0 error(s), 0 warning(s)
+spawn-args mirror check: kernel 104 B / 20 fields, every u64 classified; 3 in-tree mirrors ok (libt, libthyla-rs, pouch); go fork ok (offsets, sizes, pointer-typed addresses; /Users/northkillpd/projects/go-thylacine/src/syscall/exec_thylacine.go)
+==> Building kernel (build_type=Debug, hardening=OFF, kaslr=OFF, sanitize='', tests=ON, dir=/Users/northkillpd/projects/thylacine-corona/build/kernel)
+-- Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/kernel
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_slots.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_loom.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:88:6: warning: no previous prototype for function 'test_loom_service_slots' [-Wmissing-prototypes]
+   88 | void test_loom_service_slots(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:88:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+   88 | void test_loom_service_slots(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:96:6: warning: no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]
+   96 | void test_loom_private_owner_lifecycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:96:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+   96 | void test_loom_private_owner_lifecycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1074:6: warning: no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]
+ 1074 | void test_loom_sqpoll_charges_thread_budget(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1074:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1074 | void test_loom_sqpoll_charges_thread_budget(void) {
+      | ^
+      | static 
+3 warnings generated.
+[  3%] Linking C executable ../thylacine.elf
+ld.lld: error: undefined symbol: memset
+>>> referenced by loom_slots_fixture.h:10 (/Users/northkillpd/projects/thylacine-corona/kernel/test/loom_slots_fixture.h:10)
+>>>               CMakeFiles/thylacine.elf.dir/test/test_loom.c.obj:(test_loom_service_slots)
+>>> referenced by loom_slots_fixture.h:56 (/Users/northkillpd/projects/thylacine-corona/kernel/test/loom_slots_fixture.h:56)
+>>>               CMakeFiles/thylacine.elf.dir/test/test_loom.c.obj:(test_loom_service_slots)
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[2]: *** [kernel/CMakeFiles/thylacine.elf.dir/build.make:3856: thylacine.elf] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:106: kernel/CMakeFiles/thylacine.elf.dir/all] Error 2
+gmake: *** [Makefile:91: all] Error 2
+ci-smp-gate: default kernel build FAILED

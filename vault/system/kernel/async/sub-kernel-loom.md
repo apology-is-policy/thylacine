@@ -1228,3 +1228,14 @@ buggy configurations. This is single-agent self-review, not an independent
 review. Native guest and full current-source gates are pending at this checkpoint;
 the 50-boot result on 98c50e844 applies only to that older source. Exact host
 inputs and raw evidence: work/oct5-as-r9/astra-takeover/slots-20261008T2130Z/.
+
+
+October 8, native link correction: current-gate-20261008T213009Z stopped
+before any boot (gate.rc=runner.rc=1). The fixture's 1552-byte aggregate zero
+assignments lowered to an undefined libc memset despite freestanding flags.
+Replaced those two resets with the byte-loop convention used by existing pool
+and receipt fixtures. No production ledger behavior changed. Native kernel
+link now succeeds; all 14 actual-module ASan/UBSan host outcomes were rerun
+successfully with the corrected shared fixture (slots-20261008T2132Z/).
+The original failure and original host evidence remain preserved. Full native
+matrix remains pending until a new, exact-source run completes.
