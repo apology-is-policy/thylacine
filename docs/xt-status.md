@@ -54,7 +54,9 @@ and XT-8 onward (the runtime).
 - #6 EL2-entry `SCTLR_EL1` leaves `nTWE`/`nTWI` clear (study F2) -> XT-3a.
 - #7, #18, #19 and #20 closed by XT-3b: the lifetime cap; no `struct Thread *`
   used after its Thread can be reaped; exec's drain before the swap; the
-  EXITING preempt gate.
+  EXITING preempt gate. #22 (a dead 9P test helper, `125bba46`) and #24 (the
+  ls-ci timings recorded the requested accel, not the one that booted,
+  `2ba4c78e`) closed after it.
 - #8 documentation drift the study surfaced (its Appendix A, F4).
 - #12 `build_tyrquake` extracts an LHA archive with `/usr/bin/tar`, which is bsdtar
   only on macOS (unverified here: the shareware data is unreachable).
@@ -69,13 +71,9 @@ and XT-8 onward (the runtime).
   truncates at 4 KiB without a sign. `ps` and `cpubench` now read once
   (`41df9a8a`, task #16's fix); the systemic choice, a snapshot per open or the
   single-read contract, is open.
-- #22 hygiene: `dyz_start_clunk` and its statics in `test_9p_client.c` are dead
-  since tagpool TP-1 rewrote the two tests that used them.
 - #23 investigate: `boot-wc`'s TOTAL `max_ms` reads 1-5.5 s in KERNEL_TESTS
   boots on TCG (pre-existing), while TICKLESS-IDLE.md says a starved periodic
   park ends within a tick; measure which park it is.
-- #24 harness: the ls-ci timings table records the REQUESTED accel (`hvf`) when
-  `run-vm.sh` falls back to TCG, because the spawn path logs no resolved accel.
 
 ## Building in a Linux container (what this branch's gates ran on)
 

@@ -388,6 +388,12 @@ It was installed for this run.
 
 **Still owed:** HVF and KVM runs, on the operator's hosts.
 
+Two of those were fixed right after the close:
+- #22: the dead helper is gone (`125bba46`). The suite passes 1961/1961, and
+  the build has no unused-function warning left.
+- #24: the timings table reads run-vm.sh's own `==> qemu: accel=` line
+  (`2ba4c78e`). An ls-ci re-run passed on its first attempt and recorded `tcg`.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
