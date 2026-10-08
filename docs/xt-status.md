@@ -41,8 +41,18 @@ Sequence (the design's arc order, with two owned defects pulled forward):
 1. **XT-3a** closed (audit r1, SMP 9/9). HVF and KVM gate runs are owed by the operator's hosts.
 2. **XT-3b** closed (two audit rounds, SMP 9/9, UBSan, ls-ci). HVF and KVM gate
    runs are owed by the operator's hosts.
-3. **PAC keys per address space** (task #5, study F1): today one key set is
-   shared by the kernel's `pac-ret` and every EL0 process.
+3. **PAC keys** (task #5, study F1): today one key set is shared by the
+   kernel's `pac-ret` and every EL0 process. Voted 2026-10-08
+   (`dec-2026-10-08-pac-keys`, ARCH 24.3, I-49 RESERVED):
+   - user keys per address space;
+   - a kernel APIA key per thread, swapped on every EL0 crossing;
+   - no userspace without entropy.
+
+   Chunks:
+   - PAC-0: the scripture (landed);
+   - PAC-1: the entropy gate and exec's fail-closed AT_RANDOM (task #25);
+   - PAC-2: the key model;
+   - PAC-3: the EL0 witness, I-49 to ENFORCED, and the audit.
 4. **XT-1: exact faults**, `specs/fault_note.tla` first.
 
 Then XT-2, the rest of XT-3 (MRS emulation, `AT_HWCAP2`), XT-4 to XT-7 (kernel),

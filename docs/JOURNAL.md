@@ -22,6 +22,51 @@ needed the operator.
 
 
 ---
+## 2026-10-08 (claude/magical-shannon-sq5t3k, effort max) -- PAC-0: the PAC key model, researched and voted (scripture only)
+
+**The defect** (task #5, WINE-STUDY F1). One key set is derived at boot from
+`CNTPCT_EL0` and loaded on every CPU, and nothing switches it. Every EL0 process
+can therefore `pacia`-sign with the kernel's return-address key, and processes
+share keys with each other. ARCH 24.3 said the keys were "not exposed to
+userspace". That was true of reading them and false of using them.
+
+**Research before the fork.** A background agent read the upstream sources of
+Linux, FreeBSD, OpenBSD and XNU; its report is summarized in
+`dec-2026-10-08-pac-keys`. What decided the shape:
+- Linux and FreeBSD give each thread its own kernel APIA key. They swap only
+  APIA on EL0 entry and exit, because the kernel uses no other key, and move the
+  other four to the task switch.
+- OpenBSD keeps the user keys in the pmap and drops kernel pac-ret.
+- No kernel saves the swap by reserving a key for itself, because one SCTLR
+  enable bit covers both ELs.
+
+In the tree:
+- `struct AddrSpace` already has exactly the lifetime the user keys need:
+  shared by threads, cloned by fork, replaced by exec.
+- exec's `AT_RANDOM` ignores `kern_random_bytes`' fail-closed return and hands
+  out zeros on an unseeded pool. That is a live fail-open, found on the way,
+  queued as task #25 and folded into PAC-1.
+- hwfeat reads only the boot CPU, while each CPU enables PAC independently.
+
+**The vote** (operator, AskUserQuestion), all three as recommended:
+- a kernel APIA key per thread (not per boot, and not OpenBSD's no kernel
+  pac-ret);
+- refuse userspace until the CSPRNG is seeded (not fail each exec, and not the
+  weak pool);
+- a new section-28 invariant, I-49, reserved now. It flips to ENFORCED at PAC-2.
+
+**Landed as scripture first:**
+- ARCH 24.3 rewritten, and the summary line;
+- the ARCH section 28 row I-49 and the CLAUDE.md row (`check-invariants.py`:
+  49 rows, in sync);
+- an AUDIT-TRIGGERS row for the key swap surface, with its index line;
+- the decision note;
+- the xt-status plan, PAC-0 to PAC-3.
+
+**Next:** PAC-1, the entropy gate, then PAC-2.
+
+---
+
 ## 2026-10-08 (claude/magical-shannon-sq5t3k, effort max) -- XT-0: the x86 translation design re-read against B-2 and ratified; a fresh Linux clone builds the gate image
 
 **What the run is for.** The operator asked to begin work on

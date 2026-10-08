@@ -156,6 +156,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-46 | RESERVED: Nocturne audio authority + no-stall cycle | planned `nocturne_cycle.tla` |
 | I-47 | Inline media: decode outside halcyond, a bounded place-request, no authority in an image -- ENFORCED (2026-09-29) | prose HALCYON 14.7 + audits |
 | I-48 | RESERVED: foreign code is never host code -- no guest byte host-executable; objtype is shape, not authority; hosted decode partitioned; memory model honoured or refused; guest code held to host provenance | planned `hosted_decode.tla` + prose + audit |
+| I-49 | RESERVED: kernel PAC keys never reach EL0; an address space's PAC keys are its own (fresh at exec, copied at fork, shared by its threads, never exposed) | planned PAC-3 witness + tests + audit |
 
 ---
 
