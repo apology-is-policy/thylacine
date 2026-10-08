@@ -69,23 +69,43 @@ int addrspace_ref_count(const struct AddrSpace *as) {
 }
 
 #ifdef KERNEL_TESTS
-// Devices reset by the last-reference drain, summed (the *_for_test convention:
-// extern-declared by the harness).
+// Devices reset by the last-reference drain, summed, and the teardown order: one
+// monotonic stamp source, read by exec's handle-table walk and the drain, so a
+// test can ask which ran first (the *_for_test convention: extern-declared by
+// the harness).
 static u64 g_drain_device_resets;
+static u64 g_teardown_seq;
+static u64 g_drain_seq;
+u64 addrspace_teardown_stamp(void) {
+    return __atomic_add_fetch(&g_teardown_seq, 1, __ATOMIC_ACQ_REL);
+}
 u64 addrspace_drain_device_resets_for_test(void);
 u64 addrspace_drain_device_resets_for_test(void) {
     return __atomic_load_n(&g_drain_device_resets, __ATOMIC_ACQUIRE);
 }
+u64 addrspace_drain_seq_for_test(void);
+u64 addrspace_drain_seq_for_test(void) {
+    return __atomic_load_n(&g_drain_seq, __ATOMIC_ACQUIRE);
+}
 #endif
 
 void addrspace_unref(struct AddrSpace *as) {
+    if (addrspace_release(as)) addrspace_destroy(as);
+}
+
+bool addrspace_release(struct AddrSpace *as) {
     // NULL-safe: a kernel-only Proc has no address space, and a rollback that
     // fired before addrspace_alloc ran has none either.
-    if (!as) return;
+    if (!as) return false;
 
     int pre = __atomic_fetch_sub(&as->ref, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0) extinction("addrspace_unref of an already-released AddrSpace");
-    if (pre > 1) return;
+    return pre == 1;
+}
+
+void addrspace_destroy(struct AddrSpace *as) {
+    if (__atomic_load_n(&as->ref, __ATOMIC_ACQUIRE) != 0)
+        extinction("addrspace_destroy of an AddrSpace still referenced");
 
     // Last reference -- so this is the point at which the mappings genuinely
     // stop being anyone's, and therefore the point at which they are freed.
@@ -102,13 +122,14 @@ void addrspace_unref(struct AddrSpace *as) {
     // parent), so reaching zero means no holder is left to hand one out.
     //
     // RW-7 R3-F1: the devices mapped here stop before the drain frees the DMA
-    // buffers they were handed. Each departing holder checks too, but it reads the
-    // count before it drops its reference, so two holders leaving at once can each
-    // read the other's and both skip the reset; the last reference cannot be
-    // missed.
+    // buffers they were handed. A dying holder checks too, but reads the count at
+    // its exit close and again at its reap, and drops its reference only at the
+    // reap, so two holders leaving at once can each read the other's and both
+    // skip the reset; the last reference cannot be missed.
     int reset = addrspace_quiesce_mapped_devices(as);
 #ifdef KERNEL_TESTS
     __atomic_fetch_add(&g_drain_device_resets, (u64)reset, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_drain_seq, addrspace_teardown_stamp(), __ATOMIC_RELEASE);
 #else
     (void)reset;
 #endif

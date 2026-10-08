@@ -318,9 +318,9 @@ its table walk (`/proc/<pid>/{maps,mem}`, `/ctl/procs`) or, like the weft
 reaper, leaves it holding the LOCK of the space it found, by the pointer it
 captured there, never the Proc's ([[sub-kernel-weft]]); so if the swap's unref
 of the old space is the last, its drain takes that lock first and waits for
-the reaper. Before that unref, exec stops the old image's devices as death does
-([[sub-kernel-death]]): when the old space is the Proc's alone, every device a
-descriptor claims is reset, and the drain resets every device the space maps --
+the reaper. Before that drain, exec stops the old image's devices as death does
+([[sub-kernel-death]]): when its drop of the old space is the last, every device
+a descriptor claims is reset, and the drain resets every device the space maps --
 a device holding the physical address of a buffer in the old image is the same
 kind of stale pointer as the three below, one layer down. The rule
 governing everything it clears is one sentence: **the image is gone, so anything

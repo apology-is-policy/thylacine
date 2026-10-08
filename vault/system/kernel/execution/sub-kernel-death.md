@@ -626,34 +626,45 @@ mapped a DMA buffer and closed its descriptor holds the buffer only by the
 mapping, so exec's drain freed it while the device it had been handed to could
 still be armed, and the device then wrote into recycled memory: RW-7 R3-F1 on
 exec instead of death. By the operator's vote (2026-10-08), exec now resets the
-devices of the image it leaves. `proc_exec_replace` runs the handle-table walk
-(`quiesce_fd_devices`) when the old space is its alone, before its unref; a
-sharer -- a vfork parent, an RFMEM sibling -- keeps the mappings and may still be
-driving the device, and nothing is freed. The close-on-exec sweep runs after the
-replace, so the walk still sees a descriptor about to close. A device whose
-descriptor survives into the new image arrives reset: a virtio-mmio device
-initializes again from status 0; a PCI function is revoked for good
-(`pci_quiesce` is terminal), so the new image closes that descriptor and claims
-the function again.
+devices of the image it leaves. `proc_exec_replace` drops its reference to the
+old space with `addrspace_release`, and when that drop is the last it runs the
+handle-table walk (`quiesce_fd_devices`) before `addrspace_destroy` drains the
+space. A holder that remains -- a vfork parent, an RFMEM sibling -- keeps the
+mappings and may still be driving the device, and nothing is freed. Deciding by
+the drop rather than by reading the count first matters: a sharer's reap racing
+the exec could otherwise take the last reference after the exec read two. The
+close-on-exec sweep runs after the replace, so the walk still sees a descriptor
+about to close. A device whose descriptor survives into the new image arrives
+reset: a virtio-mmio device initializes again from status 0; a PCI function is
+revoked (`pci_quiesce` is terminal), and its claim frees for a new one only once
+the new image has closed that descriptor and every IRQ descriptor of the
+function (each holds a reference) and no hostmem client still maps one of its
+BARs (each hostmem Burrow holds one too).
 
-The mapped-device walk moved too. Each departing holder reads the space's count
-before it drops its reference (at exit, at the reap, at exec), so two holders
-leaving at once can each read the other's reference and both skip the walk, and
-the last drop then drained with the device armed. `addrspace_unref` now runs the
+The mapped-device walk moved too. A dying holder reads the space's count at its
+exit close and again at its reap, and drops its reference only at the reap, so
+two holders leaving at once can each read the other's reference and both skip
+the walk, and the last drop then drained with the device armed. `addrspace_unref` now runs the
 walk (`addrspace_quiesce_mapped_devices`, [[sub-kernel-addrspace]]) at the last
 reference, before the drain, so the reset cannot be missed however the holders
 left. The exit close keeps its own sole-gated walk: a DMA buffer held only by a
 handle frees at that close, before any drain. A device reset twice is reset
 once; `status = 0` and a revoked PCI function are both idempotent.
 
-Residual, by the vote: an exec off a shared space resets nothing (a zombie
-sibling not yet reaped still holds the space, so it counts as a sharer), and a
+Residual, by the vote: an exec whose drop is not the last resets nothing, and a
 device its descriptor still claims keeps the physical addresses of buffers left
-in that space, which free when the last sharer leaves. It is the R3-F1 trust-envelope
+in that space, which free when the last holder leaves (and the drain resets only
+what the space maps). A sibling that has exited but is not yet reaped still holds
+the space, so it counts as a holder although it cannot drive anything; that is a
+deliberate over-approximation of "held alone" (a gate on live holders, like the
+image join's zombie count, would be the precise form). A device armed but
+reachable only through a descriptor has had its registers unmapped by its own
+driver, which is the trust-envelope shape below. It is the R3-F1 trust-envelope
 residual's family (a driver releasing what an armed device still holds), which
 the R3-F8 device-session model closes. Witnesses: `virtio.exec_quiesces_devices`
 (a shared exec resets nothing; a sole exec resets the device its descriptor
-claims, by its own walk, and the device only its mapping claims, by the drain's)
+claims, by its own walk, before the drain -- a teardown stamp orders the two --
+and the device only its mapping claims, by the drain's)
 and `virtio.last_unref_quiesces_mapped_device` (a holder that saw a second
 reference skipped, then a bare last drop: the drain resets).
 

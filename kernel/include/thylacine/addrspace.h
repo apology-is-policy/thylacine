@@ -231,6 +231,19 @@ void addrspace_ref(struct AddrSpace *as);
 //     root and no lookup matches the old tag.
 void addrspace_unref(struct AddrSpace *as);
 
+// addrspace_unref in two steps, for a caller with work that must follow the
+// decision and precede the drain (exec's device reset). addrspace_release drops
+// one reference and returns true when it was the last; the caller then owns the
+// space and MUST call addrspace_destroy, under the same no-translation
+// precondition as addrspace_unref. Everyone else calls addrspace_unref.
+bool addrspace_release(struct AddrSpace *as);
+void addrspace_destroy(struct AddrSpace *as);
+
+#ifdef KERNEL_TESTS
+// A monotonic stamp for ordering teardown steps in tests.
+u64 addrspace_teardown_stamp(void);
+#endif
+
 // LINEAGE L-4b: build a COPY-ON-WRITE clone of `src` -- the address-space half of
 // fork. Returns a fresh AddrSpace with ref 1 whose VMA list mirrors `src`'s, or
 // NULL (having freed everything it allocated) on OOM, an over-cap child, or a VMA

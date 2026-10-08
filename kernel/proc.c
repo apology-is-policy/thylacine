@@ -550,7 +550,7 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
 // model; R3-F8, P5+), which closes this residual by construction.
 //
 // The last addrspace_unref also runs walk (b), before its drain, and exec runs
-// walk (a) when it leaves a space it holds alone (proc_exec_replace).
+// walk (a) when its drop of the space it leaves is the last (proc_exec_replace).
 
 // (a) device-register claims held by an open fd.
 static int quiesce_fd_devices(struct HandleTable *t) {
@@ -675,24 +675,29 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // is still driving. Any future change that lets a hardware handle reach a
     // second Proc must add a sole-ownership gate here, exactly like walk (b).
     //
-    // The count is read here and dropped later (at the reap, or by exec), so two
-    // holders leaving at once can each read the other's reference and both skip
-    // this walk. The last addrspace_unref therefore repeats it before the drain
-    // frees anything; this call stays for what must be quiet before this Proc's
-    // own handles close, since a DMA buffer held only by a handle frees at that
-    // close.
+    // A dying Proc reads the count here at its exit close and again at its reap,
+    // and drops its reference only at the reap, so two holders leaving at once can
+    // each read the other's reference and both skip this walk. The last
+    // addrspace_unref therefore repeats it before the drain frees anything; this
+    // call stays for what must be quiet before this Proc's own handles close, since
+    // a DMA buffer held only by a handle frees at that close.
     if (addrspace_ref_count(p->as) == 1)
         reset += addrspace_quiesce_mapped_devices(p->as);
     return reset;
 }
 
 #ifdef KERNEL_TESTS
-// Devices reset by exec's walk (a), summed over every exec (the *_for_test
-// convention: extern-declared by the harness).
+// Devices reset by exec's walk (a), summed over every exec, and the stamp of its
+// latest run (the *_for_test convention: extern-declared by the harness).
 static u64 g_exec_device_resets;
+static u64 g_exec_walk_a_seq;
 u64 proc_exec_device_resets_for_test(void);
 u64 proc_exec_device_resets_for_test(void) {
     return __atomic_load_n(&g_exec_device_resets, __ATOMIC_ACQUIRE);
+}
+u64 proc_exec_walk_a_seq_for_test(void);
+u64 proc_exec_walk_a_seq_for_test(void) {
+    return __atomic_load_n(&g_exec_walk_a_seq, __ATOMIC_ACQUIRE);
 }
 #endif
 
@@ -4731,34 +4736,8 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     // whole of addrspace_unref's precondition here.
     sched_activate_addrspace(self);
 
-    // The image's devices go with it, as they do at death (RW-7 R3-F1). A driver's
-    // DMA buffer whose fd it closed after mapping it is held only by that mapping,
-    // so the drain below frees it while the device it was handed to may still be
-    // armed, and the device then writes into recycled memory. Death's two walks
-    // run before that drain: (a) over the handle table here, and (b) over `old`
-    // inside addrspace_unref, which runs it for every last reference. Walk (a)
-    // runs only when `old` is ours alone, which is when the drain frees anything;
-    // a sharer (a vfork parent, an RFMEM sibling) keeps the mappings and may still
-    // be driving the device. Read after the swap, 1 stays 1: a new reference
-    // needs an rfork by a Proc holding `old`, and ours now holds `nas`. sys exec
-    // sweeps the close-on-exec descriptors after this function returns, so walk
-    // (a) still sees the ones about to close.
-    //
-    // It is death's reset, so a device whose descriptor survives into the new image
-    // arrives reset: a virtio-mmio device initializes again from status 0, and a PCI
-    // function is revoked for good (pci_quiesce is terminal), so the new image
-    // closes that descriptor and claims the function again.
-    if (addrspace_ref_count(old) == 1) {
-        int reset = quiesce_fd_devices(p->handles);
-#ifdef KERNEL_TESTS
-        __atomic_fetch_add(&g_exec_device_resets, (u64)reset, __ATOMIC_RELEASE);
-#else
-        (void)reset;
-#endif
-    }
-
     // Now this Proc's reference to the outgoing address space can go. If it was
-    // the last, addrspace_unref drains the VMA list -- dropping each Burrow's
+    // the last, addrspace_destroy drains the VMA list -- dropping each Burrow's
     // mapping ref, which is what actually frees the old image's anonymous pages
     // and releases its Image-cache text -- and destroys the page table.
     //
@@ -4767,7 +4746,36 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     // its parent is suspended on exactly this address space, which is what
     // posix_spawn does every time. Until L-3 this call site drained the list
     // itself, unconditionally, which would have unmapped the parent.
-    addrspace_unref(old);
+    //
+    // The image's devices go with it, as they do at death (RW-7 R3-F1). A driver's
+    // DMA buffer whose fd it closed after mapping it is held only by that mapping,
+    // so the drain frees it while the device it was handed to may still be armed,
+    // and the device then writes into recycled memory. Death's two walks run
+    // before the drain: (a) over the handle table here, when our drop is the last
+    // (which is when the drain frees anything; a holder that remains -- a vfork
+    // parent, an RFMEM sibling, a sibling not yet reaped -- keeps the mappings),
+    // and (b) over `old` inside addrspace_destroy. Deciding by the drop itself,
+    // rather than by reading the count first, keeps a sharer's concurrent reap
+    // from taking the last reference after we read 2. sys exec sweeps the
+    // close-on-exec descriptors after this function returns, so walk (a) still
+    // sees the ones about to close.
+    //
+    // It is death's reset, so a device whose descriptor survives into the new image
+    // arrives reset: a virtio-mmio device initializes again from status 0, and a PCI
+    // function is revoked (pci_quiesce is terminal), and its claim frees for a new
+    // one only once the new image has closed that descriptor and every IRQ
+    // descriptor of the function and no hostmem client still maps one of its
+    // BARs.
+    if (addrspace_release(old)) {
+        int reset = quiesce_fd_devices(p->handles);
+#ifdef KERNEL_TESTS
+        __atomic_fetch_add(&g_exec_device_resets, (u64)reset, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_exec_walk_a_seq, addrspace_teardown_stamp(), __ATOMIC_RELEASE);
+#else
+        (void)reset;
+#endif
+        addrspace_destroy(old);
+    }
 
     // POSIX: a successful exec resets the caught-signal dispositions to default
     // (an inherited handler would be an address in an image that no longer

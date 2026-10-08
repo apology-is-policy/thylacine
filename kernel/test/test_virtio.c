@@ -299,13 +299,16 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
 // (frees nothing, so resets nothing), the claim on an fd with the space ours alone
 // (exec's walk a), then the claim on a mapping only (walk b, in the drain).
 u64 proc_exec_device_resets_for_test(void);
+u64 proc_exec_walk_a_seq_for_test(void);
 u64 addrspace_drain_device_resets_for_test(void);
+u64 addrspace_drain_seq_for_test(void);
 
 static struct {
     u64 page;
     struct Proc *sharer;
     u64 shared, fd_only, mapped_only;   // exec's walk (a) + the drain's walk (b)
     u64 fd_by_exec, mapped_by_drain;
+    u64 seq_before, walk_a_seq, drain_seq;   // exec #2's teardown order
     u32 done;
 } g_exec_quiesce;
 
@@ -317,8 +320,9 @@ static void exec_quiesce_thunk(void *arg) {
     (void)arg;
     struct Proc *me = current_thread()->proc;
     struct KObj_MMIO *km = kobj_mmio_create(g_exec_quiesce.page, PAGE_SIZE);
-    hidx_t h = km ? handle_alloc(me, KOBJ_MMIO, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km) : -1;
-    if (h < 0) exits("setup");
+    if (!km) exits("setup");
+    hidx_t h = handle_alloc(me, KOBJ_MMIO, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km);
+    if (h < 0) { kobj_mmio_unref(km); exits("setup"); }
     g_exec_quiesce.sharer = proc_alloc_in(me->as, me->page_budget);
     struct AddrSpace *nas = g_exec_quiesce.sharer ? addrspace_alloc(me->page_budget) : NULL;
     if (!nas) exits("setup");
@@ -328,9 +332,12 @@ static void exec_quiesce_thunk(void *arg) {
 
     if (!(nas = addrspace_alloc(me->page_budget))) exits("setup");
     u64 e1 = proc_exec_device_resets_for_test();
+    g_exec_quiesce.seq_before = addrspace_teardown_stamp();
     proc_exec_replace(me, nas, me->phenotype);
     u64 c2 = departure_resets();
     g_exec_quiesce.fd_by_exec = proc_exec_device_resets_for_test() - e1;
+    g_exec_quiesce.walk_a_seq = proc_exec_walk_a_seq_for_test();
+    g_exec_quiesce.drain_seq  = addrspace_drain_seq_for_test();
 
     // SYS_MMIO_MAP, then close the fd: the claim lives on the mapping alone.
     struct Burrow *b = burrow_create_mmio(km);
@@ -360,6 +367,8 @@ void test_virtio_exec_quiesces_devices(void) {
     g_exec_quiesce.sharer = NULL;
     g_exec_quiesce.shared = g_exec_quiesce.fd_only = g_exec_quiesce.mapped_only = ~0ull;
     g_exec_quiesce.fd_by_exec = g_exec_quiesce.mapped_by_drain = ~0ull;
+    g_exec_quiesce.seq_before = ~0ull;
+    g_exec_quiesce.walk_a_seq = g_exec_quiesce.drain_seq = 0;
     g_exec_quiesce.done = 0;
     int pid = rfork(RFPROC, exec_quiesce_thunk, NULL);
     int st = -1;
@@ -376,6 +385,11 @@ void test_virtio_exec_quiesces_devices(void) {
     TEST_EXPECT_EQ(g_exec_quiesce.fd_only, (u64)expected,
                    "an exec off a sole space resets the device its fd claims");
     TEST_EXPECT_EQ(g_exec_quiesce.fd_by_exec, (u64)expected, "and exec's own walk did it");
+    TEST_ASSERT(g_exec_quiesce.walk_a_seq > g_exec_quiesce.seq_before &&
+                g_exec_quiesce.drain_seq > g_exec_quiesce.seq_before,
+                "(premise) that exec both walked and drained");
+    TEST_ASSERT(g_exec_quiesce.walk_a_seq < g_exec_quiesce.drain_seq,
+                "exec's walk ran before the drain freed the old space");
     TEST_EXPECT_EQ(g_exec_quiesce.mapped_only, (u64)expected,
                    "an exec off a sole space resets the device only its mapping claims");
     TEST_EXPECT_EQ(g_exec_quiesce.mapped_by_drain, (u64)expected, "and the drain's walk did it");
@@ -394,9 +408,13 @@ void test_virtio_last_unref_quiesces_mapped_device(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
     struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
-    TEST_ASSERT(km != NULL, "kobj_mmio_create over an empty virtio page");
-    struct Burrow *b = burrow_create_mmio(km);
-    TEST_ASSERT(b != NULL, "burrow_create_mmio");
+    struct Burrow *b = km ? burrow_create_mmio(km) : NULL;
+    if (!b) {
+        if (km) kobj_mmio_unref(km);
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        TEST_ASSERT(false, "kobj_mmio_create + burrow_create_mmio over an empty virtio page");
+    }
     TEST_EXPECT_EQ(burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW), 0,
                    "burrow_map installed the MMIO VMA");
     burrow_unref(b);
