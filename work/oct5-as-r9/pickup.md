@@ -1820,3 +1820,30 @@ NEXT: release-half sensitivity and remaining structural/engine obligations in
 checkpoint1-coverage.md, then new-source full gates and approved async-first
 engine work before MM0-MM4. No Main landing, private async/clipboard activation,
 or removal of the 128 MiB protection is implied by this bounded result.
+
+
+## October 8: release decrement witness prepared
+
+Added an isolated first private retirement with the creator's original owner
+reference retained. After the release-published retirement counter advances,
+the fixture separately checks charge/guard/owner balance and exact lifetime
+reference count against its one-reference baseline. No freed pointer is read,
+no additional pin masks the count, and no global magazine drain is introduced.
+This measures a lifetime decrement, not final descriptor/page-table reclamation.
+
+Self-review rejected a global omitted-put mutant because the shared helper has
+earlier AddrSpace-test and rollback callers. release-leg-run.sh instead expands
+only loom_private_destroy's private_end call to the current helper body, omitting
+only its lifetime put. Get, decrement and locking remain intact. The expected
+sole failure is "private retirement releases its image lifetime reference";
+the mutant deliberately leaks one reference until disposable VM teardown.
+The earlier probe precedes all rollback tests so attribution is unambiguous.
+Recovery retains quarantine-first behavior, source hash checking, exact control
+rebuild, Stratum pin and the 8 GiB floor checked before each bake. No production
+source is changed in the committed implementation.
+
+Syntax: zero errors, the same two pre-existing test-prototype warnings. Runner
+shell syntax and 19 constructed-log oracle arms pass, including a masked earlier
+failure. Raw checker transcript: astra-takeover/release-arms.txt. Guest control
+and mutant are still UNRUN at this preparation checkpoint. Existing inner-unwind
+results remain scoped to 2bf48f7ad; the new fixture needs its own runtime result.

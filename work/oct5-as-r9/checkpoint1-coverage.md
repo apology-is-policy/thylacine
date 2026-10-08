@@ -73,3 +73,9 @@ on a89f55240 (inner-leg-20261008T185135Z). M1 built but never booted because
 the 8 GiB disk floor stopped the run. All mutant discrimination and shape
 qualification remain UNRUN. Sources restored; images quarantined. See the
 takeover result JSON for exact provenance; no full-gate or UBSan promotion.
+
+
+Release decrement witness authored October 8: first isolated private retirement,
+creator still owns its image, exact ref count after retirement publication.
+Omitted-put-only mutant scoped to loom_private_destroy; guest UNRUN. This can
+close release decrement sensitivity only, not final image destruction.

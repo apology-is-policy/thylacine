@@ -91,6 +91,28 @@ static const char *loom_private_fixture(void) {
     LP_CHECK(p, "private creator allocated");
     u32 initial = p->as->page_count;
 
+    // Release sensitivity without observing freed storage or draining magazines.
+    // The creator retains its original owner reference throughout this leg;
+    // compare the exact lifetime count after the retirer's release publication.
+    // A retained owner can mask a missing GET's crash, but cannot hide an extra
+    // reference left by an omitted PUT. This witnesses the decrement only, not
+    // final descriptor/page-table reclamation after the last owner is gone.
+    // Run before rollback legs so an omitted-put-only mutant is attributed here.
+    int release_refs = addrspace_ref_count(p->as);
+    LP_CHECK(release_refs == 1 && addrspace_owner_count(p->as) == 1 &&
+             !p->as->private_rings,
+             "release probe starts with only the creator reference");
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    LP_CHECK(l, "release probe private owner admitted");
+    loom_unref(l); l = NULL;
+    LP_CHECK(lp_wait(goal), "release probe retirement completed");
+    LP_CHECK(p->as->page_count == initial && !p->as->private_rings &&
+             addrspace_owner_count(p->as) == 1,
+             "release probe returns charges and guard without dropping the owner");
+    LP_CHECK(addrspace_ref_count(p->as) == release_refs,
+             "private retirement releases its image lifetime reference");
+
     // Rollback: a refused geometry must leave neither a charge nor a guard.
     LP_CHECK(!loom_create_private(p, 3, 4, true),
              "invalid private geometry refuses before charge");

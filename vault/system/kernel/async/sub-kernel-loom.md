@@ -1156,3 +1156,12 @@ This closes the inner-unwind witness at one Mac default boot per side only.
 The observer records free-site entry, not buddy completion. Release sensitivity,
 new-source full gates and engine admission/retirement remain separate. Full
 self-review results and pins: work/oct5-as-r9/astra-takeover/inner-run-20261008T195301Z-result.json.
+
+
+The next release-sensitivity probe retains the creator's original owner and
+compares its exact lifetime count after the retirer publishes completion. An
+omitted-put-only mutation at successful retirement must fail that count while
+leaving charge/guard/owner assertions satisfied. This targets the decrement;
+final descriptor/page-table reclamation is still separate. No production
+observer or magazine drain is added. Prepared, guest UNRUN; runner and checker
+are work/oct5-as-r9/release-leg-run.sh and release-oracle-arms.sh.
