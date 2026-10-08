@@ -1,0 +1,55 @@
+{
+  "source": "2a4e501c77de6373b0cf1062cb6115273913a366",
+  "run": "work/oct5-as-r9/release-leg-20261008T200530Z",
+  "exit": 0,
+  "control": "1836/1836, normal fallthrough, test.sh 0",
+  "mutant": "1835/1836, sole expected failure: private retirement releases its image lifetime reference, test.sh 1",
+  "scope": "Successful retirement lifetime decrement with original creator owner retained; NOT final descriptor/page-table reclamation, SMP or UBSan",
+  "pin": "work/oct5-as-r9/release-leg-control-PINNED-20261008T200530Z",
+  "hashes": [
+    {
+      "file": ".config-default",
+      "sha256": "4fcc788d6be38b80d3892e51f20edeff0671532c33045c46157fbed05cccae63"
+    },
+    {
+      "file": "pool.img.baked-snapshot",
+      "sha256": "889266f25443073928123224e7a85d30c16e316dcec5a47f7aec3614c5b74dd5"
+    },
+    {
+      "file": "ramfs.cpio",
+      "sha256": "07d96fd69db705d597cf2550372ec84d9608fe9912ea41508c9d050d5d4d3e3e"
+    },
+    {
+      "file": "system.key",
+      "sha256": "a1d647b1decc281af09fc5fa1a50784d389fbb142e93b57c0acd0428b27f2082"
+    },
+    {
+      "file": "system.key.baked-snapshot",
+      "sha256": "a1d647b1decc281af09fc5fa1a50784d389fbb142e93b57c0acd0428b27f2082"
+    },
+    {
+      "file": "thylacine-undefined.bin",
+      "sha256": "988debebc9a4f803af1232c2c42585f934b03cbec0d47cb977a6532f960069e9"
+    },
+    {
+      "file": "thylacine-undefined.elf",
+      "sha256": "9a9252b1e92140cb80c49cea31a9a014c4a0d521d85b4888a9781d4b472a7152"
+    },
+    {
+      "file": "thylacine.bin",
+      "sha256": "aa7b16dc8fdfad3b4c271ce9ac1adc47480a09fa20c29d8eaa07215744e07404"
+    },
+    {
+      "file": "thylacine.elf",
+      "sha256": "7af632d30a34b6957c5e0297bbd7455d1c6560073205406bf58d1fea49763c23"
+    }
+  ],
+  "recovery": "source pristine==HEAD; ELF/bin exactly match pinned control; Mac released",
+  "log_sha256": {
+    "control-boot.log": "253ab1c09b182322d3021e6d7bea5548342de5750aa8649026bc01948a2b98ff",
+    "mutant-boot.log": "7f0f717dfaae2701bb4f8bcdf51029af42a6db8b214cb4f87001b1bc93e727cc",
+    "mutant.diff": "488d74b7a96971107dcde47592c18d1670d3e1c51979c1572f05fba7c769efa1",
+    "disk.txt": "f92b03311ace40870e54bf619e4c6c90d8f1176f76782c76c1425b7be136a3b3"
+  },
+  "undefined_pair": "older 856ecae generation, not this source"
+}

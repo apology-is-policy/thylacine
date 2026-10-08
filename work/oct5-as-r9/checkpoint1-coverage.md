@@ -48,8 +48,10 @@ Cited by symbol. Fixture = `kernel/test/loom_private_fixture.h`
 
 ## Kept separate, on purpose
 
-- The retirement's RELEASE sensitivity stays OPEN. Its structural pairing is not
-  runtime evidence, and the charge-refusal leg does not replace it (t65, t67).
+- Retirement lifetime decrement is DRIVEN with omitted-put-only RED in
+  release-leg-20261008T200530Z (2a4e501c7), control 1836/1836, mutant sole
+  expected failure 1835/1836. Original creator owner remains alive. FINAL
+  descriptor/page-table reclamation remains OPEN; no magazine-drain claim.
 - Engine-dependent checkpoint 2 obligations (terminal publication, pool/payload
   reuse, `loom_post_pool_cqe`'s missing `service_closing` check) stay with the
   engine.

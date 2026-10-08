@@ -35221,3 +35221,27 @@ shell syntax and 19 constructed-log oracle arms pass, including a masked earlier
 failure. Raw checker transcript: astra-takeover/release-arms.txt. Guest control
 and mutant are still UNRUN at this preparation checkpoint. Existing inner-unwind
 results remain scoped to 2bf48f7ad; the new fixture needs its own runtime result.
+
+
+## October 8, 20:08: lifetime release decrement discriminated
+
+Run release-leg-20261008T200530Z on 2a4e501c7 exited 0. Control 1836/1836,
+normal fallthrough, test.sh 0. The successful-retirement omitted-put-only mutant
+failed ONLY "private retirement releases its image lifetime reference":
+1835/1836, test.sh 1, sole matching diagnostic and suite-failure extinction.
+Its diff expands the current private_end body at loom_private_destroy only,
+retaining the guard decrement and locking; the shared helper and all rollback
+callers remain untouched. The leaked lifetime reference is intentionally left
+until disposable VM teardown. This discriminates the decrement while a creator
+owner remains. FINAL descriptor/page-table reclamation remains OPEN and separate.
+
+Self-review verified both raw logs, exact attribution, mutant diff, restored
+source == pristine == HEAD, and rebuilt ELF/bin == pinned control (bin
+ aa7b16dc8fdfad3b). Moved nine verified inputs outside pruning to
+release-leg-control-PINNED-20261008T200530Z. Full hashes and scope are in
+astra-takeover/release-run-20261008T200530Z-result.json; its undefined pair is
+older-source evidence only. Disk 9418 -> 9021 MiB, 8 GiB floor retained. Lease
+released. This is single-agent self-review, no independent audit or full-gate
+claim. Next: final reclamation witness/remaining checkpoint obligations and
+new-source full gates, then the approved engine and MM work. No activation,
+Main integration or removal of the 128 MiB protection.

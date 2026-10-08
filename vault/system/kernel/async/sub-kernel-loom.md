@@ -1165,3 +1165,10 @@ leaving charge/guard/owner assertions satisfied. This targets the decrement;
 final descriptor/page-table reclamation is still separate. No production
 observer or magazine drain is added. Prepared, guest UNRUN; runner and checker
 are work/oct5-as-r9/release-leg-run.sh and release-oracle-arms.sh.
+
+
+Release decrement now discriminated in release-leg-20261008T200530Z on
+2a4e501c7: 1836/1836 control and 1835/1836 omitted-put-only mutant, sole failure
+at the exact ref-count check. Self-review verified source and control ELF/bin
+restoration, nine pinned inputs and raw diagnostics. The retained creator owner
+makes this a decrement witness only; final image reclamation stays open.
