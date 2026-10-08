@@ -1,5 +1,56 @@
 # The autonomous-run journal
 
+## 2026-10-08: checkpoint 1's refusal edges (corona) -- AUTHORED, UNRUN, QUEUED
+
+Resumed from a self-compaction whose note said the next scoped step was unknown
+and that I had deliberately not checked the reconciliation obligations before
+compacting. Checking them was the first job, and it changed the plan: all four
+were already discharged by 213b695f8. loom_private_destroy does one
+burrow_unref_settled_in, there are zero claim/restore sequences in loom.c, and
+the refund is consumed from the drop. Had I opened with "convert the settlement",
+I would have rewritten finished work.
+
+The real gap was one checkpoint EARLIER than the reap leg. Checkpoint 1 asks for
+every refusal/unwind edge of loom_create_private, and the fixture drove only the
+two that never take the guard (bad geometry, a shared image). The charge refusal
+does take it, and a leak there is SILENT: the leaked guard holds a lifetime
+reference, so the final drop never reaches the private-ring check that would
+announce it. I brought that to astra with the evidence before editing. She
+approved the leg (t67) and tightened it in two ways I had not:
+- the lifetime reference is asserted ON ITS OWN, because a split defect could
+  clear the count and keep the reference;
+- the RED must be attributed to the leg's own assertion. The suite-failed
+  extinction any FAIL produces is a consequence, never a verdict.
+The layout-allocation unwind became STRUCTURAL ONLY, runtime OPEN, with a seam
+proposal owed after (a) (draft: work/oct5-as-r9/seam-b-proposal-DRAFT.md).
+
+The oracle's arms are built from real guest logs, and one of them taught me
+something before any lease: a retained real FAIL of this fixture
+(red-legs/20261007T103115Z/uncond-refund-serial.log:601-603) shows a FAIL emits
+a `[runnable-dump <msg>]` line and a cpu line INSIDE the leg's block, before the
+verdict. An arm built from my memory of the format would not have contained
+them. 18 arms, rc 0, transcript retained.
+
+WRONG TURNS, both cheap and both caught by their own output:
+- My first wake watcher died at once. The fixed thyla-wake runs `nohup "$0"`,
+  and a `git show` extract is not executable. The log made that plain; I had
+  not read the launch line before running it.
+- The mutant's syntax check failed on `"../mm/slub.h"` when compiled from
+  scratch. That was the relative include, not the mutant: `-iquote kernel`
+  resolved it, and the result was 0 errors.
+
+Also re-examined merge obligation 7 against main's LANDED vma_remove_in, rather
+than closing it on the hopeful note I had left. Main's underflow extinction runs
+AFTER the unlink, so it does not cover a double remove. Worse, a code alias
+removed twice while others are live would silently UNDERCOUNT code_vmas, which
+feeds the I-39 image join. Recorded (3ae6e401b), still unreachable today, and
+noted to main.
+
+STATE: fbb167818 + 3ae6e401b on both mirrors; the leg has never executed. The
+mac is aux's (spawn-cwd gate) with main queued first; my thyla-wake hold is
+armed. Nothing landed, nothing activated, the 128 MiB protection stays, and
+release sensitivity stays open and distinct.
+
 ## 2026-10-07: the private-owner port (corona) -- QUALIFIED ON ONE AXIS
 
 Resumed from a self-compaction with AS-R9 qualified (50/50 clean boots) and
