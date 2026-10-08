@@ -341,6 +341,10 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
             // returning it would be a kernel-side bug -> extinct, don't mask.
             extinction_with_addr("arch_fault_handle returned FAULT_USER_BUS (EL1)",
                                  (uintptr_t)fi.vaddr);
+        case FAULT_USER_DYING:
+            // Same reasoning: only userland_demand_page returns it.
+            extinction_with_addr("arch_fault_handle returned FAULT_USER_DYING (EL1)",
+                                 (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
             // Reserved — current arch_fault_handle paths extinct
             // internally. Defense-in-depth.
@@ -517,6 +521,12 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // faulting VA -- NEVER a silent zero-fill of text, NEVER a kernel
             // extinction. proc_fault_terminate is noreturn (exits()).
             proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)fi.vaddr);
+        case FAULT_USER_DYING:
+            // The thread's death was pending when the fault went unresolved
+            // (I-24): no user-fault line and no snare:* status of its own. The
+            // vector tail runs el0_return_die_check, then the note delivery
+            // that acts on a terminate latch, before any EL0 instruction.
+            return;
         case FAULT_FATAL:
             // F3 audit close: FAULT_FATAL's documented contract (per
             // arch/arm64/fault.h) is "kernel-side invariant violation;

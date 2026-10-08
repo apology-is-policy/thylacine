@@ -24,6 +24,11 @@
 //                                            wait_pid drains ALL
 //                                            Threads (the multi-thread
 //                                            reap path in wait_pid).
+//   proc.{exits,fault}_in_dying_group_keeps_group_status
+//                                          -- a last thread leaving a group
+//                                            whose termination was already
+//                                            claimed reaps with the claimed
+//                                            status (I-24).
 //
 // The kernel test harness runs at EL1 so we can't drive a full eret-to-
 // EL0 from here; the user-mode SVC dispatch + the userland_enter eret
@@ -37,6 +42,7 @@
 
 #include <thylacine/context.h>
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
@@ -375,4 +381,65 @@ void test_proc_wait_pid_concurrent_waiters_both_reap(void) {
     int p1 = __atomic_load_n(&g_wpcw_pid[1], __ATOMIC_ACQUIRE);
     TEST_ASSERT(p0 > 0 && p1 > 0, "both reaped pids recorded");
     TEST_ASSERT(p0 != p1, "the two waiters reaped DISTINCT children");
+}
+
+// ---------------------------------------------------------------------------
+// proc.exits_in_dying_group_keeps_group_status
+// proc.fault_in_dying_group_keeps_group_status
+//
+// I-24: a group's termination status is decided once; the first claim wins.
+// Main claims it with code 7 (an exit_group(7)) and leaves as a peer does.
+// The worker, now the last live Thread, then exits with another status: by
+// exits(), or by proc_fault_terminate, the path a file page-in takes when the
+// group's own death abandons its 9P read (snare:bus). The Proc must reap
+// with 7, not with the late thread's status.
+// ---------------------------------------------------------------------------
+
+static struct Thread *volatile g_dgs_main;
+static volatile bool           g_dgs_fault;
+
+static void dgs_worker_entry(void *arg) {
+    (void)arg;
+    while (g_dgs_main->state != THREAD_EXITING)
+        sched();
+    if (g_dgs_fault)
+        proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)0xdead000ul);
+    exits("snare:bus");
+}
+
+static void dgs_main_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_dgs_main = current_thread();
+    struct Thread *w = thread_create_with_arg(p, dgs_worker_entry, NULL);
+    if (!w) extinction("dgs_main_entry: thread_create_with_arg failed");
+    ready(w);
+    irq_state_t s = proc_table_lock_acquire();
+    proc_group_terminate_code(p, 7, "seven");
+    proc_table_lock_release(s);
+    thread_exit_self();
+}
+
+static int dgs_run(bool fault) {
+    g_dgs_main  = NULL;
+    g_dgs_fault = fault;
+    int child_pid = rfork(RFPROC, dgs_main_entry, NULL);
+    if (child_pid <= 0) return -2;
+    int status = -1;
+    int reaped = wait_pid(&status);
+    return reaped == child_pid ? status : -3;
+}
+
+void test_proc_exits_in_dying_group_keeps_group_status(void) {
+    int status = dgs_run(false);
+    TEST_EXPECT_NE(status, 1, "the late exits() status (1) replaced the group's");
+    TEST_EXPECT_EQ(status, 7,
+        "a last thread's exits() in a dying group reaps with the group's status");
+}
+
+void test_proc_fault_in_dying_group_keeps_group_status(void) {
+    int status = dgs_run(true);
+    TEST_EXPECT_NE(status, 1, "the late fault's snare:bus status (1) replaced the group's");
+    TEST_EXPECT_EQ(status, 7,
+        "a fault in a dying group reaps with the group's status, not snare:bus");
 }

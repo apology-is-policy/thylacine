@@ -4191,6 +4191,18 @@ void exits_code(int code, const char *msg) {
     // has live peers; or a kill / SYS_EXIT_GROUP) sweeps its scope too -- not
     // only the clean single-thread exit. A-4a audit F1.
 
+    // I-24: a group's termination status is decided once, by the first claim.
+    // A thread that reaches exits() after the claim -- an exit_group or a kill
+    // it did not see, or a fault taken while the group was dying -- leaves as a
+    // peer does, and thread_exit_self reaps with the claimed status; the
+    // last-thread path below would record this call's status over it. A claim
+    // made after this check finds this exit already decided.
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        thread_exit_self();
+        extinction("exits: thread_exit_self returned in a dying group");
+    }
+
     // Peer-Thread check (multi-thread Proc gate): every peer Thread MUST
     // be in THREAD_EXITING state already. wait_pid's reap loop later
     // walks p->threads and frees each, so the count itself is not

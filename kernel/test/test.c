@@ -623,6 +623,7 @@ void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
+void test_demand_page_file_read_error_dying_is_death(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
 void test_demand_page_file_cluster_short_read(void);
@@ -853,6 +854,8 @@ void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
+void test_proc_exits_in_dying_group_keeps_group_status(void);
+void test_proc_fault_in_dying_group_keeps_group_status(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -2746,6 +2749,8 @@ struct test_case g_tests[] = {
     { "demand_page.file_geometry_shift_bails_single", test_demand_page_file_geometry_shift_bails_single, false, NULL },
     { "demand_page.file_read_error_snare_bus",
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
+    { "demand_page.file_read_error_dying_is_death",
+                                       test_demand_page_file_read_error_dying_is_death, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
     { "demand_page.file_short_read_fills_page",
                                        test_demand_page_file_short_read_fills_page, false, NULL },
@@ -3061,6 +3066,8 @@ struct test_case g_tests[] = {
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
+    { "proc.exits_in_dying_group_keeps_group_status", test_proc_exits_in_dying_group_keeps_group_status, false, NULL },
+    { "proc.fault_in_dying_group_keeps_group_status", test_proc_fault_in_dying_group_keeps_group_status, false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },

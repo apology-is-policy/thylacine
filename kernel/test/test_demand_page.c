@@ -72,6 +72,7 @@ void test_demand_page_reclaim_asks_for_the_shortfall(void);
 void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_read_error_snare_bus(void);
+void test_demand_page_file_read_error_dying_is_death(void);
 void test_demand_page_file_multi_page(void);
 // REVENANT R-5 audit SA-F1: the slow path must LOOP over a short-returning read.
 void test_demand_page_file_short_read_fills_page(void);
@@ -990,6 +991,55 @@ void test_demand_page_file_read_error_snare_bus(void) {
     g_rev_read_fail = false;     // reset for other tests
     drop_proc(p);
     burrow_unref(v);
+}
+
+// I-24 + I-36 condition 6: a page-in that fails while the faulting thread's
+// death is pending is answered by the death, not by snare:bus -- the common
+// case is the group's own death abandoning the 9P read, and reporting it as a
+// bus error both prints a false user fault and races the claimed status.
+// Runs INSIDE an rfork'd child, because the pager asks the faulting thread.
+// Control first, one variable away: the same failing read with no death
+// pending is FAULT_USER_BUS. Then the child claims its group's termination
+// (an exit_group(5)) and the same fault answers FAULT_USER_DYING; the child
+// leaves as a peer does and reaps with 5.
+static volatile int g_dying_ctl_r;
+static volatile int g_dying_r;
+
+static void dying_page_in_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_dying_ctl_r = g_dying_r = -1;
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
+    if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
+        struct fault_info fi;
+        make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+        g_dying_ctl_r = (int)userland_demand_page(p, &fi);
+        irq_state_t st = proc_table_lock_acquire();
+        proc_group_terminate_code(p, 5, "five");
+        proc_table_lock_release(st);
+        make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+        g_dying_r = (int)userland_demand_page(p, &fi);
+    }
+    if (v) burrow_unref(v);
+    thread_exit_self();
+}
+
+void test_demand_page_file_read_error_dying_is_death(void) {
+    g_rev_read_fail  = true;
+    g_rev_read_calls = 0;
+    int pid = rfork(RFPROC, dying_page_in_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    g_rev_read_fail = false;     // reset for other tests (before any assert returns)
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid reaped the child");
+    TEST_EXPECT_EQ(g_dying_ctl_r, (int)FAULT_USER_BUS,
+        "control: a failed page-in with no death pending is snare:bus");
+    TEST_EXPECT_EQ(g_dying_r, (int)FAULT_USER_DYING,
+        "a failed page-in with the thread's death pending is answered by the death");
+    TEST_EXPECT_EQ(g_rev_read_calls, 2, "both faults attempted the read");
+    TEST_EXPECT_EQ(status, 5, "the child reaped with its group's claimed status");
 }
 
 // REVENANT read-ahead (#343): a FILE fault fills a CLUSTER of pages from ONE

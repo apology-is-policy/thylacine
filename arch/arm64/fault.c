@@ -21,6 +21,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/notes.h>      // thread_die_pending: a page-in failed by a death
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>         // REVENANT R-2: struct Spoor for the pinned backing Chan
@@ -945,9 +946,10 @@ static enum fault_result file_install_locked(struct Proc *p,
 // BURROW_TYPE_FILE fill, run with NO lock held (vma_lock was released by
 // userland_demand_page after demand_page_locked signalled the miss). Allocates a
 // fresh zeroed page, reads ONE page from the pinned backing Spoor (BLOCKS on the
-// 9P round-trip; #811-death-interruptible BY INHERITANCE from the dev9p read -- a
-// dying Proc unwinds at el0_return_die_check and the read returns < 0; no new
-// wait/wake code), then re-acquires vma_lock to install. Fail-closed: a read
+// 9P round-trip; #811-death-interruptible BY INHERITANCE from the dev9p read -- the
+// read returns < 0, userland_demand_page answers FAULT_USER_DYING, and the dying
+// thread ends at el0_return_die_check; no new wait/wake code), then re-acquires
+// vma_lock to install. Fail-closed: a read
 // error -> FAULT_USER_BUS (snare:bus, I-36 condition 6), NEVER a silent zero-fill
 // of executable text. This is ALSO the read-ahead FALLBACK -- file_demand_page_
 // cluster degrades here on any staging/page alloc shortfall or a degenerate
@@ -987,7 +989,7 @@ static enum fault_result file_demand_page_single(struct Proc *p,
                                         (s64)(freq->file_offset + got));
         if (n < 0) {
             free_pages(newpg, 0);
-            r = FAULT_USER_BUS;          // page-in I/O error / death-interrupt -> snare:bus
+            r = FAULT_USER_BUS;          // page-in I/O error -> snare:bus (a death: FAULT_USER_DYING at the entry)
             goto out;
         }
         if (n == 0) break;               // EOF -> the tail stays zero (KP_ZERO)
@@ -1262,6 +1264,11 @@ static enum fault_result demand_page_one(struct Proc *p,
 // inside an interruptible read's copy-out it turns the read into an EFAULT.
 // Death still unwinds the page-in. Restored, not cleared, because the fault may
 // sit inside a syscall that is itself interruptible.
+//
+// I-24: a fault left unresolved while the thread's death is pending answers
+// FAULT_USER_DYING, never a snare:* of its own -- the death that abandoned the
+// page-in's read is the cause, and a snare:bus here would print a false user
+// fault and race the group's claimed status.
 enum fault_result userland_demand_page(struct Proc *p,
                                        const struct fault_info *fi) {
     struct Thread *t = current_thread();
@@ -1269,6 +1276,9 @@ enum fault_result userland_demand_page(struct Proc *p,
     if (t) t->note_interruptible = false;
     enum fault_result r = demand_page_one(p, fi);
     if (t) t->note_interruptible = intr;
+    if ((r == FAULT_UNHANDLED_USER || r == FAULT_USER_BUS) &&
+        t && t->proc == p && thread_die_pending(t))
+        r = FAULT_USER_DYING;
     return r;
 }
 
