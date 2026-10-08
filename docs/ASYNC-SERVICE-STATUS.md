@@ -4,6 +4,15 @@ Approved scripture4722f34e8. Single-agent on Astra; protected authority/settings
 drafts preserved. ASYNC-SERVICE-LIFECYCLE.md owns the contract; memory-accounting
 implementation follows this facility as approved.
 
+October 8 ownership update: the operator transferred Corona's remaining work
+entirely to Astra when the Claude agents exhausted credits. Astra continues the
+existing `corona/async-memory` checkout, with Yip/resource identity rooted only in
+`thylacine-astra`. The current queue and exact verification state are in
+`work/oct5-as-r9/astra-takeover.md`. T83's helper-timeout path is corrected in
+source and the strengthened log checker passes 26 constructed-log arms; the
+actual-source host control and new guest qualification remain pending resources.
+No new runtime, integration, private activation or memory-limit removal is claimed.
+
 | Stage | State | Evidence / remaining work |
 | --- | --- | --- |
 | AS-0 contract | Approved | Scripture4722f34e8; concrete numeric/layout reservation in ASYNC-SERVICE-ABI.md. |

@@ -1,5 +1,27 @@
 # The autonomous-run journal
 
+## 2026-10-08: Astra takes over Corona's remaining work
+
+The operator transferred implementation and runtime qualification to Astra after
+the Claude agents ran out of credits. Corona's tracked tree at eb03e4f65 was clean,
+so continuing it preserves the existing evidence without importing Astra's
+pending caret work or four protected drafts. Main's gate still had live processes;
+an agent's lack of credits does not cancel its background work or transfer its
+lease. The existing monitor now continues Astra's work instead of waiting for a
+reply from Corona.
+
+The first correction addresses review T83. A shared void join reports its timeout
+and returns without reaping; the fixture had treated that return as completion.
+A later expected failure could overwrite the timeout's final message. The fixture
+now captures terminal completion explicitly before joining and stops before the
+inner test on timeout. It leaves transferred ownership with the helper. The log
+checker also rejects earlier failure diagnostics hidden by an expected final
+verdict. All 26 constructed-log arms passed, including that masking case
+(`work/oct5-as-r9/astra-takeover/inner-arms.txt`). This checks attribution only.
+Actual-source host execution and control/M1/M2/M3 guest boots await the Mac lease
+and the unchanged 8 GiB disk floor; the new code is not runtime-qualified yet.
+
+
 ## 2026-10-08: checkpoint 1's refusal edges (corona) -- BOTH DRIVABLE EDGES DISCRIMINATED
 
 Resumed from a self-compaction whose note said the next scoped step was unknown

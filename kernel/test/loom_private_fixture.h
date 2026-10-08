@@ -57,6 +57,20 @@ static void lp_cross_free(void) {
     test_kthread_park_terminal(&g_lp_cross_exited);
 }
 
+// Unlike test_kthread_join_free's void timeout return, this result belongs to
+// the fixture. Never enter the inner leg or report a completed control until
+// the helper's terminal RELEASE has been observed. On timeout the transferred
+// object stays the helper's; its static handoff storage remains valid until
+// this disposable VM ends. No retry, speculative free or helper reuse.
+static bool lp_cross_wait(void) {
+    u64 start = timer_now_ns();
+    while (!__atomic_load_n(&g_lp_cross_exited, __ATOMIC_ACQUIRE)) {
+        if (timer_now_ns() - start >= TEST_YIELD_BUDGET_NS) return false;
+        sched();
+    }
+    return true;
+}
+
 static const char *loom_private_fixture(void) {
     const char *error = NULL;
     struct Proc *p = test_proc_make();
@@ -201,7 +215,7 @@ static const char *loom_private_fixture(void) {
     // notifier's own thread cannot change mid-call. The object is handed to the
     // helper, which frees it exactly once; if no helper exists it is still ours.
     void *wc = kmalloc(sizeof(struct Loom), KP_ZERO);
-    bool cross_ran = false, cross_fired = false;
+    bool cross_ran = false, cross_fired = false, cross_timed_out = false;
     if (wc) {
         kfree_large_watch_arm_for_test(wc);
         g_lp_cross_obj = wc;
@@ -209,15 +223,22 @@ static const char *loom_private_fixture(void) {
         struct Thread *helper = thread_create(kproc(), lp_cross_free);
         if (helper) {
             ready(helper);
-            test_kthread_join_free(helper, &g_lp_cross_exited);
-            cross_ran = true;
-            cross_fired = kfree_large_watch_fired_for_test();
+            if (lp_cross_wait()) {
+                // exited is terminal and never cleared during this invocation,
+                // so the shared join cannot time out after this observation.
+                test_kthread_join_free(helper, &g_lp_cross_exited);
+                cross_ran = true;
+                cross_fired = kfree_large_watch_fired_for_test();
+            } else {
+                cross_timed_out = true;
+            }
         } else {
             kfree(wc);
         }
         wc = NULL;
     }
     kfree_large_watch_disarm_for_test();
+    LP_CHECK(!cross_timed_out, "the cross-thread watch helper completed before the deadline");
     LP_CHECK(cross_ran, "the cross-thread watch control ran");
     LP_CHECK(!cross_fired, "a watched free on another thread leaves the watch quiet");
 

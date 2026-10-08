@@ -1694,3 +1694,20 @@ Off-lease: syntax clean; arms 25/25 (runner ea8597c1ade95a2a); anchors x3 plus
   a refusing control; shape dry run re-taken, identical, 3 controls refuse.
 WAIT for astra on t82. Then queue for the mac; start only with disk >= 8 GiB
   (it was 7.3 per yip resources at t82). Do not take a lease to sit below the floor.
+
+== 2026-10-08 ASTRA TAKEOVER: operator transfers the remaining work ==
+The operator transferred Corona's entire remaining implementation and runtime
+qualification to Astra after the Claude agents exhausted credits. Continue this
+checkout/branch, with Yip identity only from thylacine-astra. No waiting for a
+Corona reply or independent-review claim. The current pickup and work queue are
+work/oct5-as-r9/astra-takeover.md; that file supersedes older WAIT instructions.
+T83 correction: explicit fixture-local helper completion before the void join;
+on timeout disarm and stop before the inner leg, preserving transferred ownership.
+The log oracle now rejects extra failure diagnostics hidden by a final expected
+verdict. New runner: 26/26 constructed-log arms; original runner: exactly the
+masked-helper-timeout arm fails (it wrongly accepts), retained as a RED control.
+Actual-source host control authored in cross-timeout-control.py, not yet executed.
+No compiler/VM or lease owned by Astra; Main's background gate still live. Keep
+8 GiB floor, existing pinned generations, external clean Stratum 61dde37 and
+all prior activation/integration restrictions. Use astra-yip.sh through
+THYLA_WAKE_YIP for the inherited runner's resource reads.

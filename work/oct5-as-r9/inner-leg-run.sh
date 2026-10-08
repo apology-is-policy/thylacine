@@ -1,5 +1,5 @@
 #!/bin/sh
-# The INNER layout-failure leg: CONTROL, then TWO independent MUTANTS, in one
+# The INNER layout-failure leg: CONTROL, then THREE independent MUTANTS, in one
 # lease window, then the production-shape check of the seam and the watch.
 # Derived from layout-leg-run.sh (lease, tree, Stratum pin, quarantine-first
 # recovery, run_suite, the leg-block oracles), carried over verbatim; what changed
@@ -162,6 +162,9 @@ pair, cross, arm = (s.index(sys.argv[2]), s.index(sys.argv[3]),
                     s.index('loom_layout_ring_fault_arm_for_test();'))
 if not (pair < cross < arm):
     sys.exit("REFUSING: the order is not pair check < cross-thread control < arm")
+timeout = 'the cross-thread watch helper completed before the deadline'
+if s.count(timeout) != 1 or not (pair < s.index(timeout) < cross):
+    sys.exit("REFUSING: the helper timeout is not checked before the cross-thread verdict")
 print("-- this leg's checks precede its oracle; pair < cross-thread control < arm")
 PY
 # THE MUTATION ANCHORS, each exactly once in ITS file and at ITS site, checked
@@ -464,6 +467,14 @@ check_mutant() { # check_mutant <boot log>; 0 = discriminated, nonzero = finding
     echo "   THE VERDICT NAMES THE ASSERTION, but the fixture's after-check-failure"
     echo "   marker does not. The two attributions disagree. A FINDING."
     /usr/bin/grep -nF 'cleanup-owner-drop' "$_blk" | head -2
+    return 2; }
+  # test_fail overwrites the current test's fail_msg. A helper can report a
+  # timeout and return, then the fixture can overwrite it with WANT. A single
+  # final FAIL verdict is insufficient: require the one expected diagnostic too.
+  _diag=$(/usr/bin/grep -E '^[[:space:]]*\[runnable-dump ' "$_m" | tr -d '\r' | sed 's/^[[:space:]]*//')
+  [ "$_diag" = "[runnable-dump $WANT]" ] || {
+    echo "   THE FAILURE DIAGNOSTICS ARE NOT EXACTLY THE EXPECTED ASSERTION:"
+    echo "$_diag"
     return 2; }
   # NOTHING ELSE FAILED: a second failing test would mean the mutant reached
   # beyond this leg, and the suite-level reading would be confounded.

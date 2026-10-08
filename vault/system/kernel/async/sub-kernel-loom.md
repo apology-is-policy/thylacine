@@ -22,7 +22,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 ## Approved private service lifecycle
@@ -1100,6 +1100,15 @@ so a `kfree`-deleted mutant would PASS. The notifier is now keyed to the arming
 thread as well. A cross-thread control drives the property that closes it: a
 helper kthread frees a watched object, and the watch must stay quiet.
 
+The fixture waits for an explicit terminal publication before calling the shared
+join helper. That helper returns `void` even after its bounded wait times out;
+returning from it alone cannot prove completion or reaping. A fixture-local
+timeout disarms the watch and stops before the inner leg. The transferred object
+stays the helper's and is never speculatively freed. Its static handoff storage
+outlives the failed fixture. A late publication does not overwrite the captured
+timeout. The host control extracts this wait and control block from the source;
+its scheduler/allocation doubles do not qualify native scheduling.
+
 The leg first checks the watch on a same-class pair: an unwatched free stays quiet
 and the watched one fires. Each object is freed exactly once before any verdict
 is read. Then the leg admits with the ring fault armed and asserts, in this
@@ -1110,13 +1119,17 @@ every earlier check passed. A free that went unobserved is UNKNOWN, not owned:
 the leaked metadata of the `kfree`-deleted mutant is never reclaimed, and stays
 an intended, bounded leak until its disposable VM ends (astra, t77).
 
-The runner (`work/oct5-as-r9/inner-leg-run.sh`) has two mutants, each applied to
+The runner (`work/oct5-as-r9/inner-leg-run.sh`) has three mutants, each applied to
 pristine copies of both files:
 - `kfree(l)` deleted: must fail ONLY the oracle.
 - the watch's hook deleted: must fail ONLY the self-check, which precedes the
   arm, so the inner leg does not run under that mutant.
 - the watch's thread check deleted: must fail ONLY the cross-thread control,
   which also precedes the arm.
+It requires exactly one matching failure diagnostic in addition to the named
+verdict. `test_fail` overwrites a test's final message, so a lone expected verdict
+otherwise could hide an earlier helper timeout. A constructed-log negative
+control covers that masking case; it is not guest evidence.
 The shape stage compiles `loom.c` and `slub.c` with `KERNEL_TESTS` off and compares
 `kfree` and every emitted Loom constructor, with relocations. The kmalloc-NULL
 edge returns before anything is allocated, and its caller-side NULL is the one

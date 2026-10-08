@@ -67,6 +67,9 @@ tally_fail = [j for j, s in enumerate(F) if s.startswith('  tests: ')]
 assert len(tally_fail) == 1 and F[tally_fail[0]] == '  tests: %d/%d FAIL\r' % (n-1, n), repr(F[tally_fail[0]])
 D = with_block(failblock(WANT, WANT))
 put('D-predicted-mutant.log', D)
+H = list(D)
+H.insert(fi + 1, '  [runnable-dump TEST_YIELD_UNTIL budget exhausted waiting for: helper]\r')
+put('H-masked-helper-timeout.log', H)
 put('D2-predicted-M2.log', with_block(failblock(WANT2, WANT2)))
 put('D3-predicted-M3.log', with_block(failblock(WANT3, WANT3)))
 put('B-marker-and-verdict-disagree.log', with_block(failblock('the inner ring failure returns the charge', WANT)))
@@ -140,6 +143,7 @@ run check_mutant  S-real-fail-other-assertion.log   2 "NOT AT THE PREDICTED ASSE
 run check_mutant  V-different-assertion.log         2 "NOT AT THE PREDICTED ASSERTION"
 run check_mutant  B-marker-and-verdict-disagree.log 2 "The two attributions disagree"
 run check_mutant  C-no-cleanup-marker.log           2 "The two attributions disagree"
+run check_mutant  H-masked-helper-timeout.log       2 "FAILURE DIAGNOSTICS ARE NOT EXACTLY"
 run check_mutant  E-second-failing-test.log         2 "FAIL verdicts in the boot, not 1"
 run check_mutant  T-tally-total-wrong.log           2 "THE TALLY DISAGREES"
 run check_mutant  X-extra-extinction.log            2 "NOT EXACTLY THE SUITE'S CONSEQUENCE"
