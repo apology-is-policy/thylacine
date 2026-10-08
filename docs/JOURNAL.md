@@ -104,6 +104,41 @@ indirect branch leaves the next one checked as that branch's target. Results:
 Both sabotages ran in a separate worktree, so the reviewer's files stayed
 untouched.
 
+**XT-3a's audit (r1, cross-family, max effort, on `ab768299`): 0 P0 / 1 P1 /
+1 P2 / 8 P3.** Fixed in `5f0e65f3`.
+- F1 was the one that mattered. ITD and SED are RES1 where EL0 has no AArch32
+  (Linux `kvm/config.c` `AS_RES1`), and HVF, the operator's default
+  accelerator, runs Apple cores without it. QEMU's HVF reset value
+  `0x30900180` sets both. The composed value had written them 0, and the TCG
+  suite could not see it. Base now `0x30D40998`.
+- The same research corrected the before-picture. Under HVF the inherited
+  value also cleared nTWE, nTWI, SA, SA0, EIS and EOS, so an EL0 WFI or WFE
+  killed the Proc on the dev host, not only on an EL2 boot.
+- F2: BT0 had been documented for years as "the BTI enable". BTI is the GP
+  bit; BT0/BT1 only stop PACIxSP being a register-BR landing pad. Comments
+  corrected and BT1 set (Linux `bti_enable`). A census of the built kernel's
+  BR instructions found 8 not through x16/x17, all intra-function jump tables
+  on `bti j`.
+
+**A nondeterministic failure during verification, hunted rather than waved
+off.** The first post-fix suite failed coreutil-smoke's "ps rich table + obj
+pid" (kernel 1956/1956); two reruns of the identical image passed. Reading the
+code instead of guessing found it:
+- ps read `/ctl/procs` with `io::slurp`, a read-to-EOF loop;
+- devctl re-renders a leaf on every read and copies from the offset;
+- so the EOF probe returned a newer rendering's tail whenever the table grew
+  in between, the tail parsed as a torn row, and ps fell back to verbatim text.
+
+ps and cpubench now read once (`41df9a8a`, task #16). The class is task #17.
+Nothing in XT-3a's diff caused it; attribution changed nothing about fixing it.
+
+**SMP subset** (`tools/smp-multiboot.sh`, `BOOT_TIMEOUT=1500` for TCG): 1, 4
+and 8 CPUs, 3 boots each, 9/9 PASS, 0 CORRUPTION. The default gate's 300 s
+per-boot bound is HVF-sized, and these boots took 161-240 s under TCG.
+
+**Still owed:** the suite under HVF and under KVM (thyla-pi). Those are the
+hosts where the reset values differ most, and none is in this container.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
