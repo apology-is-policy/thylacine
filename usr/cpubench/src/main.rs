@@ -510,22 +510,13 @@ fn field_u64(s: &str, key: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
-/// Read /ctl/sched into `buf` and return it as a &str slice (or None if /ctl is
-/// not in this namespace -- the bench then degrades to no wc reporting).
+/// Read /ctl/sched into `buf` (or None if /ctl is not in this namespace -- the
+/// bench then degrades to no wc reporting). One read is the snapshot: devctl
+/// renders the leaf afresh on every read(), so a second read can return the
+/// tail of a different rendering (kernel/devctl.c devctl_read).
 fn read_ctl_sched(buf: &mut [u8]) -> Option<usize> {
     let mut f = File::open("/ctl/sched").ok()?;
-    let mut total = 0usize;
-    loop {
-        if total >= buf.len() {
-            break;
-        }
-        match f.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(k) => total += k,
-            Err(_) => return None,
-        }
-    }
-    Some(total)
+    f.read(buf).ok()
 }
 
 /// Snapshot the tickless work-conservation counters. None if /ctl/sched is

@@ -29,6 +29,7 @@ use coreutils::color::{self, ColorMode};
 use coreutils::{boxd, palette, usage};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
+use libthyla_rs::io::Read;
 use libthyla_rs::{eprintln, io};
 
 const USAGE: &str = "\
@@ -219,6 +220,20 @@ fn render_rich(out: &mut io::OutSink, rows: &[PsRow]) {
     t.realize(&mut s);
 }
 
+/// One read is the snapshot. devctl renders /ctl/procs afresh on every read()
+/// (kernel/devctl.c devctl_read), so a second read -- even the one a
+/// read-to-EOF loop makes to find EOF -- returns the tail of a DIFFERENT
+/// rendering when the table grew in between, and that tail parses as a torn
+/// row. The leaf is capped at DEVCTL_READ_BUF (4 KiB), so one read of a larger
+/// buffer is all of it.
+fn read_procs() -> libthyla_rs::err::Result<Vec<u8>> {
+    let mut f = File::open("/ctl/procs")?;
+    let mut buf = alloc::vec![0u8; 8 * 1024];
+    let n = f.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
 fn run(args: Args) -> i64 {
     if let Some(rc) = usage::help_if_requested(args, USAGE) {
         return rc;
@@ -257,7 +272,7 @@ fn run(args: Args) -> i64 {
     let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
     let on = !rich && mode.resolve(|| libthyla_rs::stdout_is_terminal());
 
-    let raw = match File::open("/ctl/procs").and_then(|mut f| io::slurp(&mut f)) {
+    let raw = match read_procs() {
         Ok(d) => d,
         Err(e) => {
             eprintln!("ps: /ctl/procs: {}", e);

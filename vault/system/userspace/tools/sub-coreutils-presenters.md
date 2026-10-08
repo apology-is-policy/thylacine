@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -117,8 +117,14 @@ the connection plumbing — dial-string resolution and the byte pumps — from
 the library rather than each reimplementing back-pressure.
 
 **`ps` presents the kernel's process table.** It reads `/ctl/procs` in one
-atomic slurp — the kernel renders the whole table under `g_proc_table_lock`,
-so there is no readdir race to lose a row to — and offers three
+`read` of a buffer larger than the leaf's 4 KiB cap. The kernel renders the
+whole table under `g_proc_table_lock`, so there is no readdir race to lose a
+row to, but it renders afresh on every `read`. A read-to-EOF loop is therefore
+not one snapshot: its EOF-probing second read returned the tail of a newer
+rendering whenever the table grew in between, that tail parsed as a torn row,
+and `ps` fell back to the verbatim text (fixed 2026-10-08; it had used `slurp`,
+and the coreutil-smoke rich-table check caught it once in three runs). It
+offers three
 realizations of the same nine columns (PID PPID NAME STATE THREADS PAGES
 TABLES CHILDREN CPU; TABLES since prowl-6, and the end-anchored parse moved
 with it). Colour off *and* beacon off: the kernel text passes through
