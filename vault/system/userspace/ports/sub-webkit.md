@@ -6,6 +6,7 @@ parent: moc-userspace
 code:
   - usr/ports/webkit/README.md
   - usr/ports/webkit/patches/0001-thylacine-jsconly-b0.patch
+  - usr/ports/webkit/patches/0002-thylacine-jsc-jit-b2c.patch
   - cmake/Toolchain-aarch64-pouch-cxx.cmake
   - cmake/Platform/Thylacine.cmake
   - tools/interactive/ls-jsc.exp

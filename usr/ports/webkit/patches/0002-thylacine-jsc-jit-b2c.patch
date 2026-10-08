@@ -1,0 +1,304 @@
+From 74d42d2d1ee0883947e20a2b9e354078f3b84408 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <noreply@example.invalid>
+Date: Thu, 8 Oct 2026 17:42:24 +0200
+Subject: [PATCH] thylacine: B-2c the Baseline JIT on one SYS_JIT_CREATE code
+ region (WIP, local only)
+
+OS(THYLACINE) && ENABLE(JIT): the separated-WX heap with no jump islands and a
+64 MiB pool (one code region, within one near branch, so the pool-size
+static_assert proves every near branch reaches); the pool is the region's exec
+alias, adopted as the reservation; the writer alias's address lives only inside
+an execute-only thunk sealed by SYS_JIT_CREATE_SEALED, hand-encoded so no
+LinkBuffer copy of it exists; jsc acquires CAP_JIT by the SELF form before
+JSC::initialize, and --thylacine-no-cap-jit skips the acquisition (the deny
+probe). Any refusal leaves the reservation empty and JSC runs its interpreters.
+---
+ .../jit/ExecutableAllocator.cpp               | 137 +++++++++++++++++-
+ Source/JavaScriptCore/jsc.cpp                 |  32 ++++
+ Source/WTF/wtf/PageReservation.h              |  11 ++
+ Source/WTF/wtf/PlatformEnable.h               |  17 +++
+ 4 files changed, 196 insertions(+), 1 deletion(-)
+
+diff --git a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
+index c9e3589bac..7f34d4c1fa 100644
+--- a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
++++ b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
+@@ -68,6 +68,12 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ #include <wtf/spi/cocoa/MachVMSPI.h>
+ #endif
+ 
++#if OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++#include <errno.h>
++#define THYLA_JIT_NO_CAPJIT
++#include <thyla_jit.h>
++#endif
++
+ #if USE(INLINE_JIT_PERMISSIONS_API)
+ #include <wtf/darwin/WeakLinking.h>
+ WTF_WEAK_LINK_FORCE_IMPORT(be_memory_inline_jit_restrict_with_witness_supported);
+@@ -352,6 +358,128 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+ #endif // OS(DARWIN) && HAVE(REMAP_JIT)
+ 
++#if OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++
++// The write thunk, hand-encoded A64, so its bytes never pass through a LinkBuffer,
++// whose branch-compaction buffer would keep a readable copy of the writer address.
++// Called as write(offset, src, n): copies n bytes to writerBase + offset, and traps
++// (brk) when offset > poolSize or n > poolSize - offset. n == 8 at an 8-aligned
++// destination is one 64-bit store, so an 8-byte Atomic repatch is one store;
++// otherwise aligned 32-bit stores (jitMemcpyChecks asserts dst and src 4-aligned),
++// then a byte tail. x3, the one register that held the writer address, is zeroed
++// before ret.
++namespace ThylacineJITWriteThunk {
++
++constexpr unsigned X0 = 0, X1 = 1, X2 = 2, X3 = 3, X4 = 4, X9 = 9, X10 = 10, XZR = 31;
++constexpr unsigned NE = 1, LO = 3, HI = 8;
++
++constexpr uint32_t movz(unsigned rd, uint16_t imm, unsigned hw) { return 0xD2800000u | (hw << 21) | (uint32_t(imm) << 5) | rd; }
++constexpr uint32_t movk(unsigned rd, uint16_t imm, unsigned hw) { return 0xF2800000u | (hw << 21) | (uint32_t(imm) << 5) | rd; }
++constexpr uint32_t cmpReg(unsigned rn, unsigned rm) { return 0xEB000000u | (rm << 16) | (rn << 5) | XZR; }
++constexpr uint32_t cmpImm(unsigned rn, unsigned imm12) { return 0xF1000000u | (imm12 << 10) | (rn << 5) | XZR; }
++constexpr uint32_t subReg(unsigned rd, unsigned rn, unsigned rm) { return 0xCB000000u | (rm << 16) | (rn << 5) | rd; }
++constexpr uint32_t addReg(unsigned rd, unsigned rn, unsigned rm) { return 0x8B000000u | (rm << 16) | (rn << 5) | rd; }
++constexpr uint32_t subImm(unsigned rd, unsigned rn, unsigned imm12) { return 0xD1000000u | (imm12 << 10) | (rn << 5) | rd; }
++constexpr uint32_t tst7(unsigned rn) { return 0xF2400000u | (2u << 10) | (rn << 5) | XZR; }
++constexpr uint32_t ldrX(unsigned rt, unsigned rn) { return 0xF9400000u | (rn << 5) | rt; }
++constexpr uint32_t strX(unsigned rt, unsigned rn) { return 0xF9000000u | (rn << 5) | rt; }
++constexpr uint32_t ldrWPost(unsigned rt, unsigned rn, unsigned imm9) { return 0xB8400400u | ((imm9 & 0x1FFu) << 12) | (rn << 5) | rt; }
++constexpr uint32_t strWPost(unsigned rt, unsigned rn, unsigned imm9) { return 0xB8000400u | ((imm9 & 0x1FFu) << 12) | (rn << 5) | rt; }
++constexpr uint32_t ldrbPost(unsigned rt, unsigned rn, unsigned imm9) { return 0x38400400u | ((imm9 & 0x1FFu) << 12) | (rn << 5) | rt; }
++constexpr uint32_t strbPost(unsigned rt, unsigned rn, unsigned imm9) { return 0x38000400u | ((imm9 & 0x1FFu) << 12) | (rn << 5) | rt; }
++constexpr uint32_t movZero(unsigned rd) { return 0xAA1F03E0u | rd; }
++constexpr uint32_t ret() { return 0xD65F03C0u; }
++constexpr uint32_t brk(uint16_t imm) { return 0xD4200000u | (uint32_t(imm) << 5); }
++// A branch's distance is in instructions: the target's index minus its own.
++constexpr uint32_t b(int dist) { return 0x14000000u | (uint32_t(dist) & 0x3FFFFFFu); }
++constexpr uint32_t bcond(unsigned cond, int dist) { return 0x54000000u | ((uint32_t(dist) & 0x7FFFFu) << 5) | cond; }
++constexpr uint32_t cbz(unsigned rt, int dist) { return 0xB4000000u | ((uint32_t(dist) & 0x7FFFFu) << 5) | rt; }
++
++constexpr size_t words = 33;
++
++static std::array<uint32_t, words> emit(uint64_t writerBase, uint64_t poolSize)
++{
++    RELEASE_ASSERT(poolSize < (1ull << 32));
++    enum : int { Words = 19, Bytes = 25, Done = 30, Trap = 32 };
++    return {
++        /*  0 */ movz(X9, uint16_t(poolSize), 0),
++        /*  1 */ movk(X9, uint16_t(poolSize >> 16), 1),
++        /*  2 */ cmpReg(X0, X9),
++        /*  3 */ bcond(HI, Trap - 3),
++        /*  4 */ subReg(X10, X9, X0),
++        /*  5 */ cmpReg(X2, X10),
++        /*  6 */ bcond(HI, Trap - 6),
++        /*  7 */ movz(X3, uint16_t(writerBase), 0),
++        /*  8 */ movk(X3, uint16_t(writerBase >> 16), 1),
++        /*  9 */ movk(X3, uint16_t(writerBase >> 32), 2),
++        /* 10 */ movk(X3, uint16_t(writerBase >> 48), 3),
++        /* 11 */ addReg(X3, X3, X0),
++        /* 12 */ cmpImm(X2, 8),
++        /* 13 */ bcond(NE, Words - 13),
++        /* 14 */ tst7(X3),
++        /* 15 */ bcond(NE, Words - 15),
++        /* 16 */ ldrX(X4, X1),
++        /* 17 */ strX(X4, X3),
++        /* 18 */ b(Done - 18),
++        /* 19 Words */ cmpImm(X2, 4),
++        /* 20 */ bcond(LO, Bytes - 20),
++        /* 21 */ ldrWPost(X4, X1, 4),
++        /* 22 */ strWPost(X4, X3, 4),
++        /* 23 */ subImm(X2, X2, 4),
++        /* 24 */ b(Words - 24),
++        /* 25 Bytes */ cbz(X2, Done - 25),
++        /* 26 */ ldrbPost(X4, X1, 1),
++        /* 27 */ strbPost(X4, X3, 1),
++        /* 28 */ subImm(X2, X2, 1),
++        /* 29 */ b(Bytes - 29),
++        /* 30 Done */ movZero(X3),
++        /* 31 */ ret(),
++        /* 32 Trap */ brk(0xc471),
++    };
++}
++
++// A plain memset of a dying local is a dead store the compiler may drop.
++static void scrub(void* p, size_t n)
++{
++    volatile uint8_t* bytes = static_cast<volatile uint8_t*>(p);
++    while (n--)
++        *bytes++ = 0;
++}
++
++} // namespace ThylacineJITWriteThunk
++
++// The pool is one code region (SYS_JIT_CREATE): an exec alias, adopted as the
++// reservation, and a writer alias at an unrelated random address whose address
++// survives only inside the sealed thunk. Any refusal leaves the reservation empty,
++// so enableAssembler() fails and JSC runs its interpreters; EACCES (no CAP_JIT) is
++// that deny path and stays quiet, anything else is reported.
++static PageReservation createThylacineJITPool(size_t size)
++{
++    struct thyla_jit_region region { };
++    long rc = thyla_jit_create(size, &region);
++    if (rc) {
++        if (rc != -EACCES || Options::verboseExecutablePoolAllocation())
++            dataLogLn("jsc: SYS_JIT_CREATE(", size, ") refused, errno ", -rc, "; the JIT is off");
++        return { };
++    }
++    auto thunk = ThylacineJITWriteThunk::emit(region.writer_va, size);
++    uint64_t thunkVA = 0;
++    rc = thyla_jit_create_sealed(thunk.data(), sizeof(thunk), &thunkVA);
++    ThylacineJITWriteThunk::scrub(thunk.data(), sizeof(thunk));
++    if (rc) {
++        thyla_jit_destroy(region.writer_va);
++        ThylacineJITWriteThunk::scrub(&region, sizeof(region));
++        dataLogLn("jsc: SYS_JIT_CREATE_SEALED refused, errno ", -rc, "; the JIT is off");
++        return { };
++    }
++    void* exec = reinterpret_cast<void*>(region.exec_va);
++    ThylacineJITWriteThunk::scrub(&region, sizeof(region));
++    g_jscConfig.jitWriteSeparateHeaps = reinterpret_cast<JITWriteSeparateHeapsFunction>(tagCodePtr<JITThunkPtrTag>(reinterpret_cast<void*>(thunkVA)));
++    return PageReservation::adoptExecutable(exec, size);
++}
++
++#endif // OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++
+ struct JITReservation {
+     PageReservation pageReservation;
+     void* base { nullptr };
+@@ -403,10 +531,17 @@ static ALWAYS_INLINE JITReservation initializeJITPageReservation()
+         return PageReservation::tryReserveWithGuardPages(reservationSize, OSAllocator::JSJITCodePages, hintAddress, EXECUTABLE_POOL_WRITABLE, true, false, false);
+     };
+ 
++#if OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++    UNUSED_VARIABLE(tryCreatePageReservation);
++    // The kernel places both aliases at random addresses; there is no hint to honour.
++    RELEASE_ASSERT(!Options::jitMemoryReservationAddress() && "JSC_jitMemoryReservationAddress cannot be honoured on Thylacine");
++    reservation.pageReservation = createThylacineJITPool(reservation.size);
++#else
+     void* addressHint = reinterpret_cast<void*>(Options::jitMemoryReservationAddress());
+     reservation.pageReservation = tryCreatePageReservation(reservation.size, addressHint);
+     if (addressHint)
+         RELEASE_ASSERT(reservation.pageReservation.base() == addressHint && "Failed to accomodate JSC_jitMemoryReservationAddress");
++#endif
+ 
+     if (Options::verboseExecutablePoolAllocation())
+         dataLog(getpid(), ": Got executable pool reservation at ", RawPointer(reservation.pageReservation.base()), "...", RawPointer(reservation.pageReservation.end()), ", while I'm at ", RawPointer(reinterpret_cast<void*>(initializeJITPageReservation)), "\n");
+@@ -419,7 +554,7 @@ static ALWAYS_INLINE JITReservation initializeJITPageReservation()
+         if (g_jscConfig.useFastJITPermissions)
+             threadSelfRestrict<MemoryRestriction::kRwxToRx>();
+ 
+-#if ENABLE(SEPARATED_WX_HEAP)
++#if ENABLE(SEPARATED_WX_HEAP) && !OS(THYLACINE)
+         if (!g_jscConfig.useFastJITPermissions) {
+             // First page of our JIT allocation is reserved.
+             ASSERT(reservation.size >= executablePageSize() * 2);
+diff --git a/Source/JavaScriptCore/jsc.cpp b/Source/JavaScriptCore/jsc.cpp
+index 7a26bf7e0d..647ba659ed 100644
+--- a/Source/JavaScriptCore/jsc.cpp
++++ b/Source/JavaScriptCore/jsc.cpp
+@@ -93,6 +93,10 @@
+ #include <sys/types.h>
+ #include <type_traits>
+ #include <wtf/CPUTime.h>
++#if OS(THYLACINE) && ENABLE(JIT)
++#define THYLA_CAPJIT_SELF_ONLY
++#include <thyla_capjit.h>
++#endif
+ #include <wtf/CommaPrinter.h>
+ #include <wtf/FastMalloc.h>
+ #include <wtf/FileHandle.h>
+@@ -4584,6 +4588,22 @@ int jscmain(int argc, char** argv)
+ 
+     WTF::initializeMainThread();
+ 
++#if OS(THYLACINE) && ENABLE(JIT)
++    // --thylacine-no-cap-jit skips the CAP_JIT walk below (the deny probe). It is
++    // taken out of argv before CommandLine sees it; an environment variable would
++    // not do, since Thylacine's shell starts a child with no environment.
++    bool thylacineNoCapJIT = false;
++    for (int i = 1; i < argc && strcmp(argv[i], "--"); ++i) {
++        if (!strcmp(argv[i], "--thylacine-no-cap-jit")) {
++            thylacineNoCapJIT = true;
++            for (int j = i; j < argc - 1; ++j)
++                argv[j] = argv[j + 1];
++            argv[--argc] = nullptr;
++            break;
++        }
++    }
++#endif
++
+     // Note that the options parsing can affect VM creation, and thus
+     // comes first.
+     mainCommandLine.construct(argc, argv);
+@@ -4599,6 +4619,18 @@ int jscmain(int argc, char** argv)
+         processConfigFile(Options::configFile(), "jsc");
+     }
+ 
++#if OS(THYLACINE) && ENABLE(JIT)
++    // CAP_JIT is elevation-only, so no parent can hand it down: jsc walks the corvus
++    // clearance itself, by the SELF form alone (no credential is compiled in), before
++    // JSC::initialize() creates the pool. --thylacine-no-cap-jit skips the walk; the
++    // pool's SYS_JIT_CREATE is then refused and JSC runs its interpreters.
++    {
++        Options::AllowUnfinalizedAccessScope scope;
++        if (Options::useJIT() && !thylacineNoCapJIT)
++            thyla_acquire_cap_jit("jsc");
++    }
++#endif
++
+     JSC::initialize();
+ #if ENABLE(JIT_OPERATION_VALIDATION)
+     JSC::JITOperationList::populatePointersInEmbedder(&startOfJITOperationsInShell, &endOfJITOperationsInShell);
+diff --git a/Source/WTF/wtf/PageReservation.h b/Source/WTF/wtf/PageReservation.h
+index f55dac3c04..e39738108e 100644
+--- a/Source/WTF/wtf/PageReservation.h
++++ b/Source/WTF/wtf/PageReservation.h
+@@ -126,6 +126,17 @@ public:
+     }
+ 
+ 
++#if OS(THYLACINE)
++    // A range the kernel placed (SYS_JIT_CREATE's exec alias): adopted rather than
++    // reserved. commit and decommit stay OSAllocator's.
++    static PageReservation adoptExecutable(void* base, size_t size)
++    {
++        ASSERT(isPageAligned(base));
++        ASSERT(isPageAligned(size));
++        return PageReservation(base, size, false, true, false);
++    }
++#endif
++
+     void deallocate()
+     {
+         ASSERT(!m_committed);
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+index 08d8ea5a09..8ad3e9dfe3 100644
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -535,6 +535,23 @@
+ #endif
+ #endif
+ 
++/* OS(THYLACINE): the JIT pool is one SYS_JIT_CREATE code region -- an exec alias JSC
++   branches to and a writer alias at an unrelated random address, written only through
++   an execute-only thunk sealed by SYS_JIT_CREATE_SEALED. A region is at most 64 MiB,
++   within one near branch (128 MiB), so no jump islands: the pool-size static_assert in
++   ExecutableAllocator.cpp then proves every near branch reaches. */
++#if OS(THYLACINE) && ENABLE(JIT)
++#if !defined(ENABLE_SEPARATED_WX_HEAP)
++#define ENABLE_SEPARATED_WX_HEAP 1
++#endif
++#if !defined(ENABLE_JUMP_ISLANDS)
++#define ENABLE_JUMP_ISLANDS 0
++#endif
++#if !defined(FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB)
++#define FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB 64
++#endif
++#endif
++
+ #if !defined(ENABLE_SEPARATED_WX_HEAP)
+ #define ENABLE_SEPARATED_WX_HEAP 0
+ #endif
+-- 
+2.43.0
+
