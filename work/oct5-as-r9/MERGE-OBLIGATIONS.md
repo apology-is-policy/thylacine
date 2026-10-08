@@ -250,6 +250,9 @@ Measured against my branch (merge-base 8746a8a24) on 2026-10-08:
 ## ADDED 2026-10-08 16:29Z, from main's call 0202 t13 (execquiesce, NOT landed)
 
 ### 9. execquiesce's sole-holder tests read the WRONG count on this branch.
+**SUPERSEDED IN PART at 16:47Z by main 0202 t15: the text below read the PRE-AUDIT WIP
+6ff9f4bab. What LANDED (kernel 8fbaa39d0 under main a7353c36f) is in 9a; where they
+disagree, 9a wins.**
 main's `execquiesce` (WIP 6ff9f4bab, Fable audit running; read from the shared
 object store, not main's checkout) adds device quiesce walks gated on
 "the address space is sole". On main, `addrspace_ref_count` IS the owner count.
@@ -282,3 +285,29 @@ asserts "proc death resets a VMA-only device despite a descriptor pin" -- it
 FAILS if the exit walk (:684) merges with `ref`. NOTHING pins the image across
 EXEC's walk (a) (:4751), the line that merges clean. At merge, add the pinned
 exec counterpart and see it RED with `ref` before trusting it green.
+
+### 9a. What execquiesce LANDED with (main 0202 t15), and the mapping onto this branch.
+Fable r1 F1 removed exec's count read (`addrspace_ref_count(old) == 1` could be
+raced by a sibling's reap). The landed shapes:
+- EXEC: `if (addrspace_release(old)) { quiesce_fd_devices(p->handles); addrspace_destroy(old); }`.
+  addrspace_release is the fetch_sub and returns true iff pre == 1.
+  ON THIS BRANCH release must decrement OWNERS (true iff the owner count's pre
+  is 1), NEVER the lifetime count. Then walk (a) runs iff this exec dropped the
+  last owner, with no count read left to convert.
+- addrspace_destroy = the last-reference teardown: take-and-drop as->lock, the
+  MMIO-VMA walk (b), then vma_drain_in. ON THIS BRANCH it SPLITS: walk (b) and
+  vma_drain_in belong in the last-OWNER branch (`if (pre == 1) { quiesce;
+  vma_drain_in(as); }`). The page-table destroy and the kfree stay in
+  addrspace_lifetime_put, which runs when the last kernel pin or private-ring
+  guard lets go and which extincts on any remaining VMA. Do NOT move the
+  pgtable/kfree half to the owner drop: a live pin still addresses the
+  descriptor.
+- The ONE remaining count read: the exit close's walk-(b) gate in
+  proc_quiesce_owned_devices, `addrspace_ref_count(p->as) == 1`. It MUST read
+  owners. It conflicts visibly with this branch's :638; test_virtio.c:284
+  ("despite a descriptor pin") guards it.
+- REGRESSION GAP, confirmed by main: test_virtio's exec test drives
+  proc_exec_replace three times (shared; sole + fd; sole mapping-only) and pins
+  NOTHING, so a release keyed on the lifetime count would pass it. At merge, add
+  the pinned-exec counterpart and see it RED with a lifetime-count release
+  before trusting it green.
