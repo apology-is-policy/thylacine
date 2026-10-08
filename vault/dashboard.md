@@ -127,6 +127,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-08 [[chg-2026-10-08-image-holder-record]] — An address space records every holder that has left it, and the I-39 image join weighs the record; the code-alias count retires
 - 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
 - 2026-10-07 [[chg-2026-10-07-b2-jit]] — The code region is a reservation, and its writer is hardened: random placement, a thunk born sealed and execute-only, unprivileged user copies, maps withholding code addresses, and an image join that counts code as CAP_JIT; Loom registration returns -errno
 - 2026-10-07 [[chg-2026-10-07-exit-close]] — The at-exit close no longer waits on a server no death can interrupt: the clunk never waits, a kill forces the final close, the closer finishes it; and a Loom registration flushes dev9p's staged run
@@ -134,5 +135,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-06 [[chg-2026-10-06-9p-sessions-ends]] — /ctl/9p-sessions shows a row's counters only to its two ends
 - 2026-10-06 [[chg-2026-10-06-chdir-physical]] — chdir stores the name of where the walk landed
 - 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
-- 2026-10-06 [[chg-2026-10-06-devno-u64]] — devno-u64: the kernel's device number is 64 bits and never reused; t_stat.devno carries all of it
 <!-- generated:end -->

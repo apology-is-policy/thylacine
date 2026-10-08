@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -470,3 +470,14 @@ One code-comment drift was surfaced and left for its owner: `proc.h` still reads
 fields grew the struct after that comment was written. The compile-time assert is
 sound; only the prose comment drifted, so this is a [[sub-kernel-vivarium]]-arc
 code fix, not a vault edit.
+
+**2026-10-08: flagged by co-tenancy, nothing owed.** `kernel/proc.c` and its
+header moved ~174 lines since the last update: exitclose (the close at exit and
+the kill that forces it), B-2b (the image join's code count, [[chg-2026-10-07-b2-jit]])
+and [[chg-2026-10-08-image-holder-record]] (the image's record of departed
+holders). Checked by hunk context: every hunk lands in `proc_free`,
+`proc_image_join_locked`, `proc_exec_replace`, the exit and group-termination
+paths, or the first line of the ZOMBIE transition, which now records the
+departing holder in its space before the legate teardown and the orphan rule run.
+None touches sessions, process groups, the group note fan, the terminal seam or
+the job-control stop.

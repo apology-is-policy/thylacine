@@ -626,11 +626,14 @@ reap-window miss named below. A live Proc's caps only grow (every write is a
 bits), so the caps a holder carries when it leaves are every cap it held.
 
 The record is never cleared: only exec's fresh space starts without one. The
-heritage is Linux's per-mm dumpability -- `MMF_DUMPABLE` lives in `mm->flags`, not on
-the task, and `__ptrace_may_access` refuses a non-dumpable mm without
-`CAP_SYS_PTRACE` -- but the record is STRICTER: Linux's bit can be raised again on
-the same mm (`prctl(PR_SET_DUMPABLE, 1)`), and `commit_creds` lowers it on any
-credential change, not only a gain. Nothing raises the record back down here.
+heritage is Linux's dumpability, which belongs to the address-space group rather
+than the task: released kernels keep it in `mm->flags` (`MMF_DUMPABLE`), and the
+current tree keeps it in a `task_exec_state` that `CLONE_VM` siblings share, a
+fork copies and exec replaces; `__ptrace_may_access` refuses a non-dumpable target
+without `CAP_SYS_PTRACE`. The record is STRICTER. Linux's bit is a current
+setting, not a history: `prctl(PR_SET_DUMPABLE, 1)` raises it again, and
+`commit_creds` lowers it whenever the effective or filesystem ids change or the
+permitted caps grow. Nothing clears the record here.
 
 The taint rides the record as well, and today it is redundant there: it is
 inherited at fork and stamped onto every mapper, so no holder can leave carrying a
