@@ -4,9 +4,11 @@
 // (astra, yip 0161), reformatted to this tree's style, plus the final/nonfinal
 // retirement discrimination at the end -- which the draft's set did not cover,
 // because every retirement in it ends the ring's occupancy and so refunds the
-// whole charge. Scheduling is FORCED by this fixture (handles are opened and
-// closed directly, and lp_wait spins on the retirer's counter); none of it
-// demonstrates reachability from a syscall pair, and no claim of that is made.
+// whole charge -- and the admission refusal edges, the layout failure reached
+// through a KERNEL_TESTS one-shot in loom.c. Scheduling is FORCED by this
+// fixture (handles are opened and closed directly, and lp_wait spins on the
+// retirer's counter); none of it demonstrates reachability from a syscall pair,
+// and no claim of that is made.
 #ifndef LOOM_PRIVATE_FIXTURE_H
 #define LOOM_PRIVATE_FIXTURE_H
 
@@ -48,6 +50,10 @@ static const char *loom_private_fixture(void) {
     struct Proc *p = test_proc_make();
     struct Proc *tight = NULL;
     struct Loom *refused = NULL;
+    struct Proc *roomy = NULL;
+    struct Loom *probe = NULL, *faulted = NULL;
+    bool roomy_settled = false;
+    u32 roomy_initial = 0;
     struct Loom *l = NULL;
     struct Handle borrow = {0}, second = {0};
     struct AddrSpace *pin = NULL;
@@ -105,6 +111,51 @@ static const char *loom_private_fixture(void) {
              addrspace_ref_count(tight->as) == tight_refs &&
              addrspace_owner_count(tight->as) == 1,
              "refused charge leaves no guard, reference or charge");
+
+    // Layout failure AFTER the charge: the caller's unwind must return the
+    // charge and release the guard, asserted separately so a defect in either
+    // half names itself. The fault is a KERNEL_TESTS one-shot taken on entry to
+    // loom_create_private. That consumption is CHECKED here rather than reasoned
+    // about, by spending a shot on an early refusal and then admitting normally.
+    roomy = proc_alloc_in(NULL, proc_default_page_budget());
+    LP_CHECK(roomy && roomy->as, "layout-fault creator allocated");
+    LP_CHECK(!loom_private_layout_fault_armed_for_test(), "the layout fault starts disarmed");
+    loom_private_layout_fault_arm_for_test();
+    LP_CHECK(!loom_create_private(roomy, 3, 4, true) &&
+             !loom_private_layout_fault_armed_for_test(),
+             "an armed call refused early still consumes the layout fault");
+    probe = loom_create_private(roomy, 2, 2, true);
+    if (probe) goal++;
+    LP_CHECK(probe, "the admission after a consumed fault is not faulted");
+    // A LOCAL target: goal also counts the owner admitted on p above, which is
+    // still live here, so waiting on goal would wait for a ring nobody closed.
+    u64 probe_before = loom_private_retired();
+    loom_unref(probe);
+    probe = NULL;
+    LP_CHECK(lp_wait(probe_before + 1), "the unfaulted probe retires");
+    roomy_settled = true;
+
+    // Baselines BEFORE arming. The cap is checked against the admission
+    // measured above, so the charge succeeds and the layout is what fails.
+    roomy_initial = roomy->as->page_count;
+    int roomy_refs = addrspace_ref_count(roomy->as);
+    LP_CHECK(addrspace_owner_count(roomy->as) == 1 && !roomy->as->private_rings &&
+             !proc_resource_exempt(roomy),
+             "layout-fault creator is a settled, single-owner, non-exempt image");
+    LP_CHECK(roomy_initial + (charged - initial) <= roomy->as->page_budget,
+             "the cap covers the admission, so the layout is reached");
+    loom_private_layout_fault_arm_for_test();
+    LP_CHECK(loom_private_layout_fault_armed_for_test(), "the layout fault arms");
+    faulted = loom_create_private(roomy, 2, 2, true);
+    if (faulted) goal++;
+    LP_CHECK(!faulted, "an armed layout fault refuses the admission");
+    LP_CHECK(!loom_private_layout_fault_armed_for_test(),
+             "the faulted admission consumed the layout fault");
+    LP_CHECK(roomy->as->page_count == roomy_initial,
+             "layout failure returns the charge");
+    LP_CHECK(!roomy->as->private_rings && addrspace_ref_count(roomy->as) == roomy_refs &&
+             addrspace_owner_count(roomy->as) == 1,
+             "layout failure releases the guard, reference and owner");
 
     bool shared = addrspace_try_ref(p->as);
     if (shared) addrspace_unref(p->as);
@@ -353,6 +404,20 @@ done:
     if (error) { uart_puts("after-check-failure: "); uart_puts(error); }
     else uart_puts("normal-fallthrough");
     uart_puts("\n");
+    loom_private_layout_fault_disarm_for_test();
+    if (probe) loom_unref(probe);
+    if (faulted) loom_unref(faulted);
+    // A layout-failure unwind that kept its charge or its guard is undone here,
+    // after the assertion recorded it, so neither outlives the leg. Only once
+    // the probe has retired: before that, a live ring legitimately holds both.
+    if (roomy && roomy_settled && !faulted && roomy->as) {
+        spin_lock(&roomy->as->lock);
+        if (roomy->as->page_count > roomy_initial)
+            addrspace_uncharge_pages(roomy->as, roomy->as->page_count - roomy_initial);
+        spin_unlock(&roomy->as->lock);
+        if (roomy->as->private_rings) addrspace_private_end(roomy->as);
+    }
+    if (roomy) test_proc_drop(roomy);
     if (refused) loom_unref(refused);
     // A refusal that leaked its whole guard is released here, so the defect
     // fails its own assertion and cannot outlive the leg into later tests. A

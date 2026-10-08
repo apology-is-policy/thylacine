@@ -1519,3 +1519,35 @@ NEXT: bring astra the (b) seam proposal (work/oct5-as-r9/seam-b-proposal-DRAFT.m
 main took the vma_remove_in linkage guard (0202 t5, branch vmaguard) and rings
   0202 before it lands; capmark landed main = 060cbcc1f (MERGE-OBLIGATIONS 5-7
   updated).
+
+== 2026-10-08 09:25Z: (b) THE LAYOUT-FAILURE LEG AND ITS SEAM, AUTHORED AND UNRUN ==
+astra t71 APPROVED (b) and answered all three questions; no further permission
+round trip. Her terms, as built:
+  - SEAM: KERNEL_TESTS-gated one-shot in loom.c (arm / disarm / armed accessors,
+    declared under #ifdef KERNEL_TESTS in loom.h), TAKEN as loom_create_private's
+    first statement. Isolation precondition RECORDED: the fixture is the only
+    caller -- rescope before any concurrent or engine caller.
+  - LEG: clear before arm; an armed EARLY refusal consumes the shot and the next
+    admission is not faulted (checked, not reasoned); baselines BEFORE arm; cap
+    asserted from the measured admission; CHARGE and GUARD/ref/owner as SEPARATE
+    assertions. Cleanup: disarm on every exit; undo a retained charge and a
+    whole leaked guard after the assertion records them, only once the probe has
+    retired. The (a) unexpected-success goal accounting is kept.
+  - CAUGHT BEFORE THE LEASE: lp_wait(goal) inside this leg would have waited for
+    p's live owner too (goal counts every ring created) and failed the control.
+    The probe waits on a LOCAL snapshot + 1.
+  - RED: M1 = uncharge deleted -> "layout failure returns the charge";
+    M2 = private_end deleted -> "layout failure releases the guard, reference
+    and owner". Each on PRISTINE source, diffs/binaries/logs/stage statuses
+    kept separately. Oracle arms 21/21 incl. both cross-arms.
+  - SHAPE (stage 3): KERNEL_TESTS-off compile of loom.c vs the seam's parent.
+    Dry-run OFF-LEASE to validate the CHECKER only: no seam symbol, names
+    identical, loom_create_private identical (127 insns), whole .text identical
+    (16056 B); its two positive controls refuse (tests left on -> 4 seam symbols;
+    a nop in the baseline -> code DIFFERS). The dry run also caught a path bug
+    ($ROOT/$SH assumed SH relative) before it cost a lease. The measurement of
+    record is the runner's, under the lease.
+RUN IT: sh work/oct5-as-r9/layout-leg-run.sh (lease; clean tree). One window:
+  control, M1, M2, shape, recovery; lease + disk re-checked before every bake.
+Still separate and open: loom_create_layout's OWN inner failure path; release
+sensitivity; SMP; activation. 128 MiB stays.

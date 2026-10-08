@@ -593,6 +593,14 @@ struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exem
 // Caller retains p and its image throughout construction. No scopes, registered
 // buffers or worker are admitted until their private engine is qualified.
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts);
+#ifdef KERNEL_TESTS
+// One-shot test seam: the next loom_create_private treats its ring layout
+// allocation as failed. Sound only while the in-kernel fixture is that
+// function's sole caller; rescope it before any concurrent or engine caller.
+void loom_private_layout_fault_arm_for_test(void);
+void loom_private_layout_fault_disarm_for_test(void);
+bool loom_private_layout_fault_armed_for_test(void);
+#endif
 void loom_handle_closed(struct Loom *l);
 void loom_exec_latch(struct Loom *l); // leaf only; caller retains the table owner
 bool loom_is_private(const struct Loom *l);

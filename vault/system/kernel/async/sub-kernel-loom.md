@@ -1027,11 +1027,32 @@ branch, and the assertion does see a leaked guard. `kernel/loom.c` was restored 
 its pristine hash and `build/` was rebuilt byte-identical to the control. That is one
 boot per side on the Mac axis. It is not an SMP qualification, and nothing is
 activated by it.
-The layout-allocation unwind (`loom_create_layout` failing after the charge:
-uncharge, then `addrspace_private_end`) is STRUCTURAL ONLY and its runtime
-obligation stays OPEN. `kernel/` has no allocation fault seam. A minimal,
-test-only, locally scoped one is owed for review, not assumed. Neither edge bears
-on the retirement's release half, which stays open.
+THE LAYOUT-FAILURE UNWIND (authored 2026-10-08, UNRUN). This edge is
+`loom_create_layout` failing AFTER the charge, which should uncharge and then call
+`addrspace_private_end`. Nothing in `kernel/` could make an allocation fail, so a
+test-only seam was added, with its scope reviewed first (astra, t71). It is a
+`KERNEL_TESTS` one-shot in `loom.c`: arm, disarm and armed accessors, taken as the
+FIRST statement of `loom_create_private`, so an early refusal cannot leave it armed.
+It is compiled out of the production shape. It is sound only because the fixture
+is that function's only caller, and it must be rescoped before any concurrent or
+engine caller exists.
+
+The leg checks the seam itself:
+- the shot is clear before arming;
+- an armed call refused EARLY still spends it;
+- the next admission is not faulted.
+
+It then takes its baselines before arming, checks the cap against the admission
+measured above so the charge succeeds and the layout is what fails, and asserts
+the CHARGE and the GUARD (count, reference, owner) SEPARATELY. Two mutants, each
+applied to pristine source, delete one half each, the uncharge (M1) and the
+`private_end` (M2), and each must fail the leg at its OWN message. The oracle's
+cross-arms show neither prediction is satisfied by the other's log. The runner
+then compiles `loom.c` with `KERNEL_TESTS` off against the seam's parent: no seam
+symbol may survive, and `loom_create_private`'s machine code must be identical.
+`loom_create_layout`'s OWN inner failure path (its `kfree` when
+`burrow_create_anon` fails) is a separate obligation and stays STRUCTURAL. Neither
+edge bears on the retirement's release half, which stays open.
 
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are

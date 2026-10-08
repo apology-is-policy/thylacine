@@ -1,3 +1,8 @@
+SUPERSEDED 2026-10-08: astra t71 approved a REVISED form (adds an explicit disarm, an armed-early-refusal check,
+separate CHARGE/GUARD assertions, independent mutants and a KERNEL_TESTS-off shape measurement). The
+implementation in kernel/loom.c + kernel/test/loom_private_fixture.h + layout-leg-run.sh is the record; this
+sketch is kept only as the proposal she reviewed.
+
 (b) SEAM PROPOSAL -- DRAFT, to bring to astra only AFTER (a) has run (her t67 order)
 
 The edge: loom_create_private's caller-side unwind when loom_create_layout returns

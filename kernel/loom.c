@@ -326,7 +326,31 @@ u64 loom_private_retired(void) {
     return __atomic_load_n(&service_retired_count, __ATOMIC_ACQUIRE);
 }
 
+#ifdef KERNEL_TESTS
+static bool g_loom_private_layout_fault;
+
+void loom_private_layout_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_layout_fault, true, __ATOMIC_RELAXED);
+}
+
+void loom_private_layout_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+}
+
+bool loom_private_layout_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_layout_fault, __ATOMIC_RELAXED);
+}
+
+static bool loom_private_layout_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+}
+#else
+static inline bool loom_private_layout_fault_take(void) { return false; }
+#endif
+
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
+    // Taken before any refusal, so a shot armed for this call cannot outlive it.
+    bool layout_fault = loom_private_layout_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -343,7 +367,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     bool charged = addrspace_charge_pages(as, metadata + backing, exempt);
     spin_unlock(&as->lock);
     if (!charged) { addrspace_private_end(as); return NULL; }
-    struct Loom *l = loom_create_layout(sq, cq, exempt, receipts);
+    struct Loom *l = layout_fault ? NULL : loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
         spin_lock(&as->lock);
         addrspace_uncharge_pages(as, metadata + backing);
