@@ -4,7 +4,7 @@ type: chg
 title: "A spawn names its child's cwd in a record tail, and chdir answers its errno"
 date: 2026-10-07
 arc: arc-go-ide
-commits: *(pending)*
+commits: ["083683fb9", "2154b1749"]
 touched:
   - sub-kernel-syscall-abi
   - sub-kernel-syscall-dispatch

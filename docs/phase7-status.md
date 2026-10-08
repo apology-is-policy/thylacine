@@ -1300,8 +1300,8 @@ accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half
 ## A spawn names its child's cwd; chdir answers its errno — 2026-10-07
 
 Operator vote of 2026-10-06, "Add the cwd field" (the held launch's audit, round 2 F11: the Go fork borrowed the whole
-process's cwd for every spawn with a `Dir`). Scripture *(pending)*; code, witnesses and dossiers in one commit,
-*(pending)*. Cut on aux-3 62875f9df (main 25ed27f21, the exit close, plus the wake tool and its fixes), which already carries
+process's cwd for every spawn with a `Dir`). Scripture 083683fb9; code, witnesses and dossiers in one commit,
+2154b1749. Cut on aux-3 62875f9df (main 25ed27f21, the exit close, plus the wake tool and its fixes), which already carries
 aux-3 61c71525f and devno-u64.
 
 - **The record does not grow.** `_pad_envp` (offset 44, had to be 0) becomes `ext_flags`; bit 0, `SPAWN_EXT_CWD`,
@@ -1332,7 +1332,7 @@ Not witnessed, by design: a stat's or re-walk's own errno through the resolver (
 failing stat into it); the handler's own `cwd_len == 0` refusal (the resolver's `EINVAL` answers first on every
 path that reaches it) and the thunk's `fail-cwd` arm (only an allocation failure inside `territory_setdot` reaches it).
 
-**Landed beside it: the kernel builds with `-Werror=shorten-64-to-32`** (*(pending)*). Re-running devno-u64's census
+**Landed beside it: the kernel builds with `-Werror=shorten-64-to-32`** (30f807e0a). Re-running devno-u64's census
 found 12 narrowings, none a device number: 11 read the `u64` `note_mask` into `u32` locals (lossless under `notes.c`'s
 `note_claim` assert), and `init_cache`'s slab object count lands in the `u32` the in-use `refcount` is compared against
 (at most 2^27). The locals are `u64`; the slab count narrows explicitly under a `_Static_assert` pinned to `MAX_ORDER`
@@ -1345,19 +1345,19 @@ and the `launchHeld` guard are gone, and Launch spawns held unconditionally. The
 The fork's master stays at 073faaa until the peer trees carry untag 2a (cf296caa1), whose `build.sh` accepts the
 untagged fork; every peer tree predates it (main measured, yip 0177).
 
-**Landed beside it: a path in `llvm-libs.list` resolves inside the build that links** (*(pending)*). The gate's second bake
+**Landed beside it: a path in `llvm-libs.list` resolves inside the build that links** (97b78469f). The gate's second bake
 failed at `gl-sdl-prove`: hunt's `build/`, cloned from the aux worktree, listed eight JIT archives by absolute path into
 that worktree's `build/`, which is gone, and `gl_link_program` passed them to the linker verbatim. It finds a path entry by
 its file name in this build's `clade/gl/lib`, then `clade/llvm-build/lib`, now.
 
-**Landed beside it: lantern reads one byte at a time** (*(pending)*). The gate's lantern leg (f) failed 3 times in 12:
+**Landed beside it: lantern reads one byte at a time** (d255a4aa6). The gate's lantern leg (f) failed 3 times in 12:
 after `q`, the shell ran `cho lnpres $status`. A diagnostic build of ut that traced its reads found the bytes missing
 before ut ever saw them: `present()` read 64 bytes at a time and returned on `q`, dropping the rest of the read. It reads
 one byte per call now, so the quit key is the last byte it takes. Leg (j) sends `q` and the next line in one write; it
 failed in both unfixed runs that reached it. Fixed, (f) and (j) passed in 8 of 8 runs. The other raw-mode children ut runs (nora, prowl,
 quarry, ptyhost) are checked for the same loss as their own item.
 
-VERIFY_LINE
+**Gate** (aux-gate `run-cwd3.sh` on d69f2bc2f, the landing's code, 2026-10-08 08:39-10:03Z): the session image with the Instrument profile, `ls-halcyon-lantern` PASS; the gate image, suite 1939/1939, and the 12 interactive legs PASS (ls-ci, cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata, dap-nora, go6, lantern with leg (j)'s three rounds, ergo-1, dev-accounts, abin-tar). Eight kernel sabotages each turned exactly their witnesses red -- one per broken test function, since a failing `TEST_ASSERT` returns -- and joey's probes on a second boot with the four suite tests unregistered; the narrowing sabotage (a devno parameter cut to u32) failed the build three times over; the two checker sabotages (a swapped tail mirror field, a second flag on bit 0) were refused. `ci-smp-gate` PASS, 0 corruption across every configuration. The first run of the sabotage phase (on 0b0c72cc9, the same code bar one test) found that `spawn_cwd.refusals` could not see a spawner whose cwd moved; that test now stands the spawner in /, and C8 turns it red.
 
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 

@@ -4,7 +4,7 @@ type: chg
 title: "The kernel builds with -Werror=shorten-64-to-32"
 date: 2026-10-07
 arc: arc-boosty
-commits: *(pending)*
+commits: ["30f807e0a"]
 touched:
   - sub-kernel-notes
   - sub-kernel-mm-slub
