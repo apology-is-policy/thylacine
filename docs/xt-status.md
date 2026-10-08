@@ -30,7 +30,8 @@ The kernel never learns x86.
 | `124ac831` | merge of `main` at `04df02c9` (134 commits, B-2 among them) | clean merge |
 | `6018e567` | build: a fresh Linux clone builds the gate image. Two vendored crate files the ignore rules dropped are restored, the pouch, SDL2 and vkQuake patch series apply under GNU patch at fuzz 0, and each patched tree is byte-identical to the old series applied leniently | suite 1955/1955 on QEMU TCG (LLVM 18) |
 | `dd0846c5` | design revised against B-2: citations re-anchored; debug authority (5.2); guest code provenance (5.4 item 4, I-48(e)); a fork carries text, not scratch (don't-fork code regions); F10 added | docs only |
-| (XT-0) | RATIFIED: `dec-2026-10-08-xt-design`, `dec-2026-10-08-xt-guest-code`, `arc-xt`; ARCH section 28 I-48 RESERVED and the XT amendments paragraph; CLAUDE.md row; ERRORS.md exact-fault contract; the NOVEL.md candidate; the tenth spec-first re-enablement | `tools/check-invariants.py` 48 rows; `quaestor lint` |
+| `f350cc76` (XT-0) | RATIFIED: `dec-2026-10-08-xt-design`, `dec-2026-10-08-xt-guest-code`, `arc-xt`; ARCH section 28 I-48 RESERVED and the XT amendments paragraph; CLAUDE.md row; ERRORS.md exact-fault contract; the NOVEL.md candidate; the tenth spec-first re-enablement | `tools/check-invariants.py` 48 rows; `quaestor lint` |
+| *(pending)* (XT-3a) | `SCTLR_EL1` composed whole on every entry path: the direct EL1 entry, the EL2 drop, PSCI secondaries (`start.S` `sctlr_el1_init_base`, `0x30D40818`). EL0 `WFI` traps and `exception.c`'s `EC_WFX` arm retires it (ELR + 4; SS and BTYPE cleared); `WFE` runs; SP alignment is checked at EL0 and EL1 on every path. Each CPU records its final value (`hw_cpu_ident.sctlr_el1`). Fixes task #6 | suite 1956/1956 on QEMU TCG; `hardening.sctlr_composed` (every online CPU); `/hint-probe` 64 WFI + 64 WFE; red-first proofs and the audit round: in flight |
 
 ## Next
 

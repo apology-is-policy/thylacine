@@ -5919,6 +5919,22 @@ int main(void) {
         t_putstr("joey: /bus-probe-child ok (a misaligned load-exclusive died via snare:bus)\n");
     }
 
+    // === /hint-probe (XT-3a: the EL0 wait hints retire as hints) ===
+    // start.S composes SCTLR_EL1 on every entry path, so EL0 WFE runs and EL0
+    // WFI traps into exception.c's EC_WFX arm, which retires it. On an EL2-entry
+    // boot both used to kill the Proc; an arm that failed to advance ELR would
+    // re-trap the same WFI forever and this reap would never return.
+    {
+        static const char hp_name[]   = "hint-probe";
+        static const char hp_expect[] = "hint-probe: exit 0";
+        if (pouch_smoke_one(hp_name, sizeof(hp_name) - 1,
+                            hp_expect, sizeof(hp_expect) - 1) != 0) {
+            t_putstr("joey: /hint-probe FAILED (an EL0 WFI or WFE did not retire)\n");
+            return 1;
+        }
+        t_putstr("joey: /hint-probe ok (64 EL0 WFI trapped and retired; 64 WFE ran)\n");
+    }
+
     // === /capacity-probe (B-1a': capacity) ===
     // The EL0 half of ARCH 6.5's capacity contract: a 4 GiB reservation is
     // admitted (the old cap was 256 MiB), the census a program reads

@@ -93,7 +93,11 @@ void hw_cpu_ident_detect(unsigned cpu) {
     if (hw_ctr_icache_aliases(ctr))
         __atomic_store_n(&g_icache_aliasing, true, __ATOMIC_RELEASE);
 
-    // Publish LAST: a cross-CPU reader that sees valid must see both fields.
+    u64 sctlr;
+    __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
+    g_cpu_ident[cpu].sctlr_el1 = sctlr;
+
+    // Publish LAST: a cross-CPU reader that sees valid must see every field.
     __atomic_store_n(&g_cpu_ident[cpu].valid, true, __ATOMIC_RELEASE);
 }
 

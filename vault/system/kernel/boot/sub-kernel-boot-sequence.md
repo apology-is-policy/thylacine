@@ -10,6 +10,7 @@ code:
   - kernel/canary.c
   - kernel/include/thylacine/canary.h
   - kernel/fault_test.c
+  - kernel/test/test_hardening.c
   - tools/test-fault.sh
 audit: hard
 guarded-by: [inv-i15]
@@ -19,7 +20,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -155,6 +156,13 @@ identifier and cache line size are recorded *by each CPU, into its own slot*, at
 its own bring-up, with a release store publishing validity last. The header
 explains why: both registers genuinely differ on a heterogeneous machine, so a
 boot-CPU-only read would be wrong precisely where the values matter.
+
+The slot also keeps the CPU's `SCTLR_EL1` as its bring-up left it (XT-3a,
+2026-10-08). That is the composed base [[sub-kernel-boot-entry]] writes, plus
+the MMU, PAC and BTI enables. It is configuration, not identity, but it is per
+CPU and read at the same moment. `hardening.sctlr_composed` checks every online
+CPU's value against the base, and checks that the count of recorded CPUs is the
+online count, so a secondary cannot go unchecked.
 
 **Two cache sizes are now decoded, and they answer different questions.** The
 minimum data line is the smallest span a level will allocate — the maintenance

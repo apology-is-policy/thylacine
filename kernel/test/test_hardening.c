@@ -15,6 +15,7 @@
 
 #include "../../arch/arm64/hwfeat.h"
 #include <thylacine/canary.h>
+#include <thylacine/smp.h>
 #include <thylacine/types.h>
 
 static u64 read_id_aa64isar1_el1_again(void) {
@@ -66,4 +67,39 @@ void test_hardening_detect_smoke(void) {
     bool en_bt0 = (sctlr & (1ull << 35)) != 0;
     TEST_ASSERT(!g_hw_features.bti || en_bt0,
         "CPU implements BTI but SCTLR_EL1.BT0 is clear (BTI not enforced)");
+}
+
+// XT-3a: every online CPU ends bring-up with the SCTLR_EL1 start.S composes
+// (sctlr_el1_init_base) plus the enables layered on it, whatever its entry path
+// or the platform's reset value. The base is restated here rather than shared
+// with start.S, so that changing it means changing both, on purpose.
+#define SCTLR_COMPOSED_BASE 0x30D40818ull
+#define SCTLR_MMU_ON        ((1ull << 0) | (1ull << 2) | (1ull << 12))   // M C I
+#define SCTLR_PAC_ENABLES   ((1ull << 31) | (1ull << 30) | (1ull << 27) | (1ull << 13))
+#define SCTLR_BT0           (1ull << 35)
+
+void test_hardening_sctlr_composed(void) {
+    unsigned seen = 0;
+    for (unsigned cpu = 0; cpu < DTB_MAX_CPUS; cpu++) {
+        const struct hw_cpu_ident *id = hw_cpu_ident(cpu);
+        if (!id) continue;
+        seen++;
+        u64 v = id->sctlr_el1;
+
+        // The PAC and BTI enables are detect_smoke's to check; every other
+        // bit is owned here.
+        TEST_EXPECT_EQ(v & ~(SCTLR_PAC_ENABLES | SCTLR_BT0),
+                       SCTLR_COMPOSED_BASE | SCTLR_MMU_ON,
+                       "a CPU's SCTLR_EL1 is not the composed base plus M, C, I");
+
+        // The EL0 controls the composition exists for, named so a failure
+        // reads as the bit that moved.
+        TEST_ASSERT((v & (1ull << 16)) == 0, "EL0 WFI runs untrapped (nTWI set)");
+        TEST_ASSERT((v & (1ull << 18)) != 0, "EL0 WFE traps (nTWE clear)");
+        TEST_ASSERT((v & (1ull << 9)) == 0, "EL0 may mask interrupts (UMA set)");
+        TEST_ASSERT((v & (1ull << 4)) != 0, "EL0 SP alignment unchecked (SA0 clear)");
+        TEST_ASSERT((v & (1ull << 26)) == 0, "EL0 may maintain caches (UCI set)");
+    }
+    TEST_EXPECT_EQ((u64)seen, (u64)smp_cpu_online_count(),
+                   "an online CPU recorded no identity, so its SCTLR_EL1 went unchecked");
 }

@@ -80,6 +80,7 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_BTI             0x0D     /* Branch Target Exception (FEAT_BTI) */
 #define EC_BRK             0x3C     /* deliberate brk #imm */
 #define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
+#define EC_WFX             0x01     /* trapped WFI / WFE / WFIT / WFET */
 #define EC_BREAKPOINT_LOWER 0x30    /* HW breakpoint from lower EL (8a-2) */
 #define EC_SOFTSTEP_LOWER   0x32    /* software step from lower EL (8a-2b-2) */
 #define EC_WATCHPOINT_LOWER 0x34    /* data watchpoint from lower EL (8a-2b-3) */
@@ -563,6 +564,21 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // note delivery, after the stop (DEBUG-FS-DESIGN 4.2). SYS_EXITS / a die
         // path do not
         // return here (kernel exits() + sched()).
+        return;
+
+    case EC_WFX:
+        // SCTLR_EL1.nTWI is clear (start.S sctlr_el1_init_base), so an EL0 WFI
+        // traps here. A wait hint that completes at once is a valid
+        // implementation of it, so it retires and the core idles only when
+        // the scheduler decides; any other trapped wait retires the same way.
+        // Retiring it is what the PE would have done, so the two PSTATE fields
+        // an executed instruction updates are updated too (Linux's
+        // arm64_skip_faulting_instruction): SS cleared completes a single-step
+        // over it, so a stepping debugger stops at the next instruction, and
+        // BTYPE cleared keeps that instruction from being checked as the
+        // target of the branch that reached this one.
+        ctx->elr += 4;
+        ctx->spsr &= ~(SPSR_EL1_SS | SPSR_EL1_BTYPE_MASK);
         return;
 
     case EC_PC_ALIGN:

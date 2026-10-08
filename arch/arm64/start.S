@@ -33,6 +33,36 @@
 //   0x3C  u32  res5        0
 //   0x40  ...              _real_start
 
+// sctlr_el1_init_base -- write SCTLR_EL1 whole, MMU off. Every entry path (a
+// direct EL1 entry, the EL2 drop, a PSCI secondary) runs it before anything
+// that depends on the register, so no bit is left to a reset value or to
+// firmware: QEMU, KVM and PSCI firmware each leave a different one, and before
+// this the EL2 drop and the EL1 entry ran with different EL0 controls. After
+// it, only mmu_program_this_cpu (M, C, I) and pac_apply_this_cpu (EnIA, EnIB,
+// EnDA, EnDB, BT0) change the register, each by OR-ing in its own bits.
+//
+//   set    EOS 11, TSCXT 20, EIS 22, SPAN 23, nTLSMD 28, LSMAOE 29
+//                         RES1 on ARMv8.0 (ARM ARM D13.2.118)
+//          SA 3, SA0 4    SP alignment checked at EL1 and at EL0
+//          nTWE 18        EL0 WFE runs: a spin-wait sleeps on the event monitor
+//   clear  nTWI 16        EL0 WFI traps; exception.c retires it as the hint it
+//                         is, so only the scheduler idles a core (Linux traps it
+//                         the same way: traps.c wfi_handler)
+//          UMA 9          EL0 never touches DAIF
+//          UCT 15, DZE 14, UCI 26
+//                         no EL0 CTR_EL0 read, DC ZVA or cache maintenance
+//                         (UCT is XT-3c's to decide; UCI stays off, B-2a)
+//          EE 25, E0E 24  little-endian at EL1 and EL0
+//          WXN 19, A 1    no XN-implied-by-W, no alignment checking
+//          M 0, C 2, I 12 MMU and caches off until mmu_program_this_cpu
+//          CP15BEN, ITD, SED: AArch32-only, and there is no AArch32 EL0
+.macro sctlr_el1_init_base tmp
+    movz    \tmp, #0x0818
+    movk    \tmp, #0x30D4, lsl #16
+    msr     sctlr_el1, \tmp
+    isb
+.endm
+
 .section ".text._start", "ax"
 .globl _start
 .type _start, %function
@@ -97,9 +127,9 @@ _real_start:
 //      timer + counter without trapping. (Used at P1-G.)
 //   3. CNTVOFF_EL2 = 0  — no virtual time offset.
 //   4. VTTBR_EL2 = 0  — no Stage 2 translation (we're not a hypervisor).
-//   5. SCTLR_EL1 = INIT_SCTLR_EL1_MMU_OFF  — RES1 bits set, MMU off,
-//      caches off, little-endian. Bits 11, 20, 22, 23, 28, 29 are
-//      RES1 in ARMv8.0+ (per ARM ARM D13.2.118). Composite = 0x30D00800.
+//   5. SCTLR_EL1 = the composed base (sctlr_el1_init_base, above): MMU
+//      and caches off, little-endian, the EL0 controls set. EL1 code runs
+//      the moment eret lands, so the register must be whole before it.
 //   6. SPSR_EL2 = 0x3C5  — EL1h (M[3:0]=0b0101), DAIF masked
 //      (D|A|I|F = bits 9..6 = 1).
 //   7. ELR_EL2 = .Lpost_el2_drop  — return target.
@@ -127,11 +157,8 @@ _real_start:
     // 4. VTTBR_EL2 = 0.
     msr     vttbr_el2, xzr
 
-    // 5. SCTLR_EL1 = INIT_SCTLR_EL1_MMU_OFF (0x30D00800).
-    //    bits 11, 20, 22, 23, 28, 29 = 1 (RES1); everything else 0.
-    movz    x1, #0x0800, lsl #0
-    movk    x1, #0x30D0, lsl #16
-    msr     sctlr_el1, x1
+    // 5. SCTLR_EL1 = the composed base.
+    sctlr_el1_init_base x1
 
     // 6. SPSR_EL2 = 0x3C5 (EL1h, DAIF masked).
     mov     x1, #0x3C5
@@ -158,6 +185,11 @@ _real_start:
 // x0 holds the DTB physical address.
 // ---------------------------------------------------------------------------
 .Lel1_main:
+    // 1.4. SCTLR_EL1 = the composed base. A direct EL1 entry arrives with
+    //     whatever the platform reset left (QEMU and KVM differ); the EL2
+    //     path wrote the same value already, and writing it twice is free.
+    sctlr_el1_init_base x1
+
     // 1.5. Capture boot-start counter for the boot-time banner (P1-I).
     //     CNTPCT_EL0 ticks at the architectural counter frequency
     //     (CNTFRQ_EL0; ~62.5 MHz on QEMU virt, varies elsewhere).
@@ -583,6 +615,13 @@ secondary_entry:
     // Save idx in a callee-saved register — survives the bl
     // pac_apply_this_cpu / bl mmu_program_this_cpu calls.
     mov     x19, x0
+
+    // SCTLR_EL1 = the composed base, as _real_start writes it. PSCI defines
+    // little of the register at CPU_ON beyond the MMU and the data cache
+    // being off; the rest is the firmware's, and pac_apply_this_cpu and
+    // mmu_program_this_cpu below only OR bits in, so this is the write that
+    // defines the rest.
+    sctlr_el1_init_base x9
 
     // #214 ROOT CAUSE FIX: TPIDR_EL1 / TPIDR_EL0 / TPIDRRO_EL0 are
     // architecturally UNKNOWN at PSCI entry — exactly as at cold boot,

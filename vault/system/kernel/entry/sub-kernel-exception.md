@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -237,6 +237,18 @@ unresolvable fault means. From the kernel, it extincts. From EL0, it terminates
 just that Proc, tagged with the fault kind — a bad address, a bad alignment, a
 bad indirect branch target, a breakpoint, an unknown exception class. The
 kernel does not die for a userspace mistake.
+
+**One EL0 trap is not a fault: a wait (XT-3a, 2026-10-08).** `SCTLR_EL1.nTWI`
+is clear ([[sub-kernel-boot-entry]]), so an EL0 `WFI` arrives as `EC_WFX`, and
+the arm retires it. ELR advances one instruction, and `SPSR.SS` and
+`SPSR.BTYPE` clear, as the PE would have left them; this is Linux's
+`arm64_skip_faulting_instruction`. Clearing `SS` completes a single-step over
+the retired instruction. Clearing `BTYPE` keeps the next instruction from being
+checked as the target of the branch that reached the wait. A wait hint that
+completes at once is a valid implementation, and retiring it keeps every idle
+decision the scheduler's. `WFE` never traps (`nTWE` is set); any trapped wait
+retires the same way. `/hint-probe` is the device witness: 64 `WFI` and 64
+`WFE`, then a clean exit.
 
 The kernel synchronous handler carries one extra arm, and it is the interesting
 one: if the fault came from the kernel but the faulting *address* is in the

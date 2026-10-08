@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 5"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -50,6 +50,27 @@ pointer — preserved). Which path was taken is recorded and surfaced in the
 banner, because on bare-metal firmware that boots at EL2 it is the first thing
 worth knowing. On QEMU virt the EL2 arm is dead code, kept exercised by review
 rather than by execution.
+
+**Compose `SCTLR_EL1` whole, on every path (XT-3a, 2026-10-08).** One macro,
+`sctlr_el1_init_base`, writes the register in full before anything depends on
+it, and three paths run it: a direct EL1 entry, the EL2 drop before its `eret`,
+and a PSCI secondary. After it, only two writers touch the register, each OR-ing
+in its own bits: `mmu_program_this_cpu` (M, C, I) and `pac_apply_this_cpu` (the
+PAC enables, BT0).
+
+Before this, a direct EL1 entry ran with whatever the platform reset left, and
+the EL2 drop with `0x30D00800`, so the EL0 controls depended on the entry path:
+- QEMU and KVM boots let EL0 `WFI` and `WFE` run, and checked SP alignment;
+- an EL2 boot trapped both waits (`snare:ill`, a dead Proc) and checked nothing;
+- a secondary kept whatever its firmware left.
+
+The composed value, `0x30D40818`:
+- sets the ARMv8.0 RES1 set, `SA`, `SA0` and `nTWE`;
+- clears `nTWI` (an EL0 `WFI` traps, and [[sub-kernel-exception]] retires it),
+  plus `UMA`, `UCT`, `DZE`, `UCI`, the endianness bits, `WXN` and `A`.
+
+`hardening.sctlr_composed` checks every online CPU's recorded value against it
+(via [[sub-kernel-boot-sequence]]'s per-CPU identity).
 
 **Take the stack, in the right bank.** `SPSel` is asserted to 1 *before* the
 stack pointer is written, so the write lands in `SP_EL1` regardless of how
@@ -231,7 +252,11 @@ register and written to memory only after the clear.
 - Cross-language constants are duplicated by necessity and frozen by convention —
   see [[seam-kaslr-link-va-unchecked]] for the one place the freeze is claimed
   but absent.
-- The EL2 entry path is unexercised on every current target.
+- The EL2 entry path is unexercised on every current target. Since XT-3a it
+  writes the same composed `SCTLR_EL1` as the exercised paths, so the register
+  no longer differs on it; the rest of the drop is still review-only.
+- The composed `SCTLR_EL1` base is a literal in two places, `start.S` and
+  `hardening.sctlr_composed`. That is deliberate, so a change is made twice.
 
 ## Caveats
 

@@ -288,6 +288,7 @@ void test_clock_settime_cap_gate(void);
 void test_clock_nanosleep_caught_note(void);           // VIVARIUM 6.29
 void test_clock_nanosleep_wall_step(void);             // VIVARIUM 6.29
 void test_hardening_detect_smoke(void);
+void test_hardening_sctlr_composed(void);
 void test_hwdebug_dfr0_enumerate(void);
 void test_hwdebug_arm_disarm_roundtrip(void);
 void test_hwdebug_bp_table(void);
@@ -2270,6 +2271,7 @@ struct test_case g_tests[] = {
     { "clock.nanosleep_caught_note",   test_clock_nanosleep_caught_note,   false, NULL },
     { "clock.nanosleep_wall_step",     test_clock_nanosleep_wall_step,     false, NULL },
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
+    { "hardening.sctlr_composed",      test_hardening_sctlr_composed,      false, NULL },
     { "alternatives.patch_applied",    test_alternatives_patch_applied,    false, NULL },
     { "alternatives.atomics_correct",  test_alternatives_atomics_correct,  false, NULL },
     { "context.create_destroy",        test_context_create_destroy,        false, NULL },

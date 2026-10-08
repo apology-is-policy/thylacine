@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -66,6 +66,14 @@ the fault smoke (a worker's write into its own guard dies of `snare:segv`);
 `/pouch-hello-threads`'s census grew by three legs. Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
+
+**XT-3a rung (2026-10-08).** After `/bus-probe-child`, joey runs
+`pouch_smoke_one("hint-probe", "hint-probe: exit 0")`. The probe executes 64 EL0
+`WFI` and 64 `SEVL; WFE` and exits 0. `start.S`'s composed `SCTLR_EL1` lets
+`WFE` run and traps `WFI` into [[sub-kernel-exception]]'s `EC_WFX` arm, which
+retires it. A `WFI` that killed the probe fails the reap. An arm that did not
+advance ELR traps on the same `WFI` forever, and the boot never reaches its
+banner. Boot-fatal like every other rung (`joey: /hint-probe FAILED`).
 
 **B-1a' rung (2026-09-23).** After the guard child, joey spawns
 `/capacity-probe` and reaps it by pid with `t_wait_pid_for`, requiring status

@@ -41,6 +41,12 @@ struct exception_context {
 // kernel's step machine, never part of a saved user context (DEBUG-FS-DESIGN 5.5).
 #define SPSR_EL1_SS (1ull << 21)
 
+// SPSR_EL1.BTYPE (bits 11:10), the branch type the eret installs: nonzero when
+// the trapped instruction was an indirect branch's target. An instruction the
+// kernel retires in place of the PE must clear it, or the next one is checked
+// as that branch's target.
+#define SPSR_EL1_BTYPE_MASK (3ull << 10)
+
 // Set VBAR_EL1 to the kernel exception vector table. Call from
 // boot_main once MMU is on and the kernel is running at high VA.
 //

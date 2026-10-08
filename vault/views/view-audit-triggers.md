@@ -28,7 +28,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |
 | [[sub-kernel-birth-hold]] | kernel/test/test_birth_hold.c | inv-i39, inv-i24, inv-i9 | - **The hold must never join `proc_stop_requested`.** The detour would park an |
 | [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
-| [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h, kernel/canary.c, kernel/include/thylacine/canary.h, kernel/fault_test.c, tools/test-fault.sh | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
+| [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h, kernel/canary.c, kernel/include/thylacine/canary.h, kernel/fault_test.c, kernel/test/test_hardening.c, tools/test-fault.sh | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
 | [[sub-kernel-burrow]] | kernel/burrow.c, kernel/include/thylacine/burrow.h | inv-i7, inv-i32, inv-i44 | - **The free decision must stay under the lock and the free must stay outside |
 | [[sub-kernel-caps]] | kernel/include/thylacine/caps.h, kernel/devcap.c, kernel/include/thylacine/devcap.h, kernel/proc.c, kernel/test/test_devcap.c | inv-i2, inv-i25 | - A new capability bit must be added to `CAP_ALL` **or** to |
 | [[sub-kernel-cons]] | kernel/cons.c, kernel/include/thylacine/cons.h | inv-i27, inv-i9 | - **Nothing that needs [[lock-proc-table]] may be called under [[lock-cons]], |

@@ -65,6 +65,8 @@ struct hw_cpu_ident {
     u32  dcache_line;   // bytes; CTR_EL0.DminLine decoded (4 << DminLine)
     u32  cwg;           // bytes; CTR_EL0.CWG decoded (4 << CWG). 0 == the part
                         // declines to say (see CACHE_LINE_MAX_BYTES).
+    u64  sctlr_el1;     // as this CPU's bring-up left it: start.S's composed
+                        // base plus the MMU, PAC and BTI enables
     bool valid;         // this CPU has run hw_cpu_ident_detect
 };
 
