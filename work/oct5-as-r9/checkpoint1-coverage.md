@@ -90,3 +90,11 @@ in all fifty. Exact ten input hashes and 100 raw logs are preserved under
 current-gate-20261008T201816Z; result JSON is in astra-takeover. This adds
 SMP/sanitizer CONTROL coverage; it does not rerun or widen the older mutant
 legs, close final image reclamation, or close the engine-owned rows.
+
+
+October 8, 21:14: final destruction is now witnessed at the HOST boundary by
+extracted Loom/AddrSpace/MMU code: both owner-drop orders pass ASan/UBSan, and
+four omissions fail distinct descriptor/table reclamation assertions. This is
+actual destructor code with allocator/lock/VMA/ring doubles, not a guest
+buddy/SLUB gauge. Guest reclamation remains OPEN. Evidence and limitations:
+astra-takeover/final-reclaim-20261008T211401Z/result.json.

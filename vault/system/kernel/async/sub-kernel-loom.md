@@ -1182,3 +1182,13 @@ preserved in work/oct5-as-r9/current-gate-20261008T201816Z; self-review result
 in astra-takeover/current-gate-20261008T201816Z-result.json. This is control
 coverage on Mac HVF, not new mutant or Pi evidence. Final image reclamation
 and the private engine remain open; no activation or Main landing.
+
+
+October 8 host boundary evidence: final-reclaim-control.py extracts private
+retirement, AddrSpace lifecycle and the MMU table destructors. Both owner-drop
+orders free one descriptor and four table levels under ASan/UBSan; omissions
+of private put, descriptor free, table destruction and root free are each
+detected. Raw sources/diffs/results: work/oct5-as-r9/astra-takeover/
+final-reclaim-20261008T211401Z/. Allocator, lock, VMA and ring doubles bound this
+to sequential host destruction-call sensitivity. Guest reclamation and the
+private engine remain open; production and guest fixture bytes are unchanged.

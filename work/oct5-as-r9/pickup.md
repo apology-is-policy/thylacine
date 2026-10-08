@@ -1934,3 +1934,41 @@ remaining structural/engine obligations stay open, followed by the approved
 async-first implementation then MM0-MM4. No Main landing, unfinished activation
 or removal of the 128 MiB protection. This was single-agent self-review, not an
 independent audit.
+
+
+## October 8, 21:14: final destruction host controls
+
+Added final-reclaim-control.py, extracting the current AddrSpace declaration,
+Loom private destructor, AddrSpace lifecycle functions and all four page-table
+walk/free levels directly from source. The native host run uses real malloc/free
+behind checked allocator doubles, with doubles for locks, VMA drain, ring refund
+and Loom layout. Actual clearing loops and the ARM dsb remain in the extracted
+code. This is a sequential host boundary test, not guest allocator accounting.
+
+On source 657343616 (kernel bytes unchanged from qualified 98c50e844), two
+ASan/UBSan controls passed: owner dies before private retirement, and private
+retirement happens before the remaining owner dies. Each frees exactly one
+AddrSpace and four table levels, clears table bytes before freeing, excludes
+block/leaf entries from recursive table freeing, and publishes retirement.
+Four single-site omitted-release mutants each exited at its expected assertion:
+private lifetime put or descriptor kfree omitted -> descriptor reclamation;
+whole pgtable destruction or root free omitted -> four-level reclamation. No
+sanitizer diagnostic was used as a substitute for those named assertions.
+
+Raw generated sources, exact diffs, compiler commands, logs and SHA256s:
+astra-takeover/final-reclaim-20261008T211401Z/. The initial 211352Z preparation
+failed compilation because the host lock typedef was misspelled; its diagnostic
+is retained and it made no runtime claim. Corrected before the successful run.
+Self-review reread all six outputs and four diffs, checked original source and
+generated-source hashes, and verified ASan dynamic linkage. Intentional mutant
+leaks last until process exit; LSan is disabled, while ASan/UBSan remain enabled.
+Mac lease released after 49 seconds. Disk admission exceeded 8 GiB; earlier
+transient low-space readings did not cause a bake or deletion.
+
+This closes the bounded host destruction-call sensitivity gap. Guest buddy/SLUB
+reclamation, cross-CPU scheduling and actual VMA drain are NOT certified by these
+doubles and remain separate obligations. No production or guest fixture changed,
+so the recorded 50-boot kernel result is not superseded. Continue the approved
+bounded private-engine admission/retirement work, carrying these remaining guest
+obligations to its qualification; do not use host evidence as an activation waiver.
+No Main landing or private async/clipboard activation, and retain 128 MiB protection.
