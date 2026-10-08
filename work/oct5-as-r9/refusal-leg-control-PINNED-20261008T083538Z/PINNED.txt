@@ -1,0 +1,24 @@
+PINNED CONTROL GENERATION -- the 2026-10-08 08:35:38Z fresh control for the
+checkpoint-1 CHARGE-REFUSAL leg, the one the DISCRIMINATING run was measured
+against (run work/oct5-as-r9/refusal-leg-20261008T083538Z/, exit 0).
+
+WHY IT SITS HERE AND NOT UNDER boot-inputs/
+preserve_boot_inputs prunes $PRESERVE_DIR to KEEP_INPUT_GENS (=2), so a
+generation left there survives only until two more runs. Moved out on the same
+footing as the reap control (astra, yip 0161 t65); moving it also keeps
+boot-inputs/run-20261007T140852Z from being the next generation pruned.
+
+WHAT IT IS
+Source 6f2bd6226 (astra t69's two corrections included).
+  control: tests 1836/1836 PASS vs the DERIVED expectation of 1836; the leg's
+  own block carries the reap arrival marker, the normal-fallthrough marker and
+  PASS; test.sh exit 0; no extinction.
+  kernel thylacine.bin prefix dd0a56361d1e7b9d (the recovery rebuild came back
+  byte-identical to it).
+
+VERIFIED AFTER THE MOVE: 9 of 9, each compared at the width of its stored
+PREFIX (HASHES.txt stores prefixes, not full digests).
+
+NOT A SUPERSESSION. The reap-leg pins (reap-leg-control-PINNED-20261007T190621Z/
+and -20261007T204646Z/) remain THAT leg's receipts; this kernel differs from
+theirs because the fixture changed, which is why a fresh control was owed.

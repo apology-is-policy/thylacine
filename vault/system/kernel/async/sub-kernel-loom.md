@@ -992,7 +992,7 @@ are now built by editing REAL boot logs at the leg's own line, every gate in bot
 oracles has one, and two arms are real logs unedited, including the one the first
 oracle called discrimination.
 
-THE ADMISSION REFUSALS, EDGE BY EDGE (2026-10-08, authored and UNRUN). Checkpoint
+THE ADMISSION REFUSALS, EDGE BY EDGE (2026-10-08; the charge refusal RAN, below). Checkpoint
 1 asks for every refusal and unwind edge before publication, and the fixture drove
 only two of `loom_create_private`'s: invalid geometry (refused before guard and
 charge) and a shared image (the guard is never taken). The charge refusal is now a
@@ -1015,7 +1015,18 @@ leaked guard after the assertion records the failure, so the mutant cannot carry
 the leak into later tests. An admission that wrongly SUCCEEDS is counted into the
 expected retirements before its check fails, so cleanup waits for that ring too
 and no asynchronous work escapes the leg. The oracle's 18 arms pass off-lease, built from real
-guest logs including a retained real FAIL of this fixture. The guest run is owed.
+guest logs including a retained real FAIL of this fixture. AND IT HAS RUN
+(2026-10-08 08:35:38-08:38:54Z, under lease, on source 6f2bd6226): the fresh control
+`tests: 1836/1836 PASS`, the leg PASS in its own block with the normal-fallthrough
+marker, `test.sh` exit 0, kernel `dd0a56361d1e7b9d`. The mutant, kernel
+`e883d57ffdb5ba46`: the leg's block carries `after-check-failure: refused charge
+leaves no guard, reference or charge` and the identical `FAIL:` verdict, it is the
+ONLY FAIL in the boot, `tests: 1835/1836 FAIL`, the only extinction is `kernel test
+suite failed`, and `test.sh` exit 1. So the call does route through the charge
+branch, and the assertion does see a leaked guard. `kernel/loom.c` was restored to
+its pristine hash and `build/` was rebuilt byte-identical to the control. That is one
+boot per side on the Mac axis. It is not an SMP qualification, and nothing is
+activated by it.
 The layout-allocation unwind (`loom_create_layout` failing after the charge:
 uncharge, then `addrspace_private_end`) is STRUCTURAL ONLY and its runtime
 obligation stays OPEN. `kernel/` has no allocation fault seam. A minimal,

@@ -202,3 +202,28 @@ image join's CAP_JIT term -- a new neighbour, not a cover. Item stays OPEN, fix
 shape unchanged (one linkage-keyed idempotence guard, with a double-remove
 regression test). At merge, re-measure "no reachable double remove" over the
 MERGED call-site set, main's B-2 sites included.
+
+## ADDED 2026-10-08 08:41Z, from main's call 0202 (capmark LANDED, main = 060cbcc1f)
+
+### 5 (UPDATED). The AddrSpace collision changed shape, not size.
+capmark replaced `code_vmas` with `guards_ever` (same slot) and added
+`caps_ever` after `id`. main's assert is still `== 80`, and mine (owners +
+private_rings) also reads 80. THE TWO 80s AGREE BY COINCIDENCE, not by layout,
+and the merged struct carries BOTH field sets. So the rule stands: keep ONE
+assert, DERIVE the size by compiling the merged struct, extend main's field
+enumeration, and never resolve it by deleting the assert.
+
+### 6 (UPDATED). Its stated reason is gone; re-read before relying on it.
+The rule "every VMA relink goes through vma_insert_in / vma_remove_in" was
+justified by B-2b's code_vmas counting, which capmark removed (vma.c -11 lines).
+Going through the helpers is still the tree's pattern. At merge, re-read
+main's vma.c for any NEW per-relink bookkeeping rather than carrying this
+obligation's old reason forward.
+
+### 7 (UPDATED). Main is writing the guard, off main.
+With code_vmas gone, nothing makes a double vma_remove_in loud, so it is now
+wholly silent. Main took the linkage guard and a double-remove regression test
+(head AND interior VMA) on branch `vmaguard`, off 060cbcc1f, before B-2c. Main
+re-measures the call sites on main and will ring 0202 before it lands. At merge:
+take main's guard, and make sure none of my vma.c hunks (vma_free,
+vma_free_deferred, vma_detach_range_in) bypass it.

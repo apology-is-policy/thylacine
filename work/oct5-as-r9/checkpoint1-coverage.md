@@ -20,7 +20,7 @@ Cited by symbol. Fixture = `kernel/test/loom_private_fixture.h`
 | --- | --- | --- |
 | invalid geometry (`loom_measure`) | none needed; refused before guard and charge | DRIVEN: "bad geometry has no guard or charge" |
 | image not exclusively owned (`addrspace_private_begin`, owners != 1) | none needed; the guard is not taken | DRIVEN: "shared image refuses private owner" |
-| charge refused (`addrspace_charge_pages` over the space's cap) | `addrspace_private_end` releases BOTH the ring count and the lifetime reference | UNRUN: leg "refused charge leaves no guard, reference or charge", with a confined RED mutant (`refusal-leg-run.sh`); arms 18/18 off-lease |
+| charge refused (`addrspace_charge_pages` over the space's cap) | `addrspace_private_end` releases BOTH the ring count and the lifetime reference | DRIVEN, with RED witnessed (2026-10-08, run `refusal-leg-20261008T083538Z`): control 1836/1836 with the leg PASS in its own block; the one-site mutant FAILs that leg at "refused charge leaves no guard, reference or charge" and nowhere else. Mac axis, one boot each |
 | ring layout allocation fails (`loom_create_layout` returns NULL after the charge) | uncharge `metadata + backing`, then `addrspace_private_end` | STRUCTURAL; runtime unwind OPEN. No allocation fault seam exists in `kernel/`. A minimal, test-only, locally scoped seam is owed for review after the charge-refusal leg (astra t67). |
 | retirer not ready (`service_retire_ready`) | none needed; refused first | STRUCTURAL: boot-order guard, unreachable after boot |
 | private-ring count saturation (`private_rings == ~0`) | none needed; the guard is not taken | STRUCTURAL: needs 2^32 - 1 live rings on one image |

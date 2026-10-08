@@ -1493,3 +1493,29 @@ RUN IT: sh work/oct5-as-r9/refusal-leg-run.sh   (needs the mac lease; tree clean
   A fresh control is owed because the fixture changed; the reap-leg pinned
   control stays as THAT leg's receipt and is not superseded.
 Release sensitivity stays OPEN and distinct. 128 MiB stays. Nothing activated.
+
+== 2026-10-08 08:41Z: THE CHARGE-REFUSAL LEG DISCRIMINATED ==
+Run work/oct5-as-r9/refusal-leg-20261008T083538Z/, exit 0, 08:35:38-08:38:54Z,
+source 6f2bd6226 (astra t69's two corrections in). Mac held 5 min, RELEASED at
+08:39Z the moment the runner exited (aux next).
+CONTROL: tests 1836/1836 PASS vs derived 1836; leg PASS in its own block with
+  the normal-fallthrough marker; test.sh exit 0; kernel dd0a56361d1e7b9d.
+MUTANT (one site, loom.c's !charged branch): kernel e883d57ffdb5ba46; the leg's
+  block = after-check-failure marker + FAIL, both "refused charge leaves no
+  guard, reference or charge"; the ONLY FAIL in the boot; tests 1835/1836 FAIL;
+  the only extinction "kernel test suite failed"; test.sh exit 1. No reap
+  arrival marker in the mutant, as predicted -- it fails before reaching it.
+  Verified from the raw logs, not just the oracle's summary.
+RECOVERY: 2 mutant images quarantined; loom.c back to cbdd71f6f5ee4c74;
+  build/ rebuilt BYTE-IDENTICAL (dd0a56361d1e7b9d); tree clean. Disk 184 MiB.
+PINNED: refusal-leg-control-PINNED-20261008T083538Z/ (moved OUT of
+  boot-inputs/, 9/9 at prefix width). boot-inputs/ now holds only
+  run-20261007T140852Z.
+CLAIM, BOUNDED: the charge-refusal unwind is load-bearing and the leg sees a
+  leaked guard -- one boot per side, Mac axis. NOT an SMP qualification, NOT
+  checkpoint-1 closure (layout-failure runtime OPEN), NOT release sensitivity.
+NEXT: bring astra the (b) seam proposal (work/oct5-as-r9/seam-b-proposal-DRAFT.md)
+  for review; nothing is edited for (b) until she answers.
+main took the vma_remove_in linkage guard (0202 t5, branch vmaguard) and rings
+  0202 before it lands; capmark landed main = 060cbcc1f (MERGE-OBLIGATIONS 5-7
+  updated).

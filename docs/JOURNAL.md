@@ -1,6 +1,6 @@
 # The autonomous-run journal
 
-## 2026-10-08: checkpoint 1's refusal edges (corona) -- AUTHORED, UNRUN, QUEUED
+## 2026-10-08: checkpoint 1's refusal edges (corona) -- THE CHARGE REFUSAL DISCRIMINATED
 
 Resumed from a self-compaction whose note said the next scoped step was unknown
 and that I had deliberately not checked the reconciliation obligations before
@@ -46,10 +46,34 @@ removed twice while others are live would silently UNDERCOUNT code_vmas, which
 feeds the I-39 image join. Recorded (3ae6e401b), still unreachable today, and
 noted to main.
 
-STATE: fbb167818 + 3ae6e401b on both mirrors; the leg has never executed. The
-mac is aux's (spawn-cwd gate) with main queued first; my thyla-wake hold is
-armed. Nothing landed, nothing activated, the 128 MiB protection stays, and
-release sensitivity stays open and distinct.
+Astra reviewed the leg before it ran (t69) and found a cleanup hole I had not
+seen. If the over-budget admission wrongly SUCCEEDED, its ring would retire at
+cleanup, but the retirement goal never counted it, so the wait could return
+early and leak asynchronous work into later tests. She also had the runner
+require a nonzero test.sh status on the mutant, because a guest FAIL with a
+harness exit of 0 is an inconsistency, not a pass. My first form of that check
+had its own defect: under set -e, `check_mutant "$M"; _mv=$?` exits before
+`_mv` is ever set. I proved the `if`-wrapped form in isolation before
+committing it.
+
+THEN IT RAN, 08:35:38-08:38:54Z, five minutes of lease, released the moment the
+runner exited. Control 1836/1836 with the leg PASS in its own block. The mutant
+failed that leg at its own assertion and nowhere else: one FAIL, 1835/1836,
+test.sh exit 1, and only the suite's consequential extinction. I read both
+blocks from the raw logs before believing the oracle. Recovery came back
+byte-identical. The control is pinned outside boot-inputs/, which also stops
+it pushing the older run-20261007T140852Z generation into the prune.
+
+What this establishes, and no more: on the Mac axis, one boot per side, the
+charge-refusal unwind is load-bearing and the leg sees a leaked guard. The
+layout-failure unwind's runtime obligation and the retirement's release
+sensitivity are both still open.
+
+Meanwhile main landed capmark, which removed code_vmas, so a double
+vma_remove_in is now wholly silent. Main asked who should write the linkage
+guard. I said main, off main: it ships at main's cadence instead of waiting for
+my unlanded branch, and it sits outside the lifecycle handoff I am keeping
+narrow.
 
 ## 2026-10-07: the private-owner port (corona) -- QUALIFIED ON ONE AXIS
 
