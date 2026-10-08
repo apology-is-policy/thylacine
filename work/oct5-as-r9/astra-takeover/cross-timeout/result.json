@@ -1,0 +1,55 @@
+{
+  "source_sha256": "4e295342f0ac6187e0ca52db69581628047dd4a71679191b0cddf1c2a3823334",
+  "old_commit": "eb03e4f65fa230d8ab66ed792b1626639fadabf9",
+  "scope": "actual extracted fixture code with host allocation/scheduler doubles, not guest",
+  "results": [
+    {
+      "variant": "before",
+      "mode": 1,
+      "rc": 11,
+      "output": "timeout lost: fixture advanced beyond incomplete helper"
+    },
+    {
+      "variant": "after",
+      "mode": 0,
+      "rc": 0,
+      "output": "PASS mode=0 free=1 join=1 inner=1"
+    },
+    {
+      "variant": "after",
+      "mode": 1,
+      "rc": 0,
+      "output": "PASS mode=1 free=1 join=0 inner=0"
+    },
+    {
+      "variant": "after",
+      "mode": 2,
+      "rc": 0,
+      "output": "PASS mode=2 free=1 join=0 inner=0"
+    },
+    {
+      "variant": "after",
+      "mode": 3,
+      "rc": 0,
+      "output": "PASS mode=3 free=0 join=0 inner=0"
+    },
+    {
+      "variant": "after",
+      "mode": 4,
+      "rc": 0,
+      "output": "PASS mode=4 free=1 join=0 inner=0"
+    },
+    {
+      "variant": "after",
+      "mode": 5,
+      "rc": 0,
+      "output": "PASS mode=5 free=1 join=1 inner=0"
+    },
+    {
+      "variant": "after",
+      "mode": 6,
+      "rc": 0,
+      "output": "PASS mode=6 free=1 join=1 inner=1"
+    }
+  ]
+}

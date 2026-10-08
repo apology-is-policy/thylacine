@@ -26,7 +26,9 @@ or early removal of the 128 MiB protection follows from this transfer.
    no second fixture invocation is supported after this failed boot.
    `cross-timeout-control.py` extracts the actual wait/helper/control block and
    compares the old and new block with host scheduler/allocation doubles.
-   Compile/run remains pending the resource window; no guest result exists.
+   Host control executed on October 8: the old block loses the timeout (expected
+   rc 11); all seven repaired cases pass. Kernel syntax has zero errors, two
+   pre-existing prototype warnings. No new guest result exists.
 2. **Inner unwind qualification:** run control and independent M1/M2/M3 with
    `inner-leg-run.sh`, then its test-off shape check. Preserve all raw logs,
    exact source, mutations, nine matching boot inputs and restored control
@@ -49,12 +51,18 @@ or early removal of the 128 MiB protection follows from this transfer.
 
 ## Resources and verification
 
-At takeover Main's groupstatus gate had live registered processes and its own
-Mac lease; it remains untouched despite the agents' credit exhaustion. Aux was
-queued. Astra has no lease or running compiler/VM. Disk was 7.9 GiB and the
-inherited runner requires 8 GiB. Recheck before heavy work, never lower the floor
-or acquire a lease just to wait for disk. Acquire/release only Astra's lease;
-never modify another agent's lease or stop their jobs. No new cleanup is approved.
+The operator subsequently said: "Main, Aux, Corona are all out of credits until
+Monday -- all resources are free, as they cannot use them. Feel free to take any
+at will." This explicitly supersedes prior peer-lease waiting restrictions.
+Astra may reclaim resources without waiting for those agents. Record resource
+use as Astra; do not impersonate a peer or silently falsify lease checks.
+Already-launched background jobs can still run despite exhausted credits:
+Main's groupstatus/SMP gate remained live at this check and was preserved.
+The tiny host regression and syntax check ran under this operator grant.
+The 8 GiB runner disk floor remains binding (7.2 GiB observed). No files were
+deleted or peer leases changed in this checkpoint. Recheck before guest work;
+resolve actual disk capacity and resource bookkeeping rather than bypassing
+runner checks. Keep all source and pinned evidence intact.
 
 Once resources allow, from this checkout:
 
@@ -71,4 +79,4 @@ first. Keep the exact clean Stratum source `61dde3727921e70e2c72fbd3c9e2044a192f
 at `/Users/northkillpd/projects/stratum-astra/v2`. Prior full Mac qualification
 and later single-boot checkpoints retain their original scopes and source pins.
 This takeover has not repeated them. Self-review is single-agent, not independent
-Corona/Astra review. Current coordination cursor: turn 83, note 55.
+Corona/Astra review. Coordination through turn 83; operator resource override and host results recorded separately.

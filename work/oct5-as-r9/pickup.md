@@ -1711,3 +1711,22 @@ No compiler/VM or lease owned by Astra; Main's background gate still live. Keep
 8 GiB floor, existing pinned generations, external clean Stratum 61dde37 and
 all prior activation/integration restrictions. Use astra-yip.sh through
 THYLA_WAKE_YIP for the inherited runner's resource reads.
+
+
+## October 8: resource override and actual-source host regression
+
+The operator made Main, Aux and Corona resources available to Astra until Monday,
+superseding peer-lease waiting restrictions. Main's existing SMP process was still
+live and was preserved; credit exhaustion does not stop already-launched jobs.
+Under the explicit grant, cross-timeout-control.py compiled and ran actual
+extracted fixture code: old block rc 11 reproduces lost timeout; repaired modes
+0-6 all pass (completion, timeout, late completion, allocation refusal, thread
+creation refusal, foreign-thread observer mutation, timer wrap). Raw generated
+sources, compile logs and result.json are retained under
+work/oct5-as-r9/astra-takeover/cross-timeout/. Fixture SHA256:
+4e295342f0ac6187e0ca52db69581628047dd4a71679191b0cddf1c2a3823334.
+The test_loom.c syntax check passed with zero errors and only the two existing
+prototype warnings. Self-review: extracted production fixture logic with host
+doubles proves these bounded control paths, not ARM scheduler or runtime gates.
+Guest inner-unwind discrimination remains pending; disk was 7.2 GiB against the
+unchanged 8 GiB floor. No peer process, lease, source or pinned evidence removed.

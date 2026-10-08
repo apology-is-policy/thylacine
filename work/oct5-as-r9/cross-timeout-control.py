@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Actual fixture wait + cross-control block, with bounded host scheduler doubles.
 
-Requires the caller's Mac lease: compiles two tiny host programs, not a guest.
+Requires a Mac lease or explicit operator resource authorization.
+Compiles two tiny host programs, not a guest.
 The old block must demonstrate the lost timeout; the repaired block must cover
 completion, timeout, late completion, both allocation failures and M3 detection.
 No claim about ARM scheduling or buddy reclamation follows from this control.
