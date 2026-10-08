@@ -1438,6 +1438,39 @@ the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascad
 
 ---
 
+## thread_reap.tla — XT-3b (per-thread reaping; I-32, I-24; model-first)
+
+An exited Thread is reclaimed while its Proc lives on, so `PROC_THREAD_MAX` counts
+live Threads instead of every spawn of the Proc's life
+(`docs/X86-TRANSLATION-DESIGN.md` 5.8, XT-K9). Written model-first, before the C,
+because the free has four actors that can each race it: the dying Thread's own
+tail, live peers reaping at spawn and exit, exec's drain, and `wait_pid`. The model
+proves who may free a Thread and when; it abstracts the memory to one `freed` state,
+so the kernel tests are the witness that the C frees the right bytes.
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `Exit` (the commit; a peer lives on -> RETIRE, else ZOMBIE) | `kernel/proc.c::thread_exit_self` -- `t->state = THREAD_EXITING` and `proc_retire_locked` in ONE `g_proc_table_lock` hold; the last Thread out stays on `p->threads` | `RetiredAreExited`, `LiveListIsLive`, `NoLiveAfterZombie` |
+| `Settle` (the switch away completes) | `kernel/sched.c` resume path / `sched_finish_task_switch` -- the RELEASE clear of the outgoing `on_cpu` | the one moment a retired Thread stops being in use |
+| `Reap` / `ReapFree` / `ReapDone` (claim settled ones by detaching under the lock, free with it dropped) | `proc.c::proc_reap_retired` -> `proc_detach_settled_retired` + `proc_free_retired_chain`; called by `sys_thread_spawn_handler`, the vivarium clone thread arm, `thread_exit_self` and `exits_code` | `NoFreeInFlight`, `OneFreerPerThread` |
+| `Exec` / `ExecFree` / `ExecSwap` (drain every retired Thread, spinning, before the old space goes) | `proc.c::proc_exec_replace` -> `proc_drain_retired` before the swap and `addrspace_unref` (task #19) | `TailsOnLiveSpace`, `ExecCompletes` |
+| `WaitPid` / `WaitFree` / `ProcFree` (detach both lists, spin each, free, then the Proc) | `proc.c::wait_pid_for` -- `zombie->exited` taken in the `proc_unlink_child` hold, freed through `thread_free_retired` | `TailsOnLiveSpace`, `FreedProcHoldsNone`, `EventuallyFreed` |
+| `Spawn` / `ReadTid` (the tid read before `ready()`) | `kernel/syscall.c::sys_thread_spawn_handler` + the vivarium clone thread arm -- `int tid = nt->tid` captured before `ready(nt)` | `NoTidReadAfterFree` |
+
+Clean cfgs: `thread_reap.cfg` (3 Threads, 668 distinct states) and
+`thread_reap_4.cfg` (4 Threads, 4532), both with the three liveness properties.
+Buggy cfgs, one named invariant each: `thread_reap_buggy_no_oncpu`
+(`NoFreeInFlight`), `_unlocked_claim` (`OneFreerPerThread`), `_exec_no_drain`
+(`TailsOnLiveSpace`), `_waitpid_skips_retired` (`TailsOnLiveSpace`),
+`_tid_after_ready` (`NoTidReadAfterFree`). `specs/check-thread-reap.sh` runs them all
+and pins the clean counts.
+
+Pre-commit gate: `specs/check-thread-reap.sh` ALL CFGS AS CLAIMED, on any change to
+the retire, a reap point, `proc_drain_retired`, `wait_pid`'s free of the zombie's
+lists, or a spawn handler's use of the new Thread after `ready()`.
+
+---
+
 ## pipe.tla — P5-pipe (section added at RW-10; the spec landed P5)
 
 Models the two-direction pipe wait/wake state machine (I-9 specialized):

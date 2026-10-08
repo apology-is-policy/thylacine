@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1592,3 +1592,16 @@ write-behind flush's own, passed through from `dev9p_loom_register`
 ([[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]]) -- and `-EINVAL` for the
 rest (not a Loom, an unknown op, `nargs` over the table). `nargs` is a u32 by
 the ABI, so its upper bits are ignored as before.
+
+## The spawn handlers' reap point and their last look (2026-10-08, XT-3b)
+
+`sys_thread_spawn_handler` and the vivarium `clone(CLONE_THREAD)` arm now call
+`proc_reap_retired` immediately before `proc_thread_cap_ok`: the cap counts LIVE
+threads (an exited one retires off `thread_count` in its EXITING hold), and the
+reap frees the retired ones whose switch away has settled, so a pool that retires
+and respawns workers is bounded by its live set ([[sub-kernel-death]],
+[[spec-thread-reap]]). Both handlers also read the new Thread's tid into a local
+BEFORE `ready(nt)` and return that copy. They used to return `nt->tid` after
+`ready()`, which was safe only while a live Proc's Threads were never freed: once
+published, the new Thread can run, exit, retire and be freed by a peer's reap
+before the spawner's next instruction (the `BUGGY_TID_AFTER_READY` cfg).

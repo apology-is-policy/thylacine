@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -682,3 +682,15 @@ retain the kernel-reported selection, and drivers skip ISR reads in MSI-X mode.
 This helper runs before DMA setup; a subsequent driver reset would erase the
 selected vectors and is forbidden until rollback or shutdown. Full fallback
 fault-injection and the cross-controller matrix remain required.
+
+## Thread lifetime after exit (2026-10-08, XT-3b)
+
+`thread.rs`'s module note used to say the kernel keeps an exited thread's
+descriptor and kstack until the Proc dies ("per-thread reaping is a v1.x
+extension"). Since XT-3b the kernel retires an exited thread, so it stops
+counting against the per-Proc thread cap at once, and a live peer frees it at its
+next spawn or exit ([[sub-kernel-death]]). Nothing in `spawn_raw` /
+`set_tid_address` / `join_tid` changed: the join still completes on the kernel's
+exit-time store to the tid word, after which the thread never touches user memory
+again, so a joiner may reuse the thread's stack. `/thread-torture` drives that
+protocol 1,553 times in one Proc.

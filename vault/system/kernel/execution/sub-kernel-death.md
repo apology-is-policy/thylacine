@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -34,7 +34,7 @@ consequence of getting it wrong is a hang rather than a crash.
 | Entry | Caller state | Effect |
 |---|---|---|
 | `exits(msg)` | the Proc's own thread | terminate the *program*; with live peers, routes through the group cascade then self-exits |
-| `thread_exit_self()` | any thread | terminate *this Thread*; the last live one out zombies the Proc |
+| `thread_exit_self()` | any thread | terminate *this Thread*: reap the Proc's settled retired peers, then commit EXITING -- a Thread with a live peer RETIRES off `p->threads` (XT-3b), the last live one out zombies the Proc |
 | `proc_group_terminate(p, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait |
 | `el0_return_die_check()` | at every return-to-EL0 | if flagged, `thread_exit_self()` (noreturn) |
 | `proc_fault_terminate(name, addr)` | EL0 unhandled fault | diagnose + `exits(snare:*)`; noreturn |
@@ -455,7 +455,12 @@ What a change **must** re-establish:
   set `PROC_FLAG_EXIT_CLOSING` -- and before the wake loop (a close that
   re-checks after the wake must see it);
 - death winning over both stop owners at every branch, the exit close
-  included (a dying group is never asked to park).
+  included (a dying group is never asked to park);
+- (XT-3b) that a Thread retires in the SAME hold that commits it EXITING, and
+  only while a peer lives on; that a reaper takes only settled Threads and only
+  by detaching under the table lock; and that nothing frees the Proc, or exec
+  frees its old address space, while a retired tail can still run
+  ([[spec-thread-reap]]).
 
 ## Seams
 
@@ -593,3 +598,72 @@ ALIVE). The table itself is still freed at `proc_free`
 ([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
 `proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
 (`vivarium.socktab_ready_release_paths`).
+
+## Retirement and the reap points (2026-10-08, XT-3b)
+
+Before XT-3b an exited Thread stayed on `p->threads` as EXITING until the whole
+Proc was reaped, so `thread_count` -- the figure `PROC_THREAD_MAX` caps -- counted
+every Thread the Proc had ever had. A non-exempt Proc's 256th spawn failed, and
+an exempt one pinned every dead Thread's kernel stack until it exited
+(`docs/WINE-STUDY.md` Appendix A, F3; `docs/X86-TRANSLATION-DESIGN.md` 5.8,
+XT-K9). The fix is modelled first in [[spec-thread-reap]].
+
+**Retire.** `thread_exit_self` commits EXITING under the table lock as before; when
+a peer is still live, the same hold calls `proc_retire_locked`, which moves the
+Thread from `p->threads` to `p->exited`, drops `thread_count`, sets
+`Thread.retired`, and CAS-clears a debug focus naming it (the slot could be
+recycled into a new Thread of the same Proc, which the focus's list check would
+then accept). The last Thread out stays on `p->threads`, where `wait_pid` looks for
+the zombie's Threads. So `thread_count` is now exactly the live count, and
+`proc_count_live_peers_locked` -- still the gate for the exit-close window -- walks
+only live Threads plus that last one.
+
+**Reap.** A retired Thread still runs its tail (the clear-child-tid store and
+wake) and its final switch; its `on_cpu` clears only when the destination CPU
+finishes that switch, and an EXITING Thread is never dispatched again, so a clear
+`on_cpu` means nothing will ever run on it. `proc_reap_retired` frees exactly
+those: under the table lock it detaches every retired Thread whose `on_cpu` reads
+clear (ACQUIRE), folding its `run_ns` into `p->reaped_run_ns` in the same hold so
+`proc_cpu_ns` never dips, and then frees the detached chain with the lock dropped
+(`thread_free_retired`; the kstack peak is scanned there and folded into
+`p->reaped_kstack_peak` afterwards, because the scan's cost is inverted, ARCH 8.12
+audit F2). The detach is the claim: two reapers can never take one Thread.
+
+The reap points are every place a LIVE Thread of the Proc passes on its way
+through the kernel: the spawn handlers, before the cap check (the native
+`sys_thread_spawn_handler` and the vivarium clone thread arm), and
+`thread_exit_self` / `exits_code`, at entry. A live reaper is what keeps the Proc
+ALIVE through the free -- a Proc goes ZOMBIE only once no Thread of it is live --
+so no `wait_pid` can reach the same Threads. Because every exit reaps first, the
+retired-but-allocated set per Proc is bounded by the Threads between their own
+reap and their commit plus the ones still switching away at the last reap: about
+twice the CPU count. A dying group therefore reclaims itself as it goes, and its
+zombie holds only its last Thread and whatever was still switching away when that
+Thread passed.
+
+**wait_pid** takes `zombie->exited` whole in the hold that unlinks the zombie and
+frees it after the zombie's live list, spinning each `on_cpu` out.
+
+**exec** (task #19, a race that predates XT-3b): "no live peer" was never "no peer
+running". A Thread that exits just before an exec is retired but may still be in
+its tail, storing its clear_child_tid word through the OLD translation -- and a
+fault there resolves against `p->as`, which the swap replaces. `proc_exec_replace`
+therefore calls `proc_drain_retired` before the swap and the unref of the old
+space: rounds of the settled-only reap, yielding between them, until `p->exited`
+is empty. The execer is the Proc's only live Thread, so nothing new can retire
+meanwhile (the drain asserts it); the swap's critical section re-checks that the
+list is still empty.
+
+**The spawner's last look.** Once `ready()` publishes the new Thread it can run,
+exit, retire and be freed by a peer, so both spawn handlers read the tid before
+`ready()` and return that copy (they used to read `nt->tid` after it, which was
+safe only while a live Proc's Threads were never freed).
+
+Witnesses: `proc.thread_reap_churn` (1,200 spawn/exit cycles in a non-exempt Proc:
+no cap refusal, frees while the Proc lives, a bounded retired list, monotonic
+`proc_cpu_ns`, the focus cleared), `proc.thread_reap_inflight` (a retired Thread
+with `on_cpu` held survives the reap and holds up the drain), and
+`proc.thread_reap_concurrent` (three peers spawning, reaping and exiting at once);
+at EL0, `/thread-torture` -- joey's boot rung ([[sub-stratum-boot]]) and the
+`ls-ci.exp` user leg -- spawns and joins 1,553 threads in one Proc and reads its
+live count back as 1.

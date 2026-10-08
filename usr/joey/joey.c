@@ -5936,6 +5936,23 @@ int main(void) {
         t_putstr("joey: /hint-probe ok (64 EL0 WFI and 64 WFE returned)\n");
     }
 
+    // === /thread-torture (XT-3b: per-thread reaping) ===
+    // One Proc spawns and joins 1,553 threads -- sequentially, then three
+    // spawners at once -- and its live count must be back to 1. An exited
+    // thread retires and a live peer frees it; before XT-3b every one stayed
+    // linked until the Proc died, so this read 1,554 (and a non-exempt user's
+    // 256th spawn failed; tools/interactive/ls-ci.exp leg (f) is that one).
+    {
+        static const char tc_name[]   = "thread-torture";
+        static const char tc_expect[] = "thread-torture: ok";
+        if (pouch_smoke_one(tc_name, sizeof(tc_name) - 1,
+                            tc_expect, sizeof(tc_expect) - 1) != 0) {
+            t_putstr("joey: /thread-torture FAILED (exited threads not reclaimed while the Proc lived)\n");
+            return 1;
+        }
+        t_putstr("joey: /thread-torture ok (1553 spawns in one Proc; live threads 1)\n");
+    }
+
     // === /capacity-probe (B-1a': capacity) ===
     // The EL0 half of ARCH 6.5's capacity contract: a 4 GiB reservation is
     // admitted (the old cap was 256 MiB), the census a program reads

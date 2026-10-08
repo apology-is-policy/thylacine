@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**182 declared surfaces · 178 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
+**182 declared surfaces · 178 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 26 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -64,7 +64,9 @@ changed on main? — is the next increment, tracked as task #169.
 | VIVARIUM O_APPEND (FS pass-through) + pread64/pwrite64 (67/68): git co… | `init/add/commit/log/clone/verify` | no such file in the tree |
 | VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
 | W-3e: the SDL2 Vulkan glue + the img poke-completion + the first-Vulka… | `usr/ports/mesa/patches/0020` | no such file in the tree |
+| `thread_spawn` / `thread_exit` / multi-thread exit | `specs/check-thread-reap.sh` | no such file in the tree |
 | `thread_spawn` / `thread_exit` / multi-thread exit | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
+| `thread_spawn` / `thread_exit` / multi-thread exit | `specs/thread_reap.tla` | no such file in the tree |
 | `torpor_wait` / `torpor_wake` | `specs/futex.tla` | **possibly a documented NEGATIVE — read the claim** |
 | halcyond: the Halcyon transcript renderer + the shared VT core + the r… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |
 | mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint… | `usr/ports/mesa/patches/0018` | no such file in the tree |

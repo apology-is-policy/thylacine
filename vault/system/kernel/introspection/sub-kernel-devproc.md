@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -907,3 +907,19 @@ window: an alias in the window's first 508 GiB (about 0.8% of placements)
 saves a table, and that says which 512 GiB it is in, about 7 of its 34 bits.
 Linux's world-readable `VmPTE` is the same channel. Stated rather than closed
 (B-2b audit r2, self-found SF-1).
+
+## Retired threads and the debug surface (2026-10-08, XT-3b)
+
+An exited Thread of a LIVE target is now freed while the target lives (it retires
+off `p->threads` in its EXITING hold, and a live peer frees it later --
+[[sub-kernel-death]]). The debug readers were already sound against that: each
+uses a Thread only while holding `g_proc_table_lock`, and every free is preceded
+by a hold of that lock that takes the Thread off `p->threads`, so a Thread a
+reader finds on the list is allocated. `devproc_focus_thread`'s list check had
+leaned on "a reachable target's threads are never freed"; its comment now names
+both unlink points. One new hazard is closed where the Thread retires: a focus
+naming it is CAS-cleared there, because the freed slot can be recycled into a new
+Thread of the SAME Proc, which the list check would then accept as the focus.
+`status`'s `threads:` (and `sched`'s header) read `thread_count`, which is now the
+live count: a Proc that has spawned and joined a thousand threads reads 1, and a
+zombie reads 1. `sched`'s per-thread rows list live threads only.

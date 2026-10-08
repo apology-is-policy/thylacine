@@ -5312,10 +5312,16 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // alloc -- bounding a thread bomb (each thread pins unswappable kernel
     // kstack). kproc is already rejected above; the SYSTEM boot/service chain is
     // exempt. A bounded TOCTOU overshoot (<= ncpus-1) is acceptable for a floor.
+    // XT-3b: the cap counts LIVE threads -- an exited one left thread_count
+    // when it retired -- and this reap point frees the retired ones whose
+    // switch away has settled, so a pool that retires and respawns workers is
+    // bounded by its live set, not its history.
+    proc_reap_retired(p);
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
     struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
     if (!nt)                                         return -T_E_NOMEM;
+    int tid = nt->tid;
 
     // CLONE_PARENT_SETTID (#112): publish the new tid into the parent-
     // supplied user word BEFORE the child is made runnable. Parent and
@@ -5345,12 +5351,14 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // there; it exists only so a buggy/hostile native ptid is neither a
     // spawn failure nor an extinction.
     if (ptid_va != 0)
-        (void)uaccess_store_u32(ptid_va, (u32)nt->tid);
+        (void)uaccess_store_u32(ptid_va, (u32)tid);
 
     // ready() inserts the new RUNNABLE Thread into the run-tree. From
-    // here it can be picked by any CPU on the next sched() tick.
+    // here it can be picked by any CPU on the next sched() tick -- and run,
+    // exit, retire and be freed by a peer's reap (XT-3b), so `nt` is not
+    // touched after it (thread_reap.tla BUGGY_TID_AFTER_READY).
     ready(nt);
-    return (s64)nt->tid;
+    return (s64)tid;
 }
 
 // P6-pouch-threads (sub-chunk 9): SYS_THREAD_EXIT handler. Wraps
@@ -5427,7 +5435,9 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     }
 
     // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
-    // sys_thread_spawn_handler). A pthread_create storm fails clean -EAGAIN.
+    // sys_thread_spawn_handler, reap point included -- XT-3b). A
+    // pthread_create storm fails clean -EAGAIN.
+    proc_reap_retired(p);
     if (!proc_thread_cap_ok(p))                      return -(s64)T_E_AGAIN;
 
     // The crux. thread_create_forked copies `ctx` (the parent's trap frame) with
@@ -5437,6 +5447,7 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // a fork: shared address space, one pid, one ASID (I-31).
     struct Thread *nt = thread_create_forked(p, ctx, child_sp, child_tls);
     if (!nt)                                         return -(s64)T_E_NOMEM;
+    int tid = nt->tid;
 
     // CLONE_PARENT_SETTID: publish the tid into the parent word BEFORE ready(),
     // so the child can never observe a 0 tid, and read nt->tid HERE (pre-ready)
@@ -5446,7 +5457,7 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // returns -1, and is SWALLOWED -- the tid is authoritative in x0, and a
     // never-readied Thread must not be torn down on a transient uaccess fault.
     if ((flags & (u64)VIV_CLONE_PARENT_SETTID) && ptid_va != 0)
-        (void)uaccess_store_u32(ptid_va, (u32)nt->tid);
+        (void)uaccess_store_u32(ptid_va, (u32)tid);
 
     // CLONE_CHILD_CLEARTID: arm the exit-time clear+wake. thread_clear_child_tid_
     // handoff (fired from thread_exit_self at retirement) zeroes *ctid and
@@ -5462,9 +5473,11 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // linked Thread (and marked it -- its EL0-return die-check fires before it
     // reaches EL0) or has not run yet (and marks it when it does): the I-24
     // shootdown covers every Thread linked into p, exactly as for a
-    // sys_thread_spawn_handler thread created the same way.
+    // sys_thread_spawn_handler thread created the same way. After it `nt` may
+    // run, exit and be reaped by a peer (XT-3b), so only the captured tid is
+    // returned.
     ready(nt);
-    return (s64)nt->tid;
+    return (s64)tid;
 }
 
 // N-3: the futex shell -- FUTEX_WAIT/WAKE/REQUEUE onto torpor. `p` is the

@@ -20,10 +20,21 @@
 //   proc.multi_thread_reap                — rfork a child Proc, spawn
 //                                            peer Threads in it, each
 //                                            calls thread_exit_self,
-//                                            main calls exits → parent
-//                                            wait_pid drains ALL
-//                                            Threads (the multi-thread
-//                                            reap path in wait_pid).
+//                                            main calls exits → every
+//                                            Thread freed by wait_pid's
+//                                            return.
+//   proc.thread_reap_churn                — XT-3b: 1200 spawn+exit
+//                                            cycles in one non-exempt
+//                                            Proc; the cap counts live
+//                                            threads, exited ones are
+//                                            freed while the Proc lives.
+//   proc.thread_reap_inflight             — XT-3b: a retired Thread
+//                                            still switching away
+//                                            survives the reap and holds
+//                                            up exec's drain (task #19).
+//   proc.thread_reap_concurrent           — XT-3b: three peers spawn,
+//                                            reap and exit at once; every
+//                                            Thread freed exactly once.
 //
 // The kernel test harness runs at EL1 so we can't drive a full eret-to-
 // EL0 from here; the user-mode SVC dispatch + the userland_enter eret
@@ -46,6 +57,9 @@ void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
+void test_proc_thread_reap_churn(void);
+void test_proc_thread_reap_inflight(void);
+void test_proc_thread_reap_concurrent(void);
 
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout
@@ -123,20 +137,13 @@ static void mte_parent_entry(void *arg) {
         ready(peer);
     }
 
-    // Yield until every peer Thread reaches THREAD_EXITING. The state
-    // field is monotonic (peers transition only via thread_exit_self,
-    // which writes EXITING under g_proc_table_lock; a stale plain read
-    // here can see RUNNABLE/RUNNING/EXITING but never go backward), so
-    // a yield-and-recheck loop converges.
-    for (;;) {
-        bool all_exiting = true;
-        for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
-            if (peer == current_thread()) continue;
-            if (peer->state != THREAD_EXITING) { all_exiting = false; break; }
-        }
-        if (all_exiting) break;
+    // Yield until every peer Thread has exited. A peer's EXITING commit
+    // retires it off p->threads in the same g_proc_table_lock hold (XT-3b),
+    // so the live count falling back to 1 (this thread) says exactly that.
+    // Not a walk of p->threads: lock-free, a peer's reap may free the node
+    // the walk stands on.
+    while (__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) != 1)
         sched();
-    }
 
     // Self-check: Proc is still ALIVE — neither peer's thread_exit_self
     // counted as last live thread (main is still alive).
@@ -161,8 +168,8 @@ void test_thread_exit_self_marks_exiting(void) {
     TEST_EXPECT_EQ(__atomic_load_n(&g_workers_ran, __ATOMIC_ACQUIRE), 2u,
                    "both workers should have run");
 
-    // 3 threads created in the child Proc (main + 2 peers); all 3
-    // freed by wait_pid's reap loop.
+    // 3 threads created in the child Proc (main + 2 peers); all 3 freed by
+    // the time wait_pid returns (by a peer's reap or by wait_pid itself).
     u64 t_created_delta   = thread_total_created()   - t_created_before;
     u64 t_destroyed_delta = thread_total_destroyed() - t_destroyed_before;
     TEST_EXPECT_EQ(t_created_delta, 3u,
@@ -202,8 +209,9 @@ void test_thread_exit_self_last_thread_zombies(void) {
 // ---------------------------------------------------------------------------
 // proc.multi_thread_reap
 //
-// Larger reap — 5 peers; verifies wait_pid's multi-thread drain loop
-// (walks p->threads, on_cpu-spin each, thread_free each, then proc_free).
+// Larger reap — 5 peers; every Thread is freed by the time wait_pid returns,
+// whichever freer got it (a peer's reap at its exit, or wait_pid's drain of
+// the zombie's live and retired lists -- XT-3b).
 // ---------------------------------------------------------------------------
 
 #define MTR_N_WORKERS 5
@@ -225,15 +233,9 @@ static void mtr_parent_entry(void *arg) {
         ready(peer);
     }
 
-    for (;;) {
-        bool all_exiting = true;
-        for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
-            if (peer == current_thread()) continue;
-            if (peer->state != THREAD_EXITING) { all_exiting = false; break; }
-        }
-        if (all_exiting) break;
+    // As in mte_parent_entry: the live count, never a lock-free list walk.
+    while (__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) != 1)
         sched();
-    }
 
     exits("ok");
 }
@@ -375,4 +377,299 @@ void test_proc_wait_pid_concurrent_waiters_both_reap(void) {
     int p1 = __atomic_load_n(&g_wpcw_pid[1], __ATOMIC_ACQUIRE);
     TEST_ASSERT(p0 > 0 && p1 > 0, "both reaped pids recorded");
     TEST_ASSERT(p0 != p1, "the two waiters reaped DISTINCT children");
+}
+
+// ===========================================================================
+// XT-3b: per-thread reaping (specs/thread_reap.tla). A Thread that exits while
+// a peer lives on RETIRES off p->threads, and a live peer frees it at its next
+// spawn or exit once its switch away has settled.
+// ===========================================================================
+
+void proc_retire_for_test(struct Proc *p, struct Thread *t);
+unsigned proc_retired_count_for_test(struct Proc *p);
+
+// A non-exempt principal (test_resource.c's A_REAL_USER): the TCB is exempt
+// from PROC_THREAD_MAX, and a Proc rforked by the runner inherits the TCB's.
+#define REAP_TEST_USER 1000u
+
+// ---------------------------------------------------------------------------
+// proc.thread_reap_churn
+//
+// One Proc spawns and retires a worker TRC_SPAWNS times -- more than four
+// times PROC_THREAD_MAX -- running the spawn handler's two steps, in its
+// order, before each spawn: proc_reap_retired, then proc_thread_cap_ok.
+//
+// FAILS PRE-FIX in either half. Without the retire, every exited worker stays
+// on p->threads and the cap refuses spawn 256: the lifetime cap (study F3).
+// Without the reap, thread_count stays at 1 but nothing is freed while the
+// Proc lives: the retired list grows without bound and no free lands early.
+// ---------------------------------------------------------------------------
+
+#define TRC_SPAWNS 1200u
+
+static volatile u32 g_trc_ran;
+static volatile u32 g_trc_refused_at;    // 1 + the spawn the cap refused; 0 = none
+static volatile u64 g_trc_freed_alive;   // Threads freed while the Proc lived
+static volatile u32 g_trc_retired_max;   // the longest the retired list got
+static volatile u32 g_trc_cpu_dipped;    // proc_cpu_ns went backwards across a reap
+static volatile u32 g_trc_focus_kept;    // a debug focus outlived its retired Thread
+
+static void trc_worker_entry(void *arg) {
+    (void)arg;
+    __atomic_fetch_add(&g_trc_ran, 1u, __ATOMIC_RELEASE);
+    thread_exit_self();
+}
+
+static void trc_parent_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    __atomic_store_n(&p->principal_id, REAP_TEST_USER, __ATOMIC_RELEASE);
+
+    u64 freed0  = thread_total_destroyed();
+    u64 cpu_was = 0;
+    for (u32 i = 0; i < TRC_SPAWNS; i++) {
+        proc_reap_retired(p);
+        if (!proc_thread_cap_ok(p)) {
+            __atomic_store_n(&g_trc_refused_at, i + 1u, __ATOMIC_RELEASE);
+            break;
+        }
+        struct Thread *w = thread_create_with_arg(p, trc_worker_entry, NULL);
+        if (!w) extinction("trc: thread_create_with_arg failed");
+        if (i == 0u) __atomic_store_n(&p->debug_focus_thread, w, __ATOMIC_RELEASE);
+        ready(w);
+        // This is the Proc's only other live Thread, so nothing but its own
+        // next proc_reap_retired can free w: reading w until then is safe.
+        TEST_YIELD_UNTIL_PROC(__atomic_load_n(&w->state, __ATOMIC_ACQUIRE) == THREAD_EXITING);
+        if (i == 0u && __atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == w)
+            __atomic_store_n(&g_trc_focus_kept, 1u, __ATOMIC_RELEASE);
+
+        u32 retired = proc_retired_count_for_test(p);
+        if (retired > g_trc_retired_max) g_trc_retired_max = retired;
+        irq_state_t s = proc_table_lock_acquire();
+        u64 cpu = proc_cpu_ns(p);
+        proc_table_lock_release(s);
+        if (cpu < cpu_was) __atomic_store_n(&g_trc_cpu_dipped, 1u, __ATOMIC_RELEASE);
+        cpu_was = cpu;
+    }
+    __atomic_store_n(&g_trc_freed_alive, thread_total_destroyed() - freed0,
+                     __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_proc_thread_reap_churn(void) {
+    __atomic_store_n(&g_trc_ran, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trc_refused_at, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trc_freed_alive, 0ull, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trc_retired_max, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trc_cpu_dipped, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trc_focus_kept, 0u, __ATOMIC_RELEASE);
+
+    u64 created0   = thread_total_created();
+    u64 destroyed0 = thread_total_destroyed();
+
+    int pid = rfork(RFPROC, trc_parent_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the churning Proc");
+    TEST_EXPECT_EQ(status, 0, "the churning Proc exited cleanly");
+
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trc_refused_at, __ATOMIC_ACQUIRE), 0u,
+        "no spawn refused: PROC_THREAD_MAX counts live threads, not the "
+        "Proc's history (study F3 -- pre-fix the cap refuses spawn 256)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trc_ran, __ATOMIC_ACQUIRE), TRC_SPAWNS,
+        "every worker ran");
+    TEST_ASSERT(__atomic_load_n(&g_trc_freed_alive, __ATOMIC_ACQUIRE) + 2u >= TRC_SPAWNS,
+        "exited workers were freed while their Proc lived (the reap points)");
+    TEST_ASSERT(__atomic_load_n(&g_trc_retired_max, __ATOMIC_ACQUIRE) <= 4u,
+        "the retired list stays bounded (I-32: retired-but-allocated per Proc)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trc_cpu_dipped, __ATOMIC_ACQUIRE), 0u,
+        "proc_cpu_ns never dips across a reap (reaped_run_ns folds in the detach)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trc_focus_kept, __ATOMIC_ACQUIRE), 0u,
+        "a debug focus on a Thread is cleared when it retires (no recycled-slot match)");
+    TEST_EXPECT_EQ(thread_total_created() - created0, (u64)TRC_SPAWNS + 1u,
+        "TRC_SPAWNS workers + the main thread created");
+    TEST_EXPECT_EQ(thread_total_destroyed() - destroyed0, (u64)TRC_SPAWNS + 1u,
+        "every one of them freed by the time wait_pid returns");
+}
+
+// ---------------------------------------------------------------------------
+// proc.thread_reap_inflight
+//
+// A retired Thread whose switch away has not completed must survive the reap
+// and must hold up exec's drain. The test retires a Thread it built and never
+// ran, holding its on_cpu set to stand in for that switch; a helper Proc
+// clears it, as the destination CPU would, once the drain is under way.
+//
+// FAILS PRE-FIX: a reap that ignored on_cpu takes the Thread, and its free then
+// spins until the helper's fallback release -- the test sees the free land
+// (thread_reap.tla BUGGY_REAP_IGNORES_ONCPU). A drain that returns with the
+// Thread still in flight is exec freeing the old address space under a tail
+// that still stores into it (task #19, BUGGY_EXEC_NO_DRAIN).
+// ---------------------------------------------------------------------------
+
+static volatile u32 g_tri_draining;     // the Proc is about to drain
+static volatile u32 g_tri_released;     // the helper cleared on_cpu
+static volatile u32 g_tri_reap_took;    // the reap freed the in-flight Thread
+static volatile u32 g_tri_drain_early;  // the drain returned before the release
+static volatile u32 g_tri_drain_left;   // the drain left a retired Thread behind
+
+static void tri_never_runs(void *arg) {
+    (void)arg;
+    extinction("tri_never_runs: a never-readied Thread ran");
+}
+
+static void tri_helper_entry(void *arg) {
+    struct Thread *f = (struct Thread *)arg;
+    // Released ~20 ms after the drain starts. The 100 ms fallback is for a
+    // buggy reap that spins on f before the drain is ever reached: it must
+    // end in a failed assert, never a hung boot.
+    u64 fallback = timer_now_ns() + 100ull * 1000ull * 1000ull;
+    while (__atomic_load_n(&g_tri_draining, __ATOMIC_ACQUIRE) == 0u &&
+           timer_now_ns() < fallback)
+        sched();
+    u64 until = timer_now_ns() + 20ull * 1000ull * 1000ull;
+    while (timer_now_ns() < until) sched();
+    __atomic_store_n(&g_tri_released, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&f->on_cpu, false, __ATOMIC_RELEASE);   // the last touch of f
+    exits("ok");
+}
+
+static void tri_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    struct Thread *f = thread_create_with_arg(p, tri_never_runs, NULL);
+    if (!f) extinction("tri: thread_create_with_arg failed");
+    proc_retire_for_test(p, f);
+    __atomic_store_n(&f->on_cpu, true, __ATOMIC_RELEASE);   // "still switching away"
+
+    int hpid = rfork(RFPROC, tri_helper_entry, f);
+    if (hpid <= 0) extinction("tri: rfork helper failed");
+
+    u64 d0 = thread_total_destroyed();
+    proc_reap_retired(p);                          // must leave f: it is in flight
+    if (thread_total_destroyed() != d0 || proc_retired_count_for_test(p) != 1u)
+        __atomic_store_n(&g_tri_reap_took, 1u, __ATOMIC_RELEASE);
+
+    __atomic_store_n(&g_tri_draining, 1u, __ATOMIC_RELEASE);
+    proc_drain_retired(p);                         // must wait f out
+    if (__atomic_load_n(&g_tri_released, __ATOMIC_ACQUIRE) == 0u)
+        __atomic_store_n(&g_tri_drain_early, 1u, __ATOMIC_RELEASE);
+    if (proc_retired_count_for_test(p) != 0u)
+        __atomic_store_n(&g_tri_drain_left, 1u, __ATOMIC_RELEASE);
+
+    int st = -1;
+    (void)wait_pid(&st);                           // the helper
+    exits("ok");
+}
+
+void test_proc_thread_reap_inflight(void) {
+    __atomic_store_n(&g_tri_draining, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tri_released, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tri_reap_took, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tri_drain_early, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tri_drain_left, 0u, __ATOMIC_RELEASE);
+
+    u64 created0   = thread_total_created();
+    u64 destroyed0 = thread_total_destroyed();
+
+    int pid = rfork(RFPROC, tri_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the test Proc");
+    TEST_EXPECT_EQ(status, 0, "the test Proc exited cleanly");
+
+    TEST_EXPECT_EQ(__atomic_load_n(&g_tri_reap_took, __ATOMIC_ACQUIRE), 0u,
+        "the reap left a retired Thread whose switch away was in flight "
+        "(thread_reap.tla NoFreeInFlight)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_tri_drain_early, __ATOMIC_ACQUIRE), 0u,
+        "the exec drain waited out the in-flight switch (task #19)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_tri_drain_left, __ATOMIC_ACQUIRE), 0u,
+        "the drain left no retired Thread behind");
+    TEST_EXPECT_EQ(thread_total_created() - created0, 3ull,
+        "the test Proc's thread, the stand-in and the helper created");
+    TEST_EXPECT_EQ(thread_total_destroyed() - destroyed0, 3ull,
+        "all three freed by the time wait_pid returns");
+}
+
+// ---------------------------------------------------------------------------
+// proc.thread_reap_concurrent
+//
+// Three peers of one Proc each spawn and retire TRX_PER workers at the same
+// time, so reapers race each other and the exits they reap. Every worker runs
+// once and every Thread is freed exactly once: the created and destroyed
+// deltas match, and a second free of one Thread would trip
+// thread_free_retired's magic check (thread_reap.tla OneFreerPerThread).
+// ---------------------------------------------------------------------------
+
+#define TRX_SPAWNERS 3u
+#define TRX_PER      200u
+
+static volatile u32 g_trx_ran[TRX_SPAWNERS];
+static volatile u32 g_trx_refused;
+static volatile u32 g_trx_done;
+
+static void trx_worker_entry(void *arg) {
+    u32 who = (u32)(uintptr_t)arg;
+    __atomic_fetch_add(&g_trx_ran[who], 1u, __ATOMIC_RELEASE);
+    thread_exit_self();
+}
+
+static void trx_spawner_entry(void *arg) {
+    u32 who = (u32)(uintptr_t)arg;
+    struct Proc *p = current_thread()->proc;
+    for (u32 i = 0; i < TRX_PER; i++) {
+        proc_reap_retired(p);
+        if (!proc_thread_cap_ok(p)) {
+            __atomic_fetch_add(&g_trx_refused, 1u, __ATOMIC_ACQ_REL);
+            break;
+        }
+        struct Thread *w = thread_create_with_arg(p, trx_worker_entry,
+                                                  (void *)(uintptr_t)who);
+        if (!w) extinction("trx: thread_create_with_arg failed");
+        ready(w);   // a peer may free w from here on: it is not touched again
+        TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_trx_ran[who], __ATOMIC_ACQUIRE) == i + 1u);
+    }
+    __atomic_fetch_add(&g_trx_done, 1u, __ATOMIC_ACQ_REL);
+    thread_exit_self();
+}
+
+static void trx_parent_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    __atomic_store_n(&p->principal_id, REAP_TEST_USER, __ATOMIC_RELEASE);
+    for (u32 k = 0; k < TRX_SPAWNERS; k++) {
+        struct Thread *s = thread_create_with_arg(p, trx_spawner_entry,
+                                                  (void *)(uintptr_t)k);
+        if (!s) extinction("trx: spawner create failed");
+        ready(s);
+    }
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_trx_done, __ATOMIC_ACQUIRE) == TRX_SPAWNERS);
+    exits("ok");
+}
+
+void test_proc_thread_reap_concurrent(void) {
+    for (u32 k = 0; k < TRX_SPAWNERS; k++)
+        __atomic_store_n(&g_trx_ran[k], 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trx_refused, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_trx_done, 0u, __ATOMIC_RELEASE);
+
+    u64 created0   = thread_total_created();
+    u64 destroyed0 = thread_total_destroyed();
+
+    int pid = rfork(RFPROC, trx_parent_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the racing Proc");
+    TEST_EXPECT_EQ(status, 0, "the racing Proc exited cleanly");
+
+    for (u32 k = 0; k < TRX_SPAWNERS; k++)
+        TEST_EXPECT_EQ(__atomic_load_n(&g_trx_ran[k], __ATOMIC_ACQUIRE), TRX_PER,
+            "every spawner's workers all ran");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_trx_refused, __ATOMIC_ACQUIRE), 0u,
+        "no spawn refused under concurrent churn");
+    u64 total = 1u + TRX_SPAWNERS + (u64)TRX_SPAWNERS * TRX_PER;
+    TEST_EXPECT_EQ(thread_total_created() - created0, total,
+        "main + spawners + every worker created");
+    TEST_EXPECT_EQ(thread_total_destroyed() - destroyed0, total,
+        "each freed exactly once by the time wait_pid returns");
 }

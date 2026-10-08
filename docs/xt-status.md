@@ -32,16 +32,15 @@ The kernel never learns x86.
 | `dd0846c5` | design revised against B-2: citations re-anchored; debug authority (5.2); guest code provenance (5.4 item 4, I-48(e)); a fork carries text, not scratch (don't-fork code regions); F10 added | docs only |
 | `f350cc76` (XT-0) | RATIFIED: `dec-2026-10-08-xt-design`, `dec-2026-10-08-xt-guest-code`, `arc-xt`; ARCH section 28 I-48 RESERVED and the XT amendments paragraph; CLAUDE.md row; ERRORS.md exact-fault contract; the NOVEL.md candidate; the tenth spec-first re-enablement | `tools/check-invariants.py` 48 rows; `quaestor lint` |
 | `ab768299`, `5f0e65f3`, `cfb9201e` (XT-3a) | `SCTLR_EL1` composed whole on every entry path: the direct EL1 entry, the EL2 drop, PSCI secondaries (`start.S` `sctlr_el1_init_base`, `0x30D40998` after the audit). An EL0 `WFI` that would wait traps, and `exception.c`'s `EC_WFX` arm retires it (ELR + 4; SS and BTYPE cleared); `WFE` runs; SP alignment is checked at EL0 and EL1 on every path; BT1 is set with BT0. Each CPU records its final value (`hw_cpu_ident.sctlr_el1`). Fixes task #6. Audit r1 (cross-family): 0 P0 / 1 P1 / 1 P2 / 8 P3, all fixed but F10's event stream (task #15) | suite 1956/1956 on QEMU TCG (`-cpu max`); `hardening.sctlr_composed` (every online CPU, and the live register); `/hint-probe`; red-first: sabotage A fails the test, sabotage B kills the probe; `debug_step.tla` clean + 2 buggy cfgs red; SMP subset (1/4/8 CPUs, N=3): 9/9 PASS, 0 corruption. HVF and KVM runs owed (no such host here) |
+| *(pending)* (XT-3b) | Per-thread reaping, model-first (`specs/thread_reap.tla`). A thread that exits while a peer lives on RETIRES in its EXITING hold (off `p->threads` onto `p->exited`), so `thread_count` and `PROC_THREAD_MAX` count live threads; a live peer frees it at its next spawn or exit once its switch away has settled, exec drains it before the swap, `wait_pid` takes the rest with the zombie. Fixes task #7 (study F3). Also fixes task #19 (exec freed the old address space under a retired tail, a pre-existing race) and task #18's finding (both spawn handlers read `nt->tid` after `ready()`). `proc_cpu_ns` and the kstack peak keep the freed threads' totals | suite 1959/1959 on QEMU TCG; `proc.thread_reap_churn` (1,200 spawns, non-exempt), `proc.thread_reap_inflight`, `proc.thread_reap_concurrent`; `/thread-torture` at boot (1,553 spawns, live threads 1) and as a user (`ls-ci.exp` leg (f)); `check-thread-reap.sh`: 2 clean + 5 buggy cfgs as claimed. Audit pending |
 
 ## Next
 
 Sequence (the design's arc order, with two owned defects pulled forward):
 
 1. **XT-3a** closed (audit r1, SMP 9/9). HVF and KVM gate runs are owed by the operator's hosts.
-2. **XT-3b: thread reaping** (fixes task #7, study F3). An exited thread is
-   freed only when the whole Proc is reaped (`kernel/proc.c:6075-6082`), so
-   `PROC_THREAD_MAX` counts a Proc's lifetime spawns. Gate: more than 1,000
-   spawns in one Proc.
+2. **XT-3b: thread reaping** landed as WIP (above); the audit round and the SMP
+   subset are next.
 3. **PAC keys per address space** (task #5, study F1): today one key set is
    shared by the kernel's `pac-ret` and every EL0 process.
 4. **XT-1: exact faults**, `specs/fault_note.tla` first.
@@ -53,7 +52,12 @@ and XT-8 onward (the runtime).
 
 - #5 PAC keys shared between the kernel and every EL0 process (study F1).
 - #6 EL2-entry `SCTLR_EL1` leaves `nTWE`/`nTWI` clear (study F2) -> XT-3a.
-- #7 `PROC_THREAD_MAX` is a lifetime cap (study F3) -> XT-3b.
+- #7 `PROC_THREAD_MAX` is a lifetime cap (study F3) -> XT-3b (landed, audit pending).
+- #18 (sweep) no `struct Thread *` used after the Thread can be reaped -> XT-3b
+  (the two spawn handlers' `nt->tid` after `ready()`; the two lock-free list
+  walks in `test_thread_spawn.c`).
+- #19 exec freed the old address space while a retired tail could still store
+  into it -> XT-3b (`proc_drain_retired` before the swap).
 - #8 documentation drift the study surfaced (its Appendix A, F4).
 - #12 `build_tyrquake` extracts an LHA archive with `/usr/bin/tar`, which is bsdtar
   only on macOS (unverified here: the shareware data is unreachable).

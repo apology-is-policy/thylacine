@@ -168,7 +168,18 @@ lc_run_expect_hardfail "halcyon theme lint" "profile: legacy (system)" "REFUSED"
 lc_pass "I-1(g): the gate image's pinned legacy profile is named at the SYSTEM\
          tier, from the same resolution the renderers run"
 
+# (f) XT-3b -- per-thread reaping, as a USER. joey runs /thread-torture at boot,
+# but joey's children are PRINCIPAL_SYSTEM and exempt from PROC_THREAD_MAX, so
+# there only the live count witnesses the reaping. Here the cap is real: a
+# logged-in program that spawns and joins 1,553 threads must never be refused,
+# where a lifetime cap (study F3) refused its 256th spawn with EAGAIN. Rides
+# here for #139's reason: one boot's coverage for a new scenario's price is not
+# worth it. `ok (` is not in the typed command, so the match is the binary's.
+lc_run_expect_hardfail "/bin/thread-torture" "thread-torture: ok (" "thread-torture: FAIL"
+lc_pass "XT-3b: a non-exempt user's Proc spawned and joined 1,553 threads, past\
+         PROC_THREAD_MAX many times over, and ended with one live thread"
+
 lc_quit
 lc_pass "LS-CI ls-ci: login (LS-1) + stdout/pipeline/stderr (LS-2) + post-login\
-         CAP_JIT (#139) + theme lint (TH-4c, I-1) all verified"
+         CAP_JIT (#139) + theme lint (TH-4c, I-1) + thread reaping (XT-3b) all verified"
 exit 0

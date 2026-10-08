@@ -849,6 +849,9 @@ void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
+void test_proc_thread_reap_churn(void);
+void test_proc_thread_reap_inflight(void);
+void test_proc_thread_reap_concurrent(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -3047,6 +3050,9 @@ struct test_case g_tests[] = {
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
+    { "proc.thread_reap_churn",                test_proc_thread_reap_churn,                false, NULL },
+    { "proc.thread_reap_inflight",             test_proc_thread_reap_inflight,             false, NULL },
+    { "proc.thread_reap_concurrent",           test_proc_thread_reap_concurrent,           false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },

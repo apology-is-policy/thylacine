@@ -788,24 +788,25 @@ enum {
     // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
     //   (no args)
     //
-    // Atomically:
-    //   1. If clear_child_tid != 0 on this Thread (set via
+    // In order (kernel/proc.h thread_exit_self has the detail):
+    //   1. Mark self THREAD_EXITING under g_proc_table_lock. If this is the
+    //      LAST live thread in the Proc, also transition the Proc to ZOMBIE
+    //      with exit_status = 0 + wake parent's child_waiters (mirrors
+    //      exits() with status 0); otherwise the thread RETIRES and stops
+    //      counting against PROC_THREAD_MAX.
+    //   2. If clear_child_tid != 0 on this Thread (set via
     //      SYS_SET_TID_ADDRESS): uaccess_store_u32(0) at that user-VA +
     //      torpor_wake(UINT32_MAX) on the same address. Best-effort —
     //      a failed store (page unmapped) skips the wake but does not
     //      extinct.
-    //   2. Mark self THREAD_EXITING under g_proc_table_lock.
-    //   3. If this is the LAST non-EXITING thread in the Proc, also
-    //      transition the Proc to ZOMBIE with exit_status = 0 + wake
-    //      parent's child_waiters (mirrors exits() with status 0).
-    //   4. yield via sched(); never returns.
+    //   3. yield via sched(); never returns.
     //
-    // After-exit reaping: the Thread descriptor + kstack remain
-    // allocated until the Proc dies (then wait_pid's reap path frees
-    // every Thread in p->threads). v1.0 accepts this — short-lived
-    // programs (libsodium tests) bound the leak; long-running daemons
-    // (stratumd) join their threads at shutdown so the Proc dies
-    // shortly after. Per-Thread reaping is a v1.x extension.
+    // After-exit reaping (XT-3b): a retired Thread's descriptor + kstack
+    // are freed while the Proc lives on, by a live peer at its next spawn
+    // or exit once the switch away has completed; the last ones go with
+    // the zombie at wait_pid. So PROC_THREAD_MAX bounds the threads alive
+    // at once, and a pool that retires and respawns workers can run
+    // indefinitely.
     //
     // Never returns to userspace — userspace must treat any return as
     // a kernel bug. The x0 the SVC dispatch writes on a fall-through

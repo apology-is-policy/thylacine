@@ -75,6 +75,17 @@ the pipe ([[sub-kernel-protect-witness]]).
 advance ELR traps on the same `WFI` forever, and the boot never reaches its
 banner. Boot-fatal like every other rung (`joey: /hint-probe FAILED`).
 
+**XT-3b rung (2026-10-08).** After `/hint-probe`, joey runs
+`pouch_smoke_one("thread-torture", "thread-torture: ok")`. The probe spawns and
+joins 1,100 threads one at a time, then three spawners that each spawn and join
+150 at once (1,553 spawns in one Proc), and reads its own `/proc/<pid>/status`
+`threads:` back as 1. An exited thread now RETIRES and a live peer frees it
+([[sub-kernel-death]]); before XT-3b every one stayed linked until the Proc died,
+so the line read 1,554. joey's children are `PRINCIPAL_SYSTEM`, exempt from
+`PROC_THREAD_MAX`, so here the live count is the witness; the cap itself is
+`ls-ci.exp` leg (f), which runs the same binary as a logged-in user. Boot-fatal
+(`joey: /thread-torture FAILED`).
+
 **B-1a' rung (2026-09-23).** After the guard child, joey spawns
 `/capacity-probe` and reaps it by pid with `t_wait_pid_for`, requiring status
 0 -- the EL0 half of ARCH 6.5's capacity contract through the native syscalls,

@@ -6,11 +6,11 @@ parent: moc-kernel-execution
 code: ["kernel/proc.c", "kernel/include/thylacine/proc.h"]
 audit: hard
 guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44]
-validated-by: [gate-smp]
+validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Graphical seat incarnations
 
@@ -196,8 +196,10 @@ and its zombie reports the death, DEBUG-FS-DESIGN 5g). Precedence is
 exit > continue > stop. Then:
 
 - no match → `-1` (the POSIX `ECHILD` shape);
-- zombie → unlink under the lock, then **outside** it spin each Thread's
-  `on_cpu` and `thread_free` it, then `proc_free`;
+- zombie → unlink under the lock (taking `zombie->exited`, its retired
+  Threads, in the same hold -- XT-3b), then **outside** it spin each Thread's
+  `on_cpu` and free it (`thread_free` for the live list, `thread_free_retired`
+  for the retired one), then `proc_free`;
 - reportee → return the pid and packed status, consume the latch, and run
   **none** of the teardown (report-is-not-reap, PTY-1e R2-F6);
 - `WNOHANG` → `0`, an unambiguous sentinel because pid 0 is never a child;
@@ -392,7 +394,8 @@ a masked-window lever.
 
 ## Data structures
 
-`struct Proc` is 392 bytes and no longer holds a page table at all — it holds a
+`struct Proc` is 432 bytes (XT-3b appended `exited` and the reaped-Thread totals,
+below) and no longer holds a page table at all — it holds a
 pointer to a refcounted address space, which is what makes the vfork and
 copy-on-write shapes above expressible. That extraction is the **only change in
 the struct's recorded history that ever made it smaller**: 408 → 376 in one
@@ -600,11 +603,15 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   `state=ZOMBIE; proc_free()` rollback and orphan paths. Reading `proc_free`
   alone gives the wrong picture of when a Proc's fds shut. See
   [[sub-kernel-death]].
-- **`thread_count` is not "live threads".** It counts *unreaped* threads and
-  decrements only at reap, so a joined-then-exits multi-thread Proc has
-  `thread_count > 1` with zero live peers. Mistaking one for the other was
-  #68 round-2 F2 ([[fnd-68-r2-f2]]); the live count is
-  `proc_count_live_peers_locked`.
+- **`thread_count` is the live count since XT-3b (2026-10-08)** -- and was not
+  before. It used to count *unreaped* threads and decrement only at reap, so a
+  joined-then-exits multi-thread Proc had `thread_count > 1` with zero live
+  peers; mistaking one for the other was #68 round-2 F2 ([[fnd-68-r2-f2]]). Now
+  an exited Thread with a live peer retires off `p->threads` in its EXITING hold,
+  so `thread_count` counts exactly the Threads on the live list (the live ones,
+  plus a zombie's last Thread out). The exit-close gate stays
+  `proc_count_live_peers_locked`, which is the predicate that window needs; an
+  old comment reasoning from "`thread_count` counts unreaped peers" is stale.
 - **`sizeof(struct Proc)` has been wrong in the reference doc since P2.**
   The absorbed `14-process-model.md` asserted 296.
 - `proc_set_exe_path` takes the table lock — added by V-4c-3 F1 after the
@@ -642,3 +649,31 @@ so the table is no longer reference-free. The exit close already reset it
 ([[sub-kernel-death]]); what `viv_socktab_free` catches is the direct
 `state = ZOMBIE; proc_free()` paths that never ran that close, whose cached
 Spoors it clunks with the same Tclunk the `handle_table_free` beside it sends.
+
+## The retired list and the reaped totals (2026-10-08, XT-3b)
+
+`struct Proc` grew 408 -> 432 by appending four fields, each offset asserted:
+
+- `exited` -- the head of the RETIRED list, threaded through the same
+  `next_in_proc` / `prev_in_proc` links as `threads`. A Thread that exits while a
+  peer lives on moves here in its EXITING hold and stays until a reaper frees it
+  ([[sub-kernel-death]], [[spec-thread-reap]]). Under `g_proc_table_lock`; the
+  reap fast path peeks it lock-free as a hint (RELAXED, every acting reader
+  re-reads under the lock).
+- `reaped_run_ns` -- the `run_ns` of the Threads already freed, so `proc_cpu_ns`
+  (which now sums `threads`, `exited` and this) still spans the Proc's whole life.
+  Folded in the SAME hold that detaches each Thread, so a reader under the lock
+  never sees the total dip -- `/ctl/procs` diffs it for %CPU, and a dip would read
+  as a wrap.
+- `reaped_kstack_peak` / `reaped_kstack_tid` -- the deepest kernel stack a freed
+  Thread reached; `proc_kstack_peak` starts from it and then scans both lists.
+  Folded after the scan, outside the detaching hold (the scan's cost is inverted,
+  ARCH 8.12 audit F2), so the peak is a floor for an instant, which its contract
+  already says it is.
+
+`proc_free` now also refuses a Proc whose `exited` is non-NULL.
+`proc_exec_replace` drains `exited` (`proc_drain_retired`) before the swap, and
+re-checks it is empty inside the swap's critical section (task #19: a retired
+Thread's tail stores through the old translation). `/proc/<pid>/status`'s
+`threads:` and `/ctl/procs`' threads column read `thread_count`, so both now show
+the live count; a zombie shows 1.

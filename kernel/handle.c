@@ -304,8 +304,8 @@ void handle_table_free(struct HandleTable *t) {
     // proc_free (all threads reaped), at orphan-table cleanup, AND (since
     // #926, generalized by #68) at BOTH at-exit close sites -- exits() and
     // thread_exit_self's last-out -- where proc_count_live_peers_locked == 0
-    // was determined under g_proc_table_lock. thread_count may exceed 1
-    // there (unreaped EXITING peers -- it decrements only at reap), but
+    // was determined under g_proc_table_lock. Every peer has committed
+    // EXITING and retired there (XT-3b; thread_count == 1), so
     // exactly ONE live thread (the closer) exists, an EXITING peer's
     // residual execution (clear-child-tid handoff + sched()) never touches
     // the handle table, AND no production path ever touches a FOREIGN ALIVE

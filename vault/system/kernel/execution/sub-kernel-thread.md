@@ -3,13 +3,13 @@ id: sub-kernel-thread
 type: sub
 title: "The Thread: context, kstack, and the on_cpu protocol"
 parent: moc-kernel-execution
-code: ["kernel/thread.c", "kernel/include/thylacine/thread.h"]
+code: ["kernel/thread.c", "kernel/include/thylacine/thread.h", "kernel/test/test_thread_spawn.c"]
 audit: hard
 guarded-by: [inv-i21, inv-i31, inv-i44]
-validated-by: [gate-smp]
+validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -34,7 +34,13 @@ default), which several guards rely on.
 | `thread_create_bootcpu_idle` | EL1 | `thread_trampoline` | none — a dedicated BSS stack |
 
 `thread_free(t)` releases the descriptor + kstack; the caller must ensure
-`t` is not current and not in any run tree. `thread_switch(next)` is the
+`t` is not current and not in any run tree, and it refuses (extincts on) a
+RETIRED Thread. `thread_free_retired(t)` is the free for those (XT-3b): a
+Thread that exited while its Proc lived on hangs on `Proc.exited`, and its
+reaper detaches it under the table lock before calling this, which checks it is
+retired, EXITING, off every list, and spins out any switch still in flight.
+`thread_unlink_from_proc_locked` is the live-list unlink for a caller already
+holding the table lock (the retire). `thread_switch(next)` is the
 **test-only** direct-switch primitive — production multitasking is
 `sched()`.
 
@@ -132,7 +138,9 @@ in the middle of the register-save half of its own switch.
 uninitialized; `sched_remove_if_runnable` (walks every CPU's run tree under
 their locks); re-check RUNNING as a loud backstop (a peer transitioning `t`
 here should now be impossible, so extinct rather than free-under-run); then
-**spin on `on_cpu`**. Only then unlink, restore the guard pages, free.
+**spin on `on_cpu`**. Only then unlink, restore the guard pages, free. The
+spin and the release (guard restore, buddy free, slab free) are shared with
+`thread_free_retired` (`thread_wait_off_cpu`, `thread_release`).
 
 ## Data structures
 
@@ -321,6 +329,10 @@ is the running proof that the window is real.
   the interrupted thread's own kstack. Unrelated to #788 and recorded as
   future hardening in `thread.h`.
 - `thread_switch`'s off-tree half of the contract is unenforced (above).
+- (XT-3b) `thread_free_retired` cannot check that a retired Thread is not still
+  the HEAD of `Proc.exited` without the Proc's lock; it checks the link fields,
+  which catch a mid-list Thread. The reapers detach under the lock first, which
+  is the real guarantee ([[spec-thread-reap]] `OneFreerPerThread`).
 
 ## Caveats
 
@@ -349,3 +361,29 @@ size and offset assertions that guard it, both user trampolines' opposite
 register-scrub dispositions, and the floating-point save's source.
 
 [[chg-2026-08-16-thread-fork-restore]].
+
+## Who frees a Thread (2026-10-08, XT-3b)
+
+Before XT-3b a user Proc's Threads were freed only by `wait_pid`, after the whole
+Proc was a zombie: an exited Thread stayed linked, EXITING, holding its 32 KiB
+kstack until then. Now a Thread that exits while a peer lives on RETIRES
+(`Thread.retired`, set once, in the hold that commits it EXITING) onto
+`Proc.exited`, and one of three freers takes it once its switch away has settled:
+a live peer's `proc_reap_retired` at that peer's spawn or exit, exec's
+`proc_drain_retired`, or `wait_pid` with the zombie ([[sub-kernel-death]] has the
+protocol; [[spec-thread-reap]] the model). Each detaches under the table lock and
+frees through `thread_free_retired`. The `on_cpu` protocol above is what makes the
+early free sound: an EXITING Thread is never dispatched again, so once its `on_cpu`
+reads clear nothing can touch its kstack or ctx, which is the same fact
+`wait_pid`'s reap always relied on.
+
+The kernel threads keep their own freers (the 9P closers, the Loom SQPOLL join),
+which use `thread_free`: they live in kproc and never retire.
+
+`kernel/test/test_thread_spawn.c` (claimed here) holds the spawn/exit/reap
+witnesses: `thread.create_user_ctx_layout`, `thread.exit_self_*`,
+`proc.multi_thread_reap`, `proc.wait_pid_concurrent_waiters_both_reap`, and the
+XT-3b trio `proc.thread_reap_churn`, `proc.thread_reap_inflight`,
+`proc.thread_reap_concurrent`. Two of the older tests waited for their peers by
+walking `p->threads` lock-free; with peers now freed while the Proc lives, such a
+walk can stand on a freed node, so they poll the live `thread_count` instead.

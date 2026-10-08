@@ -1962,6 +1962,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread-torture"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "thyla-heap"
 version = "0.1.0"
 dependencies = [

@@ -114,16 +114,12 @@ static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
     proc_table_lock_release(s);
 }
 
-static void thread_unlink_from_proc(struct Thread *t) {
-    irq_state_t s = proc_table_lock_acquire();
+void thread_unlink_from_proc_locked(struct Thread *t) {
     struct Proc *p = t->proc;
     if (t->prev_in_proc) {
         t->prev_in_proc->next_in_proc = t->next_in_proc;
     } else {
-        if (p->threads != t) {
-            proc_table_lock_release(s);
-            extinction("thread_unlink: list head mismatch");
-        }
+        if (p->threads != t) extinction("thread_unlink: list head mismatch");
         p->threads = t->next_in_proc;
     }
     if (t->next_in_proc) {
@@ -132,6 +128,11 @@ static void thread_unlink_from_proc(struct Thread *t) {
     t->next_in_proc = NULL;
     t->prev_in_proc = NULL;
     __atomic_fetch_sub(&p->thread_count, 1, __ATOMIC_RELEASE);   // #65 audit F6
+}
+
+static void thread_unlink_from_proc(struct Thread *t) {
+    irq_state_t s = proc_table_lock_acquire();
+    thread_unlink_from_proc_locked(t);
     proc_table_lock_release(s);
 }
 
@@ -662,6 +663,9 @@ struct Thread *thread_create_forked(struct Proc *proc,
     return t;
 }
 
+static void thread_wait_off_cpu(struct Thread *t);
+static void thread_release(struct Thread *t);
+
 void thread_free(struct Thread *t) {
     if (!t)                       extinction("thread_free(NULL)");
     // Magic check catches double-free and corrupt-Thread passes. SLUB's
@@ -674,6 +678,9 @@ void thread_free(struct Thread *t) {
                                   extinction("thread_free of uninitialized Thread");
     if (t->state == THREAD_RUNNING)
                                   extinction("thread_free of RUNNING thread");
+    // XT-3b: a retired Thread hangs on Proc.exited, and this unlink would
+    // splice it out of Proc.threads instead.
+    if (t->retired)               extinction("thread_free of a retired Thread");
 
     // If t was RUNNABLE and sitting in a run tree, remove it before
     // unlinking from the proc list. sched_remove_if_runnable walks all
@@ -727,15 +734,40 @@ void thread_free(struct Thread *t) {
     // reap-path spin in wait_pid (proc.c). thread_free is always called
     // lock-free, so the spin cannot deadlock; it is bounded by the single
     // in-flight switch (the peer always resumes and clears on_cpu).
+    thread_wait_off_cpu(t);
+
+    thread_unlink_from_proc(t);
+    thread_release(t);
+}
+
+void thread_free_retired(struct Thread *t) {
+    if (!t)                         extinction("thread_free_retired(NULL)");
+    if (t->magic != THREAD_MAGIC)   extinction("thread_free_retired of corrupted or already-freed Thread");
+    if (!t->retired)                extinction("thread_free_retired of a Thread that never retired");
+    if (t == current_thread())      extinction("thread_free_retired of the running thread");
+    if (t->state != THREAD_EXITING) extinction("thread_free_retired of a non-EXITING Thread");
+    if (t->next_in_proc || t->prev_in_proc)
+                                    extinction("thread_free_retired of a Thread still on a list");
+    // A retired Thread is never in a run tree (EXITING is never re-enqueued),
+    // so only the switch away can still be using it. The live reaper takes
+    // settled Threads only; exec's drain and wait_pid take every retired one
+    // and rely on this spin (specs/thread_reap.tla ExecFree / WaitFree).
+    thread_wait_off_cpu(t);
+    thread_release(t);
+}
+
+// #788: wait out an in-flight cpu_switch_context away from t (see thread_free).
+static void thread_wait_off_cpu(struct Thread *t) {
     if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
         __atomic_fetch_add(&g_thread_free_oncpu_waits, 1u, __ATOMIC_RELAXED);
         while (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
             __asm__ __volatile__("yield" ::: "memory");
         }
     }
+}
 
-    thread_unlink_from_proc(t);
-
+// The memory half of every free: the kstack, its guard restored, and the slot.
+static void thread_release(struct Thread *t) {
     if (t->kstack_base) {
         // P2-Dc / P3-Bca: restore guard pages to normal RW in the direct
         // map before returning the allocation to buddy. If a future

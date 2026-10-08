@@ -80,7 +80,8 @@ struct Thread {
     void              *kstack_base;
     size_t             kstack_size;
 
-    // Linked-list links into Proc->threads (doubly-linked).
+    // Linked-list links into Proc->threads (doubly-linked), or into
+    // Proc->exited once the Thread has retired (XT-3b).
     struct Thread     *next_in_proc;
     struct Thread     *prev_in_proc;
 
@@ -368,6 +369,12 @@ struct Thread {
     // staged write-behind run goes to a closer (ARCH 7.9.1 part C). Set once by
     // the thread itself at entry; read only by it. Fits the same padding.
     bool               closes_never_wait;
+    // XT-3b (specs/thread_reap.tla): this Thread exited while its Proc lived
+    // on, so it hangs on Proc.exited, not Proc.threads, until a reaper frees it
+    // through thread_free_retired. Set once, by the Thread itself, in the
+    // g_proc_table_lock hold that commits it EXITING; never cleared. Fits the
+    // same padding.
+    bool               retired;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
     // this Thread's OWN debugger park rendez. A thread observing a debugger stop
@@ -856,8 +863,18 @@ struct Thread *thread_create_forked(struct Proc *proc,
 
 // Release a Thread descriptor + its kstack. Caller must ensure the
 // thread is not current (current_thread() != t) and not still on any
-// runqueue. Extincts on violation.
+// runqueue. Extincts on violation, and on a retired Thread (those are
+// freed by thread_free_retired, from Proc.exited).
 void thread_free(struct Thread *t);
+
+// Unlink `t` from its Proc's live list (Proc.threads). The caller holds
+// g_proc_table_lock; thread_free takes it itself.
+void thread_unlink_from_proc_locked(struct Thread *t);
+
+// Free a retired Thread its reaper has already detached from Proc.exited
+// under g_proc_table_lock (proc_reap_retired, proc_drain_retired). Spins
+// out a switch away still in flight, as thread_free does.
+void thread_free_retired(struct Thread *t);
 
 // Direct context switch from current_thread to `next`. Updates state
 // fields (prev → RUNNABLE, next → RUNNING), parks `next` in TPIDR_EL1,

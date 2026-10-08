@@ -1920,10 +1920,14 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // goroutine, NOT the head TID==PID); a manual stop / attach leaves it NULL. The
 // pointer is validated against the CURRENT p->threads under g_proc_table_lock
 // (every caller holds it): NO UAF, and the load-bearing reason is the GPTL PIN
-// (#95-audit F1), NOT a stop gate -- reap (wait_pid_for) does proc_unlink_child
-// under this lock BEFORE the lock-free thread_free loop, and proc_for_each walks
-// the kproc-rooted children tree, so a target a reader can still reach has not
-// been unlinked -> none of its threads is freed. A pointer that matches an
+// (#95-audit F1), NOT a stop gate -- every Thread free is preceded by a hold of
+// this lock that takes it off p->threads: reap (wait_pid_for) does
+// proc_unlink_child BEFORE the lock-free thread_free loop, and proc_for_each
+// walks the kproc-rooted children tree, so a target a reader can still reach
+// has not been unlinked; and an exited Thread of a LIVE target retires off
+// p->threads to p->exited in its EXITING hold, before any reaper can free it
+// (XT-3b, which also clears a focus on it there, so a recycled slot cannot
+// match). A pointer that matches an
 // in-list thread is therefore a LIVE struct; this validation loop IS the safety
 // net (do NOT delete it as "redundant" -- the 8b settled kstack drops the
 // fully-stopped gate, so this loop is the only thing turning a stale/foreign focus

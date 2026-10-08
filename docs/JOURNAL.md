@@ -139,6 +139,74 @@ per-boot bound is HVF-sized, and these boots took 161-240 s under TCG.
 **Still owed:** the suite under HVF and under KVM (thyla-pi). Those are the
 hosts where the reset values differ most, and none is in this container.
 
+### XT-3b: per-thread reaping (after a compaction)
+
+**The defect.** `PROC_THREAD_MAX` (256) was documented as bounding live threads
+(IDENTITY-DESIGN 3.8), but `thread_count` counted every thread still linked on
+`p->threads`, and an exited thread stayed linked until `wait_pid` reaped the
+whole Proc. So the cap bounded a Proc's lifetime spawns: a non-exempt Proc's
+256th spawn failed with EAGAIN, and an exempt one pinned 32 KiB of kstack per dead
+thread until it exited (study F3, task #7; the XT design's XT-K9).
+
+**Design, then a model, then code.** The research ran down every holder of a
+`struct Thread *` that might outlive an early free. Most were sound already:
+the debug readers, the death-wake walks and `proc_cpu_ns` hold the table lock,
+and every free is preceded by an unlink under it. One was not:
+- both spawn handlers returned `nt->tid` AFTER `ready(nt)`. That was safe only
+  because a live Proc's threads were never freed (task #18);
+- `devproc_focus_thread` validates the focus against the live list, and a freed
+  slot can be recycled into a new thread of the same Proc, so the focus is
+  CAS-cleared when its thread retires.
+
+Two lock-free walks of `p->threads` in `test_thread_spawn.c` had the same shape.
+
+The chosen design has a Linux-like retirement and a FreeBSD-like reclamation.
+- The thread retires in the hold that commits it EXITING: it moves to a per-Proc
+  `p->exited` list and `thread_count` drops.
+- A live peer frees it, once its `on_cpu` has cleared, at that peer's next spawn
+  or exit.
+- `wait_pid` frees the leftovers with the zombie.
+
+Two alternatives were rejected:
+- freeing in the next thread's switch-in path (Linux's `finish_task_switch`). It
+  puts heavy frees on the context-switch path with IRQs masked, and it races
+  `wait_pid` for the same thread;
+- a reaper kthread. It needs a claim protocol against `wait_pid` and a new global
+  queue.
+
+The chosen design needs none of that: a live reaper keeps its Proc ALIVE, so it
+can never meet `wait_pid`. Because every exit reaps first, the
+retired-but-allocated set per Proc stays bounded by about twice the CPU count.
+
+`specs/thread_reap.tla` was written before the C. It has four actors: the tail,
+the live reapers, exec's drain and `wait_pid`. Results:
+- clean at 3 and 4 threads (668 and 4,532 states), with liveness;
+- five buggy configs, each tripping one named invariant
+  (`specs/check-thread-reap.sh`).
+
+**A second defect, found by modelling exec, and older than this chunk (task
+#19).** `proc_exec_replace` gated only on "no LIVE peer". A thread that exited
+just before an exec is EXITING but can still be in its tail, storing its
+`clear_child_tid` word through the old translation, and a fault there resolves
+against `p->as`, which the swap replaces. exec now drains the retired list,
+spinning each switch out, before the swap. The model's `BUGGY_EXEC_NO_DRAIN` is
+the counterexample.
+
+**Ruled out, not assumed.** Could the tail sleep, which would make the reaper's
+wait unbounded? No. A FILE VMA is never writable (`fault.c:429` refuses the
+write before any page-in), so the tail's store can only demand-zero.
+`seam-exiting-tails-never-sleep` already records this as the property a future
+pageout must keep.
+
+**Verification so far.**
+- Suite 1959/1959 on QEMU TCG (the three new `proc.thread_reap_*` tests among
+  them).
+- At boot, `/thread-torture` printed `ok (1553 spawns, live threads 1)`. joey's
+  children are exempt from the cap, so the live count is the witness there. The
+  cap itself is `ls-ci.exp` leg (f), which runs the probe as a logged-in user.
+
+Next: red-first sabotages, the audit round, and the SMP subset.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 

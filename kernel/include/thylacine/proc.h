@@ -175,10 +175,13 @@ u32 proc_page_budget_hard_max(void);   // = capacity_pool_pages()
 struct Proc {
     u64               magic;            // PROC_MAGIC
     int               pid;
-    int               thread_count;
+    int               thread_count;      // threads on `threads` (XT-3b: the live count)
     enum proc_state   state;             // P2-D
     int               exit_status;       // P2-D: 0 = clean; non-zero = error
-    struct Thread    *threads;          // doubly-linked list head (Thread.next_in_proc)
+    // The live list (Thread.next_in_proc): every Thread that has not exited,
+    // and a zombie's last Thread out. One that exits while a peer lives on
+    // moves to `exited` (XT-3b).
+    struct Thread    *threads;
 
     // P2-D: parent/children linkage. parent is set at rfork time and is
     // rewritten only by proc_reparent_children when the parent exits with
@@ -961,6 +964,23 @@ struct Proc {
     // park reads it lock-free. KP_ZERO-fresh NONE; never rfork-inherited. Fills
     // the deliberate u32 tail pad, so sizeof is unchanged.
     u32                debug_birth_hold;
+
+    // XT-3b (I-32; specs/thread_reap.tla): the RETIRED list. A Thread that
+    // exits while a peer lives on moves here from `threads` in the
+    // g_proc_table_lock hold that commits it EXITING, and stays until a live
+    // peer reaps it once its switch away has settled (proc_reap_retired, at
+    // that peer's spawn and exit), exec drains it (proc_drain_retired), or
+    // wait_pid frees it with the zombie. All of it is under g_proc_table_lock.
+    // A retired Thread no longer counts against PROC_THREAD_MAX; the number
+    // still allocated is bounded by the reap points (proc_reap_retired).
+    struct Thread     *exited;
+    // What the freed Threads leave behind for the per-Proc totals that span
+    // its life: their run_ns (proc_cpu_ns) and the deepest kernel stack any
+    // of them reached, with its tid (proc_kstack_peak). Folded under
+    // g_proc_table_lock when a reaper frees them.
+    u64                reaped_run_ns;
+    u32                reaped_kstack_peak;
+    int                reaped_kstack_tid;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1230,8 +1250,11 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 408,
- "struct Proc size: IM-2 appended the propagating-legate pair (legate_caps "
+_Static_assert(sizeof(struct Proc) == 432,
+ "struct Proc size: XT-3b appended the retired-Thread list (exited) and the "
+ "reaped-Thread totals (reaped_run_ns, reaped_kstack_peak, "
+ "reaped_kstack_tid): 408 -> 432. Before that, "
+ "IM-2 appended the propagating-legate pair (legate_caps "
  "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
  "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
@@ -1364,6 +1387,16 @@ _Static_assert(__builtin_offsetof(struct Proc, debug_birth_hold) == 404,
  "the birth hold (DEBUG-FS-DESIGN 5f) is that next u32: it fills the tail "
  "pad after legate_flags, so sizeof stays 408 -- the sizeof assert above is "
  "the control.");
+_Static_assert(__builtin_offsetof(struct Proc, exited) == 408,
+ "XT-3b exited (the retired-Thread list head) appends at the tail; no "
+ "existing offset moves (KP_ZERO inits it NULL = none retired).");
+_Static_assert(__builtin_offsetof(struct Proc, reaped_run_ns) == 416,
+ "XT-3b reaped_run_ns follows exited.");
+_Static_assert(__builtin_offsetof(struct Proc, reaped_kstack_peak) == 424,
+ "XT-3b reaped_kstack_peak follows reaped_run_ns.");
+_Static_assert(__builtin_offsetof(struct Proc, reaped_kstack_tid) == 428,
+ "XT-3b reaped_kstack_tid follows reaped_kstack_peak and ends the struct "
+ "on its 8-byte alignment, so no tail pad is added.");
 // CL-5 page_budget, placed by the aux-2 merge. On main it sat at 392 in a
 // 400-byte Proc; aux's L-1 had moved the whole address-space block OUT of Proc
 // (pgtable_root, vma_lock, vma_count, page_count, shared_map_pages,
@@ -1436,8 +1469,8 @@ struct Proc *proc_alloc(void);
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget);
 
 // Release a Proc descriptor. Caller must ensure thread_count == 0
-// (no live threads) and state == ZOMBIE (or post-reap path). Extincts
-// on violation.
+// (no live threads), no retired Thread is left (exited == NULL), and
+// state == ZOMBIE (or post-reap path). Extincts on violation.
 void proc_free(struct Proc *p);
 
 // #65 (invariant I-32): the per-Proc resource floor.
@@ -1522,8 +1555,28 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 //   for the read (the thread_count write domain). The check and the later
 //   thread_link_into_proc ++ are at different lock holds, so a bounded TOCTOU
 //   overshoot (<= ncpus-1 concurrent spawners) is possible -- acceptable for a
-//   floor.
+//   floor. thread_count is the LIVE count (XT-3b): a retired Thread left it in
+//   the hold that retired it, so the cap counts live threads, not every spawn.
 bool proc_thread_cap_ok(struct Proc *p);
+
+// proc_reap_retired -- free p's retired Threads whose switch away has settled
+//   (XT-3b; specs/thread_reap.tla Reap / ReapFree). The caller is a LIVE Thread
+//   of p holding no lock: the spawn handlers call it before the cap check, and
+//   thread_exit_self / exits_code at entry. A live caller is what keeps p
+//   ALIVE through the free, so no wait_pid can reach the same Threads; the
+//   detach under g_proc_table_lock is what keeps two concurrent reapers
+//   disjoint. A Thread still switching away stays for a later reap point.
+//   Bound, the I-32 argument for the retired list: every exit reaps first and
+//   the Threads between their reap and their commit are on CPUs, so at most
+//   about twice the CPU count are ever retired-but-allocated per Proc.
+void proc_reap_retired(struct Proc *p);
+
+// proc_drain_retired -- free EVERY retired Thread of p, spinning out the ones
+//   still switching away. For exec (the caller is p's only live Thread, so no
+//   new one can retire) before it frees the old address space a retired tail
+//   may still be storing into (task #19; thread_reap.tla ExecFree). Returns
+//   with p->exited NULL.
+void proc_drain_retired(struct Proc *p);
 
 // proc_sqpoll_charge / _uncharge -- the SQPOLL-kthread half of the shared
 //   thread budget (fid-lift audit F1). Charge is check-AND-increment under one
@@ -1734,9 +1787,9 @@ void exits_code(int code, const char *msg);
 // ELR_EL1 (other EL0 EC), printed in the diagnostic for forensics.
 //
 // NEVER returns. Emits a uart diagnostic line + calls exits(name).
-// In multi-thread Procs (thread_count > 1) it extincts with a
-// specific message (v1.0 lacks cross-thread shootdown). In all
-// other corruption / impossible cases (no current thread, no
+// In multi-thread Procs exits() shoots the peers down through the
+// group cascade (#809/#811), so the whole Proc dies. In the
+// corruption / impossible cases (no current thread, no
 // proc, kproc-routed, ...) it extincts with a defense-in-depth
 // message.
 //
@@ -1747,15 +1800,20 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr);
 
 // P6-pouch-threads (sub-chunk 9): terminate the calling Thread.
 //
-// NEVER returns. Atomically:
-//   1. If t->clear_child_tid != 0, uaccess_store_u32(0) at that user-VA
+// NEVER returns. In order:
+//   1. Reap the Proc's settled retired Threads (proc_reap_retired; XT-3b).
+//   2. Mark self THREAD_EXITING under g_proc_table_lock. If a peer is still
+//      live, the same hold RETIRES self: it moves from p->threads to
+//      p->exited, and thread_count drops. If this was the last live Thread,
+//      it stays on p->threads and the Proc goes ZOMBIE with exit_status = 0
+//      (or the group's) + a wake of the parent's child_waiters (mirrors
+//      exits("ok")).
+//   3. If t->clear_child_tid != 0, uaccess_store_u32(0) at that user-VA
 //      + torpor_wake(UINT32_MAX). Best-effort; an unmapped tidptr skips
 //      the wake but does not extinct.
-//   2. Mark self THREAD_EXITING under g_proc_table_lock.
-//   3. If this was the last non-EXITING Thread in the Proc, ALSO mark
-//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_waiters
-//      (mirrors exits("ok")).
-//   4. yield via sched(); never returns.
+//   4. yield via sched(); never returns. The switch away is the last use of
+//      the Thread: a retired one is then freed by a live peer's reap, exec's
+//      drain or wait_pid, a zombie's last by wait_pid.
 //
 // Used by SYS_THREAD_EXIT. Distinct from exits() in two ways:
 //   - exits() requires the caller to be the last live Thread (extincts
