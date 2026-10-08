@@ -1428,3 +1428,31 @@ service_as write, loom_free static with 1 guarded call site, the retirer
 destroying unconditionally) remains its whole basis. Also still open and
 SEPARATE: whether the suite's 24 magazines_drain_all call sites satisfy the
 quiescence their sanctioned use requires -- needs the guest.
+
+== 2026-10-07 21:0xZ: ASTRA VERIFIED IT INDEPENDENTLY; BOUNDED CLOSURE ==
+astra (yip 0161 t65) re-verified the result against the artifacts rather than
+against my report: all nine saved input hashes, both current default kernel
+ELF/bin byte-identical to the saved fresh control (bin dd0c4e67c7306ae0...),
+the quarantined mutant bin (92f1dbb1c7de3778...), loom.c restored against
+pristine (cbdd71f6f5ee4c74...), tracked tree clean, external Stratum exactly
+61dde37 and clean, Mac free consistent with my release. Her words for what is
+established: "The acquisition/owner-reap fixture checkpoint is now established
+... The older premature mutant is not counted."
+
+THE CLOSURE IS BOUNDED, in her terms and mine:
+  - NO REPEAT of this experiment is needed WITHOUT RELEVANT CHANGE. If a future
+    session is tempted to re-run it, the question to answer first is what
+    changed that makes the previous receipt inapplicable -- the fixture's marker
+    text changing was such a reason, which is why a fresh control was owed this
+    time and why the kernel hash legitimately differs from 19:00Z.
+  - RELEASE SENSITIVITY STAYS EXPLICITLY OPEN, and its STRUCTURAL PAIRING stays
+    DISTINCT FROM RUNTIME EVIDENCE. The two must not be reported as one thing.
+  - NOT IMPLIED by any of this: full-arc completion, new SMP or Pi
+    qualification, a Main landing, public/private activation, clipboard
+    activation. The 128 MiB protection stays.
+
+PINNED, per her instruction, before any later pruning could reach it:
+work/oct5-as-r9/reap-leg-control-PINNED-20261007T204646Z/ (moved OUT of
+$PRESERVE_DIR; 9/9 verify, width taken from the stored prefix). The OLD control
+receipt and the REJECTED-mutant evidence are retained and named in its
+PINNED.txt so neither gets pruned as superseded.
