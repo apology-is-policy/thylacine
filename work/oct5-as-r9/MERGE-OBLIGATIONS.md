@@ -193,3 +193,12 @@ silently -- which, if it covers the hazard, turns a silent-corruption item into
 a loud-failure one, and if it does not, leaves the item open with a new
 neighbour. RE-EXAMINE against their landed code before touching it; do NOT
 assume either way, and do not close the item on the strength of this note.
+RE-EXAMINED 2026-10-08 against 4b48cb0f6:kernel/vma.c -- IT DOES NOT COVER IT.
+The unlink (and with it the head-wipe on a second call) runs BEFORE the
+code_vmas check. A double remove of a NON-code VMA still wipes as->vmas
+silently. One of the LAST code alias extincts, but only after the wipe. One of a
+code alias with others live SILENTLY UNDERCOUNTS code_vmas, which feeds the I-39
+image join's CAP_JIT term -- a new neighbour, not a cover. Item stays OPEN, fix
+shape unchanged (one linkage-keyed idempotence guard, with a double-remove
+regression test). At merge, re-measure "no reachable double remove" over the
+MERGED call-site set, main's B-2 sites included.
