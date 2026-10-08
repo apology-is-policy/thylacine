@@ -67,9 +67,24 @@ All three as recommended (operator, 2026-10-08, AskUserQuestion):
   and shared by threads. APIA is swapped on every EL0 crossing; the other four
   load at an address-space switch.
 - **No userspace without entropy.** The kernel does not launch init until the
-  CSPRNG is seeded, and exec asserts it. Rejected:
+  CSPRNG is seeded, and exec fails closed on an unseeded pool. Rejected:
   - failing each exec, which boots to a system that can run nothing;
   - falling back to the weak pool, which gives predictable keys.
+
+  **Corrected and re-voted the same day.** The first question said the DTB
+  rng-seed counts toward readiness, so no target would change. It does not
+  count: only RNDR or a virtio-rng pull flips the gate, and sub-kernel-content
+  forbids counting the bootloader seed, because KASLR may publish part of it.
+  The re-vote, with that fact and its two consequences stated, chose a
+  bounded wait, then strict. The two consequences are an RNDR-less QEMU host
+  resting on one virtio pull that can time out (#188), and bare metal without
+  RNDR (a Pi 5) never seeding. So before init the kernel retries the virtio
+  pull for up to 2 s, then refuses userspace if still unseeded. The readiness
+  rule is unchanged, and a Pi 5 waits for an in-kernel driver for its hardware
+  RNG (task #26). Rejected in the re-vote:
+  - also counting the DTB seed when KASLR used kaslr-seed, which would reverse
+    that dossier rule;
+  - booting on the weak pool with a warning.
 - **A section-28 invariant, I-49:** kernel PAC keys never reach EL0, and an
   address space's keys are its own. It has an audit-trigger row and an EL0
   witness. The alternative was a hardening property with no audit trigger.

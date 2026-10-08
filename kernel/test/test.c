@@ -652,6 +652,7 @@ void test_exec_setup_multi_segment(void);
 void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
+void test_exec_setup_refuses_unseeded_rng(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
 void test_exec_setup_bss_tail_icache_synced(void);
 void test_exec_from_spoor_bss_only_text_icache_synced(void);
@@ -2806,6 +2807,9 @@ struct test_case g_tests[] = {
     { "exec.user_stack_guard",         test_exec_user_stack_guard,         false, NULL },
     { "exec.setup_auxv",
                                        test_exec_setup_auxv,
+                                                                           false, NULL },
+    { "exec.setup_refuses_unseeded_rng",
+                                       test_exec_setup_refuses_unseeded_rng,
                                                                            false, NULL },
     { "exec.setup_auxv_no_phdr_segment",
                                        test_exec_setup_auxv_no_phdr_segment,

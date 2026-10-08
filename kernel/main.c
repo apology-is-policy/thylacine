@@ -973,6 +973,27 @@ void boot_main(void) {
     // non-zero before the banner -> joey_run extincts. Either way the banner
     // is no longer printed here -- it rides SYS_BOOT_COMPLETE while joey is
     // alive (IDENTITY-DESIGN.md section 9.9).
+    //
+    // No userspace without entropy (dec-2026-10-08-pac-keys, ARCH 24.3): every
+    // address space's keys and every AT_RANDOM come from the CSPRNG, whose
+    // readiness counts only RNDR or a virtio-rng pull -- the DTB seed is mixed
+    // in but never counted, since KASLR may publish part of it. A pull can miss
+    // its completion under contention (#188), so retry for a bounded time,
+    // then refuse to start init rather than hand a process predictable keys or
+    // a zero canary.
+    if (!kern_random_seeded()) {
+        const u64 wait_ns = 2000000000ull;
+        u64 start = timer_now_ns();
+        while (!kern_random_seeded() && timer_now_ns() - start < wait_ns)
+            (void)random_seed_from_virtio();
+        if (kern_random_seeded()) {
+            uart_puts("  random: seeded at the userspace gate after ");
+            uart_putdec((timer_now_ns() - start) / 1000000ull);
+            uart_puts(" ms\n");
+        }
+    }
+    if (!kern_random_seeded())
+        extinction("boot: the CSPRNG was never seeded (no RNDR, and no virtio-rng pull succeeded); refusing to start userspace");
     joey_run();
 
     // Reached only if joey exits cleanly WITHOUT persisting (not a v1.0 path;

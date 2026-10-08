@@ -210,6 +210,20 @@ of what the suite can observe, taken knowingly, with the multi-boot gate as the
 compensating control.
 
 
+### No userspace without entropy (2026-10-08, PAC-1)
+
+Just before `joey_run` starts init, `boot_main` checks `kern_random_seeded()`
+(`dec-2026-10-08-pac-keys`, ARCH 24.3). Every address space's PAC keys and
+every `AT_RANDOM` come from the CSPRNG, and its readiness counts only RNDR or a
+virtio-rng pull ([[sub-kernel-content]]: the DTB seed is mixed in but never
+counted). If the CSPRNG is unseeded, the gate retries `random_seed_from_virtio`
+for up to 2 s, because a pull can miss its completion under contention (#188).
+It prints how long the wait took when the wait seeded it, and otherwise
+extincts ("the CSPRNG was never seeded ... refusing to start userspace"). Every
+QEMU target passes: `run-vm.sh` always attaches virtio-rng, and TCG's
+`-cpu max` has RNDR. Bare metal with neither source (a Pi 5) stops here until an
+in-kernel driver for its hardware RNG exists (task #26).
+
 ### The boot-complete report carries a kernel-stack witness
 
 `boot_mark_complete` prints `boot-kstack: peak=<bytes> usable=16384 pid=<n>

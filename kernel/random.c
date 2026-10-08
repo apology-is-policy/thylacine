@@ -517,6 +517,16 @@ long kern_random_bytes(void *buf, long n) {
     return n;
 }
 
+#ifdef KERNEL_TESTS
+// Test-only: force the readiness signal, returning its previous value, so a
+// test can drive a caller through the unseeded (fail-closed) path. Compiled
+// out of production; one test at a time, restored before it returns.
+bool random_set_seeded_for_test(bool seeded);
+bool random_set_seeded_for_test(bool seeded) {
+    return __atomic_exchange_n(&g_rng_seeded, seeded, __ATOMIC_ACQ_REL);
+}
+#endif
+
 bool kern_random_seeded(void) {
     return __atomic_load_n(&g_rng_seeded, __ATOMIC_ACQUIRE);
 }

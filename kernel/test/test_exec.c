@@ -802,6 +802,27 @@ void test_exec_setup_auxv(void) {
     drop_proc(p);
 }
 
+// Task #25 (dec-2026-10-08-pac-keys): exec never hands out a zero AT_RANDOM.
+// With the CSPRNG unseeded, kern_random_bytes fails closed, and the exec must
+// fail with it. FAILS PRE-FIX: the draw's result was ignored and the frame
+// went out with 16 zero bytes, the seed of musl's stack canary.
+bool random_set_seeded_for_test(bool seeded);
+
+void test_exec_setup_refuses_unseeded_rng(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    bool was = random_set_seeded_for_test(false);
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    (void)random_set_seeded_for_test(was);
+    TEST_EXPECT_EQ(rc, -T_E_AGAIN,
+        "exec fails closed on an unseeded CSPRNG instead of a zero AT_RANDOM");
+
+    drop_proc(p);
+}
+
 // #140: a Proc with a real /env gets a real envp on its new image's stack.
 //
 // This is the test the bug survived for lack of. Every other frame test above

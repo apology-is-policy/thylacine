@@ -63,6 +63,24 @@ In the tree:
 - the decision note;
 - the xt-status plan, PAC-0 to PAC-3.
 
+**A wrong fact in my question, caught while writing PAC-1.** I told the
+operator that QEMU and the Pi firmware supply rng-seed, so the gate would
+change no target. `sub-kernel-content` and `random.c`'s `rng_stir_locked` say
+otherwise: readiness flips only on RNDR or a virtio-rng pull. The DTB seed is
+mixed in and deliberately never counted, because KASLR derives the published
+load offset from it when there is no kaslr-seed.
+
+`random.h`'s header claimed the DTB seed counted. That was the drift I had
+trusted, and it is now corrected. The vote had been cast on a false premise,
+so I re-asked, with the two consequences stated:
+- an RNDR-less QEMU host rests on one virtio pull, which #188 shows can time
+  out;
+- bare metal without RNDR never seeds.
+
+The answer was a bounded wait (the virtio pull retried for up to 2 s), then
+strict. The Pi 5's in-kernel RNG driver is queued as task #26. The lesson: a
+question's options are claims, and each needs the same verification as code.
+
 **Next:** PAC-1, the entropy gate, then PAC-2.
 
 ---

@@ -202,6 +202,12 @@ seed**, so it is entropy someone can partially observe. It is mixed in as
 material — through a deliberately different avalanche function, so the two
 derivations do not correlate ([[inv-i16]]) — but it does not count toward
 readiness. Only the CPU's own generator, or a pull from the host, flips the gate.
+Two consumers refuse an unseeded pool rather than fall back (2026-10-08,
+PAC-1): the boot gate before init, which retries the virtio pull for up to 2 s
+and then refuses userspace ([[sub-kernel-boot-sequence]]), and exec's
+`AT_RANDOM`, which fails the exec ([[sub-kernel-exec]]). A test-only
+`random_set_seeded_for_test` (compiled under `KERNEL_TESTS`) drives the second
+through the unseeded path.
 
 **The CPU's own generator is RNDR (FEAT_RNG), and its capture idiom is
 load-bearing.** Presence is probed once at init from `ID_AA64ISAR0_EL1`

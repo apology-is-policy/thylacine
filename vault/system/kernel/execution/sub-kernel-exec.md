@@ -281,7 +281,13 @@ produces VMAs and Burrows.
 The one layout it owns is the **System V startup frame**, in two shapes. Shape A
 is a fixed 224 bytes: argc, two NULL terminators, `EXEC_INIT_AUXV_COUNT` (11: up
 to ten auxv entries and the terminator) slots of 16, and a 16-byte `AT_RANDOM`
-block at the end. Shape B is variable — real argc, an argv
+block at the end. The block is never zeros. musl seeds its stack canary from
+it, so a failed CSPRNG draw (an unseeded pool) fails the exec with
+`-T_E_AGAIN`. It used to ignore the failure and ship sixteen zero bytes (task
+#25, `exec.setup_refuses_unseeded_rng`). The boot gate keeps init off an
+unseeded pool ([[sub-kernel-boot-sequence]]), so only an exec before that gate,
+such as the in-kernel suite on a host with no entropy, can still see the
+error. Shape B is variable — real argc, an argv
 array pointing into a strings region, **an envp array between argv and auxv**,
 the same auxv block, the same random block 16-aligned, then both strings regions.
 

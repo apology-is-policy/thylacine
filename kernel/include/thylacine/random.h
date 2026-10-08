@@ -9,9 +9,10 @@
 // the RNDR-only baseline so the same path runs on RNDR-less targets.
 //
 // Invariants:
-//   - kern_random_seeded() is the readiness signal: false until a
-//     strong entropy source has ever contributed (DTB boot seed, RNDR,
-//     or a virtio-rng pull), monotonic true thereafter. While false,
+//   - kern_random_seeded() is the readiness signal: false until an
+//     unobserved strong source has ever contributed (RNDR or a virtio-rng
+//     pull; the DTB boot seed is mixed in but never counted, because KASLR
+//     may publish part of it), monotonic true thereafter. While false,
 //     kern_random_bytes returns -1 (fail closed) and SYS_GETRANDOM
 //     refuses -- the same contract the RNDR-only baseline held.
 //   - The CSPRNG re-keys on every keystream-buffer drain (fast key

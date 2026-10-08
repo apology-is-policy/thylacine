@@ -711,9 +711,16 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     }
 
     // AT_RANDOM — 16 bytes of kernel-CSPRNG entropy. Same shape across
-    // both layouts; the in-frame offset differs.
-    u8 rand[16] = {0};
-    (void)kern_random_bytes(rand, sizeof(rand));
+    // both layouts; the in-frame offset differs. Never zeros: musl seeds its
+    // stack canary from it, so a failed draw (an unseeded pool) fails the
+    // exec closed. The boot gate keeps init off an unseeded pool, so only an
+    // exec before it (the in-kernel suite on a host with no entropy) sees this.
+    u8 rand[16];
+    if (kern_random_bytes(rand, sizeof(rand)) != (long)sizeof(rand)) {
+        kfree(frame);
+        *err_out = -T_E_AGAIN;
+        return 0;
+    }
 
     // Lay out the frame. The frame base is 16-byte aligned (exec.h
     // _Static_assert + the round_up above); every u64 below is 8-aligned.
