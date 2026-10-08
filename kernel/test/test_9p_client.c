@@ -5629,21 +5629,6 @@ static void dy_stop_flag(struct test_dying *d, bool job, u32 v) {
                      __ATOMIC_RELEASE);
 }
 
-// A third op thread: an async clunk.
-static struct test_dying g_dyz;
-static struct { u32 fid; int rc; } g_dyzop;
-
-static void dyz_run(void *arg) {
-    (void)arg;
-    g_dyzop.rc = p9_client_clunk_async(&g_client, g_dyzop.fid);
-}
-
-static bool dyz_start_clunk(u32 fid) {
-    g_dyzop.fid = fid;
-    g_dyzop.rc  = 0x7fffffff;
-    return test_dying_start(&g_dyz, dyz_run, NULL, /*dead_now=*/false);
-}
-
 // The read X waits behind the held reader with its Rread queued and is stopped
 // there (^Z). The reader departs with nobody to designate, and X resumes. X
 // must then take the role and read its own reply. Parked in place, it re-checked
@@ -6332,7 +6317,7 @@ bool test_9p_client_release(void);
 bool test_9p_client_release(void) {
     __atomic_store_n(&g_loom_fanin_test_cap, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
-    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle, &g_dle2 };
+    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dle, &g_dle2 };
     bool left = false;
     for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         struct test_dying *d = ops[i];
