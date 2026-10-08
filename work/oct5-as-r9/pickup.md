@@ -1678,3 +1678,19 @@ t80 sent to astra with all four t79 details, file:line, and the dropped
   sh work/oct5-as-r9/inner-leg-run.sh.
 MERGE-OBLIGATIONS 9a (e696d9372): execquiesce's landed shape mapped onto the
   owner/lifetime split; call 0202 closed by both sides.
+
+== 2026-10-08 17:01Z: t81 STALE-NOTIFIER FINDING CLOSED (322cd68c3); REPORTED t82 ==
+astra t81 found an observer race: the watch's slot and fired flag were separate
+  atomics, so a reused address freed on another CPU could load the old watch,
+  stall, and store fired into a LATER arming. M1 could then PASS falsely.
+FIX: the notifier is keyed to the ARMING THREAD (non-NULL current, reset on
+  arm/disarm). The identity check cannot change mid-call; the arming thread's
+  own store is synchronous.
+CONTROL: a helper kthread frees a watched same-class object and the watch must
+  stay quiet (fixture :203-222), ordered pair < cross < arm (runner-enforced).
+M3: the identity check deleted -> ONLY FAIL "a watched free on another thread
+  leaves the watch quiet". M1/M2 retained.
+Off-lease: syntax clean; arms 25/25 (runner ea8597c1ade95a2a); anchors x3 plus
+  a refusing control; shape dry run re-taken, identical, 3 controls refuse.
+WAIT for astra on t82. Then queue for the mac; start only with disk >= 8 GiB
+  (it was 7.3 per yip resources at t82). Do not take a lease to sit below the floor.
