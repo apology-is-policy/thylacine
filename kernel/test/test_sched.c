@@ -1085,15 +1085,36 @@ void test_sched_preempt_gate_defers_while_locked(void) {
 // marks itself EXITING for three ticks, then restores RUNNING and exits.
 //
 // RED without the gate: the first tick return switches the thread out, sched()
-// never re-enqueues an EXITING thread, and it never runs again -- the done flag
-// stays clear, and the runner's bounded wait fails instead of hanging in
-// wait_pid.
+// never re-enqueues an EXITING thread, and it never runs again. A watchdog
+// peer in the same Proc sees it lost and exits as the last live thread, so the
+// Proc still becomes a zombie and wait_pid frees the lost thread too (it is
+// EXITING and switched out). The test fails on the done flag, and leaves no
+// unreapable child behind to hang a later test's wait for its children.
 static volatile u32 g_pge_pending;
 static volatile u32 g_pge_done;
+
+// Lost means EXITING and switched out: with the gate the main thread is
+// EXITING only while it is on its CPU, so only an involuntary switch makes
+// both true. It cannot be freed while this peer lives (nothing retires it).
+static void pge_watchdog_entry(void *arg) {
+    struct Thread *main_thread = (struct Thread *)arg;
+    while (__atomic_load_n(&g_pge_done, __ATOMIC_ACQUIRE) == 0u) {
+        if (__atomic_load_n(&main_thread->state, __ATOMIC_ACQUIRE) == THREAD_EXITING &&
+            !__atomic_load_n(&main_thread->on_cpu, __ATOMIC_ACQUIRE))
+            exits("the EXITING thread was switched out for good");
+        sched();
+    }
+    thread_exit_self();   // the main thread lives on, so this retires
+}
 
 static void pge_entry(void *arg) {
     (void)arg;
     struct Thread *self = current_thread();
+    struct Proc *p = self->proc;
+    struct Thread *w = thread_create_with_arg(p, pge_watchdog_entry, self);
+    if (!w) extinction("pge_entry: thread_create_with_arg failed");
+    ready(w);
+
     irq_state_t s = proc_table_lock_acquire();
     self->state = THREAD_EXITING;
     proc_table_lock_release(s);
@@ -1112,6 +1133,9 @@ static void pge_entry(void *arg) {
     proc_table_lock_release(s);
     __atomic_store_n(&g_pge_pending, pending ? 1u : 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_pge_done, 1u, __ATOMIC_RELEASE);
+
+    // exits() must be the last live thread: wait for the watchdog to retire.
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) == 1);
     exits("ok");
 }
 
@@ -1120,9 +1144,12 @@ void test_sched_preempt_gate_defers_while_exiting(void) {
     __atomic_store_n(&g_pge_done, 0u, __ATOMIC_RELEASE);
     int pid = rfork(RFPROC, pge_entry, NULL);
     TEST_ASSERT(pid > 0, "rfork failed");
-    TEST_YIELD_UNTIL(__atomic_load_n(&g_pge_done, __ATOMIC_ACQUIRE) != 0u);
+    // Reaped first, pass or fail: the child always zombies, by its own exits
+    // or by the watchdog's.
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the test Proc");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_pge_done, __ATOMIC_ACQUIRE), 1u,
+        "the EXITING thread ran on to its restore (no involuntary switch took it)");
     TEST_EXPECT_EQ(status, 0, "the test Proc exited cleanly");
     TEST_EXPECT_EQ(__atomic_load_n(&g_pge_pending, __ATOMIC_ACQUIRE), 1u,
         "the gate DEFERS (does not consume) need_resched while the thread is EXITING");
