@@ -1,0 +1,10 @@
+--- kernel/loom_service_slots.c
++++ close-pin.c
+@@ -55,7 +55,6 @@
+ int loom_slot_pin(struct loom_slot_table *t, struct loom_service_ref ref, u32 kind) {
+     struct loom_service_slot *s = slot_exact(t, ref);
+     if (!s) return -T_E_NOENT;
+-    if (t->closing) return -T_E_CANCELED;
+     if (s->phase != LSLOT_LIVE || s->kind != kind) return -T_E_NOENT;
+     if (s->pins == UINT32_MAX) return -T_E_NOSPC;
+     ++s->pins;

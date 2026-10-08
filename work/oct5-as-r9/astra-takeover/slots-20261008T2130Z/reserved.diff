@@ -1,0 +1,11 @@
+--- kernel/loom_service_slots.c
++++ reserved.c
+@@ -17,7 +17,7 @@
+ }
+ static struct loom_service_slot *slot_exact(struct loom_slot_table *t,
+                                             struct loom_service_ref ref) {
+-    if (!t || ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
++    if (!t || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
+         return NULL;
+     struct loom_service_slot *s = &t->slots[ref.slot];
+     if (s->phase == LSLOT_FREE || s->incarnation != ref.incarnation) return NULL;

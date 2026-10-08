@@ -324,3 +324,37 @@ so the recorded 50-boot kernel result is not superseded. Continue the approved
 bounded private-engine admission/retirement work, carrying these remaining guest
 obligations to its qualification; do not use host evidence as an activation waiver.
 No Main landing or private async/clipboard activation, and retain 128 MiB protection.
+
+
+## October 8, shared slot ledger checkpoint
+
+Authored the approved 64-entry ring-global reservation/identity/borrow ledger,
+not yet allocated or charged by Loom and not exposed to syscalls. PROVISIONAL
+consumes capacity during copyout; rollback never reuses its burned incarnation.
+LIVE exact-kind references may borrow, RETIRING stops new borrows, and reap waits
+for zero pins. Close refuses reserve/publish/pin but preserves existing local
+retirement. Internal phases are not ABI protocol states. Full engine authority,
+parent-scope pins, terminal/publication gates, payload retention and accounting
+remain caller obligations before retirement/reap; this table is not an engine.
+
+Shared fixture registered as loom.service_slots (expected suite count 1837).
+Actual module host ASan/UBSan control passed; 13 exact-site mutants each exited1
+with precisely the expected failure, including stale generation, provisional
+visibility, wrong kind, rollback generation rewind, early/live reap, capacity,
+identity/pin overflow and three close-admission arms. Generated sources/diffs,
+commands, hashes and raw logs: astra-takeover/slots-20261008T2130Z/. The existing
+lifecycle model passed its 5828-state clean case and all seven named mutant
+verdicts: astra-takeover/slots-model-20261008T2130Z/. Real ARM compiler flags
+accepted module/test registration/fixture with no errors or new non-prototype
+warnings. Native guest/full Mac qualification is pending for this new source.
+
+Self-review checked exact identity before state access, no decrement of the
+mint counter, caller-held-lock serialization, copyout-vs-close rollback,
+pin saturation/underflow, release after close and no callback under the lock.
+One important clarification to older coverage wording: loom_post_pool_cqe only
+delivers an already committed result. Results committed before abort can still
+be delivered; a blanket service_closing guard is not the approved repair.
+Whole-ring discard requires detached consumer and local borrow retirement.
+Engine integration must preserve that distinction. Self-review only, not an
+independent audit. Prior 50-boot qualification remains bound to 98c50e844.
+No activation, Main landing, or removal of 128 MiB protection.

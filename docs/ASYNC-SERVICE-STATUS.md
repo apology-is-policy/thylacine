@@ -1460,3 +1460,15 @@ released. This is single-agent self-review, no independent audit or full-gate
 claim. Next: final reclamation witness/remaining checkpoint obligations and
 new-source full gates, then the approved engine and MM work. No activation,
 Main integration or removal of the 128 MiB protection.
+
+
+## October 8 Astra takeover: dormant shared slot identity ledger
+
+The approved shared 64-slot identity/reservation/borrow foundation is implemented
+in kernel/loom_service_slots.c, with one shared host/guest fixture. Host ASan/UBSan
+control and 13 named negative controls pass; the existing lifecycle model clean
+case (5828 states) and seven buggy cases pass their expected verdicts. Native
+runtime qualification is pending for this changed source. Scope and caller
+obligations are in the Loom dossier and work/oct5-as-r9/astra-takeover.md.
+The ledger is not yet owned/charged by a private Loom and enables no handler.
+Async engine integration still precedes MM0-MM4; all activation protections stay.

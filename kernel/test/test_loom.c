@@ -83,6 +83,12 @@ static void test_proc_drop(struct Proc *p) {
 // ---------------------------------------------------------------------------
 #include "loom_receipt_fixture.h"
 #include "loom_private_fixture.h"
+#include "loom_slots_fixture.h"
+
+void test_loom_service_slots(void) {
+    const char *slot_error = loom_slots_fixture();
+    TEST_ASSERT(slot_error == NULL, slot_error);
+}
 
 // Its own test rather than a passenger on the geometry fixture: this one
 // asserts the whole private-owner admission/retirement lifecycle, and a failure

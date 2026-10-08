@@ -666,6 +666,7 @@ void test_torpor_wait_wake_handoff(void);
 void test_torpor_wake_two_waiters_count_bound(void);
 void test_loom_create_geometry(void);
 void test_loom_private_owner_lifecycle(void);
+void test_loom_service_slots(void);
 void test_loom_create_rejects_bad_args(void);
 void test_loom_refcount_lifecycle(void);
 void test_loom_setup_via_proc(void);
@@ -2739,6 +2740,7 @@ struct test_case g_tests[] = {
     { "torpor.wait_wake_handoff",              test_torpor_wait_wake_handoff,              false, NULL },
     { "torpor.wake_two_waiters_count_bound",   test_torpor_wake_two_waiters_count_bound,   false, NULL },
     { "loom.create_geometry",            test_loom_create_geometry,            false, NULL },
+    { "loom.service_slots",              test_loom_service_slots,              false, NULL },
     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
     { "loom.create_rejects_bad_args",    test_loom_create_rejects_bad_args,    false, NULL },
     { "loom.refcount_lifecycle",         test_loom_refcount_lifecycle,         false, NULL },

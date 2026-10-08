@@ -5,6 +5,11 @@ parent: moc-kernel-async
 title: "Loom — the io_uring inversion over 9P"
 code:
   - kernel/loom.c
+  - kernel/loom_service_slots.c
+  - kernel/include/thylacine/loom_service_slots.h
+  - kernel/test/loom_slots_fixture.h
+  - tools/host-tests/loom-service-slots.c
+  - tools/test-loom-service-slots.py
   - kernel/test/test_loom.c
   - kernel/test/loom_receipt_fixture.h
   - kernel/test/loom_private_fixture.h
@@ -1192,3 +1197,34 @@ detected. Raw sources/diffs/results: work/oct5-as-r9/astra-takeover/
 final-reclaim-20261008T211401Z/. Allocator, lock, VMA and ring doubles bound this
 to sequential host destruction-call sensitivity. Guest reclamation and the
 private engine remain open; production and guest fixture bytes are unchanged.
+
+
+## Shared private slot ledger (October 8, Astra)
+
+`loom_service_slots.c` implements the approved ring-global 64-slot identity and
+borrow ledger as a dormant engine component. One 1552-byte table holds 64
+24-byte records. This is an internal layout, not a QUERY protocol state or wire
+ABI. All calls require the owning ring lock. Reservation occupies capacity and
+burns a nonzero monotonically increasing incarnation; rollback releases capacity
+but cannot rewind it. Exhaustion refuses instead of wrapping. Only exact live
+references of the requested kind borrow; retirement stops new borrows, and reap
+requires zero existing borrowers. Close freezes reserve, publish and pin while
+allowing rollback, unpin and reap to finish. Usercopy can occur between calls;
+publication rechecks close under the same lock.
+
+The ledger does not itself enforce native authority, FID parent-scope binding,
+terminal-completion publication, payload retention or protocol retirement. Those
+are caller obligations before retire/reap and remain implementation work. It is
+not yet allocated/charged inside Loom or reachable from a syscall. No new public
+mode is enabled. In particular, delivery of a result already committed before
+abort is permitted by the approved lifecycle: do not add a blanket close/abort
+rejection to completion delivery in place of engine lifetime integration.
+
+The shared host/guest fixture tests rollback/stale references, provisional
+visibility, mixed-kind capacity, pinned retirement, exhaustion and close versus
+publication. Host ASan/UBSan passed and 13 exact-site mutations each failed its
+named assertion; the existing lifecycle model passed 5828 states and all seven
+buggy configurations. This is single-agent self-review, not an independent
+review. Native guest and full current-source gates are pending at this checkpoint;
+the 50-boot result on 98c50e844 applies only to that older source. Exact host
+inputs and raw evidence: work/oct5-as-r9/astra-takeover/slots-20261008T2130Z/.

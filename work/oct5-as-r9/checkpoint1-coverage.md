@@ -98,3 +98,13 @@ four omissions fail distinct descriptor/table reclamation assertions. This is
 actual destructor code with allocator/lock/VMA/ring doubles, not a guest
 buddy/SLUB gauge. Guest reclamation remains OPEN. Evidence and limitations:
 astra-takeover/final-reclaim-20261008T211401Z/result.json.
+
+
+October 8 slot-ledger clarification: new dormant identity/borrow ledger has host
+ASan/UBSan control and 13 named negative controls; native qualification pending.
+This does not close engine-owned rows. In particular, the earlier phrase
+"loom_post_pool_cqe's missing service_closing check" is not a prescribed fix:
+that helper delivers an already committed result, and pre-abort commits may be
+delivered afterward. Owner integration must distinguish commitment from delivery
+and require consumer detachment/local retirement before whole-ring discard.
+See the current pickup and Loom dossier for ledger scope and retained evidence.
