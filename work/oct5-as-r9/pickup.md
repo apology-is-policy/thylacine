@@ -2081,3 +2081,29 @@ rollback, exact charge, close with held borrow and final refund; expected suite
 count1838. Runtime/full Mac gate is still pending on this changed source; the
 50-boot1837 result applies only to ceac7f380. This is self-review only. Preserve
 all activation guards, Main boundary, guest final-allocator/Pi residuals and128MiB.
+
+
+## October 8, 23:06 UTC: charged slot-owner full Mac gate verified
+
+current-gate-20261008T222442Z completed with gate.rc=runner.rc=0 on exact
+7c184b3ef2a1c23dbc28268abd6c12b45a3dab25, tracked source clean throughout.
+All five standard rows passed10/10 (default smp1/4/8, UBSan smp4/8), with no
+other classifications. The verifier independently checked all50 serial logs:
+1838/1838, loom.private_slot_owner PASS, loom.service_slots PASS, private-owner
+normal fallthrough PASS, D7 overlap and twenty distinct d7user00..19 completed
+cycles, plus boot banner. Optional graphics programs were absent from the exact
+captured ramfs; their two nonfatal diagnostics do not count as graphics coverage.
+
+Ten captured input hashes verified, live immutable build inputs matched capture
+at wrapper exit, and100 serial/harness logs were retained with hashes. External
+Stratum remained clean at exact61dde37. Minimum recorded admission10930MiB was
+above the unchanged8192MiB floor. Mac lease released; input generation marked
+PINNED. Full result: astra-takeover/current-gate-20261008T222442Z-result.json.
+
+This qualifies the recorded slot-page constructor/refusal/close/retirement
+integration on Mac. It does not qualify future pool storage, authority, parent
+scope/protocol/terminal/worker integration, guest final allocator reclamation,
+or Pi/A72/KVM. The host omitted-free witnesses stay at their documented boundary.
+Next is the approved pool table/member ownership and publication integration;
+async lifecycle still precedes MM0-MM4. Self-review only, not independent audit.
+No Main landing, private async/clipboard activation or128MiB protection removal.

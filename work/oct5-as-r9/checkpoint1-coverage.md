@@ -117,3 +117,11 @@ input hashes and100 logs verified; minimum recorded admission10757MiB. Detailed
 provenance and remaining caller/engine/guest-allocator obligations are in the
 latest pickup and astra-takeover/current-gate-20261008T213148Z-result.json.
 No activation or Main landing; retain128MiB protection. Self-review only.
+
+
+October8 23:06UTC: charged slot-owner integration on7c184b3ef completed50/50
+clean Mac boots,1838/1838 plus both slot tests, private-owner and complete D7
+checks in each. Ten captured inputs and100 log hashes verified; minimum admission
+10930MiB. See latest pickup and astra-takeover/current-gate-20261008T222442Z-result.json.
+Future pool/protocol ownership and guest final-allocator/Pi gaps remain open.
+Self-review only; no public activation, Main landing or128MiB removal.

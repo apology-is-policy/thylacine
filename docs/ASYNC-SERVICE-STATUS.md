@@ -1488,3 +1488,11 @@ private-only buddy page, admission rollback, lock-serialized close and guarded
 retirement. Host controls and native linking pass; guest runtime for this changed
 source is PENDING. See the latest pickup for exact evidence and remaining engine
 obligations. No service handler or private setup mode has been activated.
+
+
+October8 23:06UTC: charged slot-owner integration on7c184b3ef completed50/50
+clean Mac boots,1838/1838 plus both slot tests, private-owner and complete D7
+checks in each. Ten captured inputs and100 log hashes verified; minimum admission
+10930MiB. See latest pickup and astra-takeover/current-gate-20261008T222442Z-result.json.
+Future pool/protocol ownership and guest final-allocator/Pi gaps remain open.
+Self-review only; no public activation, Main landing or128MiB removal.

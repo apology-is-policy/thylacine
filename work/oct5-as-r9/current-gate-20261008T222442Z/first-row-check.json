@@ -1,0 +1,50 @@
+{
+  "source": "7c184b3ef2a1c23dbc28268abd6c12b45a3dab25",
+  "scope": "default smp1 ten boots only; full matrix pending",
+  "tests": 1838,
+  "private_slot_owner": true,
+  "service_slots": true,
+  "d7_distinct_cycles": 20,
+  "records": [
+    {
+      "log": "build/multiboot-logs/default-smp1-1.log",
+      "sha256": "b16c1fd94ecb45f43274ff8821b3b4ed94e1b431d2cb75f09eb8816d5acc0990"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-2.log",
+      "sha256": "a15aa4202ad14f577cf265fc28e5659467a2ee804d58b90d995bdd3c59c9f6bb"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-3.log",
+      "sha256": "b74fc001b312dc38f9d5b23864f37198f83a4db965e451398fac8454909c10fd"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-4.log",
+      "sha256": "11cb6d2ae6044963f4ecb813670223d3eb14df9c1ff56b6ba67ba8760484a930"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-5.log",
+      "sha256": "91093d1ff6ab6e8b3f678d6bce216350b062e07e214e44bef774f02f64d3a59f"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-6.log",
+      "sha256": "36a62a133756b7c3bd91826e72e5f5c1cc3d1fcad6259266caf3061c52f2a003"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-7.log",
+      "sha256": "4f8d4d71ce76154eccfd11c3c6d40f65c52590353d8fc30abceecf0e9c09fe2c"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-8.log",
+      "sha256": "68f86bce9f17c7841cf03f7aa9883dac8597304ce7e496c6aa592c4e4e6dae6a"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-9.log",
+      "sha256": "5877f6c8d096cfbd8a1588d2558d869beb9b2c13d675626324a14f9718b9e392"
+    },
+    {
+      "log": "build/multiboot-logs/default-smp1-10.log",
+      "sha256": "27785bb0bf8151d7ddec44ebf947ad4c27330e0a73e2132d00f8d831c50398d1"
+    }
+  ]
+}
