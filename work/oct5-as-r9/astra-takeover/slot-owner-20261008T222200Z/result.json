@@ -1,0 +1,117 @@
+{
+  "source_head": "df4d7f38dfcc6cb2a094f0b4b02226fddf98b8c9",
+  "source_hashes": {
+    "kernel/loom.c": "d41dfe6e801888a1242a55cd55c3510d579c440e11c6976f3c06ba088ec375ef",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0"
+  },
+  "results": [
+    {
+      "case": "control",
+      "mode": 0,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 1,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 2,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 3,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 4,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 5,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 6,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "control",
+      "mode": 7,
+      "rc": 12,
+      "expected": "private Loom retained a service slot",
+      "generated_sha256": "386e3d49328afdbcb04147289f51358a464c0c1f0d2bc40cc1a05a33123689ff"
+    },
+    {
+      "case": "omit-slot-charge",
+      "mode": 0,
+      "rc": 11,
+      "expected": "slot page charged in metadata",
+      "generated_sha256": "07a2b3b4933a1c41a269c5ac2fce8fbe7d9e0a33666686ce58102c546a7fb307"
+    },
+    {
+      "case": "omit-unwind-free",
+      "mode": 4,
+      "rc": 11,
+      "expected": "rollback frees slot page",
+      "generated_sha256": "356fcf91184f2e7b5828872dd15b2789fc1698f0fdc9a58770d40b7213e34d2c"
+    },
+    {
+      "case": "omit-unwind-refund",
+      "mode": 2,
+      "rc": 11,
+      "expected": "refusal restores accounting",
+      "generated_sha256": "1ddd0b04e77a150394c4339e4be83357cca4482a0561e035237cd0fba07af6ad"
+    },
+    {
+      "case": "omit-unwind-pin",
+      "mode": 2,
+      "rc": 11,
+      "expected": "refusal restores lifetime",
+      "generated_sha256": "38b594347fdc96d5d6e5b709c66817c253c4f3af57e743d0bf4b9c48c5097828"
+    },
+    {
+      "case": "omit-retire-free",
+      "mode": 0,
+      "rc": 11,
+      "expected": "retirement frees owner and slot page",
+      "generated_sha256": "5c2f826f97ae88865270ba61470680f893bc36311c9e70c3575718ef3024349b"
+    },
+    {
+      "case": "omit-close",
+      "mode": 0,
+      "rc": 11,
+      "expected": "close freezes ledger",
+      "generated_sha256": "94c78eee1c33174e9662f7eafa83d1ca64e1b1e4022b8be81bfd23bedcccb50c"
+    },
+    {
+      "case": "omit-busy-guard",
+      "mode": 7,
+      "rc": 11,
+      "expected": "busy retirement returned",
+      "generated_sha256": "eb026c4a1ae815a102cd8821f7e7ecfa036e52c6159650c36ceb3591e4ac6fa8"
+    }
+  ],
+  "scope": "Extracted private constructor/close/destructor plus real slot module.\n\nHost ASan/UBSan with checked allocator, geometry, Loom layout, image and lock\ndoubles. Validates rollback/free/call ordering, not guest physical accounting,\nactual image races or protocol retirement. Requires Astra's Mac lease, 8 GiB.\n"
+}

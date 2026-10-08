@@ -85,6 +85,92 @@ static void test_proc_drop(struct Proc *p) {
 #include "loom_private_fixture.h"
 #include "loom_slots_fixture.h"
 
+// Private owner integration: actual allocator/charge/close/retirer, while the
+// sequential module fixture above remains independent of this owner wrapper.
+static const char *loom_slot_owner_fixture(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make();
+    struct Loom *l = NULL;
+    struct loom_service_ref ref = {0};
+    u64 goal = loom_private_retired();
+    bool pinned = false;
+#define SO_CHECK(c, msg) do { if (!(c)) { error = msg; goto done; } } while (0)
+    SO_CHECK(p && p->as, "slot owner creator allocated");
+    u32 base = p->as->page_count;
+    int refs = addrspace_ref_count(p->as);
+    loom_private_slots_fault_arm_for_test();
+    l = loom_create_private(p, 3, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_slots_fault_armed_for_test(),
+             "early refusal consumes slot allocation fault");
+    loom_private_slots_fault_arm_for_test();
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_slots_fault_armed_for_test(),
+             "slot storage refusal consumes its fault");
+    SO_CHECK(p->as->page_count == base && !p->as->private_rings &&
+             addrspace_ref_count(p->as) == refs,
+             "slot storage refusal rolls back charge and image pin");
+    // Allocation succeeds but downstream layout fails; the new page must also
+    // be released. The host allocator control measures that free separately.
+    loom_private_layout_fault_arm_for_test();
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && p->as->page_count == base && !p->as->private_rings &&
+             addrspace_ref_count(p->as) == refs,
+             "downstream layout failure rolls back slot page charge and guard");
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    SO_CHECK(l && l->service_slots, "private owner owns its slot page");
+    SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u,
+             "slot page included in metadata charge");
+    SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
+             (u32)burrow_backing_pages(l->ring_size) + 1u,
+             "all base storage charged before owner publication");
+    SO_CHECK(!l->service_slots->closing && !l->service_slots->next_incarnation,
+             "slot page starts zero and open");
+    spin_lock(&l->lock);
+    int rc = loom_slot_reserve(l->service_slots, LOOM_SERVICE_SCOPE, &ref);
+    if (!rc) rc = loom_slot_publish(l->service_slots, ref);
+    if (!rc) { rc = loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_SCOPE); pinned = !rc; }
+    spin_unlock(&l->lock);
+    SO_CHECK(!rc, "owner ledger admits exact internal borrow");
+    loom_exec_latch(l);
+    spin_lock(&l->lock);
+    rc = loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_SCOPE);
+    bool closed = l->service_slots->closing;
+    u32 pins = l->service_slots->slots[ref.slot].pins;
+    spin_unlock(&l->lock);
+    SO_CHECK(closed && rc == -T_E_CANCELED && pins == 1,
+             "owner close freezes new slots and retains existing borrow");
+done:
+    loom_private_slots_fault_disarm_for_test();
+    loom_private_layout_fault_disarm_for_test();
+    if (l && l->service_slots && ref.incarnation) {
+        spin_lock(&l->lock);
+        if (pinned) (void)loom_slot_unpin(l->service_slots, ref);
+        if (l->service_slots->slots[ref.slot].phase == LSLOT_PROVISIONAL)
+            (void)loom_slot_rollback(l->service_slots, ref);
+        else {
+            (void)loom_slot_retire(l->service_slots, ref);
+            (void)loom_slot_reap(l->service_slots, ref);
+        }
+        spin_unlock(&l->lock);
+    }
+    if (l) loom_unref(l);
+    if (!lp_wait(goal) && !error) error = "slot owner retirement timeout";
+    if (p && !error && (p->as->page_count != base || p->as->private_rings ||
+                        addrspace_ref_count(p->as) != refs))
+        error = "slot page retirement refunds charge and image pin exactly once";
+    if (p) test_proc_drop(p);
+#undef SO_CHECK
+    return error;
+}
+void test_loom_private_slot_owner(void) {
+    const char *error = loom_slot_owner_fixture();
+    TEST_ASSERT(error == NULL, error);
+}
+
 void test_loom_service_slots(void) {
     const char *slot_error = loom_slots_fixture();
     TEST_ASSERT(slot_error == NULL, slot_error);

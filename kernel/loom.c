@@ -18,6 +18,7 @@
 #include <thylacine/loom.h>
 #include <thylacine/addrspace.h>
 #include <thylacine/loom_service_pool.h>
+#include <thylacine/loom_service_slots.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -365,6 +366,20 @@ u64 loom_private_retired(void) {
 
 #ifdef KERNEL_TESTS
 static bool g_loom_private_layout_fault;
+static bool g_loom_private_slots_fault;
+
+void loom_private_slots_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_slots_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_slots_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_slots_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_slots_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_slots_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_slots_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_slots_fault, false, __ATOMIC_RELAXED);
+}
 
 void loom_private_layout_fault_arm_for_test(void) {
     __atomic_store_n(&g_loom_private_layout_fault, true, __ATOMIC_RELAXED);
@@ -383,11 +398,13 @@ static bool loom_private_layout_fault_take(void) {
 }
 #else
 static inline bool loom_private_layout_fault_take(void) { return false; }
+static inline bool loom_private_slots_fault_take(void) { return false; }
 #endif
 
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
     // Taken before any refusal, so a shot armed for this call cannot outlive it.
     bool layout_fault = loom_private_layout_fault_take();
+    bool slots_fault = loom_private_slots_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -397,21 +414,29 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     // attributes its ring's slab descriptor for as long as ring mappings live.
     _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
     _Static_assert(sizeof(struct Burrow) <= PAGE_SIZE, "descriptor page attribution bounds object");
-    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom));
+    // Reserve an entire buddy page for the 1552-byte identity ledger. Charging
+    // that physical page avoids pretending shared slab occupancy is exact.
+    // No allocator work under as->lock; unwind frees storage BEFORE its refund.
+    _Static_assert(sizeof(struct loom_slot_table) <= PAGE_SIZE, "slot ledger page");
+    _Static_assert(PAGE_SIZE > SLUB_MAX_OBJECT_SIZE, "slot page uses buddy kmalloc");
+    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u;
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
     bool charged = addrspace_charge_pages(as, metadata + backing, exempt);
     spin_unlock(&as->lock);
     if (!charged) { addrspace_private_end(as); return NULL; }
-    struct Loom *l = layout_fault ? NULL : loom_create_layout(sq, cq, exempt, receipts);
+    struct loom_slot_table *slots = slots_fault ? NULL : kmalloc(PAGE_SIZE, KP_ZERO);
+    struct Loom *l = (!slots || layout_fault) ? NULL : loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
+        kfree(slots);
         spin_lock(&as->lock);
         addrspace_uncharge_pages(as, metadata + backing);
         spin_unlock(&as->lock);
         addrspace_private_end(as);
         return NULL;
     }
+    l->service_slots = slots;
     l->service_as = as;
     l->service_creator = p->stripes;
     l->service_metadata_pages = metadata;
@@ -425,6 +450,7 @@ void loom_exec_latch(struct Loom *l) {
     if (!loom_is_private(l)) return;
     spin_lock(&l->lock);
     l->service_closing = true;
+    loom_slots_close(l->service_slots);
     spin_unlock(&l->lock);
 }
 
@@ -465,6 +491,16 @@ static void loom_private_destroy(struct Loom *l) {
         extinction("private Loom reached legacy cleanup state");
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
         if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
+
+    // The engine must retire every record before handing its last owner ref to
+    // this queue. Today no service handler admits records; fail closed if an
+    // internal caller violates that boundary, rather than freeing live borrows.
+    if (!l->service_slots) extinction("private Loom lost slot storage");
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
+        if (l->service_slots->slots[i].phase != LSLOT_FREE ||
+            l->service_slots->slots[i].pins)
+            extinction("private Loom retained a service slot");
+    kfree(l->service_slots);
 
     // One settled drop rather than claim / drop / restore. The refund is decided
     // inside the same v->lock interval that decides whether this drop ends the

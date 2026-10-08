@@ -1265,3 +1265,41 @@ fixture success does not close them. Guest final allocator reclamation and
 Pi/A72/KVM remain open; host destruction controls remain separately bounded.
 Self-review only, no independent audit. Continue private owner integration before
 MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.
+
+
+## October 8: charged slot storage attached to the private owner (runtime pending)
+
+Private construction now precharges one additional buddy page, allocates it zeroed
+for the1552-byte slot ledger, and publishes it only with a fully constructed Loom.
+Allocation failure and downstream layout failure free acquired storage before
+refunding and dropping the exact image pin. Close freezes ledger admission under
+the existing Loom lock. Final retirement requires all records FREE and unpinned,
+frees the page outside locks, then follows the existing ring settlement and
+metadata refund ordering. Internal users must retain their Loom reference across
+slot calls/borrows. No service handler is enabled: the future engine must retire
+its records before releasing its last owner reference, or the guard fails closed.
+Pool storage, authority, parent scopes, terminal/payload gates and workers remain
+next integration work; this is not a complete service engine.
+
+Native linked DWARF measures Loom2864bytes (one buddy page) and the slot ledger
+1552bytes (one deliberately whole-page allocation). Base private metadata is now
+two pages; ring backing plus conservative Burrow descriptor attribution stays
+separate. Legacy Loom storage gains one pointer but stays in its existing buddy
+order. See astra-takeover/slot-owner-layout.json and retained DWARF output.
+
+Self-review and actual-source host ASan/UBSan: slot-owner-20261008T222200Z has
+8 controls (success, six refusals, busy-retirement guard) and7 exact-site mutants
+for charge, unwind free/refund/pin, retirement free, close freeze and busy guard.
+Every mutant fails precisely its named assertion. final-reclaim-20261008T222206Z
+passes both owner-drop orders and five omitted-release controls, now including
+slot-page free. Host geometry/Loom/image/lock/allocator doubles bound these
+results; they are not guest physical accounting or concurrency proofs. Intentional
+mutant leaks are process-bounded with LSan disabled, ASan/UBSan still enabled.
+
+Existing lifecycle model passed5828 states and all7 named buggy verdicts
+(slot-owner-model-20261008T2220Z). Real ARM syntax and native kernel linking pass.
+New separate loom.private_slot_owner fixture covers allocation refusal, downstream
+rollback, exact charge, close with held borrow and final refund; expected suite
+count1838. Runtime/full Mac gate is still pending on this changed source; the
+50-boot1837 result applies only to ceac7f380. This is self-review only. Preserve
+all activation guards, Main boundary, guest final-allocator/Pi residuals and128MiB.

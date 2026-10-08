@@ -1,0 +1,11 @@
+--- control
++++ omit-slot-free
+@@ -360,7 +360,7 @@
+         if (l->service_slots->slots[i].phase != LSLOT_FREE ||
+             l->service_slots->slots[i].pins)
+             extinction("private Loom retained a service slot");
+-    kfree(l->service_slots);
++
+ 
+     // One settled drop rather than claim / drop / restore. The refund is decided
+     // inside the same v->lock interval that decides whether this drop ends the

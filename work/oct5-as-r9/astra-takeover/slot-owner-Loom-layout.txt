@@ -1,0 +1,43 @@
+build/kernel/thylacine.elf:	file format elf64-littleaarch64
+
+0x00038356: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)
+
+0x000411e6: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)
+
+0x00054350: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)
+
+0x000ca43b: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)
+
+0x001a31af: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)
+
+0x001e7685: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)
+
+0x00231f47: DW_TAG_structure_type
+              DW_AT_name	("Loom")
+              DW_AT_byte_size	(0x0b30)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h")
+              DW_AT_decl_line	(400)

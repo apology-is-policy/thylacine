@@ -1481,3 +1481,10 @@ input hashes and100 logs verified; minimum recorded admission10757MiB. Detailed
 provenance and remaining caller/engine/guest-allocator obligations are in the
 latest pickup and astra-takeover/current-gate-20261008T213148Z-result.json.
 No activation or Main landing; retain128MiB protection. Self-review only.
+
+
+Charged slot-owner storage now implemented after the ledger qualification: one
+private-only buddy page, admission rollback, lock-serialized close and guarded
+retirement. Host controls and native linking pass; guest runtime for this changed
+source is PENDING. See the latest pickup for exact evidence and remaining engine
+obligations. No service handler or private setup mode has been activated.

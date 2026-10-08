@@ -7,7 +7,8 @@
 // Close serializes against reserve/publish/pin, while rollback/unpin/reap still
 // progress without a peer response. No pointer escapes and no callback runs.
 // Mirrors the identity/borrow subset of specs/loom_service.tla, not its complete
-// request/terminal/accounting machine. Not yet installed on a production Loom.
+// request/terminal/accounting machine. Private owner storage is charged, while
+// service handlers and protocol admission remain disabled.
 #include <thylacine/loom_service_slots.h>
 #include <thylacine/errno.h>
 

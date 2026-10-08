@@ -22,7 +22,9 @@ _Static_assert(sizeof(struct loom_slot_table) == 1552, "shared slot table ledger
 // This ledger owns identities/borrows only. The engine still owes native target
 // authority, parent-scope pins, terminal/local retirement and payload retention
 // checks BEFORE retiring/reaping records, and resource destruction after unlock.
-// It is not yet attached to Loom, charged, or reachable from a syscall.
+// Private Loom owns a charged page containing this ledger. It is not reachable
+// from a service syscall yet. Every caller retains the owning Loom throughout
+// its calls and borrows; the final owner may retire only an empty ledger.
 int loom_slot_reserve(struct loom_slot_table *, u32 kind, struct loom_service_ref *);
 int loom_slot_publish(struct loom_slot_table *, struct loom_service_ref);
 int loom_slot_rollback(struct loom_slot_table *, struct loom_service_ref);

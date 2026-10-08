@@ -213,3 +213,9 @@ bounded identity/borrow state, not private-engine activation or caller locking.
 The registration increases the source-derived denominator by one. The older
 50-boot 1836-test record remains historical; subsequent records must derive the
 count from their exact source and observe this entry's verdict separately.
+
+
+The subsequent private-owner integration adds `loom.private_slot_owner`, testing
+actual page allocation, charge/refusal rollback, close with a retained borrow and
+retirement refund. The denominator increases by another one; derive it from the
+qualified source. This entry does not enable public service registration.

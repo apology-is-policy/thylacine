@@ -1,0 +1,24 @@
+{
+  "source_sha256": {
+    "specs/loom_service.tla": "79c3ed474dec56fe955c40d16c9791cfe1e8f668956f9100550d0d9a0551666e",
+    "specs/check-loom-service.py": "1f349240c8262840e7ade935f795c0532fcd6a7e5a191598d08bf45efab6b6eb",
+    "specs/loom_service.cfg": "bead6101d372bdc644fab1065cf77b9620be32efb1e939c2840190ed4c812907",
+    "specs/loom_service_buggy_cqfull.cfg": "5a28f468172fc9c9aa58e7c89598ba7b1697a5412418ab559d485f4f2bd2042e",
+    "specs/loom_service_buggy_double.cfg": "929a84c0c8dac1422bde6685cb18e445d7eb7ac7d47ffe0ec20813f050a2cd2c",
+    "specs/loom_service_buggy_earlyfree.cfg": "139de6f234429224d10d479d90635692f8092457d8f5c887a44c55ed237d1d96",
+    "specs/loom_service_buggy_late.cfg": "57c9f65ce5fe5efdf205275f8dae1ab127457d2fa88dcb6fc01c69dd0b9a8b76",
+    "specs/loom_service_buggy_peerwait.cfg": "ad2e45dc23a158c541d773c05e693ffd1b76f0de1aced1e99f16fea324f6f913",
+    "specs/loom_service_buggy_refund.cfg": "900cc60603f0baa5cf4f62cde77b3b00a225c7bdc00fa43ebce60c4dce6aa352",
+    "specs/loom_service_buggy_reuse.cfg": "1f9e3dc6fd7a061d44f1275eb42bd27d63adc5a27d8aa97a8746ceecd196b41a"
+  },
+  "log_sha256": {
+    "cqfull.log": "7f55d073f72208f3555d1bf7deaef8bad1b59ad5d176a31b9e50cbc2a0819f32",
+    "late.log": "433386e750d4d59ce23ac394206029f075bcaa0c7c76396fe36d960009992153",
+    "peerwait.log": "cf2dc1d82b1b53b353c42d8fe653c03f6da391d0e1dcf1c35a0bbe889885f9f4",
+    "reuse.log": "7bcd8ad123ed9be6940f2fa24c8b2c148ff0d8c34d9ff7a95d405d9728f53376",
+    "clean.log": "2cae42eb9e3a4646345263503bc8c1eac7679289e955fc65a0fbcb72427660e5",
+    "earlyfree.log": "4b3d99af2ba8e37601b0990a3cfe8e83f86eef6edec3198d3042cb683cc93366",
+    "refund.log": "85bb7f2534095f850a31365f69afdbea8ab99b2a1c300f8908e5f15f0e91fc46",
+    "double.log": "a71e8e645d210b8dbf2cd3b4d96d098ffae45356310c67e00c68a8331e186033"
+  }
+}
