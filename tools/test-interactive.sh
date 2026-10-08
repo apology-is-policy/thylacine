@@ -549,9 +549,14 @@ run_one_scenario() {
         # inside the .exp itself, so the wrapper's value is simply wrong for
         # them -- and a timings table whose accel column is wrong is worse than
         # one with no accel column, because it invites exactly the tcg-vs-hvf
-        # comparison the column exists to prevent. lib.exp records the resolved
-        # value in the steps file at boot ("BOOT vm accel=<x> ...").
-        att_accel="$(grep -ha -o 'accel=[a-z]*' "$steps" 2>/dev/null | head -1 | cut -d= -f2)"
+        # comparison the column exists to prevent. The authority is run-vm.sh's
+        # own "==> qemu: accel=<x>" line in the transcript: it is printed after
+        # the fallback (hvf unavailable on a Linux host -> tcg). The steps file
+        # holds only what the .exp ASKED for ("BOOT spawn accel=<x>"), so it is
+        # the fallback for a transcript without the line (the sock transport
+        # sends run-vm's stderr to its own log).
+        att_accel="$(grep -ha -o '==> qemu: accel=[a-z]*' "$transcript" 2>/dev/null | head -1 | sed 's/.*accel=//')"
+        [[ -z "$att_accel" ]] && att_accel="$(grep -ha -o 'accel=[a-z]*' "$steps" 2>/dev/null | head -1 | cut -d= -f2)"
         [[ -z "$att_accel" ]] && att_accel="$THYLACINE_ACCEL"
         reap_slot "$slot"
         # 77 is the conventional SKIP code: the SCENARIO decided it cannot run
