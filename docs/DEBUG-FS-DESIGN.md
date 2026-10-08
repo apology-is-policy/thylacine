@@ -516,10 +516,12 @@ load-bearing, not residual. (Corrected 2026-09-24, audit F3.)
 ### 3.3 The image join, and the debug taint (2026-09-24)
 
 > **Every guard on a Proc's IMAGE is evaluated over the whole set of Procs that
-> MAP that image.** Cover must cover every mapper; `NOTRACE` on any mapper
-> refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
-> mapper; and a Proc whose image was ever under debug control, or that is still
-> shared, never gains authority again.
+> MAP that image, or ever have.** Cover must cover every mapper; `NOTRACE` on any
+> mapper refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
+> mapper; a holder that leaves the image leaves its caps and its seal and taint
+> bits in the image's record, which only exec's fresh space starts without; and a
+> Proc whose image was ever under debug control, or that is still shared, never
+> gains authority again.
 
 **The defect.** The cover rule, both seal bits and the taint are per-`Proc` facts.
 The thing they guard is not: the image — the memory, and the layout of it — lives
@@ -581,9 +583,11 @@ flag: a switch that cleared the taint would be the bypass.
 **Only the taint crosses fork; the seals deliberately do not, in either shape.**
 Under `RFMEM` the child maps the sealed bytes, so inheriting looks right — but the
 join already refuses every attach to it and every `mem`/`maps` read of it, by
-reading the parent's bit at the moment of the access (including for a child that
-was still mid-`rfork` when the parent sealed, which the stamp's traversal cannot
-see). Inheriting as well would buy nothing and cost something real: the bit is
+reading the parent's bit at the moment of the access while the parent holds the
+image (including for a child that was still mid-`rfork` when the parent sealed,
+which the stamp's traversal cannot see), and the image's record once the parent
+has left it (below; until 2026-10-08 nothing carried the bit past the parent's
+reap). Inheriting as well would buy nothing and cost something real: the bit is
 one-way, so it would outlive the sharing and leave the child permanently
 undebuggable after it execs onto an image the seal was never about. For a COW
 fork the child gets a private *copy*, and whether a copy of a secret is itself
@@ -592,19 +596,41 @@ accident. The taint is the opposite case and must cross: after the child execs
 there is no sharing left for the join to read, so only a copied bit still carries
 the history.
 
-**A code alias carries `CAP_JIT` in the join (B-2b audit r2, 2026-10-07).** A code
-region is the authority `CAP_JIT` confers, held by the image rather than by a Proc:
-`rfork(RFPROC|RFMEM)` hands it to a child born without the cap (I-2), and the child
-keeps it once its creator is reaped. From then on no mapper's `caps` word names it, so
-a capless same-principal peer would cover the child, take total control of a
-writer/exec pair (I-42) and see where it lies (`maps`). So the join ORs `CAP_JIT` into
-its caps while the address space holds any code alias (`AddrSpace.code_vmas`, kept by
-the VMA list's own insert and remove), sole mapper or not. The count has to be right
-only once the creator is gone: the creator's own exit publishes it a ZOMBIE under
-`g_proc_table_lock` after its store, a reap can only follow that, and the join runs
-under the same lock. Until then the creator, which passed the `CAP_JIT` gate, is a
-mapper the cover already weighs. A fork refuses a code region outright (the clone classifier), so `RFMEM` is
-the only way to inherit one.
+**The image records every holder that has left it (operator vote 2026-10-08,
+`dec-2026-10-08-image-holder-record`).** Authority over an image does not end with
+the Proc that held it. An `RFMEM` child, carved below its parent (I-2), keeps the
+parent's image after the parent is reaped, and from then on no mapper's word names
+what the parent held. Three things leaked that way: a code region, which is
+`CAP_JIT`'s authority (B-2b audit r2 closed that one alone, by counting code
+aliases); an MMIO, DMA or PCI BAR window, which is the I-34 allowance's (B-2b audit
+r3 F3: L-3 keeps a shared space's device mapped for the surviving sharer, so a
+capless same-principal peer covered the child and wrote the device through its
+`mem`); and a seal, since seals do not cross fork while the secret the seal kept is
+still in the shared bytes. So the `AddrSpace` keeps `caps_ever`, the OR of the caps
+of every holder that has left it, and `guards_ever`, the OR of those holders'
+`NODUMP`, `NOTRACE` and `DEBUG_TAINTED` bits, and the join ORs both in, sole mapper
+or not. Live holders, zombies included, are the walk; holders that have left are
+the record; the union is every Proc that has ever held the image.
+
+A holder leaves at exactly three points, and each records: its ZOMBIE transition
+(`proc_become_zombie_locked`), its exec onto a fresh space (`proc_exec_replace`'s
+swap), and `proc_free` (the rollback and orphan paths that never pass the ZOMBIE
+transition). The first two run under `g_proc_table_lock`, the lock every join reads
+the record under, so the record needs no ordering argument of its own; and the
+ZOMBIE transition records before any reap can unlink the Proc, which closes the
+reap-window miss named below. A live Proc's caps only grow (every write is a
+`fetch_or`, and a legate scope ends by tearing its members down, not by clearing
+bits), so the caps a holder carries when it leaves are every cap it held.
+
+The record is never cleared: only exec's fresh space starts without one, which is
+Linux's per-mm dumpability (`MMF_DUMPABLE` lives in `mm->flags`, `commit_creds`
+lowers it when credentials gain privilege, `__ptrace_may_access` refuses it without
+`CAP_SYS_PTRACE`, and only exec's new mm resets it). A COW child's space is a new
+one, so the record does not cross fork: whether a copy of a secret is itself
+secret is still decision A. The record replaced the code-alias count, because a
+code region's creator passed the `CAP_JIT` gate and is recorded when it leaves. The
+cost, voted: an orphan stays out of a lesser peer's reach for as long as it keeps
+the image, even after the aliases or the windows are gone.
 
 **What this does NOT close.**
 
@@ -616,15 +642,20 @@ the only way to inherit one.
   silent, unbounded-lifetime effect of an ungated syscall, and it is the price of
   the seal binding every door. A sealed parent also can no longer read its own
   vfork child's `mem`: surprising, harmless.
-- **A sealed Proc in the reap window** (unlinked, not yet freed) is missed by the
-  traversal, so its bit does not reach a live sharer's gate for those few
-  instructions. Closing it needs the unlink and the free to be one atom, which is
-  a lifecycle change and not this chunk.
+- **A sealed Proc in the reap window** (unlinked, not yet freed) was missed by the
+  traversal, so its bit did not reach a live sharer's gate for those few
+  instructions. CLOSED 2026-10-08 by the image's record: the ZOMBIE transition
+  writes the bit into the space before any unlink, and the join reads the record
+  sole mapper or not.
 - **The non-capability authority axes.** The join unions `proc_flags` but reads
   only the seal and taint bits from it, so §3.1's third bullet stands unchanged:
   cover still weighs one `caps` word and not the spawn perms, the I-34 allowance,
-  or the handle table. (A code alias is the one such authority it does weigh, as
-  `CAP_JIT`: above.)
+  or the handle table. The image's record weighs those only through the caps of
+  the Procs that held them: a code region's creator held `CAP_JIT` and an I-34
+  window's driver held `CAP_HW_CREATE`, so an orphan stays as far from a capless
+  peer as its creator was. Which device an allowance names is still not weighed: a
+  peer whose caps cover the driver's covers its orphan, exactly as it covers the
+  live driver.
 
 ## 4. 8a-1 — the software-checkpoint tier
 
