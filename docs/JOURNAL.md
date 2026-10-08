@@ -207,6 +207,74 @@ pageout must keep.
 
 Next: red-first sabotages, the audit round, and the SMP subset.
 
+### XT-3b audit round 1, and what the first sabotage run taught
+
+**Round 1** (Fable 5.1 at max effort, start == end, on `dec9cd55`) returned
+0 P0, 0 P1, 0 P2 and 7 P3. Those are fixed in `3638a075`; the closed list is
+`memory/audit_xt3b_closed_list.md`. Three findings changed the design rather
+than the prose.
+
+- **F1, the gauge dip.** The reap detached a Thread in one hold and folded its
+  stack depth in a later one, so a `/ctl/kstack` reading in between lost the
+  Thread. The dossier had excused this as "a floor for an instant", which is
+  exactly the trap ARCH 8.12 names. The reap is now claim-then-commit:
+  - the claim marks `reap_claimed` and leaves the Thread on `p->exited`;
+  - the commit folds `run_ns` and the depth and unlinks the Thread, all in one
+    hold.
+
+  `proc.thread_reap_gauges` reads both gauges between the two halves, and the
+  model gained `BUGGY_UNLINK_AT_CLAIM` -> `EveryThreadCounted`.
+- **F2, the tail called non-preemptible.** The reviewer's premise was half
+  wrong. They said the EL0 fault path runs with IRQs on; I checked, and it is
+  masked (only the SVC body unmasks). But the conclusion pointed at a real
+  hole: the `userland_enter` die-check runs with IRQs on and outside a syscall,
+  and `preempt_check_irq` gated only on `preempt_count` and `in_syscall`. An
+  EXITING thread switched out there is gone for good. `sched()` never
+  re-enqueues EXITING, so its clear-child-tid wake is lost, and for a last
+  thread out so are the /srv, /cap and weft cleanups. That predates XT-3b
+  (task #20). `preempt_check_irq` now refuses an EXITING thread.
+
+  Before trusting the gate I listed every write of `THREAD_EXITING` in the
+  tree. Every one is followed by the thread's own `sched()`; none spins,
+  waiting to be preempted. So the gate cannot pin a CPU.
+- **F4, the model's gaps.** The model had no bound and no reap obligation: a
+  design that never reaps was also green. It now models the two-phase claim and
+  has `ClaimsHeldByLive` and the action property `ClaimTakesAllSettled`. Both
+  were checked to fire on a sabotaged copy before I trusted them. The header
+  now says what the model cannot state: the about-2x-CPUs bound is a per-CPU
+  argument, and the model has no CPUs.
+
+**A correction to the entry above.** It said a FILE VMA is never writable
+because "`fault.c:429` refuses the write before any page-in". That line is the
+generic protection check. The property is held at four creation and raise
+sites, now listed in `seam-exiting-tails-never-sleep`:
+- exec's `file_shareable` gate;
+- `vivarium_mmap_file_decide`;
+- the VMA prot ceiling, which `burrow_protect` will not raise past;
+- the spin-only lazy-anon and COW arms.
+
+**The first sabotage run hung instead of failing.** Sabotage A had two changes:
+no retire, and a reap that ignores `on_cpu`. It ran 2400 s and timed out at
+`thread.exit_self_marks_exiting`. The two waits I had rewritten to poll
+`thread_count` were unbounded `sched()` loops, so with the retire gone they
+spun forever and hid every later test. They now use `TEST_YIELD_UNTIL_PROC`,
+so the same regression fails by name. A sabotage that only times out proves
+little: it says something is red, not that the right thing is.
+
+**Verification of `3638a075`.** The default suite passes 1961/1961, and at boot
+`/thread-torture` printed `ok (1553 spawns, live threads 1)`. The
+`check-thread-reap.sh` configs all give their claimed verdicts, with clean
+counts of 808 and 5,496.
+
+One reading needs explaining: `boot-wc` TOTAL max_ms is 5,493 here. The pre-fix
+runs read 1,070 (default) and 5,473 (UBSan), so it predates the change. But
+TICKLESS-IDLE.md says a starved periodic park ends within 1 ms, which these
+numbers contradict, so it is queued to be measured (task #23) rather than
+waved off.
+
+Round 2 (Fable, on the fixes themselves) is running, and the sabotage A' run
+(the same two changes, on the new code) is in flight.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 

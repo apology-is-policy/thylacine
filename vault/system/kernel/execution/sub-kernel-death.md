@@ -650,10 +650,13 @@ so no `wait_pid` can reach the same Threads, and `wait_pid` extincts if a
 zombie's retired list holds a claimed Thread.
 
 **The bound** on the retired-but-allocated set rests on two premises. Every exit
-reaps first. And the stretch from a Thread's reap to its settle never sleeps and
-is never switched out involuntarily: up to the commit it is a syscall body
-(`in_syscall`) or an IRQ-masked exit path, and after it the tail is EXITING,
-which `preempt_check_irq` refuses to preempt (XT-3b audit F2; task #20, below).
+reaps first. And for a Thread that retires, the stretch from its reap to its
+settle never sleeps and is never switched out involuntarily: up to the commit
+it is a syscall body (`in_syscall`) or an IRQ-masked exit path, and after it the
+tail is EXITING, which `preempt_check_irq` refuses to preempt (XT-3b audit F2;
+task #20, below). The last Thread out may sleep in the #68 close window between
+its reap and its commit, but it becomes the zombie rather than retiring, and no
+live peer is left to retire meanwhile.
 So each CPU holds at most one Thread in that stretch, and at most one per CPU has
 settled since the last claim: about twice the CPU count per Proc. Two residues
 stay within `PROC_THREAD_MAX`. A dying group whose Threads exit together leaves
