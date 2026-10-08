@@ -13,12 +13,6 @@
 #include <thylacine/addrspace.h>
 #include "../../arch/arm64/uart.h"
 #include <thylacine/vma.h>
-// The release witness below needs the physical-page gauge and its magazine
-// drain, which live in the mm internals rather than in kernel/include -- the
-// same two headers test_slub.c includes for the same instrument. Taking the
-// real declarations rather than hand-writing externs: a prototype copied by
-// hand is one that can drift from the definition without anything noticing.
-
 // A VA for the surviving-mapping leg, clear of the 0x140000000 range the
 // SQPOLL fixtures in this file use.
 #define LP_RING_VA 0x150000000ull
@@ -52,6 +46,8 @@ static bool lp_wait(u64 target) {
 static const char *loom_private_fixture(void) {
     const char *error = NULL;
     struct Proc *p = test_proc_make();
+    struct Proc *tight = NULL;
+    struct Loom *refused = NULL;
     struct Loom *l = NULL;
     struct Handle borrow = {0}, second = {0};
     struct AddrSpace *pin = NULL;
@@ -82,6 +78,30 @@ static const char *loom_private_fixture(void) {
     LP_CHECK(charged == initial + l->service_metadata_pages +
                         (u32)burrow_backing_pages(l->ring_size) + 1u,
              "ring and metadata charged before publication");
+
+    // Charge refusal: the guard addrspace_private_begin took must be released
+    // on the refusal, BOTH halves of it. A leaked guard also holds a lifetime
+    // reference, so the final drop's private-ring check never runs and nothing
+    // else would notice; a split defect could clear the count and keep the
+    // reference, so the reference is checked on its own. Every precondition
+    // that routes this call to the charge branch is asserted, and the bound is
+    // checked against the admission just measured above, not a hand count: the
+    // same geometry was admitted on p, so only the cap differs.
+    tight = proc_alloc_in(NULL, 1);
+    LP_CHECK(tight && tight->as, "budget-bound creator allocated");
+    u32 tight_initial = tight->as->page_count;
+    int tight_refs = addrspace_ref_count(tight->as);
+    LP_CHECK(addrspace_owner_count(tight->as) == 1 && !tight->as->private_rings &&
+             !proc_resource_exempt(tight),
+             "budget-bound creator is a fresh, single-owner, non-exempt image");
+    LP_CHECK(tight_initial + (charged - initial) > tight->as->page_budget,
+             "the bound cannot cover the admission it must refuse");
+    refused = loom_create_private(tight, 2, 2, true);
+    LP_CHECK(!refused, "over-budget private owner refused");
+    LP_CHECK(tight->as->page_count == tight_initial && !tight->as->private_rings &&
+             addrspace_ref_count(tight->as) == tight_refs &&
+             addrspace_owner_count(tight->as) == 1,
+             "refused charge leaves no guard, reference or charge");
 
     bool shared = addrspace_try_ref(p->as);
     if (shared) addrspace_unref(p->as);
@@ -330,6 +350,14 @@ done:
     if (error) { uart_puts("after-check-failure: "); uart_puts(error); }
     else uart_puts("normal-fallthrough");
     uart_puts("\n");
+    if (refused) loom_unref(refused);
+    // A refusal that leaked its whole guard is released here, so the defect
+    // fails its own assertion and cannot outlive the leg into later tests. A
+    // reference leaked WITHOUT the count is not repaired; it leaks the space,
+    // which is the safe direction.
+    if (tight && !refused && tight->as && tight->as->private_rings)
+        addrspace_private_end(tight->as);
+    if (tight) test_proc_drop(tight);
     if (p) test_proc_drop(p);
     if (!lp_wait(goal) && !error) error = "private fixture cleanup retirement timed out";
     if (pin) addrspace_unpin(pin);

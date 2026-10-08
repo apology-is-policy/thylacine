@@ -1456,3 +1456,40 @@ work/oct5-as-r9/reap-leg-control-PINNED-20261007T204646Z/ (moved OUT of
 $PRESERVE_DIR; 9/9 verify, width taken from the stored prefix). The OLD control
 receipt and the REJECTED-mutant evidence are retained and named in its
 PINNED.txt so neither gets pruned as superseded.
+
+== 2026-10-08 05:40Z: CHECKPOINT 1's CHARGE-REFUSAL LEG, AUTHORED AND UNRUN ==
+Section 5 of private-owner-reconciliation.md was ALREADY DISCHARGED by 213b695f8
+(re-verified at fea85b498: loom_private_destroy does one burrow_unref_settled_in,
+zero claim/restore sequences in loom.c, refund consumed from the drop). Do not
+reopen it. The gap was in CHECKPOINT 1: loom_create_private's refusal edges.
+astra t67 APPROVED (a) with these terms, all met in the fixture:
+  - assert the routing preconditions (fresh single owner, non-exempt, the
+    geometry admitted just above, a cap derived from THAT admission's charge);
+  - restore charge AND private_rings AND the lifetime ref (addrspace_ref_count)
+    AND the owner count to baseline -- the ref on its own, because a split
+    defect could clear the count and keep the reference;
+  - attribute RED to the leg's OWN assertion, never to the suite-failed
+    extinction (required to be the ONLY one) or a whole-suite failure;
+  - cleanup safe on both runs: a whole leaked guard is released after the
+    assertion records it, so the mutant cannot carry the leak forward.
+  - the stale "release witness below ... headers" comment is GONE from the
+    fixture top (its includes were removed in a26bc6ab4).
+(b), the layout-allocation unwind: STRUCTURAL ONLY, runtime obligation OPEN.
+  NOT closure and NOT a waiver. After (a) runs, bring astra a minimal,
+  test-only, locally scoped way to force loom_create_layout to fail, with
+  isolation from unrelated allocations and reset on every exit. Do not design
+  a general allocator fault framework.
+Coverage map: work/oct5-as-r9/checkpoint1-coverage.md (DRIVEN / STRUCTURAL /
+  NOT YET REACHABLE / UNRUN, never merged). "Bounded tables" is broader than
+  geometry (ASYNC-SERVICE-LIFECYCLE.md slot reservation + the 64-entry envelope).
+
+RUN IT: sh work/oct5-as-r9/refusal-leg-run.sh   (needs the mac lease; tree clean)
+  Control: 1836/1836, leg PASS in its own block, normal-fallthrough marker.
+  Mutant (one site, loom.c's !charged branch): leg FAIL with EXACTLY
+  "refused charge leaves no guard, reference or charge", marker naming the
+  same check, exactly ONE FAIL in the boot, tally 1835/1836, the only
+  extinction "kernel test suite failed". Anything else is a FINDING.
+  Oracle arms 18/18 off-lease: refusal-oracle-arms-transcript.txt.
+  A fresh control is owed because the fixture changed; the reap-leg pinned
+  control stays as THAT leg's receipt and is not superseded.
+Release sensitivity stays OPEN and distinct. 128 MiB stays. Nothing activated.

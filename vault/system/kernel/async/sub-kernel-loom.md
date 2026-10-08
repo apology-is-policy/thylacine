@@ -992,6 +992,32 @@ are now built by editing REAL boot logs at the leg's own line, every gate in bot
 oracles has one, and two arms are real logs unedited, including the one the first
 oracle called discrimination.
 
+THE ADMISSION REFUSALS, EDGE BY EDGE (2026-10-08, authored and UNRUN). Checkpoint
+1 asks for every refusal and unwind edge before publication, and the fixture drove
+only two of `loom_create_private`'s: invalid geometry (refused before guard and
+charge) and a shared image (the guard is never taken). The charge refusal is now a
+leg. It runs on a fresh space whose cap cannot cover the admission, and asserts the
+preconditions that route the call to that branch: single owner, non-exempt, the
+geometry admitted just above on the default cap, and a bound derived from that
+admission's measured charge, not hand-counted. It then asserts that the charge, the
+private-ring count AND the lifetime reference all return to baseline. The reference
+is checked on its own because a leaked guard also holds one: the final drop's
+private-ring check never runs, the leak is otherwise silent, and a split defect
+could clear the count and keep the reference (astra, yip 0161 t67). Its RED is a
+confined one-site mutant, deleting `addrspace_private_end` from the `!charged`
+branch only. It is attributed to the leg's OWN assertion: the exact verdict, and
+the fixture's `after-check-failure` marker naming the same check. The resulting
+`kernel test suite failed` is required to be the ONLY extinction and is never
+accepted on, because any FAIL produces it. The fixture's cleanup releases a whole
+leaked guard after the assertion records the failure, so the mutant cannot carry
+the leak into later tests. The oracle's 18 arms pass off-lease, built from real
+guest logs including a retained real FAIL of this fixture. The guest run is owed.
+The layout-allocation unwind (`loom_create_layout` failing after the charge:
+uncharge, then `addrspace_private_end`) is STRUCTURAL ONLY and its runtime
+obligation stays OPEN. `kernel/` has no allocation fault seam. A minimal,
+test-only, locally scoped one is owed for review, not assumed. Neither edge bears
+on the retirement's release half, which stays open.
+
 THE BOUNDARY, which the header states and this dossier repeats because a reader
 of the vault may never open the header: scheduling is FORCED here. Handles are
 opened and closed directly and the fixture waits on a counter, so nothing in it
