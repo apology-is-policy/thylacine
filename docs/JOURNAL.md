@@ -22,6 +22,54 @@ needed the operator.
 
 
 ---
+## 2026-10-08 (main, Opus 5.5, effort max) -- exec resets the image's devices; the last reference resets what is mapped (landed)
+
+**What the run is for.** vmaguard's audit r2 left a lead (OPEN-BUGS 10-08 (a)):
+exec drained the old address space with no device reset. Read in the code it
+held: `sys exec` -> `proc_exec_replace` -> `addrspace_unref(old)`, and the only
+callers of `proc_quiesce_owned_devices` were the two death sites. A driver that
+maps a DMA buffer and closes its descriptor holds the buffer only by the mapping
+(a `KObj_DMA` chunk frees when the last of its handle and Burrow references
+drops), so an exec freed it while the device that had been handed its address
+could still be armed: RW-7 R3-F1 on exec instead of death. Linux's answer (VFIO
+pins DMA pages to the device container, not the mm) is the R3-F8 device-session
+model, P5+. I asked the operator with that research; **the vote (12:41Z): exec
+resets the image's devices** -- death's two walks, when the old space is the
+exec'ing Proc's alone.
+
+**The self-audit found the walk could be skipped by anyone.** Writing exec's call,
+I asked who else reads "am I the last holder" before dropping. Every departing
+holder does: a dying Proc reads the count at its exit close and again at its
+reap, and drops its reference only at the reap. Two holders leaving at once can
+each read the other's reference and both skip the mapped-device walk; the last
+drop then drains with the device armed. That was already true of two concurrent
+reaps, and exec made a third way in. So the mapped-device walk moved to the one
+point no interleaving skips -- the last reference, inside the teardown, before
+`vma_drain_in` -- and exec runs the handle-table walk. The exit close keeps its
+own walk, because a buffer held only by a handle frees at that close, before any
+drain.
+
+**Audit r1 (Fable 5.1): 0/0/0/6, clean -- but its F1 changed the shape.** Exec's
+walk was still gated on READING the count as 1, so a sibling's reap racing the
+exec could take the last reference after the exec read two. `addrspace_unref`
+became `addrspace_release` (drop; true when it was the last) plus
+`addrspace_destroy`, and exec runs its walk exactly when its own drop is the
+last, between the two. F2 caught that the test could not see the walk's ORDER
+against the drain (moving it after the drop stayed green); a monotonic teardown
+stamp now orders them. The rest were prose (the PCI re-claim needs every IRQ
+descriptor closed too, and no hostmem client mapping a BAR), test hygiene, and a
+recorded over-approximation (an unreaped zombie sibling counts as a holder).
+
+**Audit r2 (Fable 5.1) on the restructure: 0/0/0/3, clean.** Its F-A corrected my
+record of the residual: on a shared exec the drain frees nothing, but the exec's
+own close-on-exec sweep still frees a buffer held only by a close-on-exec
+descriptor, with no reset -- death has no such gap because its walk runs
+ungated. By the vote that stays a residual (a driver setting close-on-exec on a
+buffer its device holds is releasing what the device uses), now recorded with its
+true trigger, and the audit row names what no test can reach.
+
+**RED and the land gates.** RED in the primary tree detached at the pre-rebase tip e440613e3, 13:57-14:07Z: base 1965/1965. S1 (exec's walk deleted), S2 (exec's gate always true) and S6 (exec's walk moved after the teardown) went red exactly at their predicted lines. S3 (the drain's walk deleted), S4 (the holder's == 1 gate dropped) and S5 (walk (b) over the current Proc's space) went red at their predicted first lines too, but also took down seven userspace virtio driver tests, `driver_crash_recovery` and `mmio_handle.virtio_mmio_claimable` ("virtio-mmio bank claim failed"). That was my tests, not the kernel: `TEST_EXPECT_EQ` returns on failure (test.h:86), and the last-unref test plus the two inherited death tests released their claim on the empty virtio page on their last line, so a failing assert left the page claimed for everything after it. Under S5 the inherited death test leaked first, and the exec test then failed earlier than predicted ("the child ran its three execs": the child's create was refused on the held page). Fable's r1 F4 had named the setup-path leak; I fixed that and missed the final-assert path, the M-PIN on fixtures released on a test's last line, recurred. 8db06b56c makes all three take every reading, release, then assert. The rerun, 14:09-14:14Z: S3 red at the exec test's mapping line and the last-unref line, S4 red at the control line only, S5 red at the death test's VMA-only line, the exec test's mapping line and the last-unref line, with no driver collateral; green 1965/1965. I then rebased the branch onto main 41ad15031 (weftpark) so the gated tree is the landed one; the patch is line-identical. Land gates on the rebased 8fbaa39d0: suite 1966/1966 (weftpark's 1964 plus the two new tests); test-fault 8/8 PASS; ci-smp-gate 50/50 across default smp1/4/8 and UBSan smp4/8, no corruption (14:16-15:37Z).
+
 ## 2026-10-08 (main, Opus 5.5, effort max) -- the live weft reaper never sweeps a test's binding (landed)
 
 **What the run is for.** vmaguard's audit r2 (F4) noticed that the G-3 reaper
