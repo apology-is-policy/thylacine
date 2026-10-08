@@ -235,21 +235,22 @@ void test_virtio_proc_death_quiesces_device(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
 
     struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
-    TEST_ASSERT(km != NULL, "kobj_mmio_create over an empty virtio page");
-
-    hidx_t h = handle_alloc(p, KOBJ_MMIO,
-                            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km);
-    TEST_ASSERT(h >= 0, "handle_alloc(KOBJ_MMIO) consumes the create ref");
+    // handle_alloc(KOBJ_MMIO) consumes the create ref on success.
+    hidx_t h = km ? handle_alloc(p, KOBJ_MMIO, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km) : -1;
+    if (km && h < 0) kobj_mmio_unref(km);
 
     // The crux: walk(handles) -> match(PA range) -> virtio_reset, counted.
-    int n = proc_quiesce_owned_devices(p);
-    TEST_EXPECT_EQ(n, expected,
-                   "proc death resets every virtio slot in the held range");
+    int n = h >= 0 ? proc_quiesce_owned_devices(p) : -1;
 
-    // proc_free re-runs the quiesce (harmless re-reset) then handle_table_free
-    // -> kobj_mmio_unref releases the claim. Mirrors drop_test_proc.
+    // Released before any assert -- an assert returns, and a claim left held
+    // fails every later claim on the bank. proc_free re-runs the quiesce (a
+    // harmless re-reset), then handle_table_free -> kobj_mmio_unref releases it.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+
+    TEST_ASSERT(h >= 0, "kobj_mmio_create + handle_alloc(KOBJ_MMIO) over an empty virtio page");
+    TEST_EXPECT_EQ(n, expected,
+                   "proc death resets every virtio slot in the held range");
 }
 
 void test_virtio_proc_death_quiesces_vma_only_device(void) {
@@ -266,30 +267,30 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
 
     struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
-    TEST_ASSERT(km != NULL, "kobj_mmio_create over an empty virtio page");
-
-    struct Burrow *b = burrow_create_mmio(km);
-    TEST_ASSERT(b != NULL, "burrow_create_mmio");
+    struct Burrow *b = km ? burrow_create_mmio(km) : NULL;
 
     // SYS_MMIO_MAP equivalent: install the device mapping as a VMA.
-    int rc = burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW);
-    TEST_EXPECT_EQ(rc, 0, "burrow_map installed the MMIO VMA");
+    int rc = b ? burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW) : -1;
 
     // Drop the construction ref -> the KObj_MMIO now lives ONLY on the VMA's
     // mapping ref. No fd handle was ever installed: this is the fd-closed state.
-    burrow_unref(b);
+    if (b) burrow_unref(b);
 
     // The handle table holds no KObj_MMIO; the device is reachable only via the
     // VMA. The VMA walk (round-2 F1) is what must still find + reset it.
-    int n = proc_quiesce_owned_devices(p);
-    TEST_EXPECT_EQ(n, expected,
-                   "proc death resets a device held ONLY by a VMA (fd closed)");
+    int n = rc == 0 ? proc_quiesce_owned_devices(p) : -1;
 
-    // proc_free walks + releases the VMA + Burrow (-> kobj_mmio_unref); then
-    // drop the test's own km ref. Mirrors test_mmio_map_install_vma.
+    // Released before any assert (an assert returns, and a claim left held fails
+    // every later claim on the bank): proc_free walks + releases the VMA + Burrow
+    // (-> kobj_mmio_unref), then the test's own km ref goes. Mirrors
+    // test_mmio_map_install_vma.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
-    kobj_mmio_unref(km);
+    if (km) kobj_mmio_unref(km);
+
+    TEST_ASSERT(rc == 0, "kobj_mmio_create + burrow_create_mmio + burrow_map over an empty virtio page");
+    TEST_EXPECT_EQ(n, expected,
+                   "proc death resets a device held ONLY by a VMA (fd closed)");
 }
 
 // Exec resets the devices of the image it leaves, as death does (R3-F1 on exec):
@@ -410,27 +411,25 @@ void test_virtio_last_unref_quiesces_mapped_device(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
     struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
     struct Burrow *b = km ? burrow_create_mmio(km) : NULL;
-    if (!b) {
-        if (km) kobj_mmio_unref(km);
-        p->state = PROC_STATE_ZOMBIE;
-        proc_free(p);
-        TEST_ASSERT(false, "kobj_mmio_create + burrow_create_mmio over an empty virtio page");
-    }
-    TEST_EXPECT_EQ(burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW), 0,
-                   "burrow_map installed the MMIO VMA");
-    burrow_unref(b);
+    int rc = b ? burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b) burrow_unref(b);
 
+    // Every reading is taken, and everything released, before the first assert:
+    // an assert returns, and a claim left held fails every later claim on the bank.
     struct AddrSpace *as = p->as;
     addrspace_ref(as);   // the holder still leaving when p reads the count
-    TEST_EXPECT_EQ(proc_quiesce_owned_devices(p), 0,
-                   "(control) a holder that sees a second reference resets nothing");
+    int skipped = proc_quiesce_owned_devices(p);
     u64 d0 = addrspace_drain_device_resets_for_test();
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
-    TEST_EXPECT_EQ(addrspace_drain_device_resets_for_test() - d0, 0ull,
-                   "(control) a drop that is not the last drains nothing");
+    u64 not_last = addrspace_drain_device_resets_for_test() - d0;
     addrspace_unref(as);
-    TEST_EXPECT_EQ(addrspace_drain_device_resets_for_test() - d0, (u64)expected,
+    u64 last = addrspace_drain_device_resets_for_test() - d0;
+    if (km) kobj_mmio_unref(km);
+
+    TEST_ASSERT(rc == 0, "kobj_mmio_create + burrow_create_mmio + burrow_map over an empty virtio page");
+    TEST_EXPECT_EQ(skipped, 0, "(control) a holder that sees a second reference resets nothing");
+    TEST_EXPECT_EQ(not_last, 0ull, "(control) a drop that is not the last drains nothing");
+    TEST_EXPECT_EQ(last, (u64)expected,
                    "the last reference resets the mapped device before its drain");
-    kobj_mmio_unref(km);
 }
