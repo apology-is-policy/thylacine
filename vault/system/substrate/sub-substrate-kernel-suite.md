@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 ## Purpose
@@ -203,3 +203,13 @@ verdict, the 87 split passing verdicts, the CRLF, the tally surviving a failing
 suite -- were measured against two real captured boot logs, a green one and a
 mutant one, not inferred from the source alone. The skip trap predates this
 dossier and is carried from the open-defect record rather than discovered here.
+
+
+## October 8 private service ledger fixture
+
+`loom.service_slots` is registered as its own ordinary suite entry and runs the
+same real-module fixture as tools/test-loom-service-slots.py. Its verdict checks
+bounded identity/borrow state, not private-engine activation or caller locking.
+The registration increases the source-derived denominator by one. The older
+50-boot 1836-test record remains historical; subsequent records must derive the
+count from their exact source and observe this entry's verdict separately.
