@@ -82,6 +82,28 @@ the hollow-close pattern, at the scale of a shell loop.
 **Open.** Tasks #5 to #8 and #12 to #14. Next is XT-3a: compose `SCTLR_EL1`
 once for both boot paths (#6).
 
+**XT-3a (`ab768299`, WIP until its audit closes).** The kernel never
+established `SCTLR_EL1` itself:
+- a direct EL1 entry inherited the platform reset value;
+- the EL2 drop wrote `0x30D00800`, which kills an EL0 `WFI` or `WFE` and checks
+  no SP alignment;
+- a PSCI secondary kept its firmware's value.
+
+Now one macro writes `0x30D40818` on all three paths. EL0 `WFI` traps, and the
+`EC_WFX` arm retires it with ELR + 4 and SS and BTYPE cleared. Linux does the
+same: `traps.c` `wfi_handler` and `arm64_skip_faulting_instruction`, both
+verified at v6.12. The BTYPE clear was not in the first draft. Reading Linux's
+skip routine showed it; without it, a retired instruction reached by an
+indirect branch leaves the next one checked as that branch's target. Results:
+- green: suite 1956/1956, and `/hint-probe` runs 64 `WFI` plus 64 `WFE`;
+- sabotage A (the EL1 and secondary writes removed): `hardening.sctlr_composed`
+  FAIL, 1955/1956;
+- sabotage B (the arm removed): `snare:ill` at the probe's first `WFI`,
+  ESR `0x07e00000` (EC `0x01`, TI 0), and joey failed the boot.
+
+Both sabotages ran in a separate worktree, so the reviewer's files stayed
+untouched.
+
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
 
