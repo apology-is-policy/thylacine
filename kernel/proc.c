@@ -692,8 +692,10 @@ void proc_free(struct Proc *p) {
     // still intact (round-2 F4).
     proc_quiesce_owned_devices(p);
 
-    // The departures that never passed proc_become_zombie_locked (the rollback
-    // and orphan paths) record here; for the rest this repeats an OR.
+    // Every proc_free that does not follow a reap frees a Proc that was never
+    // published (the proc_alloc_in and rfork rollbacks), so in production this
+    // repeats the ZOMBIE transition's OR or records caps the parent already holds;
+    // it records a unit fixture's unlinked Proc.
     addrspace_record_holder(p->as, p);
 
     // P3-Da: release the address space here, BEFORE handle_table_free. The

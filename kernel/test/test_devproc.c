@@ -3587,7 +3587,7 @@ void test_devproc_seal_outlives_its_holder(void) {
     struct Proc *c2 = e2 ? proc_alloc_in(e2->as, e2->page_budget) : NULL;
     struct Proc *b  = proc_alloc();
     const bool built = e && c && e2 && c2 && b;
-    bool premise = false, traced = true;
+    bool premise = false, traced = true, traced_control = false;
     long sealed_maps = -2, control_maps = -2;
     char buf[512];
 
@@ -3616,6 +3616,7 @@ void test_devproc_seal_outlives_its_holder(void) {
         control_maps = m2 ? devproc.read(m2, buf, (long)sizeof(buf), 0) : -2;
         if (m2) spoor_clunk(m2);
         traced = devproc_debug_authorized(b, c);
+        traced_control = devproc_debug_authorized(b, c2);
         proc_test_unlink(c2);
         proc_test_unlink(c);
     }
@@ -3631,20 +3632,70 @@ void test_devproc_seal_outlives_its_holder(void) {
                    "the sealed parent gone, its NODUMP still refuses the orphan's maps");
     TEST_ASSERT(!traced, "and its NOTRACE still refuses control of the orphan");
     TEST_ASSERT(control_maps >= 0, "(control) an unsealed parent's orphan reads");
+    TEST_ASSERT(traced_control, "(control) and the same peer controls the unsealed parent's orphan");
+}
+
+// The taint rides the record too. Today it is redundant there -- the taint is
+// inherited at fork and stamped onto every mapper -- so this pins the record's
+// own arm: a departed holder whose bit is written DIRECTLY (no stamp reaches the
+// orphan) still refuses the orphan's elevation, at the real legate stamp, while
+// an untainted creator's orphan elevates.
+void test_devproc_taint_outlives_its_holder(void) {
+    struct Proc *e  = proc_alloc();
+    struct Proc *c  = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *e2 = proc_alloc();
+    struct Proc *c2 = e2 ? proc_alloc_in(e2->as, e2->page_budget) : NULL;
+    const bool built = e && c && e2 && c2;
+    bool premise = false;
+    int tainted_rc = 0, clean_rc = -1;
+
+    if (built) {
+        e->caps = c->caps = e2->caps = c2->caps = 0;
+        __atomic_fetch_or(&e->proc_flags, PROC_FLAG_DEBUG_TAINTED, __ATOMIC_RELAXED);
+        premise = (c->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                  (c2->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0;
+        e->state = PROC_STATE_ZOMBIE;
+        proc_free(e);
+        e = NULL;
+        e2->state = PROC_STATE_ZOMBIE;
+        proc_free(e2);
+        e2 = NULL;
+        c->state = c2->state = PROC_STATE_ALIVE;
+        proc_test_link(c);
+        proc_test_link(c2);
+        tainted_rc = proc_become_legate(c, CAP_KILL, 1u, 0u, 0u);
+        clean_rc   = proc_become_legate(c2, CAP_KILL, 1u, 0u, 0u);
+        proc_test_unlink(c2);
+        proc_test_unlink(c);
+    }
+    if (e)  { e->state  = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (e2) { e2->state = PROC_STATE_ZOMBIE; proc_free(e2); }
+    if (c)  { c->state  = PROC_STATE_ZOMBIE; proc_free(c); }
+    if (c2) { c2->state = PROC_STATE_ZOMBIE; proc_free(c2); }
+
+    TEST_ASSERT(built, "alloc two sharing pairs");
+    TEST_ASSERT(premise, "premise: neither orphan carries the taint itself");
+    TEST_ASSERT(tainted_rc != 0, "a tainted creator gone, its orphan still may not elevate");
+    TEST_EXPECT_EQ(clean_rc, 0, "(control) an untainted creator's orphan elevates");
 }
 
 // The ZOMBIE transition records the departing holder, before any reap: the
-// record must hold the child's caps while the child is a zombie nobody has
-// waited for yet, which is the window a reap's unlink used to open (the walk
-// stops seeing the Proc there, and proc_free has not run). Driven through the
-// real rfork and exits, on proc_become_zombie_locked itself; the space stays
-// alive through a second holder the child takes on the way out.
+// record must hold the child's caps and its seal while the child is a zombie
+// nobody has waited for yet, which is the window a reap's unlink used to open
+// (the walk stops seeing the Proc there, and proc_free has not run). Driven
+// through the real rfork, proc_seal and exits, on proc_become_zombie_locked
+// itself; the space stays alive through a second holder the child takes on the
+// way out, and after the reap that holder's maps still read sealed. The child is
+// spawned with CAP_ALL: the plain rfork carves a kernel child to CAP_NONE, and a
+// zero would satisfy every equality below.
 static struct {
     struct AddrSpace *as;
     struct Proc      *holder;
     caps_t            caps;
     caps_t            before;
     caps_t            after_exec;
+    u32               guards_before;
+    u32               guards_after;
     volatile u32      done;
 } g_departure;
 
@@ -3655,6 +3706,8 @@ static void zombie_departure_thunk(void *arg) {
     g_departure.holder = proc_alloc_in(me->as, me->page_budget);
     g_departure.caps   = __atomic_load_n(&me->caps, __ATOMIC_ACQUIRE);
     g_departure.before = __atomic_load_n(&me->as->caps_ever, __ATOMIC_ACQUIRE);
+    g_departure.guards_before = __atomic_load_n(&me->as->guards_ever, __ATOMIC_ACQUIRE);
+    proc_seal(me, PROC_FLAG_NODUMP);
     __atomic_store_n(&g_departure.done, 1u, __ATOMIC_RELEASE);
     exits("ok");
 }
@@ -3662,9 +3715,13 @@ static void zombie_departure_thunk(void *arg) {
 void test_devproc_zombie_records_departure(void) {
     g_departure.as = NULL; g_departure.holder = NULL;
     g_departure.caps = 0; g_departure.before = ~0ull; g_departure.done = 0;
-    int pid = rfork(RFPROC, zombie_departure_thunk, NULL);
+    g_departure.guards_before = ~0u;
+    int pid = rfork_with_caps(RFPROC, zombie_departure_thunk, NULL, CAP_ALL);
     bool zombie = false;
     caps_t recorded = 0;
+    u32 sealed = 0;
+    long holder_maps = -2;
+    char buf[256];
     if (pid > 0) {
         u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (timer_now_ns() < deadline) {
@@ -3675,14 +3732,29 @@ void test_devproc_zombie_records_departure(void) {
             }
             sched();
         }
-        if (zombie && g_departure.as)
+        // The state was read lock-free, and the transition stores it plainly
+        // under g_proc_table_lock: one more pass through that lock is what makes
+        // everything the transition wrote, the record included, visible here.
+        if (zombie && g_departure.as) {
+            (void)proc_find_by_pid(pid);
             recorded = __atomic_load_n(&g_departure.as->caps_ever, __ATOMIC_ACQUIRE);
+            sealed   = __atomic_load_n(&g_departure.as->guards_ever, __ATOMIC_ACQUIRE);
+        }
     }
     int st = -1;
     int reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
-    if (g_departure.holder) {
-        g_departure.holder->state = PROC_STATE_ZOMBIE;
-        proc_free(g_departure.holder);
+    struct Proc *h = g_departure.holder;
+    if (h) {
+        struct Thread *th = current_thread();
+        h->principal_id = th && th->proc ? th->proc->principal_id : 0xA11CEu;
+        h->state = PROC_STATE_ALIVE;
+        proc_test_link(h);
+        struct Spoor *m = open_pidfile_for(h->pid, "maps", 0);
+        holder_maps = m ? devproc.read(m, buf, (long)sizeof(buf), 0) : -2;
+        if (m) spoor_clunk(m);
+        proc_test_unlink(h);
+        h->state = PROC_STATE_ZOMBIE;
+        proc_free(h);
     }
 
     TEST_ASSERT(pid > 0 && reaped == pid, "the child spawned and was reaped");
@@ -3690,14 +3762,19 @@ void test_devproc_zombie_records_departure(void) {
                 "the child took a second holder on its space");
     TEST_ASSERT(g_departure.caps != 0, "premise: the child holds caps to record");
     TEST_EXPECT_EQ(g_departure.before, 0ull, "(control) nothing had left the space before the child");
+    TEST_EXPECT_EQ(g_departure.guards_before, 0u, "(control) nor any seal");
     TEST_ASSERT(zombie, "the child became a zombie within the budget");
+    TEST_ASSERT(recorded != 0, "the record is not empty");
     TEST_EXPECT_EQ(recorded, g_departure.caps,
                    "a zombie nobody has reaped is already in its space's record");
+    TEST_ASSERT(sealed & PROC_FLAG_NODUMP, "and so is the seal it took");
+    TEST_EXPECT_EQ(holder_maps, (long)-T_E_ACCES,
+                   "after the reap, the sharer's maps still read sealed");
 }
 
 // exec is a departure too: the old space keeps what the exec'ing Proc held. Driven
 // by the child running proc_exec_replace on itself (the swap needs the exec'ing
-// thread). Nothing else writes the OLD space's record here: the child's death
+// thread), spawned with CAP_ALL for the zombie test's reason. Nothing else writes the OLD space's record here: the child's death
 // records into the space it exec'd onto, so this is the swap's witness alone.
 static void exec_departure_thunk(void *arg) {
     (void)arg;
@@ -3707,10 +3784,13 @@ static void exec_departure_thunk(void *arg) {
     g_departure.holder = proc_alloc_in(old, me->page_budget);
     g_departure.caps   = __atomic_load_n(&me->caps, __ATOMIC_ACQUIRE);
     g_departure.before = __atomic_load_n(&old->caps_ever, __ATOMIC_ACQUIRE);
+    g_departure.guards_before = __atomic_load_n(&old->guards_ever, __ATOMIC_ACQUIRE);
+    proc_seal(me, PROC_FLAG_NOTRACE);
     struct AddrSpace *nas = g_departure.holder ? addrspace_alloc(me->page_budget) : NULL;
     if (nas) {
         proc_exec_replace(me, nas, me->phenotype);
-        g_departure.after_exec = __atomic_load_n(&old->caps_ever, __ATOMIC_ACQUIRE);
+        g_departure.after_exec   = __atomic_load_n(&old->caps_ever, __ATOMIC_ACQUIRE);
+        g_departure.guards_after = __atomic_load_n(&old->guards_ever, __ATOMIC_ACQUIRE);
         __atomic_store_n(&g_departure.done, 1u, __ATOMIC_RELEASE);
     }
     exits("ok");
@@ -3719,7 +3799,8 @@ static void exec_departure_thunk(void *arg) {
 void test_devproc_exec_records_departure(void) {
     g_departure.as = NULL; g_departure.holder = NULL; g_departure.caps = 0;
     g_departure.before = ~0ull; g_departure.after_exec = 0; g_departure.done = 0;
-    int pid = rfork(RFPROC, exec_departure_thunk, NULL);
+    g_departure.guards_before = ~0u; g_departure.guards_after = 0;
+    int pid = rfork_with_caps(RFPROC, exec_departure_thunk, NULL, CAP_ALL);
     int st = -1;
     int reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
     caps_t kept = (g_departure.holder && g_departure.as)
@@ -3733,8 +3814,11 @@ void test_devproc_exec_records_departure(void) {
     TEST_ASSERT(g_departure.done == 1u, "the child exec'd onto a fresh space");
     TEST_ASSERT(g_departure.caps != 0, "premise: the child holds caps to record");
     TEST_EXPECT_EQ(g_departure.before, 0ull, "(control) nothing had left the old space before the exec");
+    TEST_EXPECT_EQ(g_departure.guards_before, 0u, "(control) nor any seal");
+    TEST_ASSERT(g_departure.after_exec != 0, "the old space's record is not empty");
     TEST_EXPECT_EQ(g_departure.after_exec, g_departure.caps,
                    "the exec swap recorded the child in the space it left");
+    TEST_ASSERT(g_departure.guards_after & PROC_FLAG_NOTRACE, "and the seal it carried");
     TEST_EXPECT_EQ(kept, g_departure.caps,
                    "and the old space kept it after the child died elsewhere");
 }

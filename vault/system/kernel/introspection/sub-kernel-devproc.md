@@ -899,10 +899,14 @@ reader gets the header alone, the owner a listing cut among the aliases),
 before the creator leaves, refused after it and still after the aliases are
 destroyed, admitted to a `CAP_JIT` caller), `devproc.seal_outlives_its_holder`
 (a sealed parent's orphan: `maps` EACCES and control refused after the parent is
-freed; an unsealed parent's orphan reads), `devproc.zombie_records_departure`
-(through the real `rfork` + `exits`: the record holds the child's caps while it
-is an unreaped zombie) and `devproc.exec_records_departure` (the child runs
-`proc_exec_replace` on itself; only the swap writes the old space's record).
+freed; an unsealed parent's orphan reads and is controlled),
+`devproc.taint_outlives_its_holder` (a directly tainted creator's orphan is refused
+the legate stamp; an untainted one's elevates), `devproc.zombie_records_departure`
+(a `CAP_ALL` child through the real `rfork` + `proc_seal` + `exits`: the record
+holds its caps and NODUMP while it is an unreaped zombie, and the sharer's `maps`
+read sealed after the reap) and `devproc.exec_records_departure` (the child seals
+NOTRACE and runs `proc_exec_replace` on itself; only the swap writes the old
+space's record).
 
 **A residual this section does not close.** `status` prints `tables:` (and
 `pages:`, which includes them), and the `/ctl/procs` table carries the same

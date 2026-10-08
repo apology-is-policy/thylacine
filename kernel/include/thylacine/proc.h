@@ -1147,7 +1147,9 @@ _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
 // The proc_flags bits that restrict an IMAGE rather than confer anything: the two
 // seals and the taint. An address space records them from every holder that
 // leaves it (AddrSpace.guards_ever), so they must never include a bit a reader
-// could take as permission.
+// could take as permission. The taint is redundant in the record today (it is
+// inherited at fork and stamped on every mapper); it is kept so the record is the
+// image's whole guard history.
 #define PROC_IMAGE_GUARDS (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_DEBUG_TAINTED)
 _Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_CAUGHT_NOTE_MASK |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING |

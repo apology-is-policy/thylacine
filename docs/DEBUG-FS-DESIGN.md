@@ -614,18 +614,28 @@ the record; the union is every Proc that has ever held the image.
 
 A holder leaves at exactly three points, and each records: its ZOMBIE transition
 (`proc_become_zombie_locked`), its exec onto a fresh space (`proc_exec_replace`'s
-swap), and `proc_free` (the rollback and orphan paths that never pass the ZOMBIE
-transition). The first two run under `g_proc_table_lock`, the lock every join reads
-the record under, so the record needs no ordering argument of its own; and the
+swap), and `proc_free`. Only the first two carry a production departure: every
+`proc_free` that does not follow a reap frees a Proc that was never published (the
+`proc_alloc_in` and `rfork` rollbacks, whose caps are the parent's or none), so the
+third repeats an OR, or records a unit fixture's unlinked Proc. The first two run
+under `g_proc_table_lock`, the lock every join reads the record under, so the
+record needs no ordering argument of its own; and the
 ZOMBIE transition records before any reap can unlink the Proc, which closes the
 reap-window miss named below. A live Proc's caps only grow (every write is a
 `fetch_or`, and a legate scope ends by tearing its members down, not by clearing
 bits), so the caps a holder carries when it leaves are every cap it held.
 
-The record is never cleared: only exec's fresh space starts without one, which is
-Linux's per-mm dumpability (`MMF_DUMPABLE` lives in `mm->flags`, `commit_creds`
-lowers it when credentials gain privilege, `__ptrace_may_access` refuses it without
-`CAP_SYS_PTRACE`, and only exec's new mm resets it). A COW child's space is a new
+The record is never cleared: only exec's fresh space starts without one. The
+heritage is Linux's per-mm dumpability -- `MMF_DUMPABLE` lives in `mm->flags`, not on
+the task, and `__ptrace_may_access` refuses a non-dumpable mm without
+`CAP_SYS_PTRACE` -- but the record is STRICTER: Linux's bit can be raised again on
+the same mm (`prctl(PR_SET_DUMPABLE, 1)`), and `commit_creds` lowers it on any
+credential change, not only a gain. Nothing raises the record back down here.
+
+The taint rides the record as well, and today it is redundant there: it is
+inherited at fork and stamped onto every mapper, so no holder can leave carrying a
+taint that a live mapper lacks. It is kept so that the record is the image's whole
+guard history, and `devproc.taint_outlives_its_holder` pins its arm. A COW child's space is a new
 one, so the record does not cross fork: whether a copy of a secret is itself
 secret is still decision A. The record replaced the code-alias count, because a
 code region's creator passed the `CAP_JIT` gate and is recorded when it leaves. The

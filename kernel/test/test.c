@@ -952,6 +952,7 @@ void test_devproc_maps_code_trimmed(void);     // B-2b audit r2 F2
 void test_devproc_maps_code_budget_stop(void); // B-2b audit r2 F2
 void test_devproc_debug_cover_weighs_departed(void); // the image's holder record
 void test_devproc_seal_outlives_its_holder(void);
+void test_devproc_taint_outlives_its_holder(void);
 void test_devproc_zombie_records_departure(void);
 void test_devproc_exec_records_departure(void);
 void test_devproc_environ(void);               // VIVARIUM V-4b-6
@@ -3158,6 +3159,7 @@ struct test_case g_tests[] = {
     { "devproc.maps_code_budget_stop", test_devproc_maps_code_budget_stop, false, NULL },
     { "devproc.debug_cover_weighs_departed", test_devproc_debug_cover_weighs_departed, false, NULL },
     { "devproc.seal_outlives_its_holder", test_devproc_seal_outlives_its_holder, false, NULL },
+    { "devproc.taint_outlives_its_holder", test_devproc_taint_outlives_its_holder, false, NULL },
     { "devproc.zombie_records_departure", test_devproc_zombie_records_departure, false, NULL },
     { "devproc.exec_records_departure", test_devproc_exec_records_departure, false, NULL },
     { "devproc.environ",              test_devproc_environ,               false, NULL },

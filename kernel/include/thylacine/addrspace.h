@@ -152,7 +152,7 @@ struct AddrSpace {
     // here, their caps in caps_ever below. A holder's authority stays in the bytes
     // after the holder is gone -- an RFMEM child keeps the image its creator filled
     // -- so the image join weighs the record beside its live mappers. Written at
-    // every departure (proc_note_departure_locked), never cleared; exec's fresh
+    // every departure (addrspace_record_holder), never cleared; exec's fresh
     // space starts without one.
     u32            guards_ever;
 

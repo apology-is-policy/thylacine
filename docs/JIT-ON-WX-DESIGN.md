@@ -234,7 +234,9 @@ the shape on 2026-09-28; three things change.
    and the diorama reads a Linux guest's map as itself.
    Debug authority over an image holding a code alias needs `CAP_JIT` even
    when no mapper holds it -- an `RFMEM` child keeps the aliases after their
-   creator is reaped (DEBUG-FS-DESIGN 3.3; B-2b audit r2) -- so a reader
+   creator is reaped, and the address space records the creator's caps when it
+   leaves (DEBUG-FS-DESIGN 3.3; `dec-2026-10-08-image-holder-record`, which
+   replaced B-2b audit r2's count of code aliases) -- so a reader
    holding no elevation-only cap is never shown a code address. That is what
    keeps the diorama, which reads every pid's `maps` as itself for clients of
    any principal, from becoming a deputy: it refuses to serve while it holds

@@ -260,8 +260,9 @@ word names any of it. So the address space keeps a record, `caps_ever` and
 `guards_ever` ([[sub-kernel-addrspace]]): `addrspace_record_holder` ORs the
 departing Proc's caps and its `PROC_IMAGE_GUARDS` bits (`NODUMP`, `NOTRACE`,
 `DEBUG_TAINTED`) in at each of the three ways a holder leaves -- the ZOMBIE
-transition ([[sub-kernel-death]]), the exec swap, and `proc_free` for the
-rollback and orphan paths -- and the join ORs the record in before the
+transition ([[sub-kernel-death]]), the exec swap, and `proc_free` (which in
+production only repeats an OR: every `proc_free` not after a reap frees a
+never-published rollback) -- and the join ORs the record in before the
 sole-mapper fast path. The first two write under `g_proc_table_lock`, the join's
 own lock, and the ZOMBIE transition writes before any reap can unlink the Proc
 out of the walk, so a departing holder is never in neither. A live Proc's caps
