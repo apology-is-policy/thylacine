@@ -254,6 +254,26 @@ return quarry
   entered through it, but renaming a directory above the cwd does; a
   handle-based `dot` Spoor -- the rename-robust Plan 9/Linux form -- remains the
   upgrade.
+- **A spawned child's cwd is resolved by the spawner, as chdir resolves one**
+  (`SYS_SPAWN_FULL_ARGV`'s cwd tail; operator vote 2026-10-06,
+  `dec-2026-10-06-spawn-cwd`). A spawn may name the cwd its child is born
+  with. The spawner resolves it before any child exists, by `SYS_CHDIR`'s
+  steps: joined to the spawner's own cwd when relative, walked by
+  `stalk_landed` from the root, a directory the spawner can search. The child
+  is born with the landed name, and the spawner's cwd never moves. The image
+  is resolved in the spawner too, before any child exists -- a relative image
+  name joined to the child's cwd, not the spawner's -- and so a bad cwd fails
+  the spawn itself, with no child to reap. Validating with the spawner's
+  credentials confers nothing: the cwd is a name, and every later lookup
+  through it is resolved again under the child's own identity. `SYS_CHDIR`
+  and the spawn share one resolver and answer its errno (ERRORS.md):
+  `ENOENT` for a missing component, `ENOTDIR` for a target that is not a
+  directory, `EACCES` for a refused search, `EINVAL` for a malformed path or
+  a name the walk cannot name back, and a failing stat's or re-walk's own
+  errno (`EIO` when it carries none); `SYS_CHDIR` adds `EFAULT` for a bad
+  buffer and `ENOMEM` for the store. A Dev's walk carries no errno yet, so a
+  9P walk that fails for any reason -- a dead session, or a caught note that
+  interrupts it -- answers `ENOENT` here, as it does for `open` and `stat`.
 
 ### 4.4 Name retention along the trail (Spoor.path — #66)
 

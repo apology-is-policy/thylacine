@@ -1860,9 +1860,10 @@ any thread of a multi-threaded spawner can consume).
 
 1. **The ask.** `struct sys_spawn_args` claims its forward-compat slot at offset
    100 as `debug_flags`, with `SPAWN_DEBUG_HELD = 1 << 0`. Unknown bits are
-   refused (-1), the `_pad_envp` rationale. The struct stays 104 bytes, and every
-   caller that zero-fills it is byte-identical. The slot was the last one, so the
-   next field grows the struct, with every mirror. The ask is ungated: a hold
+   refused (-1), the unknown-bits rule. The struct stays 104 bytes, and every
+   caller that zero-fills it is byte-identical. The slot was the last one; the
+   record has since extended by tails that its `ext_flags` word announces
+   (STALK-DESIGN 4.3, the spawned child's cwd), never by growing. The ask is ungated: a hold
    restricts only the spawner's own child and confers no access to it. Reading
    or controlling the child still takes an attach through the I-39 gate.
 

@@ -1613,9 +1613,10 @@ both work; fail-soft (a missing `/env` leaves the empty envp). Proven
 in-guest by `/pouch-hello-env` (joey sets two vars, the child inherits a
 copy via the rfork clone, reads both back + confirms an absent var is NULL).
 Full as-built: `docs/reference/78-pouch.md` "The environ populate". The
-`posix_spawn` `envp` argument stays inherited-via-`/env` (the
-`SYS_SPAWN_FULL_ARGV` `_pad_envp` slot reserves the kernel-side per-child
-override); `setenv` mutates only the in-process copy.
+`posix_spawn` `envp` argument stays inherited-via-`/env` (a kernel-side
+per-child override would be a `SYS_SPAWN_FULL_ARGV` record tail, announced
+by an `ext_flags` bit, the word that was `_pad_envp`); `setenv` mutates only
+the in-process copy.
 
 ### 16.11 CL-1b core as-built (posix_spawn / wait4 / pipe2 / dup2)
 
