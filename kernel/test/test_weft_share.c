@@ -925,8 +925,13 @@ void test_weft_reap_orphan_reclaimed(void) {
 // find no longer holds it, which is the point).
 static struct Proc      *g_reap_swap_proc;
 static struct AddrSpace *g_reap_swap_to;
+static bool              g_reap_window_locked;
+static int               g_reap_window_refs;
 
 static void reap_window_exec_swap(void) {
+    struct AddrSpace *old = g_reap_swap_proc->as;
+    g_reap_window_locked = __atomic_load_n(&old->lock.value, __ATOMIC_ACQUIRE) != 0u;
+    g_reap_window_refs   = addrspace_ref_count(old);
     g_reap_swap_proc->as = g_reap_swap_to;
 }
 
@@ -975,6 +980,8 @@ void test_weft_reap_pins_the_space_across_exec(void) {
 
     TEST_EXPECT_EQ(reclaimed, 1, "past the grace: reclaimed");
     TEST_ASSERT(swapped, "(premise) the swap landed between the find and the unmap");
+    TEST_ASSERT(!g_reap_window_locked, "the find holds no lock across the window");
+    TEST_EXPECT_EQ(g_reap_window_refs, refs_before + 1, "the find pinned the space with a reference");
     TEST_ASSERT(old_free, "the space the sweep locked is the space it unlocked");
     TEST_ASSERT(nas_free, "the space the Proc moved to was never locked");
     TEST_ASSERT(unmapped, "the stale mapping left the space it lived in");
